@@ -1,4 +1,4 @@
-# Vision26 — Design Spec
+# VizDAW — Design Spec
 
 - **Date:** 2026-10-15
 - **Status:** Draft, awaiting review
@@ -6,7 +6,7 @@
 
 ## 1. Intent
 
-Vision26 is a new, open-source macOS DAW inspired by Opcode Studio Vision Pro 4.5.
+VizDAW is a new, open-source macOS DAW inspired by Opcode Studio Vision Pro 4.5.
 It is not a port and not a clone. It keeps the ideas that made Studio Vision
 fast to work in and rebuilds them on a modern stack:
 
@@ -34,14 +34,20 @@ in an app that feels native on macOS.
 Studio Vision is still the intellectual property of its rights holder.
 
 - Reverse engineering (REA) is used only to understand **behaviour, workflow and concepts**. Findings are written as prose descriptions of behaviour, not as code.
-- No decompiled code, translated algorithms, resources (icons, PICTs, patterns, fonts, sounds), or Opcode trademarks/branding go into the Vision26 repo.
-- The original binary and the research dossier live in `~/workspace/SVP/research/`, **outside** the Vision26 repository.
-- Before public release, do a quick trademark check on the name "Vision26".
+- No decompiled code, translated algorithms, resources (icons, PICTs, patterns, fonts, sounds), or Opcode trademarks/branding go into the VizDAW repo.
+- The original binary and the research dossier live in `~/workspace/SVP/research/`, **outside** the VizDAW repository.
+- Before public release, search USPTO classes 9 and 42 for "VizDAW" (nearest known marks: Vizrt "Viz …" broadcast software, VIZ Media). The README must state: "Not affiliated with or endorsed by Opcode Systems or Gibson."
 
 ## 3. Platform
 
 - Apple Silicon only, macOS 14 Sonoma or later.
 - Rust (stable) for the core; Swift 5.10+/SwiftUI + AppKit for the app shell.
+
+### Naming and versioning
+
+- Product name **VizDAW**. Repository: `github.com/wblatta/vizdaw`.
+- Year-based versions: the first release line is **VizDAW 26**, tagged `26.0.0`, `26.1.0`, … and next year's is `27.x.y`.
+- The project package extension `.vizdaw` stays the same across versions; the document inside carries its own format version.
 
 ## 4. Architecture
 
@@ -70,7 +76,7 @@ Studio Vision is still the intellectual property of its rights holder.
 ### Repository layout
 
 ```
-Vision26/
+vizdaw/
   crates/
     core-model/   core-engine/   core-host/   core-io/   core-ffi/
     scan-helper/            # out-of-process plugin scanner binary
@@ -142,7 +148,7 @@ Vision26/
 
 ## 8. Files and import
 
-- **Project format:** a `.vision26` package directory containing a versioned project document (Rust `serde`; format chosen in the core-model plan), `Media/` and `Autosave/`. Saves write to a temporary file and atomically rename it over the old one. Autosave keeps rolling snapshots.
+- **Project format:** a `.vizdaw` package directory containing a versioned project document (Rust `serde`; format chosen in the core-model plan), `Media/` and `Autosave/`. Saves write to a temporary file and atomically rename it over the old one. Autosave keeps rolling snapshots.
 - **Standard MIDI Files** (types 0/1) import/export, plus the MIDI 2.0 Clip File for import/export.
 - **OMF 2.0 and AAF** import: audio clips, positions, source offsets, fades, clip gain and basic volume/pan automation; embedded or linked media.
   - AAF uses the open AAF SDK, wrapped through the C ABI, or a Rust reader if one is suitable — to be decided in that sub-project's spec.
