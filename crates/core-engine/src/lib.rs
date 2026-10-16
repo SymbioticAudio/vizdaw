@@ -20,6 +20,7 @@ pub mod engine;
 pub mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
+pub mod graph;
 pub mod midi1;
 pub mod notes;
 pub mod offline;
