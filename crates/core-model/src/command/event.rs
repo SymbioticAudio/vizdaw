@@ -228,6 +228,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &EventCmd, r: &mut Report) -> Result<
                     ev.tick = ev.tick + *delta;
                     check_event(d, *seq, &ev.spec())?;
                     d.insert_event(*seq, *lane, None, ev)?;
+                    r.moved.push(AnyId::Event(id));
                     ensure_drum_row(d, id, r)?;
                 }
             }

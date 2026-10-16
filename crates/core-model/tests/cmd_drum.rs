@@ -371,3 +371,21 @@ fn move_row_to_the_same_lane_still_validates() {
     .unwrap();
     assert_eq!(rows(&d, 0), rows(&kit(), 0));
 }
+
+#[test]
+fn move_row_reports_moved_events() {
+    let a = apply(
+        &kit(),
+        &drum(DrumCmd::MoveRowToLane {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            row: DrumRowId(0),
+            to_lane: LaneId(1),
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        a.report.moved,
+        vec![AnyId::Event(EventId(0)), AnyId::Event(EventId(2))]
+    );
+}

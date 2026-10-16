@@ -201,6 +201,7 @@ fn move_row(
             ev.dest = pin;
         }
         d.insert_event(seq, to_lane, None, ev)?;
+        r.moved.push(AnyId::Event(id));
     }
     let src_layout = layout_mut(d, seq, lane)?;
     src_layout.rows.retain(|x| x.id != row);

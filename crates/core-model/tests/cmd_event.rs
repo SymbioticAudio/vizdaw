@@ -338,3 +338,24 @@ fn nudge_clamps_pitch_at_0_and_127() {
     assert_eq!(d.event(EventId(0)).unwrap().0.tick, Tick(5));
     assert_eq!(body(&d, 1), EventBody::note(0, 100, Tick(PPQ)));
 }
+
+#[test]
+fn move_across_lanes_reports_moved() {
+    let d = insert(&two_seqs(), 0, 0, vec![note(0, 60), note(1, 62)]).unwrap();
+    let a = core_model::command::apply(
+        &d,
+        &ev(EventCmd::Move {
+            events: vec![EventId(1), EventId(0), EventId(1)],
+            delta: Tick(0),
+            to_lane: Some((SeqId(1), LaneId(1))),
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        a.report.moved,
+        vec![
+            core_model::ids::AnyId::Event(EventId(0)),
+            core_model::ids::AnyId::Event(EventId(1))
+        ]
+    );
+}
