@@ -340,7 +340,7 @@ impl Session {
         self.transport_call(|| {
             let inner = lock(&self.inner);
             let doc = inner.doc();
-            Ok(match host::state(self.id) {
+            Ok(match host::state(self.id, doc)? {
                 Some(mut h) => TransportState {
                     playing: h.playing,
                     seq: Some(h.seq.0),

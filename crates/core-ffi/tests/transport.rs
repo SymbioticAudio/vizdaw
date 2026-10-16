@@ -1,11 +1,13 @@
 //! Transport through the offline backend in real time. The engine host is
 //! process-wide, so these tests run one at a time.
 
+use core_engine::backend::BackendEvent;
 use std::sync::{Mutex, MutexGuard};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{
-    ReloadFault, drain_offline_log, engine_active, force_offline, inject_reload_fault, reset_host,
+    ReloadFault, drain_offline_log, engine_active, force_offline, hosts_created,
+    inject_reload_fault, reset_host, simulate_event,
 };
 use vizdaw_ffi::{Session, TransportState};
 
@@ -258,4 +260,90 @@ fn locate_without_the_engine_formats_against_a_sequence() {
     assert_eq!(st.seq, Some(song));
     assert!(st.position_bbu.starts_with("3.1."), "{}", st.position_bbu);
     assert!(st.seconds > 3.0, "{}", st.seconds);
+}
+
+#[test]
+fn a_device_change_rebuilds_and_resumes_at_the_same_position() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.set_loop(true).unwrap();
+    s.play(song).unwrap();
+    s.locate(3 * BAR).unwrap();
+    ms(60);
+    let before = t(&s).tick;
+    let created = hosts_created();
+    simulate_event(BackendEvent::DefaultDeviceChanged);
+    // The owner's poll handles the event: drain 300 ms, rebuild, resume.
+    t(&s);
+    assert_eq!(hosts_created(), created + 1, "no rebuild");
+    // The new engine applies Play on its first block.
+    ms(30);
+    let st = t(&s);
+    assert!(st.playing, "playback did not resume");
+    assert_eq!(st.device, "Offline");
+    // Resumed at the old position, not at bar 1.
+    assert!(
+        st.tick >= before && st.tick < 4 * BAR,
+        "{} vs {before}",
+        st.tick
+    );
+    // A lost device rebuilds without the drain wait.
+    simulate_event(BackendEvent::DeviceLost);
+    t(&s);
+    ms(30);
+    assert!(t(&s).playing);
+    assert_eq!(hosts_created(), created + 2);
+}
+
+#[test]
+fn a_buffer_size_change_keeps_the_engine() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    ms(30);
+    let created = hosts_created();
+    simulate_event(BackendEvent::BufferSizeChanged(8192));
+    t(&s);
+    ms(30);
+    assert!(t(&s).playing);
+    assert_eq!(hosts_created(), created);
+}
+
+#[test]
+fn switching_sequences_starts_the_new_one_at_bar_one() {
+    let _g = serial();
+    let (s, song) = demo();
+    let groove = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "Groove")
+        .unwrap()
+        .id;
+    s.play(song).unwrap();
+    s.locate(6 * BAR).unwrap();
+    ms(30);
+    s.play(groove).unwrap();
+    ms(30);
+    let st = t(&s);
+    assert_eq!(st.seq, Some(groove));
+    assert!(st.tick < BAR, "{}", st.tick);
+}
+
+#[test]
+fn a_device_event_on_a_released_host_rebuilds_on_the_next_play() {
+    let _g = serial();
+    let (a, song) = demo();
+    a.play(song).unwrap();
+    ms(20);
+    drop(a);
+    let created = hosts_created();
+    // Nobody owns the engine, so nobody polls the event.
+    simulate_event(BackendEvent::DeviceLost);
+    let (b, song_b) = demo();
+    b.play(song_b).unwrap();
+    assert_eq!(hosts_created(), created + 1, "played on the lost device");
+    ms(30);
+    assert!(t(&b).playing);
 }
