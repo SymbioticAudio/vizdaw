@@ -431,17 +431,36 @@ fn ump_words(t: u32) -> usize {
 }
 
 /// Decodes the type-2 and type-3 UMPs of an event list.
-fn decode(list: &MIDIEventList, out: &mut Vec<Received>, sysex: &mut Vec<u8>) {
-    let mut p: *const MIDIEventPacket = list.packet.as_ptr();
-    for _ in 0..list.numPackets {
+///
+/// `list` points at an event list CoreMIDI handed us. Packets are variable
+/// length (`wordCount` words, not the declared 64), so no packet or list is
+/// ever read as a whole struct.
+fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec<u8>) {
+    let list = list.as_ptr();
+    // SAFETY: `list` is a valid event list for the call; the header fields
+    // are read through raw field pointers without forming a reference.
+    let (num, mut p) = unsafe {
+        (
+            ptr::read_unaligned(ptr::addr_of!((*list).numPackets)),
+            ptr::addr_of!((*list).packet).cast::<MIDIEventPacket>(),
+        )
+    };
+    for _ in 0..num {
         // SAFETY: CoreMIDI guarantees `numPackets` consecutive packets, each
-        // followed by the next at `words[wordCount]` (MIDIEventPacketNext);
-        // packets are 4-byte aligned, so they are read unaligned-safely.
-        let pkt = unsafe { ptr::read_unaligned(p) };
+        // with a timestamp, a word count and `wordCount` words, followed by
+        // the next packet (MIDIEventPacketNext). Only those fields are read,
+        // through raw field pointers; packets are 4-byte aligned, so the
+        // u64 timestamp is read unaligned and the u32 words are aligned.
+        let (time_stamp, words) = unsafe {
+            let ts = ptr::read_unaligned(ptr::addr_of!((*p).timeStamp));
+            let wc = ptr::read_unaligned(ptr::addr_of!((*p).wordCount));
+            let n = (wc as usize).min(64);
+            let w = ptr::addr_of!((*p).words).cast::<u32>();
+            (ts, std::slice::from_raw_parts(w, n))
+        };
         // SAFETY: pure conversion.
-        let host_ns = unsafe { AudioConvertHostTimeToNanos(pkt.timeStamp) };
-        let words = pkt.words;
-        let n = (pkt.wordCount as usize).min(64);
+        let host_ns = unsafe { AudioConvertHostTimeToNanos(time_stamp) };
+        let n = words.len();
         let mut i = 0;
         while i < n {
             let w0 = words.get(i).copied().unwrap_or(0);
@@ -450,7 +469,7 @@ fn decode(list: &MIDIEventList, out: &mut Vec<Received>, sysex: &mut Vec<u8>) {
                     let b = [(w0 >> 16) as u8, (w0 >> 8) as u8 & 0x7F, w0 as u8 & 0x7F];
                     let len = channel_len(b[0]);
                     out.push(Received {
-                        host_time: pkt.timeStamp,
+                        host_time: time_stamp,
                         host_ns,
                         bytes: b.get(..len).unwrap_or(&b).to_vec(),
                     });
@@ -476,7 +495,7 @@ fn decode(list: &MIDIEventList, out: &mut Vec<Received>, sysex: &mut Vec<u8>) {
                     if u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_END) == status {
                         sysex.push(0xF7);
                         out.push(Received {
-                            host_time: pkt.timeStamp,
+                            host_time: time_stamp,
                             host_ns,
                             bytes: std::mem::take(sysex),
                         });
@@ -486,12 +505,13 @@ fn decode(list: &MIDIEventList, out: &mut Vec<Received>, sysex: &mut Vec<u8>) {
                 t => i += ump_words(t),
             }
         }
-        // SAFETY: see above; stays within the list CoreMIDI handed us.
-        p = unsafe {
-            (p.cast::<u8>())
-                .add(std::mem::offset_of!(MIDIEventPacket, words) + n * 4)
-                .cast::<MIDIEventPacket>()
-        };
+        // The next packet starts right after this one's `n` words
+        // (MIDIEventPacketNext); for the last packet the address is
+        // computed but never read, so plain wrapping arithmetic suffices.
+        p = p
+            .cast::<u8>()
+            .wrapping_add(std::mem::offset_of!(MIDIEventPacket, words) + n * 4)
+            .cast::<MIDIEventPacket>();
     }
 }
 
@@ -504,8 +524,6 @@ impl MidiMonitor {
         let sink = Arc::clone(&received);
         let pending = Mutex::new(Vec::new());
         let block = RcBlock::new(move |list: NonNull<MIDIEventList>, _src: *mut c_void| {
-            // SAFETY: CoreMIDI passes a valid event list for the call.
-            let list = unsafe { list.as_ref() };
             if let (Ok(mut out), Ok(mut sx)) = (sink.lock(), pending.lock()) {
                 decode(list, &mut out, &mut sx);
             }
@@ -562,4 +580,62 @@ pub fn ns_to_host(ns: u64) -> u64 {
 pub fn now_ns() -> u64 {
     // SAFETY: pure queries.
     unsafe { AudioConvertHostTimeToNanos(objc2_core_audio::AudioGetCurrentHostTime()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" {
+        fn mmap(
+            addr: *mut c_void,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            off: i64,
+        ) -> *mut c_void;
+        fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32;
+        fn munmap(addr: *mut c_void, len: usize) -> i32;
+    }
+    const PROT_NONE: i32 = 0;
+    const PROT_RW: i32 = 1 | 2;
+    const MAP_PRIVATE_ANON: i32 = 0x0002 | 0x1000;
+    const HALF: usize = 64 * 1024;
+
+    /// Decodes `words` (an event list as CoreMIDI lays it out) placed so
+    /// that the list ends exactly where an unreadable guard page begins:
+    /// reading one byte past the list crashes the test.
+    fn decode_at_guard(words: &[u32]) -> Vec<Received> {
+        // SAFETY: plain anonymous mapping, unmapped below.
+        let base = unsafe { mmap(ptr::null_mut(), 2 * HALF, PROT_RW, MAP_PRIVATE_ANON, -1, 0) };
+        assert!(!base.is_null() && base as isize != -1);
+        // SAFETY: the upper half belongs to the mapping.
+        let guard = unsafe { base.cast::<u8>().add(HALF) };
+        assert_eq!(unsafe { mprotect(guard.cast(), HALF, PROT_NONE) }, 0);
+        let bytes = words.len() * 4;
+        // SAFETY: `bytes` < HALF, so the list lies in the readable half.
+        let start = unsafe { guard.sub(bytes) }.cast::<u32>();
+        unsafe { ptr::copy_nonoverlapping(words.as_ptr(), start, words.len()) };
+        let mut out = Vec::new();
+        let mut sysex = Vec::new();
+        let list = NonNull::new(start.cast::<MIDIEventList>()).unwrap();
+        decode(list, &mut out, &mut sysex);
+        // SAFETY: the mapping is ours and nothing points into it any more.
+        unsafe { munmap(base, 2 * HALF) };
+        out
+    }
+
+    #[test]
+    fn short_packets_are_read_only_up_to_their_word_count() {
+        // protocol, numPackets = 2,
+        // packet 1: timeStamp 0 (2 words), wordCount 1, note on;
+        // packet 2: timeStamp 0, wordCount 1, note off.
+        let list = [1, 2, 0, 0, 1, 0x2090_3C40, 0, 0, 1, 0x2080_3C00];
+        let got: Vec<Vec<u8>> = decode_at_guard(&list)
+            .into_iter()
+            .map(|r| r.bytes)
+            .collect();
+        assert_eq!(got, vec![vec![0x90, 0x3C, 0x40], vec![0x80, 0x3C, 0x00]]);
+    }
 }
