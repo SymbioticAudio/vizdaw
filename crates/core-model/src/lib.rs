@@ -17,5 +17,7 @@
 
 pub mod error;
 pub mod ids;
+pub mod tempo;
+pub mod time;
 
 pub use error::{ModelError, Result};
