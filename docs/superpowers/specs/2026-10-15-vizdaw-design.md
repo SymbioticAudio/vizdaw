@@ -36,7 +36,7 @@ in an app that feels native on macOS.
 - Offline or destructive audio DSP (time/pitch scaling and similar render-to-file processing). Audio processing is non-destructive: plugins, region gain, and fades stored as region parameters. Normalize is a non-destructive gain adjustment on the region.
 - Intel Macs, macOS < 14, Windows/Linux.
 
-Limitations VizDAW deliberately does not carry over: single-level undo; fixed caps on references or nesting depth; one record-armed track at a time; replace-recording that clears material outside the recorded range; fades baked into audio files; routing and instrument changes outside undo.
+Limitations VizDAW deliberately does not carry over: single-level undo; fixed caps on references or nesting depth; one record-armed track at a time; replace-recording that clears material outside the recorded range; fades baked into audio files; external editing of shared source files in place; routing and instrument changes outside undo.
 
 ## 2. Clean-room rules
 
@@ -82,7 +82,8 @@ Studio Vision is still the intellectual property of its rights holder.
 3. **All edits are commands.** Every mutation is a reversible command, which gives undo/redo, enables testing, and later makes scripting possible.
 4. **Editors are views.** Arrange, piano roll, list, drum grid and Strip Chart all show and edit the same events through the same commands; a change in one appears in all immediately.
    - There is **one document-wide selection**: a time range (edit-in to edit-out) plus a set of selected items (notes, controllers, reference events, whole or partial audio regions). Every editor reads and writes it, and every view updates together.
-   - Commands state their scope in their names (e.g. "Quantize Selection" vs "Quantize Track"). View filters hide items without deselecting them.
+   - Commands state their scope in their names (e.g. "Quantize Selection" vs "Quantize Track").
+   - A view filter defines what that view's commands can reach: items it hides cannot be selected or changed from that view.
 
 ### Repository layout
 
@@ -110,8 +111,8 @@ vizdaw/
   - **Shared by default:** edits to a sequence apply to every place it is used. Pasting a sequence from the sequence list into a track creates a live reference, not a copy.
   - **Make Private Copy** gives one use its own new sequence (auto-named, still nestable and editable as a sequence).
   - **Flatten** turns a reference into an editable copy of its events.
-  - Per-use fields on the reference event: start, transpose, mute. Its length is derived from the referenced sequence (a short looped track inside it repeats to fill that length).
-  - **Make Reference from Selection** creates either one multi-track reference or one reference per track, with an optional repeat count.
+  - Per-use fields on the reference event: start, length, loop count (or loop to fill a length), transpose (semitones) and mute. Length defaults to the referenced sequence's length but can be shortened or extended for that use alone; a short looped track inside the sequence still repeats to fill it, which is how mid-song loops are built. The model reserves room for a per-use player slot for later performance features.
+  - **Make Reference from Selection** creates either one multi-track reference or one reference per track, optionally rounded to bar lines, with an optional loop count.
   - **Referential integrity:** the sequence list shows each sequence's use count and its users, separates top-level sequences from those used only as references, asks for confirmation before deleting a sequence that is in use (naming what will change), and offers **Remove Unused Sequences**.
 - **Track:** an untyped timeline lane that may hold MIDI events, audio regions, or both.
   - Each lane has a **MIDI destination** (an instrument-list entry) and an **audio output path** for its regions. Audio regions always follow the lane's audio output path.
@@ -197,7 +198,7 @@ vizdaw/
   - AAF uses the open AAF SDK, wrapped through the C ABI, or a Rust reader if one is suitable — to be decided in that sub-project's spec.
   - OMF needs a dedicated reader, based on the published OMF Interchange Specification 2.1.
 - **Audio files:** WAV, AIFF, CAF and FLAC decoded via `symphonia` or ExtAudioFile; playback streams from disk.
-- **External sample editor:** a region's audio file can be opened in a user-chosen external editor (set in Settings). VizDAW watches the file, detects changes and reloads it, updating every region that uses it.
+- **External sample editor:** a region's audio can be opened in a user-chosen external editor (set in Settings). VizDAW hands the editor a copy (or a rendered file of the region), never the shared original, watches that copy, and on change relinks the region to it; other regions using the original are unaffected.
 
 ## 9. Native macOS UI
 
@@ -205,15 +206,25 @@ vizdaw/
 - **Sequence sidebar** is a working surface: per sequence it shows name, keyboard slot, comment and use count; supports drag reordering, duplicate, and new-from-template.
 - **High-performance editors** are custom AppKit views drawn with Metal/Core Animation:
   - Arrangement timeline: groups each lane's events into blocks automatically (by silence gaps, fixed bar blocks, or whole lane, with a user-set size); a reference event is always its own block. Double-clicking a block opens exactly that block in a detail editor; a drag moves (with a modifier, copies) or merges blocks into another lane. A lightweight drawing mode keeps large projects fast.
-  - Piano roll, with per-note expression lanes. The cursor's action depends on its position over a note (start moves, middle transposes, end resizes), with a modifier to copy; the pencil inserts at a default size or paints a length; notes sound while dragged. It can show several lanes, shows the lanes' audio regions in their own strip, and has an optional keyboard beside it.
+  - Piano roll, with per-note expression lanes. The cursor's action depends on its position over a note (start moves, middle transposes, end resizes), with a modifier to copy; the pencil inserts at a default size or paints a length; notes sound while dragged. It can show several lanes (a VizDAW choice), shows the lanes' audio regions in their own strip between the notes and the controller pane, with mute and solo per audio output path, and has an optional keyboard beside it.
   - List editor (fast, keyboard-first, inline editing). Typing a bar number moves an event to that downbeat; a single sub-field can be edited alone; Enter commits and the list follows the moved event; pitch and velocity can be entered by playing a note; insert repeats the last inserted kind; optional columns (end, duration, release velocity, SMPTE); type/destination filters can be applied to all lists or saved as default. Reference events and audio regions are rows like any other (opening a reference opens its sequence).
   - Drum grid. Any lane can be marked as a drum lane; a drum lane is organised into rows, one per sound, each row naming its note and destination (rows with different destinations make the lane mixed-destination). The grid shows only drum lanes and offers two views: a step matrix (evenly spaced cells for programming patterns) and a timeline view showing true start times and durations. A paint tool toggles a hit on click and paints or erases a run on drag, using configurable spacing, duration and velocity; when a row shows its velocity lane, the vertical pointer position sets each new hit's velocity. Rows can be added, reordered, dragged to another drum lane (or below the last to create one) and split out into their own lanes. Each drum lane has its own play quantize (grid or groove) and nudge. A drum lane plays a note only if the note starts after playback, unmute or solo began, so loop-based sounds always start cleanly.
-  - Strip Chart with smooth 32-bit controller curves. Besides drawing new values, a drawn line over a range can modify existing data (set, scale, add, limit max/min, legato for durations, thin/thicken, compress) with a line shape (straight, free, curved, flat, random). A modifier limits the edit to selected notes. Inserting writes to the shown lane; modifying acts on every selected lane in the range. It covers velocity, release velocity, duration, controllers, pitch bend, pressure, program changes, tempo and plugin automation; drawn tempo ramps sound linear.
+  - Strip Chart with smooth 32-bit controller curves. Besides drawing new values, a drawn line over a range can modify existing data (set, scale, add, limit max/min, legato for durations, thin/thicken).
+    - Line operations take a shape: straight, free, curved (e.g. for fades), flat, random, or an oscillator (sine, square, triangle, sawtooth) whose period is set in musical or clock units and can follow the meter.
+    - **Compress** is drawn as a rectangle: every value in its time range is rescaled so the lowest lands on the rectangle's bottom edge and the highest on its top edge, widening or narrowing the range while keeping its contour.
+    - A modifier limits the edit to selected notes. Inserting writes to the shown lane; modifying acts on every selected lane in the range.
+    - It covers velocity, release velocity, duration, controllers, pitch bend, pressure, program changes, tempo, a velocity-scale lane, and automation of plugin parameters, EQ, mute, solo, sends and pan; drawn tempo ramps sound linear.
+    - Every Strip Chart operation is also available numerically in the select-and-modify panel.
 - **Shared editor behaviours:**
   - A drag in any ruler always selects a time range across all shown lanes and event kinds, whatever the current tool.
-  - **Exact mode:** any drag (move, transpose, resize, scale time, Strip Chart line) can instead open a dialog pre-filled with the dragged amounts.
-  - **Nudge** moves the selection by a set time or pitch step; pitch nudge can follow a key and scale.
-  - **Select by rule** (time, type, pitch, velocity, duration, destination, metric position, every Nth) with select, add and refine modes; rules can be saved as named presets followed by a modify step; "Repeat Last Modify".
+  - **Select-and-modify panel:** one command surface for choosing events and changing them, instead of a separate dialog per operation.
+    - Select half: rules on event kind and attributes (time, pitch, velocity, duration, value, destination, metric position, bracketing events, every Nth) with conditions such as equal, not equal, inside or outside a range; the result can replace, add to or refine the current selection.
+    - Modify half: transpose (chromatic, diatonic, inversion, to a key/scale, or by a note map; optionally as a harmonizing copy); change velocity, release velocity, duration or value by set, scale, add, limit, compress or legato, with a constant amount, an amount that changes along a shape, or an oscillating amount; quantize; density; move; scale time; trim start; set destination; substitute; delete. A modification applies in place or to a copy.
+    - The transpose, quantize, modify, move and select-by-rule menu commands all open this panel set to their task.
+    - Any configuration can be saved as a named template, listed in a menu for one-step recall.
+    - **Modify Again** repeats the last modification on the current selection.
+  - **Exact mode:** any drag (move, transpose, resize, change value, scale time, select, Strip Chart line) can instead open the select-and-modify panel set to the matching operation and pre-filled with the dragged amounts.
+  - **Nudge** moves the selection by a set time or pitch step; pitch nudge can follow a key and scale. Both steps are set on one Settings page.
 - **Keyboard:**
   - Every command, including those without a menu item (transport, locate, mode toggles, keep/discard loop pass, next/previous record lane), has a stable identifier and can be bound to a key. Shipped defaults cover a small core; users can save, load and reset bindings, and bound keys appear in menus.
   - By default, unmodified single keys drive the transport (play/pause, stop, record, play from position, scrub, previous/next marker) and mode toggles (overdub, punch, loop, step, snap).
@@ -227,7 +238,7 @@ vizdaw/
 
 - **Real-time thread:** written to be panic-free (no indexing that can go out of bounds, no `unwrap`; enforced by clippy lints on the engine crate). Faults (overload, plugin errors, xruns, nested references that could not start) set atomic flags that the UI polls and reports.
 - **Plugins:** a plugin that crashes during scanning is blocklisted. Out-of-process AUv3 plugins are isolated. A missing plugin becomes an offline placeholder that keeps its saved state.
-- **Media:** missing files become offline regions with a relink dialog. Files changed outside VizDAW (e.g. by an external sample editor) are detected and reloaded.
+- **Media:** missing files become offline regions with a relink dialog. Files changed outside VizDAW (e.g. an external-editor copy) are detected and reloaded.
 - **Devices:** handled as in Section 6.
 - **FFI:** every core API returns a `Result` mapped to a Swift `throws`. No panics cross the FFI boundary (`catch_unwind` at the boundary).
 
