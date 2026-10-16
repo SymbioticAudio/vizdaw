@@ -1604,6 +1604,7 @@ dependencies = [
  "core-engine",
  "core-host",
  "core-model",
+ "platform-macos",
  "serde_json",
  "test-plugins",
 ]

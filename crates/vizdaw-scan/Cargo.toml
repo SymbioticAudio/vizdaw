@@ -11,5 +11,8 @@ core-engine = { path = "../core-engine" }
 core-model = { path = "../core-model" }
 serde_json = "1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+platform-macos = { path = "../platform-macos" }
+
 [dev-dependencies]
 test-plugins = { path = "../test-plugins" }

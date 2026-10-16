@@ -134,3 +134,31 @@ fn copy_dir(from: &Path, to: &Path) {
         copy_dir(&e.path(), &to.join(e.file_name()));
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn audio_units_are_listed_and_scanned() {
+    use core_host::scan::scan_source;
+    let src = Source {
+        format: PluginFormat::Au,
+        path: "au:aufx/dely/appl".into(),
+        version: String::new(),
+        mtime: 0,
+    };
+    let entries = scan_source(exe(), &src, Duration::from_secs(10));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].plugin.name, "AUDelay");
+    assert_eq!(entries[0].status, core_host::catalog::ScanStatus::Ok);
+    let info = entries[0].info.as_ref().unwrap();
+    assert!(info.params.iter().any(|p| p.name == "Delay Time"));
+    let missing = run(
+        exe(),
+        &ScanRequest {
+            format: PluginFormat::Au,
+            path: "au:aufx/none/appl".into(),
+            id: None,
+            timeout: Duration::from_secs(10),
+        },
+    );
+    assert!(missing.reason().unwrap().contains("not found"));
+}

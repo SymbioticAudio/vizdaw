@@ -3,6 +3,8 @@
 //! ```text
 //! vizdaw-scan --format clap --path <bundle> --list
 //! vizdaw-scan --format clap --path <bundle> --id <plugin id>
+//! vizdaw-scan --format au --path au:<type/subtype/manufacturer> --list
+//! vizdaw-scan --format au --id <type/subtype/manufacturer>
 //! ```
 //!
 //! `--list` prints the plugins of the bundle; `--id` loads the plugin,
@@ -127,9 +129,33 @@ fn scan(args: &Args) -> Result<ScanReply, String> {
 #[cfg(target_os = "macos")]
 mod au {
     use super::*;
+    use platform_macos::au;
+
+    /// AU sources are single components: `--list` reads the registry only;
+    /// `--id` loads the unit. A v3 unit that cannot be loaded outside the
+    /// app is "not validated" (spec §8).
     pub fn scan(args: &Args) -> Result<ScanReply, String> {
-        let _ = args;
-        Err("AU scanning arrives with the AU host".into())
+        let id = match &args.id {
+            Some(id) => id.clone(),
+            None => args
+                .path
+                .to_string_lossy()
+                .strip_prefix("au:")
+                .map(String::from)
+                .ok_or("an AU path is au:<type/subtype/manufacturer>")?,
+        };
+        let c = au::component(&id).ok_or_else(|| format!("plugin not found: {id}"))?;
+        if args.id.is_none() {
+            return Ok(ScanReply::Listed(vec![(c.plugin, c.kind)]));
+        }
+        match au::load(&id, RATE, BLOCK) {
+            Ok(mut inst) => {
+                exercise(&mut inst)?;
+                Ok(ScanReply::Scanned(inst.info().clone()))
+            }
+            Err(e) if c.v3 => Ok(ScanReply::NotValidated(e.to_string())),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 
