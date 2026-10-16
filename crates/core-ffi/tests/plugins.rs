@@ -304,3 +304,40 @@ fn reentering_the_registry_is_busy_not_a_panic() {
     // The remaining session is unharmed.
     idle_until(&a, |s| slot(s, id).status == SlotStatus::Live);
 }
+
+#[test]
+fn an_edit_made_while_busy_reaches_the_engine_on_the_next_idle() {
+    let _g = serial();
+    let (_d, path, song, id) = project("vizdaw.test.gain");
+    let s = open(&path);
+    s.play(song).unwrap();
+    idle_until(&s, |s| {
+        placeholder_lines(s).is_empty() && slot(s, id).status == SlotStatus::Live
+    });
+    let lane = s.lanes(song).unwrap()[0].id;
+    let seq_row = |s: &Session| s.snapshot().unwrap();
+    let before = seq_row(&s).version;
+    // The edit lands in the document but its reload hits a busy registry.
+    vizdaw_ffi::plugins::with(0, |_| {
+        s.set_lane_mute(song, lane, true).unwrap();
+    })
+    .unwrap();
+    assert!(seq_row(&s).version > before);
+    let loads = vizdaw_ffi::host::loads();
+    let t = s.transport().unwrap();
+    assert!(
+        t.faults.iter().all(|f| !f.contains("busy")),
+        "{:?}",
+        t.faults
+    );
+    // The next tick recompiles the engine; nothing is left owed.
+    s.idle().unwrap();
+    assert!(vizdaw_ffi::host::loads() > loads, "engine recompiled");
+    assert!(s.transport().unwrap().faults.is_empty());
+    assert!(
+        s.lanes(song)
+            .unwrap()
+            .iter()
+            .any(|l| l.id == lane && l.mute)
+    );
+}

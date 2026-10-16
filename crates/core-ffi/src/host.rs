@@ -46,6 +46,8 @@ pub const OFFLINE_DEVICE: &str = "Offline";
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
 static FORCE_OFFLINE: AtomicBool = AtomicBool::new(false);
+/// Engine loads made by the host (test hook counter).
+static LOADS: AtomicU64 = AtomicU64::new(0);
 static HOSTS_CREATED: AtomicU64 = AtomicU64::new(0);
 
 /// How long a still-running device gets to play the note-offs before a
@@ -124,6 +126,12 @@ pub fn inject_reload_fault(f: Option<ReloadFault>) {
 #[cfg(feature = "test-hooks")]
 pub fn closing_hosts_waiting() -> usize {
     plugins::closing_hosts()
+}
+
+/// How many engine loads the host made (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn loads() -> u64 {
+    LOADS.load(Ordering::Relaxed)
 }
 
 /// The live engine's worker count (test hook; `None` without a host).
@@ -327,6 +335,7 @@ impl Host {
     }
 
     fn load(&mut self, doc: &Document, seq: SeqId, looped: bool) -> Result<(), VizError> {
+        LOADS.fetch_add(1, Ordering::Relaxed);
         self.plugins_in_engine |= has_slots(doc);
         let report = self.engine.load(doc, seq)?;
         self.report = report_lines(&report);

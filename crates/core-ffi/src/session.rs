@@ -42,6 +42,9 @@ struct Inner {
     /// Sticky: the last engine recompile after an edit failed. Cleared by
     /// the next successful recompile or Play.
     reload_fault: Option<String>,
+    /// A reload could not run (the plugin registry was busy, or Play's
+    /// load failed): `idle` runs it once it can.
+    reload_owed: bool,
 }
 
 impl Inner {
@@ -55,6 +58,7 @@ impl Inner {
             cursor: None,
             cursor_seq: None,
             reload_fault: None,
+            reload_owed: false,
         }
     }
 
@@ -79,8 +83,11 @@ impl Inner {
         let (doc, looped) = (self.history.doc(), self.looped);
         let r =
             ffi_guard(|| plugins::with(id, |p| host::reload(id, doc, looped, p)).and_then(|r| r));
+        self.reload_owed = matches!(r, Err(VizError::Busy { .. }));
         self.reload_fault = match r {
             Ok(()) => None,
+            // Not a fault: `idle` retries.
+            Err(VizError::Busy { .. }) => None,
             Err(e) => {
                 if let VizError::Internal { .. } = e {
                     host::reset();
@@ -327,10 +334,16 @@ impl Session {
                 _ => None,
             };
             let looped = inner.looped;
-            plugins::with(self.id, |p| {
+            let played = plugins::with(self.id, |p| {
                 host::play(self.id, inner.doc(), id, start, looped, p)
             })
-            .and_then(|r| r)?;
+            .and_then(|r| r);
+            if let Err(e) = played {
+                // Retried by `idle` (the engine may hold stale plugins).
+                inner.reload_owed = true;
+                return Err(e);
+            }
+            inner.reload_owed = false;
             inner.reload_fault = None;
             inner.cursor = None;
             inner.cursor_seq = Some(id);
@@ -427,6 +440,9 @@ impl Session {
             }
             plugins::tick_closing();
             let mut inner = lock(&self.inner);
+            if inner.reload_owed {
+                inner.reload_host(self.id);
+            }
             let report = {
                 let doc = inner.doc();
                 plugins::with(self.id, |p| p.map(|p| host::service(self.id, doc, p)))
