@@ -405,6 +405,18 @@ impl Document {
         &mut self.mixer
     }
 
+    /// Mutable slot of plugin instance `id`.
+    pub(crate) fn slot_mut(&mut self, id: PluginInstanceId) -> Result<&mut PluginSlot> {
+        let unknown = ModelError::UnknownId(AnyId::Plugin(id));
+        match self.find_slot(id).ok_or(unknown.clone())? {
+            SlotOwner::Instrument(d) => match self.instruments.get_mut(&d).map(|x| &mut x.kind) {
+                Some(DestKind::PluginInstrument { slot }) => Ok(slot),
+                _ => Err(unknown),
+            },
+            SlotOwner::Insert(s, i) => self.mixer.strip_mut(s)?.inserts.get_mut(i).ok_or(unknown),
+        }
+    }
+
     /// Mutable sequence. Callers must not add or remove take events through
     /// it; use the event functions below so the index stays correct.
     pub(crate) fn seq_mut(&mut self, id: SeqId) -> Result<&mut Sequence> {

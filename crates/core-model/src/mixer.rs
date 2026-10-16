@@ -336,6 +336,13 @@ impl Mixer {
         self.order.insert(i, id);
     }
 
+    /// Moves a strip to display position `index` (clamped).
+    pub(crate) fn move_to(&mut self, id: StripId, index: usize) {
+        self.order.retain(|x| *x != id);
+        let i = index.min(self.order.len());
+        self.order.insert(i, id);
+    }
+
     /// Removes a strip (never master): outputs to it go to master, sends to
     /// it are dropped and sidechains from it are cleared.
     pub(crate) fn remove(&mut self, id: StripId) -> Option<Strip> {
