@@ -1,0 +1,18 @@
+[package]
+name = "test-plugins"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+# `cdylib` is the CLAP binary; `rlib` lets tests call `bundle()`.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clack-plugin = "0.2"
+clack-extensions = { version = "0.2", features = ["clack-plugin", "audio-ports", "note-ports", "params", "state", "latency"] }
+
+[dev-dependencies]
+clack-host = "0.2"
