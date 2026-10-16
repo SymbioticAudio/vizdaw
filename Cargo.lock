@@ -841,6 +841,7 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "core-engine",
+ "core-model",
  "objc2-audio-toolbox",
  "objc2-core-audio",
  "objc2-core-audio-types",
