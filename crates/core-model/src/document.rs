@@ -5,7 +5,7 @@ use crate::error::{ModelError, Result};
 use crate::event::Event;
 use crate::ids::{
     AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, PluginInstanceId, SeqId,
-    StripId, TakeId,
+    StateBlobId, StripId, TakeId,
 };
 use crate::lane::Lane;
 use crate::mixer::{BUILTIN_SYNTH_REF, Mixer, PluginRef, PluginSlot, derive_mixer};
@@ -14,6 +14,8 @@ use crate::sequence::Sequence;
 use crate::time::Tick;
 use im::OrdMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// Project-wide settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,6 +163,9 @@ pub struct Document {
     media: OrdMap<MediaId, MediaItem>,
     sequences: OrdMap<SeqId, Sequence>,
     mixer: Mixer,
+    /// Plugin state blobs by ID (Plan Ruling 8). Never serialized into
+    /// `project.json`; `file::save`/`load` keep them in `PluginState/`.
+    states: OrdMap<StateBlobId, Arc<[u8]>>,
     counters: Counters,
     /// Derived, never serialized: event ID -> location.
     index: OrdMap<EventId, EventLoc>,
@@ -241,6 +246,7 @@ impl TryFrom<DocumentRepr> for Document {
             media: collect_unique(r.media, |v| v.id, "media")?,
             sequences: collect_unique(r.sequences, |v| v.id, "sequence")?,
             mixer,
+            states: OrdMap::new(),
             counters,
             index: OrdMap::new(),
         };
@@ -262,6 +268,7 @@ impl Document {
             media: OrdMap::new(),
             sequences: OrdMap::new(),
             mixer,
+            states: OrdMap::new(),
             counters,
             index: OrdMap::new(),
         }
@@ -327,6 +334,29 @@ impl Document {
             },
             SlotOwner::Insert(s, i) => self.mixer.strip(s).ok()?.inserts.get(i),
         }
+    }
+
+    /// The bytes of state blob `id`, when loaded.
+    pub fn state_blob(&self, id: StateBlobId) -> Option<&[u8]> {
+        self.states.get(&id).map(|b| &b[..])
+    }
+
+    /// Every blob a plugin slot points at.
+    pub fn referenced_states(&self) -> BTreeSet<StateBlobId> {
+        let insts = self.instruments.values().filter_map(|d| match &d.kind {
+            DestKind::PluginInstrument { slot } => slot.state,
+            DestKind::MidiEndpoint { .. } => None,
+        });
+        let inserts = self.mixer.inserts().filter_map(|(_, _, p)| p.state);
+        insts.chain(inserts).collect()
+    }
+
+    /// Referenced blobs whose bytes are not loaded (a missing file).
+    pub fn missing_states(&self) -> Vec<StateBlobId> {
+        self.referenced_states()
+            .into_iter()
+            .filter(|id| !self.states.contains_key(id))
+            .collect()
     }
 
     /// A sequence by ID.
@@ -415,6 +445,10 @@ impl Document {
             },
             SlotOwner::Insert(s, i) => self.mixer.strip_mut(s)?.inserts.get_mut(i).ok_or(unknown),
         }
+    }
+
+    pub(crate) fn states_mut(&mut self) -> &mut OrdMap<StateBlobId, Arc<[u8]>> {
+        &mut self.states
     }
 
     /// Mutable sequence. Callers must not add or remove take events through

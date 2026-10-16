@@ -12,11 +12,13 @@ use crate::history::Timestamp;
 use crate::ids::PluginInstanceId;
 use crate::mixer::{PluginRef, PluginSlot};
 use crate::rules::validate;
+use crate::state::{STATE_DIR, blob_file_name, parse_blob_file_name, states_in_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
@@ -177,18 +179,70 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Saves `doc` into the package directory (created if missing).
+/// Writes every referenced blob that is not on disk yet (blobs are
+/// immutable, so an existing file is already right). With `prune`, then
+/// deletes blob files referenced neither by `doc` nor by any autosave.
+fn write_states(doc: &Document, package: &Path, prune: bool) -> Result<()> {
+    let dir = package.join(STATE_DIR);
+    fs::create_dir_all(&dir)?;
+    let referenced = doc.referenced_states();
+    for id in &referenced {
+        let path = dir.join(blob_file_name(*id));
+        if let Some(bytes) = doc.state_blob(*id) {
+            if !path.exists() {
+                write_atomic(&path, bytes)?;
+            }
+        }
+    }
+    if prune {
+        let mut keep = referenced;
+        for a in list_autosaves(package)? {
+            // An unreadable autosave aborts the prune: its blobs must stay.
+            keep.extend(states_in_json(&fs::read_to_string(&a)?));
+        }
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let id = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(parse_blob_file_name);
+            if let Some(id) = id {
+                if !keep.contains(&id) {
+                    fs::remove_file(&path)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads every referenced blob that exists in the package.
+fn read_states(doc: &mut Document, package: &Path) {
+    let dir = package.join(STATE_DIR);
+    for id in doc.referenced_states() {
+        if let Ok(bytes) = fs::read(dir.join(blob_file_name(id))) {
+            doc.states_mut().insert(id, Arc::from(bytes));
+        }
+    }
+}
+
+/// Saves `doc` into the package directory (created if missing): blobs
+/// first, then `project.json`, then unreferenced blobs are removed.
 pub fn save(doc: &Document, package: &Path) -> Result<()> {
     fs::create_dir_all(package.join("Media"))?;
     fs::create_dir_all(package.join("Autosave"))?;
-    write_atomic(&package.join(PROJECT_FILE), to_json(doc)?.as_bytes())
+    write_states(doc, package, false)?;
+    write_atomic(&package.join(PROJECT_FILE), to_json(doc)?.as_bytes())?;
+    write_states(doc, package, true)
 }
 
-/// Loads the package's `project.json`.
+/// Loads the package's `project.json` and its plugin state blobs. A
+/// missing blob is listed by `Document::missing_states`, not an error.
 pub fn load(package: &Path) -> Result<Document> {
-    from_json(&fs::read_to_string(package.join(PROJECT_FILE))?)
+    let mut doc = from_json(&fs::read_to_string(package.join(PROJECT_FILE))?)?;
+    read_states(&mut doc, package);
+    Ok(doc)
 }
-
 /// Autosave copies in the package, newest first.
 pub fn list_autosaves(package: &Path) -> Result<Vec<PathBuf>> {
     let dir = package.join("Autosave");
@@ -219,6 +273,7 @@ pub fn autosave(doc: &Document, package: &Path, at: Timestamp) -> Result<PathBuf
         ms = ms.saturating_add(1);
         path = dir.join(format!("project-{ms:020}.json"));
     }
+    write_states(doc, package, false)?;
     write_atomic(&path, to_json(doc)?.as_bytes())?;
     let keep = usize::try_from(doc.settings().autosave_keep.max(1)).unwrap_or(usize::MAX);
     for old in list_autosaves(package)?.into_iter().skip(keep) {
