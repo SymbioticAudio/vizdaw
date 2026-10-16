@@ -116,6 +116,8 @@ impl Live {
 struct SinkInfo {
     /// Instrument latency (`None`: not an instrument sink).
     latency: Option<u32>,
+    /// Instrument outputs.
+    outputs: u16,
     /// The block size the sink was made for.
     max_frames: u32,
 }
@@ -385,6 +387,10 @@ impl Engine {
                         Sink::Instrument(node) => Some(node.latency()),
                         Sink::Midi(_) => None,
                     },
+                    outputs: match &sink {
+                        Sink::Instrument(node) => node.outputs().clamp(1, 16),
+                        Sink::Midi(_) => 0,
+                    },
                     max_frames: max,
                 };
             }
@@ -489,14 +495,15 @@ impl Engine {
             .targets
             .iter()
             .filter_map(|(i, k)| {
-                let lat = self.sinks.get(usize::from(i.0))?.latency?;
+                let info = self.sinks.get(usize::from(i.0))?;
+                let lat = info.latency?;
                 match k {
                     TargetKind::BuiltinSynth => Some(InstrumentFeed::builtin(i, lat)),
                     TargetKind::PluginInstrument(id) => {
                         let dest = doc.instruments().values().find(|d| {
                             matches!(&d.kind, DestKind::PluginInstrument { slot } if slot.id == *id)
                         })?;
-                        Some(InstrumentFeed::plugin(i, lat, dest.id))
+                        Some(InstrumentFeed::plugin(i, lat, info.outputs, dest.id))
                     }
                     _ => None,
                 }

@@ -100,8 +100,34 @@ impl StereoBuf {
     }
 }
 
-/// An instrument hosted inside the engine (the built-in synth, later
-/// plugins). Every method is called on the real-time thread.
+/// Transport facts for one block, as of its first frame (plugins read
+/// tempo and position from it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockInfo {
+    /// The transport is playing.
+    pub playing: bool,
+    /// Schedule frame of the block's first frame.
+    pub frame: u64,
+    /// Position in quarter notes (ticks ÷ PPQ; negative in a pickup).
+    pub beats: f64,
+    /// Tempo in beats per minute.
+    pub tempo_bpm: f64,
+}
+
+impl Default for BlockInfo {
+    fn default() -> BlockInfo {
+        BlockInfo {
+            playing: false,
+            frame: 0,
+            beats: 0.0,
+            tempo_bpm: 120.0,
+        }
+    }
+}
+
+/// An instrument hosted inside the engine (the built-in synth, plugin
+/// instruments). Every method but `latency` and `outputs` is called on the
+/// real-time thread.
 pub trait InstrumentNode: Send {
     /// Queues one MIDI 1.0 message (or a whole `F0 … F7` SysEx) at a frame
     /// offset within the next `render` call. // RT
@@ -120,6 +146,26 @@ pub trait InstrumentNode: Send {
     /// is created (the DLS synth: 0).
     fn latency(&self) -> u32 {
         0
+    }
+
+    /// Number of stereo outputs (1 … 16), read on the control thread when
+    /// the sink is created. Output 0 feeds the destination's `Instrument`
+    /// strip, output `k` its `InstrumentOutput(_, k)` strip.
+    fn outputs(&self) -> u16 {
+        1
+    }
+
+    /// Renders every output: `outs[k]` is output `k` (`outs.len()` is
+    /// [`InstrumentNode::outputs`]). The default renders output 0 with
+    /// `render` and silences the rest. // RT
+    fn render_outputs(&mut self, frames: u32, outs: &mut [StereoBuf], info: &BlockInfo) {
+        let _ = info;
+        if let Some((first, rest)) = outs.split_first_mut() {
+            self.render(frames, first);
+            for o in rest {
+                o.clear(frames);
+            }
+        }
     }
 }
 

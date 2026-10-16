@@ -9,9 +9,12 @@ use core_model::ids::{PluginInstanceId, StripId};
 pub enum Tap {
     /// After the inserts, before the fader (pre-fader sends).
     Pre,
-    /// After fader and pan (outputs, post-fader sends, sidechains;
-    /// instrument nodes write here).
+    /// After fader and pan (outputs, post-fader sends, sidechains); of an
+    /// instrument node, its output 0.
     Post,
+    /// Output `k` (≥ 1) of an instrument node (a multi-output plugin
+    /// instrument's extra output).
+    Out(u16),
 }
 
 /// An edge into a strip: `gain × tap(from)`.
@@ -86,6 +89,8 @@ pub enum NodeSpec {
         target: TargetIdx,
         /// The instrument's latency in frames.
         latency: u32,
+        /// Number of stereo outputs (≥ 1).
+        outputs: u16,
     },
     /// A mixer strip.
     Strip(StripSpec),
@@ -115,6 +120,7 @@ fn tap_code(t: Tap) -> u64 {
     match t {
         Tap::Pre => 1,
         Tap::Post => 2,
+        Tap::Out(k) => 3 + u64::from(k),
     }
 }
 
@@ -142,10 +148,15 @@ impl GraphSpec {
         h.u64(self.master as u64);
         for n in &self.nodes {
             match n {
-                NodeSpec::Instrument { target, latency } => {
+                NodeSpec::Instrument {
+                    target,
+                    latency,
+                    outputs,
+                } => {
                     h.u64(1);
                     h.u64(u64::from(target.0));
                     h.u64(u64::from(*latency));
+                    h.u64(u64::from(*outputs));
                 }
                 NodeSpec::Strip(s) => {
                     h.u64(2);

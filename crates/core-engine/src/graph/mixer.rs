@@ -36,6 +36,8 @@ pub struct InstrumentFeed {
     pub target: TargetIdx,
     /// The sink's latency in frames.
     pub latency: u32,
+    /// The sink's stereo outputs (≥ 1).
+    pub outputs: u16,
     /// The strip it feeds.
     pub source: FeedSource,
 }
@@ -46,15 +48,18 @@ impl InstrumentFeed {
         InstrumentFeed {
             target,
             latency,
+            outputs: 1,
             source: FeedSource::Builtin,
         }
     }
 
-    /// A plugin instrument feed for destination `dest`.
-    pub fn plugin(target: TargetIdx, latency: u32, dest: DestId) -> InstrumentFeed {
+    /// A plugin instrument feed for destination `dest` with `outputs`
+    /// stereo outputs.
+    pub fn plugin(target: TargetIdx, latency: u32, outputs: u16, dest: DestId) -> InstrumentFeed {
         InstrumentFeed {
             target,
             latency,
+            outputs: outputs.max(1),
             source: FeedSource::Plugin(dest),
         }
     }
@@ -116,6 +121,35 @@ pub fn mixer_spec(
                 tap: Tap::Post,
                 gain: 1.0,
             });
+        }
+        // Extra outputs feed their `InstrumentOutput` strips; a strip for an
+        // output the instrument does not have stays silent (spec §4).
+        if let FeedSource::Plugin(d) = f.source {
+            for s in m.strips().values() {
+                let StripKind::InstrumentOutput(x, k) = s.kind else {
+                    continue;
+                };
+                if x != d {
+                    continue;
+                }
+                if k >= f.outputs {
+                    warnings.push(format!(
+                        "strip {:?} is silent: its instrument has {} output(s)",
+                        s.name, f.outputs
+                    ));
+                    continue;
+                }
+                if let Some(t) = node(s.id)
+                    .and_then(|t| t.checked_sub(base))
+                    .and_then(|k| strips.get_mut(k))
+                {
+                    t.inputs.push(InputSpec {
+                        from: i,
+                        tap: Tap::Out(k),
+                        gain: 1.0,
+                    });
+                }
+            }
         }
     }
     let muted = |s: &Strip| s.mute || !on.contains(&s.id);
@@ -199,6 +233,7 @@ pub fn mixer_spec(
         .map(|f| NodeSpec::Instrument {
             target: f.target,
             latency: f.latency,
+            outputs: f.outputs.max(1),
         })
         .collect();
     nodes.extend(strips.into_iter().map(NodeSpec::Strip));

@@ -339,6 +339,7 @@ fn instrument_nodes_render_their_sink() {
             NodeSpec::Instrument {
                 target: TargetIdx(2),
                 latency: 0,
+                outputs: 1,
             },
             NodeSpec::Strip(s),
         ],
@@ -371,10 +372,12 @@ fn a_repeated_instrument_target_renders_its_sink_once() {
             NodeSpec::Instrument {
                 target: TargetIdx(2),
                 latency: 0,
+                outputs: 1,
             },
             NodeSpec::Instrument {
                 target: TargetIdx(2),
                 latency: 0,
+                outputs: 1,
             },
             NodeSpec::Strip(s),
         ],
@@ -505,6 +508,7 @@ fn pre_tap_of_an_instrument_reads_its_output() {
             NodeSpec::Instrument {
                 target: TargetIdx(2),
                 latency: 0,
+                outputs: 1,
             },
             NodeSpec::Strip(y),
             NodeSpec::Strip(m),

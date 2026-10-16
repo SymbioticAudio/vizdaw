@@ -37,6 +37,7 @@ fn a_chain_adds_insert_latencies() {
             NodeSpec::Instrument {
                 target: TargetIdx(0),
                 latency: 0,
+                outputs: 1,
             },
             strip(&[0], vec![ins(10), ins(20)]),
             strip(&[1], vec![]),
@@ -204,6 +205,7 @@ fn a_single_huge_latency_is_refused_even_off_any_edge() {
             NodeSpec::Instrument {
                 target: TargetIdx(0),
                 latency: l,
+                outputs: 1,
             },
             strip(&[0], vec![]),
         ],

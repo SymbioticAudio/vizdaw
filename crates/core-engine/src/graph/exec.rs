@@ -19,7 +19,7 @@
 //! - between runs (`remaining == 0` and no worker inside the job, which
 //!   `Exec::try_finish` establishes) the owner has exclusive access.
 
-use crate::backend::StereoBuf;
+use crate::backend::{BlockInfo, StereoBuf};
 use crate::error::EngineError;
 use crate::graph::delay::DelayLine;
 use crate::graph::dsp;
@@ -144,6 +144,8 @@ enum NodeDef {
 struct NodeState {
     pre: StereoBuf,
     post: StereoBuf,
+    /// An instrument node's outputs (empty for strips).
+    outs: Box<[StereoBuf]>,
     scratch: StereoBuf,
     sc: StereoBuf,
     delays: Box<[DelayLine]>,
@@ -151,10 +153,11 @@ struct NodeState {
 }
 
 impl NodeState {
-    fn instrument(max: u32) -> NodeState {
+    fn instrument(max: u32, outputs: u16) -> NodeState {
         NodeState {
             pre: StereoBuf::new(0),
-            post: StereoBuf::new(max),
+            post: StereoBuf::new(0),
+            outs: (0..outputs.max(1)).map(|_| StereoBuf::new(max)).collect(),
             scratch: StereoBuf::new(0),
             sc: StereoBuf::new(0),
             delays: Box::new([]),
@@ -172,6 +175,7 @@ impl NodeState {
         NodeState {
             pre: StereoBuf::new(max),
             post: StereoBuf::new(max),
+            outs: Box::new([]),
             scratch: StereoBuf::new(if delayed { max } else { 0 }),
             sc: StereoBuf::new(if has_sc { max } else { 0 }),
             delays: delays.into_boxed_slice(),
@@ -189,6 +193,9 @@ impl NodeState {
             if b.capacity() > 0 {
                 *b = StereoBuf::new(max);
             }
+        }
+        for b in self.outs.iter_mut() {
+            *b = StereoBuf::new(max);
         }
     }
 }
@@ -254,11 +261,19 @@ fn acyclic(succ: &[Vec<usize>], indegree: &[u32], sources: &[usize]) -> bool {
     seen == indegree.len()
 }
 
-/// The buffer an edge reads from node `from`: an instrument has only its
-/// output, so `Pre` of an instrument reads `post`. // RT
+/// The buffer an edge reads from node `from`: of an instrument, its output
+/// `k` (`Pre` and `Post` read output 0; a missing output reads an empty
+/// buffer, i.e. silence). // RT
 fn tap_buf<'a>(g: &Graph, from: usize, src: &'a NodeState, tap: Tap) -> &'a StereoBuf {
     match (tap, g.defs.get(from)) {
         (Tap::Pre, Some(NodeDef::Strip { .. })) => &src.pre,
+        (_, Some(NodeDef::Instrument { .. })) => {
+            let k = match tap {
+                Tap::Out(k) => usize::from(k),
+                Tap::Pre | Tap::Post => 0,
+            };
+            src.outs.get(k).unwrap_or(&src.post)
+        }
         _ => &src.post,
     }
 }
@@ -301,7 +316,9 @@ impl Graph {
         };
         for (i, node) in spec.nodes.iter().enumerate() {
             match node {
-                NodeSpec::Instrument { target, .. } => {
+                NodeSpec::Instrument {
+                    target, outputs, ..
+                } => {
                     // Only the first node of a target renders its sink (the
                     // module protocol needs one user per sink); a repeat, or
                     // a target beyond the table, renders silence.
@@ -313,7 +330,7 @@ impl Graph {
                         usize::MAX
                     };
                     defs.push(NodeDef::Instrument { target });
-                    nodes.push(UnsafeCell::new(NodeState::instrument(max_frames)));
+                    nodes.push(UnsafeCell::new(NodeState::instrument(max_frames, *outputs)));
                 }
                 NodeSpec::Strip(s) => {
                     let in_start = inputs.len();
@@ -515,6 +532,7 @@ fn run_insert(
     io: &mut StereoBuf,
     sc: Option<&StereoBuf>,
     shared: &Shared,
+    info: &BlockInfo,
 ) {
     if bypass || ins.faulted {
         if !ins.in_bypass {
@@ -528,7 +546,7 @@ fn run_insert(
     let Some(node) = ins.node.as_mut() else {
         return;
     };
-    let status = node.process(frames, io, sc);
+    let status = node.process_block(frames, io, sc, info);
     if status == ProcessStatus::Error || dsp::is_faulty(io, frames) {
         io.clear(frames);
         ins.bad_run = ins.bad_run.saturating_add(1);
@@ -548,7 +566,14 @@ fn run_insert(
 /// `i` was popped from `g.queue` in the current run by the calling thread,
 /// and `sinks` are that run's sinks, which the owner does not touch until
 /// the run is finished (module protocol).
-unsafe fn render_node(g: &Graph, sinks: &SinkTable, shared: &Shared, frames: u32, i: usize) {
+unsafe fn render_node(
+    g: &Graph,
+    sinks: &SinkTable,
+    shared: &Shared,
+    frames: u32,
+    info: &BlockInfo,
+    i: usize,
+) {
     let (Some(def), Some(cell)) = (g.defs.get(i), g.nodes.get(i)) else {
         return;
     };
@@ -566,8 +591,14 @@ unsafe fn render_node(g: &Graph, sinks: &SinkTable, shared: &Shared, frames: u32
             // `&mut SinkTable` between runs.
             let sink = sinks.cells.get(*target).map(|c| unsafe { &mut *c.get() });
             match sink {
-                Some(Some(Sink::Instrument(node))) => node.render(frames, &mut st.post),
-                _ => st.post.clear(frames),
+                Some(Some(Sink::Instrument(node))) => {
+                    node.render_outputs(frames, &mut st.outs, info)
+                }
+                _ => {
+                    for o in st.outs.iter_mut() {
+                        o.clear(frames);
+                    }
+                }
             }
         }
         NodeDef::Strip {
@@ -632,7 +663,7 @@ unsafe fn render_node(g: &Graph, sinks: &SinkTable, shared: &Shared, frames: u32
                     }
                     None => None,
                 };
-                run_insert(ins, idef.bypass, frames, &mut st.pre, sc, shared);
+                run_insert(ins, idef.bypass, frames, &mut st.pre, sc, shared, info);
             }
             dsp::copy(&mut st.post, &st.pre, frames);
             dsp::scale(&mut st.post, *gain_l, *gain_r, frames);
@@ -653,6 +684,7 @@ pub(crate) struct Job {
     shared: *const Shared,
     pool: Option<*const PoolShared>,
     frames: u32,
+    info: BlockInfo,
 }
 
 // SAFETY: the pointees (`Graph`, `SinkTable`, `Shared`, `PoolShared`) are
@@ -672,6 +704,7 @@ impl Job {
             shared: std::ptr::null(),
             pool: None,
             frames: 0,
+            info: BlockInfo::default(),
         }
     }
 
@@ -693,7 +726,7 @@ impl Job {
         };
         // SAFETY: this thread popped `i` from this run's queue just above,
         // and `sinks` are this run's sinks (caller's contract).
-        unsafe { render_node(g, sinks, shared, self.frames, i) };
+        unsafe { render_node(g, sinks, shared, self.frames, &self.info, i) };
         let mut ready = 0u32;
         for &s in g.succ.get(i).map(|v| &**v).unwrap_or(&[]) {
             if let Some(p) = g.pending.get(s) {
@@ -816,6 +849,7 @@ impl Exec {
         sinks: &SinkTable,
         shared: &Shared,
         frames: u32,
+        info: BlockInfo,
         deadline: Option<Instant>,
     ) -> RunResult {
         // Never reset counters or the queue under a run still in flight.
@@ -844,6 +878,7 @@ impl Exec {
                 shared,
                 pool: pool.map(|p| p as *const PoolShared),
                 frames,
+                info,
             };
         }
         self.running = true;
@@ -966,10 +1001,14 @@ impl Runner {
         if !self.exec.try_finish(deadline) {
             return false;
         }
-        match self
-            .exec
-            .run(&self.graph, &self.sinks, &self.shared, frames, deadline)
-        {
+        match self.exec.run(
+            &self.graph,
+            &self.sinks,
+            &self.shared,
+            frames,
+            BlockInfo::default(),
+            deadline,
+        ) {
             RunResult::Done => {
                 self.graph.write_master(&mut [left, right], frames);
                 true

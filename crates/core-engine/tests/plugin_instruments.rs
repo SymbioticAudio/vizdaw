@@ -6,15 +6,17 @@
 use core_engine::backend::{AudioBackend, InstrumentNode, StereoBuf};
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
-use core_engine::graph::{EffectNode, InsertFactory, TestInserts, TestInstrument};
+use core_engine::graph::{EffectNode, InsertFactory, ProcessStatus, TestInserts, TestInstrument};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::schedule::{TargetIdx, TargetKind};
-use core_model::command::{Command, RoutingCmd};
+use core_model::command::{Command, MixerCmd, RoutingCmd};
 use core_model::document::Document;
+use core_model::event::{EventBody, EventSpec};
 use core_model::ids::{DestId, PluginInstanceId, SeqId};
 use core_model::mixer::{PluginSlot, StripKind};
+use core_model::time::Tick;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const SR: f64 = 48_000.0;
@@ -296,4 +298,145 @@ fn a_released_index_is_not_reused_before_a_publish() {
         plugin_targets(&engine),
         vec![(TargetIdx(0), fourth), (TargetIdx(1), second)]
     );
+}
+
+/// A note on MIDI channel `ch` (an event-level channel override).
+fn note_on_channel(t: i64, pitch: u8, ch: u8) -> EventSpec {
+    let mut e = EventSpec::new(Tick(t), EventBody::note(pitch, 0xFFFF, Tick(16 * Q)));
+    e.group_channel = Some((0, ch));
+    e
+}
+
+#[test]
+fn multi_output_instruments_feed_their_output_strips() {
+    let mut b = Builder::new();
+    let (d, _) = b
+        .plugin_dest("Drums", TestInstrument::plugin("synth,outputs=4"))
+        .unwrap();
+    let (seq, lane) = b.sequence("S", "L", Some(d)).unwrap();
+    b.events(
+        seq,
+        lane,
+        vec![note_on_channel(0, 36, 0), note_on_channel(0, 38, 2)],
+    )
+    .unwrap();
+    for (index, name) in [(2u16, "Snare"), (5, "Ghost")] {
+        b.mixer(MixerCmd::AddInstrumentOutput {
+            dest: d,
+            index,
+            name: name.into(),
+        })
+        .unwrap();
+    }
+    let main = b.strip_of(StripKind::Instrument(d)).unwrap();
+    let snare = b.strip_of(StripKind::InstrumentOutput(d, 2)).unwrap();
+    let ghost = b.strip_of(StripKind::InstrumentOutput(d, 5)).unwrap();
+    let (mut engine, mut be, _) = engine(4096);
+    let report = engine.load(b.doc(), seq).unwrap();
+    assert_eq!(
+        report.graph.warnings,
+        vec!["strip \"Ghost\" is silent: its instrument has 4 output(s)".to_string()]
+    );
+    engine.play().unwrap();
+    be.run_frames(2048);
+    let m = engine.meters();
+    let peak = |s| m.iter().find(|x| x.strip == s).unwrap().peak_l;
+    let pan = std::f32::consts::FRAC_1_SQRT_2;
+    assert!((peak(main) - 0.1 * pan).abs() < 1e-6, "{m:?}");
+    assert!((peak(snare) - 0.3 * pan).abs() < 1e-6, "{m:?}");
+    assert_eq!(peak(ghost), 0.0);
+    let (l, _) = be.output(256);
+    assert!((l[200] - 0.4 * pan).abs() < 1e-6, "master sums both strips");
+}
+
+#[test]
+fn several_instruments_play_side_by_side() {
+    let mut b = Builder::new();
+    let (a, _) = b.plugin_dest("A", TestInstrument::plugin("synth")).unwrap();
+    let (c, _) = b
+        .plugin_dest("B", TestInstrument::plugin("synth,latency=100"))
+        .unwrap();
+    let (seq, la) = b.sequence("S", "A", Some(a)).unwrap();
+    b.notes(seq, la, &[(0, 60, 0xFFFF, 16 * Q)]).unwrap();
+    let lc = b.lane(seq, "B", Some(c)).unwrap();
+    b.notes(seq, lc, &[(0, 60, 0xFFFF, 16 * Q)]).unwrap();
+    let (mut engine, mut be, _) = engine(4096);
+    let report = engine.load(b.doc(), seq).unwrap();
+    assert_eq!(report.graph.nodes, 5, "two instruments, master, two strips");
+    assert_eq!(report.graph.latency_frames, 100, "A is delayed to match B");
+    engine.play().unwrap();
+    be.run_frames(256);
+    let (l, _) = be.output(256);
+    let pan = std::f32::consts::FRAC_1_SQRT_2;
+    assert_eq!(l[99], 0.0, "both arrive after the compensation");
+    assert!(
+        (l[100] - 0.2 * pan).abs() < 1e-6,
+        "and together: {}",
+        l[100]
+    );
+}
+
+/// An insert that records the transport facts it is given.
+#[derive(Clone, Default)]
+struct Probe {
+    frame: Arc<AtomicU64>,
+    bpm: Arc<AtomicU64>,
+    playing: Arc<AtomicBool>,
+}
+
+impl EffectNode for Probe {
+    fn latency(&self) -> u32 {
+        0
+    }
+    fn process(
+        &mut self,
+        _: u32,
+        _: &mut core_engine::backend::StereoBuf,
+        _: Option<&core_engine::backend::StereoBuf>,
+    ) -> ProcessStatus {
+        ProcessStatus::Ok
+    }
+    fn reset(&mut self) {}
+    fn process_block(
+        &mut self,
+        _: u32,
+        _: &mut core_engine::backend::StereoBuf,
+        _: Option<&core_engine::backend::StereoBuf>,
+        info: &core_engine::backend::BlockInfo,
+    ) -> ProcessStatus {
+        self.frame.store(info.frame, Ordering::Relaxed);
+        self.bpm.store(info.tempo_bpm.to_bits(), Ordering::Relaxed);
+        self.playing.store(info.playing, Ordering::Relaxed);
+        ProcessStatus::Ok
+    }
+}
+
+impl InsertFactory for Probe {
+    fn make(&mut self, _: &PluginSlot, _: f64, _: u32) -> Result<Box<dyn EffectNode>, String> {
+        Ok(Box::new(self.clone()))
+    }
+}
+
+#[test]
+fn inserts_see_tempo_position_and_play_state() {
+    let (mut b, seq, d, _) = synth_doc();
+    b.tempo(seq, &[(0, 90, false)]).unwrap();
+    let strip = b.strip_of(StripKind::Instrument(d)).unwrap();
+    b.insert(strip, TestInserts::plugin("probe")).unwrap();
+    let probe = Probe::default();
+    let (mut engine, mut be, _) = engine(4096);
+    engine.set_insert_factory(Box::new(probe.clone()));
+    engine.load(b.doc(), seq).unwrap();
+    be.run_frames(512);
+    assert!(!probe.playing.load(Ordering::Relaxed));
+    engine.play().unwrap();
+    be.run_frames(1024);
+    assert!(probe.playing.load(Ordering::Relaxed));
+    assert_eq!(
+        probe.frame.load(Ordering::Relaxed),
+        768,
+        "start of the last block"
+    );
+    let bpm = f64::from_bits(probe.bpm.load(Ordering::Relaxed));
+    assert!((bpm - 90.0).abs() < 1e-6, "{bpm}");
 }

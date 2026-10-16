@@ -1,6 +1,6 @@
 //! The real-time renderer and the state it publishes.
 
-use crate::backend::{BlockTime, MidiOut, StereoBuf};
+use crate::backend::{BlockInfo, BlockTime, MidiOut, StereoBuf};
 use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
 use crate::notes::ActiveNotes;
@@ -603,6 +603,7 @@ impl Renderer {
         }
         self.block_ns = time.host_time_ns;
         self.drain_commands();
+        let info = self.block_info();
         let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let mut o = Out {
@@ -648,7 +649,7 @@ impl Renderer {
             }
             offset += step.frames();
         }
-        let missed = self.render_graph(out, frames, deadline);
+        let missed = self.render_graph(out, frames, info, deadline);
         self.publish();
         if block_s > 0.0 {
             let load = (started.elapsed().as_secs_f64() / block_s) as f32;
@@ -665,6 +666,7 @@ impl Renderer {
         &mut self,
         out: &mut [&mut [f32]],
         frames: u32,
+        info: BlockInfo,
         deadline: Option<Instant>,
     ) -> bool {
         let Some(g) = self.graph.as_deref() else {
@@ -681,7 +683,7 @@ impl Renderer {
         }
         match self
             .exec
-            .run(g, &self.sinks, &self.shared, frames, deadline)
+            .run(g, &self.sinks, &self.shared, frames, info, deadline)
         {
             RunResult::Done => {
                 g.write_master(out, frames);
@@ -818,6 +820,24 @@ impl Renderer {
                     }
                 }
             }
+        }
+    }
+
+    /// The transport facts of the block about to render. // RT
+    fn block_info(&self) -> BlockInfo {
+        let frame = self.transport.pos;
+        let sr = self.cfg.sample_rate;
+        let (beats, tempo_bpm) = self.schedule.as_ref().map_or((0.0, 120.0), |s| {
+            (
+                s.tempo.frame_to_tick(frame).0 as f64 / core_model::time::PPQ as f64,
+                s.tempo.bpm_at(frame, sr),
+            )
+        });
+        BlockInfo {
+            playing: self.transport.state == PlayState::Playing,
+            frame,
+            beats,
+            tempo_bpm,
         }
     }
 

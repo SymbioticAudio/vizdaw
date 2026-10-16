@@ -1,7 +1,7 @@
 //! The insert seam: `EffectNode` processors made by an `InsertFactory`
 //! (Plan Ruling 12). 3a ships only test nodes; 3b wraps plugin instances.
 
-use crate::backend::{InstrumentNode, StereoBuf};
+use crate::backend::{BlockInfo, InstrumentNode, StereoBuf};
 use crate::graph::delay::DelayLine;
 use crate::graph::dsp;
 use core_model::mixer::{PluginFormat, PluginRef, PluginSlot};
@@ -33,6 +33,19 @@ pub trait EffectNode: Send {
     ) -> ProcessStatus;
     /// Clears internal state (delay memory, envelopes). // RT
     fn reset(&mut self);
+
+    /// [`EffectNode::process`] with the block's transport facts; plugin
+    /// processors override this. // RT
+    fn process_block(
+        &mut self,
+        frames: u32,
+        io: &mut StereoBuf,
+        sidechain: Option<&StereoBuf>,
+        info: &BlockInfo,
+    ) -> ProcessStatus {
+        let _ = info;
+        self.process(frames, io, sidechain)
+    }
 }
 
 /// Creates plugin processors on the control thread: inserts, and the
@@ -460,5 +473,22 @@ impl InstrumentNode for TestInstrument {
 
     fn latency(&self) -> u32 {
         self.latency
+    }
+
+    fn outputs(&self) -> u16 {
+        self.outputs
+    }
+
+    fn render_outputs(&mut self, frames: u32, outs: &mut [StereoBuf], _: &BlockInfo) {
+        for k in 0..self.outputs {
+            match outs.get_mut(usize::from(k)) {
+                Some(o) => self.render_one(k, frames, o),
+                None => {
+                    let mut dummy = StereoBuf::new(0);
+                    self.render_one(k, 0, &mut dummy);
+                }
+            }
+        }
+        self.queue.clear();
     }
 }

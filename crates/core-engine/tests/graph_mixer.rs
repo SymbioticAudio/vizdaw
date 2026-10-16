@@ -36,7 +36,8 @@ fn the_demo_plays_through_the_builtin_strip() {
         g.spec.nodes[0],
         NodeSpec::Instrument {
             target: TargetIdx(0),
-            latency: 0
+            latency: 0,
+            outputs: 1,
         }
     );
     assert_eq!(g.spec.master, 1);
@@ -215,7 +216,8 @@ fn insert_latencies_and_bypass_come_from_the_slots() {
         g.spec.nodes[0],
         NodeSpec::Instrument {
             target: TargetIdx(0),
-            latency: 7
+            latency: 7,
+            outputs: 1,
         }
     );
     let ins = &strip(&g.spec, 2).inserts[0];
@@ -296,4 +298,48 @@ fn post_fader_sends_and_bus_outputs_become_post_edges() {
     );
     assert_eq!(strip(&g.spec, 3).inputs, vec![post(2, 0.0)]);
     assert_eq!(strip(&g.spec, 4).inputs[0].gain, 0.0);
+}
+
+#[test]
+fn instrument_outputs_become_out_taps() {
+    let mut b = Builder::new();
+    let (d, _) = b
+        .plugin_dest("Kit", PluginRef::from_legacy("clap:kit"))
+        .unwrap();
+    for (index, name) in [(1u16, "Snare"), (3, "Ghost")] {
+        b.mixer(MixerCmd::AddInstrumentOutput {
+            dest: d,
+            index,
+            name: name.into(),
+        })
+        .unwrap();
+    }
+    // Nodes: 0 the kit (2 outputs), 1 master, 2 kit strip, 3 Snare, 4 Ghost.
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::plugin(TargetIdx(0), 0, 2, d)],
+        &mut zero,
+    );
+    assert_eq!(
+        g.spec.nodes[0],
+        NodeSpec::Instrument {
+            target: TargetIdx(0),
+            latency: 0,
+            outputs: 2,
+        }
+    );
+    assert_eq!(strip(&g.spec, 2).inputs, vec![post(0, 1.0)]);
+    assert_eq!(
+        strip(&g.spec, 3).inputs,
+        vec![InputSpec {
+            from: 0,
+            tap: Tap::Out(1),
+            gain: 1.0
+        }]
+    );
+    assert!(strip(&g.spec, 4).inputs.is_empty());
+    assert_eq!(
+        g.warnings,
+        vec!["strip \"Ghost\" is silent: its instrument has 2 output(s)".to_string()]
+    );
 }
