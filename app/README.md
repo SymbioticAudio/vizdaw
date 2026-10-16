@@ -46,7 +46,8 @@ Generated files (not in git): `app/Sources/VizDAWCore/vizdaw_ffi.swift`,
 6. File > Save As… `~/Desktop/demo.vizdaw`, close the window (Cmd-W),
    File > Open… and choose `~/Desktop/demo.vizdaw`: the sequence is still
    called Kit. Choosing a folder without `.vizdaw` shows an alert.
-7. Unplug or switch the output device during playback: playback stops and
-   the next Play uses the new device.
+7. Unplug or switch the output device during playback: within a moment
+   playback continues on the new device from the same position (the UI may
+   pause briefly); if no output device is left, an alert appears.
 8. `scripts/make-app.sh`, then `open dist/VizDAW.app`; double-click
    `~/Desktop/demo.vizdaw` in Finder: it opens in VizDAW.
