@@ -146,12 +146,16 @@ fn open(c: &ComponentInfo) -> Result<Unit, HostError> {
         .map_err(HostError::LoadFailed)
 }
 
-/// What the loader made: an open, configured, initialized unit.
+/// What the loader made: an open, configured, initialized unit whose input
+/// callbacks already read `feed` (so the first activation at the same
+/// configuration does not initialize it again on the main thread, Plan
+/// Ruling 2).
 struct Opened {
     unit: Unit,
     desc: AuComponent,
     kind: u32,
     config: (f64, u32),
+    feed: Feed,
 }
 
 /// The AU [`PluginFormat`].
@@ -177,12 +181,17 @@ impl PluginFormat for AuFormat {
             let c = locate(&id)?;
             let unit = open(&c)?;
             configure(&unit, c.kind, sr, max)?;
+            // The input callbacks are set while uninitialized: some units
+            // take their connections only at initialization.
+            let feed = Feed::new(max);
+            connect(&unit, &feed)?;
             unit.initialize().map_err(HostError::ActivateFailed)?;
             Ok(Prepared(Box::new(Opened {
                 desc: describe(&c),
                 kind: c.kind,
                 unit,
                 config: (sr, max),
+                feed,
             })))
         })
     }
@@ -223,6 +232,16 @@ fn configure(unit: &Unit, kind: u32, sr: f64, max: u32) -> Result<(), HostError>
         if bus == 0 && kind != kAudioUnitType_MusicDevice {
             r.map_err(HostError::ActivateFailed)?;
         }
+    }
+    Ok(())
+}
+
+/// Points every input bus (main and sidechain) of `unit` at `feed`.
+fn connect(unit: &Unit, feed: &Feed) -> Result<(), HostError> {
+    let refcon = feed.refcon();
+    for bus in 0..unit.element_count(kAudioUnitScope_Input).min(2) {
+        unit.set_input(bus, refcon)
+            .map_err(HostError::ActivateFailed)?;
     }
     Ok(())
 }
@@ -306,6 +325,14 @@ pub struct AuInstance {
     active: bool,
     latency: Arc<AtomicBool>,
     writes: Arc<HostWrites>,
+    /// While inactive: the feed the unit's input callbacks read, the unit
+    /// being initialized for `config` (set by the loader). The next
+    /// activation at that configuration hands it to the processor without
+    /// initializing the unit again.
+    ready: Option<Feed>,
+    /// Initializations done by `activate` (on the main thread).
+    #[cfg(test)]
+    main_inits: u32,
 }
 
 impl std::fmt::Debug for AuInstance {
@@ -339,6 +366,9 @@ impl AuInstance {
             latency,
             listener: None,
             writes: Arc::new(HostWrites::new(Vec::new())),
+            ready: Some(o.feed),
+            #[cfg(test)]
+            main_inits: 0,
         };
         me.read_info();
         // Only parameters a user can change (writable, not meters): a
@@ -456,18 +486,27 @@ impl PluginInstance for AuInstance {
         if self.active {
             return Err(HostError::ActivateFailed("already active".into()));
         }
-        let feed = Feed::new(max_frames);
-        let refcon = feed.refcon();
-        // The input callbacks are set while uninitialized: some units take
-        // their connections only at initialization.
-        self.unit.uninitialize();
-        configure(&self.unit, self.kind, sample_rate, max_frames)?;
-        for bus in 0..self.unit.element_count(kAudioUnitScope_Input).min(2) {
-            self.unit
-                .set_input(bus, refcon)
-                .map_err(HostError::ActivateFailed)?;
-        }
-        self.unit.initialize().map_err(HostError::ActivateFailed)?;
+        let feed = match self.ready.take() {
+            // Initialized by the loader for this configuration, its input
+            // callbacks on `feed` (formats follow the rate and block size).
+            Some(feed) if self.config == Some((sample_rate, max_frames)) => feed,
+            old => {
+                let feed = Feed::new(max_frames);
+                // The input callbacks are set while uninitialized: some
+                // units take their connections only at initialization.
+                self.unit.uninitialize();
+                configure(&self.unit, self.kind, sample_rate, max_frames)?;
+                connect(&self.unit, &feed)?;
+                // The callbacks no longer read the old feed.
+                drop(old);
+                self.unit.initialize().map_err(HostError::ActivateFailed)?;
+                #[cfg(test)]
+                {
+                    self.main_inits += 1;
+                }
+                feed
+            }
+        };
         // Initializing may itself post a latency notification: what matters
         // is a change after this point (`read_info` reads the latency next).
         self.latency.store(false, Ordering::Release);
@@ -659,5 +698,26 @@ pub fn scan_timeout(v3: bool) -> Duration {
         core_host::scan::TIMEOUT_AU_V3
     } else {
         core_host::scan::TIMEOUT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_activation_does_not_initialize_on_the_main_thread() {
+        let mut inst = load("aufx/dely/appl", 48_000.0, 512).unwrap();
+        let p = inst.activate(48_000.0, 512).unwrap();
+        assert_eq!(inst.main_inits, 0, "the loader already initialized it");
+        inst.deactivate(p);
+        let p = inst.activate(48_000.0, 512).unwrap();
+        assert_eq!(inst.main_inits, 1, "deactivation uninitialized it");
+        inst.deactivate(p);
+        // Another configuration than the loader's initializes it again.
+        let mut inst = load("aufx/dely/appl", 48_000.0, 512).unwrap();
+        let p = inst.activate(44_100.0, 1024).unwrap();
+        assert_eq!(inst.main_inits, 1);
+        inst.deactivate(p);
     }
 }
