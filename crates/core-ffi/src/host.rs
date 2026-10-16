@@ -714,7 +714,12 @@ pub fn service(owner: u64, doc: &Document, plugins: &mut PluginHost) -> IdleRepo
                 }
             }
         }
-        _ => plugins.idle(),
+        _ => {
+            // Not playing: slots the catalog released (a plugin enabled
+            // again) still load.
+            plugins.sync(doc);
+            plugins.idle()
+        }
     }
 }
 

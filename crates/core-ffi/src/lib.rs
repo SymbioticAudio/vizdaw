@@ -25,6 +25,10 @@ pub mod plugins;
 pub mod session;
 pub mod snapshot;
 
+pub use catalog::{
+    CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
+    ScanProgress,
+};
 pub use error::VizError;
 pub use guard::ffi_guard;
 pub use mixer::{
