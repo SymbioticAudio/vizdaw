@@ -223,6 +223,19 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if open { windowsOpen.insert(slot) } else { windowsOpen.remove(slot) }
     }
     func openWindows() throws -> [UInt64] { windowsOpen.sorted() }
+
+    // MARK: Safe mode and closing
+
+    var held: [UInt64] = []
+    var loadedPlugins: [[UInt64]] = []
+    var closeCalls = 0
+
+    func loadPlugins(slots: [UInt64]) throws {
+        loadedPlugins.append(slots)
+        held.removeAll { slots.contains($0) }
+    }
+    func heldSlots() throws -> [UInt64] { held }
+    func close() throws { closeCalls += 1 }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

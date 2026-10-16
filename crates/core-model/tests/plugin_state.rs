@@ -164,3 +164,16 @@ fn an_unreadable_autosave_skips_the_prune_but_save_succeeds() {
 fn a_garbage_autosave_skips_the_prune_but_save_succeeds() {
     prune_is_skipped_with("garbage", |p| std::fs::write(p, b"not json {{").unwrap());
 }
+
+#[test]
+fn an_autosave_loads_with_the_packages_blobs() {
+    let pkg = temp_package("restore");
+    save(&pad(), &pkg).unwrap();
+    let (d, id) = capture(&pad(), PluginInstanceId(0), b"autosaved").unwrap();
+    let path = autosave(&d, &pkg, Timestamp(7000)).unwrap();
+    let restored = core_model::file::load_autosave(&pkg, &path).unwrap();
+    assert_eq!(restored, d);
+    assert_eq!(restored.state_blob(id), Some(&b"autosaved"[..]));
+    assert!(core_model::file::load_autosave(&pkg, &pkg.join("Autosave/none.json")).is_err());
+    std::fs::remove_dir_all(&pkg).unwrap();
+}

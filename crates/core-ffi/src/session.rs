@@ -6,6 +6,7 @@ use crate::guard::{ffi_guard, lock};
 use crate::host;
 use crate::mixer::{self, DestRow, MixerLevels, MixerSnapshot};
 use crate::plugins;
+use crate::recovery;
 use crate::snapshot::{
     DocSnapshot, IdleUpdate, LaneRow, SlotRow, TransportState, lane_rows, position_bbu, seconds,
     seq_id, seq_rows, warnings,
@@ -20,14 +21,15 @@ use core_model::command::sequence::SequenceCmd;
 use core_model::document::DestKind;
 use core_model::document::Document;
 use core_model::file;
-use core_model::history::History;
+use core_model::history::{History, Timestamp};
 use core_model::ids::{DestId, LaneId, PluginInstanceId, SeqId, StripId};
-use core_model::mixer::{AuxSend, Output, ParamId, PluginSlot};
+use core_model::mixer::{AuxSend, Output, ParamId, PluginRef, PluginSlot};
 use core_model::selection::ViewFilter;
 use core_model::time::Tick;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Package extension.
 pub const EXTENSION: &str = "vizdaw";
@@ -58,6 +60,15 @@ struct Inner {
     windows: std::collections::BTreeSet<u64>,
     /// What plugin timer steps found since the last `idle`.
     news: News,
+    /// The plugins the crash marker names (as last written).
+    marked: Vec<PluginRef>,
+    /// When the project was last autosaved (or opened).
+    last_autosave: Instant,
+    /// A plugin loaded: autosave at the next tick (spec §10).
+    autosave_soon: bool,
+    /// A plugin changed its own state (not a parameter) since the last
+    /// save: unsaved, though the document did not change.
+    plugin_dirty: bool,
 }
 
 /// What plugin timer steps found, handed out by the next `idle`.
@@ -84,6 +95,10 @@ impl Inner {
             held: Vec::new(),
             windows: std::collections::BTreeSet::new(),
             news: News::default(),
+            marked: Vec::new(),
+            last_autosave: Instant::now(),
+            autosave_soon: false,
+            plugin_dirty: false,
         }
     }
 
@@ -126,12 +141,18 @@ impl Inner {
         self.history.doc()
     }
 
+    /// The document changed since it was opened or saved, or a plugin
+    /// changed its own state.
+    fn unsaved(&self) -> bool {
+        self.plugin_dirty || *self.doc() != self.clean
+    }
+
     fn snapshot(&self) -> Result<DocSnapshot, VizError> {
         let doc = self.doc();
         Ok(DocSnapshot {
             version: self.version,
             title: title(self.path.as_deref()),
-            dirty: *doc != self.clean,
+            dirty: self.unsaved(),
             undo_label: self.history.undo_label().map(str::to_string),
             redo_label: self.history.redo_label().map(str::to_string),
             sequences: seq_rows(doc)?,
@@ -175,16 +196,147 @@ impl std::fmt::Debug for Session {
     }
 }
 
+/// Saving and autosaving one at a time (the package's blob pruning reads
+/// the autosaves; 3a: the FFI serializes them).
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// What a held slot shows in safe mode.
+pub const PLUGINS_OFF: &str = "Plugins off (safe mode)";
+
 impl Session {
-    /// A session for `doc`; its plugins start loading on this thread.
-    fn with(doc: Document, path: Option<PathBuf>) -> Result<Arc<Session>, VizError> {
+    /// A session for `doc`; its plugins start loading on this thread (none
+    /// with `plugins_off`: every slot is held, spec §10). A project with a
+    /// path gets its crash marker before any plugin loads.
+    fn with(
+        doc: Document,
+        path: Option<PathBuf>,
+        plugins_off: bool,
+    ) -> Result<Arc<Session>, VizError> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        plugins::create(id)?;
-        let _ = plugins::with(id, |p| p.map(|p| p.sync(&doc)));
-        Ok(Arc::new(Session {
+        // Without a marker the project still opens; recovery is just not
+        // offered after a crash.
+        let unmarked = path.as_deref().and_then(|p| recovery::opened(p, &[]).err());
+        let setup = plugins::create(id).and_then(|()| {
+            plugins::with(id, |p| {
+                if let Some(p) = p {
+                    if plugins_off {
+                        for slot in mixer::slot_ids(&doc) {
+                            p.hold(slot, Some(PLUGINS_OFF.to_string()));
+                        }
+                    }
+                    p.sync(&doc);
+                }
+            })
+        });
+        // Safe mode must not open with plugins running: a busy registry
+        // fails the open instead.
+        if let Err(e) = setup {
+            if plugins_off || !matches!(e, VizError::Busy { .. }) {
+                plugins::close(id);
+                if let Some(p) = path.as_deref() {
+                    recovery::closed(p);
+                }
+                return Err(e);
+            }
+        }
+        let s = Arc::new(Session {
             id,
             inner: Mutex::new(Inner::new(doc, path)),
-        }))
+        });
+        {
+            let mut inner = lock(&s.inner);
+            if let Some(e) = unmarked {
+                inner
+                    .news
+                    .problems
+                    .push(format!("crash marker not written: {e}"));
+            }
+            s.mark(&mut inner);
+        }
+        Ok(s)
+    }
+
+    /// Rewrites the crash marker when the plugins loading changed (before
+    /// any of them can run code on this thread). The list is the host's
+    /// own `loading()`, not the slots that merely report Loading. Skipped
+    /// while the registry is busy (the next tick tries again).
+    fn mark(&self, inner: &mut Inner) {
+        let Some(path) = inner.path.clone() else {
+            return;
+        };
+        let Ok(loading) = plugins::with(self.id, |p| {
+            p.map(|p| p.loading().into_iter().map(|(_, r)| r).collect::<Vec<_>>())
+                .unwrap_or_default()
+        }) else {
+            return;
+        };
+        if loading != inner.marked {
+            if let Err(e) = recovery::write_marker(&path, &loading) {
+                inner
+                    .news
+                    .problems
+                    .push(format!("crash marker not written: {e}"));
+            }
+            inner.marked = loading;
+        }
+    }
+
+    /// Captures every running plugin's state into the document (spec §4:
+    /// on save and autosave). Refused inside an open edit. `Busy` when a
+    /// plugin call is on the stack: nothing is captured, and the caller
+    /// must not write a half-captured file.
+    fn capture_all(&self, inner: &mut Inner) -> Result<(), VizError> {
+        let history = &mut inner.history;
+        let failed = plugins::with(self.id, |p| {
+            p.map(|p| p.capture_all(history)).unwrap_or_default()
+        })?;
+        for (id, e) in failed {
+            let line = format!("{}: state not saved ({e})", slot_name(inner.doc(), id));
+            inner.news.problems.push(line);
+        }
+        Ok(())
+    }
+
+    /// Autosaves (spec §10) a project with a path and unsaved changes,
+    /// every [`recovery::autosave_interval`] and right after a plugin
+    /// loaded; never inside an open edit (a drag). A busy plugin registry
+    /// skips this autosave; it stays due and is retried.
+    fn maybe_autosave(&self, inner: &mut Inner) {
+        let Some(path) = inner.path.clone() else {
+            return;
+        };
+        let due =
+            inner.autosave_soon || inner.last_autosave.elapsed() >= recovery::autosave_interval();
+        if !due || inner.history.in_transaction() {
+            return;
+        }
+        if !inner.unsaved() {
+            // Nothing unsaved: nothing to keep.
+            inner.autosave_soon = false;
+            inner.last_autosave = Instant::now();
+            return;
+        }
+        if self.capture_all(inner).is_err() {
+            return;
+        }
+        inner.autosave_soon = false;
+        inner.last_autosave = Instant::now();
+        let _g = lock(&SAVE_LOCK);
+        if let Err(e) = file::autosave(inner.doc(), &path, Timestamp::now()) {
+            inner.news.problems.push(format!("autosave failed: {e}"));
+        }
+    }
+
+    /// Saves to `path`: plugin states captured first (`Busy`, with
+    /// nothing written, when a plugin call is on the stack).
+    fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
+        self.capture_all(inner)?;
+        let _g = lock(&SAVE_LOCK);
+        file::save(inner.doc(), path)?;
+        write_windows(path, &inner.windows);
+        inner.clean = inner.doc().clone();
+        inner.plugin_dirty = false;
+        Ok(())
     }
 
     /// One plugin timer step: the host services its plugins (with the
@@ -192,6 +344,7 @@ impl Session {
     /// and finished gestures become undo steps. Returns true when the
     /// document changed. Nothing happens while the registry is busy.
     fn pump(&self, inner: &mut Inner) -> bool {
+        self.mark(inner);
         let report = {
             let doc = inner.doc();
             plugins::with(self.id, |p| p.map(|p| host::service(self.id, doc, p)))
@@ -218,8 +371,17 @@ impl Session {
             .news
             .params_changed
             .extend(r.params_changed.iter().map(|i| i.0));
+        inner.autosave_soon |= !r.loaded.is_empty();
+        if !r.state_dirty.is_empty() && !inner.plugin_dirty {
+            inner.plugin_dirty = true;
+            // The title shows Edited.
+            inner.news.doc_changed = true;
+        }
         inner.held.extend(r.gestures);
-        self.commit_held(inner)
+        let changed = self.commit_held(inner);
+        self.mark(inner);
+        self.maybe_autosave(inner);
+        changed
     }
 
     /// Commits the gestures waiting for an open edit (a drag) to end.
@@ -262,6 +424,7 @@ impl Session {
         inner.history.execute(&cmd, &ViewFilter::default())?;
         inner.version += 1;
         inner.reload_host(self.id);
+        self.mark(&mut inner);
         inner.snapshot()
     }
 
@@ -330,6 +493,7 @@ impl Session {
         }
         inner.version += 1;
         inner.reload_host(self.id);
+        self.mark(&mut inner);
         inner.snapshot()
     }
 
@@ -349,7 +513,7 @@ impl Session {
     /// An untitled, empty document.
     #[uniffi::constructor]
     pub fn new_empty() -> Result<Arc<Session>, VizError> {
-        ffi_guard(|| Session::with(Document::new(), None))
+        ffi_guard(|| Session::with(Document::new(), None, false))
     }
 
     /// An untitled copy of the demo project.
@@ -357,22 +521,51 @@ impl Session {
     pub fn new_demo() -> Result<Arc<Session>, VizError> {
         ffi_guard(|| {
             let doc = core_engine::fixtures::demo_document()?;
-            Session::with(doc, None)
+            Session::with(doc, None, false)
         })
     }
 
     /// Opens the `.vizdaw` package at `path`.
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<Session>, VizError> {
+        Session::open_with(
+            path,
+            OpenOptions {
+                plugins_off: false,
+                autosave: None,
+            },
+        )
+    }
+
+    /// Opens the `.vizdaw` package at `path` after the app asked what
+    /// `recovery_check` found (spec §10): with every plugin slot held
+    /// ("Open with Plugins Off"), and/or from an autosave copy ("Restore
+    /// autosave": it opens as Edited, so Save keeps it).
+    #[uniffi::constructor]
+    pub fn open_with(path: String, options: OpenOptions) -> Result<Arc<Session>, VizError> {
         ffi_guard(|| {
             let p = PathBuf::from(&path);
             if !p.join(file::PROJECT_FILE).is_file() {
                 return Err(VizError::NotFound { path });
             }
-            let doc = file::load(&p)?;
+            let (doc, clean) = match &options.autosave {
+                Some(a) => {
+                    let doc = file::load_autosave(&p, Path::new(a))?;
+                    let clean = file::load(&p).unwrap_or_else(|_| doc.clone());
+                    (doc, clean)
+                }
+                None => {
+                    let doc = file::load(&p)?;
+                    (doc.clone(), doc)
+                }
+            };
             let windows = read_windows(&p);
-            let s = Session::with(doc, Some(p))?;
-            lock(&s.inner).windows = windows;
+            let s = Session::with(doc, Some(p), options.plugins_off)?;
+            {
+                let mut inner = lock(&s.inner);
+                inner.windows = windows;
+                inner.clean = clean;
+            }
             Ok(s)
         })
     }
@@ -384,10 +577,7 @@ impl Session {
             let path = inner.path.clone().ok_or_else(|| VizError::Io {
                 message: "the document has no file yet; use Save As".into(),
             })?;
-            file::save(inner.doc(), &path)?;
-            write_windows(&path, &inner.windows);
-            inner.clean = inner.doc().clone();
-            Ok(())
+            self.save_to(&mut inner, &path)
         })
     }
 
@@ -397,10 +587,15 @@ impl Session {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
             let p = with_extension(&path);
-            file::save(inner.doc(), &p)?;
-            write_windows(&p, &inner.windows);
-            inner.clean = inner.doc().clone();
-            inner.path = Some(p);
+            self.save_to(&mut inner, &p)?;
+            if inner.path.as_deref() != Some(p.as_path()) {
+                // The marker follows the project to its new place.
+                if let Some(old) = inner.path.take() {
+                    recovery::closed(&old);
+                }
+                let _ = recovery::opened(&p, &inner.marked);
+                inner.path = Some(p);
+            }
             Ok(())
         })
     }
@@ -1205,8 +1400,80 @@ impl Session {
     }
 }
 
+/// Safe mode (spec §10) and closing.
+#[uniffi::export]
+impl Session {
+    /// Loads held slots (safe mode's "Load" on a slot, "Load All" on a
+    /// strip or the document): they load from their saved state. `Busy`
+    /// when a plugin call is on the stack (nothing changes).
+    pub fn load_plugins(&self, slots: Vec<u64>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    for s in slots {
+                        p.hold(PluginInstanceId(s), None);
+                    }
+                }
+            })?;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.news.slots_changed = true;
+            Ok(())
+        })
+    }
+
+    /// The slots safe mode holds (placeholders until loaded).
+    pub fn held_slots(&self) -> Result<Vec<u64>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let slots = mixer::slot_ids(inner.doc());
+            Ok(
+                plugins::with(self.id, |p| p.map(|p| p.held()).unwrap_or_default())?
+                    .into_iter()
+                    .filter(|s| slots.contains(s))
+                    .map(|s| s.0)
+                    .collect(),
+            )
+        })
+    }
+
+    /// A clean close (the window closes, or the app quits): the crash
+    /// marker goes. Safe to call more than once.
+    pub fn close(&self) -> Result<(), VizError> {
+        ffi_guard(|| {
+            if let Some(p) = lock(&self.inner).path.clone() {
+                recovery::closed(&p);
+            }
+            Ok(())
+        })
+    }
+}
+
+/// How to open a project after a crash or with a newer autosave.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OpenOptions {
+    /// Hold every plugin slot ("Open with Plugins Off").
+    pub plugins_off: bool,
+    /// Open this autosave copy instead of `project.json`.
+    pub autosave: Option<String>,
+}
+
+/// Leaves session `s` the way a crash would: its crash marker stays and it
+/// no longer counts as open here (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn simulate_crash(s: Arc<Session>) {
+    if let Some(p) = lock(&s.inner).path.clone() {
+        recovery::forget_open(&p);
+    }
+    std::mem::forget(s);
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
+        if let Some(p) = lock(&self.inner).path.clone() {
+            recovery::closed(&p);
+        }
         // The engine goes first when this session's plugin host feeds it;
         // queued if a plugin call is running (re-entrancy, plugins.rs).
         plugins::close_session(self.id);

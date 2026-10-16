@@ -23,6 +23,7 @@ pub mod guard;
 pub mod host;
 pub mod mixer;
 pub mod plugins;
+pub mod recovery;
 pub mod session;
 pub mod snapshot;
 
@@ -36,7 +37,8 @@ pub use guard::ffi_guard;
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
 };
-pub use session::Session;
+pub use recovery::RecoveryInfo;
+pub use session::{OpenOptions, Session};
 pub use snapshot::{
     DocSnapshot, IdleUpdate, LaneRow, ParamRow, ParamValue, PluginFormatTag, PluginRefRow, SeqRow,
     SlotRow, SlotStatus, TransportState,
