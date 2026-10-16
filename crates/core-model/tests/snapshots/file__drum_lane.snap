@@ -1,0 +1,19 @@
+---
+source: crates/core-model/tests/file.rs
+expression: summary(&d)
+---
+{
+  "flattened": [
+    "0 note 36 dest=Some(0) gc=Some((0, 9)) out=None",
+    "15360 note 38 dest=Some(0) gc=Some((0, 9)) out=None",
+    "15360 note 70 dest=Some(1) gc=Some((0, 0)) out=None",
+    "30720 note 36 dest=Some(0) gc=Some((0, 9)) out=None",
+    "46080 note 38 dest=Some(0) gc=Some((0, 9)) out=None"
+  ],
+  "lengths": [
+    [
+      "Beat",
+      61440
+    ]
+  ]
+}

@@ -19,6 +19,7 @@ pub mod command;
 pub mod document;
 pub mod error;
 pub mod event;
+pub mod file;
 pub mod history;
 pub mod ids;
 pub mod lane;

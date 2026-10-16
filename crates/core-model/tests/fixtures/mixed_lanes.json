@@ -1,0 +1,165 @@
+{
+  "format": "vizdaw-project",
+  "version": 1,
+  "document": {
+    "settings": {
+      "history_depth": 200,
+      "autosave_keep": 10,
+      "templates": {}
+    },
+    "instruments": [
+      {
+        "id": 0,
+        "name": "Piano",
+        "kind": {
+          "plugin_instrument": {
+            "plugin_ref": "au:piano"
+          }
+        },
+        "default_patch": {
+          "program": 0,
+          "bank": null
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "id": 0,
+        "name": "Main",
+        "reference": "bus:main"
+      }
+    ],
+    "media": [
+      {
+        "id": 0,
+        "path": "Media/vox.wav",
+        "sample_rate": 48000,
+        "channels": 1,
+        "length_frames": 96000,
+        "content_hash": null
+      }
+    ],
+    "sequences": [
+      {
+        "id": 0,
+        "name": "Mixed",
+        "kind": "normal",
+        "keyboard_slot": null,
+        "tempo": {
+          "points": [
+            {
+              "tick": 0,
+              "bpm": 120000,
+              "ramp": false
+            }
+          ]
+        },
+        "meter": {
+          "entries": [
+            {
+              "tick": 0,
+              "meter": {
+                "num": 4,
+                "den": 4
+              },
+              "key": {
+                "sharps": 0,
+                "minor": false
+              }
+            }
+          ]
+        },
+        "markers": [],
+        "comment": "",
+        "start_offset": 0,
+        "length": "derived",
+        "lanes": [
+          {
+            "id": 0,
+            "name": "Lane 1",
+            "midi_dest": 0,
+            "audio_out": 0,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 0,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 0,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 40000,
+                      "release_velocity": 0,
+                      "duration": 7680,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 1,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "cc",
+                      "index": 64,
+                      "value": 4294967295
+                    }
+                  },
+                  {
+                    "id": 2,
+                    "tick": 15360,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "audio_region",
+                      "media": 0,
+                      "source_offset": 0,
+                      "length": 48000,
+                      "gain_db": -3.0,
+                      "fade_in": {
+                        "length": 960,
+                        "shape": "linear"
+                      },
+                      "fade_out": {
+                        "length": 0,
+                        "shape": "linear"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 0
+          }
+        ]
+      }
+    ],
+    "counters": {
+      "seq": 1,
+      "lane": 1,
+      "event": 3,
+      "dest": 1,
+      "output": 1,
+      "media": 1,
+      "take": 1,
+      "drum_row": 0
+    }
+  }
+}

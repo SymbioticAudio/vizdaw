@@ -1,0 +1,17 @@
+---
+source: crates/core-model/tests/file.rs
+expression: summary(&d)
+---
+{
+  "flattened": [
+    "0 note 60 dest=Some(0) gc=Some((0, 0)) out=None",
+    "0 Cc dest=Some(0) gc=Some((0, 0)) out=None",
+    "15360 AudioRegion dest=None gc=None out=Some(0)"
+  ],
+  "lengths": [
+    [
+      "Mixed",
+      61440
+    ]
+  ]
+}

@@ -1,0 +1,299 @@
+{
+  "format": "vizdaw-project",
+  "version": 1,
+  "document": {
+    "settings": {
+      "history_depth": 200,
+      "autosave_keep": 10,
+      "templates": {}
+    },
+    "instruments": [
+      {
+        "id": 0,
+        "name": "Synth",
+        "kind": {
+          "midi_endpoint": {
+            "endpoint_ref": "ep-1",
+            "group": 0,
+            "channel": 2
+          }
+        },
+        "default_patch": null
+      }
+    ],
+    "outputs": [],
+    "media": [],
+    "sequences": [
+      {
+        "id": 0,
+        "name": "Song",
+        "kind": "normal",
+        "keyboard_slot": null,
+        "tempo": {
+          "points": [
+            {
+              "tick": 0,
+              "bpm": 120000,
+              "ramp": false
+            }
+          ]
+        },
+        "meter": {
+          "entries": [
+            {
+              "tick": 0,
+              "meter": {
+                "num": 4,
+                "den": 4
+              },
+              "key": {
+                "sharps": 0,
+                "minor": false
+              }
+            }
+          ]
+        },
+        "markers": [],
+        "comment": "",
+        "start_offset": 0,
+        "length": "derived",
+        "lanes": [
+          {
+            "id": 0,
+            "name": "Lane 1",
+            "midi_dest": null,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 0,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 3,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "reference",
+                      "seq": 1,
+                      "length": null,
+                      "loop_count": {
+                        "count": 1
+                      },
+                      "transpose": 0
+                    }
+                  },
+                  {
+                    "id": 4,
+                    "tick": 61440,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "reference",
+                      "seq": 1,
+                      "length": null,
+                      "loop_count": {
+                        "count": 1
+                      },
+                      "transpose": 5
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 0
+          }
+        ]
+      },
+      {
+        "id": 1,
+        "name": "Verse",
+        "kind": "normal",
+        "keyboard_slot": null,
+        "tempo": {
+          "points": [
+            {
+              "tick": 0,
+              "bpm": 120000,
+              "ramp": false
+            }
+          ]
+        },
+        "meter": {
+          "entries": [
+            {
+              "tick": 0,
+              "meter": {
+                "num": 4,
+                "den": 4
+              },
+              "key": {
+                "sharps": 0,
+                "minor": false
+              }
+            }
+          ]
+        },
+        "markers": [],
+        "comment": "",
+        "start_offset": 0,
+        "length": "derived",
+        "lanes": [
+          {
+            "id": 1,
+            "name": "Lane 1",
+            "midi_dest": null,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 1,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 2,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "reference",
+                      "seq": 2,
+                      "length": 30720,
+                      "loop_count": {
+                        "count": 2
+                      },
+                      "transpose": 0
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 1
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "name": "Riff",
+        "kind": "normal",
+        "keyboard_slot": null,
+        "tempo": {
+          "points": [
+            {
+              "tick": 0,
+              "bpm": 120000,
+              "ramp": false
+            }
+          ]
+        },
+        "meter": {
+          "entries": [
+            {
+              "tick": 0,
+              "meter": {
+                "num": 4,
+                "den": 4
+              },
+              "key": {
+                "sharps": 0,
+                "minor": false
+              }
+            }
+          ]
+        },
+        "markers": [],
+        "comment": "",
+        "start_offset": 0,
+        "length": "derived",
+        "lanes": [
+          {
+            "id": 2,
+            "name": "Lane 1",
+            "midi_dest": 0,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 2,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 0,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 48,
+                      "velocity": 40000,
+                      "release_velocity": 0,
+                      "duration": 7680,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 1,
+                    "tick": 15360,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 50,
+                      "velocity": 40000,
+                      "release_velocity": 0,
+                      "duration": 7680,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 2
+          }
+        ]
+      }
+    ],
+    "counters": {
+      "seq": 3,
+      "lane": 3,
+      "event": 5,
+      "dest": 1,
+      "output": 0,
+      "media": 0,
+      "take": 3,
+      "drum_row": 0
+    }
+  }
+}
