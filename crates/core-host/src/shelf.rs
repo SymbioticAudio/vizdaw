@@ -108,22 +108,39 @@ impl Shelf {
 
     fn take(&self, slot: &PluginSlot, max_frames: u32, instrument: bool) -> Result<Ready, String> {
         let mut g = self.lock();
-        let fits = g.ready.get(&slot.id).is_some_and(|e| {
-            e.format == slot.plugin.format
-                && e.plugin == slot.plugin.id
-                && e.max_frames >= max_frames
-                && matches!(e.ready, Ready::Instrument(_)) == instrument
+        let name = &slot.plugin.name;
+        let misfit = g.ready.get(&slot.id).and_then(|e| {
+            if e.format != slot.plugin.format || e.plugin != slot.plugin.id {
+                Some(format!("{name} is waiting as a different plugin"))
+            } else if matches!(e.ready, Ready::Instrument(_)) != instrument {
+                Some(format!(
+                    "{name} is waiting as {}",
+                    if instrument {
+                        "an effect"
+                    } else {
+                        "an instrument"
+                    }
+                ))
+            } else if e.max_frames < max_frames {
+                Some(format!(
+                    "{name} is made for blocks of {} frames, the engine needs {max_frames}",
+                    e.max_frames
+                ))
+            } else {
+                None
+            }
         });
-        if fits {
+        if misfit.is_none() {
             if let Some(e) = g.ready.remove(&slot.id) {
                 return Ok(e.ready);
             }
         }
-        Err(g
-            .why
-            .get(&slot.id)
-            .cloned()
-            .unwrap_or_else(|| format!("{} is not loaded", slot.plugin.name)))
+        Err(misfit.unwrap_or_else(|| {
+            g.why
+                .get(&slot.id)
+                .cloned()
+                .unwrap_or_else(|| format!("{name} is not loaded"))
+        }))
     }
 }
 

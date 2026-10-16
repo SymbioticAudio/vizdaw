@@ -10,6 +10,8 @@ use crate::instance::AudioProcessor;
 use crate::process::{MAX_EVENTS, MAX_PARAM_EVENTS, MidiEvent, ParamChange, ParamOut, ProcessCtx};
 use crate::queue::{GestureSender, ParamReceiver};
 use core_engine::backend::{BlockInfo, InstrumentNode, StereoBuf};
+use core_engine::graph::dsp::is_faulty;
+use core_engine::graph::exec::FAULT_LIMIT;
 use core_engine::graph::{EffectNode, ProcessStatus};
 use core_model::ids::PluginInstanceId;
 use std::sync::mpsc::Sender;
@@ -277,6 +279,20 @@ pub struct PluginSynth {
     events: Box<[MidiEvent; MAX_EVENTS]>,
     count: usize,
     outputs: u16,
+    /// Consecutive faulty blocks (spec §7).
+    bad_run: u32,
+    /// Bypassed (silent) after `FAULT_LIMIT` faulty blocks.
+    faulted: bool,
+    /// The fault has not been taken by the renderer yet.
+    unreported: bool,
+}
+
+/// A note-off, or All Notes Off / All Sound Off. // RT
+fn releases(e: &MidiEvent) -> bool {
+    matches!(
+        (e.bytes[0] & 0xF0, e.bytes[1], e.bytes[2]),
+        (0x80, ..) | (0x90, _, 0) | (0xB0, 120 | 123, _)
+    )
 }
 
 impl PluginSynth {
@@ -295,6 +311,9 @@ impl PluginSynth {
             events: Box::new([MidiEvent::default(); MAX_EVENTS]),
             count: 0,
             outputs,
+            bad_run: 0,
+            faulted: false,
+            unreported: false,
         }
     }
 }
@@ -302,12 +321,47 @@ impl PluginSynth {
 impl InstrumentNode for PluginSynth {
     fn midi(&mut self, offset: u32, msg: &[u8]) {
         // SysEx is not passed to plugins (Plan Ruling 10).
-        if msg.first() == Some(&0xF0) {
+        if msg.is_empty() || msg.first() == Some(&0xF0) {
             return;
         }
+        let ev = MidiEvent::new(offset, msg);
         if let Some(slot) = self.events.get_mut(self.count) {
-            *slot = MidiEvent::new(offset, msg);
+            *slot = ev;
             self.count += 1;
+        } else if releases(&ev) {
+            // Full: a release must not be lost (a stuck note); it takes
+            // the place of the newest event that is not one.
+            let at = self.events.iter().rposition(|e| !releases(e));
+            if let Some(slot) = at.and_then(|i| self.events.get_mut(i)) {
+                *slot = ev;
+            }
+        }
+    }
+
+    fn skip(&mut self, _frames: u32) {
+        // The block was not rendered: queued notes never sound, but their
+        // releases still apply, at the start of the next block.
+        let mut kept = 0;
+        for i in 0..self.count {
+            let Some(mut e) = self.events.get(i).copied() else {
+                break;
+            };
+            if releases(&e) {
+                e.frame = 0;
+                if let Some(slot) = self.events.get_mut(kept) {
+                    *slot = e;
+                }
+                kept += 1;
+            }
+        }
+        self.count = kept;
+    }
+
+    fn take_fault(&mut self) -> Option<PluginInstanceId> {
+        if std::mem::take(&mut self.unreported) {
+            Some(self.core.id)
+        } else {
+            None
         }
     }
 
@@ -316,17 +370,43 @@ impl InstrumentNode for PluginSynth {
     }
 
     fn render_outputs(&mut self, frames: u32, outs: &mut [StereoBuf], info: &BlockInfo) {
+        if self.faulted {
+            self.count = 0;
+            for o in outs.iter_mut() {
+                o.clear(frames);
+            }
+            return;
+        }
         let n = frames.min(self.core.max_frames);
         let events = self.events.get_mut(..self.count).unwrap_or(&mut []);
         sort_by_frame(events);
         let status = self.core.run(n, &mut [], &mut [], events, info);
         self.count = 0;
+        let mut bad = status == ProcessStatus::Error;
         for (k, o) in outs.iter_mut().enumerate() {
-            if status == ProcessStatus::Error {
+            if bad {
                 o.clear(frames);
             } else {
                 self.core.write_port(k, o, n as usize);
+                bad = is_faulty(o, frames);
             }
+        }
+        if bad {
+            // Zero every output; 16 bad blocks in a row bypass the
+            // instance and raise a plugin fault (spec §7).
+            for o in outs.iter_mut() {
+                o.clear(frames);
+            }
+            self.bad_run = self.bad_run.saturating_add(1);
+            if self.bad_run >= FAULT_LIMIT {
+                self.faulted = true;
+                self.unreported = true;
+                if let Some(p) = self.core.proc.as_mut() {
+                    p.reset();
+                }
+            }
+        } else {
+            self.bad_run = 0;
         }
     }
 

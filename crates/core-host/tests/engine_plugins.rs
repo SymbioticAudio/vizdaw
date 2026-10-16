@@ -6,13 +6,19 @@ mod common;
 
 use common::{Live, load, plugin, shelve};
 use core_engine::backend::AudioBackend;
+use core_engine::backend::{BlockInfo, InstrumentNode, StereoBuf};
 use core_engine::engine::{Engine, EngineConfig, find_sequence};
 use core_engine::fixtures::{Builder, Q, demo_document};
+use core_engine::graph::ProcessStatus;
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::render::Faults;
-use core_host::ParamEvent;
-use core_host::adapt::Returned;
+use core_host::adapt::{PluginSynth, Returned};
+use core_host::queue::param_queues;
+use core_host::shelf::Ready;
 use core_host::shelf::Shelf;
+use core_host::{
+    AudioPortInfo, AudioProcessor, ParamEvent, PluginInfo, PluginKind, PortRole, ProcessCtx, Tail,
+};
 use core_model::command::MixerCmd;
 use core_model::document::Document;
 use core_model::event::{EventBody, EventSpec};
@@ -270,4 +276,180 @@ fn removed_instances_come_back_off_the_audio_thread() {
     let mut inst = live.inst;
     inst.deactivate(back.processor);
     assert!(!inst.is_active());
+}
+
+/// A test instrument: 0.5 on both channels while a note is held, or `bad`
+/// (NaN) / `Error` status on every block.
+struct Held {
+    held: i32,
+    mode: Mode,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Notes,
+    Nan,
+    Error,
+}
+
+impl AudioProcessor for Held {
+    fn process(&mut self, ctx: &mut ProcessCtx<'_>) -> ProcessStatus {
+        let mut at = 0usize;
+        let n = ctx.frames as usize;
+        for ch in ctx.outputs.iter_mut() {
+            ch.fill(0.0);
+        }
+        for e in ctx.events {
+            let end = (e.frame as usize).min(n);
+            let v = if self.held > 0 { 0.5 } else { 0.0 };
+            for ch in ctx.outputs.iter_mut() {
+                ch[at..end].fill(v);
+            }
+            at = at.max(end);
+            match e.bytes[0] & 0xF0 {
+                0x90 if e.bytes[2] > 0 => self.held += 1,
+                0x80 | 0x90 => self.held = (self.held - 1).max(0),
+                _ => {}
+            }
+        }
+        let v = if self.held > 0 { 0.5 } else { 0.0 };
+        for ch in ctx.outputs.iter_mut() {
+            ch[at..n].fill(v);
+            if self.mode == Mode::Nan {
+                ch[0] = f32::NAN;
+            }
+        }
+        if self.mode == Mode::Error {
+            ProcessStatus::Error
+        } else {
+            ProcessStatus::Ok
+        }
+    }
+
+    fn reset(&mut self) {
+        self.held = 0;
+    }
+}
+
+fn held_info(id: &str) -> PluginInfo {
+    PluginInfo {
+        plugin: plugin(id),
+        kind: PluginKind::Instrument,
+        inputs: vec![],
+        outputs: vec![AudioPortInfo {
+            name: "Out".into(),
+            channels: 2,
+            role: PortRole::Main,
+        }],
+        note_input: true,
+        params: vec![],
+        latency: 0,
+        tail: Tail::None,
+    }
+}
+
+fn held_synth(
+    id: PluginInstanceId,
+    mode: Mode,
+    back: &std::sync::mpsc::Sender<Returned>,
+) -> PluginSynth {
+    let (_, audio) = param_queues();
+    let proc = Box::new(Held { held: 0, mode });
+    PluginSynth::new(
+        id,
+        proc,
+        &held_info("vizdaw.test.synth4"),
+        4096,
+        audio,
+        back.clone(),
+    )
+}
+
+const ON: [u8; 3] = [0x90, 60, 100];
+const OFF: [u8; 3] = [0x80, 60, 0];
+
+#[test]
+fn skipped_blocks_flush_midi_but_keep_releases() {
+    let (back, _returned) = channel();
+    let mut s = held_synth(PluginInstanceId(1), Mode::Notes, &back);
+    let mut out = [StereoBuf::new(256)];
+    let info = BlockInfo::default();
+    s.midi(0, &ON);
+    s.render_outputs(256, &mut out, &info);
+    assert_eq!(out[0].left[255], 0.5);
+    // A note-off at frame 200 and a stale note-on in an unrendered block:
+    // the release applies at the start of the next block, the note-on and
+    // its offset are gone, and empty messages make no events.
+    s.midi(200, &OFF);
+    s.midi(210, &ON);
+    s.midi(0, &[]);
+    s.skip(256);
+    s.render_outputs(256, &mut out, &info);
+    assert!(
+        out[0].left.iter().all(|x| *x == 0.0),
+        "{:?}",
+        &out[0].left[..8]
+    );
+    // Nothing from the skipped block replays afterwards.
+    s.render_outputs(256, &mut out, &info);
+    assert!(out[0].left.iter().all(|x| *x == 0.0));
+}
+
+#[test]
+fn a_full_midi_queue_keeps_its_note_offs() {
+    let (back, _returned) = channel();
+    let mut s = held_synth(PluginInstanceId(1), Mode::Notes, &back);
+    let mut out = [StereoBuf::new(256)];
+    s.midi(0, &ON);
+    s.render_outputs(256, &mut out, &BlockInfo::default());
+    for _ in 0..core_host::MAX_EVENTS {
+        s.midi(10, &[0xB0, 1, 2]);
+    }
+    s.midi(20, &OFF);
+    s.render_outputs(256, &mut out, &BlockInfo::default());
+    assert_eq!(out[0].left[19], 0.5);
+    assert_eq!(out[0].left[20], 0.0);
+}
+
+fn faulty_instrument(
+    mode: Mode,
+) -> (
+    Vec<f32>,
+    Vec<PluginInstanceId>,
+    PluginInstanceId,
+    PluginInstanceId,
+) {
+    let mut b = Builder::new();
+    let (d, id) = b
+        .plugin_dest("Synth", plugin("vizdaw.test.synth4"))
+        .unwrap();
+    let (seq, lane) = b.sequence("S", "L", Some(d)).unwrap();
+    b.events(seq, lane, vec![note_on(0)]).unwrap();
+    let main = b.strip_of(StripKind::Instrument(d)).unwrap();
+    let ins = b.insert(main, plugin("vizdaw.test.gain")).unwrap();
+    let mut r = rig();
+    let synth = held_synth(id, mode, &r.back);
+    r.shelf.put(
+        id,
+        &plugin("vizdaw.test.synth4"),
+        4096,
+        Ready::Instrument(synth),
+    );
+    r.add(ins, "vizdaw.test.gain", false);
+    r.engine.load(b.doc(), seq).unwrap();
+    let out = r.play(40 * 256);
+    (out, r.engine.plugin_faults(), id, ins)
+}
+
+#[test]
+fn a_faulty_plugin_instrument_is_zeroed_and_bypassed_under_its_own_instance() {
+    for mode in [Mode::Nan, Mode::Error] {
+        let (out, faults, id, ins) = faulty_instrument(mode);
+        assert!(out.iter().all(|x| *x == 0.0), "zeroed");
+        assert_eq!(
+            faults,
+            vec![id],
+            "reported under the instrument, not {ins:?}"
+        );
+    }
 }

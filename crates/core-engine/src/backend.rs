@@ -142,6 +142,13 @@ pub trait InstrumentNode: Send {
         let _ = frames;
     }
 
+    /// The plugin instance this node has just bypassed for faults (spec
+    /// §7), once; the renderer reports it under that instance. Nodes that
+    /// are not plugins never fault. // RT
+    fn take_fault(&mut self) -> Option<core_model::ids::PluginInstanceId> {
+        None
+    }
+
     /// Output latency in frames, read on the control thread when the sink
     /// is created (the DLS synth: 0).
     fn latency(&self) -> u32 {

@@ -592,7 +592,10 @@ unsafe fn render_node(
             let sink = sinks.cells.get(*target).map(|c| unsafe { &mut *c.get() });
             match sink {
                 Some(Some(Sink::Instrument(node))) => {
-                    node.render_outputs(frames, &mut st.outs, info)
+                    node.render_outputs(frames, &mut st.outs, info);
+                    if let Some(id) = node.take_fault() {
+                        shared.report_plugin_fault(Some(id));
+                    }
                 }
                 _ => {
                     for o in st.outs.iter_mut() {
