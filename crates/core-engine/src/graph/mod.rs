@@ -1,10 +1,12 @@
 //! The mixer render graph (spec §6, §7): strip DSP (`dsp`), delay lines
 //! (`delay`), insert processors (`node`), the graph description (`spec`),
-//! PDC planning (`pdc`) and the runtime graph and executor (`exec`).
+//! PDC planning (`pdc`), the runtime graph and executor (`exec`) and the
+//! mixer translation (`mixer`).
 
 pub mod delay;
 pub mod dsp;
 pub mod exec;
+pub mod mixer;
 pub mod node;
 pub mod pdc;
 pub mod spec;

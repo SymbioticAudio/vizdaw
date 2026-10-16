@@ -2,11 +2,13 @@
 //! `fixtures`). Shared by engine tests, `vizdaw-play` and the app (2c).
 
 use core_model::command::{
-    Command, DrumCmd, EventCmd, LaneCmd, ReferenceCmd, Report, RoutingCmd, SequenceCmd, apply,
+    Command, DrumCmd, EventCmd, LaneCmd, MixerCmd, ReferenceCmd, Report, RoutingCmd, SequenceCmd,
+    apply,
 };
 use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec, LoopCount};
-use core_model::ids::{AnyId, DestId, EventId, LaneId, SeqId};
+use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
+use core_model::mixer::{PluginRef, StripKind};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::{PPQ, Tick};
 use core_model::{ModelError, Result};
@@ -50,6 +52,49 @@ impl Builder {
         let a = apply(&self.doc, &cmd)?;
         self.doc = a.doc;
         Ok(a.report)
+    }
+
+    /// Continues building `doc`.
+    pub fn from_doc(doc: Document) -> Builder {
+        Builder { doc }
+    }
+
+    /// Applies a mixer command.
+    pub fn mixer(&mut self, cmd: MixerCmd) -> Result<Report> {
+        self.run(Command::Mixer(cmd))
+    }
+
+    /// The strip of `kind`.
+    pub fn strip_of(&self, kind: StripKind) -> Result<StripId> {
+        self.doc
+            .mixer()
+            .find_kind(kind)
+            .ok_or_else(|| ModelError::invalid(format!("no {kind:?} strip")))
+    }
+
+    /// Adds an aux bus.
+    pub fn bus(&mut self, name: &str) -> Result<StripId> {
+        let r = self.mixer(MixerCmd::AddBus {
+            name: name.into(),
+            index: None,
+        })?;
+        created(&r, |id| match id {
+            AnyId::Strip(s) => Some(*s),
+            _ => None,
+        })
+    }
+
+    /// Appends an insert to `strip`.
+    pub fn insert(&mut self, strip: StripId, plugin: PluginRef) -> Result<PluginInstanceId> {
+        let r = self.mixer(MixerCmd::AddInsert {
+            strip,
+            index: None,
+            plugin,
+        })?;
+        created(&r, |id| match id {
+            AnyId::Plugin(p) => Some(*p),
+            _ => None,
+        })
     }
 
     /// Adds a destination.
