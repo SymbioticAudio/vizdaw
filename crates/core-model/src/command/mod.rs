@@ -1,9 +1,11 @@
 //! Commands: every edit is a `Command` applied by the pure [`apply`].
 
+pub mod drum;
 pub mod event;
 pub mod lane;
 pub mod sequence;
 
+pub use drum::DrumCmd;
 pub use event::EventCmd;
 pub use lane::LaneCmd;
 pub use sequence::SequenceCmd;
@@ -53,6 +55,8 @@ pub enum Command {
     Lane(LaneCmd),
     /// Event edits.
     Event(EventCmd),
+    /// Drum-lane edits.
+    Drum(DrumCmd),
 }
 
 impl Command {
@@ -62,6 +66,7 @@ impl Command {
             Command::Sequence(c) => c.name(),
             Command::Lane(c) => c.name(),
             Command::Event(c) => c.name(),
+            Command::Drum(c) => c.name(),
         }
     }
 }
@@ -97,6 +102,10 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
         }
         Command::Event(c) => {
             event::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::Drum(c) => {
+            drum::apply(&mut d, c, &mut report)?;
             None
         }
     };
