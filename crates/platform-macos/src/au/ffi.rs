@@ -14,8 +14,8 @@ use objc2_audio_toolbox::{
     AudioUnitInitialize, AudioUnitParameter, AudioUnitParameterInfo, AudioUnitParameterOptions,
     AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender, AudioUnitRenderActionFlags,
     AudioUnitReset, AudioUnitScope, AudioUnitSetParameter, AudioUnitSetProperty,
-    AudioUnitUninitialize, MusicDeviceMIDIEvent, kAudioUnitProperty_ClassInfo,
-    kAudioUnitProperty_ElementCount, kAudioUnitProperty_Latency,
+    AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent, kAudioUnitProperty_ClassInfo,
+    kAudioUnitProperty_ElementCount, kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
     kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_ParameterInfo,
     kAudioUnitProperty_ParameterList, kAudioUnitProperty_SetRenderCallback,
     kAudioUnitProperty_StreamFormat, kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
@@ -31,7 +31,7 @@ use objc2_core_foundation::{
 };
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -1015,4 +1015,283 @@ pub(crate) fn ui_gesture(unit: &Unit, id: u32, value: f32) {
         );
         AUEventListenerNotify(ptr::null_mut(), ptr::null_mut(), &end);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Transport for AUs (`kAudioUnitProperty_HostCallbacks`, spec §5): the
+// processor stores each block's facts in atomics before rendering; the
+// unit's calls read them on the render thread. // RT
+
+/// The transport facts one unit's host callbacks report.
+#[derive(Debug, Default)]
+pub(crate) struct HostTransport {
+    /// Quarter-note position (f64 bits).
+    beat: AtomicU64,
+    /// Tempo in BPM (f64 bits).
+    tempo: AtomicU64,
+    /// Schedule frame (f64 bits).
+    sample: AtomicU64,
+    /// Stream rate (f64 bits).
+    rate: AtomicU64,
+    playing: AtomicBool,
+    /// Set when playing toggled or the position jumped; cleared when a
+    /// unit reads it.
+    changed: AtomicBool,
+}
+
+impl HostTransport {
+    /// A transport at 120 BPM, stopped at 0, for `rate`.
+    pub(crate) fn new(rate: f64) -> HostTransport {
+        let t = HostTransport::default();
+        t.tempo.store(120f64.to_bits(), Ordering::Relaxed);
+        t.rate.store(rate.to_bits(), Ordering::Relaxed);
+        t
+    }
+
+    /// The stream rate changed (activation). Main thread.
+    pub(crate) fn set_rate(&self, rate: f64) {
+        self.rate.store(rate.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Stores one block's facts (`expected` is the frame the previous
+    /// block's end predicted: anything else is a jump). // RT
+    pub(crate) fn set(&self, playing: bool, frame: u64, beats: f64, tempo: f64, expected: u64) {
+        let was = self.playing.swap(playing, Ordering::Relaxed);
+        if was != playing || frame != expected {
+            self.changed.store(true, Ordering::Relaxed);
+        }
+        self.beat.store(beats.to_bits(), Ordering::Relaxed);
+        let tempo = if tempo.is_finite() && tempo > 0.0 {
+            tempo
+        } else {
+            120.0
+        };
+        self.tempo.store(tempo.to_bits(), Ordering::Relaxed);
+        self.sample
+            .store((frame as f64).to_bits(), Ordering::Relaxed);
+    }
+
+    fn f(a: &AtomicU64) -> f64 {
+        f64::from_bits(a.load(Ordering::Relaxed))
+    }
+
+    /// What `beatAndTempoProc` reports: beat, tempo. // RT
+    pub(crate) fn beat_and_tempo(&self) -> (f64, f64) {
+        (Self::f(&self.beat), Self::f(&self.tempo))
+    }
+
+    /// What `musicalTimeLocationProc` reports: frames to the next whole
+    /// beat, the 4/4 time signature (3b Plan Ruling 11) and the downbeat of
+    /// the current bar. // RT
+    pub(crate) fn musical_time(&self) -> (u32, f32, u32, f64) {
+        let beat = Self::f(&self.beat);
+        let frames_per_beat = 60.0 / Self::f(&self.tempo) * Self::f(&self.rate);
+        let to_next = (beat.ceil() - beat) * frames_per_beat;
+        let downbeat = (beat / 4.0).floor() * 4.0;
+        (to_next.round().max(0.0) as u32, 4.0, 4, downbeat)
+    }
+
+    /// What `transportStateProc2` reports: playing, changed (cleared by the
+    /// read), sample position. // RT
+    pub(crate) fn state(&self) -> (bool, bool, f64) {
+        (
+            self.playing.load(Ordering::Relaxed),
+            self.changed.swap(false, Ordering::Relaxed),
+            Self::f(&self.sample),
+        )
+    }
+}
+
+/// `refcon` is the `HostTransport` the callbacks were installed with.
+unsafe fn transport<'a>(refcon: *mut c_void) -> Option<&'a HostTransport> {
+    // SAFETY: the callbacks are installed with a pointer to a
+    // `HostTransport` that the instance and its processor keep alive (in an
+    // `Arc`) for as long as the unit exists.
+    unsafe { refcon.cast::<HostTransport>().as_ref() }
+}
+
+unsafe extern "C-unwind" fn beat_and_tempo_proc(
+    refcon: *mut c_void,
+    beat: *mut f64,
+    tempo: *mut f64,
+) -> i32 {
+    // SAFETY: see `transport`.
+    let Some(t) = (unsafe { transport(refcon) }) else {
+        return -10863; // kAudioUnitErr_CannotDoInCurrentContext
+    };
+    let (b, bpm) = t.beat_and_tempo();
+    // SAFETY: the unit passes valid out-pointers or null for values it
+    // does not want.
+    unsafe {
+        if let Some(p) = beat.as_mut() {
+            *p = b;
+        }
+        if let Some(p) = tempo.as_mut() {
+            *p = bpm;
+        }
+    }
+    0
+}
+
+unsafe extern "C-unwind" fn musical_time_proc(
+    refcon: *mut c_void,
+    to_next_beat: *mut u32,
+    numerator: *mut f32,
+    denominator: *mut u32,
+    downbeat: *mut f64,
+) -> i32 {
+    // SAFETY: see `transport`.
+    let Some(t) = (unsafe { transport(refcon) }) else {
+        return -10863;
+    };
+    let (next, num, den, down) = t.musical_time();
+    // SAFETY: valid out-pointers or null, as above.
+    unsafe {
+        if let Some(p) = to_next_beat.as_mut() {
+            *p = next;
+        }
+        if let Some(p) = numerator.as_mut() {
+            *p = num;
+        }
+        if let Some(p) = denominator.as_mut() {
+            *p = den;
+        }
+        if let Some(p) = downbeat.as_mut() {
+            *p = down;
+        }
+    }
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C-unwind" fn transport_state_proc2(
+    refcon: *mut c_void,
+    playing: *mut u8,
+    recording: *mut u8,
+    changed: *mut u8,
+    sample: *mut f64,
+    cycling: *mut u8,
+    cycle_start: *mut f64,
+    cycle_end: *mut f64,
+) -> i32 {
+    // SAFETY: see `transport`.
+    let Some(t) = (unsafe { transport(refcon) }) else {
+        return -10863;
+    };
+    let (play, moved, at) = t.state();
+    // SAFETY: valid out-pointers or null, as above.
+    unsafe {
+        if let Some(p) = playing.as_mut() {
+            *p = u8::from(play);
+        }
+        if let Some(p) = recording.as_mut() {
+            *p = 0;
+        }
+        if let Some(p) = changed.as_mut() {
+            *p = u8::from(moved);
+        }
+        if let Some(p) = sample.as_mut() {
+            *p = at;
+        }
+        if let Some(p) = cycling.as_mut() {
+            *p = 0;
+        }
+        if let Some(p) = cycle_start.as_mut() {
+            *p = 0.0;
+        }
+        if let Some(p) = cycle_end.as_mut() {
+            *p = 0.0;
+        }
+    }
+    0
+}
+
+unsafe extern "C-unwind" fn transport_state_proc(
+    refcon: *mut c_void,
+    playing: *mut u8,
+    changed: *mut u8,
+    sample: *mut f64,
+    cycling: *mut u8,
+    cycle_start: *mut f64,
+    cycle_end: *mut f64,
+) -> i32 {
+    // SAFETY: forwards the same pointers (recording not asked).
+    unsafe {
+        transport_state_proc2(
+            refcon,
+            playing,
+            ptr::null_mut(),
+            changed,
+            sample,
+            cycling,
+            cycle_start,
+            cycle_end,
+        )
+    }
+}
+
+fn callbacks(t: &HostTransport) -> HostCallbackInfo {
+    HostCallbackInfo {
+        hostUserData: ptr::from_ref(t).cast_mut().cast::<c_void>(),
+        beatAndTempoProc: Some(beat_and_tempo_proc),
+        musicalTimeLocationProc: Some(musical_time_proc),
+        transportStateProc: Some(transport_state_proc),
+        transportStateProc2: Some(transport_state_proc2),
+    }
+}
+
+impl Unit {
+    /// Installs the host callbacks reading `t` (which must outlive the
+    /// unit: callers keep it in the same `Arc`s as the unit).
+    pub(crate) fn set_host_callbacks(&self, t: &Arc<HostTransport>) -> Result<(), String> {
+        let info = callbacks(t);
+        self.set(
+            "set HostCallbacks",
+            kAudioUnitProperty_HostCallbacks,
+            kAudioUnitScope_Global,
+            0,
+            &info,
+        )
+    }
+}
+
+/// What the callbacks installed for `t` report, called the way a unit
+/// calls them (tests): beat and tempo; frames to the next beat, numerator,
+/// denominator, downbeat; playing, changed, sample.
+#[allow(clippy::type_complexity)]
+pub(crate) fn call_host_callbacks(
+    t: &HostTransport,
+) -> ((f64, f64), (u32, f32, u32, f64), (bool, bool, f64)) {
+    let info = callbacks(t);
+    let (mut b, mut bpm) = (0.0, 0.0);
+    let (mut next, mut num, mut den, mut down) = (0u32, 0f32, 0u32, 0.0);
+    let (mut play, mut rec, mut moved, mut at, mut cyc, mut cs, mut ce) =
+        (0u8, 0u8, 0u8, 0.0, 0u8, 0.0, 0.0);
+    // SAFETY: the callbacks get the pointer they were made for and valid
+    // out-pointers, exactly as a unit would pass them.
+    unsafe {
+        if let Some(f) = info.beatAndTempoProc {
+            f(info.hostUserData, &mut b, &mut bpm);
+        }
+        if let Some(f) = info.musicalTimeLocationProc {
+            f(info.hostUserData, &mut next, &mut num, &mut den, &mut down);
+        }
+        if let Some(f) = info.transportStateProc2 {
+            f(
+                info.hostUserData,
+                &mut play,
+                &mut rec,
+                &mut moved,
+                &mut at,
+                &mut cyc,
+                &mut cs,
+                &mut ce,
+            );
+        }
+    }
+    (
+        (b, bpm),
+        (next, num, den, down),
+        (play != 0, moved != 0, at),
+    )
 }

@@ -7,6 +7,7 @@
 
 mod ffi;
 
+use core_engine::backend::BlockInfo;
 use core_engine::graph::ProcessStatus;
 use core_host::catalog::Source;
 use core_host::{
@@ -15,7 +16,7 @@ use core_host::{
     Prepared, ProcessCtx, Tail,
 };
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
-use ffi::{ComponentInfo, Feed, GestureListener, Unit};
+use ffi::{ComponentInfo, Feed, GestureListener, HostTransport, Unit};
 use objc2_audio_toolbox::{
     AudioUnitParameterOptions, kAudioUnitScope_Input, kAudioUnitScope_Output,
     kAudioUnitType_Effect, kAudioUnitType_MusicDevice, kAudioUnitType_MusicEffect,
@@ -156,6 +157,9 @@ struct Opened {
     kind: u32,
     config: (f64, u32),
     feed: Feed,
+    /// What its host callbacks read (installed when the unit took them).
+    transport: Arc<HostTransport>,
+    callbacks: bool,
 }
 
 /// The AU [`PluginFormat`].
@@ -185,6 +189,10 @@ impl PluginFormat for AuFormat {
             // take their connections only at initialization.
             let feed = Feed::new(max);
             connect(&unit, &feed)?;
+            // Tempo and position for tempo-synced units (spec §5); a unit
+            // that refuses the callbacks still plays.
+            let transport = Arc::new(HostTransport::new(sr));
+            let callbacks = unit.set_host_callbacks(&transport).is_ok();
             unit.initialize().map_err(HostError::ActivateFailed)?;
             Ok(Prepared(Box::new(Opened {
                 desc: describe(&c),
@@ -192,6 +200,8 @@ impl PluginFormat for AuFormat {
                 unit,
                 config: (sr, max),
                 feed,
+                transport,
+                callbacks,
             })))
         })
     }
@@ -330,6 +340,9 @@ pub struct AuInstance {
     /// activation at that configuration hands it to the processor without
     /// initializing the unit again.
     ready: Option<Feed>,
+    /// What the unit's host callbacks read.
+    transport: Arc<HostTransport>,
+    callbacks: bool,
     /// Initializations done by `activate` (on the main thread).
     #[cfg(test)]
     main_inits: u32,
@@ -367,6 +380,8 @@ impl AuInstance {
             listener: None,
             writes: Arc::new(HostWrites::new(Vec::new())),
             ready: Some(o.feed),
+            transport: o.transport,
+            callbacks: o.callbacks,
             #[cfg(test)]
             main_inits: 0,
         };
@@ -463,6 +478,12 @@ impl AuInstance {
         };
     }
 
+    /// Whether the unit took VizDAW's host callbacks (tempo, beat
+    /// position, transport state).
+    pub fn host_callbacks_installed(&self) -> bool {
+        self.callbacks
+    }
+
     /// Acts like the plugin's own UI changing parameter `id` (begin
     /// gesture, value, end gesture). For tests: Apple's built-in units have
     /// no scriptable UI.
@@ -511,11 +532,14 @@ impl PluginInstance for AuInstance {
         // is a change after this point (`read_info` reads the latency next).
         self.latency.store(false, Ordering::Release);
         self.config = Some((sample_rate, max_frames));
+        self.transport.set_rate(sample_rate);
         self.read_info();
         self.active = true;
         Ok(Box::new(AuProcessor {
             unit: Arc::clone(&self.unit),
             writes: Arc::clone(&self.writes),
+            transport: Arc::clone(&self.transport),
+            last: None,
             feed,
             sample_time: 0.0,
             out_counts: self
@@ -613,6 +637,10 @@ impl PluginInstance for AuInstance {
 pub struct AuProcessor {
     unit: Arc<Unit>,
     writes: Arc<HostWrites>,
+    /// What the unit's host callbacks read; set before each render.
+    transport: Arc<HostTransport>,
+    /// The previous block's playing frame and length.
+    last: Option<(u64, u32)>,
     feed: Feed,
     sample_time: f64,
     out_counts: Vec<usize>,
@@ -628,6 +656,7 @@ impl std::fmt::Debug for AuProcessor {
 impl AudioProcessor for AuProcessor {
     fn process(&mut self, ctx: &mut ProcessCtx<'_>) -> ProcessStatus {
         let n = ctx.frames.min(self.max_frames);
+        store_block(&self.transport, &mut self.last, ctx.transport, n);
         for p in ctx.params_in {
             if let Ok(id) = u32::try_from(p.id.0) {
                 self.writes.note(id, p.value as f32);
@@ -666,6 +695,76 @@ impl AudioProcessor for AuProcessor {
     fn reset(&mut self) {
         self.unit.reset();
     }
+}
+
+/// Stores one block's transport facts for the host callbacks; a playing
+/// block that does not follow the previous one is a jump. // RT
+fn store_block(t: &HostTransport, last: &mut Option<(u64, u32)>, info: &BlockInfo, n: u32) {
+    let expected = match last {
+        Some((frame, len)) if info.playing => *frame + u64::from(*len),
+        _ => info.frame,
+    };
+    t.set(
+        info.playing,
+        info.frame,
+        info.beats,
+        info.tempo_bpm,
+        expected,
+    );
+    *last = info.playing.then_some((info.frame, n));
+}
+
+/// What an AU's host callbacks report (`kAudioUnitProperty_HostCallbacks`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HostCallbacksSeen {
+    /// Quarter-note position.
+    pub beat: f64,
+    /// Tempo in BPM.
+    pub tempo: f64,
+    /// Frames from the block start to the next whole beat.
+    pub to_next_beat: u32,
+    /// Time signature numerator.
+    pub numerator: f32,
+    /// Time signature denominator.
+    pub denominator: u32,
+    /// Beat of the current bar's downbeat.
+    pub downbeat: f64,
+    /// The transport plays.
+    pub playing: bool,
+    /// Playing toggled or the position jumped since the last read.
+    pub changed: bool,
+    /// Schedule frame of the block start.
+    pub sample: f64,
+}
+
+/// Calls the host callbacks the way a unit does after a processor stored
+/// `blocks` (each with its frame count), at `rate`. For tests: Apple's
+/// built-in units do not ask for the transport.
+pub fn host_callbacks_after(rate: f64, blocks: &[(BlockInfo, u32)]) -> Vec<HostCallbacksSeen> {
+    let t = HostTransport::new(rate);
+    let mut last = None;
+    blocks
+        .iter()
+        .map(|(info, n)| {
+            store_block(&t, &mut last, info, *n);
+            let (
+                (beat, tempo),
+                (to_next_beat, numerator, denominator, downbeat),
+                (playing, changed, sample),
+            ) = ffi::call_host_callbacks(&t);
+            HostCallbacksSeen {
+                beat,
+                tempo,
+                to_next_beat,
+                numerator,
+                denominator,
+                downbeat,
+                playing,
+                changed,
+                sample,
+            }
+        })
+        .collect()
 }
 
 /// Loads a component for the scanner and the tests: instantiate, configure
