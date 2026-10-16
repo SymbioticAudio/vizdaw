@@ -8,6 +8,7 @@ use crate::error::{ModelError, Result};
 use crate::event::{Event, EventBody, EventSpec, Fade};
 use crate::ids::{AnyId, EventId, LaneId, MediaId, SeqId};
 use crate::rules::check_event_fields;
+use crate::tempo::TempoMap;
 use crate::time::Tick;
 
 /// Audio-region edits.
@@ -96,6 +97,23 @@ fn region(d: &Document, id: EventId) -> Result<(Event, SeqId, f64)> {
     Ok((ev.clone(), loc.seq, rate))
 }
 
+/// Shortens a region's fades so neither is longer than the region itself
+/// (measured in ticks under `tempo` from the region's start).
+fn clamp_fades(ev: &mut Event, tempo: &TempoMap, rate: f64) {
+    if let EventBody::AudioRegion {
+        length,
+        fade_in,
+        fade_out,
+        ..
+    } = &mut ev.body
+    {
+        let start = tempo.tick_to_seconds(ev.tick);
+        let part = tempo.seconds_to_tick(start + *length as f64 / rate) - ev.tick;
+        fade_in.length = fade_in.length.min(part);
+        fade_out.length = fade_out.length.min(part);
+    }
+}
+
 fn store(d: &mut Document, ev: Event) -> Result<()> {
     check_event_fields(d, &ev.spec())?;
     d.replace_event(ev)?;
@@ -151,6 +169,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 let secs = tempo.tick_to_seconds(ev.tick) + *front_frames as f64 / rate;
                 ev.tick = tempo.seconds_to_tick(secs);
             }
+            clamp_fades(&mut ev, &tempo, rate);
             store(d, ev)?;
         }
         AudioCmd::Split { event, at } => {
@@ -182,9 +201,10 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 fade_in,
                 fade_out: Fade::default(),
             };
+            clamp_fades(&mut a, &tempo, rate);
             store(d, a)?;
             let id = d.counters_mut().alloc_event();
-            let b = Event {
+            let mut b = Event {
                 id,
                 tick: *at,
                 dest: ev.dest,
@@ -199,6 +219,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                     fade_out,
                 },
             };
+            clamp_fades(&mut b, &tempo, rate);
             check_event_fields(d, &b.spec())?;
             let loc = d.locate(*event)?;
             d.insert_event(loc.seq, loc.lane, Some(loc.take), b)?;

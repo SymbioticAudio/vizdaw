@@ -499,3 +499,59 @@ fn gain_and_fades() {
         .is_err()
     );
 }
+
+/// A 4-beat region at beat 1 with a 1.5-beat fade in and a 2-beat fade out.
+fn with_long_fades(d: &Document) -> Document {
+    run(
+        d,
+        audio(AudioCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            tick: Tick(PPQ),
+            media: MediaId(0),
+            source_offset: 0,
+            length: 96_000,
+            gain_db: 0.0,
+            fade_in: Fade {
+                length: Tick(3 * PPQ / 2),
+                shape: FadeShape::Linear,
+            },
+            fade_out: Fade {
+                length: Tick(2 * PPQ),
+                shape: FadeShape::Linear,
+            },
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn split_and_trim_clamp_fades_to_the_part_length() {
+    let d = with_long_fades(&base());
+    // Split one beat in: part one is 1 beat, part two 3 beats.
+    let s = run(
+        &d,
+        audio(AudioCmd::Split {
+            event: EventId(0),
+            at: Tick(2 * PPQ),
+        }),
+    )
+    .unwrap();
+    let (_, _, _, fi0, _) = region(&s, 0);
+    let (_, _, _, _, fo1) = region(&s, 1);
+    assert_eq!(fi0.length, Tick(PPQ));
+    assert_eq!(fo1.length, Tick(2 * PPQ));
+    // Trim three beats off the end: one beat left, both fades clamp to it.
+    let t = run(
+        &d,
+        audio(AudioCmd::Trim {
+            event: EventId(0),
+            front_frames: 0,
+            back_frames: 72_000,
+        }),
+    )
+    .unwrap();
+    let (_, _, len, fi, fo) = region(&t, 0);
+    assert_eq!(len, 24_000);
+    assert_eq!((fi.length, fo.length), (Tick(PPQ), Tick(PPQ)));
+}
