@@ -5,11 +5,11 @@ use crate::guard::{ffi_guard, lock};
 use crate::host;
 use crate::mixer::{self, DestRow, MixerLevels, MixerSnapshot};
 use crate::plugins;
-use crate::snapshot::PluginRefRow;
 use crate::snapshot::{
     DocSnapshot, IdleUpdate, LaneRow, SlotRow, TransportState, lane_rows, position_bbu, seconds,
     seq_id, seq_rows, warnings,
 };
+use crate::snapshot::{ParamRow, ParamValue, PluginRefRow};
 use core_host::PluginHost;
 use core_model::command::Command;
 use core_model::command::MixerCmd;
@@ -21,7 +21,7 @@ use core_model::document::Document;
 use core_model::file;
 use core_model::history::History;
 use core_model::ids::{DestId, LaneId, PluginInstanceId, SeqId, StripId};
-use core_model::mixer::{AuxSend, Output, PluginSlot};
+use core_model::mixer::{AuxSend, Output, ParamId, PluginSlot};
 use core_model::selection::ViewFilter;
 use core_model::time::Tick;
 use std::path::{Path, PathBuf};
@@ -51,6 +51,19 @@ struct Inner {
     /// A reload could not run (the plugin registry was busy, or Play's
     /// load failed): `idle` runs it once it can.
     reload_owed: bool,
+    /// Plugin gestures waiting for an open edit to end.
+    held: Vec<core_host::Gesture>,
+    /// What plugin timer steps found since the last `idle`.
+    news: News,
+}
+
+/// What plugin timer steps found, handed out by the next `idle`.
+#[derive(Debug, Default)]
+struct News {
+    doc_changed: bool,
+    slots_changed: bool,
+    params_changed: std::collections::BTreeSet<u64>,
+    problems: Vec<String>,
 }
 
 impl Inner {
@@ -65,6 +78,8 @@ impl Inner {
             cursor_seq: None,
             reload_fault: None,
             reload_owed: false,
+            held: Vec::new(),
+            news: News::default(),
         }
     }
 
@@ -168,6 +183,51 @@ impl Session {
         }))
     }
 
+    /// One plugin timer step: the host services its plugins (with the
+    /// engine when this session plays), news are kept for the next `idle`,
+    /// and finished gestures become undo steps. Returns true when the
+    /// document changed. Nothing happens while the registry is busy.
+    fn pump(&self, inner: &mut Inner) -> bool {
+        let report = {
+            let doc = inner.doc();
+            plugins::with(self.id, |p| p.map(|p| host::service(self.id, doc, p)))
+        };
+        let Ok(Some(r)) = report else {
+            return false;
+        };
+        for (id, why) in &r.failed {
+            let line = format!("{}: {why}", slot_name(inner.doc(), *id));
+            inner.news.problems.push(line);
+        }
+        for (id, why) in &r.rejected_state {
+            let line = format!(
+                "{}: saved state refused ({why})",
+                slot_name(inner.doc(), *id)
+            );
+            inner.news.problems.push(line);
+        }
+        inner.news.slots_changed |= !r.loaded.is_empty()
+            || !r.failed.is_empty()
+            || !r.restart.is_empty()
+            || r.compiled.is_some();
+        inner
+            .news
+            .params_changed
+            .extend(r.params_changed.iter().map(|i| i.0));
+        inner.held.extend(r.gestures);
+        self.commit_held(inner)
+    }
+
+    /// Commits the gestures waiting for an open edit (a drag) to end.
+    /// Inside the edit they would merge into its undo step, so they wait.
+    fn commit_held(&self, inner: &mut Inner) -> bool {
+        if inner.history.in_transaction() {
+            return false;
+        }
+        let gestures = std::mem::take(&mut inner.held);
+        self.commit_gestures(inner, &gestures)
+    }
+
     /// Commits plugin-UI gestures as undo steps (spec §4), then lets the
     /// plugin host and the engine follow (the host must see the committed
     /// document before any undo, 3b `PluginHost::commit_gestures`).
@@ -242,7 +302,13 @@ impl Session {
     /// Undo or redo, then recompile if playing.
     fn step(&self, undo: bool) -> Result<DocSnapshot, VizError> {
         let next = {
-            let inner = lock(&self.inner);
+            let mut inner = lock(&self.inner);
+            // A gesture the plugin finished since the last timer tick is
+            // the newest step: undo must see it (3b: sync after commit,
+            // before undo).
+            if self.pump(&mut inner) {
+                inner.news.doc_changed = true;
+            }
             if undo {
                 inner.history.peek_undo().cloned()
             } else {
@@ -506,36 +572,17 @@ impl Session {
             if inner.reload_owed {
                 inner.reload_host(self.id);
             }
-            let report = {
-                let doc = inner.doc();
-                plugins::with(self.id, |p| p.map(|p| host::service(self.id, doc, p)))
-            };
-            let Ok(Some(r)) = report else {
-                return Ok(nothing());
-            };
-            let mut problems: Vec<String> = Vec::new();
-            for (id, why) in &r.failed {
-                problems.push(format!("{}: {why}", slot_name(inner.doc(), *id)));
-            }
-            for (id, why) in &r.rejected_state {
-                problems.push(format!(
-                    "{}: saved state refused ({why})",
-                    slot_name(inner.doc(), *id)
-                ));
-            }
-            let changed = self.commit_gestures(&mut inner, &r.gestures);
+            let changed = self.pump(&mut inner);
+            let n = std::mem::take(&mut inner.news);
             Ok(IdleUpdate {
-                snapshot: if changed {
+                snapshot: if changed || n.doc_changed {
                     Some(inner.snapshot()?)
                 } else {
                     None
                 },
-                slots_changed: !r.loaded.is_empty()
-                    || !r.failed.is_empty()
-                    || !r.restart.is_empty()
-                    || r.compiled.is_some(),
-                params_changed: r.params_changed.iter().map(|i| i.0).collect(),
-                problems,
+                slots_changed: n.slots_changed,
+                params_changed: n.params_changed.into_iter().collect(),
+                problems: n.problems,
             })
         })
     }
@@ -546,6 +593,83 @@ impl Session {
         ffi_guard(|| {
             let inner = lock(&self.inner);
             plugins::with(self.id, |p| plugins::slot_rows(inner.doc(), p))
+        })
+    }
+}
+
+/// Plugin parameters (spec §11): the list with current values, a live
+/// set for controls being dragged, and the commit that makes one undo step.
+#[uniffi::export]
+impl Session {
+    /// Slot `slot`'s parameters with their current values (empty while it
+    /// is not running).
+    pub fn params(&self, slot: u64) -> Result<Vec<ParamRow>, VizError> {
+        ffi_guard(|| {
+            plugins::with(self.id, |p| {
+                let Some(inst) = p.and_then(|p| p.instance(PluginInstanceId(slot))) else {
+                    return Vec::new();
+                };
+                let infos = inst.info().params.clone();
+                infos
+                    .into_iter()
+                    .map(|i| ParamRow {
+                        id: i.id.0,
+                        value: inst.param_value(i.id).unwrap_or(i.default),
+                        name: i.name,
+                        module: i.module,
+                        min: i.min,
+                        max: i.max,
+                        default: i.default,
+                        stepped: i.stepped,
+                        automatable: i.automatable,
+                        hidden: i.hidden,
+                    })
+                    .collect()
+            })
+        })
+    }
+
+    /// Sends a value to the running plugin now, without an undo step (a
+    /// control being dragged); `commit_params` records the final value.
+    pub fn set_param(&self, slot: u64, param: u64, value: f64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            if !value.is_finite() {
+                return Err(VizError::Model {
+                    message: "parameter values must be finite".into(),
+                });
+            }
+            plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    p.set_param(PluginInstanceId(slot), ParamId(param), value);
+                }
+            })
+        })
+    }
+
+    /// Records parameter values in the slot's overlay as one undo step
+    /// (`SetPluginParams`, spec §4).
+    pub fn commit_params(
+        &self,
+        slot: u64,
+        values: Vec<ParamValue>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetPluginParams {
+                slot: PluginInstanceId(slot),
+                params: values.iter().map(|v| (ParamId(v.id), v.value)).collect(),
+            }))
+        })
+    }
+
+    /// Closes the gesture slot `slot`'s editor left open (its window
+    /// closed); it becomes an undo step at the next timer tick.
+    pub fn end_plugin_gestures(&self, slot: u64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    p.end_gestures(PluginInstanceId(slot));
+                }
+            })
         })
     }
 }
@@ -588,6 +712,7 @@ impl Session {
                 inner.history.commit()?;
                 inner.version += 1;
             }
+            self.commit_held(&mut inner);
             inner.snapshot()
         })
     }

@@ -180,6 +180,22 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func setDestinationPlugin(dest: UInt64, plugin: PluginRefRow) throws -> DocSnapshot {
         try mixerCall("destPlugin \(dest) \(plugin.id)")
     }
+
+    // MARK: Parameters
+
+    var paramTable: [UInt64: [ParamRow]] = [:]
+    /// Live sets, in order: (slot, param, value).
+    var liveSets: [(UInt64, UInt64, Double)] = []
+    var endedGestures: [UInt64] = []
+
+    func params(slot: UInt64) throws -> [ParamRow] { paramTable[slot] ?? [] }
+    func setParam(slot: UInt64, param: UInt64, value: Double) throws {
+        liveSets.append((slot, param, value))
+    }
+    func commitParams(slot: UInt64, values: [ParamValue]) throws -> DocSnapshot {
+        try mixerCall("commitParams \(slot) " + values.map { "\($0.id)=\($0.value)" }.joined(separator: ","))
+    }
+    func endPluginGestures(slot: UInt64) throws { endedGestures.append(slot) }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

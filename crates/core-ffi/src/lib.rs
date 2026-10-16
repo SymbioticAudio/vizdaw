@@ -32,8 +32,8 @@ pub use mixer::{
 };
 pub use session::Session;
 pub use snapshot::{
-    DocSnapshot, IdleUpdate, LaneRow, PluginFormatTag, PluginRefRow, SeqRow, SlotRow, SlotStatus,
-    TransportState,
+    DocSnapshot, IdleUpdate, LaneRow, ParamRow, ParamValue, PluginFormatTag, PluginRefRow, SeqRow,
+    SlotRow, SlotStatus, TransportState,
 };
 
 /// Panics inside the guard (test hook): returns `VizError::Internal`.

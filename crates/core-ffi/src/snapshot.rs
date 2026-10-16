@@ -314,3 +314,37 @@ pub struct IdleUpdate {
     /// state.
     pub problems: Vec<String>,
 }
+
+/// One plugin parameter and its current value.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct ParamRow {
+    /// Stable ID.
+    pub id: u64,
+    /// Name.
+    pub name: String,
+    /// Group path (`/`-separated, may be empty).
+    pub module: String,
+    /// Lowest value.
+    pub min: f64,
+    /// Highest value.
+    pub max: f64,
+    /// Default value.
+    pub default: f64,
+    /// Current value.
+    pub value: f64,
+    /// Whole values only.
+    pub stepped: bool,
+    /// Automatable.
+    pub automatable: bool,
+    /// Hidden from the user.
+    pub hidden: bool,
+}
+
+/// A parameter value to record.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct ParamValue {
+    /// Parameter ID.
+    pub id: u64,
+    /// Value.
+    pub value: f64,
+}
