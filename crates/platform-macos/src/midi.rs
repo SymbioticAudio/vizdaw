@@ -144,6 +144,8 @@ enum Dest {
 struct Lane {
     rx: Consumer<Packet>,
     dest: Dest,
+    /// Latest timestamp handed to CoreMIDI from this lane.
+    latest_ns: u64,
 }
 
 #[derive(Default)]
@@ -194,13 +196,16 @@ fn deliver(dest: Dest, p: &Packet) {
 fn drain_lanes(lanes: &mut [Lane], send: &mut impl FnMut(Dest, &Packet)) {
     for lane in lanes.iter_mut() {
         while let Ok(p) = lane.rx.pop() {
+            lane.latest_ns = lane.latest_ns.max(p.host_ns);
             send(lane.dest, &p);
         }
     }
 }
 
 /// Final drain, then All Notes Off (CC123) on all 16 channels of every
-/// distinct output, timestamped "now", so nothing is left sounding.
+/// distinct output, so nothing is left sounding. The CC123s are stamped no
+/// earlier than the latest packet delivered to that output (0, "now", when
+/// there was none), so a note-on scheduled ahead cannot land after them.
 fn shutdown_lanes(lanes: &mut [Lane], mut send: impl FnMut(Dest, &Packet)) {
     drain_lanes(lanes, &mut send);
     let mut done: Vec<Dest> = Vec::with_capacity(lanes.len());
@@ -209,9 +214,15 @@ fn shutdown_lanes(lanes: &mut [Lane], mut send: impl FnMut(Dest, &Packet)) {
             continue;
         }
         done.push(lane.dest);
+        let at = lanes
+            .iter()
+            .filter(|l| l.dest == lane.dest)
+            .map(|l| l.latest_ns)
+            .max()
+            .unwrap_or(0);
         for ch in 0..16u8 {
             let p = Packet {
-                host_ns: 0,
+                host_ns: at,
                 kind: KIND_CHANNEL,
                 len: 3,
                 data: [0xB0 | ch, 123, 0, 0, 0, 0],
@@ -334,7 +345,11 @@ impl MidiSystem {
     fn add_lane(&mut self, dest: Dest) -> Box<dyn MidiOut> {
         let (tx, rx) = RingBuffer::new(MIDI_RING_CAPACITY);
         if let Ok(mut lanes) = self.state.lanes.lock() {
-            lanes.push(Lane { rx, dest });
+            lanes.push(Lane {
+                rx,
+                dest,
+                latest_ns: 0,
+            });
         }
         Box::new(RingMidiOut { tx })
     }
@@ -658,7 +673,14 @@ mod tests {
 
     fn lane(dest: Dest) -> (Lane, RingMidiOut) {
         let (tx, rx) = RingBuffer::new(16);
-        (Lane { rx, dest }, RingMidiOut { tx })
+        (
+            Lane {
+                rx,
+                dest,
+                latest_ns: 0,
+            },
+            RingMidiOut { tx },
+        )
     }
 
     #[test]
@@ -681,13 +703,36 @@ mod tests {
             (Dest::Source(1), 6, vec![0x80, 60, 0]),
             (Dest::Source(1), 7, vec![0x91, 62, 100]),
         ];
-        // All notes off on every channel, once per distinct output, now.
-        for d in [Dest::Source(1), Dest::Source(2)] {
+        // All notes off on every channel, once per distinct output, no
+        // earlier than the latest packet queued for that output (an output
+        // with nothing queued gets "now", 0).
+        for (d, at) in [(Dest::Source(1), 7), (Dest::Source(2), 0)] {
             for ch in 0..16u8 {
-                want.push((d, 0, vec![0xB0 | ch, 123, 0]));
+                want.push((d, at, vec![0xB0 | ch, 123, 0]));
             }
         }
         assert_eq!(sent, want);
+    }
+
+    #[test]
+    fn shutdown_stamps_after_packets_delivered_by_earlier_drains() {
+        let (a, mut out_a) = lane(Dest::Source(1));
+        let mut lanes = vec![a];
+        // A note scheduled ahead, delivered by a regular drain…
+        assert!(out_a.send(1_000, &[0x90, 60, 100]));
+        drain_lanes(&mut lanes, &mut |_, _| {});
+        // …then an earlier-stamped packet left for the final drain.
+        assert!(out_a.send(500, &[0x80, 61, 0]));
+        let mut stamps: Vec<(u64, u8)> = Vec::new();
+        shutdown_lanes(&mut lanes, |_, p| stamps.push((p.host_ns, p.data[1])));
+        assert_eq!(stamps.first(), Some(&(500, 61)));
+        assert_eq!(stamps.len(), 17);
+        assert!(
+            stamps
+                .iter()
+                .skip(1)
+                .all(|&(t, cc)| t == 1_000 && cc == 123)
+        );
     }
 
     #[test]
