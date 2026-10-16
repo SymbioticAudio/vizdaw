@@ -18,5 +18,6 @@
 pub mod backend;
 pub mod error;
 pub mod midi1;
+pub mod schedule;
 
 pub use error::{BackendError, EngineError};
