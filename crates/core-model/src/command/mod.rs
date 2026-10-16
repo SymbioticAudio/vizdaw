@@ -3,11 +3,13 @@
 pub mod drum;
 pub mod event;
 pub mod lane;
+pub mod reference;
 pub mod sequence;
 
 pub use drum::DrumCmd;
 pub use event::EventCmd;
 pub use lane::LaneCmd;
+pub use reference::ReferenceCmd;
 pub use sequence::SequenceCmd;
 
 use crate::document::Document;
@@ -57,6 +59,8 @@ pub enum Command {
     Event(EventCmd),
     /// Drum-lane edits.
     Drum(DrumCmd),
+    /// Reference edits.
+    Reference(ReferenceCmd),
 }
 
 impl Command {
@@ -67,6 +71,7 @@ impl Command {
             Command::Lane(c) => c.name(),
             Command::Event(c) => c.name(),
             Command::Drum(c) => c.name(),
+            Command::Reference(c) => c.name(),
         }
     }
 }
@@ -90,7 +95,6 @@ pub fn apply(doc: &Document, cmd: &Command) -> Result<Applied> {
 pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Applied> {
     let mut d = doc.clone();
     let mut report = Report::default();
-    let _ = ctx;
     let selection = match cmd {
         Command::Sequence(c) => {
             sequence::apply(&mut d, c, &mut report)?;
@@ -106,6 +110,10 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
         }
         Command::Drum(c) => {
             drum::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::Reference(c) => {
+            reference::apply(&mut d, ctx, c, &mut report)?;
             None
         }
     };
