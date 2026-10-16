@@ -2,6 +2,7 @@
 //! CoreAudio/CoreMIDI; the `offline` module implements them for tests.
 
 use crate::error::BackendError;
+use crate::render::Renderer;
 
 /// Largest block any node or renderer is prepared for.
 pub const MAX_FRAMES: u32 = 4096;
@@ -50,6 +51,19 @@ pub enum BackendEvent {
     SampleRateChanged(f64),
     /// The IO buffer size changed.
     BufferSizeChanged(u32),
+}
+
+/// An audio output device driving a [`Renderer`].
+pub trait AudioBackend {
+    /// Opens the device (not yet running).
+    fn open(&mut self, cfg: &AudioConfig) -> Result<StreamInfo, BackendError>;
+    /// Moves the renderer to the real-time thread and starts it.
+    fn start(&mut self, renderer: Renderer) -> Result<(), BackendError>;
+    /// Stops the device and hands the renderer back (never dropped on the
+    /// real-time thread).
+    fn stop(&mut self) -> Result<Renderer, BackendError>;
+    /// Device events since the last call.
+    fn take_events(&mut self) -> Vec<BackendEvent>;
 }
 
 /// Planar stereo scratch buffers, allocated once.

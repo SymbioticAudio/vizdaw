@@ -16,11 +16,14 @@
 )]
 
 pub mod backend;
+pub mod engine;
 pub mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
 pub mod midi1;
 pub mod notes;
+pub mod render;
+pub mod rt_check;
 pub mod schedule;
 pub mod transport;
 
