@@ -18,9 +18,13 @@ uniffi::setup_scaffolding!();
 
 pub mod error;
 pub mod guard;
+pub mod session;
+pub mod snapshot;
 
 pub use error::VizError;
 pub use guard::ffi_guard;
+pub use session::Session;
+pub use snapshot::{DocSnapshot, LaneRow, SeqRow, TransportState};
 
 /// Panics inside the guard (test hook): returns `VizError::Internal`.
 #[cfg(feature = "test-hooks")]
