@@ -73,19 +73,22 @@ Uses plugins installed on this Mac; nothing here is automated. Build first:
 9. `cargo run -p vizdaw-play --release -- --scan` — lists every installed
    CLAP and AU with its status; a second `--scan` scans nothing new
    ("scanning 0 source(s)").
-10. Pick an AU instrument from the list (e.g. Diva:
-    `--instrument "Piano=au:aumu/…/…"` with the id `--plugins` prints) and play
-    the demo's Song — the instrument plays the piano part; the status line
-    load stays sane; Ctrl-C leaves no hanging notes.
-11. Add an AU and a CLAP effect to the instrument's strip
-    (`--insert "Piano=au:aufx/dely/appl" --insert "Piano=clap:<id>"`) — both
-    audible; a plugin with latency (a lookahead limiter) keeps the drums in
-    time with the piano.
+10. Pick an AU instrument from the list (e.g. Diva) and play the demo's
+    Song on it: `cargo run -p vizdaw-play --release -- fixtures/demo.vizdaw
+    --seq Song --instrument "Built-in Piano=au:<id>"` with the id
+    `--plugins` prints — the instrument plays the piano part; the status
+    line load stays sane; Ctrl-C leaves no hanging notes.
+11. Add an AU and a CLAP effect on the demo's strips (the CLI can address
+    "Built-in Synth" and "Master" only):
+    `--insert "Built-in Synth=au:aufx/dely/appl" --insert "Master=clap:<id>"`
+    — both audible; a plugin with latency (a lookahead limiter) keeps the
+    drums in time with the piano.
 12. Sidechain: with a third-party compressor that has a sidechain input,
     set one up in a project (3c's mixer, or a hand-edited project.json:
     `"sidechain": <strip id>` on the insert) — the kick ducks the pad.
-13. A multi-output drum instrument with `AddInstrumentOutput` strips — each
-    output plays on its strip.
+13. A multi-output drum instrument: the CLI cannot add instrument-output
+    strips (`AddInstrumentOutput`), so use a hand-edited project or 3c's
+    mixer — each output plays on its strip.
 14. Copy a known-crashing or hanging test plugin into
     `~/Library/Audio/Plug-Ins/CLAP` (the in-repo `target/test-plugins/VizDAW
     Test.clap`) and `--scan` — the crasher shows `Blocklisted: crashed

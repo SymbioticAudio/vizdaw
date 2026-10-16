@@ -137,6 +137,9 @@ fn plugin_ref(spec: &str, cat: &Catalog) -> Result<PluginRef, String> {
         Some(("clap", id)) => (PluginFormat::Clap, id),
         _ => return Err(format!("{spec:?}: expected au:<id> or clap:<id>")),
     };
+    if id.is_empty() {
+        return Err(format!("{spec:?}: empty plugin id"));
+    }
     Ok(cat
         .get(format, id)
         .map(|e| e.plugin.clone())

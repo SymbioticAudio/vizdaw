@@ -68,11 +68,11 @@ pub struct Args {
     /// Add a plugin insert before playing: `STRIP=FORMAT:ID`, e.g.
     /// `"Built-in Synth=au:aufx/dely/appl"` or `"Master=clap:com.u-he.diva"`
     /// (repeatable; live playback only).
-    #[arg(long = "insert", value_name = "STRIP=FORMAT:ID")]
+    #[arg(long = "insert", value_name = "STRIP=FORMAT:ID", conflicts_with_all = ["scan", "plugins"])]
     pub inserts: Vec<String>,
     /// Play a destination on a plugin instrument instead: `DEST=FORMAT:ID`,
     /// e.g. `"Piano=au:aumu/dls /appl"` (repeatable; live playback only).
-    #[arg(long = "instrument", value_name = "DEST=FORMAT:ID")]
+    #[arg(long = "instrument", value_name = "DEST=FORMAT:ID", conflicts_with_all = ["scan", "plugins"])]
     pub instruments: Vec<String>,
     /// Scan for new or changed plugins (CLAP folders and Audio Units), update
     /// the catalog and list it, then exit.
@@ -96,7 +96,7 @@ pub struct Args {
     pub no_au: bool,
     /// Time each plugin scan may take, in milliseconds (default: 10 s, 30 s
     /// for AU v3).
-    #[arg(long = "scan-timeout-ms", value_name = "MS")]
+    #[arg(long = "scan-timeout-ms", value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
     pub scan_timeout_ms: Option<u64>,
     /// Write the demo project to this package path, then exit.
     #[arg(long = "write-demo", value_name = "DIR/demo.vizdaw", conflicts_with_all = ["project", "offline", "list"])]

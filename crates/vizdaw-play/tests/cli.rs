@@ -282,3 +282,51 @@ fn copy_dir(from: &Path, to: &Path) {
         copy_dir(&e.path(), &to.join(e.file_name()));
     }
 }
+
+#[test]
+fn offline_and_list_leave_the_catalog_alone() {
+    let dir = temp("lazycat");
+    let home = dir.join("home");
+    let cat = home.join("Library/Application Support/VizDAW/plugins.json");
+    std::fs::create_dir_all(cat.parent().unwrap()).unwrap();
+    std::fs::write(&cat, "not json").unwrap();
+    let demo = repo().join("fixtures/demo.vizdaw");
+    let out = bin()
+        .env("HOME", &home)
+        .arg(&demo)
+        .arg("--offline")
+        .arg(dir.join("x.txt"))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = bin()
+        .env("HOME", &home)
+        .arg(&demo)
+        .arg("--list")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(std::fs::read_to_string(&cat).unwrap(), "not json");
+    assert!(!cat.with_file_name("plugins.json.corrupt").exists());
+}
+
+#[test]
+fn plugin_argument_validation() {
+    let demo = repo().join("fixtures/demo.vizdaw");
+    for args in [
+        vec!["--scan", "--scan-timeout-ms", "0"],
+        vec!["--scan", "--insert", "Master=clap:x"],
+        vec!["--plugins", "--instrument", "A=clap:x"],
+    ] {
+        let out = bin().args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+    let out = bin()
+        .arg(&demo)
+        .args(["--insert", "Master=clap:", "--offline"])
+        .arg(temp("emptyid").join("x.txt"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("empty plugin id"));
+}

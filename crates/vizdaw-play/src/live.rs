@@ -149,12 +149,15 @@ pub fn run(args: &Args, doc: &Document, seq: SeqId, catalog: &mut Catalog) -> Re
         std::thread::sleep(Duration::from_millis(100));
         // `host_idle`: plugin callbacks, restarts (a latency change
         // recompiles), processors coming back.
-        let r = s
-            .host
-            .service(&mut s.engine, doc, seq)
-            .map_err(|e| e.to_string())?;
-        if let Some(c) = r.compiled {
-            eprintln!("\nrecompiled: latency {} frame(s)", c.graph.latency_frames);
+        // An error is reported and playback goes on: the host keeps a
+        // failed load and retries it.
+        match s.host.service(&mut s.engine, doc, seq) {
+            Ok(r) => {
+                if let Some(c) = r.compiled {
+                    eprintln!("\nrecompiled: latency {} frame(s)", c.graph.latency_frames);
+                }
+            }
+            Err(e) => eprintln!("\nwarning: plugin host: {e}"),
         }
         let pos = meter.tick_to_bbu(s.engine.position_tick(), 4);
         let load = s.engine.dsp_load();

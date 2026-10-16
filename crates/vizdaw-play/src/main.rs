@@ -44,7 +44,12 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         return Err("no project given".into());
     };
     let doc = project::load(path)?;
-    let mut catalog = plugins::load_catalog_or_empty(args);
+    // The catalog is only read where plugins can load: live playback.
+    let mut catalog = if args.offline.is_some() || args.list {
+        core_host::catalog::Catalog::new()
+    } else {
+        plugins::load_catalog_or_empty(args)
+    };
     let doc = plugins::edit(&doc, args, &catalog)?;
     if args.list {
         list(&doc);
