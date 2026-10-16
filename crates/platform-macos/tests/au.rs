@@ -272,3 +272,29 @@ fn read_only_parameters_and_host_echoes_are_not_gestures() {
         vec![ParamEvent::Begin(ParamId(0)), ParamEvent::End(ParamId(0))]
     );
 }
+
+#[test]
+fn a_user_toggling_away_and_back_to_the_hosts_value_is_two_gestures() {
+    let mut inst = load(DELAY);
+    inst.set_params(&[(ParamId(0), 0.0)]).unwrap();
+    inst.simulate_ui_gesture(ParamId(0), 100.0);
+    assert_eq!(
+        gestures_until_end(&mut inst),
+        vec![
+            ParamEvent::Begin(ParamId(0)),
+            ParamEvent::Value(ParamId(0), 100.0),
+            ParamEvent::End(ParamId(0)),
+        ]
+    );
+    // Back to what the host last wrote: still the user, not an echo.
+    inst.simulate_ui_gesture(ParamId(0), 0.0);
+    assert_eq!(
+        gestures_until_end(&mut inst),
+        vec![
+            ParamEvent::Begin(ParamId(0)),
+            ParamEvent::Value(ParamId(0), 0.0),
+            ParamEvent::End(ParamId(0)),
+        ]
+    );
+    assert_eq!(inst.param_value(ParamId(0)), Some(0.0));
+}

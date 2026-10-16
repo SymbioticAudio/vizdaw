@@ -273,10 +273,24 @@ impl HostWrites {
         }
     }
 
-    /// Whether `value` is what the host last wrote to `id`.
-    fn is_echo(&self, id: u32, value: f32) -> bool {
-        self.slot(id)
-            .is_some_and(|s| s.load(Ordering::Relaxed) == value.to_bits())
+    /// Classifies a value notification for `id`, one-shot: the first
+    /// notification equal to the host's last write is its echo (true); any
+    /// notification (echo or user) then clears the slot, so a user moving
+    /// away and back to that value is never mistaken for an echo. Exact
+    /// bits: a unit that quantises the host's value echoes it as a user
+    /// change.
+    fn take_echo(&self, id: u32, value: f32) -> bool {
+        let Some(s) = self.slot(id) else {
+            return false;
+        };
+        let none = f32::NAN.to_bits();
+        let echo = s
+            .compare_exchange(value.to_bits(), none, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok();
+        if !echo {
+            s.store(none, Ordering::Relaxed);
+        }
+        echo
     }
 }
 
@@ -454,12 +468,12 @@ impl PluginInstance for AuInstance {
                 .map_err(HostError::ActivateFailed)?;
         }
         self.unit.initialize().map_err(HostError::ActivateFailed)?;
+        // Initializing may itself post a latency notification: what matters
+        // is a change after this point (`read_info` reads the latency next).
+        self.latency.store(false, Ordering::Release);
         self.config = Some((sample_rate, max_frames));
         self.read_info();
         self.active = true;
-        // Initializing may itself post a latency notification: what matters
-        // is a change after this point.
-        self.latency.store(false, Ordering::Release);
         Ok(Box::new(AuProcessor {
             unit: Arc::clone(&self.unit),
             writes: Arc::clone(&self.writes),
@@ -545,7 +559,7 @@ impl PluginInstance for AuInstance {
                 let id = ParamId(u64::from(raw));
                 match kind {
                     // An echo of the host's own write is not the user.
-                    0 if writes.is_echo(raw, value) => None,
+                    0 if writes.take_echo(raw, value) => None,
                     0 => Some(ParamEvent::Value(id, f64::from(value))),
                     1 => Some(ParamEvent::Begin(id)),
                     2 => Some(ParamEvent::End(id)),
