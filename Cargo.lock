@@ -1595,6 +1595,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vizdaw-scan"
+version = "0.1.0"
+dependencies = [
+ "core-engine",
+ "core-host",
+ "core-model",
+ "serde_json",
+ "test-plugins",
+]
+
+[[package]]
 name = "wait-timeout"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -25,6 +25,7 @@ pub mod info;
 pub mod instance;
 pub mod process;
 pub mod queue;
+pub mod scan;
 pub mod shelf;
 
 pub use error::HostError;
