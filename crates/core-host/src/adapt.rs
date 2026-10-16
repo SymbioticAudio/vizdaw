@@ -299,12 +299,15 @@ pub struct PluginSynth {
     unreported: bool,
 }
 
-/// A note-off, or All Notes Off / All Sound Off. // RT
+/// A message that ends sound and must survive a skipped block: a
+/// note-off, a sustain-pedal release (CC64 below 64), Reset All
+/// Controllers (CC121, which also releases the pedal), All Sound Off or
+/// All Notes Off. // RT
 fn releases(e: &MidiEvent) -> bool {
     matches!(
         (e.bytes[0] & 0xF0, e.bytes[1], e.bytes[2]),
-        (0x80, ..) | (0x90, _, 0) | (0xB0, 120 | 123, _)
-    )
+        (0x80, ..) | (0x90, _, 0) | (0xB0, 120 | 121 | 123, _)
+    ) || matches!((e.bytes[0] & 0xF0, e.bytes[1], e.bytes[2]), (0xB0, 64, v) if v < 64)
 }
 
 impl PluginSynth {
@@ -447,5 +450,30 @@ impl InstrumentNode for PluginSynth {
 
     fn outputs(&self) -> u16 {
         self.outputs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(msg: &[u8]) -> bool {
+        releases(&MidiEvent::new(0, msg))
+    }
+
+    #[test]
+    fn releases_include_pedal_ups_and_controller_resets() {
+        assert!(r(&[0x80, 60, 0]));
+        assert!(r(&[0x93, 60, 0]), "note-on with velocity 0");
+        assert!(r(&[0xB0, 64, 0]), "sustain released");
+        assert!(r(&[0xB5, 64, 63]));
+        assert!(r(&[0xB0, 121, 0]), "reset all controllers");
+        assert!(r(&[0xB0, 120, 0]));
+        assert!(r(&[0xB0, 123, 0]));
+        assert!(!r(&[0x90, 60, 100]));
+        assert!(!r(&[0xB0, 64, 64]), "sustain pressed");
+        assert!(!r(&[0xB0, 64, 127]));
+        assert!(!r(&[0xB0, 1, 0]));
+        assert!(!r(&[0xE0, 0, 64]));
     }
 }
