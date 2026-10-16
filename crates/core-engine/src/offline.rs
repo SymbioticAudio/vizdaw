@@ -336,6 +336,9 @@ impl SinkFactory for OfflineSinks {
         sample_rate: f64,
         _max_frames: u32,
     ) -> Result<Sink, BackendError> {
+        if let TargetKind::PluginInstrument(id) = kind {
+            return Err(BackendError::NotSupported(format!("plugin instance {id}")));
+        }
         let tx = self.log.add(target, self.capacity);
         Ok(match kind {
             TargetKind::BuiltinSynth => Sink::Instrument(Box::new(RecordingNode {
@@ -345,14 +348,14 @@ impl SinkFactory for OfflineSinks {
                 dropped: Arc::clone(&self.log.dropped),
                 tone: self.tone.then(|| Box::new(Tone::new())),
             })),
-            TargetKind::MidiVirtualSource | TargetKind::MidiDestination(_) => {
-                Sink::Midi(Box::new(RecordingMidiOut {
-                    tx,
-                    target,
-                    sample_rate,
-                    accept: self.midi_accepts,
-                }))
-            }
+            TargetKind::MidiVirtualSource
+            | TargetKind::MidiDestination(_)
+            | TargetKind::PluginInstrument(_) => Sink::Midi(Box::new(RecordingMidiOut {
+                tx,
+                target,
+                sample_rate,
+                accept: self.midi_accepts,
+            })),
         })
     }
 }

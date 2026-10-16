@@ -8,7 +8,7 @@ use core_model::command::{
 use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec, LoopCount};
 use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
-use core_model::mixer::{PluginRef, StripKind};
+use core_model::mixer::{PluginRef, PluginSlot, StripKind};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::{PPQ, Tick};
 use core_model::{ModelError, Result};
@@ -113,6 +113,27 @@ impl Builder {
             AnyId::Dest(d) => Some(*d),
             _ => None,
         })
+    }
+
+    /// Adds a plugin instrument destination playing `plugin`; returns the
+    /// destination and its instance.
+    pub fn plugin_dest(
+        &mut self,
+        name: &str,
+        plugin: PluginRef,
+    ) -> Result<(DestId, PluginInstanceId)> {
+        let d = self.dest_kind(
+            name,
+            DestKind::PluginInstrument {
+                slot: PluginSlot::new(PluginInstanceId(0), plugin),
+            },
+            None,
+        )?;
+        let slot = match self.doc.instruments().get(&d).map(|x| &x.kind) {
+            Some(DestKind::PluginInstrument { slot }) => slot.id,
+            _ => return Err(ModelError::invalid("not a plugin instrument")),
+        };
+        Ok((d, slot))
     }
 
     /// Adds a MIDI-endpoint destination on group 0.

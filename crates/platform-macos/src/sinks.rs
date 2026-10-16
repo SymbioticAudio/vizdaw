@@ -52,6 +52,9 @@ impl SinkFactory for MacSinks {
                 Sink::Midi(self.midi()?.open_virtual_source(VIRTUAL_SOURCE_NAME)?)
             }
             TargetKind::MidiDestination(port) => Sink::Midi(self.midi()?.open_destination(port)?),
+            TargetKind::PluginInstrument(id) => {
+                return Err(BackendError::NotSupported(format!("plugin instance {id}")));
+            }
         })
     }
 }

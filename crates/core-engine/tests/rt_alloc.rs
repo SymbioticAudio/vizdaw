@@ -7,7 +7,7 @@ use core_engine::engine::{Engine, EngineConfig, find_sequence};
 use core_engine::error::EngineError;
 use core_engine::fixtures::demo_document;
 use core_engine::offline::{OfflineBackend, OfflineSinks};
-use core_engine::render::Faults;
+use core_engine::render::{Faults, RETIRE_CAPACITY};
 use core_engine::rt_check::{self, CountingAlloc};
 use core_engine::schedule::BuiltinRoute;
 use core_engine::transport::PlayState;
@@ -110,10 +110,11 @@ fn render_path_never_allocates() {
     assert_eq!(ended, 1, "the end was never reported");
 
     // 100 schedule swaps; with the collector paused the retire ring
-    // (capacity 8) fills and the ninth swap is deferred.
+    // (`RETIRE_CAPACITY`, two entries per load) fills and a swap is
+    // deferred.
     engine.pause_collector(true);
     for i in 0..100 {
-        if i == 12 {
+        if i == RETIRE_CAPACITY / 2 + 4 {
             engine.pause_collector(false);
         }
         // Once the collector resumes it frees the retire ring on its own

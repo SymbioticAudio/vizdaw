@@ -354,6 +354,9 @@ pub enum EngineCmd {
     SetLoop(Option<(u64, u64)>),
     /// Install the sink of a new target (targets are only appended).
     AddSink(TargetIdx, Sink),
+    /// Remove a released target's sink; it goes back through the retire
+    /// ring (a plugin instrument is deactivated off the audio thread).
+    RemoveSink(TargetIdx),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -363,13 +366,15 @@ pub enum Retired {
     Schedule(Box<Schedule>),
     /// A replaced graph (with the inserts it did not hand on).
     Graph(Box<Graph>),
+    /// A removed sink.
+    Sink(Sink),
 }
 
 /// Capacity of the command ring.
-pub const CMD_CAPACITY: usize = 64;
-/// Capacity of the retire ring: eight edits, each retiring a schedule and
-/// a graph (Plan Ruling 30).
-pub const RETIRE_CAPACITY: usize = 16;
+pub const CMD_CAPACITY: usize = 256;
+/// Capacity of the retire ring: room for a schedule, a graph and a
+/// removed sink per target (3a Plan Ruling 30; 3b Plan Ruling 4).
+pub const RETIRE_CAPACITY: usize = 64;
 
 /// Renderer settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -451,11 +456,11 @@ impl Out<'_> {
 
 /// Tells every instrument sink not in `except` (a target bitmask) that
 /// `frames` frames passed unrendered. // RT
-fn skip_sinks(sinks: &mut SinkTable, frames: u64, except: u16) {
+fn skip_sinks(sinks: &mut SinkTable, frames: u64, except: u64) {
     for (t, s) in sinks.iter_mut().enumerate() {
         let bit = u32::try_from(t)
             .ok()
-            .and_then(|t| 1u16.checked_shl(t))
+            .and_then(|t| 1u64.checked_shl(t))
             .unwrap_or(0);
         if except & bit != 0 {
             continue;
@@ -701,6 +706,7 @@ impl Renderer {
                     self.schedule.is_some() && self.retire.slots() == 0
                 }
                 Ok(EngineCmd::SetGraph(_)) => self.graph.is_some() && self.retire.slots() == 0,
+                Ok(EngineCmd::RemoveSink(_)) => self.retire.slots() == 0,
                 Ok(_) => false,
                 Err(_) => break,
             };
@@ -789,6 +795,20 @@ impl Renderer {
                 self.seek();
             }
             EngineCmd::SetLoop(range) => self.transport.loop_range = range,
+            EngineCmd::RemoveSink(idx) => {
+                // Forget its sounding notes: nothing will play them now.
+                self.notes.release(idx, |_| {});
+                let taken = self
+                    .sinks
+                    .get_mut(usize::from(idx.0))
+                    .and_then(Option::take);
+                if let Some(old) = taken {
+                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Sink(old)) {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+            }
             EngineCmd::AddSink(idx, sink) => {
                 if let Some(slot) = self.sinks.get_mut(usize::from(idx.0)) {
                     if let Some(old) = slot.replace(sink) {

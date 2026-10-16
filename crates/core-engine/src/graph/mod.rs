@@ -14,8 +14,10 @@ pub mod spec;
 use core_model::ids::PluginInstanceId;
 
 pub use exec::{Graph, InsertInit, Runner, SinkTable};
+pub use mixer::{FeedSource, InstrumentFeed};
 pub use node::{
-    EffectNode, InsertFactory, NoInserts, ProcessStatus, TestInserts, TestMode, TestNode,
+    EffectNode, InsertFactory, NoInserts, ProcessStatus, TestInserts, TestInstrument, TestMode,
+    TestNode,
 };
 pub use pdc::{MAX_INSERTS, MAX_NODES, Plan, PlanError, plan};
 pub use spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};

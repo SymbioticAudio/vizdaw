@@ -2,8 +2,8 @@ use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig, find_sequence};
 use core_engine::fixtures::{BAR, Builder, Q, demo_document};
 use core_engine::offline::{EventLog, LogRecord, OfflineBackend, OfflineSinks};
-use core_engine::render::Faults;
-use core_engine::schedule::{BuiltinRoute, CompileReport};
+use core_engine::render::{Faults, RETIRE_CAPACITY};
+use core_engine::schedule::{BuiltinRoute, CompileReport, MAX_TARGETS};
 use core_engine::transport::PlayState;
 use core_model::document::{DestKind, Document};
 use core_model::event::EventBody;
@@ -295,9 +295,13 @@ fn unroutable_plugin_is_reported_and_absent() {
     let doc = b.finish();
     let mut run = start(&doc, seq, 512);
     assert_eq!(run.report.unroutable.len(), 2);
-    assert_eq!(run.report.warnings, vec![
-        "2 event(s) not played: Pad: plugin instrument \"clap:pad\" cannot play until plugin hosting exists".to_string()
-    ]);
+    assert_eq!(
+        run.report.warnings,
+        vec![
+            "2 event(s) not played: Pad: clap:pad cannot load until plugin hosting exists"
+                .to_string()
+        ]
+    );
     insta::assert_snapshot!(run.play_to_end(), @r"
 0 t0 90 3c 40
 24000 t0 80 3c 00
@@ -436,7 +440,8 @@ fn swap_waits_while_the_retire_ring_is_full() {
     let mut run = start(&doc, seq, 64);
     run.engine.pause_collector(true);
     run.backend.run_blocks([64]);
-    for _ in 0..8 {
+    // Each load retires a schedule and a graph.
+    for _ in 0..RETIRE_CAPACITY / 2 {
         run.engine.load(&doc, seq).unwrap();
         run.backend.run_blocks([64]);
     }
@@ -653,7 +658,7 @@ fn load_while_default_loop_is_on_follows_the_new_length() {
 fn sinks_get_the_engine_target_index_after_a_failed_load() {
     use core_engine::EngineError;
     use core_engine::backend::MidiPortInfo;
-    let ports: Vec<MidiPortInfo> = (0..17)
+    let ports: Vec<MidiPortInfo> = (0..=MAX_TARGETS)
         .map(|i| MidiPortInfo {
             name: format!("Port {i}"),
             unique_id: None,
@@ -661,7 +666,7 @@ fn sinks_get_the_engine_target_index_after_a_failed_load() {
         .collect();
     let mut b = Builder::new();
     let (many, _) = b.sequence("Many", "L", None).unwrap();
-    for i in 0..17 {
+    for i in 0..=MAX_TARGETS {
         let name = format!("Port {i}");
         let d = b.dest(&name, &name, 0).unwrap();
         let l = b.lane(many, &name, Some(d)).unwrap();
@@ -675,7 +680,7 @@ fn sinks_get_the_engine_target_index_after_a_failed_load() {
     let sinks = OfflineSinks::new(100).with_ports(ports);
     let log = sinks.log();
     let (mut engine, renderer) = Engine::new(EngineConfig::new(SR), Box::new(sinks)).unwrap();
-    // Fails after 16 sinks were made; the engine forgets those targets.
+    // Fails after 64 sinks were made; the engine forgets those targets.
     assert_eq!(engine.load(&doc, many), Err(EngineError::TooManyTargets));
     engine.load(&doc, one).unwrap();
     let mut backend = OfflineBackend::new(SR, 512);

@@ -1,6 +1,6 @@
 use core_engine::fixtures::{Builder, demo_document};
 use core_engine::graph::mixer::mixer_spec;
-use core_engine::graph::{InputSpec, NodeSpec, StripSpec, Tap};
+use core_engine::graph::{InputSpec, InstrumentFeed, NodeSpec, StripSpec, Tap};
 use core_engine::schedule::TargetIdx;
 use core_model::command::MixerCmd;
 use core_model::document::{DestKind, Document, DocumentRepr, Settings};
@@ -30,7 +30,7 @@ fn zero(_: &PluginSlot) -> u32 {
 #[test]
 fn the_demo_plays_through_the_builtin_strip() {
     let doc = demo_document().unwrap();
-    let g = mixer_spec(&doc, &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(&doc, &[InstrumentFeed::builtin(TargetIdx(0), 0)], &mut zero);
     assert!(g.warnings.is_empty(), "{:?}", g.warnings);
     assert_eq!(
         g.spec.nodes[0],
@@ -81,7 +81,11 @@ fn routed() -> Builder {
 #[test]
 fn outputs_sends_and_sidechains_become_edges() {
     let b = routed();
-    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut zero,
+    );
     assert_eq!(
         strip(&g.spec, 1).inputs,
         vec![post(2, 1.0), post(3, 1.0), post(4, 1.0)]
@@ -104,7 +108,11 @@ fn mute_and_solo_become_gains() {
         mute: true,
     })
     .unwrap();
-    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut zero,
+    );
     assert_eq!(strip(&g.spec, 1).inputs[0], post(2, 0.0));
     assert_eq!(strip(&g.spec, 3).inputs[0].gain, 0.0);
     assert_eq!(strip(&g.spec, 4).inserts[0].sidechain, Some(post(2, 0.0)));
@@ -117,7 +125,11 @@ fn mute_and_solo_become_gains() {
         solo: true,
     })
     .unwrap();
-    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut zero,
+    );
     assert_eq!(
         strip(&g.spec, 1).inputs,
         vec![post(2, 0.0), post(3, 0.0), post(4, 1.0)]
@@ -132,7 +144,11 @@ fn mute_and_solo_become_gains() {
         solo: true,
     })
     .unwrap();
-    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut zero,
+    );
     assert_eq!(
         strip(&g.spec, 1).inputs,
         vec![post(2, 1.0), post(3, 1.0), post(4, 0.0)]
@@ -165,7 +181,11 @@ fn faders_pans_and_disabled_sends() {
         send: off,
     })
     .unwrap();
-    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut zero,
+    );
     let synth = strip(&g.spec, 2);
     assert_eq!(synth.gain_l, 1.0);
     assert!(synth.gain_r.abs() < 1e-7);
@@ -186,7 +206,11 @@ fn insert_latencies_and_bypass_come_from_the_slots() {
     })
     .unwrap();
     let mut lat = |s: &PluginSlot| if s.id == eq { 64 } else { 0 };
-    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 7)], &mut lat);
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 7)],
+        &mut lat,
+    );
     assert_eq!(
         g.spec.nodes[0],
         NodeSpec::Instrument {
@@ -216,7 +240,7 @@ fn missing_builtin_strip_and_silent_instrument_strips_are_reported() {
         },
     })
     .unwrap();
-    let g = mixer_spec(&doc, &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(&doc, &[InstrumentFeed::builtin(TargetIdx(0), 0)], &mut zero);
     assert_eq!(strip(&g.spec, 1).inputs, vec![post(0, 1.0)]);
     assert!(g.warnings[0].contains("no built-in synth strip"));
 
@@ -226,7 +250,7 @@ fn missing_builtin_strip_and_silent_instrument_strips_are_reported() {
     let g = mixer_spec(b.doc(), &[], &mut zero);
     assert_eq!(
         g.warnings,
-        vec!["strip \"Pad\" has no instrument until plugin hosting exists".to_string()]
+        vec!["strip \"Pad\" has no instrument".to_string()]
     );
 }
 
@@ -247,7 +271,11 @@ fn post_fader_sends_and_bus_outputs_become_post_edges() {
     let mut send = AuxSend::new(bus_b);
     send.level_db = -6.020_6;
     b.mixer(MixerCmd::AddSend { strip: synth, send }).unwrap();
-    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut zero,
+    );
     // Master hears A and B, not the synth directly.
     assert_eq!(strip(&g.spec, 1).inputs, vec![post(3, 1.0), post(4, 1.0)]);
     assert_eq!(strip(&g.spec, 3).inputs, vec![post(2, 1.0)]);
@@ -261,7 +289,11 @@ fn post_fader_sends_and_bus_outputs_become_post_edges() {
         mute: true,
     })
     .unwrap();
-    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut zero,
+    );
     assert_eq!(strip(&g.spec, 3).inputs, vec![post(2, 0.0)]);
     assert_eq!(strip(&g.spec, 4).inputs[0].gain, 0.0);
 }

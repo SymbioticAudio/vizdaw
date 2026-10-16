@@ -7,7 +7,7 @@ use core_engine::engine::{Engine, EngineConfig, find_sequence};
 use core_engine::fixtures::{Builder, demo_document};
 use core_engine::graph::TestInserts;
 use core_engine::offline::{OfflineBackend, OfflineSinks};
-use core_engine::render::Faults;
+use core_engine::render::{Faults, RETIRE_CAPACITY};
 use core_engine::rt_check::{self, CountingAlloc};
 use core_engine::schedule::BuiltinRoute;
 use core_model::command::MixerCmd;
@@ -166,11 +166,10 @@ fn graph_render_path_never_allocates() {
 
     // Phase 2: graph swaps with the retire ring full (deferred swaps),
     // value-only and structural. Each load queues three commands and each
-    // applied swap retires two items, so the 16-slot retire ring is full
-    // after eight blocks; resuming at block 10 keeps the 64-slot command
-    // ring from refusing a load, and stopping at 20 keeps the loop from
-    // outrunning the collector (it frees every 10 ms; an optimised loop
-    // makes 20 edits in far less).
+    // applied swap retires two items, so the retire ring is full after
+    // `RETIRE_CAPACITY / 2` blocks; resuming two blocks later keeps the
+    // command ring from refusing a load, and stopping ten blocks after that
+    // keeps the loop from outrunning the collector (it frees every 10 ms).
     let mut cfg = EngineConfig::new(48_000.0);
     cfg.workers = 3;
     cfg.route = BuiltinRoute::Both;
@@ -190,8 +189,11 @@ fn graph_render_path_never_allocates() {
     let before = rt_check::count();
     let applied = engine.graphs_applied();
     engine.pause_collector(true);
-    for i in 0..20 {
-        if i == 10 {
+    // Two retire entries per load: the ring fills after
+    // `RETIRE_CAPACITY / 2` loads.
+    let fill = RETIRE_CAPACITY / 2;
+    for i in 0..fill + 10 {
+        if i == fill + 2 {
             engine.pause_collector(false);
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -206,7 +208,7 @@ fn graph_render_path_never_allocates() {
     );
     // Let the deferred swaps land, then check they all did.
     let drain = std::time::Instant::now();
-    while engine.graphs_applied() - applied < 20 && drain.elapsed().as_secs() < 5 {
+    while engine.graphs_applied() - applied < (fill + 10) as u64 && drain.elapsed().as_secs() < 5 {
         armed_block(&mut b, 256);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -215,7 +217,11 @@ fn graph_render_path_never_allocates() {
         0,
         "allocations draining deferred swaps"
     );
-    assert_eq!(engine.graphs_applied() - applied, 20, "swaps applied");
+    assert_eq!(
+        engine.graphs_applied() - applied,
+        (fill + 10) as u64,
+        "swaps applied"
+    );
     log.drain();
     drop(b.stop().unwrap());
     drop(engine);

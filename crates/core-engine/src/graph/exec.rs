@@ -205,7 +205,7 @@ pub struct Graph {
     latency: u64,
     shape: u64,
     max_frames: u32,
-    instruments: u16,
+    instruments: u64,
     /// `(new index, old index, bypass line for the new spec latency)`.
     adopt: Box<[(usize, usize, DelayLine)]>,
     nodes: Box<[UnsafeCell<NodeState>]>,
@@ -288,7 +288,7 @@ impl Graph {
         let mut nodes = Vec::with_capacity(n);
         let mut inserts = Vec::new();
         let mut adopt = Vec::new();
-        let mut instruments = 0u16;
+        let mut instruments = 0u64;
         let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut indegree = vec![0u32; n];
         let mut edge = |from: usize, to: usize, succ: &mut Vec<Vec<usize>>| {
@@ -305,7 +305,7 @@ impl Graph {
                     // Only the first node of a target renders its sink (the
                     // module protocol needs one user per sink); a repeat, or
                     // a target beyond the table, renders silence.
-                    let bit = 1u16.checked_shl(u32::from(target.0)).unwrap_or(0);
+                    let bit = 1u64.checked_shl(u32::from(target.0)).unwrap_or(0);
                     let target = if bit != 0 && instruments & bit == 0 {
                         instruments |= bit;
                         usize::from(target.0)
@@ -438,7 +438,7 @@ impl Graph {
     }
 
     /// Bitmask of the targets that have an instrument node.
-    pub fn instruments(&self) -> u16 {
+    pub fn instruments(&self) -> u64 {
         self.instruments
     }
 

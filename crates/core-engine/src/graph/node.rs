@@ -1,7 +1,7 @@
 //! The insert seam: `EffectNode` processors made by an `InsertFactory`
 //! (Plan Ruling 12). 3a ships only test nodes; 3b wraps plugin instances.
 
-use crate::backend::StereoBuf;
+use crate::backend::{InstrumentNode, StereoBuf};
 use crate::graph::delay::DelayLine;
 use crate::graph::dsp;
 use core_model::mixer::{PluginFormat, PluginRef, PluginSlot};
@@ -35,7 +35,8 @@ pub trait EffectNode: Send {
     fn reset(&mut self);
 }
 
-/// Creates insert processors on the control thread.
+/// Creates plugin processors on the control thread: inserts, and the
+/// instruments of plugin instrument destinations.
 pub trait InsertFactory: Send {
     /// The processor for `slot` at the stream's rate and largest block.
     /// `Err` leaves the slot a placeholder (audio passes, no latency) and is
@@ -46,6 +47,22 @@ pub trait InsertFactory: Send {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<Box<dyn EffectNode>, String>;
+
+    /// The instrument for a plugin instrument destination's `slot`. `Err`
+    /// leaves the destination unroutable (reported in the compile
+    /// warnings) and its strip silent.
+    fn make_instrument(
+        &mut self,
+        slot: &PluginSlot,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<Box<dyn InstrumentNode>, String> {
+        let _ = (sample_rate, max_frames);
+        Err(format!(
+            "{} cannot load until plugin hosting exists",
+            slot.plugin.name
+        ))
+    }
 }
 
 /// The factory before plugin hosting: every slot is a placeholder.
@@ -289,5 +306,159 @@ impl InsertFactory for TestInserts {
         let n = self.parse(&slot.plugin.id)?;
         self.made.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(n))
+    }
+
+    fn make_instrument(
+        &mut self,
+        slot: &PluginSlot,
+        _: f64,
+        max_frames: u32,
+    ) -> Result<Box<dyn InstrumentNode>, String> {
+        let n = TestInstrument::parse(&slot.plugin.id, max_frames)?;
+        self.made.fetch_add(1, Ordering::Relaxed);
+        Ok(Box::new(n))
+    }
+}
+
+/// A test stand-in for a plugin instrument, from CLAP ids
+/// `vizdaw.test:synth[,outputs=N][,latency=L]`: while a note on MIDI
+/// channel `c` is held, output `c % N` carries the constant
+/// `0.1 × (c % N + 1)` (sample-exact from the note's offset), delayed by
+/// `latency` frames.
+#[derive(Debug, Clone)]
+pub struct TestInstrument {
+    outputs: u16,
+    latency: u32,
+    /// Held notes per output.
+    held: [u32; 16],
+    /// `(offset, output, on)` of this block's notes, in arrival order.
+    queue: Vec<(u32, u16, bool)>,
+    delay: Vec<DelayLine>,
+    max_frames: u32,
+}
+
+impl TestInstrument {
+    /// Parses a `vizdaw.test:synth…` id.
+    pub fn parse(id: &str, max_frames: u32) -> Result<TestInstrument, String> {
+        let spec = id
+            .strip_prefix(TestInserts::PREFIX)
+            .ok_or_else(|| format!("{id:?} is not a test plugin"))?;
+        let mut outputs = 1u16;
+        let mut latency = 0u32;
+        let mut synth = false;
+        for part in spec.split(',').filter(|p| !p.is_empty()) {
+            let (k, v) = part.split_once('=').unwrap_or((part, ""));
+            let bad = || format!("bad value {v:?} for {k:?}");
+            match k {
+                "synth" => synth = true,
+                "outputs" => outputs = v.parse().map_err(|_| bad())?,
+                "latency" => latency = v.parse().map_err(|_| bad())?,
+                other => return Err(format!("unknown test instrument key {other:?}")),
+            }
+        }
+        if !synth {
+            return Err(format!("{id:?} is not a test instrument"));
+        }
+        let outputs = outputs.clamp(1, 16);
+        Ok(TestInstrument {
+            outputs,
+            latency,
+            held: [0; 16],
+            queue: Vec::with_capacity(256),
+            delay: (0..outputs).map(|_| DelayLine::new(latency)).collect(),
+            max_frames,
+        })
+    }
+
+    /// The reference of test instrument `spec`, e.g. `"synth,outputs=4"`.
+    pub fn plugin(spec: &str) -> PluginRef {
+        TestInserts::plugin(spec)
+    }
+
+    /// Output count.
+    pub fn output_count(&self) -> u16 {
+        self.outputs
+    }
+
+    /// Renders output `k` into `out` from the held state, applying this
+    /// block's queued notes for that output at their offsets. // RT
+    fn render_one(&mut self, k: u16, frames: u32, out: &mut StereoBuf) {
+        let n = (frames as usize).min(out.left.len()).min(out.right.len());
+        let level = 0.1 * f32::from(k + 1);
+        let mut held = self.held.get(usize::from(k)).copied().unwrap_or(0);
+        let mut at = 0usize;
+        let queue = std::mem::take(&mut self.queue);
+        for &(off, o, on) in queue.iter().filter(|(_, o, _)| *o == k) {
+            let _ = o;
+            let end = (off as usize).min(n);
+            let v = if held > 0 { level } else { 0.0 };
+            if let (Some(l), Some(r)) = (out.left.get_mut(at..end), out.right.get_mut(at..end)) {
+                l.fill(v);
+                r.fill(v);
+            }
+            at = at.max(end);
+            held = if on { held + 1 } else { held.saturating_sub(1) };
+        }
+        self.queue = queue;
+        let v = if held > 0 { level } else { 0.0 };
+        if let (Some(l), Some(r)) = (out.left.get_mut(at..n), out.right.get_mut(at..n)) {
+            l.fill(v);
+            r.fill(v);
+        }
+        if let Some(h) = self.held.get_mut(usize::from(k)) {
+            *h = held;
+        }
+        if let (Some(d), Some(l), Some(r)) = (
+            self.delay.get_mut(usize::from(k)),
+            out.left.get_mut(..n),
+            out.right.get_mut(..n),
+        ) {
+            d.process(l, r);
+        }
+    }
+}
+
+impl InstrumentNode for TestInstrument {
+    fn midi(&mut self, offset: u32, msg: &[u8]) {
+        let (Some(&status), Some(&vel)) = (msg.first(), msg.get(2)) else {
+            return;
+        };
+        let out = u16::from(status & 0x0F) % self.outputs;
+        let on = match status & 0xF0 {
+            0x90 if vel > 0 => true,
+            0x90 | 0x80 => false,
+            _ => return,
+        };
+        if self.queue.len() < self.queue.capacity() {
+            self.queue.push((offset.min(self.max_frames), out, on));
+        }
+    }
+
+    fn render(&mut self, frames: u32, out: &mut StereoBuf) {
+        self.render_one(0, frames, out);
+        // Outputs without a buffer still consume their notes.
+        for k in 1..self.outputs {
+            let mut held = self.held.get(usize::from(k)).copied().unwrap_or(0);
+            for &(_, o, on) in self.queue.iter().filter(|(_, o, _)| *o == k) {
+                let _ = o;
+                held = if on { held + 1 } else { held.saturating_sub(1) };
+            }
+            if let Some(h) = self.held.get_mut(usize::from(k)) {
+                *h = held;
+            }
+        }
+        self.queue.clear();
+    }
+
+    fn reset(&mut self) {
+        self.held = [0; 16];
+        self.queue.clear();
+        for d in &mut self.delay {
+            d.clear();
+        }
+    }
+
+    fn latency(&self) -> u32 {
+        self.latency
     }
 }

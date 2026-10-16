@@ -3,8 +3,8 @@ use core_engine::backend::MidiPortInfo;
 use core_engine::fixtures::{BAR, Builder, Q};
 use core_engine::midi1::Midi1Msg;
 use core_engine::schedule::{
-    BuiltinRoute, CompileOptions, CompileReport, Entry, Schedule, TargetIdx, TargetKind,
-    TargetTable, WireMsg, compile,
+    BuiltinRoute, CompileOptions, CompileReport, Entry, MAX_TARGETS, Schedule, TargetIdx,
+    TargetKind, TargetTable, WireMsg, compile,
 };
 use core_model::command::{Command, SequenceCmd};
 use core_model::document::{DestKind, Document, Patch};
@@ -276,24 +276,25 @@ fn unroutable_events_are_reported_not_played() {
     let ok_lane = b.lane(seq, "Ok", Some(synth)).unwrap();
     b.notes(seq, ok_lane, &[(0, 67, 0x8000, Q)]).unwrap();
     let doc = b.finish();
-    let (s, r, _) = compile_all(&doc, seq, &CompileOptions::new(48_000.0));
-    assert_eq!(r.events, 1);
-    assert_eq!(s.entries.len(), 2);
-    assert_eq!(r.unroutable.len(), 3);
-    let reasons: Vec<&str> = r.unroutable.iter().map(|u| u.reason.as_str()).collect();
+    let (s, r, table) = compile_all(&doc, seq, &CompileOptions::new(48_000.0));
+    // The plugin instrument is a target of its own (its sink comes from
+    // the plugin factory, which this resolver stands in for).
+    assert_eq!(r.events, 2);
+    assert_eq!(s.entries.len(), 4);
     assert!(
-        reasons
+        table
             .iter()
-            .any(|w| w.contains("Pad") && w.contains("au:pad")),
-        "{reasons:?}"
+            .any(|(_, k)| matches!(k, TargetKind::PluginInstrument(_)))
     );
+    assert_eq!(r.unroutable.len(), 2);
+    let reasons: Vec<&str> = r.unroutable.iter().map(|u| u.reason.as_str()).collect();
     assert!(
         reasons.iter().any(|w| w.contains("Missing Synth")),
         "{reasons:?}"
     );
     assert!(reasons.contains(&"no destination"), "{reasons:?}");
     assert!(r.unroutable.iter().all(|u| u.path.len() == 1));
-    assert_eq!(r.warnings.len(), 3, "{:?}", r.warnings);
+    assert_eq!(r.warnings.len(), 2, "{:?}", r.warnings);
 }
 
 #[test]
@@ -430,7 +431,7 @@ fn too_many_targets_is_an_error() {
     let mut b = Builder::new();
     let (seq, _) = b.sequence("S", "L", None).unwrap();
     let mut ports = Vec::new();
-    for i in 0..17 {
+    for i in 0..=MAX_TARGETS {
         let name = format!("Port {i}");
         let d = b.dest(&name, &name, 0).unwrap();
         let l = b.lane(seq, &name, Some(d)).unwrap();

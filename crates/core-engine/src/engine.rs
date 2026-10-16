@@ -5,7 +5,8 @@ use crate::backend::MidiPortInfo;
 use crate::error::{BackendError, EngineError};
 use crate::graph::mixer::mixer_spec;
 use crate::graph::{
-    EffectNode, Graph, GraphReport, InsertFactory, InsertInit, NoInserts, NodeSpec, PlanError, plan,
+    EffectNode, Graph, GraphReport, InsertFactory, InsertInit, InstrumentFeed, NoInserts, NodeSpec,
+    PlanError, plan,
 };
 use crate::pool::{Pool, RtEnv, RtPlatform, StdPlatform};
 use crate::render::{
@@ -17,12 +18,12 @@ use crate::schedule::{
     TempoTable, compile,
 };
 use crate::transport::PlayState;
-use core_model::document::Document;
+use core_model::document::{DestKind, Document};
 use core_model::ids::{PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
 use core_model::time::Tick;
 use rtrb::{Producer, RingBuffer};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -96,12 +97,27 @@ struct Live {
     latency: u32,
     format: PluginFormat,
     plugin: String,
+    /// The block size it was made for.
+    max_frames: u32,
 }
 
 impl Live {
-    fn serves(&self, slot: &PluginSlot) -> bool {
-        self.format == slot.plugin.format && self.plugin == slot.plugin.id
+    /// True when this instance may keep serving `slot` with blocks of up
+    /// to `max_frames`.
+    fn serves(&self, slot: &PluginSlot, max_frames: u32) -> bool {
+        self.format == slot.plugin.format
+            && self.plugin == slot.plugin.id
+            && self.max_frames >= max_frames
     }
+}
+
+/// What the engine knows about a target's sink.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SinkInfo {
+    /// Instrument latency (`None`: not an instrument sink).
+    latency: Option<u32>,
+    /// The block size the sink was made for.
+    max_frames: u32,
 }
 
 /// The control handle.
@@ -117,8 +133,10 @@ pub struct Engine {
     loop_range: Option<(u64, u64)>,
     /// The default loop (bar 1 to the end) is on: loads re-send it.
     default_loop: bool,
-    /// Latency of each target's instrument sink.
-    instrument_latency: [Option<u32>; MAX_TARGETS],
+    /// Each target's sink.
+    sinks: [SinkInfo; MAX_TARGETS],
+    /// Instances to recreate at the next load (`Engine::restart_instance`).
+    restart: BTreeSet<PluginInstanceId>,
     /// Insert instances in the last published graph, by ID.
     live: BTreeMap<PluginInstanceId, Live>,
     /// Meter cell of every strip of the last published graph, by strip
@@ -233,7 +251,8 @@ impl Engine {
             length_frames: 0,
             loop_range: None,
             default_loop: false,
-            instrument_latency: [None; MAX_TARGETS],
+            sinks: [SinkInfo::default(); MAX_TARGETS],
+            restart: BTreeSet::new(),
             live: BTreeMap::new(),
             meter_slots: BTreeMap::new(),
             latency: 0,
@@ -298,9 +317,10 @@ impl Engine {
     /// Compiles `seq` and the mixer graph and sends them (and sinks for new
     /// targets) to the renderer. Call again after every committed edit.
     pub fn load(&mut self, doc: &Document, seq: SeqId) -> Result<CompileReport, EngineError> {
-        // Room for every possible new sink plus the graph, the schedule and
-        // the loop, so no push below can fail after targets were interned.
-        if self.cmds.slots() < MAX_TARGETS + 3 {
+        // Room for removing and adding every possible sink plus the graph,
+        // the schedule and the loop, so no push below can fail after
+        // targets were interned.
+        if self.cmds.slots() < 2 * MAX_TARGETS + 3 {
             return Err(EngineError::Busy);
         }
         let opts = CompileOptions {
@@ -309,26 +329,33 @@ impl Engine {
             ports: self.factory.ports(),
         };
         let (sr, max) = (self.cfg.sample_rate, self.block_frames());
-        let before = self.targets.len();
+        self.targets.recycle();
+        self.release_stale_targets(doc, max)?;
         let mut new_sinks: Vec<(TargetIdx, Sink)> = Vec::new();
         let targets = &mut self.targets;
         let factory = &mut self.factory;
+        let inserts = &mut self.inserts;
         let mut resolve = |kind: &TargetKind| -> Result<Result<TargetIdx, String>, EngineError> {
             if let Some(i) = targets.find(kind) {
                 return Ok(Ok(i));
             }
-            if targets.len() >= MAX_TARGETS {
-                return Err(EngineError::TooManyTargets);
-            }
-            // `intern` appends, so the new target gets the next index.
-            let next = u8::try_from(targets.len()).map_err(|_| EngineError::TooManyTargets)?;
-            match factory.make(TargetIdx(next), kind, sr, max) {
+            let next = targets.next_index().ok_or(EngineError::TooManyTargets)?;
+            let made = match kind {
+                TargetKind::PluginInstrument(id) => match doc.plugin_slot(*id) {
+                    Some(slot) => inserts.make_instrument(slot, sr, max).map(Sink::Instrument),
+                    None => Err(format!("plugin instance {id} has no slot")),
+                },
+                other => factory
+                    .make(next, other, sr, max)
+                    .map_err(|e| e.to_string()),
+            };
+            match made {
                 Ok(sink) => {
                     let i = targets.intern(kind.clone())?;
                     new_sinks.push((i, sink));
                     Ok(Ok(i))
                 }
-                Err(e) => Ok(Err(e.to_string())),
+                Err(e) => Ok(Err(e)),
             }
         };
         let compiled = compile(doc, seq, &opts, &mut resolve);
@@ -337,19 +364,26 @@ impl Engine {
             Err(e) => {
                 // Targets interned by this load have no sinks yet; forget
                 // them (their sinks drop with `new_sinks`).
-                self.targets.truncate(before);
+                for (i, _) in &new_sinks {
+                    self.targets.forget(*i);
+                }
                 return Err(e);
             }
         };
         for (i, sink) in new_sinks {
-            if let (Sink::Instrument(node), Some(l)) =
-                (&sink, self.instrument_latency.get_mut(usize::from(i.0)))
-            {
-                *l = Some(node.latency());
+            if let Some(info) = self.sinks.get_mut(usize::from(i.0)) {
+                *info = SinkInfo {
+                    latency: match &sink {
+                        Sink::Instrument(node) => Some(node.latency()),
+                        Sink::Midi(_) => None,
+                    },
+                    max_frames: max,
+                };
             }
             self.push(EngineCmd::AddSink(i, sink))?;
         }
         report.graph = self.compile_graph(doc)?;
+        self.restart.clear();
         self.tempo = Some(schedule.tempo.clone());
         self.length_frames = schedule.length_frames;
         self.loop_range = schedule.loop_range;
@@ -360,6 +394,49 @@ impl Engine {
             self.push(EngineCmd::SetLoop(self.loop_range))?;
         }
         Ok(report)
+    }
+
+    /// Releases targets whose sink must go before this load: plugin
+    /// instruments no longer in `doc` or marked for restart, and instrument
+    /// sinks made for blocks smaller than `max` (a later
+    /// `Renderer::prepare` grew the block size; Plan Ruling 5).
+    fn release_stale_targets(&mut self, doc: &Document, max: u32) -> Result<(), EngineError> {
+        let stale: Vec<TargetIdx> = self
+            .targets
+            .iter()
+            .filter(|(i, kind)| {
+                let info = self.sinks.get(usize::from(i.0)).copied().unwrap_or_default();
+                let small = info.latency.is_some() && info.max_frames < max;
+                match kind {
+                    TargetKind::PluginInstrument(id) => {
+                        small
+                            || self.restart.contains(id)
+                            || !doc.instruments().values().any(|d| {
+                                matches!(&d.kind, DestKind::PluginInstrument { slot } if slot.id == *id)
+                            })
+                    }
+                    TargetKind::BuiltinSynth => small,
+                    TargetKind::MidiVirtualSource | TargetKind::MidiDestination(_) => false,
+                }
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for i in stale {
+            self.push(EngineCmd::RemoveSink(i))?;
+            self.targets.release(i);
+            if let Some(info) = self.sinks.get_mut(usize::from(i.0)) {
+                *info = SinkInfo::default();
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes the next load recreate instance `id` (an insert or a plugin
+    /// instrument) instead of keeping the running one: its old processor
+    /// is retired with the graph or sink it lived in. The plugin host calls
+    /// this when a plugin asks to be restarted (a latency change).
+    pub fn restart_instance(&mut self, id: PluginInstanceId) {
+        self.restart.insert(id);
     }
 
     /// Meter cells for `strips`: a strip keeps its cell; a new strip gets
@@ -394,26 +471,34 @@ impl Engine {
     /// playing (spec §6).
     fn compile_graph(&mut self, doc: &Document) -> Result<GraphReport, EngineError> {
         let (sr, max) = (self.cfg.sample_rate, self.block_frames());
-        let instruments: Vec<(TargetIdx, u32)> = self
+        let instruments: Vec<InstrumentFeed> = self
             .targets
             .iter()
-            .filter(|(_, k)| **k == TargetKind::BuiltinSynth)
-            .filter_map(|(i, _)| {
-                let lat = self
-                    .instrument_latency
-                    .get(usize::from(i.0))
-                    .copied()
-                    .flatten()?;
-                Some((i, lat))
+            .filter_map(|(i, k)| {
+                let lat = self.sinks.get(usize::from(i.0))?.latency?;
+                match k {
+                    TargetKind::BuiltinSynth => Some(InstrumentFeed::builtin(i, lat)),
+                    TargetKind::PluginInstrument(id) => {
+                        let dest = doc.instruments().values().find(|d| {
+                            matches!(&d.kind, DestKind::PluginInstrument { slot } if slot.id == *id)
+                        })?;
+                        Some(InstrumentFeed::plugin(i, lat, dest.id))
+                    }
+                    _ => None,
+                }
             })
             .collect();
         let mut fresh: BTreeMap<PluginInstanceId, (Box<dyn EffectNode>, Live)> = BTreeMap::new();
         let mut adopted: BTreeMap<PluginInstanceId, Live> = BTreeMap::new();
         let mut placeholders: Vec<(PluginInstanceId, String)> = Vec::new();
         let live = &self.live;
+        let restart = &self.restart;
         let inserts = &mut self.inserts;
         let mut latency = |slot: &PluginSlot| -> u32 {
-            if let Some(l) = live.get(&slot.id).filter(|l| l.serves(slot)) {
+            if let Some(l) = live
+                .get(&slot.id)
+                .filter(|l| l.serves(slot, max) && !restart.contains(&slot.id))
+            {
                 adopted.insert(slot.id, l.clone());
                 return l.latency;
             }
@@ -425,6 +510,7 @@ impl Engine {
                         latency: lat,
                         format: slot.plugin.format,
                         plugin: slot.plugin.id.clone(),
+                        max_frames: max,
                     };
                     fresh.insert(slot.id, (node, info));
                     lat
@@ -499,8 +585,9 @@ impl Engine {
 
     /// The block size graphs, inserts and sinks are built for: the
     /// configured size, or the renderer's prepared size when a host grew it
-    /// (`Renderer::prepare`).
-    fn block_frames(&self) -> u32 {
+    /// (`Renderer::prepare`). Plugin hosts activate instances for this
+    /// size.
+    pub fn block_frames(&self) -> u32 {
         self.cfg.max_frames.max(self.shared.prepared_frames())
     }
 

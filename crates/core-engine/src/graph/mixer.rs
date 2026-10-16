@@ -4,7 +4,7 @@ use crate::graph::dsp::strip_gains;
 use crate::graph::spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};
 use crate::schedule::TargetIdx;
 use core_model::document::Document;
-use core_model::ids::StripId;
+use core_model::ids::{DestId, StripId};
 use core_model::mixer::{Output, PluginSlot, Strip, StripKind, db_to_gain};
 use core_model::mixer_rules::audible;
 use std::collections::BTreeMap;
@@ -20,12 +20,53 @@ pub struct MixerGraph {
     pub warnings: Vec<String>,
 }
 
-/// Builds the graph of `doc`'s mixer. `instruments` are the built-in synth
-/// targets that have an instrument sink, with their latency;
-/// `insert_latency` gives each insert's latency (0 for placeholders).
+/// Which strip an instrument node feeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedSource {
+    /// The built-in synth: its `BuiltinSynth` strip.
+    Builtin,
+    /// A plugin instrument destination: its `Instrument` strip.
+    Plugin(DestId),
+}
+
+/// An instrument node of the graph: a target with an instrument sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstrumentFeed {
+    /// The engine target whose sink renders.
+    pub target: TargetIdx,
+    /// The sink's latency in frames.
+    pub latency: u32,
+    /// The strip it feeds.
+    pub source: FeedSource,
+}
+
+impl InstrumentFeed {
+    /// A built-in synth feed.
+    pub fn builtin(target: TargetIdx, latency: u32) -> InstrumentFeed {
+        InstrumentFeed {
+            target,
+            latency,
+            source: FeedSource::Builtin,
+        }
+    }
+
+    /// A plugin instrument feed for destination `dest`.
+    pub fn plugin(target: TargetIdx, latency: u32, dest: DestId) -> InstrumentFeed {
+        InstrumentFeed {
+            target,
+            latency,
+            source: FeedSource::Plugin(dest),
+        }
+    }
+}
+
+/// Builds the graph of `doc`'s mixer. `instruments` are the targets with an
+/// instrument sink (instrument nodes `0..instruments.len()`, in this
+/// order); `insert_latency` gives each insert's latency (0 for
+/// placeholders).
 pub fn mixer_spec(
     doc: &Document,
-    instruments: &[(TargetIdx, u32)],
+    instruments: &[InstrumentFeed],
     insert_latency: &mut dyn FnMut(&PluginSlot) -> u32,
 ) -> MixerGraph {
     let m = doc.mixer();
@@ -45,14 +86,30 @@ pub fn mixer_spec(
         .map(|s| StripSpec::new(Some(s.id)))
         .collect();
     let master = node(m.master()).unwrap_or(base);
-    let feed = m.find_kind(StripKind::BuiltinSynth).and_then(node);
-    if feed.is_none() && !instruments.is_empty() {
-        warnings.push(
-            "no built-in synth strip: the built-in synth plays straight to master".to_string(),
-        );
-    }
-    let to = feed.unwrap_or(master);
-    for (i, _) in instruments.iter().enumerate() {
+    let builtin_strip = m.find_kind(StripKind::BuiltinSynth).and_then(node);
+    let mut fed: Vec<usize> = Vec::new();
+    for (i, f) in instruments.iter().enumerate() {
+        let to = match f.source {
+            FeedSource::Builtin => {
+                if builtin_strip.is_none() {
+                    warnings.push(
+                        "no built-in synth strip: the built-in synth plays straight to master"
+                            .to_string(),
+                    );
+                }
+                builtin_strip.unwrap_or(master)
+            }
+            FeedSource::Plugin(d) => match m.find_kind(StripKind::Instrument(d)).and_then(node) {
+                Some(n) => n,
+                None => {
+                    warnings.push(format!(
+                        "instrument {d} has no strip: it plays straight to master"
+                    ));
+                    master
+                }
+            },
+        };
+        fed.push(to);
         if let Some(s) = to.checked_sub(base).and_then(|k| strips.get_mut(k)) {
             s.inputs.push(InputSpec {
                 from: i,
@@ -126,14 +183,9 @@ pub fn mixer_spec(
                 sidechain,
             });
         }
-        if matches!(
-            s.kind,
-            StripKind::Instrument(_) | StripKind::InstrumentOutput(..)
-        ) {
-            warnings.push(format!(
-                "strip {:?} has no instrument until plugin hosting exists",
-                s.name
-            ));
+        let has_feed = node(s.id).is_some_and(|n| fed.contains(&n));
+        if matches!(s.kind, StripKind::Instrument(_)) && !has_feed {
+            warnings.push(format!("strip {:?} has no instrument", s.name));
         }
     }
     let strip_nodes = m
@@ -144,9 +196,9 @@ pub fn mixer_spec(
         .collect();
     let mut nodes: Vec<NodeSpec> = instruments
         .iter()
-        .map(|(t, l)| NodeSpec::Instrument {
-            target: *t,
-            latency: *l,
+        .map(|f| NodeSpec::Instrument {
+            target: f.target,
+            latency: f.latency,
         })
         .collect();
     nodes.extend(strips.into_iter().map(NodeSpec::Strip));
