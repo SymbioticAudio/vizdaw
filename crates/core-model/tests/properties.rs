@@ -276,16 +276,16 @@ fn seed() -> Document {
 
 /// Applies the ops through a History, skipping refused commands. Returns the
 /// history and the number of applied steps.
+/// Runs the ops; returns the history and its number of undo steps (failed
+/// and no-op commands add none).
 fn build(ops: &[Op]) -> (History, usize) {
     let mut h = History::new(seed());
-    let mut n = 0;
     for op in ops {
         if let Some(cmd) = concrete(h.doc(), op) {
-            if h.execute(&cmd, &ViewFilter::default()).is_ok() {
-                n += 1;
-            }
+            let _ = h.execute(&cmd, &ViewFilter::default());
         }
     }
+    let n = h.undo_depth();
     (h, n)
 }
 

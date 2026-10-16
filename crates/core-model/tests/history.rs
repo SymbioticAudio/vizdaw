@@ -209,3 +209,57 @@ fn modify_again_without_history_is_invalid() {
     let mut h = hist();
     assert!(h.modify_again(&f()).is_err());
 }
+
+#[test]
+fn undo_inside_a_transaction_then_commit_leaves_nothing_to_redo() {
+    let mut h = hist();
+    h.begin("Gesture").unwrap();
+    h.execute(&rename("A"), &f()).unwrap();
+    h.execute(&rename("B"), &f()).unwrap();
+    h.undo().unwrap();
+    h.commit().unwrap();
+    assert_eq!(name(&h), "A");
+    // B was an intra-transaction state; it must not be reachable by redo.
+    assert!(h.redo().is_err());
+    h.undo().unwrap();
+    assert_eq!(name(&h), "S");
+    h.redo().unwrap();
+    assert_eq!(name(&h), "A");
+}
+
+#[test]
+fn empty_transaction_keeps_the_redo_stack() {
+    let mut h = hist();
+    h.execute(&rename("A"), &f()).unwrap();
+    h.undo().unwrap();
+    h.begin("Nothing").unwrap();
+    h.commit().unwrap();
+    h.redo().unwrap();
+    assert_eq!(name(&h), "A");
+}
+
+#[test]
+fn no_op_command_adds_no_undo_step() {
+    let mut h = hist();
+    h.execute(&insert_note(60), &f()).unwrap();
+    h.execute(&rename("A"), &f()).unwrap();
+    h.undo().unwrap();
+    let depth = h.undo_depth();
+    // Nothing is selected, so the transpose changes nothing.
+    let up = Modify::Transpose(Transpose::Interval { semitones: 1 });
+    h.execute(
+        &Command::SelectAndModify {
+            rule: None,
+            mode: SelectMode::Select,
+            modify: Some(up.clone()),
+            to_copy: false,
+        },
+        &f(),
+    )
+    .unwrap();
+    assert_eq!(h.undo_depth(), depth);
+    assert_eq!(h.last_modify(), Some(&up));
+    // A no-op does not discard the redo stack either.
+    h.redo().unwrap();
+    assert_eq!(name(&h), "A");
+}

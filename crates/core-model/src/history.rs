@@ -40,6 +40,8 @@ struct Txn {
     start: usize,
     base: Version,
     base_future: Vec<Version>,
+    /// Whether any command inside the transaction made an undo step.
+    executed: bool,
 }
 
 /// Undo/redo stacks plus the selection and the last modification.
@@ -127,7 +129,8 @@ impl History {
         }
     }
 
-    /// Applies a command. On error nothing changes. A selection-only
+    /// Applies a command. On error nothing changes; a command that changes
+    /// nothing adds no undo step. A selection-only
     /// select-and-modify updates the selection without an undo step.
     pub fn execute(&mut self, cmd: &Command, filter: &ViewFilter) -> Result<Report> {
         let applied = apply_in(
@@ -145,7 +148,9 @@ impl History {
         {
             self.last_modify = Some(m.clone());
         }
-        if !selection_only {
+        // A command that changes nothing (e.g. a modify of an empty
+        // selection) is not an undo step and keeps the redo stack.
+        if !selection_only && applied.doc != self.present.doc {
             let next = Version {
                 doc: applied.doc,
                 label: cmd.name().to_string(),
@@ -153,6 +158,9 @@ impl History {
             };
             self.past.push(std::mem::replace(&mut self.present, next));
             self.future.clear();
+            if let Some(t) = self.txn.as_mut() {
+                t.executed = true;
+            }
             self.trim();
         }
         let sel = applied.selection.unwrap_or_else(|| self.selection.clone());
@@ -215,11 +223,13 @@ impl History {
             start: self.past.len(),
             base: self.present.clone(),
             base_future: self.future.clone(),
+            executed: false,
         });
         Ok(())
     }
 
-    /// Closes the transaction, collapsing its steps into one.
+    /// Closes the transaction, collapsing its steps into one. If it made
+    /// any step, nothing is left to redo.
     pub fn commit(&mut self) -> Result<()> {
         let t = self
             .txn
@@ -231,6 +241,14 @@ impl History {
             self.present.label = t.label;
             self.present.at = Timestamp::now();
         }
+        // Versions undone inside the transaction are intermediate states
+        // that must not be redone; an empty transaction keeps the old redo
+        // stack.
+        self.future = if t.executed {
+            Vec::new()
+        } else {
+            t.base_future
+        };
         self.trim();
         Ok(())
     }
