@@ -5,6 +5,7 @@ use crate::error::{ModelError, Result};
 use crate::event::Event;
 use crate::ids::{AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, SeqId, TakeId};
 use crate::lane::Lane;
+use crate::modify::ModifyTemplate;
 use crate::sequence::Sequence;
 use crate::time::Tick;
 use im::OrdMap;
@@ -18,6 +19,8 @@ pub struct Settings {
     pub history_depth: u32,
     /// Autosave copies to keep (default 10).
     pub autosave_keep: u32,
+    /// Named select-and-modify templates.
+    pub templates: OrdMap<String, ModifyTemplate>,
 }
 
 impl Default for Settings {
@@ -25,6 +28,7 @@ impl Default for Settings {
         Settings {
             history_depth: 200,
             autosave_keep: 10,
+            templates: OrdMap::new(),
         }
     }
 }

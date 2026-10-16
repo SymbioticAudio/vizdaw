@@ -6,7 +6,9 @@ pub mod event;
 pub mod lane;
 pub mod reference;
 pub mod routing;
+mod select;
 pub mod sequence;
+pub mod settings;
 
 pub use audio::AudioCmd;
 pub use drum::DrumCmd;
@@ -15,10 +17,13 @@ pub use lane::LaneCmd;
 pub use reference::ReferenceCmd;
 pub use routing::RoutingCmd;
 pub use sequence::SequenceCmd;
+pub use settings::SettingsCmd;
 
 use crate::document::Document;
 use crate::error::Result;
 use crate::ids::AnyId;
+use crate::modify::Modify;
+use crate::rule::{Rule, SelectMode};
 use crate::selection::{Selection, ViewFilter};
 
 /// What a command did.
@@ -69,6 +74,19 @@ pub enum Command {
     Audio(AudioCmd),
     /// Destination, output and media edits.
     Routing(RoutingCmd),
+    /// Document-settings edits.
+    Settings(SettingsCmd),
+    /// Select events by rule, then optionally modify them (or copies).
+    SelectAndModify {
+        /// Rule; `None` uses the current selection as is.
+        rule: Option<Rule>,
+        /// How the rule combines with the selection.
+        mode: SelectMode,
+        /// Modification; `None` only changes the selection.
+        modify: Option<Modify>,
+        /// Modify copies inserted beside the originals.
+        to_copy: bool,
+    },
 }
 
 impl Command {
@@ -82,6 +100,10 @@ impl Command {
             Command::Reference(c) => c.name(),
             Command::Audio(c) => c.name(),
             Command::Routing(c) => c.name(),
+            Command::Settings(c) => c.name(),
+            Command::SelectAndModify { modify, .. } => {
+                modify.as_ref().map_or("Select", Modify::name)
+            }
         }
     }
 }
@@ -134,6 +156,24 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
             routing::apply(&mut d, c, &mut report)?;
             None
         }
+        Command::Settings(c) => {
+            settings::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::SelectAndModify {
+            rule,
+            mode,
+            modify,
+            to_copy,
+        } => Some(select::apply(
+            &mut d,
+            ctx,
+            rule.as_ref(),
+            *mode,
+            modify.as_ref(),
+            *to_copy,
+            &mut report,
+        )?),
     };
     Ok(Applied {
         doc: d,
