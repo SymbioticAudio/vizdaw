@@ -158,3 +158,81 @@ fn the_host_learns_paths_and_unavailable_plugins() {
     assert!(host.instance(gain).is_some(), "{:?}", host.failure(gain));
     assert_eq!(host.failure(nan), Some("Disabled in Plugin Manager"));
 }
+
+#[test]
+fn newer_files_are_untouched_and_corrupt_ones_are_moved_aside() {
+    let dir = temp("guard");
+    let path = dir.join("plugins.json");
+    let newer = r#"{"version":99,"future":true}"#;
+    std::fs::write(&path, newer).unwrap();
+    assert!(Catalog::load(&path).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+    let (c, _, _) = sample();
+    assert!(c.save(&path).is_err(), "save refuses to overwrite");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+
+    std::fs::write(&path, "{ not json").unwrap();
+    assert!(Catalog::load(&path).is_err());
+    assert!(!path.exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("plugins.json.corrupt")).unwrap(),
+        "{ not json"
+    );
+    c.save(&path).unwrap();
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "no tmp left");
+}
+
+#[test]
+fn apply_clears_only_its_own_reasons() {
+    let bundle = test_plugins::bundle();
+    let src = Source::clap_bundle(&bundle);
+    let mut c = Catalog::new();
+    c.record(
+        &src,
+        vec![entry(
+            &src,
+            "vizdaw.test.nan",
+            PluginKind::Effect,
+            ScanStatus::Ok,
+        )],
+    );
+    c.set_enabled(PluginFormat::Clap, "vizdaw.test.nan", false);
+    let mut host = PluginHost::new(48_000.0, 512).unwrap();
+    c.apply(&mut host);
+    let mut b = core_engine::fixtures::Builder::new();
+    let (_, nan) = b.plugin_dest("N", plugin("vizdaw.test.nan")).unwrap();
+    host.sync(b.doc());
+    host.wait_ready(std::time::Duration::from_secs(10));
+    assert_eq!(host.failure(nan), Some("Disabled in Plugin Manager"));
+    c.set_enabled(PluginFormat::Clap, "vizdaw.test.nan", true);
+    c.apply(&mut host);
+    host.sync(b.doc());
+    host.wait_ready(std::time::Duration::from_secs(10));
+    assert!(host.instance(nan).is_some(), "{:?}", host.failure(nan));
+
+    // A plugin the catalog never marked keeps the host's own failure.
+    let mut host = PluginHost::new(48_000.0, 512).unwrap();
+    let mut c = Catalog::new();
+    c.record(
+        &src,
+        vec![entry(
+            &src,
+            "vizdaw.test.gain",
+            PluginKind::Effect,
+            ScanStatus::Ok,
+        )],
+    );
+    let mut b = core_engine::fixtures::Builder::new();
+    let (_, ghost) = b.plugin_dest("X", plugin("vizdaw.test.unknown")).unwrap();
+    host.sync(b.doc());
+    host.wait_ready(std::time::Duration::from_secs(10));
+    let before = host.failure(ghost).map(str::to_string);
+    assert!(before.is_some());
+    c.apply(&mut host);
+    assert_eq!(host.failure(ghost).map(str::to_string), before);
+}

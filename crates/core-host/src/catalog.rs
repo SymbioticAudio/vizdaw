@@ -159,6 +159,8 @@ pub struct Catalog {
     disabled: BTreeSet<(PluginFormat, String)>,
     /// Sources found missing by the last [`Catalog::mark_found`].
     missing: BTreeSet<Source>,
+    /// Plugins the last [`Catalog::apply`] marked unavailable on the host.
+    marked: BTreeSet<(PluginFormat, String)>,
 }
 
 impl Catalog {
@@ -192,19 +194,41 @@ impl Catalog {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Catalog::new()),
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
-        let r: Repr =
-            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let fail = |e: String| format!("{}: {e}", path.display());
+        let corrupt = |e: String| {
+            // Keep the unreadable file for inspection; a fresh save must not
+            // destroy it.
+            let mut name = path.as_os_str().to_owned();
+            name.push(".corrupt");
+            let _ = std::fs::rename(path, PathBuf::from(name));
+            fail(format!("{e} (moved to .corrupt)"))
+        };
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => return Err(corrupt(e.to_string())),
+        };
+        if let Some(v) = value.get("version").and_then(|v| v.as_u64()) {
+            if v > u64::from(CATALOG_VERSION) {
+                return Err(fail(format!(
+                    "catalog version {v} is newer than this app understands ({CATALOG_VERSION}); left untouched"
+                )));
+            }
+        }
+        let r: Repr = match serde_json::from_value(value) {
+            Ok(r) => r,
+            Err(e) => return Err(corrupt(e.to_string())),
+        };
         if r.version != CATALOG_VERSION {
-            return Err(format!(
-                "{}: catalog version {} (expected {CATALOG_VERSION})",
-                path.display(),
+            return Err(corrupt(format!(
+                "catalog version {} (expected {CATALOG_VERSION})",
                 r.version
-            ));
+            )));
         }
         Ok(Catalog {
             entries: r.entries,
             disabled: r.disabled.into_iter().collect(),
             missing: BTreeSet::new(),
+            marked: BTreeSet::new(),
         })
     }
 
@@ -216,13 +240,34 @@ impl Catalog {
             entries: self.entries.clone(),
             disabled: self.disabled.iter().cloned().collect(),
         };
+        if let Ok(old) = std::fs::read_to_string(path) {
+            let newer = serde_json::from_str::<serde_json::Value>(&old)
+                .ok()
+                .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
+                .is_some_and(|v| v > u64::from(CATALOG_VERSION));
+            if newer {
+                return Err(format!(
+                    "{}: written by a newer version; not overwriting",
+                    path.display()
+                ));
+            }
+        }
         let text = serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        let write = || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)
+        };
+        write().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e.to_string()
+        })
     }
 
     /// Every entry.
@@ -349,8 +394,11 @@ impl Catalog {
     }
 
     /// Tells `host` where every plugin lives and which ones are
-    /// unavailable (their slots load as placeholders with the reason).
-    pub fn apply(&self, host: &mut PluginHost) {
+    /// unavailable (their slots load as placeholders with the reason, at
+    /// the next load; live instances are not stopped). It clears only
+    /// reasons it set itself earlier, never a failure of the host's own.
+    pub fn apply(&mut self, host: &mut PluginHost) {
+        let mut now = BTreeSet::new();
         for e in &self.entries {
             if e.plugin.id.is_empty() {
                 continue;
@@ -364,7 +412,15 @@ impl Catalog {
                 PluginStatus::Blocklisted(r) => Some(format!("Blocklisted: {r}")),
                 PluginStatus::Missing => Some("Missing".to_string()),
             };
-            host.set_unavailable(e.plugin.format, &e.plugin.id, why);
+            if let Some(w) = why {
+                let key = (e.plugin.format, e.plugin.id.clone());
+                host.set_unavailable(key.0, &key.1, Some(w));
+                now.insert(key);
+            }
         }
+        for (format, id) in self.marked.difference(&now) {
+            host.set_unavailable(*format, id, None);
+        }
+        self.marked = now;
     }
 }
