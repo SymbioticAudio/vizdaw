@@ -17,6 +17,7 @@
 )]
 
 pub mod adapt;
+pub mod catalog;
 pub mod clap;
 pub mod error;
 pub mod host;
