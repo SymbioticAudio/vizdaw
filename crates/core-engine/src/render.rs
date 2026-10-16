@@ -151,6 +151,8 @@ pub struct Shared {
     plugin_faults: AtomicU64,
     load_last: AtomicU32,
     load_peak: AtomicU32,
+    /// Block size the renderer was last prepared for.
+    prepared: AtomicU32,
     meters: Box<[MeterCell]>,
     board: Box<[AtomicU64]>,
 }
@@ -170,6 +172,7 @@ impl Default for Shared {
             plugin_faults: AtomicU64::new(0),
             load_last: AtomicU32::new(0),
             load_peak: AtomicU32::new(0),
+            prepared: AtomicU32::new(0),
             meters: (0..MAX_NODES).map(|_| MeterCell::default()).collect(),
             board: (0..MAX_INSERTS).map(|_| AtomicU64::new(0)).collect(),
         }
@@ -256,6 +259,19 @@ impl Shared {
             last: f32::from_bits(self.load_last.load(Ordering::Relaxed)),
             peak: f32::from_bits(self.load_peak.swap(0, Ordering::Relaxed)),
         }
+    }
+
+    /// The block size the renderer was last prepared for (0 before it
+    /// was); the engine builds graphs, inserts and sinks for at least this.
+    pub fn prepared_frames(&self) -> u32 {
+        self.prepared.load(Ordering::Acquire)
+    }
+
+    /// Counts a block rendered as silence because it was larger than the
+    /// prepared size or the graph's buffers. // RT
+    pub fn count_xrun(&self) {
+        self.raise(Faults::XRUN);
+        self.xruns.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Counts a block that missed its deadline. // RT
@@ -481,6 +497,7 @@ impl Renderer {
     pub fn prepare(&mut self, max_frames: u32) {
         self.exec.wait_idle();
         self.cfg.max_frames = max_frames;
+        self.shared.prepared.store(max_frames, Ordering::Release);
         self.bufs = (0..MAX_TARGETS)
             .map(|_| StereoBuf::new(max_frames))
             .collect();
@@ -530,17 +547,20 @@ impl Renderer {
             // use (Plan Ruling 18).
             self.shared.count_busy_block();
             self.pending_skip = self.pending_skip.saturating_add(u64::from(frames));
+            // The block was lost to the graph: report it as full load.
+            self.shared.set_load(1.0);
             return;
         }
         if self.pending_skip > 0 {
             let skip = std::mem::take(&mut self.pending_skip);
             skip_sinks(&mut self.sinks, skip, 0);
         }
-        let graph_small = self.graph.as_ref().is_some_and(|g| g.max_frames() < frames);
-        if frames > self.cfg.max_frames || graph_small || out.iter().any(|c| c.len() < n) {
+        // A graph smaller than the block is caught in `render_graph`, after
+        // the commands: checking it here would also hold back the graph
+        // that replaces it.
+        if frames > self.cfg.max_frames || out.iter().any(|c| c.len() < n) {
             skip_sinks(&mut self.sinks, u64::from(frames), 0);
-            self.shared.raise(Faults::XRUN);
-            self.shared.xruns.fetch_add(1, Ordering::Relaxed);
+            self.shared.count_xrun();
             return;
         }
         self.block_ns = time.host_time_ns;
@@ -590,29 +610,36 @@ impl Renderer {
             }
             offset += step.frames();
         }
-        self.render_graph(out, frames, deadline);
+        let missed = self.render_graph(out, frames, deadline);
         self.publish();
         if block_s > 0.0 {
+            let load = (started.elapsed().as_secs_f64() / block_s) as f32;
+            // A missed deadline lost the block: at least full load.
             self.shared
-                .set_load((started.elapsed().as_secs_f64() / block_s) as f32);
+                .set_load(if missed { load.max(1.0) } else { load });
         }
     }
 
     /// Renders the graph (or, before the first graph arrives, sums the
-    /// instrument sinks) into channels 0–1 and clamps. // RT
-    fn render_graph(&mut self, out: &mut [&mut [f32]], frames: u32, deadline: Option<Instant>) {
+    /// instrument sinks) into channels 0–1 and clamps; true when the graph
+    /// missed its deadline. // RT
+    fn render_graph(
+        &mut self,
+        out: &mut [&mut [f32]],
+        frames: u32,
+        deadline: Option<Instant>,
+    ) -> bool {
         let Some(g) = self.graph.as_deref() else {
             self.mix_direct(out, frames);
             clamp_master(out, frames, &self.shared);
-            return;
+            return false;
         };
         if g.max_frames() < frames {
-            // A graph that arrived in this block's commands with smaller
-            // buffers (built before a `prepare`): never run it past them.
+            // A graph with smaller buffers than the block (built before a
+            // `prepare` and still queued then): never run it past them.
             skip_sinks(&mut self.sinks, u64::from(frames), 0);
-            self.shared.raise(Faults::XRUN);
-            self.shared.xruns.fetch_add(1, Ordering::Relaxed);
-            return;
+            self.shared.count_xrun();
+            return false;
         }
         match self
             .exec
@@ -623,8 +650,12 @@ impl Renderer {
                 let covered = g.instruments();
                 skip_sinks(&mut self.sinks, u64::from(frames), covered);
                 clamp_master(out, frames, &self.shared);
+                false
             }
-            RunResult::Missed => self.shared.count_deadline_miss(),
+            RunResult::Missed => {
+                self.shared.count_deadline_miss();
+                true
+            }
         }
     }
 

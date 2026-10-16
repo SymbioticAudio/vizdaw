@@ -405,6 +405,11 @@ fn a_stalled_node_misses_the_deadline_without_blocking() {
     let c = engine.counters();
     assert_eq!((c.deadline_misses, c.busy_blocks), (1, 1));
     assert!(engine.faults().contains(Faults::XRUN));
+    let load = engine.dsp_load();
+    assert!(
+        load.last >= 1.0 && load.peak >= 1.0,
+        "a lost block is full load: {load:?}"
+    );
     flag.store(true, Ordering::Release);
     std::thread::sleep(std::time::Duration::from_millis(50));
     b.run_blocks([512]);
@@ -412,7 +417,7 @@ fn a_stalled_node_misses_the_deadline_without_blocking() {
 }
 
 #[test]
-fn a_graph_smaller_than_the_block_is_not_run() {
+fn a_load_after_a_larger_prepare_plays_at_the_new_size() {
     let (doc, song) = song();
     let mut cfg = EngineConfig::new(SR);
     cfg.max_frames = 512;
@@ -428,11 +433,43 @@ fn a_graph_smaller_than_the_block_is_not_run() {
     b.start(r).unwrap();
     b.run_blocks([2048]);
     assert!(engine.faults().is_empty());
-    // This graph is built for the engine's 512-frame blocks, and arrives in
-    // a 2048-frame block.
+    // An edit after the device grew its buffer: the graph is built for the
+    // prepared size, not the configured one.
     engine.load(&doc, song).unwrap();
+    let out = render(&mut b, 48 * 2048, &[2048]);
+    let faults = engine.faults();
+    assert!(faults.is_empty(), "{:?}", faults.names());
+    assert_eq!(engine.counters().xruns, 0);
+    assert!(out.iter().any(|x| *x != 0.0));
+}
+
+#[test]
+fn a_graph_queued_before_a_larger_prepare_is_not_run_past_its_buffers() {
+    let (doc, song) = song();
+    let mut cfg = EngineConfig::new(SR);
+    cfg.max_frames = 512;
+    let (mut engine, r) =
+        Engine::new(cfg, Box::new(OfflineSinks::new(1 << 16).with_tone())).unwrap();
+    engine.load(&doc, song).unwrap();
+    let mut b = OfflineBackend::new(SR, 512);
+    b.start(r).unwrap();
+    engine.play().unwrap();
+    b.run_blocks([512]);
+    // Still queued (built for 512 frames) when the renderer is prepared for
+    // 2048: the guard renders the block as an xrun (the backstop).
+    engine.load(&doc, song).unwrap();
+    let mut r = b.stop().unwrap();
+    r.prepare(2048);
+    b.start(r).unwrap();
     b.run_blocks([2048]);
     assert!(engine.faults().contains(Faults::XRUN));
     assert!(b.output(2048).0.iter().all(|x| *x == 0.0));
     assert_eq!(engine.counters().xruns, 1);
+    // The next load builds at the prepared size and heals it.
+    engine.load(&doc, song).unwrap();
+    let out = render(&mut b, 48 * 2048, &[2048]);
+    let faults = engine.faults();
+    assert!(faults.is_empty(), "{:?}", faults.names());
+    assert_eq!(engine.counters().xruns, 1);
+    assert!(out.iter().any(|x| *x != 0.0));
 }

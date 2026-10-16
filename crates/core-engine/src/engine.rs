@@ -294,7 +294,7 @@ impl Engine {
             route: self.cfg.route,
             ports: self.factory.ports(),
         };
-        let (sr, max) = (self.cfg.sample_rate, self.cfg.max_frames);
+        let (sr, max) = (self.cfg.sample_rate, self.block_frames());
         let before = self.targets.len();
         let mut new_sinks: Vec<(TargetIdx, Sink)> = Vec::new();
         let targets = &mut self.targets;
@@ -352,7 +352,7 @@ impl Engine {
     /// is reported (and its fault raised) and the previous graph keeps
     /// playing (spec §6).
     fn compile_graph(&mut self, doc: &Document) -> Result<GraphReport, EngineError> {
-        let (sr, max) = (self.cfg.sample_rate, self.cfg.max_frames);
+        let (sr, max) = (self.cfg.sample_rate, self.block_frames());
         let instruments: Vec<(TargetIdx, u32)> = self
             .targets
             .iter()
@@ -446,6 +446,13 @@ impl Engine {
         self.latency = report.latency_frames;
         self.strip_nodes = mg.strips;
         Ok(report)
+    }
+
+    /// The block size graphs, inserts and sinks are built for: the
+    /// configured size, or the renderer's prepared size when a host grew it
+    /// (`Renderer::prepare`).
+    fn block_frames(&self) -> u32 {
+        self.cfg.max_frames.max(self.shared.prepared_frames())
     }
 
     fn push(&mut self, cmd: EngineCmd) -> Result<(), EngineError> {
