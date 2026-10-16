@@ -17,6 +17,8 @@
 
 pub mod backend;
 pub mod error;
+#[cfg(feature = "fixtures")]
+pub mod fixtures;
 pub mod midi1;
 pub mod schedule;
 
