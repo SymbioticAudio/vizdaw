@@ -39,7 +39,18 @@ pub struct InstanceEvents {
 
 /// The native view an editor attaches to (an `NSView *` on macOS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParentView(pub *mut c_void);
+pub struct ParentView(pub(crate) *mut c_void);
+
+impl ParentView {
+    /// Wraps the native parent view.
+    ///
+    /// # Safety
+    /// `view` must be a valid `NSView *` (or the platform's parent view)
+    /// that stays alive until the editor it is passed to is closed.
+    pub unsafe fn new(view: *mut c_void) -> ParentView {
+        ParentView(view)
+    }
+}
 
 /// A plugin's own editor. Main thread only.
 pub trait PluginEditor {

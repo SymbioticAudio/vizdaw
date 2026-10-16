@@ -26,11 +26,13 @@ pub(crate) fn set_cocoa_parent(
     if parent.is_null() {
         return Err(HostError::EditorUnavailable("no parent view".into()));
     }
-    // SAFETY: the caller (the app, through `PluginEditor::open`) passes a
-    // live `NSView *` that outlives the editor; the plugin only adds a
-    // subview to it.
+    // SAFETY: `parent` comes from `ParentView::new`, whose contract is that
+    // the `NSView *` stays valid until the editor is closed, i.e. until
+    // `gui.destroy`, which `ClapInstance` calls before releasing it; the
+    // plugin only adds a subview to it.
     let window = unsafe { Window::from_cocoa_nsview(parent) };
-    // SAFETY: as above; the window handle is valid for this call.
+    // SAFETY: as above; the view (and so the window handle) is valid until
+    // `gui.destroy`.
     unsafe { gui.set_parent(plugin, window) }
         .map_err(|e| HostError::EditorUnavailable(format!("{e:?}")))
 }

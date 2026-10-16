@@ -39,9 +39,13 @@ impl OutputEventBuffer for GestureOut<'_> {
     }
 }
 
+/// A port's channels: the caller's, then scratch for those it lacks.
+type Chans<'a> =
+    std::iter::Chain<std::slice::IterMut<'a, Box<[f32]>>, std::slice::IterMut<'a, Box<[f32]>>>;
+
 /// A port's input channels, each cut to the block length.
 struct InChans<'a> {
-    it: std::slice::IterMut<'a, Box<[f32]>>,
+    it: Chans<'a>,
     n: usize,
 }
 
@@ -56,7 +60,7 @@ impl<'a> Iterator for InChans<'a> {
 
 /// A port's output channels, each cut to the block length.
 struct OutChans<'a> {
-    it: std::slice::IterMut<'a, Box<[f32]>>,
+    it: Chans<'a>,
     n: usize,
 }
 
@@ -69,19 +73,26 @@ impl<'a> Iterator for OutChans<'a> {
     }
 }
 
-/// Splits a flat channel list into consecutive ports. // RT
+/// Splits a flat channel list into consecutive ports, each with exactly
+/// its declared channel count: the list's channels first, then scratch
+/// channels for the ones the list lacks. // RT
 struct Split<'a, 'c> {
     rest: &'a mut [Box<[f32]>],
+    pad: &'a mut [Box<[f32]>],
     counts: std::slice::Iter<'c, u16>,
 }
 
 impl<'a> Iterator for Split<'a, '_> {
-    type Item = &'a mut [Box<[f32]>];
+    type Item = Chans<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        let c = usize::from(*self.counts.next()?).min(self.rest.len());
+        let want = usize::from(*self.counts.next()?);
+        let c = want.min(self.rest.len());
         let (head, tail) = std::mem::take(&mut self.rest).split_at_mut(c);
         self.rest = tail;
-        Some(head)
+        let missing = (want - c).min(self.pad.len());
+        let (extra, pad_tail) = std::mem::take(&mut self.pad).split_at_mut(missing);
+        self.pad = pad_tail;
+        Some(head.iter_mut().chain(extra.iter_mut()))
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.counts.size_hint()
@@ -105,6 +116,8 @@ pub struct ClapProcessor {
     /// Every input port's channels, port after port.
     inputs: Box<[Box<[f32]>]>,
     out_counts: Box<[u16]>,
+    /// Stand-ins for output channels the context does not offer.
+    out_pad: Box<[Box<[f32]>]>,
     events: EventBuffer,
     clap_notes: bool,
     steady: u64,
@@ -142,6 +155,9 @@ impl ClapProcessor {
                 .collect(),
             in_counts,
             out_counts,
+            out_pad: (0..out_total)
+                .map(|_| vec![0.0f32; max_frames as usize].into_boxed_slice())
+                .collect(),
             events: EventBuffer::with_capacity(MAX_EVENTS + MAX_PARAM_EVENTS),
             clap_notes,
             steady: 0,
@@ -272,26 +288,22 @@ impl AudioProcessor for ClapProcessor {
         let steady = self.steady;
         let ins = Split {
             rest: &mut self.inputs,
+            pad: &mut [],
             counts: self.in_counts.iter(),
         }
         .map(|chans| AudioPortBuffer {
             latency: 0,
-            channels: AudioPortBufferType::<_, NoF64In>::F32(InChans {
-                it: chans.iter_mut(),
-                n,
-            }),
+            channels: AudioPortBufferType::<_, NoF64In>::F32(InChans { it: chans, n }),
         });
         let input = self.in_ports.with_input_buffers(ins);
         let outs = Split {
             rest: ctx.outputs,
+            pad: &mut self.out_pad,
             counts: self.out_counts.iter(),
         }
         .map(|chans| AudioPortBuffer {
             latency: 0,
-            channels: AudioPortBufferType::<_, NoF64Out>::F32(OutChans {
-                it: chans.iter_mut(),
-                n,
-            }),
+            channels: AudioPortBufferType::<_, NoF64Out>::F32(OutChans { it: chans, n }),
         });
         let mut output = self.out_ports.with_output_buffers(outs);
         let events_in = self.events.as_input();

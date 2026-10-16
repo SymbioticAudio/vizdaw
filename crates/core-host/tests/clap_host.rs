@@ -268,3 +268,32 @@ fn plugins_without_a_gui_have_no_editor() {
     let mut inst = load("vizdaw.test.gain");
     assert!(inst.editor().is_none());
 }
+
+#[test]
+fn ports_the_context_does_not_fill_still_get_their_channels() {
+    // The synth declares 8 output channels; the context offers 2.
+    let mut inst = load("vizdaw.test.synth4");
+    let mut p = inst.activate(48_000.0, 512).unwrap();
+    let mut b = Block::new(0, 2, 0.0);
+    b.events.push(MidiEvent::new(0, &[0x90, 69, 100]));
+    assert_eq!(b.run(p.as_mut()), ProcessStatus::Ok);
+    // Output 0 sounds; the discarded ports do not disturb it.
+    assert!(b.outputs[0][..N].iter().any(|x| *x != 0.0));
+    inst.deactivate(p);
+    // A stereo effect given one channel.
+    let mut inst = load("vizdaw.test.gain");
+    let mut p = inst.activate(48_000.0, 512).unwrap();
+    let mut b = Block::new(2, 1, 0.5);
+    assert_eq!(b.run(p.as_mut()), ProcessStatus::Ok);
+    assert!(b.outputs[0][..N].iter().all(|x| *x == 0.5));
+    inst.deactivate(p);
+}
+
+#[test]
+fn a_dropped_processor_does_not_block_reactivation() {
+    let mut inst = load("vizdaw.test.gain");
+    let p = inst.activate(48_000.0, 512).unwrap();
+    drop(p);
+    let p = inst.activate(48_000.0, 512).unwrap();
+    inst.deactivate(p);
+}

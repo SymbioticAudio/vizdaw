@@ -183,6 +183,11 @@ impl PluginInstance for ClapInstance {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<Box<dyn AudioProcessor>, HostError> {
+        // A processor dropped without `deactivate` leaves the plugin active;
+        // this succeeds exactly when no processor handle remains.
+        if self.inst.is_active() {
+            let _ = self.inst.try_deactivate();
+        }
         if self.inst.is_active() {
             return Err(HostError::ActivateFailed("already active".into()));
         }
@@ -289,6 +294,11 @@ impl PluginInstance for ClapInstance {
     }
 
     fn idle(&mut self) -> InstanceEvents {
+        if self.inst.is_active() {
+            // Reclaims a plugin whose processor was dropped; fails
+            // harmlessly while one is still out.
+            let _ = self.inst.try_deactivate();
+        }
         if Flags::take(&self.flags.callback) {
             self.inst.call_on_main_thread_callback();
         }
@@ -321,6 +331,7 @@ impl PluginEditor for ClapInstance {
         if self.gui_open {
             gui.hide(&h).ok();
             gui.destroy(&h);
+            self.gui_open = false;
         }
         gui.create(
             &h,
@@ -331,9 +342,16 @@ impl PluginEditor for ClapInstance {
         )
         .map_err(|e| HostError::EditorUnavailable(format!("{e:?}")))?;
         self.gui_open = true;
-        ffi::set_cocoa_parent(&gui, &h, parent.0)?;
-        gui.show(&h)
-            .map_err(|e| HostError::EditorUnavailable(format!("{e:?}")))?;
+        if let Err(e) = ffi::set_cocoa_parent(&gui, &h, parent.0) {
+            gui.destroy(&h);
+            self.gui_open = false;
+            return Err(e);
+        }
+        if let Err(e) = gui.show(&h) {
+            gui.destroy(&h);
+            self.gui_open = false;
+            return Err(HostError::EditorUnavailable(format!("{e:?}")));
+        }
         let size = gui.get_size(&h).unwrap_or(GuiSize {
             width: 400,
             height: 300,
