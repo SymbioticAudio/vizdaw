@@ -7,7 +7,7 @@ use core_engine::backend::{BlockTime, InstrumentNode, MidiOut, MidiPortInfo, Ste
 use core_engine::engine::{Engine, EngineConfig, SinkFactory, find_sequence};
 use core_engine::fixtures::{Builder, Q};
 use core_engine::render::{Faults, Renderer, Sink};
-use core_engine::schedule::{BuiltinRoute, TargetKind};
+use core_engine::schedule::{BuiltinRoute, TargetIdx, TargetKind};
 use core_engine::transport::PlayState;
 use core_model::document::Document;
 use core_model::ids::SeqId;
@@ -60,7 +60,13 @@ impl SinkFactory for Factory {
     fn ports(&self) -> Vec<MidiPortInfo> {
         vec![]
     }
-    fn make(&mut self, kind: &TargetKind, _sr: f64, _max: u32) -> Result<Sink, BackendError> {
+    fn make(
+        &mut self,
+        _target: TargetIdx,
+        kind: &TargetKind,
+        _sr: f64,
+        _max: u32,
+    ) -> Result<Sink, BackendError> {
         Ok(match kind {
             TargetKind::BuiltinSynth => Sink::Instrument(Box::new(Node {
                 seen: self.synth.clone(),
@@ -239,7 +245,13 @@ impl SinkFactory for PortFactory {
             })
             .collect()
     }
-    fn make(&mut self, kind: &TargetKind, _sr: f64, _max: u32) -> Result<Sink, BackendError> {
+    fn make(
+        &mut self,
+        _target: TargetIdx,
+        kind: &TargetKind,
+        _sr: f64,
+        _max: u32,
+    ) -> Result<Sink, BackendError> {
         let TargetKind::MidiDestination(p) = kind else {
             panic!("unexpected {kind:?}");
         };

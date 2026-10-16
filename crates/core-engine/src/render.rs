@@ -275,6 +275,11 @@ impl Renderer {
             for ch in out.iter_mut() {
                 ch.fill(0.0);
             }
+            for sink in self.sinks.iter_mut().flatten() {
+                if let Sink::Instrument(node) = sink {
+                    node.skip(frames);
+                }
+            }
             self.shared.raise(Faults::XRUN);
             self.shared.xruns.fetch_add(1, Ordering::Relaxed);
             return;

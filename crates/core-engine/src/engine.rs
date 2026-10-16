@@ -25,9 +25,11 @@ use std::time::Duration;
 pub trait SinkFactory: Send {
     /// MIDI destinations that exist now.
     fn ports(&self) -> Vec<MidiPortInfo>;
-    /// Creates the sink of a target at the stream's rate and block size.
+    /// Creates the sink of target `target` (the index the engine gives
+    /// it) at the stream's rate and block size.
     fn make(
         &mut self,
+        target: TargetIdx,
         kind: &TargetKind,
         sample_rate: f64,
         max_frames: u32,
@@ -203,7 +205,9 @@ impl Engine {
             if targets.len() >= MAX_TARGETS {
                 return Err(EngineError::TooManyTargets);
             }
-            match factory.make(kind, sr, max) {
+            // `intern` appends, so the new target gets the next index.
+            let next = u8::try_from(targets.len()).map_err(|_| EngineError::TooManyTargets)?;
+            match factory.make(TargetIdx(next), kind, sr, max) {
                 Ok(sink) => {
                     let i = targets.intern(kind.clone())?;
                     new_sinks.push((i, sink));

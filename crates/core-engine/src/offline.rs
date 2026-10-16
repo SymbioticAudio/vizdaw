@@ -11,6 +11,7 @@ use crate::render::{Renderer, Sink};
 use crate::schedule::{TargetIdx, TargetKind};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Bytes kept per logged message (longer SysEx is truncated in the log).
@@ -68,6 +69,7 @@ type Readers = Vec<(TargetIdx, Consumer<LogRecord>)>;
 #[derive(Clone, Default)]
 pub struct EventLog {
     readers: Arc<Mutex<Readers>>,
+    dropped: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for EventLog {
@@ -102,9 +104,17 @@ impl EventLog {
         s
     }
 
+    /// Records instrument sinks could not keep because their log was full.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// A new log for `target`, replacing any earlier one (whose sink was
+    /// dropped with a failed load and never played).
     fn add(&self, target: TargetIdx, capacity: usize) -> Producer<LogRecord> {
         let (tx, rx) = RingBuffer::new(capacity);
         if let Ok(mut readers) = self.readers.lock() {
+            readers.retain(|(t, _)| *t != target);
             readers.push((target, rx));
         }
         tx
@@ -116,15 +126,15 @@ pub struct RecordingNode {
     tx: Producer<LogRecord>,
     target: TargetIdx,
     rendered: u64,
+    dropped: Arc<AtomicU64>,
 }
 
 impl InstrumentNode for RecordingNode {
     fn midi(&mut self, offset: u32, msg: &[u8]) {
-        let _ = self.tx.push(LogRecord::new(
-            self.rendered + u64::from(offset),
-            self.target,
-            msg,
-        ));
+        let r = LogRecord::new(self.rendered + u64::from(offset), self.target, msg);
+        if self.tx.push(r).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn render(&mut self, frames: u32, out: &mut StereoBuf) {
@@ -133,6 +143,10 @@ impl InstrumentNode for RecordingNode {
     }
 
     fn reset(&mut self) {}
+
+    fn skip(&mut self, frames: u32) {
+        self.rendered += u64::from(frames);
+    }
 }
 
 /// A MIDI output that records what it receives, converting host time back
@@ -197,24 +211,18 @@ impl SinkFactory for OfflineSinks {
 
     fn make(
         &mut self,
+        target: TargetIdx,
         kind: &TargetKind,
         sample_rate: f64,
         _max_frames: u32,
     ) -> Result<Sink, BackendError> {
-        // The index this target will get is the number of sinks made so far.
-        let target = TargetIdx(
-            self.log
-                .readers
-                .lock()
-                .map(|r| u8::try_from(r.len()).unwrap_or(u8::MAX))
-                .unwrap_or(0),
-        );
         let tx = self.log.add(target, self.capacity);
         Ok(match kind {
             TargetKind::BuiltinSynth => Sink::Instrument(Box::new(RecordingNode {
                 tx,
                 target,
                 rendered: 0,
+                dropped: Arc::clone(&self.log.dropped),
             })),
             TargetKind::MidiVirtualSource | TargetKind::MidiDestination(_) => {
                 Sink::Midi(Box::new(RecordingMidiOut {

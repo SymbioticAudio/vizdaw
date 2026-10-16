@@ -7,7 +7,7 @@ use core_engine::BackendError;
 use core_engine::backend::{MidiBackend, MidiPortInfo};
 use core_engine::engine::SinkFactory;
 use core_engine::render::Sink;
-use core_engine::schedule::TargetKind;
+use core_engine::schedule::{TargetIdx, TargetKind};
 
 /// Name of VizDAW's virtual source.
 pub const VIRTUAL_SOURCE_NAME: &str = "VizDAW Out";
@@ -39,6 +39,7 @@ impl SinkFactory for MacSinks {
 
     fn make(
         &mut self,
+        _target: TargetIdx,
         kind: &TargetKind,
         sample_rate: f64,
         max_frames: u32,

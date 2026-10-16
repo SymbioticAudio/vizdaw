@@ -654,3 +654,75 @@ fn load_while_default_loop_is_on_follows_the_new_length() {
         log.join("\n")
     );
 }
+
+#[test]
+fn sinks_get_the_engine_target_index_after_a_failed_load() {
+    use core_engine::EngineError;
+    use core_engine::backend::MidiPortInfo;
+    let ports: Vec<MidiPortInfo> = (0..17)
+        .map(|i| MidiPortInfo {
+            name: format!("Port {i}"),
+            unique_id: None,
+        })
+        .collect();
+    let mut b = Builder::new();
+    let (many, _) = b.sequence("Many", "L", None).unwrap();
+    for i in 0..17 {
+        let name = format!("Port {i}");
+        let d = b.dest(&name, &name, 0).unwrap();
+        let l = b.lane(many, &name, Some(d)).unwrap();
+        b.notes(many, l, &[(0, 60, 0x8000, Q)]).unwrap();
+    }
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (one, lane) = b.sequence("One", "L", Some(synth)).unwrap();
+    b.notes(one, lane, &[(0, 60, 0x8000, Q)]).unwrap();
+    let doc = b.finish();
+
+    let sinks = OfflineSinks::new(100).with_ports(ports);
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(EngineConfig::new(SR), Box::new(sinks)).unwrap();
+    // Fails after 16 sinks were made; the engine forgets those targets.
+    assert_eq!(engine.load(&doc, many), Err(EngineError::TooManyTargets));
+    engine.load(&doc, one).unwrap();
+    let mut backend = OfflineBackend::new(SR, 512);
+    backend.start(renderer).unwrap();
+    engine.play().unwrap();
+    backend.run_frames(512);
+    assert_eq!(log.drain_text(), "0 t0 90 3c 40\n");
+}
+
+#[test]
+fn recording_node_counts_dropped_records() {
+    let (doc, seq) = one_bar();
+    let mut run = start_with(&doc, seq, 512, EngineConfig::new(SR), OfflineSinks::new(3));
+    run.engine.play().unwrap();
+    run.backend.run_frames(96_000);
+    assert_eq!(run.log.dropped(), 5);
+    assert_eq!(run.log.drain().len(), 3);
+}
+
+#[test]
+fn recording_node_frames_advance_over_xrun_blocks() {
+    let (doc, seq) = one_bar();
+    let mut cfg = EngineConfig::new(SR);
+    cfg.max_frames = 256;
+    cfg.route = BuiltinRoute::Both;
+    let mut run = start_with(&doc, seq, 256, cfg, OfflineSinks::new(100));
+    run.engine.play().unwrap();
+    run.backend.run_blocks([256]);
+    // An oversized block is an xrun: silence, but device time moves on.
+    run.backend.run_blocks([512]);
+    run.backend.run_frames(12_288);
+    let lines: Vec<String> = run.log.drain().iter().map(LogRecord::line).collect();
+    // The instrument (t0) and the MIDI output (t1) agree on the frames: the
+    // note-off at schedule frame 12000 comes 512 device frames late.
+    assert_eq!(
+        lines,
+        vec![
+            "0 t0 90 3c 40",
+            "0 t1 90 3c 40",
+            "12512 t0 80 3c 00",
+            "12512 t1 80 3c 00"
+        ]
+    );
+}

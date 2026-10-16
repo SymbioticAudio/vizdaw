@@ -110,6 +110,11 @@ pub trait InstrumentNode: Send {
     fn render(&mut self, frames: u32, out: &mut StereoBuf);
     /// All notes off and controllers reset. // RT
     fn reset(&mut self);
+    /// A block of `frames` frames was not rendered (an xrun); nodes that
+    /// track time advance by it. // RT
+    fn skip(&mut self, frames: u32) {
+        let _ = frames;
+    }
 }
 
 /// A timestamped MIDI output. `send` must be wait-free.
