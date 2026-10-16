@@ -149,7 +149,13 @@ pub fn compile(
                 continue;
             }
         };
-        let (group, channel) = r.group_channel.unwrap_or((0, 0));
+        let Some((group, channel)) = r.group_channel else {
+            report.unroutable.push(Unroutable {
+                path: r.path,
+                reason: "no group/channel".into(),
+            });
+            continue;
+        };
         if group != 0 {
             report.group_folded += 1;
         }

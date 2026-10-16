@@ -91,7 +91,7 @@ Not chosen:
 5. **Sort:** entries are sorted by `(frame, class, source order)`, where `class` is: note-off < program/bank < CC/pitch bend/pressure < note-on. That order means a note retriggered on the same frame still sounds, and patch changes land before notes.
 6. **Tempo table:** a piecewise-linear map from frames to ticks for real-time position use (display, schedule swap, loop). It is built from 2a's `tick_to_seconds`:
    - one knot per tempo point;
-   - inside linear ramps, one knot every 960 ticks (1/16 note).
+   - inside linear ramps, one knot every 960 ticks (1/64 note at PPQ 15360).
    - Lookups are a binary search plus one interpolation, with no allocation.
 7. **Output:**
    - `Schedule { sample_rate, entries: Box<[Entry]>, sysex: Box<[u8]>, tempo: TempoTable, length_frames, loop_range: Option<(u64, u64)>, used_channels: [u16; MAX_TARGETS] }`.
@@ -302,7 +302,7 @@ These need no audio or MIDI hardware and run on CI macOS runners.
 
 ## Rulings
 
-- **Ruling:** The engine does no tempo math of its own. Event frames come from 2a's `tick_to_seconds`, and the real-time `TempoTable` is a piecewise-linear table sampled from it (a knot every 1/16 note inside ramps) — why: there is one source of truth for ramp semantics, and the "drawn ramps sound linear" definition lives only in 2a — cost if wrong: if 2a's conversion is too slow or imprecise for compile budgets, we would add a closed-form table in core-engine. That is about a day, and the proptests already compare against 2a.
+- **Ruling:** The engine does no tempo math of its own. Event frames come from 2a's `tick_to_seconds`, and the real-time `TempoTable` is a piecewise-linear table sampled from it (a knot every 1/64 note inside ramps) — why: there is one source of truth for ramp semantics, and the "drawn ramps sound linear" definition lives only in 2a — cost if wrong: if 2a's conversion is too slow or imprecise for compile budgets, we would add a closed-form table in core-engine. That is about a day, and the proptests already compare against 2a.
 - **Ruling:** Schedules travel as `Box<Schedule>` through `rtrb` rings: commands in, retired schedules out to a collector thread. `arc-swap` and `triple_buffer` are not used — why: the audio thread can never perform the final free, and the swap is wait-free with fixed capacity — cost if wrong: a deferred swap when the retire ring is full delays an edit by one block. It is visible as a fault counter and cheap to change.
 - **Ruling:** Each edit recompiles the whole schedule synchronously in `Engine::load`. There is no incremental compilation — why: 2a's flatten target is < 5 ms for a 64-bar, 3-level song, which is well under interactive latency — cost if wrong: large projects would stutter on edit. We would move compilation to a worker thread with coalescing, about a day, with no API change because `load` already returns a report.
 - **Ruling:** A schedule swap during playback cuts sounding notes (note-off at the swap point), and the new schedule fires only events at or after the position — why: this is simple and can never leave a note hanging; the parent's drum-lane rule already avoids mid-note starts — cost if wrong: held notes get cut whenever an edit lands during playback. A later refinement can diff active notes against the new schedule, which is local to `render`.

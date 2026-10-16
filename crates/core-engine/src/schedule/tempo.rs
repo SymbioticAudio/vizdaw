@@ -4,7 +4,7 @@
 use core_model::tempo::TempoMap;
 use core_model::time::{PPQ, Tick};
 
-/// Largest knot spacing inside a ramp: one 1/16 note.
+/// Largest knot spacing inside a ramp: one 1/64 note (960 ticks at PPQ 15360).
 pub const RAMP_KNOT_TICKS: i64 = 960;
 /// Inside ramps, knots are subdivided until linear interpolation is within
 /// this many ticks (frame → tick) and frames (tick → frame) of 2a's
