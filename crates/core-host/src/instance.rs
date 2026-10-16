@@ -96,6 +96,12 @@ pub trait PluginInstance {
     /// Main-thread servicing (`host_idle`, 60 Hz): runs callbacks the
     /// plugin asked for and reports what it requested.
     fn idle(&mut self) -> InstanceEvents;
+
+    /// Parameter events from the plugin's UI that reach the host on the
+    /// main thread (AU listeners); CLAP reports them from `process`.
+    fn gestures(&mut self) -> Vec<crate::process::ParamEvent> {
+        Vec::new()
+    }
 }
 
 /// What to load.

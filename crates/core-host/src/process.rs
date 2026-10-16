@@ -119,11 +119,13 @@ impl ParamOut {
 pub struct ProcessCtx<'a> {
     /// Frames to process.
     pub frames: u32,
-    /// Main input channels (empty for instruments).
-    pub input: &'a [Box<[f32]>],
+    /// Main input channels (empty for instruments). Mutable so formats
+    /// that take the host's buffers (AU) can lend them; a plugin must not
+    /// rely on what it finds there afterwards.
+    pub input: &'a mut [Box<[f32]>],
     /// Sidechain input channels, when the plugin has a sidechain port
     /// (silent when nothing is routed to it).
-    pub sidechain: &'a [Box<[f32]>],
+    pub sidechain: &'a mut [Box<[f32]>],
     /// Output channels of every port.
     pub outputs: &'a mut [Box<[f32]>],
     /// MIDI events sorted by frame.

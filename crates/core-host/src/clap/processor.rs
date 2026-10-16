@@ -183,8 +183,8 @@ impl ClapProcessor {
             }
         }
         for (port, src) in [
-            (self.main_in, ctx.input),
-            (self.sidechain_in, ctx.sidechain),
+            (self.main_in, &*ctx.input),
+            (self.sidechain_in, &*ctx.sidechain),
         ] {
             let Some(port) = port else {
                 continue;

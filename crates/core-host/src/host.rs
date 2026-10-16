@@ -918,7 +918,9 @@ fn collect_gestures(
     doc: &BTreeMap<ParamId, f64>,
     out: &mut Vec<Gesture>,
 ) {
-    for e in l.gestures.drain() {
+    let mut events = l.gestures.drain();
+    events.extend(l.inst.gestures());
+    for e in events {
         match e {
             ParamEvent::Begin(p) => {
                 if !l.open.insert(p) {

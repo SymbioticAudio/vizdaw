@@ -434,7 +434,7 @@ impl AudioProcessor for FakeProcessor {
             }
             ctx.params_out.push(e);
         }
-        for (o, i) in ctx.outputs.iter_mut().zip(ctx.input) {
+        for (o, i) in ctx.outputs.iter_mut().zip(ctx.input.iter()) {
             let n = ctx.frames as usize;
             o[..n].copy_from_slice(&i[..n]);
         }
