@@ -121,9 +121,7 @@ fn endpoint_refs_map_to_target_kinds() {
             .unwrap_err()
             .contains("Nope")
     );
-    let plugin = DestKind::PluginInstrument {
-        plugin_ref: "au:x".into(),
-    };
+    let plugin = DestKind::plugin("au:x");
     assert!(
         kinds_for(&plugin, BuiltinRoute::Builtin, &ports)
             .unwrap_err()

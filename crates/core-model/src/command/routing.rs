@@ -112,8 +112,20 @@ impl RoutingCmd {
 }
 
 fn check_dest(kind: &DestKind, patch: &Option<Patch>) -> Result<()> {
-    if let DestKind::MidiEndpoint { group, channel, .. } = kind {
-        check_group_channel(Some((*group, *channel)))?;
+    match kind {
+        DestKind::MidiEndpoint { group, channel, .. } => {
+            check_group_channel(Some((*group, *channel)))?;
+        }
+        DestKind::PluginInstrument { slot } => {
+            if slot.sidechain.is_some() {
+                return Err(ModelError::invalid(
+                    "a plugin instrument's own slot has no sidechain input",
+                ));
+            }
+            if slot.params.values().any(|v| !v.is_finite()) {
+                return Err(ModelError::range("params", "non-finite value"));
+            }
+        }
     }
     if let Some(p) = patch {
         if p.program > 127 || p.bank.is_some_and(|(m, l)| m > 127 || l > 127) {

@@ -24,7 +24,7 @@ pub enum TargetKind {
 }
 
 /// Endpoint reference that selects the built-in synth.
-pub const BUILTIN_SYNTH_REF: &str = "builtin:synth";
+pub use core_model::mixer::BUILTIN_SYNTH_REF;
 /// Endpoint reference that selects the virtual source.
 pub const VIRTUAL_OUT_REF: &str = "virtual:out";
 
@@ -114,8 +114,9 @@ pub fn kinds_for(
     ports: &[MidiPortInfo],
 ) -> Result<Vec<TargetKind>, String> {
     match kind {
-        DestKind::PluginInstrument { plugin_ref } => Err(format!(
-            "plugin instrument {plugin_ref:?} cannot play until plugin hosting exists"
+        DestKind::PluginInstrument { slot } => Err(format!(
+            "plugin instrument {:?} cannot play until plugin hosting exists",
+            slot.plugin.name
         )),
         DestKind::MidiEndpoint { endpoint_ref, .. } => match endpoint_ref.as_str() {
             BUILTIN_SYNTH_REF => Ok(match route {

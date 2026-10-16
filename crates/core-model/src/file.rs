@@ -1,6 +1,6 @@
 //! The `.vizdaw` package: `project.json`, `Media/` and `Autosave/`.
 //!
-//! `project.json` is `{ "format": "vizdaw-project", "version": 1,
+//! `project.json` is `{ "format": "vizdaw-project", "version": 2,
 //! "document": { … } }`. Loading migrates older versions step by step,
 //! refuses newer ones, rejects unknown fields and runs every integrity
 //! check. Saving writes a temporary file, syncs it, renames it over the old
@@ -9,9 +9,11 @@
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::history::Timestamp;
+use crate::ids::PluginInstanceId;
+use crate::mixer::{PluginRef, PluginSlot};
 use crate::rules::validate;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
 /// The version this build writes.
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = 2;
 /// The oldest version this build can migrate from.
 pub const FIRST_VERSION: u64 = 1;
 /// The project file name inside a package.
@@ -28,10 +30,42 @@ pub const PROJECT_FILE: &str = "project.json";
 /// A migration from version N to N+1, on raw JSON.
 pub type Migration = fn(Value) -> Result<Value>;
 
-/// Migrations indexed by `from - FIRST_VERSION`. Version 1 is the first
-/// format, so the table is empty; add `migrate_v1_to_v2` here when version
-/// 2 is introduced.
-pub const MIGRATIONS: &[Migration] = &[];
+/// Migrations indexed by `from - FIRST_VERSION`.
+pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2];
+
+/// Version 1 → 2: each plugin instrument's `plugin_ref` string becomes a
+/// `slot` holding `PluginRef::from_legacy(string)` with instance IDs 0, 1, …
+/// in destination order; `counters` gains `strip` (0) and `plugin`. The
+/// mixer is left out; loading derives it (Plan Ruling 6).
+pub fn migrate_v1_to_v2(mut v: Value) -> Result<Value> {
+    let doc = v
+        .get_mut("document")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing document"))?;
+    let mut next = 0u64;
+    if let Some(Value::Array(insts)) = doc.get_mut("instruments") {
+        for d in insts.iter_mut() {
+            let Some(p) = d.pointer_mut("/kind/plugin_instrument") else {
+                continue;
+            };
+            let name = p
+                .get("plugin_ref")
+                .and_then(Value::as_str)
+                .ok_or_else(|| corrupt("plugin_instrument without plugin_ref"))?
+                .to_string();
+            let slot = PluginSlot::new(PluginInstanceId(next), PluginRef::from_legacy(&name));
+            *p = json!({ "slot": serde_json::to_value(slot).map_err(corrupt)? });
+            next += 1;
+        }
+    }
+    let counters = doc
+        .get_mut("counters")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing counters"))?;
+    counters.insert("strip".into(), Value::from(0u64));
+    counters.insert("plugin".into(), Value::from(next));
+    Ok(v)
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

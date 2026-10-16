@@ -161,6 +161,10 @@ pub struct Counters {
     pub take: u64,
     /// Next drum-row ID.
     pub drum_row: u64,
+    /// Next strip ID.
+    pub strip: u64,
+    /// Next plugin instance ID.
+    pub plugin: u64,
 }
 
 fn bump(c: &mut u64) -> u64 {
@@ -201,5 +205,13 @@ impl Counters {
     /// Allocates a drum-row ID.
     pub fn alloc_drum_row(&mut self) -> DrumRowId {
         DrumRowId(bump(&mut self.drum_row))
+    }
+    /// Allocates a strip ID.
+    pub fn alloc_strip(&mut self) -> StripId {
+        StripId(bump(&mut self.strip))
+    }
+    /// Allocates a plugin instance ID.
+    pub fn alloc_plugin(&mut self) -> PluginInstanceId {
+        PluginInstanceId(bump(&mut self.plugin))
     }
 }

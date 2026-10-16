@@ -3,8 +3,12 @@
 
 use crate::error::{ModelError, Result};
 use crate::event::Event;
-use crate::ids::{AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, SeqId, TakeId};
+use crate::ids::{
+    AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, PluginInstanceId, SeqId,
+    StripId, TakeId,
+};
 use crate::lane::Lane;
+use crate::mixer::{BUILTIN_SYNTH_REF, Mixer, PluginRef, PluginSlot, derive_mixer};
 use crate::modify::ModifyTemplate;
 use crate::sequence::Sequence;
 use crate::time::Tick;
@@ -34,7 +38,7 @@ impl Default for Settings {
 }
 
 /// An instrument-list entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Destination {
     /// Destination ID.
@@ -48,7 +52,7 @@ pub struct Destination {
 }
 
 /// Destination kinds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DestKind {
     /// A MIDI endpoint with a UMP group and channel (each 0–15).
@@ -60,11 +64,35 @@ pub enum DestKind {
         /// Channel.
         channel: u8,
     },
-    /// A hosted plugin instrument (group 0, channel 0).
+    /// A hosted plugin instrument (group 0, channel 0) and its own slot.
     PluginInstrument {
-        /// Opaque plugin reference.
-        plugin_ref: String,
+        /// The instrument's plugin instance.
+        slot: PluginSlot,
     },
+}
+
+impl DestKind {
+    /// A plugin instrument whose slot holds `PluginRef::from_legacy(name)`
+    /// with instance ID 0; `AddDestination` replaces the ID with a fresh one.
+    pub fn plugin(name: &str) -> DestKind {
+        DestKind::PluginInstrument {
+            slot: PluginSlot::new(PluginInstanceId(0), PluginRef::from_legacy(name)),
+        }
+    }
+
+    /// True for MIDI endpoints that play on the built-in synth.
+    pub fn is_builtin_synth(&self) -> bool {
+        matches!(self, DestKind::MidiEndpoint { endpoint_ref, .. } if endpoint_ref == BUILTIN_SYNTH_REF)
+    }
+}
+
+/// Where a plugin slot lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotOwner {
+    /// A plugin instrument destination's own slot.
+    Instrument(DestId),
+    /// Insert `index` of a strip.
+    Insert(StripId, usize),
 }
 
 /// Program and optional bank `(msb, lsb)`, each 0–127.
@@ -130,6 +158,7 @@ pub struct Document {
     outputs: OrdMap<OutputPathId, OutputPath>,
     media: OrdMap<MediaId, MediaItem>,
     sequences: OrdMap<SeqId, Sequence>,
+    mixer: Mixer,
     counters: Counters,
     /// Derived, never serialized: event ID -> location.
     index: OrdMap<EventId, EventLoc>,
@@ -156,6 +185,10 @@ pub struct DocumentRepr {
     pub media: Vec<MediaItem>,
     /// Sequences.
     pub sequences: Vec<Sequence>,
+    /// The mixer; `None` (version-1 input, programmatic construction)
+    /// derives one (Plan Ruling 6).
+    #[serde(default)]
+    pub mixer: Option<Mixer>,
     /// ID counters.
     pub counters: Counters,
 }
@@ -168,6 +201,7 @@ impl From<Document> for DocumentRepr {
             outputs: d.outputs.values().cloned().collect(),
             media: d.media.values().cloned().collect(),
             sequences: d.sequences.values().cloned().collect(),
+            mixer: Some(d.mixer),
             counters: d.counters,
         }
     }
@@ -191,13 +225,21 @@ fn collect_unique<K: Ord + Clone + std::fmt::Display, V: Clone>(
 impl TryFrom<DocumentRepr> for Document {
     type Error = String;
     fn try_from(r: DocumentRepr) -> std::result::Result<Self, String> {
+        let instruments = collect_unique(r.instruments, |v| v.id, "destination")?;
+        let outputs = collect_unique(r.outputs, |v| v.id, "output")?;
+        let mut counters = r.counters;
+        let mixer = match r.mixer {
+            Some(m) => m,
+            None => derive_mixer(instruments.values(), outputs.values(), &mut counters),
+        };
         let mut d = Document {
             settings: r.settings,
-            instruments: collect_unique(r.instruments, |v| v.id, "destination")?,
-            outputs: collect_unique(r.outputs, |v| v.id, "output")?,
+            instruments,
+            outputs,
             media: collect_unique(r.media, |v| v.id, "media")?,
             sequences: collect_unique(r.sequences, |v| v.id, "sequence")?,
-            counters: r.counters,
+            mixer,
+            counters,
             index: OrdMap::new(),
         };
         d.rebuild_index()?;
@@ -206,15 +248,19 @@ impl TryFrom<DocumentRepr> for Document {
 }
 
 impl Document {
-    /// An empty document with default settings.
+    /// An empty document with default settings and a mixer holding only
+    /// the master strip.
     pub fn new() -> Document {
+        let mut counters = Counters::default();
+        let mixer = Mixer::new(counters.alloc_strip());
         Document {
             settings: Settings::default(),
             instruments: OrdMap::new(),
             outputs: OrdMap::new(),
             media: OrdMap::new(),
             sequences: OrdMap::new(),
-            counters: Counters::default(),
+            mixer,
+            counters,
             index: OrdMap::new(),
         }
     }
@@ -248,6 +294,37 @@ impl Document {
     /// ID counters.
     pub fn counters(&self) -> &Counters {
         &self.counters
+    }
+
+    /// The mixer.
+    pub fn mixer(&self) -> &Mixer {
+        &self.mixer
+    }
+
+    /// Where plugin instance `id` lives.
+    pub fn find_slot(&self, id: PluginInstanceId) -> Option<SlotOwner> {
+        for d in self.instruments.values() {
+            if let DestKind::PluginInstrument { slot } = &d.kind {
+                if slot.id == id {
+                    return Some(SlotOwner::Instrument(d.id));
+                }
+            }
+        }
+        self.mixer
+            .inserts()
+            .find(|(_, _, p)| p.id == id)
+            .map(|(s, i, _)| SlotOwner::Insert(s, i))
+    }
+
+    /// Plugin instance `id`'s slot.
+    pub fn plugin_slot(&self, id: PluginInstanceId) -> Option<&PluginSlot> {
+        match self.find_slot(id)? {
+            SlotOwner::Instrument(d) => match &self.instruments.get(&d)?.kind {
+                DestKind::PluginInstrument { slot } => Some(slot),
+                DestKind::MidiEndpoint { .. } => None,
+            },
+            SlotOwner::Insert(s, i) => self.mixer.strip(s).ok()?.inserts.get(i),
+        }
     }
 
     /// A sequence by ID.

@@ -39,6 +39,7 @@ fn big_doc() -> Document {
         outputs: vec![],
         media: vec![],
         sequences: vec![Sequence::new(SeqId(0), "Big", lanes)],
+        mixer: None,
         counters: Counters {
             seq: 1,
             lane: 10,
@@ -121,6 +122,7 @@ fn nested_song() -> Document {
         outputs: vec![],
         media: vec![],
         sequences: vec![song, verse, riff],
+        mixer: None,
         counters: Counters {
             seq: 3,
             lane: 6,

@@ -285,13 +285,7 @@ fn unroutable_plugin_is_reported_and_absent() {
     let mut b = Builder::new();
     let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
     let pad = b
-        .dest_kind(
-            "Pad",
-            DestKind::PluginInstrument {
-                plugin_ref: "clap:pad".into(),
-            },
-            None,
-        )
+        .dest_kind("Pad", DestKind::plugin("clap:pad"), None)
         .unwrap();
     let (seq, lane) = b.sequence("S", "Synth", Some(synth)).unwrap();
     b.notes(seq, lane, &[(0, 60, 0x8000, Q)]).unwrap();

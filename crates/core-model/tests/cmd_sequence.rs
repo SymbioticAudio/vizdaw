@@ -44,6 +44,7 @@ fn song() -> Document {
             Sequence::new(SeqId(0), "Song", Vector::unit(song_lane)),
             Sequence::new(SeqId(1), "Verse", Vector::unit(verse_lane)),
         ],
+        mixer: None,
         counters: Counters {
             seq: 2,
             lane: 2,

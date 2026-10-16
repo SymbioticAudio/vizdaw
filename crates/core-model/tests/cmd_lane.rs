@@ -17,16 +17,16 @@ fn base() -> Document {
         instruments: vec![Destination {
             id: DestId(0),
             name: "Piano".into(),
-            kind: DestKind::PluginInstrument {
-                plugin_ref: "p".into(),
-            },
+            kind: DestKind::plugin("p"),
             default_patch: None,
         }],
         outputs: vec![],
         media: vec![],
         sequences: vec![],
+        mixer: None,
         counters: Counters {
             dest: 1,
+            plugin: 1,
             ..Counters::default()
         },
     })

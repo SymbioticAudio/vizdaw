@@ -43,9 +43,7 @@ fn base() -> Document {
             Destination {
                 id: DestId(1),
                 name: "Plug".into(),
-                kind: DestKind::PluginInstrument {
-                    plugin_ref: "p".into(),
-                },
+                kind: DestKind::plugin("p"),
                 default_patch: None,
             },
         ],
@@ -59,8 +57,10 @@ fn base() -> Document {
             content_hash: None,
         }],
         sequences: vec![],
+        mixer: None,
         counters: Counters {
             dest: 2,
+            plugin: 1,
             media: 1,
             ..Counters::default()
         },

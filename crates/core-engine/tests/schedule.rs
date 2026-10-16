@@ -263,13 +263,7 @@ fn default_patch_plays_first_on_frame_zero() {
 fn unroutable_events_are_reported_not_played() {
     let mut b = Builder::new();
     let plugin = b
-        .dest_kind(
-            "Pad",
-            DestKind::PluginInstrument {
-                plugin_ref: "au:pad".into(),
-            },
-            None,
-        )
+        .dest_kind("Pad", DestKind::plugin("au:pad"), None)
         .unwrap();
     let missing = b.dest("Rack", "Missing Synth", 0).unwrap();
     let synth = b.dest("Synth", "builtin:synth", 0).unwrap();

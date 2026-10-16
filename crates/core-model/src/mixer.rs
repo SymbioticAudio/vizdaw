@@ -2,8 +2,9 @@
 //! Routing rules live in [`crate::mixer_rules`]; edits in
 //! `crate::command::mixer`.
 
+use crate::document::{DestKind, Destination, OutputPath};
 use crate::error::{ModelError, Result};
-use crate::ids::{AnyId, DestId, OutputPathId, PluginInstanceId, StateBlobId, StripId};
+use crate::ids::{AnyId, Counters, DestId, OutputPathId, PluginInstanceId, StateBlobId, StripId};
 use im::{OrdMap, Vector};
 use serde::{Deserialize, Serialize};
 
@@ -320,6 +321,14 @@ impl Mixer {
             .values()
             .flat_map(|s| s.inserts.iter().enumerate().map(move |(i, p)| (s.id, i, p)))
     }
+
+    /// Adds `strip` at display position `index` (default: the end).
+    pub(crate) fn add(&mut self, strip: Strip, index: Option<usize>) {
+        let id = strip.id;
+        self.strips.insert(id, strip);
+        let i = index.unwrap_or(self.order.len()).min(self.order.len());
+        self.order.insert(i, id);
+    }
 }
 
 /// Linear gain of a level in dB; at or below [`GAIN_FLOOR_DB`] it is 0.
@@ -336,4 +345,54 @@ pub fn db_to_gain(db: f64) -> f64 {
 pub fn pan_gains(pan: f64) -> (f64, f64) {
     let t = (pan.clamp(-1.0, 1.0) + 1.0) * std::f64::consts::FRAC_PI_4;
     (t.cos(), t.sin())
+}
+
+/// The mixer a document without one gets (Plan Ruling 6): master; then,
+/// in destination order, an `Instrument` strip per plugin instrument and
+/// the built-in synth strip at the first `builtin:synth` destination; then
+/// an `AudioPath` strip per output path. Everything routes to master.
+pub fn derive_mixer<'a>(
+    instruments: impl IntoIterator<Item = &'a Destination>,
+    outputs: impl IntoIterator<Item = &'a OutputPath>,
+    counters: &mut Counters,
+) -> Mixer {
+    let mut m = Mixer::new(counters.alloc_strip());
+    let mut builtin = false;
+    for d in instruments {
+        match &d.kind {
+            DestKind::PluginInstrument { .. } => m.add(
+                Strip::new(
+                    counters.alloc_strip(),
+                    d.name.clone(),
+                    StripKind::Instrument(d.id),
+                ),
+                None,
+            ),
+            DestKind::MidiEndpoint { endpoint_ref, .. }
+                if endpoint_ref == BUILTIN_SYNTH_REF && !builtin =>
+            {
+                builtin = true;
+                m.add(
+                    Strip::new(
+                        counters.alloc_strip(),
+                        BUILTIN_SYNTH_STRIP,
+                        StripKind::BuiltinSynth,
+                    ),
+                    None,
+                );
+            }
+            DestKind::MidiEndpoint { .. } => {}
+        }
+    }
+    for o in outputs {
+        m.add(
+            Strip::new(
+                counters.alloc_strip(),
+                o.name.clone(),
+                StripKind::AudioPath(o.id),
+            ),
+            None,
+        );
+    }
+    m
 }
