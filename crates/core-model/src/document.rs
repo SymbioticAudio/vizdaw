@@ -73,7 +73,9 @@ pub enum DestKind {
 
 impl DestKind {
     /// A plugin instrument whose slot holds `PluginRef::from_legacy(name)`
-    /// with instance ID 0; `AddDestination` replaces the ID with a fresh one.
+    /// with instance ID 0; `AddDestination` and `EditDestination` ignore the
+    /// caller's ID and allocate a fresh one (an edit to the same plugin keeps
+    /// the existing slot).
     pub fn plugin(name: &str) -> DestKind {
         DestKind::PluginInstrument {
             slot: PluginSlot::new(PluginInstanceId(0), PluginRef::from_legacy(name)),
@@ -398,6 +400,9 @@ impl Document {
     }
     pub(crate) fn counters_mut(&mut self) -> &mut Counters {
         &mut self.counters
+    }
+    pub(crate) fn mixer_mut(&mut self) -> &mut Mixer {
+        &mut self.mixer
     }
 
     /// Mutable sequence. Callers must not add or remove take events through

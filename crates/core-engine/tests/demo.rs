@@ -1,6 +1,7 @@
 use core_engine::fixtures::{BAR, demo_document};
 use core_model::document::{DestKind, Document};
 use core_model::ids::SeqId;
+use core_model::mixer::StripKind;
 use core_model::query::{drum_view, seq_length, unused_sequences, use_count};
 use core_model::rules::validate;
 use core_model::time::Tick;
@@ -80,6 +81,8 @@ fn demo_matches_the_app_shell_spec() {
             (12 * BAR, 90_000, false)
         ]
     );
+    let strips: Vec<StripKind> = doc.mixer().strips().values().map(|s| s.kind).collect();
+    assert_eq!(strips, vec![StripKind::Master, StripKind::BuiltinSynth]);
 }
 
 #[test]

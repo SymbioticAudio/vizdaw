@@ -1,11 +1,12 @@
 //! Instrument-list, output-path and media-pool commands. Removing an item
 //! in use is refused unless a replacement is given.
 
-use super::Report;
+use super::{Report, strips};
 use crate::document::{DestKind, Destination, Document, MediaItem, OutputPath, Patch};
 use crate::error::{ModelError, Result};
 use crate::event::EventBody;
 use crate::ids::{AnyId, DestId, LaneId, MediaId, OutputPathId, SeqId};
+use crate::mixer::StripKind;
 use crate::rules::{check_event_fields, check_group_channel, check_media_path};
 
 /// Destination, output and media edits.
@@ -208,6 +209,7 @@ fn remove_destination(
     }
     d.instruments_mut().remove(&dest);
     r.removed.push(AnyId::Dest(dest));
+    strips::remove_dest_strips(d, dest, r);
     Ok(())
 }
 
@@ -220,22 +222,33 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
         } => {
             check_dest(kind, default_patch)?;
             let id = d.counters_mut().alloc_dest();
+            r.created.push(AnyId::Dest(id));
+            let mut kind = kind.clone();
+            if let DestKind::PluginInstrument { slot } = &mut kind {
+                slot.id = d.counters_mut().alloc_plugin();
+                r.created.push(AnyId::Plugin(slot.id));
+            }
+            let plugin = matches!(kind, DestKind::PluginInstrument { .. });
             d.instruments_mut().insert(
                 id,
                 Destination {
                     id,
                     name: name.clone(),
-                    kind: kind.clone(),
+                    kind,
                     default_patch: *default_patch,
                 },
             );
-            r.created.push(AnyId::Dest(id));
+            if plugin {
+                strips::add_instrument_strip(d, id, name, r);
+            }
+            strips::ensure_builtin(d, r);
         }
         RoutingCmd::RenameDestination { dest, name } => {
             d.instruments_mut()
                 .get_mut(dest)
                 .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?
                 .name = name.clone();
+            strips::rename_kind(d, StripKind::Instrument(*dest), name);
         }
         RoutingCmd::EditDestination {
             dest,
@@ -243,12 +256,42 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             default_patch,
         } => {
             check_dest(kind, default_patch)?;
+            let old = d
+                .instruments()
+                .get(dest)
+                .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?
+                .clone();
+            let mut kind = kind.clone();
+            if let DestKind::PluginInstrument { slot } = &mut kind {
+                match &old.kind {
+                    DestKind::PluginInstrument { slot: o }
+                        if o.plugin.format == slot.plugin.format
+                            && o.plugin.id == slot.plugin.id =>
+                    {
+                        let plugin = slot.plugin.clone();
+                        *slot = o.clone();
+                        slot.plugin = plugin;
+                    }
+                    _ => {
+                        slot.id = d.counters_mut().alloc_plugin();
+                        r.created.push(AnyId::Plugin(slot.id));
+                    }
+                }
+            }
+            let was = matches!(old.kind, DestKind::PluginInstrument { .. });
+            let is = matches!(kind, DestKind::PluginInstrument { .. });
             let x = d
                 .instruments_mut()
                 .get_mut(dest)
                 .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?;
-            x.kind = kind.clone();
+            x.kind = kind;
             x.default_patch = *default_patch;
+            match (was, is) {
+                (true, false) => strips::remove_dest_strips(d, *dest, r),
+                (false, true) => strips::add_instrument_strip(d, *dest, &old.name, r),
+                _ => {}
+            }
+            strips::ensure_builtin(d, r);
         }
         RoutingCmd::RemoveDestination { dest, replacement } => {
             remove_destination(d, *dest, *replacement, r)?
@@ -264,12 +307,14 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                 },
             );
             r.created.push(AnyId::Output(id));
+            strips::add_audio_path_strip(d, id, name, r);
         }
         RoutingCmd::RenameOutput { output, name } => {
             d.outputs_mut()
                 .get_mut(output)
                 .ok_or(ModelError::UnknownId(AnyId::Output(*output)))?
                 .name = name.clone();
+            strips::rename_kind(d, StripKind::AudioPath(*output), name);
         }
         RoutingCmd::EditOutput { output, reference } => {
             d.outputs_mut()
@@ -301,6 +346,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             }
             d.outputs_mut().remove(output);
             r.removed.push(AnyId::Output(*output));
+            strips::remove_kind(d, StripKind::AudioPath(*output), r);
         }
         RoutingCmd::AddMedia {
             path,

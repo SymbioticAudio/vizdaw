@@ -9,6 +9,7 @@ pub mod routing;
 mod select;
 pub mod sequence;
 pub mod settings;
+mod strips;
 
 pub use audio::AudioCmd;
 pub use drum::DrumCmd;

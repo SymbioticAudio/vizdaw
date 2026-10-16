@@ -1446,12 +1446,26 @@
     ],
     "mixer": {
       "master": 0,
-      "order": [],
+      "order": [
+        1
+      ],
       "strips": [
         {
           "id": 0,
           "name": "Master",
           "kind": "master",
+          "inserts": [],
+          "gain_db": 0.0,
+          "pan": 0.0,
+          "mute": false,
+          "solo": false,
+          "sends": [],
+          "output": "master"
+        },
+        {
+          "id": 1,
+          "name": "Built-in Synth",
+          "kind": "builtin_synth",
           "inserts": [],
           "gain_db": 0.0,
           "pan": 0.0,
@@ -1471,7 +1485,7 @@
       "media": 0,
       "take": 5,
       "drum_row": 3,
-      "strip": 1,
+      "strip": 2,
       "plugin": 0
     }
   }

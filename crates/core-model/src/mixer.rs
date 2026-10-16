@@ -315,6 +315,12 @@ impl Mixer {
         self.strips.values().find(|s| s.kind == kind).map(|s| s.id)
     }
 
+    pub(crate) fn strip_mut(&mut self, id: StripId) -> Result<&mut Strip> {
+        self.strips
+            .get_mut(&id)
+            .ok_or(ModelError::UnknownId(AnyId::Strip(id)))
+    }
+
     /// Every insert as `(strip, position, slot)`, by strip ID then position.
     pub fn inserts(&self) -> impl Iterator<Item = (StripId, usize, &PluginSlot)> + '_ {
         self.strips
@@ -328,6 +334,31 @@ impl Mixer {
         self.strips.insert(id, strip);
         let i = index.unwrap_or(self.order.len()).min(self.order.len());
         self.order.insert(i, id);
+    }
+
+    /// Removes a strip (never master): outputs to it go to master, sends to
+    /// it are dropped and sidechains from it are cleared.
+    pub(crate) fn remove(&mut self, id: StripId) -> Option<Strip> {
+        if id == self.master {
+            return None;
+        }
+        let s = self.strips.remove(&id)?;
+        self.order.retain(|x| *x != id);
+        let ids: Vec<StripId> = self.strips.keys().copied().collect();
+        for k in ids {
+            if let Some(st) = self.strips.get_mut(&k) {
+                if st.output == Output::Bus(id) {
+                    st.output = Output::Master;
+                }
+                st.sends.retain(|x| x.target != id);
+                for slot in st.inserts.iter_mut() {
+                    if slot.sidechain == Some(id) {
+                        slot.sidechain = None;
+                    }
+                }
+            }
+        }
+        Some(s)
     }
 }
 
