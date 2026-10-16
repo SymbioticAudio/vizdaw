@@ -9,6 +9,7 @@ use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::render::Faults;
 use core_engine::rt_check::{self, CountingAlloc};
 use core_engine::schedule::BuiltinRoute;
+use core_engine::transport::PlayState;
 use core_model::time::Tick;
 
 #[global_allocator]
@@ -49,21 +50,63 @@ fn render_path_never_allocates() {
     b.reserve(4096);
     engine.set_loop(true).unwrap();
     engine.play().unwrap();
+    // What the phases exercised (read outside the armed blocks).
+    let (mut wraps, mut stops, mut locates, mut tails, mut ended) = (0, 0, 0, 0, 0);
     for i in 0..10_000u32 {
+        let mut moved = false;
         match i % 1000 {
-            300 => engine.stop().unwrap(),
+            300 => {
+                engine.stop().unwrap();
+                stops += 1;
+            }
             310 => engine.play().unwrap(),
-            500 => engine.locate_tick(Tick(15_360 * 40)).unwrap(),
+            500 => {
+                engine.locate_tick(Tick(15_360 * 40)).unwrap();
+                locates += 1;
+                moved = true;
+            }
             700 => engine.set_loop(false).unwrap(),
             900 => engine.set_loop(true).unwrap(),
             _ => {}
         }
+        let at = engine.position_frames();
         armed_block(&mut b, 1 + (i * 37) % 1024);
+        if !moved && engine.position_frames() < at {
+            wraps += 1;
+        }
         if i % 100 == 0 {
             log.drain();
         }
     }
     assert_eq!(rt_check::count() - before, 0, "allocations while playing");
+
+    // Loop off: play past the end into the tail until the end is reported.
+    engine.set_loop(false).unwrap();
+    engine
+        .locate_frame(engine.length_frames() - 10_000)
+        .unwrap();
+    locates += 1;
+    engine.play().unwrap();
+    for i in 0..1_000u32 {
+        armed_block(&mut b, 1 + (i * 53) % 1024);
+        if engine.state() == PlayState::Tail {
+            tails += 1;
+        }
+        if engine.take_ended() {
+            ended += 1;
+            break;
+        }
+    }
+    log.drain();
+    assert_eq!(engine.state(), PlayState::Stopped);
+    assert_eq!(rt_check::count() - before, 0, "allocations into the tail");
+    assert!(wraps >= 1, "no loop wrap was rendered");
+    assert!(
+        stops >= 1 && locates >= 1,
+        "stops {stops}, locates {locates}"
+    );
+    assert!(tails >= 1, "the tail was never rendered");
+    assert_eq!(ended, 1, "the end was never reported");
 
     // 100 schedule swaps; with the collector paused the retire ring
     // (capacity 8) fills and the ninth swap is deferred.
