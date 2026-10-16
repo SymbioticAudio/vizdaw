@@ -11,11 +11,17 @@ core-host = { path = "../core-host" }
 core-model = { path = "../core-model" }
 rtrb = "0.4"
 block2 = "0.6"
+objc2 = "0.6"
 objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "HostTime", "objc2-core-audio-types"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AudioComponent", "AUComponent", "AudioUnitProperties", "AudioUnitUtilities", "MusicDevice", "objc2-core-audio-types", "objc2-core-foundation", "block2"] }
 objc2-core-midi = { version = "0.3.2", default-features = false, features = ["std", "MIDIServices", "MIDIMessages", "objc2", "objc2-core-foundation", "block2"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString", "CFData", "CFError", "CFPropertyList"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString", "CFData", "CFError", "CFPropertyList", "CFBundle", "CFURL", "CFRunLoop", "CFDate", "CFCGTypes", "objc2"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 core-engine = { path = "../core-engine", features = ["fixtures"] }
+
+# AppKit needs the process main thread, so this test brings its own `main`.
+[[test]]
+name = "au_editor"
+harness = false

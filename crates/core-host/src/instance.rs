@@ -50,6 +50,11 @@ impl ParentView {
     pub unsafe fn new(view: *mut c_void) -> ParentView {
         ParentView(view)
     }
+
+    /// The native view (for format hosts outside this crate).
+    pub fn as_ptr(self) -> *mut c_void {
+        self.0
+    }
 }
 
 /// A plugin's own editor. Main thread only.

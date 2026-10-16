@@ -4,21 +4,26 @@
 //! UI gestures.
 
 use block2::RcBlock;
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{AnyClass, AnyObject};
+use objc2::{MainThreadMarker, msg_send};
 use objc2_audio_toolbox::{
     AUListenerDispose, AUParameterListenerRef, AUParameterSet, AURenderCallbackStruct,
     AudioComponent, AudioComponentCopyName, AudioComponentDescription, AudioComponentFindNext,
     AudioComponentFlags, AudioComponentGetDescription, AudioComponentGetVersion,
     AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioComponentInstantiate,
     AudioComponentInstantiationOptions, AudioUnit, AudioUnitAddPropertyListener,
-    AudioUnitEventType, AudioUnitGetParameter, AudioUnitGetProperty, AudioUnitGetPropertyInfo,
-    AudioUnitInitialize, AudioUnitParameter, AudioUnitParameterInfo, AudioUnitParameterOptions,
-    AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender, AudioUnitRenderActionFlags,
-    AudioUnitReset, AudioUnitScope, AudioUnitSetParameter, AudioUnitSetProperty,
-    AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent, kAudioUnitProperty_ClassInfo,
-    kAudioUnitProperty_ElementCount, kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
+    AudioUnitCocoaViewInfo, AudioUnitEventType, AudioUnitGetParameter, AudioUnitGetProperty,
+    AudioUnitGetPropertyInfo, AudioUnitInitialize, AudioUnitParameter, AudioUnitParameterInfo,
+    AudioUnitParameterOptions, AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender,
+    AudioUnitRenderActionFlags, AudioUnitReset, AudioUnitScope, AudioUnitSetParameter,
+    AudioUnitSetProperty, AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent,
+    kAudioUnitProperty_ClassInfo, kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount,
+    kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
     kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_ParameterInfo,
-    kAudioUnitProperty_ParameterList, kAudioUnitProperty_SetRenderCallback,
-    kAudioUnitProperty_StreamFormat, kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
+    kAudioUnitProperty_ParameterList, kAudioUnitProperty_RequestViewController,
+    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat,
+    kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
@@ -26,9 +31,11 @@ use objc2_core_audio_types::{
     kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 use objc2_core_foundation::{
-    CFData, CFPropertyList, CFPropertyListCreateData, CFPropertyListCreateWithData,
-    CFPropertyListFormat, CFRetained, CFString,
+    CFBundle, CFData, CFPropertyList, CFPropertyListCreateData, CFPropertyListCreateWithData,
+    CFPropertyListFormat, CFRetained, CFRunLoop, CFString, CFURL, CGPoint, CGRect, CGSize,
+    kCFRunLoopDefaultMode,
 };
+use std::ffi::CString;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1294,4 +1301,235 @@ pub(crate) fn call_host_callbacks(
         (next, num, den, down),
         (play != 0, moved != 0, at),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Editors (spec §9; 3b Plan Ruling 7 left them to 3c): the unit's own Cocoa
+// view (AU v2, `kAudioUnitProperty_CocoaUI`), its view controller's view
+// (AU v3, `kAudioUnitProperty_RequestViewController`), or CoreAudioKit's
+// generic view. AppKit: main thread only.
+
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {}
+#[link(name = "CoreAudioKit", kind = "framework")]
+unsafe extern "C" {}
+
+/// Where an editor's view came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewKind {
+    /// The unit's Cocoa view factory (AU v2).
+    Cocoa,
+    /// The unit's view controller (AU v3).
+    Controller,
+    /// CoreAudioKit's `AUGenericView` (a unit without a UI of its own).
+    Generic,
+}
+
+/// A plugin's `NSView`, shown inside a parent view the app owns. Removed
+/// from its parent on drop (before the unit can go: `AuInstance` drops its
+/// editor first).
+pub(crate) struct View {
+    view: Retained<AnyObject>,
+    /// A v3 view controller owns its view: kept while the view is shown.
+    _controller: Option<Retained<AnyObject>>,
+    pub(crate) kind: ViewKind,
+}
+
+impl std::fmt::Debug for View {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("View").field("kind", &self.kind).finish()
+    }
+}
+
+/// The size an editor is asked for when the unit has no preference.
+const PREFERRED: CGSize = CGSize {
+    width: 400.0,
+    height: 300.0,
+};
+
+impl Unit {
+    /// The unit's editor view: its Cocoa view, else its v3 view controller
+    /// (waited for up to `wait` while the main run loop runs), else the
+    /// generic view. Main thread only.
+    pub(crate) fn editor_view(&self, wait: Duration) -> Result<View, String> {
+        if MainThreadMarker::new().is_none() {
+            return Err("plugin editors open on the main thread only".into());
+        }
+        self.cocoa_view()
+            .or_else(|_| self.controller_view(wait))
+            .or_else(|_| self.generic_view())
+    }
+
+    fn cocoa_view(&self) -> Result<View, String> {
+        let mut size = 0u32;
+        // SAFETY: valid unit and out-pointer; no data is written.
+        os("CocoaUI info", unsafe {
+            AudioUnitGetPropertyInfo(
+                self.unit,
+                kAudioUnitProperty_CocoaUI,
+                kAudioUnitScope_Global,
+                0,
+                &mut size,
+                ptr::null_mut(),
+            )
+        })?;
+        let n = size as usize;
+        if n < size_of::<AudioUnitCocoaViewInfo>() {
+            return Err("no Cocoa view".into());
+        }
+        // One URL followed by at least one class name, each a CF object.
+        let mut raw = vec![ptr::null::<c_void>(); n.div_ceil(size_of::<*const c_void>())];
+        // SAFETY: `raw` has room for `size` bytes.
+        os("CocoaUI", unsafe {
+            AudioUnitGetProperty(
+                self.unit,
+                kAudioUnitProperty_CocoaUI,
+                kAudioUnitScope_Global,
+                0,
+                NonNull::new_unchecked(raw.as_mut_ptr().cast::<c_void>()),
+                NonNull::from(&mut size),
+            )
+        })?;
+        let (url, class) = match raw.as_slice() {
+            [u, c, ..] if !u.is_null() && !c.is_null() => (*u, *c),
+            _ => return Err("empty Cocoa view info".into()),
+        };
+        // SAFETY: the property hands the host one reference to each CF
+        // object (the URL and every class name), which the host releases;
+        // further class names are released here too.
+        let (url, class) = unsafe {
+            for extra in raw.iter().skip(2).take(n / size_of::<*const c_void>() - 2) {
+                if !extra.is_null() {
+                    drop(CFRetained::<CFString>::from_raw(NonNull::new_unchecked(
+                        extra.cast_mut().cast(),
+                    )));
+                }
+            }
+            (
+                CFRetained::<CFURL>::from_raw(NonNull::new_unchecked(url.cast_mut().cast())),
+                CFRetained::<CFString>::from_raw(NonNull::new_unchecked(class.cast_mut().cast())),
+            )
+        };
+        let bundle = CFBundle::new(None, Some(&url)).ok_or("cannot open the view bundle")?;
+        // SAFETY: loading the plugin's own view bundle runs its
+        // initializers; the plugin is trusted in-process code by then.
+        if !unsafe { bundle.load_executable() } {
+            return Err("cannot load the view bundle".into());
+        }
+        let name = CString::new(class.to_string()).map_err(|e| e.to_string())?;
+        let cls = AnyClass::get(&name).ok_or("no view factory class")?;
+        // SAFETY: the class implements `AUCocoaUIBase` (that is what the
+        // property names); `new` returns an owned factory and
+        // `uiViewForAudioUnit:withSize:` an autoreleased `NSView` for a live
+        // unit.
+        let view: Option<Retained<AnyObject>> = unsafe {
+            let factory: Retained<AnyObject> = msg_send![cls, new];
+            msg_send![&factory, uiViewForAudioUnit: self.unit, withSize: PREFERRED]
+        };
+        Ok(View {
+            view: view.ok_or("the view factory made no view")?,
+            _controller: None,
+            kind: ViewKind::Cocoa,
+        })
+    }
+
+    fn controller_view(&self, wait: Duration) -> Result<View, String> {
+        let slot: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+        let fill = Arc::clone(&slot);
+        let block = RcBlock::new(move |vc: *mut AnyObject| {
+            // SAFETY: the unit hands over a valid view controller (or
+            // null); one reference is taken here and adopted below.
+            if let Some(vc) = unsafe { Retained::retain(vc) } {
+                let raw = Retained::into_raw(vc) as usize;
+                *fill.lock().unwrap_or_else(PoisonError::into_inner) = Some(raw);
+            }
+        });
+        let ptr_to_block: *const block2::Block<dyn Fn(*mut AnyObject)> = &*block;
+        self.set(
+            "RequestViewController",
+            kAudioUnitProperty_RequestViewController,
+            kAudioUnitScope_Global,
+            0,
+            &ptr_to_block,
+        )?;
+        let until = std::time::Instant::now() + wait;
+        let raw = loop {
+            if let Some(raw) = slot.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                break raw;
+            }
+            if std::time::Instant::now() >= until {
+                return Err("no view controller".into());
+            }
+            // SAFETY: the default mode is a valid static; the main run loop
+            // delivers the unit's completion.
+            let mode = unsafe { kCFRunLoopDefaultMode };
+            CFRunLoop::run_in_mode(mode, 0.02, true);
+        };
+        // SAFETY: `raw` is the reference taken in the block.
+        let vc =
+            unsafe { Retained::from_raw(raw as *mut AnyObject) }.ok_or("no view controller")?;
+        // SAFETY: an `NSViewController`'s `view` is a retained-by-it NSView.
+        let view: Option<Retained<AnyObject>> = unsafe { msg_send![&vc, view] };
+        Ok(View {
+            view: view.ok_or("the view controller has no view")?,
+            _controller: Some(vc),
+            kind: ViewKind::Controller,
+        })
+    }
+
+    fn generic_view(&self) -> Result<View, String> {
+        let cls = AnyClass::get(c"AUGenericView").ok_or("CoreAudioKit is missing")?;
+        // SAFETY: `AUGenericView` is an NSView subclass whose
+        // `initWithAudioUnit:` takes a live unit.
+        let view: Option<Retained<AnyObject>> = unsafe {
+            let obj: Allocated<AnyObject> = msg_send![cls, alloc];
+            msg_send![obj, initWithAudioUnit: self.unit]
+        };
+        Ok(View {
+            view: view.ok_or("no generic view")?,
+            _controller: None,
+            kind: ViewKind::Generic,
+        })
+    }
+}
+
+impl View {
+    /// Adds the view to `parent` (an `NSView *` the caller keeps alive while
+    /// it is shown) at its top-left; returns its size in points.
+    pub(crate) fn attach(&self, parent: *mut c_void) -> Result<(u32, u32), String> {
+        if MainThreadMarker::new().is_none() {
+            return Err("plugin editors open on the main thread only".into());
+        }
+        let parent = parent.cast::<AnyObject>();
+        // SAFETY: `parent` is a live `NSView` (the `ParentView` contract);
+        // the view is ours.
+        unsafe {
+            let parent = parent.as_ref().ok_or("no parent view")?;
+            let _: () = msg_send![parent, addSubview: &*self.view];
+            let _: () = msg_send![&*self.view, setFrameOrigin: CGPoint { x: 0.0, y: 0.0 }];
+        }
+        Ok(self.size())
+    }
+
+    /// The view's size in points.
+    pub(crate) fn size(&self) -> (u32, u32) {
+        // SAFETY: `frame` of a live view.
+        let f: CGRect = unsafe { msg_send![&*self.view, frame] };
+        (
+            f.size.width.round().max(1.0) as u32,
+            f.size.height.round().max(1.0) as u32,
+        )
+    }
+}
+
+impl Drop for View {
+    fn drop(&mut self) {
+        if MainThreadMarker::new().is_some() {
+            // SAFETY: removing a live view from its parent (a no-op when it
+            // has none).
+            unsafe {
+                let _: () = msg_send![&*self.view, removeFromSuperview];
+            }
+        }
+    }
 }

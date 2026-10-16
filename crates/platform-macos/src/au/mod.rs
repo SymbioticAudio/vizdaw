@@ -12,8 +12,8 @@ use core_engine::graph::ProcessStatus;
 use core_host::catalog::Source;
 use core_host::{
     AudioPortInfo, AudioProcessor, HostError, InstanceEvents, LoadRequest, ParamEvent, ParamInfo,
-    PluginEditor, PluginFormat, PluginInfo, PluginInstance, PluginKind, PortRole, PrepareJob,
-    Prepared, ProcessCtx, Tail,
+    ParentView, PluginEditor, PluginFormat, PluginInfo, PluginInstance, PluginKind, PortRole,
+    PrepareJob, Prepared, ProcessCtx, Tail,
 };
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
 use ffi::{ComponentInfo, Feed, GestureListener, HostTransport, Unit};
@@ -325,8 +325,11 @@ impl HostWrites {
 
 /// A loaded AU (main-thread half).
 pub struct AuInstance {
-    // Declared first so it is dropped first: the listener's registrations
-    // go before the unit is disposed.
+    // Declared first so it is dropped first: its view leaves the window
+    // before anything else of the unit goes.
+    editor: AuEditor,
+    // Dropped next: the listener's registrations go before the unit is
+    // disposed.
     listener: Option<GestureListener>,
     unit: Arc<Unit>,
     kind: u32,
@@ -361,8 +364,13 @@ impl AuInstance {
         let latency = Arc::new(AtomicBool::new(false));
         // A unit that cannot report latency changes still works.
         let _ = o.unit.watch_latency(Arc::clone(&latency));
+        let unit = Arc::new(o.unit);
         let mut me = AuInstance {
-            unit: Arc::new(o.unit),
+            editor: AuEditor {
+                unit: Arc::clone(&unit),
+                view: None,
+            },
+            unit,
             kind: o.kind,
             info: PluginInfo {
                 plugin: o.desc.plugin,
@@ -590,9 +598,8 @@ impl PluginInstance for AuInstance {
     }
 
     fn editor(&mut self) -> Option<&mut dyn PluginEditor> {
-        // AU editors (view controllers, Cocoa UI) arrive with the app's
-        // plugin windows (3c, Plan Ruling 7).
-        None
+        // Every unit has one: its own view, or the generic view.
+        Some(&mut self.editor)
     }
 
     fn idle(&mut self) -> InstanceEvents {
@@ -630,6 +637,74 @@ impl PluginInstance for AuInstance {
                 }
             })
             .collect()
+    }
+}
+
+/// How long opening an AU v3 editor waits for its view controller.
+pub const V3_VIEW_WAIT: Duration = Duration::from_secs(3);
+
+/// An AU's editor (spec §9): the unit's own view (AU v2 Cocoa UI, AU v3
+/// view controller) or CoreAudioKit's generic view, added to the window's
+/// parent view. Fixed size: AU views size themselves.
+pub struct AuEditor {
+    unit: Arc<Unit>,
+    view: Option<ffi::View>,
+}
+
+impl std::fmt::Debug for AuEditor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuEditor")
+            .field("open", &self.view.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuEditor {
+    /// Where the open view came from: `"cocoa"`, `"controller"` or
+    /// `"generic"` (`None` while closed).
+    pub fn view_kind(&self) -> Option<&'static str> {
+        self.view.as_ref().map(|v| match v.kind {
+            ffi::ViewKind::Cocoa => "cocoa",
+            ffi::ViewKind::Controller => "controller",
+            ffi::ViewKind::Generic => "generic",
+        })
+    }
+}
+
+impl PluginEditor for AuEditor {
+    fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError> {
+        self.close();
+        let view = self
+            .unit
+            .editor_view(V3_VIEW_WAIT)
+            .map_err(HostError::EditorUnavailable)?;
+        let size = view
+            .attach(parent.as_ptr())
+            .map_err(HostError::EditorUnavailable)?;
+        self.view = Some(view);
+        Ok(size)
+    }
+
+    fn resize(&mut self, _width: u32, _height: u32) -> Result<(u32, u32), HostError> {
+        self.view
+            .as_ref()
+            .map(ffi::View::size)
+            .ok_or_else(|| HostError::EditorUnavailable("not open".into()))
+    }
+
+    fn can_resize(&mut self) -> bool {
+        false
+    }
+
+    fn close(&mut self) {
+        self.view = None;
+    }
+}
+
+impl AuInstance {
+    /// The editor, typed (tests read [`AuEditor::view_kind`]).
+    pub fn au_editor(&mut self) -> &mut AuEditor {
+        &mut self.editor
     }
 }
 
