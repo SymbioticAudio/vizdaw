@@ -201,8 +201,11 @@ impl History {
         Ok(())
     }
 
-    /// Steps forward one version.
+    /// Steps forward one version. Refused while a transaction is open.
     pub fn redo(&mut self) -> Result<()> {
+        if self.txn.is_some() {
+            return Err(ModelError::invalid("nothing to redo"));
+        }
         let next = self
             .future
             .pop()

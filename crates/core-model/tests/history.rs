@@ -110,7 +110,9 @@ fn transaction_is_one_undo_step() {
     h.execute(&insert_note(62), &f()).unwrap();
     // Inside the pass, steps undo individually.
     h.undo().unwrap();
-    h.redo().unwrap();
+    // Redo is refused inside a transaction; re-do the edit instead.
+    assert!(h.redo().is_err());
+    h.execute(&insert_note(62), &f()).unwrap();
     h.commit().unwrap();
     assert_eq!(h.undo_label(), Some("Record"));
     let after = h.doc().clone();
@@ -262,4 +264,20 @@ fn no_op_command_adds_no_undo_step() {
     // A no-op does not discard the redo stack either.
     h.redo().unwrap();
     assert_eq!(name(&h), "A");
+}
+
+#[test]
+fn redo_is_refused_inside_an_open_transaction() {
+    let mut h = hist();
+    h.execute(&rename("A"), &f()).unwrap();
+    h.undo().unwrap();
+    h.begin("T").unwrap();
+    assert!(h.redo().is_err());
+    assert_eq!(name(&h), "S");
+    h.commit().unwrap();
+    assert_eq!(h.undo_depth(), 0);
+    // The redo stack of an empty transaction is intact.
+    h.redo().unwrap();
+    assert_eq!(name(&h), "A");
+    assert_eq!(h.undo_depth(), 1);
 }
