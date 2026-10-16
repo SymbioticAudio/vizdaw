@@ -49,3 +49,20 @@ fn reset_silences_held_notes() {
     }
     assert!(rms_dbfs(&buf, 1024) < -80.0);
 }
+
+#[test]
+fn frames_beyond_max_frames_are_zeroed() {
+    let mut synth = DlsSynth::new(48_000.0, 256).unwrap();
+    let mut buf = StereoBuf::new(1024);
+    buf.left.fill(9.0);
+    buf.right.fill(9.0);
+    synth.render(1024, &mut buf);
+    assert!(buf.left[..256].iter().all(|x| *x != 9.0));
+    assert!(
+        buf.left[256..]
+            .iter()
+            .chain(&buf.right[256..])
+            .all(|x| *x == 0.0),
+        "stale samples after max_frames"
+    );
+}

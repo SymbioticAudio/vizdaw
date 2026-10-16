@@ -226,6 +226,14 @@ impl InstrumentNode for DlsSynth {
                 }
             }
         }
+        // Frames past `max_frames` (or past the buffer) were not rendered:
+        // silence them rather than leave stale samples. // RT
+        let end = frames.min(out.capacity()) as usize;
+        for ch in [&mut out.left, &mut out.right] {
+            if let Some(rest) = ch.get_mut(n as usize..end) {
+                rest.fill(0.0);
+            }
+        }
     }
 
     fn reset(&mut self) {
