@@ -352,7 +352,8 @@ pub enum EngineCmd {
     Locate(u64),
     /// Set or clear the loop range.
     SetLoop(Option<(u64, u64)>),
-    /// Install the sink of a new target (targets are only appended).
+    /// Install the sink of a new target (a released index is reused only
+    /// after its `RemoveSink` and every schedule and graph naming it).
     AddSink(TargetIdx, Sink),
     /// Remove a released target's sink; it goes back through the retire
     /// ring (a plugin instrument is deactivated off the audio thread).

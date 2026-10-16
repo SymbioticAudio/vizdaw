@@ -110,7 +110,8 @@ impl EventLog {
     }
 
     /// A new log for `target`, replacing any earlier one (whose sink was
-    /// dropped with a failed load and never played).
+    /// dropped with a failed load, or removed before its index was reused;
+    /// unread records of the old target are discarded).
     fn add(&self, target: TargetIdx, capacity: usize) -> Producer<LogRecord> {
         let (tx, rx) = RingBuffer::new(capacity);
         if let Ok(mut readers) = self.readers.lock() {

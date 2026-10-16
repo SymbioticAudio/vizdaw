@@ -3,16 +3,19 @@
 //! released when the destination goes, restarts or is too small for the
 //! renderer.
 
-use core_engine::backend::AudioBackend;
+use core_engine::backend::{AudioBackend, InstrumentNode, StereoBuf};
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
-use core_engine::graph::{TestInserts, TestInstrument};
+use core_engine::graph::{EffectNode, InsertFactory, TestInserts, TestInstrument};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::schedule::{TargetIdx, TargetKind};
 use core_model::command::{Command, RoutingCmd};
 use core_model::document::Document;
 use core_model::ids::{DestId, PluginInstanceId, SeqId};
-use core_model::mixer::StripKind;
+use core_model::mixer::{PluginSlot, StripKind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 const SR: f64 = 48_000.0;
 
@@ -174,4 +177,123 @@ fn a_larger_prepare_recreates_instrument_sinks_and_inserts() {
     let (l, _) = be.output(2048);
     assert!(l.iter().all(|x| *x > 0.0), "plays at the new size");
     assert!(engine.faults().is_empty(), "{:?}", engine.faults().names());
+}
+
+/// A test instrument that counts its drops.
+struct Counted(Box<dyn InstrumentNode>, Arc<AtomicUsize>);
+
+impl InstrumentNode for Counted {
+    fn midi(&mut self, offset: u32, msg: &[u8]) {
+        self.0.midi(offset, msg);
+    }
+    fn render(&mut self, frames: u32, out: &mut StereoBuf) {
+        self.0.render(frames, out);
+    }
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+    fn latency(&self) -> u32 {
+        self.0.latency()
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.1.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct CountingInserts(TestInserts, Arc<AtomicUsize>);
+
+impl InsertFactory for CountingInserts {
+    fn make(
+        &mut self,
+        slot: &PluginSlot,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<Box<dyn EffectNode>, String> {
+        self.0.make(slot, sample_rate, max_frames)
+    }
+    fn make_instrument(
+        &mut self,
+        slot: &PluginSlot,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<Box<dyn InstrumentNode>, String> {
+        let n = self.0.make_instrument(slot, sample_rate, max_frames)?;
+        Ok(Box::new(Counted(n, Arc::clone(&self.1))))
+    }
+}
+
+#[test]
+fn a_removed_sink_is_dropped_by_the_collector() {
+    let (mut b, seq, d, _) = synth_doc();
+    let (mut engine, mut be, _) = engine(4096);
+    let drops = Arc::new(AtomicUsize::new(0));
+    engine.set_insert_factory(Box::new(CountingInserts(
+        TestInserts::new(),
+        Arc::clone(&drops),
+    )));
+    engine.load(b.doc(), seq).unwrap();
+    be.run_frames(256);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    let (d2, _) = b
+        .plugin_dest("Synth 2", TestInstrument::plugin("synth"))
+        .unwrap();
+    let b = Builder::from_doc(replace(b.doc(), d, d2));
+    engine.load(b.doc(), seq).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while drops.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        be.run_frames(256);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(drops.load(Ordering::SeqCst), 1, "removed sink dropped once");
+}
+
+#[test]
+fn a_released_index_is_not_reused_before_a_publish() {
+    let (mut b, seq, d, _) = synth_doc();
+    let (mut engine, mut be, _) = engine(4096);
+    engine.load(b.doc(), seq).unwrap();
+    be.run_frames(256);
+    let (d2, second) = b
+        .plugin_dest("Synth 2", TestInstrument::plugin("synth"))
+        .unwrap();
+    let mut ok = Builder::from_doc(replace(b.doc(), d, d2));
+    let mut bad = Builder::from_doc(ok.doc().clone());
+    let strip = bad.strip_of(StripKind::Instrument(d2)).unwrap();
+    bad.insert(strip, TestInserts::plugin("gain=0.5,latency=200000"))
+        .unwrap();
+    // Index 0 is released, but the graph cannot be planned: the old graph
+    // keeps playing and still names it.
+    let report = engine.load(bad.doc(), seq).unwrap();
+    assert!(report.graph.error.is_some(), "{:?}", report.graph);
+    be.run_frames(256);
+    let (d3, third) = bad
+        .plugin_dest("Synth 3", TestInstrument::plugin("synth"))
+        .unwrap();
+    let lane = bad.lane(seq, "L3", Some(d3)).unwrap();
+    bad.notes(seq, lane, &[(0, 64, 0xFFFF, Q)]).unwrap();
+    let report = engine.load(bad.doc(), seq).unwrap();
+    assert!(report.graph.error.is_some());
+    assert_eq!(
+        plugin_targets(&engine),
+        vec![(TargetIdx(1), second), (TargetIdx(2), third)],
+        "index 0 not reused while nothing was published"
+    );
+    be.run_frames(256);
+    // A good load publishes; the next one may reuse index 0.
+    let report = engine.load(ok.doc(), seq).unwrap();
+    assert!(report.graph.error.is_none(), "{:?}", report.graph);
+    be.run_frames(256);
+    let (d4, fourth) = ok
+        .plugin_dest("Synth 4", TestInstrument::plugin("synth"))
+        .unwrap();
+    let lane = ok.lane(seq, "L4", Some(d4)).unwrap();
+    ok.notes(seq, lane, &[(0, 64, 0xFFFF, Q)]).unwrap();
+    engine.load(ok.doc(), seq).unwrap();
+    assert_eq!(
+        plugin_targets(&engine),
+        vec![(TargetIdx(0), fourth), (TargetIdx(1), second)]
+    );
 }

@@ -137,6 +137,9 @@ pub struct Engine {
     sinks: [SinkInfo; MAX_TARGETS],
     /// Instances to recreate at the next load (`Engine::restart_instance`).
     restart: BTreeSet<PluginInstanceId>,
+    /// Targets were released and no load has published a schedule and a
+    /// graph since: the published ones may still name them.
+    release_unpublished: bool,
     /// Insert instances in the last published graph, by ID.
     live: BTreeMap<PluginInstanceId, Live>,
     /// Meter cell of every strip of the last published graph, by strip
@@ -253,6 +256,7 @@ impl Engine {
             default_loop: false,
             sinks: [SinkInfo::default(); MAX_TARGETS],
             restart: BTreeSet::new(),
+            release_unpublished: false,
             live: BTreeMap::new(),
             meter_slots: BTreeMap::new(),
             latency: 0,
@@ -329,7 +333,11 @@ impl Engine {
             ports: self.factory.ports(),
         };
         let (sr, max) = (self.cfg.sample_rate, self.block_frames());
-        self.targets.recycle();
+        // Indices released by an earlier load are free only once a load
+        // published both a schedule and a graph after the release.
+        if !self.release_unpublished {
+            self.targets.recycle();
+        }
         self.release_stale_targets(doc, max)?;
         let mut new_sinks: Vec<(TargetIdx, Sink)> = Vec::new();
         let targets = &mut self.targets;
@@ -383,7 +391,12 @@ impl Engine {
             self.push(EngineCmd::AddSink(i, sink))?;
         }
         report.graph = self.compile_graph(doc)?;
-        self.restart.clear();
+        if report.graph.error.is_none() {
+            // Schedule and graph both go out below: nothing published
+            // still names a released index.
+            self.release_unpublished = false;
+            self.restart.clear();
+        }
         self.tempo = Some(schedule.tempo.clone());
         self.length_frames = schedule.length_frames;
         self.loop_range = schedule.loop_range;
@@ -422,6 +435,7 @@ impl Engine {
             .map(|(i, _)| i)
             .collect();
         for i in stale {
+            self.release_unpublished = true;
             self.push(EngineCmd::RemoveSink(i))?;
             self.targets.release(i);
             if let Some(info) = self.sinks.get_mut(usize::from(i.0)) {
