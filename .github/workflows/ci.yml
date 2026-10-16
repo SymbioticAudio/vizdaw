@@ -38,3 +38,23 @@ jobs:
           diff fixtures/demo.offline.txt "$RUNNER_TEMP/demo.txt"
       - name: Benchmarks compile
         run: cargo bench --workspace --no-run
+
+  app:
+    name: app (macOS)
+    runs-on: macos-15
+    env:
+      VIZDAW_AUDIO: offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: FFI tests
+        run: cargo test -p core-ffi
+      - name: Build the FFI library and Swift bindings
+        run: scripts/build-ffi.sh
+      - name: Swift build
+        run: scripts/swift.sh build
+      - name: Swift tests
+        run: scripts/swift.sh test
+      - name: App bundle
+        run: scripts/make-app.sh
