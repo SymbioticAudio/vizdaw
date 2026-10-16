@@ -46,7 +46,8 @@ fn open(
     let (mut engine, renderer) = Engine::new(
         engine_config(args, info.sample_rate),
         Box::new(MacSinks::new()),
-    );
+    )
+    .map_err(|e| e.to_string())?;
     let report = engine.load(doc, seq).map_err(|e| e.to_string())?;
     for w in &report.warnings {
         eprintln!("warning: {w}");

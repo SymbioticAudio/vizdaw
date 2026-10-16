@@ -109,7 +109,8 @@ fn events_land_at_their_offsets_and_stop_releases() {
         level: 0.25,
         ..Factory::default()
     };
-    let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone()));
+    let (mut engine, mut r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
     let report = engine.load(&doc, seq).unwrap();
     assert_eq!(report.events, 2);
     engine.play().unwrap();
@@ -142,7 +143,7 @@ fn midi_outs_get_host_times() {
     let mut cfg = EngineConfig::new(48_000.0);
     cfg.route = BuiltinRoute::Virtual;
     cfg.midi_offset_ns = 1_000;
-    let (mut engine, mut r) = Engine::new(cfg, Box::new(f.clone()));
+    let (mut engine, mut r) = Engine::new(cfg, Box::new(f.clone())).unwrap();
     engine.load(&doc, seq).unwrap();
     engine.play().unwrap();
     let mut ns = 5_000_000_000;
@@ -163,7 +164,7 @@ fn clipping_and_xruns_are_faults_that_clear_on_read() {
         level: 2.0,
         ..Factory::default()
     };
-    let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f));
+    let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f)).unwrap();
     engine.load(&doc, seq).unwrap();
     let mut ns = 0;
     let out = blocks(&mut r, 1, 64, &mut ns);
@@ -185,7 +186,7 @@ fn non_finite_samples_are_silenced_and_flagged() {
             level,
             ..Factory::default()
         };
-        let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f));
+        let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f)).unwrap();
         engine.load(&doc, seq).unwrap();
         let mut l = vec![0.5f32; 64];
         let mut rr = vec![0.5f32; 64];
@@ -266,7 +267,8 @@ fn ports_doc(n: usize) -> (Document, SeqId) {
 #[test]
 fn failed_load_leaves_the_target_table_unchanged() {
     let f = PortFactory::default();
-    let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone()));
+    let (mut engine, mut r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
     let (doc, seq) = ports_doc(17);
     assert_eq!(engine.load(&doc, seq), Err(EngineError::TooManyTargets));
     assert!(engine.targets().is_empty(), "{:?}", engine.targets());
@@ -293,7 +295,8 @@ fn failed_load_leaves_the_target_table_unchanged() {
 fn loop_and_locate_by_tick() {
     let (doc, seq) = doc();
     let f = Factory::default();
-    let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone()));
+    let (mut engine, mut r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
     engine.load(&doc, seq).unwrap();
     assert_eq!(engine.length_frames(), 96_000);
     engine.set_loop(true).unwrap();
@@ -320,7 +323,8 @@ fn engine_errors() {
         find_sequence(&doc, "Nope").unwrap_err(),
         EngineError::UnknownSequence("Nope".into())
     );
-    let (mut engine, _r) = Engine::new(EngineConfig::new(48_000.0), Box::new(Factory::default()));
+    let (mut engine, _r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(Factory::default())).unwrap();
     assert!(matches!(
         engine.load(&doc, SeqId(99)),
         Err(EngineError::Model(_))

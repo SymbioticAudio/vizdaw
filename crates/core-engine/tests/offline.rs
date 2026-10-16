@@ -27,7 +27,7 @@ fn start_with(
     sinks: OfflineSinks,
 ) -> Run {
     let log = sinks.log();
-    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks));
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks)).unwrap();
     let report = engine.load(doc, seq).unwrap();
     let mut backend = OfflineBackend::new(SR, block);
     backend.start(renderer).unwrap();

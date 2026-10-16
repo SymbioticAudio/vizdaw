@@ -25,7 +25,7 @@ pub fn render(
     let log = sinks.log();
     let mut cfg = EngineConfig::new(RATE);
     cfg.route = route;
-    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks));
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks)).map_err(|e| e.to_string())?;
     let report = engine.load(doc, seq).map_err(|e| e.to_string())?;
     let mut backend = OfflineBackend::new(RATE, BLOCK);
     backend.start(renderer).map_err(|e| e.to_string())?;

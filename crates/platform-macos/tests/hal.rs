@@ -22,7 +22,8 @@ fn hal_default_device_opens() {
     let (mut engine, renderer) = Engine::new(
         EngineConfig::new(info.sample_rate),
         Box::new(OfflineSinks::new(16)),
-    );
+    )
+    .unwrap();
     engine.load(&doc, seq).unwrap();
     engine.play().unwrap();
     backend.start(renderer).unwrap();

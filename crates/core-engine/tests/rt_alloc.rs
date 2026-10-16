@@ -42,7 +42,7 @@ fn render_path_never_allocates() {
     cfg.route = BuiltinRoute::Both;
     let sinks = OfflineSinks::new(1 << 20);
     let log = sinks.log();
-    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks));
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks)).unwrap();
     engine.load(&doc, song).unwrap();
     let mut b = OfflineBackend::new(48_000.0, 512);
     b.start(renderer).unwrap();
@@ -89,7 +89,7 @@ fn render_path_never_allocates() {
     // A full MIDI queue drops instead of allocating.
     let mut cfg = EngineConfig::new(48_000.0);
     cfg.route = BuiltinRoute::Virtual;
-    let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(8)));
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(8))).unwrap();
     engine.load(&doc, song).unwrap();
     let mut b = OfflineBackend::new(48_000.0, 512);
     b.start(renderer).unwrap();

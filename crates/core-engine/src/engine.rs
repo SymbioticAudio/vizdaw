@@ -85,8 +85,25 @@ impl std::fmt::Debug for Engine {
 
 impl Engine {
     /// Creates the control handle and its renderer, and starts the collector
-    /// thread that frees retired schedules every 10 ms.
-    pub fn new(cfg: EngineConfig, factory: Box<dyn SinkFactory>) -> (Engine, Renderer) {
+    /// thread that frees retired schedules every 10 ms. Fails when that
+    /// thread cannot be started (ruling O24): without it retired schedules
+    /// would never be freed.
+    pub fn new(
+        cfg: EngineConfig,
+        factory: Box<dyn SinkFactory>,
+    ) -> Result<(Engine, Renderer), EngineError> {
+        Engine::with_spawner(cfg, factory, |b, f| b.spawn(f))
+    }
+
+    /// [`Engine::new`] with the thread spawn injected (tests make it fail).
+    fn with_spawner(
+        cfg: EngineConfig,
+        factory: Box<dyn SinkFactory>,
+        spawn: impl FnOnce(
+            std::thread::Builder,
+            Box<dyn FnOnce() + Send + 'static>,
+        ) -> std::io::Result<JoinHandle<()>>,
+    ) -> Result<(Engine, Renderer), EngineError> {
         let (cmd_tx, cmd_rx) = RingBuffer::<EngineCmd>::new(CMD_CAPACITY);
         let (retire_tx, mut retire_rx) = RingBuffer::<Box<Schedule>>::new(RETIRE_CAPACITY);
         let shared = Arc::new(Shared::default());
@@ -94,9 +111,10 @@ impl Engine {
         let collector_paused = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&collector_stop);
         let paused = Arc::clone(&collector_paused);
-        let collector = std::thread::Builder::new()
-            .name("vizdaw-collector".into())
-            .spawn(move || {
+        const COLLECTOR: &str = "vizdaw-collector";
+        let collector = spawn(
+            std::thread::Builder::new().name(COLLECTOR.into()),
+            Box::new(move || {
                 loop {
                     while !paused.load(Ordering::Relaxed) {
                         let Ok(old) = retire_rx.pop() else {
@@ -109,8 +127,12 @@ impl Engine {
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-            })
-            .ok();
+            }),
+        )
+        .map_err(|e| EngineError::Thread {
+            name: COLLECTOR,
+            reason: e.to_string(),
+        })?;
         let renderer = Renderer::new(
             RenderConfig {
                 sample_rate: cfg.sample_rate,
@@ -132,9 +154,9 @@ impl Engine {
             loop_range: None,
             collector_stop,
             collector_paused,
-            collector,
+            collector: Some(collector),
         };
-        (engine, renderer)
+        Ok((engine, renderer))
     }
 
     /// Pauses or resumes freeing retired schedules (a diagnostic hook:
@@ -298,4 +320,30 @@ pub fn find_sequence(doc: &Document, name: &str) -> Result<SeqId, EngineError> {
         .find(|s| s.name == name)
         .map(|s| s.id)
         .ok_or_else(|| EngineError::UnknownSequence(name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::offline::OfflineSinks;
+
+    #[test]
+    fn new_fails_when_the_collector_thread_cannot_start() {
+        let r = Engine::with_spawner(
+            EngineConfig::new(48_000.0),
+            Box::new(OfflineSinks::new(4)),
+            |_, _| Err(std::io::Error::other("no threads")),
+        );
+        match r {
+            Err(EngineError::Thread { name, .. }) => assert_eq!(name, "vizdaw-collector"),
+            other => panic!("expected a thread error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_succeeds_normally() {
+        let (engine, _r) =
+            Engine::new(EngineConfig::new(48_000.0), Box::new(OfflineSinks::new(4))).unwrap();
+        assert!(engine.targets().is_empty());
+    }
 }

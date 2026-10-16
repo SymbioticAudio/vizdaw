@@ -46,4 +46,12 @@ pub enum EngineError {
     /// The document needs more than 16 playback targets.
     #[error("more than 16 playback targets")]
     TooManyTargets,
+    /// A helper thread could not be started.
+    #[error("cannot start thread {name:?}: {reason}")]
+    Thread {
+        /// The thread's name.
+        name: &'static str,
+        /// The OS error.
+        reason: String,
+    },
 }
