@@ -20,6 +20,8 @@ pub mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
 pub mod midi1;
+pub mod notes;
 pub mod schedule;
+pub mod transport;
 
 pub use error::{BackendError, EngineError};
