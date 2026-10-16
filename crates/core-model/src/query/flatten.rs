@@ -142,10 +142,9 @@ impl<'a> Walk<'a> {
                 win.0.max(pass_start),
                 win.1.min(base + limit + lane.play_shift),
             );
-            for e in take.events.values() {
-                if e.tick >= limit {
-                    continue;
-                }
+            // Events at or after the loop limit never play, so skip them
+            // without scanning.
+            for (_, e) in take.events.range(..(limit, EventId(0))) {
                 if e.mute || !self.filter.allows(lane.id, e.body.kind()) {
                     continue;
                 }

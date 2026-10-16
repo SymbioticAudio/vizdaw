@@ -560,3 +560,46 @@ fn audio_region_is_clipped_at_a_reference_length_using_the_playing_tempo() {
     // One beat at the song's 120 BPM = 0.5 s = 24 000 frames.
     assert_eq!(region_lengths(&d), vec![24_000]);
 }
+
+#[test]
+fn short_loop_over_many_out_of_range_events_emits_only_in_range_passes() {
+    use core_model::sequence::SeqLength;
+    let d = run(
+        &base(),
+        Command::Sequence(SequenceCmd::SetLength {
+            seq: SeqId(0),
+            length: SeqLength::Locked(Tick(256 * Q)),
+        }),
+    );
+    let d = run(
+        &d,
+        Command::Lane(LaneCmd::SetLength {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            length: Some(Tick(Q)),
+            looped: true,
+            locked: false,
+        }),
+    );
+    let mut specs: Vec<EventSpec> = (0..4)
+        .map(|i| {
+            EventSpec::new(
+                Tick(i * Q / 4),
+                EventBody::note(60 + i as u8, 100, Tick(Q / 8)),
+            )
+        })
+        .collect();
+    // 10 000 events beyond the 1-beat loop limit never play.
+    specs.extend(
+        (0..10_000).map(|i| EventSpec::new(Tick(Q + 1 + i), EventBody::note(100, 100, Tick(1)))),
+    );
+    let d = insert(&d, 0, 0, specs);
+    let out: Vec<_> = flatten(&d, SeqId(0), None, &ViewFilter::default())
+        .unwrap()
+        .collect();
+    assert_eq!(out.len(), 4 * 256);
+    assert!(
+        out.iter()
+            .all(|e| !matches!(e.body, EventBody::Note { pitch: 100, .. }))
+    );
+}

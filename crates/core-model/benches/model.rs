@@ -2,7 +2,7 @@
 //! one edit on a 100k-event document < 1 ms; flattening a 64-bar song with
 //! three levels of references < 5 ms; loading a 100k-event project < 200 ms.
 
-use core_model::command::{Command, EventCmd, apply};
+use core_model::command::{Command, EventCmd, LaneCmd, SequenceCmd, apply};
 use core_model::document::{Document, DocumentRepr, Settings};
 use core_model::event::{EventBody, EventSpec, LoopCount};
 use core_model::file::{from_json, to_json};
@@ -10,7 +10,7 @@ use core_model::ids::{Counters, EventId, LaneId, SeqId, TakeId};
 use core_model::lane::Lane;
 use core_model::query::flatten;
 use core_model::selection::ViewFilter;
-use core_model::sequence::Sequence;
+use core_model::sequence::{SeqLength, Sequence};
 use core_model::time::{PPQ, Tick};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use im::Vector;
@@ -132,6 +132,52 @@ fn nested_song() -> Document {
     .unwrap()
 }
 
+/// A 64-bar locked sequence whose one lane loops every beat over 10 000
+/// events (almost all beyond the loop limit).
+fn looped_doc() -> Document {
+    let d = Document::new();
+    let d = apply(
+        &d,
+        &Command::Sequence(SequenceCmd::New { name: "L".into() }),
+    )
+    .unwrap()
+    .doc;
+    let d = apply(
+        &d,
+        &Command::Sequence(SequenceCmd::SetLength {
+            seq: SeqId(0),
+            length: SeqLength::Locked(Tick(256 * PPQ)),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let d = apply(
+        &d,
+        &Command::Lane(LaneCmd::SetLength {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            length: Some(Tick(PPQ)),
+            looped: true,
+            locked: false,
+        }),
+    )
+    .unwrap()
+    .doc;
+    let specs = (0..10_000i64)
+        .map(|i| EventSpec::new(Tick(i * 4), EventBody::note(60, 100, Tick(1))))
+        .collect();
+    apply(
+        &d,
+        &Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            events: specs,
+        }),
+    )
+    .unwrap()
+    .doc
+}
+
 fn benches(c: &mut Criterion) {
     let big = big_doc();
     let edit = Command::Event(EventCmd::SetVelocity {
@@ -147,6 +193,15 @@ fn benches(c: &mut Criterion) {
     c.bench_function("flatten 64 bars, 3 levels", |b| {
         b.iter(|| {
             flatten(black_box(&song), SeqId(0), None, &filter)
+                .unwrap()
+                .count()
+        })
+    });
+
+    let looped = looped_doc();
+    c.bench_function("flatten 1-beat loop over 10k events, 64 bars", |b| {
+        b.iter(|| {
+            flatten(black_box(&looped), SeqId(0), None, &filter)
                 .unwrap()
                 .count()
         })
