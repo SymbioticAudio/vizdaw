@@ -16,4 +16,6 @@
 )]
 
 pub mod dls;
+pub mod hal;
 pub mod midi;
+pub mod sinks;
