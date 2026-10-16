@@ -4,6 +4,7 @@
 
 use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig, find_sequence};
+use core_engine::error::EngineError;
 use core_engine::fixtures::demo_document;
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::render::Faults;
@@ -114,9 +115,22 @@ fn render_path_never_allocates() {
     for i in 0..100 {
         if i == 12 {
             engine.pause_collector(false);
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        engine.load(&doc, song).unwrap();
+        // Once the collector resumes it frees the retire ring on its own
+        // schedule; until then deferred commands can fill the command
+        // ring and `load` reports `Busy`. Keep rendering until it fits
+        // rather than guessing how long the collector takes to run.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match engine.load(&doc, song) {
+                Ok(_) => break,
+                Err(EngineError::Busy) if std::time::Instant::now() < deadline => {
+                    armed_block(&mut b, 256);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("load failed: {e:?}"),
+            }
+        }
         armed_block(&mut b, 256);
     }
     assert!(engine.counters().swaps_deferred >= 1);
