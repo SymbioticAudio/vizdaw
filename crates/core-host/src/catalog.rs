@@ -189,19 +189,25 @@ impl Catalog {
     /// Reads `path`; a missing file is an empty catalog, an unreadable or
     /// corrupt one is an error (the caller decides whether to start over).
     pub fn load(path: &Path) -> Result<Catalog, String> {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Catalog::new()),
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
         let fail = |e: String| format!("{}: {e}", path.display());
         let corrupt = |e: String| {
-            // Keep the unreadable file for inspection; a fresh save must not
-            // destroy it.
+            // Keep the unreadable file for inspection. If it cannot be
+            // moved, `save` refuses to overwrite it.
             let mut name = path.as_os_str().to_owned();
             name.push(".corrupt");
-            let _ = std::fs::rename(path, PathBuf::from(name));
-            fail(format!("{e} (moved to .corrupt)"))
+            match std::fs::rename(path, PathBuf::from(name)) {
+                Ok(()) => fail(format!("{e} (moved to .corrupt)")),
+                Err(m) => fail(format!("{e} (cannot move it to .corrupt: {m})")),
+            }
+        };
+        let text = match String::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => return Err(corrupt(e.to_string())),
         };
         let value: serde_json::Value = match serde_json::from_str(&text) {
             Ok(v) => v,
@@ -233,24 +239,37 @@ impl Catalog {
     }
 
     /// Writes `path` (creating its folder) through a temporary file, so a
-    /// crash never leaves half a catalog.
+    /// crash never leaves half a catalog. An existing file is overwritten
+    /// only when it is a catalog this app can read (version up to
+    /// [`CATALOG_VERSION`]): a newer, unreadable or corrupt file (one
+    /// [`Catalog::load`] could not move aside) is left alone and `save`
+    /// fails, so the user's disabled list and blocklist are never lost.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let r = Repr {
             version: CATALOG_VERSION,
             entries: self.entries.clone(),
             disabled: self.disabled.iter().cloned().collect(),
         };
-        if let Ok(old) = std::fs::read_to_string(path) {
-            let newer = serde_json::from_str::<serde_json::Value>(&old)
-                .ok()
-                .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
-                .is_some_and(|v| v > u64::from(CATALOG_VERSION));
-            if newer {
-                return Err(format!(
-                    "{}: written by a newer version; not overwriting",
-                    path.display()
-                ));
+        let refuse = |why: &str| Err(format!("{}: {why}; not overwriting", path.display()));
+        match std::fs::read(path) {
+            Ok(old) => {
+                let value = serde_json::from_slice::<serde_json::Value>(&old).ok();
+                let version = value
+                    .as_ref()
+                    .and_then(|v| v.get("version"))
+                    .and_then(|v| v.as_u64());
+                if version.is_some_and(|v| v > u64::from(CATALOG_VERSION)) {
+                    return refuse("written by a newer version");
+                }
+                let readable = value
+                    .and_then(|v| serde_json::from_value::<Repr>(v).ok())
+                    .is_some_and(|old| old.version <= CATALOG_VERSION);
+                if !readable {
+                    return refuse("the existing file is not a catalog this app can read");
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return refuse(&format!("cannot read the existing file ({e})")),
         }
         let text = serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {

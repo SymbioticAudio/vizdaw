@@ -236,3 +236,35 @@ fn apply_clears_only_its_own_reasons() {
     c.apply(&mut host);
     assert_eq!(host.failure(ghost).map(str::to_string), before);
 }
+
+#[test]
+fn save_refuses_to_overwrite_a_file_it_cannot_read() {
+    let dir = temp("refuse");
+    let path = dir.join("plugins.json");
+    let (c, _, _) = sample();
+    // Corrupt (as when moving it aside failed), not a catalog, non-UTF-8,
+    // or not a file at all: left alone.
+    let bad: [&[u8]; 3] = [
+        b"{ not json",
+        br#"{"version":1,"other":2}"#,
+        &[0xFF, 0xFE, 0x00],
+    ];
+    for old in bad {
+        std::fs::write(&path, old).unwrap();
+        assert!(c.save(&path).is_err(), "{old:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+    }
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(c.save(&path).is_err(), "a folder is not overwritten");
+    std::fs::remove_dir(&path).unwrap();
+    // A non-UTF-8 file is moved aside by `load`; then saving works.
+    std::fs::write(&path, [0xFF, 0xFE, 0x00]).unwrap();
+    assert!(Catalog::load(&path).is_err());
+    assert!(!path.exists());
+    assert!(dir.join("plugins.json.corrupt").exists());
+    c.save(&path).unwrap();
+    // A readable catalog is overwritten.
+    c.save(&path).unwrap();
+    assert_eq!(Catalog::load(&path).unwrap().entries(), c.entries());
+}
