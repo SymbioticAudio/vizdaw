@@ -41,7 +41,8 @@ pub enum BuiltinRoute {
 }
 
 /// The targets of an engine, in creation order. Targets are only ever
-/// appended, so an index stays valid for the engine's lifetime.
+/// appended (a failed load rolls back the ones it added before any sink
+/// reached the renderer), so an index stays valid for the engine's lifetime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TargetTable {
     kinds: Vec<TargetKind>,
@@ -73,6 +74,12 @@ impl TargetTable {
         let i = u8::try_from(self.kinds.len()).map_err(|_| EngineError::TooManyTargets)?;
         self.kinds.push(kind);
         Ok(TargetIdx(i))
+    }
+
+    /// Drops targets added after the table had `len` entries (rollback of
+    /// a failed load whose new targets never got sinks).
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.kinds.truncate(len);
     }
 
     /// The kind at `idx`.

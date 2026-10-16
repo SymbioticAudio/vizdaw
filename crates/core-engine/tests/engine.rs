@@ -207,6 +207,86 @@ fn non_finite_samples_are_silenced_and_flagged() {
     }
 }
 
+type PortSeen = Arc<Mutex<Vec<(usize, Vec<u8>)>>>;
+
+/// Lists 17 MIDI ports; each port's sink records `(port index, bytes)`.
+#[derive(Default, Clone)]
+struct PortFactory {
+    seen: PortSeen,
+}
+
+struct PortOut {
+    port: usize,
+    seen: PortSeen,
+}
+
+impl MidiOut for PortOut {
+    fn send(&mut self, _host_time_ns: u64, msg: &[u8]) -> bool {
+        self.seen.lock().unwrap().push((self.port, msg.to_vec()));
+        true
+    }
+}
+
+impl SinkFactory for PortFactory {
+    fn ports(&self) -> Vec<MidiPortInfo> {
+        (0..17)
+            .map(|i| MidiPortInfo {
+                name: format!("Port {i}"),
+                unique_id: None,
+            })
+            .collect()
+    }
+    fn make(&mut self, kind: &TargetKind, _sr: f64, _max: u32) -> Result<Sink, BackendError> {
+        let TargetKind::MidiDestination(p) = kind else {
+            panic!("unexpected {kind:?}");
+        };
+        let port = p.name.trim_start_matches("Port ").parse().unwrap();
+        Ok(Sink::Midi(Box::new(PortOut {
+            port,
+            seen: self.seen.clone(),
+        })))
+    }
+}
+
+/// One note on each of ports `0..n`.
+fn ports_doc(n: usize) -> (Document, SeqId) {
+    let mut b = Builder::new();
+    let (seq, _) = b.sequence("S", "L", None).unwrap();
+    for i in 0..n {
+        let name = format!("Port {i}");
+        let d = b.dest(&name, &name, 0).unwrap();
+        let l = b.lane(seq, &name, Some(d)).unwrap();
+        b.notes(seq, l, &[(0, 60, 0x8000, Q)]).unwrap();
+    }
+    (b.finish(), seq)
+}
+
+#[test]
+fn failed_load_leaves_the_target_table_unchanged() {
+    let f = PortFactory::default();
+    let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone()));
+    let (doc, seq) = ports_doc(17);
+    assert_eq!(engine.load(&doc, seq), Err(EngineError::TooManyTargets));
+    assert!(engine.targets().is_empty(), "{:?}", engine.targets());
+
+    let (doc, seq) = ports_doc(16);
+    engine.load(&doc, seq).unwrap();
+    assert_eq!(engine.targets().len(), 16);
+    engine.play().unwrap();
+    let mut ns = 0;
+    blocks(&mut r, 1, 64, &mut ns);
+    let mut sounded: Vec<usize> = f
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, b)| b[0] == 0x90)
+        .map(|(p, _)| *p)
+        .collect();
+    sounded.sort();
+    assert_eq!(sounded, (0..16).collect::<Vec<_>>());
+}
+
 #[test]
 fn loop_and_locate_by_tick() {
     let (doc, seq) = doc();

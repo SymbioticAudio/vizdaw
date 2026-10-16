@@ -167,6 +167,7 @@ impl Engine {
             ports: self.factory.ports(),
         };
         let (sr, max) = (self.cfg.sample_rate, self.cfg.max_frames);
+        let before = self.targets.len();
         let mut new_sinks: Vec<(TargetIdx, Sink)> = Vec::new();
         let targets = &mut self.targets;
         let factory = &mut self.factory;
@@ -186,7 +187,16 @@ impl Engine {
                 Err(e) => Ok(Err(e.to_string())),
             }
         };
-        let (schedule, report) = compile(doc, seq, &opts, &mut resolve)?;
+        let compiled = compile(doc, seq, &opts, &mut resolve);
+        let (schedule, report) = match compiled {
+            Ok(c) => c,
+            Err(e) => {
+                // Targets interned by this load have no sinks yet; forget
+                // them (their sinks drop with `new_sinks`).
+                self.targets.truncate(before);
+                return Err(e);
+            }
+        };
         for (i, sink) in new_sinks {
             self.push(EngineCmd::AddSink(i, sink))?;
         }
