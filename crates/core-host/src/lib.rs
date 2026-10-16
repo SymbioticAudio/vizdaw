@@ -3,8 +3,11 @@
 //! [`AudioProcessor`] it hands out when activated (Plan Ruling 1);
 //! [`adapt`] wraps processors as the engine's inserts and instruments.
 //!
-//! `unsafe` lives only in `clap/ffi.rs`, with a `// SAFETY:` comment per
-//! block. Everything marked `// RT` must not allocate, lock or block.
+//! `unsafe` blocks and impls live only in `clap/ffi.rs`, with a
+//! `// SAFETY:` comment each. The one `unsafe fn` elsewhere,
+//! [`ParentView::new`], only declares a contract (its `# Safety` section)
+//! and contains no `unsafe` code. Everything marked `// RT` must not
+//! allocate, lock or block.
 #![deny(missing_docs)]
 #![cfg_attr(
     not(test),

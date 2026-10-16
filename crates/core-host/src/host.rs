@@ -51,7 +51,17 @@ pub struct IdleReport {
     pub gestures: Vec<Gesture>,
     /// Saved states a plugin rejected on load (it plays with its defaults).
     pub rejected_state: Vec<(PluginInstanceId, String)>,
-    /// Processors were shelved: the engine should load again.
+    /// Instances whose parameter list or values changed outside a gesture
+    /// (refresh their parameter lists).
+    pub params_changed: Vec<PluginInstanceId>,
+    /// Instances whose state changed in a way worth saving (autosave).
+    pub state_dirty: Vec<PluginInstanceId>,
+    /// The engine owes a load (processors were shelved, an edit waited
+    /// for a load, a load failed, a restart is due). From
+    /// [`PluginHost::idle`]: the caller loads the engine once `sync`
+    /// reports no load in progress. From [`PluginHost::service`]: a load is
+    /// still owed after this call (one is in progress, or the engine
+    /// refused the last one).
     pub reload: bool,
     /// The engine load `PluginHost::service` ran, if any.
     pub compiled: Option<CompileReport>,
@@ -64,6 +74,8 @@ impl IdleReport {
         self.restart.extend(o.restart);
         self.gestures.extend(o.gestures);
         self.rejected_state.extend(o.rejected_state);
+        self.params_changed.extend(o.params_changed);
+        self.state_dirty.extend(o.state_dirty);
         self.reload |= o.reload;
         if o.compiled.is_some() {
             self.compiled = o.compiled;
@@ -158,12 +170,34 @@ struct Slot {
     state: State,
 }
 
+/// An engine load `service` ran that the engine refused (an error, or a
+/// graph it could not plan), and what it was given.
+struct Refused {
+    doc: Document,
+    seq: SeqId,
+    block: u32,
+}
+
 /// A job for the loader thread.
 type Job = (PluginInstanceId, u64, crate::instance::PrepareJob);
 type Done = (PluginInstanceId, u64, Result<Prepared, HostError>);
 
 /// The plugin host. Create it on the main thread; drop the engine before
 /// it (processors in the engine come back through it).
+///
+/// What the app must do around it:
+/// - Call [`PluginHost::sync`] after every committed edit, and load the
+///   engine itself only when it returns true; otherwise
+///   [`PluginHost::service`] loads it once the loads are done.
+/// - Call [`PluginHost::reconfigure`] when the device's sample rate
+///   changes: `service` follows only a grown block size, and the shelf
+///   does not check the rate processors were activated at.
+/// - Call [`PluginHost::capture`] before committing the removal of a
+///   plugin whose state must survive (an undo of the removal restores the
+///   captured state; `sync` cannot capture, it has no `History`).
+/// - After [`PluginHost::commit_gestures`], call `sync` before an undo,
+///   so the host knows the document has the gesture's values and sends the
+///   undone ones.
 pub struct PluginHost {
     formats: Vec<Box<dyn PluginFormat>>,
     paths: BTreeMap<(Format, String), PathBuf>,
@@ -175,10 +209,25 @@ pub struct PluginHost {
     /// (several per id when an id was reused), oldest first.
     retiring: BTreeMap<PluginInstanceId, Vec<Retired>>,
     /// The report of a `service` whose engine load failed, given out by
-    /// the next `idle` (nothing in it is lost).
+    /// the next `idle` or `service` (nothing in it is lost, and the next
+    /// call hands it out even when the load fails again).
     carry: Option<IdleReport>,
-    /// Prepared loads waiting for their main-thread step.
-    finishing: VecDeque<(PluginInstanceId, Prepared)>,
+    /// The engine owes a load: set when processors are shelved, when
+    /// `sync` defers an edit, when a load fails and when a restart is due;
+    /// cleared only by a load in `service` that published a graph (or when
+    /// `idle` handed it to its caller with no load in progress).
+    owed_load: bool,
+    /// The last load `service` ran was refused: it is not run again until
+    /// the document, the sequence or the block size changes, a load
+    /// finishes or a restart is due.
+    refused: Option<Refused>,
+    /// Instances whose processor came back while the load was refused:
+    /// deactivated, and activated again only when the refusal ends (no
+    /// activation churn for an identical load).
+    parked: BTreeSet<PluginInstanceId>,
+    /// Prepared loads (with their generation) waiting for their
+    /// main-thread step.
+    finishing: VecDeque<(PluginInstanceId, u64, Prepared)>,
     generation: u64,
     shelf: Shelf,
     back_tx: Sender<Returned>,
@@ -226,6 +275,9 @@ impl PluginHost {
             slots: BTreeMap::new(),
             retiring: BTreeMap::new(),
             carry: None,
+            owed_load: false,
+            refused: None,
+            parked: BTreeSet::new(),
             finishing: VecDeque::new(),
             generation: 0,
             shelf: Shelf::new(),
@@ -414,7 +466,13 @@ impl PluginHost {
                 }
             }
         }
-        self.pending() == 0
+        let ready = self.pending() == 0;
+        if !ready {
+            // The caller defers its engine load; `service` runs it once
+            // the loads are done, whether they succeed or fail.
+            self.owed_load = true;
+        }
+        ready
     }
 
     fn fail(&mut self, id: PluginInstanceId, why: String) {
@@ -478,6 +536,7 @@ impl PluginHost {
     /// `retiring` for it.
     fn remove(&mut self, id: PluginInstanceId) {
         self.shelf.clear_reason(id);
+        self.parked.remove(&id);
         let Some(Slot { want, state }) = self.slots.remove(&id) else {
             return;
         };
@@ -540,28 +599,46 @@ impl PluginHost {
 
     /// Main-thread servicing (`host_idle`, 60 Hz; spec §5): finishes one
     /// load, deactivates processors the engine gave back, runs plugin
-    /// callbacks, and collects restarts and gestures.
+    /// callbacks, and collects restarts and gestures. Use it without an
+    /// engine (or with one the caller loads itself); with an engine,
+    /// [`PluginHost::service`] calls it. `reload` in its report hands the
+    /// owed engine load to the caller: once no load is in progress it is
+    /// reported once and then forgotten.
     pub fn idle(&mut self) -> IdleReport {
+        let mut r = self.tick();
+        r.reload = self.owed_load;
+        if self.pending() == 0 && self.finishing.is_empty() {
+            self.owed_load = false;
+        }
+        r
+    }
+
+    /// [`PluginHost::idle`]'s work, leaving the owed load to the caller.
+    fn tick(&mut self) -> IdleReport {
         let mut r = self.carry.take().unwrap_or_default();
         while let Ok((id, generation, result)) = self.done.try_recv() {
-            let current = matches!(
-                self.slots.get(&id).map(|s| &s.state),
-                Some(State::Loading(g)) if *g == generation
-            );
-            if !current {
+            if !self.is_loading(id, generation) {
                 continue;
             }
             match result {
-                Ok(p) => self.finishing.push_back((id, p)),
+                Ok(p) => self.finishing.push_back((id, generation, p)),
                 Err(e) => {
                     let why = format!("failed: {e}");
                     r.failed.push((id, why.clone()));
                     self.fail(id, why);
+                    // Its placeholder now shows why; an edit may have
+                    // waited for it.
+                    self.owed_load = true;
                 }
             }
         }
-        if let Some((id, prepared)) = self.finishing.pop_front() {
-            self.finish(id, prepared, &mut r);
+        // One load per call; a prepared load whose slot was removed or
+        // started loading again since is dropped.
+        while let Some((id, generation, prepared)) = self.finishing.pop_front() {
+            if self.is_loading(id, generation) {
+                self.finish(id, prepared, &mut r);
+                break;
+            }
         }
         while let Ok(back) = self.back_rx.try_recv() {
             self.returned(back, &mut r);
@@ -571,6 +648,14 @@ impl PluginHost {
             self.service_instance(id, &mut r);
         }
         r
+    }
+
+    /// Whether slot `id` waits for load `generation`.
+    fn is_loading(&self, id: PluginInstanceId, generation: u64) -> bool {
+        matches!(
+            self.slots.get(&id).map(|s| &s.state),
+            Some(State::Loading(g)) if *g == generation
+        )
     }
 
     fn finish(&mut self, id: PluginInstanceId, prepared: Prepared, r: &mut IdleReport) {
@@ -629,6 +714,7 @@ impl PluginHost {
             Ok(()) => {
                 r.loaded.push(id);
                 r.reload = true;
+                self.owed_load = true;
                 if let Some(s) = self.slots.get_mut(&id) {
                     s.state = State::Live(live);
                 }
@@ -717,11 +803,21 @@ impl PluginHost {
         collect_gestures(id, &mut live, &doc, &mut r.gestures);
         live.open.clear();
         flush_gesture(id, &mut live, &mut r.gestures);
+        if self.refused.is_some() {
+            // The engine refused the load that would have used it: wait
+            // for a change instead of activating it for the same load.
+            self.parked.insert(id);
+            if let Some(s) = self.slots.get_mut(&id) {
+                s.state = State::Live(live);
+            }
+            return;
+        }
         // A processor comes back only when the engine dropped it: a
         // restart or a new configuration. Activate it again.
         match self.activate(id, &mut live, instrument) {
             Ok(()) => {
                 r.reload = true;
+                self.owed_load = true;
                 if let Some(s) = self.slots.get_mut(&id) {
                     s.state = State::Live(live);
                 }
@@ -743,6 +839,12 @@ impl PluginHost {
         };
         let ev = live.inst.idle();
         collect_gestures(id, live, &want.params, &mut r.gestures);
+        if ev.params_changed {
+            r.params_changed.push(id);
+        }
+        if ev.state_dirty {
+            r.state_dirty.push(id);
+        }
         if ev.restart || ev.latency_changed {
             self.shelf.set_reason(id, "restarting");
             // Still on the shelf: restart it here; otherwise the engine
@@ -760,9 +862,14 @@ impl PluginHost {
 
     /// Changes the rate or block size: every instance is activated again
     /// (those in the engine once it gives them back; `service` asks it to).
+    /// The app calls it on a sample-rate change; `service` calls it only
+    /// for a grown block size.
     pub fn reconfigure(&mut self, sample_rate: f64, max_frames: u32) -> Vec<PluginInstanceId> {
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);
+        // A new configuration ends a refusal (parked instances are
+        // activated for it by the next `service`).
+        self.refused = None;
         let mut out_in_engine = Vec::new();
         let ids: Vec<PluginInstanceId> = self.slots.keys().copied().collect();
         for id in ids {
@@ -784,17 +891,27 @@ impl PluginHost {
         out_in_engine
     }
 
-    /// The main-thread timer's step with an engine: [`PluginHost::idle`],
-    /// then asks the engine to drop restarting instances, follows a grown
-    /// block size, syncs `doc` and loads it again when processors were
-    /// shelved or restarts are due and no load is in progress.
+    /// The main-thread timer's step with an engine: [`PluginHost::idle`]'s
+    /// work, then asks the engine to drop restarting instances, follows a
+    /// grown block size, syncs `doc` and loads it when the engine owes a
+    /// load and no load is in progress.
+    ///
+    /// A load the engine refuses (an error, or `Ok` with
+    /// `graph.error` set) is reported once (the `Err`, or `compiled`) and
+    /// not run again until something changes: `doc` (an edit), `seq`, the
+    /// block size, a plugin load finishing or failing, or a restart. What
+    /// the report of a failed load held (gestures, loads, failures) is
+    /// handed out by the next call.
     pub fn service(
         &mut self,
         engine: &mut Engine,
         doc: &Document,
         seq: SeqId,
     ) -> Result<IdleReport, EngineError> {
-        let mut r = self.idle();
+        // What a failed load left is handed out below, but is not news:
+        // only this call's events end a refusal.
+        let carried = self.carry.take();
+        let mut r = self.tick();
         if engine.block_frames() > self.max_frames {
             r.restart
                 .extend(self.reconfigure(self.sample_rate, engine.block_frames()));
@@ -802,20 +919,94 @@ impl PluginHost {
         for id in &r.restart {
             engine.restart_instance(*id);
         }
+        if !r.restart.is_empty() {
+            self.owed_load = true;
+        }
         let ready = self.sync(doc);
-        if ready && (r.reload || !r.restart.is_empty()) {
+        let changed = self.refused.as_ref().is_some_and(|f| {
+            !r.loaded.is_empty()
+                || !r.failed.is_empty()
+                || !r.restart.is_empty()
+                || f.seq != seq
+                || f.block != engine.block_frames()
+                // Compared only while a load is refused.
+                || f.doc != *doc
+        });
+        if changed {
+            self.refused = None;
+        }
+        if let Some(mut c) = carried {
+            c.merge(r);
+            r = c;
+        }
+        if self.refused.is_none() && !self.parked.is_empty() {
+            self.unpark(&mut r);
+        }
+        if ready && self.owed_load && self.refused.is_none() {
             match engine.load(doc, seq) {
-                Ok(c) => r.compiled = Some(c),
+                Ok(c) => {
+                    if c.graph.error.is_some() {
+                        self.refuse(doc, seq, engine);
+                    } else {
+                        self.owed_load = false;
+                    }
+                    r.compiled = Some(c);
+                }
                 Err(e) => {
-                    // Gestures, loads and the owed reload are given out
-                    // again by the next `idle` (or `service`, which retries
-                    // the load).
+                    // `Busy` passes: retried by the next call. Anything
+                    // else waits for a change.
+                    if !matches!(e, EngineError::Busy) {
+                        self.refuse(doc, seq, engine);
+                    }
                     self.carry = Some(r);
                     return Err(e);
                 }
             }
         }
+        r.reload = self.owed_load;
         Ok(r)
+    }
+
+    fn refuse(&mut self, doc: &Document, seq: SeqId, engine: &Engine) {
+        self.refused = Some(Refused {
+            doc: doc.clone(),
+            seq,
+            block: engine.block_frames(),
+        });
+    }
+
+    /// Activates the instances parked while a load was refused.
+    fn unpark(&mut self, r: &mut IdleReport) {
+        for id in std::mem::take(&mut self.parked) {
+            let Some(instrument) = self
+                .slots
+                .get(&id)
+                .filter(|s| matches!(&s.state, State::Live(l) if !l.active))
+                .map(|s| s.want.instrument)
+            else {
+                continue;
+            };
+            let Some(State::Live(mut live)) = self
+                .slots
+                .get_mut(&id)
+                .map(|s| std::mem::replace(&mut s.state, State::Failed(String::new())))
+            else {
+                continue;
+            };
+            match self.activate(id, &mut live, instrument) {
+                Ok(()) => {
+                    self.owed_load = true;
+                    if let Some(s) = self.slots.get_mut(&id) {
+                        s.state = State::Live(live);
+                    }
+                }
+                Err(e) => {
+                    let why = format!("failed: {e}");
+                    r.failed.push((id, why.clone()));
+                    self.fail(id, why);
+                }
+            }
+        }
     }
 
     /// Calls [`PluginHost::idle`] until no load is in progress (or
@@ -837,7 +1028,9 @@ impl PluginHost {
     }
 
     /// Stores instance `id`'s state through `History::capture_state` (spec
-    /// §4: on save, autosave and before removal; no undo step).
+    /// §4: on save, autosave and before removal; no undo step). The app
+    /// calls it before it commits a removal whose plugin state must be
+    /// kept: the host cannot capture an instance after `sync` removed it.
     pub fn capture(
         &mut self,
         history: &mut History,
@@ -875,7 +1068,9 @@ impl PluginHost {
             .collect()
     }
 
-    /// Commits gestures as undoable `SetPluginParams` commands.
+    /// Commits gestures as undoable `SetPluginParams` commands. Call
+    /// [`PluginHost::sync`] afterwards (before any undo), so the plugin's
+    /// values count as committed.
     pub fn commit_gestures(history: &mut History, gestures: &[Gesture]) -> core_model::Result<()> {
         for g in gestures {
             history.execute(
