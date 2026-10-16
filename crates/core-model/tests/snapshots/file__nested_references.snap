@@ -1,0 +1,30 @@
+---
+source: crates/core-model/tests/file.rs
+expression: summary(&d)
+---
+{
+  "flattened": [
+    "0 note 48 dest=Some(0) gc=Some((0, 2)) out=None",
+    "15360 note 50 dest=Some(0) gc=Some((0, 2)) out=None",
+    "30720 note 48 dest=Some(0) gc=Some((0, 2)) out=None",
+    "46080 note 50 dest=Some(0) gc=Some((0, 2)) out=None",
+    "61440 note 53 dest=Some(0) gc=Some((0, 2)) out=None",
+    "76800 note 55 dest=Some(0) gc=Some((0, 2)) out=None",
+    "92160 note 53 dest=Some(0) gc=Some((0, 2)) out=None",
+    "107520 note 55 dest=Some(0) gc=Some((0, 2)) out=None"
+  ],
+  "lengths": [
+    [
+      "Song",
+      122880
+    ],
+    [
+      "Verse",
+      61440
+    ],
+    [
+      "Riff",
+      61440
+    ]
+  ]
+}

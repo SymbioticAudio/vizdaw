@@ -1,0 +1,102 @@
+{
+  "format": "vizdaw-project",
+  "version": 1,
+  "document": {
+    "settings": {
+      "history_depth": 200,
+      "autosave_keep": 10,
+      "templates": {}
+    },
+    "instruments": [],
+    "outputs": [],
+    "media": [],
+    "sequences": [
+      {
+        "id": 0,
+        "name": "Song",
+        "kind": "normal",
+        "keyboard_slot": null,
+        "tempo": {
+          "points": [
+            {
+              "tick": 0,
+              "bpm": 120000,
+              "ramp": false
+            }
+          ]
+        },
+        "meter": {
+          "entries": [
+            {
+              "tick": 0,
+              "meter": {
+                "num": 4,
+                "den": 4
+              },
+              "key": {
+                "sharps": 0,
+                "minor": false
+              }
+            }
+          ]
+        },
+        "markers": [],
+        "comment": "",
+        "start_offset": 0,
+        "length": "derived",
+        "lanes": [
+          {
+            "id": 0,
+            "name": "Lane 1",
+            "midi_dest": null,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 0,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 0,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 40000,
+                      "release_velocity": 0,
+                      "duration": 7680,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 0
+          }
+        ]
+      }
+    ],
+    "counters": {
+      "seq": 1,
+      "lane": 1,
+      "event": 1,
+      "dest": 0,
+      "output": 0,
+      "media": 0,
+      "take": 1,
+      "drum_row": 0
+    }
+  }
+}

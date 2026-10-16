@@ -1,0 +1,23 @@
+[package]
+name = "core-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# `fixtures::demo_document()` and the document `Builder`.
+fixtures = []
+# Arms `rt_check` around every `Renderer::process` call.
+rt-check = []
+
+[dependencies]
+core-model = { path = "../core-model" }
+rtrb = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+core-engine = { path = ".", features = ["fixtures"] }
+im = "15"
+proptest = "1"
+insta = "1"

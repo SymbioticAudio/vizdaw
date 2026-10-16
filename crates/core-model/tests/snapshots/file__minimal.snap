@@ -1,0 +1,15 @@
+---
+source: crates/core-model/tests/file.rs
+expression: summary(&d)
+---
+{
+  "flattened": [
+    "0 note 60 dest=None gc=None out=None"
+  ],
+  "lengths": [
+    [
+      "Song",
+      61440
+    ]
+  ]
+}

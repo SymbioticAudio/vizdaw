@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (rt-check build)
+        run: cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Device test (macOS runners have a null output device)
+        if: runner.os == 'macOS'
+        run: cargo test -p platform-macos --test hal -- --ignored || echo "no output device on this runner"
+      - name: Offline render matches the fixture
+        run: |
+          cargo run -p vizdaw-play -- fixtures/demo.vizdaw --seq Song --offline "$RUNNER_TEMP/demo.txt"
+          diff fixtures/demo.offline.txt "$RUNNER_TEMP/demo.txt"
+      - name: Benchmarks compile
+        run: cargo bench --workspace --no-run
+
+  app:
+    name: app (macOS)
+    runs-on: macos-15
+    env:
+      VIZDAW_AUDIO: offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: FFI tests
+        run: cargo test -p core-ffi
+      - name: Build the FFI library and Swift bindings
+        run: scripts/build-ffi.sh
+      - name: Swift build
+        run: scripts/swift.sh build
+      - name: Swift tests
+        run: scripts/swift.sh test
+      - name: App bundle
+        run: scripts/make-app.sh

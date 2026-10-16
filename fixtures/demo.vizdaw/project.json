@@ -1,0 +1,1458 @@
+{
+  "format": "vizdaw-project",
+  "version": 1,
+  "document": {
+    "settings": {
+      "history_depth": 200,
+      "autosave_keep": 10,
+      "templates": {}
+    },
+    "instruments": [
+      {
+        "id": 0,
+        "name": "Built-in Piano",
+        "kind": {
+          "midi_endpoint": {
+            "endpoint_ref": "builtin:synth",
+            "group": 0,
+            "channel": 0
+          }
+        },
+        "default_patch": null
+      },
+      {
+        "id": 1,
+        "name": "Built-in Bass",
+        "kind": {
+          "midi_endpoint": {
+            "endpoint_ref": "builtin:synth",
+            "group": 0,
+            "channel": 1
+          }
+        },
+        "default_patch": null
+      },
+      {
+        "id": 2,
+        "name": "Built-in Drums",
+        "kind": {
+          "midi_endpoint": {
+            "endpoint_ref": "builtin:synth",
+            "group": 0,
+            "channel": 9
+          }
+        },
+        "default_patch": {
+          "program": 0,
+          "bank": null
+        }
+      }
+    ],
+    "outputs": [],
+    "media": [],
+    "sequences": [
+      {
+        "id": 0,
+        "name": "Beat",
+        "kind": "normal",
+        "keyboard_slot": null,
+        "tempo": {
+          "points": [
+            {
+              "tick": 0,
+              "bpm": 120000,
+              "ramp": false
+            }
+          ]
+        },
+        "meter": {
+          "entries": [
+            {
+              "tick": 0,
+              "meter": {
+                "num": 4,
+                "den": 4
+              },
+              "key": {
+                "sharps": 0,
+                "minor": false
+              }
+            }
+          ]
+        },
+        "markers": [],
+        "comment": "",
+        "start_offset": 0,
+        "length": "derived",
+        "lanes": [
+          {
+            "id": 0,
+            "name": "Drums",
+            "midi_dest": 2,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": {
+              "rows": [
+                {
+                  "id": 0,
+                  "name": "Kick",
+                  "note": 36,
+                  "dest": null,
+                  "show_velocity": false
+                },
+                {
+                  "id": 1,
+                  "name": "Snare",
+                  "note": 38,
+                  "dest": null,
+                  "show_velocity": false
+                },
+                {
+                  "id": 2,
+                  "name": "Closed Hat",
+                  "note": 42,
+                  "dest": null,
+                  "show_velocity": false
+                }
+              ]
+            },
+            "takes": [
+              {
+                "id": 0,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 0,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 42,
+                      "velocity": 36864,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 8,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 36,
+                      "velocity": 49152,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 1,
+                    "tick": 7680,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 42,
+                      "velocity": 24576,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 2,
+                    "tick": 15360,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 42,
+                      "velocity": 36864,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 10,
+                    "tick": 15360,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 38,
+                      "velocity": 45056,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 3,
+                    "tick": 23040,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 42,
+                      "velocity": 24576,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 4,
+                    "tick": 30720,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 42,
+                      "velocity": 36864,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 9,
+                    "tick": 30720,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 36,
+                      "velocity": 49152,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 5,
+                    "tick": 38400,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 42,
+                      "velocity": 24576,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 6,
+                    "tick": 46080,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 42,
+                      "velocity": 36864,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 11,
+                    "tick": 46080,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 38,
+                      "velocity": 45056,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 7,
+                    "tick": 53760,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 42,
+                      "velocity": 24576,
+                      "release_velocity": 0,
+                      "duration": 3840,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 0
+          }
+        ]
+      },
+      {
+        "id": 1,
+        "name": "Groove",
+        "kind": "normal",
+        "keyboard_slot": null,
+        "tempo": {
+          "points": [
+            {
+              "tick": 0,
+              "bpm": 120000,
+              "ramp": false
+            }
+          ]
+        },
+        "meter": {
+          "entries": [
+            {
+              "tick": 0,
+              "meter": {
+                "num": 4,
+                "den": 4
+              },
+              "key": {
+                "sharps": 0,
+                "minor": false
+              }
+            }
+          ]
+        },
+        "markers": [],
+        "comment": "",
+        "start_offset": 0,
+        "length": "derived",
+        "lanes": [
+          {
+            "id": 1,
+            "name": "Drums",
+            "midi_dest": 2,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 1,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 12,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "reference",
+                      "seq": 0,
+                      "length": null,
+                      "loop_count": {
+                        "count": 4
+                      },
+                      "transpose": 0
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 1
+          },
+          {
+            "id": 2,
+            "name": "Bass",
+            "midi_dest": 1,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 2,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 13,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "program",
+                      "program": 33,
+                      "bank": null
+                    }
+                  },
+                  {
+                    "id": 14,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 36,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 15,
+                    "tick": 15360,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 48,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 16,
+                    "tick": 30720,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 43,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 17,
+                    "tick": 46080,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 48,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 18,
+                    "tick": 61440,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 33,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 19,
+                    "tick": 76800,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 45,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 20,
+                    "tick": 92160,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 40,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 21,
+                    "tick": 107520,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 45,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 22,
+                    "tick": 122880,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 29,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 23,
+                    "tick": 138240,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 41,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 24,
+                    "tick": 153600,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 36,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 25,
+                    "tick": 168960,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 41,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 26,
+                    "tick": 184320,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 31,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 27,
+                    "tick": 199680,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 43,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 28,
+                    "tick": 215040,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 38,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 29,
+                    "tick": 230400,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 43,
+                      "velocity": 40960,
+                      "release_velocity": 0,
+                      "duration": 13824,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 2
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "name": "Song",
+        "kind": "normal",
+        "keyboard_slot": null,
+        "tempo": {
+          "points": [
+            {
+              "tick": 0,
+              "bpm": 120000,
+              "ramp": false
+            },
+            {
+              "tick": 614400,
+              "bpm": 120000,
+              "ramp": true
+            },
+            {
+              "tick": 737280,
+              "bpm": 90000,
+              "ramp": false
+            }
+          ]
+        },
+        "meter": {
+          "entries": [
+            {
+              "tick": 0,
+              "meter": {
+                "num": 4,
+                "den": 4
+              },
+              "key": {
+                "sharps": 0,
+                "minor": false
+              }
+            }
+          ]
+        },
+        "markers": [],
+        "comment": "",
+        "start_offset": 0,
+        "length": "derived",
+        "lanes": [
+          {
+            "id": 3,
+            "name": "Groove",
+            "midi_dest": null,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 3,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 30,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "reference",
+                      "seq": 1,
+                      "length": null,
+                      "loop_count": {
+                        "count": 1
+                      },
+                      "transpose": 0
+                    }
+                  },
+                  {
+                    "id": 31,
+                    "tick": 245760,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "reference",
+                      "seq": 1,
+                      "length": null,
+                      "loop_count": {
+                        "count": 1
+                      },
+                      "transpose": 5
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 3
+          },
+          {
+            "id": 4,
+            "name": "Chords",
+            "midi_dest": 0,
+            "audio_out": null,
+            "mute": false,
+            "solo": false,
+            "arm": false,
+            "length": null,
+            "looped": false,
+            "length_locked": false,
+            "play_quantize": null,
+            "play_shift": 0,
+            "drum": null,
+            "takes": [
+              {
+                "id": 4,
+                "name": "Take 1",
+                "events": [
+                  {
+                    "id": 32,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "program",
+                      "program": 0,
+                      "bank": null
+                    }
+                  },
+                  {
+                    "id": 33,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "cc",
+                      "index": 7,
+                      "value": 3355443200
+                    }
+                  },
+                  {
+                    "id": 34,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 35,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 64,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 36,
+                    "tick": 0,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 67,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 37,
+                    "tick": 61440,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 57,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 38,
+                    "tick": 61440,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 39,
+                    "tick": 61440,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 64,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 40,
+                    "tick": 122880,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 53,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 41,
+                    "tick": 122880,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 57,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 42,
+                    "tick": 122880,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 43,
+                    "tick": 184320,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 55,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 44,
+                    "tick": 184320,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 59,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 45,
+                    "tick": 184320,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 62,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 46,
+                    "tick": 245760,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 65,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 47,
+                    "tick": 245760,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 69,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 48,
+                    "tick": 245760,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 72,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 49,
+                    "tick": 307200,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 62,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 50,
+                    "tick": 307200,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 65,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 51,
+                    "tick": 307200,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 69,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 52,
+                    "tick": 368640,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 58,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 53,
+                    "tick": 368640,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 62,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 54,
+                    "tick": 368640,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 65,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 55,
+                    "tick": 430080,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 56,
+                    "tick": 430080,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 64,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 57,
+                    "tick": 430080,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 67,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 58,
+                    "tick": 491520,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 59,
+                    "tick": 491520,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 64,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 60,
+                    "tick": 491520,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 67,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 61,
+                    "tick": 552960,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 57,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 62,
+                    "tick": 552960,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 63,
+                    "tick": 552960,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 64,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 64,
+                    "tick": 614400,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 53,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 65,
+                    "tick": 614400,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 57,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 66,
+                    "tick": 614400,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 60,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 67,
+                    "tick": 675840,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 55,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 68,
+                    "tick": 675840,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 59,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 69,
+                    "tick": 675840,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "note",
+                      "pitch": 62,
+                      "velocity": 28672,
+                      "release_velocity": 0,
+                      "duration": 59520,
+                      "attribute": null,
+                      "per_note": []
+                    }
+                  },
+                  {
+                    "id": 70,
+                    "tick": 706560,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "pitch_bend",
+                      "value": 2415919104
+                    }
+                  },
+                  {
+                    "id": 71,
+                    "tick": 721920,
+                    "dest": null,
+                    "group_channel": null,
+                    "mute": false,
+                    "body": {
+                      "type": "pitch_bend",
+                      "value": 2147483648
+                    }
+                  }
+                ]
+              }
+            ],
+            "active_take": 4
+          }
+        ]
+      }
+    ],
+    "counters": {
+      "seq": 3,
+      "lane": 5,
+      "event": 72,
+      "dest": 3,
+      "output": 0,
+      "media": 0,
+      "take": 5,
+      "drum_row": 3
+    }
+  }
+}
