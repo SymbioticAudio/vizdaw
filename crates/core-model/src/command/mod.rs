@@ -1,15 +1,19 @@
 //! Commands: every edit is a `Command` applied by the pure [`apply`].
 
+pub mod audio;
 pub mod drum;
 pub mod event;
 pub mod lane;
 pub mod reference;
+pub mod routing;
 pub mod sequence;
 
+pub use audio::AudioCmd;
 pub use drum::DrumCmd;
 pub use event::EventCmd;
 pub use lane::LaneCmd;
 pub use reference::ReferenceCmd;
+pub use routing::RoutingCmd;
 pub use sequence::SequenceCmd;
 
 use crate::document::Document;
@@ -61,6 +65,10 @@ pub enum Command {
     Drum(DrumCmd),
     /// Reference edits.
     Reference(ReferenceCmd),
+    /// Audio-region edits.
+    Audio(AudioCmd),
+    /// Destination, output and media edits.
+    Routing(RoutingCmd),
 }
 
 impl Command {
@@ -72,6 +80,8 @@ impl Command {
             Command::Event(c) => c.name(),
             Command::Drum(c) => c.name(),
             Command::Reference(c) => c.name(),
+            Command::Audio(c) => c.name(),
+            Command::Routing(c) => c.name(),
         }
     }
 }
@@ -114,6 +124,14 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
         }
         Command::Reference(c) => {
             reference::apply(&mut d, ctx, c, &mut report)?;
+            None
+        }
+        Command::Audio(c) => {
+            audio::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::Routing(c) => {
+            routing::apply(&mut d, c, &mut report)?;
             None
         }
     };
