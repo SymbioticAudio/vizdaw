@@ -21,6 +21,14 @@ import VizDAWCore
         #expect(Formatting.time(.infinity) == "--:--.---")
     }
 
+    @Test func hugeFiniteTimeDoesNotTrap() {
+        let big = Formatting.time(.greatestFiniteMagnitude)
+        #expect(big == Formatting.time(1e300))
+        #expect(big.hasSuffix(".000") || big.contains(":"))
+        #expect(Formatting.time(-.greatestFiniteMagnitude) == "-" + big)
+        #expect(Formatting.time(9.3e15) == big)
+    }
+
     @Test func bbuPassesRustTextThrough() {
         #expect(Formatting.bbu("5.2.480") == "5.2.480")
         #expect(Formatting.bbu("0.4.0") == "0.4.0")

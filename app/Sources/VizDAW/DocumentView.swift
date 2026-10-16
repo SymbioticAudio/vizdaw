@@ -149,8 +149,9 @@ struct TransportToolbar: ToolbarContent {
                 .help("Faults and compile messages")
                 .popover(isPresented: $model.showsFaults) {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(model.transport.faults + model.transport.report, id: \.self) {
-                            Text($0)
+                        let lines = model.transport.faults + model.transport.report
+                        ForEach(Array(lines.enumerated()), id: \.offset) {
+                            Text($0.element)
                         }
                     }
                     .padding()

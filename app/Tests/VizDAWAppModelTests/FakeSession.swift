@@ -13,6 +13,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var savedPath: String?
     var lanesCalls = 0
     var renames: [(UInt64, String)] = []
+    var mutes: [(seq: UInt64, lane: UInt64, mute: Bool)] = []
     var nextSnapshot: DocSnapshot?
 
     init(_ sequences: [SeqRow], version: UInt64 = 0) {
@@ -70,7 +71,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
 
     func setLaneMute(seq: UInt64, lane: UInt64, mute: Bool) throws -> DocSnapshot {
-        commandResult()
+        mutes.append((seq, lane, mute))
+        return commandResult()
     }
 
     func setLoop(on: Bool) throws {}

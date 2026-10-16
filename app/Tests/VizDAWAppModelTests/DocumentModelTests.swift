@@ -150,6 +150,28 @@ import VizDAWCore
         m.toggleMute(lane: 31)
         #expect(f.snap.version == before + 1)
         #expect(m.alert == nil)
+        #expect(f.mutes.count == 1)
+        #expect(f.mutes.first?.seq == 3)
+        #expect(f.mutes.first?.lane == 31)
+        #expect(f.mutes.first?.mute == true)
+    }
+
+    @Test func toggleMuteUnmutesAMutedLane() throws {
+        let f = demoFake()
+        f.laneTable[3] = [lane(30, "Groove"), lane(31, "Chords", mute: true)]
+        let m = try DocumentModel(session: f)
+        m.toggleMute(lane: 31)
+        #expect(f.mutes.map(\.mute) == [false])
+    }
+
+    @Test func saveWhileUntitledSurfacesUseSaveAs() throws {
+        let f = demoFake()
+        let m = try DocumentModel(session: f)
+        #expect(m.needsSaveAs)
+        m.save()
+        #expect(m.alert?.title == "Save Failed")
+        #expect(m.alert?.message == "use Save As")
+        #expect(m.needsSaveAs)
     }
 
     @Test func failingPollsRaiseOneAlert() throws {

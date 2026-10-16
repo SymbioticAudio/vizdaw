@@ -4,16 +4,20 @@ import VizDAWCore
 /// Pure display helpers.
 public enum Formatting {
     /// `m:ss.fff`, with a leading `-` before zero (pickups).
-    /// Non-finite input gives `--:--.---`.
+    /// Non-finite input gives `--:--.---`; huge values are clamped so the
+    /// conversion to `Int64` cannot trap.
     public static func time(_ seconds: Double) -> String {
         guard seconds.isFinite else { return "--:--.---" }
-        let totalMs = Int64((abs(seconds) * 1000).rounded())
+        let totalMs = Int64(min((abs(seconds) * 1000).rounded(), maxMs))
         let sign = seconds < 0 && totalMs > 0 ? "-" : ""
         let minutes = totalMs / 60_000
         let secs = (totalMs / 1000) % 60
         let ms = totalMs % 1000
         return sign + String(format: "%d:%02d.%03d", minutes, secs, ms)
     }
+
+    /// Largest millisecond count shown (below `Int64.max`).
+    private static let maxMs = 9e18
 
     /// Bar·beat·unit as Rust formats it (`5.2.480`, `0.4.0` in a pickup,
     /// `-1.1.0` before it); empty input shows `-.-.-`.
