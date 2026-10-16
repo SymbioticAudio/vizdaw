@@ -300,7 +300,8 @@ impl Host {
     /// Makes `owner`'s plugin host the engine's insert factory (if it is
     /// not already) and activates its plugins for this engine's rate and
     /// block size.
-    fn attach(&mut self, owner: u64, plugins: Option<&mut PluginHost>) {
+    fn attach(&mut self, owner: u64, plugins: Option<&mut PluginHost>) -> bool {
+        let mut restarted = false;
         let block = self.engine.block_frames();
         if self.factory_owner != owner {
             match plugins.as_deref() {
@@ -312,10 +313,17 @@ impl Host {
         if let Some(p) = plugins {
             let (rate, max) = p.config();
             if rate != self.sample_rate || max < block {
-                p.reconfigure(self.sample_rate, block.max(max));
+                // Processors still in the engine are made for the old
+                // configuration: the engine drops them (they come back and
+                // are activated again; the host then owes a load).
+                for id in p.reconfigure(self.sample_rate, block.max(max)) {
+                    self.engine.restart_instance(id);
+                    restarted = true;
+                }
             }
         }
         plugins::set_config(self.sample_rate, block);
+        restarted
     }
 
     fn load(&mut self, doc: &Document, seq: SeqId, looped: bool) -> Result<(), VizError> {
@@ -531,7 +539,7 @@ pub fn play(
     let host = slot.as_mut().ok_or_else(|| VizError::Internal {
         message: "engine host missing".into(),
     })?;
-    host.attach(owner, plugins.as_deref_mut());
+    let restarted = host.attach(owner, plugins.as_deref_mut());
     if let Some(p) = plugins {
         // Slots still loading play as placeholders; `service` loads again
         // once they are in.
@@ -543,6 +551,9 @@ pub fn play(
         host.engine.locate_tick(start.unwrap_or(Tick::ZERO))?;
         host.owner = owner;
         host.seq = seq;
+    } else if restarted {
+        // Resumed with restarted instances: compile their placeholders.
+        host.load(doc, seq, looped)?;
     }
     host.faults.clear();
     host.engine.play()?;

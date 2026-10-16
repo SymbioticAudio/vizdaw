@@ -268,3 +268,39 @@ fn the_live_engine_uses_the_default_worker_count() {
     s.play(song).unwrap();
     assert_eq!(vizdaw_ffi::host::engine_workers(), Some(0));
 }
+
+#[test]
+fn reentering_the_registry_is_busy_not_a_panic() {
+    let _g = serial();
+    let (_d, path, _song, id) = project("vizdaw.test.gain");
+    let a = open(&path);
+    let b = open(&path);
+    idle_until(&b, |s| slot(s, id).status == SlotStatus::Live);
+    let hosts = vizdaw_ffi::plugins::host_count();
+    let mut b = Some(b);
+    // A nested run loop inside a plugin call: the timer ticks, another
+    // call asks for a host, a session is dropped.
+    let inner = vizdaw_ffi::plugins::with(0, |_| {
+        let u = a.idle().unwrap();
+        assert!(u.snapshot.is_none() && !u.slots_changed && u.problems.is_empty());
+        assert!(matches!(
+            vizdaw_ffi::plugins::with(0, |_| ()),
+            Err(vizdaw_ffi::VizError::Busy { .. })
+        ));
+        assert!(matches!(
+            a.plugin_slots(),
+            Err(vizdaw_ffi::VizError::Busy { .. })
+        ));
+        drop(b.take());
+        assert_eq!(vizdaw_ffi::plugins::pending_closes(), 1);
+    });
+    assert!(inner.is_ok());
+    // The deferred close runs on the next tick.
+    assert_eq!(vizdaw_ffi::plugins::host_count(), hosts);
+    a.idle().unwrap();
+    assert_eq!(vizdaw_ffi::plugins::pending_closes(), 0);
+    assert_eq!(vizdaw_ffi::plugins::host_count(), hosts - 1);
+    assert_eq!(closing_hosts_waiting(), 0);
+    // The remaining session is unharmed.
+    idle_until(&a, |s| slot(s, id).status == SlotStatus::Live);
+}

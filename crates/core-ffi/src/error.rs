@@ -36,6 +36,13 @@ pub enum VizError {
         /// Why.
         message: String,
     },
+    /// A plugin call is already running on this thread (a nested run
+    /// loop re-entered the FFI); try again later.
+    #[error("{message}")]
+    Busy {
+        /// Why.
+        message: String,
+    },
     /// A bug: a caught panic or an impossible state.
     #[error("internal error: {message}")]
     Internal {

@@ -162,7 +162,7 @@ public final class DocumentModel {
         guard let u = try? session.idle() else { return }
         if let s = u.snapshot { apply(s) }
         if u.slotsChanged { slotsVersion += 1 }
-        paramsChanged.formUnion(u.paramsChanged)
+        if !u.paramsChanged.isEmpty { paramsChanged.formUnion(u.paramsChanged) }
         if !u.problems.isEmpty {
             pluginProblems.append(contentsOf: u.problems)
             if pluginProblems.count > 50 { pluginProblems.removeFirst(pluginProblems.count - 50) }

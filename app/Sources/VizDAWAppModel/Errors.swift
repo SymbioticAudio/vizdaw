@@ -36,6 +36,7 @@ extension VizError {
         case let .Io(message): message
         case let .Engine(message): message
         case let .NoDevice(message): "No audio output: \(message)"
+        case let .Busy(message): message
         case let .Internal(message): "Internal error: \(message)"
         }
     }

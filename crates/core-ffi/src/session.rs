@@ -77,7 +77,8 @@ impl Inner {
     /// fails the edit: it becomes a sticky fault.
     fn reload_host(&mut self, id: u64) {
         let (doc, looped) = (self.history.doc(), self.looped);
-        let r = ffi_guard(|| plugins::with(id, |p| host::reload(id, doc, looped, p)));
+        let r =
+            ffi_guard(|| plugins::with(id, |p| host::reload(id, doc, looped, p)).and_then(|r| r));
         self.reload_fault = match r {
             Ok(()) => None,
             Err(e) => {
@@ -147,7 +148,7 @@ impl Session {
     fn with(doc: Document, path: Option<PathBuf>) -> Result<Arc<Session>, VizError> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         plugins::create(id)?;
-        plugins::with(id, |p| p.map(|p| p.sync(&doc)));
+        let _ = plugins::with(id, |p| p.map(|p| p.sync(&doc)));
         Ok(Arc::new(Session {
             id,
             inner: Mutex::new(Inner::new(doc, path)),
@@ -328,7 +329,8 @@ impl Session {
             let looped = inner.looped;
             plugins::with(self.id, |p| {
                 host::play(self.id, inner.doc(), id, start, looped, p)
-            })?;
+            })
+            .and_then(|r| r)?;
             inner.reload_fault = None;
             inner.cursor = None;
             inner.cursor_seq = Some(id);
@@ -367,7 +369,7 @@ impl Session {
         self.transport_call(|| {
             let inner = lock(&self.inner);
             let doc = inner.doc();
-            let state = plugins::with(self.id, |p| host::state(self.id, doc, p))?;
+            let state = plugins::with(self.id, |p| host::state(self.id, doc, p)).and_then(|r| r)?;
             Ok(match state {
                 Some(mut h) => TransportState {
                     playing: h.playing,
@@ -412,19 +414,25 @@ impl Session {
     /// gestures into undo steps.
     pub fn idle(&self) -> Result<IdleUpdate, VizError> {
         ffi_guard(|| {
+            let nothing = || IdleUpdate {
+                snapshot: None,
+                slots_changed: false,
+                params_changed: Vec::new(),
+                problems: Vec::new(),
+            };
+            // A nested run loop inside a plugin call: skip this tick (before
+            // taking the session lock, which that call may hold).
+            if plugins::is_busy() {
+                return Ok(nothing());
+            }
             plugins::tick_closing();
             let mut inner = lock(&self.inner);
             let report = {
                 let doc = inner.doc();
                 plugins::with(self.id, |p| p.map(|p| host::service(self.id, doc, p)))
             };
-            let Some(r) = report else {
-                return Ok(IdleUpdate {
-                    snapshot: None,
-                    slots_changed: false,
-                    params_changed: Vec::new(),
-                    problems: Vec::new(),
-                });
+            let Ok(Some(r)) = report else {
+                return Ok(nothing());
             };
             let mut problems: Vec<String> = Vec::new();
             for (id, why) in &r.failed {
@@ -458,9 +466,7 @@ impl Session {
     pub fn plugin_slots(&self) -> Result<Vec<SlotRow>, VizError> {
         ffi_guard(|| {
             let inner = lock(&self.inner);
-            Ok(plugins::with(self.id, |p| {
-                plugins::slot_rows(inner.doc(), p)
-            }))
+            plugins::with(self.id, |p| plugins::slot_rows(inner.doc(), p))
         })
     }
 }
@@ -488,7 +494,7 @@ impl Session {
     /// The sample rate this session's plugins are activated for (test
     /// hook).
     pub fn debug_plugin_rate(&self) -> Result<f64, VizError> {
-        ffi_guard(|| Ok(plugins::with(self.id, |p| p.map_or(0.0, |p| p.config().0))))
+        ffi_guard(|| plugins::with(self.id, |p| p.map_or(0.0, |p| p.config().0)))
     }
 
     /// Panics while holding the session lock (test hook): poisons it.
@@ -505,14 +511,8 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // The engine may still hold this session's processors: when its
-        // plugin host feeds the engine, the engine goes first (it gives
-        // them back), then the plugin host.
-        if plugins::has_plugins(self.id) && host::factory_owner() == Some(self.id) {
-            host::reset();
-        } else {
-            host::release(self.id);
-        }
-        plugins::close(self.id);
+        // The engine goes first when this session's plugin host feeds it;
+        // queued if a plugin call is running (re-entrancy, plugins.rs).
+        plugins::close_session(self.id);
     }
 }
