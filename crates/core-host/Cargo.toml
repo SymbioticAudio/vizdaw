@@ -9,9 +9,12 @@ rust-version.workspace = true
 core-model = { path = "../core-model" }
 core-engine = { path = "../core-engine" }
 rtrb = "0.4"
+clack-host = "0.2"
+clack-extensions = { version = "0.2", features = ["clack-host", "audio-ports", "note-ports", "params", "state", "latency", "gui", "tail", "log", "thread-check"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
 core-engine = { path = "../core-engine", features = ["fixtures"] }
+test-plugins = { path = "../test-plugins" }

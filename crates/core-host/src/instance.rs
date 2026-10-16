@@ -49,7 +49,7 @@ pub trait PluginEditor {
     /// Asks for a new size; returns the size the plugin accepted.
     fn resize(&mut self, width: u32, height: u32) -> Result<(u32, u32), HostError>;
     /// Whether the user may resize it.
-    fn can_resize(&self) -> bool;
+    fn can_resize(&mut self) -> bool;
     /// Hides and detaches it (also on drop).
     fn close(&mut self);
 }
@@ -81,7 +81,7 @@ pub trait PluginInstance {
     /// A parameter's current value, when the plugin reports one.
     fn param_value(&mut self, id: ParamId) -> Option<f64>;
     /// The plugin's editor, if it has one.
-    fn editor(&mut self) -> Option<Box<dyn PluginEditor + '_>>;
+    fn editor(&mut self) -> Option<&mut dyn PluginEditor>;
     /// Main-thread servicing (`host_idle`, 60 Hz): runs callbacks the
     /// plugin asked for and reports what it requested.
     fn idle(&mut self) -> InstanceEvents;
