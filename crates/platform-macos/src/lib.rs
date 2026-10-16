@@ -16,3 +16,4 @@
 )]
 
 pub mod dls;
+pub mod midi;
