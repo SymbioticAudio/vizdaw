@@ -15,14 +15,14 @@ use core_host::{
     Prepared, ProcessCtx, Tail,
 };
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
-use ffi::{ComponentInfo, GestureListener, InputFeed, Unit};
+use ffi::{ComponentInfo, Feed, GestureListener, Unit};
 use objc2_audio_toolbox::{
     AudioUnitParameterOptions, kAudioUnitScope_Input, kAudioUnitScope_Output,
     kAudioUnitType_Effect, kAudioUnitType_MusicDevice, kAudioUnitType_MusicEffect,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 /// Component types VizDAW hosts: effects, instruments and MIDI-driven
@@ -227,15 +227,71 @@ fn configure(unit: &Unit, kind: u32, sr: f64, max: u32) -> Result<(), HostError>
     Ok(())
 }
 
+/// The last value the host itself wrote to each watched parameter, so the
+/// gesture listener can tell the plugin's UI from an echo of the host's own
+/// `AudioUnitSetParameter` (AU v3 units bridged to the C API may notify
+/// listeners of those). Fixed at creation: writing is lock- and
+/// allocation-free (RT).
+#[derive(Debug)]
+struct HostWrites {
+    /// Watched parameter ids, sorted.
+    ids: Box<[u32]>,
+    /// `f32` bits of the last value written per id; NaN when none.
+    values: Box<[AtomicU32]>,
+}
+
+impl HostWrites {
+    fn new(mut ids: Vec<u32>) -> HostWrites {
+        ids.sort_unstable();
+        ids.dedup();
+        let values = ids
+            .iter()
+            .map(|_| AtomicU32::new(f32::NAN.to_bits()))
+            .collect();
+        HostWrites {
+            ids: ids.into_boxed_slice(),
+            values,
+        }
+    }
+
+    fn slot(&self, id: u32) -> Option<&AtomicU32> {
+        self.ids
+            .binary_search(&id)
+            .ok()
+            .and_then(|i| self.values.get(i))
+    }
+
+    /// Whether the listener watches `id` (a writable parameter).
+    fn watches(&self, id: u32) -> bool {
+        self.slot(id).is_some()
+    }
+
+    /// Notes a value the host wrote. // RT
+    fn note(&self, id: u32, value: f32) {
+        if let Some(s) = self.slot(id) {
+            s.store(value.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Whether `value` is what the host last wrote to `id`.
+    fn is_echo(&self, id: u32, value: f32) -> bool {
+        self.slot(id)
+            .is_some_and(|s| s.load(Ordering::Relaxed) == value.to_bits())
+    }
+}
+
 /// A loaded AU (main-thread half).
 pub struct AuInstance {
+    // Declared first so it is dropped first: the listener's registrations
+    // go before the unit is disposed.
+    listener: Option<GestureListener>,
     unit: Arc<Unit>,
     kind: u32,
     info: PluginInfo,
     config: Option<(f64, u32)>,
     active: bool,
     latency: Arc<AtomicBool>,
-    listener: Option<GestureListener>,
+    writes: Arc<HostWrites>,
 }
 
 impl std::fmt::Debug for AuInstance {
@@ -268,10 +324,24 @@ impl AuInstance {
             active: false,
             latency,
             listener: None,
+            writes: Arc::new(HostWrites::new(Vec::new())),
         };
         me.read_info();
-        let ids: Vec<u32> = me.unit.parameter_ids();
+        // Only parameters a user can change (writable, not meters): a
+        // read-only value moving is not a gesture.
+        let ids: Vec<u32> = me
+            .unit
+            .parameter_ids()
+            .into_iter()
+            .filter(|id| {
+                me.unit.parameter_info(*id).is_some_and(|i| {
+                    i.4.contains(AudioUnitParameterOptions::Flag_IsWritable)
+                        && !i.4.contains(AudioUnitParameterOptions::Flag_MeterReadOnly)
+                })
+            })
+            .collect();
         me.listener = GestureListener::new(&me.unit, &ids).ok();
+        me.writes = Arc::new(HostWrites::new(ids));
         Ok(me)
     }
 
@@ -372,8 +442,8 @@ impl PluginInstance for AuInstance {
         if self.active {
             return Err(HostError::ActivateFailed("already active".into()));
         }
-        let mut feed = Box::new(InputFeed::new(max_frames));
-        let refcon = std::ptr::from_mut::<InputFeed>(&mut feed).cast::<std::ffi::c_void>();
+        let feed = Feed::new(max_frames);
+        let refcon = feed.refcon();
         // The input callbacks are set while uninitialized: some units take
         // their connections only at initialization.
         self.unit.uninitialize();
@@ -387,8 +457,12 @@ impl PluginInstance for AuInstance {
         self.config = Some((sample_rate, max_frames));
         self.read_info();
         self.active = true;
+        // Initializing may itself post a latency notification: what matters
+        // is a change after this point.
+        self.latency.store(false, Ordering::Release);
         Ok(Box::new(AuProcessor {
             unit: Arc::clone(&self.unit),
+            writes: Arc::clone(&self.writes),
             feed,
             sample_time: 0.0,
             out_counts: self
@@ -403,6 +477,10 @@ impl PluginInstance for AuInstance {
 
     fn deactivate(&mut self, processor: Box<dyn AudioProcessor>) {
         drop(processor);
+        // Uninitialized (on the main thread) it cannot be rendered with the
+        // input callbacks that pointed at the processor's feed; `activate`
+        // sets them again.
+        self.unit.uninitialize();
         self.active = false;
     }
 
@@ -421,6 +499,7 @@ impl PluginInstance for AuInstance {
     fn set_params(&mut self, values: &[(ParamId, f64)]) -> Result<(), HostError> {
         for (id, v) in values {
             if let Ok(id) = u32::try_from(id.0) {
+                self.writes.note(id, *v as f32);
                 self.unit.set_param(id, *v as f32, 0);
             }
         }
@@ -440,8 +519,16 @@ impl PluginInstance for AuInstance {
     }
 
     fn idle(&mut self) -> InstanceEvents {
+        // Units post the notification freely (on initialization, on any
+        // reconfiguration): only a different latency is a change.
+        let notified = self.latency.swap(false, Ordering::AcqRel);
+        let latency_changed = notified && {
+            let sr = self.config.map_or(48_000.0, |c| c.0);
+            let now = (self.unit.latency() * sr).round().max(0.0) as u32;
+            now != self.info.latency
+        };
         InstanceEvents {
-            latency_changed: self.latency.swap(false, Ordering::AcqRel),
+            latency_changed,
             ..InstanceEvents::default()
         }
     }
@@ -450,11 +537,15 @@ impl PluginInstance for AuInstance {
         let Some(l) = &self.listener else {
             return Vec::new();
         };
+        let writes = &self.writes;
         l.take()
             .into_iter()
-            .filter_map(|(kind, id, value)| {
-                let id = ParamId(u64::from(id));
+            .filter(|(_, id, _)| writes.watches(*id))
+            .filter_map(|(kind, raw, value)| {
+                let id = ParamId(u64::from(raw));
                 match kind {
+                    // An echo of the host's own write is not the user.
+                    0 if writes.is_echo(raw, value) => None,
                     0 => Some(ParamEvent::Value(id, f64::from(value))),
                     1 => Some(ParamEvent::Begin(id)),
                     2 => Some(ParamEvent::End(id)),
@@ -468,7 +559,8 @@ impl PluginInstance for AuInstance {
 /// The real-time half of an [`AuInstance`].
 pub struct AuProcessor {
     unit: Arc<Unit>,
-    feed: Box<InputFeed>,
+    writes: Arc<HostWrites>,
+    feed: Feed,
     sample_time: f64,
     out_counts: Vec<usize>,
     max_frames: u32,
@@ -485,18 +577,22 @@ impl AudioProcessor for AuProcessor {
         let n = ctx.frames.min(self.max_frames);
         for p in ctx.params_in {
             if let Ok(id) = u32::try_from(p.id.0) {
-                self.unit.set_param(id, p.value as f32, p.frame.min(n));
+                self.writes.note(id, p.value as f32);
+                self.unit
+                    .set_param(id, p.value as f32, p.frame.min(n.saturating_sub(1)));
             }
         }
         for e in ctx.events {
             let [s, d1, d2] = e.bytes;
             self.unit.midi(s, d1, d2, e.frame.min(n.saturating_sub(1)));
         }
-        self.feed.buses = [
-            (ctx.input.as_mut_ptr(), ctx.input.len()),
-            (ctx.sidechain.as_mut_ptr(), ctx.sidechain.len()),
-        ];
-        self.feed.frames = n as usize;
+        self.feed.set(
+            [
+                (ctx.input.as_mut_ptr(), ctx.input.len()),
+                (ctx.sidechain.as_mut_ptr(), ctx.sidechain.len()),
+            ],
+            n as usize,
+        );
         let mut ok = true;
         let mut rest: &mut [Box<[f32]>] = ctx.outputs;
         for (bus, count) in self.out_counts.iter().enumerate() {
@@ -505,7 +601,7 @@ impl AudioProcessor for AuProcessor {
             rest = tail;
             ok &= self.unit.render(bus as u32, self.sample_time, n, port);
         }
-        self.feed.buses = [(std::ptr::null_mut(), 0); 2];
+        self.feed.set([(std::ptr::null_mut(), 0); 2], 0);
         self.sample_time += f64::from(n);
         if ok {
             ProcessStatus::Ok

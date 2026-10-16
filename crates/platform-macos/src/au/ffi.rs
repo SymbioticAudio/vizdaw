@@ -12,13 +12,13 @@ use objc2_audio_toolbox::{
     AudioComponentInstantiationOptions, AudioUnit, AudioUnitAddPropertyListener,
     AudioUnitEventType, AudioUnitGetParameter, AudioUnitGetProperty, AudioUnitGetPropertyInfo,
     AudioUnitInitialize, AudioUnitParameter, AudioUnitParameterInfo, AudioUnitParameterOptions,
-    AudioUnitPropertyID, AudioUnitRender, AudioUnitRenderActionFlags, AudioUnitReset,
-    AudioUnitScope, AudioUnitSetParameter, AudioUnitSetProperty, AudioUnitUninitialize,
-    MusicDeviceMIDIEvent, kAudioUnitProperty_ClassInfo, kAudioUnitProperty_ElementCount,
-    kAudioUnitProperty_Latency, kAudioUnitProperty_MaximumFramesPerSlice,
-    kAudioUnitProperty_ParameterInfo, kAudioUnitProperty_ParameterList,
-    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat,
-    kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
+    AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender, AudioUnitRenderActionFlags,
+    AudioUnitReset, AudioUnitScope, AudioUnitSetParameter, AudioUnitSetProperty,
+    AudioUnitUninitialize, MusicDeviceMIDIEvent, kAudioUnitProperty_ClassInfo,
+    kAudioUnitProperty_ElementCount, kAudioUnitProperty_Latency,
+    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_ParameterInfo,
+    kAudioUnitProperty_ParameterList, kAudioUnitProperty_SetRenderCallback,
+    kAudioUnitProperty_StreamFormat, kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
@@ -32,8 +32,8 @@ use objc2_core_foundation::{
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::channel;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// Most channels of one bus VizDAW renders (the graph is stereo).
@@ -175,9 +175,25 @@ pub(crate) fn instantiate_async(
     timeout: Duration,
 ) -> Result<Unit, String> {
     let (tx, rx) = channel::<(usize, i32)>();
-    let tx = Mutex::new(Some(tx));
+    // The completion may arrive after the wait gave up: it then owns the
+    // instance and disposes it. The flag and the send happen under one lock,
+    // so an instance is either received below or disposed, never lost.
+    let state = Arc::new(Mutex::new(Completion {
+        tx: Some(tx),
+        abandoned: false,
+    }));
+    let completion = Arc::clone(&state);
     let done = RcBlock::new(move |unit: AudioUnit, status: i32| {
-        if let Some(tx) = tx.lock().ok().and_then(|mut g| g.take()) {
+        let mut g = completion.lock().unwrap_or_else(PoisonError::into_inner);
+        if g.abandoned {
+            if !unit.is_null() {
+                // SAFETY: the instance was just created for this request,
+                // which was abandoned: nothing else refers to it.
+                unsafe { AudioComponentInstanceDispose(unit) };
+            }
+            return;
+        }
+        if let Some(tx) = g.tx.take() {
             let _ = tx.send((unit as usize, status));
         }
     });
@@ -189,17 +205,36 @@ pub(crate) fn instantiate_async(
     // SAFETY: `c` is valid; the block is retained by the system until it is
     // called.
     unsafe { AudioComponentInstantiate(c.0, opts, &done) };
-    let (unit, status) = rx
-        .recv_timeout(timeout)
-        .map_err(|_| "instantiation timed out".to_string())?;
-    os("AudioComponentInstantiate", status)?;
+    let (unit, status) = match rx.recv_timeout(timeout) {
+        Ok(v) => v,
+        Err(_) => {
+            let mut g = state.lock().unwrap_or_else(PoisonError::into_inner);
+            g.abandoned = true;
+            // It may have been sent between the timeout and the lock.
+            rx.try_recv()
+                .map_err(|_| "instantiation timed out".to_string())?
+        }
+    };
     if unit == 0 {
+        os("AudioComponentInstantiate", status)?;
         return Err("AudioComponentInstantiate gave no instance".into());
+    }
+    if let Err(e) = os("AudioComponentInstantiate", status) {
+        // SAFETY: an instance came with an error status; it is ours and
+        // unused.
+        unsafe { AudioComponentInstanceDispose(unit as AudioUnit) };
+        return Err(e);
     }
     Ok(Unit {
         unit: unit as AudioUnit,
         latency_flag: None,
     })
+}
+
+/// What the v3 completion handler shares with the waiting loader.
+struct Completion {
+    tx: Option<Sender<(usize, i32)>>,
+    abandoned: bool,
 }
 
 fn stream(sample_rate: f64, channels: u32) -> AudioStreamBasicDescription {
@@ -467,6 +502,12 @@ impl Unit {
                 .collect();
             String::from_utf8_lossy(&bytes).into_owned()
         };
+        if info.unit == AudioUnitParameterUnit::CustomUnit
+            && flags.contains(AudioUnitParameterOptions::Flag_CFNameRelease)
+        {
+            // The host owns the custom unit name too; release it.
+            drop(cfstring(info.unitName));
+        }
         Some((
             name,
             info.minValue,
@@ -570,8 +611,9 @@ impl Unit {
         })
     }
 
-    /// Renders `frames` frames of output bus `bus` into `channels` (each at
-    /// least `frames` long), at `sample_time`. False when the unit failed.
+    /// Renders `frames` frames of output bus `bus` into `channels` (fewer
+    /// when a channel is shorter), at `sample_time`. False when the unit
+    /// failed.
     /// // RT
     pub(crate) fn render(
         &self,
@@ -581,6 +623,15 @@ impl Unit {
         channels: &mut [Box<[f32]>],
     ) -> bool {
         let n = channels.len().min(MAX_BUS_CHANNELS);
+        // Never let the unit write past a channel: render no more frames
+        // than the shortest one holds.
+        let shortest = channels
+            .iter()
+            .take(n)
+            .map(|c| u32::try_from(c.len()).unwrap_or(u32::MAX))
+            .min()
+            .unwrap_or(frames);
+        let frames = frames.min(shortest);
         let bytes = frames * 4;
         let empty = AudioBuffer {
             mNumberChannels: 1,
@@ -598,7 +649,8 @@ impl Unit {
         let mut stamp = timestamp(sample_time);
         let mut flags = AudioUnitRenderActionFlags(0);
         // SAFETY: `list` describes `n` buffers of `frames` f32 owned by
-        // `channels`, valid for the call; `stamp` and `flags` are valid. //
+        // `channels` (each at least `frames` long, clamped above), valid for
+        // the call; `stamp` and `flags` are valid. //
         // RT
         let st = unsafe {
             AudioUnitRender(
@@ -662,29 +714,63 @@ fn timestamp(sample_time: f64) -> AudioTimeStamp {
 /// Where the input callback reads from: set by the processor before each
 /// render. Bus 0 is the main input, bus 1 the sidechain.
 #[derive(Debug)]
-pub(crate) struct InputFeed {
+struct InputFeed {
     /// `(pointer, channels)` per bus; null means silence.
-    pub buses: [(*mut Box<[f32]>, usize); 2],
+    buses: [(*mut Box<[f32]>, usize); 2],
     /// Frames available in each channel.
-    pub frames: usize,
+    frames: usize,
     /// Silence, for buses with nothing routed (at least `frames` long).
-    pub zeros: Box<[f32]>,
+    zeros: Box<[f32]>,
 }
 
-impl InputFeed {
+/// Owns an [`InputFeed`] on the heap. The unit's input callbacks get its
+/// raw address (`refcon`) and only ever go through that pointer, so moving
+/// the handle or writing through it never invalidates what they hold.
+#[derive(Debug)]
+pub(crate) struct Feed(NonNull<InputFeed>);
+
+// SAFETY: the feed is touched by its owner (the processor) and by the render
+// callback inside the owner's `AudioUnitRender` call: one thread at a time.
+unsafe impl Send for Feed {}
+
+impl Feed {
     /// A feed with silence for blocks of up to `max_frames`.
-    pub(crate) fn new(max_frames: u32) -> InputFeed {
-        InputFeed {
+    pub(crate) fn new(max_frames: u32) -> Feed {
+        let feed = Box::new(InputFeed {
             buses: [(ptr::null_mut(), 0); 2],
             frames: 0,
             zeros: vec![0.0; max_frames as usize].into_boxed_slice(),
+        });
+        Feed(NonNull::from(Box::leak(feed)))
+    }
+
+    /// The callbacks' `refcon`.
+    pub(crate) fn refcon(&self) -> *mut c_void {
+        self.0.as_ptr().cast::<c_void>()
+    }
+
+    /// Points the callbacks at `buses` (`(channels, count)` for the main
+    /// input and the sidechain), `frames` long; null for silence. // RT
+    pub(crate) fn set(&mut self, buses: [(*mut Box<[f32]>, usize); 2], frames: usize) {
+        let p = self.0.as_ptr();
+        // SAFETY: the feed is alive (owned by `self`) and no callback runs
+        // now: they run only inside `AudioUnitRender`, which the owner is
+        // not in while it holds `&mut self`. // RT
+        unsafe {
+            (*p).buses = buses;
+            (*p).frames = frames;
         }
     }
 }
 
-// SAFETY: the raw pointers are only dereferenced by the render callback
-// while the processor that owns the feed renders (one thread at a time).
-unsafe impl Send for InputFeed {}
+impl Drop for Feed {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from `Box::leak` in `new` and is freed
+        // once, here; the unit is not rendered any more (its processor is
+        // being dropped).
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+    }
+}
 
 /// The AudioUnit input callback: hands the unit our input channels (when
 /// its buffers are null) or copies them into its buffers. // RT
@@ -696,9 +782,14 @@ unsafe extern "C-unwind" fn render_input(
     frames: u32,
     io_data: *mut AudioBufferList,
 ) -> i32 {
-    // SAFETY: `refcon` is the processor's boxed `InputFeed`, alive and not
-    // otherwise borrowed while the processor is inside `AudioUnitRender`.
-    let feed = unsafe { refcon.cast::<InputFeed>().as_mut() };
+    let feed = refcon.cast::<InputFeed>().as_ptr();
+    // SAFETY: `refcon` is the processor's live `InputFeed` (see `Feed`),
+    // not written while the processor is inside `AudioUnitRender`; only
+    // plain fields are read, through the raw pointer.
+    let (buses, avail, zeros, zeros_len) = unsafe {
+        let z: &mut Box<[f32]> = &mut (*feed).zeros;
+        ((*feed).buses, (*feed).frames, z.as_mut_ptr(), z.len())
+    };
     let Some(list) = NonNull::new(io_data) else {
         return 0;
     };
@@ -711,29 +802,32 @@ unsafe extern "C-unwind" fn render_input(
             count,
         )
     };
-    let (src, channels) = feed
-        .buses
+    let (src, channels) = buses
         .get(bus as usize)
         .copied()
         .unwrap_or((ptr::null_mut(), 0));
-    let n = (frames as usize).min(feed.frames);
+    let n = (frames as usize).min(avail);
     for (k, b) in buffers.iter_mut().enumerate() {
         // A mono source feeds every channel; nothing routed is silence.
-        let chan: Option<&mut Box<[f32]>> = if src.is_null() || channels == 0 {
+        // Either way several of the unit's buffers may be lent the same
+        // memory: that is fine because a unit only reads input it was lent
+        // (the AUBase contract when it passes null buffers).
+        let chan: Option<&mut [f32]> = if src.is_null() || channels == 0 {
             None
         } else {
             // SAFETY: `src` points at `channels` boxed channels owned by the
-            // processor, valid and unaliased during the render.
-            Some(unsafe { &mut *src.add(k.min(channels - 1)) })
+            // processor's context, valid and unaliased during the render;
+            // the reference ends with this iteration.
+            Some(unsafe { &mut **src.add(k.min(channels - 1)) })
         };
         if b.mData.is_null() {
             // The unit wants our buffer: lend it the channel (or silence).
-            let data: &mut [f32] = match chan {
-                Some(c) => c,
-                None => &mut feed.zeros,
+            let (data, len) = match chan {
+                Some(c) => (c.as_mut_ptr(), c.len()),
+                None => (zeros, zeros_len),
             };
-            b.mData = data.as_mut_ptr().cast::<c_void>();
-            b.mDataByteSize = (n.min(data.len()) * 4) as u32;
+            b.mData = data.cast::<c_void>();
+            b.mDataByteSize = (n.min(len) * 4) as u32;
             continue;
         }
         let want = (frames as usize).min(b.mDataByteSize as usize / 4);

@@ -215,3 +215,60 @@ fn ui_gestures_are_captured() {
     );
     assert_eq!(inst.param_value(ParamId(0)), Some(25.0));
 }
+
+#[test]
+fn it_activates_again_after_a_deactivation() {
+    let mut inst = load(DELAY);
+    inst.set_params(&[(ParamId(0), 0.0)]).unwrap();
+    for round in 0..3 {
+        let mut p = inst.activate(48_000.0, N as u32).unwrap();
+        assert!(inst.is_active());
+        let mut b = Block::new(2, 2, 0.5);
+        assert_eq!(b.run(p.as_mut()), ProcessStatus::Ok, "round {round}");
+        assert!(
+            b.outputs[0].iter().all(|x| (*x - 0.5).abs() < 1e-4),
+            "round {round}: {:?}",
+            &b.outputs[0][..4]
+        );
+        inst.deactivate(p);
+        assert!(!inst.is_active());
+    }
+    // Re-initializing is not a latency change.
+    assert!(!inst.idle().latency_changed);
+}
+
+/// Gestures until an `End` arrives (or two seconds pass).
+fn gestures_until_end(inst: &mut AuInstance) -> Vec<ParamEvent> {
+    let start = Instant::now();
+    let mut got = Vec::new();
+    while !got.iter().any(|e| matches!(e, ParamEvent::End(_)))
+        && start.elapsed() < Duration::from_secs(2)
+    {
+        got.extend(inst.gestures());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    got
+}
+
+#[test]
+fn read_only_parameters_and_host_echoes_are_not_gestures() {
+    let mut inst = load(DYNAMICS);
+    let meter = inst
+        .info()
+        .params
+        .iter()
+        .find(|p| !p.automatable)
+        .map(|p| p.id)
+        .expect("the dynamics processor has read-only meters");
+    inst.simulate_ui_gesture(meter, 1.0);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(inst.gestures(), Vec::new(), "a meter is not the user");
+    // A value equal to what the host just wrote is its own echo.
+    let mut delay = load(DELAY);
+    delay.set_params(&[(ParamId(0), 30.0)]).unwrap();
+    delay.simulate_ui_gesture(ParamId(0), 30.0);
+    assert_eq!(
+        gestures_until_end(&mut delay),
+        vec![ParamEvent::Begin(ParamId(0)), ParamEvent::End(ParamId(0))]
+    );
+}

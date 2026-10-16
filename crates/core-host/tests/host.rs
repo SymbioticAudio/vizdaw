@@ -334,6 +334,9 @@ struct Script {
     events: Mutex<VecDeque<ParamEvent>>,
     /// Ask for a restart at the next idle.
     restart: AtomicBool,
+    /// Events the instance reports from the main thread (as AU listeners
+    /// do) at the next `gestures()`.
+    ui: Mutex<VecDeque<ParamEvent>>,
 }
 
 impl Script {
@@ -498,6 +501,15 @@ impl PluginInstance for FakeInstance {
             ..InstanceEvents::default()
         }
     }
+    fn gestures(&mut self) -> Vec<ParamEvent> {
+        let events: Vec<ParamEvent> = self.script.ui.lock().unwrap().drain(..).collect();
+        for e in &events {
+            if let ParamEvent::Value(p, v) = e {
+                self.script.held.lock().unwrap().insert(*p, *v);
+            }
+        }
+        events
+    }
 }
 
 /// The demo with the scripted plugin as an insert on the synth's strip,
@@ -569,6 +581,28 @@ fn a_drag_in_the_plugin_is_never_fought_and_its_undo_restores_the_base() {
     host.sync(hist.doc());
     peak(&mut be, 512);
     assert_eq!(script.held(GAIN), 1.0);
+    drop(engine);
+}
+
+#[test]
+fn main_thread_gestures_from_the_instance_are_reported_by_idle() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    script.ui.lock().unwrap().extend([
+        ParamEvent::Begin(GAIN),
+        ParamEvent::Value(GAIN, 0.7),
+        ParamEvent::End(GAIN),
+    ]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(r.gestures.len(), 1);
+    assert_eq!(r.gestures[0].slot, id);
+    assert_eq!(r.gestures[0].values, vec![(GAIN, 0.7)]);
+    PluginHost::commit_gestures(&mut hist, &r.gestures).unwrap();
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(gain_params(&hist, id), vec![(GAIN, 0.7)]);
+    assert_eq!(script.held(GAIN), 0.7);
     drop(engine);
 }
 
