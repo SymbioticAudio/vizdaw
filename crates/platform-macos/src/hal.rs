@@ -307,11 +307,35 @@ struct RtContext {
     poisoned: bool,
 }
 
+/// The `mNumberBuffers` buffers of `list`. // RT
+///
+/// # Safety
+///
+/// `list` must point at a valid `AudioBufferList` followed by its
+/// `mNumberBuffers` buffers, all valid and not otherwise accessed for `'a`.
+unsafe fn buffers<'a>(list: NonNull<AudioBufferList>) -> &'a mut [AudioBuffer] {
+    let l = list.as_ptr();
+    // SAFETY: the caller guarantees `list` is valid. The buffers trail the
+    // header beyond the declared one-element `mBuffers` array, so the slice
+    // pointer is derived from `list` itself with `addr_of_mut!` (raw-pointer
+    // provenance over the whole list) rather than through a
+    // `&mut AudioBufferList`, whose provenance would cover only the first
+    // buffer.
+    unsafe {
+        let n = ptr::read(ptr::addr_of!((*l).mNumberBuffers)) as usize;
+        let first = ptr::addr_of_mut!((*l).mBuffers).cast::<AudioBuffer>();
+        std::slice::from_raw_parts_mut(first, n)
+    }
+}
+
 /// Zeroes every output buffer. // RT
-fn silence(out: &mut AudioBufferList) {
-    let n = out.mNumberBuffers as usize;
-    // SAFETY: CoreAudio hands us `mNumberBuffers` trailing buffers.
-    let bufs = unsafe { std::slice::from_raw_parts_mut(out.mBuffers.as_mut_ptr(), n) };
+///
+/// # Safety
+///
+/// As for [`buffers`].
+unsafe fn silence(out: NonNull<AudioBufferList>) {
+    // SAFETY: forwarded from the caller.
+    let bufs = unsafe { buffers(out) };
     for b in bufs {
         if !b.mData.is_null() {
             // SAFETY: `mData` holds `mDataByteSize` bytes.
@@ -322,10 +346,14 @@ fn silence(out: &mut AudioBufferList) {
 
 /// Renders planar stereo and writes it to the device's buffers:
 /// global channel 0 = left, 1 = right, others zero. // RT
-fn render(ctx: &mut RtContext, out: &mut AudioBufferList, time: &AudioTimeStamp) {
-    let n = out.mNumberBuffers as usize;
-    // SAFETY: CoreAudio hands us `mNumberBuffers` trailing buffers.
-    let bufs = unsafe { std::slice::from_raw_parts_mut(out.mBuffers.as_mut_ptr(), n) };
+///
+/// # Safety
+///
+/// As for [`buffers`].
+unsafe fn render(ctx: &mut RtContext, out: NonNull<AudioBufferList>, time: &AudioTimeStamp) {
+    // SAFETY: forwarded from the caller (CoreAudio hands the IOProc
+    // `mNumberBuffers` trailing buffers, valid for the call).
+    let bufs = unsafe { buffers(out) };
     let Some(first) = bufs.first() else {
         return;
     };
@@ -380,30 +408,28 @@ unsafe extern "C-unwind" fn io_proc(
     _now: NonNull<AudioTimeStamp>,
     _input: NonNull<AudioBufferList>,
     _input_time: NonNull<AudioTimeStamp>,
-    mut output: NonNull<AudioBufferList>,
+    output: NonNull<AudioBufferList>,
     output_time: NonNull<AudioTimeStamp>,
     client: *mut c_void,
 ) -> i32 {
     // SAFETY: `client` is the `RtContext` boxed in `start`, owned by this
     // IOProc until `stop` has returned from `AudioDeviceStop`; the buffer
-    // list and timestamp are valid for this call. // RT
-    let (ctx, out, time) = unsafe {
-        (
-            &mut *client.cast::<RtContext>(),
-            output.as_mut(),
-            output_time.as_ref(),
-        )
-    };
+    // list and timestamp are valid for this call. The buffer list stays a
+    // raw pointer (see `buffers`). // RT
+    let (ctx, time) = unsafe { (&mut *client.cast::<RtContext>(), output_time.as_ref()) };
     if ctx.poisoned {
-        silence(out);
+        // SAFETY: CoreAudio's output list is valid for this call.
+        unsafe { silence(output) };
         return 0;
     }
-    let ok = catch_unwind(AssertUnwindSafe(|| render(ctx, out, time))).is_ok();
+    // SAFETY: as above; `render` is the only user of the list meanwhile.
+    let ok = catch_unwind(AssertUnwindSafe(|| unsafe { render(ctx, output, time) })).is_ok();
     if !ok {
         // Never unwind into CoreAudio: go silent for good and report.
         ctx.poisoned = true;
         ctx.renderer.raise(Faults::PANIC);
-        silence(out);
+        // SAFETY: as above; the panicked `render` no longer uses the list.
+        unsafe { silence(output) };
     }
     0
 }
@@ -727,5 +753,38 @@ impl AudioBackend for CoreAudioBackend {
 impl Drop for CoreAudioBackend {
     fn drop(&mut self) {
         drop(self.close());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `AudioBufferList` with two trailing buffers, laid out as
+    /// CoreAudio does.
+    #[repr(C)]
+    struct TwoBuffers {
+        n: u32,
+        bufs: [AudioBuffer; 2],
+    }
+
+    #[test]
+    fn silence_reaches_every_trailing_buffer() {
+        let mut a = [1.0f32; 8];
+        let mut b = [1.0f32; 8];
+        let buf = |d: &mut [f32; 8]| AudioBuffer {
+            mNumberChannels: 1,
+            mDataByteSize: 32,
+            mData: d.as_mut_ptr().cast(),
+        };
+        let mut list = TwoBuffers {
+            n: 2,
+            bufs: [buf(&mut a), buf(&mut b)],
+        };
+        let p = NonNull::from(&mut list).cast::<AudioBufferList>();
+        // SAFETY: `list` is a valid two-buffer list for the call.
+        unsafe { silence(p) };
+        assert_eq!(a, [0.0; 8]);
+        assert_eq!(b, [0.0; 8]);
     }
 }
