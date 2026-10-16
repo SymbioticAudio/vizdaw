@@ -24,7 +24,7 @@ Run from the repository root with the toolchain environment exported
 
 1. `cargo run -p vizdaw-play --release -- fixtures/demo.vizdaw --seq Song`
    — drums, bass and chords are audible; bars 5–8 are a fourth higher (the
-   drum kit becomes toms there); the ritardando over the last two bars is
+   drums stay as they are there: drum lanes are never transposed); the ritardando over the last two bars is
    audible; the process exits 0 about a second after the last chord.
 2. Add `--loop`, let it wrap twice, press Ctrl-C — no hanging notes.
 3. Add `--to virtual` and watch the events in MIDI Monitor (or

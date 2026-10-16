@@ -1,4 +1,6 @@
-use core_model::command::{AudioCmd, Command, EventCmd, LaneCmd, RoutingCmd, SequenceCmd, apply};
+use core_model::command::{
+    AudioCmd, Command, DrumCmd, EventCmd, LaneCmd, RoutingCmd, SequenceCmd, apply,
+};
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
 use core_model::event::{EventBody, EventKind, EventSpec, Fade, LoopCount};
 use core_model::ids::{Counters, DestId, EventId, LaneId, MediaId, SeqId};
@@ -280,6 +282,53 @@ fn transpose_accumulates_and_clamps() {
     let d = insert(&base(), 1, 1, vec![note(0, 3, 1)]);
     let d = insert(&d, 0, 0, vec![reference(0, None, LoopCount::Count(1), -12)]);
     assert_eq!(notes(&d), vec![(0.0, 0, 1.0)]);
+}
+
+#[test]
+fn reference_transpose_skips_drum_lanes() {
+    // Sub gets a second lane (lane2) marked as a drum lane (ruling O21).
+    let d = run(
+        &base(),
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(1),
+            name: "Drums".into(),
+            index: None,
+        }),
+    );
+    let d = run(
+        &d,
+        Command::Drum(DrumCmd::MarkDrumLane {
+            seq: SeqId(1),
+            lane: LaneId(2),
+            drum: true,
+        }),
+    );
+    let d = insert(&d, 1, 1, vec![note(0, 60, 1)]);
+    let d = insert(
+        &d,
+        1,
+        2,
+        vec![
+            note(1, 36, 1),
+            EventSpec::new(
+                Tick(2 * Q),
+                EventBody::PolyPressure {
+                    pitch: 36,
+                    value: 1,
+                },
+            ),
+        ],
+    );
+    let d = insert(&d, 0, 0, vec![reference(0, None, LoopCount::Count(1), 7)]);
+    assert_eq!(notes(&d), vec![(0.0, 67, 1.0), (1.0, 36, 1.0)]);
+    let pp: Vec<u8> = flat(&d)
+        .into_iter()
+        .filter_map(|r| match r.body {
+            EventBody::PolyPressure { pitch, .. } => Some(pitch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pp, vec![36]);
 }
 
 #[test]

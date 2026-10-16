@@ -34,7 +34,7 @@ pub enum ReferenceCmd {
         length: Option<Tick>,
         /// Repeats.
         loop_count: LoopCount,
-        /// Transpose in semitones.
+        /// Transpose in semitones (drum-lane notes are never transposed).
         transpose: i8,
     },
     /// Move the selected lanes' active-take events inside the selection's
@@ -64,8 +64,8 @@ pub enum ReferenceCmd {
         event: EventId,
     },
     /// Replace the reference with its events, inlined in place (length,
-    /// loop, transpose, mute and nested references applied; destinations made
-    /// explicit). Events of a muted use are inlined muted.
+    /// loop, transpose (not on drum-lane notes), mute and nested references
+    /// applied; destinations made explicit). Events of a muted use are inlined muted.
     Flatten {
         /// The reference event.
         event: EventId,

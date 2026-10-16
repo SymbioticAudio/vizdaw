@@ -155,7 +155,8 @@ pub enum EventBody {
         length: Option<Tick>,
         /// How many times the use repeats.
         loop_count: LoopCount,
-        /// Transpose in semitones, applied to notes and poly pressure.
+        /// Transpose in semitones, applied to notes and poly pressure outside
+        /// drum lanes.
         transpose: i8,
     },
     /// An audio region on the lane's audio output path.

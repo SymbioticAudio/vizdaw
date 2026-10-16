@@ -263,6 +263,8 @@ impl<'a> Walk<'a> {
         if abs < self.range.0 || abs >= self.range.1 {
             return;
         }
+        // Per-use transpose never moves drum-lane pitches (ruling O21).
+        let transpose = if lane.drum.is_some() { 0 } else { transpose };
         let mut body = e.body.clone();
         match &mut body {
             EventBody::Note {

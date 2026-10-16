@@ -121,7 +121,7 @@ fn demo_plays_to_the_end() {
     assert_eq!(run.engine.state(), PlayState::Stopped);
     assert!(run.engine.faults().is_empty());
     insta::assert_snapshot!(digest(&log), @r"
-lines 335 hash 91aebc6c2ca3a33a
+lines 335 hash 1feb33c1bfd60916
 80: 36
 81: 32
 89: 96

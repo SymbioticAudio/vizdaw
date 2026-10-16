@@ -1,7 +1,7 @@
 use core_model::ModelError;
 use core_model::command::{
-    AudioCmd, Command, Context, EventCmd, LaneCmd, ReferenceCmd, RoutingCmd, SequenceCmd, apply,
-    apply_in,
+    AudioCmd, Command, Context, DrumCmd, EventCmd, LaneCmd, ReferenceCmd, RoutingCmd, SequenceCmd,
+    apply, apply_in,
 };
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
 use core_model::event::{EventBody, EventKind, EventSpec, Fade, LoopCount};
@@ -263,6 +263,60 @@ fn flatten_applies_length_loop_and_transpose() {
             (Tick(2 * Q), EventBody::note(62, 100, Tick(Q))),
         ]
     );
+}
+
+#[test]
+fn flatten_does_not_transpose_drum_lane_notes() {
+    // Verse's lane1 becomes a drum lane; a transposed use inlines its notes
+    // at their original pitches (ruling O21).
+    let d = run(
+        &base(),
+        Command::Drum(DrumCmd::MarkDrumLane {
+            seq: SeqId(1),
+            lane: LaneId(1),
+            drum: true,
+        }),
+    )
+    .unwrap();
+    let d = run(
+        &d,
+        rc(ReferenceCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            tick: Tick(0),
+            target: SeqId(1),
+            length: None,
+            loop_count: LoopCount::Count(1),
+            transpose: 5,
+        }),
+    )
+    .unwrap();
+    let before = played(&d, 0);
+    let reference = d
+        .lane(SeqId(0), LaneId(0))
+        .unwrap()
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .find(|e| matches!(e.body, EventBody::Reference { .. }))
+        .unwrap()
+        .id;
+    let f = run(&d, rc(ReferenceCmd::Flatten { event: reference })).unwrap();
+    assert_eq!(played(&f, 0), before);
+    let pitches: Vec<u8> = f
+        .lane(SeqId(0), LaneId(0))
+        .unwrap()
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::Note { pitch, .. } => Some(pitch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pitches, vec![60, 62]);
 }
 
 #[test]
