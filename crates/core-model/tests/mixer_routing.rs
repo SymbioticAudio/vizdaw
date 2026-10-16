@@ -238,7 +238,8 @@ fn output_paths_get_audio_path_strips() {
 
 #[test]
 fn removing_a_plugin_destination_is_one_undo_step() {
-    let mut h = History::new(Document::new());
+    let start = Document::new();
+    let mut h = History::new(start.clone());
     let f = ViewFilter::default();
     h.execute(
         &Command::Routing(RoutingCmd::AddDestination {
@@ -250,6 +251,15 @@ fn removing_a_plugin_destination_is_one_undo_step() {
     )
     .unwrap();
     let before = h.doc().clone();
+    assert_eq!(before.mixer().strips().len(), 2);
+    assert!(
+        before
+            .mixer()
+            .find_kind(StripKind::Instrument(DestId(0)))
+            .is_some()
+    );
+    assert!(before.plugin_slot(PluginInstanceId(0)).is_some());
+    assert_eq!(h.undo_depth(), 1);
     h.execute(
         &Command::Routing(RoutingCmd::RemoveDestination {
             dest: DestId(0),
@@ -258,8 +268,28 @@ fn removing_a_plugin_destination_is_one_undo_step() {
         &f,
     )
     .unwrap();
+    assert_eq!(h.undo_depth(), 2);
     assert_eq!(h.doc().mixer().strips().len(), 1);
+    assert!(
+        h.doc()
+            .mixer()
+            .find_kind(StripKind::Instrument(DestId(0)))
+            .is_none()
+    );
     assert!(h.doc().plugin_slot(PluginInstanceId(0)).is_none());
     h.undo().unwrap();
+    assert_eq!(h.undo_depth(), 1);
     assert_eq!(h.doc(), &before);
+    assert!(
+        h.doc()
+            .mixer()
+            .find_kind(StripKind::Instrument(DestId(0)))
+            .is_some()
+    );
+    assert!(h.doc().plugin_slot(PluginInstanceId(0)).is_some());
+    // Undoing the add returns strips and counters to the start.
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &start);
+    assert_eq!(h.doc().mixer().strips().len(), 1);
+    assert_eq!(h.doc().counters(), start.counters());
 }
