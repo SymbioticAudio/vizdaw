@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 //! The AU host against Apple's built-in units (never played on a device):
 //! enumeration, ports, parameters, processing, sidechain, instruments,
 //! state and UI gestures.

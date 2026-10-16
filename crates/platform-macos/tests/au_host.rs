@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 //! Apple's units through the plugin host and the engine (offline, never on
 //! a device): an AU insert, an AU instrument, overlay values and state
 //! capture.
