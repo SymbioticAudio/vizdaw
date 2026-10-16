@@ -15,6 +15,7 @@
     )
 )]
 
+pub mod command;
 pub mod document;
 pub mod error;
 pub mod event;
@@ -22,6 +23,7 @@ pub mod ids;
 pub mod lane;
 pub mod meter;
 pub mod rules;
+pub mod selection;
 pub mod sequence;
 pub mod tempo;
 pub mod time;
