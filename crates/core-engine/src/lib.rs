@@ -22,6 +22,7 @@ pub mod error;
 pub mod fixtures;
 pub mod midi1;
 pub mod notes;
+pub mod offline;
 pub mod render;
 pub mod rt_check;
 pub mod schedule;
