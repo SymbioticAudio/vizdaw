@@ -23,6 +23,11 @@ pub struct EditorSize {
 /// called `close_editor` for the slot, and every call is made on the main
 /// thread.
 pub fn parent(view: u64) -> Result<ParentView, VizError> {
+    if !on_main_thread() {
+        return Err(VizError::Engine {
+            message: "editor unavailable: plugin editors open on the main thread only".into(),
+        });
+    }
     if view == 0 {
         return Err(VizError::Engine {
             message: "editor unavailable: no parent view".into(),
@@ -34,4 +39,19 @@ pub fn parent(view: u64) -> Result<ParentView, VizError> {
     // SAFETY: `ptr` is the address of an `NSView` the app keeps alive until
     // it closes the editor (the contract above, which is `ParentView`'s).
     Ok(unsafe { ParentView::new(ptr) })
+}
+
+#[cfg(target_os = "macos")]
+fn on_main_thread() -> bool {
+    unsafe extern "C" {
+        fn pthread_main_np() -> std::ffi::c_int;
+    }
+    // SAFETY: `pthread_main_np` takes no arguments, touches no memory of
+    // ours and is always callable.
+    unsafe { pthread_main_np() != 0 }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn on_main_thread() -> bool {
+    true
 }

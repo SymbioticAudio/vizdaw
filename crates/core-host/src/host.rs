@@ -636,6 +636,12 @@ impl PluginHost {
             return;
         };
         if let State::Live(mut l) = state {
+            // The editor goes before the instance does (moved to `retiring`
+            // it could no longer be reached): the app frees the parent view
+            // once the slot is gone, and a plugin GUI must not outlive it.
+            if let Some(e) = l.inst.editor() {
+                e.close();
+            }
             let shelved = self.shelf.take_unwanted(|k| k != id);
             let mut back = false;
             for p in shelved.into_iter().filter_map(Ready::into_processor) {

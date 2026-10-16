@@ -1085,6 +1085,10 @@ impl Session {
     /// Hides slot `slot`'s editor (its window is closing) and ends any
     /// gesture it left open. Like `open_editor`, holds no session lock
     /// while the plugin runs (closing may also run the main loop).
+    ///
+    /// Returns VizError::Busy while another editor is opening (nested run
+    /// loop); the caller must keep the parent view alive and retry until
+    /// this returns Ok.
     pub fn close_editor(&self, slot: u64) -> Result<(), VizError> {
         ffi_guard(|| {
             plugins::with(self.id, |p| {
