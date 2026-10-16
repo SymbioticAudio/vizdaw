@@ -20,12 +20,16 @@ pub mod catalog;
 pub mod error;
 pub mod guard;
 pub mod host;
+pub mod mixer;
 pub mod plugins;
 pub mod session;
 pub mod snapshot;
 
 pub use error::VizError;
 pub use guard::ffi_guard;
+pub use mixer::{
+    BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
+};
 pub use session::Session;
 pub use snapshot::{
     DocSnapshot, IdleUpdate, LaneRow, PluginFormatTag, PluginRefRow, SeqRow, SlotRow, SlotStatus,

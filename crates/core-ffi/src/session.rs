@@ -3,19 +3,25 @@
 use crate::error::VizError;
 use crate::guard::{ffi_guard, lock};
 use crate::host;
+use crate::mixer::{self, DestRow, MixerLevels, MixerSnapshot};
 use crate::plugins;
+use crate::snapshot::PluginRefRow;
 use crate::snapshot::{
     DocSnapshot, IdleUpdate, LaneRow, SlotRow, TransportState, lane_rows, position_bbu, seconds,
     seq_id, seq_rows, warnings,
 };
 use core_host::PluginHost;
 use core_model::command::Command;
+use core_model::command::MixerCmd;
+use core_model::command::RoutingCmd;
 use core_model::command::lane::LaneCmd;
 use core_model::command::sequence::SequenceCmd;
+use core_model::document::DestKind;
 use core_model::document::Document;
 use core_model::file;
 use core_model::history::History;
-use core_model::ids::{LaneId, SeqId};
+use core_model::ids::{DestId, LaneId, PluginInstanceId, SeqId, StripId};
+use core_model::mixer::{AuxSend, Output, PluginSlot};
 use core_model::selection::ViewFilter;
 use core_model::time::Tick;
 use std::path::{Path, PathBuf};
@@ -179,7 +185,15 @@ impl Session {
     }
 
     /// Applies one command as one undo step and recompiles if playing.
+    /// Running plugins it removes are captured first (spec §4), so an undo
+    /// brings them back with their state.
     fn execute(&self, cmd: Command) -> Result<DocSnapshot, VizError> {
+        let next = core_model::command::apply(lock(&self.inner).doc(), &cmd)
+            .ok()
+            .map(|n| n.doc);
+        if let Some(next) = next {
+            self.capture_removed(&next)?;
+        }
         let mut inner = lock(&self.inner);
         inner.history.execute(&cmd, &ViewFilter::default())?;
         inner.version += 1;
@@ -187,8 +201,57 @@ impl Session {
         inner.snapshot()
     }
 
+    /// Captures the state of every running plugin that `next` (the
+    /// document an edit, undo or redo is about to make) no longer has
+    /// (Plan Ruling 8; the model's `Report.removed` does not list them
+    /// all). Plugin code (`save_state` may spin a run loop) runs without
+    /// the session lock, against a copy of the history; blobs are
+    /// content-addressed, so storing the same bytes in the real history
+    /// afterwards gives the ids the host recorded. Nothing is captured
+    /// inside an open edit (a drag removes no plugin). `Busy` when a
+    /// plugin call is on the stack: the removal is refused rather than
+    /// losing the state.
+    fn capture_removed(&self, next: &Document) -> Result<(), VizError> {
+        let (mut scratch, gone) = {
+            let inner = lock(&self.inner);
+            let before = mixer::slot_ids(inner.doc());
+            let after = mixer::slot_ids(next);
+            let gone: Vec<_> = before.difference(&after).copied().collect();
+            if gone.is_empty() {
+                return Ok(());
+            }
+            (inner.history.clone(), gone)
+        };
+        let captured = plugins::with(self.id, |p| {
+            let Some(p) = p else { return Vec::new() };
+            gone.into_iter()
+                // A placeholder has nothing to capture; its saved state
+                // stays in the document.
+                .filter_map(|id| p.capture(&mut scratch, id).ok().map(|blob| (id, blob)))
+                .collect::<Vec<_>>()
+        })?;
+        let mut inner = lock(&self.inner);
+        for (id, blob) in captured {
+            if let Some(bytes) = scratch.doc().state_blob(blob) {
+                let _ = inner.history.capture_state(id, bytes);
+            }
+        }
+        Ok(())
+    }
+
     /// Undo or redo, then recompile if playing.
     fn step(&self, undo: bool) -> Result<DocSnapshot, VizError> {
+        let next = {
+            let inner = lock(&self.inner);
+            if undo {
+                inner.history.peek_undo().cloned()
+            } else {
+                inner.history.peek_redo().cloned()
+            }
+        };
+        if let Some(next) = next {
+            self.capture_removed(&next)?;
+        }
         let mut inner = lock(&self.inner);
         if undo {
             inner.history.undo()?;
@@ -487,6 +550,316 @@ impl Session {
     }
 }
 
+/// Mixer reads and edits (spec §11). Every edit is one undo step; a drag
+/// (fader, pan, send level) is bracketed by `begin_edit` / `end_edit` and
+/// becomes one step.
+#[uniffi::export]
+impl Session {
+    /// The mixer: strips in display order (master last) with their slots.
+    pub fn mixer(&self) -> Result<MixerSnapshot, VizError> {
+        ffi_guard(|| {
+            // A copy, so the session lock is not held while the registry is.
+            let (doc, version) = {
+                let inner = lock(&self.inner);
+                (inner.doc().clone(), inner.version)
+            };
+            plugins::with(self.id, |p| mixer::snapshot(&doc, version, p))
+        })
+    }
+
+    /// Meters, DSP load, latency and fault-bypassed plugins (empty unless
+    /// this session holds the engine). The mixer polls it at 30 Hz.
+    pub fn levels(&self) -> Result<MixerLevels, VizError> {
+        ffi_guard(|| Ok(host::levels(self.id).unwrap_or_else(MixerLevels::empty)))
+    }
+
+    /// Opens a continuous edit (a drag): commands until `end_edit` are one
+    /// undo step named `label`, and each is heard at once.
+    pub fn begin_edit(&self, label: String) -> Result<(), VizError> {
+        ffi_guard(|| Ok(lock(&self.inner).history.begin(label)?))
+    }
+
+    /// Closes the edit `begin_edit` opened (nothing happens when none is
+    /// open).
+    pub fn end_edit(&self) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if inner.history.in_transaction() {
+                inner.history.commit()?;
+                inner.version += 1;
+            }
+            inner.snapshot()
+        })
+    }
+
+    /// Adds an aux bus at the end.
+    pub fn add_bus(&self, name: String) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.execute(Command::Mixer(MixerCmd::AddBus { name, index: None })))
+    }
+
+    /// Removes a bus (outputs to it go to master, sends to it go).
+    pub fn remove_bus(&self, strip: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::RemoveBus {
+                strip: StripId(strip),
+            }))
+        })
+    }
+
+    /// Renames a strip.
+    pub fn rename_strip(&self, strip: u64, name: String) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::RenameStrip {
+                strip: StripId(strip),
+                name,
+            }))
+        })
+    }
+
+    /// Moves a strip (not master) to display position `index`.
+    pub fn move_strip(&self, strip: u64, index: u32) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::MoveStrip {
+                strip: StripId(strip),
+                index: index as usize,
+            }))
+        })
+    }
+
+    /// Sets a fader (dB; −144 is −∞, at most +12).
+    pub fn set_gain(&self, strip: u64, gain_db: f64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetGain {
+                strip: StripId(strip),
+                gain_db,
+            }))
+        })
+    }
+
+    /// Sets a pan (−1 … +1).
+    pub fn set_pan(&self, strip: u64, pan: f64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetPan {
+                strip: StripId(strip),
+                pan,
+            }))
+        })
+    }
+
+    /// Mutes or unmutes a strip.
+    pub fn set_strip_mute(&self, strip: u64, mute: bool) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetMute {
+                strip: StripId(strip),
+                mute,
+            }))
+        })
+    }
+
+    /// Solos or unsolos a strip.
+    pub fn set_strip_solo(&self, strip: u64, solo: bool) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetSolo {
+                strip: StripId(strip),
+                solo,
+            }))
+        })
+    }
+
+    /// Routes a strip's output to bus `bus`, or to master (`None`).
+    pub fn set_output(&self, strip: u64, bus: Option<u64>) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetOutput {
+                strip: StripId(strip),
+                output: bus.map_or(Output::Master, |b| Output::Bus(StripId(b))),
+            }))
+        })
+    }
+
+    /// Adds a post-fader send at 0 dB to bus `target`.
+    pub fn add_send(&self, strip: u64, target: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::AddSend {
+                strip: StripId(strip),
+                send: AuxSend::new(StripId(target)),
+            }))
+        })
+    }
+
+    /// Changes send `index` of a strip.
+    pub fn edit_send(
+        &self,
+        strip: u64,
+        index: u32,
+        send: crate::mixer::SendRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::EditSend {
+                strip: StripId(strip),
+                index: index as usize,
+                send: AuxSend {
+                    target: StripId(send.target),
+                    level_db: send.level_db,
+                    pre_fader: send.pre_fader,
+                    enabled: send.enabled,
+                },
+            }))
+        })
+    }
+
+    /// Removes send `index` of a strip.
+    pub fn remove_send(&self, strip: u64, index: u32) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::RemoveSend {
+                strip: StripId(strip),
+                index: index as usize,
+            }))
+        })
+    }
+
+    /// Inserts `plugin` at `index` of a strip's chain (default: the end);
+    /// it starts loading at once.
+    pub fn add_insert(
+        &self,
+        strip: u64,
+        index: Option<u32>,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::AddInsert {
+                strip: StripId(strip),
+                index: index.map(|i| i as usize),
+                plugin: (&plugin).into(),
+            }))
+        })
+    }
+
+    /// Removes an insert (its state is captured first, so Undo restores
+    /// it).
+    pub fn remove_insert(&self, slot: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::RemoveInsert {
+                slot: PluginInstanceId(slot),
+            }))
+        })
+    }
+
+    /// Moves an insert to position `index` of `strip` (drag to reorder).
+    pub fn move_insert(&self, slot: u64, strip: u64, index: u32) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::MoveInsert {
+                slot: PluginInstanceId(slot),
+                strip: StripId(strip),
+                index: index as usize,
+            }))
+        })
+    }
+
+    /// Bypasses a plugin, or turns it back on.
+    pub fn set_bypass(&self, slot: u64, bypass: bool) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetBypass {
+                slot: PluginInstanceId(slot),
+                bypass,
+            }))
+        })
+    }
+
+    /// Feeds an insert's sidechain from strip `source` (post-fader), or
+    /// from nothing.
+    pub fn set_sidechain(&self, slot: u64, source: Option<u64>) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetSidechain {
+                slot: PluginInstanceId(slot),
+                source: source.map(StripId),
+            }))
+        })
+    }
+
+    /// Adds a strip for extra output `index` of a multi-output plugin
+    /// instrument ("Add Outputs…").
+    pub fn add_instrument_output(
+        &self,
+        dest: u64,
+        index: u16,
+        name: String,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::AddInstrumentOutput {
+                dest: DestId(dest),
+                index,
+                name,
+            }))
+        })
+    }
+
+    /// Adds a plugin instrument destination named `name` (and its
+    /// instrument strip): "New Plugin Instrument…".
+    pub fn add_plugin_instrument(
+        &self,
+        name: String,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Routing(RoutingCmd::AddDestination {
+                name,
+                kind: DestKind::PluginInstrument {
+                    slot: PluginSlot::new(PluginInstanceId(0), (&plugin).into()),
+                },
+                default_patch: None,
+            }))
+        })
+    }
+
+    /// The instrument list: every destination, with the plugin it plays
+    /// (none: a MIDI endpoint or the built-in synth).
+    pub fn destinations(&self) -> Result<Vec<DestRow>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            Ok(inner
+                .doc()
+                .instruments()
+                .values()
+                .map(|d| DestRow {
+                    id: d.id.0,
+                    name: d.name.clone(),
+                    plugin: match &d.kind {
+                        DestKind::PluginInstrument { slot } => Some((&slot.plugin).into()),
+                        DestKind::MidiEndpoint { .. } => None,
+                    },
+                })
+                .collect())
+        })
+    }
+
+    /// Makes destination `dest` play `plugin` (every lane using it now
+    /// plays the plugin; one undo step). The same plugin keeps its
+    /// instance and state (3a Plan Ruling 10).
+    pub fn set_destination_plugin(
+        &self,
+        dest: u64,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let default_patch = lock(&self.inner)
+                .doc()
+                .instruments()
+                .get(&DestId(dest))
+                .ok_or_else(|| VizError::Model {
+                    message: format!("unknown id {}", DestId(dest)),
+                })?
+                .default_patch;
+            self.execute(Command::Routing(RoutingCmd::EditDestination {
+                dest: DestId(dest),
+                kind: DestKind::PluginInstrument {
+                    slot: PluginSlot::new(PluginInstanceId(0), (&plugin).into()),
+                },
+                default_patch,
+            }))
+        })
+    }
+}
+
 /// "Strip — Plugin" for messages about slot `id`.
 fn slot_name(doc: &Document, id: core_model::ids::PluginInstanceId) -> String {
     use core_model::document::SlotOwner;
@@ -511,6 +884,19 @@ impl Session {
     /// hook).
     pub fn debug_plugin_rate(&self) -> Result<f64, VizError> {
         ffi_guard(|| plugins::with(self.id, |p| p.map_or(0.0, |p| p.config().0)))
+    }
+
+    /// Slot `slot`'s state blob in the document, if it has one (test
+    /// hook).
+    pub fn debug_slot_state(&self, slot: u64) -> Result<Option<u64>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            Ok(inner
+                .doc()
+                .plugin_slot(PluginInstanceId(slot))
+                .and_then(|s| s.state)
+                .map(|b| b.0))
+        })
     }
 
     /// Panics while holding the session lock (test hook): poisons it.

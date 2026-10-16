@@ -99,6 +99,87 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
 
     func pluginSlots() throws -> [SlotRow] { slots }
+
+    // MARK: Mixer
+
+    var mixerSnap = MixerSnapshot(version: 0, strips: [], buses: [])
+    var levelsValue = MixerLevels(
+        meters: [], dspLoad: 0, dspPeak: 0, latencyFrames: 0, faulted: [])
+    var levelsCalls = 0
+    /// Every mixer call, as text (`"setGain 1 -3.0"`).
+    var calls: [String] = []
+    var mixerError: VizError?
+
+    private func mixerCall(_ text: String) throws -> DocSnapshot {
+        if let e = mixerError { throw e }
+        calls.append(text)
+        return commandResult()
+    }
+
+    func mixer() throws -> MixerSnapshot { mixerSnap }
+    func levels() throws -> MixerLevels {
+        levelsCalls += 1
+        return levelsValue
+    }
+    func beginEdit(label: String) throws { calls.append("begin \(label)") }
+    func endEdit() throws -> DocSnapshot { try mixerCall("end") }
+    func addBus(name: String) throws -> DocSnapshot { try mixerCall("addBus \(name)") }
+    func removeBus(strip: UInt64) throws -> DocSnapshot { try mixerCall("removeBus \(strip)") }
+    func renameStrip(strip: UInt64, name: String) throws -> DocSnapshot {
+        try mixerCall("renameStrip \(strip) \(name)")
+    }
+    func moveStrip(strip: UInt64, index: UInt32) throws -> DocSnapshot {
+        try mixerCall("moveStrip \(strip) \(index)")
+    }
+    func setGain(strip: UInt64, gainDb: Double) throws -> DocSnapshot {
+        try mixerCall("setGain \(strip) \(gainDb)")
+    }
+    func setPan(strip: UInt64, pan: Double) throws -> DocSnapshot {
+        try mixerCall("setPan \(strip) \(pan)")
+    }
+    func setStripMute(strip: UInt64, mute: Bool) throws -> DocSnapshot {
+        try mixerCall("mute \(strip) \(mute)")
+    }
+    func setStripSolo(strip: UInt64, solo: Bool) throws -> DocSnapshot {
+        try mixerCall("solo \(strip) \(solo)")
+    }
+    func setOutput(strip: UInt64, bus: UInt64?) throws -> DocSnapshot {
+        try mixerCall("output \(strip) \(bus.map(String.init) ?? "master")")
+    }
+    func addSend(strip: UInt64, target: UInt64) throws -> DocSnapshot {
+        try mixerCall("addSend \(strip) \(target)")
+    }
+    func editSend(strip: UInt64, index: UInt32, send: SendRow) throws -> DocSnapshot {
+        try mixerCall(
+            "editSend \(strip) \(index) \(send.target) \(send.levelDb) \(send.preFader) \(send.enabled)")
+    }
+    func removeSend(strip: UInt64, index: UInt32) throws -> DocSnapshot {
+        try mixerCall("removeSend \(strip) \(index)")
+    }
+    func addInsert(strip: UInt64, index: UInt32?, plugin: PluginRefRow) throws -> DocSnapshot {
+        try mixerCall("addInsert \(strip) \(index.map(String.init) ?? "end") \(plugin.id)")
+    }
+    func removeInsert(slot: UInt64) throws -> DocSnapshot { try mixerCall("removeInsert \(slot)") }
+    func moveInsert(slot: UInt64, strip: UInt64, index: UInt32) throws -> DocSnapshot {
+        try mixerCall("moveInsert \(slot) \(strip) \(index)")
+    }
+    func setBypass(slot: UInt64, bypass: Bool) throws -> DocSnapshot {
+        try mixerCall("bypass \(slot) \(bypass)")
+    }
+    func setSidechain(slot: UInt64, source: UInt64?) throws -> DocSnapshot {
+        try mixerCall("sidechain \(slot) \(source.map(String.init) ?? "none")")
+    }
+    func addInstrumentOutput(dest: UInt64, index: UInt16, name: String) throws -> DocSnapshot {
+        try mixerCall("addOutput \(dest) \(index) \(name)")
+    }
+    func addPluginInstrument(name: String, plugin: PluginRefRow) throws -> DocSnapshot {
+        try mixerCall("addInstrument \(name) \(plugin.id)")
+    }
+    var dests: [DestRow] = []
+    func destinations() throws -> [DestRow] { dests }
+    func setDestinationPlugin(dest: UInt64, plugin: PluginRefRow) throws -> DocSnapshot {
+        try mixerCall("destPlugin \(dest) \(plugin.id)")
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

@@ -227,6 +227,9 @@ struct Host {
     sample_rate: f64,
     report: Vec<String>,
     faults: Vec<String>,
+    /// Instances the engine bypassed for faults (sticky for this engine,
+    /// 3a Plan Ruling 23).
+    faulted: std::collections::BTreeSet<u64>,
     /// Read only by the `drain_offline_log` test hook.
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     log: Option<EventLog>,
@@ -300,6 +303,7 @@ impl Host {
             sample_rate,
             report: Vec::new(),
             faults: Vec::new(),
+            faulted: std::collections::BTreeSet::new(),
             log,
             injected: Vec::new(),
         }
@@ -731,4 +735,30 @@ pub fn factory_owner() -> Option<u64> {
         .as_ref()
         .map(|h| h.factory_owner)
         .filter(|o| *o != 0)
+}
+
+/// `owner`'s meters, DSP load, latency and fault-bypassed instances, or
+/// `None` when it does not hold the engine.
+pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
+    let mut slot = lock(&HOST);
+    let h = slot.as_mut().filter(|h| h.owner == owner)?;
+    h.faulted
+        .extend(h.engine.plugin_faults().into_iter().map(|i| i.0));
+    let load = h.engine.dsp_load();
+    Some(crate::mixer::MixerLevels {
+        meters: h
+            .engine
+            .meters()
+            .into_iter()
+            .map(|m| crate::mixer::MeterRow {
+                strip: m.strip.0,
+                peak_l: m.peak_l,
+                peak_r: m.peak_r,
+            })
+            .collect(),
+        dsp_load: load.last,
+        dsp_peak: load.peak,
+        latency_frames: h.engine.latency_frames(),
+        faulted: h.faulted.iter().copied().collect(),
+    })
 }
