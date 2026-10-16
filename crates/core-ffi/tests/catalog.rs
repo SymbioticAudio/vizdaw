@@ -121,9 +121,12 @@ fn a_scan_fills_the_manager_and_blocklists_crashers() {
         ids(c.browser(PluginKindTag::Instrument).unwrap()),
         ["vizdaw.test.synth4"]
     );
-    // Saved: a new catalog reads the same.
+    // Saved: a new catalog reads the same (open replaces the global one,
+    // so compare with a snapshot taken before).
+    let before = c.rows().unwrap();
     let again = PluginCatalog::open(config(d.path(), Path::new("/nonexistent"))).unwrap();
-    assert_eq!(again.rows().unwrap(), c.rows().unwrap());
+    assert_eq!(again.rows().unwrap(), before);
+    assert!(!before.is_empty());
     // Unchanged bundles are not scanned again.
     again.scan(false).unwrap();
     assert!(!again.progress().unwrap().running);

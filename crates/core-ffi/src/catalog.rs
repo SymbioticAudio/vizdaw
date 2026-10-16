@@ -160,7 +160,7 @@ struct ScanState {
 pub struct PluginCatalog {
     config: CatalogConfig,
     /// Why the catalog file was not read or not written, if it was not.
-    problem: Mutex<Option<String>>,
+    problem: Arc<Mutex<Option<String>>>,
     scan: Arc<Mutex<ScanState>>,
     /// Bumped by scan threads after recording; `progress` applies the
     /// catalog to the hosts when it moved.
@@ -264,31 +264,40 @@ impl PluginCatalog {
         let state = Arc::clone(&self.scan);
         let recorded = Arc::clone(&self.recorded);
         let path = PathBuf::from(&self.config.path);
+        let problem = Arc::clone(&self.problem);
         let queue = Arc::new(Mutex::new(jobs));
         let spawned = std::thread::Builder::new()
             .name("vizdaw-scan-pool".into())
             .spawn(move || {
-                std::thread::scope(|sc| {
-                    for _ in 0..scan::PARALLEL {
-                        sc.spawn(|| {
-                            loop {
-                                let job = lock(&queue).pop();
-                                let Some((src, timeout)) = job else {
-                                    break;
-                                };
-                                let entries = scan::scan_source(&exe, &src, timeout);
-                                with(|c| c.record(&src, entries));
-                                lock(&state).done += 1;
-                                recorded.fetch_add(1, Ordering::Release);
-                            }
-                        });
-                    }
-                });
+                // A panicking worker must not leave the scan "running".
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    std::thread::scope(|sc| {
+                        for _ in 0..scan::PARALLEL {
+                            sc.spawn(|| {
+                                loop {
+                                    let job = lock(&queue).pop();
+                                    let Some((src, timeout)) = job else {
+                                        break;
+                                    };
+                                    let entries = scan::scan_source(&exe, &src, timeout);
+                                    with(|c| c.record(&src, entries));
+                                    lock(&state).done += 1;
+                                    recorded.fetch_add(1, Ordering::Release);
+                                }
+                            });
+                        }
+                    });
+                }));
+                if outcome.is_err() {
+                    *lock(&problem) = Some("plugin scan failed unexpectedly".into());
+                }
                 // A file the app cannot read is never overwritten (the
                 // problem shows on the next action).
                 let _ = with(|c| c.save(&path));
-                lock(&state).running = false;
+                // Results first, then "not running": a poll that sees the
+                // scan ended also sees (and applies) everything it recorded.
                 recorded.fetch_add(1, Ordering::Release);
+                lock(&state).running = false;
             });
         if let Err(e) = spawned {
             lock(&self.scan).running = false;
@@ -341,7 +350,7 @@ impl PluginCatalog {
             crate::plugins::apply_catalog();
             Ok(Arc::new(PluginCatalog {
                 config,
-                problem: Mutex::new(problem),
+                problem: Arc::new(Mutex::new(problem)),
                 scan: Arc::new(Mutex::new(ScanState::default())),
                 recorded: Arc::new(AtomicU64::new(0)),
                 applied: AtomicU64::new(0),
@@ -386,6 +395,17 @@ impl PluginCatalog {
     /// Forgets a plugin's blocklist entry and scans its bundle again.
     pub fn clear_blocklist(&self, plugin: PluginKey) -> Result<(), VizError> {
         ffi_guard(|| {
+            // Fail before forgetting the entry when the scan cannot start.
+            if !PathBuf::from(&self.config.scanner).is_file() {
+                return Err(VizError::NotFound {
+                    path: self.config.scanner.clone(),
+                });
+            }
+            if lock(&self.scan).running {
+                return Err(VizError::Engine {
+                    message: "a scan is already running".into(),
+                });
+            }
             let src = with(|c| c.clear_blocklist(plugin.format.into(), &plugin.id));
             self.changed();
             match src {
@@ -406,6 +426,7 @@ impl PluginCatalog {
         ffi_guard(|| {
             let found = self.discover();
             let todo = with(|c| c.mark_found(&found));
+            self.changed();
             if all {
                 self.start(found)
             } else if todo.is_empty() {
@@ -420,15 +441,20 @@ impl PluginCatalog {
     /// scans recorded since the last call reaches the open documents here.
     pub fn progress(&self) -> Result<ScanProgress, VizError> {
         ffi_guard(|| {
+            // State first, then `recorded`: a poll that sees the scan ended
+            // sees its final bump too.
+            let (running, done, total) = {
+                let st = lock(&self.scan);
+                (st.running, st.done, st.total)
+            };
             let now = self.recorded.load(Ordering::Acquire);
             if self.applied.swap(now, Ordering::AcqRel) != now {
                 crate::plugins::apply_catalog();
             }
-            let st = lock(&self.scan);
             Ok(ScanProgress {
-                running: st.running,
-                done: st.done,
-                total: st.total,
+                running,
+                done,
+                total,
             })
         })
     }
