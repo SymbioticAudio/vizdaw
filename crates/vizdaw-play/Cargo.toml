@@ -12,7 +12,11 @@ rt-check = ["core-engine/rt-check"]
 [dependencies]
 core-model = { path = "../core-model" }
 core-engine = { path = "../core-engine", features = ["fixtures"] }
+core-host = { path = "../core-host" }
 clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { path = "../platform-macos" }
+
+[dev-dependencies]
+test-plugins = { path = "../test-plugins" }

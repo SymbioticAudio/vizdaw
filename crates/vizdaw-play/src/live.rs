@@ -1,14 +1,16 @@
-//! Live playback through CoreAudio, the DLS synth's mixer strip and
-//! CoreMIDI (macOS), rendered in parallel on worker threads joined to the
-//! device's workgroup.
+//! Live playback through CoreAudio, the mixer (with the project's AU and
+//! CLAP plugins) and CoreMIDI (macOS), rendered in parallel on worker
+//! threads joined to the device's workgroup.
 
 use crate::args::Args;
-use crate::signal;
+use crate::{plugins, signal};
 use core_engine::backend::{AudioBackend, AudioConfig, BackendEvent, StreamInfo};
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::pool::RtEnv;
 use core_engine::render::Renderer;
 use core_engine::transport::PlayState;
+use core_host::PluginHost;
+use core_host::catalog::Catalog;
 use core_model::document::Document;
 use core_model::ids::SeqId;
 use core_model::time::Tick;
@@ -25,6 +27,8 @@ const DEADLINE: f64 = 0.8;
 struct Session {
     backend: CoreAudioBackend,
     engine: Engine,
+    /// Dropped after the engine: processors come back through it.
+    host: PluginHost,
     info: StreamInfo,
 }
 
@@ -52,6 +56,7 @@ fn open(
     args: &Args,
     doc: &Document,
     seq: SeqId,
+    catalog: &mut Catalog,
     at: Tick,
     playing: bool,
 ) -> Result<Session, String> {
@@ -70,6 +75,9 @@ fn open(
     let env = rt_env(&backend, &info);
     let joined = env.workgroup.is_some();
     engine.set_rt_env(env);
+    // Plugins load (and fail, reported) before the first graph.
+    let host = plugins::host(doc, catalog, info.sample_rate, engine.block_frames())?;
+    engine.set_insert_factory(Box::new(host.factory()));
     let report = engine.load(doc, seq).map_err(|e| e.to_string())?;
     for w in report.warnings.iter().chain(&report.graph.warnings) {
         eprintln!("warning: {w}");
@@ -109,17 +117,20 @@ fn open(
     Ok(Session {
         backend,
         engine,
+        host,
         info,
     })
 }
 
 /// Stops the device, frees the renderer on this thread, then drops the
-/// engine: its MIDI sender drains and sends All Notes Off to every MIDI
-/// output it owned before the next session opens any.
+/// engine (its MIDI sender drains and sends All Notes Off to every MIDI
+/// output it owned before the next session opens any), then the plugin
+/// host, which deactivates the processors the engine gave back.
 fn close(mut s: Session) {
     let r: Option<Renderer> = s.backend.stop().ok();
     drop(r);
     drop(s.engine);
+    drop(s.host);
 }
 
 /// Stops the transport and gives a live device a few blocks to play the
@@ -130,12 +141,21 @@ fn stop_and_wait(s: &mut Session) {
 }
 
 /// Plays until the end (exit 0) or Ctrl-C.
-pub fn run(args: &Args, doc: &Document, seq: SeqId) -> Result<(), String> {
+pub fn run(args: &Args, doc: &Document, seq: SeqId, catalog: &mut Catalog) -> Result<(), String> {
     signal::install();
     let meter = doc.sequence(seq).map_err(|e| e.to_string())?.meter.clone();
-    let mut s = open(args, doc, seq, Tick::ZERO, true)?;
+    let mut s = open(args, doc, seq, catalog, Tick::ZERO, true)?;
     loop {
         std::thread::sleep(Duration::from_millis(100));
+        // `host_idle`: plugin callbacks, restarts (a latency change
+        // recompiles), processors coming back.
+        let r = s
+            .host
+            .service(&mut s.engine, doc, seq)
+            .map_err(|e| e.to_string())?;
+        if let Some(c) = r.compiled {
+            eprintln!("\nrecompiled: latency {} frame(s)", c.graph.latency_frames);
+        }
         let pos = meter.tick_to_bbu(s.engine.position_tick(), 4);
         let load = s.engine.dsp_load();
         print!(
@@ -197,7 +217,7 @@ pub fn run(args: &Args, doc: &Document, seq: SeqId) -> Result<(), String> {
                     }
                     let old_rate = s.info.sample_rate;
                     close(s);
-                    s = open(args, doc, seq, at, playing)?;
+                    s = open(args, doc, seq, catalog, at, playing)?;
                     if s.info.sample_rate != old_rate {
                         eprintln!(
                             "sample rate {old_rate} -> {}: recompiled",

@@ -132,6 +132,31 @@ pub fn bundle() -> PathBuf {
     }
 }
 
+/// The `vizdaw-scan` binary, built once per test process into the same
+/// separate target directory (for tests of programs that run it).
+pub fn scanner() -> PathBuf {
+    static PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    let r = PATH.get_or_init(|| {
+        let root = workspace_root();
+        let target = root.join("target").join("test-plugins");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = Command::new(cargo)
+            .current_dir(&root)
+            .args(["build", "--quiet", "-p", "vizdaw-scan", "--target-dir"])
+            .arg(&target)
+            .status()
+            .map_err(|e| format!("cannot run cargo: {e}"))?;
+        if !status.success() {
+            return Err(format!("building vizdaw-scan failed: {status}"));
+        }
+        Ok(target.join("debug").join("vizdaw-scan"))
+    });
+    match r {
+        Ok(p) => p.clone(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
 const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

@@ -4,6 +4,7 @@ mod args;
 #[cfg(target_os = "macos")]
 mod live;
 mod offline;
+mod plugins;
 mod project;
 #[cfg(target_os = "macos")]
 mod signal;
@@ -35,10 +36,16 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         println!("wrote {}", path.display());
         return Ok(ExitCode::SUCCESS);
     }
+    if args.scan || args.plugins {
+        plugins::run(args)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let Some(path) = &args.project else {
         return Err("no project given".into());
     };
     let doc = project::load(path)?;
+    let mut catalog = plugins::load_catalog_or_empty(args);
+    let doc = plugins::edit(&doc, args, &catalog)?;
     if args.list {
         list(&doc);
         return Ok(ExitCode::SUCCESS);
@@ -70,7 +77,7 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         eprintln!("wrote {} ({} event(s))", out.display(), report.events);
         return Ok(ExitCode::SUCCESS);
     }
-    play(args, &doc, seq)?;
+    play(args, &doc, seq, &mut catalog)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -79,8 +86,9 @@ fn play(
     args: &Args,
     doc: &core_model::document::Document,
     seq: core_model::ids::SeqId,
+    catalog: &mut core_host::catalog::Catalog,
 ) -> Result<(), String> {
-    live::run(args, doc, seq)?;
+    live::run(args, doc, seq, catalog)?;
     #[cfg(feature = "rt-check")]
     eprintln!(
         "rt-check: {} allocation(s) on the render path",
@@ -94,6 +102,7 @@ fn play(
     _: &Args,
     _: &core_model::document::Document,
     _: core_model::ids::SeqId,
+    _: &mut core_host::catalog::Catalog,
 ) -> Result<(), String> {
     Err("live playback needs macOS; use --offline".into())
 }

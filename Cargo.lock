@@ -1593,8 +1593,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "core-engine",
+ "core-host",
  "core-model",
  "platform-macos",
+ "test-plugins",
 ]
 
 [[package]]

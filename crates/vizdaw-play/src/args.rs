@@ -30,7 +30,7 @@ impl From<To> for BuiltinRoute {
 #[command(name = "vizdaw-play", version)]
 pub struct Args {
     /// The `.vizdaw` package to play.
-    #[arg(required_unless_present = "write_demo")]
+    #[arg(required_unless_present_any = ["write_demo", "scan", "plugins"])]
     pub project: Option<PathBuf>,
     /// Sequence to play (default: the only top-level sequence).
     #[arg(long = "seq", value_name = "NAME")]
@@ -65,6 +65,39 @@ pub struct Args {
     /// List sequences, output devices and MIDI destinations, then exit.
     #[arg(long)]
     pub list: bool,
+    /// Add a plugin insert before playing: `STRIP=FORMAT:ID`, e.g.
+    /// `"Built-in Synth=au:aufx/dely/appl"` or `"Master=clap:com.u-he.diva"`
+    /// (repeatable; live playback only).
+    #[arg(long = "insert", value_name = "STRIP=FORMAT:ID")]
+    pub inserts: Vec<String>,
+    /// Play a destination on a plugin instrument instead: `DEST=FORMAT:ID`,
+    /// e.g. `"Piano=au:aumu/dls /appl"` (repeatable; live playback only).
+    #[arg(long = "instrument", value_name = "DEST=FORMAT:ID")]
+    pub instruments: Vec<String>,
+    /// Scan for new or changed plugins (CLAP folders and Audio Units), update
+    /// the catalog and list it, then exit.
+    #[arg(long, conflicts_with_all = ["offline", "list", "write_demo"])]
+    pub scan: bool,
+    /// List the plugin catalog, then exit.
+    #[arg(long, conflicts_with_all = ["offline", "list", "write_demo"])]
+    pub plugins: bool,
+    /// The plugin catalog (default: the app's `plugins.json`).
+    #[arg(long, value_name = "FILE")]
+    pub catalog: Option<PathBuf>,
+    /// Look for CLAP bundles here instead of the standard folders
+    /// (repeatable).
+    #[arg(long = "clap-dir", value_name = "DIR")]
+    pub clap_dirs: Vec<PathBuf>,
+    /// The `vizdaw-scan` binary (default: next to this program).
+    #[arg(long, value_name = "FILE")]
+    pub scanner: Option<PathBuf>,
+    /// Do not scan Audio Units.
+    #[arg(long = "no-au")]
+    pub no_au: bool,
+    /// Time each plugin scan may take, in milliseconds (default: 10 s, 30 s
+    /// for AU v3).
+    #[arg(long = "scan-timeout-ms", value_name = "MS")]
+    pub scan_timeout_ms: Option<u64>,
     /// Write the demo project to this package path, then exit.
     #[arg(long = "write-demo", value_name = "DIR/demo.vizdaw", conflicts_with_all = ["project", "offline", "list"])]
     pub write_demo: Option<PathBuf>,
