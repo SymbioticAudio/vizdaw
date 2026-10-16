@@ -13,12 +13,14 @@ crate-type = ["staticlib", "cdylib", "lib"]
 [features]
 # `debug_panic`, `Session::debug_panic_locked`, `force_offline`,
 # `reset_host`, `drain_offline_log`, `simulate_event`, `hosts_created`,
-# `inject_reload_fault` and `engine_active`, for tests only.
+# `inject_reload_fault`, `engine_active`, `engine_workers`,
+# `add_test_bundle` and `closing_hosts`, for tests only.
 test-hooks = []
 
 [dependencies]
 core-model = { path = "../core-model" }
 core-engine = { path = "../core-engine", features = ["fixtures"] }
+core-host = { path = "../core-host" }
 thiserror = "2"
 uniffi = { version = "=0.32.2", default-features = false }
 
@@ -28,3 +30,4 @@ platform-macos = { path = "../platform-macos" }
 [dev-dependencies]
 core-ffi = { path = ".", features = ["test-hooks"] }
 tempfile = "3"
+test-plugins = { path = "../test-plugins" }

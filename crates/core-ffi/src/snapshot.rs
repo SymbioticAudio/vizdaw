@@ -195,3 +195,122 @@ pub fn seconds(doc: &Document, seq: SeqId, tick: Tick) -> f64 {
     doc.sequence(seq)
         .map_or(0.0, |s| s.tempo.tick_to_seconds(tick))
 }
+
+/// A plugin format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum PluginFormatTag {
+    /// Audio Unit (v2 or v3).
+    Au,
+    /// CLAP.
+    Clap,
+}
+
+impl From<core_model::mixer::PluginFormat> for PluginFormatTag {
+    fn from(f: core_model::mixer::PluginFormat) -> Self {
+        match f {
+            core_model::mixer::PluginFormat::Au => PluginFormatTag::Au,
+            core_model::mixer::PluginFormat::Clap => PluginFormatTag::Clap,
+        }
+    }
+}
+
+impl From<PluginFormatTag> for core_model::mixer::PluginFormat {
+    fn from(f: PluginFormatTag) -> Self {
+        match f {
+            PluginFormatTag::Au => core_model::mixer::PluginFormat::Au,
+            PluginFormatTag::Clap => core_model::mixer::PluginFormat::Clap,
+        }
+    }
+}
+
+/// Which plugin, as the app names it (spec §4 `PluginRef`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct PluginRefRow {
+    /// Format.
+    pub format: PluginFormatTag,
+    /// AU `type/subtype/manufacturer`, or the CLAP id.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Vendor.
+    pub vendor: String,
+    /// Version.
+    pub version: String,
+}
+
+impl From<&core_model::mixer::PluginRef> for PluginRefRow {
+    fn from(p: &core_model::mixer::PluginRef) -> Self {
+        PluginRefRow {
+            format: p.format.into(),
+            id: p.id.clone(),
+            name: p.name.clone(),
+            vendor: p.vendor.clone(),
+            version: p.version.clone(),
+        }
+    }
+}
+
+impl From<&PluginRefRow> for core_model::mixer::PluginRef {
+    fn from(p: &PluginRefRow) -> Self {
+        core_model::mixer::PluginRef {
+            format: p.format.into(),
+            id: p.id.clone(),
+            name: p.name.clone(),
+            vendor: p.vendor.clone(),
+            version: p.version.clone(),
+        }
+    }
+}
+
+/// Where a plugin slot stands.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum SlotStatus {
+    /// Loading.
+    Loading,
+    /// Running.
+    Live,
+    /// A placeholder (spec §9): it failed to load, is disabled, missing or
+    /// blocklisted, or safe mode keeps it off; audio passes through.
+    Placeholder {
+        /// Why, as shown in the slot and its window.
+        reason: String,
+    },
+}
+
+/// One plugin slot: an insert, or a plugin instrument's own slot.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SlotRow {
+    /// Instance ID.
+    pub id: u64,
+    /// The plugin.
+    pub plugin: PluginRefRow,
+    /// A plugin instrument's own slot (not an insert).
+    pub instrument: bool,
+    /// Bypassed.
+    pub bypass: bool,
+    /// Strip feeding its sidechain input.
+    pub sidechain: Option<u64>,
+    /// Loading, running or a placeholder.
+    pub status: SlotStatus,
+    /// Latency in frames (running plugins).
+    pub latency: u32,
+    /// It has a sidechain input (only then the sidechain menu shows).
+    pub has_sidechain_input: bool,
+    /// Output ports (multi-output instruments have more than one).
+    pub outputs: u32,
+}
+
+/// What a plugin timer tick changed.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct IdleUpdate {
+    /// The document, when plugin-UI gestures became undo steps.
+    pub snapshot: Option<DocSnapshot>,
+    /// Slots finished loading, failed, restarted or came back: refetch
+    /// the mixer.
+    pub slots_changed: bool,
+    /// Slots whose parameter list or values changed outside a gesture.
+    pub params_changed: Vec<u64>,
+    /// New problems: plugins that failed to load or refused their saved
+    /// state.
+    pub problems: Vec<String>,
+}

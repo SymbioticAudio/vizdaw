@@ -3,10 +3,12 @@
 use crate::error::VizError;
 use crate::guard::{ffi_guard, lock};
 use crate::host;
+use crate::plugins;
 use crate::snapshot::{
-    DocSnapshot, LaneRow, TransportState, lane_rows, position_bbu, seconds, seq_id, seq_rows,
-    warnings,
+    DocSnapshot, IdleUpdate, LaneRow, SlotRow, TransportState, lane_rows, position_bbu, seconds,
+    seq_id, seq_rows, warnings,
 };
+use core_host::PluginHost;
 use core_model::command::Command;
 use core_model::command::lane::LaneCmd;
 use core_model::command::sequence::SequenceCmd;
@@ -70,10 +72,12 @@ impl Inner {
             .map(|r| SeqId(r.id))
     }
 
-    /// Recompiles the engine after an edit. A failure (or panic, which also
-    /// resets the host) never fails the edit: it becomes a sticky fault.
+    /// After an edit: the plugin host follows the document and the engine
+    /// recompiles. A failure (or panic, which also resets the host) never
+    /// fails the edit: it becomes a sticky fault.
     fn reload_host(&mut self, id: u64) {
-        let r = ffi_guard(|| host::reload(id, self.history.doc(), self.looped));
+        let (doc, looped) = (self.history.doc(), self.looped);
+        let r = ffi_guard(|| plugins::with(id, |p| host::reload(id, doc, looped, p)));
         self.reload_fault = match r {
             Ok(()) => None,
             Err(e) => {
@@ -139,11 +143,31 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-    fn with(doc: Document, path: Option<PathBuf>) -> Arc<Session> {
-        Arc::new(Session {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+    /// A session for `doc`; its plugins start loading on this thread.
+    fn with(doc: Document, path: Option<PathBuf>) -> Result<Arc<Session>, VizError> {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        plugins::create(id)?;
+        plugins::with(id, |p| p.map(|p| p.sync(&doc)));
+        Ok(Arc::new(Session {
+            id,
             inner: Mutex::new(Inner::new(doc, path)),
-        })
+        }))
+    }
+
+    /// Commits plugin-UI gestures as undo steps (spec §4), then lets the
+    /// plugin host and the engine follow (the host must see the committed
+    /// document before any undo, 3b `PluginHost::commit_gestures`).
+    fn commit_gestures(&self, inner: &mut Inner, gestures: &[core_host::Gesture]) -> bool {
+        if gestures.is_empty() {
+            return false;
+        }
+        let r = PluginHost::commit_gestures(&mut inner.history, gestures);
+        inner.version += 1;
+        inner.reload_host(self.id);
+        if let Err(e) = r {
+            inner.reload_fault = Some(format!("plugin gesture refused: {e}"));
+        }
+        true
     }
 
     /// Applies one command as one undo step and recompiles if playing.
@@ -184,7 +208,7 @@ impl Session {
     /// An untitled, empty document.
     #[uniffi::constructor]
     pub fn new_empty() -> Result<Arc<Session>, VizError> {
-        ffi_guard(|| Ok(Session::with(Document::new(), None)))
+        ffi_guard(|| Session::with(Document::new(), None))
     }
 
     /// An untitled copy of the demo project.
@@ -192,7 +216,7 @@ impl Session {
     pub fn new_demo() -> Result<Arc<Session>, VizError> {
         ffi_guard(|| {
             let doc = core_engine::fixtures::demo_document()?;
-            Ok(Session::with(doc, None))
+            Session::with(doc, None)
         })
     }
 
@@ -205,7 +229,7 @@ impl Session {
                 return Err(VizError::NotFound { path });
             }
             let doc = file::load(&p)?;
-            Ok(Session::with(doc, Some(p)))
+            Session::with(doc, Some(p))
         })
     }
 
@@ -301,7 +325,10 @@ impl Session {
                 (Some(t), Some(s)) if s == id => Some(t),
                 _ => None,
             };
-            host::play(self.id, inner.doc(), id, start, inner.looped)?;
+            let looped = inner.looped;
+            plugins::with(self.id, |p| {
+                host::play(self.id, inner.doc(), id, start, looped, p)
+            })?;
             inner.reload_fault = None;
             inner.cursor = None;
             inner.cursor_seq = Some(id);
@@ -340,7 +367,8 @@ impl Session {
         self.transport_call(|| {
             let inner = lock(&self.inner);
             let doc = inner.doc();
-            Ok(match host::state(self.id, doc)? {
+            let state = plugins::with(self.id, |p| host::state(self.id, doc, p))?;
+            Ok(match state {
                 Some(mut h) => TransportState {
                     playing: h.playing,
                     seq: Some(h.seq.0),
@@ -376,9 +404,93 @@ impl Session {
     }
 }
 
+#[uniffi::export]
+impl Session {
+    /// The plugin timer's step (spec §5 `host_idle`; the app calls it about
+    /// 60 times a second on the main thread): finishes plugin loads, runs
+    /// plugin callbacks, lets the engine follow, and turns plugin-UI
+    /// gestures into undo steps.
+    pub fn idle(&self) -> Result<IdleUpdate, VizError> {
+        ffi_guard(|| {
+            plugins::tick_closing();
+            let mut inner = lock(&self.inner);
+            let report = {
+                let doc = inner.doc();
+                plugins::with(self.id, |p| p.map(|p| host::service(self.id, doc, p)))
+            };
+            let Some(r) = report else {
+                return Ok(IdleUpdate {
+                    snapshot: None,
+                    slots_changed: false,
+                    params_changed: Vec::new(),
+                    problems: Vec::new(),
+                });
+            };
+            let mut problems: Vec<String> = Vec::new();
+            for (id, why) in &r.failed {
+                problems.push(format!("{}: {why}", slot_name(inner.doc(), *id)));
+            }
+            for (id, why) in &r.rejected_state {
+                problems.push(format!(
+                    "{}: saved state refused ({why})",
+                    slot_name(inner.doc(), *id)
+                ));
+            }
+            let changed = self.commit_gestures(&mut inner, &r.gestures);
+            Ok(IdleUpdate {
+                snapshot: if changed {
+                    Some(inner.snapshot()?)
+                } else {
+                    None
+                },
+                slots_changed: !r.loaded.is_empty()
+                    || !r.failed.is_empty()
+                    || !r.restart.is_empty()
+                    || r.compiled.is_some(),
+                params_changed: r.params_changed.iter().map(|i| i.0).collect(),
+                problems,
+            })
+        })
+    }
+
+    /// Every plugin slot with its status: instruments' own slots, then
+    /// inserts.
+    pub fn plugin_slots(&self) -> Result<Vec<SlotRow>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            Ok(plugins::with(self.id, |p| {
+                plugins::slot_rows(inner.doc(), p)
+            }))
+        })
+    }
+}
+
+/// "Strip — Plugin" for messages about slot `id`.
+fn slot_name(doc: &Document, id: core_model::ids::PluginInstanceId) -> String {
+    use core_model::document::SlotOwner;
+    let plugin = doc
+        .plugin_slot(id)
+        .map_or_else(|| id.to_string(), |s| s.plugin.name.clone());
+    let place = match doc.find_slot(id) {
+        Some(SlotOwner::Insert(strip, _)) => doc.mixer().strip(strip).ok().map(|s| s.name.clone()),
+        Some(SlotOwner::Instrument(d)) => doc.instruments().get(&d).map(|d| d.name.clone()),
+        None => None,
+    };
+    match place {
+        Some(p) => format!("{p} — {plugin}"),
+        None => plugin,
+    }
+}
+
 #[cfg(feature = "test-hooks")]
 #[uniffi::export]
 impl Session {
+    /// The sample rate this session's plugins are activated for (test
+    /// hook).
+    pub fn debug_plugin_rate(&self) -> Result<f64, VizError> {
+        ffi_guard(|| Ok(plugins::with(self.id, |p| p.map_or(0.0, |p| p.config().0))))
+    }
+
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
@@ -393,6 +505,14 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        host::release(self.id);
+        // The engine may still hold this session's processors: when its
+        // plugin host feeds the engine, the engine goes first (it gives
+        // them back), then the plugin host.
+        if plugins::has_plugins(self.id) && host::factory_owner() == Some(self.id) {
+            host::reset();
+        } else {
+            host::release(self.id);
+        }
+        plugins::close(self.id);
     }
 }

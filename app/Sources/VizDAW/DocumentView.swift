@@ -149,8 +149,7 @@ struct TransportToolbar: ToolbarContent {
                 .help("Faults and compile messages")
                 .popover(isPresented: $model.showsFaults) {
                     VStack(alignment: .leading, spacing: 4) {
-                        let lines = model.transport.faults + model.transport.report
-                        ForEach(Array(lines.enumerated()), id: \.offset) {
+                        ForEach(Array(model.messages.enumerated()), id: \.offset) {
                             Text($0.element)
                         }
                     }

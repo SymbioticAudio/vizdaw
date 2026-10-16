@@ -1,14 +1,19 @@
 //! The process-wide engine host: one engine, one output, one playing
-//! session at a time. Created lazily on the first Play.
+//! session at a time. Created lazily on the first Play. The engine plays
+//! the inserts and plugin instruments of the session that played last
+//! (its plugin host is the engine's insert factory, Plan Ruling 2).
 
 use crate::error::VizError;
 use crate::guard::lock;
+use crate::plugins;
 use core_engine::backend::{AudioBackend, BackendEvent};
 use core_engine::engine::{Engine, EngineConfig};
+use core_engine::graph::NoInserts;
 use core_engine::offline::{EventLog, OfflineBackend, OfflineSinks};
 use core_engine::render::Renderer;
 use core_engine::schedule::CompileReport;
 use core_engine::transport::PlayState;
+use core_host::{IdleReport, PluginHost};
 use core_model::document::Document;
 use core_model::ids::SeqId;
 use core_model::time::Tick;
@@ -19,6 +24,21 @@ use std::time::{Duration, Instant};
 
 /// Offline sample rate.
 pub const OFFLINE_RATE: f64 = 48_000.0;
+
+/// The offline rate in use (f64 bits): `OFFLINE_RATE` unless a test set
+/// another (`set_offline_rate`).
+static OFFLINE_RATE_BITS: AtomicU64 = AtomicU64::new(0x40E7_7000_0000_0000);
+
+fn offline_rate() -> f64 {
+    f64::from_bits(OFFLINE_RATE_BITS.load(Ordering::Relaxed))
+}
+
+/// Makes offline hosts created from now on run at `rate` (test hook: a
+/// device whose rate changed).
+#[cfg(feature = "test-hooks")]
+pub fn set_offline_rate(rate: f64) {
+    OFFLINE_RATE_BITS.store(rate.to_bits(), Ordering::Relaxed);
+}
 /// Offline block size.
 pub const OFFLINE_BLOCK: u32 = 512;
 /// Device label of the offline backend.
@@ -100,6 +120,18 @@ pub fn inject_reload_fault(f: Option<ReloadFault>) {
     *lock(&RELOAD_FAULT) = f;
 }
 
+/// Closed sessions' plugin hosts still waiting for processors (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn closing_hosts_waiting() -> usize {
+    plugins::closing_hosts()
+}
+
+/// The live engine's worker count (test hook; `None` without a host).
+#[cfg(feature = "test-hooks")]
+pub fn engine_workers() -> Option<usize> {
+    lock(&HOST).as_ref().map(|h| h.engine.config().workers)
+}
+
 /// True when a host exists and its engine is not stopped (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn engine_active() -> bool {
@@ -122,7 +154,8 @@ struct OfflineDriver {
 
 impl OfflineDriver {
     fn start(renderer: Renderer) -> Result<OfflineDriver, VizError> {
-        let mut backend = OfflineBackend::new(OFFLINE_RATE, OFFLINE_BLOCK);
+        let rate = offline_rate();
+        let mut backend = OfflineBackend::new(rate, OFFLINE_BLOCK);
         backend.start(renderer)?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -131,7 +164,7 @@ impl OfflineDriver {
             .spawn(move || {
                 let t0 = Instant::now();
                 while !flag.load(Ordering::Relaxed) {
-                    let due = (t0.elapsed().as_secs_f64() * OFFLINE_RATE) as u64;
+                    let due = (t0.elapsed().as_secs_f64() * rate) as u64;
                     if due > backend.frames() {
                         backend.run_frames(due - backend.frames());
                     }
@@ -172,6 +205,14 @@ struct Host {
     output: Output,
     engine: Engine,
     owner: u64,
+    /// The session whose plugin host is the engine's insert factory (0:
+    /// none).
+    factory_owner: u64,
+    /// The engine loaded a document with plugin slots since it was made:
+    /// its instances and plugin targets are keyed by that document's
+    /// instance IDs, so another session must not inherit them (Plan
+    /// Ruling 2).
+    plugins_in_engine: bool,
     seq: SeqId,
     looped: bool,
     device: String,
@@ -192,15 +233,10 @@ impl Host {
         if offline_mode() {
             let sinks = OfflineSinks::new(1 << 16);
             let log = sinks.log();
-            let (engine, renderer) = Engine::new(EngineConfig::new(OFFLINE_RATE), Box::new(sinks))?;
+            let rate = offline_rate();
+            let (engine, renderer) = Engine::new(EngineConfig::new(rate), Box::new(sinks))?;
             let output = Output::Offline(OfflineDriver::start(renderer)?);
-            return Ok(Host::new(
-                engine,
-                output,
-                OFFLINE_DEVICE,
-                OFFLINE_RATE,
-                Some(log),
-            ));
+            return Ok(Host::new(engine, output, OFFLINE_DEVICE, rate, Some(log)));
         }
         Host::create_live()
     }
@@ -209,13 +245,17 @@ impl Host {
     fn create_live() -> Result<Host, VizError> {
         use core_engine::backend::AudioConfig;
         use platform_macos::hal::CoreAudioBackend;
+        use platform_macos::rt::MacRtPlatform;
         use platform_macos::sinks::MacSinks;
+        use std::sync::Arc;
         let mut backend = CoreAudioBackend::new();
         let info = backend.open(&AudioConfig::default())?;
-        let (engine, renderer) = Engine::new(
-            EngineConfig::new(info.sample_rate),
+        let (engine, renderer) = Engine::with_platform(
+            live_config(info.sample_rate),
             Box::new(MacSinks::new()),
+            Arc::new(MacRtPlatform),
         )?;
+        engine.set_rt_env(rt_env(&backend, info.buffer_frames, info.sample_rate));
         backend.start(renderer)?;
         Ok(Host::new(
             engine,
@@ -244,6 +284,8 @@ impl Host {
             output,
             engine,
             owner: 0,
+            factory_owner: 0,
+            plugins_in_engine: false,
             seq: SeqId(0),
             looped: false,
             device: device.to_string(),
@@ -255,7 +297,29 @@ impl Host {
         }
     }
 
+    /// Makes `owner`'s plugin host the engine's insert factory (if it is
+    /// not already) and activates its plugins for this engine's rate and
+    /// block size.
+    fn attach(&mut self, owner: u64, plugins: Option<&mut PluginHost>) {
+        let block = self.engine.block_frames();
+        if self.factory_owner != owner {
+            match plugins.as_deref() {
+                Some(p) => self.engine.set_insert_factory(Box::new(p.factory())),
+                None => self.engine.set_insert_factory(Box::new(NoInserts)),
+            }
+            self.factory_owner = owner;
+        }
+        if let Some(p) = plugins {
+            let (rate, max) = p.config();
+            if rate != self.sample_rate || max < block {
+                p.reconfigure(self.sample_rate, block.max(max));
+            }
+        }
+        plugins::set_config(self.sample_rate, block);
+    }
+
     fn load(&mut self, doc: &Document, seq: SeqId, looped: bool) -> Result<(), VizError> {
+        self.plugins_in_engine |= has_slots(doc);
         let report = self.engine.load(doc, seq)?;
         self.report = report_lines(&report);
         self.engine.set_loop(looped)?;
@@ -299,17 +363,52 @@ impl Host {
                 if frames > r.config().max_frames {
                     r.prepare(frames);
                 }
-                Ok(b.start(r)?)
+                b.start(r)?;
+                // The workers follow the new block period.
+                self.engine.set_rt_env(rt_env(b, frames, self.sample_rate));
+                Ok(())
             }
         }
+    }
+}
+
+/// Live blocks may use 80 % of their duration (3a Plan Ruling 18).
+pub const DEADLINE: f64 = 0.8;
+
+/// The live engine's settings: the spec's default worker count
+/// `min(performance cores − 1, 7)` (3a Plan Ruling 20) and the deadline.
+/// The offline backend keeps 0 workers and no deadline.
+#[cfg(target_os = "macos")]
+pub fn live_config(sample_rate: f64) -> EngineConfig {
+    let mut cfg = EngineConfig::new(sample_rate);
+    cfg.workers = platform_macos::rt::default_workers();
+    cfg.deadline = Some(DEADLINE);
+    cfg
+}
+
+/// The device's block period and workgroup, for the workers.
+#[cfg(target_os = "macos")]
+fn rt_env(
+    backend: &platform_macos::hal::CoreAudioBackend,
+    frames: u32,
+    sample_rate: f64,
+) -> core_engine::pool::RtEnv {
+    core_engine::pool::RtEnv {
+        period_ns: (f64::from(frames) * 1e9 / sample_rate.max(1.0)).round() as u64,
+        workgroup: backend.workgroup(),
     }
 }
 
 /// Handles device events for the owner (mirrors `vizdaw-play`'s live
 /// loop): a buffer-size change restarts the output; a lost device, a new
 /// default device or a rate change rebuild output and engine, recompile,
-/// and resume at the same tick. A failed rebuild leaves no host.
-fn handle_events(slot: &mut Option<Host>, doc: &Document) -> Result<(), VizError> {
+/// and resume at the same tick. A failed rebuild leaves no host. The
+/// owner's plugins follow the new engine's rate (`attach`).
+fn handle_events(
+    slot: &mut Option<Host>,
+    doc: &Document,
+    plugins: Option<&mut PluginHost>,
+) -> Result<(), VizError> {
     let Some(h) = slot.as_mut() else {
         return Ok(());
     };
@@ -334,9 +433,11 @@ fn handle_events(slot: &mut Option<Host>, doc: &Document) -> Result<(), VizError
                     std::thread::sleep(DRAIN);
                 }
                 let (owner, seq, looped) = (old.owner, old.seq, old.looped);
-                // Output first (frees the renderer), then the engine.
+                // Output first (frees the renderer), then the engine: its
+                // processors go back to the plugin host.
                 drop(old);
                 let mut new = Host::create()?;
+                new.attach(owner, plugins);
                 new.load(doc, seq, looped)?;
                 new.engine.locate_tick(at)?;
                 if playing {
@@ -353,9 +454,20 @@ fn handle_events(slot: &mut Option<Host>, doc: &Document) -> Result<(), VizError
     Ok(())
 }
 
+/// The compile report as messages: warnings, unroutable events, then the
+/// mixer graph's (placeholders as "plugin N: why", other warnings, and why
+/// a graph was not used).
 fn report_lines(r: &CompileReport) -> Vec<String> {
     let mut lines = r.warnings.clone();
     lines.extend(r.unroutable.iter().map(|u| u.reason.clone()));
+    let g = &r.graph;
+    lines.extend(
+        g.placeholders
+            .iter()
+            .map(|(id, why)| format!("{id}: {why}")),
+    );
+    lines.extend(g.warnings.iter().cloned());
+    lines.extend(g.error.iter().map(|e| format!("mixer graph not used: {e}")));
     lines
 }
 
@@ -387,6 +499,7 @@ pub fn play(
     seq: SeqId,
     start: Option<Tick>,
     looped: bool,
+    mut plugins: Option<&mut PluginHost>,
 ) -> Result<(), VizError> {
     let mut slot = lock(&HOST);
     // Device events nobody polled (the host had no owner, or another one):
@@ -402,7 +515,15 @@ pub fn play(
             }
         }
     } else {
-        handle_events(&mut slot, doc)?;
+        handle_events(&mut slot, doc, plugins.as_deref_mut())?;
+    }
+    // Another session's plugins played here: a fresh engine, so none of
+    // its instances is taken for this document's (same-numbered) slots.
+    if slot
+        .as_ref()
+        .is_some_and(|h| h.factory_owner != owner && h.plugins_in_engine)
+    {
+        *slot = None;
     }
     if slot.is_none() {
         *slot = Some(Host::create()?);
@@ -410,6 +531,12 @@ pub fn play(
     let host = slot.as_mut().ok_or_else(|| VizError::Internal {
         message: "engine host missing".into(),
     })?;
+    host.attach(owner, plugins.as_deref_mut());
+    if let Some(p) = plugins {
+        // Slots still loading play as placeholders; `service` loads again
+        // once they are in.
+        p.sync(doc);
+    }
     if host.owner != owner || host.seq != seq || start.is_some() {
         host.engine.stop()?;
         host.load(doc, seq, looped)?;
@@ -457,8 +584,16 @@ pub fn set_loop(owner: u64, on: bool) -> Result<(), VizError> {
     }
 }
 
-/// Recompiles after an edit if `owner` holds the engine.
-pub fn reload(owner: u64, doc: &Document, looped: bool) -> Result<(), VizError> {
+/// After an edit: starts loading the plugins `doc` gained (and drops the
+/// ones it lost), then recompiles if `owner` holds the engine and no
+/// plugin is loading (otherwise `service` loads once they are in).
+pub fn reload(
+    owner: u64,
+    doc: &Document,
+    looped: bool,
+    plugins: Option<&mut PluginHost>,
+) -> Result<(), VizError> {
+    let ready = plugins.is_none_or(|p| p.sync(doc));
     let mut slot = lock(&HOST);
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
@@ -480,6 +615,9 @@ pub fn reload(owner: u64, doc: &Document, looped: bool) -> Result<(), VizError> 
                 h.owner = 0;
                 return Ok(());
             }
+            if !ready {
+                return Ok(());
+            }
             h.load(doc, seq, looped)
         }
         _ => Ok(()),
@@ -489,13 +627,17 @@ pub fn reload(owner: u64, doc: &Document, looped: bool) -> Result<(), VizError> 
 /// `owner`'s view of the transport, or `None` when it does not hold the
 /// engine. For the owner, device events are handled first (`doc` is the
 /// owner's document, needed to recompile after a rebuild).
-pub fn state(owner: u64, doc: &Document) -> Result<Option<HostState>, VizError> {
+pub fn state(
+    owner: u64,
+    doc: &Document,
+    plugins: Option<&mut PluginHost>,
+) -> Result<Option<HostState>, VizError> {
     let mut slot = lock(&HOST);
     match slot.as_ref() {
         Some(h) if h.owner == owner => {}
         _ => return Ok(None),
     }
-    handle_events(&mut slot, doc)?;
+    handle_events(&mut slot, doc, plugins)?;
     let Some(h) = slot.as_mut() else {
         return Ok(None);
     };
@@ -520,4 +662,53 @@ pub fn release(owner: u64) {
             h.owner = 0;
         }
     }
+}
+
+/// The main-thread timer's plugin step for session `owner` (spec §5,
+/// 3b `PluginHost::service`): with the engine when `owner` plays through
+/// it, so finished loads, restarts and edits that waited reach it; else
+/// the host's own `idle`. An engine error is kept as a fault (the host
+/// retries once something changes).
+pub fn service(owner: u64, doc: &Document, plugins: &mut PluginHost) -> IdleReport {
+    let mut slot = lock(&HOST);
+    match slot.as_mut() {
+        Some(h) if h.owner == owner && h.factory_owner == owner => {
+            h.plugins_in_engine |= has_slots(doc);
+            match plugins.service(&mut h.engine, doc, h.seq) {
+                Ok(r) => {
+                    if let Some(c) = &r.compiled {
+                        h.report = report_lines(c);
+                    }
+                    r
+                }
+                Err(e) => {
+                    let f = format!("plugin load: {e}");
+                    if !h.faults.contains(&f) {
+                        h.faults.push(f);
+                    }
+                    IdleReport::default()
+                }
+            }
+        }
+        _ => plugins.idle(),
+    }
+}
+
+/// Whether `doc` has a plugin slot (an insert or a plugin instrument).
+fn has_slots(doc: &Document) -> bool {
+    doc.mixer().inserts().next().is_some()
+        || doc.instruments().values().any(|d| {
+            matches!(
+                d.kind,
+                core_model::document::DestKind::PluginInstrument { .. }
+            )
+        })
+}
+
+/// The session whose plugin host feeds the engine, if any.
+pub fn factory_owner() -> Option<u64> {
+    lock(&HOST)
+        .as_ref()
+        .map(|h| h.factory_owner)
+        .filter(|o| *o != 0)
 }

@@ -391,9 +391,11 @@ version = "0.1.0"
 dependencies = [
  "core-engine",
  "core-ffi",
+ "core-host",
  "core-model",
  "platform-macos",
  "tempfile",
+ "test-plugins",
  "thiserror",
  "uniffi",
 ]

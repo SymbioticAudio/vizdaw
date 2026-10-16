@@ -15,6 +15,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var renames: [(UInt64, String)] = []
     var mutes: [(seq: UInt64, lane: UInt64, mute: Bool)] = []
     var nextSnapshot: DocSnapshot?
+    /// What the next `idle()` calls return, oldest first.
+    var idleUpdates: [IdleUpdate] = []
+    var idleCalls = 0
+    var slots: [SlotRow] = []
 
     init(_ sequences: [SeqRow], version: UInt64 = 0) {
         snap = DocSnapshot(
@@ -83,6 +87,18 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return state
     }
     func undo() throws -> DocSnapshot { commandResult() }
+
+    func idle() throws -> IdleUpdate {
+        idleCalls += 1
+        if let u = idleUpdates.first {
+            idleUpdates.removeFirst()
+            if let s = u.snapshot { snap = s }
+            return u
+        }
+        return IdleUpdate(snapshot: nil, slotsChanged: false, paramsChanged: [], problems: [])
+    }
+
+    func pluginSlots() throws -> [SlotRow] { slots }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

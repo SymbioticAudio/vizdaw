@@ -29,12 +29,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         StoreAlerts.watch(appStore)
+        PluginTicker.start(appStore)
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
             appStore.enqueue(appStore.open(path: url.path))
         }
+    }
+}
+
+/// The main-thread plugin timer (spec §5 `host_idle`, 60 Hz): every open
+/// document's plugins load, run their callbacks and report gestures here.
+@MainActor
+enum PluginTicker {
+    private static var timer: Timer?
+
+    static func start(_ store: DocumentStore) {
+        guard timer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                for model in store.documents.values { model.idle() }
+            }
+        }
+        // Common modes: keeps ticking while a menu or a drag tracks.
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 }
 

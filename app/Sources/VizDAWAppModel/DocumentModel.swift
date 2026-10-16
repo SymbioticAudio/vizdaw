@@ -25,6 +25,14 @@ public final class DocumentModel {
     private var lanesKey: LanesKey?
     /// How often `lanes` were fetched (tests check refetch rules).
     public private(set) var laneFetches = 0
+    /// Plugins that failed to load or refused their state (newest last).
+    public private(set) var pluginProblems: [String] = []
+    /// Bumped when plugin slots change (loaded, failed, restarted): views
+    /// that show slots refetch.
+    public private(set) var slotsVersion = 0
+    /// Slots whose parameters changed outside a gesture (their windows
+    /// refetch), cleared by whoever handles them.
+    public var paramsChanged: Set<UInt64> = []
 
     private struct LanesKey: Equatable {
         let version: UInt64
@@ -55,7 +63,10 @@ public final class DocumentModel {
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
     public var pollInterval: Duration { isPlaying ? .milliseconds(33) : .milliseconds(250) }
     public var hasFaults: Bool { !transport.faults.isEmpty }
-    public var hasReport: Bool { !transport.report.isEmpty }
+    public var hasReport: Bool { !transport.report.isEmpty || !pluginProblems.isEmpty }
+    /// Every line of the fault popover: faults, compile messages, plugin
+    /// problems.
+    public var messages: [String] { transport.faults + transport.report + pluginProblems }
     public var selectedName: String? {
         snapshot.sequences.first { $0.id == selectedSeq }?.name
     }
@@ -141,6 +152,20 @@ public final class DocumentModel {
             transport = try session.transport()
         } catch {
             if alert == nil { alert = AlertItem(error, title: "Transport Failed") }
+        }
+    }
+
+    /// The plugin timer's step (about 60 times a second, spec §5): plugin
+    /// loads finish, plugin-UI gestures become undo steps. Failures go to
+    /// the fault popover, not to alerts.
+    public func idle() {
+        guard let u = try? session.idle() else { return }
+        if let s = u.snapshot { apply(s) }
+        if u.slotsChanged { slotsVersion += 1 }
+        paramsChanged.formUnion(u.paramsChanged)
+        if !u.problems.isEmpty {
+            pluginProblems.append(contentsOf: u.problems)
+            if pluginProblems.count > 50 { pluginProblems.removeFirst(pluginProblems.count - 50) }
         }
     }
 
