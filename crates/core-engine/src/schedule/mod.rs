@@ -1,8 +1,10 @@
 //! Immutable playback schedules and their compiler.
 
+pub mod compile;
 pub mod targets;
 pub mod tempo;
 
+pub use compile::{CompileOptions, CompileReport, Unroutable, compile};
 pub use targets::{BuiltinRoute, MAX_TARGETS, TargetIdx, TargetKind, TargetTable};
 pub use tempo::TempoTable;
 
