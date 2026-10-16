@@ -149,6 +149,8 @@ impl RtWaker for StdWaker {
 pub struct PoolShared {
     job: AtomicPtr<Job>,
     in_job: AtomicU32,
+    /// Graph nodes rendered by worker threads (diagnostic hook).
+    worker_steps: AtomicU64,
     /// One waker per worker.
     wakers: Box<[Box<dyn RtWaker>]>,
     /// Round-robin cursor for job wakes.
@@ -175,6 +177,12 @@ impl PoolShared {
     /// Number of worker threads.
     pub fn workers(&self) -> usize {
         self.workers
+    }
+
+    /// Graph nodes rendered by worker threads so far (diagnostic hook:
+    /// tests use it to prove workers did render).
+    pub fn worker_steps(&self) -> u64 {
+        self.worker_steps.load(Ordering::Relaxed)
     }
 
     /// Whether the callback thread renders nodes too.
@@ -268,6 +276,7 @@ impl PoolShared {
                 // SAFETY: this worker saw the job published and counts in
                 // `in_job` (the contract of `Job::step`, argued above).
                 if unsafe { job.step() } {
+                    self.worker_steps.fetch_add(1, Ordering::Relaxed);
                     idle = None;
                     continue;
                 }
@@ -355,6 +364,7 @@ impl Pool {
         let shared = Arc::new(PoolShared {
             job: AtomicPtr::new(std::ptr::null_mut()),
             in_job: AtomicU32::new(0),
+            worker_steps: AtomicU64::new(0),
             wakers: (0..workers).map(|_| platform.waker()).collect(),
             next: AtomicUsize::new(0),
             workers,

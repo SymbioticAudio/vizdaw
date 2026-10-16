@@ -13,7 +13,7 @@ use core_engine::schedule::BuiltinRoute;
 use core_model::command::MixerCmd;
 use core_model::document::Document;
 use core_model::ids::{SeqId, StripId};
-use core_model::mixer::{AuxSend, StripKind};
+use core_model::mixer::{AuxSend, ParamId, StripKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,14 +29,17 @@ fn armed_block(b: &mut OfflineBackend, frames: u32) {
 /// The demo with: a gain/latency insert and a NaN insert (it faults after
 /// 16 blocks) on the synth, a post send to "Verb" (noise, latency 200) whose
 /// second insert adds the synth's sidechain, and a pre-fader send to "Dry".
-fn mixed(master_db: f64, extra_bus: bool) -> (Document, SeqId) {
+/// `master_db` and `param` (an insert parameter overlay) change values only;
+/// `extra_bus` changes the graph's shape.
+fn mixed(master_db: f64, param: f64, extra_bus: bool) -> (Document, SeqId) {
     let doc = demo_document().unwrap();
     let song = find_sequence(&doc, "Song").unwrap();
     let mut b = Builder::from_doc(doc);
     let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
     let verb = b.bus("Verb").unwrap();
     let dry = b.bus("Dry").unwrap();
-    b.insert(synth, TestInserts::plugin("gain=0.7,latency=33"))
+    let gain = b
+        .insert(synth, TestInserts::plugin("gain=0.7,latency=33"))
         .unwrap();
     b.insert(synth, TestInserts::plugin("nan")).unwrap();
     b.insert(verb, TestInserts::plugin("noise=3,latency=200"))
@@ -45,6 +48,11 @@ fn mixed(master_db: f64, extra_bus: bool) -> (Document, SeqId) {
     b.mixer(MixerCmd::SetSidechain {
         slot: sc,
         source: Some(synth),
+    })
+    .unwrap();
+    b.mixer(MixerCmd::SetPluginParams {
+        slot: gain,
+        params: vec![(ParamId(1), param)],
     })
     .unwrap();
     b.mixer(MixerCmd::AddSend {
@@ -70,6 +78,72 @@ fn mixed(master_db: f64, extra_bus: bool) -> (Document, SeqId) {
     (b.finish(), song)
 }
 
+/// Plays `blocks` blocks of the full graph on `workers` workers, swapping
+/// in a value-only variant every 300 blocks and a structural one every 700
+/// (its delay lines are new; its instances are adopted). Asserts nothing
+/// allocated, every swap was applied, and (when the callback does not
+/// help) that workers rendered nodes.
+fn play_graph(workers: usize, callback_helps: bool, blocks: u32) {
+    let (doc, song) = mixed(0.0, 0.0, false);
+    let (quieter, _) = mixed(-3.0, 0.5, false);
+    let (wider, _) = mixed(-3.0, 0.5, true);
+    let mut cfg = EngineConfig::new(48_000.0);
+    cfg.workers = workers;
+    cfg.route = BuiltinRoute::Both;
+    let sinks = OfflineSinks::new(1 << 20).with_tone();
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks)).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.set_callback_helps(callback_helps);
+    engine.load(&doc, song).unwrap();
+    let mut b = OfflineBackend::new(48_000.0, 512);
+    b.start(renderer).unwrap();
+    b.reserve(4096);
+    engine.set_loop(true).unwrap();
+    engine.play().unwrap();
+    let before = rt_check::count();
+    let steps = engine.worker_steps();
+    let mut loads = 0u64;
+    for i in 0..blocks {
+        if i % 300 == 150 {
+            engine
+                .load(if i % 600 == 150 { &quieter } else { &doc }, song)
+                .unwrap();
+            loads += 1;
+        }
+        if i % 700 == 350 {
+            engine.load(&wider, song).unwrap();
+            loads += 1;
+        }
+        armed_block(&mut b, 1 + (i * 37) % 1024);
+        if i % 100 == 0 {
+            log.drain();
+        }
+    }
+    assert_eq!(
+        rt_check::count() - before,
+        0,
+        "allocations while playing the graph"
+    );
+    // Every load's graph was swapped in (plus the first one), none rejected.
+    assert!(
+        engine.graphs_applied() > loads,
+        "{} graphs for {loads} loads",
+        engine.graphs_applied()
+    );
+    assert!(engine.faults().contains(Faults::PLUGIN_FAULT));
+    assert_eq!(engine.plugin_faults().len(), 1);
+    if !callback_helps {
+        assert!(
+            engine.worker_steps() - steps >= u64::from(blocks),
+            "workers rendered {} nodes",
+            engine.worker_steps() - steps
+        );
+    }
+    drop(b.stop().unwrap());
+    drop(engine);
+}
+
 /// One test: the allocation counter is global.
 #[test]
 fn graph_render_path_never_allocates() {
@@ -81,13 +155,22 @@ fn graph_render_path_never_allocates() {
     rt_check::disarm();
     assert_eq!(rt_check::count() - before, 2);
 
-    let (doc, song) = mixed(0.0, false);
-    let (quieter, _) = mixed(-3.0, false);
-    let (wider, _) = mixed(-3.0, true);
+    let (doc, song) = mixed(0.0, 0.0, false);
+    let (quieter, _) = mixed(-3.0, 0.5, false);
+    let (wider, _) = mixed(-3.0, 0.5, true);
 
-    // Phase 1: three workers, both routes, 3000 blocks of varying size,
-    // with a parameter swap every 300 blocks and a structural swap every
-    // 700 (its delay lines are new; its instances are adopted).
+    // Phase 1: both routes, 3000 blocks of varying size, callback helping;
+    // then 1500 blocks where only the workers render nodes.
+    play_graph(3, true, 3000);
+    play_graph(3, false, 1500);
+
+    // Phase 2: graph swaps with the retire ring full (deferred swaps),
+    // value-only and structural. Each load queues three commands and each
+    // applied swap retires two items, so the 16-slot retire ring is full
+    // after eight blocks; resuming at block 10 keeps the 64-slot command
+    // ring from refusing a load, and stopping at 20 keeps the loop from
+    // outrunning the collector (it frees every 10 ms; an optimised loop
+    // makes 20 edits in far less).
     let mut cfg = EngineConfig::new(48_000.0);
     cfg.workers = 3;
     cfg.route = BuiltinRoute::Both;
@@ -101,44 +184,18 @@ fn graph_render_path_never_allocates() {
     b.reserve(4096);
     engine.set_loop(true).unwrap();
     engine.play().unwrap();
-    let before = rt_check::count();
-    for i in 0..3000u32 {
-        if i % 300 == 150 {
-            engine
-                .load(if i % 600 == 150 { &quieter } else { &doc }, song)
-                .unwrap();
-        }
-        if i % 700 == 350 {
-            engine.load(&wider, song).unwrap();
-        }
-        armed_block(&mut b, 1 + (i * 37) % 1024);
-        if i % 100 == 0 {
-            log.drain();
-        }
+    for _ in 0..20 {
+        armed_block(&mut b, 256);
     }
-    assert_eq!(
-        rt_check::count() - before,
-        0,
-        "allocations while playing the graph"
-    );
-    assert!(engine.faults().contains(Faults::PLUGIN_FAULT));
-    assert_eq!(engine.plugin_faults().len(), 1);
-
-    // Phase 2: graph swaps with the retire ring full (deferred swaps).
-    // Each load queues three commands and each applied swap retires two
-    // items, so the 16-slot retire ring is full after eight blocks;
-    // resuming at block 10 keeps the 64-slot command ring from refusing a
-    // load, and stopping at 20 keeps the loop from outrunning the collector
-    // (it frees every 10 ms; an optimised loop makes 20 edits in far less).
+    let before = rt_check::count();
+    let applied = engine.graphs_applied();
     engine.pause_collector(true);
     for i in 0..20 {
         if i == 10 {
             engine.pause_collector(false);
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        engine
-            .load(if i % 2 == 0 { &quieter } else { &doc }, song)
-            .unwrap();
+        engine.load([&quieter, &wider, &doc][i % 3], song).unwrap();
         armed_block(&mut b, 256);
     }
     assert!(engine.counters().swaps_deferred >= 1);
@@ -147,6 +204,17 @@ fn graph_render_path_never_allocates() {
         0,
         "allocations during graph swaps"
     );
+    // Let the deferred swaps land, then check they all did.
+    for _ in 0..40 {
+        armed_block(&mut b, 256);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        rt_check::count() - before,
+        0,
+        "allocations draining deferred swaps"
+    );
+    assert_eq!(engine.graphs_applied() - applied, 20, "swaps applied");
     log.drain();
     drop(b.stop().unwrap());
     drop(engine);
@@ -175,13 +243,28 @@ fn graph_render_path_never_allocates() {
     for _ in 0..3 {
         armed_block(&mut b, 512);
     }
+    let c = engine.counters();
+    assert!(c.deadline_misses >= 1, "{c:?}");
     flag.store(true, Ordering::Release);
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    for _ in 0..10 {
+    // Wait (up to 2 s) for a block that neither misses nor finds the
+    // stalled node still running: the insert recovered.
+    let mut recovered = false;
+    for _ in 0..2000 {
+        let c = engine.counters();
         armed_block(&mut b, 512);
+        let d = engine.counters();
+        if d.deadline_misses == c.deadline_misses
+            && d.busy_blocks == c.busy_blocks
+            && c.busy_blocks >= 1
+        {
+            recovered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let c = engine.counters();
-    assert!(c.deadline_misses >= 1 && c.busy_blocks >= 1, "{c:?}");
+    assert!(c.busy_blocks >= 1, "{c:?}");
+    assert!(recovered, "the stalled insert never recovered: {c:?}");
     assert_eq!(
         rt_check::count() - before,
         0,

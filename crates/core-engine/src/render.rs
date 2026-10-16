@@ -145,6 +145,7 @@ pub struct Shared {
     ended: AtomicBool,
     midi_dropped: AtomicU64,
     swaps_deferred: AtomicU64,
+    graphs_applied: AtomicU64,
     xruns: AtomicU64,
     deadline_misses: AtomicU64,
     busy_blocks: AtomicU64,
@@ -166,6 +167,7 @@ impl Default for Shared {
             ended: AtomicBool::new(false),
             midi_dropped: AtomicU64::new(0),
             swaps_deferred: AtomicU64::new(0),
+            graphs_applied: AtomicU64::new(0),
             xruns: AtomicU64::new(0),
             deadline_misses: AtomicU64::new(0),
             busy_blocks: AtomicU64::new(0),
@@ -204,6 +206,11 @@ impl Shared {
     /// True once after playback reached the end and the tail finished.
     pub fn take_ended(&self) -> bool {
         self.ended.swap(false, Ordering::Relaxed)
+    }
+
+    /// Graphs the renderer has swapped in so far (diagnostic hook).
+    pub fn graphs_applied(&self) -> u64 {
+        self.graphs_applied.load(Ordering::Relaxed)
     }
 
     /// Current counters.
@@ -737,6 +744,7 @@ impl Renderer {
                 }
                 self.latency = new.latency();
                 self.graph = Some(new);
+                self.shared.graphs_applied.fetch_add(1, Ordering::Relaxed);
             }
             EngineCmd::Play => {
                 let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);

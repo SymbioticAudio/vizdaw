@@ -265,6 +265,17 @@ impl Engine {
         }
     }
 
+    /// Graph nodes rendered by worker threads so far (diagnostic hook:
+    /// tests use it to prove workers rendered).
+    pub fn worker_steps(&self) -> u64 {
+        self.pool.as_ref().map_or(0, |p| p.handle().worker_steps())
+    }
+
+    /// Graphs the renderer has swapped in so far (diagnostic hook).
+    pub fn graphs_applied(&self) -> u64 {
+        self.shared.graphs_applied()
+    }
+
     /// Pauses or resumes freeing retired schedules and graphs (a diagnostic
     /// hook: tests use it to fill the retire ring).
     pub fn pause_collector(&self, paused: bool) {
