@@ -3,9 +3,14 @@
 use crate::error::VizError;
 use crate::guard::{ffi_guard, lock};
 use crate::snapshot::{DocSnapshot, LaneRow, lane_rows, seq_rows, warnings};
+use core_model::command::Command;
+use core_model::command::lane::LaneCmd;
+use core_model::command::sequence::SequenceCmd;
 use core_model::document::Document;
 use core_model::file;
 use core_model::history::History;
+use core_model::ids::{LaneId, SeqId};
+use core_model::selection::ViewFilter;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -93,6 +98,26 @@ impl Session {
             inner: Mutex::new(Inner::new(doc, path)),
         })
     }
+
+    /// Applies one command as one undo step.
+    fn execute(&self, cmd: Command) -> Result<DocSnapshot, VizError> {
+        let mut inner = lock(&self.inner);
+        inner.history.execute(&cmd, &ViewFilter::default())?;
+        inner.version += 1;
+        inner.snapshot()
+    }
+
+    /// Undo or redo.
+    fn step(&self, undo: bool) -> Result<DocSnapshot, VizError> {
+        let mut inner = lock(&self.inner);
+        if undo {
+            inner.history.undo()?;
+        } else {
+            inner.history.redo()?;
+        }
+        inner.version += 1;
+        inner.snapshot()
+    }
 }
 
 #[uniffi::export]
@@ -170,5 +195,53 @@ impl Session {
     /// The lanes of sequence `seq`.
     pub fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
         ffi_guard(|| lane_rows(lock(&self.inner).doc(), seq))
+    }
+
+    /// Renames sequence `seq` (one undo step).
+    pub fn rename_sequence(&self, seq: u64, name: String) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Sequence(SequenceCmd::Rename {
+                seq: SeqId(seq),
+                name,
+            }))
+        })
+    }
+
+    /// Mutes or unmutes lane `lane` of sequence `seq` (one undo step).
+    pub fn set_lane_mute(&self, seq: u64, lane: u64, mute: bool) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Lane(LaneCmd::SetFlags {
+                seq: SeqId(seq),
+                lane: LaneId(lane),
+                mute: Some(mute),
+                solo: None,
+                arm: None,
+            }))
+        })
+    }
+
+    /// Reverts the last step.
+    pub fn undo(&self) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.step(true))
+    }
+
+    /// Reapplies the last undone step.
+    pub fn redo(&self) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.step(false))
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[uniffi::export]
+impl Session {
+    /// Panics while holding the session lock (test hook): poisons it.
+    pub fn debug_panic_locked(&self) -> Result<(), VizError> {
+        ffi_guard(|| -> Result<(), VizError> {
+            let _inner = lock(&self.inner);
+            #[allow(clippy::panic)]
+            {
+                panic!("panic while locked")
+            }
+        })
     }
 }
