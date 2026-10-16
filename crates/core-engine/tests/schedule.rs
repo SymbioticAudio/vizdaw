@@ -127,6 +127,47 @@ fn same_frame_order_is_off_patch_control_on() {
 }
 
 #[test]
+fn raw_bank_select_ccs_stay_with_the_program_change() {
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, lane) = b.sequence("S", "L", Some(synth)).unwrap();
+    let cc = |index: u8, v7: u32| EventBody::Cc {
+        index,
+        value: v7 << 25,
+    };
+    // Volume first in source order, then CC0, CC32, PC.
+    b.event(seq, lane, Q, cc(7, 100)).unwrap();
+    b.event(seq, lane, Q, cc(0, 1)).unwrap();
+    b.event(seq, lane, Q, cc(32, 2)).unwrap();
+    b.event(
+        seq,
+        lane,
+        Q,
+        EventBody::Program {
+            program: 5,
+            bank: None,
+        },
+    )
+    .unwrap();
+    let doc = b.finish();
+    let (s, _, _) = compile_all(&doc, seq, &CompileOptions::new(48_000.0));
+    let at: Vec<Vec<u8>> = bytes(&s)
+        .into_iter()
+        .filter(|(f, _, _)| *f == 24_000)
+        .map(|(_, _, b)| b)
+        .collect();
+    assert_eq!(
+        at,
+        vec![
+            vec![0xB0, 0, 1],
+            vec![0xB0, 32, 2],
+            vec![0xC0, 5],
+            vec![0xB0, 7, 100],
+        ]
+    );
+}
+
+#[test]
 fn default_patch_plays_first_on_frame_zero() {
     let mut b = Builder::new();
     let d = b

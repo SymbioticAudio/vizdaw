@@ -87,7 +87,8 @@ pub struct Drops {
 pub struct Out {
     /// Start or end of the event.
     pub when: When,
-    /// Sort class (bank-select CCs belong to [`Class::Patch`]).
+    /// Sort class (bank-select CCs, raw or from a program change, belong to
+    /// [`Class::Patch`]).
     pub class: Class,
     /// The message.
     pub msg: Midi1Msg,
@@ -183,9 +184,18 @@ pub fn translate(body: &EventBody, channel: u8) -> Translated<'_> {
             t.drops.attribute = attribute.is_some();
         }
         EventBody::Cc { index, value } => {
-            t.push(
+            let index = index & 0x7F;
+            // Bank select (CC0/CC32) sorts with program changes so
+            // bank-then-program holds on a shared frame (ruling O19).
+            let class = if matches!(index, 0 | 32) {
+                Class::Patch
+            } else {
+                Class::Control
+            };
+            t.push_class(
                 When::Start,
-                Midi1Msg::three(0xB0 | ch, index & 0x7F, value7(*value)),
+                class,
+                Midi1Msg::three(0xB0 | ch, index, value7(*value)),
             );
         }
         EventBody::PitchBend { value } => {

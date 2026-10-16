@@ -168,3 +168,23 @@ fn class_order() {
     assert_eq!(Class::of(0xC5), Class::Patch);
     assert_eq!(Class::of(0xB5), Class::Control);
 }
+
+#[test]
+fn raw_bank_select_ccs_sort_as_patch() {
+    // (CC index, expected sort class) — ruling O19.
+    let table = [
+        (0u8, Class::Patch),
+        (32, Class::Patch),
+        (1, Class::Control),
+        (7, Class::Control),
+        (31, Class::Control),
+        (33, Class::Control),
+        (64, Class::Control),
+        (127, Class::Control),
+    ];
+    for (index, class) in table {
+        let body = EventBody::Cc { index, value: 0 };
+        let t = translate(&body, 0);
+        assert_eq!(t.msgs()[0].class, class, "CC {index}");
+    }
+}
