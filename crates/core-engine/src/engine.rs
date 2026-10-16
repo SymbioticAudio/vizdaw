@@ -69,6 +69,8 @@ pub struct Engine {
     tempo: Option<TempoTable>,
     length_frames: u64,
     loop_range: Option<(u64, u64)>,
+    /// The default loop (bar 1 to the end) is on: loads re-send it.
+    default_loop: bool,
     collector_stop: Arc<AtomicBool>,
     collector_paused: Arc<AtomicBool>,
     collector: Option<JoinHandle<()>>,
@@ -152,6 +154,7 @@ impl Engine {
             tempo: None,
             length_frames: 0,
             loop_range: None,
+            default_loop: false,
             collector_stop,
             collector_paused,
             collector: Some(collector),
@@ -178,9 +181,9 @@ impl Engine {
     /// Compiles `seq` and sends the schedule (and sinks for new targets) to
     /// the renderer. Call again after every committed edit.
     pub fn load(&mut self, doc: &Document, seq: SeqId) -> Result<CompileReport, EngineError> {
-        // Room for every possible new sink plus the schedule, so no push
-        // below can fail after targets were interned.
-        if self.cmds.slots() < MAX_TARGETS + 1 {
+        // Room for every possible new sink plus the schedule and the loop,
+        // so no push below can fail after targets were interned.
+        if self.cmds.slots() < MAX_TARGETS + 2 {
             return Err(EngineError::Busy);
         }
         let opts = CompileOptions {
@@ -226,6 +229,11 @@ impl Engine {
         self.length_frames = schedule.length_frames;
         self.loop_range = schedule.loop_range;
         self.push(EngineCmd::SetSchedule(Box::new(schedule)))?;
+        if self.default_loop {
+            // The length may have changed; the mapped old range would not
+            // follow it.
+            self.push(EngineCmd::SetLoop(self.loop_range))?;
+        }
         Ok(report)
     }
 
@@ -257,12 +265,16 @@ impl Engine {
     /// Loops bar 1 to the end of the loaded sequence, or stops looping.
     pub fn set_loop(&mut self, on: bool) -> Result<(), EngineError> {
         let range = if on { self.loop_range } else { None };
-        self.push(EngineCmd::SetLoop(range))
+        self.push(EngineCmd::SetLoop(range))?;
+        self.default_loop = on;
+        Ok(())
     }
 
     /// Loops an explicit frame range, or stops looping.
     pub fn set_loop_range(&mut self, range: Option<(u64, u64)>) -> Result<(), EngineError> {
-        self.push(EngineCmd::SetLoop(range))
+        self.push(EngineCmd::SetLoop(range))?;
+        self.default_loop = false;
+        Ok(())
     }
 
     /// Schedule frame of the transport.

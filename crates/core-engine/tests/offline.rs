@@ -599,3 +599,58 @@ fn loop_wrap_resends_the_chased_state() {
         index_of(&log, &format!("{at} t0 b0 07 64"));
     }
 }
+
+#[test]
+fn load_while_default_loop_is_on_follows_the_new_length() {
+    let bars = |n: i64| {
+        let mut b = Builder::new();
+        let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+        let (seq, lane) = b.sequence("S", "L", Some(synth)).unwrap();
+        for i in 0..n {
+            b.notes(seq, lane, &[(i * BAR, 60 + i as u8, 0x8000, Q)])
+                .unwrap();
+        }
+        (b.finish(), seq)
+    };
+    let (one, seq) = bars(1);
+    let mut run = start(&one, seq, 512);
+    run.engine.set_loop(true).unwrap();
+    run.engine.play().unwrap();
+    run.backend.run_frames(1_024);
+    // The sequence grows to two bars: the default loop must follow.
+    let (two, seq2) = bars(2);
+    run.engine.load(&two, seq2).unwrap();
+    run.backend.run_frames(200_000);
+    let log: Vec<String> = run.log.drain().iter().map(LogRecord::line).collect();
+    // Frames are within one of the bar lines: the swap maps the position
+    // through ticks.
+    let on = |pitch: &str| -> Vec<u64> {
+        log.iter()
+            .filter(|l| l.ends_with(&format!("90 {pitch} 40")))
+            .map(|l| l.split(' ').next().unwrap().parse().unwrap())
+            .collect()
+    };
+    assert!(
+        on("3d").iter().any(|f| (95_999..=96_001).contains(f)),
+        "{}",
+        log.join("\n")
+    );
+    assert!(
+        on("3c").iter().any(|f| (191_999..=192_001).contains(f)),
+        "{}",
+        log.join("\n")
+    );
+    // An explicit loop range is kept across loads.
+    run.engine.set_loop_range(Some((0, 48_000))).unwrap();
+    run.engine.locate_frame(0).unwrap();
+    run.backend.run_frames(512);
+    run.engine.load(&two, seq2).unwrap();
+    run.log.drain();
+    run.backend.run_frames(96_000);
+    let log: Vec<String> = run.log.drain().iter().map(LogRecord::line).collect();
+    assert!(
+        !log.iter().any(|l| l.contains("90 3d")),
+        "{}",
+        log.join("\n")
+    );
+}
