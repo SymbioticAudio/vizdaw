@@ -22,6 +22,7 @@ pub mod event;
 pub mod ids;
 pub mod lane;
 pub mod meter;
+pub mod query;
 pub mod rules;
 pub mod selection;
 pub mod sequence;
