@@ -106,29 +106,70 @@ fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
     }
 }
 
+/// Most output kept from each pipe.
+const MAX_OUTPUT: u64 = 1 << 20;
+/// How long to wait for the pipes to close once the scanner is gone.
+const DRAIN_WAIT: Duration = Duration::from_secs(2);
+
 /// Runs `exe` (the `vizdaw-scan` binary) for `req` and waits for it, at
 /// most `req.timeout`.
 pub fn run(exe: &Path, req: &ScanRequest) -> ScanOutcome {
-    let child = Command::new(exe)
-        .args(req.args())
-        .stdin(Stdio::null())
+    let mut cmd = Command::new(exe);
+    cmd.args(req.args());
+    run_command(cmd, req.timeout)
+}
+
+/// Kills the child, and on unix its whole process group (a plugin may have
+/// forked helpers that hold the pipes), then reaps it.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let killed = Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !killed {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+fn run_command(mut cmd: Command, timeout: Duration) -> ScanOutcome {
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return ScanOutcome::Failed(format!("cannot start the scanner: {e}")),
     };
     // Drain both pipes on their own threads: a large reply must never
-    // block the child (which would look like a hang).
+    // block the child (which would look like a hang). Each thread keeps
+    // draining past the cap so the child never blocks.
     let drain = |p: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut s = String::new();
+            let mut buf = Vec::new();
             if let Some(mut p) = p {
-                let _ = p.read_to_string(&mut s);
+                let _ = (&mut p).take(MAX_OUTPUT).read_to_end(&mut buf);
+                let _ = std::io::copy(&mut p, &mut std::io::sink());
             }
-            s
-        })
+            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+        });
+        rx
     };
     let out = drain(
         child
@@ -146,17 +187,21 @@ pub fn run(exe: &Path, req: &ScanRequest) -> ScanOutcome {
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
-            Ok(None) if start.elapsed() >= req.timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
+            Ok(None) if start.elapsed() >= timeout => {
+                kill_tree(&mut child);
                 break None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => return ScanOutcome::Failed(e.to_string()),
+            Err(e) => {
+                kill_tree(&mut child);
+                return ScanOutcome::Failed(e.to_string());
+            }
         }
     };
-    let stdout = out.join().unwrap_or_default();
-    let stderr = err.join().unwrap_or_default();
+    // A helper that outlives the scanner may still hold the pipes: wait a
+    // little, then go on with what we have (the threads detach).
+    let stdout = out.recv_timeout(DRAIN_WAIT).unwrap_or_default();
+    let stderr = err.recv_timeout(DRAIN_WAIT).unwrap_or_default();
     let Some(status) = status else {
         return ScanOutcome::TimedOut;
     };
@@ -174,11 +219,10 @@ pub fn run(exe: &Path, req: &ScanRequest) -> ScanOutcome {
     match stdout
         .lines()
         .rev()
-        .find(|l| !l.trim().is_empty())
-        .map(serde_json::from_str::<ScanReply>)
+        .filter(|l| !l.trim().is_empty())
+        .find_map(|l| serde_json::from_str::<ScanReply>(l).ok())
     {
-        Some(Ok(r)) => ScanOutcome::Done(r),
-        Some(Err(e)) => ScanOutcome::Failed(format!("unreadable reply: {e}")),
+        Some(r) => ScanOutcome::Done(r),
         None => ScanOutcome::Failed("no reply".to_string()),
     }
 }
@@ -299,4 +343,29 @@ pub fn discover_clap() -> Vec<Source> {
         .iter()
         .map(|p| Source::clap_bundle(p))
         .collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_helper_holding_the_pipes_cannot_defeat_the_timeout() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & sleep 30"]);
+        let start = Instant::now();
+        let out = run_command(cmd, Duration::from_millis(300));
+        assert_eq!(out, ScanOutcome::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn invalid_utf8_and_trailing_noise_still_give_the_reply() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", r#"printf '{"not_validated":"x"}\n\377\376 log\n'"#]);
+        assert_eq!(
+            run_command(cmd, Duration::from_secs(5)),
+            ScanOutcome::Done(ScanReply::NotValidated("x".into()))
+        );
+    }
 }
