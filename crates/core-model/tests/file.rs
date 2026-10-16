@@ -258,3 +258,109 @@ fn golden_mixed_lanes() {
 fn golden_drum_lane() {
     golden("drum_lane");
 }
+
+/// Insert a bogus field into every object matching `pick`, return whether any changed.
+fn poison(v: &mut Value, pick: &dyn Fn(&serde_json::Map<String, Value>) -> bool) -> bool {
+    let mut hit = false;
+    match v {
+        Value::Object(m) => {
+            if pick(m) {
+                m.insert("bogus".into(), json!(1));
+                hit = true;
+            }
+            for c in m.values_mut() {
+                hit |= poison(c, pick);
+            }
+        }
+        Value::Array(a) => {
+            for c in a {
+                hit |= poison(c, pick);
+            }
+        }
+        _ => {}
+    }
+    hit
+}
+
+#[test]
+fn unknown_fields_inside_persisted_enums_are_rejected() {
+    use core_model::modify::{Modify, ModifyTemplate, Quantize, Transpose};
+    use core_model::rule::Rule;
+    use core_model::rule::SelectMode;
+    use core_model::sequence::{GeneratorParams, SeqKind};
+    let d = small_doc();
+    let d = apply(
+        &d,
+        &Command::Sequence(SequenceCmd::SetKind {
+            seq: SeqId(0),
+            kind: SeqKind::Generated {
+                generator: GeneratorParams {
+                    generator: "g".into(),
+                    params: Default::default(),
+                },
+            },
+        }),
+    )
+    .unwrap()
+    .doc;
+    let t = ModifyTemplate {
+        rule: Some(Rule::Not(Box::new(Rule::TimeRange {
+            start: Tick(0),
+            end: Tick(10),
+        }))),
+        mode: SelectMode::Select,
+        modify: Some(Modify::Quantize(Quantize::Grid {
+            grid: Tick(PPQ),
+            strength: 100,
+        })),
+    };
+    let d = apply(
+        &d,
+        &Command::Settings(SettingsCmd::SetTemplate {
+            name: "T".into(),
+            template: Some(t),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let t2 = ModifyTemplate {
+        rule: None,
+        mode: SelectMode::Add,
+        modify: Some(Modify::Transpose(Transpose::Interval { semitones: 1 })),
+    };
+    let d = apply(
+        &d,
+        &Command::Settings(SettingsCmd::SetTemplate {
+            name: "U".into(),
+            template: Some(t2),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let base: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    assert!(from_json(&serde_json::to_string(&base).unwrap()).is_ok());
+    type Pick = Box<dyn Fn(&serde_json::Map<String, Value>) -> bool>;
+    let picks: Vec<(&str, Pick)> = vec![
+        (
+            "generated",
+            Box::new(|m| m.get("generator").is_some_and(Value::is_object)),
+        ),
+        (
+            "rule",
+            Box::new(|m| m.contains_key("start") && m.contains_key("end")),
+        ),
+        (
+            "quantize",
+            Box::new(|m| m.contains_key("grid") && m.contains_key("strength")),
+        ),
+        ("transpose", Box::new(|m| m.contains_key("semitones"))),
+    ];
+    for (name, pick) in picks {
+        let mut v = base.clone();
+        assert!(poison(&mut v, &*pick), "{name}: nothing matched");
+        assert!(
+            from_json(&serde_json::to_string(&v).unwrap()).is_err(),
+            "{name}: bogus field accepted"
+        );
+    }
+}

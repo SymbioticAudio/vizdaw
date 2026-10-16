@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 /// A change applied to every selected event it fits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Modify {
     /// Change note and poly-pressure pitches.
     Transpose(Transpose),
@@ -50,7 +50,7 @@ pub enum Modify {
 
 /// Pitch changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Transpose {
     /// By an interval (clamped at 0 and 127).
     Interval {
@@ -69,7 +69,7 @@ pub enum Transpose {
 
 /// Quantize kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Quantize {
     /// Snap to `grid` with `strength` percent.
     Grid {
