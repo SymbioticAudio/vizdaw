@@ -6,7 +6,7 @@ use crate::document::{DestKind, Destination, Document, MediaItem, OutputPath, Pa
 use crate::error::{ModelError, Result};
 use crate::event::EventBody;
 use crate::ids::{AnyId, DestId, LaneId, MediaId, OutputPathId, SeqId};
-use crate::rules::{check_event_fields, check_group_channel};
+use crate::rules::{check_event_fields, check_group_channel, check_media_path};
 
 /// Destination, output and media edits.
 #[derive(Debug, Clone, PartialEq)]
@@ -300,6 +300,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             if *sample_rate == 0 || *channels == 0 {
                 return Err(ModelError::range("media.format", sample_rate));
             }
+            check_media_path(path)?;
             let id = d.counters_mut().alloc_media();
             d.media_mut().insert(
                 id,

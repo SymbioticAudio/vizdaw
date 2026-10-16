@@ -555,3 +555,66 @@ fn split_and_trim_clamp_fades_to_the_part_length() {
     assert_eq!(len, 24_000);
     assert_eq!((fi.length, fo.length), (Tick(PPQ), Tick(PPQ)));
 }
+
+#[test]
+fn media_paths_must_be_relative_and_normalized() {
+    for bad in [
+        "",
+        "/abs/a.wav",
+        "../a.wav",
+        "Media/../a.wav",
+        "Media//a.wav",
+        "./a.wav",
+        "Media/a.wav/",
+        "C:/a.wav",
+        "Media\\a.wav",
+        "Media/..",
+    ] {
+        let r = run(
+            &Document::new(),
+            routing(RoutingCmd::AddMedia {
+                path: bad.into(),
+                sample_rate: 48_000,
+                channels: 2,
+                length_frames: 1,
+                content_hash: None,
+            }),
+        );
+        assert!(
+            matches!(r, Err(core_model::ModelError::Invalid { .. })),
+            "{bad:?} accepted"
+        );
+    }
+    let d = run(
+        &Document::new(),
+        routing(RoutingCmd::AddMedia {
+            path: "Media/sub/a.wav".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 1,
+            content_hash: None,
+        }),
+    )
+    .unwrap();
+    assert!(validate(&d).is_empty());
+}
+
+#[test]
+fn validate_rejects_bad_media_paths_from_files() {
+    use core_model::file::{from_json, to_json};
+    let d = run(
+        &Document::new(),
+        routing(RoutingCmd::AddMedia {
+            path: "Media/a.wav".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 1,
+            content_hash: None,
+        }),
+    )
+    .unwrap();
+    let text = to_json(&d)
+        .unwrap()
+        .replace("Media/a.wav", "../../etc/passwd");
+    assert!(from_json(&text).is_err());
+}

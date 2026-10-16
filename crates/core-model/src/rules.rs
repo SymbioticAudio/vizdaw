@@ -101,6 +101,23 @@ fn need(cond: bool, field: &'static str, value: impl std::fmt::Display) -> Resul
     }
 }
 
+/// Checks a media path: relative to the package, normalized (no empty or
+/// `.` components, no trailing slash), no `..`, no backslashes, no drive or
+/// absolute root.
+pub fn check_media_path(path: &str) -> Result<()> {
+    let ok = !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains(['\\', ':', '\0'])
+        && path.split('/').all(|c| !matches!(c, "" | "." | ".."));
+    if ok {
+        Ok(())
+    } else {
+        Err(ModelError::invalid(format!(
+            "media path must be relative and normalized: {path:?}"
+        )))
+    }
+}
+
 /// Checks a group/channel pair (each 0–15).
 pub fn check_group_channel(gc: Option<(u8, u8)>) -> Result<()> {
     if let Some((g, c)) = gc {
@@ -235,6 +252,7 @@ pub fn validate(doc: &Document) -> Vec<String> {
         if m.id.0 >= c.media {
             push(Err(ModelError::range("counters.media", m.id)), "media");
         }
+        push(check_media_path(&m.path), &m.id.to_string());
         push(
             need(
                 m.sample_rate > 0 && m.channels > 0,
