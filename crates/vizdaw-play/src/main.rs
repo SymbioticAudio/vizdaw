@@ -55,9 +55,16 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         }
     };
     if let Some(out) = &args.offline {
-        let (report, text) = offline::render(&doc, seq, args.to.into(), args.looped)?;
-        for w in &report.warnings {
+        let workers = args.workers.unwrap_or(0) as usize;
+        let (report, text) = offline::render(&doc, seq, args.to.into(), args.looped, workers)?;
+        for w in report.warnings.iter().chain(&report.graph.warnings) {
             eprintln!("warning: {w}");
+        }
+        for (id, why) in &report.graph.placeholders {
+            eprintln!("warning: {id}: {why}");
+        }
+        if let Some(e) = &report.graph.error {
+            eprintln!("warning: mixer graph not used: {e}");
         }
         std::fs::write(out, text).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
         eprintln!("wrote {} ({} event(s))", out.display(), report.events);

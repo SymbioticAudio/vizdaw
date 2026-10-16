@@ -157,3 +157,36 @@ fn bad_arguments_are_refused() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot load"));
 }
+
+#[test]
+fn offline_render_with_workers_matches_the_checked_in_log() {
+    let dir = temp("workers");
+    let log = dir.join("demo.txt");
+    let out = bin()
+        .arg(repo().join("fixtures/demo.vizdaw"))
+        .args(["--seq", "Song", "--workers", "4", "--offline"])
+        .arg(&log)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = std::fs::read_to_string(&log).unwrap();
+    let want = std::fs::read_to_string(repo().join("fixtures/demo.offline.txt")).unwrap();
+    assert!(
+        got == want,
+        "offline log with workers differs from fixtures/demo.offline.txt"
+    );
+}
+
+#[test]
+fn too_many_workers_are_refused() {
+    let out = bin()
+        .arg(repo().join("fixtures/demo.vizdaw"))
+        .args(["--workers", "16", "--offline", "x.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

@@ -14,17 +14,20 @@ pub const BLOCK: u32 = 512;
 
 /// Plays `seq` to its end and returns the compile report and the log text.
 /// When `looped`, the loop is switched off during the third pass, so three
-/// passes play followed by the tail.
+/// passes play followed by the tail. `workers` render threads help; the
+/// log does not depend on them.
 pub fn render(
     doc: &Document,
     seq: SeqId,
     route: BuiltinRoute,
     looped: bool,
+    workers: usize,
 ) -> Result<(CompileReport, String), String> {
     let sinks = OfflineSinks::new(1 << 16);
     let log = sinks.log();
     let mut cfg = EngineConfig::new(RATE);
     cfg.route = route;
+    cfg.workers = workers;
     let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks)).map_err(|e| e.to_string())?;
     let report = engine.load(doc, seq).map_err(|e| e.to_string())?;
     let mut backend = OfflineBackend::new(RATE, BLOCK);

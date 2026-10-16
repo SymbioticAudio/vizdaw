@@ -55,6 +55,10 @@ pub struct Args {
         allow_negative_numbers = true
     )]
     pub midi_offset_ms: f64,
+    /// Render worker threads besides the audio thread (0–15). Default:
+    /// performance cores − 1, at most 7, when playing live; 0 offline.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(0..=15))]
+    pub workers: Option<u32>,
     /// Render offline (48 kHz, 512-frame blocks) and write the event log.
     #[arg(long, value_name = "OUT.txt")]
     pub offline: Option<PathBuf>,
