@@ -122,7 +122,11 @@ fn events_land_at_their_offsets_and_stop_releases() {
     engine.play().unwrap();
     let mut ns = 0;
     let out = blocks(&mut r, 50, 1000, &mut ns); // 50 000 frames
-    assert_eq!(out[0], 0.25, "instrument output is mixed into channel 0");
+    assert_eq!(
+        out[0],
+        0.25 * std::f32::consts::FRAC_1_SQRT_2,
+        "instrument output reaches channel 0 through the built-in strip (−3 dB pan law)"
+    );
     assert_eq!(engine.state(), PlayState::Playing);
     assert_eq!(engine.position_frames(), 50_000);
     engine.stop().unwrap();

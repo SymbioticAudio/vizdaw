@@ -11,9 +11,28 @@ pub mod node;
 pub mod pdc;
 pub mod spec;
 
+use core_model::ids::PluginInstanceId;
+
 pub use exec::{Graph, InsertInit, Runner, SinkTable};
 pub use node::{
     EffectNode, InsertFactory, NoInserts, ProcessStatus, TestInserts, TestMode, TestNode,
 };
 pub use pdc::{MAX_INSERTS, MAX_NODES, Plan, PlanError, plan};
 pub use spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};
+
+/// What compiling the mixer graph did (`CompileReport::graph`, Plan
+/// Ruling 13).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GraphReport {
+    /// Nodes in the graph.
+    pub nodes: usize,
+    /// Total latency `L` in frames.
+    pub latency_frames: u64,
+    /// Slots whose processor could not be created, and why (they pass
+    /// audio with no latency).
+    pub placeholders: Vec<(PluginInstanceId, String)>,
+    /// Other problems (no built-in strip, strips without an instrument).
+    pub warnings: Vec<String>,
+    /// Why this graph was not used; the previous one keeps playing.
+    pub error: Option<String>,
+}

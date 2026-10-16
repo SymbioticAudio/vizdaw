@@ -1,27 +1,32 @@
 //! The real-time renderer and the state it publishes.
 
-use crate::backend::{BlockTime, InstrumentNode, MidiOut, StereoBuf};
-use crate::graph::{MAX_INSERTS, MAX_NODES};
+use crate::backend::{BlockTime, MidiOut, StereoBuf};
+use crate::graph::exec::{Exec, RunResult, SinkTable};
+use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
 use crate::notes::ActiveNotes;
+use crate::pool::PoolShared;
 use crate::schedule::{MAX_TARGETS, Schedule, TargetIdx};
 use crate::transport::{PlayState, Step, Transport};
 use core_model::ids::PluginInstanceId;
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Real-time fault bits, cleared when read by [`crate::engine::Engine::faults`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Faults(pub u32);
 
 impl Faults {
-    /// A block was larger than the prepared size (rendered as silence).
+    /// A block was larger than the prepared size, missed its deadline or
+    /// found stragglers running (rendered as silence).
     pub const XRUN: Faults = Faults(1);
     /// The master bus was clamped at ±1.0.
     pub const CLIPPED: Faults = Faults(2);
     /// A MIDI output queue was full; a message was dropped.
     pub const MIDI_DROPPED: Faults = Faults(4);
-    /// A schedule swap waited a block because the retire ring was full.
+    /// A schedule or graph swap waited a block because the retire ring was
+    /// full.
     pub const SWAP_DEFERRED: Faults = Faults(8);
     /// The audio callback panicked; output is silent.
     pub const PANIC: Faults = Faults(16);
@@ -79,7 +84,7 @@ impl Faults {
 pub struct Counters {
     /// MIDI messages dropped because an output queue was full.
     pub midi_dropped: u64,
-    /// Blocks in which a schedule swap was deferred.
+    /// Blocks in which a schedule or graph swap was deferred.
     pub swaps_deferred: u64,
     /// Blocks rendered as silence because they were too large.
     pub xruns: u64,
@@ -182,7 +187,8 @@ impl Shared {
         Faults(self.faults.swap(0, Ordering::Relaxed))
     }
 
-    /// Schedule frame of the transport.
+    /// Schedule frame of the transport, minus the graph latency (Plan
+    /// Ruling 17).
     pub fn position(&self) -> u64 {
         self.position.load(Ordering::Relaxed)
     }
@@ -267,8 +273,8 @@ impl Shared {
 
 /// Where a target's events go.
 pub enum Sink {
-    /// An instrument rendered into the mix.
-    Instrument(Box<dyn InstrumentNode>),
+    /// An instrument rendered into the graph.
+    Instrument(Box<dyn crate::backend::InstrumentNode>),
     /// A timestamped MIDI output.
     Midi(Box<dyn MidiOut>),
 }
@@ -287,6 +293,9 @@ impl std::fmt::Debug for Sink {
 pub enum EngineCmd {
     /// Replace the schedule, keeping the musical position.
     SetSchedule(Box<Schedule>),
+    /// Replace the render graph; it adopts the running graph's inserts and,
+    /// with the same shape, its node state.
+    SetGraph(Box<Graph>),
     /// Start playing.
     Play,
     /// Stop (note-offs are sent).
@@ -299,10 +308,20 @@ pub enum EngineCmd {
     AddSink(TargetIdx, Sink),
 }
 
+/// Something the renderer hands back for freeing off the audio thread.
+#[derive(Debug)]
+pub enum Retired {
+    /// A replaced schedule.
+    Schedule(Box<Schedule>),
+    /// A replaced graph (with the inserts it did not hand on).
+    Graph(Box<Graph>),
+}
+
 /// Capacity of the command ring.
 pub const CMD_CAPACITY: usize = 64;
-/// Capacity of the retire ring.
-pub const RETIRE_CAPACITY: usize = 8;
+/// Capacity of the retire ring: eight edits, each retiring a schedule and
+/// a graph (Plan Ruling 30).
+pub const RETIRE_CAPACITY: usize = 16;
 
 /// Renderer settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -313,6 +332,9 @@ pub struct RenderConfig {
     pub max_frames: u32,
     /// Added to every MIDI-out timestamp.
     pub midi_offset_ns: i64,
+    /// Fraction of the block duration the graph may take before the block
+    /// is given up (Plan Ruling 18); `None` waits for the graph.
+    pub deadline: Option<f64>,
 }
 
 /// The real-time object. Built by [`crate::engine::Engine::new`], moved to
@@ -320,18 +342,24 @@ pub struct RenderConfig {
 pub struct Renderer {
     cfg: RenderConfig,
     cmds: Consumer<EngineCmd>,
-    retire: Producer<Box<Schedule>>,
+    retire: Producer<Retired>,
     shared: Arc<Shared>,
     schedule: Option<Box<Schedule>>,
     cursor: usize,
     transport: Transport,
     notes: ActiveNotes,
-    sinks: [Option<Sink>; MAX_TARGETS],
+    sinks: Box<SinkTable>,
     bufs: Vec<StereoBuf>,
     block_ns: u64,
     /// Controllers were reset (stop, locate, wrap or swap): the next played
     /// frames start with the chased state.
     chase_pending: bool,
+    graph: Option<Box<Graph>>,
+    exec: Box<Exec>,
+    /// Graph latency `L` in frames (Plan Ruling 17).
+    latency: u64,
+    /// Frames of busy blocks the sinks have not been told about.
+    pending_skip: u64,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -339,17 +367,19 @@ impl std::fmt::Debug for Renderer {
         f.debug_struct("Renderer")
             .field("cfg", &self.cfg)
             .field("transport", &self.transport)
+            .field("graph", &self.graph)
             .finish_non_exhaustive()
     }
 }
 
 /// Everything `send` needs, borrowed apart from the note tracker.
 struct Out<'a> {
-    sinks: &'a mut [Option<Sink>; MAX_TARGETS],
+    sinks: &'a mut SinkTable,
     shared: &'a Shared,
     block_ns: u64,
     ns_per_frame: f64,
-    midi_offset_ns: i64,
+    /// MIDI offset plus the graph latency, in ns.
+    late_ns: i64,
 }
 
 impl Out<'_> {
@@ -360,7 +390,7 @@ impl Out<'_> {
             Some(Some(Sink::Midi(out))) => {
                 let at = self.block_ns as i64
                     + (f64::from(offset) * self.ns_per_frame).round() as i64
-                    + self.midi_offset_ns;
+                    + self.late_ns;
                 if !out.send(at.max(0) as u64, bytes) {
                     self.shared.raise(Faults::MIDI_DROPPED);
                     self.shared.midi_dropped.fetch_add(1, Ordering::Relaxed);
@@ -371,12 +401,58 @@ impl Out<'_> {
     }
 }
 
+/// Tells every instrument sink not in `except` (a target bitmask) that
+/// `frames` frames passed unrendered. // RT
+fn skip_sinks(sinks: &mut SinkTable, frames: u64, except: u16) {
+    for (t, s) in sinks.iter_mut().enumerate() {
+        let bit = u32::try_from(t)
+            .ok()
+            .and_then(|t| 1u16.checked_shl(t))
+            .unwrap_or(0);
+        if except & bit != 0 {
+            continue;
+        }
+        if let Some(Sink::Instrument(node)) = s {
+            let mut left = frames;
+            while left > 0 {
+                let k = u32::try_from(left).unwrap_or(u32::MAX);
+                node.skip(k);
+                left -= u64::from(k);
+            }
+        }
+    }
+}
+
+/// Hard clamp of channels 0–1 at ±1.0; non-finite samples become 0. Raises
+/// `CLIPPED` when anything was changed (engine ruling). // RT
+fn clamp_master(out: &mut [&mut [f32]], frames: u32, shared: &Shared) {
+    let n = frames as usize;
+    let mut clipped = false;
+    for ch in out.iter_mut().take(2) {
+        if let Some(c) = ch.get_mut(..n) {
+            for x in c {
+                if !x.is_finite() {
+                    clipped = true;
+                    *x = 0.0;
+                } else if *x > 1.0 || *x < -1.0 {
+                    clipped = true;
+                    *x = x.clamp(-1.0, 1.0);
+                }
+            }
+        }
+    }
+    if clipped {
+        shared.raise(Faults::CLIPPED);
+    }
+}
+
 impl Renderer {
     pub(crate) fn new(
         cfg: RenderConfig,
         cmds: Consumer<EngineCmd>,
-        retire: Producer<Box<Schedule>>,
+        retire: Producer<Retired>,
         shared: Arc<Shared>,
+        pool: Option<Arc<PoolShared>>,
     ) -> Renderer {
         let mut r = Renderer {
             cfg,
@@ -387,22 +463,30 @@ impl Renderer {
             cursor: 0,
             transport: Transport::new(cfg.sample_rate.max(0.0).round() as u64),
             notes: ActiveNotes::default(),
-            sinks: std::array::from_fn(|_| None),
+            sinks: Box::default(),
             bufs: Vec::new(),
             block_ns: 0,
             chase_pending: false,
+            graph: None,
+            exec: Exec::new(pool),
+            latency: 0,
+            pending_skip: 0,
         };
         r.prepare(cfg.max_frames);
         r
     }
 
-    /// (Re)allocates scratch buffers for blocks of up to `max_frames`.
-    /// Not real-time safe: call only while stopped.
+    /// (Re)allocates scratch and graph buffers for blocks of up to
+    /// `max_frames`. Not real-time safe: call only while stopped.
     pub fn prepare(&mut self, max_frames: u32) {
+        self.exec.wait_idle();
         self.cfg.max_frames = max_frames;
         self.bufs = (0..MAX_TARGETS)
             .map(|_| StereoBuf::new(max_frames))
             .collect();
+        if let Some(g) = self.graph.as_mut() {
+            g.prepare(max_frames);
+        }
     }
 
     /// Settings.
@@ -416,7 +500,7 @@ impl Renderer {
     }
 
     /// Renders one block of `frames` frames into planar `out` channels.
-    /// Channels 0–1 get the mix, the rest zeros. // RT
+    /// Channels 0–1 get master, the rest zeros. // RT
     pub fn process(&mut self, out: &mut [&mut [f32]], frames: u32, time: BlockTime) {
         #[cfg(feature = "rt-check")]
         crate::rt_check::arm();
@@ -425,17 +509,36 @@ impl Renderer {
         crate::rt_check::disarm();
     }
 
+    fn latency_ns(&self) -> i64 {
+        (self.latency as f64 * 1e9 / self.cfg.sample_rate.max(1.0)).round() as i64
+    }
+
     fn process_inner(&mut self, out: &mut [&mut [f32]], frames: u32, time: BlockTime) {
+        let started = Instant::now();
+        let block_s = f64::from(frames) / self.cfg.sample_rate.max(1.0);
+        let deadline = self
+            .cfg
+            .deadline
+            .and_then(|f| Duration::try_from_secs_f64(f * block_s).ok())
+            .and_then(|d| started.checked_add(d));
         let n = frames as usize;
-        if frames > self.cfg.max_frames || out.iter().any(|c| c.len() < n) {
-            for ch in out.iter_mut() {
-                ch.fill(0.0);
-            }
-            for sink in self.sinks.iter_mut().flatten() {
-                if let Sink::Instrument(node) = sink {
-                    node.skip(frames);
-                }
-            }
+        for ch in out.iter_mut() {
+            ch.fill(0.0);
+        }
+        if !self.exec.try_finish(deadline) {
+            // Nodes of a missed block are still running: touch nothing they
+            // use (Plan Ruling 18).
+            self.shared.count_busy_block();
+            self.pending_skip = self.pending_skip.saturating_add(u64::from(frames));
+            return;
+        }
+        if self.pending_skip > 0 {
+            let skip = std::mem::take(&mut self.pending_skip);
+            skip_sinks(&mut self.sinks, skip, 0);
+        }
+        let graph_small = self.graph.as_ref().is_some_and(|g| g.max_frames() < frames);
+        if frames > self.cfg.max_frames || graph_small || out.iter().any(|c| c.len() < n) {
+            skip_sinks(&mut self.sinks, u64::from(frames), 0);
             self.shared.raise(Faults::XRUN);
             self.shared.xruns.fetch_add(1, Ordering::Relaxed);
             return;
@@ -443,12 +546,13 @@ impl Renderer {
         self.block_ns = time.host_time_ns;
         self.drain_commands();
         let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
+        let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let mut o = Out {
             sinks: &mut self.sinks,
             shared: &self.shared,
             block_ns: time.host_time_ns,
             ns_per_frame: 1e9 / self.cfg.sample_rate.max(1.0),
-            midi_offset_ns: self.cfg.midi_offset_ns,
+            late_ns,
         };
         let mut offset = 0u32;
         while offset < frames {
@@ -486,18 +590,54 @@ impl Renderer {
             }
             offset += step.frames();
         }
-        self.mix(out, frames);
+        self.render_graph(out, frames, deadline);
         self.publish();
+        if block_s > 0.0 {
+            self.shared
+                .set_load((started.elapsed().as_secs_f64() / block_s) as f32);
+        }
     }
 
-    /// Applies queued commands. A `SetSchedule` waits when the retire ring
-    /// is full (and everything after it waits too, to keep order). // RT
+    /// Renders the graph (or, before the first graph arrives, sums the
+    /// instrument sinks) into channels 0–1 and clamps. // RT
+    fn render_graph(&mut self, out: &mut [&mut [f32]], frames: u32, deadline: Option<Instant>) {
+        let Some(g) = self.graph.as_deref() else {
+            self.mix_direct(out, frames);
+            clamp_master(out, frames, &self.shared);
+            return;
+        };
+        if g.max_frames() < frames {
+            // A graph that arrived in this block's commands with smaller
+            // buffers (built before a `prepare`): never run it past them.
+            skip_sinks(&mut self.sinks, u64::from(frames), 0);
+            self.shared.raise(Faults::XRUN);
+            self.shared.xruns.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        match self
+            .exec
+            .run(g, &self.sinks, &self.shared, frames, deadline)
+        {
+            RunResult::Done => {
+                g.write_master(out, frames);
+                let covered = g.instruments();
+                skip_sinks(&mut self.sinks, u64::from(frames), covered);
+                clamp_master(out, frames, &self.shared);
+            }
+            RunResult::Missed => self.shared.count_deadline_miss(),
+        }
+    }
+
+    /// Applies queued commands. A `SetSchedule` or `SetGraph` waits when
+    /// the retire ring is full (and everything after it waits too, to keep
+    /// order). // RT
     fn drain_commands(&mut self) {
         loop {
             let deferred = match self.cmds.peek() {
                 Ok(EngineCmd::SetSchedule(_)) => {
                     self.schedule.is_some() && self.retire.slots() == 0
                 }
+                Ok(EngineCmd::SetGraph(_)) => self.graph.is_some() && self.retire.slots() == 0,
                 Ok(_) => false,
                 Err(_) => break,
             };
@@ -517,12 +657,13 @@ impl Renderer {
     /// schedule, at block offset 0; the next played frames chase the
     /// controller state (ruling O23). // RT
     fn release_now(&mut self) {
+        let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let mut o = Out {
             sinks: &mut self.sinks,
             shared: &self.shared,
             block_ns: self.block_ns,
             ns_per_frame: 0.0,
-            midi_offset_ns: self.cfg.midi_offset_ns,
+            late_ns,
         };
         release_all(&mut self.notes, &mut o, 0);
         if let Some(s) = self.schedule.as_deref() {
@@ -544,7 +685,9 @@ impl Renderer {
                             new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)),
                         )
                     });
-                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(old) {
+                    if let Err(rtrb::PushError::Full(old)) =
+                        self.retire.push(Retired::Schedule(old))
+                    {
                         // Unreachable: room was checked in `drain_commands`.
                         // Leaking is the only RT-safe choice.
                         std::mem::forget(old);
@@ -552,6 +695,17 @@ impl Renderer {
                 }
                 self.cursor = new.cursor_at(self.transport.pos);
                 self.schedule = Some(new);
+            }
+            EngineCmd::SetGraph(mut new) => {
+                if let Some(mut old) = self.graph.take() {
+                    new.adopt_from(&mut old);
+                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Graph(old)) {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+                self.latency = new.latency();
+                self.graph = Some(new);
             }
             EngineCmd::Play => {
                 let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
@@ -586,15 +740,10 @@ impl Renderer {
             .map_or(0, |s| s.cursor_at(self.transport.pos));
     }
 
-    /// Renders instrument sinks and sums them into channels 0–1. // RT
-    fn mix(&mut self, out: &mut [&mut [f32]], frames: u32) {
+    /// Before the first graph: renders instrument sinks and sums them into
+    /// channels 0–1 (2b behaviour). // RT
+    fn mix_direct(&mut self, out: &mut [&mut [f32]], frames: u32) {
         let n = frames as usize;
-        for ch in out.iter_mut() {
-            if let Some(c) = ch.get_mut(..n) {
-                c.fill(0.0);
-            }
-        }
-        let mut clipped = false;
         for (sink, buf) in self.sinks.iter_mut().zip(self.bufs.iter_mut()) {
             let Some(Sink::Instrument(node)) = sink else {
                 continue;
@@ -611,29 +760,14 @@ impl Renderer {
                 }
             }
         }
-        for ch in out.iter_mut().take(2) {
-            if let Some(c) = ch.get_mut(..n) {
-                for x in c {
-                    // NaN fails both comparisons below; silence any
-                    // non-finite sample and report it as clipping.
-                    if !x.is_finite() {
-                        clipped = true;
-                        *x = 0.0;
-                    } else if *x > 1.0 || *x < -1.0 {
-                        clipped = true;
-                        *x = x.clamp(-1.0, 1.0);
-                    }
-                }
-            }
-        }
-        if clipped {
-            self.shared.raise(Faults::CLIPPED);
-        }
     }
 
     fn publish(&mut self) {
         let s = &self.shared;
-        s.position.store(self.transport.pos, Ordering::Relaxed);
+        s.position.store(
+            self.transport.pos.saturating_sub(self.latency),
+            Ordering::Relaxed,
+        );
         s.state.store(self.transport.state as u8, Ordering::Relaxed);
         if self.transport.take_ended() {
             s.ended.store(true, Ordering::Relaxed);
@@ -642,6 +776,7 @@ impl Renderer {
 
     /// Resets every instrument (all notes off). Call while stopped.
     pub fn reset_instruments(&mut self) {
+        self.exec.wait_idle();
         for sink in self.sinks.iter_mut().flatten() {
             if let Sink::Instrument(node) = sink {
                 node.reset();
@@ -651,9 +786,22 @@ impl Renderer {
 
     /// Mutable access to a target's sink (for backends and tests, not RT).
     pub fn sink_mut(&mut self, idx: TargetIdx) -> Option<&mut Sink> {
+        self.exec.wait_idle();
         self.sinks
             .get_mut(usize::from(idx.0))
             .and_then(Option::as_mut)
+    }
+
+    /// The graph latency `L` in frames.
+    pub fn latency(&self) -> u64 {
+        self.latency
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        // Stragglers of a missed block may still use the graph and sinks.
+        self.exec.wait_idle();
     }
 }
 

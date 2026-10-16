@@ -1,21 +1,28 @@
-//! The control handle (non-RT): compiles documents, sends commands to the
-//! renderer and reads what it publishes.
+//! The control handle (non-RT): compiles documents and mixer graphs, sends
+//! commands to the renderer and reads what it publishes.
 
 use crate::backend::MidiPortInfo;
 use crate::error::{BackendError, EngineError};
+use crate::graph::mixer::mixer_spec;
+use crate::graph::{
+    EffectNode, Graph, GraphReport, InsertFactory, InsertInit, NoInserts, PlanError, plan,
+};
+use crate::pool::{Pool, RtEnv, RtPlatform, StdPlatform};
 use crate::render::{
-    CMD_CAPACITY, Counters, EngineCmd, Faults, RETIRE_CAPACITY, RenderConfig, Renderer, Shared,
-    Sink,
+    CMD_CAPACITY, Counters, DspLoad, EngineCmd, Faults, RETIRE_CAPACITY, RenderConfig, Renderer,
+    Retired, Shared, Sink,
 };
 use crate::schedule::{
-    BuiltinRoute, CompileOptions, CompileReport, MAX_TARGETS, Schedule, TargetIdx, TargetKind,
-    TargetTable, TempoTable, compile,
+    BuiltinRoute, CompileOptions, CompileReport, MAX_TARGETS, TargetIdx, TargetKind, TargetTable,
+    TempoTable, compile,
 };
 use crate::transport::PlayState;
 use core_model::document::Document;
-use core_model::ids::SeqId;
+use core_model::ids::{PluginInstanceId, SeqId, StripId};
+use core_model::mixer::{PluginFormat, PluginSlot};
 use core_model::time::Tick;
 use rtrb::{Producer, RingBuffer};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -47,17 +54,53 @@ pub struct EngineConfig {
     pub midi_offset_ns: i64,
     /// Where `builtin:synth` destinations play.
     pub route: BuiltinRoute,
+    /// Render worker threads besides the callback thread (0–15; Plan
+    /// Ruling 20).
+    pub workers: usize,
+    /// Fraction of a block the graph may take (Plan Ruling 18); `None`
+    /// waits (offline).
+    pub deadline: Option<f64>,
 }
 
 impl EngineConfig {
-    /// Defaults: 4096-frame blocks, no MIDI offset, built-in routing.
+    /// Defaults: 4096-frame blocks, no MIDI offset, built-in routing, no
+    /// workers, no deadline.
     pub fn new(sample_rate: f64) -> EngineConfig {
         EngineConfig {
             sample_rate,
             max_frames: crate::backend::MAX_FRAMES,
             midi_offset_ns: 0,
             route: BuiltinRoute::Builtin,
+            workers: 0,
+            deadline: None,
         }
+    }
+}
+
+/// One strip's peaks since the last read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripMeter {
+    /// The strip.
+    pub strip: StripId,
+    /// Left peak (linear).
+    pub peak_l: f32,
+    /// Right peak (linear).
+    pub peak_r: f32,
+}
+
+/// An insert instance in the last published graph. An instance is reused
+/// only for a slot with the same ID and the same plugin (format + id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Live {
+    index: usize,
+    latency: u32,
+    format: PluginFormat,
+    plugin: String,
+}
+
+impl Live {
+    fn serves(&self, slot: &PluginSlot) -> bool {
+        self.format == slot.plugin.format && self.plugin == slot.plugin.id
     }
 }
 
@@ -68,14 +111,24 @@ pub struct Engine {
     shared: Arc<Shared>,
     targets: TargetTable,
     factory: Box<dyn SinkFactory>,
+    inserts: Box<dyn InsertFactory>,
     tempo: Option<TempoTable>,
     length_frames: u64,
     loop_range: Option<(u64, u64)>,
     /// The default loop (bar 1 to the end) is on: loads re-send it.
     default_loop: bool,
+    /// Latency of each target's instrument sink.
+    instrument_latency: [Option<u32>; MAX_TARGETS],
+    /// Insert instances in the last published graph, by ID.
+    live: BTreeMap<PluginInstanceId, Live>,
+    /// `(node, strip)` of the last published graph.
+    strip_nodes: Vec<(usize, StripId)>,
+    /// Latency of the last published graph.
+    latency: u64,
     collector_stop: Arc<AtomicBool>,
     collector_paused: Arc<AtomicBool>,
     collector: Option<JoinHandle<()>>,
+    pool: Option<Pool>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -88,28 +141,40 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
-    /// Creates the control handle and its renderer, and starts the collector
-    /// thread that frees retired schedules every 10 ms. Fails when that
-    /// thread cannot be started (ruling O24): without it retired schedules
-    /// would never be freed.
+    /// Creates the control handle and its renderer, starts the collector
+    /// thread that frees retired schedules and graphs every 10 ms and, with
+    /// `cfg.workers > 0`, the portable worker pool. Fails when a thread
+    /// cannot be started (ruling O24).
     pub fn new(
         cfg: EngineConfig,
         factory: Box<dyn SinkFactory>,
     ) -> Result<(Engine, Renderer), EngineError> {
-        Engine::with_spawner(cfg, factory, |b, f| b.spawn(f))
+        Engine::with_platform(cfg, factory, Arc::new(StdPlatform))
     }
 
-    /// [`Engine::new`] with the thread spawn injected (tests make it fail).
+    /// [`Engine::new`] with platform wakers and real-time promotion for the
+    /// workers (`platform-macos` passes `MacRtPlatform`).
+    pub fn with_platform(
+        cfg: EngineConfig,
+        factory: Box<dyn SinkFactory>,
+        platform: Arc<dyn RtPlatform>,
+    ) -> Result<(Engine, Renderer), EngineError> {
+        Engine::with_spawner(cfg, factory, platform, |b, f| b.spawn(f))
+    }
+
+    /// [`Engine::with_platform`] with the collector's thread spawn injected
+    /// (tests make it fail).
     fn with_spawner(
         cfg: EngineConfig,
         factory: Box<dyn SinkFactory>,
+        platform: Arc<dyn RtPlatform>,
         spawn: impl FnOnce(
             std::thread::Builder,
             Box<dyn FnOnce() + Send + 'static>,
         ) -> std::io::Result<JoinHandle<()>>,
     ) -> Result<(Engine, Renderer), EngineError> {
         let (cmd_tx, cmd_rx) = RingBuffer::<EngineCmd>::new(CMD_CAPACITY);
-        let (retire_tx, mut retire_rx) = RingBuffer::<Box<Schedule>>::new(RETIRE_CAPACITY);
+        let (retire_tx, mut retire_rx) = RingBuffer::<Retired>::new(RETIRE_CAPACITY);
         let shared = Arc::new(Shared::default());
         let collector_stop = Arc::new(AtomicBool::new(false));
         let collector_paused = Arc::new(AtomicBool::new(false));
@@ -137,15 +202,22 @@ impl Engine {
             name: COLLECTOR,
             reason: e.to_string(),
         })?;
+        let pool = if cfg.workers > 0 {
+            Some(Pool::new(cfg.workers, platform, Arc::clone(&shared))?)
+        } else {
+            None
+        };
         let renderer = Renderer::new(
             RenderConfig {
                 sample_rate: cfg.sample_rate,
                 max_frames: cfg.max_frames,
                 midi_offset_ns: cfg.midi_offset_ns,
+                deadline: cfg.deadline,
             },
             cmd_rx,
             retire_tx,
             Arc::clone(&shared),
+            pool.as_ref().map(Pool::handle),
         );
         let engine = Engine {
             cfg,
@@ -153,19 +225,48 @@ impl Engine {
             shared,
             targets: TargetTable::new(),
             factory,
+            inserts: Box::new(NoInserts),
             tempo: None,
             length_frames: 0,
             loop_range: None,
             default_loop: false,
+            instrument_latency: [None; MAX_TARGETS],
+            live: BTreeMap::new(),
+            strip_nodes: Vec::new(),
+            latency: 0,
             collector_stop,
             collector_paused,
             collector: Some(collector),
+            pool,
         };
         Ok((engine, renderer))
     }
 
-    /// Pauses or resumes freeing retired schedules (a diagnostic hook:
-    /// tests use it to fill the retire ring).
+    /// Replaces the insert factory (default [`NoInserts`]; tests pass
+    /// `TestInserts`, 3b the plugin hosts). Affects inserts created by later
+    /// loads.
+    pub fn set_insert_factory(&mut self, f: Box<dyn InsertFactory>) {
+        self.inserts = f;
+    }
+
+    /// Hands the render workers the device's period and workgroup (Plan
+    /// Ruling 22); no-op without workers.
+    pub fn set_rt_env(&self, env: RtEnv) {
+        if let Some(p) = &self.pool {
+            p.set_env(env);
+        }
+    }
+
+    /// Whether the callback thread renders graph nodes too (diagnostic
+    /// hook, Plan Ruling 19).
+    pub fn set_callback_helps(&self, on: bool) {
+        if let Some(p) = &self.pool {
+            p.set_callback_helps(on);
+        }
+    }
+
+    /// Pauses or resumes freeing retired schedules and graphs (a diagnostic
+    /// hook: tests use it to fill the retire ring).
     pub fn pause_collector(&self, paused: bool) {
         self.collector_paused.store(paused, Ordering::Relaxed);
     }
@@ -180,12 +281,12 @@ impl Engine {
         &self.targets
     }
 
-    /// Compiles `seq` and sends the schedule (and sinks for new targets) to
-    /// the renderer. Call again after every committed edit.
+    /// Compiles `seq` and the mixer graph and sends them (and sinks for new
+    /// targets) to the renderer. Call again after every committed edit.
     pub fn load(&mut self, doc: &Document, seq: SeqId) -> Result<CompileReport, EngineError> {
-        // Room for every possible new sink plus the schedule and the loop,
-        // so no push below can fail after targets were interned.
-        if self.cmds.slots() < MAX_TARGETS + 2 {
+        // Room for every possible new sink plus the graph, the schedule and
+        // the loop, so no push below can fail after targets were interned.
+        if self.cmds.slots() < MAX_TARGETS + 3 {
             return Err(EngineError::Busy);
         }
         let opts = CompileOptions {
@@ -217,7 +318,7 @@ impl Engine {
             }
         };
         let compiled = compile(doc, seq, &opts, &mut resolve);
-        let (schedule, report) = match compiled {
+        let (schedule, mut report) = match compiled {
             Ok(c) => c,
             Err(e) => {
                 // Targets interned by this load have no sinks yet; forget
@@ -227,8 +328,14 @@ impl Engine {
             }
         };
         for (i, sink) in new_sinks {
+            if let (Sink::Instrument(node), Some(l)) =
+                (&sink, self.instrument_latency.get_mut(usize::from(i.0)))
+            {
+                *l = Some(node.latency());
+            }
             self.push(EngineCmd::AddSink(i, sink))?;
         }
+        report.graph = self.compile_graph(doc)?;
         self.tempo = Some(schedule.tempo.clone());
         self.length_frames = schedule.length_frames;
         self.loop_range = schedule.loop_range;
@@ -238,6 +345,106 @@ impl Engine {
             // follow it.
             self.push(EngineCmd::SetLoop(self.loop_range))?;
         }
+        Ok(report)
+    }
+
+    /// Builds and publishes the mixer graph. A graph that cannot be planned
+    /// is reported (and its fault raised) and the previous graph keeps
+    /// playing (spec §6).
+    fn compile_graph(&mut self, doc: &Document) -> Result<GraphReport, EngineError> {
+        let (sr, max) = (self.cfg.sample_rate, self.cfg.max_frames);
+        let instruments: Vec<(TargetIdx, u32)> = self
+            .targets
+            .iter()
+            .filter(|(_, k)| **k == TargetKind::BuiltinSynth)
+            .filter_map(|(i, _)| {
+                let lat = self
+                    .instrument_latency
+                    .get(usize::from(i.0))
+                    .copied()
+                    .flatten()?;
+                Some((i, lat))
+            })
+            .collect();
+        let mut fresh: BTreeMap<PluginInstanceId, (Box<dyn EffectNode>, Live)> = BTreeMap::new();
+        let mut adopted: BTreeMap<PluginInstanceId, Live> = BTreeMap::new();
+        let mut placeholders: Vec<(PluginInstanceId, String)> = Vec::new();
+        let live = &self.live;
+        let inserts = &mut self.inserts;
+        let mut latency = |slot: &PluginSlot| -> u32 {
+            if let Some(l) = live.get(&slot.id).filter(|l| l.serves(slot)) {
+                adopted.insert(slot.id, l.clone());
+                return l.latency;
+            }
+            match inserts.make(slot, sr, max) {
+                Ok(node) => {
+                    let lat = node.latency();
+                    let info = Live {
+                        index: 0,
+                        latency: lat,
+                        format: slot.plugin.format,
+                        plugin: slot.plugin.id.clone(),
+                    };
+                    fresh.insert(slot.id, (node, info));
+                    lat
+                }
+                Err(why) => {
+                    placeholders.push((slot.id, why));
+                    0
+                }
+            }
+        };
+        let mg = mixer_spec(doc, &instruments, &mut latency);
+        let mut report = GraphReport {
+            nodes: mg.spec.nodes.len(),
+            latency_frames: 0,
+            placeholders,
+            warnings: mg.warnings,
+            error: None,
+        };
+        let max_delay = (2.0 * sr).round().max(0.0) as u64;
+        let p = match plan(&mg.spec, max_delay) {
+            Ok(p) => p,
+            Err(e) => {
+                self.shared.raise(match e {
+                    PlanError::TooLarge { .. } => Faults::GRAPH_TOO_LARGE,
+                    PlanError::LatencyTooLarge { .. } => Faults::LATENCY_TOO_LARGE,
+                    PlanError::Cycle | PlanError::BadIndex { .. } => Faults::GRAPH_INVALID,
+                });
+                // The planner knows only `max_delay`; name the engine's
+                // limit (spec §6).
+                report.error = Some(match e {
+                    PlanError::LatencyTooLarge { frames } => format!(
+                        "a latency or compensation delay of {frames} frames exceeds the 2 s limit ({max_delay} frames)"
+                    ),
+                    other => other.to_string(),
+                });
+                return Ok(report);
+            }
+        };
+        let mut next_live: BTreeMap<PluginInstanceId, Live> = BTreeMap::new();
+        let graph = Graph::build(&mg.spec, &p, max, |idx, ins| {
+            let Some(id) = ins.instance else {
+                return InsertInit::Placeholder;
+            };
+            if let Some(l) = adopted.remove(&id) {
+                let old = l.index;
+                next_live.insert(id, Live { index: idx, ..l });
+                return InsertInit::Adopt(old);
+            }
+            match fresh.remove(&id) {
+                Some((node, info)) => {
+                    next_live.insert(id, Live { index: idx, ..info });
+                    InsertInit::Fresh(node)
+                }
+                None => InsertInit::Placeholder,
+            }
+        });
+        report.latency_frames = graph.latency();
+        self.push(EngineCmd::SetGraph(Box::new(graph)))?;
+        self.live = next_live;
+        self.latency = report.latency_frames;
+        self.strip_nodes = mg.strips;
         Ok(report)
     }
 
@@ -281,12 +488,14 @@ impl Engine {
         Ok(())
     }
 
-    /// Schedule frame of the transport.
+    /// Frame of the transport as heard (schedule frame minus the graph
+    /// latency).
     pub fn position_frames(&self) -> u64 {
         self.shared.position()
     }
 
-    /// Tick of the transport, through the last loaded schedule's tempo table.
+    /// Tick of the transport as heard, through the last loaded schedule's
+    /// tempo table.
     pub fn position_tick(&self) -> Tick {
         let f = self.shared.position();
         self.tempo
@@ -297,6 +506,11 @@ impl Engine {
     /// Frame of the loaded sequence's end.
     pub fn length_frames(&self) -> u64 {
         self.length_frames
+    }
+
+    /// Latency `L` of the last published graph, in frames.
+    pub fn latency_frames(&self) -> u64 {
+        self.latency
     }
 
     /// Transport state.
@@ -317,6 +531,33 @@ impl Engine {
     /// True once after playback reached the end and the tail finished.
     pub fn take_ended(&self) -> bool {
         self.shared.take_ended()
+    }
+
+    /// Peak meters of every strip of the last published graph since the
+    /// last call (read and cleared).
+    pub fn meters(&self) -> Vec<StripMeter> {
+        self.strip_nodes
+            .iter()
+            .filter_map(|(node, strip)| {
+                let (l, r) = self.shared.meter(*node)?.take();
+                Some(StripMeter {
+                    strip: *strip,
+                    peak_l: l,
+                    peak_r: r,
+                })
+            })
+            .collect()
+    }
+
+    /// DSP load of the last block and the peak since the last call.
+    pub fn dsp_load(&self) -> DspLoad {
+        self.shared.take_load()
+    }
+
+    /// Instances bypassed for faults since the last call (read and
+    /// cleared).
+    pub fn plugin_faults(&self) -> Vec<PluginInstanceId> {
+        self.shared.take_plugin_faults()
     }
 }
 
@@ -348,6 +589,7 @@ mod tests {
         let r = Engine::with_spawner(
             EngineConfig::new(48_000.0),
             Box::new(OfflineSinks::new(4)),
+            Arc::new(StdPlatform),
             |_, _| Err(std::io::Error::other("no threads")),
         );
         match r {

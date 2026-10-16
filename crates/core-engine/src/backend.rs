@@ -115,6 +115,12 @@ pub trait InstrumentNode: Send {
     fn skip(&mut self, frames: u32) {
         let _ = frames;
     }
+
+    /// Output latency in frames, read on the control thread when the sink
+    /// is created (the DLS synth: 0).
+    fn latency(&self) -> u32 {
+        0
+    }
 }
 
 /// A timestamped MIDI output. `send` must be wait-free.
