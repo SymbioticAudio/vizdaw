@@ -18,6 +18,24 @@ pub enum Ready {
     Instrument(PluginSynth),
 }
 
+impl Ready {
+    /// The instance it serves.
+    pub fn id(&self) -> PluginInstanceId {
+        match self {
+            Ready::Effect(e) => e.id(),
+            Ready::Instrument(s) => s.id(),
+        }
+    }
+
+    /// Unwraps the processor.
+    pub fn into_processor(self) -> Option<Box<dyn crate::instance::AudioProcessor>> {
+        match self {
+            Ready::Effect(e) => e.into_processor(),
+            Ready::Instrument(s) => s.into_processor(),
+        }
+    }
+}
+
 struct Entry {
     format: PluginFormat,
     plugin: String,

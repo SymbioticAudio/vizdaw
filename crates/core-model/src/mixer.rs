@@ -25,7 +25,7 @@ pub const BUILTIN_SYNTH_STRIP: &str = "Built-in Synth";
 pub struct ParamId(pub u64);
 
 /// Plugin formats VizDAW hosts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginFormat {
     /// Audio Unit (v2 or v3).

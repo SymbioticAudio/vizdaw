@@ -19,6 +19,7 @@
 pub mod adapt;
 pub mod clap;
 pub mod error;
+pub mod host;
 pub mod info;
 pub mod instance;
 pub mod process;
@@ -26,6 +27,7 @@ pub mod queue;
 pub mod shelf;
 
 pub use error::HostError;
+pub use host::{Gesture, IdleReport, PluginHost};
 pub use info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Tail};
 pub use instance::{
     AudioProcessor, InstanceEvents, LoadRequest, ParentView, PluginEditor, PluginFormat,

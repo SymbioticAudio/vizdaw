@@ -205,6 +205,18 @@ fn copy_in(dst: &mut [Box<[f32]>], src: &StereoBuf, n: usize) {
     }
 }
 
+impl PluginEffect {
+    /// The instance it serves.
+    pub fn id(&self) -> PluginInstanceId {
+        self.core.id
+    }
+
+    /// Unwraps the processor (it is not sent back).
+    pub fn into_processor(mut self) -> Option<Box<dyn AudioProcessor>> {
+        self.core.proc.take()
+    }
+}
+
 impl EffectNode for PluginEffect {
     fn latency(&self) -> u32 {
         self.core.latency
@@ -315,6 +327,18 @@ impl PluginSynth {
             faulted: false,
             unreported: false,
         }
+    }
+}
+
+impl PluginSynth {
+    /// The instance it serves.
+    pub fn id(&self) -> PluginInstanceId {
+        self.core.id
+    }
+
+    /// Unwraps the processor (it is not sent back).
+    pub fn into_processor(mut self) -> Option<Box<dyn AudioProcessor>> {
+        self.core.proc.take()
     }
 }
 
