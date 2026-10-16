@@ -134,3 +134,33 @@ fn missing_blob_loads_and_is_reported() {
     assert_eq!(back.state_blob(id), None);
     std::fs::remove_dir_all(&pkg).unwrap();
 }
+
+/// Saves `d2` over a package whose newest autosave was replaced by `bad`;
+/// nothing may be deleted and the save must still succeed.
+fn prune_is_skipped_with(tag: &str, bad: impl Fn(&std::path::Path)) {
+    let pkg = temp_package(tag);
+    let (d1, id1) = capture(&pad(), PluginInstanceId(0), b"one").unwrap();
+    let auto = autosave(&d1, &pkg, Timestamp(1000)).unwrap();
+    let (d2, id2) = capture(&d1, PluginInstanceId(0), b"two").unwrap();
+    let stray = pkg.join("PluginState").join(blob_file_name(StateBlobId(7)));
+    std::fs::write(&stray, b"stray").unwrap();
+    std::fs::remove_file(&auto).unwrap();
+    bad(&auto);
+    save(&d2, &pkg).unwrap();
+    let dir = pkg.join("PluginState");
+    assert!(dir.join(blob_file_name(id1)).exists());
+    assert!(dir.join(blob_file_name(id2)).exists());
+    assert!(stray.exists(), "no prune happened");
+    assert_eq!(load(&pkg).unwrap(), d2, "project.json was updated");
+    std::fs::remove_dir_all(&pkg).unwrap();
+}
+
+#[test]
+fn an_unreadable_autosave_skips_the_prune_but_save_succeeds() {
+    prune_is_skipped_with("unreadable", |p| std::fs::create_dir(p).unwrap());
+}
+
+#[test]
+fn a_garbage_autosave_skips_the_prune_but_save_succeeds() {
+    prune_is_skipped_with("garbage", |p| std::fs::write(p, b"not json {{").unwrap());
+}

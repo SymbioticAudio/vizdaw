@@ -12,7 +12,7 @@ use crate::history::Timestamp;
 use crate::ids::PluginInstanceId;
 use crate::mixer::{PluginRef, PluginSlot};
 use crate::rules::validate;
-use crate::state::{STATE_DIR, blob_file_name, parse_blob_file_name, states_in_json};
+use crate::state::{STATE_DIR, blob_file_name, parse_blob_file_name, try_states_in_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
@@ -180,13 +180,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Writes every referenced blob that is not on disk yet (blobs are
-/// immutable, so an existing file is already right). With `prune`, then
-/// deletes blob files referenced neither by `doc` nor by any autosave.
-fn write_states(doc: &Document, package: &Path, prune: bool) -> Result<()> {
+/// immutable, so an existing file is already right). `save` and `autosave`
+/// must not run concurrently (the FFI layer serializes them).
+fn write_states(doc: &Document, package: &Path) -> Result<()> {
     let dir = package.join(STATE_DIR);
     fs::create_dir_all(&dir)?;
-    let referenced = doc.referenced_states();
-    for id in &referenced {
+    for id in &doc.referenced_states() {
         let path = dir.join(blob_file_name(*id));
         if let Some(bytes) = doc.state_blob(*id) {
             if !path.exists() {
@@ -194,26 +193,31 @@ fn write_states(doc: &Document, package: &Path, prune: bool) -> Result<()> {
             }
         }
     }
-    if prune {
-        let mut keep = referenced;
-        for a in list_autosaves(package)? {
-            // An unreadable autosave aborts the prune: its blobs must stay.
-            keep.extend(states_in_json(&fs::read_to_string(&a)?));
-        }
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            let id = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(parse_blob_file_name);
-            if let Some(id) = id {
-                if !keep.contains(&id) {
-                    fs::remove_file(&path)?;
-                }
+    Ok(())
+}
+
+/// Best-effort: deletes blob files referenced neither by `doc` nor by any
+/// autosave. If any autosave cannot be listed, read or parsed, or the
+/// folder cannot be read, nothing is deleted. A failed delete is ignored.
+fn prune_states(doc: &Document, package: &Path) -> Option<()> {
+    let mut keep = doc.referenced_states();
+    for a in list_autosaves(package).ok()? {
+        keep.extend(try_states_in_json(&fs::read_to_string(&a).ok()?)?);
+    }
+    let dir = package.join(STATE_DIR);
+    for entry in fs::read_dir(&dir).ok()? {
+        let path = entry.ok()?.path();
+        let id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(parse_blob_file_name);
+        if let Some(id) = id {
+            if !keep.contains(&id) {
+                let _ = fs::remove_file(&path);
             }
         }
     }
-    Ok(())
+    Some(())
 }
 
 /// Reads every referenced blob that exists in the package.
@@ -231,9 +235,11 @@ fn read_states(doc: &mut Document, package: &Path) {
 pub fn save(doc: &Document, package: &Path) -> Result<()> {
     fs::create_dir_all(package.join("Media"))?;
     fs::create_dir_all(package.join("Autosave"))?;
-    write_states(doc, package, false)?;
+    write_states(doc, package)?;
     write_atomic(&package.join(PROJECT_FILE), to_json(doc)?.as_bytes())?;
-    write_states(doc, package, true)
+    // `project.json` is durable; pruning is best-effort.
+    let _ = prune_states(doc, package);
+    Ok(())
 }
 
 /// Loads the package's `project.json` and its plugin state blobs. A
@@ -243,6 +249,7 @@ pub fn load(package: &Path) -> Result<Document> {
     read_states(&mut doc, package);
     Ok(doc)
 }
+
 /// Autosave copies in the package, newest first.
 pub fn list_autosaves(package: &Path) -> Result<Vec<PathBuf>> {
     let dir = package.join("Autosave");
@@ -273,7 +280,7 @@ pub fn autosave(doc: &Document, package: &Path, at: Timestamp) -> Result<PathBuf
         ms = ms.saturating_add(1);
         path = dir.join(format!("project-{ms:020}.json"));
     }
-    write_states(doc, package, false)?;
+    write_states(doc, package)?;
     write_atomic(&path, to_json(doc)?.as_bytes())?;
     let keep = usize::try_from(doc.settings().autosave_keep.max(1)).unwrap_or(usize::MAX);
     for old in list_autosaves(package)?.into_iter().skip(keep) {

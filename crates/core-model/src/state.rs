@@ -65,6 +65,11 @@ pub fn capture(
 /// Blob IDs a `project.json` text references (every `state` field of an
 /// object that also has a `plugin` field, i.e. every plugin slot).
 pub fn states_in_json(text: &str) -> BTreeSet<StateBlobId> {
+    try_states_in_json(text).unwrap_or_default()
+}
+
+/// Like [`states_in_json`], but `None` when `text` is not JSON.
+pub fn try_states_in_json(text: &str) -> Option<BTreeSet<StateBlobId>> {
     fn walk(v: &Value, out: &mut BTreeSet<StateBlobId>) {
         match v {
             Value::Object(m) => {
@@ -85,9 +90,8 @@ pub fn states_in_json(text: &str) -> BTreeSet<StateBlobId> {
             _ => {}
         }
     }
+    let v = serde_json::from_str::<Value>(text).ok()?;
     let mut out = BTreeSet::new();
-    if let Ok(v) = serde_json::from_str::<Value>(text) {
-        walk(&v, &mut out);
-    }
-    out
+    walk(&v, &mut out);
+    Some(out)
 }
