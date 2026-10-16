@@ -1,0 +1,21 @@
+//! `core-model`: the VizDAW project model.
+//!
+//! A pure-Rust crate holding a VizDAW project and every edit that can be made
+//! to it. It has no audio, MIDI I/O, UI or OS dependencies. All edits are
+//! [`command::Command`] values applied by the pure function
+//! [`command::apply`]; documents are immutable values that share structure.
+#![deny(missing_docs)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )
+)]
+
+pub mod error;
+pub mod ids;
+
+pub use error::{ModelError, Result};
