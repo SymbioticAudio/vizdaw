@@ -295,3 +295,79 @@ fn split_row_creates_lane_after_source() {
     assert_eq!(a.doc.event(EventId(1)).unwrap().1.lane, LaneId(2));
     assert!(validate(&a.doc).is_empty());
 }
+
+#[test]
+fn move_row_into_a_normal_lane_keeps_its_notes_visible() {
+    let d = run(
+        &kit(),
+        Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            events: vec![note(0, 50), note(PPQ, 51)],
+        }),
+    )
+    .unwrap();
+    let a = apply(
+        &d,
+        &drum(DrumCmd::MoveRowToLane {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            row: DrumRowId(0),
+            to_lane: LaneId(1),
+        }),
+    )
+    .unwrap();
+    let d = a.doc;
+    // Lane 1 is now a drum lane with rows for its own notes plus the moved row.
+    assert_eq!(
+        rows(&d, 1),
+        vec![
+            (50, None, "D3".into()),
+            (51, None, "D#3".into()),
+            (36, Some(DestId(0)), "C2".into())
+        ]
+    );
+    let view = core_model::query::drum_view(&d, SeqId(0), LaneId(1)).unwrap();
+    let shown: usize = view.iter().map(|(_, ids)| ids.len()).sum();
+    assert_eq!(shown, 4);
+    assert_eq!(
+        a.report
+            .created
+            .iter()
+            .filter(|i| matches!(i, AnyId::DrumRow(_)))
+            .count(),
+        2
+    );
+    assert!(validate(&d).is_empty());
+}
+
+#[test]
+fn move_row_to_the_same_lane_still_validates() {
+    for (lane, row) in [(0, 99), (7, 0)] {
+        assert!(
+            run(
+                &kit(),
+                drum(DrumCmd::MoveRowToLane {
+                    seq: SeqId(0),
+                    lane: LaneId(lane),
+                    row: DrumRowId(row),
+                    to_lane: LaneId(lane),
+                }),
+            )
+            .is_err(),
+            "lane {lane} row {row}"
+        );
+    }
+    // A real row moved onto its own lane is a no-op.
+    let d = run(
+        &kit(),
+        drum(DrumCmd::MoveRowToLane {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            row: DrumRowId(0),
+            to_lane: LaneId(0),
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&d, 0), rows(&kit(), 0));
+}

@@ -133,6 +133,41 @@ pub(crate) fn row_events(lane: &Lane, row: &DrumRow, active_only: bool) -> Vec<E
         .collect()
 }
 
+/// Makes a lane a drum lane (if it is not one already), creating a row for
+/// every `(pitch, dest)` among its active-take notes.
+fn mark_drum(d: &mut Document, seq: SeqId, lane: LaneId, r: &mut Report) -> Result<()> {
+    let l = d.lane(seq, lane)?;
+    if l.drum.is_some() {
+        return Ok(());
+    }
+    let keys: BTreeSet<(u8, Option<DestId>)> = l
+        .active()
+        .map(|t| {
+            t.events
+                .values()
+                .filter_map(|e| match e.body {
+                    EventBody::Note { pitch, .. } => Some((pitch, e.dest)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut layout = DrumLayout::default();
+    for (note, dest) in keys {
+        let id = d.counters_mut().alloc_drum_row();
+        layout.rows.push_back(DrumRow {
+            id,
+            name: note_name(note),
+            note,
+            dest,
+            show_velocity: false,
+        });
+        r.created.push(AnyId::DrumRow(id));
+    }
+    d.lane_mut(seq, lane)?.drum = Some(layout);
+    Ok(())
+}
+
 fn move_row(
     d: &mut Document,
     seq: SeqId,
@@ -141,12 +176,15 @@ fn move_row(
     to_lane: LaneId,
     r: &mut Report,
 ) -> Result<()> {
-    if lane == to_lane {
-        return Ok(());
-    }
     let mut moved = find_row(d, seq, lane, row)?;
     let src = d.lane(seq, lane)?.clone();
     let dst = d.lane(seq, to_lane)?.clone();
+    if lane == to_lane {
+        return Ok(());
+    }
+    // A normal target lane becomes a drum lane with rows for its own notes
+    // first, so none of them drop out of the drum view.
+    mark_drum(d, seq, to_lane, r)?;
     let ids = row_events(&src, &moved, true);
     // Keep the sound: pin the source lane's destination when it differs.
     let pin = if moved.dest.is_none() && src.midi_dest != dst.midi_dest {
@@ -166,8 +204,7 @@ fn move_row(
     }
     let src_layout = layout_mut(d, seq, lane)?;
     src_layout.rows.retain(|x| x.id != row);
-    let dst_lane = d.lane_mut(seq, to_lane)?;
-    let layout = dst_lane.drum.get_or_insert_with(DrumLayout::default);
+    let layout = layout_mut(d, seq, to_lane)?;
     if !layout
         .rows
         .iter()
@@ -184,39 +221,11 @@ fn move_row(
 pub(crate) fn apply(d: &mut Document, cmd: &DrumCmd, r: &mut Report) -> Result<()> {
     match cmd {
         DrumCmd::MarkDrumLane { seq, lane, drum } => {
-            let l = d.lane(*seq, *lane)?.clone();
-            if !*drum {
+            if *drum {
+                mark_drum(d, *seq, *lane, r)?;
+            } else {
                 d.lane_mut(*seq, *lane)?.drum = None;
-                return Ok(());
             }
-            if l.drum.is_some() {
-                return Ok(());
-            }
-            let keys: BTreeSet<(u8, Option<DestId>)> = l
-                .active()
-                .map(|t| {
-                    t.events
-                        .values()
-                        .filter_map(|e| match e.body {
-                            EventBody::Note { pitch, .. } => Some((pitch, e.dest)),
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut layout = DrumLayout::default();
-            for (note, dest) in keys {
-                let id = d.counters_mut().alloc_drum_row();
-                layout.rows.push_back(DrumRow {
-                    id,
-                    name: note_name(note),
-                    note,
-                    dest,
-                    show_velocity: false,
-                });
-                r.created.push(AnyId::DrumRow(id));
-            }
-            d.lane_mut(*seq, *lane)?.drum = Some(layout);
         }
         DrumCmd::AddRow {
             seq,
