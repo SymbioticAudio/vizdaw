@@ -19,6 +19,10 @@ use crate::sequence::Sequence;
 use crate::tempo::TempoMap;
 use crate::time::Tick;
 
+/// Upper bound on loop passes of one lane or one reference use, so a tiny
+/// period inside a huge window can't make flattening pathologically slow.
+const MAX_PASSES: i64 = 1_000_000;
+
 /// One step of the path from the flattened sequence to a source event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PathStep {
@@ -122,13 +126,14 @@ impl<'a> Walk<'a> {
         let mut k = 0i64;
         loop {
             let base = period.map_or(Tick::ZERO, |p| p.times(k));
-            if period.is_some() && base >= win.1 {
+            if k > 0 && (base + lane.play_shift >= win.1 || k >= MAX_PASSES) {
                 break;
             }
             // A pass spans [base, base + limit) (shifted); playback of the
-            // lane stops at its own length, and a looped pass starts at its
+            // lane stops at its own length. Negative-tick (pickup) events
+            // play only before the first pass: later passes start at their
             // loop point.
-            let pass_start = if period.is_some() {
+            let pass_start = if k > 0 {
                 base + lane.play_shift
             } else {
                 Tick::MIN
@@ -205,8 +210,10 @@ impl<'a> Walk<'a> {
         let use_len = length.unwrap_or(b);
         let (iter_len, count) = match loop_count {
             LoopCount::Count(n) => (use_len, i64::from(n.max(1))),
-            LoopCount::Fill => (b, (use_len.0 + b.0 - 1) / b.0),
+            // Ceiling division without overflow (b > 0).
+            LoopCount::Fill => (b, use_len.0.saturating_add(b.0 - 1) / b.0),
         };
+        let count = count.min(MAX_PASSES);
         let total = match loop_count {
             LoopCount::Count(_) => iter_len.times(count),
             LoopCount::Fill => use_len,
@@ -226,6 +233,9 @@ impl<'a> Walk<'a> {
             let hi = iter_len.min(end - start);
             let abs_lo = offset + start + lo;
             let abs_hi = offset + start + hi;
+            if i > 0 && abs_lo >= self.range.1 {
+                break;
+            }
             if abs_hi <= self.range.0 || abs_lo >= self.range.1 {
                 continue;
             }
@@ -263,6 +273,23 @@ impl<'a> Walk<'a> {
                 *duration = (*duration).min(win_end - lt);
             }
             EventBody::PolyPressure { pitch, .. } => *pitch = shift_pitch(*pitch, transpose),
+            EventBody::AudioRegion { media, length, .. } => {
+                // Clip at the window end, measured in the playing tempo.
+                let rate = self
+                    .doc
+                    .media()
+                    .get(media)
+                    .map_or(48_000, |m| m.sample_rate.max(1));
+                let secs =
+                    self.tempo.tick_to_seconds(offset + win_end) - self.tempo.tick_to_seconds(abs);
+                // A tiny epsilon keeps float error from losing a whole frame.
+                let avail = (secs * f64::from(rate) + 1e-6).floor();
+                if avail < 1.0 {
+                    return;
+                }
+                // Float-to-int `as` saturates, so a huge window is safe.
+                *length = (*length).min(avail as u64);
+            }
             _ => {}
         }
         let (dest, group_channel, audio_out) = if body.is_midi() {

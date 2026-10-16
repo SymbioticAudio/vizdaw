@@ -1,7 +1,7 @@
-use core_model::command::{Command, EventCmd, LaneCmd, SequenceCmd, apply};
+use core_model::command::{AudioCmd, Command, EventCmd, LaneCmd, RoutingCmd, SequenceCmd, apply};
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
-use core_model::event::{EventBody, EventKind, EventSpec, LoopCount};
-use core_model::ids::{Counters, DestId, EventId, LaneId, SeqId};
+use core_model::event::{EventBody, EventKind, EventSpec, Fade, LoopCount};
+use core_model::ids::{Counters, DestId, EventId, LaneId, MediaId, SeqId};
 use core_model::query::flatten::{PathStep, ResolvedEvent, flatten};
 use core_model::selection::ViewFilter;
 use core_model::tempo::{Bpm, TempoMap};
@@ -421,6 +421,142 @@ fn looped_lane_passes_start_at_the_loop_point() {
             locked: false,
         }),
     );
-    // Negative ticks never play in a looped lane; the beat-0 note repeats every 2 beats.
+    // Song has no pickup (start_offset 0), so the beat -1 note is outside the
+    // playing window; the beat-0 note repeats every 2 beats.
     assert_eq!(notes(&d), vec![(0.0, 41, 1.0), (2.0, 41, 1.0)]);
+}
+
+fn set_length(d: &Document, seq: u64, lane: u64, beats: i64, looped: bool) -> Document {
+    run(
+        d,
+        Command::Lane(LaneCmd::SetLength {
+            seq: SeqId(seq),
+            lane: LaneId(lane),
+            length: Some(Tick(beats * Q)),
+            looped,
+            locked: false,
+        }),
+    )
+}
+
+#[test]
+fn looped_lane_pickup_plays_only_before_the_first_pass() {
+    let d = run(
+        &base(),
+        Command::Sequence(SequenceCmd::SetStartOffset {
+            seq: SeqId(0),
+            offset: Tick(Q),
+        }),
+    );
+    let d = insert(&d, 0, 0, vec![note(-1, 40, 1), note(0, 41, 1)]);
+    let d = set_length(&d, 0, 0, 2, true);
+    assert_eq!(
+        notes(&d),
+        vec![(-1.0, 40, 1.0), (0.0, 41, 1.0), (2.0, 41, 1.0)]
+    );
+}
+
+#[test]
+fn negative_play_shift_reaches_the_last_pass() {
+    // Note at beat 0.5 in a 2-beat loop shifted one beat early: passes at
+    // -0.5 (cut by the window), 1.5 and 3.5 (pass base 4 shifted to 3).
+    let half = EventSpec::new(Tick(Q / 2), EventBody::note(60, 100, Tick(Q / 4)));
+    let d = insert(&base(), 0, 0, vec![half]);
+    let d = set_length(&d, 0, 0, 2, true);
+    let d = run(
+        &d,
+        Command::Lane(LaneCmd::SetPlayShift {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            shift: Tick(-Q),
+        }),
+    );
+    let beats: Vec<f64> = notes(&d).into_iter().map(|n| n.0).collect();
+    assert_eq!(beats, vec![1.5, 3.5]);
+}
+
+#[test]
+fn huge_fill_length_does_not_overflow() {
+    let d = insert(&base(), 1, 1, vec![note(0, 60, 1)]);
+    let mut r = reference(0, None, LoopCount::Fill, 0);
+    if let EventBody::Reference { length, .. } = &mut r.body {
+        *length = Some(Tick(i64::MAX - 1));
+    }
+    let d = insert(&d, 0, 0, vec![r]);
+    let n = flatten(
+        &d,
+        SeqId(0),
+        Some((Tick(0), Tick(9 * Q))),
+        &ViewFilter::default(),
+    )
+    .unwrap()
+    .count();
+    assert_eq!(n, 3);
+}
+
+/// Adds media0 (48 kHz, 4 beats at 120 BPM) and a region of all of it at
+/// `beat` on `seq`/`lane`.
+fn with_region(d: &Document, seq: u64, lane: u64, beat: i64) -> Document {
+    let d = run(
+        d,
+        Command::Routing(RoutingCmd::AddMedia {
+            path: "Media/a.wav".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 96_000,
+            content_hash: None,
+        }),
+    );
+    run(
+        &d,
+        Command::Audio(AudioCmd::Insert {
+            seq: SeqId(seq),
+            lane: LaneId(lane),
+            tick: Tick(beat * Q),
+            media: MediaId(0),
+            source_offset: 0,
+            length: 96_000,
+            gain_db: 0.0,
+            fade_in: Fade::default(),
+            fade_out: Fade::default(),
+        }),
+    )
+}
+
+fn region_lengths(d: &Document) -> Vec<u64> {
+    flat(d)
+        .into_iter()
+        .filter_map(|r| match r.body {
+            EventBody::AudioRegion { length, .. } => Some(length),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn audio_region_is_clipped_at_the_lane_length() {
+    let d = with_region(&base(), 0, 0, 0);
+    let d = set_length(&d, 0, 0, 2, false);
+    // Two beats at 120 BPM = 1 s = 48 000 frames.
+    assert_eq!(region_lengths(&d), vec![48_000]);
+}
+
+#[test]
+fn audio_region_is_clipped_at_a_reference_length_using_the_playing_tempo() {
+    let d = with_region(&base(), 1, 1, 0);
+    let d = run(
+        &d,
+        Command::Sequence(SequenceCmd::SetTempo {
+            seq: SeqId(1),
+            tempo: TempoMap::constant(Bpm::whole(60)).unwrap(),
+        }),
+    );
+    let d = insert(
+        &d,
+        0,
+        0,
+        vec![reference(0, Some(1), LoopCount::Count(1), 0)],
+    );
+    // One beat at the song's 120 BPM = 0.5 s = 24 000 frames.
+    assert_eq!(region_lengths(&d), vec![24_000]);
 }
