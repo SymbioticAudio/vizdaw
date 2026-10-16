@@ -440,3 +440,39 @@ fn inserts_see_tempo_position_and_play_state() {
     let bpm = f64::from_bits(probe.bpm.load(Ordering::Relaxed));
     assert!((bpm - 90.0).abs() < 1e-6, "{bpm}");
 }
+
+/// Counts the inserts it makes.
+struct MakeCounter(TestInserts, Arc<AtomicUsize>);
+
+impl InsertFactory for MakeCounter {
+    fn make(
+        &mut self,
+        slot: &PluginSlot,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<Box<dyn EffectNode>, String> {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        self.0.make(slot, sample_rate, max_frames)
+    }
+}
+
+#[test]
+fn inserts_of_a_refused_graph_are_kept_for_the_next_load() {
+    let (mut b, seq, d, _) = synth_doc();
+    let (mut engine, mut be, _) = engine(4096);
+    let made = Arc::new(AtomicUsize::new(0));
+    engine.set_insert_factory(Box::new(MakeCounter(TestInserts::new(), Arc::clone(&made))));
+    let strip = b.strip_of(StripKind::Instrument(d)).unwrap();
+    b.insert(strip, TestInserts::plugin("gain=0.5,latency=200000"))
+        .unwrap();
+    for _ in 0..3 {
+        let report = engine.load(b.doc(), seq).unwrap();
+        assert!(report.graph.error.is_some(), "{:?}", report.graph);
+        be.run_frames(256);
+    }
+    assert_eq!(
+        made.load(Ordering::SeqCst),
+        1,
+        "the unplaced insert waits for the next load instead of being made again"
+    );
+}

@@ -144,6 +144,11 @@ pub struct Engine {
     release_unpublished: bool,
     /// Insert instances in the last published graph, by ID.
     live: BTreeMap<PluginInstanceId, Live>,
+    /// Inserts made for a graph that could not be planned: kept for the
+    /// next load instead of being dropped, so a refused graph does not send
+    /// every new plugin back to its host (which would activate it again and
+    /// ask for the same load).
+    spare: BTreeMap<PluginInstanceId, (Box<dyn EffectNode>, Live)>,
     /// Meter cell of every strip of the last published graph, by strip
     /// (cells are keyed by strip, not node, so a structural edit never
     /// moves a strip's peaks to another strip).
@@ -260,6 +265,7 @@ impl Engine {
             restart: BTreeSet::new(),
             release_unpublished: false,
             live: BTreeMap::new(),
+            spare: BTreeMap::new(),
             meter_slots: BTreeMap::new(),
             latency: 0,
             collector_stop,
@@ -275,6 +281,8 @@ impl Engine {
     /// loads.
     pub fn set_insert_factory(&mut self, f: Box<dyn InsertFactory>) {
         self.inserts = f;
+        // Spares came from the old factory.
+        self.spare.clear();
     }
 
     /// Hands the render workers the device's period and workgroup (Plan
@@ -515,6 +523,9 @@ impl Engine {
         let live = &self.live;
         let restart = &self.restart;
         let inserts = &mut self.inserts;
+        // Spares of a refused graph that still fit are used first; the
+        // others (and those whose slot is gone) drop below.
+        let mut spare = std::mem::take(&mut self.spare);
         let mut latency = |slot: &PluginSlot| -> u32 {
             if let Some(l) = live
                 .get(&slot.id)
@@ -522,6 +533,22 @@ impl Engine {
             {
                 adopted.insert(slot.id, l.clone());
                 return l.latency;
+            }
+            if let Some((node, info)) = spare.remove(&slot.id) {
+                if info.serves(slot, max) && !restart.contains(&slot.id) {
+                    let lat = node.latency();
+                    fresh.insert(
+                        slot.id,
+                        (
+                            node,
+                            Live {
+                                latency: lat,
+                                ..info
+                            },
+                        ),
+                    );
+                    return lat;
+                }
             }
             match inserts.make(slot, sr, max) {
                 Ok(node) => {
@@ -543,6 +570,7 @@ impl Engine {
             }
         };
         let mut mg = mixer_spec(doc, &instruments, &mut latency);
+        drop(spare);
         let slots = self.assign_meters(&mg.strips);
         for (node, strip) in &mg.strips {
             if let (Some(NodeSpec::Strip(s)), Some(slot)) =
@@ -575,6 +603,9 @@ impl Engine {
                     ),
                     other => other.to_string(),
                 });
+                // Nothing was published: keep the new inserts for the next
+                // load.
+                self.spare = fresh;
                 return Ok(report);
             }
         };
