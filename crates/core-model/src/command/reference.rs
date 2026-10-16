@@ -8,7 +8,7 @@ use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::event::{EventBody, EventSpec, LoopCount};
 use crate::ids::{AnyId, EventId, LaneId, SeqId};
-use crate::lane::Lane;
+use crate::lane::{DrumLayout, Lane};
 use crate::query::flatten::Walk;
 use crate::query::seq_length;
 use crate::rules::{check_event_fields, check_reference};
@@ -39,6 +39,8 @@ pub enum ReferenceCmd {
     },
     /// Move the selected lanes' active-take events inside the selection's
     /// time range into new sequence(s) and put reference(s) in their place.
+    /// New lanes keep the source lanes' routing, mute, solo, play quantize,
+    /// play shift and drum layout; events the view filter hides stay put.
     FromSelection {
         /// The sequence the selection is in.
         seq: SeqId,
@@ -63,7 +65,7 @@ pub enum ReferenceCmd {
     },
     /// Replace the reference with its events, inlined in place (length,
     /// loop, transpose, mute and nested references applied; destinations made
-    /// explicit).
+    /// explicit). Events of a muted use are inlined muted.
     Flatten {
         /// The reference event.
         event: EventId,
@@ -133,6 +135,11 @@ fn flatten_ref(d: &mut Document, event: EventId, r: &mut Report) -> Result<()> {
         );
         w.out
     };
+    let resolved_audio_outs: Vec<_> = resolved
+        .iter()
+        .filter(|x| matches!(x.body, EventBody::AudioRegion { .. }))
+        .map(|x| x.audio_out)
+        .collect();
     let mut specs = Vec::with_capacity(resolved.len());
     for x in resolved {
         let source_gc = x
@@ -144,9 +151,31 @@ fn flatten_ref(d: &mut Document, event: EventId, r: &mut Report) -> Result<()> {
             tick: x.tick,
             dest: x.dest,
             group_channel: source_gc,
-            mute: false,
+            // A muted use stays silent once inlined.
+            mute: ev.mute,
             body: x.body,
         });
+    }
+    let owner_lane = d.lane(loc.seq, loc.lane)?;
+    let lost_out = resolved_audio_outs
+        .iter()
+        .filter(|o| o.is_some() && **o != owner_lane.audio_out)
+        .count();
+    if lost_out > 0 {
+        r.warnings.push(format!(
+            "{lost_out} flattened audio regions now use this lane's audio output instead of their own"
+        ));
+    }
+    if owner_lane.play_quantize.is_some() {
+        let notes = specs
+            .iter()
+            .filter(|s| matches!(s.body, EventBody::Note { .. }))
+            .count();
+        if notes > 0 {
+            r.warnings.push(format!(
+                "{notes} flattened notes are now subject to this lane's play quantize"
+            ));
+        }
     }
     let unresolved = specs
         .iter()
@@ -204,9 +233,12 @@ fn from_selection(
     let lanes: Vec<Lane> = parent
         .lanes
         .iter()
-        .filter(|l| ctx.selection.lanes.contains(&(seq, l.id)))
+        .filter(|l| {
+            ctx.selection.lanes.contains(&(seq, l.id)) && !ctx.filter.hidden_lanes.contains(&l.id)
+        })
         .cloned()
         .collect();
+    let any_solo = parent.lanes.iter().any(|l| l.solo);
     if lanes.is_empty() {
         return Err(ModelError::invalid(
             "no lanes of that sequence are selected",
@@ -224,12 +256,33 @@ fn from_selection(
         let mut moves = Vec::new();
         for l in &group {
             let (nl_id, take) = (c.alloc_lane(), c.alloc_take());
+            r.created.extend([AnyId::Lane(nl_id), AnyId::Take(take)]);
             let mut nl = Lane::new(nl_id, take, l.name.clone());
             nl.midi_dest = l.midi_dest;
             nl.audio_out = l.audio_out;
+            nl.mute = l.mute;
+            nl.solo = l.solo;
+            nl.play_quantize = l.play_quantize;
+            nl.play_shift = l.play_shift;
+            nl.drum = l.drum.as_ref().map(|dl| DrumLayout {
+                rows: dl
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let mut nr = row.clone();
+                        nr.id = c.alloc_drum_row();
+                        r.created.push(AnyId::DrumRow(nr.id));
+                        nr
+                    })
+                    .collect(),
+            });
             new_lanes.push_back(nl);
             if let Some(t) = l.active() {
-                for e in t.events.values().filter(|e| e.tick >= a && e.tick < b) {
+                for e in t
+                    .events
+                    .values()
+                    .filter(|e| e.tick >= a && e.tick < b && ctx.filter.allows(l.id, e.body.kind()))
+                {
                     moves.push((e.id, nl_id));
                 }
             }
@@ -248,13 +301,19 @@ fn from_selection(
             let (mut ev, _) = d.remove_event(id)?;
             ev.tick = ev.tick - a;
             d.insert_event(new_seq, nl, None, ev)?;
+            r.moved.push(AnyId::Event(id));
         }
-        let first = group
-            .first()
-            .map(|l| l.id)
+        // Host the reference on a lane that is audible in the parent, so
+        // the new lanes' own mute/solo decide what plays; offset it by the
+        // host's play shift, which the new lanes already carry.
+        let host = group
+            .iter()
+            .find(|l| !l.mute && (!any_solo || l.solo))
+            .or_else(|| group.first())
             .ok_or_else(|| ModelError::invalid("empty lane group"))?;
+        let (host_id, host_shift) = (host.id, host.play_shift);
         let spec = EventSpec::new(
-            a,
+            a - host_shift,
             EventBody::Reference {
                 seq: new_seq,
                 length: None,
@@ -262,7 +321,7 @@ fn from_selection(
                 transpose: 0,
             },
         );
-        insert_specs(d, seq, first, &[spec], r)?;
+        insert_specs(d, seq, host_id, &[spec], r)?;
     }
     Ok(())
 }
@@ -309,6 +368,8 @@ pub(crate) fn apply(
             let name = format!("{} (copy)", d.sequence(target)?.name);
             let copy = clone_sequence(d, target, name)?;
             r.created.push(AnyId::Seq(copy));
+            r.created
+                .extend(d.sequence(copy)?.lanes.iter().map(|l| AnyId::Lane(l.id)));
             set_target(d, *event, copy)?;
         }
         ReferenceCmd::Flatten { event } => flatten_ref(d, *event, r)?,

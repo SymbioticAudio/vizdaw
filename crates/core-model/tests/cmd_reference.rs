@@ -1,10 +1,12 @@
 use core_model::ModelError;
 use core_model::command::{
-    Command, Context, EventCmd, LaneCmd, ReferenceCmd, SequenceCmd, apply, apply_in,
+    AudioCmd, Command, Context, EventCmd, LaneCmd, ReferenceCmd, RoutingCmd, SequenceCmd, apply,
+    apply_in,
 };
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
-use core_model::event::{EventBody, EventSpec, LoopCount};
-use core_model::ids::{AnyId, Counters, DestId, EventId, LaneId, SeqId};
+use core_model::event::{EventBody, EventKind, EventSpec, Fade, LoopCount};
+use core_model::ids::{AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, SeqId};
+use core_model::lane::QuantizeSpec;
 use core_model::query::{flatten, seq_length, use_count, users_of};
 use core_model::rules::{find_cycle, validate};
 use core_model::selection::{Selection, ViewFilter};
@@ -200,7 +202,12 @@ fn private_copy_versus_flatten() {
     let before = played(&d, 0);
 
     let a = apply(&d, &rc(ReferenceCmd::MakePrivateCopy { event: EventId(2) })).unwrap();
-    assert_eq!(a.report.created, vec![AnyId::Seq(SeqId(3))]);
+    // The copy and its lanes are reported.
+    let copy_lane = a.doc.sequence(SeqId(3)).unwrap().lanes[0].id;
+    assert_eq!(
+        a.report.created,
+        vec![AnyId::Seq(SeqId(3)), AnyId::Lane(copy_lane)]
+    );
     assert_eq!(a.doc.sequence(SeqId(3)).unwrap().name, "Verse (copy)");
     assert_eq!(use_count(&a.doc, SeqId(1)), 0);
     assert_eq!(users_of(&a.doc, SeqId(3)), vec![EventId(2)]);
@@ -460,4 +467,208 @@ fn flattening_unresolved_events_warns() {
             .iter()
             .any(|w| w.contains("no destination"))
     );
+}
+
+fn flags(d: &Document, seq: u64, lane: u64, mute: Option<bool>, solo: Option<bool>) -> Document {
+    run(
+        d,
+        Command::Lane(LaneCmd::SetFlags {
+            seq: SeqId(seq),
+            lane: LaneId(lane),
+            mute,
+            solo,
+            arm: None,
+        }),
+    )
+    .unwrap()
+}
+
+fn lane_events(d: &Document, seq: u64, lane: u64) -> Vec<(Tick, bool, EventBody)> {
+    d.lane(SeqId(seq), LaneId(lane))
+        .unwrap()
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .map(|e| (e.tick, e.mute, e.body.clone()))
+        .collect()
+}
+
+#[test]
+fn flattening_a_muted_reference_inlines_muted_events() {
+    let mut r = EventSpec::new(Tick(0), EventBody::reference(SeqId(1)));
+    r.mute = true;
+    let d = insert(&base(), 0, 0, vec![r]); // ev2
+    let before = played(&d, 0);
+    assert!(before.is_empty());
+    let f = run(&d, rc(ReferenceCmd::Flatten { event: EventId(2) })).unwrap();
+    assert_eq!(played(&f, 0), before);
+    let ev = lane_events(&f, 0, 0);
+    assert_eq!(ev.len(), 2);
+    assert!(ev.iter().all(|(_, mute, _)| *mute));
+}
+
+#[test]
+fn flattening_a_two_level_nested_reference() {
+    // Fill (dest0, note 70 @0) <- Verse at beat 2 <- Song at beat 4.
+    let d = run(
+        &base(),
+        Command::Lane(LaneCmd::SetDest {
+            seq: SeqId(2),
+            lane: LaneId(2),
+            dest: Some(DestId(0)),
+        }),
+    )
+    .unwrap();
+    let d = insert(&d, 2, 2, vec![note(0, 70)]); // ev2
+    let d = insert_ref(&d, 1, 1, 2, 2).unwrap(); // ev3
+    let d = insert_ref(&d, 0, 0, 4, 1).unwrap(); // ev4
+    let before = played(&d, 0);
+    let f = run(&d, rc(ReferenceCmd::Flatten { event: EventId(4) })).unwrap();
+    assert_eq!(played(&f, 0), before);
+    let ev: Vec<(Tick, u8)> = lane_events(&f, 0, 0)
+        .into_iter()
+        .filter_map(|(t, _, b)| match b {
+            EventBody::Note { pitch, .. } => Some((t, pitch)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ev,
+        vec![(Tick(4 * Q), 60), (Tick(5 * Q), 62), (Tick(6 * Q), 70)]
+    );
+    assert_eq!(use_count(&f, SeqId(1)), 0);
+    assert_eq!(use_count(&f, SeqId(2)), 1); // only Verse's own use remains
+    assert!(validate(&f).is_empty());
+}
+
+#[test]
+fn flatten_warns_about_lost_audio_output_and_owner_quantize() {
+    let mut d = base();
+    for c in [
+        RoutingCmd::AddOutput {
+            name: "Main".into(),
+            reference: "bus:0".into(),
+        },
+        RoutingCmd::AddMedia {
+            path: "Media/a.wav".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 48_000,
+            content_hash: None,
+        },
+    ] {
+        d = run(&d, Command::Routing(c)).unwrap();
+    }
+    let d = run(
+        &d,
+        Command::Lane(LaneCmd::SetOutput {
+            seq: SeqId(1),
+            lane: LaneId(1),
+            output: Some(OutputPathId(0)),
+        }),
+    )
+    .unwrap();
+    let d = run(
+        &d,
+        Command::Audio(AudioCmd::Insert {
+            seq: SeqId(1),
+            lane: LaneId(1),
+            tick: Tick(0),
+            media: MediaId(0),
+            source_offset: 0,
+            length: 24_000,
+            gain_db: 0.0,
+            fade_in: Fade::default(),
+            fade_out: Fade::default(),
+        }),
+    )
+    .unwrap();
+    let d = run(
+        &d,
+        Command::Lane(LaneCmd::SetPlayQuantize {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            quantize: Some(QuantizeSpec {
+                grid: Tick(Q),
+                strength: 100,
+            }),
+        }),
+    )
+    .unwrap();
+    let d = insert_ref(&d, 0, 0, 0, 1).unwrap();
+    let r = users_of(&d, SeqId(1))[0];
+    let a = apply(&d, &rc(ReferenceCmd::Flatten { event: r })).unwrap();
+    let w = a.report.warnings.join("\n");
+    assert!(w.contains("audio output"), "{w}");
+    assert!(w.contains("play quantize"), "{w}");
+}
+
+#[test]
+fn make_reference_from_selection_keeps_lane_properties() {
+    // lane0 muted, lane3 shifted by half a beat and a drum lane; a CC on
+    // lane3 is hidden by the view and must stay behind.
+    let d = two_lane_song();
+    let d = flags(&d, 0, 0, Some(true), None);
+    let d = run(
+        &d,
+        Command::Lane(LaneCmd::SetPlayShift {
+            seq: SeqId(0),
+            lane: LaneId(3),
+            shift: Tick(Q / 2),
+        }),
+    )
+    .unwrap();
+    let d = run(
+        &d,
+        Command::Drum(core_model::command::DrumCmd::MarkDrumLane {
+            seq: SeqId(0),
+            lane: LaneId(3),
+            drum: true,
+        }),
+    )
+    .unwrap();
+    let cc = EventSpec::new(Tick(5 * Q), EventBody::Cc { index: 1, value: 9 });
+    let d = insert(&d, 0, 3, vec![cc]);
+    let cc_id = EventId(8);
+    assert!(matches!(
+        d.event(cc_id).unwrap().0.body,
+        EventBody::Cc { .. }
+    ));
+    let before = played(&d, 0);
+    let sel = selection((4 * Q, 8 * Q), &[(0, 0), (0, 3)]);
+    let mut filter = ViewFilter::default();
+    filter.hidden_kinds.insert(EventKind::Cc);
+    let a = apply_in(
+        &d,
+        Context {
+            selection: &sel,
+            filter: &filter,
+        },
+        &rc(ReferenceCmd::FromSelection {
+            seq: SeqId(0),
+            per_lane: false,
+            round_to_bars: false,
+            loop_count: LoopCount::Count(1),
+        }),
+    )
+    .unwrap();
+    assert_eq!(played(&a.doc, 0), before);
+    let new = a.doc.sequence(SeqId(3)).unwrap();
+    assert!(new.lanes[0].mute);
+    assert!(!new.lanes[1].mute);
+    assert_eq!(new.lanes[1].play_shift, Tick(Q / 2));
+    assert!(new.lanes[1].drum.is_some());
+    // The hidden CC stayed on the original lane.
+    assert_eq!(a.doc.event(cc_id).unwrap().1.lane, LaneId(3));
+    // The report lists the new lanes and takes and the moved events.
+    for l in &new.lanes {
+        assert!(a.report.created.contains(&AnyId::Lane(l.id)));
+        assert!(a.report.created.contains(&AnyId::Take(l.active_take)));
+    }
+    // Notes at beat 5: ev3 on lane0, ev6 on lane3.
+    assert!(a.report.moved.contains(&AnyId::Event(EventId(3))));
+    assert!(a.report.moved.contains(&AnyId::Event(EventId(6))));
+    assert!(!a.report.moved.contains(&AnyId::Event(cc_id)));
+    assert!(validate(&a.doc).is_empty(), "{:?}", validate(&a.doc));
 }

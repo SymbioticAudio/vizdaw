@@ -33,6 +33,9 @@ pub struct Report {
     pub created: Vec<AnyId>,
     /// IDs removed.
     pub removed: Vec<AnyId>,
+    /// IDs that kept their identity but moved (to another lane or
+    /// sequence).
+    pub moved: Vec<AnyId>,
     /// Non-fatal notes for the user.
     pub warnings: Vec<String>,
 }
