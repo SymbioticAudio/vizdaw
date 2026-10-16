@@ -4,6 +4,9 @@ import PackageDescription
 let package = Package(
     name: "VizDAW",
     platforms: [.macOS(.v14)],
+    products: [
+        .executable(name: "VizDAW", targets: ["VizDAW"])
+    ],
     targets: [
         // Generated header + module map (scripts/build-ffi.sh).
         .target(name: "vizdaw_ffiFFI", path: "Sources/vizdaw_ffiFFI"),
@@ -27,6 +30,11 @@ let package = Package(
             name: "VizDAWAppModel",
             dependencies: ["VizDAWCore"],
             path: "Sources/VizDAWAppModel"
+        ),
+        .executableTarget(
+            name: "VizDAW",
+            dependencies: ["VizDAWAppModel", "VizDAWCore"],
+            path: "Sources/VizDAW"
         ),
         .testTarget(
             name: "VizDAWAppModelTests",
