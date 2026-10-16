@@ -25,7 +25,16 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (rt-check build)
+        run: cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Device test (macOS runners have a null output device)
+        if: runner.os == 'macOS'
+        run: cargo test -p platform-macos --test hal -- --ignored || echo "no output device on this runner"
+      - name: Offline render matches the fixture
+        run: |
+          cargo run -p vizdaw-play -- fixtures/demo.vizdaw --seq Song --offline "$RUNNER_TEMP/demo.txt"
+          diff fixtures/demo.offline.txt "$RUNNER_TEMP/demo.txt"
       - name: Benchmarks compile
         run: cargo bench --workspace --no-run
