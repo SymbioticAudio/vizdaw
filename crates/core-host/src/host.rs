@@ -8,7 +8,7 @@
 use crate::adapt::{PluginEffect, PluginSynth, Returned};
 use crate::clap::ClapFormat;
 use crate::error::HostError;
-use crate::instance::{LoadRequest, PluginFormat, PluginInstance, Prepared};
+use crate::instance::{AudioProcessor, LoadRequest, PluginFormat, PluginInstance, Prepared};
 use crate::process::ParamEvent;
 use crate::queue::{GestureReceiver, ParamSender, param_queues};
 use crate::shelf::{Ready, Shelf, ShelfFactory};
@@ -21,7 +21,7 @@ use core_model::history::History;
 use core_model::ids::{PluginInstanceId, SeqId, StateBlobId};
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef, PluginSlot};
 use core_model::selection::ViewFilter;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -93,6 +93,20 @@ impl Want {
     }
 }
 
+/// A value the plugin holds that the document does not have yet: from a
+/// gesture in the plugin's UI (open, or reported and not yet committed) or
+/// from [`PluginHost::set_param`] (a mixer control that commits later).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Pending {
+    /// What the plugin holds.
+    value: f64,
+    /// The document's overlay value for the parameter when `value` was
+    /// recorded. While the document still says this, it has not caught up
+    /// and the plugin is left alone; any other value is a newer edit (an
+    /// undo, a redo, a mixer edit) that replaces `value`.
+    doc: Option<f64>,
+}
+
 /// A live instance and its main-thread ends.
 struct Live {
     inst: Box<dyn PluginInstance>,
@@ -100,18 +114,34 @@ struct Live {
     gestures: GestureReceiver,
     /// The processor is out (on the shelf or in the engine).
     active: bool,
+    /// Address of the processor that is out, to recognise it when the
+    /// engine gives it back.
+    processor: Option<usize>,
     /// The state blob last loaded into it.
     applied_state: Option<StateBlobId>,
     /// Parameter values before the overlay (to restore when an overlay
     /// entry goes away, e.g. on undo).
     base: BTreeMap<ParamId, f64>,
-    /// Overlay values already sent.
+    /// The values it was loaded with when it had no state: restored when an
+    /// undo goes back past its first capture (Plan Ruling 15).
+    defaults: Option<BTreeMap<ParamId, f64>>,
+    /// Overlay values the plugin holds (sent by the host, or set by a
+    /// gesture).
     sent: BTreeMap<ParamId, f64>,
+    /// Values the document has not caught up with (Plan Ruling 16: never
+    /// echoed over).
+    pending: BTreeMap<ParamId, Pending>,
     /// Values of the gesture in progress.
     gesture: Vec<(ParamId, f64)>,
-    open: usize,
-    /// Must be activated again when its processor comes back.
-    reactivate: bool,
+    /// Parameters whose gesture is open.
+    open: BTreeSet<ParamId>,
+}
+
+/// A removed instance whose processor is still out.
+struct Retired {
+    plugin: PluginRef,
+    instrument: bool,
+    live: Box<Live>,
 }
 
 enum State {
@@ -141,8 +171,12 @@ pub struct PluginHost {
     sample_rate: f64,
     max_frames: u32,
     slots: BTreeMap<PluginInstanceId, Slot>,
-    /// Instances removed from the document whose processor is still out.
-    retiring: BTreeMap<PluginInstanceId, Box<dyn PluginInstance>>,
+    /// Instances removed from the document whose processor is still out
+    /// (several per id when an id was reused), oldest first.
+    retiring: BTreeMap<PluginInstanceId, Vec<Retired>>,
+    /// The report of a `service` whose engine load failed, given out by
+    /// the next `idle` (nothing in it is lost).
+    carry: Option<IdleReport>,
     /// Prepared loads waiting for their main-thread step.
     finishing: VecDeque<(PluginInstanceId, Prepared)>,
     generation: u64,
@@ -191,6 +225,7 @@ impl PluginHost {
             max_frames: max_frames.max(1),
             slots: BTreeMap::new(),
             retiring: BTreeMap::new(),
+            carry: None,
             finishing: VecDeque::new(),
             generation: 0,
             shelf: Shelf::new(),
@@ -265,7 +300,7 @@ impl PluginHost {
 
     /// Removed instances whose processor the engine has not given back.
     pub fn retiring(&self) -> usize {
-        self.retiring.len()
+        self.retiring.values().map(Vec::len).sum()
     }
 
     /// Instance `id`, if loaded (for its editor and parameter list).
@@ -285,10 +320,24 @@ impl PluginHost {
     }
 
     /// Sets a parameter now (a mixer control): sent to the running plugin;
-    /// the app also records it in the overlay with `SetPluginParams`.
+    /// the app also records it in the overlay with `SetPluginParams`. Until
+    /// the document has that value (or a newer edit of the parameter),
+    /// `sync` leaves the plugin's value alone.
     pub fn set_param(&mut self, id: PluginInstanceId, param: ParamId, value: f64) {
-        if let Some(State::Live(l)) = self.slots.get_mut(&id).map(|s| &mut s.state) {
-            send(l, param, value);
+        let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
+            return;
+        };
+        if let State::Live(l) = state {
+            if push(l, param, value) {
+                l.sent.insert(param, value);
+                l.pending.insert(
+                    param,
+                    Pending {
+                        value,
+                        doc: want.params.get(&param).copied(),
+                    },
+                );
+            }
         }
     }
 
@@ -337,6 +386,20 @@ impl PluginHost {
                     }
                 }
                 None => {
+                    // Back before the engine gave the processor of the
+                    // removed instance back (an undo): the engine still
+                    // plays it, so keep using it.
+                    if let Some(mut live) = self.revive(id, &want) {
+                        apply_want(&mut live, &want);
+                        self.slots.insert(
+                            id,
+                            Slot {
+                                want,
+                                state: State::Live(live),
+                            },
+                        );
+                        continue;
+                    }
                     self.slots.insert(
                         id,
                         Slot {
@@ -415,27 +478,71 @@ impl PluginHost {
     /// `retiring` for it.
     fn remove(&mut self, id: PluginInstanceId) {
         self.shelf.clear_reason(id);
-        let Some(s) = self.slots.remove(&id) else {
+        let Some(Slot { want, state }) = self.slots.remove(&id) else {
             return;
         };
-        if let State::Live(mut l) = s.state {
+        if let State::Live(mut l) = state {
             let shelved = self.shelf.take_unwanted(|k| k != id);
             let mut back = false;
             for p in shelved.into_iter().filter_map(Ready::into_processor) {
                 back = true;
                 l.inst.deactivate(p);
+                l.active = false;
+                l.processor = None;
             }
             if l.active && !back {
-                self.retiring.insert(id, l.inst);
+                self.retiring.entry(id).or_default().push(Retired {
+                    plugin: want.plugin,
+                    instrument: want.instrument,
+                    live: l,
+                });
             }
         }
+    }
+
+    /// Takes back a removed instance of `want`'s plugin whose processor is
+    /// still out, if there is one.
+    fn revive(&mut self, id: PluginInstanceId, want: &Want) -> Option<Box<Live>> {
+        let list = self.retiring.get_mut(&id)?;
+        let i = list.iter().rposition(|r| {
+            r.plugin.format == want.plugin.format
+                && r.plugin.id == want.plugin.id
+                && r.instrument == want.instrument
+        })?;
+        let r = (i < list.len()).then(|| list.remove(i));
+        if list.is_empty() {
+            self.retiring.remove(&id);
+        }
+        // Shown only if the engine already dropped it: then it comes back,
+        // is activated again and shelved.
+        self.shelf.set_reason(id, "restarting");
+        r.map(|r| r.live)
+    }
+
+    /// Takes the removed instance that owns `processor` (or, failing a
+    /// match, the oldest one of `id` unless the live slot owns it).
+    fn take_retired(&mut self, id: PluginInstanceId, processor: usize) -> Option<Retired> {
+        let live_owns = matches!(
+            self.slots.get(&id).map(|s| &s.state),
+            Some(State::Live(l)) if l.processor == Some(processor)
+        );
+        let list = self.retiring.get_mut(&id)?;
+        let i = list
+            .iter()
+            .position(|r| r.live.processor == Some(processor))
+            .or((!live_owns).then_some(0))?;
+        let r = (i < list.len()).then(|| list.remove(i));
+        if list.is_empty() {
+            self.retiring.remove(&id);
+        }
+        r
     }
 
     /// Main-thread servicing (`host_idle`, 60 Hz; spec §5): finishes one
     /// load, deactivates processors the engine gave back, runs plugin
     /// callbacks, and collects restarts and gestures.
     pub fn idle(&mut self) -> IdleReport {
-        let mut r = IdleReport::default();
+        let mut r = self.carry.take().unwrap_or_default();
         while let Ok((id, generation, result)) = self.done.try_recv() {
             let current = matches!(
                 self.slots.get(&id).map(|s| &s.state),
@@ -494,12 +601,14 @@ impl PluginHost {
             params,
             gestures,
             active: false,
+            processor: None,
             applied_state: None,
             base: BTreeMap::new(),
+            defaults: None,
             sent: BTreeMap::new(),
+            pending: BTreeMap::new(),
             gesture: Vec::new(),
-            open: 0,
-            reactivate: false,
+            open: BTreeSet::new(),
         });
         // State first, then the overlay (spec §4).
         if let Some((sid, bytes)) = &want.state {
@@ -509,6 +618,9 @@ impl PluginHost {
             }
         }
         live.base = current_values(live.inst.as_mut());
+        if live.applied_state.is_none() {
+            live.defaults = Some(live.base.clone());
+        }
         let overlay: Vec<(ParamId, f64)> = want.params.iter().map(|(k, v)| (*k, *v)).collect();
         if live.inst.set_params(&overlay).is_ok() {
             live.sent = want.params.clone();
@@ -541,7 +653,7 @@ impl PluginHost {
         live.params = params;
         live.gestures = gestures;
         live.active = true;
-        live.reactivate = false;
+        live.processor = Some(address(proc.as_ref()));
         let info = live.inst.info().clone();
         let back = self.back_tx.clone();
         let ready = if instrument {
@@ -577,11 +689,18 @@ impl PluginHost {
 
     fn returned(&mut self, back: Returned, r: &mut IdleReport) {
         let Returned { id, processor } = back;
-        if let Some(mut inst) = self.retiring.remove(&id) {
-            inst.deactivate(processor);
+        if let Some(mut r) = self.take_retired(id, address(processor.as_ref())) {
+            r.live.inst.deactivate(processor);
             return;
         }
-        let instrument = self.slots.get(&id).is_some_and(|s| s.want.instrument);
+        let Some((instrument, doc)) = self
+            .slots
+            .get(&id)
+            .map(|s| (s.want.instrument, s.want.params.clone()))
+        else {
+            drop(processor);
+            return;
+        };
         let Some(State::Live(mut live)) = self
             .slots
             .get_mut(&id)
@@ -592,6 +711,12 @@ impl PluginHost {
         };
         live.inst.deactivate(processor);
         live.active = false;
+        live.processor = None;
+        // Its gesture queue goes with it: report what is in it, and close
+        // a gesture the deactivation cut off (its `End` never comes).
+        collect_gestures(id, &mut live, &doc, &mut r.gestures);
+        live.open.clear();
+        flush_gesture(id, &mut live, &mut r.gestures);
         // A processor comes back only when the engine dropped it: a
         // restart or a new configuration. Activate it again.
         match self.activate(id, &mut live, instrument) {
@@ -610,39 +735,15 @@ impl PluginHost {
     }
 
     fn service_instance(&mut self, id: PluginInstanceId, r: &mut IdleReport) {
-        let Some(State::Live(live)) = self.slots.get_mut(&id).map(|s| &mut s.state) else {
+        let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
+            return;
+        };
+        let State::Live(live) = state else {
             return;
         };
         let ev = live.inst.idle();
-        for e in live.gestures.drain() {
-            match e {
-                ParamEvent::Begin(_) => live.open += 1,
-                ParamEvent::Value(p, v) => {
-                    live.sent.insert(p, v);
-                    match live.gesture.iter_mut().find(|(k, _)| *k == p) {
-                        Some(x) => x.1 = v,
-                        None => live.gesture.push((p, v)),
-                    }
-                    if live.open == 0 {
-                        r.gestures.push(Gesture {
-                            slot: id,
-                            values: std::mem::take(&mut live.gesture),
-                        });
-                    }
-                }
-                ParamEvent::End(_) => {
-                    live.open = live.open.saturating_sub(1);
-                    if live.open == 0 && !live.gesture.is_empty() {
-                        r.gestures.push(Gesture {
-                            slot: id,
-                            values: std::mem::take(&mut live.gesture),
-                        });
-                    }
-                }
-            }
-        }
+        collect_gestures(id, live, &want.params, &mut r.gestures);
         if ev.restart || ev.latency_changed {
-            live.reactivate = true;
             self.shelf.set_reason(id, "restarting");
             // Still on the shelf: restart it here; otherwise the engine
             // must give it back first.
@@ -671,7 +772,6 @@ impl PluginHost {
             if !live.active {
                 continue;
             }
-            live.reactivate = true;
             self.shelf.set_reason(id, "restarting");
             let shelved = self.shelf.take_unwanted(|k| k != id);
             if shelved.is_empty() {
@@ -704,7 +804,16 @@ impl PluginHost {
         }
         let ready = self.sync(doc);
         if ready && (r.reload || !r.restart.is_empty()) {
-            r.compiled = Some(engine.load(doc, seq)?);
+            match engine.load(doc, seq) {
+                Ok(c) => r.compiled = Some(c),
+                Err(e) => {
+                    // Gestures, loads and the owed reload are given out
+                    // again by the next `idle` (or `service`, which retries
+                    // the load).
+                    self.carry = Some(r);
+                    return Err(e);
+                }
+            }
         }
         Ok(r)
     }
@@ -742,9 +851,11 @@ impl PluginHost {
             .capture_state(id, &bytes)
             .map_err(|e| HostError::StateRejected(e.to_string()))?;
         live.applied_state = Some(blob);
-        // The overlay is now part of the state.
+        // The overlay, and values the document had not caught up with, are
+        // now part of the state.
         let sent = std::mem::take(&mut live.sent);
         live.base.extend(sent);
+        live.pending.clear();
         if let Some(s) = self.slots.get_mut(&id) {
             s.want.state = history.doc().state_blob(blob).map(|b| (blob, Arc::from(b)));
             s.want.params.clear();
@@ -779,49 +890,140 @@ impl PluginHost {
     }
 }
 
-/// Sends `value` to a running instance (or sets it while inactive) and
-/// remembers it; a value that did not fit the queue is not remembered, so
-/// the next `sync` sends it again.
-fn send(l: &mut Live, param: ParamId, value: f64) {
-    let ok = if l.active {
+/// Sends `value` to a running instance (or sets it while inactive); false
+/// when it did not fit the queue (the caller sends it again later).
+fn push(l: &mut Live, param: ParamId, value: f64) -> bool {
+    if l.active {
         l.params.send(param, value)
     } else {
         l.inst.set_params(&[(param, value)]).is_ok()
-    };
-    if ok {
-        l.sent.insert(param, value);
+    }
+}
+
+/// The address of a processor, which identifies it while it is out.
+fn address(p: &dyn AudioProcessor) -> usize {
+    std::ptr::from_ref(p).cast::<()>().addr()
+}
+
+/// Groups the plugin's parameter events into gestures (Plan Ruling 16):
+/// from the first `Begin` to the `End` that closes the last open
+/// parameter; a value while nothing is open is a one-value gesture. A
+/// second `Begin` of an open parameter means its `End` was lost: the
+/// gesture so far is closed first. An `End` of a parameter that is not
+/// open only closes when nothing else is open. Every value counts as sent
+/// and is pending until the document has it.
+fn collect_gestures(
+    id: PluginInstanceId,
+    l: &mut Live,
+    doc: &BTreeMap<ParamId, f64>,
+    out: &mut Vec<Gesture>,
+) {
+    for e in l.gestures.drain() {
+        match e {
+            ParamEvent::Begin(p) => {
+                if !l.open.insert(p) {
+                    flush_gesture(id, l, out);
+                }
+            }
+            ParamEvent::Value(p, v) => {
+                l.sent.insert(p, v);
+                l.pending.insert(
+                    p,
+                    Pending {
+                        value: v,
+                        doc: doc.get(&p).copied(),
+                    },
+                );
+                match l.gesture.iter_mut().find(|(k, _)| *k == p) {
+                    Some(x) => x.1 = v,
+                    None => l.gesture.push((p, v)),
+                }
+                if l.open.is_empty() {
+                    flush_gesture(id, l, out);
+                }
+            }
+            ParamEvent::End(p) => {
+                l.open.remove(&p);
+                if l.open.is_empty() {
+                    flush_gesture(id, l, out);
+                }
+            }
+        }
+    }
+}
+
+/// Reports the gesture so far, if it has values.
+fn flush_gesture(id: PluginInstanceId, l: &mut Live, out: &mut Vec<Gesture>) {
+    if !l.gesture.is_empty() {
+        out.push(Gesture {
+            slot: id,
+            values: std::mem::take(&mut l.gesture),
+        });
     }
 }
 
 /// Brings a running instance in line with what the document wants: a new
-/// state blob is loaded (an undo past a capture), then overlay values that
-/// changed are sent and removed ones go back to their base values.
+/// state blob is loaded (an undo past a capture; no blob restores the
+/// values it was loaded with), then overlay values that changed are sent
+/// and removed ones go back to their base values. Values the plugin holds
+/// that the document has not caught up with are left alone (Plan Ruling
+/// 16) until it has them or a newer edit of that parameter replaces them.
+/// What did not fit the queue is sent again by the next call (Plan Ruling
+/// 15).
 fn apply_want(l: &mut Live, want: &Want) {
     let want_state = want.state.as_ref().map(|(id, _)| *id);
     if want_state != l.applied_state {
-        if let Some((sid, bytes)) = &want.state {
-            if l.inst.load_state(bytes).is_ok() {
-                l.applied_state = Some(*sid);
-                l.base = current_values(l.inst.as_mut());
-                l.sent.clear();
+        match &want.state {
+            Some((sid, bytes)) => {
+                if l.inst.load_state(bytes).is_ok() {
+                    l.applied_state = Some(*sid);
+                    l.base = current_values(l.inst.as_mut());
+                    l.sent.clear();
+                    l.pending.clear();
+                }
+            }
+            None => {
+                if let Some(defaults) = l.defaults.clone() {
+                    let changed: Vec<(ParamId, f64)> = defaults
+                        .iter()
+                        .filter(|(p, v)| l.base.get(p) != Some(v))
+                        .map(|(p, v)| (*p, *v))
+                        .collect();
+                    let mut all = true;
+                    for (p, v) in changed {
+                        all &= push(l, p, v);
+                    }
+                    if all {
+                        l.applied_state = None;
+                        l.base = defaults;
+                        l.pending.clear();
+                    }
+                }
             }
         }
     }
+    l.pending.retain(|p, pend| {
+        let doc = want.params.get(p).copied();
+        doc == pend.doc && doc != Some(pend.value)
+    });
     let removed: Vec<ParamId> = l
         .sent
         .keys()
-        .filter(|k| !want.params.contains_key(k))
+        .filter(|k| !want.params.contains_key(k) && !l.pending.contains_key(k))
         .copied()
         .collect();
     for p in removed {
-        if let Some(v) = l.base.get(&p).copied() {
-            send(l, p, v);
+        let done = match l.base.get(&p).copied() {
+            Some(v) => push(l, p, v),
+            None => true,
+        };
+        if done {
+            l.sent.remove(&p);
         }
-        l.sent.remove(&p);
     }
     for (p, v) in &want.params {
-        if l.sent.get(p) != Some(v) {
-            send(l, *p, *v);
+        if !l.pending.contains_key(p) && l.sent.get(p) != Some(v) && push(l, *p, *v) {
+            l.sent.insert(*p, *v);
         }
     }
 }
@@ -849,8 +1051,8 @@ impl Drop for PluginHost {
             .collect();
         back.extend(self.back_rx.try_iter());
         for Returned { id, processor } in back {
-            if let Some(mut inst) = self.retiring.remove(&id) {
-                inst.deactivate(processor);
+            if let Some(mut r) = self.take_retired(id, address(processor.as_ref())) {
+                r.live.inst.deactivate(processor);
             } else if let Some(State::Live(l)) = self.slots.get_mut(&id).map(|s| &mut s.state) {
                 l.inst.deactivate(processor);
                 l.active = false;
