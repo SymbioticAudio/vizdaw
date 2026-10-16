@@ -1,5 +1,6 @@
 //! `Session`: one open document (one window).
 
+use crate::editor::{self, EditorSize};
 use crate::error::VizError;
 use crate::guard::{ffi_guard, lock};
 use crate::host;
@@ -53,6 +54,8 @@ struct Inner {
     reload_owed: bool,
     /// Plugin gestures waiting for an open edit to end.
     held: Vec<core_host::Gesture>,
+    /// Slots whose plugin window is open (saved with the project, spec §9).
+    windows: std::collections::BTreeSet<u64>,
     /// What plugin timer steps found since the last `idle`.
     news: News,
 }
@@ -79,6 +82,7 @@ impl Inner {
             reload_fault: None,
             reload_owed: false,
             held: Vec::new(),
+            windows: std::collections::BTreeSet::new(),
             news: News::default(),
         }
     }
@@ -366,7 +370,10 @@ impl Session {
                 return Err(VizError::NotFound { path });
             }
             let doc = file::load(&p)?;
-            Session::with(doc, Some(p))
+            let windows = read_windows(&p);
+            let s = Session::with(doc, Some(p))?;
+            lock(&s.inner).windows = windows;
+            Ok(s)
         })
     }
 
@@ -378,6 +385,7 @@ impl Session {
                 message: "the document has no file yet; use Save As".into(),
             })?;
             file::save(inner.doc(), &path)?;
+            write_windows(&path, &inner.windows);
             inner.clean = inner.doc().clone();
             Ok(())
         })
@@ -390,6 +398,7 @@ impl Session {
             let mut inner = lock(&self.inner);
             let p = with_extension(&path);
             file::save(inner.doc(), &p)?;
+            write_windows(&p, &inner.windows);
             inner.clean = inner.doc().clone();
             inner.path = Some(p);
             Ok(())
@@ -982,6 +991,146 @@ impl Session {
                 default_patch,
             }))
         })
+    }
+}
+
+/// The package file holding which plugin windows were open (not part of
+/// the document: no undo, Plan Ruling 13).
+pub const UI_FILE: &str = "ui.json";
+
+fn read_windows(package: &Path) -> std::collections::BTreeSet<u64> {
+    std::fs::read_to_string(package.join(UI_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str::<UiState>(&t).ok())
+        .map(|u| u.open_plugin_windows.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Best-effort: a project whose window list cannot be written still saved.
+fn write_windows(package: &Path, windows: &std::collections::BTreeSet<u64>) {
+    let ui = UiState {
+        open_plugin_windows: windows.iter().copied().collect(),
+    };
+    if let Ok(text) = serde_json::to_string_pretty(&ui) {
+        let _ = file::write_atomic(&package.join(UI_FILE), text.as_bytes());
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UiState {
+    open_plugin_windows: Vec<u64>,
+}
+
+/// Plugin windows (spec §9): the plugin's own editor inside a window the
+/// app owns, and which windows are open (they reopen with the project).
+#[uniffi::export]
+impl Session {
+    /// Shows slot `slot`'s editor inside the `NSView` at address `parent`
+    /// (main thread; the view lives until `close_editor`). Fails with
+    /// "editor unavailable" when the plugin has none (the app then shows
+    /// its parameters).
+    ///
+    /// RE-ENTRANCY CONTRACT: an AU v3 editor spins the main run loop (up to
+    /// about 3 s) inside the plugin while it opens, so the app's 60 Hz timer
+    /// and other main-queue work call back into core-ffi meanwhile. This
+    /// function therefore holds NO session `inner` lock (nor any other mutex
+    /// a nested FFI call could take) across the open. Only the plugin
+    /// registry borrow of `plugins::with` is held; nested calls get
+    /// `VizError::Busy` and idle skips.
+    pub fn open_editor(&self, slot: u64, parent: u64) -> Result<EditorSize, VizError> {
+        ffi_guard(|| {
+            let parent = editor::parent(parent)?;
+            plugins::with(self.id, |p| {
+                let ed = p
+                    .and_then(|p| p.instance(PluginInstanceId(slot)))
+                    .and_then(|i| i.editor())
+                    .ok_or_else(|| unavailable("the plugin has no editor"))?;
+                let (width, height) = ed.open(parent).map_err(|e| unavailable(&e.to_string()))?;
+                Ok(EditorSize {
+                    width,
+                    height,
+                    resizable: ed.can_resize(),
+                })
+            })
+            .and_then(|r| r)
+        })
+    }
+
+    /// Asks slot `slot`'s editor for a new size; returns what it took.
+    pub fn resize_editor(
+        &self,
+        slot: u64,
+        width: u32,
+        height: u32,
+    ) -> Result<EditorSize, VizError> {
+        ffi_guard(|| {
+            plugins::with(self.id, |p| {
+                let ed = p
+                    .and_then(|p| p.instance(PluginInstanceId(slot)))
+                    .and_then(|i| i.editor())
+                    .ok_or_else(|| unavailable("the plugin has no editor"))?;
+                let (width, height) = ed
+                    .resize(width, height)
+                    .map_err(|e| unavailable(&e.to_string()))?;
+                Ok(EditorSize {
+                    width,
+                    height,
+                    resizable: ed.can_resize(),
+                })
+            })
+            .and_then(|r| r)
+        })
+    }
+
+    /// Hides slot `slot`'s editor (its window is closing) and ends any
+    /// gesture it left open. Like `open_editor`, holds no session lock
+    /// while the plugin runs (closing may also run the main loop).
+    pub fn close_editor(&self, slot: u64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    if let Some(ed) = p.instance(PluginInstanceId(slot)).and_then(|i| i.editor()) {
+                        ed.close();
+                    }
+                    p.end_gestures(PluginInstanceId(slot));
+                }
+            })
+        })
+    }
+
+    /// Records that slot `slot`'s window is open or closed (saved with the
+    /// project).
+    pub fn set_window_open(&self, slot: u64, open: bool) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if open {
+                inner.windows.insert(slot);
+            } else {
+                inner.windows.remove(&slot);
+            }
+            Ok(())
+        })
+    }
+
+    /// The plugin windows to open now: those open when the project was
+    /// saved whose slot still exists.
+    pub fn open_windows(&self) -> Result<Vec<u64>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let slots = mixer::slot_ids(inner.doc());
+            Ok(inner
+                .windows
+                .iter()
+                .copied()
+                .filter(|w| slots.contains(&PluginInstanceId(*w)))
+                .collect())
+        })
+    }
+}
+
+fn unavailable(why: &str) -> VizError {
+    VizError::Engine {
+        message: format!("editor unavailable: {why}"),
     }
 }
 

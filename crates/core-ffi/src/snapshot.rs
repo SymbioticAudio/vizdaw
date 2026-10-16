@@ -298,6 +298,9 @@ pub struct SlotRow {
     pub has_sidechain_input: bool,
     /// Output ports (multi-output instruments have more than one).
     pub outputs: u32,
+    /// It has its own editor (otherwise its window lists its
+    /// parameters).
+    pub has_editor: bool,
 }
 
 /// What a plugin timer tick changed.

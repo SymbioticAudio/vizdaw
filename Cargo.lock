@@ -394,6 +394,8 @@ dependencies = [
  "core-host",
  "core-model",
  "platform-macos",
+ "serde",
+ "serde_json",
  "tempfile",
  "test-plugins",
  "thiserror",

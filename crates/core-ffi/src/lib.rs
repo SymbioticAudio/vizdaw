@@ -17,6 +17,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod catalog;
+pub mod editor;
 pub mod error;
 pub mod guard;
 pub mod host;
@@ -29,6 +30,7 @@ pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
     ScanProgress,
 };
+pub use editor::EditorSize;
 pub use error::VizError;
 pub use guard::ffi_guard;
 pub use mixer::{

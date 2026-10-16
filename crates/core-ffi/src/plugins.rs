@@ -228,6 +228,7 @@ pub fn slot_row(
         latency: 0,
         has_sidechain_input: false,
         outputs: 0,
+        has_editor: false,
     };
     let Some(host) = host else {
         return row;
@@ -242,6 +243,7 @@ pub fn slot_row(
         row.latency = info.latency;
         row.has_sidechain_input = info.sidechain_input().is_some();
         row.outputs = u32::try_from(info.outputs.len()).unwrap_or(u32::MAX);
+        row.has_editor = inst.editor().is_some();
     }
     row
 }

@@ -21,6 +21,10 @@ let package = Package(
                 .linkedLibrary("vizdaw_ffi"),
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AudioToolbox"),
+                // Plugin editors: AppKit views and AU generic views (the
+                // static library's own link requests do not reach SwiftPM).
+                .linkedFramework("AppKit"),
+                .linkedFramework("CoreAudioKit"),
                 .linkedFramework("CoreMIDI"),
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("Foundation"),

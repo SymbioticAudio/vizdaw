@@ -21,6 +21,8 @@ test-hooks = []
 core-model = { path = "../core-model" }
 core-engine = { path = "../core-engine", features = ["fixtures"] }
 core-host = { path = "../core-host" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 uniffi = { version = "=0.32.2", default-features = false }
 

@@ -196,6 +196,33 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         try mixerCall("commitParams \(slot) " + values.map { "\($0.id)=\($0.value)" }.joined(separator: ","))
     }
     func endPluginGestures(slot: UInt64) throws { endedGestures.append(slot) }
+
+    // MARK: Plugin windows
+
+    /// Editor sizes by slot; slots not listed have no editor.
+    var editors: [UInt64: EditorSize] = [:]
+    var openedEditors: [UInt64] = []
+    var closedEditors: [UInt64] = []
+    var windowsOpen: Set<UInt64> = []
+
+    func openEditor(slot: UInt64, parent: UInt64) throws -> EditorSize {
+        guard let e = editors[slot] else {
+            throw VizError.Engine(message: "editor unavailable: the plugin has no editor")
+        }
+        openedEditors.append(slot)
+        return e
+    }
+    func resizeEditor(slot: UInt64, width: UInt32, height: UInt32) throws -> EditorSize {
+        guard let e = editors[slot] else {
+            throw VizError.Engine(message: "editor unavailable: the plugin has no editor")
+        }
+        return e.resizable ? EditorSize(width: width, height: height, resizable: true) : e
+    }
+    func closeEditor(slot: UInt64) throws { closedEditors.append(slot) }
+    func setWindowOpen(slot: UInt64, open: Bool) throws {
+        if open { windowsOpen.insert(slot) } else { windowsOpen.remove(slot) }
+    }
+    func openWindows() throws -> [UInt64] { windowsOpen.sorted() }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {
