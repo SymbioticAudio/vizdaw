@@ -229,3 +229,39 @@ fn missing_builtin_strip_and_silent_instrument_strips_are_reported() {
         vec!["strip \"Pad\" has no instrument until plugin hosting exists".to_string()]
     );
 }
+
+#[test]
+fn post_fader_sends_and_bus_outputs_become_post_edges() {
+    // Synth (1) → bus A (2) by its output, post-fader send at −6 dB to bus
+    // B (3); A → master. Nodes: 0 instrument, 1 master, 2 synth, 3 A, 4 B.
+    let mut b = Builder::new();
+    b.dest("Synth", "builtin:synth", 0).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let a = b.bus("A").unwrap();
+    let bus_b = b.bus("B").unwrap();
+    b.mixer(MixerCmd::SetOutput {
+        strip: synth,
+        output: core_model::mixer::Output::Bus(a),
+    })
+    .unwrap();
+    let mut send = AuxSend::new(bus_b);
+    send.level_db = -6.020_6;
+    b.mixer(MixerCmd::AddSend { strip: synth, send }).unwrap();
+    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    // Master hears A and B, not the synth directly.
+    assert_eq!(strip(&g.spec, 1).inputs, vec![post(3, 1.0), post(4, 1.0)]);
+    assert_eq!(strip(&g.spec, 3).inputs, vec![post(2, 1.0)]);
+    let to_b = &strip(&g.spec, 4).inputs;
+    assert_eq!(to_b.len(), 1);
+    assert_eq!((to_b[0].from, to_b[0].tap), (2, Tap::Post));
+    assert!((to_b[0].gain - 0.5).abs() < 1e-4);
+    // Muting the synth silences its output and its post send alike.
+    b.mixer(MixerCmd::SetMute {
+        strip: synth,
+        mute: true,
+    })
+    .unwrap();
+    let g = mixer_spec(b.doc(), &[(TargetIdx(0), 0)], &mut zero);
+    assert_eq!(strip(&g.spec, 3).inputs, vec![post(2, 0.0)]);
+    assert_eq!(strip(&g.spec, 4).inputs[0].gain, 0.0);
+}

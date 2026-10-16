@@ -80,6 +80,9 @@ pub struct Transport {
     pub loop_range: Option<(u64, u64)>,
     /// Tail length in frames.
     pub tail_frames: u64,
+    /// Graph latency `L`: added to the tail, so `ended` fires only after
+    /// the delay-compensated audio of the end has been heard.
+    pub latency: u64,
     tail_left: u64,
     ended: bool,
 }
@@ -92,6 +95,7 @@ impl Transport {
             pos: 0,
             loop_range: None,
             tail_frames,
+            latency: 0,
             tail_left: 0,
             ended: false,
         }
@@ -160,7 +164,7 @@ impl Transport {
                 };
                 if self.pos >= end {
                     self.state = PlayState::Tail;
-                    self.tail_left = self.tail_frames;
+                    self.tail_left = self.tail_frames.saturating_add(self.latency);
                     if self.tail_left == 0 {
                         self.state = PlayState::Stopped;
                         self.ended = true;

@@ -293,3 +293,71 @@ fn removing_a_plugin_destination_is_one_undo_step() {
     assert_eq!(h.doc().mixer().strips().len(), 1);
     assert_eq!(h.doc().counters(), start.counters());
 }
+
+#[test]
+fn changing_the_plugin_removes_its_extra_output_strips() {
+    use core_model::command::MixerCmd;
+    let a = add(&Document::new(), "Drums", DestKind::plugin("clap:kit")).doc;
+    let b = apply(
+        &a,
+        &Command::Mixer(MixerCmd::AddInstrumentOutput {
+            dest: DestId(0),
+            index: 1,
+            name: "Kick".into(),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let out = b
+        .mixer()
+        .find_kind(StripKind::InstrumentOutput(DestId(0), 1))
+        .unwrap();
+    // Same plugin, new version: the output strip stays.
+    let mut same = DestKind::plugin("clap:kit");
+    if let DestKind::PluginInstrument { slot } = &mut same {
+        slot.plugin.version = "2".into();
+    }
+    let c = run(
+        &b,
+        RoutingCmd::EditDestination {
+            dest: DestId(0),
+            kind: same,
+            default_patch: None,
+        },
+    );
+    assert!(c.doc.mixer().strip(out).is_ok());
+    // Another plugin: its port layout is unknown, so the output strip goes
+    // (the main strip and its inserts stay) and the old instance is reported.
+    let d = run(
+        &c.doc,
+        RoutingCmd::EditDestination {
+            dest: DestId(0),
+            kind: DestKind::plugin("clap:other"),
+            default_patch: None,
+        },
+    );
+    assert!(d.doc.mixer().strip(out).is_err());
+    assert!(
+        d.doc
+            .mixer()
+            .find_kind(StripKind::Instrument(DestId(0)))
+            .is_some()
+    );
+    assert_eq!(
+        d.report.removed,
+        vec![AnyId::Plugin(PluginInstanceId(0)), AnyId::Strip(out)]
+    );
+    // One undo step restores the strip.
+    let mut h = History::new(c.doc.clone());
+    h.execute(
+        &Command::Routing(RoutingCmd::EditDestination {
+            dest: DestId(0),
+            kind: DestKind::plugin("clap:other"),
+            default_patch: None,
+        }),
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    h.undo().unwrap();
+    assert!(h.doc().mixer().strip(out).is_ok());
+}

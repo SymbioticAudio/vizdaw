@@ -272,9 +272,16 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                         *slot = o.clone();
                         slot.plugin = plugin;
                     }
-                    _ => {
+                    other => {
                         slot.id = d.counters_mut().alloc_plugin();
                         r.created.push(AnyId::Plugin(slot.id));
+                        if let DestKind::PluginInstrument { slot: o } = other {
+                            // A different plugin: the old instance and its
+                            // extra-output strips go (their port layout is
+                            // the old plugin's).
+                            r.removed.push(AnyId::Plugin(o.id));
+                            strips::remove_output_strips(d, *dest, r);
+                        }
                     }
                 }
             }

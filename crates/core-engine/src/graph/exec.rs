@@ -137,6 +137,7 @@ enum NodeDef {
         gain_l: f32,
         gain_r: f32,
         audible: bool,
+        meter: usize,
     },
 }
 
@@ -373,6 +374,7 @@ impl Graph {
                         gain_l: s.gain_l,
                         gain_r: s.gain_r,
                         audible: s.audible,
+                        meter: s.meter.unwrap_or(i),
                     });
                     nodes.push(UnsafeCell::new(NodeState::strip(
                         max_frames, has_sc, delays, sc_delays,
@@ -513,7 +515,6 @@ fn run_insert(
     io: &mut StereoBuf,
     sc: Option<&StereoBuf>,
     shared: &Shared,
-    idx: usize,
 ) {
     if bypass || ins.faulted {
         if !ins.in_bypass {
@@ -534,7 +535,7 @@ fn run_insert(
         if ins.bad_run >= FAULT_LIMIT {
             ins.faulted = true;
             node.reset();
-            shared.report_plugin_fault(idx, ins.instance);
+            shared.report_plugin_fault(ins.instance);
         }
     } else {
         ins.bad_run = 0;
@@ -575,6 +576,7 @@ unsafe fn render_node(g: &Graph, sinks: &SinkTable, shared: &Shared, frames: u32
             gain_l,
             gain_r,
             audible,
+            meter,
         } => {
             st.pre.clear(frames);
             for (k, inp) in g
@@ -630,13 +632,13 @@ unsafe fn render_node(g: &Graph, sinks: &SinkTable, shared: &Shared, frames: u32
                     }
                     None => None,
                 };
-                run_insert(ins, idef.bypass, frames, &mut st.pre, sc, shared, idx);
+                run_insert(ins, idef.bypass, frames, &mut st.pre, sc, shared);
             }
             dsp::copy(&mut st.post, &st.pre, frames);
             dsp::scale(&mut st.post, *gain_l, *gain_r, frames);
             if *audible {
                 let (l, r) = dsp::peaks(&st.post, frames);
-                if let Some(m) = shared.meter(i) {
+                if let Some(m) = shared.meter(*meter) {
                     m.hold(l, r);
                 }
             }

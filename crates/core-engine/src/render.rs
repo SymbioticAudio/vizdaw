@@ -140,6 +140,7 @@ pub struct DspLoad {
 #[derive(Debug)]
 pub struct Shared {
     position: AtomicU64,
+    transport_pos: AtomicU64,
     state: AtomicU8,
     faults: AtomicU32,
     ended: AtomicBool,
@@ -162,6 +163,7 @@ impl Default for Shared {
     fn default() -> Shared {
         Shared {
             position: AtomicU64::new(0),
+            transport_pos: AtomicU64::new(0),
             state: AtomicU8::new(0),
             faults: AtomicU32::new(0),
             ended: AtomicBool::new(false),
@@ -198,6 +200,12 @@ impl Shared {
         self.position.load(Ordering::Relaxed)
     }
 
+    /// Schedule frame of the transport (not reduced by the graph latency):
+    /// where a rebuilt engine must locate to continue seamlessly.
+    pub fn transport_position(&self) -> u64 {
+        self.transport_pos.load(Ordering::Relaxed)
+    }
+
     /// Transport state.
     pub fn state(&self) -> PlayState {
         PlayState::from_u8(self.state.load(Ordering::Relaxed))
@@ -230,26 +238,43 @@ impl Shared {
         self.meters.get(i)
     }
 
-    /// Records that the insert at board index `slot` was bypassed for
-    /// faults. // RT
-    pub fn report_plugin_fault(&self, slot: usize, instance: Option<PluginInstanceId>) {
+    /// Records that `instance` was bypassed for faults. The board is an
+    /// open-addressed set keyed by instance ID, so an ID survives structural
+    /// edits until it is read. // RT
+    pub fn report_plugin_fault(&self, instance: Option<PluginInstanceId>) {
         self.raise(Faults::PLUGIN_FAULT);
         self.plugin_faults.fetch_add(1, Ordering::Relaxed);
-        if let (Some(cell), Some(id)) = (self.board.get(slot), instance) {
-            cell.store(id.0.saturating_add(1), Ordering::Relaxed);
+        let Some(id) = instance else {
+            return;
+        };
+        let v = id.0.saturating_add(1);
+        let n = self.board.len().max(1);
+        let start = (id.0 % n as u64) as usize;
+        for k in 0..n {
+            let Some(cell) = self.board.get((start + k) % n) else {
+                return;
+            };
+            match cell.compare_exchange(0, v, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(x) if x == v => return,
+                Err(_) => {}
+            }
         }
     }
 
     /// Instances bypassed for faults since the last call (read and
-    /// cleared).
+    /// cleared), in ascending ID order.
     pub fn take_plugin_faults(&self) -> Vec<PluginInstanceId> {
-        self.board
+        let mut v: Vec<PluginInstanceId> = self
+            .board
             .iter()
             .filter_map(|c| {
                 let v = c.swap(0, Ordering::Relaxed);
                 (v != 0).then(|| PluginInstanceId(v - 1))
             })
-            .collect()
+            .collect();
+        v.sort();
+        v
     }
 
     /// Stores one block's DSP load. // RT
@@ -743,6 +768,9 @@ impl Renderer {
                     }
                 }
                 self.latency = new.latency();
+                // The compensated audio of the last notes arrives L frames
+                // late: the tail waits for it before `ended`.
+                self.transport.latency = self.latency;
                 self.graph = Some(new);
                 self.shared.graphs_applied.fetch_add(1, Ordering::Relaxed);
             }
@@ -807,6 +835,7 @@ impl Renderer {
             self.transport.pos.saturating_sub(self.latency),
             Ordering::Relaxed,
         );
+        s.transport_pos.store(self.transport.pos, Ordering::Relaxed);
         s.state.store(self.transport.state as u8, Ordering::Relaxed);
         if self.transport.take_ended() {
             s.ended.store(true, Ordering::Relaxed);

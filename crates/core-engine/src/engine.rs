@@ -5,7 +5,7 @@ use crate::backend::MidiPortInfo;
 use crate::error::{BackendError, EngineError};
 use crate::graph::mixer::mixer_spec;
 use crate::graph::{
-    EffectNode, Graph, GraphReport, InsertFactory, InsertInit, NoInserts, PlanError, plan,
+    EffectNode, Graph, GraphReport, InsertFactory, InsertInit, NoInserts, NodeSpec, PlanError, plan,
 };
 use crate::pool::{Pool, RtEnv, RtPlatform, StdPlatform};
 use crate::render::{
@@ -121,8 +121,10 @@ pub struct Engine {
     instrument_latency: [Option<u32>; MAX_TARGETS],
     /// Insert instances in the last published graph, by ID.
     live: BTreeMap<PluginInstanceId, Live>,
-    /// `(node, strip)` of the last published graph.
-    strip_nodes: Vec<(usize, StripId)>,
+    /// Meter cell of every strip of the last published graph, by strip
+    /// (cells are keyed by strip, not node, so a structural edit never
+    /// moves a strip's peaks to another strip).
+    meter_slots: BTreeMap<StripId, usize>,
     /// Latency of the last published graph.
     latency: u64,
     collector_stop: Arc<AtomicBool>,
@@ -233,7 +235,7 @@ impl Engine {
             default_loop: false,
             instrument_latency: [None; MAX_TARGETS],
             live: BTreeMap::new(),
-            strip_nodes: Vec::new(),
+            meter_slots: BTreeMap::new(),
             latency: 0,
             collector_stop,
             collector_paused,
@@ -360,6 +362,33 @@ impl Engine {
         Ok(report)
     }
 
+    /// Meter cells for `strips`: a strip keeps its cell; a new strip gets
+    /// the lowest free one, cleared first (Plan Ruling 13).
+    fn assign_meters(&self, strips: &[(usize, StripId)]) -> BTreeMap<StripId, usize> {
+        let mut out = BTreeMap::new();
+        for (_, id) in strips {
+            if let Some(c) = self.meter_slots.get(id) {
+                out.insert(*id, *c);
+            }
+        }
+        let mut used: std::collections::BTreeSet<usize> = out.values().copied().collect();
+        let mut next = 0usize;
+        for (_, id) in strips {
+            if out.contains_key(id) {
+                continue;
+            }
+            while used.contains(&next) {
+                next += 1;
+            }
+            if let Some(m) = self.shared.meter(next) {
+                m.take();
+                out.insert(*id, next);
+                used.insert(next);
+            }
+        }
+        out
+    }
+
     /// Builds and publishes the mixer graph. A graph that cannot be planned
     /// is reported (and its fault raised) and the previous graph keeps
     /// playing (spec §6).
@@ -406,7 +435,15 @@ impl Engine {
                 }
             }
         };
-        let mg = mixer_spec(doc, &instruments, &mut latency);
+        let mut mg = mixer_spec(doc, &instruments, &mut latency);
+        let slots = self.assign_meters(&mg.strips);
+        for (node, strip) in &mg.strips {
+            if let (Some(NodeSpec::Strip(s)), Some(slot)) =
+                (mg.spec.nodes.get_mut(*node), slots.get(strip))
+            {
+                s.meter = Some(*slot);
+            }
+        }
         let mut report = GraphReport {
             nodes: mg.spec.nodes.len(),
             latency_frames: 0,
@@ -456,7 +493,7 @@ impl Engine {
         self.push(EngineCmd::SetGraph(Box::new(graph)))?;
         self.live = next_live;
         self.latency = report.latency_frames;
-        self.strip_nodes = mg.strips;
+        self.meter_slots = slots;
         Ok(report)
     }
 
@@ -522,6 +559,20 @@ impl Engine {
             .map_or(Tick::ZERO, |t| t.frame_to_tick(f))
     }
 
+    /// Schedule frame of the transport, not reduced by the graph latency:
+    /// where a rebuilt engine locates to continue (a device reopen).
+    pub fn transport_frames(&self) -> u64 {
+        self.shared.transport_position()
+    }
+
+    /// [`Engine::transport_frames`] as a tick of the loaded sequence.
+    pub fn transport_tick(&self) -> Tick {
+        let f = self.shared.transport_position();
+        self.tempo
+            .as_ref()
+            .map_or(Tick::ZERO, |t| t.frame_to_tick(f))
+    }
+
     /// Frame of the loaded sequence's end.
     pub fn length_frames(&self) -> u64 {
         self.length_frames
@@ -555,10 +606,10 @@ impl Engine {
     /// Peak meters of every strip of the last published graph since the
     /// last call (read and cleared).
     pub fn meters(&self) -> Vec<StripMeter> {
-        self.strip_nodes
+        self.meter_slots
             .iter()
-            .filter_map(|(node, strip)| {
-                let (l, r) = self.shared.meter(*node)?.take();
+            .filter_map(|(strip, slot)| {
+                let (l, r) = self.shared.meter(*slot)?.take();
                 Some(StripMeter {
                     strip: *strip,
                     peak_l: l,

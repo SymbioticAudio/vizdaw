@@ -57,6 +57,22 @@ pub(crate) fn remove_dest_strips(d: &mut Document, dest: DestId, r: &mut Report)
     }
 }
 
+/// Removes `dest`'s `InstrumentOutput` strips (not its main strip).
+pub(crate) fn remove_output_strips(d: &mut Document, dest: DestId, r: &mut Report) {
+    let ids: Vec<StripId> = d
+        .mixer()
+        .strips()
+        .values()
+        .filter(|s| matches!(s.kind, StripKind::InstrumentOutput(x, _) if x == dest))
+        .map(|s| s.id)
+        .collect();
+    for id in ids {
+        if d.mixer_mut().remove(id).is_some() {
+            r.removed.push(AnyId::Strip(id));
+        }
+    }
+}
+
 /// Removes the strip of `kind`, if any.
 pub(crate) fn remove_kind(d: &mut Document, kind: StripKind, r: &mut Report) {
     if let Some(id) = d.mixer().find_kind(kind) {

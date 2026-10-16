@@ -188,7 +188,7 @@ pub fn run(args: &Args, doc: &Document, seq: SeqId) -> Result<(), String> {
                 | BackendEvent::DefaultDeviceChanged
                 | BackendEvent::SampleRateChanged(_) => {
                     eprintln!("\n{ev:?}: reopening the output");
-                    let at = s.engine.position_tick();
+                    let at = s.engine.transport_tick();
                     let playing = s.engine.state() == PlayState::Playing;
                     if !matches!(ev, BackendEvent::DeviceLost) {
                         // The device still renders: let the engine send its

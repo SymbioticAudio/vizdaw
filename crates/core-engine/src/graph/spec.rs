@@ -55,6 +55,10 @@ pub struct StripSpec {
     /// False when muted (explicitly or by solo): metered silent and, for
     /// master, not written to the device.
     pub audible: bool,
+    /// Meter cell this strip writes (`Shared::meter`); `None` uses the
+    /// node index (graph tests). The engine gives every strip a cell keyed
+    /// by its `StripId`, so meters survive structural edits.
+    pub meter: Option<usize>,
 }
 
 impl StripSpec {
@@ -67,6 +71,7 @@ impl StripSpec {
             gain_l: 1.0,
             gain_r: 1.0,
             audible: true,
+            meter: None,
         }
     }
 }
