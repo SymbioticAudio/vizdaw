@@ -50,6 +50,7 @@ Studio Vision is still the intellectual property of its rights holder.
 ## 3. Platform
 
 - Apple Silicon only, macOS 14 Sonoma or later.
+- Portability: a Linux port may follow later. Core crates (model, engine graph, file I/O) stay platform-neutral; OS-specific code (CoreAudio, CoreMIDI, AU hosting, the Swift UI) sits behind narrow interfaces so it can be replaced (e.g. by ALSA/JACK/PipeWire and another UI toolkit).
 - Rust (stable) for the core; Swift 5.10+/SwiftUI + AppKit for the app shell.
 
 ### Naming and versioning
