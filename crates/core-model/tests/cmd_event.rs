@@ -2,8 +2,10 @@ use core_model::ModelError;
 use core_model::command::{Command, EventCmd, LaneCmd, SequenceCmd, apply};
 use core_model::document::Document;
 use core_model::event::{EventBody, EventSpec};
+use core_model::history::History;
 use core_model::ids::{AnyId, EventId, LaneId, SeqId, TakeId};
 use core_model::rules::validate;
+use core_model::selection::ViewFilter;
 use core_model::time::{PPQ, Tick};
 
 fn run(d: &Document, c: Command) -> core_model::Result<Document> {
@@ -88,10 +90,31 @@ fn insert_goes_to_the_active_take() {
 
 #[test]
 fn failed_insert_changes_nothing() {
+    // Through History, which owns the document: a batch whose second spec
+    // is invalid must leave no partial change, no undo step and no consumed
+    // IDs behind.
     let d = insert(&two_seqs(), 0, 0, vec![note(0, 60)]).unwrap();
-    let err = insert(&d, 0, 0, vec![note(0, 61), note(0, 200)]).unwrap_err();
+    let mut h = History::new(d.clone());
+    let bad = ev(EventCmd::Insert {
+        seq: SeqId(0),
+        lane: LaneId(0),
+        events: vec![note(0, 61), note(0, 200)],
+    });
+    let err = h.execute(&bad, &ViewFilter::default()).unwrap_err();
     assert!(matches!(err, ModelError::OutOfRange { field: "pitch", .. }));
-    assert_eq!(d.all_events().count(), 1);
+    assert_eq!(h.doc(), &d);
+    assert_eq!(h.undo_depth(), 0);
+    assert_eq!(h.doc().all_events().count(), 1);
+    // The first spec of the failed batch was not inserted: inserting it now
+    // gets the next ID, so none were consumed by the failed attempt.
+    let ok = ev(EventCmd::Insert {
+        seq: SeqId(0),
+        lane: LaneId(0),
+        events: vec![note(0, 61)],
+    });
+    let r = h.execute(&ok, &ViewFilter::default()).unwrap();
+    assert_eq!(r.created, vec![AnyId::Event(EventId(1))]);
+    assert_eq!(h.doc().all_events().count(), 2);
 }
 
 #[test]
