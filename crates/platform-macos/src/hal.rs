@@ -271,8 +271,8 @@ unsafe extern "C-unwind" fn listener(
     client: *mut c_void,
 ) -> i32 {
     // SAFETY: `client` is the `Arc<Flags>` pointer registered in `listen`,
-    // kept alive until the listener is removed; `addresses` holds `count`
-    // entries.
+    // kept alive for the backend's lifetime (`retired`); `addresses` holds
+    // `count` entries.
     let (flags, addrs) = unsafe {
         (
             &*client.cast::<Flags>(),
@@ -425,6 +425,11 @@ pub struct CoreAudioBackend {
     info: Option<StreamInfo>,
     running: Option<Running>,
     listening: Option<Listening>,
+    /// Flags of removed listeners. CoreAudio may still be running a
+    /// listener call on its notification thread while
+    /// `AudioObjectRemovePropertyListener` returns, so the flags live as
+    /// long as the backend.
+    retired: Vec<Arc<Flags>>,
 }
 
 impl std::fmt::Debug for CoreAudioBackend {
@@ -461,6 +466,7 @@ impl CoreAudioBackend {
             info: None,
             running: None,
             listening: None,
+            retired: Vec::new(),
         }
     }
 
@@ -477,14 +483,20 @@ impl CoreAudioBackend {
             }
             let obj = if system { SYSTEM } else { device };
             let mut a = addr(selector, kAudioObjectPropertyScopeGlobal);
-            // SAFETY: `flags` stays alive until `unlisten` removes this
-            // listener with the same arguments.
-            unsafe {
+            // SAFETY: `flags` stays alive for the backend's lifetime (see
+            // `retired`).
+            let status = unsafe {
                 AudioObjectAddPropertyListener(
                     obj,
                     NonNull::from(&mut a),
                     Some(listener),
                     flags.cast_mut().cast::<c_void>(),
+                )
+            };
+            if status != 0 {
+                eprintln!(
+                    "warning: AudioObjectAddPropertyListener({selector:#x}) failed ({status}); \
+                     device changes may go unnoticed"
                 );
             }
         }
@@ -515,8 +527,10 @@ impl CoreAudioBackend {
                 );
             }
         }
-        // SAFETY: no listener refers to `flags` any more.
-        drop(unsafe { Arc::from_raw(l.flags) });
+        // SAFETY: `l.flags` came from `Arc::into_raw` in `listen` and is
+        // taken back exactly once; the Arc is kept (not freed) in case a
+        // listener call is still in flight.
+        self.retired.push(unsafe { Arc::from_raw(l.flags) });
     }
 
     /// Stops (if running) and forgets the device.
@@ -620,11 +634,12 @@ impl AudioBackend for CoreAudioBackend {
         // SAFETY: `proc_id` was just created on `device`.
         let started = unsafe { AudioDeviceStart(device, proc_id) };
         if let Err(e) = os("AudioDeviceStart", started) {
-            // SAFETY: the device never ran the IOProc; destroy it and take
-            // `ctx` back.
+            // SAFETY: the device never ran the IOProc; once it is destroyed
+            // we own `ctx` again. If destroying fails, `ctx` is leaked.
             unsafe {
-                AudioDeviceDestroyIOProcID(device, proc_id);
-                drop(Box::from_raw(ctx));
+                if AudioDeviceDestroyIOProcID(device, proc_id) == 0 {
+                    drop(Box::from_raw(ctx));
+                }
             }
             return Err(e);
         }
@@ -635,13 +650,16 @@ impl AudioBackend for CoreAudioBackend {
     fn stop(&mut self) -> Result<Renderer, BackendError> {
         let device = self.device.ok_or(BackendError::NoDevice)?;
         let run = self.running.take().ok_or(BackendError::NoDevice)?;
-        // SAFETY: after `AudioDeviceStop` returns the IOProc no longer runs,
-        // so after destroying it we own `ctx` again.
-        let ctx = unsafe {
+        // SAFETY: the IOProc ID belongs to `device`.
+        let destroyed = unsafe {
             AudioDeviceStop(device, run.proc_id);
-            AudioDeviceDestroyIOProcID(device, run.proc_id);
-            Box::from_raw(run.ctx)
+            AudioDeviceDestroyIOProcID(device, run.proc_id)
         };
+        // If the IOProc could not be destroyed it may still reference
+        // `ctx`: leak it (and the renderer) rather than free it.
+        os("AudioDeviceDestroyIOProcID", destroyed)?;
+        // SAFETY: the IOProc is destroyed, so we own `ctx` again.
+        let ctx = unsafe { Box::from_raw(run.ctx) };
         Ok(ctx.renderer)
     }
 
