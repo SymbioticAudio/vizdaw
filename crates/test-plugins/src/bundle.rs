@@ -44,8 +44,22 @@ fn build() -> Result<PathBuf, String> {
         "libtest_plugins.so"
     });
     let bundle = target.join(BUNDLE_NAME);
-    // Build the new bundle beside the old one, then swap it in, so a
-    // concurrent test process never sees a half-written bundle.
+    let installed = if cfg!(target_os = "macos") {
+        bundle.join("Contents").join("MacOS").join("VizDAW Test")
+    } else {
+        bundle.clone()
+    };
+    // An identical bundle is left alone: another process may have just
+    // returned it and be about to load it.
+    if same_bytes(&lib, &installed) {
+        return Ok(bundle);
+    }
+    let _lock = Lock::take(&target.join("bundle.lock"))?;
+    // Another process may have installed it while we waited for the lock.
+    if same_bytes(&lib, &installed) {
+        return Ok(bundle);
+    }
+    // Build the new bundle beside the old one, then swap it in.
     let tmp = target.join(format!("{BUNDLE_NAME}.{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_file(&tmp);
@@ -62,6 +76,50 @@ fn build() -> Result<PathBuf, String> {
     let _ = std::fs::remove_file(&bundle);
     std::fs::rename(&tmp, &bundle).map_err(|e| e.to_string())?;
     Ok(bundle)
+}
+
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// An exclusive lock file shared by every test process (std only). A lock
+/// older than a minute is taken to belong to a killed process.
+struct Lock(PathBuf);
+
+impl Lock {
+    fn take(path: &Path) -> Result<Lock, String> {
+        let start = std::time::Instant::now();
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(_) => return Ok(Lock(path.to_path_buf())),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age > std::time::Duration::from_secs(60));
+                    if stale || start.elapsed() > std::time::Duration::from_secs(120) {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => return Err(format!("cannot lock {path:?}: {e}")),
+            }
+        }
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// The path of `VizDAW Test.clap`, built once per test process. Panics

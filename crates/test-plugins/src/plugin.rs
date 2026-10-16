@@ -341,8 +341,9 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a>> for Processor<'a> 
     ) -> Result<Self, PluginError> {
         match shared.kind {
             Kind::Crasher => {
-                // SAFETY: none — this plugin exists to crash its host (a
-                // null write raises SIGSEGV).
+                // SAFETY: this is undefined behaviour by design: a deliberate
+                // null write that raises SIGSEGV, for the scanner's crash
+                // tests.
                 unsafe { std::ptr::null_mut::<u8>().write_volatile(1) };
             }
             Kind::Hanger => loop {
@@ -430,7 +431,9 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a>> for Processor<'a> 
                 }
             }
             if self.shared.kind == Kind::Nan {
-                o[0] = f32::NAN;
+                if let Some(first) = o.first_mut() {
+                    *first = f32::NAN;
+                }
             }
         }
         if lat > 0 {
