@@ -291,11 +291,14 @@ impl<'a> Walk<'a> {
             }
             _ => {}
         }
-        let (dest, group_channel, audio_out) = if body.is_midi() {
-            let r = resolve(self.doc, lane, e);
-            (r.dest, r.group_channel, None)
-        } else {
-            (None, None, lane.audio_out)
+        let (dest, group_channel, audio_out) = match body {
+            _ if body.is_midi() => {
+                let r = resolve(self.doc, lane, e);
+                (r.dest, r.group_channel, None)
+            }
+            EventBody::AudioRegion { .. } => (None, None, lane.audio_out),
+            // Text meta-events carry no routing; the engine ignores them.
+            _ => (None, None, None),
         };
         self.out.push(ResolvedEvent {
             tick: abs,

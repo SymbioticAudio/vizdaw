@@ -20,6 +20,12 @@ pub struct Routing {
 /// Resolves an event's destination override against `fallback` (the lane's
 /// destination).
 pub fn resolve_with(doc: &Document, fallback: Option<DestId>, ev: &Event) -> Routing {
+    if !ev.body.is_midi() {
+        return Routing {
+            dest: None,
+            group_channel: None,
+        };
+    }
     let dest = ev.dest.or(fallback);
     let from_dest = dest
         .and_then(|d| doc.instruments().get(&d))

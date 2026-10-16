@@ -279,3 +279,38 @@ fn drum_view_groups_notes_by_row() {
     assert_eq!(view[0].0.note, 60);
     assert_eq!(view[0].1, vec![EventId(0), EventId(1)]);
 }
+
+#[test]
+fn text_events_are_not_midi_for_routing() {
+    use core_model::event::TextKind;
+    use core_model::query::flatten;
+    use core_model::selection::ViewFilter;
+    let text = EventSpec::new(
+        Tick(0),
+        EventBody::Text {
+            kind: TextKind::Lyric,
+            text: "la".into(),
+        },
+    );
+    // seq1's lane has no destination: the text is not "unresolved".
+    let d = insert(&base(), 1, 1, vec![text.clone()]);
+    assert!(unresolved_events(&d).is_empty());
+    assert_eq!(
+        resolve_event(&d, EventId(0)).unwrap(),
+        Routing {
+            dest: None,
+            group_channel: None
+        }
+    );
+    // On a lane with a destination it still flattens, but unrouted.
+    let d = insert(&d, 0, 0, vec![text]);
+    let out: Vec<_> = flatten(&d, SeqId(0), None, &ViewFilter::default())
+        .unwrap()
+        .collect();
+    assert_eq!(out.len(), 1);
+    assert!(matches!(out[0].body, EventBody::Text { .. }));
+    assert_eq!(
+        (out[0].dest, out[0].group_channel, out[0].audio_out),
+        (None, None, None)
+    );
+}

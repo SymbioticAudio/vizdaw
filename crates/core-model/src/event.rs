@@ -240,12 +240,13 @@ impl EventBody {
         }
     }
 
-    /// Whether this body is sent to a MIDI destination (everything except
-    /// references and audio regions).
+    /// Whether this body is routed to a MIDI destination (everything except
+    /// references, audio regions and text meta-events, which the engine
+    /// ignores for routing).
     pub fn is_midi(&self) -> bool {
         !matches!(
             self,
-            EventBody::Reference { .. } | EventBody::AudioRegion { .. }
+            EventBody::Reference { .. } | EventBody::AudioRegion { .. } | EventBody::Text { .. }
         )
     }
 }
