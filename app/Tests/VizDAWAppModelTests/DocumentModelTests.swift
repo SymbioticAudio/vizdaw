@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -206,5 +207,50 @@ import VizDAWCore
         #expect(s.takePending() == a)
         #expect(s.takePending() == b)
         #expect(s.takePending() == nil)
+    }
+
+    @Test func windowWithoutAnIdAdoptsTheQueuedDocument() throws {
+        let s = store()
+        let a = s.newDemo()
+        s.enqueue(a)
+        #expect(s.documentForWindow(nil) == a)
+        #expect(s.pending.isEmpty)
+    }
+
+    @Test func windowWithoutAnIdAndNoQueueGetsANewDocument() throws {
+        let s = store()
+        let id = try #require(s.documentForWindow(nil))
+        #expect(s.model(id) != nil)
+        #expect(s.documents.count == 1)
+    }
+
+    @Test func windowWithALiveIdKeepsIt() throws {
+        let s = store()
+        let a = try #require(s.newDemo())
+        s.enqueue(s.newEmpty())
+        #expect(s.documentForWindow(a) == a)
+        #expect(s.pending.count == 1)
+    }
+
+    @Test func windowWithAStaleIdAdoptsOrCreates() throws {
+        let s = store()
+        let stale = UUID()
+        let queued = s.newDemo()
+        s.enqueue(queued)
+        #expect(s.documentForWindow(stale) == queued)
+        let closed = try #require(s.newDemo())
+        s.close(closed)
+        let fresh = try #require(s.documentForWindow(closed))
+        #expect(fresh != closed)
+        #expect(s.model(fresh) != nil)
+    }
+
+    @Test func takeAlertClearsTheStoreAlert() {
+        let s = store()
+        _ = s.open(path: "/Users/me/Music")
+        let a = s.takeAlert()
+        #expect(a?.title == "Open Failed")
+        #expect(s.alert == nil)
+        #expect(s.takeAlert() == nil)
     }
 }

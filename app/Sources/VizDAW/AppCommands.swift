@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SwiftUI
 import VizDAWAppModel
 
@@ -76,13 +77,13 @@ struct AppCommands: Commands {
 /// Open and save panels.
 @MainActor
 enum Panels {
-    /// A `.vizdaw` package. Without a registered UTI (under `swift run`)
-    /// packages look like folders, so folders are selectable and the
-    /// store checks the extension.
+    /// A `.vizdaw` package. In the bundle the UTI (a package) makes it a
+    /// file; under `swift run` it looks like a folder. Both are
+    /// selectable and the store checks the extension.
     static func chooseProject() -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
-        panel.canChooseFiles = false
+        panel.canChooseFiles = true
         panel.treatsFilePackagesAsDirectories = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
@@ -96,5 +97,32 @@ enum Panels {
         panel.nameFieldStringValue = "\(title).vizdaw"
         panel.canCreateDirectories = true
         return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+}
+
+/// Store-level failures (New, Open, Finder opens, launch arguments) have
+/// no window of their own, so the app shows them as modal `NSAlert`s.
+/// Per-document failures stay on their window.
+@MainActor
+enum StoreAlerts {
+    /// Shows any pending store alert, then re-arms on the next change.
+    static func watch(_ store: DocumentStore) {
+        withObservationTracking {
+            _ = store.alert
+        } onChange: {
+            DispatchQueue.main.async { watch(store) }
+        }
+        DispatchQueue.main.async { present(store) }
+    }
+
+    private static func present(_ store: DocumentStore) {
+        while let item = store.takeAlert() {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = item.title
+            alert.informativeText = item.message
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
     }
 }

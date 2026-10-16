@@ -62,6 +62,20 @@ public final class DocumentStore {
         pending.isEmpty ? nil : pending.removeFirst()
     }
 
+    /// The document a window should show: its own when it still exists,
+    /// else the oldest queued one, else a new empty one (nil only if that
+    /// fails). Covers fresh windows and stale restored or closed ids.
+    public func documentForWindow(_ id: UUID?) -> UUID? {
+        if let id, documents[id] != nil { return id }
+        return takePending() ?? newEmpty()
+    }
+
+    /// The store-level alert, cleared (the app shows it once).
+    public func takeAlert() -> AlertItem? {
+        defer { alert = nil }
+        return alert
+    }
+
     public func close(_ id: UUID) {
         if let doc = documents.removeValue(forKey: id), doc.isPlaying {
             try? doc.session.stop()

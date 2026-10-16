@@ -1,8 +1,9 @@
 import SwiftUI
 import VizDAWAppModel
 
-/// One window: adopts a queued document or makes an empty one, shows it,
-/// polls the transport while key and opens windows other code requested.
+/// One window: shows its document (adopting a queued one or making an
+/// empty one when it has none, or only a stale id), polls the transport
+/// while key or playing and opens windows other code requested.
 struct DocumentWindow: View {
     @Binding var id: UUID?
     let store: DocumentStore
@@ -15,7 +16,9 @@ struct DocumentWindow: View {
                 DocumentView(model: model)
                     .focusedSceneValue(\.documentModel, model)
                     .task(id: PollKey(key: activeState == .key, playing: model.isPlaying)) {
-                        guard activeState == .key else { return }
+                        // Background playback keeps polling so device
+                        // events are handled (O27).
+                        guard activeState == .key || model.isPlaying else { return }
                         while !Task.isCancelled {
                             model.poll()
                             try? await Task.sleep(for: model.pollInterval)
@@ -25,26 +28,22 @@ struct DocumentWindow: View {
                     .onDisappear { store.close(id) }
             } else {
                 ProgressView()
+                    .onAppear { adopt() }
             }
         }
         .onAppear {
-            if id == nil {
-                id = store.takePending() ?? store.newEmpty()
-            }
+            adopt()
             openQueued()
         }
         .onChange(of: store.pending) { openQueued() }
-        .alert(
-            store.alert?.title ?? "",
-            isPresented: Binding(
-                get: { store.alert != nil && activeState == .key },
-                set: { if !$0 { store.alert = nil } }),
-            presenting: store.alert
-        ) { _ in
-            Button("OK") { store.alert = nil }
-        } message: { item in
-            Text(item.message)
-        }
+        .onChange(of: activeState) { openQueued() }
+    }
+
+    /// Gives the window a live document when it has none (new window,
+    /// stale restored id, or its document was closed).
+    private func adopt() {
+        guard id.flatMap(store.model) == nil else { return }
+        id = store.documentForWindow(id)
     }
 
     /// Opens a window for every queued document (only the key window
