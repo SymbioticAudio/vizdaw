@@ -161,9 +161,12 @@ pub fn compile(
             EventBody::Note { duration, .. } => r.tick + *duration,
             _ => r.tick,
         };
+        let on = frame(r.tick);
+        // A note-off never sorts at or before its note-on (ruling O20).
+        let off = frame(end).max(on.saturating_add(1));
         let mut played = false;
         for out in t.msgs() {
-            let f = frame(if out.when == When::End { end } else { r.tick });
+            let f = if out.when == When::End { off } else { on };
             for target in &targets {
                 pending.push(Pending {
                     frame: f,

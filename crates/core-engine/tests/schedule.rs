@@ -167,6 +167,39 @@ fn raw_bank_select_ccs_stay_with_the_program_change() {
     );
 }
 
+/// `(frame, status)` of every note-on/off, in schedule order.
+fn note_frames(s: &Schedule) -> Vec<(u64, u8)> {
+    bytes(s)
+        .into_iter()
+        .filter(|(_, _, b)| matches!(b[0] & 0xF0, 0x80 | 0x90))
+        .map(|(f, _, b)| (f, b[0]))
+        .collect()
+}
+
+#[test]
+fn zero_duration_note_off_follows_its_on() {
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, lane) = b.sequence("S", "L", Some(synth)).unwrap();
+    b.notes(seq, lane, &[(Q, 60, 0x8000, 0)]).unwrap();
+    let doc = b.finish();
+    let (s, _, _) = compile_all(&doc, seq, &CompileOptions::new(48_000.0));
+    assert_eq!(note_frames(&s), vec![(24_000, 0x90), (24_001, 0x80)]);
+}
+
+#[test]
+fn one_tick_note_at_fast_tempo_and_low_rate_off_follows_its_on() {
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, lane) = b.sequence("S", "L", Some(synth)).unwrap();
+    b.tempo(seq, &[(0, 999, false)]).unwrap();
+    b.notes(seq, lane, &[(Q, 60, 0x8000, 1)]).unwrap();
+    let doc = b.finish();
+    let (s, _, _) = compile_all(&doc, seq, &CompileOptions::new(22_050.0));
+    // One quarter at 999 BPM is 1324.3 frames; one tick is 0.086 frames.
+    assert_eq!(note_frames(&s), vec![(1_324, 0x90), (1_325, 0x80)]);
+}
+
 #[test]
 fn default_patch_plays_first_on_frame_zero() {
     let mut b = Builder::new();
