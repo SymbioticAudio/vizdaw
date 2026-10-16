@@ -16,12 +16,14 @@
     )
 )]
 
+pub mod adapt;
 pub mod clap;
 pub mod error;
 pub mod info;
 pub mod instance;
 pub mod process;
 pub mod queue;
+pub mod shelf;
 
 pub use error::HostError;
 pub use info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Tail};

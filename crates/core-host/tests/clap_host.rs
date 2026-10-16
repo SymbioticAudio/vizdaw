@@ -5,30 +5,15 @@ use core_engine::backend::BlockInfo;
 use core_engine::graph::ProcessStatus;
 use core_host::clap::{ClapFormat, list_bundle};
 use core_host::{
-    AudioProcessor, LoadRequest, MidiEvent, ParamChange, ParamOut, PluginFormat, PluginInstance,
-    PluginKind, PortRole, ProcessCtx,
+    AudioProcessor, LoadRequest, MidiEvent, ParamChange, ParamOut, PluginFormat, PluginKind,
+    PortRole, ProcessCtx,
 };
-use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
+use core_model::mixer::{ParamId, PluginRef};
+
+mod common;
+use common::load;
 
 const N: usize = 64;
-
-pub fn load(id: &str) -> Box<dyn PluginInstance> {
-    let mut f = ClapFormat::new();
-    let req = LoadRequest {
-        plugin: PluginRef {
-            format: Format::Clap,
-            id: id.into(),
-            name: id.into(),
-            vendor: String::new(),
-            version: String::new(),
-        },
-        path: Some(test_plugins::bundle()),
-        sample_rate: 48_000.0,
-        max_frames: 512,
-    };
-    let prepared = (f.prepare(&req))().unwrap();
-    f.finish(&req, prepared).unwrap()
-}
 
 fn bufs(channels: usize, v: f32) -> Vec<Box<[f32]>> {
     (0..channels)
