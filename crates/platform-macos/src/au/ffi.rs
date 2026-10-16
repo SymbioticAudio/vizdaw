@@ -1390,26 +1390,26 @@ impl Unit {
                 NonNull::from(&mut size),
             )
         })?;
-        let (url, class) = match raw.as_slice() {
-            [u, c, ..] if !u.is_null() && !c.is_null() => (*u, *c),
-            _ => return Err("empty Cocoa view info".into()),
-        };
         // SAFETY: the property hands the host one reference to each CF
-        // object (the URL and every class name), which the host releases;
-        // further class names are released here too.
-        let (url, class) = unsafe {
-            for extra in raw.iter().skip(2).take(n / size_of::<*const c_void>() - 2) {
-                if !extra.is_null() {
-                    drop(CFRetained::<CFString>::from_raw(NonNull::new_unchecked(
-                        extra.cast_mut().cast(),
-                    )));
-                }
-            }
-            (
-                CFRetained::<CFURL>::from_raw(NonNull::new_unchecked(url.cast_mut().cast())),
-                CFRetained::<CFString>::from_raw(NonNull::new_unchecked(class.cast_mut().cast())),
-            )
+        // object (the URL, then every class name); each non-null entry is
+        // adopted exactly once here, so every path below releases them.
+        let (url, mut names) = unsafe {
+            let mut it = raw.iter().take(n / size_of::<*const c_void>());
+            let url = it
+                .next()
+                .and_then(|u| NonNull::new(u.cast_mut().cast::<CFURL>()))
+                .map(|u| CFRetained::from_raw(u));
+            let names: Vec<CFRetained<CFString>> = it
+                .filter_map(|c| NonNull::new(c.cast_mut().cast::<CFString>()))
+                .map(|c| CFRetained::from_raw(c))
+                .collect();
+            (url, names)
         };
+        if names.is_empty() {
+            return Err("empty Cocoa view info".into());
+        }
+        let url = url.ok_or("empty Cocoa view info")?;
+        let class = names.swap_remove(0);
         let bundle = CFBundle::new(None, Some(&url)).ok_or("cannot open the view bundle")?;
         // SAFETY: loading the plugin's own view bundle runs its
         // initializers; the plugin is trusted in-process code by then.
@@ -1434,14 +1434,28 @@ impl Unit {
     }
 
     fn controller_view(&self, wait: Duration) -> Result<View, String> {
-        let slot: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+        /// What the completion handler reported.
+        #[derive(Default)]
+        struct Reply {
+            /// The handler ran (with a controller or with nil).
+            answered: bool,
+            /// A retained controller (`Retained::into_raw`), if given.
+            vc: Option<usize>,
+            /// The wait is over: a late controller is not kept.
+            abandoned: bool,
+        }
+        let slot: Arc<Mutex<Reply>> = Arc::new(Mutex::new(Reply::default()));
         let fill = Arc::clone(&slot);
         let block = RcBlock::new(move |vc: *mut AnyObject| {
+            let mut r = fill.lock().unwrap_or_else(PoisonError::into_inner);
+            r.answered = true;
+            if r.abandoned {
+                return;
+            }
             // SAFETY: the unit hands over a valid view controller (or
             // null); one reference is taken here and adopted below.
             if let Some(vc) = unsafe { Retained::retain(vc) } {
-                let raw = Retained::into_raw(vc) as usize;
-                *fill.lock().unwrap_or_else(PoisonError::into_inner) = Some(raw);
+                r.vc = Some(Retained::into_raw(vc) as usize);
             }
         });
         let ptr_to_block: *const block2::Block<dyn Fn(*mut AnyObject)> = &*block;
@@ -1454,11 +1468,16 @@ impl Unit {
         )?;
         let until = std::time::Instant::now() + wait;
         let raw = loop {
-            if let Some(raw) = slot.lock().unwrap_or_else(PoisonError::into_inner).take() {
-                break raw;
-            }
-            if std::time::Instant::now() >= until {
-                return Err("no view controller".into());
+            {
+                let mut r = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                if r.answered {
+                    // A nil answer: no controller, no more waiting.
+                    break r.vc.take().ok_or("no view controller")?;
+                }
+                if std::time::Instant::now() >= until {
+                    r.abandoned = true;
+                    return Err("no view controller".into());
+                }
             }
             // SAFETY: the default mode is a valid static; the main run loop
             // delivers the unit's completion.
@@ -1495,7 +1514,7 @@ impl Unit {
 
 impl View {
     /// Adds the view to `parent` (an `NSView *` the caller keeps alive while
-    /// it is shown) at its top-left; returns its size in points.
+    /// it is shown) at the origin (the bottom-left of an unflipped parent); returns its size in points.
     pub(crate) fn attach(&self, parent: *mut c_void) -> Result<(u32, u32), String> {
         if MainThreadMarker::new().is_none() {
             return Err("plugin editors open on the main thread only".into());
