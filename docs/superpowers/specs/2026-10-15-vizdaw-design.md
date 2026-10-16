@@ -80,7 +80,7 @@ Studio Vision is still the intellectual property of its rights holder.
 1. **Rust owns the model.** Swift never owns project state. It sends commands and receives immutable snapshots or diffs to draw.
 2. **The real-time thread never blocks.** No locks, allocation, I/O or syscalls other than CoreAudio/CoreMIDI real-time calls. A test allocator enforces this.
 3. **All edits are commands.** Every mutation is a reversible command, which gives undo/redo, enables testing, and later makes scripting possible.
-4. **Editors are views.** Arrange, piano roll, list and Strip Chart all show and edit the same events through the same commands; a change in one appears in all immediately.
+4. **Editors are views.** Arrange, piano roll, list, drum grid and Strip Chart all show and edit the same events through the same commands; a change in one appears in all immediately.
    - There is **one document-wide selection**: a time range (edit-in to edit-out) plus a set of selected items (notes, controllers, reference events, whole or partial audio regions). Every editor reads and writes it, and every view updates together.
    - Commands state their scope in their names (e.g. "Quantize Selection" vs "Quantize Track"). View filters hide items without deselecting them.
 
@@ -207,6 +207,7 @@ vizdaw/
   - Arrangement timeline: groups each lane's events into blocks automatically (by silence gaps, fixed bar blocks, or whole lane, with a user-set size); a reference event is always its own block. Double-clicking a block opens exactly that block in a detail editor; a drag moves (with a modifier, copies) or merges blocks into another lane. A lightweight drawing mode keeps large projects fast.
   - Piano roll, with per-note expression lanes. The cursor's action depends on its position over a note (start moves, middle transposes, end resizes), with a modifier to copy; the pencil inserts at a default size or paints a length; notes sound while dragged. It can show several lanes, shows the lanes' audio regions in their own strip, and has an optional keyboard beside it.
   - List editor (fast, keyboard-first, inline editing). Typing a bar number moves an event to that downbeat; a single sub-field can be edited alone; Enter commits and the list follows the moved event; pitch and velocity can be entered by playing a note; insert repeats the last inserted kind; optional columns (end, duration, release velocity, SMPTE); type/destination filters can be applied to all lists or saved as default. Reference events and audio regions are rows like any other (opening a reference opens its sequence).
+  - Drum grid. Any lane can be marked as a drum lane; a drum lane is organised into rows, one per sound, each row naming its note and destination (rows with different destinations make the lane mixed-destination). The grid shows only drum lanes and offers two views: a step matrix (evenly spaced cells for programming patterns) and a timeline view showing true start times and durations. A paint tool toggles a hit on click and paints or erases a run on drag, using configurable spacing, duration and velocity; when a row shows its velocity lane, the vertical pointer position sets each new hit's velocity. Rows can be added, reordered, dragged to another drum lane (or below the last to create one) and split out into their own lanes. Each drum lane has its own play quantize (grid or groove) and nudge. A drum lane plays a note only if the note starts after playback, unmute or solo began, so loop-based sounds always start cleanly.
   - Strip Chart with smooth 32-bit controller curves. Besides drawing new values, a drawn line over a range can modify existing data (set, scale, add, limit max/min, legato for durations, thin/thicken, compress) with a line shape (straight, free, curved, flat, random). A modifier limits the edit to selected notes. Inserting writes to the shown lane; modifying acts on every selected lane in the range. It covers velocity, release velocity, duration, controllers, pitch bend, pressure, program changes, tempo and plugin automation; drawn tempo ramps sound linear.
 - **Shared editor behaviours:**
   - A drag in any ruler always selects a time range across all shown lanes and event kinds, whatever the current tool.
@@ -235,12 +236,10 @@ vizdaw/
 1. **Research dossier (private):** an REA study of Studio Vision Pro 4.5.3 covering menus, windows, dialogs, the editing model, sequence/subsequence behaviour, alternate takes, the list editor and Strip Chart. Output is a behaviour description in `~/workspace/SVP/research/`.
 2. **Core model, engine and MIDI:** the core-model crate with commands and undo, the core-engine crate with CoreAudio/CoreMIDI, the FFI layer, and a minimal Swift window that plays a sequence to an external MIDI device.
 3. **Plugin hosting:** AU first, then CLAP; the scanner; plugin windows.
-4. **Editors:** arrangement, piano roll, list, Strip Chart, and the sequence/subsequence workflow in the UI.
+4. **Editors:** arrangement, piano roll, list, Strip Chart, drum grid, and the sequence/subsequence workflow in the UI.
 5. **Audio tracks:** recording, regions, fades, disk streaming.
 6. **Import:** SMF and MIDI Clip File, then OMF, then AAF.
 7. **UI polish:** the full modern Mac UX pass.
-
-**Open decision:** a dedicated drum-grid editor is under consideration pending further research; it is neither in v1 scope nor a non-goal yet.
 
 ## 12. Testing
 
