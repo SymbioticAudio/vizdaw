@@ -76,10 +76,20 @@ fn open(
     })
 }
 
-/// Stops the device and frees the renderer on this thread.
-fn close(s: &mut Session) {
+/// Stops the device, frees the renderer on this thread, then drops the
+/// engine: its MIDI sender drains and sends All Notes Off to every MIDI
+/// output it owned before the next session opens any.
+fn close(mut s: Session) {
     let r: Option<Renderer> = s.backend.stop().ok();
     drop(r);
+    drop(s.engine);
+}
+
+/// Stops the transport and gives a live device a few blocks to play the
+/// note-offs (and release tails).
+fn stop_and_wait(s: &mut Session) {
+    let _ = s.engine.stop();
+    std::thread::sleep(Duration::from_millis(300));
 }
 
 /// Plays until the end (exit 0) or Ctrl-C.
@@ -110,8 +120,7 @@ pub fn run(args: &Args, doc: &Document, seq: SeqId) -> Result<(), String> {
         if signal::interrupted() {
             // Stop sends note-offs; give the device a few blocks to play
             // them and the release tails.
-            let _ = s.engine.stop();
-            std::thread::sleep(Duration::from_millis(300));
+            stop_and_wait(&mut s);
             println!();
             break;
         }
@@ -131,8 +140,13 @@ pub fn run(args: &Args, doc: &Document, seq: SeqId) -> Result<(), String> {
                     eprintln!("\n{ev:?}: reopening the output");
                     let at = s.engine.position_tick();
                     let playing = s.engine.state() == PlayState::Playing;
-                    close(&mut s);
+                    if !matches!(ev, BackendEvent::DeviceLost) {
+                        // The device still renders: let the engine send its
+                        // note-offs to MIDI outputs before the rebuild.
+                        stop_and_wait(&mut s);
+                    }
                     let old_rate = s.info.sample_rate;
+                    close(s);
                     s = open(args, doc, seq, at, playing)?;
                     if s.info.sample_rate != old_rate {
                         eprintln!(
@@ -145,6 +159,6 @@ pub fn run(args: &Args, doc: &Document, seq: SeqId) -> Result<(), String> {
             }
         }
     }
-    close(&mut s);
+    close(s);
     Ok(())
 }

@@ -133,7 +133,7 @@ impl MidiOut for RingMidiOut {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dest {
     /// Our virtual source: `MIDIReceivedEventList`.
     Source(MIDIEndpointRef),
@@ -190,16 +190,46 @@ fn deliver(dest: Dest, p: &Packet) {
     }
 }
 
+/// Delivers everything queued on every lane.
+fn drain_lanes(lanes: &mut [Lane], send: &mut impl FnMut(Dest, &Packet)) {
+    for lane in lanes.iter_mut() {
+        while let Ok(p) = lane.rx.pop() {
+            send(lane.dest, &p);
+        }
+    }
+}
+
+/// Final drain, then All Notes Off (CC123) on all 16 channels of every
+/// distinct output, timestamped "now", so nothing is left sounding.
+fn shutdown_lanes(lanes: &mut [Lane], mut send: impl FnMut(Dest, &Packet)) {
+    drain_lanes(lanes, &mut send);
+    let mut done: Vec<Dest> = Vec::with_capacity(lanes.len());
+    for lane in lanes.iter() {
+        if done.contains(&lane.dest) {
+            continue;
+        }
+        done.push(lane.dest);
+        for ch in 0..16u8 {
+            let p = Packet {
+                host_ns: 0,
+                kind: KIND_CHANNEL,
+                len: 3,
+                data: [0xB0 | ch, 123, 0, 0, 0, 0],
+            };
+            send(lane.dest, &p);
+        }
+    }
+}
+
 fn sender_loop(state: Arc<SenderState>) {
     while !state.stop.load(Ordering::Relaxed) {
         if let Ok(mut lanes) = state.lanes.lock() {
-            for lane in lanes.iter_mut() {
-                while let Ok(p) = lane.rx.pop() {
-                    deliver(lane.dest, &p);
-                }
-            }
+            drain_lanes(&mut lanes, &mut deliver);
         }
         std::thread::sleep(Duration::from_millis(1));
+    }
+    if let Ok(mut lanes) = state.lanes.lock() {
+        shutdown_lanes(&mut lanes, deliver);
     }
 }
 
@@ -624,6 +654,40 @@ mod tests {
         // SAFETY: the mapping is ours and nothing points into it any more.
         unsafe { munmap(base, 2 * HALF) };
         out
+    }
+
+    fn lane(dest: Dest) -> (Lane, RingMidiOut) {
+        let (tx, rx) = RingBuffer::new(16);
+        (Lane { rx, dest }, RingMidiOut { tx })
+    }
+
+    #[test]
+    fn shutdown_drains_queued_packets_then_silences_every_output() {
+        let (a, mut out_a) = lane(Dest::Source(1));
+        let (b, _out_b) = lane(Dest::Source(2));
+        let (a2, mut out_a2) = lane(Dest::Source(1));
+        assert!(out_a.send(5, &[0x90, 60, 100]));
+        assert!(out_a.send(6, &[0x80, 60, 0]));
+        assert!(out_a2.send(7, &[0x91, 62, 100]));
+        let mut lanes = vec![a, b, a2];
+        let mut sent: Vec<(Dest, u64, Vec<u8>)> = Vec::new();
+        shutdown_lanes(&mut lanes, |d, p| {
+            let (w, _) = p.words();
+            let bytes = [(w[0] >> 16) as u8, (w[0] >> 8) as u8, w[0] as u8];
+            sent.push((d, p.host_ns, bytes.to_vec()));
+        });
+        let mut want = vec![
+            (Dest::Source(1), 5, vec![0x90, 60, 100]),
+            (Dest::Source(1), 6, vec![0x80, 60, 0]),
+            (Dest::Source(1), 7, vec![0x91, 62, 100]),
+        ];
+        // All notes off on every channel, once per distinct output, now.
+        for d in [Dest::Source(1), Dest::Source(2)] {
+            for ch in 0..16u8 {
+                want.push((d, 0, vec![0xB0 | ch, 123, 0]));
+            }
+        }
+        assert_eq!(sent, want);
     }
 
     #[test]
