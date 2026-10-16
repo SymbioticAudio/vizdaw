@@ -434,7 +434,12 @@ impl Renderer {
         for ch in out.iter_mut().take(2) {
             if let Some(c) = ch.get_mut(..n) {
                 for x in c {
-                    if *x > 1.0 || *x < -1.0 {
+                    // NaN fails both comparisons below; silence any
+                    // non-finite sample and report it as clipping.
+                    if !x.is_finite() {
+                        clipped = true;
+                        *x = 0.0;
+                    } else if *x > 1.0 || *x < -1.0 {
                         clipped = true;
                         *x = x.clamp(-1.0, 1.0);
                     }

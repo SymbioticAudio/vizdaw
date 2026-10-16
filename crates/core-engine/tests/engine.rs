@@ -176,6 +176,38 @@ fn clipping_and_xruns_are_faults_that_clear_on_read() {
 }
 
 #[test]
+fn non_finite_samples_are_silenced_and_flagged() {
+    for level in [f32::NAN, f32::INFINITY] {
+        let (doc, seq) = doc();
+        let f = Factory {
+            level,
+            ..Factory::default()
+        };
+        let (mut engine, mut r) = Engine::new(EngineConfig::new(48_000.0), Box::new(f));
+        engine.load(&doc, seq).unwrap();
+        let mut l = vec![0.5f32; 64];
+        let mut rr = vec![0.5f32; 64];
+        let mut chans: [&mut [f32]; 2] = [&mut l, &mut rr];
+        r.process(
+            &mut chans,
+            64,
+            core_engine::backend::BlockTime {
+                host_time_ns: 0,
+                sample_rate: 48_000.0,
+            },
+        );
+        // Left gets `level`, right gets `-level`.
+        assert!(l.iter().all(|x| *x == 0.0), "left {level}: {:?}", &l[..4]);
+        assert!(
+            rr.iter().all(|x| *x == 0.0),
+            "right {level}: {:?}",
+            &rr[..4]
+        );
+        assert!(engine.faults().contains(Faults::CLIPPED), "{level}");
+    }
+}
+
+#[test]
 fn loop_and_locate_by_tick() {
     let (doc, seq) = doc();
     let f = Factory::default();
