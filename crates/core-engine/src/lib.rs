@@ -4,6 +4,8 @@
 //!
 //! Everything reachable from `render::Renderer::process` is marked
 //! `// RT`; such code must not allocate, free, lock, do I/O or log.
+//! Graph workers (`pool`) are `// RT` while they run a job; `unsafe` lives
+//! only in `graph/exec.rs`, `pool.rs` and `rt_check.rs`.
 #![deny(missing_docs)]
 #![cfg_attr(
     not(test),
@@ -24,6 +26,7 @@ pub mod graph;
 pub mod midi1;
 pub mod notes;
 pub mod offline;
+pub mod pool;
 pub mod render;
 pub mod rt_check;
 pub mod schedule;

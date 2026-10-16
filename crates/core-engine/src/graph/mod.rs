@@ -1,13 +1,15 @@
 //! The mixer render graph (spec §6, §7): strip DSP (`dsp`), delay lines
-//! (`delay`), insert processors (`node`), the graph description (`spec`)
-//! and PDC planning (`pdc`).
+//! (`delay`), insert processors (`node`), the graph description (`spec`),
+//! PDC planning (`pdc`) and the runtime graph and executor (`exec`).
 
 pub mod delay;
 pub mod dsp;
+pub mod exec;
 pub mod node;
 pub mod pdc;
 pub mod spec;
 
+pub use exec::{Graph, InsertInit, Runner, SinkTable};
 pub use node::{
     EffectNode, InsertFactory, NoInserts, ProcessStatus, TestInserts, TestMode, TestNode,
 };

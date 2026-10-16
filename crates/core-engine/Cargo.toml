@@ -13,6 +13,7 @@ rt-check = []
 
 [dependencies]
 core-model = { path = "../core-model" }
+crossbeam-queue = "0.3"
 rtrb = "0.4"
 thiserror = "2"
 

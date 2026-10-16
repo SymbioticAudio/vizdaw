@@ -1,9 +1,11 @@
 //! The real-time renderer and the state it publishes.
 
 use crate::backend::{BlockTime, InstrumentNode, MidiOut, StereoBuf};
+use crate::graph::{MAX_INSERTS, MAX_NODES};
 use crate::notes::ActiveNotes;
 use crate::schedule::{MAX_TARGETS, Schedule, TargetIdx};
 use crate::transport::{PlayState, Step, Transport};
+use core_model::ids::PluginInstanceId;
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -23,6 +25,22 @@ impl Faults {
     pub const SWAP_DEFERRED: Faults = Faults(8);
     /// The audio callback panicked; output is silent.
     pub const PANIC: Faults = Faults(16);
+    /// A recompiled graph exceeded 1024 nodes or 4096 inserts; the
+    /// previous graph keeps playing.
+    pub const GRAPH_TOO_LARGE: Faults = Faults(32);
+    /// A recompiled graph needs more than 2 s of delay on an edge; the
+    /// previous graph keeps playing.
+    pub const LATENCY_TOO_LARGE: Faults = Faults(64);
+    /// An insert produced 16 faulty blocks in a row and was bypassed
+    /// (`Engine::plugin_faults` names it).
+    pub const PLUGIN_FAULT: Faults = Faults(128);
+    /// A render worker could not join the device's workgroup.
+    pub const WORKGROUP_JOIN_FAILED: Faults = Faults(256);
+    /// A render worker could not get real-time scheduling.
+    pub const THREAD_POLICY_FAILED: Faults = Faults(512);
+    /// A recompiled graph was invalid (cycle or bad index); the previous
+    /// graph keeps playing.
+    pub const GRAPH_INVALID: Faults = Faults(1024);
 
     /// True when every bit of `other` is set.
     pub fn contains(self, other: Faults) -> bool {
@@ -42,6 +60,12 @@ impl Faults {
             (Faults::MIDI_DROPPED, "midi-dropped"),
             (Faults::SWAP_DEFERRED, "swap-deferred"),
             (Faults::PANIC, "panic"),
+            (Faults::GRAPH_TOO_LARGE, "graph-too-large"),
+            (Faults::LATENCY_TOO_LARGE, "latency-too-large"),
+            (Faults::PLUGIN_FAULT, "plugin-fault"),
+            (Faults::WORKGROUP_JOIN_FAILED, "workgroup-join-failed"),
+            (Faults::THREAD_POLICY_FAILED, "thread-policy-failed"),
+            (Faults::GRAPH_INVALID, "graph-invalid"),
         ]
         .into_iter()
         .filter(|(f, _)| self.contains(*f))
@@ -59,10 +83,56 @@ pub struct Counters {
     pub swaps_deferred: u64,
     /// Blocks rendered as silence because they were too large.
     pub xruns: u64,
+    /// Blocks rendered as silence because the graph missed its deadline.
+    pub deadline_misses: u64,
+    /// Blocks rendered as silence because nodes of a missed block were
+    /// still running.
+    pub busy_blocks: u64,
+    /// Inserts bypassed for faults.
+    pub plugin_faults: u64,
 }
 
-/// State shared between the renderer and the control side (atomics only).
+/// Peak meter of one graph node: the largest |sample| per channel since
+/// the last read, as `f32` bits (non-negative floats order like their
+/// bits, so `fetch_max` works).
 #[derive(Debug, Default)]
+pub struct MeterCell {
+    l: AtomicU32,
+    r: AtomicU32,
+}
+
+impl MeterCell {
+    /// Raises the held peaks. // RT
+    pub fn hold(&self, l: f32, r: f32) {
+        if l.is_finite() && l > 0.0 {
+            self.l.fetch_max(l.to_bits(), Ordering::Relaxed);
+        }
+        if r.is_finite() && r > 0.0 {
+            self.r.fetch_max(r.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Reads and clears the held peaks.
+    pub fn take(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.l.swap(0, Ordering::Relaxed)),
+            f32::from_bits(self.r.swap(0, Ordering::Relaxed)),
+        )
+    }
+}
+
+/// DSP load: render time ÷ block duration.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DspLoad {
+    /// The last block.
+    pub last: f32,
+    /// The highest since the last read.
+    pub peak: f32,
+}
+
+/// State shared between the renderer, its workers and the control side
+/// (atomics only).
+#[derive(Debug)]
 pub struct Shared {
     position: AtomicU64,
     state: AtomicU8,
@@ -71,6 +141,34 @@ pub struct Shared {
     midi_dropped: AtomicU64,
     swaps_deferred: AtomicU64,
     xruns: AtomicU64,
+    deadline_misses: AtomicU64,
+    busy_blocks: AtomicU64,
+    plugin_faults: AtomicU64,
+    load_last: AtomicU32,
+    load_peak: AtomicU32,
+    meters: Box<[MeterCell]>,
+    board: Box<[AtomicU64]>,
+}
+
+impl Default for Shared {
+    fn default() -> Shared {
+        Shared {
+            position: AtomicU64::new(0),
+            state: AtomicU8::new(0),
+            faults: AtomicU32::new(0),
+            ended: AtomicBool::new(false),
+            midi_dropped: AtomicU64::new(0),
+            swaps_deferred: AtomicU64::new(0),
+            xruns: AtomicU64::new(0),
+            deadline_misses: AtomicU64::new(0),
+            busy_blocks: AtomicU64::new(0),
+            plugin_faults: AtomicU64::new(0),
+            load_last: AtomicU32::new(0),
+            load_peak: AtomicU32::new(0),
+            meters: (0..MAX_NODES).map(|_| MeterCell::default()).collect(),
+            board: (0..MAX_INSERTS).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
 }
 
 impl Shared {
@@ -105,7 +203,65 @@ impl Shared {
             midi_dropped: self.midi_dropped.load(Ordering::Relaxed),
             swaps_deferred: self.swaps_deferred.load(Ordering::Relaxed),
             xruns: self.xruns.load(Ordering::Relaxed),
+            deadline_misses: self.deadline_misses.load(Ordering::Relaxed),
+            busy_blocks: self.busy_blocks.load(Ordering::Relaxed),
+            plugin_faults: self.plugin_faults.load(Ordering::Relaxed),
         }
+    }
+
+    /// The meter of graph node `i`. // RT
+    pub fn meter(&self, i: usize) -> Option<&MeterCell> {
+        self.meters.get(i)
+    }
+
+    /// Records that the insert at board index `slot` was bypassed for
+    /// faults. // RT
+    pub fn report_plugin_fault(&self, slot: usize, instance: Option<PluginInstanceId>) {
+        self.raise(Faults::PLUGIN_FAULT);
+        self.plugin_faults.fetch_add(1, Ordering::Relaxed);
+        if let (Some(cell), Some(id)) = (self.board.get(slot), instance) {
+            cell.store(id.0.saturating_add(1), Ordering::Relaxed);
+        }
+    }
+
+    /// Instances bypassed for faults since the last call (read and
+    /// cleared).
+    pub fn take_plugin_faults(&self) -> Vec<PluginInstanceId> {
+        self.board
+            .iter()
+            .filter_map(|c| {
+                let v = c.swap(0, Ordering::Relaxed);
+                (v != 0).then(|| PluginInstanceId(v - 1))
+            })
+            .collect()
+    }
+
+    /// Stores one block's DSP load. // RT
+    pub fn set_load(&self, load: f32) {
+        // Not `load.max(0.0)`: that may keep -0.0, whose bits beat every load.
+        let bits = if load > 0.0 { load.to_bits() } else { 0 };
+        self.load_last.store(bits, Ordering::Relaxed);
+        self.load_peak.fetch_max(bits, Ordering::Relaxed);
+    }
+
+    /// The last block's load and the peak since the last call (cleared).
+    pub fn take_load(&self) -> DspLoad {
+        DspLoad {
+            last: f32::from_bits(self.load_last.load(Ordering::Relaxed)),
+            peak: f32::from_bits(self.load_peak.swap(0, Ordering::Relaxed)),
+        }
+    }
+
+    /// Counts a block that missed its deadline. // RT
+    pub fn count_deadline_miss(&self) {
+        self.raise(Faults::XRUN);
+        self.deadline_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts a block skipped because stragglers were running. // RT
+    pub fn count_busy_block(&self) {
+        self.raise(Faults::XRUN);
+        self.busy_blocks.fetch_add(1, Ordering::Relaxed);
     }
 }
 
