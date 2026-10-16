@@ -25,6 +25,7 @@ pub mod ids;
 pub mod lane;
 pub mod meter;
 pub mod mixer;
+pub mod mixer_rules;
 pub mod modify;
 pub mod query;
 pub mod rule;
