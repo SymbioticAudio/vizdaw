@@ -305,9 +305,7 @@ impl Document {
     }
 }
 
-/// Crate-internal mutation, used only by commands. (`dead_code` is allowed
-/// until the command tasks use every function; Task 18 removes the allow.)
-#[allow(dead_code)]
+/// Crate-internal mutation, used only by commands.
 impl Document {
     pub(crate) fn settings_mut(&mut self) -> &mut Settings {
         &mut self.settings

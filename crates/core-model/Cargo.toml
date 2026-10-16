@@ -15,3 +15,7 @@ thiserror = "2"
 proptest = "1"
 criterion = "0.5"
 insta = { version = "1", features = ["json"] }
+
+[[bench]]
+name = "model"
+harness = false
