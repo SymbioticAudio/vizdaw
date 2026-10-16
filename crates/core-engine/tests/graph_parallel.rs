@@ -1,6 +1,6 @@
 use core_engine::graph::exec::{Graph, InsertInit, Runner};
 use core_engine::graph::{
-    GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap, TestMode, TestNode, plan,
+    GraphSpec, InputSpec, InsertSpec, NodeSpec, Plan, StripSpec, Tap, TestMode, TestNode, plan,
 };
 use core_engine::pool::{RtEnv, RtPlatform, RtWaker, RtWorkgroup, StdPlatform, WorkgroupToken};
 use core_engine::render::Faults;
@@ -382,4 +382,62 @@ fn failed_join_and_promotion_are_reported() {
         let f = r.shared().take_faults();
         f.contains(Faults::WORKGROUP_JOIN_FAILED) || f.contains(Faults::THREAD_POLICY_FAILED)
     }));
+}
+
+#[test]
+fn cyclic_graph_renders_silence_and_drops() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // A ↔ B cycle feeding master, built without `plan`.
+        let mut a = StripSpec::new(None);
+        a.inputs.push(InputSpec {
+            from: 1,
+            tap: Tap::Post,
+            gain: 1.0,
+        });
+        a.inserts.push(InsertSpec {
+            instance: None,
+            latency: 0,
+            bypass: false,
+            sidechain: None,
+        });
+        let mut b = StripSpec::new(None);
+        b.inputs.push(InputSpec {
+            from: 0,
+            tap: Tap::Post,
+            gain: 1.0,
+        });
+        let mut m = StripSpec::new(None);
+        m.inputs.push(InputSpec {
+            from: 0,
+            tap: Tap::Post,
+            gain: 1.0,
+        });
+        let spec = GraphSpec {
+            nodes: vec![NodeSpec::Strip(a), NodeSpec::Strip(b), NodeSpec::Strip(m)],
+            master: 2,
+        };
+        let build = || {
+            Graph::build(&spec, &Plan::default(), 256, |_, _| {
+                InsertInit::Fresh(Box::new(TestNode::new(
+                    TestMode::Noise {
+                        seed: 1,
+                        level: 0.25,
+                    },
+                    0,
+                )))
+            })
+        };
+        let mut serial = Runner::serial(build());
+        let (l, _) = serial.render(256, &[64]);
+        assert!(l.iter().all(|x| *x == 0.0));
+        drop(serial);
+        let mut pooled = Runner::parallel(build(), 2, Arc::new(StdPlatform)).unwrap();
+        let (l, _) = pooled.render(256, &[64]);
+        assert!(l.iter().all(|x| *x == 0.0));
+        drop(pooled);
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("a cyclic graph must not hang");
 }

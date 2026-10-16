@@ -79,18 +79,29 @@ pub struct InsertState {
     instance: Option<PluginInstanceId>,
     bad_run: u32,
     faulted: bool,
+    /// Delays by the spec latency while bypassed or faulted.
     bypass: DelayLine,
+    /// The last block went through `bypass` (so entering bypass again
+    /// starts it from silence, not from audio of the previous bypass).
+    in_bypass: bool,
 }
 
 impl InsertState {
-    fn new(node: Option<Box<dyn EffectNode>>, instance: Option<PluginInstanceId>) -> InsertState {
-        let latency = node.as_ref().map_or(0, |n| n.latency());
+    /// `latency` is the spec's (bounded by `plan`); a placeholder has no
+    /// latency to keep, so its line is empty. Not RT.
+    fn new(
+        node: Option<Box<dyn EffectNode>>,
+        instance: Option<PluginInstanceId>,
+        latency: u32,
+    ) -> InsertState {
+        let latency = if node.is_some() { latency } else { 0 };
         InsertState {
             node,
             instance,
             bad_run: 0,
             faulted: false,
             bypass: DelayLine::new(latency),
+            in_bypass: false,
         }
     }
 }
@@ -194,7 +205,8 @@ pub struct Graph {
     shape: u64,
     max_frames: u32,
     instruments: u16,
-    adopt: Box<[(usize, usize)]>,
+    /// `(new index, old index, bypass line for the new spec latency)`.
+    adopt: Box<[(usize, usize, DelayLine)]>,
     nodes: Box<[UnsafeCell<NodeState>]>,
     inserts: Box<[UnsafeCell<Option<InsertState>>]>,
     pending: Box<[AtomicU32]>,
@@ -221,6 +233,35 @@ impl std::fmt::Debug for Graph {
     }
 }
 
+/// Kahn's algorithm over the built edges: true when every node can be
+/// reached in topological order, i.e. every run completes. Not RT.
+fn acyclic(succ: &[Vec<usize>], indegree: &[u32], sources: &[usize]) -> bool {
+    let mut left = indegree.to_vec();
+    let mut ready = sources.to_vec();
+    let mut seen = 0usize;
+    while let Some(v) = ready.pop() {
+        seen += 1;
+        for &s in succ.get(v).map(Vec::as_slice).unwrap_or(&[]) {
+            if let Some(d) = left.get_mut(s) {
+                *d = d.saturating_sub(1);
+                if *d == 0 {
+                    ready.push(s);
+                }
+            }
+        }
+    }
+    seen == indegree.len()
+}
+
+/// The buffer an edge reads from node `from`: an instrument has only its
+/// output, so `Pre` of an instrument reads `post`. // RT
+fn tap_buf<'a>(g: &Graph, from: usize, src: &'a NodeState, tap: Tap) -> &'a StereoBuf {
+    match (tap, g.defs.get(from)) {
+        (Tap::Pre, Some(NodeDef::Strip { .. })) => &src.pre,
+        _ => &src.post,
+    }
+}
+
 fn delay_at(v: &[Vec<u32>], i: usize, k: usize) -> u32 {
     v.get(i).and_then(|d| d.get(k)).copied().unwrap_or(0)
 }
@@ -229,7 +270,10 @@ impl Graph {
     /// Builds the runtime graph for `spec` as planned by `plan`, with
     /// buffers for blocks of up to `max_frames`. `init(index, insert)` says
     /// where each insert's processor comes from (indices count inserts in
-    /// node order). Self-edges are dropped (Plan Ruling 29). Not RT.
+    /// node order). Self-edges are dropped (Plan Ruling 29). A cyclic spec
+    /// (which `plan` refuses, but a mismatched plan lets through) gives a
+    /// graph with no nodes: every run completes at once and master is
+    /// silent. Not RT.
     pub fn build(
         spec: &GraphSpec,
         plan: &Plan,
@@ -309,13 +353,17 @@ impl Graph {
                         let idx = inserts.len();
                         let state = match init(idx, ins) {
                             InsertInit::Adopt(old) => {
-                                adopt.push((idx, old));
+                                // A line for the spec latency, swapped in on
+                                // adoption if the adopted one differs.
+                                adopt.push((idx, old, DelayLine::new(ins.latency)));
                                 None
                             }
                             InsertInit::Fresh(node) => {
-                                Some(InsertState::new(Some(node), ins.instance))
+                                Some(InsertState::new(Some(node), ins.instance, ins.latency))
                             }
-                            InsertInit::Placeholder => Some(InsertState::new(None, ins.instance)),
+                            InsertInit::Placeholder => {
+                                Some(InsertState::new(None, ins.instance, ins.latency))
+                            }
                         };
                         inserts.push(UnsafeCell::new(state));
                     }
@@ -332,7 +380,20 @@ impl Graph {
                 }
             }
         }
-        let sources: Vec<usize> = (0..n).filter(|i| indegree.get(*i) == Some(&0)).collect();
+        let mut sources: Vec<usize> = (0..n).filter(|i| indegree.get(*i) == Some(&0)).collect();
+        if !acyclic(&succ, &indegree, &sources) {
+            // A run could never complete (and `wait_idle` would block
+            // forever): keep the inserts so they can be adopted, but render
+            // no node, so every run is `Done` at once with master silent.
+            // (No `debug_assert!`: this path is tested, so it must not panic.)
+            defs.clear();
+            inputs.clear();
+            succ.clear();
+            indegree.clear();
+            nodes.clear();
+            sources.clear();
+            instruments = 0;
+        }
         Graph {
             defs: defs.into_boxed_slice(),
             inputs: inputs.into_boxed_slice(),
@@ -383,9 +444,18 @@ impl Graph {
     /// when both have the same shape and block size, swaps in `old`'s node
     /// state (buffers and delay lines). Runs between runs. // RT
     pub(crate) fn adopt_from(&mut self, old: &mut Graph) {
-        for &(new, prev) in self.adopt.iter() {
-            let taken = old.inserts.get_mut(prev).and_then(|c| c.get_mut().take());
-            if let Some(cell) = self.inserts.get_mut(new) {
+        for (new, prev, line) in self.adopt.iter_mut() {
+            let mut taken = old.inserts.get_mut(*prev).and_then(|c| c.get_mut().take());
+            if let Some(st) = taken.as_mut() {
+                // The spec latency changed: use the line `build` allocated
+                // (a swap, so nothing is freed here; the old line goes with
+                // this graph's `adopt`).
+                if st.node.is_some() && st.bypass.delay() != line.delay() {
+                    std::mem::swap(&mut st.bypass, line);
+                    st.in_bypass = false;
+                }
+            }
+            if let Some(cell) = self.inserts.get_mut(*new) {
                 *cell.get_mut() = taken;
             }
         }
@@ -446,9 +516,14 @@ fn run_insert(
     idx: usize,
 ) {
     if bypass || ins.faulted {
+        if !ins.in_bypass {
+            ins.bypass.clear();
+            ins.in_bypass = true;
+        }
         ins.bypass.process_buf(io, frames);
         return;
     }
+    ins.in_bypass = false;
     let Some(node) = ins.node.as_mut() else {
         return;
     };
@@ -518,10 +593,7 @@ unsafe fn render_node(g: &Graph, sinks: &SinkTable, shared: &Shared, frames: u32
                 let Some(src) = g.nodes.get(inp.from).map(|c| unsafe { &*c.get() }) else {
                     continue;
                 };
-                let buf = match inp.tap {
-                    Tap::Pre => &src.pre,
-                    Tap::Post => &src.post,
-                };
+                let buf = tap_buf(g, inp.from, src, inp.tap);
                 match st.delays.get_mut(k) {
                     Some(d) if d.delay() > 0 => {
                         dsp::copy(&mut st.scratch, buf, frames);
@@ -548,10 +620,7 @@ unsafe fn render_node(g: &Graph, sinks: &SinkTable, shared: &Shared, frames: u32
                         // sidechains, and `x.from` is a finished predecessor
                         // of `i` (its sidechain edge counts in `pending`).
                         if let Some(src) = g.nodes.get(x.from).map(|c| unsafe { &*c.get() }) {
-                            let buf = match x.tap {
-                                Tap::Pre => &src.pre,
-                                Tap::Post => &src.post,
-                            };
+                            let buf = tap_buf(g, x.from, src, x.tap);
                             dsp::mix_into(&mut st.sc, buf, x.gain, frames);
                         }
                         if let Some(d) = st.sc_delays.get_mut(k) {

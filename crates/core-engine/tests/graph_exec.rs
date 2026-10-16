@@ -390,3 +390,134 @@ fn a_repeated_instrument_target_renders_its_sink_once() {
         "only the first node of a target renders it"
     );
 }
+
+#[test]
+fn bypass_line_follows_the_spec_latency() {
+    // The node reports latency 0 but the spec (what plan compensates) says 50.
+    let mut n = Net::new();
+    let s = n.strip(&[], &[(TestMode::Impulse, 0)]);
+    let x = n.strip(&[s], &[(TestMode::Gain(1.0), 0)]);
+    n.strip(&[x], &[]);
+    n.strip_mut(x).inserts[0].latency = 50;
+    n.strip_mut(x).inserts[0].bypass = true;
+    let p = plan(&n.spec, 96_000).unwrap();
+    assert_eq!(p.latency, 50);
+    let g = Graph::build(&n.spec, &p, 1024, |idx, _| {
+        let mode = if idx == 0 {
+            TestMode::Impulse
+        } else {
+            TestMode::Gain(1.0)
+        };
+        InsertInit::Fresh(Box::new(TestNode::new(mode, 0)))
+    });
+    let (l, _) = Runner::serial(g).render(200, &[64]);
+    assert_eq!(nonzero(&l), vec![(50, 1.0)]);
+}
+
+#[test]
+fn adopted_bypass_line_is_rebuilt_for_a_new_latency() {
+    let mut n = Net::new();
+    let s = n.strip(&[], &[(TestMode::Impulse, 0)]);
+    let x = n.strip(&[s], &[(TestMode::Gain(1.0), 0)]);
+    n.strip(&[x], &[]);
+    let mut r = Runner::serial(n.graph());
+    let _ = r.render(64, &[64]);
+    // Same instance, now reported at latency 50 and bypassed; a fresh
+    // impulse source shows where the bypass line puts the audio.
+    n.strip_mut(x).inserts[0].latency = 50;
+    n.strip_mut(x).inserts[0].bypass = true;
+    let p = plan(&n.spec, 96_000).unwrap();
+    let g = Graph::build(&n.spec, &p, 1024, |idx, _| {
+        if idx == 0 {
+            InsertInit::Fresh(Box::new(TestNode::new(TestMode::Impulse, 0)))
+        } else {
+            InsertInit::Adopt(idx)
+        }
+    });
+    r.replace_graph(g);
+    let (l, _) = r.render(200, &[64]);
+    assert_eq!(nonzero(&l), vec![(50, 1.0)]);
+}
+
+#[test]
+fn re_entering_bypass_does_not_replay_stale_audio() {
+    let mut n = Net::new();
+    let s = n.strip(
+        &[],
+        &[
+            (
+                TestMode::Noise {
+                    seed: 9,
+                    level: 0.25,
+                },
+                0,
+            ),
+            (TestMode::Gain(1.0), 100),
+        ],
+    );
+    n.strip(&[s], &[]);
+    let mut r = Runner::serial(n.graph());
+    let swap = |r: &mut Runner, n: &mut Net, bypass: bool| {
+        n.strip_mut(s).inserts[1].bypass = bypass;
+        let p = plan(&n.spec, 96_000).unwrap();
+        r.replace_graph(Graph::build(&n.spec, &p, 1024, |idx, _| {
+            InsertInit::Adopt(idx)
+        }));
+    };
+    let _ = r.render(300, &[64]);
+    swap(&mut r, &mut n, true);
+    let _ = r.render(300, &[64]);
+    swap(&mut r, &mut n, false);
+    let _ = r.render(300, &[64]);
+    swap(&mut r, &mut n, true);
+    let (l, _) = r.render(200, &[64]);
+    assert!(
+        nonzero(&l[..100]).is_empty(),
+        "the bypass line starts silent"
+    );
+    assert!(!nonzero(&l[100..]).is_empty());
+}
+
+#[test]
+fn pre_tap_of_an_instrument_reads_its_output() {
+    // Master reads the instrument pre-fader through a 10-frame compensation
+    // delay (Y's insert has latency 10).
+    let mut y = StripSpec::new(None);
+    y.inserts.push(InsertSpec {
+        instance: None,
+        latency: 10,
+        bypass: false,
+        sidechain: None,
+    });
+    let mut m = StripSpec::new(None);
+    m.inputs.push(InputSpec {
+        from: 0,
+        tap: Tap::Pre,
+        gain: 1.0,
+    });
+    m.inputs.push(InputSpec {
+        from: 1,
+        tap: Tap::Post,
+        gain: 1.0,
+    });
+    let spec = GraphSpec {
+        nodes: vec![
+            NodeSpec::Instrument {
+                target: TargetIdx(2),
+                latency: 0,
+            },
+            NodeSpec::Strip(y),
+            NodeSpec::Strip(m),
+        ],
+        master: 2,
+    };
+    let p = plan(&spec, 96_000).unwrap();
+    let g = Graph::build(&spec, &p, 256, |_, _| {
+        InsertInit::Fresh(Box::new(TestNode::new(TestMode::Gain(1.0), 10)))
+    });
+    let mut r = Runner::serial(g);
+    *r.sinks_mut().get_mut(2).unwrap() = Some(Sink::Instrument(Box::new(Dc(0.5))));
+    let (l, _) = r.render(128, &[64]);
+    assert!(l[..10].iter().all(|x| *x == 0.0));
+    assert!(l[10..].iter().all(|x| *x == 0.5));
+}
