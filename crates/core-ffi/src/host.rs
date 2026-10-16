@@ -61,6 +61,33 @@ pub fn drain_offline_log() -> Vec<(u64, Vec<u8>)> {
         .unwrap_or_default()
 }
 
+/// What the next `reload` should do instead of recompiling (test hook).
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadFault {
+    /// Return an engine error.
+    Error,
+    /// Panic while holding the host lock.
+    Panic,
+}
+
+#[cfg(feature = "test-hooks")]
+static RELOAD_FAULT: Mutex<Option<ReloadFault>> = Mutex::new(None);
+
+/// Makes the next `reload` that reaches the engine fail (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn inject_reload_fault(f: Option<ReloadFault>) {
+    *lock(&RELOAD_FAULT) = f;
+}
+
+/// True when a host exists and its engine is not stopped (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn engine_active() -> bool {
+    lock(&HOST)
+        .as_ref()
+        .is_some_and(|h| h.engine.state() != PlayState::Stopped)
+}
+
 /// Drops the host, stopping its output.
 pub fn reset() {
     let old = lock(&HOST).take();
@@ -315,6 +342,17 @@ pub fn reload(owner: u64, doc: &Document, looped: bool) -> Result<(), VizError> 
     let mut slot = lock(&HOST);
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
+            #[cfg(feature = "test-hooks")]
+            match lock(&RELOAD_FAULT).take() {
+                Some(ReloadFault::Error) => {
+                    return Err(VizError::Engine {
+                        message: "injected reload fault".into(),
+                    });
+                }
+                #[allow(clippy::panic)]
+                Some(ReloadFault::Panic) => panic!("injected reload panic"),
+                None => {}
+            }
             let seq = h.seq;
             // The loaded sequence may have been deleted by the edit.
             if doc.sequence(seq).is_err() {

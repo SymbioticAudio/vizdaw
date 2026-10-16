@@ -37,6 +37,9 @@ struct Inner {
     cursor: Option<Tick>,
     /// The sequence `cursor` belongs to.
     cursor_seq: Option<SeqId>,
+    /// Sticky: the last engine recompile after an edit failed. Cleared by
+    /// the next successful recompile or Play.
+    reload_fault: Option<String>,
 }
 
 impl Inner {
@@ -49,7 +52,37 @@ impl Inner {
             looped: false,
             cursor: None,
             cursor_seq: None,
+            reload_fault: None,
         }
+    }
+
+    /// The sequence a position set without the engine belongs to: the one
+    /// last played, else the first top-level sequence.
+    fn selected_seq(&self) -> Option<SeqId> {
+        let doc = self.doc();
+        if let Some(s) = self.cursor_seq.filter(|s| doc.sequence(*s).is_ok()) {
+            return Some(s);
+        }
+        let rows = seq_rows(doc).ok()?;
+        rows.iter()
+            .find(|r| r.top_level)
+            .or_else(|| rows.first())
+            .map(|r| SeqId(r.id))
+    }
+
+    /// Recompiles the engine after an edit. A failure (or panic, which also
+    /// resets the host) never fails the edit: it becomes a sticky fault.
+    fn reload_host(&mut self, id: u64) {
+        let r = ffi_guard(|| host::reload(id, self.history.doc(), self.looped));
+        self.reload_fault = match r {
+            Ok(()) => None,
+            Err(e) => {
+                if let VizError::Internal { .. } = e {
+                    host::reset();
+                }
+                Some(format!("reload failed: {e}"))
+            }
+        };
     }
 
     fn doc(&self) -> &Document {
@@ -118,7 +151,7 @@ impl Session {
         let mut inner = lock(&self.inner);
         inner.history.execute(&cmd, &ViewFilter::default())?;
         inner.version += 1;
-        host::reload(self.id, inner.doc(), inner.looped)?;
+        inner.reload_host(self.id);
         inner.snapshot()
     }
 
@@ -131,7 +164,7 @@ impl Session {
             inner.history.redo()?;
         }
         inner.version += 1;
-        host::reload(self.id, inner.doc(), inner.looped)?;
+        inner.reload_host(self.id);
         inner.snapshot()
     }
 
@@ -269,6 +302,7 @@ impl Session {
                 _ => None,
             };
             host::play(self.id, inner.doc(), id, start, inner.looped)?;
+            inner.reload_fault = None;
             inner.cursor = None;
             inner.cursor_seq = Some(id);
             Ok(())
@@ -286,6 +320,7 @@ impl Session {
             let mut inner = lock(&self.inner);
             if !host::locate(self.id, Tick(tick))? {
                 inner.cursor = Some(Tick(tick));
+                inner.cursor_seq = inner.selected_seq();
             }
             Ok(())
         })
@@ -306,7 +341,7 @@ impl Session {
             let inner = lock(&self.inner);
             let doc = inner.doc();
             Ok(match host::state(self.id) {
-                Some(h) => TransportState {
+                Some(mut h) => TransportState {
                     playing: h.playing,
                     seq: Some(h.seq.0),
                     tick: h.tick.0,
@@ -314,7 +349,10 @@ impl Session {
                     seconds: seconds(doc, h.seq, h.tick),
                     sample_rate: h.sample_rate,
                     device: h.device,
-                    faults: h.faults,
+                    faults: {
+                        h.faults.extend(inner.reload_fault.clone());
+                        h.faults
+                    },
                     report: h.report,
                 },
                 None => {
@@ -329,7 +367,7 @@ impl Session {
                         seconds: seq.map_or(0.0, |s| seconds(doc, s, tick)),
                         sample_rate: 0.0,
                         device: String::new(),
-                        faults: Vec::new(),
+                        faults: inner.reload_fault.iter().cloned().collect(),
                         report: Vec::new(),
                     }
                 }

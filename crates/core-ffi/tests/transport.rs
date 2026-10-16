@@ -4,7 +4,9 @@
 use std::sync::{Mutex, MutexGuard};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use vizdaw_ffi::host::{drain_offline_log, force_offline, reset_host};
+use vizdaw_ffi::host::{
+    ReloadFault, drain_offline_log, engine_active, force_offline, inject_reload_fault, reset_host,
+};
 use vizdaw_ffi::{Session, TransportState};
 
 const PPQ: i64 = 15_360;
@@ -15,6 +17,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 fn serial() -> MutexGuard<'static, ()> {
     let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     force_offline();
+    inject_reload_fault(None);
     reset_host();
     g
 }
@@ -195,9 +198,64 @@ fn muting_while_playing_recompiles() {
 fn dropping_the_playing_session_stops_the_engine() {
     let _g = serial();
     let (a, song) = demo();
+    // Start half a beat before bar 2, where the chords change.
+    a.locate(BAR - PPQ / 2).unwrap();
     a.play(song).unwrap();
-    ms(30);
+    ms(20);
+    assert!(engine_active());
     drop(a);
-    let (b, _) = demo();
-    assert!(!t(&b).playing);
+    // The release tail may still emit note-offs; no new note-ons may start.
+    drain_offline_log();
+    ms(600);
+    assert_eq!(chord_note_ons(), 0, "audio kept playing after the drop");
+}
+
+#[test]
+fn a_failed_reload_keeps_the_edit_and_shows_as_a_fault() {
+    let _g = serial();
+    let (s, song) = demo();
+    let chords = s.lanes(song).unwrap()[1].id;
+    s.play(song).unwrap();
+    inject_reload_fault(Some(ReloadFault::Error));
+    let snap = s.set_lane_mute(song, chords, true).unwrap();
+    assert!(snap.undo_label.is_some());
+    assert!(s.lanes(song).unwrap()[1].mute);
+    let faults = t(&s).faults;
+    assert!(
+        faults.iter().any(|f| f.contains("reload failed")),
+        "{faults:?}"
+    );
+    // The next good recompile clears it.
+    s.undo().unwrap();
+    assert!(t(&s).faults.is_empty());
+}
+
+#[test]
+fn a_panic_during_reload_resets_the_host_and_keeps_the_edit() {
+    let _g = serial();
+    let (s, song) = demo();
+    let chords = s.lanes(song).unwrap()[1].id;
+    s.play(song).unwrap();
+    inject_reload_fault(Some(ReloadFault::Panic));
+    s.set_lane_mute(song, chords, true).unwrap();
+    assert!(!engine_active(), "host not reset");
+    assert!(s.lanes(song).unwrap()[1].mute);
+    let st = t(&s);
+    assert!(!st.playing);
+    assert!(st.faults.iter().any(|f| f.contains("reload failed")));
+    // A later Play starts clean.
+    s.play(song).unwrap();
+    ms(40);
+    assert!(t(&s).playing);
+}
+
+#[test]
+fn locate_without_the_engine_formats_against_a_sequence() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.locate(2 * BAR).unwrap();
+    let st = t(&s);
+    assert_eq!(st.seq, Some(song));
+    assert!(st.position_bbu.starts_with("3.1."), "{}", st.position_bbu);
+    assert!(st.seconds > 3.0, "{}", st.seconds);
 }
