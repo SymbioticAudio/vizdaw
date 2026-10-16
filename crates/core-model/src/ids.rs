@@ -60,6 +60,23 @@ id_type!(
     DrumRowId,
     "row"
 );
+id_type!(
+    /// Identifies a mixer strip.
+    StripId,
+    "strip"
+);
+id_type!(
+    /// Identifies a plugin instance (an insert or a plugin instrument's
+    /// own slot); stable for the instance's life, never reused.
+    PluginInstanceId,
+    "plug"
+);
+id_type!(
+    /// Identifies an immutable plugin state blob (the FNV-1a hash of its
+    /// bytes), stored as `PluginState/<16 hex digits>.bin`.
+    StateBlobId,
+    "state"
+);
 
 /// Any ID, used in errors and reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -80,6 +97,10 @@ pub enum AnyId {
     Take(TakeId),
     /// A drum row.
     DrumRow(DrumRowId),
+    /// A mixer strip.
+    Strip(StripId),
+    /// A plugin instance.
+    Plugin(PluginInstanceId),
 }
 
 impl fmt::Display for AnyId {
@@ -93,6 +114,8 @@ impl fmt::Display for AnyId {
             AnyId::Media(i) => i.fmt(f),
             AnyId::Take(i) => i.fmt(f),
             AnyId::DrumRow(i) => i.fmt(f),
+            AnyId::Strip(i) => i.fmt(f),
+            AnyId::Plugin(i) => i.fmt(f),
         }
     }
 }
@@ -114,6 +137,8 @@ any_from!(OutputPathId, Output);
 any_from!(MediaId, Media);
 any_from!(TakeId, Take);
 any_from!(DrumRowId, DrumRow);
+any_from!(StripId, Strip);
+any_from!(PluginInstanceId, Plugin);
 
 /// Per-document ID counters. Each holds the next value to hand out; IDs are
 /// never reused within a document.
