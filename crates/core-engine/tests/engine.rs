@@ -128,7 +128,9 @@ fn events_land_at_their_offsets_and_stop_releases() {
             (0, vec![0x90, 60, 64]),
             (24_000, vec![0x80, 60, 0]),
             (24_000, vec![0x90, 62, 64]),
-            (50_000, vec![0x80, 62, 0]), // cut by stop
+            (50_000, vec![0x80, 62, 0]),   // cut by stop
+            (50_000, vec![0xE0, 0, 0x40]), // bend centre
+            (50_000, vec![0xB0, 121, 0]),  // reset all controllers
         ]
     );
 }

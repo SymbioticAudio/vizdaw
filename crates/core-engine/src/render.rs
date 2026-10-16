@@ -173,6 +173,9 @@ pub struct Renderer {
     sinks: [Option<Sink>; MAX_TARGETS],
     bufs: Vec<StereoBuf>,
     block_ns: u64,
+    /// Controllers were reset (stop, locate, wrap or swap): the next played
+    /// frames start with the chased state.
+    chase_pending: bool,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -231,6 +234,7 @@ impl Renderer {
             sinks: std::array::from_fn(|_| None),
             bufs: Vec::new(),
             block_ns: 0,
+            chase_pending: false,
         };
         r.prepare(cfg.max_frames);
         r
@@ -291,6 +295,10 @@ impl Renderer {
             match step {
                 Step::Play { from, to, offset } => {
                     if let Some(s) = self.schedule.as_deref() {
+                        if std::mem::take(&mut self.chase_pending) {
+                            s.chase
+                                .state_before(from, |t, m| o.send(t, offset, m.as_slice()));
+                        }
                         while let Some(e) = s.entries.get(self.cursor) {
                             if e.frame >= to {
                                 break;
@@ -306,6 +314,10 @@ impl Renderer {
                 }
                 Step::Wrap { offset, to } => {
                     release_all(&mut self.notes, &mut o, offset);
+                    if let Some(s) = self.schedule.as_deref() {
+                        reset_controllers(s, &mut o, offset);
+                    }
+                    self.chase_pending = true;
                     self.cursor = self.schedule.as_ref().map_or(0, |s| s.cursor_at(to));
                 }
                 Step::End { offset } => release_all(&mut self.notes, &mut o, offset),
@@ -340,6 +352,9 @@ impl Renderer {
         }
     }
 
+    /// Note-offs, then a controller reset on every channel of the current
+    /// schedule, at block offset 0; the next played frames chase the
+    /// controller state (ruling O23). // RT
     fn release_now(&mut self) {
         let mut o = Out {
             sinks: &mut self.sinks,
@@ -349,6 +364,10 @@ impl Renderer {
             midi_offset_ns: self.cfg.midi_offset_ns,
         };
         release_all(&mut self.notes, &mut o, 0);
+        if let Some(s) = self.schedule.as_deref() {
+            reset_controllers(s, &mut o, 0);
+        }
+        self.chase_pending = true;
     }
 
     fn apply(&mut self, cmd: EngineCmd) {
@@ -474,6 +493,20 @@ impl Renderer {
         self.sinks
             .get_mut(usize::from(idx.0))
             .and_then(Option::as_mut)
+    }
+}
+
+/// Pitch-bend centre and CC 121 (reset all controllers) on every channel
+/// `s` uses, at block offset `offset`. // RT
+fn reset_controllers(s: &Schedule, o: &mut Out<'_>, offset: u32) {
+    for (t, mask) in s.used_channels.iter().enumerate() {
+        let target = TargetIdx(t as u8);
+        for ch in 0..16u8 {
+            if mask & (1 << ch) != 0 {
+                o.send(target, offset, &[0xE0 | ch, 0x00, 0x40]);
+                o.send(target, offset, &[0xB0 | ch, 121, 0x00]);
+            }
+        }
     }
 }
 

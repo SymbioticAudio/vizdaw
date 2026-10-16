@@ -3,7 +3,7 @@
 
 use super::targets::{BuiltinRoute, TargetIdx, TargetKind, kinds_for};
 use super::tempo::TempoTable;
-use super::{Entry, MAX_TARGETS, Schedule, WireMsg};
+use super::{ChaseIndex, Entry, MAX_TARGETS, Schedule, WireMsg};
 use crate::backend::MidiPortInfo;
 use crate::error::EngineError;
 use crate::midi1::{Class, Midi1Msg, When, translate};
@@ -263,6 +263,7 @@ pub fn compile(
     report.entries = entries.len();
     let length_frames = frame(len);
     let bar1 = frame(Tick::ZERO);
+    let chase = ChaseIndex::build(&entries);
     let schedule = Schedule {
         sample_rate: sr,
         entries,
@@ -271,6 +272,7 @@ pub fn compile(
         length_frames,
         loop_range: (bar1 < length_frames).then_some((bar1, length_frames)),
         used_channels,
+        chase,
     };
     report.warnings = warnings(&report);
     report.compile_time = started.elapsed().saturating_sub(resolving);

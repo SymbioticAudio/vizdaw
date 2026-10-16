@@ -218,16 +218,24 @@ fn loop_wraps_three_times_with_note_offs() {
 24000 t0 80 3c 00
 48000 t0 90 43 40
 96000 t0 80 43 00
+96000 t0 e0 00 40
+96000 t0 b0 79 00
 96000 t0 90 3c 40
 120000 t0 80 3c 00
 144000 t0 90 43 40
 192000 t0 80 43 00
+192000 t0 e0 00 40
+192000 t0 b0 79 00
 192000 t0 90 3c 40
 216000 t0 80 3c 00
 240000 t0 90 43 40
 288000 t0 80 43 00
+288000 t0 e0 00 40
+288000 t0 b0 79 00
 288000 t0 90 3c 40
 300000 t0 80 3c 00
+300000 t0 e0 00 40
+300000 t0 b0 79 00
 ");
 }
 
@@ -341,10 +349,16 @@ fn stop_and_locate_send_note_offs() {
 0 t0 90 3c 40
 1000 t0 80 3c 00
 1000 t0 b0 40 00
+1000 t0 e0 00 40
+1000 t0 b0 79 00
+1100 t0 e0 00 40
+1100 t0 b0 79 00
 1100 t0 b0 40 7f
 1100 t0 90 3c 40
 2100 t0 80 3c 00
 2100 t0 b0 40 00
+2100 t0 e0 00 40
+2100 t0 b0 79 00
 ");
 }
 
@@ -383,6 +397,9 @@ fn schedule_swap_mid_play_keeps_position_and_cuts_notes() {
             "0 t0 90 3c 40".to_string(),
             // The sounding note is cut at the swap.
             "30208 t0 80 3c 00".to_string(),
+            // Then the old schedule's channels are reset (ruling O23).
+            "30208 t0 e0 00 40".to_string(),
+            "30208 t0 b0 79 00".to_string(),
             // New schedule from the same tick: beat 3 (tick 30720) is frame
             // 96000 at 60 BPM, i.e. 96000 − 60416 frames after the swap.
             "65792 t0 90 43 40".to_string(),
@@ -483,5 +500,102 @@ proptest! {
         let reference = render_with_blocks(&doc, seq, &[512], looped);
         let sizes: Vec<u32> = jitter.iter().map(|j| 1 + j % base).collect();
         prop_assert_eq!(render_with_blocks(&doc, seq, &sizes, looped), reference);
+    }
+}
+
+/// Log lines (`frame tN bytes`) of channel-voice status `status` (high
+/// nibble and channel), in log order.
+fn with_status<'a>(log: &'a [String], status: &str) -> Vec<&'a String> {
+    log.iter()
+        .filter(|l| l.split(' ').nth(2) == Some(status))
+        .collect()
+}
+
+fn index_of(log: &[String], line: &str) -> usize {
+    log.iter()
+        .position(|l| l == line)
+        .unwrap_or_else(|| panic!("{line:?} not in log:\n{}", log.join("\n")))
+}
+
+#[test]
+fn locate_into_bar_3_chases_patch_and_volume() {
+    let doc = demo_document().unwrap();
+    let song = find_sequence(&doc, "Song").unwrap();
+    let mut run = start(&doc, song, 512);
+    run.engine
+        .locate_tick(core_model::time::Tick(2 * BAR))
+        .unwrap();
+    run.engine.play().unwrap();
+    run.backend.run_frames(48_000);
+    let log: Vec<String> = run.log.drain().iter().map(LogRecord::line).collect();
+    // Resets on every used channel (0, 1, 9) at the locate.
+    for ch in ["0", "1", "9"] {
+        index_of(&log, &format!("0 t0 e{ch} 00 40"));
+        index_of(&log, &format!("0 t0 b{ch} 79 00"));
+    }
+    // Bass (channel 1): program 33 before its first note.
+    let pc = index_of(&log, "0 t0 c1 21");
+    let first_bass = log.iter().position(|l| l.contains(" t0 91 ")).unwrap();
+    assert!(pc < first_bass, "{}", log.join("\n"));
+    assert!(index_of(&log, "0 t0 b1 79 00") < pc);
+    // Chords (channel 0): program 0 and CC7 100 before the first chord.
+    let first_chord = log.iter().position(|l| l.contains(" t0 90 ")).unwrap();
+    assert!(index_of(&log, "0 t0 c0 00") < first_chord);
+    assert!(index_of(&log, "0 t0 b0 07 64") < first_chord);
+    // Drums keep their default patch.
+    assert!(index_of(&log, "0 t0 c9 00") < log.iter().position(|l| l.contains(" t0 99 ")).unwrap());
+    // Nothing was chased twice.
+    assert_eq!(with_status(&log, "c1").len(), 1);
+}
+
+#[test]
+fn stop_inside_the_bar_12_bend_recentres_it() {
+    let doc = demo_document().unwrap();
+    let song = find_sequence(&doc, "Song").unwrap();
+    let mut run = start(&doc, song, 512);
+    run.engine
+        .locate_tick(core_model::time::Tick(11 * BAR))
+        .unwrap();
+    run.engine.play().unwrap();
+    // Play past the bend up (beat 3) but not to the recentre (beat 4).
+    while run.engine.position_tick().0 < 11 * BAR + 2 * Q + Q / 2 {
+        run.backend.run_frames(512);
+    }
+    run.engine.stop().unwrap();
+    run.backend.run_frames(512);
+    run.engine.locate_frame(0).unwrap();
+    run.engine.play().unwrap();
+    run.backend.run_frames(512);
+    let log: Vec<String> = run.log.drain().iter().map(LogRecord::line).collect();
+    let bends = with_status(&log, "e0");
+    let up = bends
+        .iter()
+        .position(|l| l.ends_with("e0 00 48"))
+        .unwrap_or_else(|| panic!("no bend up:\n{}", log.join("\n")));
+    assert!(
+        bends.iter().skip(up + 1).any(|l| l.ends_with("e0 00 40")),
+        "no recentre after the stop:\n{}",
+        log.join("\n")
+    );
+}
+
+#[test]
+fn loop_wrap_resends_the_chased_state() {
+    let doc = demo_document().unwrap();
+    let song = find_sequence(&doc, "Song").unwrap();
+    let mut run = start(&doc, song, 512);
+    // Bars 3–4 at 120 BPM: frames 192000..384000.
+    run.engine.set_loop_range(Some((192_000, 384_000))).unwrap();
+    run.engine.locate_frame(192_000).unwrap();
+    run.engine.play().unwrap();
+    run.backend.run_frames(192_000 + 4_800);
+    let log: Vec<String> = run.log.drain().iter().map(LogRecord::line).collect();
+    for at in [0, 192_000] {
+        let reset = index_of(&log, &format!("{at} t0 b1 79 00"));
+        let pc = index_of(&log, &format!("{at} t0 c1 21"));
+        assert!(reset < pc);
+        index_of(&log, &format!("{at} t0 e0 00 40"));
+        index_of(&log, &format!("{at} t0 c0 00"));
+        index_of(&log, &format!("{at} t0 b0 07 64"));
     }
 }
