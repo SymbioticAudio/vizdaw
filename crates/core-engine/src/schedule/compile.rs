@@ -70,6 +70,8 @@ pub struct CompileReport {
     pub warnings: Vec<String>,
     /// Wall-clock compile time, excluding target (sink) creation.
     pub compile_time: Duration,
+    /// The mixer graph compiled with this schedule (`Engine::load`).
+    pub graph: crate::graph::GraphReport,
 }
 
 type Routes = Result<Vec<TargetIdx>, String>;

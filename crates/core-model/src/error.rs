@@ -1,6 +1,6 @@
 //! The single error type of the crate.
 
-use crate::ids::{AnyId, SeqId};
+use crate::ids::{AnyId, SeqId, StripId};
 
 /// Every failure the model can report.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -11,6 +11,23 @@ pub enum ModelError {
     Cycle {
         /// The cycle, first element repeated at the end.
         path: Vec<SeqId>,
+    },
+    /// An output, send or sidechain would make the routing graph cyclic.
+    /// `path` starts and ends with the same strip.
+    #[error("routing cycle through strips {path:?}")]
+    RoutingCycle {
+        /// The cycle, first element repeated at the end.
+        path: Vec<StripId>,
+    },
+    /// An output or send targets a strip it may not target.
+    #[error("{strip} cannot route to {target}: {reason}")]
+    InvalidRoutingTarget {
+        /// The routed strip.
+        strip: StripId,
+        /// The refused target.
+        target: StripId,
+        /// Why.
+        reason: String,
     },
     /// An ID that does not exist in the document.
     #[error("unknown id {0}")]

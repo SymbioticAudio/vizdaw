@@ -345,5 +345,6 @@ pub fn validate(doc: &Document) -> Vec<String> {
     if let Some(path) = find_cycle(doc) {
         p.push(ModelError::Cycle { path }.to_string());
     }
+    p.extend(crate::mixer_rules::mixer_problems(doc));
     p
 }

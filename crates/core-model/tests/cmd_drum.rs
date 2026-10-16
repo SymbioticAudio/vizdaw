@@ -2,7 +2,10 @@ use core_model::ModelError;
 use core_model::command::{Command, DrumCmd, EventCmd, LaneCmd, SequenceCmd, apply};
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
 use core_model::event::{EventBody, EventSpec};
-use core_model::ids::{AnyId, Counters, DestId, DrumRowId, EventId, LaneId, SeqId};
+use core_model::ids::{
+    AnyId, Counters, DestId, DrumRowId, EventId, LaneId, PluginInstanceId, SeqId,
+};
+use core_model::mixer::{PluginRef, PluginSlot};
 use core_model::rules::validate;
 use core_model::time::{PPQ, Tick};
 
@@ -24,7 +27,7 @@ fn kit() -> Document {
         id: DestId(i),
         name: format!("D{i}"),
         kind: DestKind::PluginInstrument {
-            plugin_ref: "p".into(),
+            slot: PluginSlot::new(PluginInstanceId(i), PluginRef::from_legacy("p")),
         },
         default_patch: None,
     };
@@ -34,8 +37,10 @@ fn kit() -> Document {
         outputs: vec![],
         media: vec![],
         sequences: vec![],
+        mixer: None,
         counters: Counters {
             dest: 2,
+            plugin: 2,
             ..Counters::default()
         },
     })

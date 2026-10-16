@@ -326,7 +326,7 @@ fn handle_events(slot: &mut Option<Host>, doc: &Document) -> Result<(), VizError
                 let Some(mut old) = slot.take() else {
                     return Ok(());
                 };
-                let at = old.engine.position_tick();
+                let at = old.engine.transport_tick();
                 let playing = old.engine.state() == PlayState::Playing;
                 if !matches!(ev, BackendEvent::DeviceLost) {
                     // The device still renders: let the note-offs play.

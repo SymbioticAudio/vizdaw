@@ -2,9 +2,10 @@ use core_engine::EngineError;
 use core_engine::backend::MidiPortInfo;
 use core_engine::schedule::TempoTable;
 use core_engine::schedule::targets::{
-    BuiltinRoute, TargetIdx, TargetKind, TargetTable, find_port, kinds_for,
+    BuiltinRoute, MAX_TARGETS, TargetIdx, TargetKind, TargetTable, find_port, kinds_for,
 };
 use core_model::document::DestKind;
+use core_model::ids::PluginInstanceId;
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::Tick;
 use proptest::prelude::*;
@@ -48,7 +49,7 @@ fn ramp_knots_are_at_most_a_sixteenth_apart() {
 }
 
 #[test]
-fn target_table_interns_and_caps_at_16() {
+fn target_table_interns_and_caps_at_max_targets() {
     let mut t = TargetTable::new();
     assert_eq!(t.intern(TargetKind::BuiltinSynth).unwrap(), TargetIdx(0));
     assert_eq!(
@@ -56,14 +57,14 @@ fn target_table_interns_and_caps_at_16() {
         TargetIdx(1)
     );
     assert_eq!(t.intern(TargetKind::BuiltinSynth).unwrap(), TargetIdx(0));
-    for i in 0..14 {
+    for i in 0..MAX_TARGETS - 2 {
         let p = MidiPortInfo {
             name: format!("P{i}"),
             unique_id: None,
         };
         t.intern(TargetKind::MidiDestination(p)).unwrap();
     }
-    assert_eq!(t.len(), 16);
+    assert_eq!(t.len(), MAX_TARGETS);
     let p = MidiPortInfo {
         name: "one too many".into(),
         unique_id: None,
@@ -73,7 +74,17 @@ fn target_table_interns_and_caps_at_16() {
         Err(EngineError::TooManyTargets)
     );
     assert_eq!(t.get(TargetIdx(1)), Some(&TargetKind::MidiVirtualSource));
-    assert_eq!(t.iter().count(), 16);
+    assert_eq!(t.iter().count(), MAX_TARGETS);
+    // A released index is reused only after `recycle` (the next load).
+    t.release(TargetIdx(1));
+    assert_eq!(t.get(TargetIdx(1)), None);
+    assert_eq!(t.next_index(), None, "released, not free");
+    t.recycle();
+    assert_eq!(t.next_index(), Some(TargetIdx(1)));
+    assert_eq!(
+        t.intern(TargetKind::PluginInstrument(PluginInstanceId(7))),
+        Ok(TargetIdx(1))
+    );
 }
 
 #[test]
@@ -121,13 +132,10 @@ fn endpoint_refs_map_to_target_kinds() {
             .unwrap_err()
             .contains("Nope")
     );
-    let plugin = DestKind::PluginInstrument {
-        plugin_ref: "au:x".into(),
-    };
-    assert!(
-        kinds_for(&plugin, BuiltinRoute::Builtin, &ports)
-            .unwrap_err()
-            .contains("au:x")
+    let plugin = DestKind::plugin("au:x");
+    assert_eq!(
+        kinds_for(&plugin, BuiltinRoute::Builtin, &ports),
+        Ok(vec![TargetKind::PluginInstrument(PluginInstanceId(0))])
     );
     assert_eq!(find_port("11", &ports), Some(&ports[0]));
     assert_eq!(find_port("-5", &ports), Some(&ports[1]));

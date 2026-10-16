@@ -4,9 +4,10 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static COUNT: AtomicU64 = AtomicU64::new(0);
+static ARM_WORKERS: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
@@ -63,4 +64,15 @@ pub fn disarm() {
 /// Allocations counted so far (all threads).
 pub fn count() -> u64 {
     COUNT.load(Ordering::Relaxed)
+}
+
+/// Makes render workers arm themselves around every job (tests set this
+/// when they install the counting allocator).
+pub fn set_arm_workers(on: bool) {
+    ARM_WORKERS.store(on, Ordering::Relaxed);
+}
+
+/// Whether render workers arm themselves (always with `rt-check`).
+pub fn arm_workers() -> bool {
+    ARM_WORKERS.load(Ordering::Relaxed) || cfg!(feature = "rt-check")
 }

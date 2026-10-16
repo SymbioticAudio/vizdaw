@@ -1,6 +1,6 @@
 //! The `.vizdaw` package: `project.json`, `Media/` and `Autosave/`.
 //!
-//! `project.json` is `{ "format": "vizdaw-project", "version": 1,
+//! `project.json` is `{ "format": "vizdaw-project", "version": 2,
 //! "document": { … } }`. Loading migrates older versions step by step,
 //! refuses newer ones, rejects unknown fields and runs every integrity
 //! check. Saving writes a temporary file, syncs it, renames it over the old
@@ -9,17 +9,21 @@
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::history::Timestamp;
+use crate::ids::PluginInstanceId;
+use crate::mixer::{PluginRef, PluginSlot};
 use crate::rules::validate;
+use crate::state::{STATE_DIR, blob_file_name, parse_blob_file_name, try_states_in_json};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
 /// The version this build writes.
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = 2;
 /// The oldest version this build can migrate from.
 pub const FIRST_VERSION: u64 = 1;
 /// The project file name inside a package.
@@ -28,10 +32,42 @@ pub const PROJECT_FILE: &str = "project.json";
 /// A migration from version N to N+1, on raw JSON.
 pub type Migration = fn(Value) -> Result<Value>;
 
-/// Migrations indexed by `from - FIRST_VERSION`. Version 1 is the first
-/// format, so the table is empty; add `migrate_v1_to_v2` here when version
-/// 2 is introduced.
-pub const MIGRATIONS: &[Migration] = &[];
+/// Migrations indexed by `from - FIRST_VERSION`.
+pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2];
+
+/// Version 1 → 2: each plugin instrument's `plugin_ref` string becomes a
+/// `slot` holding `PluginRef::from_legacy(string)` with instance IDs 0, 1, …
+/// in destination order; `counters` gains `strip` (0) and `plugin`. The
+/// mixer is left out; loading derives it (Plan Ruling 6).
+pub fn migrate_v1_to_v2(mut v: Value) -> Result<Value> {
+    let doc = v
+        .get_mut("document")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing document"))?;
+    let mut next = 0u64;
+    if let Some(Value::Array(insts)) = doc.get_mut("instruments") {
+        for d in insts.iter_mut() {
+            let Some(p) = d.pointer_mut("/kind/plugin_instrument") else {
+                continue;
+            };
+            let name = p
+                .get("plugin_ref")
+                .and_then(Value::as_str)
+                .ok_or_else(|| corrupt("plugin_instrument without plugin_ref"))?
+                .to_string();
+            let slot = PluginSlot::new(PluginInstanceId(next), PluginRef::from_legacy(&name));
+            *p = json!({ "slot": serde_json::to_value(slot).map_err(corrupt)? });
+            next += 1;
+        }
+    }
+    let counters = doc
+        .get_mut("counters")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing counters"))?;
+    counters.insert("strip".into(), Value::from(0u64));
+    counters.insert("plugin".into(), Value::from(next));
+    Ok(v)
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,16 +179,75 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Saves `doc` into the package directory (created if missing).
+/// Writes every referenced blob that is not on disk yet (blobs are
+/// immutable, so an existing file is already right). `save` and `autosave`
+/// must not run concurrently (the FFI layer serializes them).
+fn write_states(doc: &Document, package: &Path) -> Result<()> {
+    let dir = package.join(STATE_DIR);
+    fs::create_dir_all(&dir)?;
+    for id in &doc.referenced_states() {
+        let path = dir.join(blob_file_name(*id));
+        if let Some(bytes) = doc.state_blob(*id) {
+            if !path.exists() {
+                write_atomic(&path, bytes)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort: deletes blob files referenced neither by `doc` nor by any
+/// autosave. If any autosave cannot be listed, read or parsed, or the
+/// folder cannot be read, nothing is deleted. A failed delete is ignored.
+fn prune_states(doc: &Document, package: &Path) -> Option<()> {
+    let mut keep = doc.referenced_states();
+    for a in list_autosaves(package).ok()? {
+        keep.extend(try_states_in_json(&fs::read_to_string(&a).ok()?)?);
+    }
+    let dir = package.join(STATE_DIR);
+    for entry in fs::read_dir(&dir).ok()? {
+        let path = entry.ok()?.path();
+        let id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(parse_blob_file_name);
+        if let Some(id) = id {
+            if !keep.contains(&id) {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    Some(())
+}
+
+/// Reads every referenced blob that exists in the package.
+fn read_states(doc: &mut Document, package: &Path) {
+    let dir = package.join(STATE_DIR);
+    for id in doc.referenced_states() {
+        if let Ok(bytes) = fs::read(dir.join(blob_file_name(id))) {
+            doc.states_mut().insert(id, Arc::from(bytes));
+        }
+    }
+}
+
+/// Saves `doc` into the package directory (created if missing): blobs
+/// first, then `project.json`, then unreferenced blobs are removed.
 pub fn save(doc: &Document, package: &Path) -> Result<()> {
     fs::create_dir_all(package.join("Media"))?;
     fs::create_dir_all(package.join("Autosave"))?;
-    write_atomic(&package.join(PROJECT_FILE), to_json(doc)?.as_bytes())
+    write_states(doc, package)?;
+    write_atomic(&package.join(PROJECT_FILE), to_json(doc)?.as_bytes())?;
+    // `project.json` is durable; pruning is best-effort.
+    let _ = prune_states(doc, package);
+    Ok(())
 }
 
-/// Loads the package's `project.json`.
+/// Loads the package's `project.json` and its plugin state blobs. A
+/// missing blob is listed by `Document::missing_states`, not an error.
 pub fn load(package: &Path) -> Result<Document> {
-    from_json(&fs::read_to_string(package.join(PROJECT_FILE))?)
+    let mut doc = from_json(&fs::read_to_string(package.join(PROJECT_FILE))?)?;
+    read_states(&mut doc, package);
+    Ok(doc)
 }
 
 /// Autosave copies in the package, newest first.
@@ -185,6 +280,7 @@ pub fn autosave(doc: &Document, package: &Path, at: Timestamp) -> Result<PathBuf
         ms = ms.saturating_add(1);
         path = dir.join(format!("project-{ms:020}.json"));
     }
+    write_states(doc, package)?;
     write_atomic(&path, to_json(doc)?.as_bytes())?;
     let keep = usize::try_from(doc.settings().autosave_keep.max(1)).unwrap_or(usize::MAX);
     for old in list_autosaves(package)?.into_iter().skip(keep) {

@@ -24,12 +24,15 @@ pub mod history;
 pub mod ids;
 pub mod lane;
 pub mod meter;
+pub mod mixer;
+pub mod mixer_rules;
 pub mod modify;
 pub mod query;
 pub mod rule;
 pub mod rules;
 pub mod selection;
 pub mod sequence;
+pub mod state;
 pub mod tempo;
 pub mod time;
 

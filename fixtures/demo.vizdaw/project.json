@@ -1,6 +1,6 @@
 {
   "format": "vizdaw-project",
-  "version": 1,
+  "version": 2,
   "document": {
     "settings": {
       "history_depth": 200,
@@ -1444,6 +1444,38 @@
         ]
       }
     ],
+    "mixer": {
+      "master": 0,
+      "order": [
+        1
+      ],
+      "strips": [
+        {
+          "id": 0,
+          "name": "Master",
+          "kind": "master",
+          "inserts": [],
+          "gain_db": 0.0,
+          "pan": 0.0,
+          "mute": false,
+          "solo": false,
+          "sends": [],
+          "output": "master"
+        },
+        {
+          "id": 1,
+          "name": "Built-in Synth",
+          "kind": "builtin_synth",
+          "inserts": [],
+          "gain_db": 0.0,
+          "pan": 0.0,
+          "mute": false,
+          "solo": false,
+          "sends": [],
+          "output": "master"
+        }
+      ]
+    },
     "counters": {
       "seq": 3,
       "lane": 5,
@@ -1452,7 +1484,9 @@
       "output": 0,
       "media": 0,
       "take": 5,
-      "drum_row": 3
+      "drum_row": 3,
+      "strip": 2,
+      "plugin": 0
     }
   }
 }

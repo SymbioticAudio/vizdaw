@@ -120,7 +120,10 @@ fn sample() -> Document {
             content_hash: None,
         }],
         sequences: vec![top, sub],
+        mixer: None,
         counters: Counters {
+            strip: 0,
+            plugin: 0,
             seq: 2,
             lane: 2,
             event: n,

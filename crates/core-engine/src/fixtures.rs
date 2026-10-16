@@ -2,11 +2,13 @@
 //! `fixtures`). Shared by engine tests, `vizdaw-play` and the app (2c).
 
 use core_model::command::{
-    Command, DrumCmd, EventCmd, LaneCmd, ReferenceCmd, Report, RoutingCmd, SequenceCmd, apply,
+    Command, DrumCmd, EventCmd, LaneCmd, MixerCmd, ReferenceCmd, Report, RoutingCmd, SequenceCmd,
+    apply,
 };
 use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec, LoopCount};
-use core_model::ids::{AnyId, DestId, EventId, LaneId, SeqId};
+use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
+use core_model::mixer::{PluginRef, PluginSlot, StripKind};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::{PPQ, Tick};
 use core_model::{ModelError, Result};
@@ -52,6 +54,49 @@ impl Builder {
         Ok(a.report)
     }
 
+    /// Continues building `doc`.
+    pub fn from_doc(doc: Document) -> Builder {
+        Builder { doc }
+    }
+
+    /// Applies a mixer command.
+    pub fn mixer(&mut self, cmd: MixerCmd) -> Result<Report> {
+        self.run(Command::Mixer(cmd))
+    }
+
+    /// The strip of `kind`.
+    pub fn strip_of(&self, kind: StripKind) -> Result<StripId> {
+        self.doc
+            .mixer()
+            .find_kind(kind)
+            .ok_or_else(|| ModelError::invalid(format!("no {kind:?} strip")))
+    }
+
+    /// Adds an aux bus.
+    pub fn bus(&mut self, name: &str) -> Result<StripId> {
+        let r = self.mixer(MixerCmd::AddBus {
+            name: name.into(),
+            index: None,
+        })?;
+        created(&r, |id| match id {
+            AnyId::Strip(s) => Some(*s),
+            _ => None,
+        })
+    }
+
+    /// Appends an insert to `strip`.
+    pub fn insert(&mut self, strip: StripId, plugin: PluginRef) -> Result<PluginInstanceId> {
+        let r = self.mixer(MixerCmd::AddInsert {
+            strip,
+            index: None,
+            plugin,
+        })?;
+        created(&r, |id| match id {
+            AnyId::Plugin(p) => Some(*p),
+            _ => None,
+        })
+    }
+
     /// Adds a destination.
     pub fn dest_kind(
         &mut self,
@@ -68,6 +113,27 @@ impl Builder {
             AnyId::Dest(d) => Some(*d),
             _ => None,
         })
+    }
+
+    /// Adds a plugin instrument destination playing `plugin`; returns the
+    /// destination and its instance.
+    pub fn plugin_dest(
+        &mut self,
+        name: &str,
+        plugin: PluginRef,
+    ) -> Result<(DestId, PluginInstanceId)> {
+        let d = self.dest_kind(
+            name,
+            DestKind::PluginInstrument {
+                slot: PluginSlot::new(PluginInstanceId(0), plugin),
+            },
+            None,
+        )?;
+        let slot = match self.doc.instruments().get(&d).map(|x| &x.kind) {
+            Some(DestKind::PluginInstrument { slot }) => slot.id,
+            _ => return Err(ModelError::invalid("not a plugin instrument")),
+        };
+        Ok((d, slot))
     }
 
     /// Adds a MIDI-endpoint destination on group 0.

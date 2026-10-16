@@ -1,13 +1,14 @@
 use core_model::ModelError;
 use core_model::command::{Command, EventCmd, SequenceCmd, SettingsCmd, apply};
-use core_model::document::Document;
+use core_model::document::{DestKind, Document};
 use core_model::event::{EventBody, EventSpec};
 use core_model::file::{
     FORMAT, Migration, VERSION, autosave, from_json, list_autosaves, load, run_migrations, save,
     to_json,
 };
 use core_model::history::Timestamp;
-use core_model::ids::{LaneId, SeqId};
+use core_model::ids::{DestId, LaneId, OutputPathId, PluginInstanceId, SeqId, StripId};
+use core_model::mixer::{Output, PluginFormat, PluginRef, StripKind};
 use core_model::query::{flatten, seq_length};
 use core_model::selection::ViewFilter;
 use core_model::time::{PPQ, Tick};
@@ -30,7 +31,7 @@ fn temp_package(tag: &str) -> PathBuf {
 
 fn fixture(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("tests/fixtures/v1")
         .join(format!("{name}.json"));
     std::fs::read_to_string(path).unwrap()
 }
@@ -112,6 +113,8 @@ fn unknown_fields_are_rejected_at_every_level() {
     for pointer in [
         "",
         "/document",
+        "/document/mixer",
+        "/document/mixer/strips/0",
         "/document/sequences/0",
         "/document/sequences/0/lanes/0/takes/0/events/0/body",
     ] {
@@ -233,9 +236,12 @@ fn summary(d: &Document) -> Value {
 
 fn golden(name: &str) {
     let text = fixture(name);
+    // Version-1 input: loading migrates it.
     let d = from_json(&text).unwrap();
-    // Canonical: re-serializing reproduces the fixture byte for byte.
-    assert_eq!(to_json(&d).unwrap() + "\n", text);
+    let v2 = to_json(&d).unwrap();
+    assert!(v2.contains("\"version\": 2"), "{name}");
+    // Canonical: a version-2 file re-serializes byte for byte.
+    assert_eq!(to_json(&from_json(&v2).unwrap()).unwrap(), v2, "{name}");
     insta::assert_json_snapshot!(name, summary(&d));
 }
 
@@ -363,4 +369,63 @@ fn unknown_fields_inside_persisted_enums_are_rejected() {
             "{name}: bogus field accepted"
         );
     }
+}
+
+#[test]
+fn v1_plugin_instruments_migrate_to_slots_and_strips() {
+    let d = from_json(&fixture("mixed_lanes")).unwrap();
+    let DestKind::PluginInstrument { slot } = &d.instruments().get(&DestId(0)).unwrap().kind else {
+        panic!("dest0 is not a plugin instrument");
+    };
+    assert_eq!(slot.id, PluginInstanceId(0));
+    assert_eq!(slot.plugin, PluginRef::from_legacy("au:piano"));
+    assert_eq!(slot.plugin.format, PluginFormat::Au);
+    assert!(slot.params.is_empty() && slot.state.is_none() && !slot.bypass);
+    let strips: Vec<(StripId, StripKind, String)> = d
+        .mixer()
+        .strips()
+        .values()
+        .map(|s| (s.id, s.kind, s.name.clone()))
+        .collect();
+    assert_eq!(
+        strips,
+        vec![
+            (StripId(0), StripKind::Master, "Master".to_string()),
+            (
+                StripId(1),
+                StripKind::Instrument(DestId(0)),
+                "Piano".to_string()
+            ),
+            (
+                StripId(2),
+                StripKind::AudioPath(OutputPathId(0)),
+                "Main".to_string()
+            ),
+        ]
+    );
+    assert!(
+        d.mixer()
+            .strips()
+            .values()
+            .all(|s| s.output == Output::Master)
+    );
+    assert_eq!((d.counters().strip, d.counters().plugin), (3, 1));
+    let v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    assert_eq!(v["version"], 2);
+    assert_eq!(
+        v["document"]["instruments"][0]["kind"]["plugin_instrument"]["slot"]["plugin"]["format"],
+        "au"
+    );
+
+    // drum_lane: dest0 is an external endpoint, dest1 the plugin "clap:perc".
+    let d = from_json(&fixture("drum_lane")).unwrap();
+    assert_eq!(
+        d.mixer().find_kind(StripKind::Instrument(DestId(1))),
+        Some(StripId(1))
+    );
+    assert_eq!(d.mixer().find_kind(StripKind::BuiltinSynth), None);
+    assert_eq!(
+        d.plugin_slot(PluginInstanceId(0)).unwrap().plugin.id,
+        "clap:perc"
+    );
 }

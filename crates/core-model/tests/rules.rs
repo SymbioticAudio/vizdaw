@@ -41,6 +41,7 @@ fn doc_with_refs(n: u64, refs: &[(u64, u64)]) -> Document {
             content_hash: None,
         }],
         sequences: seqs,
+        mixer: None,
         counters: Counters {
             seq: n,
             lane: n,

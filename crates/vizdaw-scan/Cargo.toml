@@ -1,0 +1,18 @@
+[package]
+name = "vizdaw-scan"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+core-host = { path = "../core-host" }
+core-engine = { path = "../core-engine" }
+core-model = { path = "../core-model" }
+serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+platform-macos = { path = "../platform-macos" }
+
+[dev-dependencies]
+test-plugins = { path = "../test-plugins" }

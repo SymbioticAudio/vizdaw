@@ -56,9 +56,7 @@ fn base() -> Document {
             Destination {
                 id: DestId(0),
                 name: "Plug".into(),
-                kind: DestKind::PluginInstrument {
-                    plugin_ref: "p".into(),
-                },
+                kind: DestKind::plugin("p"),
                 default_patch: None,
             },
             Destination {
@@ -75,8 +73,10 @@ fn base() -> Document {
         outputs: vec![],
         media: vec![],
         sequences: vec![],
+        mixer: None,
         counters: Counters {
             dest: 2,
+            plugin: 1,
             ..Counters::default()
         },
     })

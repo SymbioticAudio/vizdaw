@@ -7,13 +7,15 @@ rust-version.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-engine = { path = "../core-engine" }
+core-host = { path = "../core-host" }
+core-model = { path = "../core-model" }
 rtrb = "0.4"
 block2 = "0.6"
 objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "HostTime", "objc2-core-audio-types"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
-objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AudioComponent", "AUComponent", "AudioUnitProperties", "MusicDevice", "objc2-core-audio-types"] }
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AudioComponent", "AUComponent", "AudioUnitProperties", "AudioUnitUtilities", "MusicDevice", "objc2-core-audio-types", "objc2-core-foundation", "block2"] }
 objc2-core-midi = { version = "0.3.2", default-features = false, features = ["std", "MIDIServices", "MIDIMessages", "objc2", "objc2-core-foundation", "block2"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString", "CFData", "CFError", "CFPropertyList"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 core-engine = { path = "../core-engine", features = ["fixtures"] }

@@ -4,9 +4,11 @@
 use crate::backend::MidiPortInfo;
 use crate::error::EngineError;
 use core_model::document::DestKind;
+use core_model::ids::PluginInstanceId;
 
-/// Most targets one engine can drive.
-pub const MAX_TARGETS: usize = 16;
+/// Most targets one engine can drive at once (Plan Ruling 4: plugin
+/// instruments are targets too).
+pub const MAX_TARGETS: usize = 64;
 
 /// Index into a [`TargetTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -21,10 +23,13 @@ pub enum TargetKind {
     MidiVirtualSource,
     /// An existing MIDI destination.
     MidiDestination(MidiPortInfo),
+    /// A plugin instrument destination's instance (its sink comes from the
+    /// engine's plugin factory, `InsertFactory::make_instrument`).
+    PluginInstrument(PluginInstanceId),
 }
 
 /// Endpoint reference that selects the built-in synth.
-pub const BUILTIN_SYNTH_REF: &str = "builtin:synth";
+pub use core_model::mixer::BUILTIN_SYNTH_REF;
 /// Endpoint reference that selects the virtual source.
 pub const VIRTUAL_OUT_REF: &str = "virtual:out";
 
@@ -40,12 +45,25 @@ pub enum BuiltinRoute {
     Both,
 }
 
-/// The targets of an engine, in creation order. Targets are only ever
-/// appended (a failed load rolls back the ones it added before any sink
-/// reached the renderer), so an index stays valid for the engine's lifetime.
+/// One entry of a [`TargetTable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Entry {
+    /// In use.
+    Live(TargetKind),
+    /// Released by this load: its sink is being removed, and a schedule
+    /// still queued may name it, so it is not reused before the next load.
+    Released,
+    /// Reusable.
+    Free,
+}
+
+/// The targets of an engine. An index names one target from `intern`
+/// until `release`; a released index is reused only from the next load on
+/// (`recycle`), after every schedule that named it was replaced (Plan
+/// Ruling 4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TargetTable {
-    kinds: Vec<TargetKind>,
+    kinds: Vec<Entry>,
 }
 
 impl TargetTable {
@@ -54,55 +72,96 @@ impl TargetTable {
         TargetTable::default()
     }
 
-    /// The index of `kind`, if present.
+    /// The index of live `kind`, if present.
     pub fn find(&self, kind: &TargetKind) -> Option<TargetIdx> {
         self.kinds
             .iter()
-            .position(|k| k == kind)
+            .position(|k| matches!(k, Entry::Live(x) if x == kind))
             .and_then(|i| u8::try_from(i).ok())
             .map(TargetIdx)
     }
 
-    /// Adds `kind` (or returns its existing index).
+    /// The index the next new target gets, or `None` when the table is
+    /// full.
+    pub fn next_index(&self) -> Option<TargetIdx> {
+        let i = self
+            .kinds
+            .iter()
+            .position(|k| *k == Entry::Free)
+            .unwrap_or(self.kinds.len());
+        if i >= MAX_TARGETS {
+            return None;
+        }
+        u8::try_from(i).ok().map(TargetIdx)
+    }
+
+    /// Adds `kind` at [`TargetTable::next_index`] (or returns its existing
+    /// index).
     pub fn intern(&mut self, kind: TargetKind) -> Result<TargetIdx, EngineError> {
         if let Some(i) = self.find(&kind) {
             return Ok(i);
         }
-        if self.kinds.len() >= MAX_TARGETS {
-            return Err(EngineError::TooManyTargets);
+        let i = self.next_index().ok_or(EngineError::TooManyTargets)?;
+        match self.kinds.get_mut(usize::from(i.0)) {
+            Some(e) => *e = Entry::Live(kind),
+            None => self.kinds.push(Entry::Live(kind)),
         }
-        let i = u8::try_from(self.kinds.len()).map_err(|_| EngineError::TooManyTargets)?;
-        self.kinds.push(kind);
-        Ok(TargetIdx(i))
+        Ok(i)
     }
 
-    /// Drops targets added after the table had `len` entries (rollback of
-    /// a failed load whose new targets never got sinks).
-    pub(crate) fn truncate(&mut self, len: usize) {
-        self.kinds.truncate(len);
+    /// Stops using `idx` (its sink is being removed).
+    pub fn release(&mut self, idx: TargetIdx) {
+        if let Some(e) = self.kinds.get_mut(usize::from(idx.0)) {
+            if matches!(e, Entry::Live(_)) {
+                *e = Entry::Released;
+            }
+        }
     }
 
-    /// The kind at `idx`.
+    /// Forgets `idx` at once (a failed load's target that never got a
+    /// sink).
+    pub(crate) fn forget(&mut self, idx: TargetIdx) {
+        if let Some(e) = self.kinds.get_mut(usize::from(idx.0)) {
+            *e = Entry::Free;
+        }
+    }
+
+    /// Makes indices released by earlier loads reusable (start of a load).
+    pub fn recycle(&mut self) {
+        for e in &mut self.kinds {
+            if *e == Entry::Released {
+                *e = Entry::Free;
+            }
+        }
+    }
+
+    /// The live kind at `idx`.
     pub fn get(&self, idx: TargetIdx) -> Option<&TargetKind> {
-        self.kinds.get(usize::from(idx.0))
+        match self.kinds.get(usize::from(idx.0)) {
+            Some(Entry::Live(k)) => Some(k),
+            _ => None,
+        }
     }
 
-    /// Number of targets.
+    /// Number of live targets.
     pub fn len(&self) -> usize {
-        self.kinds.len()
-    }
-
-    /// True when there are no targets.
-    pub fn is_empty(&self) -> bool {
-        self.kinds.is_empty()
-    }
-
-    /// `(index, kind)` pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (TargetIdx, &TargetKind)> + '_ {
         self.kinds
             .iter()
-            .enumerate()
-            .filter_map(|(i, k)| u8::try_from(i).ok().map(|i| (TargetIdx(i), k)))
+            .filter(|k| matches!(k, Entry::Live(_)))
+            .count()
+    }
+
+    /// True when there are no live targets.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// `(index, kind)` of every live target, by index.
+    pub fn iter(&self) -> impl Iterator<Item = (TargetIdx, &TargetKind)> + '_ {
+        self.kinds.iter().enumerate().filter_map(|(i, k)| match k {
+            Entry::Live(k) => u8::try_from(i).ok().map(|i| (TargetIdx(i), k)),
+            _ => None,
+        })
     }
 }
 
@@ -114,9 +173,7 @@ pub fn kinds_for(
     ports: &[MidiPortInfo],
 ) -> Result<Vec<TargetKind>, String> {
     match kind {
-        DestKind::PluginInstrument { plugin_ref } => Err(format!(
-            "plugin instrument {plugin_ref:?} cannot play until plugin hosting exists"
-        )),
+        DestKind::PluginInstrument { slot } => Ok(vec![TargetKind::PluginInstrument(slot.id)]),
         DestKind::MidiEndpoint { endpoint_ref, .. } => match endpoint_ref.as_str() {
             BUILTIN_SYNTH_REF => Ok(match route {
                 BuiltinRoute::Builtin => vec![TargetKind::BuiltinSynth],

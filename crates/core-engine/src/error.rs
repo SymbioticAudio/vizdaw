@@ -26,6 +26,10 @@ pub enum BackendError {
     /// The built-in synth's audio component is not installed.
     #[error("audio component missing")]
     ComponentMissing,
+    /// This factory does not make sinks of this kind (plugin instruments
+    /// come from the plugin factory).
+    #[error("{0} is not made by this sink factory")]
+    NotSupported(String),
 }
 
 /// Failures of the non-real-time engine API.
@@ -43,8 +47,8 @@ pub enum EngineError {
     /// The command ring to the audio thread is full; retry later.
     #[error("engine command queue is full")]
     Busy,
-    /// The document needs more than 16 playback targets.
-    #[error("more than 16 playback targets")]
+    /// The document needs more than `MAX_TARGETS` (64) playback targets.
+    #[error("more than 64 playback targets")]
     TooManyTargets,
     /// A helper thread could not be started.
     #[error("cannot start thread {name:?}: {reason}")]

@@ -5,8 +5,11 @@ use core_model::command::{
 };
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
 use core_model::event::{EventBody, EventKind, EventSpec, Fade, LoopCount};
-use core_model::ids::{AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, SeqId};
+use core_model::ids::{
+    AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, PluginInstanceId, SeqId,
+};
 use core_model::lane::QuantizeSpec;
+use core_model::mixer::{PluginRef, PluginSlot};
 use core_model::query::{flatten, seq_length, use_count, users_of};
 use core_model::rules::{find_cycle, validate};
 use core_model::selection::{Selection, ViewFilter};
@@ -67,7 +70,7 @@ fn base() -> Document {
         id: DestId(i),
         name: format!("D{i}"),
         kind: DestKind::PluginInstrument {
-            plugin_ref: "p".into(),
+            slot: PluginSlot::new(PluginInstanceId(i), PluginRef::from_legacy("p")),
         },
         default_patch: None,
     };
@@ -77,8 +80,10 @@ fn base() -> Document {
         outputs: vec![],
         media: vec![],
         sequences: vec![],
+        mixer: None,
         counters: Counters {
             dest: 2,
+            plugin: 2,
             ..Counters::default()
         },
     })

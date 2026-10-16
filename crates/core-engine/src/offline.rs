@@ -110,7 +110,8 @@ impl EventLog {
     }
 
     /// A new log for `target`, replacing any earlier one (whose sink was
-    /// dropped with a failed load and never played).
+    /// dropped with a failed load, or removed before its index was reused;
+    /// unread records of the old target are discarded).
     fn add(&self, target: TargetIdx, capacity: usize) -> Producer<LogRecord> {
         let (tx, rx) = RingBuffer::new(capacity);
         if let Ok(mut readers) = self.readers.lock() {
@@ -121,12 +122,114 @@ impl EventLog {
     }
 }
 
-/// An instrument that records what it receives and renders silence.
+/// A deterministic, sample-accurate test voice (Plan Ruling 27): every
+/// held note adds a quiet sawtooth whose period depends on its pitch;
+/// events apply at their frame offsets.
+struct Tone {
+    on: [u128; 16],
+    events: [(u32, [u8; 3]); 64],
+    len: usize,
+    t: u64,
+}
+
+impl Tone {
+    fn new() -> Tone {
+        Tone {
+            on: [0; 16],
+            events: [(0, [0; 3]); 64],
+            len: 0,
+            t: 0,
+        }
+    }
+
+    /// Queues a message for the next render (at most 64 per block). // RT
+    fn queue(&mut self, offset: u32, msg: &[u8]) {
+        let (Some(&s), Some(slot)) = (msg.first(), self.events.get_mut(self.len)) else {
+            return;
+        };
+        *slot = (
+            offset,
+            [
+                s,
+                msg.get(1).copied().unwrap_or(0),
+                msg.get(2).copied().unwrap_or(0),
+            ],
+        );
+        self.len += 1;
+    }
+
+    fn apply(&mut self, [s, d1, d2]: [u8; 3]) {
+        let Some(mask) = self.on.get_mut(usize::from(s & 0x0F)) else {
+            return;
+        };
+        let bit = 1u128 << (d1 & 0x7F);
+        match s & 0xF0 {
+            0x90 if d2 > 0 => *mask |= bit,
+            0x80 | 0x90 => *mask &= !bit,
+            0xB0 if d1 == 123 => *mask = 0,
+            _ => {}
+        }
+    }
+
+    /// Renders `frames` frames, applying queued events at their offsets. // RT
+    fn render(&mut self, frames: u32, out: &mut StereoBuf) {
+        let n = (frames as usize).min(out.left.len()).min(out.right.len());
+        let mut next = 0;
+        for f in 0..n {
+            while next < self.len {
+                let Some(&(off, m)) = self.events.get(next) else {
+                    break;
+                };
+                if off as usize > f {
+                    break;
+                }
+                self.apply(m);
+                next += 1;
+            }
+            let mut v = 0.0f32;
+            for mask in self.on {
+                let mut m = mask;
+                while m != 0 {
+                    let p = u64::from(m.trailing_zeros());
+                    m &= m - 1;
+                    v += ((self.t.wrapping_mul(p + 1) % 512) as f32 / 512.0 - 0.5) * 0.02;
+                }
+            }
+            if let (Some(l), Some(r)) = (out.left.get_mut(f), out.right.get_mut(f)) {
+                *l = v;
+                *r = v;
+            }
+            self.t += 1;
+        }
+        self.flush(next);
+    }
+
+    /// Applies the queued events from index `from` on and empties the
+    /// queue. // RT
+    fn flush(&mut self, from: usize) {
+        for i in from..self.len {
+            if let Some(&(_, m)) = self.events.get(i) {
+                self.apply(m);
+            }
+        }
+        self.len = 0;
+    }
+
+    /// A block passed unrendered. // RT
+    fn skip(&mut self, frames: u32) {
+        self.flush(0);
+        self.t += u64::from(frames);
+    }
+}
+
+/// An instrument that records what it receives and renders silence (or,
+/// from [`OfflineSinks::with_tone`], a test tone).
 pub struct RecordingNode {
     tx: Producer<LogRecord>,
     target: TargetIdx,
     rendered: u64,
     dropped: Arc<AtomicU64>,
+    tone: Option<Box<Tone>>,
 }
 
 impl InstrumentNode for RecordingNode {
@@ -135,16 +238,25 @@ impl InstrumentNode for RecordingNode {
         if self.tx.push(r).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
+        if let Some(t) = self.tone.as_mut() {
+            t.queue(offset, msg);
+        }
     }
 
     fn render(&mut self, frames: u32, out: &mut StereoBuf) {
-        out.clear(frames);
+        match self.tone.as_mut() {
+            Some(t) => t.render(frames, out),
+            None => out.clear(frames),
+        }
         self.rendered += u64::from(frames);
     }
 
     fn reset(&mut self) {}
 
     fn skip(&mut self, frames: u32) {
+        if let Some(t) = self.tone.as_mut() {
+            t.skip(frames);
+        }
         self.rendered += u64::from(frames);
     }
 }
@@ -179,6 +291,7 @@ pub struct OfflineSinks {
     /// When false, every MIDI output refuses messages (tests the
     /// midi-dropped fault).
     pub midi_accepts: bool,
+    tone: bool,
 }
 
 impl OfflineSinks {
@@ -189,12 +302,20 @@ impl OfflineSinks {
             capacity,
             ports: Vec::new(),
             midi_accepts: true,
+            tone: false,
         }
     }
 
     /// Pretends these MIDI destinations exist.
     pub fn with_ports(mut self, ports: Vec<MidiPortInfo>) -> OfflineSinks {
         self.ports = ports;
+        self
+    }
+
+    /// Built-in synth sinks also render a deterministic test tone (Plan
+    /// Ruling 27).
+    pub fn with_tone(mut self) -> OfflineSinks {
+        self.tone = true;
         self
     }
 
@@ -216,6 +337,9 @@ impl SinkFactory for OfflineSinks {
         sample_rate: f64,
         _max_frames: u32,
     ) -> Result<Sink, BackendError> {
+        if let TargetKind::PluginInstrument(id) = kind {
+            return Err(BackendError::NotSupported(format!("plugin instance {id}")));
+        }
         let tx = self.log.add(target, self.capacity);
         Ok(match kind {
             TargetKind::BuiltinSynth => Sink::Instrument(Box::new(RecordingNode {
@@ -223,15 +347,16 @@ impl SinkFactory for OfflineSinks {
                 target,
                 rendered: 0,
                 dropped: Arc::clone(&self.log.dropped),
+                tone: self.tone.then(|| Box::new(Tone::new())),
             })),
-            TargetKind::MidiVirtualSource | TargetKind::MidiDestination(_) => {
-                Sink::Midi(Box::new(RecordingMidiOut {
-                    tx,
-                    target,
-                    sample_rate,
-                    accept: self.midi_accepts,
-                }))
-            }
+            TargetKind::MidiVirtualSource
+            | TargetKind::MidiDestination(_)
+            | TargetKind::PluginInstrument(_) => Sink::Midi(Box::new(RecordingMidiOut {
+                tx,
+                target,
+                sample_rate,
+                accept: self.midi_accepts,
+            })),
         })
     }
 }
@@ -318,6 +443,16 @@ impl OfflineBackend {
             self.reserve(n);
             self.block(n);
         }
+    }
+
+    /// The last block's output: `frames` frames of the left and right
+    /// channels.
+    pub fn output(&self, frames: u32) -> (&[f32], &[f32]) {
+        let n = frames as usize;
+        (
+            self.left.get(..n).unwrap_or(&[]),
+            self.right.get(..n).unwrap_or(&[]),
+        )
     }
 
     /// Mutable access to the running renderer (not RT; for tests).

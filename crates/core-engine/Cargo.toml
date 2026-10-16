@@ -8,11 +8,13 @@ rust-version.workspace = true
 [features]
 # `fixtures::demo_document()` and the document `Builder`.
 fixtures = []
-# Arms `rt_check` around every `Renderer::process` call.
+# Arms `rt_check` around every `Renderer::process` call and around every
+# job a render worker runs.
 rt-check = []
 
 [dependencies]
 core-model = { path = "../core-model" }
+crossbeam-queue = "0.3"
 rtrb = "0.4"
 thiserror = "2"
 

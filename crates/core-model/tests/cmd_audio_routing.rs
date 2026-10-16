@@ -43,9 +43,7 @@ fn base() -> Document {
         },
         RoutingCmd::AddDestination {
             name: "Plug".into(),
-            kind: DestKind::PluginInstrument {
-                plugin_ref: "p".into(),
-            },
+            kind: DestKind::plugin("p"),
             default_patch: Some(Patch {
                 program: 3,
                 bank: Some((0, 1)),

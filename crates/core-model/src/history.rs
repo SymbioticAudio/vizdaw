@@ -4,6 +4,7 @@
 use crate::command::{Command, Context, Report, apply_in};
 use crate::document::Document;
 use crate::error::{ModelError, Result};
+use crate::ids::{PluginInstanceId, StateBlobId};
 use crate::modify::Modify;
 use crate::rule::SelectMode;
 use crate::selection::{Selection, ViewFilter};
@@ -267,5 +268,19 @@ impl History {
         self.future = t.base_future;
         self.selection = self.selection.retain_existing(&self.present.doc);
         Ok(())
+    }
+
+    /// Stores `bytes` as plugin instance `slot`'s state and clears its
+    /// overlay in the present version, without an undo step (Plan Ruling
+    /// 9). Refused inside an open transaction.
+    pub fn capture_state(&mut self, slot: PluginInstanceId, bytes: &[u8]) -> Result<StateBlobId> {
+        if self.txn.is_some() {
+            return Err(ModelError::invalid(
+                "cannot capture plugin state inside a transaction",
+            ));
+        }
+        let (doc, id) = crate::state::capture(&self.present.doc, slot, bytes)?;
+        self.present.doc = doc;
+        Ok(id)
     }
 }

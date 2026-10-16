@@ -7,7 +7,7 @@ use core_engine::backend::{BlockTime, InstrumentNode, MidiOut, MidiPortInfo, Ste
 use core_engine::engine::{Engine, EngineConfig, SinkFactory, find_sequence};
 use core_engine::fixtures::{Builder, Q};
 use core_engine::render::{Faults, Renderer, Sink};
-use core_engine::schedule::{BuiltinRoute, TargetIdx, TargetKind};
+use core_engine::schedule::{BuiltinRoute, MAX_TARGETS, TargetIdx, TargetKind};
 use core_engine::transport::PlayState;
 use core_model::document::Document;
 use core_model::ids::SeqId;
@@ -122,7 +122,11 @@ fn events_land_at_their_offsets_and_stop_releases() {
     engine.play().unwrap();
     let mut ns = 0;
     let out = blocks(&mut r, 50, 1000, &mut ns); // 50 000 frames
-    assert_eq!(out[0], 0.25, "instrument output is mixed into channel 0");
+    assert_eq!(
+        out[0],
+        0.25 * std::f32::consts::FRAC_1_SQRT_2,
+        "instrument output reaches channel 0 through the built-in strip (−3 dB pan law)"
+    );
     assert_eq!(engine.state(), PlayState::Playing);
     assert_eq!(engine.position_frames(), 50_000);
     engine.stop().unwrap();
@@ -238,7 +242,7 @@ impl MidiOut for PortOut {
 
 impl SinkFactory for PortFactory {
     fn ports(&self) -> Vec<MidiPortInfo> {
-        (0..17)
+        (0..=MAX_TARGETS)
             .map(|i| MidiPortInfo {
                 name: format!("Port {i}"),
                 unique_id: None,
@@ -281,13 +285,13 @@ fn failed_load_leaves_the_target_table_unchanged() {
     let f = PortFactory::default();
     let (mut engine, mut r) =
         Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
-    let (doc, seq) = ports_doc(17);
+    let (doc, seq) = ports_doc(MAX_TARGETS + 1);
     assert_eq!(engine.load(&doc, seq), Err(EngineError::TooManyTargets));
     assert!(engine.targets().is_empty(), "{:?}", engine.targets());
 
-    let (doc, seq) = ports_doc(16);
+    let (doc, seq) = ports_doc(MAX_TARGETS);
     engine.load(&doc, seq).unwrap();
-    assert_eq!(engine.targets().len(), 16);
+    assert_eq!(engine.targets().len(), MAX_TARGETS);
     engine.play().unwrap();
     let mut ns = 0;
     blocks(&mut r, 1, 64, &mut ns);
@@ -300,7 +304,7 @@ fn failed_load_leaves_the_target_table_unchanged() {
         .map(|(p, _)| *p)
         .collect();
     sounded.sort();
-    assert_eq!(sounded, (0..16).collect::<Vec<_>>());
+    assert_eq!(sounded, (0..MAX_TARGETS).collect::<Vec<_>>());
 }
 
 #[test]
@@ -341,9 +345,9 @@ fn engine_errors() {
         engine.load(&doc, SeqId(99)),
         Err(EngineError::Model(_))
     ));
-    // The command ring holds 64 commands; nothing drains it here.
+    // The command ring holds 256 commands; nothing drains it here.
     let mut busy = false;
-    for _ in 0..100 {
+    for _ in 0..300 {
         if engine.play() == Err(EngineError::Busy) {
             busy = true;
             break;

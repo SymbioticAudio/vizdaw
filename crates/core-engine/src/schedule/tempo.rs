@@ -104,6 +104,26 @@ impl TempoTable {
         Tick(t.round() as i64)
     }
 
+    /// The tempo at `frame` in beats per minute (the local slope of the
+    /// map). // RT
+    pub fn bpm_at(&self, frame: u64, sample_rate: f64) -> f64 {
+        let f = frame as f64;
+        let i = self.knots.partition_point(|k| k.frame <= f);
+        let slope = match (
+            i.checked_sub(1).and_then(|j| self.knots.get(j)),
+            self.knots.get(i),
+        ) {
+            (Some(a), Some(b)) if b.tick > a.tick => (b.frame - a.frame) / (b.tick - a.tick) as f64,
+            (None, Some(_)) => self.head_slope,
+            _ => self.tail_slope,
+        };
+        if slope > 0.0 {
+            60.0 * sample_rate / (slope * PPQ as f64)
+        } else {
+            120.0
+        }
+    }
+
     /// The frame at `tick`, rounded to the nearest frame (0 before the
     /// origin). // RT
     pub fn tick_to_frame(&self, tick: Tick) -> u64 {

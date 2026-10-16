@@ -157,3 +157,176 @@ fn bad_arguments_are_refused() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot load"));
 }
+
+#[test]
+fn offline_render_with_workers_matches_the_checked_in_log() {
+    let dir = temp("workers");
+    let log = dir.join("demo.txt");
+    let out = bin()
+        .arg(repo().join("fixtures/demo.vizdaw"))
+        .args(["--seq", "Song", "--workers", "4", "--offline"])
+        .arg(&log)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = std::fs::read_to_string(&log).unwrap();
+    let want = std::fs::read_to_string(repo().join("fixtures/demo.offline.txt")).unwrap();
+    assert!(
+        got == want,
+        "offline log with workers differs from fixtures/demo.offline.txt"
+    );
+}
+
+#[test]
+fn too_many_workers_are_refused() {
+    let out = bin()
+        .arg(repo().join("fixtures/demo.vizdaw"))
+        .args(["--workers", "16", "--offline", "x.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn scan_fills_the_catalog_and_plugins_lists_it() {
+    let dir = temp("scan");
+    let plugins = dir.join("clap");
+    std::fs::create_dir_all(&plugins).unwrap();
+    let bundle = test_plugins::bundle();
+    copy_dir(&bundle, &plugins.join("VizDAW Test.clap"));
+    let catalog = dir.join("plugins.json");
+    let out = bin()
+        .args([
+            "--scan",
+            "--no-au",
+            "--scan-timeout-ms",
+            "2000",
+            "--catalog",
+        ])
+        .arg(&catalog)
+        .arg("--clap-dir")
+        .arg(&plugins)
+        .arg("--scanner")
+        .arg(test_plugins::scanner())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        "clap:vizdaw.test.gain  Test Gain (VizDAW)  OK",
+        "clap:vizdaw.test.crasher  Test Crasher (VizDAW)  Blocklisted: crashed (signal 11)",
+        "clap:vizdaw.test.hanger  Test Hanger (VizDAW)  Blocklisted: timed out",
+    ] {
+        assert!(
+            text.lines().any(|l| l == line),
+            "missing {line:?} in\n{text}"
+        );
+    }
+    // The catalog persists; listing does not scan again.
+    let out = bin()
+        .arg("--plugins")
+        .arg("--catalog")
+        .arg(&catalog)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), text);
+}
+
+#[test]
+fn bad_plugin_arguments_are_errors() {
+    let dir = temp("badplugin");
+    let catalog = dir.join("plugins.json");
+    for (arg, want) in [
+        (
+            "--insert=Nowhere=au:aufx/dely/appl",
+            "no strip named \"Nowhere\"",
+        ),
+        ("--insert=Master=vst3:x", "expected au:<id> or clap:<id>"),
+        (
+            "--instrument=Nobody=clap:x",
+            "no destination named \"Nobody\"",
+        ),
+    ] {
+        let out = bin()
+            .arg(repo().join("fixtures/demo.vizdaw"))
+            .arg(arg)
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["--offline"])
+            .arg(dir.join("x.txt"))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{arg}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(want), "{arg}: {err}");
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    if from.is_file() {
+        std::fs::copy(from, to).unwrap();
+        return;
+    }
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        copy_dir(&e.path(), &to.join(e.file_name()));
+    }
+}
+
+#[test]
+fn offline_and_list_leave_the_catalog_alone() {
+    let dir = temp("lazycat");
+    let home = dir.join("home");
+    let cat = home.join("Library/Application Support/VizDAW/plugins.json");
+    std::fs::create_dir_all(cat.parent().unwrap()).unwrap();
+    std::fs::write(&cat, "not json").unwrap();
+    let demo = repo().join("fixtures/demo.vizdaw");
+    let out = bin()
+        .env("HOME", &home)
+        .arg(&demo)
+        .arg("--offline")
+        .arg(dir.join("x.txt"))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = bin()
+        .env("HOME", &home)
+        .arg(&demo)
+        .arg("--list")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(std::fs::read_to_string(&cat).unwrap(), "not json");
+    assert!(!cat.with_file_name("plugins.json.corrupt").exists());
+}
+
+#[test]
+fn plugin_argument_validation() {
+    let demo = repo().join("fixtures/demo.vizdaw");
+    for args in [
+        vec!["--scan", "--scan-timeout-ms", "0"],
+        vec!["--scan", "--insert", "Master=clap:x"],
+        vec!["--plugins", "--instrument", "A=clap:x"],
+    ] {
+        let out = bin().args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+    let out = bin()
+        .arg(&demo)
+        .args(["--insert", "Master=clap:", "--offline"])
+        .arg(temp("emptyid").join("x.txt"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("empty plugin id"));
+}
