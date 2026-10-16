@@ -17,3 +17,4 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 core-engine = { path = "../core-engine", features = ["fixtures"] }
+core-model = { path = "../core-model" }

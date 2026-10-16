@@ -5,6 +5,7 @@ use core_engine::BackendError;
 use core_engine::backend::{
     AudioBackend, AudioConfig, BackendEvent, BlockTime, MAX_FRAMES, StreamInfo,
 };
+use core_engine::pool::RtWorkgroup;
 use core_engine::render::{Faults, Renderer};
 use objc2_core_audio::{
     AudioConvertHostTimeToNanos, AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID,
@@ -13,11 +14,11 @@ use objc2_core_audio::{
     AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyScope,
     AudioObjectPropertySelector, AudioObjectRemovePropertyListener, AudioObjectSetPropertyData,
     kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyDeviceIsAlive,
-    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreamConfiguration,
-    kAudioDevicePropertyStreams, kAudioHardwarePropertyDefaultOutputDevice,
-    kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain, kAudioObjectPropertyName,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
-    kAudioStreamPropertyVirtualFormat,
+    kAudioDevicePropertyIOThreadOSWorkgroup, kAudioDevicePropertyNominalSampleRate,
+    kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyStreams,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, kAudioStreamPropertyVirtualFormat,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
@@ -499,6 +500,23 @@ impl CoreAudioBackend {
     /// What `open` found.
     pub fn info(&self) -> Option<&StreamInfo> {
         self.info.as_ref()
+    }
+
+    /// The open device's IO-thread workgroup, for render workers to join
+    /// (spec §7); `None` when closed or unsupported.
+    pub fn workgroup(&self) -> Option<Arc<dyn RtWorkgroup>> {
+        let device = self.device?;
+        let raw: usize = get(
+            device,
+            kAudioDevicePropertyIOThreadOSWorkgroup,
+            kAudioObjectPropertyScopeGlobal,
+        )
+        .ok()?;
+        // SAFETY: the HAL returns a retained `os_workgroup_t` that "the
+        // caller is responsible for releasing" (AudioHardware.h);
+        // `OsWorkgroup` releases it on drop.
+        let wg = unsafe { crate::rt::OsWorkgroup::from_owned(raw as *mut c_void) }?;
+        Some(Arc::new(wg))
     }
 
     fn listen(&mut self, device: AudioObjectID, follow_default: bool) {

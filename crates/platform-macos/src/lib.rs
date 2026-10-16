@@ -1,7 +1,7 @@
 //! `platform-macos`: CoreAudio HAL output, CoreMIDI output and Apple's DLS
 //! synth as the built-in synth, implementing `core-engine`'s backend traits.
 //!
-//! All `unsafe` lives in `hal.rs`, `dls.rs` and `midi.rs`, with a
+//! All `unsafe` lives in `hal.rs`, `dls.rs`, `midi.rs` and `rt.rs`, with a
 //! `// SAFETY:` comment per block.
 #![cfg(target_os = "macos")]
 #![deny(missing_docs)]
@@ -18,4 +18,5 @@
 pub mod dls;
 pub mod hal;
 pub mod midi;
+pub mod rt;
 pub mod sinks;
