@@ -1,7 +1,9 @@
 //! Commands: every edit is a `Command` applied by the pure [`apply`].
 
+pub mod lane;
 pub mod sequence;
 
+pub use lane::LaneCmd;
 pub use sequence::SequenceCmd;
 
 use crate::document::Document;
@@ -45,6 +47,8 @@ pub struct Context<'a> {
 pub enum Command {
     /// Sequence-level edits.
     Sequence(SequenceCmd),
+    /// Lane and take edits.
+    Lane(LaneCmd),
 }
 
 impl Command {
@@ -52,6 +56,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Sequence(c) => c.name(),
+            Command::Lane(c) => c.name(),
         }
     }
 }
@@ -79,6 +84,10 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
     let selection = match cmd {
         Command::Sequence(c) => {
             sequence::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::Lane(c) => {
+            lane::apply(&mut d, c, &mut report)?;
             None
         }
     };
