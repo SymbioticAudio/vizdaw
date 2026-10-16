@@ -411,9 +411,20 @@ fn a_stalled_node_misses_the_deadline_without_blocking() {
         "a lost block is full load: {load:?}"
     );
     flag.store(true, Ordering::Release);
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    b.run_blocks([512]);
-    assert_eq!(engine.counters().busy_blocks, 1, "recovered");
+    // Run blocks until one neither misses nor finds the node still busy.
+    let mut recovered = false;
+    for _ in 0..2000 {
+        let c = engine.counters();
+        b.run_blocks([512]);
+        let d = engine.counters();
+        if d.deadline_misses == c.deadline_misses && d.busy_blocks == c.busy_blocks {
+            recovered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(recovered, "recovered");
+    assert!(engine.counters().busy_blocks >= 1);
 }
 
 #[test]

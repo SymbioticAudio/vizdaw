@@ -205,7 +205,8 @@ fn graph_render_path_never_allocates() {
         "allocations during graph swaps"
     );
     // Let the deferred swaps land, then check they all did.
-    for _ in 0..40 {
+    let drain = std::time::Instant::now();
+    while engine.graphs_applied() - applied < 20 && drain.elapsed().as_secs() < 5 {
         armed_block(&mut b, 256);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }

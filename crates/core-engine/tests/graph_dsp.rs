@@ -150,16 +150,22 @@ fn bad_nodes_report_themselves() {
 fn stall_waits_for_its_flag() {
     let flag = Arc::new(AtomicBool::new(false));
     let f2 = Arc::clone(&flag);
+    let (tx, rx) = std::sync::mpsc::channel();
     let t = std::thread::spawn(move || {
         let mut s = TestNode::new(TestMode::Stall(f2), 0);
         let mut io = StereoBuf::new(1);
-        let start = std::time::Instant::now();
+        tx.send(()).unwrap();
         s.process(1, &mut io, None);
-        start.elapsed()
     });
+    rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));
+    // Only a late-scheduled thread could make this pass wrongly, never fail.
+    assert!(
+        !t.is_finished(),
+        "the node returned before its flag was set"
+    );
     flag.store(true, Ordering::Release);
-    assert!(t.join().unwrap() >= std::time::Duration::from_millis(25));
+    t.join().unwrap();
 }
 
 fn slot(id: &str) -> PluginSlot {

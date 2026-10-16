@@ -202,8 +202,9 @@ impl Engine {
             name: COLLECTOR,
             reason: e.to_string(),
         })?;
-        let pool = if cfg.workers > 0 {
-            Some(Pool::new(cfg.workers, platform, Arc::clone(&shared))?)
+        let workers = cfg.workers.min(MAX_WORKERS);
+        let pool = if workers > 0 {
+            Some(Pool::new(workers, platform, Arc::clone(&shared))?)
         } else {
             None
         };
@@ -597,6 +598,9 @@ pub fn find_sequence(doc: &Document, name: &str) -> Result<SeqId, EngineError> {
         .ok_or_else(|| EngineError::UnknownSequence(name.to_string()))
 }
 
+/// Most render workers an engine starts, whatever the config asks for.
+const MAX_WORKERS: usize = 15;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +618,14 @@ mod tests {
             Err(EngineError::Thread { name, .. }) => assert_eq!(name, "vizdaw-collector"),
             other => panic!("expected a thread error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn workers_are_clamped() {
+        let mut cfg = EngineConfig::new(48_000.0);
+        cfg.workers = 1000;
+        let (e, _r) = Engine::new(cfg, Box::new(OfflineSinks::new(4))).unwrap();
+        assert_eq!(e.pool.as_ref().unwrap().handle().workers(), MAX_WORKERS);
     }
 
     #[test]

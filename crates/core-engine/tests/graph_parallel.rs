@@ -252,10 +252,19 @@ fn missed_deadline_is_silent_and_recovers() {
         "the next block finds the straggler busy"
     );
     flag.store(true, Ordering::Release);
-    std::thread::sleep(Duration::from_millis(50));
-    // No deadline for the check, so a slow machine cannot make it flaky.
+    // No deadline for the check; `block` returns false at once while the
+    // straggler is still running, so retry (bounded) until it has finished.
     r.set_deadline(None);
-    assert!(r.block(64, &mut l, &mut rr), "recovered");
+    let t = Instant::now();
+    let mut ok = false;
+    while t.elapsed() < Duration::from_secs(2) {
+        if r.block(64, &mut l, &mut rr) {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(ok, "recovered");
     assert!(l.iter().any(|x| *x != 0.0));
 }
 
