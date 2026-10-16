@@ -233,7 +233,7 @@ impl Session {
         let mut inner = lock(&self.inner);
         for (id, blob) in captured {
             if let Some(bytes) = scratch.doc().state_blob(blob) {
-                let _ = inner.history.capture_state(id, bytes);
+                inner.history.capture_state(id, bytes)?;
             }
         }
         Ok(())
@@ -884,6 +884,22 @@ impl Session {
     /// hook).
     pub fn debug_plugin_rate(&self) -> Result<f64, VizError> {
         ffi_guard(|| plugins::with(self.id, |p| p.map_or(0.0, |p| p.config().0)))
+    }
+
+    /// Sets parameter `param` of slot `slot` as one undo step, like a
+    /// plugin-UI gesture (test hook).
+    pub fn debug_set_slot_param(
+        &self,
+        slot: u64,
+        param: u64,
+        value: f64,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetPluginParams {
+                slot: PluginInstanceId(slot),
+                params: vec![(core_model::mixer::ParamId(param), value)],
+            }))
+        })
     }
 
     /// Slot `slot`'s state blob in the document, if it has one (test

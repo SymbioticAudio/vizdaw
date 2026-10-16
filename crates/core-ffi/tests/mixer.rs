@@ -212,11 +212,34 @@ fn a_removed_plugin_keeps_its_state_for_undo_and_redo() {
     idle_until(&s, |s| {
         strip(s, "Built-in Synth").inserts[0].status == SlotStatus::Live
     });
-    // Undoing the add removes it too: captured for the redo.
+    // A fresh insert, never captured: undoing its add removes it too, and
+    // that step must capture it for the redo (the document it comes back
+    // from has no state of its own).
+    s.add_insert(synth, None, test_plugin("vizdaw.test.gain", "Test Gain"))
+        .unwrap();
+    let id2 = strip(&s, "Built-in Synth").inserts[1].id;
+    assert_ne!(id2, id);
+    idle_until(&s, |s| {
+        strip(s, "Built-in Synth").inserts[1].status == SlotStatus::Live
+    });
+    // Parameters reach the plugin while the engine plays.
+    s.debug_set_slot_param(id2, 0, 0.5).unwrap();
+    let song = s.snapshot().unwrap().sequences[2].id;
+    s.play(song).unwrap();
+    for _ in 0..30 {
+        s.idle().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    s.stop().unwrap();
+    assert_eq!(saved_state(&s, id2), None, "never captured yet");
     s.undo().unwrap();
-    assert!(strip(&s, "Built-in Synth").inserts.is_empty());
+    s.undo().unwrap();
+    assert_eq!(strip(&s, "Built-in Synth").inserts.len(), 1);
     s.redo().unwrap();
-    assert!(saved_state(&s, id).is_some());
+    assert!(
+        saved_state(&s, id2).is_some(),
+        "captured when the undo removed it"
+    );
 }
 
 #[test]
