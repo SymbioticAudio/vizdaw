@@ -12,7 +12,7 @@ pub const MAX_INSERTS: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
     /// Beyond [`MAX_NODES`] or [`MAX_INSERTS`].
-    #[error("graph too large: {nodes} node(s), {inserts} insert(s) (limits 1024 and 4096)")]
+    #[error("graph too large: {nodes} node(s), {inserts} insert(s) (limits {MAX_NODES} and {MAX_INSERTS})", MAX_NODES = MAX_NODES, MAX_INSERTS = MAX_INSERTS)]
     TooLarge {
         /// Node count.
         nodes: usize,
@@ -28,8 +28,8 @@ pub enum PlanError {
         /// The missing index.
         node: usize,
     },
-    /// An edge would need more than the maximum delay.
-    #[error("a compensation delay of {frames} frames exceeds the 2 s limit")]
+    /// An insert, instrument or edge needs more than the maximum delay.
+    #[error("a latency or compensation delay of {frames} frames exceeds the maximum delay")]
     LatencyTooLarge {
         /// The delay needed.
         frames: u64,
@@ -81,6 +81,15 @@ pub fn plan(spec: &GraphSpec, max_delay: u64) -> Result<Plan, PlanError> {
     }
     if spec.master >= n {
         return Err(PlanError::BadIndex { node: spec.master });
+    }
+    for x in &spec.nodes {
+        let lats: Vec<u32> = match x {
+            NodeSpec::Instrument { latency, .. } => vec![*latency],
+            NodeSpec::Strip(s) => s.inserts.iter().map(|k| k.latency).collect(),
+        };
+        for l in lats {
+            bounded(u64::from(l), max_delay)?;
+        }
     }
     let mut indeg = vec![0usize; n];
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];

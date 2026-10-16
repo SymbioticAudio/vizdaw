@@ -177,3 +177,41 @@ fn shape_ignores_parameters_but_not_structure() {
     assert_eq!(a.deps(3), vec![1, 2]);
     assert_eq!(sidechained(0).deps(2), vec![1, 0]);
 }
+
+#[test]
+fn a_single_huge_latency_is_refused_even_off_any_edge() {
+    let one = |l: u32, bypass: bool| {
+        let mut i = ins(l);
+        i.bypass = bypass;
+        GraphSpec {
+            nodes: vec![strip(&[], vec![i])],
+            master: 0,
+        }
+    };
+    assert_eq!(
+        plan(&one(u32::MAX, false), MAX),
+        Err(PlanError::LatencyTooLarge {
+            frames: u64::from(u32::MAX)
+        })
+    );
+    assert_eq!(
+        plan(&one(96_001, true), MAX),
+        Err(PlanError::LatencyTooLarge { frames: 96_001 })
+    );
+    assert!(plan(&one(96_000, true), MAX).is_ok());
+    let inst = |l: u32| GraphSpec {
+        nodes: vec![
+            NodeSpec::Instrument {
+                target: TargetIdx(0),
+                latency: l,
+            },
+            strip(&[0], vec![]),
+        ],
+        master: 1,
+    };
+    assert_eq!(
+        plan(&inst(96_001), MAX),
+        Err(PlanError::LatencyTooLarge { frames: 96_001 })
+    );
+    assert!(plan(&inst(96_000), MAX).is_ok());
+}
