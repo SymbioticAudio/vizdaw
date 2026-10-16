@@ -1,0 +1,125 @@
+//! Platform-neutral backend traits. `platform-macos` implements them with
+//! CoreAudio/CoreMIDI; the `offline` module implements them for tests.
+
+use crate::error::BackendError;
+
+/// Largest block any node or renderer is prepared for.
+pub const MAX_FRAMES: u32 = 4096;
+
+/// Timing of one block: its first frame reaches the output at
+/// `host_time_ns`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockTime {
+    /// Host time (nanoseconds) at which the block's first frame is heard.
+    pub host_time_ns: u64,
+    /// Stream sample rate.
+    pub sample_rate: f64,
+}
+
+/// What the caller wants from an audio device.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioConfig {
+    /// Device name; `None` follows the system default output.
+    pub device: Option<String>,
+    /// Requested buffer size in frames (32–2048); `None` keeps the device's.
+    pub buffer_frames: Option<u32>,
+}
+
+/// What a backend opened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamInfo {
+    /// Device display name.
+    pub device_name: String,
+    /// Nominal sample rate.
+    pub sample_rate: f64,
+    /// IO buffer size in frames.
+    pub buffer_frames: u32,
+    /// Output channel count.
+    pub channels: u32,
+}
+
+/// Something that happened to the device, reported by
+/// [`AudioBackend::take_events`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackendEvent {
+    /// The device disappeared.
+    DeviceLost,
+    /// The system default output changed (only when following it).
+    DefaultDeviceChanged,
+    /// The nominal sample rate changed.
+    SampleRateChanged(f64),
+    /// The IO buffer size changed.
+    BufferSizeChanged(u32),
+}
+
+/// Planar stereo scratch buffers, allocated once.
+#[derive(Debug, Clone)]
+pub struct StereoBuf {
+    /// Left channel.
+    pub left: Box<[f32]>,
+    /// Right channel.
+    pub right: Box<[f32]>,
+}
+
+impl StereoBuf {
+    /// Zeroed buffers of `frames` samples per channel.
+    pub fn new(frames: u32) -> StereoBuf {
+        let n = frames as usize;
+        StereoBuf {
+            left: vec![0.0; n].into_boxed_slice(),
+            right: vec![0.0; n].into_boxed_slice(),
+        }
+    }
+
+    /// Capacity in frames.
+    pub fn capacity(&self) -> u32 {
+        u32::try_from(self.left.len().min(self.right.len())).unwrap_or(u32::MAX)
+    }
+
+    /// Zeroes the first `frames` samples of both channels. // RT
+    pub fn clear(&mut self, frames: u32) {
+        let n = (frames as usize).min(self.left.len()).min(self.right.len());
+        if let (Some(l), Some(r)) = (self.left.get_mut(..n), self.right.get_mut(..n)) {
+            l.fill(0.0);
+            r.fill(0.0);
+        }
+    }
+}
+
+/// An instrument hosted inside the engine (the built-in synth, later
+/// plugins). Every method is called on the real-time thread.
+pub trait InstrumentNode: Send {
+    /// Queues one MIDI 1.0 message (or a whole `F0 … F7` SysEx) at a frame
+    /// offset within the next `render` call. // RT
+    fn midi(&mut self, offset: u32, msg: &[u8]);
+    /// Renders `frames` frames into `out`, replacing its contents. // RT
+    fn render(&mut self, frames: u32, out: &mut StereoBuf);
+    /// All notes off and controllers reset. // RT
+    fn reset(&mut self);
+}
+
+/// A timestamped MIDI output. `send` must be wait-free.
+pub trait MidiOut: Send {
+    /// Queues `msg` for delivery at `host_time_ns`; `false` means it was
+    /// dropped because the queue is full. // RT
+    fn send(&mut self, host_time_ns: u64, msg: &[u8]) -> bool;
+}
+
+/// A MIDI destination visible to the system.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MidiPortInfo {
+    /// Display name.
+    pub name: String,
+    /// CoreMIDI unique ID, when known.
+    pub unique_id: Option<i32>,
+}
+
+/// The system MIDI service.
+pub trait MidiBackend {
+    /// Destinations that can be opened.
+    fn destinations(&self) -> Vec<MidiPortInfo>;
+    /// Creates VizDAW's own virtual source.
+    fn open_virtual_source(&mut self, name: &str) -> Result<Box<dyn MidiOut>, BackendError>;
+    /// Opens an existing destination.
+    fn open_destination(&mut self, port: &MidiPortInfo) -> Result<Box<dyn MidiOut>, BackendError>;
+}
