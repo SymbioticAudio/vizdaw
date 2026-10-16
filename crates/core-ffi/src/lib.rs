@@ -18,6 +18,7 @@ uniffi::setup_scaffolding!();
 
 pub mod error;
 pub mod guard;
+pub mod host;
 pub mod session;
 pub mod snapshot;
 

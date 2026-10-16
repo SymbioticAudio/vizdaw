@@ -2,7 +2,11 @@
 
 use crate::error::VizError;
 use crate::guard::{ffi_guard, lock};
-use crate::snapshot::{DocSnapshot, LaneRow, lane_rows, seq_rows, warnings};
+use crate::host;
+use crate::snapshot::{
+    DocSnapshot, LaneRow, TransportState, lane_rows, position_bbu, seconds, seq_id, seq_rows,
+    warnings,
+};
 use core_model::command::Command;
 use core_model::command::lane::LaneCmd;
 use core_model::command::sequence::SequenceCmd;
@@ -11,6 +15,7 @@ use core_model::file;
 use core_model::history::History;
 use core_model::ids::{LaneId, SeqId};
 use core_model::selection::ViewFilter;
+use core_model::time::Tick;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,6 +31,12 @@ struct Inner {
     /// The document as last opened or saved; `dirty` compares against it.
     clean: Document,
     version: u64,
+    looped: bool,
+    /// Where the next Play starts when this session does not hold the
+    /// engine; `None` means bar 1 (or resume when it does).
+    cursor: Option<Tick>,
+    /// The sequence `cursor` belongs to.
+    cursor_seq: Option<SeqId>,
 }
 
 impl Inner {
@@ -35,6 +46,9 @@ impl Inner {
             path,
             clean: doc,
             version: 0,
+            looped: false,
+            cursor: None,
+            cursor_seq: None,
         }
     }
 
@@ -99,15 +113,16 @@ impl Session {
         })
     }
 
-    /// Applies one command as one undo step.
+    /// Applies one command as one undo step and recompiles if playing.
     fn execute(&self, cmd: Command) -> Result<DocSnapshot, VizError> {
         let mut inner = lock(&self.inner);
         inner.history.execute(&cmd, &ViewFilter::default())?;
         inner.version += 1;
+        host::reload(self.id, inner.doc(), inner.looped)?;
         inner.snapshot()
     }
 
-    /// Undo or redo.
+    /// Undo or redo, then recompile if playing.
     fn step(&self, undo: bool) -> Result<DocSnapshot, VizError> {
         let mut inner = lock(&self.inner);
         if undo {
@@ -116,7 +131,18 @@ impl Session {
             inner.history.redo()?;
         }
         inner.version += 1;
+        host::reload(self.id, inner.doc(), inner.looped)?;
         inner.snapshot()
+    }
+
+    /// Runs a transport call; an `Internal` error drops the engine host so
+    /// the next Play starts clean.
+    fn transport_call<T>(&self, f: impl FnOnce() -> Result<T, VizError>) -> Result<T, VizError> {
+        let r = ffi_guard(f);
+        if let Err(VizError::Internal { .. }) = &r {
+            host::reset();
+        }
+        r
     }
 }
 
@@ -229,6 +255,87 @@ impl Session {
     pub fn redo(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| self.step(false))
     }
+
+    /// Plays sequence `seq`, stopping any other session. Resumes where
+    /// this session stopped when the same sequence is still loaded.
+    pub fn play(&self, seq: u64) -> Result<(), VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let id = seq_id(inner.doc(), seq)?;
+            // A position set while another session held the engine.
+            let start = match (inner.cursor, inner.cursor_seq) {
+                (Some(t), None) => Some(t),
+                (Some(t), Some(s)) if s == id => Some(t),
+                _ => None,
+            };
+            host::play(self.id, inner.doc(), id, start, inner.looped)?;
+            inner.cursor = None;
+            inner.cursor_seq = Some(id);
+            Ok(())
+        })
+    }
+
+    /// Stops; the position is kept.
+    pub fn stop(&self) -> Result<(), VizError> {
+        self.transport_call(|| host::stop(self.id))
+    }
+
+    /// Moves the position to `tick`.
+    pub fn locate(&self, tick: i64) -> Result<(), VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            if !host::locate(self.id, Tick(tick))? {
+                inner.cursor = Some(Tick(tick));
+            }
+            Ok(())
+        })
+    }
+
+    /// Loops from bar 1 to the end of the sequence, or stops looping.
+    pub fn set_loop(&self, on: bool) -> Result<(), VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            inner.looped = on;
+            host::set_loop(self.id, on)
+        })
+    }
+
+    /// Where the transport stands.
+    pub fn transport(&self) -> Result<TransportState, VizError> {
+        self.transport_call(|| {
+            let inner = lock(&self.inner);
+            let doc = inner.doc();
+            Ok(match host::state(self.id) {
+                Some(h) => TransportState {
+                    playing: h.playing,
+                    seq: Some(h.seq.0),
+                    tick: h.tick.0,
+                    position_bbu: position_bbu(doc, h.seq, h.tick),
+                    seconds: seconds(doc, h.seq, h.tick),
+                    sample_rate: h.sample_rate,
+                    device: h.device,
+                    faults: h.faults,
+                    report: h.report,
+                },
+                None => {
+                    let tick = inner.cursor.unwrap_or(Tick::ZERO);
+                    let seq = inner.cursor_seq;
+                    TransportState {
+                        playing: false,
+                        seq: seq.map(|s| s.0),
+                        tick: tick.0,
+                        position_bbu: seq
+                            .map_or_else(|| "1.1.0".to_string(), |s| position_bbu(doc, s, tick)),
+                        seconds: seq.map_or(0.0, |s| seconds(doc, s, tick)),
+                        sample_rate: 0.0,
+                        device: String::new(),
+                        faults: Vec::new(),
+                        report: Vec::new(),
+                    }
+                }
+            })
+        })
+    }
 }
 
 #[cfg(feature = "test-hooks")]
@@ -243,5 +350,11 @@ impl Session {
                 panic!("panic while locked")
             }
         })
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        host::release(self.id);
     }
 }
