@@ -877,3 +877,87 @@ fn a_base_value_that_did_not_fit_the_queue_is_sent_again() {
     assert_eq!(script.held(GAIN), 1.0, "the base was sent again");
     drop(engine);
 }
+
+// ---------------------------------------------------------------------------
+// What the app needs (plan 3c): held slots (safe mode), the plugins loading
+// now (crash marker), gestures whose End was lost, closing an editor.
+
+#[test]
+fn held_slots_are_placeholders_until_released() {
+    let (hist, song, gain) = with_gain();
+    let mut host = host(4096);
+    host.hold(gain, Some("Plugins off".into()));
+    assert!(host.sync(hist.doc()), "a held slot does not load");
+    assert_eq!(
+        host.state(gain),
+        Some(core_host::SlotState::Failed("Plugins off".into()))
+    );
+    assert_eq!(host.held(), vec![gain]);
+    let (mut engine, _be) = engine(&host, 4096);
+    let report = engine.load(hist.doc(), song).unwrap();
+    assert_eq!(
+        report.graph.placeholders,
+        vec![(gain, "Plugins off".to_string())]
+    );
+    host.hold(gain, None);
+    assert!(host.held().is_empty());
+    assert!(!host.sync(hist.doc()), "released: it loads");
+    assert_eq!(host.state(gain), Some(core_host::SlotState::Loading));
+    let r = host.wait_ready(WAIT);
+    assert_eq!(r.loaded, vec![gain], "{:?}", r.failed);
+    assert_eq!(host.state(gain), Some(core_host::SlotState::Live));
+    drop(engine);
+}
+
+#[test]
+fn loading_names_the_plugins_in_flight() {
+    let (hist, _song, gain) = with_gain();
+    let mut host = host(4096);
+    assert!(host.loading().is_empty());
+    host.sync(hist.doc());
+    let names: Vec<(PluginInstanceId, String)> = host
+        .loading()
+        .into_iter()
+        .map(|(id, p)| (id, p.id))
+        .collect();
+    assert_eq!(names, vec![(gain, "vizdaw.test.gain".to_string())]);
+    host.wait_ready(WAIT);
+    assert!(host.loading().is_empty());
+    assert_eq!(host.state(PluginInstanceId(999)), None);
+}
+
+#[test]
+fn a_gesture_whose_end_was_lost_closes_after_the_timeout() {
+    let (hist, song, id, mut host, script) = with_fake();
+    host.set_gesture_timeout(Duration::from_millis(50));
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.5)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert!(r.gestures.is_empty(), "still open");
+    std::thread::sleep(Duration::from_millis(80));
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(r.gestures.len(), 1, "closed by the timeout");
+    assert_eq!(r.gestures[0].slot, id);
+    assert_eq!(r.gestures[0].values, vec![(GAIN, 0.5)]);
+    drop(engine);
+}
+
+#[test]
+fn closing_the_editor_ends_its_gesture() {
+    let (hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.25)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert!(r.gestures.is_empty());
+    host.end_gestures(id);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(r.gestures.len(), 1);
+    assert_eq!(r.gestures[0].values, vec![(GAIN, 0.25)]);
+    // A later End of the closed gesture opens nothing.
+    script.emit(&[ParamEvent::End(GAIN)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert!(r.gestures.is_empty());
+    drop(engine);
+}

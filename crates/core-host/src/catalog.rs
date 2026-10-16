@@ -152,6 +152,13 @@ struct Repr {
     disabled: Vec<(PluginFormat, String)>,
 }
 
+/// The plugins one host was marked unavailable by
+/// [`Catalog::apply_to`]: each host keeps its own, so a catalog applied to
+/// several hosts (one per open document) clears exactly what it set on
+/// each.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostMarks(BTreeSet<(PluginFormat, String)>);
+
 /// The catalog.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Catalog {
@@ -160,7 +167,7 @@ pub struct Catalog {
     /// Sources found missing by the last [`Catalog::mark_found`].
     missing: BTreeSet<Source>,
     /// Plugins the last [`Catalog::apply`] marked unavailable on the host.
-    marked: BTreeSet<(PluginFormat, String)>,
+    marked: HostMarks,
 }
 
 impl Catalog {
@@ -234,7 +241,7 @@ impl Catalog {
             entries: r.entries,
             disabled: r.disabled.into_iter().collect(),
             missing: BTreeSet::new(),
-            marked: BTreeSet::new(),
+            marked: HostMarks::default(),
         })
     }
 
@@ -416,7 +423,16 @@ impl Catalog {
     /// unavailable (their slots load as placeholders with the reason, at
     /// the next load; live instances are not stopped). It clears only
     /// reasons it set itself earlier, never a failure of the host's own.
+    /// For one host; with several, use [`Catalog::apply_to`].
     pub fn apply(&mut self, host: &mut PluginHost) {
+        let mut marks = std::mem::take(&mut self.marked);
+        self.apply_to(host, &mut marks);
+        self.marked = marks;
+    }
+
+    /// [`Catalog::apply`] for one of several hosts: `marks` is what this
+    /// catalog told `host` last time (start with `HostMarks::default()`).
+    pub fn apply_to(&self, host: &mut PluginHost, marks: &mut HostMarks) {
         let mut now = BTreeSet::new();
         for e in &self.entries {
             if e.plugin.id.is_empty() {
@@ -437,9 +453,9 @@ impl Catalog {
                 now.insert(key);
             }
         }
-        for (format, id) in self.marked.difference(&now) {
+        for (format, id) in marks.0.difference(&now) {
             host.set_unavailable(*format, id, None);
         }
-        self.marked = now;
+        marks.0 = now;
     }
 }

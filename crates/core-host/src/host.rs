@@ -83,6 +83,22 @@ impl IdleReport {
     }
 }
 
+/// Where a slot stands (for the mixer and the Plugin Manager).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotState {
+    /// Loading (or waiting for the next `sync` to load it).
+    Loading,
+    /// Running.
+    Live,
+    /// A placeholder, and why: it failed to load, is unavailable, or is
+    /// held ([`PluginHost::hold`]).
+    Failed(String),
+}
+
+/// How long an open gesture may go without an event from the plugin before
+/// the host closes it (its `End` was lost).
+pub const GESTURE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What the document wants of a slot.
 #[derive(Clone)]
 struct Want {
@@ -147,6 +163,8 @@ struct Live {
     gesture: Vec<(ParamId, f64)>,
     /// Parameters whose gesture is open.
     open: BTreeSet<ParamId>,
+    /// When the plugin last reported a parameter event.
+    last_event: Option<Instant>,
 }
 
 /// A removed instance whose processor is still out.
@@ -229,6 +247,12 @@ pub struct PluginHost {
     /// main-thread step.
     finishing: VecDeque<(PluginInstanceId, u64, Prepared)>,
     generation: u64,
+    /// Slots kept from loading (safe mode), with the reason they show.
+    held: BTreeMap<PluginInstanceId, String>,
+    /// Gestures closed by [`PluginHost::end_gestures`], reported by the
+    /// next `idle` or `service`.
+    ended: Vec<Gesture>,
+    gesture_timeout: Duration,
     shelf: Shelf,
     back_tx: Sender<Returned>,
     back_rx: Receiver<Returned>,
@@ -280,6 +304,9 @@ impl PluginHost {
             parked: BTreeSet::new(),
             finishing: VecDeque::new(),
             generation: 0,
+            held: BTreeMap::new(),
+            ended: Vec::new(),
+            gesture_timeout: GESTURE_TIMEOUT,
             shelf: Shelf::new(),
             back_tx,
             back_rx,
@@ -371,6 +398,70 @@ impl PluginHost {
         }
     }
 
+    /// Where slot `id` stands, if the document has it.
+    pub fn state(&self, id: PluginInstanceId) -> Option<SlotState> {
+        Some(match &self.slots.get(&id)?.state {
+            State::Loading(_) => SlotState::Loading,
+            State::Live(_) => SlotState::Live,
+            State::Failed(w) if w.is_empty() => SlotState::Loading,
+            State::Failed(w) => SlotState::Failed(w.clone()),
+        })
+    }
+
+    /// The plugins loading now (the crash marker names them, spec §10).
+    pub fn loading(&self) -> Vec<(PluginInstanceId, PluginRef)> {
+        self.slots
+            .iter()
+            .filter(|(_, s)| matches!(s.state, State::Loading(_)))
+            .map(|(id, s)| (*id, s.want.plugin.clone()))
+            .collect()
+    }
+
+    /// Keeps slot `id` from loading (safe mode, spec §10): until released
+    /// it plays as a placeholder showing `why`. `None` releases it; it
+    /// loads at the next `sync`. A slot already running is not stopped.
+    pub fn hold(&mut self, id: PluginInstanceId, why: Option<String>) {
+        match why {
+            Some(w) => {
+                self.held.insert(id, w);
+            }
+            None => {
+                if self.held.remove(&id).is_some() {
+                    if let Some(s) = self.slots.get_mut(&id) {
+                        if matches!(s.state, State::Failed(_)) {
+                            s.state = State::Failed(String::new());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The slots kept from loading.
+    pub fn held(&self) -> Vec<PluginInstanceId> {
+        self.held.keys().copied().collect()
+    }
+
+    /// How long an open gesture may go without an event before it is
+    /// closed ([`GESTURE_TIMEOUT`] by default).
+    pub fn set_gesture_timeout(&mut self, timeout: Duration) {
+        self.gesture_timeout = timeout;
+    }
+
+    /// Closes instance `id`'s open gesture (its editor window closed): what
+    /// it changed so far is reported by the next `idle` or `service`.
+    pub fn end_gestures(&mut self, id: PluginInstanceId) {
+        let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
+            return;
+        };
+        let State::Live(live) = state else {
+            return;
+        };
+        collect_gestures(id, live, &want.params, &mut self.ended);
+        live.open.clear();
+        flush_gesture(id, live, &mut self.ended);
+    }
+
     /// Sets a parameter now (a mixer control): sent to the running plugin;
     /// the app also records it in the overlay with `SetPluginParams`. Until
     /// the document has that value (or a newer edit of the parameter),
@@ -459,7 +550,7 @@ impl PluginHost {
                             state: State::Failed(String::new()),
                         },
                     );
-                    match unavailable {
+                    match self.held.get(&id).cloned().or(unavailable) {
                         Some(why) => self.fail(id, why),
                         None => self.start_load(id),
                     }
@@ -486,6 +577,10 @@ impl PluginHost {
         let Some(want) = self.slots.get(&id).map(|s| s.want.clone()) else {
             return;
         };
+        if let Some(why) = self.held.get(&id).cloned() {
+            self.fail(id, why);
+            return;
+        }
         if let Some(why) = self
             .unavailable
             .get(&(want.plugin.format, want.plugin.id.clone()))
@@ -616,6 +711,7 @@ impl PluginHost {
     /// [`PluginHost::idle`]'s work, leaving the owed load to the caller.
     fn tick(&mut self) -> IdleReport {
         let mut r = self.carry.take().unwrap_or_default();
+        r.gestures.append(&mut self.ended);
         while let Ok((id, generation, result)) = self.done.try_recv() {
             if !self.is_loading(id, generation) {
                 continue;
@@ -694,6 +790,7 @@ impl PluginHost {
             pending: BTreeMap::new(),
             gesture: Vec::new(),
             open: BTreeSet::new(),
+            last_event: None,
         });
         // State first, then the overlay (spec §4).
         if let Some((sid, bytes)) = &want.state {
@@ -839,6 +936,14 @@ impl PluginHost {
         };
         let ev = live.inst.idle();
         collect_gestures(id, live, &want.params, &mut r.gestures);
+        let stale = live
+            .last_event
+            .is_some_and(|t| t.elapsed() >= self.gesture_timeout);
+        if !live.open.is_empty() && stale {
+            // Its `End` was lost: what it changed so far is one gesture.
+            live.open.clear();
+            flush_gesture(id, live, &mut r.gestures);
+        }
         if ev.params_changed {
             r.params_changed.push(id);
         }
@@ -1115,6 +1220,9 @@ fn collect_gestures(
 ) {
     let mut events = l.gestures.drain();
     events.extend(l.inst.gestures());
+    if !events.is_empty() {
+        l.last_event = Some(Instant::now());
+    }
     for e in events {
         match e {
             ParamEvent::Begin(p) => {
