@@ -17,6 +17,7 @@
 
 pub mod error;
 pub mod ids;
+pub mod meter;
 pub mod tempo;
 pub mod time;
 
