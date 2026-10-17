@@ -41,8 +41,9 @@ temporary support folder and never scans.
 ## Editors (plan 4a)
 
 - The document window shows the arrangement (the selected sequence's
-  lanes and their blocks) over a detail pane. Detail editors arrive in
-  plans 4b-4e; until then the pane names its target and event count.
+  lanes and their blocks) over a detail pane. The piano roll (plan 4b)
+  is built; the other detail editors arrive in plans 4c-4e and until
+  then the pane names its target and event count.
   Cmd-1 to Cmd-4 choose piano roll, list, Strip Chart or drum grid;
   Option-Cmd-1 to Option-Cmd-4 open one in its own window.
 - Blocks follow the toolbar's rule (silence gap, fixed bars, whole lane);
@@ -202,9 +203,8 @@ Use the demo project (File > Create Demo Project; its window is titled
     status line and changes nothing; Parameters... (the repeats sheet) with
     Repeats 2 doubles the block, Transpose +5 is audible. Each is one Undo
     step.
-32. Detail pane: double-click the Chords block: the pane below says "Piano
-    Roll arrives in plan 4b" with "40 events in this selection"; Cmd-2
-    switches to List; Option-Cmd-1 opens a "Piano Roll — Untitled" window.
+32. Detail pane: double-click the Chords block: the pane below shows the
+    piano roll (see plan 4b); Cmd-2 switches to List; Option-Cmd-1 opens a "Piano Roll — Untitled" window.
     Option-Cmd-2 also opens a List window. Select Beat in the sidebar, open
     a window on it, then Delete... Beat: the window closes (so does one
     whose lane disappears, for example through Undo). Move and resize one, Save As
@@ -229,3 +229,109 @@ Use the demo project (File > Create Demo Project; its window is titled
     events" and "Reference to Groove on Groove, bars 1 to 4"; VO-Space on a
     block selects it. The lane headers read "Chords, Built-in Piano"; the
     toolbar controls (tool, Snap, Blocks, Light, Follow, zoom) are labelled.
+
+### Piano roll (plan 4b)
+
+Use the demo project (File > Create Demo Project) unless a step says
+otherwise. The audio engine starts on the first Play: until then pressing a
+note shows "Notes sound once the audio engine runs: press Play once." once,
+so press Space twice (play, stop) before the sound steps.
+
+36. Double-click the Chords block: the detail pane shows the piano roll with
+    a toolbar (Arrow/Pencil/Eraser, Keyboard, Lanes, Insert Into, Audio,
+    Expression, row-height and zoom buttons), a keyboard on the left with
+    its C keys labelled (C4, C5), the ruler, and one three-note chord per
+    bar in blue with black-key rows shaded and a line under every C. The
+    Keyboard toggle hides the keys (the column stays). Taller Rows /
+    Shorter Rows (hover help) and the zoom buttons change the rows and the
+    zoom; Cmd-scroll zooms around the pointer; scrolling moves both ways
+    and the keyboard follows. Key labels disappear below 8-point rows.
+37. Sound: click a note: it is outlined (selected) and sounds while the
+    button is held and stops on release. Click a key: it sounds; drag down
+    the keyboard: each key plays in turn; release: silence.
+38. Cursor zones: over a note's left edge the pointer is an open hand, over
+    the middle up-down arrows, over the right edge a resize arrow. Zoom out
+    until notes are a few points wide: the zones still work (the middle
+    stays reachable, nothing flickers). Drag the middle of a note up two
+    rows: it follows in semitones and sounds at each new pitch; release,
+    then Edit > Undo Transpose Notes restores it in one step. Drag the left
+    edge one quarter right: it moves on the grid (Undo Move Notes). Drag
+    the right edge: the length changes on the grid (Undo Resize Notes).
+    Option-drag the left edge or the middle: a copy appears (Undo Copy
+    Notes). Press Escape during any drag: everything snaps back, the sound
+    stops and Edit has no new undo step.
+39. Rubber band: with the arrow, drag over empty space around a chord: its
+    three notes are selected; drag one of them up: all three move together;
+    drag far up: the chord stops when its top note reaches G9 (no
+    squashing).
+40. Pencil: choose Pencil and click an empty row: a one-grid-step note
+    appears and sounds while held; Edit shows Undo Insert Note. Drag right
+    from empty space: the new note's length follows the pointer in grid
+    steps (one undo step, "Insert Note"). Press G (snap off): the pencil
+    paints any length. Eraser: a click deletes a note; dragging across
+    notes deletes each one crossed, with one undo step "Undo Erase Notes".
+    Select notes and press Delete: they go (one undo step).
+41. Several lanes: double-click a Groove block (it opens Groove), then
+    double-click its Bass block. Lanes > Drums adds the Drums lane. It has
+    no notes of its own (it only references Beat), so use Insert Into >
+    Drums and the pencil to add a few notes: they are drawn in a second
+    colour (orange) and the Bass notes (blue) are drawn fainter while Drums
+    is the active lane. Press a Bass note: "Insert Into" switches back to
+    Bass and the Bass notes are drawn on top. Overlapping notes of the two
+    lanes: the click picks the one drawn on top. Lanes > Drums again hides
+    it (the target's own lane, Bass, cannot be hidden).
+42. Playing: Transport > Loop on, Space; drag a chord note up and hold it
+    while the loop restarts: the dragged note keeps sounding until you
+    release; the music follows the edit; Stop silences everything.
+43. Torn window: Option-Cmd-1 opens "Piano Roll — Untitled" on the same
+    target. With it in front: Space plays and stops, Cmd-Z undoes (the
+    Edit menu names the step), Cmd-2 switches that window to List,
+    Option-Cmd-1 opens another window on its target, Cmd-1 to Cmd-4 switch
+    that window and Option-Cmd-1 to Option-Cmd-4 open windows from it. Open
+    a second project (File > New, then Create Demo Project) with its own
+    piano-roll window: while a window of one project is in front, Space,
+    Cmd-Z and the shortcuts act on that project only; click the other
+    project's window and they move to it. Press and hold a keyboard key in
+    a torn window and close it with Cmd-W: no note keeps sounding.
+44. Audio: File > Create Demo Project with Audio; press Cmd-1 with nothing
+    selected: the piano roll shows Song with the Chords and Loop lanes. Under
+    the notes the strip "Audio 1-2" holds two teal regions labelled Loop at
+    bars 1 and 5 (silent until sub-project 5). M and S toggle mute and solo
+    of the "Audio 1-2" mixer strip (Window > Mixer shows the same, and a
+    toggle there shows here); Undo reverts. Drag a region one bar right: it
+    moves on the grid (Undo Move Region). The Audio toggle hides the strip.
+45. Expression: the pane under the strip shows "Bend ▾" and a centre line.
+    Select a chord note and draw across it in the pane: a stepped line
+    follows the pointer inside that note only (Undo Draw Expression). "Bend
+    ▾" > Registered 74 (Timbre) shows that kind; the eraser removes values
+    (Undo Erase Expression). Escape during a stroke removes it. Save As,
+    close, reopen: the values and the chosen kind are still there. (The
+    built-in instruments are MIDI 1.0 and ignore per-note data; the compile
+    report says so.) The Expression toggle hides the pane.
+46. Nudge: VizDAW > Settings… (Cmd-,) shows "Nudge in Time" (Step: Edit
+    Grid) and "Nudge in Pitch" (Step: Semitones, Amount: 1). Select a chord:
+    Option-Right (Editors > Nudge Later) moves it one grid step later,
+    Option-Left back, Option-Up a semitone up, Option-Down back. The items
+    are disabled with nothing selected. Choose Scale Steps with "Follow the
+    sequence's key signature" on: Option-Up turns C-E-G into D-F-A (C
+    major). Turn following off, Root D, Scale Dorian: steps follow D
+    Dorian. Quit and relaunch: the settings are kept. In a lane name field
+    and the Comment... editor Option-arrows move the text cursor, not notes.
+47. Busy: with an AU v3 instrument whose editor opens slowly (plan 3c
+    steps), start opening it and at once drag a piano-roll note and
+    release: no note keeps sounding, and the drag lands (perhaps a moment
+    later) as one undo step. If a note-off cannot be delivered the status
+    line says "A note may still be sounding — press Stop."; Stop silences it.
+48. VoiceOver (Cmd-F5): the piano roll is a group "Piano Roll" whose notes
+    read like "Note C4, bar 1 beat 1, velocity 56"; VO-Space selects one.
+    The keyboard reads "Keyboard", the strip "Audio Regions" with "Mute
+    Audio 1-2" and "Solo Audio 1-2", its regions "Region on Loop, Audio
+    1-2", the pane "Expression: Per-Note Pitch Bend".
+49. Layout: change Keyboard, row height and zoom, show an extra lane, Save,
+    close and reopen: the piano roll and its torn windows come back the
+    same.
+50. Typing never plays (again): with a project open and stopped, press Space
+    in the text fields added or reused by 4b (the lane name field, the
+    Comment... editor, the Settings window fields) and check a space is
+    typed and playback does not start; Space in the piano roll itself still
+    plays and stops.
