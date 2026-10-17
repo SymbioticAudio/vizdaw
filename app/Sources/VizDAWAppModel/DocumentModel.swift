@@ -202,14 +202,7 @@ public final class DocumentModel {
         poll()
     }
 
-    public func returnToStart() {
-        do {
-            try session.locate(tick: 0)
-        } catch {
-            alert = AlertItem(error, title: "Locate Failed")
-        }
-        poll()
-    }
+    public func returnToStart() { locate(0) }
 
     /// Reads the transport. A failure shows one alert, not one per poll.
     /// `Busy` (an AU v3 editor opening in a nested run loop) keeps the last

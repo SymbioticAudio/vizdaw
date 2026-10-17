@@ -90,4 +90,128 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         await settle()
         #expect(released == nil, "nothing keeps the removed arrangement alive")
     }
+
+    // MARK: Drag ends
+
+    @Test func aPlainMoveIsOneBeginEndPair() throws {
+        let f = editorFake()
+        let (m, v) = try arrangement(f)
+        f.calls = []
+        v.contentMouseDown(onChords, clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 300, y: 70), modifiers: [])
+        v.contentMouseUp(CGPoint(x: 300, y: 70), modifiers: [])
+        #expect(f.calls == ["begin Move Block", "gesture", "end"])
+        guard case .event(.move(let ids, let delta, let toLane))? = f.gestureEdits.last else {
+            Issue.record("expected a move, got \(f.gestureEdits)")
+            return
+        }
+        #expect(ids == [1] && delta > 0 && toLane == nil)
+        #expect(m.editor.gesture == nil)
+    }
+
+    @Test func anOptionDragCopiesIntoTheTargetLane() throws {
+        let f = editorFake()
+        let (_, v) = try arrangement(f)
+        f.calls = []
+        v.contentMouseDown(onChords, clicks: 1, modifiers: [.option])
+        v.contentMouseDragged(CGPoint(x: 300, y: 20), modifiers: [.option])
+        v.contentMouseUp(CGPoint(x: 300, y: 20), modifiers: [.option])
+        #expect(f.calls == ["begin Copy Block", "gesture", "end"])
+        guard case .event(.insert(let seq, let lane, let events))? = f.gestureEdits.last else {
+            Issue.record("expected an insert, got \(f.gestureEdits)")
+            return
+        }
+        #expect((seq, lane) == (3, 30))
+        #expect(events.count == 1 && events[0].tick > 0)
+    }
+
+    @Test func aDragOntoAnotherRowMergesIntoItsLane() throws {
+        let f = editorFake()
+        let (_, v) = try arrangement(f)
+        f.calls = []
+        v.contentMouseDown(onChords, clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 50, y: 20), modifiers: [])
+        v.contentMouseUp(CGPoint(x: 50, y: 20), modifiers: [])
+        #expect(f.calls == ["begin Move Block", "gesture", "end"])
+        #expect(f.gestureEdits == [.event(edit: .move(events: [1], delta: 0, toLane: LaneRef(seq: 3, lane: 30)))])
+    }
+
+    @Test func escapeMidDragLeavesNoChange() throws {
+        let f = editorFake()
+        let (m, v) = try arrangement(f)
+        f.calls = []
+        v.contentMouseDown(onChords, clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 300, y: 70), modifiers: [])
+        v.contentCancel()
+        v.contentMouseUp(CGPoint(x: 300, y: 70), modifiers: [])
+        #expect(f.calls == ["begin Move Block", "gesture", "abort"])
+        #expect(m.editor.gesture == nil)
+    }
+
+    @Test func optionPressedMidDragDoesNotTurnAMoveIntoACopy() throws {
+        let f = editorFake()
+        let (_, v) = try arrangement(f)
+        f.calls = []
+        v.contentMouseDown(onChords, clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 300, y: 70), modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 300, y: 20), modifiers: [.option])
+        v.contentMouseUp(CGPoint(x: 300, y: 20), modifiers: [.option])
+        #expect(f.calls.first == "begin Move Block")
+        #expect(f.calls.last == "end")
+        for e in f.gestureEdits {
+            guard case .event(.move) = e else {
+                Issue.record("expected only moves, got \(e)")
+                return
+            }
+        }
+        guard case .event(.move(_, _, let toLane))? = f.gestureEdits.last else { return }
+        #expect(toLane == LaneRef(seq: 3, lane: 30))
+    }
+
+    // MARK: Light drawing
+
+    @Test func lightModeCountsTheVisibleBlocksNotTheDirtyRect() throws {
+        let f = editorFake()
+        f.blocksTable["3/31"] = (0..<1_501).map { blockRow(Int64($0) * 100, Int64($0) * 100, events: [UInt64($0) + 100]) }
+        let (_, v) = try arrangement(f)
+        #expect(v.visibleBlockCount == 1_502, "1 501 Chords blocks and the Groove reference")
+        let image = NSImage(size: NSSize(width: 800, height: 300))
+        image.lockFocus()
+        v.drawContent(in: CGRect(x: 700, y: 0, width: 10, height: 10))
+        image.unlockFocus()
+        #expect(v.light, "a small redraw away from the blocks still draws light")
+    }
+
+    // MARK: Lane headers
+
+    @Test func unreadableDestinationsSaySoInTheMenu() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        let lane = m.lanes[1]
+        f.dests = [DestRow(id: 5, name: "Synth", plugin: nil)]
+        #expect(h.destinationMenu(seq: 3, lane: lane).items.map(\.title) == ["No Destination", "Synth"])
+        f.destinationsError = .Busy(message: "busy")
+        let busy = h.destinationMenu(seq: 3, lane: lane).items
+        #expect(busy.map(\.title) == ["No Destination", "Destinations unavailable (busy)"])
+        #expect(!busy[1].isEnabled)
+        #expect(m.editor.status == nil, "Busy is not a failure to report")
+        f.destinationsError = .Model(message: "no destinations")
+        let failed = h.destinationMenu(seq: 3, lane: lane).items
+        #expect(failed.map(\.title) == ["No Destination", "Destinations unavailable"])
+        #expect(!failed[1].isEnabled)
+        #expect(m.editor.status == "no destinations")
+    }
+
+    @Test func aRenameEndsOnTheLaneItBeganOn() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        h.beginRename(m.lanes[1], seq: 3, row: 1)
+        h.renaming?.field.stringValue = "Keys"
+        m.choose(2)
+        h.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification))
+        #expect(f.edits.last == .lane(edit: .rename(seq: 3, lane: 31, name: "Keys")))
+        #expect(h.renaming == nil)
+    }
 }

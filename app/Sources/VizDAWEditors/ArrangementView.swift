@@ -98,21 +98,30 @@ public final class ArrangementView: EditorCanvas {
 
     // MARK: Drawing
 
-    public override func drawContent(in dirty: CGRect) {
-        let keys = lanes
+    /// The blocks of the rows in `rect`, per row, that intersect it.
+    private func blocks(in rect: CGRect) -> [(Int, LaneKey, [BlockRow])] {
         var rows: [(Int, LaneKey, [BlockRow])] = []
-        var visible = 0
-        for (i, key) in keys.enumerated() {
+        for (i, key) in lanes.enumerated() {
             let top = geometry.rowTop(i)
-            guard top + geometry.laneHeight >= dirty.minY, top <= dirty.maxY else { continue }
+            guard top + geometry.laneHeight >= rect.minY, top <= rect.maxY else { continue }
             let shown = editor.blocks(key).filter {
-                geometry.blockRect($0, row: i, axis: axis).intersects(dirty)
+                geometry.blockRect($0, row: i, axis: axis).intersects(rect)
             }
-            visible += shown.count
             rows.append((i, key, shown))
         }
-        light = LightDrawing.isLight(editor.layout.lightMode, visibleBlocks: visible)
-        for (i, key, blocks) in rows {
+        return rows
+    }
+
+    /// How many blocks the whole visible area shows (Plan Ruling 17): light
+    /// mode depends on this, never on the dirty rect, so a partial redraw
+    /// cannot mix the two modes.
+    var visibleBlockCount: Int {
+        blocks(in: content.bounds).reduce(0) { $0 + $1.2.count }
+    }
+
+    public override func drawContent(in dirty: CGRect) {
+        light = LightDrawing.isLight(editor.layout.lightMode, visibleBlocks: visibleBlockCount)
+        for (i, key, blocks) in blocks(in: dirty) {
             NSColor.separatorColor.setFill()
             CGRect(x: dirty.minX, y: geometry.rowTop(i + 1) - 0.5, width: dirty.width, height: 1).fill()
             for b in blocks { draw(b, row: i, key: key) }

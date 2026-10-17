@@ -10,7 +10,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
     public let document: DocumentModel
     var editor: EditorModel { document.editor }
     public var verticalOffset: CGFloat = 0 { didSet { needsDisplay = true } }
-    private var renaming: (lane: UInt64, field: NSTextField)?
+    /// The lane being renamed, fixed when editing began (the shown
+    /// sequence may change before it ends).
+    private(set) var renaming: (seq: UInt64, lane: UInt64, name: String, field: NSTextField)?
 
     public init(document: DocumentModel) {
         self.document = document
@@ -109,7 +111,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         case .solo: flags(seq, lane.id, solo: !lane.solo)
         case .arm: flags(seq, lane.id, arm: !lane.arm)
         case .destination: destinationMenu(seq: seq, lane: lane, at: p)
-        case .name where e.clickCount >= 2: beginRename(lane, row: i)
+        case .name where e.clickCount >= 2: beginRename(lane, seq: seq, row: i)
         case .name, nil: break
         }
     }
@@ -119,22 +121,43 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
     }
 
     private func destinationMenu(seq: UInt64, lane: LaneRow, at p: CGPoint) {
+        destinationMenu(seq: seq, lane: lane).popUp(positioning: nil, at: p, in: self)
+    }
+
+    /// "No Destination" and every destination. When they cannot be read the
+    /// menu says so (a disabled item) instead of looking empty; a failure
+    /// other than Busy also shows in the status line (spec §5).
+    func destinationMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let menu = NSMenu()
+        menu.autoenablesItems = false
         let none = MenuAction(title: "No Destination") { [unowned self] in
             self.editor.edit(.lane(edit: .setDest(seq: seq, lane: lane.id, dest: nil)))
         }
         menu.addItem(none.item(checked: lane.midiDest == nil))
-        let dests = (try? document.session.destinations()) ?? []
+        let dests: [DestRow]
+        do {
+            dests = try document.session.destinations()
+        } catch {
+            var busy = false
+            if case .Busy? = error as? VizError { busy = true }
+            if !busy { editor.report(error) }
+            let item = NSMenuItem(
+                title: busy ? "Destinations unavailable (busy)" : "Destinations unavailable",
+                action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            return menu
+        }
         for d in dests {
             let a = MenuAction(title: d.name) { [unowned self] in
                 self.editor.edit(.lane(edit: .setDest(seq: seq, lane: lane.id, dest: d.id)))
             }
             menu.addItem(a.item(checked: lane.midiDest == d.id))
         }
-        menu.popUp(positioning: nil, at: p, in: self)
+        return menu
     }
 
-    private func beginRename(_ lane: LaneRow, row i: Int) {
+    func beginRename(_ lane: LaneRow, seq: UInt64, row i: Int) {
         renaming?.field.removeFromSuperview()
         guard let r = LaneHeaderLayout.controls(rowTop: rowTop(i)).first(where: { $0.0 == .name })?.1 else { return }
         let field = NSTextField(string: lane.name)
@@ -142,18 +165,16 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         field.delegate = self
         addSubview(field)
         window?.makeFirstResponder(field)
-        renaming = (lane.id, field)
+        renaming = (seq, lane.id, lane.name, field)
     }
 
     public func controlTextDidEndEditing(_ obj: Notification) {
-        guard let r = renaming, let seq = document.selectedSeq else { return }
-        let (lane, field) = (r.lane, r.field)
+        guard let r = renaming else { return }
         renaming = nil
-        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        field.removeFromSuperview()
-        let current = document.lanes.first { $0.id == lane }?.name
-        if !name.isEmpty, name != current {
-            editor.edit(.lane(edit: .rename(seq: seq, lane: lane, name: name)))
+        let name = r.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        r.field.removeFromSuperview()
+        if !name.isEmpty, name != r.name {
+            editor.edit(.lane(edit: .rename(seq: r.seq, lane: r.lane, name: name)))
         }
     }
 
