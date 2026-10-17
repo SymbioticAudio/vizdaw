@@ -9,6 +9,8 @@ import VizDAWCore
 public final class DocumentModel {
     public let session: any SessionProtocol
     public private(set) var snapshot: DocSnapshot
+    /// The editors (plan 4a).
+    public let editor: EditorModel
     public private(set) var selectedSeq: UInt64?
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState
@@ -43,7 +45,9 @@ public final class DocumentModel {
 
     public init(session: any SessionProtocol) throws {
         self.session = session
-        snapshot = try session.snapshot()
+        let snap = try session.snapshot()
+        snapshot = snap
+        editor = EditorModel(session: session, snapshot: snap)
         // Busy (an AU v3 editor opening in a nested run loop): start
         // stopped at the beginning; the next poll reads the real state.
         do {
@@ -51,8 +55,9 @@ public final class DocumentModel {
         } catch VizError.Busy {
             transport = Self.stopped
         }
-        clock.update(transport, pollInterval: transport.playing ? 0.033 : 0.25)
-        apply(snapshot)
+        clock.update(transport, pollInterval: Self.pollSeconds(playing: transport.playing))
+        apply(snap)
+        editor.applySnapshot = { [weak self] in self?.apply($0) }
     }
 
     /// The transport shown until the first successful read.
@@ -63,8 +68,12 @@ public final class DocumentModel {
 
     // MARK: Derived state
 
-    public var topLevel: [SeqRow] { snapshot.sequences.filter(\.topLevel) }
-    public var referenced: [SeqRow] { snapshot.sequences.filter { !$0.topLevel } }
+    public var topLevel: [SeqRow] {
+        SequenceOrder.sorted(snapshot.sequences.filter(\.topLevel), by: editor.layout.sequenceOrder)
+    }
+    public var referenced: [SeqRow] {
+        SequenceOrder.sorted(snapshot.sequences.filter { !$0.topLevel }, by: editor.layout.sequenceOrder)
+    }
     public var windowTitle: String { Formatting.windowTitle(snapshot) }
     public var undoTitle: String { snapshot.undoLabel.map { "Undo \($0)" } ?? "Undo" }
     public var redoTitle: String { snapshot.redoLabel.map { "Redo \($0)" } ?? "Redo" }
@@ -76,9 +85,12 @@ public final class DocumentModel {
     public var transportKeysEnabled: Bool { renamingSeq == nil }
     public var canPlay: Bool { selectedSeq != nil || isPlaying }
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
-    public var pollInterval: Duration { isPlaying ? .milliseconds(33) : .milliseconds(250) }
+    public var pollInterval: Duration { .seconds(pollSeconds) }
     /// `pollInterval` in seconds.
-    public var pollSeconds: Double { isPlaying ? 0.033 : 0.25 }
+    public var pollSeconds: Double { Self.pollSeconds(playing: isPlaying) }
+
+    /// The one place the poll period is defined.
+    static func pollSeconds(playing: Bool) -> Double { playing ? 0.033 : 0.25 }
     public var hasFaults: Bool { !transport.faults.isEmpty }
     public var hasReport: Bool { !transport.report.isEmpty || !pluginProblems.isEmpty }
     /// Every line of the fault popover: faults, compile messages, plugin
@@ -94,6 +106,12 @@ public final class DocumentModel {
         guard seq != selectedSeq else { return }
         selectedSeq = seq
         refreshLanes()
+    }
+
+    /// The sidebar chose a sequence: reference navigation starts over.
+    public func choose(_ seq: UInt64?) {
+        editor.resetNavigation()
+        select(seq)
     }
 
     public func beginRename(_ seq: UInt64) {
@@ -130,9 +148,15 @@ public final class DocumentModel {
 
     /// Undo and Redo do nothing while the plugin host is busy (an AU v3
     /// editor opening): the core refuses before touching history.
-    public func undo() { command("Undo Failed", quietWhenBusy: true) { try $0.undo() } }
+    public func undo() {
+        command("Undo Failed", quietWhenBusy: true) { try $0.undo() }
+        editor.refreshSelection()
+    }
 
-    public func redo() { command("Redo Failed", quietWhenBusy: true) { try $0.redo() } }
+    public func redo() {
+        command("Redo Failed", quietWhenBusy: true) { try $0.redo() }
+        editor.refreshSelection()
+    }
 
     public func playStop() {
         do {
@@ -197,10 +221,12 @@ public final class DocumentModel {
     public var needsSaveAs: Bool { ((try? session.path()) ?? nil) == nil }
 
     public func save() {
+        editor.storeLayout()
         perform("Save Failed") { try $0.save() }
     }
 
     public func saveAs(path: String) {
+        editor.storeLayout()
         perform("Save Failed") { try $0.saveAs(path: path) }
     }
 
@@ -232,6 +258,7 @@ public final class DocumentModel {
     /// exists (else the first top-level one), refetches lanes if needed.
     func apply(_ s: DocSnapshot) {
         snapshot = s
+        editor.sync(s)
         if selectedSeq.map({ id in !s.sequences.contains { $0.id == id } }) ?? true {
             selectedSeq = s.sequences.first(where: \.topLevel)?.id ?? s.sequences.first?.id
         }
