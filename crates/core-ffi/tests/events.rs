@@ -495,6 +495,10 @@ fn automation_rows_round_trip_and_bad_ones_are_refused() {
         rows[0].value,
         i64::from(core_model::automation::to_u32(0.25))
     );
+    // Automation is not MIDI: the lane row counts it as no MIDI event.
+    let lane_row = s.lanes(seq.0).unwrap();
+    assert_eq!(lane_row.len(), 1);
+    assert_eq!(lane_row[0].midi_event_count, 0);
     // Every target kind survives the trip.
     for target in [
         AutomationTargetRow::StripFader { strip: 1 },
