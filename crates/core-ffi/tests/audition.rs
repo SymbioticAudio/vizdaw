@@ -79,3 +79,29 @@ fn the_transport_carries_host_time_and_tempo() {
         t.ticks_per_second
     );
 }
+
+#[test]
+fn another_session_taking_the_engine_releases_an_audition_note() {
+    let _g = serial();
+    let (a, song, piano) = demo();
+    a.play(song).unwrap();
+    sleep(Duration::from_millis(50));
+    a.stop().unwrap();
+    sleep(Duration::from_millis(50));
+    drain_offline_log();
+    assert!(a.audition(piano, 75, 0x8000, true).unwrap());
+    sleep(Duration::from_millis(50));
+    // Another document plays without `a` releasing the engine first.
+    let (b, song_b, _) = demo();
+    b.play(song_b).unwrap();
+    sleep(Duration::from_millis(100));
+    b.stop().unwrap();
+    let log = drain_offline_log();
+    assert!(log.iter().any(|(_, m)| m == &vec![0x90, 75, 64]), "{log:?}");
+    assert!(log.iter().any(|(_, m)| m == &vec![0x80, 75, 0]), "{log:?}");
+    assert!(
+        !a.audition(piano, 75, 0, false).unwrap(),
+        "a no longer holds the engine"
+    );
+    reset_host();
+}

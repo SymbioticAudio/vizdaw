@@ -195,3 +195,64 @@ fn a_meter_change_bumps_every_lane_of_that_sequence_only() {
         .unwrap();
     only_sequence_bumped(&before, &after, beat);
 }
+
+#[test]
+fn a_media_pool_change_bumps_only_lanes_holding_regions() {
+    use core_model::command::routing::RoutingCmd;
+    use core_model::event::{EventBody, Fade};
+    use core_model::ids::AnyId;
+    use vizdaw_ffi::revs::Revisions;
+
+    let mut b = Builder::new();
+    let r = b
+        .run(Command::Routing(RoutingCmd::AddMedia {
+            path: "Media/a.wav".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 96_000,
+            content_hash: None,
+        }))
+        .unwrap();
+    let media = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Media(m) => Some(*m),
+            _ => None,
+        })
+        .unwrap();
+    let (seq, audio) = b.sequence("S", "Audio", None).unwrap();
+    let notes = b.lane(seq, "Notes", None).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0x8000, 960)]).unwrap();
+    b.event(
+        seq,
+        audio,
+        0,
+        EventBody::AudioRegion {
+            media,
+            source_offset: 0,
+            length: 48_000,
+            gain_db: 0.0,
+            fade_in: Fade::default(),
+            fade_out: Fade::default(),
+        },
+    )
+    .unwrap();
+    let mut revs = Revisions::new(b.doc());
+    let (audio_rev, notes_rev) = (revs.rev(seq, audio).unwrap(), revs.rev(seq, notes).unwrap());
+    b.run(Command::Routing(RoutingCmd::AddMedia {
+        path: "Media/b.wav".into(),
+        sample_rate: 44_100,
+        channels: 1,
+        length_frames: 10,
+        content_hash: None,
+    }))
+    .unwrap();
+    revs.update(b.doc());
+    assert_ne!(
+        revs.rev(seq, audio).unwrap(),
+        audio_rev,
+        "region durations are computed through the media pool"
+    );
+    assert_eq!(revs.rev(seq, notes).unwrap(), notes_rev);
+}

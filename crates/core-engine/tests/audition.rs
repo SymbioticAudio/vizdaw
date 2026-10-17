@@ -139,3 +139,57 @@ fn destinations_without_a_loaded_target_are_not_auditioned() {
             .unwrap()
     );
 }
+
+fn note_off(seen: &[(u64, Vec<u8>)], pitch: u8) -> bool {
+    seen.iter().any(|(_, b)| b == &vec![0x82, pitch, 0])
+}
+
+#[test]
+fn an_audition_note_survives_a_recompile_and_a_loop_wrap() {
+    let (doc, seq, synth, _) = doc();
+    let f = Factory::default();
+    let (mut engine, mut r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
+    engine.load(&doc, seq).unwrap();
+    engine.set_loop_range(Some((0, 1_024))).unwrap();
+    engine.play().unwrap();
+    let mut ns = 0;
+    blocks(&mut r, 1, &mut ns);
+    assert!(engine.audition(&doc, synth, 70, 0x8000, true).unwrap());
+    // An edit during a drag recompiles: the schedule is swapped.
+    engine.load(&doc, seq).unwrap();
+    // 12 blocks of 256 frames: three wraps of the 1 024-frame loop.
+    blocks(&mut r, 12, &mut ns);
+    let seen = f.synth.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|(_, b)| b == &vec![0x92, 70, 64]),
+        "{seen:?}"
+    );
+    assert!(
+        note_off(&seen, 60),
+        "played notes are still released at the wrap: {seen:?}"
+    );
+    assert!(
+        !note_off(&seen, 70),
+        "the dragged note keeps sounding: {seen:?}"
+    );
+    engine.stop().unwrap();
+    blocks(&mut r, 1, &mut ns);
+    assert!(note_off(&f.synth.lock().unwrap(), 70), "stop releases it");
+}
+
+#[test]
+fn locate_releases_an_audition_note() {
+    let (doc, seq, synth, _) = doc();
+    let f = Factory::default();
+    let (mut engine, mut r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
+    engine.load(&doc, seq).unwrap();
+    let mut ns = 0;
+    blocks(&mut r, 1, &mut ns);
+    assert!(engine.audition(&doc, synth, 70, 0x8000, true).unwrap());
+    blocks(&mut r, 1, &mut ns);
+    engine.locate_tick(core_model::time::Tick(0)).unwrap();
+    blocks(&mut r, 1, &mut ns);
+    assert!(note_off(&f.synth.lock().unwrap(), 70));
+}

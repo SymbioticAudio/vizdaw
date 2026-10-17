@@ -71,6 +71,7 @@ pub fn force_offline() {
 #[cfg(feature = "test-hooks")]
 pub fn reset_host() {
     reset();
+    lock(&RETIRED_LOG).clear();
 }
 
 /// Queues a device event as if the output reported it (test hook); the
@@ -88,19 +89,22 @@ pub fn hosts_created() -> u64 {
     HOSTS_CREATED.load(Ordering::Relaxed)
 }
 
-/// Drains the offline event log as `(frame, bytes)` (test hook).
+/// Offline events of hosts retired for another session's document (their
+/// logs go with them), until the next `drain_offline_log`.
+#[cfg(feature = "test-hooks")]
+static RETIRED_LOG: Mutex<Vec<(u64, Vec<u8>)>> = Mutex::new(Vec::new());
+
+/// Drains the offline event log as `(frame, bytes)` (test hook): the
+/// events of hosts retired since the last drain first, then the current
+/// host's.
 #[cfg(feature = "test-hooks")]
 pub fn drain_offline_log() -> Vec<(u64, Vec<u8>)> {
+    let mut events = std::mem::take(&mut *lock(&RETIRED_LOG));
     let host = lock(&HOST);
-    host.as_ref()
-        .and_then(|h| h.log.as_ref())
-        .map(|log| {
-            log.drain()
-                .iter()
-                .map(|r| (r.frame, r.bytes().to_vec()))
-                .collect()
-        })
-        .unwrap_or_default()
+    if let Some(log) = host.as_ref().and_then(|h| h.log.as_ref()) {
+        events.extend(log.drain().iter().map(|r| (r.frame, r.bytes().to_vec())));
+    }
+    events
 }
 
 /// What the next `reload` should do instead of recompiling (test hook).
@@ -146,6 +150,20 @@ pub fn engine_active() -> bool {
     lock(&HOST)
         .as_ref()
         .is_some_and(|h| h.engine.state() != PlayState::Stopped)
+}
+
+/// Lets a stopped host's still-running output play its note-offs, then
+/// drops it (output first, then the engine). Call without the host lock.
+fn retire(old: Option<Host>) {
+    let Some(old) = old else {
+        return;
+    };
+    std::thread::sleep(DRAIN);
+    #[cfg(feature = "test-hooks")]
+    if let Some(log) = &old.log {
+        lock(&RETIRED_LOG).extend(log.drain().iter().map(|r| (r.frame, r.bytes().to_vec())));
+    }
+    drop(old);
 }
 
 /// Drops the host, stopping its output.
@@ -530,30 +548,47 @@ pub fn play(
     looped: bool,
     mut plugins: Option<&mut PluginHost>,
 ) -> Result<(), VizError> {
-    let mut slot = lock(&HOST);
-    // Device events nobody polled (the host had no owner, or another one):
-    // a rebuild-class event drops the host so a fresh one opens below.
-    if let Some(h) = slot.as_mut().filter(|h| h.owner != owner) {
-        for ev in h.take_events() {
-            match ev {
-                BackendEvent::BufferSizeChanged(n) => h.restart_output(n)?,
-                _ => {
-                    *slot = None;
-                    break;
+    let mut slot = loop {
+        let mut slot = lock(&HOST);
+        // Device events nobody polled (the host had no owner, or another
+        // one): a rebuild-class event drops the host so a fresh one opens
+        // below.
+        if let Some(h) = slot.as_mut().filter(|h| h.owner != owner) {
+            for ev in h.take_events() {
+                match ev {
+                    BackendEvent::BufferSizeChanged(n) => h.restart_output(n)?,
+                    _ => {
+                        *slot = None;
+                        break;
+                    }
                 }
             }
+        } else {
+            handle_events(&mut slot, doc, plugins.as_deref_mut())?;
         }
-    } else {
-        handle_events(&mut slot, doc, plugins.as_deref_mut())?;
-    }
-    // Another session's plugins played here: a fresh engine, so none of
-    // its instances is taken for this document's (same-numbered) slots.
-    if slot
-        .as_ref()
-        .is_some_and(|h| h.factory_owner != owner && h.plugins_in_engine)
-    {
-        *slot = None;
-    }
+        // Another session's plugins played here: a fresh engine, so none
+        // of its instances is taken for this document's (same-numbered)
+        // slots.
+        if slot
+            .as_ref()
+            .is_some_and(|h| h.factory_owner != owner && h.plugins_in_engine)
+        {
+            let mut old = slot.take();
+            if let Some(h) = old.as_mut() {
+                // Its played and auditioned notes end before the engine
+                // goes (4b Plan Ruling 1).
+                let _ = h.engine.stop();
+            }
+            // The note-offs play and the old host is dropped without the
+            // lock, so no other host call (the UI's timers) waits on them.
+            // Then start over: another call may have changed the host
+            // meanwhile.
+            drop(slot);
+            retire(old);
+            continue;
+        }
+        break slot;
+    };
     if slot.is_none() {
         *slot = Some(Host::create()?);
     }

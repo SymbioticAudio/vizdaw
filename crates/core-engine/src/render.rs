@@ -359,8 +359,11 @@ pub enum EngineCmd {
     /// Remove a released target's sink; it goes back through the retire
     /// ring (a plugin instrument is deactivated off the audio thread).
     RemoveSink(TargetIdx),
-    /// Send a note on or off to a target now (editor audition), tracked
-    /// like any played note so Stop and Locate release it.
+    /// Send a note on or off to a target now (editor audition). Tracked
+    /// apart from played notes: Stop, Locate and removing the target
+    /// release it; a schedule swap (every edit recompiles), a loop wrap and
+    /// the end do not, so a note dragged in an editor keeps sounding until
+    /// the editor ends it (4b Plan Ruling 1).
     Audition(TargetIdx, Midi1Msg),
 }
 
@@ -406,6 +409,8 @@ pub struct Renderer {
     cursor: usize,
     transport: Transport,
     notes: ActiveNotes,
+    /// Notes sounding because an editor auditions them.
+    audition: ActiveNotes,
     sinks: Box<SinkTable>,
     bufs: Vec<StereoBuf>,
     block_ns: u64,
@@ -521,6 +526,7 @@ impl Renderer {
             cursor: 0,
             transport: Transport::new(cfg.sample_rate.max(0.0).round() as u64),
             notes: ActiveNotes::default(),
+            audition: ActiveNotes::default(),
             sinks: Box::default(),
             bufs: Vec::new(),
             block_ns: 0,
@@ -729,10 +735,11 @@ impl Renderer {
         }
     }
 
-    /// Note-offs, then a controller reset on every channel of the current
-    /// schedule, at block offset 0; the next played frames chase the
-    /// controller state (ruling O23). // RT
-    fn release_now(&mut self) {
+    /// Note-offs (of audition notes too when `auditions`), then a
+    /// controller reset on every channel of the current schedule, at block
+    /// offset 0; the next played frames chase the controller state (ruling
+    /// O23). // RT
+    fn release_now(&mut self, auditions: bool) {
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let mut o = Out {
             sinks: &mut self.sinks,
@@ -742,6 +749,9 @@ impl Renderer {
             late_ns,
         };
         release_all(&mut self.notes, &mut o, 0);
+        if auditions {
+            release_all(&mut self.audition, &mut o, 0);
+        }
         if let Some(s) = self.schedule.as_deref() {
             reset_controllers(s, &mut o, 0);
         }
@@ -751,7 +761,7 @@ impl Renderer {
     fn apply(&mut self, cmd: EngineCmd) {
         match cmd {
             EngineCmd::SetSchedule(new) => {
-                self.release_now();
+                self.release_now(false);
                 if let Some(old) = self.schedule.take() {
                     let tick = old.tempo.frame_to_tick(self.transport.pos);
                     self.transport.pos = new.tempo.tick_to_frame(tick);
@@ -793,11 +803,11 @@ impl Renderer {
                 self.seek();
             }
             EngineCmd::Stop => {
-                self.release_now();
+                self.release_now(true);
                 self.transport.stop();
             }
             EngineCmd::Locate(frame) => {
-                self.release_now();
+                self.release_now(true);
                 self.transport.locate(frame);
                 self.seek();
             }
@@ -805,6 +815,7 @@ impl Renderer {
             EngineCmd::RemoveSink(idx) => {
                 // Forget its sounding notes: nothing will play them now.
                 self.notes.release(idx, |_| {});
+                self.audition.release(idx, |_| {});
                 let taken = self
                     .sinks
                     .get_mut(usize::from(idx.0))
@@ -826,7 +837,7 @@ impl Renderer {
                     late_ns,
                 };
                 o.send(target, 0, msg.as_slice());
-                self.notes.observe(target, msg.as_slice());
+                self.audition.observe(target, msg.as_slice());
             }
             EngineCmd::AddSink(idx, sink) => {
                 if let Some(slot) = self.sinks.get_mut(usize::from(idx.0)) {

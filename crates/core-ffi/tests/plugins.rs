@@ -11,7 +11,8 @@ use core_model::mixer::{PluginFormat, PluginRef, StripKind};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{
-    closing_hosts_waiting, engine_active, force_offline, hosts_created, reset_host, simulate_event,
+    closing_hosts_waiting, drain_offline_log, engine_active, factory_owner, force_offline,
+    hosts_created, reset_host, simulate_event,
 };
 use vizdaw_ffi::{Session, SlotRow, SlotStatus};
 
@@ -339,5 +340,61 @@ fn an_edit_made_while_busy_reaches_the_engine_on_the_next_idle() {
             .unwrap()
             .iter()
             .any(|l| l.id == lane && l.mute)
+    );
+}
+
+#[test]
+fn a_fresh_engine_for_another_document_first_releases_an_audition_note() {
+    let _g = serial();
+    let (_d, path, song, id) = project("vizdaw.test.gain");
+    let a = open(&path);
+    a.play(song).unwrap();
+    idle_until(&a, |s| {
+        placeholder_lines(s).is_empty() && slot(s, id).status == SlotStatus::Live
+    });
+    a.stop().unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    drain_offline_log();
+    let piano = a
+        .destinations()
+        .unwrap()
+        .iter()
+        .find(|d| d.name == "Built-in Piano")
+        .unwrap()
+        .id;
+    assert!(a.audition(piano, 75, 0x8000, true).unwrap());
+    std::thread::sleep(Duration::from_millis(50));
+    // b plays without a releasing the engine first: a's plugins played
+    // there, so b gets a fresh engine and a's goes.
+    let b = Session::new_demo().unwrap();
+    let b_song = b
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "Song")
+        .unwrap()
+        .id;
+    let created = hosts_created();
+    // While the old engine plays its note-offs, the host lock is free.
+    let probe = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = factory_owner();
+        Instant::now()
+    });
+    b.play(b_song).unwrap();
+    let played = Instant::now();
+    assert_eq!(hosts_created(), created + 1, "a fresh engine for b");
+    assert!(
+        probe.join().unwrap() < played,
+        "the host lock is not held while the old engine drains"
+    );
+    b.stop().unwrap();
+    let log = drain_offline_log();
+    assert!(log.iter().any(|(_, m)| m == &vec![0x90, 75, 64]), "{log:?}");
+    assert!(log.iter().any(|(_, m)| m == &vec![0x80, 75, 0]), "{log:?}");
+    assert!(
+        !a.audition(piano, 75, 0, false).unwrap(),
+        "a no longer holds the engine"
     );
 }
