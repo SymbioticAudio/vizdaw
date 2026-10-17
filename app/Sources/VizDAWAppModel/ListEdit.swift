@@ -195,6 +195,17 @@ public enum ListEdit {
                 throw ListEditError("Gain must be -144 to 24 dB.")
             }
             return replace { $0.gainDb = g }
+        case .automation:
+            guard let a = e.automation else { return .unchanged }
+            guard let v = AutomationText.parsePercent(t) else {
+                throw ListEditError("Type a value from 0 to 100 %.")
+            }
+            return v == a.value
+                ? .unchanged
+                : replace {
+                    $0.automation = AutomationRow(target: a.target, value: v)
+                    $0.value = Int64((v * Double(UInt32.max)).rounded())
+                }
         default:
             return .unchanged
         }

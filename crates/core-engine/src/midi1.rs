@@ -234,7 +234,10 @@ pub fn translate(body: &EventBody, channel: u8) -> Translated<'_> {
                 t.sysex = Some(data);
             }
         }
-        EventBody::Text { .. } | EventBody::Reference { .. } | EventBody::AudioRegion { .. } => {}
+        EventBody::Text { .. }
+        | EventBody::Reference { .. }
+        | EventBody::AudioRegion { .. }
+        | EventBody::Automation { .. } => {}
     }
     t
 }

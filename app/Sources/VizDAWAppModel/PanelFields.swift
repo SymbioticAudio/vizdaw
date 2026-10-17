@@ -109,7 +109,7 @@ extension ConditionTest {
         case .controller: [Field("from", .bounded(0, 127)), Field("to", .bounded(0, 127))]
         case .metric: [Field("grid", .length), Field("offset", .length), Field("within", .length)]
         case .everyNth: [Field("every", .bounded(1, 1_000_000)), Field("starting at", .count)]
-        case .kinds, .dest: []
+        case .kinds, .dest, .automation: []
         }
     }
 
@@ -123,7 +123,7 @@ extension ConditionTest {
         case let .controller(l, h): [Int64(l), Int64(h)]
         case let .metric(g, o, t): [g, o, t]
         case let .everyNth(n, p): [Int64(n), Int64(p)]
-        case .kinds, .dest: []
+        case .kinds, .dest, .automation: []
         }
     }
 
@@ -143,7 +143,7 @@ extension ConditionTest {
         case .controller: return .controller(low: pitch(at(0)), high: pitch(at(1)))
         case .metric: return .metric(grid: max(at(0), 1), offset: at(1), tolerance: max(at(2), 0))
         case .everyNth: return .everyNth(n: UInt32(clamping: max(at(0), 1)), phase: UInt32(clamping: at(1)))
-        case .kinds, .dest: return self
+        case .kinds, .dest, .automation: return self
         }
     }
 }

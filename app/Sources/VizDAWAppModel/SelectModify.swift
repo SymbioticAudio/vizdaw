@@ -105,7 +105,7 @@ public struct SelectModifyConfig: Equatable, Sendable {
 /// The attributes a condition tests (parent spec §9 select half).
 public enum ConditionKind: String, CaseIterable, Sendable {
     case time, kind, pitch, velocity, releaseVelocity, duration, value, controller, destination, metric, everyNth
-    case bracketed
+    case bracketed, automation
 
     public var title: String {
         switch self {
@@ -121,6 +121,7 @@ public enum ConditionKind: String, CaseIterable, Sendable {
         case .metric: "Metric Position"
         case .everyNth: "Every Nth"
         case .bracketed: "Inside a Note"
+        case .automation: "Automation Target"
         }
     }
 
@@ -138,6 +139,7 @@ public enum ConditionKind: String, CaseIterable, Sendable {
         case .metric: self = .metric
         case .everyNth: self = .everyNth
         case .bracketedBy: self = .bracketed
+        case .automation: self = .automation
         }
     }
 
@@ -160,6 +162,7 @@ public enum ConditionKind: String, CaseIterable, Sendable {
         case .metric: return .metric(grid: q, offset: 0, tolerance: q / 16)
         case .everyNth: return .everyNth(n: 2, phase: 0)
         case .bracketed: return .bracketedBy(low: 0, high: 127)
+        case .automation: return .automation(target: .stripFader(strip: 0))
         }
     }
 }

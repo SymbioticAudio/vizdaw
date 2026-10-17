@@ -134,6 +134,16 @@ fn every_kind() -> (Document, SeqId, LaneId) {
                 },
             },
         ),
+        EventSpec::new(
+            Tick(3 * BAR),
+            EventBody::Automation {
+                target: core_model::automation::AutomationTarget::SendLevel(
+                    core_model::ids::StripId(2),
+                    core_model::automation::SendIndex(1),
+                ),
+                value: 0.375,
+            },
+        ),
     ];
     b.events(seq, lane, specs).unwrap();
     (b.finish(), seq, lane)
@@ -153,7 +163,7 @@ fn every_kind_round_trips_through_a_row() {
         .collect();
     let s = Session::from_document(doc).unwrap();
     let rows = s.lane_events(seq.0, lane.0).unwrap().events;
-    assert_eq!(rows.len(), 10);
+    assert_eq!(rows.len(), 11);
     let kinds: Vec<EventKindRow> = rows.iter().map(|r| r.kind).collect();
     assert_eq!(
         kinds,
@@ -168,6 +178,7 @@ fn every_kind_round_trips_through_a_row() {
             EventKindRow::Text,
             EventKindRow::Reference,
             EventKindRow::AudioRegion,
+            EventKindRow::Automation,
         ]
     );
     for (row, original) in rows.iter().zip(&originals) {
@@ -452,4 +463,136 @@ fn the_other_variants_round_trip_too() {
         .find(|r| r.kind == EventKindRow::Reference)
         .unwrap();
     assert_eq!((reference.ref_loops, reference.ref_length), (0, Some(Q)));
+}
+use core_engine::fixtures::Builder as AutoBuilder;
+use vizdaw_ffi::{AutomationRow, AutomationTargetRow};
+
+#[test]
+fn automation_rows_round_trip_and_bad_ones_are_refused() {
+    let mut b = AutoBuilder::new();
+    let (seq, lane) = b.sequence("S", "Auto", None).unwrap();
+    let s = vizdaw_ffi::Session::from_document(b.finish()).unwrap();
+    let insert = |row: vizdaw_ffi::EventRow| vizdaw_ffi::EditCommand::Event {
+        edit: vizdaw_ffi::EventEdit::Insert {
+            seq: seq.0,
+            lane: lane.0,
+            events: vec![row],
+        },
+    };
+    let a = AutomationRow {
+        target: AutomationTargetRow::SendLevel { strip: 4, send: 1 },
+        value: 0.25,
+    };
+    let mut r = vizdaw_ffi::EventRow::blank(0, 960, vizdaw_ffi::EventKindRow::Automation);
+    r.automation = Some(a);
+    s.edit(insert(r), None).unwrap();
+    let rows = s.lane_events(seq.0, lane.0).unwrap().events;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, vizdaw_ffi::EventKindRow::Automation);
+    assert_eq!(rows[0].tick, 960);
+    assert_eq!(rows[0].automation, Some(a));
+    assert_eq!(
+        rows[0].value,
+        i64::from(core_model::automation::to_u32(0.25))
+    );
+    // Every target kind survives the trip.
+    for target in [
+        AutomationTargetRow::StripFader { strip: 1 },
+        AutomationTargetRow::StripPan { strip: 1 },
+        AutomationTargetRow::StripMute { strip: 1 },
+        AutomationTargetRow::StripSolo { strip: 1 },
+        AutomationTargetRow::PluginParam {
+            slot: 9,
+            param: 1 << 40,
+        },
+        AutomationTargetRow::VelocityScale { dest: 2 },
+    ] {
+        let mut r = vizdaw_ffi::EventRow::blank(0, 0, vizdaw_ffi::EventKindRow::Automation);
+        r.automation = Some(AutomationRow { target, value: 1.0 });
+        let spec = vizdaw_ffi::events::spec(&r).unwrap();
+        let back = match spec.body {
+            core_model::event::EventBody::Automation { target, value } => {
+                (vizdaw_ffi::events::automation_target_row(target), value)
+            }
+            b => panic!("{b:?}"),
+        };
+        assert_eq!(back, (target, 1.0));
+    }
+    // No automation record, or a value outside 0–1: refused, no undo step.
+    let before = s.snapshot().unwrap().undo_label;
+    let bare = vizdaw_ffi::EventRow::blank(0, 0, vizdaw_ffi::EventKindRow::Automation);
+    assert!(matches!(
+        s.edit(insert(bare), None),
+        Err(vizdaw_ffi::VizError::Model { .. })
+    ));
+    let mut high = vizdaw_ffi::EventRow::blank(0, 0, vizdaw_ffi::EventKindRow::Automation);
+    high.automation = Some(AutomationRow {
+        target: AutomationTargetRow::StripFader { strip: 1 },
+        value: 1.5,
+    });
+    assert!(s.edit(insert(high), None).is_err());
+    assert_eq!(s.snapshot().unwrap().undo_label, before);
+}
+
+#[test]
+fn the_automation_condition_selects_one_target() {
+    let mut b = AutoBuilder::new();
+    let (seq, lane) = b.sequence("S", "Auto", None).unwrap();
+    let fader = core_model::automation::AutomationTarget::StripFader(core_model::ids::StripId(1));
+    let pan = core_model::automation::AutomationTarget::StripPan(core_model::ids::StripId(1));
+    b.events(
+        seq,
+        lane,
+        vec![
+            EventSpec::new(
+                Tick(0),
+                EventBody::Automation {
+                    target: fader,
+                    value: 0.1,
+                },
+            ),
+            EventSpec::new(
+                Tick(10),
+                EventBody::Automation {
+                    target: pan,
+                    value: 0.2,
+                },
+            ),
+        ],
+    )
+    .unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    s.set_selection(vizdaw_ffi::SelectionRow {
+        time_range: None,
+        lanes: vec![vizdaw_ffi::LaneRef {
+            seq: seq.0,
+            lane: lane.0,
+        }],
+        events: vec![],
+    })
+    .unwrap();
+    let rule = vizdaw_ffi::RuleRow {
+        conditions: vec![vizdaw_ffi::ConditionRow {
+            test: vizdaw_ffi::ConditionTest::Automation {
+                target: AutomationTargetRow::StripPan { strip: 1 },
+            },
+            negate: false,
+        }],
+        match_all: true,
+    };
+    s.edit(
+        vizdaw_ffi::EditCommand::SelectAndModify {
+            rule: Some(rule.clone()),
+            mode: vizdaw_ffi::SelectModeRow::Select,
+            modify: None,
+            to_copy: false,
+        },
+        None,
+    )
+    .unwrap();
+    let rows = s.lane_events(seq.0, lane.0).unwrap().events;
+    assert_eq!(s.selection().unwrap().events, vec![rows[1].id]);
+    // The condition reads back from the core rule unchanged.
+    let core = vizdaw_ffi::modify::rule(&rule).unwrap();
+    assert_eq!(vizdaw_ffi::modify::rule_row(&core), Some(rule));
 }

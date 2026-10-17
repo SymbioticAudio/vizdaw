@@ -101,6 +101,11 @@ pub enum ConditionTest {
         /// Highest pitch.
         high: u8,
     },
+    /// An automation point driving `target` (4d).
+    Automation {
+        /// The target.
+        target: crate::events::AutomationTargetRow,
+    },
 }
 
 /// A condition, optionally negated ("not equal", "outside").
@@ -404,6 +409,7 @@ fn kind_row(k: EventKind) -> EventKindRow {
         EventKind::Text => EventKindRow::Text,
         EventKind::Reference => EventKindRow::Reference,
         EventKind::AudioRegion => EventKindRow::AudioRegion,
+        EventKind::Automation => EventKindRow::Automation,
     }
 }
 
@@ -494,6 +500,9 @@ fn leaf(t: &ConditionTest) -> Result<Rule, VizError> {
                 high: *high,
             }),
         },
+        ConditionTest::Automation { target } => Rule::Automation {
+            target: crate::events::automation_target_of(*target),
+        },
     })
 }
 
@@ -566,6 +575,9 @@ fn test_of(r: &Rule) -> Option<ConditionTest> {
                 high: *high,
             },
             _ => return None,
+        },
+        Rule::Automation { target } => ConditionTest::Automation {
+            target: crate::events::automation_target_row(*target),
         },
         Rule::All(_) | Rule::Any(_) | Rule::Not(_) => return None,
     })

@@ -6,6 +6,7 @@ import VizDAWCore
 public enum ListKind: String, Codable, CaseIterable, Hashable, Sendable {
     case note, cc, pitchBend, channelPressure, polyPressure, program, sysEx, text, reference, audioRegion
     case tempo, meter, marker
+    case automation
 
     public init(_ k: EventKindRow) {
         switch k {
@@ -19,6 +20,7 @@ public enum ListKind: String, Codable, CaseIterable, Hashable, Sendable {
         case .text: self = .text
         case .reference: self = .reference
         case .audioRegion: self = .audioRegion
+        case .automation: self = .automation
         }
     }
 
@@ -34,6 +36,7 @@ public enum ListKind: String, Codable, CaseIterable, Hashable, Sendable {
         case .text: .text
         case .reference: .reference
         case .audioRegion: .audioRegion
+        case .automation: .automation
         case .tempo, .meter, .marker: nil
         }
     }
@@ -61,6 +64,7 @@ public enum ListKind: String, Codable, CaseIterable, Hashable, Sendable {
         case .tempo: "Tempo"
         case .meter: "Meter and Key"
         case .marker: "Marker"
+        case .automation: "Automation"
         }
     }
 
@@ -362,6 +366,7 @@ public enum ListText {
             case .text: return title(e.textKind)
             case .reference: return e.refSeq.flatMap { c.seqNames[$0] } ?? "Sequence"
             case .audioRegion: return "Audio"
+            case .automation: return e.automation.map { AutomationText.short($0.target) } ?? ""
             case .pitchBend, .channelPressure: return ""
             }
         }
@@ -386,6 +391,7 @@ public enum ListText {
                 let loops = e.refLoops == 0 ? "fill" : "×\(e.refLoops)"
                 return "\(loops) \(e.refTranspose > 0 ? "+" : "")\(e.refTranspose)"
             case .audioRegion: return String(format: "%.1f dB", e.gainDb)
+            case .automation: return e.automation.map { AutomationText.percent($0.value) } ?? ""
             }
         }
     }
@@ -404,8 +410,11 @@ public enum ListText {
             case .kind, .lane: return false
             case .data1: return [.note, .polyPressure, .cc, .program, .text].contains(e.kind)
             case .data2:
-                return [.note, .cc, .pitchBend, .channelPressure, .polyPressure, .program, .text, .reference, .audioRegion]
-                    .contains(e.kind)
+                return [
+                    .note, .cc, .pitchBend, .channelPressure, .polyPressure, .program, .text, .reference, .audioRegion,
+                    .automation,
+                ]
+                .contains(e.kind)
             }
         }
     }

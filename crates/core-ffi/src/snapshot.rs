@@ -175,6 +175,7 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                     match ev.body {
                         EventBody::Reference { .. } => refs += 1,
                         EventBody::AudioRegion { .. } => regions += 1,
+                        EventBody::Automation { .. } => {}
                         _ => midi += 1,
                     }
                 }

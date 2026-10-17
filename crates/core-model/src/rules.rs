@@ -197,6 +197,11 @@ pub fn check_event_fields(doc: &Document, ev: &EventSpec) -> Result<()> {
             need(fade_in.length.0 >= 0, "fade_in.length", fade_in.length.0)?;
             need(fade_out.length.0 >= 0, "fade_out.length", fade_out.length.0)?;
         }
+        EventBody::Automation { value, .. } => need(
+            crate::automation::check_value(*value),
+            "automation.value",
+            value,
+        )?,
         EventBody::PitchBend { .. }
         | EventBody::ChannelPressure { .. }
         | EventBody::Text { .. } => {}

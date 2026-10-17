@@ -105,6 +105,7 @@ pub enum EditCommand {
 }
 
 /// Mirrors `core_model::command::EventCmd`.
+#[allow(clippy::large_enum_variant)] // boxing would change the generated Swift API
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum EventEdit {
     /// Insert rows (IDs ignored) into a lane's active take.

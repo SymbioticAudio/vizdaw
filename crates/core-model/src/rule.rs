@@ -1,5 +1,6 @@
 //! Composable event predicates for select-and-modify.
 
+use crate::automation::AutomationTarget;
 use crate::document::Document;
 use crate::event::{Event, EventBody, EventKind};
 use crate::ids::{DestId, EventId, LaneId, SeqId};
@@ -101,6 +102,11 @@ pub enum Rule {
         /// What the bracketing note must match.
         by: Box<Rule>,
     },
+    /// An automation event driving `target`.
+    Automation {
+        /// The target.
+        target: AutomationTarget,
+    },
 }
 
 /// How a rule combines with the current selection.
@@ -175,6 +181,9 @@ pub fn matches(
             matches!(ev.body, EventBody::Cc { index, .. } if (*low..=*high).contains(&index))
         }
         Rule::Bracketed { by } => bracketed(doc, by, ev),
+        Rule::Automation { target } => {
+            matches!(ev.body, EventBody::Automation { target: t, .. } if t == *target)
+        }
     }
 }
 

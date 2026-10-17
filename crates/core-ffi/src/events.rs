@@ -14,12 +14,15 @@
 
 use crate::error::VizError;
 use crate::snapshot::KeySlotRow;
+use core_model::automation::{AutomationTarget, SendIndex};
 use core_model::document::Document;
 use core_model::event::{
     Event, EventBody, EventSpec, Fade, FadeShape, LoopCount, NoteAttribute, PerNoteCtl,
     PerNoteKind, TextKind,
 };
 use core_model::ids::{DestId, LaneId, MediaId, SeqId};
+use core_model::ids::{PluginInstanceId, StripId};
+use core_model::mixer::ParamId;
 use core_model::query::length::{reference_span, seq_length};
 use core_model::sequence::SeqKind;
 use core_model::tempo::TempoMap;
@@ -50,6 +53,99 @@ pub enum EventKindRow {
     Reference,
     /// An audio region.
     AudioRegion,
+    /// An automation point (4d).
+    Automation,
+}
+
+/// What an automation event drives (core `AutomationTarget`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum AutomationTargetRow {
+    /// A strip's fader.
+    StripFader {
+        /// Strip ID.
+        strip: u64,
+    },
+    /// A strip's pan.
+    StripPan {
+        /// Strip ID.
+        strip: u64,
+    },
+    /// A strip's mute.
+    StripMute {
+        /// Strip ID.
+        strip: u64,
+    },
+    /// A strip's solo.
+    StripSolo {
+        /// Strip ID.
+        strip: u64,
+    },
+    /// A send's level.
+    SendLevel {
+        /// Strip ID.
+        strip: u64,
+        /// The send's position in the strip's sends.
+        send: u16,
+    },
+    /// A plugin parameter.
+    PluginParam {
+        /// Plugin instance (slot) ID.
+        slot: u64,
+        /// Stable parameter ID.
+        param: u64,
+    },
+    /// A destination's velocity scale.
+    VelocityScale {
+        /// Destination ID.
+        dest: u64,
+    },
+}
+
+/// An automation point's target and normalised value (0–1).
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct AutomationRow {
+    /// What it drives.
+    pub target: AutomationTargetRow,
+    /// Normalised value.
+    pub value: f64,
+}
+
+/// The row of a core target.
+pub fn automation_target_row(t: AutomationTarget) -> AutomationTargetRow {
+    match t {
+        AutomationTarget::StripFader(s) => AutomationTargetRow::StripFader { strip: s.0 },
+        AutomationTarget::StripPan(s) => AutomationTargetRow::StripPan { strip: s.0 },
+        AutomationTarget::StripMute(s) => AutomationTargetRow::StripMute { strip: s.0 },
+        AutomationTarget::StripSolo(s) => AutomationTargetRow::StripSolo { strip: s.0 },
+        AutomationTarget::SendLevel(s, i) => AutomationTargetRow::SendLevel {
+            strip: s.0,
+            send: i.0,
+        },
+        AutomationTarget::PluginParam(p, id) => AutomationTargetRow::PluginParam {
+            slot: p.0,
+            param: id.0,
+        },
+        AutomationTarget::VelocityScale(d) => AutomationTargetRow::VelocityScale { dest: d.0 },
+    }
+}
+
+/// The core target of a row.
+pub fn automation_target_of(t: AutomationTargetRow) -> AutomationTarget {
+    match t {
+        AutomationTargetRow::StripFader { strip } => AutomationTarget::StripFader(StripId(strip)),
+        AutomationTargetRow::StripPan { strip } => AutomationTarget::StripPan(StripId(strip)),
+        AutomationTargetRow::StripMute { strip } => AutomationTarget::StripMute(StripId(strip)),
+        AutomationTargetRow::StripSolo { strip } => AutomationTarget::StripSolo(StripId(strip)),
+        AutomationTargetRow::SendLevel { strip, send } => {
+            AutomationTarget::SendLevel(StripId(strip), SendIndex(send))
+        }
+        AutomationTargetRow::PluginParam { slot, param } => {
+            AutomationTarget::PluginParam(PluginInstanceId(slot), ParamId(param))
+        }
+        AutomationTargetRow::VelocityScale { dest } => {
+            AutomationTarget::VelocityScale(DestId(dest))
+        }
+    }
 }
 
 /// Text meta-event kinds.
@@ -205,6 +301,10 @@ pub struct EventRow {
     pub data: Vec<u8>,
     /// SysEx may hold 8-bit data.
     pub eight_bit: bool,
+    /// An automation point's target and value (4d; `value` then holds the
+    /// value on the 32-bit scale, Plan 4d Ruling 25).
+    #[uniffi(default = None)]
+    pub automation: Option<AutomationRow>,
 }
 
 const NO_FADE: FadeRow = FadeRow {
@@ -245,6 +345,7 @@ impl EventRow {
             text_kind: None,
             data: Vec::new(),
             eight_bit: false,
+            automation: None,
         }
     }
 }
@@ -354,6 +455,7 @@ fn kind_row(b: &EventBody) -> EventKindRow {
         EventBody::Text { .. } => EventKindRow::Text,
         EventBody::Reference { .. } => EventKindRow::Reference,
         EventBody::AudioRegion { .. } => EventKindRow::AudioRegion,
+        EventBody::Automation { .. } => EventKindRow::Automation,
     }
 }
 
@@ -371,6 +473,7 @@ pub fn kind_of(k: EventKindRow) -> core_model::event::EventKind {
         EventKindRow::Text => K::Text,
         EventKindRow::Reference => K::Reference,
         EventKindRow::AudioRegion => K::AudioRegion,
+        EventKindRow::Automation => K::Automation,
     }
 }
 
@@ -549,6 +652,13 @@ pub fn row(
             r.fade_out = fade_row(*fade_out);
             r.duration = region_ticks(doc, tempo, ev.tick, *media, *length);
         }
+        EventBody::Automation { target, value } => {
+            r.automation = Some(AutomationRow {
+                target: automation_target_row(*target),
+                value: *value,
+            });
+            r.value = i64::from(core_model::automation::to_u32(*value));
+        }
     }
     r
 }
@@ -618,6 +728,15 @@ pub fn spec(row: &EventRow) -> Result<EventSpec, VizError> {
             fade_in: fade_of(&row.fade_in),
             fade_out: fade_of(&row.fade_out),
         },
+        EventKindRow::Automation => {
+            let a = row
+                .automation
+                .ok_or_else(|| bad("an automation row needs its automation record"))?;
+            EventBody::Automation {
+                target: automation_target_of(a.target),
+                value: a.value,
+            }
+        }
     };
     Ok(EventSpec {
         tick: Tick(row.tick),
