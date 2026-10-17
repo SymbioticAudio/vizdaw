@@ -3,6 +3,8 @@ import VizDAWCore
 /// A drag in progress: one undo step named `label` (spec §3.2, §3.8).
 public struct Gesture: Equatable, Sendable {
     public let label: String
+    /// The gesture that opened it; only note and block drags go exact.
+    public let origin: GestureOrigin
     /// The lanes it edits; it is cancelled when one disappears (spec §5).
     public internal(set) var lanes: Set<LaneKey>
     /// The target the document shows now (`nil`: the start state).
@@ -21,11 +23,11 @@ extension EditorModel {
     /// Opens a gesture once the pointer left the dead zone. False when
     /// one is already open or the session refused.
     @discardableResult
-    public func beginGesture(_ label: String, lanes: Set<LaneKey>) -> Bool {
+    public func beginGesture(_ label: String, lanes: Set<LaneKey>, origin: GestureOrigin) -> Bool {
         guard gesture == nil else { return false }
         do {
             try session.beginEdit(label: label)
-            gesture = Gesture(label: label, lanes: lanes)
+            gesture = Gesture(label: label, origin: origin, lanes: lanes)
             return true
         } catch {
             report(error)
@@ -75,6 +77,15 @@ extension EditorModel {
     /// as one undo step; Busy leaves it pending for `tick()`.
     public func endGesture(_ final: EditCommand?) {
         guard var g = gesture else { return }
+        // Exact mode: the drag was a preview; put it back (before the panel
+        // records its baseline), then ask instead of applying.
+        if exactMode, !g.finishing, let final,
+            let r = ExactMode.request(for: final, lanes: g.lanes, origin: g.origin)
+        {
+            cancelGesture()
+            requestExact(r)
+            return
+        }
         g.finishing = true
         g.pendingFinal = final
         gesture = g

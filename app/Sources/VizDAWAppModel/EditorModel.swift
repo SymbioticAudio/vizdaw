@@ -41,6 +41,19 @@ public final class EditorModel {
     /// returning to the start (Plan 4c Ruling 20).
     public var listFocused = false
 
+    /// Exact mode (parent spec §9, Plan 4c Ruling 23): a drag opens the
+    /// select-and-modify panel with its amounts instead of applying.
+    public var exactMode = false
+    /// Opens the panel for a request (set by `DocumentModel`).
+    @ObservationIgnored var onExact: ((ModifyRequest) -> Void)?
+
+    /// The request's events and lanes (or its range and lanes) become the
+    /// selection, then the panel opens.
+    public func requestExact(_ r: ModifyRequest) {
+        setSelection(SelectionRow(timeRange: r.range, lanes: r.lanes.map(\.ref), events: r.events ?? []))
+        onExact?(r)
+    }
+
     public func beginTextEditing(_ owner: String) { textEditors.insert(owner) }
 
     public func endTextEditing(_ owner: String) { textEditors.remove(owner) }

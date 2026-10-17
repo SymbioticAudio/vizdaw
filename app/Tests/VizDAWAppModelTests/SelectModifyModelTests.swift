@@ -235,7 +235,7 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
     @Test func anOpenDragRefusesApplyWithoutTouchingTheSelection() throws {
         let (f, m, s) = try panel()
         s.open(dragRequest())
-        #expect(m.editor.beginGesture("Drag", lanes: [LaneKey(3, 31)]))
+        #expect(m.editor.beginGesture("Drag", lanes: [LaneKey(3, 31)], origin: .other))
         let sets = f.selectionSets.count
         #expect(!s.apply())
         #expect(m.editor.status == EditorModel.gestureOpenMessage)

@@ -11,7 +11,7 @@ private let move2: EditCommand = .event(edit: .move(events: [1], delta: 200, toL
         let f = editorFake()
         let m = try DocumentModel(session: f)
         f.calls = []
-        #expect(m.editor.beginGesture("Move Block", lanes: [chords]))
+        #expect(m.editor.beginGesture("Move Block", lanes: [chords], origin: .other))
         return (f, m, m.editor)
     }
 
@@ -128,7 +128,7 @@ private let move2: EditCommand = .event(edit: .move(events: [1], delta: 200, toL
 
     @Test func onlyOneGestureAtATime() throws {
         let (_, _, e) = try open()
-        #expect(!e.beginGesture("Copy Block", lanes: []))
+        #expect(!e.beginGesture("Copy Block", lanes: [], origin: .other))
     }
 
     @Test func aBusyIntermediateEditForgetsTheAppliedTarget() throws {

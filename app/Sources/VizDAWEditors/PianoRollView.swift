@@ -281,7 +281,7 @@ public final class PianoRollView: EditorCanvas {
             }
         case (.pencil, .empty(let tick, let pitch)):
             // A gesture, so the undo step reads "Insert Note" (Plan Ruling 7).
-            guard let lane = model.editLane, openGesture("Insert Note", lanes: [lane]) else { return }
+            guard let lane = model.editLane, openGesture("Insert Note", lanes: [lane], origin: .other) else { return }
             let start = Pencil.start(tick, snap: snap, meter: meter)
             editor.endGesture(
                 Pencil.command(
@@ -295,7 +295,7 @@ public final class PianoRollView: EditorCanvas {
         switch (editor.tool, hit) {
         case (.eraser, _):
             let erased = Eraser.adding(hit, to: [])
-            guard openGesture("Erase Notes", lanes: Set(model.shownLanes)) else { return }
+            guard openGesture("Erase Notes", lanes: Set(model.shownLanes), origin: .other) else { return }
             drag = .erase(erased, last: from)
             editor.updateGesture(Eraser.command(erased))
         case (_, .note(let n)):
@@ -307,10 +307,10 @@ public final class PianoRollView: EditorCanvas {
             let d = NoteDrag(
                 zone: n.zone, pressed: n.row, lane: n.lane, events: ids, lowest: pitches.min() ?? n.row.pitch,
                 highest: pitches.max() ?? n.row.pitch, copy: modifiers.contains(.option))
-            guard openGesture(d.label, lanes: Set(model.shownLanes)) else { return }
+            guard openGesture(d.label, lanes: Set(model.shownLanes), origin: .notes) else { return }
             drag = .notes(d, startTick: axis.tick(atX: from.x), startY: from.y)
         case (.pencil, .empty(let tick, let pitch)):
-            guard let lane = model.editLane, openGesture("Insert Note", lanes: [lane]) else { return }
+            guard let lane = model.editLane, openGesture("Insert Note", lanes: [lane], origin: .other) else { return }
             drag = .pencil(lane: lane, start: Pencil.start(tick, snap: snap, meter: meter), pitch: pitch)
         case (_, .empty):
             drag = .band(from: from, adding: modifiers.contains(.shift))
@@ -320,9 +320,9 @@ public final class PianoRollView: EditorCanvas {
     /// Opens the gesture a pencil click or drag needs. Refused while
     /// another one is still finishing: the status says so and the note
     /// sounded on mouse-down stops.
-    private func openGesture(_ label: String, lanes: Set<LaneKey>) -> Bool {
+    private func openGesture(_ label: String, lanes: Set<LaneKey>, origin: GestureOrigin) -> Bool {
         let pending = editor.gesture != nil
-        if editor.beginGesture(label, lanes: lanes) { return true }
+        if editor.beginGesture(label, lanes: lanes, origin: origin) { return true }
         if pending { editor.status = EditorModel.gestureOpenMessage }
         model.silence()
         return false
@@ -378,8 +378,20 @@ public final class PianoRollView: EditorCanvas {
         drag = nil
         if case let .band(from, adding) = d {
             clearBand()
+            let rect = RubberBand.rect(from: from, to: p)
+            if editor.exactMode {
+                let start = axis.tick(atX: rect.minX)
+                let end = max(axis.tick(atX: rect.maxX), start + 1)
+                let a = pitchAxis.pitch(atY: rect.minY)
+                let b = pitchAxis.pitch(atY: rect.maxY)
+                editor.requestExact(
+                    ExactMode.selectRequest(
+                        range: TickRange(start: start, end: end), pitches: min(a, b)...max(a, b),
+                        lanes: model.shownLanes, adding: adding))
+                return
+            }
             let found = PianoRollGeometry.notes(
-                in: RubberBand.rect(from: from, to: p), lanes: laneNotes(), time: axis, pitch: pitchAxis)
+                in: rect, lanes: laneNotes(), time: axis, pitch: pitchAxis)
             model.select(found, adding: adding)
             return
         }

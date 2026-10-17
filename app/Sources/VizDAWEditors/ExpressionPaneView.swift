@@ -117,7 +117,7 @@ public final class ExpressionPaneView: NSView, TimeAxisFollower {
         stroke.append(CGPoint(x: max(p.x, side) - side, y: p.y))
         if !open {
             guard hypot(p.x - s.x, p.y - s.y) > ToolMachine<Int>.deadZone, let lane = model.editLane else { return }
-            open = editor.beginGesture(label, lanes: [lane])
+            open = editor.beginGesture(label, lanes: [lane], origin: .expression)
         }
         if open { editor.updateGesture(command()) }
     }
@@ -134,7 +134,7 @@ public final class ExpressionPaneView: NSView, TimeAxisFollower {
         } else if let c = command(), let lane = model.editLane {
             // A tap is one step named like a stroke.
             let pending = editor.gesture != nil
-            guard editor.beginGesture(label, lanes: [lane]) else {
+            guard editor.beginGesture(label, lanes: [lane], origin: .expression) else {
                 if pending { editor.status = EditorModel.gestureOpenMessage }
                 return
             }

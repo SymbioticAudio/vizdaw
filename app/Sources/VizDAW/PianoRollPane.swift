@@ -61,6 +61,8 @@ struct PianoRollBar: View {
             }
             .frame(width: 190)
             .help("The lane the pencil adds notes to")
+            Toggle("Exact", isOn: $editor.exactMode)
+                .help("Exact mode: a drag opens Select and Modify with its amounts (⌃⌘E)")
             Toggle("Audio", isOn: setting(\.showRegions))
             Toggle("Expression", isOn: setting(\.showExpression))
             Spacer()

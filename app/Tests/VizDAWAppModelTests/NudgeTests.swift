@@ -95,7 +95,7 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
 
     @Test func refusedWhileADragIsOpen() throws {
         let (f, e) = try selected([1])
-        #expect(e.beginGesture("Move Notes", lanes: [LaneKey(3, 31)]))
+        #expect(e.beginGesture("Move Notes", lanes: [LaneKey(3, 31)], origin: .other))
         #expect(!e.nudge(.up, settings: NudgeSettings()))
         #expect(f.edits.isEmpty)
         #expect(e.status == EditorModel.gestureOpenMessage)

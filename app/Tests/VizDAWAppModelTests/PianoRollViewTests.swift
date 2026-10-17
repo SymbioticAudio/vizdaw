@@ -137,6 +137,26 @@ private func log(_ f: FakeSession) -> [String] {
         #expect(m.editor.gesture == nil, "selecting is not an edit")
     }
 
+    @Test func aRubberBandInExactModeOpensSelectByRule() throws {
+        let (_, m, v) = try roll()
+        m.editor.exactMode = true
+        let a = point(v, 1, .start)
+        let b = point(v, 2, .end)
+        let from = CGPoint(x: a.x - 1, y: b.y - 15)
+        let to = CGPoint(x: b.x, y: a.y + 15)
+        v.contentMouseDown(from, clicks: 1, modifiers: [])
+        v.contentMouseDragged(to, modifiers: [])
+        v.contentMouseUp(to, modifiers: [])
+        let s = m.selectModify
+        #expect(s.isOpen && s.task == .selectByRule && !s.config.modify.enabled)
+        guard case let .pitch(low, high)? = s.config.select.conditions.last?.test else {
+            Issue.record("no pitch condition")
+            return
+        }
+        #expect(low <= 60 && high >= 64, "the band's rows: C4 to E4 and a little more")
+        #expect(m.editor.selection.events.isEmpty && m.editor.selection.timeRange != nil)
+    }
+
     @Test func aNoteDragEndsItsSoundEvenWhenTheFinalEditWaits() throws {
         let (f, m, v) = try roll()
         let p = point(v, 1, .middle)
@@ -275,7 +295,7 @@ private func log(_ f: FakeSession) -> [String] {
 
     @Test func aPencilClickWhileAGestureFinishesSaysSoAndIsSilent() throws {
         let (f, m, v) = try roll()
-        #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)]))
+        #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)], origin: .other))
         m.editor.tool = .pencil
         let p = CGPoint(x: 400, y: v.pitchAxis.center(67))
         v.contentMouseDown(p, clicks: 1, modifiers: [])
@@ -287,7 +307,7 @@ private func log(_ f: FakeSession) -> [String] {
 
     @Test func aNoteDragWhileAGestureFinishesSaysSoAndSilences() throws {
         let (f, m, v) = try roll()
-        #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)]))
+        #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)], origin: .other))
         let p = point(v, 1, .middle)
         v.contentMouseDown(p, clicks: 1, modifiers: [])
         #expect(log(f) == ["on 60"])

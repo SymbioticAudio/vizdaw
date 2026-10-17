@@ -51,7 +51,7 @@ func audioFake() -> FakeSession {
         let f = audioFake()
         let m = try DocumentModel(session: f)
         m.editor.openDetail(.sequence(3), kind: .pianoRoll)
-        #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)]))
+        #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)], origin: .other))
         m.pianoRoll(.pane).setOutputMute(7, true)
         #expect(!f.calls.contains("mute 40 true"))
         #expect(m.editor.status == EditorModel.gestureOpenMessage)

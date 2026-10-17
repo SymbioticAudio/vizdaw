@@ -261,7 +261,7 @@ public final class ArrangementView: EditorCanvas {
         let events = BlockDrag.events(pressed: b.block, laneBlocks: editor.blocks(b.lane), selected: selected)
         let rows = copy ? (editor.laneEvents(b.lane)?.events ?? []) : []
         let d = Drag(hit: b, events: events, rows: rows, copy: copy, startTick: axis.tick(atX: from.x))
-        guard editor.beginGesture(BlockDrag.label(copy: copy), lanes: touched(d, to: to)) else { return }
+        guard editor.beginGesture(BlockDrag.label(copy: copy), lanes: touched(d, to: to), origin: .blocks) else { return }
         drag = d
     }
 

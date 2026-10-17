@@ -99,7 +99,7 @@ import VizDAWCore
         f.lastModifyRow = .move(delta: 5)
         m.editor.edit(.event(edit: .delete(events: [1])))
         #expect(p.canModifyAgain && p.modifyAgainTitle == "Modify Again: Move")
-        #expect(m.editor.beginGesture("Drag", lanes: [LaneKey(3, 31)]))
+        #expect(m.editor.beginGesture("Drag", lanes: [LaneKey(3, 31)], origin: .other))
         #expect(!p.canModifyAgain)
     }
 

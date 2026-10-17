@@ -127,6 +127,13 @@ struct AppCommands: Commands {
                 }
             }
             .disabled((doc?.editor.modifyTemplates() ?? []).isEmpty)
+            Divider()
+            Toggle(
+                "Exact Mode",
+                isOn: Binding(get: { doc?.editor.exactMode ?? false }, set: { doc?.editor.exactMode = $0 })
+            )
+            .keyboardShortcut("e", modifiers: [.command, .control])
+            .disabled(doc == nil)
         }
         CommandMenu("Sequence") {
             Button("Make Reference from Selection") {

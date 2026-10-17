@@ -151,6 +151,7 @@ public final class DocumentModel {
         editor.selectSequence = { [weak self] in self?.select($0) }
         editor.currentSequence = { [weak self] in self?.selectedSeq }
         selectModify.document = self
+        editor.onExact = { [weak self] r in self?.selectModify.open(r) }
         editor.layoutChanged = { [weak self] in self?.pruneLists() }
     }
 
