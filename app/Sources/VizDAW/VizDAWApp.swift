@@ -27,6 +27,7 @@ struct VizDAWApp: App {
         appStore.willClose = {
             PluginWindows.closeDocument($0)
             EditorWindows.closeDocument($0)
+            ModifyPanels.close($0)
         }
         appStore.recovery = Recovery(
             check: { try recoveryCheck(path: $0) },

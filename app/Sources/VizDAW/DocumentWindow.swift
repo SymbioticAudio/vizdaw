@@ -29,6 +29,7 @@ struct DocumentWindow: View {
                         }
                     }
                     .onAppear {
+                        model.selectModify.onPresent = { ModifyPanels.show(store, doc: id) }
                         SmokeRun.start(model) { openWindow(id: "mixer", value: id) }
                         PluginWindows.reopen(store, doc: id)
                         EditorWindows.reopen(store, doc: id)

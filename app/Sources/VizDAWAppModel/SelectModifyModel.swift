@@ -25,7 +25,7 @@ public final class SelectModifyModel {
     @ObservationIgnored public var nextSeed: () -> UInt64 = { UInt64.random(in: 0...UInt64.max) }
     /// Why the panel shows what it shows (a dropped drag axis), else nil.
     public var notice: String? { requestIsStale ? nil : storedNotice }
-    @ObservationIgnored private var storedNotice: String?
+    private var storedNotice: String?
     /// The selection the request was opened over. The request is stale
     /// when the selection moved on, or a dragged event no longer exists
     /// (other snapshots, e.g. plugin loads, leave it alone).
@@ -43,8 +43,9 @@ public final class SelectModifyModel {
         return !ids.allSatisfy(present.contains)
     }
     /// The dragged events an exact-mode panel acts on (the command carries
-    /// no ids, so Apply selects them first).
-    @ObservationIgnored private var pending: ModifyRequest?
+    /// no ids, so Apply selects them first). Observed: the panel says
+    /// what Apply acts on.
+    private var pending: ModifyRequest?
     @ObservationIgnored private var destCache: (version: UInt64, rows: [DestRow])?
 
     public static let nothingMessage = "Turn on Select or Modify first."
@@ -56,6 +57,39 @@ public final class SelectModifyModel {
     /// Modify Again repeats on the selection in place, whatever the last
     /// modify did (ruling F11).
     public static let modifyAgainHelp = "Modify Again changes the selection in place."
+
+    public static let draggedEventsTarget = "Apply acts on the dragged events."
+    public static let selectionTarget = "Apply acts on the current selection."
+
+    /// Apply selects the dragged events of an exact-mode request first.
+    public var actsOnDraggedEvents: Bool { pending?.events != nil && !requestIsStale }
+
+    /// What Apply acts on, as the panel says it.
+    public var applyTarget: String { actsOnDraggedEvents ? Self.draggedEventsTarget : Self.selectionTarget }
+
+    /// The panel's text fields own the keyboard by these names (Plan 4c
+    /// Ruling 21), one per field so moving between fields never clears it.
+    public static let textOwnerPrefix = "selectModify."
+    public static func textOwner(_ field: String) -> String { textOwnerPrefix + field }
+
+    /// Panel field `field` has the keyboard (`on`) or gave it back.
+    public func setTextEditing(_ field: String, _ on: Bool) {
+        if on { editor?.beginTextEditing(Self.textOwner(field)) } else { editor?.endTextEditing(Self.textOwner(field)) }
+    }
+
+    /// The panel's fields give the keyboard back (it resigned key or closed).
+    public func endTextEditing() { editor?.endTextEditing(prefix: Self.textOwnerPrefix) }
+
+    /// Modify > Modify Again's title: the last modify by name.
+    public var modifyAgainTitle: String {
+        editor?.lastModify().map { "Modify Again: \(ModifyKind.title($0))" } ?? "Modify Again"
+    }
+
+    /// Modify Again needs a last modify and no open drag.
+    public var canModifyAgain: Bool {
+        guard let editor else { return false }
+        return editor.lastModify() != nil && editor.gesture == nil
+    }
 
     public init() {}
 
@@ -110,6 +144,7 @@ public final class SelectModifyModel {
     public func close() {
         isOpen = false
         isKey = false
+        endTextEditing()
         pending = nil
         storedNotice = nil
         baseline = nil

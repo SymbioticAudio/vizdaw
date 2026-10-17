@@ -45,6 +45,9 @@ public final class EditorModel {
 
     public func endTextEditing(_ owner: String) { textEditors.remove(owner) }
 
+    /// Every owner named `prefix…` (a closing window's fields) ends.
+    public func endTextEditing(prefix: String) { textEditors = textEditors.filter { !$0.hasPrefix(prefix) } }
+
     private struct BlockEntry {
         let rev: UInt64
         let rule: BlockRule

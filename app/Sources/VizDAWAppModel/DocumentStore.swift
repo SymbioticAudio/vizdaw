@@ -81,6 +81,28 @@ public final class DocumentStore {
         if panelFocus == doc { panelFocus = nil }
     }
 
+    /// Document `doc`'s panel window became key: it takes the menu
+    /// commands and the transport keys go off.
+    public func panelBecameKey(_ doc: UUID) {
+        focusPanel(doc)
+        model(doc)?.selectModify.isKey = true
+    }
+
+    /// Document `doc`'s panel window resigned key: its fields give the
+    /// keyboard back too (a field stays first responder in a non-key panel).
+    public func panelResignedKey(_ doc: UUID) {
+        blurPanel(doc)
+        guard let p = model(doc)?.selectModify else { return }
+        p.isKey = false
+        p.endTextEditing()
+    }
+
+    /// Document `doc`'s panel window closed (by the user or with its document).
+    public func panelClosed(_ doc: UUID) {
+        blurPanel(doc)
+        model(doc)?.selectModify.close()
+    }
+
     /// The document menu commands act on: a key torn-off window's, else a
     /// key select-and-modify panel's, else the focused document window's.
     public func commandTarget(focused: UUID?) -> UUID? {

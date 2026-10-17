@@ -108,6 +108,26 @@ struct AppCommands: Commands {
             nudge("Nudge Up", .up, .upArrow)
             nudge("Nudge Down", .down, .downArrow)
         }
+        CommandMenu("Modify") {
+            panelItem(.selectByRule, "s")
+            panelItem(.transpose, "t")
+            panelItem(.quantize, "u")
+            panelItem(.change, "m")
+            panelItem(.move, "v")
+            Divider()
+            Button(doc?.selectModify.modifyAgainTitle ?? "Modify Again") {
+                doc?.selectModify.modifyAgain()
+            }
+            .keyboardShortcut("r", modifiers: [.command, .control])
+            .help(SelectModifyModel.modifyAgainHelp)
+            .disabled(!(doc?.selectModify.canModifyAgain ?? false))
+            Menu("Templates") {
+                ForEach(doc?.editor.modifyTemplates() ?? [], id: \.name) { t in
+                    Button(t.name) { doc?.selectModify.run(t) }
+                }
+            }
+            .disabled((doc?.editor.modifyTemplates() ?? []).isEmpty)
+        }
         CommandMenu("Sequence") {
             Button("Make Reference from Selection") {
                 if let doc, let seq = doc.selectedSeq { doc.editor.makeReferenceFromSelection(seq: seq) }
@@ -137,6 +157,13 @@ struct AppCommands: Commands {
             .keyboardShortcut(key, modifiers: .option)
             .disabled(
                 doc == nil || !(doc?.transportKeysEnabled ?? false) || (doc?.editor.selection.events.isEmpty ?? true))
+    }
+
+    /// A Modify menu command: the panel set to its task (Plan 4c Ruling 10).
+    private func panelItem(_ task: PanelTask, _ key: Character) -> some View {
+        Button("\(task.title)…") { doc?.selectModify.open(task) }
+            .keyboardShortcut(KeyEquivalent(key), modifiers: [.command, .control])
+            .disabled(doc == nil)
     }
 
     private func show(_ id: UUID?) {

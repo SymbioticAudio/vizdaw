@@ -95,6 +95,8 @@ struct ListBar: View {
             .help("The kinds and destinations this list shows")
             Toggle("MIDI In", isOn: $model.midiIn)
                 .help("Play a note to enter its pitch and velocity")
+            Button("Modify…") { model.document?.selectModify.open(.change, filter: model.filter.viewFilter) }
+                .help("Select and Modify, hiding the kinds this list hides")
             Spacer()
             Text("\(model.rows.count) rows").foregroundStyle(.secondary).font(.caption)
         }
