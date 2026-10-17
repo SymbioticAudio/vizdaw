@@ -79,6 +79,9 @@ struct Inner {
     /// The label of the edit `begin_edit` opened (`edit_gesture` reopens
     /// it under the same label).
     edit_label: Option<String>,
+    /// The editors' layout, opaque JSON from the app, saved in `ui.json`
+    /// (plan 4a Ruling 12).
+    editor_layout: Option<serde_json::Value>,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -116,6 +119,7 @@ impl Inner {
             key,
             revs: crate::revs::Revisions::new(&doc),
             edit_label: None,
+            editor_layout: None,
             history: History::new(doc.clone()),
             path,
             clean: doc,
@@ -412,7 +416,7 @@ impl Session {
         let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
         file::save(inner.doc(), path)?;
-        write_windows(path, &inner.windows);
+        write_windows(path, &inner.windows, inner.editor_layout.as_ref());
         inner.clean = inner.doc().clone();
         // A plugin whose state could not be captured is still unsaved.
         if captured {
@@ -710,10 +714,12 @@ impl Session {
                 }
             };
             let windows = read_windows(&p);
+            let layout = read_layout(&p);
             let s = Session::with(doc, Some(p), options.plugins_off)?;
             {
                 let mut inner = lock(&s.inner);
                 inner.windows = windows;
+                inner.editor_layout = layout;
                 inner.clean = clean;
             }
             Ok(s)
@@ -1363,18 +1369,31 @@ impl Session {
 /// the document: no undo, Plan Ruling 13).
 pub const UI_FILE: &str = "ui.json";
 
-fn read_windows(package: &Path) -> std::collections::BTreeSet<u64> {
+fn read_ui(package: &Path) -> Option<UiState> {
     std::fs::read_to_string(package.join(UI_FILE))
         .ok()
         .and_then(|t| serde_json::from_str::<UiState>(&t).ok())
+}
+
+fn read_windows(package: &Path) -> std::collections::BTreeSet<u64> {
+    read_ui(package)
         .map(|u| u.open_plugin_windows.into_iter().collect())
         .unwrap_or_default()
 }
 
+fn read_layout(package: &Path) -> Option<serde_json::Value> {
+    read_ui(package).and_then(|u| u.editor_layout)
+}
+
 /// Best-effort: a project whose window list cannot be written still saved.
-fn write_windows(package: &Path, windows: &std::collections::BTreeSet<u64>) {
+fn write_windows(
+    package: &Path,
+    windows: &std::collections::BTreeSet<u64>,
+    layout: Option<&serde_json::Value>,
+) {
     let ui = UiState {
         open_plugin_windows: windows.iter().copied().collect(),
+        editor_layout: layout.cloned(),
     };
     if let Ok(text) = serde_json::to_string_pretty(&ui) {
         let _ = file::write_atomic(&package.join(UI_FILE), text.as_bytes());
@@ -1384,6 +1403,9 @@ fn write_windows(package: &Path, windows: &std::collections::BTreeSet<u64>) {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct UiState {
     open_plugin_windows: Vec<u64>,
+    /// The editors' layout (plan 4a); older files have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    editor_layout: Option<serde_json::Value>,
 }
 
 /// Plugin windows (spec §9): the plugin's own editor inside a window the
@@ -1733,6 +1755,73 @@ impl Session {
             inner.edit_label = None;
             self.commit_held(&mut inner);
             inner.snapshot()
+        })
+    }
+}
+
+/// The selection (spec §3.3), sequence templates and the editor layout.
+#[uniffi::export]
+impl Session {
+    /// The document-wide selection.
+    pub fn selection(&self) -> Result<crate::selection::SelectionRow, VizError> {
+        ffi_guard(|| Ok(crate::selection::row(lock(&self.inner).history.selection())))
+    }
+
+    /// Replaces the selection (not an undo step); unknown lanes and events
+    /// are dropped.
+    pub fn set_selection(&self, selection: crate::selection::SelectionRow) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let sel = crate::selection::selection(&selection).retain_existing(inner.doc());
+            inner.history.set_selection(sel);
+            Ok(())
+        })
+    }
+
+    /// A new sequence from `template` named `name`, as one undo step.
+    pub fn new_sequence_from_template(
+        &self,
+        name: String,
+        template: crate::templates::SequenceTemplate,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if inner.history.in_transaction() {
+                return Err(crate::events::bad("finish the open edit first"));
+            }
+            inner.history.begin("New Sequence from Template")?;
+            match crate::templates::build(&mut inner.history, &name, &template) {
+                Ok(_) => inner.history.commit()?,
+                Err(e) => {
+                    inner.history.abort()?;
+                    return Err(e);
+                }
+            }
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+
+    /// The editor layout saved with the project (JSON), if any.
+    pub fn ui_layout(&self) -> Result<Option<String>, VizError> {
+        ffi_guard(|| {
+            Ok(lock(&self.inner)
+                .editor_layout
+                .as_ref()
+                .map(|v| v.to_string()))
+        })
+    }
+
+    /// Replaces the editor layout (JSON; written by the next save, never an
+    /// undo step).
+    pub fn set_ui_layout(&self, json: String) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let v: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|e| crate::events::bad(&format!("the layout is not JSON: {e}")))?;
+            lock(&self.inner).editor_layout = Some(v);
+            Ok(())
         })
     }
 }

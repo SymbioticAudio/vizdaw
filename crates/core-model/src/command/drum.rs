@@ -47,6 +47,17 @@ pub enum DrumCmd {
         /// New name.
         name: String,
     },
+    /// Show or hide the velocity strip of a row.
+    SetRowShowVelocity {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// Row.
+        row: DrumRowId,
+        /// Whether the grid shows the row's velocities.
+        show: bool,
+    },
     /// Move a row to display position `to` (clamped).
     ReorderRow {
         /// Sequence.
@@ -97,6 +108,7 @@ impl DrumCmd {
             DrumCmd::MarkDrumLane { .. } => "Mark as Drum Lane",
             DrumCmd::AddRow { .. } => "Add Drum Row",
             DrumCmd::RenameRow { .. } => "Rename Drum Row",
+            DrumCmd::SetRowShowVelocity { .. } => "Show Drum Row Velocity",
             DrumCmd::ReorderRow { .. } => "Reorder Drum Row",
             DrumCmd::RemoveRow { .. } => "Remove Drum Row",
             DrumCmd::MoveRowToLane { .. } => "Move Drum Row to Lane",
@@ -272,6 +284,20 @@ pub(crate) fn apply(d: &mut Document, cmd: &DrumCmd, r: &mut Report) -> Result<(
                 .find(|x| x.id == *row)
                 .ok_or(ModelError::UnknownId(AnyId::DrumRow(*row)))?;
             x.name = name.clone();
+        }
+        DrumCmd::SetRowShowVelocity {
+            seq,
+            lane,
+            row,
+            show,
+        } => {
+            let layout = layout_mut(d, *seq, *lane)?;
+            let x = layout
+                .rows
+                .iter_mut()
+                .find(|x| x.id == *row)
+                .ok_or(ModelError::UnknownId(AnyId::DrumRow(*row)))?;
+            x.show_velocity = *show;
         }
         DrumCmd::ReorderRow { seq, lane, row, to } => {
             let layout = layout_mut(d, *seq, *lane)?;

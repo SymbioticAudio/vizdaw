@@ -339,6 +339,26 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         calls.append("abort")
         return commandResult()
     }
+
+    // MARK: Selection, templates, layout (plan 4a)
+
+    var sel = SelectionRow(timeRange: nil, lanes: [], events: [])
+    var selectionSets: [SelectionRow] = []
+    func selection() throws -> SelectionRow { sel }
+    func setSelection(selection: SelectionRow) throws {
+        selectionSets.append(selection)
+        sel = selection
+    }
+
+    var templates: [(name: String, template: SequenceTemplate)] = []
+    func newSequenceFromTemplate(name: String, template: SequenceTemplate) throws -> DocSnapshot {
+        templates.append((name, template))
+        return commandResult()
+    }
+
+    var layout: String?
+    func uiLayout() throws -> String? { layout }
+    func setUiLayout(json: String) throws { layout = json }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

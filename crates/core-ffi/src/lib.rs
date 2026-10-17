@@ -28,8 +28,10 @@ pub mod mixer;
 pub mod plugins;
 pub mod recovery;
 pub mod revs;
+pub mod selection;
 pub mod session;
 pub mod snapshot;
+pub mod templates;
 
 pub use blocks::{BlockKind, BlockRow, BlockRule};
 pub use catalog::{
@@ -53,11 +55,13 @@ pub use mixer::{
 };
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
+pub use selection::{SelectionRow, TickRange};
 pub use session::{OpenOptions, Session};
 pub use snapshot::{
     DocSnapshot, IdleUpdate, KeySlotRow, LaneRow, ParamRow, ParamValue, PluginFormatTag,
     PluginRefRow, SeqRow, SlotRow, SlotStatus, TransportState,
 };
+pub use templates::SequenceTemplate;
 
 /// The app is quitting: stops and drops the engine host so no plugin
 /// host is still rendering when thread-local destructors run at exit.
