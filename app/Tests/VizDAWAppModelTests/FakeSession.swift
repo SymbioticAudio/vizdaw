@@ -303,6 +303,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var infoTable: [UInt64: SequenceInfo] = [:]
     var infoCalls = 0
     func modifyTemplates() throws -> [ModifyTemplateRow] { [] }
+    func secondsAt(seq: UInt64, ticks: [Int64]) throws -> [Double] { ticks.map { Double($0) / 30_720 } }
+    func ticksAt(seq: UInt64, seconds: [Double]) throws -> [Int64] { seconds.map { Int64(($0 * 30_720).rounded()) } }
     func lastModify() throws -> ModifyRow? { nil }
 
     func sequenceInfo(seq: UInt64) throws -> SequenceInfo {

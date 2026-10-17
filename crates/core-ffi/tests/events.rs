@@ -299,3 +299,157 @@ fn the_demo_with_audio_has_a_loop_lane_with_two_regions() {
             && st.name == "Audio 1-2"
     ));
 }
+
+#[test]
+fn seconds_and_ticks_follow_the_sequence_tempo() {
+    let mut b = Builder::new();
+    let (seq, _) = b.sequence("S", "L", None).unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    let bpm = s.sequence_info(seq.0).unwrap().tempo[0].bpm;
+    let spq = 60.0 / bpm;
+    let secs = s.seconds_at(seq.0, vec![0, Q, -Q]).unwrap();
+    assert_eq!(secs[0], 0.0);
+    assert!((secs[1] - spq).abs() < 1e-9, "{secs:?}");
+    assert!((secs[2] + spq).abs() < 1e-9, "{secs:?}");
+    assert_eq!(
+        s.ticks_at(seq.0, vec![spq, 2.0 * spq]).unwrap(),
+        vec![Q, 2 * Q]
+    );
+    assert!(matches!(
+        s.seconds_at(9_999, vec![0]),
+        Err(VizError::Model { .. })
+    ));
+}
+
+/// 4a ledger T2: the variants `every_kind` does not cover.
+#[test]
+fn the_other_variants_round_trip_too() {
+    let mut b = Builder::new();
+    let piano = b.dest("Piano", "builtin:synth", 0).unwrap();
+    let r = b
+        .run(Command::Routing(RoutingCmd::AddMedia {
+            path: "Media/b.wav".into(),
+            sample_rate: 48_000,
+            channels: 1,
+            length_frames: 96_000,
+            content_hash: None,
+        }))
+        .unwrap();
+    let media = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Media(m) => Some(*m),
+            _ => None,
+        })
+        .unwrap();
+    let (sub, sub_lane) = b.sequence("Sub", "L", Some(piano)).unwrap();
+    b.notes(sub, sub_lane, &[(0, 60, 0x8000, Q)]).unwrap();
+    let (seq, lane) = b.sequence("Other", "Variants", Some(piano)).unwrap();
+    let mut specs = vec![
+        EventSpec::new(
+            Tick(0),
+            EventBody::Note {
+                pitch: 50,
+                velocity: 1,
+                release_velocity: 2,
+                duration: Tick(Q),
+                attribute: None,
+                per_note: [
+                    PerNoteCtl {
+                        kind: PerNoteKind::Assignable(3),
+                        offset: Tick(5),
+                        value: 9,
+                    },
+                    PerNoteCtl {
+                        kind: PerNoteKind::PitchBend,
+                        offset: Tick(6),
+                        value: 0x8000_0000,
+                    },
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ),
+        EventSpec::new(
+            Tick(10),
+            EventBody::Program {
+                program: 5,
+                bank: None,
+            },
+        ),
+        EventSpec::new(
+            Tick(20),
+            EventBody::SysEx {
+                data: Arc::from(&[0x7E_u8, 0x7F][..]),
+                eight_bit: false,
+            },
+        ),
+    ];
+    for (i, kind) in [
+        TextKind::Text,
+        TextKind::Lyric,
+        TextKind::Marker,
+        TextKind::Copyright,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        specs.push(EventSpec::new(
+            Tick(30 + i as i64),
+            EventBody::Text {
+                kind,
+                text: format!("t{i}"),
+            },
+        ));
+    }
+    specs.push(EventSpec::new(
+        Tick(BAR),
+        EventBody::Reference {
+            seq: sub,
+            length: Some(Tick(Q)),
+            loop_count: LoopCount::Fill,
+            transpose: 0,
+        },
+    ));
+    specs.push(EventSpec::new(
+        Tick(2 * BAR),
+        EventBody::AudioRegion {
+            media,
+            source_offset: 0,
+            length: 48_000,
+            gain_db: 0.0,
+            fade_in: Fade {
+                length: Tick(Q / 2),
+                shape: FadeShape::Linear,
+            },
+            fade_out: Fade {
+                length: Tick(Q / 2),
+                shape: FadeShape::Exponential,
+            },
+        },
+    ));
+    b.events(seq, lane, specs).unwrap();
+    let doc = b.finish();
+    let originals: Vec<EventSpec> = doc
+        .lane(seq, lane)
+        .unwrap()
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .map(|e| e.spec())
+        .collect();
+    let s = Session::from_document(doc).unwrap();
+    let rows = s.lane_events(seq.0, lane.0).unwrap().events;
+    assert_eq!(rows.len(), originals.len());
+    for (row, original) in rows.iter().zip(&originals) {
+        assert_eq!(&spec(row).unwrap(), original, "{:?}", row.kind);
+    }
+    assert_eq!(rows[1].value2, -1, "no bank");
+    let reference = rows
+        .iter()
+        .find(|r| r.kind == EventKindRow::Reference)
+        .unwrap();
+    assert_eq!((reference.ref_loops, reference.ref_length), (0, Some(Q)));
+}

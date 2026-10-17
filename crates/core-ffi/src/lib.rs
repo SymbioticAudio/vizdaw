@@ -25,6 +25,7 @@ pub mod error;
 pub mod events;
 pub mod guard;
 pub mod host;
+pub mod input;
 pub mod mixer;
 pub mod modify;
 pub mod plugins;
@@ -52,6 +53,7 @@ pub use events::{
     TempoPointRow, TextKindRow,
 };
 pub use guard::ffi_guard;
+pub use input::{NoteInRow, NoteInput};
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
 };

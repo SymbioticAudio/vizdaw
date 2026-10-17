@@ -15,10 +15,10 @@ use objc2_core_foundation::{CFRetained, CFString};
 use objc2_core_midi::{
     MIDIClientCreate, MIDIClientDispose, MIDIClientRef, MIDIEndpointDispose, MIDIEndpointRef,
     MIDIEventList, MIDIEventPacket, MIDIGetDestination, MIDIGetNumberOfDestinations,
-    MIDIInputPortCreateWithProtocol, MIDIObjectGetIntegerProperty, MIDIObjectGetStringProperty,
-    MIDIObjectRef, MIDIOutputPortCreate, MIDIPortConnectSource, MIDIPortDispose, MIDIPortRef,
-    MIDIProtocolID, MIDIReceivedEventList, MIDISendEventList, MIDISourceCreateWithProtocol,
-    kMIDIPropertyName, kMIDIPropertyUniqueID,
+    MIDIGetNumberOfSources, MIDIGetSource, MIDIInputPortCreateWithProtocol,
+    MIDIObjectGetIntegerProperty, MIDIObjectGetStringProperty, MIDIObjectRef, MIDIOutputPortCreate,
+    MIDIPortConnectSource, MIDIPortDispose, MIDIPortRef, MIDIProtocolID, MIDIReceivedEventList,
+    MIDISendEventList, MIDISourceCreateWithProtocol, kMIDIPropertyName, kMIDIPropertyUniqueID,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::c_void;
@@ -611,6 +611,110 @@ impl Drop for MidiMonitor {
         // SAFETY: the port belongs to this monitor and is not used again.
         unsafe {
             MIDIPortDispose(self.port);
+        }
+    }
+}
+
+/// What a [`NoteListener`] hands each received MIDI 1.0 message to (on
+/// CoreMIDI's thread). It must not block.
+pub type MessageSink = Box<dyn Fn(&[u8]) + Send + Sync>;
+
+/// Listens to every MIDI source present when it connects (plan 4c: notes
+/// played into the list editor). It has its own client, so output is never
+/// disturbed; sources added later are picked up by connecting again.
+pub struct NoteListener {
+    client: MIDIClientRef,
+    port: MIDIPortRef,
+    sources: u32,
+    _block: RcBlock<dyn Fn(NonNull<MIDIEventList>, *mut c_void)>,
+}
+
+// SAFETY: the client and port are plain CoreMIDI object references, usable
+// from any thread; the block is only called by CoreMIDI (its captures are
+// `Send + Sync`) and is dropped with the listener after the port is
+// disposed.
+unsafe impl Send for NoteListener {}
+
+impl NoteListener {
+    /// Creates client `name` and connects it to every source present now.
+    pub fn connect_all(name: &str, sink: MessageSink) -> Result<NoteListener, BackendError> {
+        let mut client: MIDIClientRef = 0;
+        let cf = CFString::from_str(name);
+        // SAFETY: `client` is a valid out-pointer; no notification callback.
+        os("MIDIClientCreate", unsafe {
+            MIDIClientCreate(&cf, None, ptr::null_mut(), NonNull::from(&mut client))
+        })?;
+        // Scratch buffers reused across callbacks (CoreMIDI calls the block
+        // from one thread at a time, so the lock is never contended).
+        let scratch = Mutex::new((Vec::<Received>::new(), Vec::<u8>::new()));
+        let block = RcBlock::new(move |list: NonNull<MIDIEventList>, _src: *mut c_void| {
+            if let Ok(mut s) = scratch.try_lock() {
+                let (out, sx) = &mut *s;
+                out.clear();
+                decode(list, out, sx);
+                for r in out.iter() {
+                    sink(&r.bytes);
+                }
+            }
+        });
+        let mut port: MIDIPortRef = 0;
+        let pcf = CFString::from_str("VizDAW Notes In");
+        // SAFETY: valid client, out-pointer and block; CoreMIDI copies the
+        // block, and ours lives as long as the port anyway.
+        let made = os("MIDIInputPortCreateWithProtocol", unsafe {
+            MIDIInputPortCreateWithProtocol(
+                client,
+                &pcf,
+                MIDIProtocolID::Protocol_1_0,
+                NonNull::from(&mut port),
+                (&*block as *const block2::DynBlock<_>).cast_mut(),
+            )
+        });
+        if let Err(e) = made {
+            // SAFETY: the client was created above and is not used again.
+            unsafe {
+                MIDIClientDispose(client);
+            }
+            return Err(e);
+        }
+        // SAFETY: a pure query.
+        let n = unsafe { MIDIGetNumberOfSources() };
+        let mut sources = 0u32;
+        for i in 0..n {
+            // SAFETY: `i` is below the count just read.
+            let src = unsafe { MIDIGetSource(i) };
+            if src == 0 {
+                continue;
+            }
+            // SAFETY: both objects are live; the port belongs to our client.
+            let ok = os("MIDIPortConnectSource", unsafe {
+                MIDIPortConnectSource(port, src, ptr::null_mut())
+            });
+            if ok.is_ok() {
+                sources = sources.saturating_add(1);
+            }
+        }
+        Ok(NoteListener {
+            client,
+            port,
+            sources,
+            _block: block,
+        })
+    }
+
+    /// How many sources it listens to.
+    pub fn sources(&self) -> u32 {
+        self.sources
+    }
+}
+
+impl Drop for NoteListener {
+    fn drop(&mut self) {
+        // SAFETY: the port and client belong to this listener and are not
+        // used again.
+        unsafe {
+            MIDIPortDispose(self.port);
+            MIDIClientDispose(self.client);
         }
     }
 }

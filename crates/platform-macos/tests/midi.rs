@@ -51,3 +51,27 @@ fn destinations_can_be_listed() {
         assert!(!d.name.is_empty());
     }
 }
+
+#[test]
+fn a_note_listener_hears_every_source() {
+    use platform_macos::midi::NoteListener;
+    use std::sync::{Arc, Mutex};
+    let mut sys = MidiSystem::new("VizDAW Keys Test").unwrap();
+    let mut out = sys.open_virtual_source("VizDAW Keys Test Out").unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let got = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let sink = Arc::clone(&got);
+    let listener = NoteListener::connect_all(
+        "VizDAW Keys Test In",
+        Box::new(move |b: &[u8]| sink.lock().unwrap().push(b.to_vec())),
+    )
+    .unwrap();
+    assert!(listener.sources() >= 1, "the virtual source counts");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(out.send(now_ns(), &[0x92, 61, 100]));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !got.lock().unwrap().contains(&vec![0x92, 61, 100]) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(got.lock().unwrap().contains(&vec![0x92, 61, 100]));
+}

@@ -1720,6 +1720,31 @@ impl Session {
         })
     }
 
+    /// Seconds from tick 0 of sequence `seq` at each tick, through its own
+    /// tempo map (the list's SMPTE column, 4c).
+    pub fn seconds_at(&self, seq: u64, ticks: Vec<i64>) -> Result<Vec<f64>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let tempo = &inner.doc().sequence(SeqId(seq))?.tempo;
+            Ok(ticks
+                .into_iter()
+                .map(|t| tempo.tick_to_seconds(core_model::time::Tick(t)))
+                .collect())
+        })
+    }
+
+    /// The nearest tick at each time in seconds (typed SMPTE positions, 4c).
+    pub fn ticks_at(&self, seq: u64, seconds: Vec<f64>) -> Result<Vec<i64>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let tempo = &inner.doc().sequence(SeqId(seq))?.tempo;
+            Ok(seconds
+                .into_iter()
+                .map(|s| tempo.seconds_to_tick(s).0)
+                .collect())
+        })
+    }
+
     /// The select-and-modify templates, by name (4c).
     pub fn modify_templates(&self) -> Result<Vec<crate::modify::ModifyTemplateRow>, VizError> {
         ffi_guard(|| Ok(crate::modify::template_rows(lock(&self.inner).doc())))
