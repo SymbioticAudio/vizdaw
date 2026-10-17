@@ -61,4 +61,15 @@ import VizDAWCore
         let data = try JSONEncoder().encode(s)
         #expect(try JSONDecoder().decode(Snap.self, from: data) == s)
     }
+
+    @Test func floorTakesTheGridLineAtOrBefore() {
+        let meter = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor: false)]
+        var s = Snap()
+        s.division = .quarter
+        #expect(s.floor(15_359, meter: meter) == 0)
+        #expect(s.floor(15_360, meter: meter) == 15_360)
+        #expect(s.floor(-1, meter: meter) == -15_360, "pickup bars")
+        s.enabled = false
+        #expect(s.floor(15_359, meter: meter) == 15_359)
+    }
 }

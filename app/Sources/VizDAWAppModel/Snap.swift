@@ -43,6 +43,15 @@ public struct Snap: Codable, Equatable, Sendable {
         return max(s, 1)
     }
 
+    /// `tick` on the grid line at or before it, within its bar. Unchanged
+    /// when snap is off (the pencil's start, Plan 4b Ruling 7).
+    public func floor(_ tick: Int64, meter: [MeterEntryRow]) -> Int64 {
+        guard enabled else { return tick }
+        let bar = MeterMath.bar(at: tick, meter)
+        let s = step(in: bar.meter)
+        return bar.start + ((tick - bar.start) / s) * s
+    }
+
     /// `tick` on the nearest grid line of its bar (ties go later); the bar's
     /// end counts as a grid line. Unchanged when snap is off.
     public func apply(_ tick: Int64, meter: [MeterEntryRow]) -> Int64 {
