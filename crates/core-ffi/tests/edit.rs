@@ -861,3 +861,29 @@ fn edit_all_is_one_undo_step_and_all_or_nothing() {
     s.edit(move_note(&f, Q, None), None).unwrap();
     assert_eq!(note_tick(&s, &f), Q);
 }
+
+#[test]
+fn a_panic_inside_edit_all_aborts_the_step_and_closes_it() {
+    let f = fixture();
+    let s = Session::from_document(f.doc.clone()).unwrap();
+    let start = state(&s);
+    let delete = ev(EventEdit::Delete {
+        events: vec![f.note.0],
+    });
+    let markers = EditCommand::Sequence {
+        edit: SequenceEdit::SetMarkers {
+            seq: f.s.0,
+            markers: vec![],
+        },
+    };
+    // Only an edit_all with this label panics (tests run in parallel).
+    vizdaw_ffi::session::inject_edit_all_panic(Some("Panics"), 1);
+    let r = s.edit_all("Panics".into(), vec![delete, markers], None);
+    vizdaw_ffi::session::inject_edit_all_panic(None, 0);
+    assert!(matches!(r, Err(VizError::Internal { .. })), "{r:?}");
+    assert_eq!(state(&s), start, "the first command was rolled back");
+    assert_eq!(s.snapshot().unwrap().undo_label, None, "no undo step");
+    // The transaction is closed: plain edits apply again.
+    s.edit(move_note(&f, Q, None), None).unwrap();
+    assert_eq!(note_tick(&s, &f), Q);
+}

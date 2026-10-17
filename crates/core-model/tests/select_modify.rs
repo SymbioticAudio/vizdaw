@@ -1163,3 +1163,28 @@ fn to_copy_delete_and_no_op_changes_add_no_undo_step() {
     .unwrap();
     assert_eq!(h.undo_label(), None);
 }
+
+#[test]
+fn scale_time_keeps_a_note_with_a_length_at_least_one_tick_long() {
+    // 1/1 000 000 of a half note or a quarter is under one tick.
+    let d = notes_after(Modify::ScaleTime {
+        num: 1,
+        den: 1_000_000,
+        anchor: Tick(0),
+    });
+    assert_eq!(durations(&d), vec![1; 4]);
+    // A zero-length note stays zero.
+    let zero = notes_after(change(ValueTarget::Duration, ChangeOp::Set, constant(0)));
+    let d = try_sm(
+        &zero,
+        &lane_sel(&NOTES),
+        Modify::ScaleTime {
+            num: 3,
+            den: 1,
+            anchor: Tick(0),
+        },
+    )
+    .unwrap()
+    .doc;
+    assert_eq!(durations(&d), vec![0; 4]);
+}

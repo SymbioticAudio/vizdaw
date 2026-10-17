@@ -1776,6 +1776,33 @@ impl Session {
     }
 }
 
+/// The `edit_all` that panics (test hook): its label and the 0-based
+/// command it panics before.
+#[cfg(feature = "test-hooks")]
+static EDIT_ALL_PANIC: Mutex<Option<(String, usize)>> = Mutex::new(None);
+
+/// Makes the next `edit_all` named `label` panic before command `step`
+/// (0-based); `None` clears it (test hook, Plan 4d Ruling 1).
+#[cfg(feature = "test-hooks")]
+pub fn inject_edit_all_panic(label: Option<&str>, step: usize) {
+    *lock(&EDIT_ALL_PANIC) = label.map(|l| (l.to_string(), step));
+}
+
+/// Panics when `edit_all` `label` reaches the injected `step`.
+#[cfg(feature = "test-hooks")]
+#[allow(clippy::panic)]
+fn edit_all_hook(label: &str, step: usize) {
+    let hit = lock(&EDIT_ALL_PANIC)
+        .as_ref()
+        .is_some_and(|(l, s)| l == label && *s == step);
+    if hit {
+        panic!("injected edit_all panic");
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn edit_all_hook(_label: &str, _step: usize) {}
+
 /// Editor edits (spec §3.2, §3.8).
 #[uniffi::export]
 impl Session {
@@ -1806,7 +1833,10 @@ impl Session {
 
     /// Runs `cmds` in order as one undo step named `label`: all of them or
     /// none (a refused command restores the document from before the
-    /// first, and its error is returned). For a list Delete of mixed rows.
+    /// first, and its error is returned; a panic inside a command does too
+    /// and returns `Internal`). For a list Delete of mixed rows. None of
+    /// these commands removes a running plugin: mixer edits, which capture
+    /// a plugin's state before it goes, are not editor commands.
     pub fn edit_all(
         &self,
         label: String,
@@ -1836,18 +1866,34 @@ impl Session {
             {
                 let mut inner = lock(&self.inner);
                 inner.history.begin(label.clone())?;
-                inner.edit_label = Some(label);
+                inner.edit_label = Some(label.clone());
             }
-            for c in core {
-                if let Err(e) = self.execute_with(c, &filter) {
-                    let mut inner = lock(&self.inner);
-                    inner.edit_label = None;
-                    inner.history.abort()?;
-                    inner.version += 1;
-                    inner.reload_host(self.id);
-                    self.commit_held(&mut inner);
-                    return Err(e);
+            // A panic inside a command must not leave the transaction open:
+            // `ffi_guard` alone would report it but keep `edit_label` set.
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for (step, c) in core.into_iter().enumerate() {
+                    edit_all_hook(&label, step);
+                    self.execute_with(c, &filter)?;
                 }
+                Ok::<(), VizError>(())
+            }));
+            let failure = match run {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e),
+                Err(payload) => Some(VizError::Internal {
+                    message: crate::guard::panic_message(payload.as_ref()),
+                }),
+            };
+            if let Some(e) = failure {
+                let mut inner = lock(&self.inner);
+                inner.edit_label = None;
+                if inner.history.in_transaction() {
+                    inner.history.abort()?;
+                }
+                inner.version += 1;
+                inner.reload_host(self.id);
+                self.commit_held(&mut inner);
+                return Err(e);
             }
             let mut inner = lock(&self.inner);
             inner.edit_label = None;

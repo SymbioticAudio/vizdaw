@@ -450,18 +450,24 @@ fn rt_env(
     }
 }
 
+/// A rebuild `handle_events` started: the old host is out of the slot;
+/// [`rebuild`] finishes it without the host lock.
+struct Rebuild {
+    old: Host,
+    at: Tick,
+    playing: bool,
+    /// The device still renders: its note-offs get `DRAIN` to play.
+    drain: bool,
+}
+
 /// Handles device events for the owner (mirrors `vizdaw-play`'s live
-/// loop): a buffer-size change restarts the output; a lost device, a new
-/// default device or a rate change rebuild output and engine, recompile,
-/// and resume at the same tick. A failed rebuild leaves no host. The
-/// owner's plugins follow the new engine's rate (`attach`).
-fn handle_events(
-    slot: &mut Option<Host>,
-    doc: &Document,
-    plugins: Option<&mut PluginHost>,
-) -> Result<(), VizError> {
+/// loop): a buffer-size change restarts the output at once; a lost device,
+/// a new default device or a rate change take the host out of `slot` and
+/// return the rebuild, which the caller runs with [`rebuild`] after
+/// dropping the host lock (Plan 4d Ruling 1: the drain sleeps 300 ms).
+fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
     let Some(h) = slot.as_mut() else {
-        return Ok(());
+        return Ok(None);
     };
     for ev in h.take_events() {
         match ev {
@@ -474,34 +480,63 @@ fn handle_events(
             | BackendEvent::DefaultDeviceChanged
             | BackendEvent::SampleRateChanged(_) => {
                 let Some(mut old) = slot.take() else {
-                    return Ok(());
+                    return Ok(None);
                 };
                 let at = old.engine.transport_tick();
                 let playing = old.engine.state() == PlayState::Playing;
-                if !matches!(ev, BackendEvent::DeviceLost) {
-                    // The device still renders: let the note-offs play.
+                let drain = !matches!(ev, BackendEvent::DeviceLost);
+                if drain {
                     let _ = old.engine.stop();
-                    std::thread::sleep(DRAIN);
                 }
-                let (owner, seq, looped) = (old.owner, old.seq, old.looped);
-                // Output first (frees the renderer), then the engine: its
-                // processors go back to the plugin host.
-                drop(old);
-                let mut new = Host::create()?;
-                new.attach(owner, plugins);
-                new.load(doc, seq, looped)?;
-                new.engine.locate_tick(at)?;
-                if playing {
-                    new.engine.play()?;
-                }
-                new.owner = owner;
-                new.seq = seq;
-                *slot = Some(new);
                 // The rebuilt host replaces any later queued events.
-                return Ok(());
+                return Ok(Some(Rebuild {
+                    old,
+                    at,
+                    playing,
+                    drain,
+                }));
             }
         }
     }
+    Ok(None)
+}
+
+/// Finishes a rebuild without the host lock: lets a still-running output
+/// play its note-offs, drops it (output first, then the engine, whose
+/// processors go back to the plugin host), makes a new host for the
+/// owner, recompiles and resumes at the same tick. The owner's plugins
+/// follow the new engine's rate (`attach`). A failed rebuild leaves no
+/// host; a host another call made meanwhile wins.
+fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Result<(), VizError> {
+    let Rebuild {
+        old,
+        at,
+        playing,
+        drain,
+    } = r;
+    let (owner, seq, looped) = (old.owner, old.seq, old.looped);
+    if drain {
+        std::thread::sleep(DRAIN);
+    }
+    drop(old);
+    let mut new = Host::create()?;
+    new.attach(owner, plugins);
+    new.load(doc, seq, looped)?;
+    new.engine.locate_tick(at)?;
+    if playing {
+        new.engine.play()?;
+    }
+    new.owner = owner;
+    new.seq = seq;
+    let mut slot = lock(&HOST);
+    let spare = if slot.is_none() {
+        *slot = Some(new);
+        None
+    } else {
+        Some(new)
+    };
+    drop(slot);
+    drop(spare);
     Ok(())
 }
 
@@ -569,8 +604,12 @@ pub fn play(
                     }
                 }
             }
-        } else {
-            handle_events(&mut slot, doc, plugins.as_deref_mut())?;
+        } else if let Some(r) = handle_events(&mut slot)? {
+            // The drain and the rebuild run without the host lock; then
+            // start over (another call may have changed the host).
+            drop(slot);
+            rebuild(r, doc, plugins.as_deref_mut())?;
+            continue;
         }
         // Another session's plugins played here: a fresh engine, so none
         // of its instances is taken for this document's (same-numbered)
@@ -739,8 +778,12 @@ pub fn state(
         Some(h) if h.owner == owner => {}
         _ => return Ok(None),
     }
-    handle_events(&mut slot, doc, plugins)?;
-    let Some(h) = slot.as_mut() else {
+    if let Some(r) = handle_events(&mut slot)? {
+        drop(slot);
+        rebuild(r, doc, plugins)?;
+        slot = lock(&HOST);
+    }
+    let Some(h) = slot.as_mut().filter(|h| h.owner == owner) else {
         return Ok(None);
     };
     h.collect_faults();

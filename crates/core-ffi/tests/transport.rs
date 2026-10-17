@@ -1,6 +1,8 @@
 //! Transport through the offline backend in real time. The engine host is
 //! process-wide, so these tests run one at a time.
 
+#![recursion_limit = "256"]
+
 use core_engine::backend::BackendEvent;
 use std::sync::{Mutex, MutexGuard};
 use std::thread::sleep;
@@ -360,4 +362,28 @@ fn shutdown_stops_and_drops_the_engine_host() {
     // Idempotent, and the session still closes cleanly.
     vizdaw_ffi::shutdown().unwrap();
     s.close().unwrap();
+}
+
+#[test]
+fn a_device_rebuild_drains_without_holding_the_host_lock() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    ms(40);
+    simulate_event(BackendEvent::DefaultDeviceChanged);
+    // The owner's poll handles the event on another thread: 300 ms of
+    // drain, then the rebuild.
+    let poller = std::sync::Arc::clone(&s);
+    let poll = std::thread::spawn(move || poller.transport().map(|t| t.playing));
+    ms(100);
+    let t0 = Instant::now();
+    let _ = vizdaw_ffi::host::factory_owner();
+    let waited = t0.elapsed();
+    assert!(
+        waited < Duration::from_millis(150),
+        "another host call waited {waited:?} for the drain"
+    );
+    assert!(poll.join().unwrap().is_ok());
+    ms(30);
+    assert!(t(&s).playing, "playback resumed after the rebuild");
 }

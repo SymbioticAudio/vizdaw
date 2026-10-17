@@ -597,7 +597,14 @@ fn modify_one(e: &mut Event, m: &Modify) -> Result<()> {
             }
             e.tick = *anchor + Tick(scale((e.tick - *anchor).0, *num, *den));
             if let EventBody::Note { duration, .. } = &mut e.body {
-                *duration = Tick(scale(duration.0, *num, *den));
+                // A note that had a length keeps at least one tick, as
+                // Resize and relative changes do (Plan 4d Ruling 1).
+                let scaled = scale(duration.0, *num, *den);
+                *duration = Tick(if duration.0 > 0 {
+                    scaled.max(1)
+                } else {
+                    scaled
+                });
             }
         }
         Modify::Move { delta } => e.tick = e.tick + *delta,
