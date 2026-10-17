@@ -61,6 +61,8 @@ struct AppCommands: Commands {
             Button("Mixer") { if let docID { openWindow(id: "mixer", value: docID) } }
                 .keyboardShortcut("m", modifiers: [.command, .option])
                 .disabled(docID == nil)
+            Button("Plugin Manager") { openWindow(id: "plugins") }
+                .keyboardShortcut("p", modifiers: [.command, .option])
             Divider()
         }
         CommandMenu("Transport") {

@@ -9,6 +9,9 @@ import VizDAWCore
 /// The app's plugin catalog (main actor).
 @MainActor let appPlugins = AppPlugins(open: { try PluginCatalog.open(config: $0) })
 
+/// The Plugin Manager window's model.
+@MainActor let pluginManager = PluginManagerModel(plugins: appPlugins)
+
 @main
 struct VizDAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
@@ -27,6 +30,9 @@ struct VizDAWApp: App {
             MixerWindow(id: $id, store: appStore)
         }
         .defaultSize(width: 760, height: 560)
+        Window("Plugin Manager", id: "plugins") {
+            PluginManagerView(model: pluginManager)
+        }
     }
 }
 
