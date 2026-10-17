@@ -360,6 +360,23 @@ fn compress_thin_thicken_and_legato() {
     .unwrap();
     assert_eq!(velocities(&h), [100, 200, 300, 400]);
     assert_eq!(h.undo_label(), Some("Compress"));
+    // A flat line sets every velocity to 100 but Compress still maps the
+    // lowest to `start` and the highest to `end`.
+    let flat = |op| {
+        velocity_line(
+            op,
+            Line {
+                shape: LineShape::Flat,
+                ..line(0, 3 * Q, 100, 400)
+            },
+        )
+    };
+    let mut hc = History::new(d.clone());
+    run(&mut hc, &[L0], &[], false, flat(LineOp::Compress)).unwrap();
+    assert_eq!(velocities(&hc), [100, 200, 300, 400]);
+    let mut hs = History::new(d.clone());
+    run(&mut hs, &[L0], &[], false, flat(LineOp::Set)).unwrap();
+    assert_eq!(velocities(&hs), [100, 100, 100, 100]);
     // Thicken CC7 between 0 and 2Q every half quarter, then thin it again.
     let cc7 = Series::Controller(7);
     let thick = LineChange {
@@ -530,4 +547,127 @@ fn thin_and_thicken_work_on_automation_series() {
             .collect::<Vec<_>>(),
         vec![0, 2 * Q, 4 * Q]
     );
+}
+
+/// `d` with `specs` inserted into lane 0.
+fn with_events(d: &Document, specs: Vec<EventSpec>) -> Document {
+    apply(
+        d,
+        &Command::Event(EventCmd::Insert {
+            seq: S,
+            lane: L0,
+            events: specs,
+        }),
+    )
+    .unwrap()
+    .doc
+}
+
+fn programs(h: &History) -> Vec<(i64, u8)> {
+    series(h, L0, Series::Program)
+        .into_iter()
+        .map(|(t, b)| match b {
+            EventBody::Program { program, .. } => (t, program),
+            b => panic!("{b:?}"),
+        })
+        .collect()
+}
+
+fn fader_values(h: &History, fader: Series) -> Vec<f64> {
+    series(h, L0, fader)
+        .into_iter()
+        .map(|(_, b)| match b {
+            EventBody::Automation { value, .. } => value,
+            b => panic!("{b:?}"),
+        })
+        .collect()
+}
+
+fn prog(t: i64, program: u8) -> EventSpec {
+    EventSpec::new(
+        Tick(t),
+        EventBody::Program {
+            program,
+            bank: None,
+        },
+    )
+}
+
+#[test]
+fn set_scale_and_add_use_the_program_value_space() {
+    let (d, _) = doc();
+    let d = with_events(&d, vec![prog(0, 10), prog(Q, 20), prog(2 * Q, 30)]);
+    let check = |op, l: Line, want: [u8; 3]| {
+        let mut h = History::new(d.clone());
+        let c = LineChange {
+            target: LineTarget::Series(Series::Program),
+            op,
+            line: l,
+        };
+        run(&mut h, &[L0], &[], false, c).unwrap();
+        let got: Vec<u8> = programs(&h).into_iter().map(|p| p.1).collect();
+        assert_eq!(got, want, "{op:?}");
+        assert_eq!(h.undo_label(), Some("Change Values"));
+    };
+    // Programs are the 7-bit number times 2^25 on the line's scale.
+    check(LineOp::Set, line(0, 2 * Q, 0, 100 << 25), [0, 50, 100]);
+    check(LineOp::Scale, line(0, 2 * Q, 100, 300), [10, 40, 90]);
+    check(LineOp::Add, line(0, 2 * Q, 5 << 25, 15 << 25), [15, 30, 45]);
+}
+
+#[test]
+fn set_scale_and_add_use_the_automation_value_space() {
+    let (d, _) = doc();
+    let fader = Series::Automation(AutomationTarget::StripFader(StripId(1)));
+    let auto = |t, value| {
+        EventSpec::new(
+            Tick(t),
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(StripId(1)),
+                value,
+            },
+        )
+    };
+    let d = with_events(&d, vec![auto(0, 0.25), auto(Q, 0.5), auto(2 * Q, 0.75)]);
+    let full = i64::from(u32::MAX);
+    let check = |op, l: Line, want: [f64; 3]| {
+        let mut h = History::new(d.clone());
+        let c = LineChange {
+            target: LineTarget::Series(fader),
+            op,
+            line: l,
+        };
+        run(&mut h, &[L0], &[], false, c).unwrap();
+        let got = fader_values(&h, fader);
+        assert_eq!(got.len(), 3);
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-6, "{op:?}: {got:?} vs {want:?}");
+        }
+    };
+    // 0..1 on the 32-bit scale; results clamp at 1.
+    check(LineOp::Set, line(0, 2 * Q, 0, full), [0.0, 0.5, 1.0]);
+    check(LineOp::Scale, line(0, 2 * Q, 100, 200), [0.25, 0.75, 1.0]);
+    check(LineOp::Add, line(0, 2 * Q, 0, full / 4), [0.25, 0.625, 1.0]);
+}
+
+#[test]
+fn thin_and_thicken_work_on_program_changes() {
+    let (d, _) = doc();
+    let d = with_events(&d, vec![prog(0, 0), prog(4 * Q, 100)]);
+    let mut h = History::new(d);
+    let change = |op, step| LineChange {
+        target: LineTarget::Series(Series::Program),
+        op,
+        line: Line {
+            step: Tick(step),
+            ..line(0, 4 * Q, 0, 0)
+        },
+    };
+    run(&mut h, &[L0], &[], false, change(LineOp::Thicken, Q)).unwrap();
+    assert_eq!(
+        programs(&h),
+        vec![(0, 0), (Q, 25), (2 * Q, 50), (3 * Q, 75), (4 * Q, 100)]
+    );
+    run(&mut h, &[L0], &[], false, change(LineOp::Thin, 2 * Q)).unwrap();
+    assert_eq!(programs(&h), vec![(0, 0), (2 * Q, 50), (4 * Q, 100)]);
 }
