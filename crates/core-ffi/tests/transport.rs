@@ -347,3 +347,17 @@ fn a_device_event_on_a_released_host_rebuilds_on_the_next_play() {
     ms(30);
     assert!(t(&b).playing);
 }
+
+#[test]
+fn shutdown_stops_and_drops_the_engine_host() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    ms(20);
+    assert!(engine_active());
+    vizdaw_ffi::shutdown().unwrap();
+    assert!(!engine_active());
+    // Idempotent, and the session still closes cleanly.
+    vizdaw_ffi::shutdown().unwrap();
+    s.close().unwrap();
+}

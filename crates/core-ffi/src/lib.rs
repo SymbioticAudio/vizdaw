@@ -44,6 +44,18 @@ pub use snapshot::{
     SlotRow, SlotStatus, TransportState,
 };
 
+/// The app is quitting: stops and drops the engine host so no plugin
+/// host is still rendering when thread-local destructors run at exit.
+/// Call on the main thread after every session was closed; a later Play
+/// would simply create a new host.
+#[uniffi::export]
+pub fn shutdown() -> Result<(), VizError> {
+    ffi_guard(|| {
+        host::reset();
+        Ok(())
+    })
+}
+
 /// Panics inside the guard (test hook): returns `VizError::Internal`.
 #[cfg(feature = "test-hooks")]
 #[uniffi::export]

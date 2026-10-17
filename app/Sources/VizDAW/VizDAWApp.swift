@@ -17,6 +17,15 @@ struct VizDAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
+        appStore.willClose = { PluginWindows.closeDocument($0) }
+        appStore.recovery = Recovery(
+            check: { try recoveryCheck(path: $0) },
+            openWith: { try Session.openWith(path: $0, options: $1) },
+            disable: { plugins in
+                for p in plugins { appPlugins.setEnabled(PluginKey(p), false) }
+            },
+            shiftHeld: { NSEvent.modifierFlags.contains(.shift) },
+            questions: RecoveryAlerts())
         LaunchArguments.apply(CommandLine.arguments, to: appStore)
     }
 
@@ -45,6 +54,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         StoreAlerts.watch(appStore)
         AppSetup.startPlugins()
         PluginTicker.start(appStore)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // A clean quit leaves no crash markers.
+        MainActor.assumeIsolated {
+            appStore.closeAll()
+            // Stop the engine so no plugin host is dropped while it renders.
+            try? shutdown()
+        }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -218,5 +236,44 @@ enum SmokeRun {
         PluginWindows.show(appStore, doc: id, slot: slot)
         try? await Task.sleep(for: .milliseconds(300))
         return PluginWindows.editorSize(doc: id, slot: slot).map { "\($0.width)x\($0.height)" }
+    }
+}
+
+/// The recovery questions as modal alerts (spec §10).
+@MainActor
+final class RecoveryAlerts: RecoveryQuestions {
+    func afterCrash(project: String, loading: [PluginRefRow], crashed: Bool) -> CrashChoice {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        let names = loading.map(\.name).joined(separator: ", ")
+        if crashed {
+            alert.messageText = loading.isEmpty
+                ? "VizDAW quit unexpectedly while this project was open."
+                : "VizDAW quit unexpectedly while this project was open, while loading \(names)."
+        } else {
+            alert.messageText = "Open “\(project)” with plugins off?"
+        }
+        alert.informativeText = "With plugins off, every plugin is a placeholder you can load one by one."
+        alert.addButton(withTitle: "Open with Plugins Off")
+        alert.addButton(withTitle: "Open Normally")
+        alert.addButton(withTitle: "Cancel")
+        if crashed && !loading.isEmpty {
+            alert.addButton(withTitle: "Disable \(names)")
+        }
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .pluginsOff
+        case .alertSecondButtonReturn: return .normally
+        case .alertThirdButtonReturn: return .cancel
+        default: return .disable
+        }
+    }
+
+    func restoreAutosave(project: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "“\(project)” has an autosave newer than its last save."
+        alert.informativeText = "Restoring opens the autosaved version as an unsaved change."
+        alert.addButton(withTitle: "Restore Autosave")
+        alert.addButton(withTitle: "Open Last Saved")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }

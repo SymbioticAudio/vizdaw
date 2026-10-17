@@ -18,6 +18,12 @@ public final class DocumentStore {
     public private(set) var pending: [UUID] = []
     /// Failures that have no window to show them in.
     public var alert: AlertItem?
+    /// Crash and autosave checks before a project opens (spec §10); none
+    /// in tests that do not set it.
+    public var recovery: Recovery?
+    /// Runs before a document's session closes (the app closes that
+    /// document's plugin windows and releases their editors).
+    public var willClose: ((UUID) -> Void)?
 
     private let makeEmpty: Make
     private let makeDemo: Make
@@ -66,7 +72,11 @@ public final class DocumentStore {
                 message: "\((path as NSString).lastPathComponent) is not a .vizdaw project.")
             return nil
         }
-        return add("Open Failed") { try self.openPath(path) }
+        guard let recovery else {
+            return add("Open Failed") { try self.openPath(path) }
+        }
+        guard let options = recovery.options(for: path) else { return nil }
+        return add("Open Failed") { try recovery.openWith(path, options) }
     }
 
     /// Queues a document for the next window to appear.
@@ -93,11 +103,21 @@ public final class DocumentStore {
         return alert
     }
 
+    /// A window closed: its document goes (a clean close: the crash
+    /// marker is removed).
     public func close(_ id: UUID) {
         mixers.removeValue(forKey: id)?.endOpenDrag()
-        if let doc = documents.removeValue(forKey: id), doc.isPlaying {
-            try? doc.session.stop()
+        // Plugin windows detach their editors before the session goes.
+        willClose?(id)
+        if let doc = documents.removeValue(forKey: id) {
+            if doc.isPlaying { try? doc.session.stop() }
+            try? doc.session.close()
         }
+    }
+
+    /// The app quits: every document closes cleanly.
+    public func closeAll() {
+        for id in Array(documents.keys) { close(id) }
     }
 
     private func add(_ title: String, _ make: Make) -> UUID? {
