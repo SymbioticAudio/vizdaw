@@ -36,6 +36,8 @@ public final class PianoRollContainer: NSView {
         // Lower panes (plan 4b Tasks 11 and 12) are added here.
         let strip = RegionStripView(model: model)
         addLowerPane(strip) { [weak strip] in strip?.wantedHeight() ?? 0 }
+        let expression = ExpressionPaneView(model: model)
+        addLowerPane(expression) { [weak expression] in expression?.wantedHeight() ?? 0 }
         observe()
     }
 
