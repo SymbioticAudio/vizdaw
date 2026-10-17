@@ -214,8 +214,8 @@ public enum ListEdit {
             }
         case .data1:
             let s = t.lowercased().replacingOccurrences(of: "bpm", with: "").trimmingCharacters(in: .whitespaces)
-            guard let bpm = Double(s), bpm.isFinite, (1...999).contains(bpm) else {
-                throw ListEditError("Tempo must be 1 to 999 BPM.")
+            guard let bpm = Double(s), bpm.isFinite, (5...999).contains(bpm) else {
+                throw ListEditError("Tempo must be 5 to 999 BPM.")
             }
             n.bpm = bpm
         case .data2:

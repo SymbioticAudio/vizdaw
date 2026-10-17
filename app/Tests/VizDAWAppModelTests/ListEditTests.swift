@@ -137,7 +137,8 @@ private func message(_ body: () throws -> ListChange) -> String? {
         #expect(message { try commit("maybe", .mute, r) } == "Type M to mute, or clear the cell.")
         let c = listContext()
         let tempo = ListRow(.tempo(index: 1, point: c.info!.tempo[1]))
-        #expect(message { try commit("0", .data1, tempo) } == "Tempo must be 1 to 999 BPM.")
+        #expect(message { try commit("0", .data1, tempo) } == "Tempo must be 5 to 999 BPM.")
+        #expect(message { try commit("3", .data1, tempo) } == "Tempo must be 5 to 999 BPM.")
         let region = ListRow(.event(lane: listLaneA, row: listEvent(7, 0, .audioRegion)))
         #expect(message { try commit("+30 dB", .data2, region) } == "Gain must be -144 to 24 dB.")
     }
