@@ -59,6 +59,30 @@ private func message(_ body: () throws -> ListChange) -> String? {
         }
     }
 
+    @Test func equalPositionsWrittenDifferentlyChangeNothing() throws {
+        let r = noteRowAt(q + 100)
+        for text in [".2", "1.2.06", "1..6", "1.2.6"] {
+            #expect(try commit(text, .position, r) == .unchanged, "\(text)")
+        }
+        #expect(try commit("1.3.06", .end, r) == .unchanged)
+        #expect(try commit("1.00", .duration, r) == .unchanged)
+    }
+
+    @Test func textKeepsItsSpaces() throws {
+        var t = listEvent(5, 0, .text)
+        t.text = "a"
+        t.textKind = .text
+        let row = ListRow(.event(lane: listLaneA, row: t))
+        #expect(try commit(" b ", .data2, row) == replaced(row) { $0.text = " b " })
+        #expect(try commit("a", .data2, row) == .unchanged)
+        let marker = ListRow(.marker(index: 0, marker: listContext().info!.markers[0]))
+        var markers = listContext().info!.markers
+        markers[0].name = " Chorus "
+        #expect(
+            try commit(" Chorus ", .data2, marker)
+                == .edit(.sequence(edit: .setMarkers(seq: 3, markers: markers)), tick: q))
+    }
+
     @Test func noteCellsReplaceTheEvent() throws {
         let r = noteRowAt(0)
         #expect(try commit("D4", .data1, r) == replaced(r) { $0.pitch = 62 })
@@ -140,6 +164,31 @@ private func message(_ body: () throws -> ListChange) -> String? {
                 == .edit(.sequence(edit: .setMarkers(seq: 3, markers: [MarkerRow(tick: 2 * bar, name: "Verse")])), tick: 2 * bar))
         let first = ListRow(.tempo(index: 0, point: info.tempo[0]))
         #expect(try commit("2", .position, first) == .unchanged, "the first tempo stays at 0")
+    }
+
+    @Test func mapEditsTheCoreWouldRejectAreRefused() {
+        var c = listContext()
+        let info = c.info!
+        let tempo = ListRow(.tempo(index: 1, point: info.tempo[1]))
+        #expect(message { try commit("1", .position, tempo) } == "A tempo change is already at that position.")
+        var info2 = info
+        info2.tempo.append(TempoPointRow(tick: 8 * q, bpm: 100, ramp: false))
+        c.info = info2
+        #expect(message { try commit("3", .position, tempo, c) } == "A tempo change is already at that position.")
+        // Meters: 4/4 at 0, 3/4 at bar 3 (tick 8q).
+        var info3 = info
+        info3.meter.append(MeterEntryRow(tick: 2 * bar, num: 3, den: 4, sharps: 0, minor: false))
+        c.info = info3
+        c.meter = info3.meter
+        let second = ListRow(.meter(index: 1, entry: info3.meter[1]))
+        #expect(message { try commit("1", .position, second, c) } == "A meter change is already at that position.")
+        #expect(message { try commit("2", .position, second, c) } == nil)
+        #expect(message { try commit("2.2", .position, second, c) } == "Meter changes must start on a barline.")
+        // 4/4 -> 3/4 first: bars shrink, tick 2*bar is no longer a barline (3q does not divide 8q).
+        let first = ListRow(.meter(index: 0, entry: info3.meter[0]))
+        #expect(
+            message { try commit("3/4", .data1, first, c) }
+                == "That meter would move a later meter change off its barline.")
     }
 
     @Test func typedSmpteRoundsToADisplayUnit() throws {

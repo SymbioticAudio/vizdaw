@@ -20,10 +20,19 @@ public enum ListEdit {
     public static func commit(_ text: String, column: ListColumn, row r: ListRow, context c: ListContext) throws
         -> ListChange
     {
-        let t = text.trimmingCharacters(in: .whitespaces)
+        // Free text (text data, marker names) keeps its spaces; every other
+        // cell is trimmed before it is parsed.
+        let free: Bool
+        switch r.source {
+        case .event(_, let e): free = e.kind == .text && column == .data2
+        case .marker: free = column == .data2
+        default: free = false
+        }
+        let t = free ? text : text.trimmingCharacters(in: .whitespaces)
         // Text equal to what the cell shows changes nothing, so an off-grid
         // event never moves when its unchanged position is committed.
-        if t == ListText.cell(r, column, c).trimmingCharacters(in: .whitespaces) { return .unchanged }
+        let shown = ListText.cell(r, column, c)
+        if t == (free ? shown : shown.trimmingCharacters(in: .whitespaces)) { return .unchanged }
         switch r.source {
         case .event(_, let e): return try event(t, column, e, c)
         case .tempo(let i, let p): return try tempo(t, column, i, p, c)
@@ -36,7 +45,8 @@ public enum ListEdit {
         guard let b = PositionInput.parse(t, current: Bbu.of(tick, meter: c.meter)) else {
             throw ListEditError("\"\(t)\" is not a position: type a bar, bar.beat or bar.beat.unit.")
         }
-        return b.tick(meter: c.meter)
+        // The same position written differently keeps the exact tick.
+        return b == Bbu.of(tick, meter: c.meter) ? tick : b.tick(meter: c.meter)
     }
 
     /// A typed SMPTE time as a tick, rounded to the nearest display unit.
@@ -75,6 +85,8 @@ public enum ListEdit {
             guard let d = DurationText.parse(t, current: e.duration, beat: c.beat(at: e.tick)) else {
                 throw ListEditError("\"\(t)\" is not a length: type beats.units, such as 1.480.")
             }
+            let beat = c.beat(at: e.tick)
+            if DurationText.text(d, beat: beat) == DurationText.text(e.duration, beat: beat) { return .unchanged }
             return replace { $0.duration = d }
         case .release:
             let v = try number(t, 0...127, "Release velocity")
@@ -197,6 +209,9 @@ public enum ListEdit {
         case .position:
             guard i > 0 else { return .unchanged }
             n.tick = try position(t, from: p.tick, c)
+            if n.tick <= 0 || points.enumerated().contains(where: { $0.offset != i && $0.element.tick == n.tick }) {
+                throw ListEditError("A tempo change is already at that position.")
+            }
         case .data1:
             let s = t.lowercased().replacingOccurrences(of: "bpm", with: "").trimmingCharacters(in: .whitespaces)
             guard let bpm = Double(s), bpm.isFinite, (1...999).contains(bpm) else {
@@ -227,6 +242,9 @@ public enum ListEdit {
         case .position:
             guard i > 0 else { return .unchanged }
             n.tick = try position(t, from: m.tick, c)
+            if n.tick <= 0 || entries.enumerated().contains(where: { $0.offset != i && $0.element.tick == n.tick }) {
+                throw ListEditError("A meter change is already at that position.")
+            }
         case .data1:
             let parts = t.split(separator: "/").compactMap { UInt8($0.trimmingCharacters(in: .whitespaces)) }
             guard parts.count == 2, (1...64).contains(parts[0]), [1, 2, 4, 8, 16, 32, 64].contains(parts[1]) else {
@@ -244,6 +262,13 @@ public enum ListEdit {
         guard n != m else { return .unchanged }
         entries[i] = n
         entries.sort { $0.tick < $1.tick }
+        // The core needs every meter change on a barline of the meters before it.
+        for j in entries.indices.dropFirst() where MeterMath.bar(at: entries[j].tick, Array(entries[..<j])).start != entries[j].tick {
+            throw ListEditError(
+                col == .position
+                    ? "Meter changes must start on a barline."
+                    : "That meter would move a later meter change off its barline.")
+        }
         return .edit(.sequence(edit: .setMeter(seq: c.seq, meter: entries)), tick: n.tick)
     }
 
@@ -256,7 +281,7 @@ public enum ListEdit {
         case .position:
             n.tick = try position(t, from: m.tick, c)
         case .data2:
-            guard !t.isEmpty else { throw ListEditError("A marker needs a name.") }
+            guard !t.trimmingCharacters(in: .whitespaces).isEmpty else { throw ListEditError("A marker needs a name.") }
             n.name = t
         default:
             return .unchanged
