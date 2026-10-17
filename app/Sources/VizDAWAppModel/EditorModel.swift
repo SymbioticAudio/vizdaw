@@ -56,6 +56,7 @@ public final class EditorModel {
     @ObservationIgnored private var blockCache: [LaneKey: BlockEntry] = [:]
     @ObservationIgnored private var infoCache: [UInt64: (version: UInt64, info: SequenceInfo)] = [:]
     /// Sequences whose info read failed (not Busy) at a snapshot version.
+    @ObservationIgnored private var laneRowFailures: [UInt64: UInt64] = [:]
     @ObservationIgnored private var infoFailures: [UInt64: UInt64] = [:]
     @ObservationIgnored private var sequenceRows: [SeqRow] = []
     @ObservationIgnored private var laneRowCache: [UInt64: (version: UInt64, rows: [LaneRow])] = [:]
@@ -178,6 +179,7 @@ public final class EditorModel {
     /// does not), cached per snapshot version; Busy keeps the old rows.
     public func laneRows(_ seq: UInt64) -> [LaneRow] {
         if let c = laneRowCache[seq], c.version == snapshotVersion { return c.rows }
+        if laneRowFailures[seq] == snapshotVersion { return [] }
         do {
             let rows = try session.lanes(seq: seq)
             laneRowCache[seq] = (snapshotVersion, rows)
@@ -185,6 +187,7 @@ public final class EditorModel {
         } catch VizError.Busy {
             return laneRowCache[seq]?.rows ?? []
         } catch {
+            laneRowFailures[seq] = snapshotVersion
             reportFromRead(error)
             return []
         }

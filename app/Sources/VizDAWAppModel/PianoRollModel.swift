@@ -15,10 +15,13 @@ public enum DetailSlot: Hashable, Sendable {
 @Observable
 @MainActor
 public final class PianoRollModel {
-    public unowned let document: DocumentModel
-    public var editor: EditorModel { document.editor }
+    /// Weak: closing a document while its roll is on screen must not trap.
+    /// Without it `read` yields nil and `write` does nothing.
+    public weak var document: DocumentModel?
+    /// Held directly (it never refers back to a roll, so no cycle).
+    public let editor: EditorModel
     @ObservationIgnored private let read: @MainActor () -> DetailState?
-    @ObservationIgnored private let write: @MainActor (DetailState) -> Void
+    @ObservationIgnored let write: @MainActor (DetailState) -> Void
     /// The lane of the last pressed or selected note (Plan 4b Ruling 9).
     public var chosenLane: LaneKey?
     /// The note sounding while a note or key is pressed.
@@ -29,6 +32,7 @@ public final class PianoRollModel {
         write: @escaping @MainActor (DetailState) -> Void
     ) {
         self.document = document
+        self.editor = document.editor
         self.read = read
         self.write = write
     }
@@ -37,17 +41,17 @@ public final class PianoRollModel {
     public static func pane(_ document: DocumentModel) -> PianoRollModel {
         PianoRollModel(
             document: document,
-            read: { [unowned document] in document.editor.layout.detail },
-            write: { [unowned document] d in document.editor.updateLayout { $0.detail = d } })
+            read: { [weak document] in document?.editor.layout.detail },
+            write: { [weak document] d in document?.editor.updateLayout { $0.detail = d } })
     }
 
     /// The piano roll of torn-off window `id`.
     public static func window(_ id: UUID, of document: DocumentModel) -> PianoRollModel {
         PianoRollModel(
             document: document,
-            read: { [unowned document] in document.editor.layout.windows.first { $0.id == id }?.detail },
-            write: { [unowned document] d in
-                document.editor.updateLayout { l in
+            read: { [weak document] in document?.editor.layout.windows.first { $0.id == id }?.detail },
+            write: { [weak document] d in
+                document?.editor.updateLayout { l in
                     if let i = l.windows.firstIndex(where: { $0.id == id }) { l.windows[i].detail = d }
                 }
             })

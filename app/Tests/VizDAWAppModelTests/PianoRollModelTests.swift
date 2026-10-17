@@ -22,16 +22,11 @@ func rollFake() -> FakeSession {
     return f
 }
 
-/// `PianoRollModel.document` is unowned, so a test that drops the
-/// document from its tuple would leave the roll dangling.
-@MainActor private var liveDocuments: [DocumentModel] = []
-
 @MainActor
 @Suite struct PianoRollModelTests {
     func make(_ target: EditorTarget, lanes: [UInt64]? = nil) throws -> (FakeSession, DocumentModel, PianoRollModel) {
         let f = rollFake()
         let m = try DocumentModel(session: f)
-        liveDocuments.append(m)
         m.editor.openDetail(target, kind: .pianoRoll)
         if let lanes { m.editor.updateLayout { $0.detail?.lanes = lanes } }
         return (f, m, PianoRollModel.pane(m))
@@ -42,7 +37,8 @@ func rollFake() -> FakeSession {
     }
 
     @Test func aLaneTargetShowsItsLanePlusExtras() throws {
-        let (_, _, r) = try make(.lane(seq: 3, lane: 31))
+        let (_, m, r) = try make(.lane(seq: 3, lane: 31))
+        defer { withExtendedLifetime(m) {} }
         #expect(r.shownLanes == [LaneKey(3, 31)])
         r.toggleShown(32)
         #expect(r.shownLanes == [LaneKey(3, 31), LaneKey(3, 32)])
@@ -54,6 +50,7 @@ func rollFake() -> FakeSession {
 
     @Test func aSequenceTargetShowsLanesWithNotesOrADestination() throws {
         let (_, m, r) = try make(.sequence(3))
+        defer { withExtendedLifetime(m) {} }
         #expect(r.shownLanes == [LaneKey(3, 31), LaneKey(3, 32)])
         r.toggleShown(31)
         #expect(r.shownLanes == [LaneKey(3, 32)])
@@ -63,20 +60,23 @@ func rollFake() -> FakeSession {
     }
 
     @Test func coloursFollowTheLaneIndexInItsSequence() throws {
-        let (_, _, r) = try make(.sequence(3))
+        let (_, m, r) = try make(.sequence(3))
+        defer { withExtendedLifetime(m) {} }
         #expect(r.colorIndex(LaneKey(3, 30)) == 0)
         #expect(r.colorIndex(LaneKey(3, 32)) == 2)
     }
 
     @Test func theEditLaneFollowsTheLastChosenShownLane() throws {
-        let (_, _, r) = try make(.lane(seq: 3, lane: 31), lanes: [32])
+        let (_, m, r) = try make(.lane(seq: 3, lane: 31), lanes: [32])
+        defer { withExtendedLifetime(m) {} }
         #expect(r.editLane == LaneKey(3, 31))
         r.select([(LaneKey(3, 32), 3)], adding: false)
         #expect(r.editLane == LaneKey(3, 32))
     }
 
     @Test func theEditLaneFallsBackWhenItsLaneIsHidden() throws {
-        let (_, _, r) = try make(.lane(seq: 3, lane: 31), lanes: [32])
+        let (_, m, r) = try make(.lane(seq: 3, lane: 31), lanes: [32])
+        defer { withExtendedLifetime(m) {} }
         r.chosenLane = LaneKey(3, 32)
         r.toggleShown(32)
         #expect(r.editLane == LaneKey(3, 31))
@@ -84,6 +84,7 @@ func rollFake() -> FakeSession {
 
     @Test func selectingTogglingAndDeletingNotes() throws {
         let (f, m, r) = try make(.lane(seq: 3, lane: 31), lanes: [32])
+        defer { withExtendedLifetime(m) {} }
         r.select([(LaneKey(3, 31), 1), (LaneKey(3, 32), 3)], adding: false)
         #expect(m.editor.selection.events == [1, 3])
         #expect(m.editor.selection.lanes == [LaneRef(seq: 3, lane: 31), LaneRef(seq: 3, lane: 32)])
@@ -94,7 +95,8 @@ func rollFake() -> FakeSession {
     }
 
     @Test func soundingANewPitchEndsTheOldOne() throws {
-        let (f, _, r) = try make(.lane(seq: 3, lane: 31))
+        let (f, m, r) = try make(.lane(seq: 3, lane: 31))
+        defer { withExtendedLifetime(m) {} }
         r.sound(60, velocity: 0x8000, dest: 5)
         r.sound(60, velocity: 0x8000, dest: 5)
         r.sound(62, velocity: 0x8000, dest: 5)
@@ -105,6 +107,7 @@ func rollFake() -> FakeSession {
 
     @Test func aLaneWithoutDestinationIsSilent() throws {
         let (f, m, r) = try make(.lane(seq: 3, lane: 30))
+        defer { withExtendedLifetime(m) {} }
         let groove = LaneKey(3, 30)
         var row = noteRow(9, tick: 0)
         #expect(r.dest(of: row, in: groove) == nil)
@@ -118,6 +121,7 @@ func rollFake() -> FakeSession {
 
     @Test func aShownLaneThatVanishesIsDropped() throws {
         let (f, m, r) = try make(.lane(seq: 3, lane: 31), lanes: [32])
+        defer { withExtendedLifetime(m) {} }
         nextSnapshot(f) { $0.laneRevs.removeAll { $0.lane == 32 } }
         f.laneTable[3]?.removeAll { $0.id == 32 }
         m.rename(1, to: "Kit")
@@ -127,7 +131,8 @@ func rollFake() -> FakeSession {
     }
 
     @Test func aBlockTargetHasAFocusRange() throws {
-        let (_, _, r) = try make(.block(seq: 3, lane: 31, start: 61_440, end: 122_880))
+        let (_, m, r) = try make(.block(seq: 3, lane: 31, start: 61_440, end: 122_880))
+        defer { withExtendedLifetime(m) {} }
         #expect(r.focusRange == TickRange(start: 61_440, end: 122_880))
         #expect(r.shownLanes == [LaneKey(3, 31)])
     }
@@ -157,5 +162,48 @@ func rollFake() -> FakeSession {
         for k in ExpressionKind.choices { #expect(ExpressionKind(k.row) == k) }
         #expect(ExpressionKind.pitchBend.neutral == 0x8000_0000)
         #expect(ExpressionKind.registered(74).title == "Registered 74 (Timbre)")
+    }
+
+    @Test func aRollWhoseDocumentWasFreedReadsDefaultsAndWritesNothing() throws {
+        var roll: PianoRollModel?
+        do {
+            let m = try DocumentModel(session: rollFake())
+            m.editor.openDetail(.lane(seq: 3, lane: 31), kind: .pianoRoll)
+            roll = PianoRollModel.pane(m)
+        }
+        let r = try #require(roll)
+        #expect(r.document == nil)
+        #expect(r.state == nil)
+        #expect(r.shownLanes.isEmpty)
+        r.toggleShown(32)
+        r.write(DetailState(kind: .pianoRoll, target: .sequence(3)))
+        #expect(r.state == nil)
+    }
+
+    @Test func aTornWindowRollWritesToItsWindow() throws {
+        let f = rollFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.sequence(3), kind: .pianoRoll)
+        let w = try #require(m.editor.tearOff(.pianoRoll, shown: 3))
+        let r = PianoRollModel.window(w.id, of: m)
+        #expect(r.shownLanes == [LaneKey(3, 31), LaneKey(3, 32)])
+        r.toggleShown(31)
+        #expect(m.editor.layout.windows.first?.detail.lanes == [32])
+        #expect(m.editor.layout.detail?.lanes == nil, "the pane is untouched")
+    }
+
+    @Test func aVanishedLaneLeavesATornWindow() throws {
+        let f = rollFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.lane(seq: 3, lane: 31), kind: .pianoRoll)
+        let w = try #require(m.editor.tearOff(.pianoRoll, shown: 3))
+        let r = PianoRollModel.window(w.id, of: m)
+        r.toggleShown(32)
+        #expect(m.editor.layout.windows.first?.detail.lanes == [32])
+        nextSnapshot(f) { $0.laneRevs.removeAll { $0.lane == 32 } }
+        f.laneTable[3]?.removeAll { $0.id == 32 }
+        m.rename(1, to: "Kit")
+        #expect(m.editor.layout.windows.first?.detail.lanes == nil)
+        #expect(r.shownLanes == [LaneKey(3, 31)])
     }
 }
