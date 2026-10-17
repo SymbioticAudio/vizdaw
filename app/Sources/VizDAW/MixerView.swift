@@ -11,6 +11,13 @@ struct MixerWindow: View {
     /// (`State` spelled out: the Command Line Tools cannot expand `@State`.)
     private var focusToken = State(initialValue: UUID())
 
+    /// Spelled out: a private stored property makes the memberwise
+    /// initializer private under Xcode's compiler.
+    init(id: Binding<UUID?>, store: DocumentStore) {
+        _id = id
+        self.store = store
+    }
+
     var body: some View {
         content
             .onChange(of: KeyDoc(id: id, key: activeState == .key), initial: true) { old, new in
