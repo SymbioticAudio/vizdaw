@@ -469,3 +469,211 @@ fn a_project_saved_before_to_copy_existed_still_opens() {
     assert_eq!(templates[0].name, "Old");
     assert!(!templates[0].to_copy);
 }
+
+/// Every 4c rule and modification variant survives save and reopen
+/// (through `Session::open`) unchanged.
+#[test]
+fn templates_with_every_new_variant_survive_save_and_reopen() {
+    use core_model::command::{Command, SettingsCmd, apply};
+    use core_model::event::EventKind;
+    use core_model::modify::{
+        Amount, ChangeOp, Curve, Density, ModifyTemplate, Substitute, Transpose, ValueTarget, Wave,
+    };
+    use core_model::rule::{Rule, SelectMode};
+    use core_model::time::Tick;
+
+    let rules = [
+        Rule::Bracketed {
+            by: Box::new(Rule::PitchRange { low: 36, high: 48 }),
+        },
+        Rule::ValueRange { low: 5, high: 900 },
+        Rule::ReleaseVelocityRange { low: 1, high: 300 },
+        Rule::ControllerRange { low: 7, high: 11 },
+        Rule::All(vec![
+            Rule::Kind {
+                kinds: vec![EventKind::Cc, EventKind::Note],
+            },
+            Rule::Bracketed {
+                by: Box::new(Rule::VelocityRange { low: 0, high: 9 }),
+            },
+        ]),
+    ];
+    let mut modifies = vec![
+        Modify::Substitute(Substitute::Controller { index: 74 }),
+        Modify::Substitute(Substitute::PitchBend),
+        Modify::Substitute(Substitute::ChannelPressure),
+        Modify::Substitute(Substitute::Pitch { pitch: 38 }),
+        Modify::Density(Density::Thin { spacing: Tick(30) }),
+        Modify::Density(Density::Thicken { spacing: Tick(15) }),
+        Modify::NoteMap {
+            map: vec![(60, 36), (62, 38)],
+        },
+        Modify::TrimStart { delta: Tick(-12) },
+        Modify::Delete,
+        Modify::Transpose(Transpose::Diatonic {
+            steps: -3,
+            root: 2,
+            mask: C_MAJOR,
+        }),
+        Modify::Transpose(Transpose::Invert { axis: 64 }),
+    ];
+    let targets = [
+        ValueTarget::Velocity,
+        ValueTarget::ReleaseVelocity,
+        ValueTarget::Duration,
+        ValueTarget::Value,
+    ];
+    let ops = [
+        ChangeOp::Set,
+        ChangeOp::Scale,
+        ChangeOp::Add,
+        ChangeOp::Limit { min: -4, max: 99 },
+        ChangeOp::Compress { low: 3, high: 70 },
+        ChangeOp::Legato,
+    ];
+    let mut amounts = vec![
+        Amount::Constant { value: -17 },
+        Amount::Random {
+            low: 1,
+            high: 9,
+            seed: u64::MAX,
+        },
+    ];
+    for curve in [
+        Curve::Straight,
+        Curve::EaseIn,
+        Curve::EaseOut,
+        Curve::SCurve,
+    ] {
+        amounts.push(Amount::Line {
+            from: -5,
+            to: 500,
+            curve,
+        });
+    }
+    for wave in [Wave::Sine, Wave::Square, Wave::Triangle, Wave::Saw] {
+        amounts.push(Amount::Oscillator {
+            wave,
+            low: 2,
+            high: 80,
+            period: Tick(960),
+            phase: Tick(-7),
+        });
+    }
+    for (i, amount) in amounts.iter().enumerate() {
+        modifies.push(Modify::Change {
+            target: targets[i % targets.len()],
+            op: ops[i % ops.len()],
+            amount: *amount,
+        });
+    }
+    for op in ops {
+        modifies.push(Modify::Change {
+            target: ValueTarget::Duration,
+            op,
+            amount: Amount::Constant { value: 1 },
+        });
+    }
+    let mut b = Builder::new();
+    b.sequence("S", "L", None).unwrap();
+    let mut doc = b.finish();
+    for (i, m) in modifies.iter().enumerate() {
+        let t = ModifyTemplate {
+            rule: Some(rules[i % rules.len()].clone()),
+            mode: [SelectMode::Select, SelectMode::Add, SelectMode::Refine][i % 3],
+            modify: Some(m.clone()),
+            to_copy: i % 2 == 0,
+        };
+        doc = apply(
+            &doc,
+            &Command::Settings(SettingsCmd::SetTemplate {
+                name: format!("T{i:02}"),
+                template: Some(t),
+            }),
+        )
+        .unwrap()
+        .doc;
+    }
+    let want = doc.settings().templates.clone();
+    assert_eq!(want.len(), modifies.len());
+
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("a.vizdaw");
+    let second = dir.path().join("b.vizdaw");
+    let s = Session::from_document(doc).unwrap();
+    s.save_as(first.to_string_lossy().into_owned()).unwrap();
+    let reopened = Session::open(first.to_string_lossy().into_owned()).unwrap();
+    reopened
+        .save_as(second.to_string_lossy().into_owned())
+        .unwrap();
+    let got = core_model::file::load(&second).unwrap();
+    assert_eq!(got.settings().templates, want);
+    // The flat ones still show as rows after the reopen.
+    let names: Vec<String> = reopened
+        .modify_templates()
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(names.contains(&"T01".to_string()), "{names:?}");
+}
+
+/// Save refuses to overwrite a template the panel can't list (a nested
+/// rule): the user can't see what they would replace.
+#[test]
+fn save_refuses_to_overwrite_a_template_that_is_not_listed() {
+    use core_model::command::{Command, SettingsCmd, apply};
+    use core_model::modify::ModifyTemplate;
+    use core_model::rule::{Rule, SelectMode};
+
+    let nested = ModifyTemplate {
+        rule: Some(Rule::All(vec![Rule::Any(vec![
+            Rule::PitchRange { low: 0, high: 10 },
+            Rule::ValueRange { low: 0, high: 1 },
+        ])])),
+        mode: SelectMode::Select,
+        modify: Some(Modify::Delete),
+        to_copy: false,
+    };
+    let mut b = Builder::new();
+    b.sequence("S", "L", None).unwrap();
+    let doc = apply(
+        &b.finish(),
+        &Command::Settings(SettingsCmd::SetTemplate {
+            name: "Hidden".into(),
+            template: Some(nested.clone()),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let s = Session::from_document(doc).unwrap();
+    assert!(s.modify_templates().unwrap().is_empty(), "not listed");
+    let row = |name: &str| ModifyTemplateRow {
+        name: name.into(),
+        rule: None,
+        mode: SelectModeRow::Select,
+        modify: Some(ModifyRow::Delete),
+        to_copy: true,
+    };
+    let save = |t| {
+        s.edit(
+            EditCommand::Settings {
+                edit: SettingsEdit::SaveTemplate { template: t },
+            },
+            None,
+        )
+    };
+    match save(row(" Hidden ")) {
+        Err(VizError::Model { message }) => {
+            assert_eq!(message, vizdaw_ffi::modify::HIDDEN_TEMPLATE_MESSAGE)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(s.modify_templates().unwrap().is_empty(), "nothing replaced");
+    // A listed template of the same name is overwritten as usual.
+    save(row("Shown")).unwrap();
+    let mut again = row("Shown");
+    again.to_copy = false;
+    save(again.clone()).unwrap();
+    assert_eq!(s.modify_templates().unwrap(), vec![again]);
+}

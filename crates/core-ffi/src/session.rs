@@ -503,8 +503,6 @@ impl Session {
         self.execute_with(cmd, &ViewFilter::default())
     }
 
-    /// [`Session::execute`] with a view filter (editor commands that act
-    /// on the selection).
     /// Modify Again (Plan 4c Ruling 8): the last modification on the
     /// current selection, one undo step named after it. It removes no
     /// plugin, so nothing is captured first.
@@ -517,6 +515,8 @@ impl Session {
         inner.snapshot()
     }
 
+    /// [`Session::execute`] with a view filter (editor commands that act
+    /// on the selection).
     fn execute_with(&self, cmd: Command, filter: &ViewFilter) -> Result<DocSnapshot, VizError> {
         let next = core_model::command::apply(lock(&self.inner).doc(), &cmd)
             .ok()
@@ -1795,6 +1795,9 @@ impl Session {
             let filter = crate::edit::view_filter(filter.as_ref());
             if matches!(cmd, crate::edit::EditCommand::ModifyAgain) {
                 return self.modify_again_with(&filter);
+            }
+            if let crate::edit::EditCommand::Settings { edit } = &cmd {
+                crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
             }
             let c = crate::edit::to_command(&cmd)?;
             self.execute_with(c, &filter)

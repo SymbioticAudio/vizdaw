@@ -932,6 +932,25 @@ pub fn template_rows(doc: &Document) -> Vec<ModifyTemplateRow> {
         .collect()
 }
 
+/// Why Save refuses to overwrite a stored template the panel can't show.
+pub const HIDDEN_TEMPLATE_MESSAGE: &str =
+    "A template with that name exists but can't be shown here.";
+
+/// Refuses a Save that would silently overwrite a template of the same
+/// name whose rule has no row (it is not listed, so the user can't see
+/// what they would replace).
+pub fn check_settings_edit(doc: &Document, e: &SettingsEdit) -> Result<(), VizError> {
+    if let SettingsEdit::SaveTemplate { template: t } = e {
+        let name = t.name.trim();
+        if let Some(old) = doc.settings().templates.get(name) {
+            if template_row(name, old).is_none() {
+                return Err(bad(HIDDEN_TEMPLATE_MESSAGE));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The core settings command of a settings edit.
 pub fn settings_cmd(e: &SettingsEdit) -> Result<SettingsCmd, VizError> {
     Ok(match e {
