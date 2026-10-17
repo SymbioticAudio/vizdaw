@@ -130,11 +130,15 @@ public struct DetailState: Codable, Hashable, Sendable {
     /// target exactly the lanes shown (nil: the default set). Optional, so
     /// 4a layouts decode (Plan 4b Rulings 9, 11).
     public var lanes: [UInt64]?
+    /// List editor: its kind and destination filter (nil: the default).
+    /// Optional, so earlier layouts decode (Plan 4c Ruling 19).
+    public var listFilter: ListFilter?
 
-    public init(kind: DetailEditorKind, target: EditorTarget, lanes: [UInt64]? = nil) {
+    public init(kind: DetailEditorKind, target: EditorTarget, lanes: [UInt64]? = nil, listFilter: ListFilter? = nil) {
         self.kind = kind
         self.target = target
         self.lanes = lanes
+        self.listFilter = listFilter
     }
 }
 

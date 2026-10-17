@@ -54,6 +54,7 @@ public final class DocumentStore {
             open: { try Session.open(path: $0) }
         )
         s.makeDemoAudio = { try Session.newDemoAudio() }
+        s.listPreferences = ListPreferences(defaults: .standard)
         return s
     }
 
@@ -106,6 +107,9 @@ public final class DocumentStore {
 
     /// Makes the demo with an audio lane (Plan 4b Ruling 19); set by `live()`.
     public var makeDemoAudio: Make?
+
+    /// List defaults and columns given to every document (Plan 4c Ruling 19).
+    public var listPreferences = ListPreferences()
 
     public func newDemoAudio() -> UUID? {
         guard let make = makeDemoAudio else { return nil }
@@ -175,6 +179,7 @@ public final class DocumentStore {
     private func add(_ title: String, _ make: Make) -> UUID? {
         do {
             let model = try DocumentModel(session: make())
+            model.listPreferences = listPreferences
             let id = UUID()
             documents[id] = model
             return id

@@ -341,7 +341,7 @@ public final class EditorModel {
             let k = kind ?? l.lastKind
             l.lastKind = k
             let lanes = l.detail?.target == target ? l.detail?.lanes : nil
-            l.detail = DetailState(kind: k, target: target, lanes: lanes)
+            l.detail = DetailState(kind: k, target: target, lanes: lanes, listFilter: l.detail?.listFilter)
         }
     }
 
@@ -356,6 +356,13 @@ public final class EditorModel {
     public func back() {
         guard let parent = pop() else { return }
         selectSequence(parent)
+    }
+
+    /// Shows sequence `seq`, remembering the current one for Back (a
+    /// reference opened from a list, Plan 4c Ruling 24).
+    public func openSequence(_ seq: UInt64) {
+        if let current = currentSequence() { push(current) }
+        selectSequence(seq)
     }
 
     public func push(_ parent: UInt64) { navigation.append(parent) }

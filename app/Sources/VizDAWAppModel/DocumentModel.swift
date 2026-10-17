@@ -65,6 +65,45 @@ public final class DocumentModel {
         pianoRolls.removeValue(forKey: slot)?.silence()
     }
 
+    /// The list default filter and columns (set by `DocumentStore`).
+    @ObservationIgnored public var listPreferences = ListPreferences()
+    /// One list editor per slot.
+    @ObservationIgnored private var lists: [DetailSlot: ListEditorModel] = [:]
+    /// The list the keyboard was last in (Insert Event, played notes).
+    @ObservationIgnored public var activeList: DetailSlot?
+
+    /// The list editor of the detail pane or a torn-off window, made once.
+    public func list(_ slot: DetailSlot) -> ListEditorModel {
+        if let l = lists[slot] { return l }
+        let l: ListEditorModel
+        switch slot {
+        case .pane: l = .pane(self)
+        case .window(let id): l = .window(id, of: self)
+        }
+        lists[slot] = l
+        return l
+    }
+
+    public func dropList(_ slot: DetailSlot) {
+        lists.removeValue(forKey: slot)
+        if activeList == slot { activeList = nil }
+    }
+
+    /// The active list while its slot shows a list.
+    public func listForCommands() -> ListEditorModel? {
+        guard let slot = activeList, let l = lists[slot], l.state?.kind == .list else { return nil }
+        return l
+    }
+
+    public var listensForNotes: Bool { lists.values.contains { $0.midiIn } }
+
+    /// Played notes go to the active list when it listens, else to a
+    /// listening one.
+    public func receiveNotes(_ notes: [NoteInRow]) {
+        let active = listForCommands().flatMap { $0.midiIn ? $0 : nil }
+        (active ?? lists.values.first { $0.midiIn })?.receive(notes)
+    }
+
     private struct LanesKey: Equatable {
         let version: UInt64
         let seq: UInt64?
