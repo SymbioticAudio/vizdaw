@@ -359,3 +359,198 @@ fn move_across_lanes_reports_moved() {
         ]
     );
 }
+
+use core_model::event::{PerNoteCtl, PerNoteKind};
+use core_model::modify::scale_step;
+
+const C_MAJOR: u16 = 0b1010_1011_0101;
+
+fn pitch_of(d: &Document, id: u64) -> u8 {
+    match body(d, id) {
+        EventBody::Note { pitch, .. } => pitch,
+        b => panic!("not a note: {b:?}"),
+    }
+}
+
+#[test]
+fn duplicate_copies_in_place_with_offsets() {
+    let d = insert(&two_seqs(), 0, 0, vec![note(0, 120), note(PPQ, 60)]).unwrap();
+    let a = core_model::command::apply(
+        &d,
+        &ev(EventCmd::Duplicate {
+            events: vec![EventId(0), EventId(1)],
+            ticks: Tick(10),
+            semitones: 12,
+        }),
+    )
+    .unwrap();
+    assert_eq!(a.report.created.len(), 2);
+    let d = a.doc;
+    assert_eq!(pitch_of(&d, 0), 120, "originals stay");
+    assert_eq!(pitch_of(&d, 2), 127, "clamped at 127");
+    assert_eq!(d.event(EventId(2)).unwrap().0.tick, Tick(10));
+    assert_eq!(pitch_of(&d, 3), 72);
+    assert_eq!(d.event(EventId(3)).unwrap().1.lane, LaneId(0));
+}
+
+#[test]
+fn resize_is_relative_and_keeps_one_tick() {
+    let d = insert(&two_seqs(), 0, 0, vec![note(0, 60), note(0, 62)]).unwrap();
+    let d = run(
+        &d,
+        ev(EventCmd::Resize {
+            events: vec![EventId(0), EventId(1)],
+            delta: Tick(-PPQ / 2),
+        }),
+    )
+    .unwrap();
+    assert_eq!(body(&d, 0), EventBody::note(60, 100, Tick(PPQ / 2)));
+    let d = run(
+        &d,
+        ev(EventCmd::Resize {
+            events: vec![EventId(0)],
+            delta: Tick(-10 * PPQ),
+        }),
+    )
+    .unwrap();
+    assert_eq!(body(&d, 0), EventBody::note(60, 100, Tick(1)));
+    assert_eq!(body(&d, 1), EventBody::note(62, 100, Tick(PPQ / 2)));
+}
+
+#[test]
+fn transpose_in_scale_moves_by_degrees() {
+    // E4 F4 C#4 B4 C4
+    let d = insert(
+        &two_seqs(),
+        0,
+        0,
+        vec![
+            note(0, 64),
+            note(0, 65),
+            note(0, 61),
+            note(0, 71),
+            note(0, 60),
+        ],
+    )
+    .unwrap();
+    let up = |steps: i8| {
+        run(
+            &d,
+            ev(EventCmd::TransposeInScale {
+                events: (0..5).map(EventId).collect(),
+                steps,
+                root: 0,
+                mask: C_MAJOR,
+            }),
+        )
+        .unwrap()
+    };
+    let d1 = up(1);
+    let got: Vec<u8> = (0..5).map(|i| pitch_of(&d1, i)).collect();
+    assert_eq!(got, vec![65, 67, 62, 72, 62]);
+    let d2 = up(-1);
+    let got: Vec<u8> = (0..5).map(|i| pitch_of(&d2, i)).collect();
+    assert_eq!(got, vec![62, 64, 60, 69, 59]);
+    for bad in [
+        EventCmd::TransposeInScale {
+            events: vec![EventId(0)],
+            steps: 1,
+            root: 12,
+            mask: C_MAJOR,
+        },
+        EventCmd::TransposeInScale {
+            events: vec![EventId(0)],
+            steps: 1,
+            root: 0,
+            mask: 0,
+        },
+    ] {
+        assert!(matches!(
+            run(&d, ev(bad)),
+            Err(ModelError::OutOfRange { .. })
+        ));
+    }
+}
+
+#[test]
+fn scale_step_stops_at_the_range_edges() {
+    assert_eq!(scale_step(127, 1, 0, C_MAJOR), 127, "G9 is the top");
+    assert_eq!(scale_step(126, 1, 0, C_MAJOR), 127);
+    assert_eq!(scale_step(0, -1, 0, C_MAJOR), 0);
+    assert_eq!(scale_step(60, 7, 0, C_MAJOR), 72, "an octave");
+    assert_eq!(scale_step(60, 0, 0, C_MAJOR), 60);
+    assert_eq!(
+        scale_step(61, 0, 0, C_MAJOR),
+        61,
+        "zero steps keep an off-scale pitch"
+    );
+}
+
+#[test]
+fn set_per_note_replaces_values_in_the_range() {
+    let d = insert(&two_seqs(), 0, 0, vec![note(PPQ, 60)]).unwrap();
+    let pb = PerNoteKind::PitchBend;
+    let set = |d: &Document, from: i64, to: i64, points: Vec<(i64, u32)>| {
+        run(
+            d,
+            ev(EventCmd::SetPerNote {
+                events: vec![EventId(0)],
+                kind: pb,
+                from: Tick(from),
+                to: Tick(to),
+                points: points.into_iter().map(|(t, v)| (Tick(t), v)).collect(),
+            }),
+        )
+        .unwrap()
+    };
+    // Absolute ticks; the point before the note and the one after it are dropped.
+    let d = set(
+        &d,
+        0,
+        3 * PPQ,
+        vec![
+            (0, 1),
+            (PPQ, 2),
+            (PPQ + 100, 3),
+            (2 * PPQ, 4),
+            (2 * PPQ + 1, 5),
+        ],
+    );
+    let values = |d: &Document| match body(d, 0) {
+        EventBody::Note { per_note, .. } => per_note
+            .iter()
+            .map(|p: &PerNoteCtl| (p.offset.0, p.value))
+            .collect::<Vec<_>>(),
+        b => panic!("{b:?}"),
+    };
+    assert_eq!(values(&d), vec![(0, 2), (100, 3), (PPQ, 4)]);
+    // Erase the middle one only.
+    let d = set(&d, PPQ + 50, PPQ + 150, vec![]);
+    assert_eq!(values(&d), vec![(0, 2), (PPQ, 4)]);
+    // Another kind is untouched by a pitch-bend write.
+    let d = run(
+        &d,
+        ev(EventCmd::SetPerNote {
+            events: vec![EventId(0)],
+            kind: PerNoteKind::Registered(1),
+            from: Tick(0),
+            to: Tick(10 * PPQ),
+            points: vec![(Tick(PPQ + 10), 9)],
+        }),
+    )
+    .unwrap();
+    assert_eq!(values(&d), vec![(0, 2), (10, 9), (PPQ, 4)]);
+    assert!(matches!(
+        run(
+            &d,
+            ev(EventCmd::SetPerNote {
+                events: vec![EventId(0)],
+                kind: pb,
+                from: Tick(5),
+                to: Tick(4),
+                points: vec![],
+            })
+        ),
+        Err(ModelError::OutOfRange { .. })
+    ));
+}

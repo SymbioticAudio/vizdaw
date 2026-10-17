@@ -167,6 +167,29 @@ fn snap_to_scale(p: u8, root: u8, mask: u16) -> u8 {
     p
 }
 
+/// `p` moved `steps` degrees of a scale (bit `i` of `mask` enables pitch
+/// class `root + i`): an off-scale pitch reaching the next scale pitch in
+/// the step's direction counts as one step; it stops at the last scale
+/// pitch inside 0–127. An empty mask or zero steps leave `p` unchanged.
+pub fn scale_step(p: u8, steps: i32, root: u8, mask: u16) -> u8 {
+    if mask & 0x0fff == 0 || steps == 0 {
+        return p;
+    }
+    let in_scale = |q: i32| {
+        let pc = (q - i32::from(root % 12)).rem_euclid(12);
+        mask & (1 << pc) != 0
+    };
+    let dir = steps.signum();
+    let mut q = i32::from(p);
+    for _ in 0..steps.unsigned_abs() {
+        match (1..=12).map(|d| q + dir * d).find(|c| in_scale(*c)) {
+            Some(c) if (0..=127).contains(&c) => q = c,
+            _ => break,
+        }
+    }
+    shift_pitch(0, q)
+}
+
 fn quantize_tick(t: Tick, q: &Quantize) -> Result<Tick> {
     let (grid, strength, offsets): (Tick, u8, &[Tick]) = match q {
         Quantize::Grid { grid, strength } => (*grid, *strength, &[]),

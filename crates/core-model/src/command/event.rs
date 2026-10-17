@@ -2,10 +2,11 @@
 
 use super::Report;
 use crate::document::Document;
-use crate::error::Result;
-use crate::event::{Event, EventBody, EventSpec};
+use crate::error::{ModelError, Result};
+use crate::event::{Event, EventBody, EventSpec, PerNoteCtl, PerNoteKind};
 use crate::ids::{AnyId, DestId, EventId, LaneId, SeqId};
 use crate::lane::DrumRow;
+use crate::modify::scale_step;
 use crate::rules::{check_event, check_event_fields};
 use crate::time::Tick;
 use std::collections::BTreeSet;
@@ -95,6 +96,48 @@ pub enum EventCmd {
         /// Pitch offset.
         semitones: i8,
     },
+    /// Copy events into their own lanes, moved by `ticks`; notes and poly
+    /// pressure transposed by `semitones` (clamped at 0 and 127).
+    Duplicate {
+        /// The events.
+        events: Vec<EventId>,
+        /// Time offset of the copies.
+        ticks: Tick,
+        /// Pitch offset of the copies.
+        semitones: i8,
+    },
+    /// Lengthen or shorten notes by `delta`; a note keeps at least 1 tick.
+    Resize {
+        /// The events.
+        events: Vec<EventId>,
+        /// Duration change.
+        delta: Tick,
+    },
+    /// Move note and poly-pressure pitches `steps` degrees of a scale.
+    TransposeInScale {
+        /// The events.
+        events: Vec<EventId>,
+        /// Scale degrees (negative: down).
+        steps: i8,
+        /// Root pitch class 0–11.
+        root: u8,
+        /// 12-bit scale mask (bit `i`: pitch class `root + i`).
+        mask: u16,
+    },
+    /// Replace the per-note values of `kind` whose absolute tick lies in
+    /// `from..=to` with the `points` (absolute ticks) inside the note.
+    SetPerNote {
+        /// The notes.
+        events: Vec<EventId>,
+        /// Which per-note controller.
+        kind: PerNoteKind,
+        /// First tick replaced.
+        from: Tick,
+        /// Last tick replaced.
+        to: Tick,
+        /// `(tick, value)` pairs.
+        points: Vec<(Tick, u32)>,
+    },
 }
 
 impl EventCmd {
@@ -112,6 +155,10 @@ impl EventCmd {
             EventCmd::SetGroupChannel { .. } => "Set Group/Channel",
             EventCmd::SetMute { .. } => "Mute Events",
             EventCmd::Nudge { .. } => "Nudge Events",
+            EventCmd::Duplicate { .. } => "Duplicate Events",
+            EventCmd::Resize { .. } => "Resize Notes",
+            EventCmd::TransposeInScale { .. } => "Transpose in Scale",
+            EventCmd::SetPerNote { .. } => "Set Per-Note Values",
         }
     }
 }
@@ -293,6 +340,103 @@ pub(crate) fn apply(d: &mut Document, cmd: &EventCmd, r: &mut Report) -> Result<
             }
             Ok(())
         })?,
+        EventCmd::Duplicate {
+            events,
+            ticks,
+            semitones,
+        } => {
+            let unique: BTreeSet<EventId> = events.iter().copied().collect();
+            for id in unique {
+                let (ev, loc) = d.event(id)?;
+                let mut spec = ev.spec();
+                spec.tick = spec.tick + *ticks;
+                match &mut spec.body {
+                    EventBody::Note { pitch, .. } | EventBody::PolyPressure { pitch, .. } => {
+                        *pitch = shift_pitch(*pitch, i32::from(*semitones))
+                    }
+                    _ => {}
+                }
+                check_event(d, loc.seq, &spec)?;
+                let new_id = d.counters_mut().alloc_event();
+                d.insert_event(loc.seq, loc.lane, Some(loc.take), spec.with_id(new_id))?;
+                r.created.push(AnyId::Event(new_id));
+                ensure_drum_row(d, new_id, r)?;
+            }
+        }
+        EventCmd::Resize { events, delta } => edit_events(d, events, r, |e| {
+            if let EventBody::Note { duration, .. } = &mut e.body {
+                if delta.0 != 0 {
+                    *duration = Tick(duration.0.saturating_add(delta.0).max(1));
+                }
+            }
+            Ok(())
+        })?,
+        EventCmd::TransposeInScale {
+            events,
+            steps,
+            root,
+            mask,
+        } => {
+            if *root > 11 {
+                return Err(ModelError::range("scale.root", root));
+            }
+            if mask & 0x0fff == 0 {
+                return Err(ModelError::range("scale.mask", mask));
+            }
+            edit_events(d, events, r, |e| {
+                match &mut e.body {
+                    EventBody::Note { pitch, .. } | EventBody::PolyPressure { pitch, .. } => {
+                        *pitch = scale_step(*pitch, i32::from(*steps), *root, *mask)
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })?
+        }
+        EventCmd::SetPerNote {
+            events,
+            kind,
+            from,
+            to,
+            points,
+        } => {
+            if from > to {
+                return Err(ModelError::range(
+                    "per_note.range",
+                    format!("{}..={}", from.0, to.0),
+                ));
+            }
+            edit_events(d, events, r, |e| {
+                let start = e.tick;
+                if let EventBody::Note {
+                    duration, per_note, ..
+                } = &mut e.body
+                {
+                    let end = start + *duration;
+                    let mut kept: Vec<PerNoteCtl> = per_note
+                        .iter()
+                        .filter(|p| {
+                            let at = start + p.offset;
+                            p.kind != *kind || at < *from || at > *to
+                        })
+                        .copied()
+                        .collect();
+                    kept.extend(
+                        points
+                            .iter()
+                            .filter(|(t, _)| *t >= *from && *t <= *to && *t >= start && *t <= end)
+                            .map(|(t, v)| PerNoteCtl {
+                                kind: *kind,
+                                offset: *t - start,
+                                value: *v,
+                            }),
+                    );
+                    kept.sort_by_key(|p| p.offset);
+                    *per_note = kept.into_iter().collect();
+                }
+                Ok(())
+            })?
+        }
     }
     Ok(())
 }
