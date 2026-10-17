@@ -44,6 +44,7 @@ struct AppCommands: Commands {
             Button("Open…") { if let path = Panels.chooseProject() { show(store.open(path: path)) } }
                 .keyboardShortcut("o")
             Button("Create Demo Project") { show(store.newDemo()) }
+            Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
         }
         CommandGroup(replacing: .saveItem) {
             Button("Close") { NSApp.keyWindow?.performClose(nil) }

@@ -26,6 +26,7 @@ public final class PianoRollModel {
     public var chosenLane: LaneKey?
     /// The note sounding while a note or key is pressed.
     public private(set) var sounding: AuditionNote?
+    @ObservationIgnored private var stripCache: (version: UInt64, strips: [UInt64: StripRow])?
 
     public init(
         document: DocumentModel, read: @escaping @MainActor () -> DetailState?,
@@ -127,6 +128,48 @@ public final class PianoRollModel {
     /// Where a note sounds: its own destination, else its lane's.
     public func dest(of n: EventRow, in key: LaneKey) -> UInt64? {
         n.dest ?? row(key)?.midiDest
+    }
+
+    // MARK: Audio regions (Plan 4b Ruling 13)
+
+    /// The shown lanes with their output path and regions.
+    public func regionLanes() -> [(lane: LaneKey, output: UInt64?, regions: [EventRow])] {
+        shownLanes.map { (lane: $0, output: row($0)?.audioOut, regions: regions($0)) }
+    }
+
+    /// Mixer strips of audio output paths, by path, cached per snapshot
+    /// version; a failed read keeps the last ones.
+    public func outputStrips() -> [UInt64: StripRow] {
+        if let c = stripCache, c.version == editor.snapshotVersion { return c.strips }
+        guard let m = try? document?.session.mixer() else { return stripCache?.strips ?? [:] }
+        var out: [UInt64: StripRow] = [:]
+        for s in m.strips {
+            if case let .audioPath(path) = s.kind { out[path] = s }
+        }
+        stripCache = (editor.snapshotVersion, out)
+        return out
+    }
+
+    public func setOutputMute(_ output: UInt64, _ on: Bool) {
+        mixerEdit(output) { s, strip in try s.setStripMute(strip: strip, mute: on) }
+    }
+
+    public func setOutputSolo(_ output: UInt64, _ on: Bool) {
+        mixerEdit(output) { s, strip in try s.setStripSolo(strip: strip, solo: on) }
+    }
+
+    private func mixerEdit(_ output: UInt64, _ body: (any SessionProtocol, UInt64) throws -> DocSnapshot) {
+        guard editor.gesture == nil else {
+            editor.status = EditorModel.gestureOpenMessage
+            return
+        }
+        guard let strip = outputStrips()[output] else { return }
+        do {
+            guard let session = document?.session else { return }
+            editor.applySnapshot(try body(session, strip.id))
+        } catch {
+            editor.report(error)
+        }
     }
 
     // MARK: Sound (Plan 4b Ruling 6)

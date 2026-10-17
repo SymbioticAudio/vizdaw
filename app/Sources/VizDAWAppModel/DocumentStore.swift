@@ -48,11 +48,13 @@ public final class DocumentStore {
 
     /// The store backed by the Rust library.
     public static func live() -> DocumentStore {
-        DocumentStore(
+        let s = DocumentStore(
             makeEmpty: { try Session.newEmpty() },
             makeDemo: { try Session.newDemo() },
             open: { try Session.open(path: $0) }
         )
+        s.makeDemoAudio = { try Session.newDemoAudio() }
+        return s
     }
 
     public func model(_ id: UUID) -> DocumentModel? { documents[id] }
@@ -91,6 +93,14 @@ public final class DocumentStore {
     public func newEmpty() -> UUID? { add("New Document Failed", makeEmpty) }
 
     public func newDemo() -> UUID? { add("Demo Project Failed", makeDemo) }
+
+    /// Makes the demo with an audio lane (Plan 4b Ruling 19); set by `live()`.
+    public var makeDemoAudio: Make?
+
+    public func newDemoAudio() -> UUID? {
+        guard let make = makeDemoAudio else { return nil }
+        return add("Demo Project Failed", make)
+    }
 
     /// Opens a `.vizdaw` package; other paths are refused with an alert.
     public func open(path: String) -> UUID? {
