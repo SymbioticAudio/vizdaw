@@ -45,6 +45,25 @@ public final class DocumentModel {
     public var paramsChanged: Set<UInt64> = []
     /// The playhead between polls (spec §3.4); fed by `poll()`.
     @ObservationIgnored public let clock = TransportClock()
+    /// One piano roll per slot (Plan 4b Ruling 22).
+    @ObservationIgnored private var pianoRolls: [DetailSlot: PianoRollModel] = [:]
+
+    /// The piano roll of the detail pane or a torn-off window, made once.
+    public func pianoRoll(_ slot: DetailSlot) -> PianoRollModel {
+        if let m = pianoRolls[slot] { return m }
+        let m: PianoRollModel
+        switch slot {
+        case .pane: m = .pane(self)
+        case .window(let id): m = .window(id, of: self)
+        }
+        pianoRolls[slot] = m
+        return m
+    }
+
+    /// A torn-off window closed: its piano roll goes, silencing its note.
+    public func dropPianoRoll(_ slot: DetailSlot) {
+        pianoRolls.removeValue(forKey: slot)?.silence()
+    }
 
     private struct LanesKey: Equatable {
         let version: UInt64

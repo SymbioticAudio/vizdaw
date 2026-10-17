@@ -2,10 +2,12 @@ import SwiftUI
 import VizDAWAppModel
 
 /// A detail editor's frame: the editor picker, its target, Open in Window,
-/// and — in 4a — a placeholder where the editor will draw (4b–4e).
+/// and the editor: the piano roll (4b), else a placeholder (4c–4e).
 struct DetailPane: View {
     let model: DocumentModel
     let state: DetailState
+    /// This frame's piano roll (the pane's or the torn window's).
+    let roll: PianoRollModel
     let onKind: (DetailEditorKind) -> Void
     let onTearOff: (() -> Void)?
     let onClose: (() -> Void)?
@@ -36,10 +38,14 @@ struct DetailPane: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             Divider()
-            ContentUnavailableView(
-                "\(state.kind.title) arrives in plan \(state.kind.plan)",
-                systemImage: "rectangle.and.pencil.and.ellipsis",
-                description: Text(summary))
+            if state.kind == .pianoRoll {
+                PianoRollEditor(model: roll)
+            } else {
+                ContentUnavailableView(
+                    "\(state.kind.title) arrives in plan \(state.kind.plan)",
+                    systemImage: "rectangle.and.pencil.and.ellipsis",
+                    description: Text(summary))
+            }
         }
     }
 
@@ -59,7 +65,7 @@ struct DetailArea: View {
     var body: some View {
         if let d = model.editor.layout.detail {
             DetailPane(
-                model: model, state: d,
+                model: model, state: d, roll: model.pianoRoll(.pane),
                 onKind: { k in model.editor.openDetail(d.target, kind: k) },
                 onTearOff: {
                     EditorWindows.tearOff(appStore, doc: docID, kind: d.kind)

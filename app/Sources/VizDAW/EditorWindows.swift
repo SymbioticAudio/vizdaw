@@ -22,6 +22,7 @@ enum EditorWindows {
         weak var made: EditorWindowController?
         let c = EditorWindowController(model: model, doc: doc, window: window) { byUser in
             if byUser { model.editor.closeWindow(window.id) }
+            model.dropPianoRoll(.window(window.id))
             // Called from windowWillClose: dropping the last strong reference to the
             // controller inside its own delegate call frees it mid-close, so defer it.
             let closing = made
@@ -128,9 +129,12 @@ struct TornEditorView: View {
 
     var body: some View {
         if let w = model.editor.layout.windows.first(where: { $0.id == id }) {
-            DetailPane(
-                model: model, state: w.detail, onKind: { model.editor.setWindowKind(id, $0) },
-                onTearOff: nil, onClose: nil)
+            VStack(spacing: 0) {
+                DetailPane(
+                    model: model, state: w.detail, roll: model.pianoRoll(.window(id)),
+                    onKind: { model.editor.setWindowKind(id, $0) }, onTearOff: nil, onClose: nil)
+                StatusLine(editor: model.editor)
+            }
         } else {
             ContentUnavailableView("Editor Closed", systemImage: "xmark.rectangle")
                 .onAppear(perform: onGone)
