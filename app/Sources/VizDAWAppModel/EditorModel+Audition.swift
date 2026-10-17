@@ -18,6 +18,8 @@ extension EditorModel {
     public static let noteOffRetries = 120
     public static let auditionHint = "Notes sound once the audio engine runs: press Play once."
 
+    public static let stuckNoteHint = "A note may still be sounding — press Stop."
+
     /// Sounds `note`. Note-offs still pending are retried first; while the
     /// one for this very note cannot be sent, the note is not started.
     public func auditionOn(_ note: AuditionNote, velocity: UInt16) {
@@ -62,8 +64,14 @@ extension EditorModel {
     private func sendOff(_ note: AuditionNote, attemptsLeft: Int) {
         do {
             _ = try session.audition(dest: note.dest, pitch: note.pitch, velocity: 0, on: false)
+        } catch VizError.Busy {
+            if attemptsLeft > 0 {
+                pendingOffs[note] = attemptsLeft
+            } else {
+                status = Self.stuckNoteHint
+            }
         } catch {
-            if attemptsLeft > 0 { pendingOffs[note] = attemptsLeft }
+            report(error)
         }
     }
 }

@@ -154,10 +154,10 @@ open class EditorCanvas: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
         for v in [grid, content, overlay, ruler] { addSubview(v) }
-        grid.paint = { [unowned self] r in self.drawGrid(r) }
-        content.paint = { [unowned self] r in self.drawContent(in: r) }
-        overlay.paint = { [unowned self] r in self.drawOverlayBase(r) }
-        ruler.paint = { [unowned self] r in self.drawRuler(r) }
+        grid.paint = { [weak self] r in self?.drawGrid(r) }
+        content.paint = { [weak self] r in self?.drawContent(in: r) }
+        overlay.paint = { [weak self] r in self?.drawOverlayBase(r) }
+        ruler.paint = { [weak self] r in self?.drawRuler(r) }
         playheadLayer.backgroundColor = NSColor.systemRed.cgColor
         playheadLayer.isHidden = true
         overlay.layer?.addSublayer(playheadLayer)

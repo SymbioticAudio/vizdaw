@@ -53,11 +53,34 @@ private let d4 = AuditionNote(dest: 5, pitch: 62)
     @Test func aNoteOffThatKeepsFailingIsDroppedAfterTheRetries() throws {
         let (f, e) = try make()
         e.auditionOn(c4, velocity: 0x8000)
-        f.auditionErrors = Array(repeating: .Engine(message: "queue full"), count: EditorModel.noteOffRetries + 5)
+        f.auditionErrors = Array(repeating: .Busy(message: "busy"), count: EditorModel.noteOffRetries + 5)
         e.auditionOff(c4)
         for _ in 0..<EditorModel.noteOffRetries { e.tick() }
         #expect(!e.hasPendingNoteOffs)
         #expect(log(f) == ["on 60"])
+        #expect(e.status == EditorModel.stuckNoteHint)
+    }
+
+    @Test func aNonBusyNoteOffErrorIsReportedAtOnce() throws {
+        let (f, e) = try make()
+        e.auditionOn(c4, velocity: 0x8000)
+        f.auditionErrors = [.Engine(message: "queue full")]
+        e.auditionOff(c4)
+        #expect(!e.hasPendingNoteOffs, "not retried")
+        #expect(e.status != nil)
+        #expect(log(f) == ["on 60"])
+    }
+
+    @Test func offAllMeetingBusyQueuesRetries() throws {
+        let (f, e) = try make()
+        e.auditionOn(c4, velocity: 0x8000)
+        e.auditionOn(d4, velocity: 0x8000)
+        f.auditionErrors = [.Busy(message: "busy"), .Busy(message: "busy")]
+        e.auditionOffAll()
+        #expect(e.hasPendingNoteOffs)
+        e.tick()
+        #expect(!e.hasPendingNoteOffs)
+        #expect(Set(log(f).suffix(2)) == ["off 60", "off 62"])
     }
 
     @Test func aNoteOnWaitsForItsPendingNoteOff() throws {
