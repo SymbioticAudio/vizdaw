@@ -426,10 +426,11 @@ impl Catalog {
     }
 
     /// Tells `host` where every plugin lives and which ones are
-    /// unavailable (their slots load as placeholders with the reason;
-    /// running instances are captured and unloaded by
-    /// [`PluginHost::unload_unavailable`], which the caller runs since it
-    /// needs the document's history). It clears only
+    /// unavailable (their slots load as placeholders with the reason).
+    /// Running instances of a plugin the user turned off are captured and
+    /// unloaded by [`PluginHost::unload_unavailable`], which the caller
+    /// runs since it needs the document's history; blocklisted and missing
+    /// ones keep running until they next load. It clears only
     /// reasons it set itself earlier, never a failure of the host's own.
     /// For one host; with several, use [`Catalog::apply_to`].
     pub fn apply(&mut self, host: &mut PluginHost) {
@@ -455,14 +456,17 @@ impl Catalog {
                 PluginStatus::Blocklisted(r) => Some(format!("Blocklisted: {r}")),
                 PluginStatus::Missing => Some("Missing".to_string()),
             };
+            let key = (e.plugin.format, e.plugin.id.clone());
+            // Only the user's preference stops running instances.
+            host.set_disabled(key.0, &key.1, self.disabled.contains(&key));
             if let Some(w) = why {
-                let key = (e.plugin.format, e.plugin.id.clone());
                 host.set_unavailable(key.0, &key.1, Some(w));
                 now.insert(key);
             }
         }
         for (format, id) in marks.0.difference(&now) {
             host.set_unavailable(*format, id, None);
+            host.set_disabled(*format, id, false);
         }
         marks.0 = now;
     }

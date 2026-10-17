@@ -1115,6 +1115,8 @@ fn a_load_in_progress_of_a_disabled_plugin_is_abandoned() {
         "vizdaw.test.gain",
         Some("Disabled in Plugin Manager".into()),
     );
+    assert!(!host.unloads_due(), "unavailable, not turned off");
+    host.set_disabled(PluginFormat::Clap, "vizdaw.test.gain", true);
     assert!(host.unloads_due());
     assert!(host.unload_unavailable(&mut hist).is_empty(), "nothing ran");
     host.wait_ready(WAIT);
@@ -1125,4 +1127,65 @@ fn a_load_in_progress_of_a_disabled_plugin_is_abandoned() {
             "Disabled in Plugin Manager".into()
         ))
     );
+}
+
+#[test]
+fn only_turning_a_plugin_off_unloads_it_blocklisted_and_missing_ones_keep_running() {
+    use core_host::catalog::{Catalog, CatalogEntry, ScanStatus, Source};
+    let (mut hist, song, gain) = with_gain();
+    let src = Source::clap_bundle(&test_plugins::bundle());
+    let entry = |status| CatalogEntry {
+        source: src.clone(),
+        plugin: plugin("vizdaw.test.gain"),
+        kind: Some(PluginKind::Effect),
+        info: None,
+        status,
+    };
+    let mut cat = Catalog::new();
+    cat.record(&src, vec![entry(ScanStatus::Ok)]);
+    let mut host = host(4096);
+    cat.apply(&mut host);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    let (mut engine, _be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    let live = |h: &PluginHost| h.state(gain) == Some(core_host::SlotState::Live);
+    assert!(live(&host));
+
+    // A rescan blocklists it (it timed out): it keeps running.
+    cat.record(
+        &src,
+        vec![entry(ScanStatus::Blocklisted {
+            reason: "timed out".into(),
+        })],
+    );
+    cat.apply(&mut host);
+    assert!(!host.unloads_due());
+    host.sync(hist.doc());
+    host.service(&mut engine, hist.doc(), song).unwrap();
+    assert!(live(&host), "{:?}", host.state(gain));
+
+    // Its bundle went missing: it keeps running too.
+    cat.record(&src, vec![entry(ScanStatus::Ok)]);
+    cat.mark_found(&[]);
+    cat.apply(&mut host);
+    assert!(!host.unloads_due());
+    host.service(&mut engine, hist.doc(), song).unwrap();
+    assert!(live(&host));
+
+    // Turned off by the user: unloaded (also while missing).
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", false);
+    cat.apply(&mut host);
+    assert!(host.unloads_due());
+    assert_eq!(host.unload_unavailable(&mut hist).len(), 1);
+    assert!(host.instance(gain).is_none());
+    // On again but still missing: it waits as a placeholder.
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", true);
+    cat.apply(&mut host);
+    assert!(!host.unloads_due());
+    assert_eq!(
+        host.state(gain),
+        Some(core_host::SlotState::Failed("Missing".into()))
+    );
+    drop(engine);
 }

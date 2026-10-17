@@ -224,6 +224,9 @@ pub struct PluginHost {
     formats: Vec<Box<dyn PluginFormat>>,
     paths: BTreeMap<(Format, String), PathBuf>,
     unavailable: BTreeMap<(Format, String), String>,
+    /// Plugins the user turned off ([`PluginHost::set_disabled`]): their
+    /// running instances are unloaded, not only their next loads.
+    disabled: BTreeSet<(Format, String)>,
     sample_rate: f64,
     max_frames: u32,
     slots: BTreeMap<PluginInstanceId, Slot>,
@@ -302,6 +305,7 @@ impl PluginHost {
             formats: vec![Box::new(ClapFormat::new())],
             paths: BTreeMap::new(),
             unavailable: BTreeMap::new(),
+            disabled: BTreeSet::new(),
             sample_rate,
             max_frames: max_frames.max(1),
             slots: BTreeMap::new(),
@@ -335,11 +339,11 @@ impl PluginHost {
         self.paths.insert((format, id.to_string()), path);
     }
 
-    /// Marks a plugin as unavailable (disabled or blocklisted); its slots
-    /// become placeholders showing `why` (spec §9): those not running at
-    /// once, running ones by [`PluginHost::unload_unavailable`] (it needs
-    /// the `History` to keep their state). `None` makes it available again
-    /// (its slots load at the next `sync`).
+    /// Marks a plugin as unavailable (disabled, blocklisted or missing);
+    /// its slots become placeholders showing `why` (spec §9) when they
+    /// next load: running instances keep running, unless the user turned
+    /// the plugin off ([`PluginHost::set_disabled`]). `None` makes it
+    /// available again (its slots load at the next `sync`).
     pub fn set_unavailable(&mut self, format: Format, id: &str, why: Option<String>) {
         let key = (format, id.to_string());
         match why {
@@ -358,6 +362,21 @@ impl PluginHost {
                     }
                 }
             }
+        }
+    }
+
+    /// Records whether the user turned a plugin off (the Plugin Manager's
+    /// preference, spec §9). Together with [`PluginHost::set_unavailable`]
+    /// this makes its running instances due for
+    /// [`PluginHost::unload_unavailable`]; a plugin unavailable for another
+    /// reason (blocklisted by a rescan, missing) keeps its running
+    /// instances until they next load.
+    pub fn set_disabled(&mut self, format: Format, id: &str, disabled: bool) {
+        let key = (format, id.to_string());
+        if disabled {
+            self.disabled.insert(key);
+        } else {
+            self.disabled.remove(&key);
         }
     }
 
@@ -1222,22 +1241,23 @@ impl PluginHost {
         Ok(blob)
     }
 
-    /// Whether a slot still runs (or is loading) a plugin that has become
-    /// unavailable since (disabled in the Plugin Manager): then
+    /// Whether a slot still runs (or is loading) a plugin the user turned
+    /// off since (unavailable and [`PluginHost::set_disabled`]): then
     /// [`PluginHost::unload_unavailable`] is due.
     pub fn unloads_due(&self) -> bool {
         self.slots.values().any(|s| self.unloads(s))
     }
 
     fn unloads(&self, s: &Slot) -> bool {
+        let key = (s.want.plugin.format, s.want.plugin.id.clone());
         matches!(s.state, State::Live(_) | State::Loading(_))
-            && self
-                .unavailable
-                .contains_key(&(s.want.plugin.format, s.want.plugin.id.clone()))
+            && self.disabled.contains(&key)
+            && self.unavailable.contains_key(&key)
     }
 
-    /// Unloads every instance of a plugin that became unavailable (spec §9:
-    /// turning a plugin off stops it in every open project). Each running
+    /// Unloads every instance of a plugin the user turned off (spec §9:
+    /// turning a plugin off stops it in every open project; a blocklisted
+    /// or missing plugin is left running). Each running
     /// one has its state captured first, through
     /// [`PluginHost::capture`] (no undo step), so the document keeps its
     /// settings; then it goes the way of a removed instance (editor
