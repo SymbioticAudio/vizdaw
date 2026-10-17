@@ -34,7 +34,8 @@ extension EditorModel {
     @discardableResult
     public func tearOff(_ kind: DetailEditorKind, shown seq: UInt64?) -> TornWindow? {
         guard let target = layout.detail?.target ?? detailTarget(shown: seq) else { return nil }
-        let w = TornWindow(id: UUID(), detail: DetailState(kind: kind, target: target), frame: nil)
+        let w = TornWindow(
+            id: UUID(), detail: DetailState(kind: kind, target: target, lanes: layout.detail?.lanes), frame: nil)
         updateLayout {
             $0.windows.append(w)
             $0.lastKind = kind

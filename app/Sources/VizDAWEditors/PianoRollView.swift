@@ -33,13 +33,16 @@ public final class PianoRollView: EditorCanvas {
     public var onTimeAxis: ((TimeAxis) -> Void)?
 
     private var machine = ToolMachine<PianoRollHit>()
-    private var centered = false
+    /// The target the view last centred on: another one (a different
+    /// block opened in this roll) centres and scrolls again.
+    private var centeredOn: EditorTarget??
     private var tracking: NSTrackingArea?
 
     private enum Drag {
         case notes(NoteDrag, startTick: Int64, startY: CGFloat)
         case pencil(lane: LaneKey, start: Int64, pitch: UInt8)
-        case erase([UInt64])
+        /// The notes erased so far and the last pointer position.
+        case erase([UInt64], last: CGPoint)
         case band(from: CGPoint, adding: Bool)
     }
 
@@ -120,15 +123,17 @@ public final class PianoRollView: EditorCanvas {
         follow = editor.layout.follow
         let key = document?.playKey
         setPlaying(key?.playing == true && key?.seq == model.seq)
+        if let c = centeredOn, c != model.target { needsLayout = true }
         reload()
     }
 
-    /// The first layout centres the shown notes and scrolls to a block
-    /// target (Plan 4b Ruling 10).
+    /// The first layout, and the first after the target changed, centres
+    /// the shown notes and scrolls to a block target (Plan 4b Ruling 10).
     public override func layout() {
         super.layout()
-        guard !centered, content.bounds.height > 0 else { return }
-        centered = true
+        let target = model.target
+        guard centeredOn != .some(target), content.bounds.height > 0 else { return }
+        centeredOn = .some(target)
         let pitches = model.shownLanes.flatMap { model.notes($0) }.map(\.pitch)
         var middle: UInt8 = 60
         if let lo = pitches.min(), let hi = pitches.max() { middle = UInt8((Int(lo) + Int(hi)) / 2) }
@@ -276,7 +281,7 @@ public final class PianoRollView: EditorCanvas {
             }
         case (.pencil, .empty(let tick, let pitch)):
             // A gesture, so the undo step reads "Insert Note" (Plan Ruling 7).
-            guard let lane = model.editLane, editor.beginGesture("Insert Note", lanes: [lane]) else { return }
+            guard let lane = model.editLane, openGesture("Insert Note", lanes: [lane]) else { return }
             let start = Pencil.start(tick, snap: snap, meter: meter)
             editor.endGesture(
                 Pencil.command(
@@ -290,8 +295,8 @@ public final class PianoRollView: EditorCanvas {
         switch (editor.tool, hit) {
         case (.eraser, _):
             let erased = Eraser.adding(hit, to: [])
-            guard editor.beginGesture("Erase Notes", lanes: Set(model.shownLanes)) else { return }
-            drag = .erase(erased)
+            guard openGesture("Erase Notes", lanes: Set(model.shownLanes)) else { return }
+            drag = .erase(erased, last: from)
             editor.updateGesture(Eraser.command(erased))
         case (_, .note(let n)):
             if !editor.isSelected(event: n.row.id) { model.select([(n.lane, n.row.id)], adding: false) }
@@ -302,14 +307,30 @@ public final class PianoRollView: EditorCanvas {
             let d = NoteDrag(
                 zone: n.zone, pressed: n.row, lane: n.lane, events: ids, lowest: pitches.min() ?? n.row.pitch,
                 highest: pitches.max() ?? n.row.pitch, copy: modifiers.contains(.option))
-            guard editor.beginGesture(d.label, lanes: Set(model.shownLanes)) else { return }
+            guard openGesture(d.label, lanes: Set(model.shownLanes)) else { return }
             drag = .notes(d, startTick: axis.tick(atX: from.x), startY: from.y)
         case (.pencil, .empty(let tick, let pitch)):
-            guard let lane = model.editLane, editor.beginGesture("Insert Note", lanes: [lane]) else { return }
+            guard let lane = model.editLane, openGesture("Insert Note", lanes: [lane]) else { return }
             drag = .pencil(lane: lane, start: Pencil.start(tick, snap: snap, meter: meter), pitch: pitch)
         case (_, .empty):
             drag = .band(from: from, adding: modifiers.contains(.shift))
         }
+    }
+
+    /// Opens the gesture a pencil click or drag needs. Refused while
+    /// another one is still finishing: the status says so and the note
+    /// sounded on mouse-down stops.
+    private func openGesture(_ label: String, lanes: Set<LaneKey>) -> Bool {
+        let pending = editor.gesture != nil
+        if editor.beginGesture(label, lanes: lanes) { return true }
+        if pending { editor.status = EditorModel.gestureOpenMessage }
+        model.silence()
+        return false
+    }
+
+    /// The notes the eraser crossed between two drag points.
+    private func crossed(from a: CGPoint, to b: CGPoint) -> [UInt64] {
+        PianoRollGeometry.notes(crossingFrom: a, to: b, lanes: laneNotes(), time: axis, pitch: pitchAxis)
     }
 
     private func target(_ d: Drag, at p: CGPoint) -> EditCommand? {
@@ -324,8 +345,8 @@ public final class PianoRollView: EditorCanvas {
         case let .pencil(lane, start, pitch):
             let length = Pencil.length(start: start, to: axis.tick(atX: p.x), snap: snap, meter: meter)
             return Pencil.command(lane: lane, tick: start, pitch: pitch, length: length)
-        case .erase(let erased):
-            return Eraser.command(Eraser.adding(hit(p), to: erased))
+        case let .erase(erased, last):
+            return Eraser.command(Eraser.adding(crossed(from: last, to: p), to: erased))
         case .band:
             return nil
         }
@@ -341,10 +362,10 @@ public final class PianoRollView: EditorCanvas {
                 dest: model.dest(of: nd.pressed, in: nd.lane))
         case .pencil:
             editor.updateGesture(target(d, at: p))
-        case .erase(let erased):
-            let next = Eraser.adding(hit(p), to: erased)
+        case let .erase(erased, last):
+            let next = Eraser.adding(crossed(from: last, to: p), to: erased)
+            drag = .erase(next, last: p)
             guard next != erased else { return }
-            drag = .erase(next)
             editor.updateGesture(Eraser.command(next))
         case let .band(from, _):
             band = RubberBand.rect(from: from, to: p)

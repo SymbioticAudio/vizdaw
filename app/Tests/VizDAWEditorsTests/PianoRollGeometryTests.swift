@@ -146,6 +146,36 @@ private func y(_ p: UInt8) -> CGFloat { pitch.center(p) }
             == .event(edit: .insert(seq: 3, lane: 31, events: [row])))
     }
 
+    @Test func aSegmentFindsEveryNoteItCrossesInOrder() {
+        func n(_ id: UInt64, _ tick: Int64, _ p: UInt8) -> EventRow { note(id, tick, p, 960) }
+        // Three notes on one row, 10 pt wide, 20 pt apart; one row above.
+        let lanes = [
+            LaneNotes(lane: LaneKey(1, 1), notes: [n(1, 0, 60), n(2, 1_920, 60), n(3, 3_840, 60), n(4, 1_920, 61)])
+        ]
+        let y = pitch.center(60)
+        // Sampled points 0 and 45 only touch 1; the segment crosses 1, 2, 3.
+        #expect(
+            PianoRollGeometry.notes(
+                crossingFrom: CGPoint(x: 5, y: y), to: CGPoint(x: 45, y: y), lanes: lanes, time: time, pitch: pitch)
+                == [1, 2, 3])
+        // Right to left: the order the pointer meets them.
+        #expect(
+            PianoRollGeometry.notes(
+                crossingFrom: CGPoint(x: 45, y: y), to: CGPoint(x: 5, y: y), lanes: lanes, time: time, pitch: pitch)
+                == [3, 2, 1])
+        // A miss, and a single point.
+        let above = pitch.center(70)
+        #expect(
+            PianoRollGeometry.notes(
+                crossingFrom: CGPoint(x: 0, y: above), to: CGPoint(x: 60, y: above), lanes: lanes, time: time,
+                pitch: pitch).isEmpty)
+        #expect(
+            PianoRollGeometry.notes(
+                crossingFrom: CGPoint(x: 25, y: y), to: CGPoint(x: 25, y: y), lanes: lanes, time: time, pitch: pitch)
+                == [2])
+        #expect(Eraser.adding([2, 1, 3], to: [1]) == [1, 2, 3])
+    }
+
     @Test func theEraserCollectsEachNoteOnce() {
         let hit = PianoRollHit.note(NoteHit(lane: laneA, row: note(2, 0, 60), zone: .middle))
         let once = Eraser.adding(hit, to: [1])

@@ -256,6 +256,91 @@ private func log(_ f: FakeSession) -> [String] {
         #expect(log(f) == ["on 60", "off 60"])
     }
 
+    @Test func openingAnotherBlockRecentresAndScrolls() throws {
+        let (_, m, v) = try roll()
+        let middle = { v.pitchAxis.pitch(atY: v.content.bounds.height / 2) }
+        #expect((61...63).contains(middle()), "centred on C4–E4")
+        #expect(v.axis.originTick <= 0)
+        // Bass (E2) from bar 2, in the same open roll (Plan 4b Ruling 10).
+        m.editor.openDetail(.block(seq: 3, lane: 32, start: 61_440, end: 122_880), kind: .pianoRoll)
+        v.refresh()
+        v.layout()
+        #expect((39...41).contains(middle()), "centred on E2, not \(middle())")
+        #expect(v.axis.originTick == 61_440 - 16 * v.axis.ticksPerPoint)
+        // A layout with the same target leaves the user's scroll alone.
+        v.verticalOffset = 0
+        v.layout()
+        #expect(v.verticalOffset == 0)
+    }
+
+    @Test func aPencilClickWhileAGestureFinishesSaysSoAndIsSilent() throws {
+        let (f, m, v) = try roll()
+        #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)]))
+        m.editor.tool = .pencil
+        let p = CGPoint(x: 400, y: v.pitchAxis.center(67))
+        v.contentMouseDown(p, clicks: 1, modifiers: [])
+        v.contentMouseUp(p, modifiers: [])
+        #expect(m.editor.status == EditorModel.gestureOpenMessage)
+        #expect(!f.calls.contains("begin Insert Note"))
+        #expect(log(f) == ["on 67", "off 67"])
+    }
+
+    @Test func aNoteDragWhileAGestureFinishesSaysSoAndSilences() throws {
+        let (f, m, v) = try roll()
+        #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)]))
+        let p = point(v, 1, .middle)
+        v.contentMouseDown(p, clicks: 1, modifiers: [])
+        #expect(log(f) == ["on 60"])
+        v.contentMouseDragged(CGPoint(x: p.x, y: p.y - 30), modifiers: [])
+        #expect(m.editor.status == EditorModel.gestureOpenMessage)
+        #expect(log(f) == ["on 60", "off 60"], "the pressed note stops when the drag is refused")
+        v.contentMouseUp(CGPoint(x: p.x, y: p.y - 30), modifiers: [])
+        #expect(m.editor.gesture?.label == "Move Notes", "the other gesture is untouched")
+    }
+
+    @Test func aFastEraserDragErasesTheNotesBetweenSamples() throws {
+        let (f, m, v) = try roll()
+        defer { withExtendedLifetime(m) {} }
+        m.editor.tool = .eraser
+        // A diagonal from below-left of C4 to above-right of E4: neither
+        // sample lands on a note, the segments cross both.
+        let a = point(v, 1, .middle)
+        let b = point(v, 2, .middle)
+        let from = CGPoint(x: a.x - (b.x - a.x) / 4, y: a.y - (b.y - a.y) / 4)
+        let to = CGPoint(x: b.x + (b.x - a.x) / 4, y: b.y + (b.y - a.y) / 4)
+        guard case .empty = PianoRollGeometry.hit(
+            from, lanes: v.laneNotes(), active: nil, time: v.axis, pitch: v.pitchAxis),
+            case .empty = PianoRollGeometry.hit(
+                to, lanes: v.laneNotes(), active: nil, time: v.axis, pitch: v.pitchAxis)
+        else {
+            Issue.record("a sample landed on a note")
+            return
+        }
+        v.contentMouseDown(from, clicks: 1, modifiers: [])
+        v.contentMouseDragged(to, modifiers: [])
+        v.contentMouseUp(to, modifiers: [])
+        #expect(f.gestureEdits.last == .event(edit: .delete(events: [1, 2])))
+    }
+
+    @Test func leavingTheWindowCancelsARegionMove() throws {
+        let f = audioFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.sequence(3), kind: .pianoRoll)
+        let v = RegionStripView(model: m.pianoRoll(.pane))
+        v.frame = NSRect(x: 0, y: 0, width: 800, height: 60)
+        v.timeAxis = TimeAxis(ticksPerPoint: 96)
+        let side = PianoRollContainer.sideWidth
+        v.pressed(at: CGPoint(x: side + 50, y: 11), clicks: 1, modifiers: [])
+        v.dragged(to: CGPoint(x: side + 150, y: 11), modifiers: [])
+        #expect(m.editor.gesture?.label == "Move Region")
+        // ⌘W mid-drag: the release never comes.
+        v.viewWillMove(toWindow: nil)
+        #expect(m.editor.gesture == nil)
+        #expect(f.calls.last == "abort")
+        v.released(at: CGPoint(x: side + 150, y: 11), modifiers: [])
+        #expect(m.editor.gesture == nil)
+    }
+
     @Test func laneColoursWrapAroundThePalette() {
         #expect(PianoRollPalette.color(8) == PianoRollPalette.color(0))
         #expect(PianoRollPalette.color(-1) == PianoRollPalette.color(7))

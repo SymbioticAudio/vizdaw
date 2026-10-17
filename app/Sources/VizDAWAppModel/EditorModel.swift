@@ -320,12 +320,14 @@ public final class EditorModel {
     @ObservationIgnored var currentSequence: () -> UInt64? = { nil }
 
     /// Shows `target` in the detail pane, in `kind` or the last-used
-    /// editor (spec §3.7).
+    /// editor (spec §3.7). The piano roll's shown lanes stay while the
+    /// target is the same.
     public func openDetail(_ target: EditorTarget, kind: DetailEditorKind? = nil) {
         updateLayout { l in
             let k = kind ?? l.lastKind
             l.lastKind = k
-            l.detail = DetailState(kind: k, target: target)
+            let lanes = l.detail?.target == target ? l.detail?.lanes : nil
+            l.detail = DetailState(kind: k, target: target, lanes: lanes)
         }
     }
 

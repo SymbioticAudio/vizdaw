@@ -75,6 +75,46 @@ public enum PianoRollGeometry {
         return .empty(tick: time.tick(atX: p.x), pitch: target)
     }
 
+    /// The notes the pointer crossed moving from `a` to `b`, in the order
+    /// it met them (Plan 4b Ruling 8: a fast eraser drag skips none).
+    public static func notes(
+        crossingFrom a: CGPoint, to b: CGPoint, lanes: [LaneNotes], time: TimeAxis, pitch: PitchAxis
+    ) -> [UInt64] {
+        var hits: [(t: CGFloat, order: Int, id: UInt64)] = []
+        for l in lanes {
+            for n in l.notes {
+                if let t = entry(from: a, to: b, into: rect(n, time: time, pitch: pitch)) {
+                    hits.append((t, hits.count, n.id))
+                }
+            }
+        }
+        return hits.sorted { ($0.t, $0.order) < ($1.t, $1.order) }.map(\.id)
+    }
+
+    /// Where along `a`–`b` (0…1) the segment enters `r`; nil when it misses
+    /// (Liang–Barsky clipping).
+    static func entry(from a: CGPoint, to b: CGPoint, into r: CGRect) -> CGFloat? {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        var t0: CGFloat = 0
+        var t1: CGFloat = 1
+        for (p, q) in [(-dx, a.x - r.minX), (dx, r.maxX - a.x), (-dy, a.y - r.minY), (dy, r.maxY - a.y)] {
+            if p == 0 {
+                if q < 0 { return nil }
+                continue
+            }
+            let t = q / p
+            if p < 0 {
+                if t > t1 { return nil }
+                t0 = max(t0, t)
+            } else {
+                if t < t0 { return nil }
+                t1 = min(t1, t)
+            }
+        }
+        return t0
+    }
+
     /// The notes a rubber band `r` touches, lane by lane.
     public static func notes(
         in r: CGRect, lanes: [LaneNotes], time: TimeAxis, pitch: PitchAxis

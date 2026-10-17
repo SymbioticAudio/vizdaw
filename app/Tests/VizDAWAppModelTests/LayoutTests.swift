@@ -21,6 +21,23 @@ import VizDAWCore
         #expect(e.layout.detail == nil)
     }
 
+    @Test func reopeningTheSameTargetKeepsItsShownLanes() throws {
+        let m = try DocumentModel(session: editorFake())
+        let e = m.editor
+        e.openDetail(.sequence(3), kind: .pianoRoll)
+        e.updateLayout { $0.detail?.lanes = [30, 32] }
+        e.openDetail(.sequence(3), kind: .pianoRoll)
+        #expect(e.layout.detail?.lanes == [30, 32])
+        e.showDetail(.list, shown: 3)
+        #expect(e.layout.detail == DetailState(kind: .list, target: .sequence(3), lanes: [30, 32]))
+        e.showDetail(.pianoRoll, shown: 3)
+        #expect(e.layout.detail?.lanes == [30, 32], "⌘1–⌘4 keep the lanes")
+        let w = try #require(e.tearOff(.pianoRoll, shown: 3))
+        #expect(w.detail.lanes == [30, 32], "a torn-off copy too")
+        e.openDetail(.lane(seq: 3, lane: 31))
+        #expect(e.layout.detail?.lanes == nil, "another target starts with its own lanes")
+    }
+
     @Test func tearingOffAddsAWindowAndClosingRemovesIt() throws {
         let m = try DocumentModel(session: editorFake())
         let e = m.editor

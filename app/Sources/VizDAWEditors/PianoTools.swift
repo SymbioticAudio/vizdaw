@@ -53,6 +53,13 @@ public enum Eraser {
         return erased + [n.row.id]
     }
 
+    /// `erased` plus the notes in `ids` it lacks, in order.
+    public static func adding(_ ids: [UInt64], to erased: [UInt64]) -> [UInt64] {
+        var out = erased
+        for id in ids where !out.contains(id) { out.append(id) }
+        return out
+    }
+
     public static func command(_ erased: [UInt64]) -> EditCommand? {
         erased.isEmpty ? nil : .event(edit: .delete(events: erased))
     }
