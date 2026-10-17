@@ -7,7 +7,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var laneTable: [UInt64: [LaneRow]] = [:]
     var state = TransportState(
         playing: false, seq: nil, tick: 0, positionBbu: "1.1.0", seconds: 0,
-        sampleRate: 0, device: "", faults: [], report: [])
+        sampleRate: 0, device: "", faults: [], report: [], hostTimeNs: 0,
+        ticksPerSecond: 30_720)
     var playError: VizError?
     var transportError: VizError?
     /// Thrown by `undo()` and `redo()`.
@@ -359,6 +360,12 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var layout: String?
     func uiLayout() throws -> String? { layout }
     func setUiLayout(json: String) throws { layout = json }
+
+    var auditions: [(dest: UInt64, pitch: UInt8, on: Bool)] = []
+    func audition(dest: UInt64, pitch: UInt8, velocity: UInt16, on: Bool) throws -> Bool {
+        auditions.append((dest, pitch, on))
+        return true
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

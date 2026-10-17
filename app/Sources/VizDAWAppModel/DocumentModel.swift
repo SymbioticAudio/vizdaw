@@ -55,7 +55,8 @@ public final class DocumentModel {
     /// The transport shown until the first successful read.
     static let stopped = TransportState(
         playing: false, seq: nil, tick: 0, positionBbu: "1.1.0", seconds: 0,
-        sampleRate: 0, device: "", faults: [], report: [])
+        sampleRate: 0, device: "", faults: [], report: [], hostTimeNs: 0,
+        ticksPerSecond: 30_720)
 
     // MARK: Derived state
 

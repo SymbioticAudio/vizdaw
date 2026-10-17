@@ -18,6 +18,7 @@ uniffi::setup_scaffolding!();
 
 pub mod blocks;
 pub mod catalog;
+pub mod clock;
 pub mod edit;
 pub mod editor;
 pub mod error;

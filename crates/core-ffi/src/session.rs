@@ -879,6 +879,23 @@ impl Session {
         })
     }
 
+    /// Sounds (`on`) or releases `pitch` on destination `dest` without
+    /// touching the document (spec §3.2). True when it was sent; false
+    /// when this session does not hold the engine or the loaded sequence
+    /// does not play on `dest`'s target (Plan Ruling 9).
+    pub fn audition(
+        &self,
+        dest: u64,
+        pitch: u8,
+        velocity: u16,
+        on: bool,
+    ) -> Result<bool, VizError> {
+        self.transport_call(|| {
+            let inner = lock(&self.inner);
+            host::audition(self.id, inner.doc(), DestId(dest), pitch, velocity, on)
+        })
+    }
+
     /// Where the transport stands.
     pub fn transport(&self) -> Result<TransportState, VizError> {
         self.transport_call(|| {
@@ -899,9 +916,12 @@ impl Session {
                         h.faults
                     },
                     report: h.report,
+                    host_time_ns: h.host_time_ns,
+                    ticks_per_second: crate::clock::ticks_per_second(doc, Some(h.seq), h.tick),
                 },
                 None => {
                     let tick = inner.cursor.unwrap_or(Tick::ZERO);
+                    let host_time_ns = crate::clock::now_ns();
                     let seq = inner.cursor_seq;
                     TransportState {
                         playing: false,
@@ -914,6 +934,8 @@ impl Session {
                         device: String::new(),
                         faults: inner.reload_fault.iter().cloned().collect(),
                         report: Vec::new(),
+                        host_time_ns,
+                        ticks_per_second: crate::clock::ticks_per_second(doc, seq, tick),
                     }
                 }
             })

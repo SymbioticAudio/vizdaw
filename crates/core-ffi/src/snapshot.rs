@@ -121,6 +121,11 @@ pub struct TransportState {
     pub faults: Vec<String>,
     /// Messages of the last compile report.
     pub report: Vec<String>,
+    /// Host time (ns; `CACurrentMediaTime`'s clock on macOS) when `tick`
+    /// was read.
+    pub host_time_ns: u64,
+    /// Tempo at `tick` in ticks per second.
+    pub ticks_per_second: f64,
 }
 
 fn count(n: usize) -> u32 {

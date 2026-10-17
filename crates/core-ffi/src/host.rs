@@ -15,7 +15,7 @@ use core_engine::schedule::CompileReport;
 use core_engine::transport::PlayState;
 use core_host::{IdleReport, PluginHost};
 use core_model::document::Document;
-use core_model::ids::SeqId;
+use core_model::ids::{DestId, SeqId};
 use core_model::time::Tick;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -507,6 +507,8 @@ pub struct HostState {
     pub seq: SeqId,
     /// Position.
     pub tick: Tick,
+    /// Host time (ns) stamped right after `tick` was read.
+    pub host_time_ns: u64,
     /// Stream rate.
     pub sample_rate: f64,
     /// Device label.
@@ -615,6 +617,23 @@ pub fn set_loop(owner: u64, on: bool) -> Result<(), VizError> {
     }
 }
 
+/// Sends an audition note through `owner`'s engine (Plan Ruling 9); false
+/// when `owner` does not hold the engine or it has no target for `dest`.
+pub fn audition(
+    owner: u64,
+    doc: &Document,
+    dest: DestId,
+    pitch: u8,
+    velocity: u16,
+    on: bool,
+) -> Result<bool, VizError> {
+    let mut slot = lock(&HOST);
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => Ok(h.engine.audition(doc, dest, pitch, velocity, on)?),
+        _ => Ok(false),
+    }
+}
+
 /// After an edit: starts loading the plugins `doc` gained (and drops the
 /// ones it lost), then recompiles if `owner` holds the engine and no
 /// plugin is loading (otherwise `service` loads once they are in).
@@ -684,10 +703,16 @@ pub fn state(
         return Ok(None);
     };
     h.collect_faults();
+    let playing = h.engine.state() != PlayState::Stopped;
+    // The stamp follows the tick read directly: the playhead extrapolates
+    // from this pair (spec §3.4).
+    let tick = h.engine.position_tick();
+    let host_time_ns = crate::clock::now_ns();
     Ok(Some(HostState {
-        playing: h.engine.state() != PlayState::Stopped,
+        playing,
         seq: h.seq,
-        tick: h.engine.position_tick(),
+        tick,
+        host_time_ns,
         sample_rate: h.sample_rate,
         device: h.device.clone(),
         faults: h.faults.clone(),

@@ -3,6 +3,7 @@
 use crate::backend::{BlockInfo, BlockTime, MidiOut, StereoBuf};
 use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
+use crate::midi1::Midi1Msg;
 use crate::notes::ActiveNotes;
 use crate::pool::PoolShared;
 use crate::schedule::{MAX_TARGETS, Schedule, TargetIdx};
@@ -358,6 +359,9 @@ pub enum EngineCmd {
     /// Remove a released target's sink; it goes back through the retire
     /// ring (a plugin instrument is deactivated off the audio thread).
     RemoveSink(TargetIdx),
+    /// Send a note on or off to a target now (editor audition), tracked
+    /// like any played note so Stop and Locate release it.
+    Audition(TargetIdx, Midi1Msg),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -811,6 +815,18 @@ impl Renderer {
                         std::mem::forget(old);
                     }
                 }
+            }
+            EngineCmd::Audition(target, msg) => {
+                let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+                let mut o = Out {
+                    sinks: &mut self.sinks,
+                    shared: &self.shared,
+                    block_ns: self.block_ns,
+                    ns_per_frame: 0.0,
+                    late_ns,
+                };
+                o.send(target, 0, msg.as_slice());
+                self.notes.observe(target, msg.as_slice());
             }
             EngineCmd::AddSink(idx, sink) => {
                 if let Some(slot) = self.sinks.get_mut(usize::from(idx.0)) {

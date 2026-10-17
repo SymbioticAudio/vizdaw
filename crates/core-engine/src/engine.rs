@@ -8,18 +8,20 @@ use crate::graph::{
     EffectNode, Graph, GraphReport, InsertFactory, InsertInit, InstrumentFeed, NoInserts, NodeSpec,
     PlanError, plan,
 };
+use crate::midi1::{Midi1Msg, note_on_velocity, release_velocity};
 use crate::pool::{Pool, RtEnv, RtPlatform, StdPlatform};
 use crate::render::{
     CMD_CAPACITY, Counters, DspLoad, EngineCmd, Faults, RETIRE_CAPACITY, RenderConfig, Renderer,
     Retired, Shared, Sink,
 };
+use crate::schedule::targets::kinds_for;
 use crate::schedule::{
     BuiltinRoute, CompileOptions, CompileReport, MAX_TARGETS, TargetIdx, TargetKind, TargetTable,
     TempoTable, compile,
 };
 use crate::transport::PlayState;
 use core_model::document::{DestKind, Document};
-use core_model::ids::{PluginInstanceId, SeqId, StripId};
+use core_model::ids::{DestId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
 use core_model::time::Tick;
 use rtrb::{Producer, RingBuffer};
@@ -645,6 +647,44 @@ impl Engine {
 
     fn push(&mut self, cmd: EngineCmd) -> Result<(), EngineError> {
         self.cmds.push(cmd).map_err(|_| EngineError::Busy)
+    }
+
+    /// Sends a note on (`on`) or off for `pitch` straight to the targets
+    /// `dest` plays on, without touching the document (editor audition,
+    /// spec §3.2). Returns false when this engine has none of them (the
+    /// loaded sequence does not use that target) or `dest` is unknown.
+    pub fn audition(
+        &mut self,
+        doc: &Document,
+        dest: DestId,
+        pitch: u8,
+        velocity: u16,
+        on: bool,
+    ) -> Result<bool, EngineError> {
+        let Some(d) = doc.instruments().get(&dest) else {
+            return Ok(false);
+        };
+        let channel = match &d.kind {
+            DestKind::MidiEndpoint { channel, .. } => channel & 0x0F,
+            DestKind::PluginInstrument { .. } => 0,
+        };
+        let Ok(kinds) = kinds_for(&d.kind, self.cfg.route, &self.factory.ports()) else {
+            return Ok(false);
+        };
+        let pitch = pitch & 0x7F;
+        let msg = if on {
+            Midi1Msg::three(0x90 | channel, pitch, note_on_velocity(velocity))
+        } else {
+            Midi1Msg::three(0x80 | channel, pitch, release_velocity(velocity))
+        };
+        let mut sent = false;
+        for k in &kinds {
+            if let Some(t) = self.targets.find(k) {
+                self.push(EngineCmd::Audition(t, msg))?;
+                sent = true;
+            }
+        }
+        Ok(sent)
     }
 
     /// Starts playback (from the start when at or past the end).
