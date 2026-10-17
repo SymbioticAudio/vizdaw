@@ -67,10 +67,11 @@ public final class DocumentModel {
 
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()
-    /// One list editor per slot.
-    @ObservationIgnored private var lists: [DetailSlot: ListEditorModel] = [:]
-    /// The list the keyboard was last in (Insert Event, played notes).
-    @ObservationIgnored public var activeList: DetailSlot?
+    /// One list editor per slot, while that slot shows a list.
+    @ObservationIgnored private(set) var lists: [DetailSlot: ListEditorModel] = [:]
+    /// The list the keyboard was last in (Insert Event, played notes);
+    /// observed, so Editors > Insert Event enables when a list gets focus.
+    public var activeList: DetailSlot?
 
     /// The list editor of the detail pane or a torn-off window, made once.
     public func list(_ slot: DetailSlot) -> ListEditorModel {
@@ -84,9 +85,22 @@ public final class DocumentModel {
         return l
     }
 
+    /// A torn-off window closed (also with its document): its list goes.
     public func dropList(_ slot: DetailSlot) {
         lists.removeValue(forKey: slot)
         if activeList == slot { activeList = nil }
+    }
+
+    /// The document closed: every list goes (none keeps MIDI input running).
+    public func dropLists() {
+        for slot in Array(lists.keys) { dropList(slot) }
+    }
+
+    /// Lists whose slot no longer shows a list (the pane switched editor or
+    /// closed, a window changed editor or left the layout) go, so none
+    /// lingers with MIDI In on or as the active list.
+    func pruneLists() {
+        for (slot, l) in lists where l.state?.kind != .list { dropList(slot) }
     }
 
     /// The active list while its slot shows a list.
@@ -134,6 +148,7 @@ public final class DocumentModel {
         editor.applySnapshot = { [weak self] in self?.apply($0) }
         editor.selectSequence = { [weak self] in self?.select($0) }
         editor.currentSequence = { [weak self] in self?.selectedSeq }
+        editor.layoutChanged = { [weak self] in self?.pruneLists() }
     }
 
     /// The transport shown until the first successful read.

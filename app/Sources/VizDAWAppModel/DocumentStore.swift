@@ -87,6 +87,21 @@ public final class DocumentStore {
         tornFocus.map(\.doc) ?? panelFocus ?? focused
     }
 
+    /// The document whose own window (document or mixer) is key; the
+    /// timer, which has no SwiftUI focus, asks this.
+    public private(set) var keyDocument: UUID?
+
+    public func focusDocument(_ doc: UUID) { keyDocument = doc }
+
+    /// Document `doc`'s window resigned key or closed.
+    public func blurDocument(_ doc: UUID) {
+        if keyDocument == doc { keyDocument = nil }
+    }
+
+    /// The document played notes go to: the command target (Plan 4c
+    /// Ruling 11).
+    public var noteTarget: DocumentModel? { commandTarget(focused: keyDocument).flatMap(model) }
+
     /// Document `id`'s mixer (one per document), or nil once it is closed.
     public func mixer(_ id: UUID) -> MixerModel? {
         if let m = mixers[id] { return m }
@@ -160,12 +175,15 @@ public final class DocumentStore {
     public func close(_ id: UUID) {
         if tornFocus?.doc == id { tornFocus = nil }
         if panelFocus == id { panelFocus = nil }
+        if keyDocument == id { keyDocument = nil }
         mixers.removeValue(forKey: id)?.endOpenDrag()
         // Plugin windows detach their editors before the session goes.
         willClose?(id)
         if let doc = documents.removeValue(forKey: id) {
             // A note an editor sounds (a press on a closing piano roll) ends.
             doc.editor.auditionOffAll()
+            // No list outlives its document (none keeps MIDI input running).
+            doc.dropLists()
             if doc.isPlaying { try? doc.session.stop() }
             try? doc.session.close()
         }

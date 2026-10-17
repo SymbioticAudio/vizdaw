@@ -321,7 +321,12 @@ public final class EditorModel {
     public func updateLayout(_ change: (inout EditorLayout) -> Void) {
         change(&layout)
         drawVersion += 1
+        layoutChanged()
     }
+
+    /// Runs after every layout change (set by `DocumentModel`: list
+    /// editors whose slot stopped showing a list go).
+    @ObservationIgnored var layoutChanged: () -> Void = {}
 
     /// Hands the layout to the session; the next save writes it.
     public func storeLayout() {

@@ -6,8 +6,17 @@ import VizDAWCore
 struct MixerWindow: View {
     @Binding var id: UUID?
     let store: DocumentStore
+    @Environment(\.controlActiveState) private var activeState
 
     var body: some View {
+        content
+            .onChange(of: KeyDoc(id: id, key: activeState == .key), initial: true) { old, new in
+                KeyDoc.changed(store, from: old, to: new)
+            }
+            .onDisappear { if let id, activeState == .key { store.blurDocument(id) } }
+    }
+
+    @ViewBuilder private var content: some View {
         if let id, let mixer = store.mixer(id) {
             MixerView(model: mixer)
                 .environment(\.openPluginWindow, { slot in PluginWindows.show(store, doc: id, slot: slot) })

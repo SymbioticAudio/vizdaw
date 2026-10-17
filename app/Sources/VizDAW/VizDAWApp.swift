@@ -15,6 +15,10 @@ import VizDAWCore
 /// Editing preferences: the nudge steps (Plan 4b Ruling 16).
 @MainActor let editingPreferences = EditingPreferences()
 
+/// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
+/// Ruling 11).
+@MainActor let noteInputHub = NoteInputHub(input: NoteInput())
+
 @main
 struct VizDAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
@@ -161,6 +165,8 @@ enum PluginTicker {
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in
             MainActor.assumeIsolated {
                 for model in store.documents.values { model.idle() }
+                // Open documents only; played notes go to the command target.
+                noteInputHub.poll(Array(store.documents.values), focused: store.noteTarget)
                 PluginWindows.tick(store)
                 ticks += 1
                 if ticks % 15 == 0 { appPlugins.poll() }

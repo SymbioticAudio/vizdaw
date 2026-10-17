@@ -99,6 +99,9 @@ struct AppCommands: Commands {
             Divider()
             Button("Close Detail Editor") { doc?.editor.closeDetail() }
                 .disabled(doc?.editor.layout.detail == nil)
+            Button("Insert Event") { doc?.listForCommands()?.insert() }
+                .keyboardShortcut("i")
+                .disabled(doc?.listForCommands() == nil || doc?.editor.textEditing == true)
             Divider()
             nudge("Nudge Earlier", .earlier, .leftArrow)
             nudge("Nudge Later", .later, .rightArrow)

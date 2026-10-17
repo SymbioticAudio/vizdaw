@@ -27,7 +27,8 @@ public final class NoteInputHub {
 
     /// Played notes go only to `focused` (the command-target document), and
     /// only if it listens; any listening document keeps the input running.
-    public func poll(_ docs: [DocumentModel], focused: DocumentModel? = nil) {
+    /// `focused` has no default, so no caller can leave it out by accident.
+    public func poll(_ docs: [DocumentModel], focused: DocumentModel?) {
         guard let input else { return }
         let listening = docs.filter(\.listensForNotes)
         if listening.isEmpty {

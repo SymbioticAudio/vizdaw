@@ -42,6 +42,9 @@ struct DocumentWindow: View {
         }
         .onChange(of: store.pending) { openQueued() }
         .onChange(of: activeState) { openQueued() }
+        .onChange(of: KeyDoc(id: id, key: activeState == .key), initial: true) { old, new in
+            KeyDoc.changed(store, from: old, to: new)
+        }
     }
 
     /// Gives the window a live document when it has none (new window,
@@ -58,6 +61,18 @@ struct DocumentWindow: View {
         while let next = store.takePending() {
             openWindow(value: next)
         }
+    }
+}
+
+/// Whether a document's own window (document or mixer) is key: the
+/// timer's note target, since the timer has no SwiftUI focus.
+struct KeyDoc: Equatable {
+    let id: UUID?
+    let key: Bool
+
+    @MainActor static func changed(_ store: DocumentStore, from old: KeyDoc, to new: KeyDoc) {
+        if let o = old.id, old.key, !new.key || new.id != o { store.blurDocument(o) }
+        if let n = new.id, new.key { store.focusDocument(n) }
     }
 }
 
