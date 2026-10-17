@@ -214,4 +214,19 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(f.edits.last == .lane(edit: .rename(seq: 3, lane: 31, name: "Keys")))
         #expect(h.renaming == nil)
     }
+
+    @Test func aHeaderTornDownMidRenameReEnablesTransportKeys() throws {
+        let m = try DocumentModel(session: editorFake())
+        let h = LaneHeaderView(document: m)
+        h.frame = CGRect(x: 0, y: 0, width: 200, height: 300)
+        let w = NSWindow(
+            contentRect: h.frame, styleMask: [.titled], backing: .buffered, defer: true)
+        w.contentView?.addSubview(h)
+        h.beginRename(m.lanes[1], seq: 3, row: 1)
+        #expect(m.editor.textEditors == ["laneName"])
+        #expect(!m.transportKeysEnabled)
+        h.removeFromSuperview()
+        #expect(m.editor.textEditors.isEmpty)
+        #expect(m.transportKeysEnabled)
+    }
 }
