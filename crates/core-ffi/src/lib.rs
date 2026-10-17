@@ -34,6 +34,7 @@ pub mod revs;
 pub mod selection;
 pub mod session;
 pub mod snapshot;
+pub mod strip;
 pub mod templates;
 
 pub use blocks::{BlockKind, BlockRow, BlockRule};
@@ -68,6 +69,9 @@ pub use session::{OpenOptions, Session};
 pub use snapshot::{
     DocSnapshot, IdleUpdate, KeySlotRow, LaneRow, ParamRow, ParamValue, PluginFormatTag,
     PluginRefRow, SeqRow, SlotRow, SlotStatus, TransportState,
+};
+pub use strip::{
+    LineOpRow, LinePointRow, LineRow, LineShapeRow, LineTargetRow, PeriodRow, SeriesRow,
 };
 pub use templates::SequenceTemplate;
 

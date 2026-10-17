@@ -365,6 +365,15 @@ pub enum ModifyRow {
     },
     /// Delete.
     Delete,
+    /// A Strip Chart line (4d, Plan 4d Ruling 15).
+    Line {
+        /// What it acts on.
+        target: crate::strip::LineTargetRow,
+        /// What it does.
+        op: crate::strip::LineOpRow,
+        /// The line.
+        line: crate::strip::LineRow,
+    },
 }
 
 /// A named configuration.
@@ -607,7 +616,7 @@ pub fn rule_row(r: &Rule) -> Option<RuleRow> {
     })
 }
 
-fn target_of(t: ValueTargetRow) -> ValueTarget {
+pub(crate) fn target_of(t: ValueTargetRow) -> ValueTarget {
     match t {
         ValueTargetRow::Velocity => ValueTarget::Velocity,
         ValueTargetRow::ReleaseVelocity => ValueTarget::ReleaseVelocity,
@@ -616,7 +625,7 @@ fn target_of(t: ValueTargetRow) -> ValueTarget {
     }
 }
 
-fn target_row(t: ValueTarget) -> ValueTargetRow {
+pub(crate) fn target_row(t: ValueTarget) -> ValueTargetRow {
     match t {
         ValueTarget::Velocity => ValueTargetRow::Velocity,
         ValueTarget::ReleaseVelocity => ValueTargetRow::ReleaseVelocity,
@@ -647,7 +656,7 @@ fn op_row(o: ChangeOp) -> ChangeOpRow {
     }
 }
 
-fn curve_of(c: CurveRow) -> Curve {
+pub(crate) fn curve_of(c: CurveRow) -> Curve {
     match c {
         CurveRow::Straight => Curve::Straight,
         CurveRow::EaseIn => Curve::EaseIn,
@@ -656,7 +665,7 @@ fn curve_of(c: CurveRow) -> Curve {
     }
 }
 
-fn curve_row(c: Curve) -> CurveRow {
+pub(crate) fn curve_row(c: Curve) -> CurveRow {
     match c {
         Curve::Straight => CurveRow::Straight,
         Curve::EaseIn => CurveRow::EaseIn,
@@ -665,7 +674,7 @@ fn curve_row(c: Curve) -> CurveRow {
     }
 }
 
-fn wave_of(w: WaveRow) -> Wave {
+pub(crate) fn wave_of(w: WaveRow) -> Wave {
     match w {
         WaveRow::Sine => Wave::Sine,
         WaveRow::Square => Wave::Square,
@@ -674,7 +683,7 @@ fn wave_of(w: WaveRow) -> Wave {
     }
 }
 
-fn wave_row(w: Wave) -> WaveRow {
+pub(crate) fn wave_row(w: Wave) -> WaveRow {
     match w {
         Wave::Sine => WaveRow::Sine,
         Wave::Square => WaveRow::Square,
@@ -815,6 +824,9 @@ pub fn modify(m: &ModifyRow) -> Result<Modify, VizError> {
             spacing: Tick(*spacing),
         }),
         ModifyRow::Delete => Modify::Delete,
+        ModifyRow::Line { target, op, line } => {
+            Modify::Line(crate::strip::line_change(*target, *op, line))
+        }
     })
 }
 
@@ -904,6 +916,10 @@ pub fn modify_row(m: &Modify) -> ModifyRow {
         Modify::Density(Density::Thin { spacing }) => ModifyRow::Thin { spacing: spacing.0 },
         Modify::Density(Density::Thicken { spacing }) => ModifyRow::Thicken { spacing: spacing.0 },
         Modify::Delete => ModifyRow::Delete,
+        Modify::Line(c) => {
+            let (target, op, line) = crate::strip::line_change_row(c);
+            ModifyRow::Line { target, op, line }
+        }
     }
 }
 

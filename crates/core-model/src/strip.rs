@@ -4,14 +4,23 @@
 //! line draws.
 
 use crate::automation::{self, AutomationTarget};
+use crate::command::Report;
+use crate::command::event::{edit_events, insert_specs};
+use crate::document::Document;
 use crate::error::{ModelError, Result};
-use crate::event::EventBody;
+use crate::event::{EventBody, EventSpec};
+use crate::ids::{AnyId, EventId, LaneId, SeqId};
 use crate::meter::MeterMap;
-use crate::modify::{Curve, Wave, lerp, splitmix};
+use crate::modify::{
+    Amount, ChangeOp, Curve, Density, ValueTarget, Wave, apply_change, density, legato, lerp,
+    narrow, read_value, splitmix, write_value,
+};
 use crate::sequence::Sequence;
 use crate::tempo::TempoMap;
 use crate::time::Tick;
+use im::OrdSet;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// The most samples one line may write.
 pub const MAX_SAMPLES: usize = 100_000;
@@ -302,7 +311,7 @@ pub fn reduce(samples: &[(Tick, i64)], ramps: bool) -> Vec<(Tick, i64)> {
 }
 
 /// A controller-like series a line draws (Plan 4d Ruling 15).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Series {
     /// Control change `n`.
@@ -397,4 +406,235 @@ impl Series {
             _ => Ok(()),
         }
     }
+}
+
+/// What a Strip Chart line acts on (Plan 4d Ruling 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineTarget {
+    /// A value of the events in range (velocity, release velocity, length,
+    /// or any value on the 32-bit scale).
+    Value(ValueTarget),
+    /// One series of the events in range; drawing writes it into every
+    /// selected lane.
+    Series(Series),
+}
+
+/// What a Strip Chart line does (Plan 4d Rulings 15, 19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineOp {
+    /// Write the line: a series is replaced in range; a note value is set.
+    Draw,
+    /// Each value becomes the line's.
+    Set,
+    /// Each value times the line's, in percent.
+    Scale,
+    /// Each value plus the line's.
+    Add,
+    /// Each value at most the line's.
+    LimitMax,
+    /// Each value at least the line's.
+    LimitMin,
+    /// The lowest value in range becomes `start`, the highest `end`.
+    Compress,
+    /// Events closer than `step` to the last kept one go.
+    Thin,
+    /// Straight-line values every `step` between neighbours.
+    Thicken,
+    /// Notes end where the next note in range starts (lengths only).
+    Legato,
+}
+
+/// A Strip Chart edit: `op` with `line` over `target` (the one
+/// modification every Strip Chart operation is, Plan 4d Ruling 15).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineChange {
+    /// What it acts on.
+    pub target: LineTarget,
+    /// What it does.
+    pub op: LineOp,
+    /// The line.
+    pub line: Line,
+}
+
+impl LineChange {
+    /// The undo label.
+    pub fn name(&self) -> &'static str {
+        match (self.op, self.target) {
+            (LineOp::Draw, LineTarget::Series(Series::Automation(_))) => "Draw Automation",
+            (LineOp::Draw, LineTarget::Series(Series::Program)) => "Draw Program Changes",
+            (LineOp::Draw, LineTarget::Series(_)) => "Draw Controllers",
+            (LineOp::Thin, _) => "Thin Out",
+            (LineOp::Thicken, _) => "Thicken",
+            (LineOp::Compress, _) => "Compress",
+            (LineOp::Legato, _) => "Legato",
+            (_, LineTarget::Value(ValueTarget::Velocity)) => "Change Velocity",
+            (_, LineTarget::Value(ValueTarget::ReleaseVelocity)) => "Change Release Velocity",
+            (_, LineTarget::Value(ValueTarget::Duration)) => "Change Duration",
+            _ => "Change Values",
+        }
+    }
+
+    /// Refuses a bad line, a bad series, and legato on anything but lengths.
+    pub fn check(&self) -> Result<()> {
+        self.line.check()?;
+        if let LineTarget::Series(s) = self.target {
+            s.check()?;
+        }
+        if self.op == LineOp::Legato && self.target != LineTarget::Value(ValueTarget::Duration) {
+            return Err(ModelError::invalid("legato changes note lengths only"));
+        }
+        Ok(())
+    }
+}
+
+/// Runs `c` for select-and-modify: drawing writes into `lanes`; every other
+/// operation changes the events of `targets` its line covers. Returns the
+/// events the selection holds afterwards.
+pub(crate) fn apply_line(
+    d: &mut Document,
+    lanes: &OrdSet<(SeqId, LaneId)>,
+    targets: &[EventId],
+    c: &LineChange,
+    r: &mut Report,
+) -> Result<Vec<EventId>> {
+    c.check()?;
+    match (c.target, c.op) {
+        (LineTarget::Series(s), LineOp::Draw) => draw_series(d, lanes, s, &c.line, r),
+        (target, op) => change_events(d, targets, target, op, &c.line, r),
+    }
+}
+
+/// Replaces series `s` in `[from, to]` of every lane in `lanes` with the
+/// line's reduced samples (Plan 4d Ruling 16).
+fn draw_series(
+    d: &mut Document,
+    lanes: &OrdSet<(SeqId, LaneId)>,
+    s: Series,
+    line: &Line,
+    r: &mut Report,
+) -> Result<Vec<EventId>> {
+    if lanes.is_empty() {
+        return Err(ModelError::invalid("select a lane to draw in"));
+    }
+    let mut created = Vec::new();
+    for (seq, lane) in lanes.iter().copied() {
+        // Each sample as the series can hold it (programs are 7-bit), so
+        // reduce sees the values that will be written.
+        let held: Vec<(Tick, i64)> = line
+            .samples(TimeCtx::of(d.sequence(seq)?))?
+            .into_iter()
+            .map(|(t, v)| (t, Series::value(&s.body(v)).unwrap_or(v)))
+            .collect();
+        let samples = reduce(&held, s.ramps());
+        let old: Vec<EventId> = d
+            .lane(seq, lane)?
+            .active()
+            .map(|t| {
+                t.events
+                    .values()
+                    .filter(|e| line.covers(e.tick) && Series::of(&e.body) == Some(s))
+                    .map(|e| e.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in old {
+            d.remove_event(id)?;
+            r.removed.push(AnyId::Event(id));
+        }
+        let specs: Vec<EventSpec> = samples
+            .iter()
+            .map(|(t, v)| EventSpec::new(*t, s.body(*v)))
+            .collect();
+        created.extend(insert_specs(d, seq, lane, &specs, r)?);
+    }
+    Ok(created)
+}
+
+/// Changes the events of `ids` that `target` covers inside the line's range.
+fn change_events(
+    d: &mut Document,
+    ids: &[EventId],
+    target: LineTarget,
+    op: LineOp,
+    line: &Line,
+    r: &mut Report,
+) -> Result<Vec<EventId>> {
+    let vt = match target {
+        LineTarget::Value(vt) => vt,
+        LineTarget::Series(_) => ValueTarget::Value,
+    };
+    let mut hit: Vec<(EventId, Tick)> = Vec::new();
+    for id in ids.iter().copied().collect::<BTreeSet<_>>() {
+        let (ev, _) = d.event(id)?;
+        let fits = match target {
+            LineTarget::Value(vt) => read_value(ev, vt).is_some(),
+            LineTarget::Series(s) => Series::of(&ev.body) == Some(s),
+        };
+        if fits && line.covers(ev.tick) {
+            hit.push((id, ev.tick));
+        }
+    }
+    let changed: Vec<EventId> = hit.iter().map(|h| h.0).collect();
+    match op {
+        LineOp::Legato => legato(d, &changed, r)?,
+        LineOp::Compress => apply_change(
+            d,
+            &changed,
+            vt,
+            ChangeOp::Compress {
+                low: line.start,
+                high: line.end,
+            },
+            &Amount::Constant { value: 0 },
+            r,
+        )?,
+        LineOp::Thin => {
+            return density(d, &changed, Density::Thin { spacing: line.step }, r);
+        }
+        LineOp::Thicken => {
+            return density(d, &changed, Density::Thicken { spacing: line.step }, r);
+        }
+        LineOp::Draw
+        | LineOp::Set
+        | LineOp::Scale
+        | LineOp::Add
+        | LineOp::LimitMax
+        | LineOp::LimitMin => {
+            for (id, tick) in &hit {
+                let (a, v) = {
+                    let (ev, loc) = d.event(*id)?;
+                    let s = d.sequence(loc.seq)?;
+                    (
+                        line.at(*tick, TimeCtx::of(s)),
+                        read_value(ev, vt).unwrap_or(0),
+                    )
+                };
+                let next = match op {
+                    LineOp::Scale => narrow(i128::from(v) * i128::from(a) / 100),
+                    LineOp::Add => v.saturating_add(a),
+                    LineOp::LimitMax => v.min(a),
+                    LineOp::LimitMin => v.max(a),
+                    _ => a,
+                };
+                // A note that had a length keeps at least one tick unless
+                // the line sets it (as Change does).
+                let next = if vt == ValueTarget::Duration
+                    && v > 0
+                    && !matches!(op, LineOp::Draw | LineOp::Set)
+                {
+                    next.max(1)
+                } else {
+                    next
+                };
+                edit_events(d, &[*id], r, |e| {
+                    write_value(e, vt, next);
+                    Ok(())
+                })?;
+            }
+        }
+    }
+    Ok(changed)
 }

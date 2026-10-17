@@ -173,6 +173,64 @@ extension ModifyRow {
         }
     }
 
+    /// What a line's values are typed in (Plan 4d Ruling 18).
+    static func lineUnit(_ t: LineTargetRow, _ op: LineOpRow) -> FieldKind {
+        let add = op == .add
+        if op == .scale { return .percent }
+        switch t {
+        case .value(.velocity), .value(.releaseVelocity): return .velocity(add ? .delta : .exact)
+        case .value(.duration): return .length
+        default: return .value(add ? .delta : .exact)
+        }
+    }
+
+    static func lineFields(_ t: LineTargetRow, _ op: LineOpRow, _ l: LineRow) -> [Field] {
+        let u = lineUnit(t, op)
+        var f = [Field("from", .position), Field("to", .position), Field("start", u), Field("end", u), Field("step", .length)]
+        if case .oscillator(_, let p, _) = l.shape {
+            switch p {
+            case .ticks: f.append(Field("period", .length))
+            case .millis: f.append(Field("period (ms)", .bounded(1, 600_000)))
+            case .bars: f.append(Field("period (bars)", .bounded(1, 1_000)))
+            }
+            f.append(Field("phase (‰)", .bounded(0, 999)))
+        }
+        return f
+    }
+
+    static func lineNumbers(_ l: LineRow) -> [Int64] {
+        var n = [l.from, l.to, l.start, l.end, l.step]
+        if case .oscillator(_, let p, let ph) = l.shape {
+            switch p {
+            case .ticks(let t): n.append(t)
+            case .millis(let ms): n.append(Int64(ms))
+            case .bars(let b): n.append(Int64(b))
+            }
+            n.append(Int64(ph))
+        }
+        return n
+    }
+
+    static func lineWith(_ l: LineRow, _ at: (Int) -> Int64) -> LineRow {
+        var o = l
+        o.from = at(0)
+        o.to = max(at(1), at(0))
+        o.start = at(2)
+        o.end = at(3)
+        o.step = max(at(4), 1)
+        if case .oscillator(let w, let p, _) = l.shape {
+            let v = max(at(5), 1)
+            let period: PeriodRow
+            switch p {
+            case .ticks: period = .ticks(ticks: v)
+            case .millis: period = .millis(ms: UInt32(clamping: v))
+            case .bars: period = .bars(bars: UInt32(clamping: v))
+            }
+            o.shape = .oscillator(wave: w, period: period, phase: UInt16(clamping: min(max(at(6), 0), 999)))
+        }
+        return o
+    }
+
     public var fields: [Field] {
         switch self {
         case .transposeInterval: [Field("semitones", .bounded(-127, 127))]
@@ -186,6 +244,7 @@ extension ModifyRow {
         case .substitute(.controller): [Field("controller", .bounded(0, 127))]
         case .substitute(.pitch): [Field("pitch", .pitch)]
         case .thin, .thicken: [Field("spacing", .length)]
+        case let .line(t, op, l): Self.lineFields(t, op, l)
         case .transposeToScale, .noteMap, .setDest, .substitute, .delete: []
         }
     }
@@ -213,6 +272,7 @@ extension ModifyRow {
         case .substitute(.controller(let i)): return [Int64(i)]
         case .substitute(.pitch(let p)): return [Int64(p)]
         case .thin(let s), .thicken(let s): return [s]
+        case .line(_, _, let l): return Self.lineNumbers(l)
         case .transposeToScale, .noteMap, .setDest, .substitute, .delete: return []
         }
     }
@@ -256,6 +316,7 @@ extension ModifyRow {
         case .substitute(.pitch): return .substitute(to: .pitch(pitch: pitch(at(0))))
         case .thin: return .thin(spacing: max(at(0), 1))
         case .thicken: return .thicken(spacing: max(at(0), 1))
+        case let .line(t, op, l): return .line(target: t, op: op, line: Self.lineWith(l, at))
         case .transposeToScale, .noteMap, .setDest, .substitute, .delete: return self
         }
     }

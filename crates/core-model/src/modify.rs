@@ -7,7 +7,9 @@ use crate::error::{ModelError, Result};
 use crate::event::{Event, EventBody};
 use crate::ids::{AnyId, DestId, EventId};
 use crate::rule::{Rule, SelectMode};
+use crate::strip::{LineChange, Series};
 use crate::time::Tick;
+use im::OrdSet;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -72,6 +74,8 @@ pub enum Modify {
         /// The amount (percent for `Scale`).
         amount: Amount,
     },
+    /// A Strip Chart line (Plan 4d Ruling 15).
+    Line(LineChange),
 }
 
 /// What [`Modify::Substitute`] turns events into (Plan 4c Ruling 5).
@@ -126,7 +130,8 @@ pub enum ValueTarget {
     ReleaseVelocity,
     /// Note length in ticks.
     Duration,
-    /// CC, pitch-bend and pressure values (32-bit).
+    /// CC, pitch-bend and pressure values, programs (× 2²⁵) and automation
+    /// (× (2³² − 1)), all on the 32-bit scale (Plan 4d Ruling 18).
     Value,
 }
 
@@ -428,6 +433,7 @@ impl Modify {
                 ValueTarget::Duration => "Change Duration",
                 ValueTarget::Value => "Change Values",
             },
+            Modify::Line(c) => c.name(),
         }
     }
 }
@@ -542,8 +548,8 @@ fn modify_one(e: &mut Event, m: &Modify) -> Result<()> {
                 }
             }
         }
-        // Applied to the whole set in `apply_modify`.
-        Modify::Change { .. } | Modify::Density(_) | Modify::Delete => {}
+        // Applied to the whole set in `apply_modify` (lines in `strip`).
+        Modify::Change { .. } | Modify::Density(_) | Modify::Delete | Modify::Line(_) => {}
         Modify::TrimStart { delta } => {
             if let EventBody::Note { duration, .. } = &mut e.body {
                 if duration.0 > 0 {
@@ -635,7 +641,7 @@ fn modify_one(e: &mut Event, m: &Modify) -> Result<()> {
 }
 
 /// Notes end where the next of `ids` in their lane starts.
-fn legato(d: &mut Document, ids: &[EventId], r: &mut Report) -> Result<()> {
+pub(crate) fn legato(d: &mut Document, ids: &[EventId], r: &mut Report) -> Result<()> {
     let mut by_lane: BTreeMap<_, Vec<(Tick, EventId)>> = BTreeMap::new();
     for id in ids {
         let (ev, loc) = d.event(*id)?;
@@ -665,7 +671,7 @@ fn legato(d: &mut Document, ids: &[EventId], r: &mut Report) -> Result<()> {
     Ok(())
 }
 
-fn read_value(e: &Event, t: ValueTarget) -> Option<i64> {
+pub(crate) fn read_value(e: &Event, t: ValueTarget) -> Option<i64> {
     match (t, &e.body) {
         (ValueTarget::Velocity, EventBody::Note { velocity, .. }) => Some(i64::from(*velocity)),
         (
@@ -675,20 +681,13 @@ fn read_value(e: &Event, t: ValueTarget) -> Option<i64> {
             },
         ) => Some(i64::from(*release_velocity)),
         (ValueTarget::Duration, EventBody::Note { duration, .. }) => Some(duration.0),
-        (
-            ValueTarget::Value,
-            EventBody::Cc { value, .. }
-            | EventBody::PitchBend { value }
-            | EventBody::ChannelPressure { value }
-            | EventBody::PolyPressure { value, .. },
-        ) => Some(i64::from(*value)),
+        (ValueTarget::Value, b) => Series::value(b),
         _ => None,
     }
 }
 
-fn write_value(e: &mut Event, t: ValueTarget, v: i64) {
+pub(crate) fn write_value(e: &mut Event, t: ValueTarget, v: i64) {
     let v16 = u16::try_from(v.clamp(0, i64::from(u16::MAX))).unwrap_or(u16::MAX);
-    let v32 = u32::try_from(v.clamp(0, i64::from(u32::MAX))).unwrap_or(u32::MAX);
     match (t, &mut e.body) {
         (ValueTarget::Velocity, EventBody::Note { velocity, .. }) => *velocity = v16,
         (
@@ -698,22 +697,16 @@ fn write_value(e: &mut Event, t: ValueTarget, v: i64) {
             },
         ) => *release_velocity = v16,
         (ValueTarget::Duration, EventBody::Note { duration, .. }) => *duration = Tick(v.max(0)),
-        (
-            ValueTarget::Value,
-            EventBody::Cc { value, .. }
-            | EventBody::PitchBend { value }
-            | EventBody::ChannelPressure { value }
-            | EventBody::PolyPressure { value, .. },
-        ) => *value = v32,
+        (ValueTarget::Value, b) => Series::set_value(b, v),
         _ => {}
     }
 }
 
-fn narrow(v: i128) -> i64 {
+pub(crate) fn narrow(v: i128) -> i64 {
     i64::try_from(v).unwrap_or(if v < 0 { i64::MIN } else { i64::MAX })
 }
 
-fn apply_change(
+pub(crate) fn apply_change(
     d: &mut Document,
     ids: &[EventId],
     target: ValueTarget,
@@ -793,37 +786,19 @@ fn apply_change(
 }
 
 /// The series a controller event belongs to inside its lane and take.
-fn series(e: &Event) -> Option<(u8, u8)> {
-    match e.body {
-        EventBody::Cc { index, .. } => Some((0, index)),
-        EventBody::PitchBend { .. } => Some((1, 0)),
-        EventBody::ChannelPressure { .. } => Some((2, 0)),
-        EventBody::PolyPressure { pitch, .. } => Some((3, pitch)),
-        _ => None,
-    }
+fn series(e: &Event) -> Option<Series> {
+    Series::of(&e.body)
 }
 
-fn series_value(b: &EventBody) -> u32 {
-    match b {
-        EventBody::Cc { value, .. }
-        | EventBody::PitchBend { value }
-        | EventBody::ChannelPressure { value }
-        | EventBody::PolyPressure { value, .. } => *value,
-        _ => 0,
-    }
+fn series_value(b: &EventBody) -> i64 {
+    Series::value(b).unwrap_or(0)
 }
 
-fn with_value(b: &mut EventBody, v: u32) {
-    if let EventBody::Cc { value, .. }
-    | EventBody::PitchBend { value }
-    | EventBody::ChannelPressure { value }
-    | EventBody::PolyPressure { value, .. } = b
-    {
-        *value = v;
-    }
+fn with_value(b: &mut EventBody, v: i64) {
+    Series::set_value(b, v);
 }
 
-fn density(
+pub(crate) fn density(
     d: &mut Document,
     ids: &[EventId],
     den: Density,
@@ -844,15 +819,15 @@ fn density(
     {
         let (ev, loc) = d.event(id)?;
         match series(ev) {
-            Some((a, b)) => groups
-                .entry((loc.seq, loc.lane, loc.take, a, b))
+            Some(s) => groups
+                .entry((loc.seq, loc.lane, loc.take, s))
                 .or_default()
                 .push((ev.tick, id)),
             None => out.push(id),
         }
     }
     let mut added = 0usize;
-    for ((seq, lane, take, _, _), mut evs) in groups {
+    for ((seq, lane, take, _), mut evs) in groups {
         evs.sort();
         match den {
             Density::Thin { .. } => {
@@ -883,7 +858,7 @@ fn density(
                         let v = va + (vb - va) * i128::from(t - t0.0) / gap;
                         let mut spec = first.spec();
                         spec.tick = Tick(t);
-                        with_value(&mut spec.body, u32::try_from(v).unwrap_or(0));
+                        with_value(&mut spec.body, i64::try_from(v).unwrap_or(0));
                         let id = d.counters_mut().alloc_event();
                         d.insert_event(seq, lane, Some(take), spec.with_id(id))?;
                         r.created.push(AnyId::Event(id));
@@ -922,6 +897,7 @@ fn validate(m: &Modify) -> Result<()> {
         Modify::Substitute(Substitute::Pitch { pitch }) if *pitch > 127 => {
             Err(ModelError::range("substitute.pitch", pitch))
         }
+        Modify::Line(c) => c.check(),
         _ => Ok(()),
     }
 }
@@ -950,6 +926,9 @@ pub(crate) fn apply_modify(
             return Ok(Vec::new());
         }
         Modify::Change { target, op, amount } => apply_change(d, ids, *target, *op, amount, r)?,
+        // Without the selection's lanes (select-and-modify passes them, see
+        // `command::select`), a draw is refused.
+        Modify::Line(c) => return crate::strip::apply_line(d, &OrdSet::new(), ids, c, r),
         _ => edit_events(d, ids, r, |e| modify_one(e, m))?,
     }
     Ok(ids.to_vec())

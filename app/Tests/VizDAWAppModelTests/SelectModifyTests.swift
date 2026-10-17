@@ -146,3 +146,31 @@ private let meter44 = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor: 
         }
     }
 }
+
+@Suite struct LineRowFieldTests {
+    private let q: Int64 = 15_360
+
+    @Test func lineFieldsRoundTripAndNameTheStep() {
+        let osc = ModifyRow.line(
+            target: .series(series: .controller(index: 7)), op: .add,
+            line: LineRow(
+                from: 0, to: 4 * q, start: -5, end: 5, step: q / 8,
+                shape: .oscillator(wave: .sine, period: .millis(ms: 250), phase: 125)))
+        #expect(osc.fields.map(\.label) == ["from", "to", "start", "end", "step", "period (ms)", "phase (‰)"])
+        #expect(osc.fields[2].kind == .value(.delta))
+        #expect(osc.numbers == [0, 4 * q, -5, 5, q / 8, 250, 125])
+        #expect(osc.with(osc.numbers) == osc)
+        // A typed `to` before `from` is held at `from`.
+        if case .line(_, _, let l) = osc.with([4 * q, 0]) {
+            #expect(l.from == 4 * q && l.to == 4 * q)
+        } else {
+            Issue.record("with() did not return a line")
+        }
+        #expect(ModifyKind.title(osc) == "Change Values")
+        #expect(ModifyKind.lineTitle(.series(series: .program), .draw) == "Draw Program Changes")
+        #expect(ModifyKind.lineTitle(.value(target: .releaseVelocity), .scale) == "Change Release Velocity")
+        var c = SelectModifyConfig()
+        c.modify = ModifyHalf(enabled: true, op: osc, toCopy: true)
+        #expect(c.command() == .selectAndModify(rule: nil, mode: .select, modify: osc, toCopy: false))
+    }
+}

@@ -88,7 +88,8 @@ public struct SelectModifyConfig: Equatable, Sendable {
         let r = rule
         let m = modification
         guard r != nil || m != nil else { return nil }
-        return .selectAndModify(rule: r, mode: select.mode, modify: m, toCopy: m != nil && modify.toCopy)
+        return .selectAndModify(
+            rule: r, mode: select.mode, modify: m, toCopy: m != nil && modify.toCopy && m?.isLine != true)
     }
 
     public init(template t: ModifyTemplateRow) {
@@ -225,7 +226,7 @@ public enum Comparison: String, CaseIterable, Sendable {
 /// The panel's modify choices (parent spec §9 modify half).
 public enum ModifyKind: String, CaseIterable, Sendable {
     case transpose, diatonic, toScale, invert, noteMap, quantize, change, move, scaleTime, trimStart, setDest
-    case substitute, thin, thicken, delete
+    case substitute, thin, thicken, delete, line
 
     public var title: String {
         switch self {
@@ -244,6 +245,7 @@ public enum ModifyKind: String, CaseIterable, Sendable {
         case .thin: "Thin Out"
         case .thicken: "Thicken"
         case .delete: "Delete"
+        case .line: "Strip Chart Line"
         }
     }
 
@@ -264,6 +266,7 @@ public enum ModifyKind: String, CaseIterable, Sendable {
         case .thin: self = .thin
         case .thicken: self = .thicken
         case .delete: self = .delete
+        case .line: self = .line
         }
     }
 
@@ -286,6 +289,10 @@ public enum ModifyKind: String, CaseIterable, Sendable {
         case .thin: return .thin(spacing: q / 16)
         case .thicken: return .thicken(spacing: q / 16)
         case .delete: return .delete
+        case .line:
+            return .line(
+                target: .value(target: .velocity), op: .set,
+                line: LineRow(from: 0, to: 4 * q, start: 0, end: 0xFFFF, step: q / 8, shape: .straight))
         }
     }
 
@@ -309,7 +316,33 @@ public enum ModifyKind: String, CaseIterable, Sendable {
         case .thin: "Thin Out"
         case .thicken: "Thicken"
         case .delete: "Delete Events"
+        case .line(let t, let op, _): lineTitle(t, op)
         }
+    }
+
+    /// A line's undo label, as the core names it (Plan 4d Ruling 15).
+    public static func lineTitle(_ t: LineTargetRow, _ op: LineOpRow) -> String {
+        switch (op, t) {
+        case (.draw, .series(.automation)): "Draw Automation"
+        case (.draw, .series(.program)): "Draw Program Changes"
+        case (.draw, .series): "Draw Controllers"
+        case (.thin, _): "Thin Out"
+        case (.thicken, _): "Thicken"
+        case (.compress, _): "Compress"
+        case (.legato, _): "Legato"
+        case (_, .value(.velocity)): "Change Velocity"
+        case (_, .value(.releaseVelocity)): "Change Release Velocity"
+        case (_, .value(.duration)): "Change Duration"
+        default: "Change Values"
+        }
+    }
+}
+
+extension ModifyRow {
+    /// A Strip Chart line (never applied to a copy).
+    public var isLine: Bool {
+        if case .line = self { return true }
+        return false
     }
 }
 

@@ -43,6 +43,11 @@ pub(crate) fn apply(
     };
     let mut targets: Vec<EventId> = chosen.iter().copied().collect();
     if let Some(m) = modify {
+        if to_copy && matches!(m, Modify::Line(_)) {
+            return Err(crate::error::ModelError::invalid(
+                "a Strip Chart line cannot change copies",
+            ));
+        }
         // Deleting copies would leave the document as it was.
         if to_copy && matches!(m, Modify::Delete) {
             return Ok(Selection {
@@ -63,7 +68,11 @@ pub(crate) fn apply(
             }
             targets = copies;
         }
-        targets = apply_modify(d, &targets, m, r)?;
+        targets = match m {
+            // A line draws into the selection's lanes (Plan 4d Ruling 16).
+            Modify::Line(c) => crate::strip::apply_line(d, &base.lanes, &targets, c, r)?,
+            _ => apply_modify(d, &targets, m, r)?,
+        };
     }
     Ok(Selection {
         time_range: base.time_range,
