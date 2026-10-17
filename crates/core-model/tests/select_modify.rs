@@ -463,6 +463,7 @@ fn templates_are_stored_in_settings() {
             grid: Tick(Q / 4),
             strength: 80,
         })),
+        to_copy: true,
     };
     let d = apply(
         &doc(),
@@ -512,4 +513,85 @@ fn undo_label_names_the_modification() {
         to_copy: false,
     };
     assert_eq!(c.name(), "Select");
+}
+
+#[test]
+fn value_controller_release_and_bracketing_rules() {
+    let d = doc();
+    // ev3 is CC7 = 100; the notes have release velocity 0.
+    assert_eq!(
+        matching(&d, Rule::ValueRange { low: 50, high: 150 }),
+        vec![3]
+    );
+    assert_eq!(
+        matching(&d, Rule::ControllerRange { low: 7, high: 7 }),
+        vec![3]
+    );
+    assert!(matching(&d, Rule::ControllerRange { low: 8, high: 127 }).is_empty());
+    assert_eq!(
+        matching(&d, Rule::ReleaseVelocityRange { low: 0, high: 0 }),
+        vec![0, 1, 2, 4]
+    );
+    // ev5: a CC at 5Q, inside ev4 (72, 4Q..6Q).
+    let d = apply(
+        &d,
+        &Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            events: vec![EventSpec::new(
+                Tick(5 * Q),
+                EventBody::Cc { index: 1, value: 5 },
+            )],
+        }),
+    )
+    .unwrap()
+    .doc;
+    let under_72 = Rule::Bracketed {
+        by: Box::new(Rule::PitchRange { low: 72, high: 72 }),
+    };
+    assert_eq!(matching(&d, under_72), vec![5]);
+    // No note starts inside another note; ev3 at 3Q is at ev2's end (excluded).
+    let under_any_note = Rule::Bracketed {
+        by: Box::new(Rule::Kind {
+            kinds: vec![EventKind::Note],
+        }),
+    };
+    assert_eq!(matching(&d, under_any_note), vec![5]);
+    // "Outside" is a negated range.
+    let outside = Rule::All(vec![
+        Rule::Kind {
+            kinds: vec![EventKind::Note],
+        },
+        Rule::Not(Box::new(Rule::PitchRange { low: 60, high: 64 })),
+    ]);
+    assert_eq!(matching(&d, outside), vec![2, 4]);
+}
+
+#[test]
+fn program_numbers_match_value_ranges() {
+    let d = apply(
+        &doc(),
+        &Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            events: vec![EventSpec::new(
+                Tick(0),
+                EventBody::Program {
+                    program: 9,
+                    bank: None,
+                },
+            )],
+        }),
+    )
+    .unwrap()
+    .doc;
+    assert_eq!(matching(&d, Rule::ValueRange { low: 9, high: 9 }), vec![5]);
+}
+
+#[test]
+fn a_template_saved_before_to_copy_existed_still_loads() {
+    let t: ModifyTemplate =
+        serde_json::from_str(r#"{"rule":null,"mode":"select","modify":"legato"}"#).unwrap();
+    assert!(!t.to_copy);
+    assert_eq!(t.modify, Some(Modify::Legato));
 }

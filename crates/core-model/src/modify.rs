@@ -121,6 +121,9 @@ pub struct ModifyTemplate {
     pub mode: SelectMode,
     /// Modification.
     pub modify: Option<Modify>,
+    /// Modify copies inserted beside the originals (a harmonizing copy).
+    #[serde(default)]
+    pub to_copy: bool,
 }
 
 impl Modify {

@@ -74,6 +74,33 @@ pub enum Rule {
     Any(Vec<Rule>),
     /// The sub-rule does not match.
     Not(Box<Rule>),
+    /// Note release velocity in range.
+    ReleaseVelocityRange {
+        /// Lowest.
+        low: u16,
+        /// Highest.
+        high: u16,
+    },
+    /// CC, pitch-bend and pressure value, or program number, in range.
+    ValueRange {
+        /// Lowest.
+        low: u32,
+        /// Highest.
+        high: u32,
+    },
+    /// Control-change controller number in range.
+    ControllerRange {
+        /// Lowest.
+        low: u8,
+        /// Highest.
+        high: u8,
+    },
+    /// Starts inside a note of the same lane and take (`note.tick <= tick <
+    /// note.tick + duration`, the event itself excluded) that matches `by`.
+    Bracketed {
+        /// What the bracketing note must match.
+        by: Box<Rule>,
+    },
 }
 
 /// How a rule combines with the current selection.
@@ -132,7 +159,44 @@ pub fn matches(
         Rule::All(rs) => rs.iter().all(|r| matches(doc, r, lane_dest, ev, index)),
         Rule::Any(rs) => rs.iter().any(|r| matches(doc, r, lane_dest, ev, index)),
         Rule::Not(r) => !matches(doc, r, lane_dest, ev, index),
+        Rule::ReleaseVelocityRange { low, high } => matches!(
+            ev.body,
+            EventBody::Note { release_velocity, .. } if (*low..=*high).contains(&release_velocity)
+        ),
+        Rule::ValueRange { low, high } => match ev.body {
+            EventBody::Cc { value, .. }
+            | EventBody::PitchBend { value }
+            | EventBody::ChannelPressure { value }
+            | EventBody::PolyPressure { value, .. } => (*low..=*high).contains(&value),
+            EventBody::Program { program, .. } => (*low..=*high).contains(&u32::from(program)),
+            _ => false,
+        },
+        Rule::ControllerRange { low, high } => {
+            matches!(ev.body, EventBody::Cc { index, .. } if (*low..=*high).contains(&index))
+        }
+        Rule::Bracketed { by } => bracketed(doc, by, ev),
     }
+}
+
+/// Whether a note of `ev`'s own lane and take that matches `by` sounds at
+/// `ev`'s start.
+fn bracketed(doc: &Document, by: &Rule, ev: &Event) -> bool {
+    let Ok(loc) = doc.locate(ev.id) else {
+        return false;
+    };
+    let Ok(lane) = doc.lane(loc.seq, loc.lane) else {
+        return false;
+    };
+    let Some(take) = lane.take(loc.take) else {
+        return false;
+    };
+    take.events
+        .range(..=(ev.tick, EventId(u64::MAX)))
+        .any(|(_, b)| {
+            b.id != ev.id
+                && matches!(b.body, EventBody::Note { duration, .. } if ev.tick < b.tick + duration)
+                && matches(doc, by, lane.midi_dest, b, 0)
+        })
 }
 
 /// Filters `candidates` (ordered by `(tick, id)` first) to those visible
