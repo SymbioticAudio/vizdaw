@@ -14,7 +14,13 @@ public final class AppPlugins {
     /// Every known plugin, by name (refreshed after each change and scan).
     public private(set) var rows: [CatalogRowFfi] = []
     public private(set) var progress = ScanProgress(running: false, done: 0, total: 0)
-    public var alert: AlertItem?
+    /// Pending alerts, oldest first (none is dropped or overwritten).
+    public private(set) var alerts: [AlertItem] = []
+    /// The alert to show now; setting nil dismisses it (the next one follows).
+    public var alert: AlertItem? {
+        get { alerts.first }
+        set { if newValue == nil, !alerts.isEmpty { alerts.removeFirst() } else if let a = newValue { enqueue(a) } }
+    }
     /// Bumped whenever `rows` changes (browsers refetch).
     public private(set) var version = 0
 
@@ -34,11 +40,11 @@ public final class AppPlugins {
         do {
             catalog = try open(config)
         } catch {
-            alert = AlertItem(error, title: "Plugins Unavailable")
+            report(error, "Plugins Unavailable")
             return
         }
         refresh()
-        if scan { self.scan(all: false) }
+        if scan { self.scan(all: false, automatic: true) }
     }
 
     /// The configuration the app uses: the catalog in `supportDir`, the
@@ -55,11 +61,13 @@ public final class AppPlugins {
         do {
             rows = try c.rows()
             version += 1
-            if let p = try c.takeProblem(), alert == nil {
-                alert = AlertItem(title: "Plugin Settings", message: p)
+            // Bounded: a catalog repeating one problem cannot spin this loop.
+            for _ in 0..<16 {
+                guard let p = try c.takeProblem() else { break }
+                enqueue(AlertItem(title: "Plugin Settings", message: p))
             }
         } catch {
-            alert = AlertItem(error, title: "Plugins Unavailable")
+            report(error, "Plugins Unavailable")
         }
     }
 
@@ -79,7 +87,12 @@ public final class AppPlugins {
     }
 
     public func scan(all: Bool) {
-        perform("Scan Failed") { try $0.scan(all: all) }
+        scan(all: all, automatic: false)
+    }
+
+    /// An automatic scan (at launch) is silent when one already runs.
+    private func scan(all: Bool, automatic: Bool) {
+        perform("Scan Failed", quietWhenRunning: automatic) { try $0.scan(all: all) }
     }
 
     public func rescan(_ keys: [PluginKey]) {
@@ -99,12 +112,28 @@ public final class AppPlugins {
         (try? catalog?.revealPath(plugin: key)) ?? nil
     }
 
-    private func perform(_ title: String, _ body: (any PluginCatalogProtocol) throws -> Void) {
+    /// Queues `item` unless an identical alert is already waiting.
+    private func enqueue(_ item: AlertItem) {
+        if alerts.contains(where: { $0.title == item.title && $0.message == item.message }) { return }
+        alerts.append(item)
+    }
+
+    /// Queues an alert for `error`; `Busy` is retried on the next tick, silently.
+    private func report(_ error: any Error, _ title: String, quietWhenRunning: Bool = false) {
+        if case .Busy = error as? VizError { return }
+        if quietWhenRunning, case let .Engine(m) = error as? VizError, m.contains("already running") { return }
+        enqueue(AlertItem(error, title: title))
+    }
+
+    private func perform(
+        _ title: String, quietWhenRunning: Bool = false,
+        _ body: (any PluginCatalogProtocol) throws -> Void
+    ) {
         guard let c = catalog else { return }
         do {
             try body(c)
         } catch {
-            alert = AlertItem(error, title: title)
+            report(error, title, quietWhenRunning: quietWhenRunning)
         }
         refresh()
         poll()

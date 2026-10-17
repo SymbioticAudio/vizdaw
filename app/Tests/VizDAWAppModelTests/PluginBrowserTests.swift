@@ -94,4 +94,42 @@ import VizDAWCore
         #expect(p.alert?.message == "denied")
         #expect(p.browser(.effect).isEmpty)
     }
+
+    @Test func aProblemAndAFailedScanAreBothShownInOrder() {
+        let cat = FakeCatalog()
+        cat.problems = ["plugin settings not read: newer"]
+        cat.scanError = .NotFound(path: "/x/vizdaw-scan")
+        let p = AppPlugins(open: { _ in cat })
+        p.start(config: AppPlugins.config(supportDir: URL(fileURLWithPath: "/tmp"), scanner: "x"), scan: true)
+        #expect(p.alerts.map(\.title) == ["Plugin Settings", "Scan Failed"])
+        p.alert = nil
+        #expect(p.alert?.title == "Scan Failed")
+        p.alert = nil
+        #expect(p.alert == nil)
+    }
+
+    @Test func aRepeatedProblemIsQueuedOnce() {
+        let cat = FakeCatalog()
+        cat.stickyProblem = "not saved"
+        let p = AppPlugins(open: { _ in cat })
+        p.start(config: AppPlugins.config(supportDir: URL(fileURLWithPath: "/tmp"), scanner: "x"), scan: false)
+        p.refresh()
+        p.refresh()
+        #expect(p.alerts.count == 1)
+    }
+
+    @Test func busyNeverAlertsAndAutomaticRunningScanIsSilent() {
+        let cat = FakeCatalog()
+        cat.scanError = .Busy(message: "busy")
+        let p = AppPlugins(open: { _ in cat })
+        p.start(config: AppPlugins.config(supportDir: URL(fileURLWithPath: "/tmp"), scanner: "x"), scan: true)
+        p.scan(all: true)
+        #expect(p.alerts.isEmpty)
+        cat.scanError = .Engine(message: "a scan is already running")
+        p.start(config: AppPlugins.config(supportDir: URL(fileURLWithPath: "/tmp"), scanner: "x"), scan: true)
+        #expect(p.alerts.isEmpty)
+        p.rescan([])
+        p.scan(all: true)
+        #expect(p.alerts.count == 1)
+    }
 }

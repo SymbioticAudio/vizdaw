@@ -11,6 +11,9 @@ final class FakeCatalog: PluginCatalogProtocol, @unchecked Sendable {
     var cleared: [PluginKey] = []
     var state = ScanProgress(running: false, done: 0, total: 0)
     var scanError: VizError?
+    /// A problem every `takeProblem` returns (never drained).
+    var stickyProblem: String?
+    var rowsError: VizError?
 
     func browser(kind: PluginKindTag) throws -> [CatalogRowFfi] {
         table.filter { $0.kind == kind && $0.status == .ok }
@@ -21,7 +24,10 @@ final class FakeCatalog: PluginCatalogProtocol, @unchecked Sendable {
     func revealPath(plugin: PluginKey) throws -> String? {
         plugin.format == .clap ? "/Library/Audio/Plug-Ins/CLAP/\(plugin.id).clap" : nil
     }
-    func rows() throws -> [CatalogRowFfi] { table }
+    func rows() throws -> [CatalogRowFfi] {
+        if let e = rowsError { throw e }
+        return table
+    }
     func scan(all: Bool) throws {
         if let e = scanError { throw e }
         scans.append(all)
@@ -33,7 +39,10 @@ final class FakeCatalog: PluginCatalogProtocol, @unchecked Sendable {
             table[i].status = on ? .ok : .disabled
         }
     }
-    func takeProblem() throws -> String? { problems.isEmpty ? nil : problems.removeFirst() }
+    func takeProblem() throws -> String? {
+        if let s = stickyProblem { return s }
+        return problems.isEmpty ? nil : problems.removeFirst()
+    }
 }
 
 func catalogRow(
