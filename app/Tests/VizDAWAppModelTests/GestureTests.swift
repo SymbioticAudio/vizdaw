@@ -150,4 +150,25 @@ private let move2: EditCommand = .event(edit: .move(events: [1], delta: 200, toL
         e.updateGesture(nil)
         #expect(f.calls.suffix(2) == ["abort", "begin Move Block"])
     }
+
+    @Test func aRefusedTargetThenMouseUpWithoutOneAborts() throws {
+        let (f, _, e) = try open()
+        e.updateGesture(move1)
+        f.gestureErrors = [.Model(message: "refused")]
+        e.updateGesture(move2)
+        e.endGesture(nil)
+        #expect(f.calls.suffix(1) == ["abort"])
+        #expect(!f.calls.contains("end"))
+    }
+
+    @Test func aGestureCancelledByASnapshotStaysCancelled() throws {
+        let (f, m, e) = try open()
+        var s = f.snap
+        s.version += 1
+        s.laneRevs.removeAll { $0.lane == 31 }
+        f.bump(s)
+        e.updateGesture(move1)
+        withExtendedLifetime(m) {}
+        #expect(e.gesture == nil)
+    }
 }

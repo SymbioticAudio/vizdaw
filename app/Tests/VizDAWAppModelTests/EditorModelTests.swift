@@ -24,6 +24,11 @@ func nextSnapshot(_ f: FakeSession, _ change: (inout DocSnapshot) -> Void) {
     f.bump(s)
 }
 
+/// Lets the main-actor publish of a draw-time failure run.
+@MainActor func settle() async {
+    for _ in 0..<5 { await Task.yield() }
+}
+
 let chords = LaneKey(3, 31)
 let grooveLane = LaneKey(3, 30)
 
@@ -104,7 +109,7 @@ let grooveLane = LaneKey(3, 30)
         #expect(m.editor.status == nil)
         f.readError = .Model(message: "gone")
         #expect(m.editor.laneEvents(chords) == nil)
-        try await Task.sleep(for: .milliseconds(20))
+        await settle()
         #expect(m.editor.status == "gone")
     }
 
@@ -204,11 +209,11 @@ let grooveLane = LaneKey(3, 30)
         #expect(m.editor.laneEvents(chords) == nil)
         #expect(m.editor.blocks(chords).isEmpty)
         #expect(m.editor.status == nil, "nothing observed changes while drawing")
-        try await Task.sleep(for: .milliseconds(20))
+        await settle()
         #expect(m.editor.status == "lane unreadable")
         m.editor.clearStatus()
         _ = m.editor.laneEvents(chords)
-        try await Task.sleep(for: .milliseconds(20))
+        await settle()
         #expect(m.editor.status == nil, "the same error is not shown again every redraw")
     }
 
@@ -221,5 +226,17 @@ let grooveLane = LaneKey(3, 30)
         #expect(m.editor.selection == before)
         #expect(!m.editor.isSelected(event: 1))
         #expect(m.editor.status == "no")
+    }
+
+    @Test func anInfoFailureIsPublishedOnceAndNotRefetchedPerDraw() async throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        f.readError = .Model(message: "no info")
+        #expect(m.editor.info(3) == nil)
+        #expect(m.editor.info(3) == nil)
+        #expect(m.editor.infoFetches == 1)
+        #expect(m.editor.status == nil)
+        await settle()
+        #expect(m.editor.status == "no info")
     }
 }

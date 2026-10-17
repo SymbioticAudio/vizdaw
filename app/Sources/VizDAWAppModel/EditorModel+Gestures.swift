@@ -40,7 +40,7 @@ extension EditorModel {
         guard var g = gesture, !g.finishing, target != g.applied || g.uncertain else { return }
         guard let target else {
             rewind(&g)
-            gesture = g
+            if gesture != nil { gesture = g }
             return
         }
         do {
@@ -53,12 +53,14 @@ extension EditorModel {
             g.applied = nil
             g.uncertain = true
         } catch {
-            // Refused: the session rewound to the start state.
+            // Refused: a conversion refusal keeps the previous target, a core
+            // refusal rewinds to the start; either way `applied` is unknown.
             g.applied = nil
-            g.uncertain = false
+            g.uncertain = true
             if let s = try? session.snapshot() { applySnapshot(s) }
         }
-        gesture = g
+        // applySnapshot may have cancelled the gesture (its lane vanished).
+        if gesture != nil { gesture = g }
     }
 
     /// Mouse-up: `final` becomes the gesture's content and the edit closes
@@ -112,6 +114,7 @@ extension EditorModel {
                 applySnapshot(try session.editGesture(cmd: cmd, filter: nil))
                 g.applied = cmd
                 g.uncertain = false
+                guard gesture != nil else { return }
                 gesture = g
             } catch VizError.Busy {
                 return

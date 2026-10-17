@@ -51,6 +51,8 @@ public final class EditorModel {
     @ObservationIgnored private var lastReadFailure: String?
     @ObservationIgnored private var blockCache: [LaneKey: BlockEntry] = [:]
     @ObservationIgnored private var infoCache: [UInt64: (version: UInt64, info: SequenceInfo)] = [:]
+    /// Sequences whose info read failed (not Busy) at a snapshot version.
+    @ObservationIgnored private var infoFailures: [UInt64: UInt64] = [:]
     @ObservationIgnored private var sequenceRows: [SeqRow] = []
     @ObservationIgnored private var selectedEvents: Set<UInt64> = []
 
@@ -144,6 +146,7 @@ public final class EditorModel {
     /// Tempo, meter and markers of `seq`, cached per snapshot version.
     public func info(_ seq: UInt64) -> SequenceInfo? {
         if let c = infoCache[seq], c.version == snapshotVersion { return c.info }
+        if infoFailures[seq] == snapshotVersion { return nil }
         do {
             infoFetches += 1
             let i = try session.sequenceInfo(seq: seq)
@@ -152,7 +155,8 @@ public final class EditorModel {
         } catch VizError.Busy {
             return infoCache[seq]?.info
         } catch {
-            report(error)
+            infoFailures[seq] = snapshotVersion
+            reportFromRead(error)
             return nil
         }
     }
