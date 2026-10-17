@@ -451,9 +451,20 @@ fn swap_waits_while_the_retire_ring_is_full() {
     assert!(run.engine.faults().contains(Faults::SWAP_DEFERRED));
     assert_eq!(run.engine.counters().swaps_deferred, 1);
     run.engine.pause_collector(false);
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    run.backend.run_blocks([64]);
-    assert!(run.engine.faults().is_empty());
+    // The collector drains the ring in its own time (slow CI runners take
+    // longer than 50 ms): the deferred swap goes through once it has.
+    let start = std::time::Instant::now();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        run.backend.run_blocks([64]);
+        if run.engine.faults().is_empty() {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "the swap stayed deferred"
+        );
+    }
 }
 
 fn arb_doc() -> impl Strategy<Value = Vec<(i64, u8, i64, bool)>> {
