@@ -114,8 +114,11 @@ public final class DocumentModel {
     /// or reference field is edited, so typing a space types a space.
     public var transportKeysEnabled: Bool {
         renamingSeq == nil && commentDraft == nil && slotDraft == nil
-            && editor.referenceDraft == nil && !editor.textEditing
+            && editor.referenceDraft == nil && !editor.textEditing && !editor.panelKey
     }
+    /// Return (Return to Start) is also off while a list editor has the
+    /// keyboard: there it edits the cursor row (Plan 4c Ruling 20).
+    public var returnKeyEnabled: Bool { transportKeysEnabled && !editor.listFocused }
     public var canPlay: Bool { selectedSeq != nil || isPlaying }
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
     public var pollInterval: Duration { .seconds(pollSeconds) }

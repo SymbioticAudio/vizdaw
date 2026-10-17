@@ -169,13 +169,13 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         addSubview(field)
         window?.makeFirstResponder(field)
         renaming = (seq, lane.id, lane.name, field)
-        editor.textEditing = true
+        editor.beginTextEditing("laneName")
     }
 
     public func controlTextDidEndEditing(_ obj: Notification) {
         guard let r = renaming else { return }
         renaming = nil
-        editor.textEditing = false
+        editor.endTextEditing("laneName")
         let name = r.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         r.field.removeFromSuperview()
         if !name.isEmpty, name != r.name {
@@ -189,7 +189,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         super.viewDidMoveToWindow()
         if window == nil, renaming != nil {
             renaming = nil
-            editor.textEditing = false
+            editor.endTextEditing("laneName")
         }
     }
 

@@ -50,4 +50,24 @@ import VizDAWCore
         #expect(m.editor.layout.windows.map(\.id) == [w.id, w2.id])
         #expect(m.editor.tearOff(.list, from: UUID()) == nil)
     }
+
+    @Test func aKeyPanelIsTheCommandTargetAfterATornWindow() throws {
+        let s = store()
+        let a = try #require(s.newEmpty())
+        let b = try #require(s.newEmpty())
+        let c = try #require(s.newEmpty())
+        s.focusPanel(a)
+        #expect(s.commandTarget(focused: b) == a, "a's panel is key")
+        let w = UUID()
+        s.focusTorn(TornFocus(doc: c, window: w))
+        #expect(s.commandTarget(focused: b) == c, "a torn window wins")
+        s.blurTorn(window: w)
+        s.blurPanel(b)
+        #expect(s.commandTarget(focused: b) == a, "blurring another panel keeps it")
+        s.blurPanel(a)
+        #expect(s.commandTarget(focused: b) == b)
+        s.focusPanel(a)
+        s.close(a)
+        #expect(s.panelFocus == nil)
+    }
 }

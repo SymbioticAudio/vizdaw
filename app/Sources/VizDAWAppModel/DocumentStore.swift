@@ -70,10 +70,20 @@ public final class DocumentStore {
         if tornFocus?.window == window { tornFocus = nil }
     }
 
-    /// The document menu commands act on: a key torn-off window's, else the
-    /// focused document window's.
+    /// The document whose select-and-modify panel is key (Plan 4c Ruling 22).
+    public private(set) var panelFocus: UUID?
+
+    public func focusPanel(_ doc: UUID) { panelFocus = doc }
+
+    /// Document `doc`'s panel resigned key or closed.
+    public func blurPanel(_ doc: UUID) {
+        if panelFocus == doc { panelFocus = nil }
+    }
+
+    /// The document menu commands act on: a key torn-off window's, else a
+    /// key select-and-modify panel's, else the focused document window's.
     public func commandTarget(focused: UUID?) -> UUID? {
-        tornFocus.map(\.doc) ?? focused
+        tornFocus.map(\.doc) ?? panelFocus ?? focused
     }
 
     /// Document `id`'s mixer (one per document), or nil once it is closed.
@@ -145,6 +155,7 @@ public final class DocumentStore {
     /// marker is removed).
     public func close(_ id: UUID) {
         if tornFocus?.doc == id { tornFocus = nil }
+        if panelFocus == id { panelFocus = nil }
         mixers.removeValue(forKey: id)?.endOpenDrag()
         // Plugin windows detach their editors before the session goes.
         willClose?(id)

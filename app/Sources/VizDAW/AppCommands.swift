@@ -31,8 +31,12 @@ struct AppCommands: Commands {
     @FocusedValue(\.documentID) private var focusedID
     @Environment(\.openWindow) private var openWindow
 
-    /// A key torn-off window's document first (Plan 4b Ruling 18).
-    private var doc: DocumentModel? { store.tornFocus.flatMap { store.model($0.doc) } ?? focusedDoc }
+    /// A key torn-off window's document first (Plan 4b Ruling 18), then a key
+    /// select-and-modify panel's (Plan 4c Ruling 22).
+    private var doc: DocumentModel? {
+        store.tornFocus.flatMap { store.model($0.doc) } ?? store.panelFocus.flatMap { store.model($0) }
+            ?? focusedDoc
+    }
     private var docID: UUID? { store.commandTarget(focused: focusedID) }
     /// The key torn-off window, if any.
     private var tornWindow: UUID? { store.tornFocus?.window }
@@ -119,7 +123,7 @@ struct AppCommands: Commands {
                 .disabled(doc == nil)
             Button("Return to Start") { doc?.returnToStart() }
                 .keyboardShortcut(.return, modifiers: [])
-                .disabled(!(doc?.transportKeysEnabled ?? false))
+                .disabled(!(doc?.returnKeyEnabled ?? false))
         }
     }
 

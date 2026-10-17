@@ -302,10 +302,25 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     var infoTable: [UInt64: SequenceInfo] = [:]
     var infoCalls = 0
-    func modifyTemplates() throws -> [ModifyTemplateRow] { [] }
     func secondsAt(seq: UInt64, ticks: [Int64]) throws -> [Double] { ticks.map { Double($0) / 30_720 } }
     func ticksAt(seq: UInt64, seconds: [Double]) throws -> [Int64] { seconds.map { Int64(($0 * 30_720).rounded()) } }
-    func lastModify() throws -> ModifyRow? { nil }
+
+    // MARK: Select-and-modify and the list (plan 4c)
+
+    var lastModifyRow: ModifyRow?
+    var modifyTemplateRows: [ModifyTemplateRow] = []
+    /// Thrown by `lastModify()` and `modifyTemplates()`.
+    var modifyReadError: VizError?
+    var modifyReads = 0
+    func lastModify() throws -> ModifyRow? {
+        modifyReads += 1
+        if let e = modifyReadError { throw e }
+        return lastModifyRow
+    }
+    func modifyTemplates() throws -> [ModifyTemplateRow] {
+        if let e = modifyReadError { throw e }
+        return modifyTemplateRows
+    }
 
     func sequenceInfo(seq: UInt64) throws -> SequenceInfo {
         infoCalls += 1

@@ -327,9 +327,9 @@ import VizDAWCore
     @Test func transportKeysAreOffWhileAnyTextIsEdited() throws {
         let m = try DocumentModel(session: demoFake())
         #expect(m.transportKeysEnabled)
-        m.editor.textEditing = true
+        m.editor.beginTextEditing("test")
         #expect(!m.transportKeysEnabled)
-        m.editor.textEditing = false
+        m.editor.endTextEditing("test")
         m.beginComment(3)
         #expect(!m.transportKeysEnabled)
         m.commentDraft = nil

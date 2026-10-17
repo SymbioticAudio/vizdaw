@@ -30,8 +30,20 @@ public final class EditorModel {
     public internal(set) var gesture: Gesture?
     /// The reference whose parameters are being edited.
     public var referenceDraft: ReferenceDraft?
-    /// An editor text field (a lane name) has the keyboard.
-    public var textEditing = false
+    /// The editor text fields that have the keyboard, by owner ("laneName",
+    /// "list"); transport keys are off while any has it (Plan 4c Ruling 21).
+    public private(set) var textEditors: Set<String> = []
+    public var textEditing: Bool { !textEditors.isEmpty }
+    /// This document's select-and-modify panel is the key window (Plan 4c
+    /// Ruling 22).
+    public var panelKey = false
+    /// A list editor's table has the keyboard: Return edits instead of
+    /// returning to the start (Plan 4c Ruling 20).
+    public var listFocused = false
+
+    public func beginTextEditing(_ owner: String) { textEditors.insert(owner) }
+
+    public func endTextEditing(_ owner: String) { textEditors.remove(owner) }
 
     private struct BlockEntry {
         let rev: UInt64
@@ -61,6 +73,8 @@ public final class EditorModel {
     @ObservationIgnored private var sequenceRows: [SeqRow] = []
     @ObservationIgnored private var laneRowCache: [UInt64: (version: UInt64, rows: [LaneRow])] = [:]
     @ObservationIgnored private var selectedEvents: Set<UInt64> = []
+    /// Templates and the last modification at a snapshot version (plan 4c).
+    @ObservationIgnored var modifyCache: ModifyReads?
 
     /// Audition notes sounding now, note-offs waiting for a retry with the
     /// attempts left, and whether the no-engine hint was shown (Plan 4b
