@@ -337,3 +337,194 @@ so press Space twice (play, stop) before the sound steps.
     Comment... editor, the Settings window fields) and check a space is
     typed and playback does not start; Space in the piano roll itself still
     plays and stops.
+
+### List editor and Select and Modify (plan 4c)
+
+Use the demo project (File > Create Demo Project; its window is titled
+"Untitled" until saved) unless a step says otherwise. In the demo, Song's
+Chords lane holds 36 notes (three per bar, bars 1-12, velocity 56), a
+Program and a Controller 7 = 100 event at 1.1.0 and two Pitch Bend events in
+bar 12 (the block has 40 events); Song's tempo map is 120 BPM at 1.1.0, a
+120 ramp at 11.1.0 and 90 at 13.1.0. The status line is the strip under the
+editors (and at the bottom of the panel).
+
+51. List: double-click the Chords block and press Cmd-2: the detail pane
+    shows an "Event List" table with the columns Position, Length, Kind,
+    Destination, Data 1, Data 2 and Mute (a Lane column appears only when
+    the list covers more than one lane) and "40 rows" in its bar. The first
+    rows at 1.1.0 are Program (Data 1 0), Controller (7, 100) and three
+    "Note" rows (pitch name such as C4 in Data 1, velocity 56 in Data 2).
+    Click a row, then use Up and Down: the cursor moves; the selected rows
+    are the document's selection (Cmd-1 shows those notes selected in the
+    piano roll; Cmd-2 comes back).
+52. Typing a position: click a note row in bar 1 and press Return: its
+    Position cell edits. Type 3 and press Return: the note moves to 3.1.0,
+    the list scrolls to it and keeps it selected (the cursor follows the
+    moved event, not the old row) and Edit shows "Undo Move Events". On
+    another note press Return, type ".3" and Return: only its beat changes;
+    type "..480": only its unit changes. Type "abc": the status line says
+    "abc" is not a position (type a bar, bar.beat or bar.beat.unit) and the
+    cell shows the old value. Return on the Program row works the same way.
+53. Cells and keys: click a note row, press Return (Position edits), then
+    Tab: the cursor moves through Length, Destination, Data 1 and Data 2
+    (Tab skips read-only cells; Shift-Tab goes back). In Data 1 type D4, in
+    Data 2 type 100: each changed cell is one undo step "Edit Event" and the
+    list stays on the row; a cell you leave unchanged adds no step. Type
+    "H9" in Data 1: the status line explains the refusal. Escape in any cell
+    leaves it unchanged with no undo step and the table keeps the keyboard.
+    Double-click a cell edits it too; Delete removes the selected rows
+    ("Undo Delete Events").
+54. Typing never plays: while a cell is edited, Space types a space and the
+    transport does not start, and Return commits the cell without the
+    position display jumping to the start. With the list focused but not
+    editing, Return edits the selected row (it does not return to the
+    start) and Space plays and stops. Click the arrangement: Return returns
+    to the start again.
+55. Insert: with a note row selected click "Insert Note": a C4 quarter note
+    (velocity 100) appears at the selected row's position and becomes the
+    selection ("Undo Insert Events"). With no row selected it goes at the
+    stopped playhead if that lies in the block, else at the block's start.
+    Open the arrow of the Insert button, choose Controller: a Controller 7
+    = 64 appears and the button now reads "Insert Controller". Press Cmd-I
+    (Editors > Insert Event): another controller is added at the new
+    selected row's position. Insert's menu offers Note, Controller, Pitch
+    Bend, Channel Pressure, Poly Pressure, Program, SysEx and Text and, in
+    a block's list, no Reference, Audio Region, Tempo, Meter or Marker.
+    While a cell is edited the Cmd-I item is greyed.
+56. Optional columns: Columns > turn on End, Release Velocity and SMPTE and
+    pick SMPTE Frame Rate 25 fps (Length is on by default and can be turned
+    off): End appears after Position, Release before Mute and SMPTE before
+    Mute. A note's End is its Position plus its Length. Type 00:00:02:00 in
+    the SMPTE cell of a bar-1 note: it moves to 2.1.0 (two seconds at 120
+    BPM; "Undo Move Events"). Type 2.1.0 in a note's End cell: its length
+    changes ("Undo Edit Event"); an End before the note's Position is
+    refused in the status line. Type 64 in a Release cell: it changes.
+    Quit and relaunch: the column choices and the frame rate are kept.
+57. Filters: Show lists every kind (Note, Controller, ... Marker) and the
+    destinations Built-in Piano, Built-in Bass and Built-in Drums. Turn off
+    Controller: the Controller row disappears and the row count drops; turn
+    off Built-in Piano (the Chords lane's destination): every row
+    disappears; Show Everything restores them. Option-Cmd-2 opens a second
+    list window on the same block: it shows everything (the filter is per
+    list). In the first list turn off Controller and choose Apply to All
+    Lists: the other list hides Controller too. Choose Save as Default
+    (this keeps hidden kinds only, not destinations), then File > Create
+    Demo Project and press Cmd-2 on its Chords block: that list starts with
+    Controller hidden. Restore with Show Everything and Save as Default.
+58. Whole sequence: click Song in the sidebar, click empty arrangement
+    space (nothing selected) and press Cmd-2: at 1.1.0 the list shows a
+    Tempo row (Data 1 120.00, Data 2 jump) and a Meter and Key row (4/4, C
+    major), then every lane's rows with a Lane column (Groove, Chords);
+    Tempo rows for 11.1.0 (120.00, ramp) and 13.1.0 (90.00, jump) follow in
+    position order. Select a note row in bar 3 and choose Insert > Marker
+    (the menu now also offers Tempo, Meter and Marker): "Marker 1" appears
+    at 3.1.0 (Data 2 holds its name, editable; Undo Set Markers). Type 100
+    in the first Tempo row's Data 1: the tempo changes ("Undo Set Tempo")
+    and Play is slower.
+59. Tempo, meter and marker refusals: the first Tempo and Meter rows'
+    Position cells do not edit (Return does nothing); press Delete on the
+    first Tempo row: the status says "The first tempo change stays." On
+    the 13.1.0 tempo row type 11 in Position: "A tempo change is already
+    at that position." Select the 11.1.0 Tempo row and choose Insert >
+    Meter: a Meter row appears at 11.1.0; type 11.2 in its Position: "Meter
+    changes must start on a barline."; type 12: it moves to 12.1.0. Select
+    the first Tempo row (1.1.0) and choose Insert > Meter: "There is
+    already a meter change at the next barline." Clear a marker's Data 2:
+    "A marker needs a name."
+60. References: Song's list shows two "Reference" rows (Data 1 "Groove",
+    Data 2 "×1 0" and "×1 +5"). Type "×2 +12" (or "x2 +12") in the first
+    one's Data 2: that use repeats twice an octave up ("Undo Edit Event");
+    "abc" is refused with a hint. Select a Reference row and press Cmd-Down
+    (or double-click its Kind or Data 1 cell): the list and the
+    arrangement show Groove; Sequence > Back to Parent Sequence (Cmd-[)
+    returns the arrangement to Song.
+61. MIDI In (needs a MIDI keyboard connected): in a Chords list turn on MIDI
+    In and select a note row, then play a key: the row takes the played
+    pitch and velocity ("Undo Edit Event"). Edit a Data 1 cell (Return,
+    Tab until Data 1) and play: the note name appears in the cell, selected,
+    and Return commits it; in a Data 2 cell the played velocity (0-127)
+    appears. With two projects open, play: only the front project's list
+    receives (the other's MIDI In stays on but ignores the notes). Press
+    Cmd-1 (the pane becomes the piano roll) and play: nothing is entered;
+    Cmd-2 again shows a list whose MIDI In is off. Turn MIDI In off: playing
+    changes nothing. If input cannot start the status line says "MIDI input
+    couldn't start." With no keyboard, MIDI In does nothing.
+62. Modify menu and panel: Modify lists Select by Rule... (Ctrl-Cmd-S),
+    Transpose... (Ctrl-Cmd-T), Quantize... (Ctrl-Cmd-U), Change Values...
+    (Ctrl-Cmd-M), Move... (Ctrl-Cmd-V), Modify Again (Ctrl-Cmd-R),
+    Templates and Exact Mode (Ctrl-Cmd-E). Select the Chords block and
+    choose Transpose...: the floating panel "Select and Modify — Untitled"
+    opens with Task "Transpose", the Modify switch on and a "semitones"
+    field. Type 12 and press Apply: the chords move up an octave and Edit
+    shows "Undo Transpose". Choose each other menu item: the panel's Task
+    follows it. Choose "To a Copy", Transpose, type 4, Apply: a harmonizing
+    copy a third higher appears and the originals stay. The panel floats
+    above the document windows; note that it also floats above the windows
+    of other open projects (each project has its own panel) and hides when
+    VizDAW is not the active app.
+63. Select half: select the Chords block, Modify > Select by Rule... (Ctrl-
+    Cmd-S): Select is on and Modify off, Kind is Note and Position is inside
+    the block. Add Condition > Pitch (it starts inside C4 to C5): set "to"
+    to E4 and press Apply: only notes from C4 to E4 are selected, in the
+    list and the piano roll, and Edit gains no undo step. Set Result to
+    "Refine the Selection", change the Pitch comparison to "is" (C4 to C4)
+    and Apply: only the C4 notes stay selected. Set Result to "Replace the
+    Selection", click empty arrangement space (nothing selected) and
+    Apply: the status says "Select lanes to search first: drag in a ruler
+    or select a block." Set Result to "Refine the Selection" and Apply
+    again with nothing selected: that message does not appear (Refine skips
+    the check). The minus button removes a condition; Match "Any Condition"
+    selects notes meeting either of two conditions.
+64. Shapes: select the Chords block, Modify > Change Values... (Ctrl-Cmd-M):
+    it starts as Velocity, Add, Constant. Choose Operation "Set to", Amount
+    "Along a Line", from 20 to 120 and Apply: the list shows velocities
+    rising across the selection ("Undo Change Velocity"); the Curve picker
+    offers Straight, Ease In, Ease Out and S-Curve. Choose Amount
+    "Oscillating", Wave Square, low 30, high 110, period 8.0 and Apply: the
+    velocities alternate bar by bar between 110 and 30. Type "abc" in a
+    field: it turns red and Apply says "Fix the fields marked in red
+    first." Modify... in the list bar opens the panel on Change Values with
+    that list's hidden kinds left alone.
+65. Templates and Modify Again: choose Transpose..., type 12, type "Octave
+    Up" in Template name and Save as Template: the panel's Templates menu
+    lists Load "Octave Up" and Delete "Octave Up", and Modify > Templates
+    lists "Octave Up". Save As, close and reopen the project: the template
+    is still there. Select other notes and choose Modify > Templates >
+    Octave Up: it runs at once ("Undo Transpose"). Modify > Modify Again now
+    reads "Modify Again: Transpose" (Ctrl-Cmd-R) and repeats the last
+    modification on the current selection, in place even after a "To a
+    Copy"; the panel's Modify Again button shows "Modify Again changes the
+    selection in place." on hover and is disabled in a project with no
+    modification yet. Delete "Octave Up" in the panel: Templates in the
+    Modify menu is greyed again. Saving a template with no name says "Name
+    the template first."
+66. Exact mode: open the piano roll (Cmd-1) on Chords and choose Modify >
+    Exact Mode (Ctrl-Cmd-E; the toolbar's Exact toggle shows it too). Drag a
+    chord note's left edge one beat right: it follows the pointer and, on
+    release, goes back while the panel opens on Move with "by" 1.0 and "Apply
+    acts on the dragged events."; Apply moves it as one undo step. A
+    middle-zone drag straight up three rows opens Transpose with semitones
+    3; a diagonal middle drag opens whichever axis is stronger with a
+    notice "The vertical part of the drag was left out." or "The horizontal
+    part of the drag was left out."; an end-zone drag opens Change Values
+    (Length, Add); an Option-drag opens the same with "To a Copy" chosen; a
+    rubber band opens Select by Rule with Kind, Position and Pitch
+    conditions (Shift-band: Result "Add to the Selection"). Drag a Chords
+    block one bar right in the arrangement: Move opens with "by" 4.0.
+    Region drags (Audio project), a drag into another lane, pencil clicks,
+    the eraser and expression strokes still apply as usual. Escape during
+    a drag opens nothing and leaves no undo step. Turn Exact Mode off: drags
+    apply again.
+67. Keyboard and VoiceOver: with the panel in front, Cmd-Z undoes in its
+    document, Space in a panel field types a space and playback does not
+    start, and Space with no field focused does not play; Space and Return in
+    the Template name and condition fields type. Close the panel and reopen
+    it with Ctrl-Cmd-M: it comes back where it was. With a torn list or
+    piano roll window in front, the Modify menu and Modify Again act on that
+    window's document. With VoiceOver (Cmd-F5) the list is a table "Event
+    List" with the column names as headers and rows that read like "Note
+    C4, bar 1 beat 1, velocity 56", "Controller, bar 1 beat 1, 7, 100" or
+    "Tempo, bar 1 beat 1, 120.00, jump" (with the row's own values); the
+    panel's controls read their labels (Task, Result, Match, Operation,
+    Apply, Comparison, Amount, Curve, Wave, "Pitch from", "Pitch to",
+    Remove Condition, Template name).
