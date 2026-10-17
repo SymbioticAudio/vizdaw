@@ -33,6 +33,8 @@ public final class DocumentModel {
     /// Slots whose parameters changed outside a gesture (their windows
     /// refetch), cleared by whoever handles them.
     public var paramsChanged: Set<UInt64> = []
+    /// The playhead between polls (spec §3.4); fed by `poll()`.
+    @ObservationIgnored public let clock = TransportClock()
 
     private struct LanesKey: Equatable {
         let version: UInt64
@@ -49,6 +51,7 @@ public final class DocumentModel {
         } catch VizError.Busy {
             transport = Self.stopped
         }
+        clock.update(transport, pollInterval: transport.playing ? 0.033 : 0.25)
         apply(snapshot)
     }
 
@@ -74,6 +77,8 @@ public final class DocumentModel {
     public var canPlay: Bool { selectedSeq != nil || isPlaying }
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
     public var pollInterval: Duration { isPlaying ? .milliseconds(33) : .milliseconds(250) }
+    /// `pollInterval` in seconds.
+    public var pollSeconds: Double { isPlaying ? 0.033 : 0.25 }
     public var hasFaults: Bool { !transport.faults.isEmpty }
     public var hasReport: Bool { !transport.report.isEmpty || !pluginProblems.isEmpty }
     /// Every line of the fault popover: faults, compile messages, plugin
@@ -166,6 +171,7 @@ public final class DocumentModel {
     public func poll() {
         do {
             transport = try session.transport()
+            clock.update(transport, pollInterval: pollSeconds)
         } catch VizError.Busy {
             return
         } catch {
