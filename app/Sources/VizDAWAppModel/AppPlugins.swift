@@ -99,9 +99,16 @@ public final class AppPlugins {
         perform("Rescan Failed") { try $0.rescan(plugins: keys) }
     }
 
-    public func setEnabled(_ key: PluginKey, _ on: Bool) {
+    /// True when the catalog took the change (false: not open yet, or it
+    /// failed).
+    @discardableResult
+    public func setEnabled(_ key: PluginKey, _ on: Bool) -> Bool {
         perform("Plugin Settings") { try $0.setEnabled(plugin: key, enabled: on) }
     }
+
+    /// Scans new or changed plugins in the background (silent when a scan
+    /// already runs).
+    public func scanNew() { scan(all: false, automatic: true) }
 
     /// Forgets the blocklist entries of `keys`; their bundles are scanned
     /// again (one scan).
@@ -127,18 +134,22 @@ public final class AppPlugins {
         enqueue(AlertItem(error, title: title))
     }
 
+    @discardableResult
     private func perform(
         _ title: String, quietWhenRunning: Bool = false,
         _ body: (any PluginCatalogProtocol) throws -> Void
-    ) {
-        guard let c = catalog else { return }
+    ) -> Bool {
+        guard let c = catalog else { return false }
+        var ok = true
         do {
             try body(c)
         } catch {
+            ok = false
             report(error, title, quietWhenRunning: quietWhenRunning)
         }
         refresh()
         poll()
+        return ok
     }
 }
 

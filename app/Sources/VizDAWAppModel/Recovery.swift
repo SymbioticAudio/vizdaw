@@ -27,15 +27,16 @@ public protocol RecoveryQuestions: AnyObject {
 public struct Recovery {
     public var check: (String) throws -> RecoveryInfo
     public var openWith: (String, OpenOptions) throws -> any SessionProtocol
-    /// Disables plugins in the Plugin Manager.
-    public var disable: ([PluginRefRow]) -> Void
+    /// Disables plugins in the Plugin Manager; false when that was not
+    /// possible (the project then opens with plugins off).
+    public var disable: ([PluginRefRow]) -> Bool
     public var shiftHeld: () -> Bool
     public var questions: any RecoveryQuestions
 
     public init(
         check: @escaping (String) throws -> RecoveryInfo,
         openWith: @escaping (String, OpenOptions) throws -> any SessionProtocol,
-        disable: @escaping ([PluginRefRow]) -> Void,
+        disable: @escaping ([PluginRefRow]) -> Bool,
         shiftHeld: @escaping () -> Bool,
         questions: any RecoveryQuestions
     ) {
@@ -56,7 +57,9 @@ public struct Recovery {
             case .cancel: return nil
             case .pluginsOff: options.pluginsOff = true
             case .normally: break
-            case .disable: disable(info.loading)
+            case .disable:
+                // Never open normally with the crashing plugin still enabled.
+                if !disable(info.loading) { options.pluginsOff = true }
             }
         }
         if let a = info.autosave, questions.restoreAutosave(project: name) {

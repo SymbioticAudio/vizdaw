@@ -41,21 +41,19 @@ enum PluginWindows {
         pending.append(PendingClose(key: Key(doc: doc, slot: model.slot), model: model, host: host))
     }
 
-    /// A document is closing: its windows close and every editor detaches
-    /// before the session goes. A close that stays `Busy` after a few
-    /// retries is released anyway (closing the session closes the editors).
+    /// A document is closing: its windows close and each editor detaches
+    /// (one `closeEditor` try per window). A close that is `Busy` (a nested
+    /// run loop below us holds the registry) stays in `pending`, which keeps
+    /// the parent view and the model alive; `tick` retries it until
+    /// `closeEditor` succeeds, and only then is it released. `Session.close()`
+    /// only removes the crash marker: editors close on `closeEditor` or when
+    /// the session drops. At quit one try is all there is: leftovers die with
+    /// the process (`shutdown()` has stopped the engine).
     static func closeDocument(_ doc: UUID) {
         for (key, c) in Array(open) where key.doc == doc {
             guard open[key] === c else { continue }
             c.close()
         }
-        for _ in 0..<5 {
-            let mine = pending.filter { $0.key.doc == doc }
-            if mine.isEmpty { break }
-            let done = mine.filter { $0.model.retryClose() }.map(\.model)
-            pending.removeAll { p in done.contains { $0 === p.model } }
-        }
-        pending.removeAll { $0.key.doc == doc }
     }
 
     /// Shows slot `slot`'s window of document `doc` (brings it to the

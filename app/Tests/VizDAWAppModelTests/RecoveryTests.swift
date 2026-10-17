@@ -26,7 +26,7 @@ final class FakeQuestions: RecoveryQuestions {
     let diva = PluginRefRow(format: .au, id: "aumu/Diva/UHfX", name: "Diva", vendor: "u-he", version: "1")
 
     func store(
-        _ info: RecoveryInfo, _ q: FakeQuestions, shift: Bool = false
+        _ info: RecoveryInfo, _ q: FakeQuestions, shift: Bool = false, catalogReady: Bool = true
     ) -> (DocumentStore, () -> [OpenOptions], () -> [[PluginRefRow]]) {
         var opened: [OpenOptions] = []
         var disabled: [[PluginRefRow]] = []
@@ -37,7 +37,11 @@ final class FakeQuestions: RecoveryQuestions {
                 opened.append(o)
                 return demoFake()
             },
-            disable: { disabled.append($0) },
+            disable: {
+                guard catalogReady else { return false }
+                disabled.append($0)
+                return true
+            },
             shiftHeld: { shift },
             questions: q)
         return (s, { opened }, { disabled })
@@ -72,6 +76,16 @@ final class FakeQuestions: RecoveryQuestions {
         #expect(s.open(path: "/p/Song.vizdaw") != nil)
         #expect(disabled() == [[diva]])
         #expect(opened() == [OpenOptions(pluginsOff: false, autosave: nil)])
+    }
+
+    @Test func disablingWithoutACatalogOpensWithPluginsOff() {
+        let q = FakeQuestions()
+        q.crash = .disable
+        let info = RecoveryInfo(crashed: true, loading: [diva], autosave: nil)
+        let (s, opened, disabled) = store(info, q, catalogReady: false)
+        #expect(s.open(path: "/p/Song.vizdaw") != nil)
+        #expect(disabled().isEmpty)
+        #expect(opened() == [OpenOptions(pluginsOff: true, autosave: nil)])
     }
 
     @Test func shiftAsksEvenWithoutACrash() {

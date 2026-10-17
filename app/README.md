@@ -88,7 +88,7 @@ multi-output drum instrument).
     Piano" instrument strip appears; its slot turns green once loaded.
     Play Song: the chords sound through Diva. (Instruments > New Plugin
     Instrument… adds a destination of its own.) Double-click the slot: a window
-    "Diva — Diva" shows Diva's own editor. Turning a knob in it and then
+    "Built-in Piano — Diva" shows Diva's own editor. Turning a knob in it and then
     Edit > Undo returns the knob (one undo step per drag). Closing the
     window does not remove the plugin.
 12. On a strip, "+": add a CLAP effect and an AU effect. Drag the second
@@ -96,8 +96,8 @@ multi-output drum instrument).
     and from its window's header. Remove one, then Undo: it comes back
     with the settings it had.
 13. "Add Bus", rename it "Verb" (double-click its name), add a reverb to
-    it, add a send from the Diva strip to Verb; drag the send level and
-    toggle Pre: the reverb follows. Solo the Diva strip: the bus still
+    it, add a send from the "Built-in Piano" strip to Verb; drag the send level and
+    toggle Pre: the reverb follows. Solo that strip: the bus still
     sounds, other strips go dim and silent.
 14. Sidechain: put a compressor with a sidechain input on a pad strip,
     choose the kick's strip in its Sidechain menu, play: the pad ducks on

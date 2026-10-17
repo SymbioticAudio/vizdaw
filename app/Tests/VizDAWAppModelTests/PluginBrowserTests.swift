@@ -87,6 +87,16 @@ import VizDAWCore
         #expect(p.alert?.title == "Scan Failed")
     }
 
+    @Test func setEnabledReportsWhetherTheCatalogTookIt() {
+        let cat = FakeCatalog()
+        cat.table = [catalogRow("a", "A", vendor: "V")]
+        let key = PluginKey(cat.table[0].plugin)
+        let p = AppPlugins(open: { _ in cat })
+        #expect(!p.setEnabled(key, false), "no catalog yet")
+        p.start(config: AppPlugins.config(supportDir: URL(fileURLWithPath: "/tmp"), scanner: "x"), scan: false)
+        #expect(p.setEnabled(key, false))
+    }
+
     @Test func aCatalogThatCannotOpenIsAnAlert() {
         let p = AppPlugins(open: { _ in throw VizError.Io(message: "denied") })
         p.start(config: AppPlugins.config(supportDir: URL(fileURLWithPath: "/tmp"), scanner: "x"), scan: true)

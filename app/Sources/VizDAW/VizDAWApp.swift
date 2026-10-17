@@ -22,10 +22,14 @@ struct VizDAWApp: App {
             check: { try recoveryCheck(path: $0) },
             openWith: { try Session.openWith(path: $0, options: $1) },
             disable: { plugins in
-                for p in plugins { appPlugins.setEnabled(PluginKey(p), false) }
+                plugins.map { appPlugins.setEnabled(PluginKey($0), false) }.allSatisfy { $0 }
             },
             shiftHeld: { NSEvent.modifierFlags.contains(.shift) },
             questions: RecoveryAlerts())
+        // The catalog and support folder exist before any project can open
+        // (launch arguments, Finder opens), so "Disable ‹plugin›" works.
+        LaunchArguments.parseFlags(CommandLine.arguments)
+        AppSetup.openCatalog()
         LaunchArguments.apply(CommandLine.arguments, to: appStore)
     }
 
@@ -52,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         StoreAlerts.watch(appStore)
-        AppSetup.startPlugins()
+        AppSetup.startScan()
         PluginTicker.start(appStore)
     }
 
@@ -99,13 +103,16 @@ enum AppSetup {
 
     /// Opens the catalog and scans new or changed plugins (not in `--smoke`
     /// or `--no-scan` runs).
-    static func startPlugins() {
+    static func openCatalog() {
         let dir = supportDir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? setSupportDir(path: dir.path)
-        appPlugins.start(
-            config: AppPlugins.config(supportDir: dir, scanner: scanner),
-            scan: !LaunchArguments.smokeRun && !LaunchArguments.noScan)
+        appPlugins.start(config: AppPlugins.config(supportDir: dir, scanner: scanner), scan: false)
+    }
+
+    /// After launch: the scan and the catalog's alerts.
+    static func startScan() {
+        if !LaunchArguments.smokeRun && !LaunchArguments.noScan { appPlugins.scanNew() }
         PluginAlerts.watch(appPlugins)
     }
 }
@@ -165,6 +172,14 @@ enum LaunchArguments {
     @MainActor static var smokeRun = false
     /// `--no-scan`: do not scan plugins at launch.
     @MainActor static var noScan = false
+
+    /// The flags that decide the support folder and the scan.
+    @MainActor static func parseFlags(_ args: [String]) {
+        for arg in args.dropFirst() {
+            if arg == "--no-scan" { noScan = true }
+            if arg == "--smoke" { smokeRun = true }
+        }
+    }
 
     @MainActor static func apply(_ args: [String], to store: DocumentStore) {
         for arg in args.dropFirst() {
@@ -264,7 +279,9 @@ final class RecoveryAlerts: RecoveryQuestions {
         case .alertFirstButtonReturn: return .pluginsOff
         case .alertSecondButtonReturn: return .normally
         case .alertThirdButtonReturn: return .cancel
-        default: return .disable
+        case NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertThirdButtonReturn.rawValue + 1):
+            return .disable
+        default: return .cancel
         }
     }
 
