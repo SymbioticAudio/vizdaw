@@ -17,7 +17,10 @@ struct VizDAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
-        appStore.willClose = { PluginWindows.closeDocument($0) }
+        appStore.willClose = {
+            PluginWindows.closeDocument($0)
+            EditorWindows.closeDocument($0)
+        }
         appStore.recovery = Recovery(
             check: { try recoveryCheck(path: $0) },
             openWith: { try Session.openWith(path: $0, options: $1) },

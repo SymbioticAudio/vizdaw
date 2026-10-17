@@ -13,7 +13,7 @@ struct DocumentWindow: View {
     var body: some View {
         Group {
             if let id, let model = store.model(id) {
-                DocumentView(model: model)
+                DocumentView(model: model, docID: id)
                     .focusedSceneValue(\.documentModel, model)
                     .focusedSceneValue(\.documentID, id)
                     .task(id: PollKey(key: activeState == .key, playing: model.isPlaying)) {
@@ -28,6 +28,7 @@ struct DocumentWindow: View {
                     .onAppear {
                         SmokeRun.start(model) { openWindow(id: "mixer", value: id) }
                         PluginWindows.reopen(store, doc: id)
+                        EditorWindows.reopen(store, doc: id)
                     }
                     .onDisappear { store.close(id) }
             } else {

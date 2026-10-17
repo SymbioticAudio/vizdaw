@@ -95,6 +95,7 @@ public final class EditorModel {
         snapshotVersion = s.version
         drawVersion += 1
         afterSync(s)
+        pruneLayout(s)
     }
 
     /// A gesture whose lanes vanished (undo in another window, a plugin

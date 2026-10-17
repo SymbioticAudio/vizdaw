@@ -5,13 +5,14 @@ import VizDAWCore
 /// Sidebar of sequences, table of lanes, transport toolbar.
 struct DocumentView: View {
     @Bindable var model: DocumentModel
+    let docID: UUID
 
     var body: some View {
         NavigationSplitView {
             SequenceSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         } detail: {
-            ArrangementPane(model: model)
+            EditorSplit(model: model, docID: docID)
         }
         .navigationTitle(model.windowTitle)
         .toolbar { TransportToolbar(model: model) }

@@ -65,6 +65,24 @@ struct AppCommands: Commands {
                 .keyboardShortcut("p", modifiers: [.command, .option])
             Divider()
         }
+        CommandMenu("Editors") {
+            ForEach(DetailEditorKind.allCases, id: \.self) { kind in
+                Button(kind.title) { doc?.editor.showDetail(kind, shown: doc?.selectedSeq) }
+                    .keyboardShortcut(KeyEquivalent(Character(kind.key)), modifiers: .command)
+                    .disabled(doc == nil)
+            }
+            Divider()
+            ForEach(DetailEditorKind.allCases, id: \.self) { kind in
+                Button("Open \(kind.title) in Window") {
+                    if let docID { EditorWindows.tearOff(store, doc: docID, kind: kind) }
+                }
+                .keyboardShortcut(KeyEquivalent(Character(kind.key)), modifiers: [.command, .option])
+                .disabled(docID == nil)
+            }
+            Divider()
+            Button("Close Detail Editor") { doc?.editor.closeDetail() }
+                .disabled(doc?.editor.layout.detail == nil)
+        }
         CommandMenu("Sequence") {
             Button("Make Reference from Selection") {
                 if let doc, let seq = doc.selectedSeq { doc.editor.makeReferenceFromSelection(seq: seq) }
