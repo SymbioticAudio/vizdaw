@@ -15,6 +15,7 @@ struct DocumentWindow: View {
             if let id, let model = store.model(id) {
                 DocumentView(model: model)
                     .focusedSceneValue(\.documentModel, model)
+                    .focusedSceneValue(\.documentID, id)
                     .task(id: PollKey(key: activeState == .key, playing: model.isPlaying)) {
                         // Background playback keeps polling so device
                         // events are handled (O27).
@@ -24,7 +25,9 @@ struct DocumentWindow: View {
                             try? await Task.sleep(for: model.pollInterval)
                         }
                     }
-                    .onAppear { SmokeRun.start(model) }
+                    .onAppear {
+                        SmokeRun.start(model) { openWindow(id: "mixer", value: id) }
+                    }
                     .onDisappear { store.close(id) }
             } else {
                 ProgressView()

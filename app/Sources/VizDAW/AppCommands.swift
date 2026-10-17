@@ -7,10 +7,20 @@ struct DocumentModelKey: FocusedValueKey {
     typealias Value = DocumentModel
 }
 
+struct DocumentIDKey: FocusedValueKey {
+    typealias Value = UUID
+}
+
 extension FocusedValues {
     var documentModel: DocumentModel? {
         get { self[DocumentModelKey.self] }
         set { self[DocumentModelKey.self] = newValue }
+    }
+
+    /// The store's key of the focused window's document.
+    var documentID: UUID? {
+        get { self[DocumentIDKey.self] }
+        set { self[DocumentIDKey.self] = newValue }
     }
 }
 
@@ -18,6 +28,7 @@ extension FocusedValues {
 struct AppCommands: Commands {
     let store: DocumentStore
     @FocusedValue(\.documentModel) private var doc
+    @FocusedValue(\.documentID) private var docID
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -45,6 +56,12 @@ struct AppCommands: Commands {
             Button(doc?.redoTitle ?? "Redo") { doc?.redo() }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
                 .disabled(!(doc?.canRedo ?? false))
+        }
+        CommandGroup(before: .windowList) {
+            Button("Mixer") { if let docID { openWindow(id: "mixer", value: docID) } }
+                .keyboardShortcut("m", modifiers: [.command, .option])
+                .disabled(docID == nil)
+            Divider()
         }
         CommandMenu("Transport") {
             Button(doc?.isPlaying == true ? "Stop" : "Play") { doc?.playStop() }

@@ -23,6 +23,10 @@ struct VizDAWApp: App {
         }
         .defaultSize(width: 980, height: 620)
         .commands { AppCommands(store: appStore) }
+        WindowGroup("Mixer", id: "mixer", for: UUID.self) { $id in
+            MixerWindow(id: $id, store: appStore)
+        }
+        .defaultSize(width: 760, height: 560)
     }
 }
 
@@ -154,14 +158,16 @@ enum LaunchArguments {
     }
 }
 
-/// The `--smoke` run: Play, poll for 3 s through the window's model, exit.
+/// The `--smoke` run: Play, open the mixer, poll for 3 s through the
+/// window's model, exit.
 enum SmokeRun {
-    @MainActor static func start(_ model: DocumentModel) {
+    @MainActor static func start(_ model: DocumentModel, openMixer: @escaping () -> Void) {
         guard LaunchArguments.smoke else { return }
         LaunchArguments.smoke = false
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
             model.playStop()
+            openMixer()
             var ticks: [Int64] = []
             for _ in 0..<12 {
                 try? await Task.sleep(for: .milliseconds(250))
@@ -170,7 +176,13 @@ enum SmokeRun {
                 FileHandle.standardError.write(Data(
                     "smoke: \(model.selectedName ?? "-") \(Formatting.position(model.transport)) playing=\(model.isPlaying) device=\(Formatting.device(model.transport))\n".utf8))
             }
+            // The mixer window polls its levels: every strip has a meter.
+            let mixer = appStore.documents.first { $0.value === model }.flatMap { appStore.mixer($0.key) }
+            let strips = mixer?.snapshot.strips.count ?? 0
+            let meters = mixer?.meters.count ?? 0
+            FileHandle.standardError.write(Data("smoke: mixer strips \(strips) meters \(meters)\n".utf8))
             let ok = model.alert == nil && (ticks.last ?? 0) > (ticks.first ?? 0)
+                && strips >= 2 && meters == strips
             if let a = model.alert {
                 FileHandle.standardError.write(Data("smoke: alert \(a.title): \(a.message)\n".utf8))
             }

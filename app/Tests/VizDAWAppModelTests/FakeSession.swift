@@ -116,7 +116,14 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
-    func mixer() throws -> MixerSnapshot { mixerSnap }
+    var mixerCalls = 0
+    /// Thrown by `mixer()` only (a busy session while an editor opens).
+    var mixerFetchError: VizError?
+    func mixer() throws -> MixerSnapshot {
+        mixerCalls += 1
+        if let e = mixerFetchError { throw e }
+        return mixerSnap
+    }
     func levels() throws -> MixerLevels {
         levelsCalls += 1
         return levelsValue
@@ -260,5 +267,36 @@ func demoFake() -> FakeSession {
     ])
     f.laneTable = [1: [lane(10, "Drums")], 2: [lane(20, "Drums"), lane(21, "Bass")],
                    3: [lane(30, "Groove"), lane(31, "Chords")]]
+    return f
+}
+
+func slotRow(_ id: UInt64, _ name: String, status: SlotStatus = .live, sidechain: Bool = false) -> SlotRow {
+    SlotRow(
+        id: id, plugin: PluginRefRow(format: .clap, id: "x.\(name)", name: name, vendor: "V", version: "1"),
+        instrument: false, bypass: false, sidechain: nil, status: status, latency: 0,
+        hasSidechainInput: sidechain, outputs: 1, hasEditor: false)
+}
+
+func stripRow(
+    _ id: UInt64, _ name: String, kind: StripKindRow = .bus, inserts: [SlotRow] = [],
+    sends: [SendRow] = [], output: UInt64? = nil
+) -> StripRow {
+    StripRow(
+        id: id, name: name, kind: kind, kindLabel: "\(kind)", instrument: nil, inserts: inserts,
+        gainDb: 0, pan: 0, mute: false, solo: false, soloMuted: false, sends: sends,
+        output: output, freeOutputs: [])
+}
+
+/// A mixer: Synth (built-in, one insert) and Bus 1, then Master.
+func mixerFake() -> FakeSession {
+    let f = demoFake()
+    f.mixerSnap = MixerSnapshot(
+        version: f.snap.version,
+        strips: [
+            stripRow(1, "Synth", kind: .builtinSynth, inserts: [slotRow(10, "Gain")]),
+            stripRow(2, "Bus 1"),
+            stripRow(0, "Master", kind: .master),
+        ],
+        buses: [BusRow(id: 2, name: "Bus 1")])
     return f
 }

@@ -10,6 +10,9 @@ public final class DocumentStore {
     public typealias Open = (String) throws -> any SessionProtocol
 
     public private(set) var documents: [UUID: DocumentModel] = [:]
+    /// Mixer windows' models, made on first use and dropped with their
+    /// document.
+    private var mixers: [UUID: MixerModel] = [:]
     /// Documents created without a window yet (Finder opens, launch
     /// arguments); the next window to appear adopts the first one.
     public private(set) var pending: [UUID] = []
@@ -36,6 +39,20 @@ public final class DocumentStore {
     }
 
     public func model(_ id: UUID) -> DocumentModel? { documents[id] }
+
+    /// Document `id`'s mixer (one per document), or nil once it is closed.
+    public func mixer(_ id: UUID) -> MixerModel? {
+        if let m = mixers[id] { return m }
+        guard let doc = documents[id] else { return nil }
+        do {
+            let m = try MixerModel(document: doc)
+            mixers[id] = m
+            return m
+        } catch {
+            doc.alert = AlertItem(error, title: "Mixer Unavailable")
+            return nil
+        }
+    }
 
     public func newEmpty() -> UUID? { add("New Document Failed", makeEmpty) }
 
@@ -77,6 +94,7 @@ public final class DocumentStore {
     }
 
     public func close(_ id: UUID) {
+        mixers.removeValue(forKey: id)
         if let doc = documents.removeValue(forKey: id), doc.isPlaying {
             try? doc.session.stop()
         }
