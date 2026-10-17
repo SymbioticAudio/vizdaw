@@ -4,7 +4,7 @@ import VizDAWCore
 public struct Gesture: Equatable, Sendable {
     public let label: String
     /// The lanes it edits; it is cancelled when one disappears (spec §5).
-    public let lanes: Set<LaneKey>
+    public internal(set) var lanes: Set<LaneKey>
     /// The target the document shows now (`nil`: the start state).
     public var applied: EditCommand?
     /// The mouse-up target, until it has been applied and the edit closed.
@@ -31,6 +31,14 @@ extension EditorModel {
             report(error)
             return false
         }
+    }
+
+    /// The lanes the open gesture touches now (a drag that changed its
+    /// target lane); `afterSync` aborts it when one of them disappears.
+    public func setGestureLanes(_ lanes: Set<LaneKey>) {
+        guard var g = gesture, g.lanes != lanes else { return }
+        g.lanes = lanes
+        gesture = g
     }
 
     /// The pointer moved; `target` is the full change from the drag's start

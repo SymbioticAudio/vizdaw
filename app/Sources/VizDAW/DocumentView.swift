@@ -11,7 +11,7 @@ struct DocumentView: View {
             SequenceSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         } detail: {
-            LaneTable(model: model)
+            ArrangementPane(model: model)
         }
         .navigationTitle(model.windowTitle)
         .toolbar { TransportToolbar(model: model) }
@@ -75,39 +75,6 @@ struct SequenceRow: View {
             }
         }
         .tag(row.id)
-    }
-}
-
-struct LaneTable: View {
-    let model: DocumentModel
-
-    var body: some View {
-        if model.selectedSeq == nil {
-            ContentUnavailableView(
-                "No Sequence", systemImage: "music.note.list",
-                description: Text("Choose File > Create Demo Project to try VizDAW."))
-        } else {
-            Table(model.lanes) {
-                TableColumn("Mute") { lane in
-                    Toggle(
-                        "Mute",
-                        isOn: Binding(
-                            get: { lane.mute },
-                            set: { model.setMute(lane: lane.id, $0) })
-                    )
-                    .labelsHidden()
-                }
-                .width(40)
-                TableColumn("Name", value: \.name)
-                TableColumn("Destination") { Text($0.destination ?? "—") }
-                TableColumn("MIDI events") { Text("\($0.midiEventCount)").monospacedDigit() }
-                TableColumn("Regions") { Text("\($0.regionCount)").monospacedDigit() }
-                TableColumn("References") { Text("\($0.referenceCount)").monospacedDigit() }
-                TableColumn("Takes (active)") { Text("\($0.takeCount) (\($0.activeTake))") }
-                TableColumn("Loop") { Text($0.looped ? "Yes" : "") }
-                TableColumn("Drum") { Text($0.isDrum ? "Yes" : "") }
-            }
-        }
     }
 }
 

@@ -267,6 +267,34 @@ public final class EditorModel {
         try? session.setUiLayout(json: layout.encoded())
     }
 
+    /// Selects a sequence in the document / reads the shown one (set by
+    /// `DocumentModel`).
+    @ObservationIgnored var selectSequence: (UInt64) -> Void = { _ in }
+    @ObservationIgnored var currentSequence: () -> UInt64? = { nil }
+
+    /// Shows `target` in the detail pane, in `kind` or the last-used
+    /// editor (spec §3.7).
+    public func openDetail(_ target: EditorTarget, kind: DetailEditorKind? = nil) {
+        updateLayout { l in
+            let k = kind ?? l.lastKind
+            l.lastKind = k
+            l.detail = DetailState(kind: k, target: target)
+        }
+    }
+
+    /// Opens the sequence a reference block plays (Plan Ruling 14).
+    public func openReference(_ b: BlockRow) {
+        guard let target = b.refSeq, let current = currentSequence() else { return }
+        push(current)
+        selectSequence(target)
+    }
+
+    /// Back to the sequence the last opened reference sat in.
+    public func back() {
+        guard let parent = pop() else { return }
+        selectSequence(parent)
+    }
+
     public func push(_ parent: UInt64) { navigation.append(parent) }
 
     public func pop() -> UInt64? { navigation.popLast() }

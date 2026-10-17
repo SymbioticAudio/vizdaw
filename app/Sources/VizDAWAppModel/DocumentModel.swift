@@ -14,6 +14,10 @@ public final class DocumentModel {
     public private(set) var selectedSeq: UInt64?
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState
+    /// Playing, which sequence, and the tick while stopped; set only when
+    /// they change, so views that must not redraw on every poll observe
+    /// this, not `transport`.
+    public private(set) var playKey = PlayKey(playing: false, seq: nil, stoppedTick: 0)
     public private(set) var looping = false
     /// The sequence whose name is being edited in the sidebar.
     public private(set) var renamingSeq: UInt64?
@@ -56,8 +60,11 @@ public final class DocumentModel {
             transport = Self.stopped
         }
         clock.update(transport, pollInterval: Self.pollSeconds(playing: transport.playing))
+        updatePlayKey()
         apply(snap)
         editor.applySnapshot = { [weak self] in self?.apply($0) }
+        editor.selectSequence = { [weak self] in self?.select($0) }
+        editor.currentSequence = { [weak self] in self?.selectedSeq }
     }
 
     /// The transport shown until the first successful read.
@@ -180,6 +187,21 @@ public final class DocumentModel {
         }
     }
 
+    private func updatePlayKey() {
+        let k = PlayKey(transport)
+        if k != playKey { playKey = k }
+    }
+
+    /// Moves the transport to `tick` (a click in a ruler).
+    public func locate(_ tick: Int64) {
+        do {
+            try session.locate(tick: tick)
+        } catch {
+            alert = AlertItem(error, title: "Locate Failed")
+        }
+        poll()
+    }
+
     public func returnToStart() {
         do {
             try session.locate(tick: 0)
@@ -196,6 +218,7 @@ public final class DocumentModel {
         do {
             transport = try session.transport()
             clock.update(transport, pollInterval: pollSeconds)
+            updatePlayKey()
         } catch VizError.Busy {
             return
         } catch {
@@ -285,5 +308,25 @@ public final class DocumentModel {
             lanes = []
             alert = AlertItem(error, title: "Lanes Unavailable")
         }
+    }
+}
+
+/// Whether the transport plays, which sequence, and where it sits while
+/// stopped (a locate while stopped must move the playhead; ticks while
+/// playing do not change it).
+public struct PlayKey: Equatable, Sendable {
+    public let playing: Bool
+    public let seq: UInt64?
+    /// The transport's tick while stopped; nil while playing.
+    public let stoppedTick: Int64?
+
+    public init(playing: Bool, seq: UInt64?, stoppedTick: Int64?) {
+        self.playing = playing
+        self.seq = seq
+        self.stoppedTick = stoppedTick
+    }
+
+    init(_ t: TransportState) {
+        self.init(playing: t.playing, seq: t.seq, stoppedTick: t.playing ? nil : t.tick)
     }
 }

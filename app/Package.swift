@@ -48,7 +48,8 @@ let package = Package(
         ),
         .testTarget(
             name: "VizDAWAppModelTests",
-            dependencies: ["VizDAWAppModel", "VizDAWCore"],
+            // VizDAWEditors: arrangement view tests reuse this target's FakeSession.
+            dependencies: ["VizDAWAppModel", "VizDAWCore", "VizDAWEditors"],
             path: "Tests/VizDAWAppModelTests"
         ),
         .testTarget(
