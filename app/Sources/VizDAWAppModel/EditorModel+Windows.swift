@@ -42,6 +42,20 @@ extension EditorModel {
         return w
     }
 
+    /// ⌥⌘1–⌥⌘4 while torn-off window `id` is key: a new window with `kind`
+    /// on that window's target (Plan 4b Ruling 18).
+    @discardableResult
+    public func tearOff(_ kind: DetailEditorKind, from id: UUID) -> TornWindow? {
+        guard var detail = layout.windows.first(where: { $0.id == id })?.detail else { return nil }
+        detail.kind = kind
+        let w = TornWindow(id: UUID(), detail: detail, frame: nil)
+        updateLayout {
+            $0.windows.append(w)
+            $0.lastKind = kind
+        }
+        return w
+    }
+
     public func closeWindow(_ id: UUID) {
         updateLayout { $0.windows.removeAll { $0.id == id } }
     }

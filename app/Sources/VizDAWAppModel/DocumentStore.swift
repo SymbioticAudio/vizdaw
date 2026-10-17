@@ -2,6 +2,17 @@ import Foundation
 import Observation
 import VizDAWCore
 
+/// A torn-off editor window that is key (Plan 4b Ruling 18).
+public struct TornFocus: Equatable, Sendable {
+    public let doc: UUID
+    public let window: UUID
+
+    public init(doc: UUID, window: UUID) {
+        self.doc = doc
+        self.window = window
+    }
+}
+
 /// The open documents, one per window, keyed by the window's value.
 @Observable
 @MainActor
@@ -45,6 +56,23 @@ public final class DocumentStore {
     }
 
     public func model(_ id: UUID) -> DocumentModel? { documents[id] }
+
+    /// The torn-off editor window that is key, if any. AppKit windows
+    /// publish no SwiftUI focused values, so menu commands ask this first.
+    public private(set) var tornFocus: TornFocus?
+
+    public func focusTorn(_ f: TornFocus) { tornFocus = f }
+
+    /// Window `window` resigned key or closed.
+    public func blurTorn(window: UUID) {
+        if tornFocus?.window == window { tornFocus = nil }
+    }
+
+    /// The document menu commands act on: a key torn-off window's, else the
+    /// focused document window's.
+    public func commandTarget(focused: UUID?) -> UUID? {
+        tornFocus.map(\.doc) ?? focused
+    }
 
     /// Document `id`'s mixer (one per document), or nil once it is closed.
     public func mixer(_ id: UUID) -> MixerModel? {
@@ -106,6 +134,7 @@ public final class DocumentStore {
     /// A window closed: its document goes (a clean close: the crash
     /// marker is removed).
     public func close(_ id: UUID) {
+        if tornFocus?.doc == id { tornFocus = nil }
         mixers.removeValue(forKey: id)?.endOpenDrag()
         // Plugin windows detach their editors before the session goes.
         willClose?(id)

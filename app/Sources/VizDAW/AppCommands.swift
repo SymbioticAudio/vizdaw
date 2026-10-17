@@ -27,9 +27,15 @@ extension FocusedValues {
 /// File, Edit and Transport menus.
 struct AppCommands: Commands {
     let store: DocumentStore
-    @FocusedValue(\.documentModel) private var doc
-    @FocusedValue(\.documentID) private var docID
+    @FocusedValue(\.documentModel) private var focusedDoc
+    @FocusedValue(\.documentID) private var focusedID
     @Environment(\.openWindow) private var openWindow
+
+    /// A key torn-off window's document first (Plan 4b Ruling 18).
+    private var doc: DocumentModel? { store.tornFocus.flatMap { store.model($0.doc) } ?? focusedDoc }
+    private var docID: UUID? { store.commandTarget(focused: focusedID) }
+    /// The key torn-off window, if any.
+    private var tornWindow: UUID? { store.tornFocus?.window }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -67,14 +73,20 @@ struct AppCommands: Commands {
         }
         CommandMenu("Editors") {
             ForEach(DetailEditorKind.allCases, id: \.self) { kind in
-                Button(kind.title) { doc?.editor.showDetail(kind, shown: doc?.selectedSeq) }
-                    .keyboardShortcut(KeyEquivalent(Character(kind.key)), modifiers: .command)
-                    .disabled(doc == nil)
+                Button(kind.title) {
+                    if let w = tornWindow {
+                        doc?.editor.setWindowKind(w, kind)
+                    } else {
+                        doc?.editor.showDetail(kind, shown: doc?.selectedSeq)
+                    }
+                }
+                .keyboardShortcut(KeyEquivalent(Character(kind.key)), modifiers: .command)
+                .disabled(doc == nil)
             }
             Divider()
             ForEach(DetailEditorKind.allCases, id: \.self) { kind in
                 Button("Open \(kind.title) in Window") {
-                    if let docID { EditorWindows.tearOff(store, doc: docID, kind: kind) }
+                    if let docID { EditorWindows.tearOff(store, doc: docID, kind: kind, from: tornWindow) }
                 }
                 .keyboardShortcut(KeyEquivalent(Character(kind.key)), modifiers: [.command, .option])
                 .disabled(docID == nil)

@@ -20,7 +20,7 @@ enum EditorWindows {
         }
         guard let model = store.model(doc) else { return }
         weak var made: EditorWindowController?
-        let c = EditorWindowController(model: model, window: window) { byUser in
+        let c = EditorWindowController(model: model, doc: doc, window: window) { byUser in
             if byUser { model.editor.closeWindow(window.id) }
             // Called from windowWillClose: dropping the last strong reference to the
             // controller inside its own delegate call frees it mid-close, so defer it.
@@ -34,10 +34,12 @@ enum EditorWindows {
         c.showWindow(nil)
     }
 
-    /// ⌥⌘1–⌥⌘4 and "Open in Window".
-    static func tearOff(_ store: DocumentStore, doc: UUID, kind: DetailEditorKind) {
-        guard let model = store.model(doc), let w = model.editor.tearOff(kind, shown: model.selectedSeq)
-        else { return }
+    /// ⌥⌘1–⌥⌘4 and "Open in Window"; `from` a key torn window copies its
+    /// target (Plan 4b Ruling 18).
+    static func tearOff(_ store: DocumentStore, doc: UUID, kind: DetailEditorKind, from window: UUID? = nil) {
+        guard let model = store.model(doc) else { return }
+        let made = window.map { model.editor.tearOff(kind, from: $0) } ?? model.editor.tearOff(kind, shown: model.selectedSeq)
+        guard let w = made else { return }
         show(store, doc: doc, window: w)
     }
 
@@ -56,13 +58,15 @@ enum EditorWindows {
 @MainActor
 final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private let model: DocumentModel
+    private let doc: UUID
     private let id: UUID
     private let onClose: (Bool) -> Void
     private var forDocument = false
     private(set) var closed = false
 
-    init(model: DocumentModel, window w: TornWindow, onClose: @escaping (Bool) -> Void) {
+    init(model: DocumentModel, doc: UUID, window w: TornWindow, onClose: @escaping (Bool) -> Void) {
         self.model = model
+        self.doc = doc
         id = w.id
         self.onClose = onClose
         let saved = w.frame.flatMap { f in
@@ -99,8 +103,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard !closed else { return }
         closed = true
+        appStore.blurTorn(window: id)
         onClose(!forDocument)
     }
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard !closed else { return }
+        appStore.focusTorn(TornFocus(doc: doc, window: id))
+    }
+    func windowDidResignKey(_ notification: Notification) { appStore.blurTorn(window: id) }
     func windowDidMove(_ notification: Notification) { saveFrame() }
     func windowDidEndLiveResize(_ notification: Notification) { saveFrame() }
 
