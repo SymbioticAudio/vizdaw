@@ -121,6 +121,7 @@ enum PluginTicker {
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in
             MainActor.assumeIsolated {
                 for model in store.documents.values { model.idle() }
+                PluginWindows.tick(store)
                 ticks += 1
                 if ticks % 15 == 0 { appPlugins.poll() }
             }
@@ -181,13 +182,35 @@ enum SmokeRun {
             let strips = mixer?.snapshot.strips.count ?? 0
             let meters = mixer?.meters.count ?? 0
             FileHandle.standardError.write(Data("smoke: mixer strips \(strips) meters \(meters)\n".utf8))
+            let editor = await smokePluginWindow(model)
+            FileHandle.standardError.write(Data("smoke: plugin window \(editor ?? "none")\n".utf8))
             let ok = model.alert == nil && (ticks.last ?? 0) > (ticks.first ?? 0)
-                && strips >= 2 && meters == strips
+                && strips >= 2 && meters == strips && editor != nil
             if let a = model.alert {
                 FileHandle.standardError.write(Data("smoke: alert \(a.title): \(a.message)\n".utf8))
             }
             FileHandle.standardError.write(Data("smoke: \(ok ? "ok" : "FAILED")\n".utf8))
             exit(ok ? 0 : 1)
         }
+    }
+
+    /// Puts Apple's AUDelay on the first strip and opens its window: the
+    /// size of the editor it shows, or nil.
+    @MainActor static func smokePluginWindow(_ model: DocumentModel) async -> String? {
+        guard let id = appStore.documents.first(where: { $0.value === model })?.key,
+            let mixer = appStore.mixer(id), let strip = mixer.strips.first
+        else { return nil }
+        mixer.browser = .insert(strip: strip.id)
+        mixer.pick(PluginRefRow(format: .au, id: "aufx/dely/appl", name: "AUDelay", vendor: "Apple", version: ""))
+        guard let slot = mixer.snapshot.strips.first(where: { $0.id == strip.id })?.inserts.last?.id else {
+            return nil
+        }
+        for _ in 0..<40 {
+            try? await Task.sleep(for: .milliseconds(50))
+            if model.slotsVersion > 0 { break }
+        }
+        PluginWindows.show(appStore, doc: id, slot: slot)
+        try? await Task.sleep(for: .milliseconds(300))
+        return PluginWindows.editorSize(doc: id, slot: slot).map { "\($0.width)x\($0.height)" }
     }
 }

@@ -10,6 +10,7 @@ struct MixerWindow: View {
     var body: some View {
         if let id, let mixer = store.mixer(id) {
             MixerView(model: mixer)
+                .environment(\.openPluginWindow, { slot in PluginWindows.show(store, doc: id, slot: slot) })
                 .focusedSceneValue(\.documentModel, mixer.document)
                 .focusedSceneValue(\.documentID, id)
                 .navigationTitle("Mixer — \(mixer.document.snapshot.title)")
@@ -249,6 +250,7 @@ struct SlotView: View {
     let slot: SlotRow
     /// Position among the inserts (`nil`: an instrument's own slot).
     let index: Int?
+    @Environment(\.openPluginWindow) private var openWindow
 
     static func slotID(_ text: String) -> UInt64? {
         text.hasPrefix("slot:") ? UInt64(text.dropFirst(5)) : nil
@@ -276,6 +278,7 @@ struct SlotView: View {
         .frame(maxWidth: .infinity, minHeight: 18)
         .background(RoundedRectangle(cornerRadius: 3).fill(.background))
         .help(reason ?? "\(slot.plugin.name) (\(slot.plugin.vendor))")
+        .onTapGesture(count: 2) { openWindow(slot.id) }
         .contextMenu { menu }
         .modifier(Reorder(model: model, strip: strip, slot: slot, index: index))
     }
@@ -290,6 +293,7 @@ struct SlotView: View {
     }
 
     @ViewBuilder private var menu: some View {
+        Button("Open") { openWindow(slot.id) }
         if model.held.contains(slot.id) {
             Button("Load") { model.load([slot.id]) }
         }

@@ -27,6 +27,7 @@ struct DocumentWindow: View {
                     }
                     .onAppear {
                         SmokeRun.start(model) { openWindow(id: "mixer", value: id) }
+                        PluginWindows.reopen(store, doc: id)
                     }
                     .onDisappear { store.close(id) }
             } else {

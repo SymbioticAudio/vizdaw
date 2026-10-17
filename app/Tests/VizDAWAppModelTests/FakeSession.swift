@@ -229,7 +229,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         }
         return e.resizable ? EditorSize(width: width, height: height, resizable: true) : e
     }
-    func closeEditor(slot: UInt64) throws { closedEditors.append(slot) }
+    /// closeEditor throws Busy this many more times before succeeding.
+    var closeBusy = 0
+    func closeEditor(slot: UInt64) throws {
+        if closeBusy > 0 {
+            closeBusy -= 1
+            throw VizError.Busy(message: "another editor is opening")
+        }
+        closedEditors.append(slot)
+    }
     func setWindowOpen(slot: UInt64, open: Bool) throws {
         if open { windowsOpen.insert(slot) } else { windowsOpen.remove(slot) }
     }
