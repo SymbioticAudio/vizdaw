@@ -366,8 +366,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
+    /// abortEdit throws these, front first, before working.
+    var abortErrors: [VizError] = []
     func abortEdit() throws -> DocSnapshot {
         calls.append("abort")
+        if !abortErrors.isEmpty { throw abortErrors.removeFirst() }
         return commandResult()
     }
 

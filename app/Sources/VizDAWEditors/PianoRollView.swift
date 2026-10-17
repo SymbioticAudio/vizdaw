@@ -307,7 +307,8 @@ public final class PianoRollView: EditorCanvas {
             let d = NoteDrag(
                 zone: n.zone, pressed: n.row, lane: n.lane, events: ids, lowest: pitches.min() ?? n.row.pitch,
                 highest: pitches.max() ?? n.row.pitch, copy: modifiers.contains(.option))
-            guard openGesture(d.label, lanes: Set(model.shownLanes), origin: .notes) else { return }
+            let touched = Set(lanes.filter { l in l.notes.contains { idSet.contains($0.id) } }.map(\.lane))
+            guard openGesture(d.label, lanes: touched, origin: .notes) else { return }
             drag = .notes(d, startTick: axis.tick(atX: from.x), startY: from.y)
         case (.pencil, .empty(let tick, let pitch)):
             guard let lane = model.editLane, openGesture("Insert Note", lanes: [lane], origin: .other) else { return }

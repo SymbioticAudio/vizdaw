@@ -95,6 +95,52 @@ private let move200: EditCommand = .event(edit: .move(events: [1], delta: 200, t
         #expect(f.calls.last == "end" && c.n == 0)
     }
 
+    @Test func aBusyRevertKeepsTheGestureAndTheRetryOpensThePanel() throws {
+        let (f, m, c) = try open(exact: true)
+        f.abortErrors = [VizError.Busy(message: "busy")]
+        #expect(m.editor.beginGesture("Move Notes", lanes: [chords], origin: .notes))
+        m.editor.updateGesture(move200)
+        m.editor.endGesture(move200)
+        #expect(m.editor.gesture != nil, "the session edit is still open, so the gesture is too")
+        #expect(c.n == 0 && !m.selectModify.isOpen, "no panel over an unreverted document")
+        m.editor.tick()
+        #expect(m.editor.gesture == nil && f.calls.suffix(2) == ["abort", "abort"])
+        #expect(c.n == 1 && m.selectModify.task == .move, "the revert succeeded on the retry")
+    }
+
+    @Test func aFailedRevertOpensNoPanel() throws {
+        let (f, m, c) = try open(exact: true)
+        f.abortErrors = [VizError.Internal(message: "boom")]
+        #expect(m.editor.beginGesture("Move Notes", lanes: [chords], origin: .notes))
+        m.editor.endGesture(move200)
+        #expect(c.n == 0 && !m.selectModify.isOpen)
+        #expect(m.editor.gesture == nil)
+    }
+
+    @Test func escapeOnABusyAbortIsRetriedByTheTick() throws {
+        let (f, m, c) = try open(exact: false)
+        f.abortErrors = [VizError.Busy(message: "busy")]
+        #expect(m.editor.beginGesture("Move Notes", lanes: [chords], origin: .notes))
+        m.editor.updateGesture(move200)
+        m.editor.cancelGesture()
+        #expect(m.editor.gesture != nil)
+        m.editor.updateGesture(nil)
+        m.editor.endGesture(move200)
+        #expect(f.calls.last == "abort", "a reverting gesture takes no more edits")
+        m.editor.tick()
+        #expect(m.editor.gesture == nil && f.calls.last == "abort" && c.n == 0)
+        #expect(f.calls.filter { $0 == "abort" }.count == 2)
+    }
+
+    @Test func aShiftBandInExactModeKeepsTheSelection() throws {
+        let (f, m, _) = try open(exact: true)
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 31)], events: [2]))
+        m.editor.requestExact(
+            ExactMode.selectRequest(
+                range: TickRange(start: 0, end: 100), pitches: 60...64, lanes: [chords], adding: true))
+        #expect(f.sel.events == [2] && m.editor.selection.events == [2])
+    }
+
     // MARK: Each view passes its own origin
 
     @Test func anArrangementBlockDragGoesExact() throws {

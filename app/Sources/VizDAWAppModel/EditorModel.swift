@@ -47,10 +47,10 @@ public final class EditorModel {
     /// Opens the panel for a request (set by `DocumentModel`).
     @ObservationIgnored var onExact: ((ModifyRequest) -> Void)?
 
-    /// The request's events and lanes (or its range and lanes) become the
-    /// selection, then the panel opens.
+    /// The request's events (none: the selection's own) and lanes (or its
+    /// range and lanes) become the selection, then the panel opens.
     public func requestExact(_ r: ModifyRequest) {
-        setSelection(SelectionRow(timeRange: r.range, lanes: r.lanes.map(\.ref), events: r.events ?? []))
+        setSelection(SelectionRow(timeRange: r.range, lanes: r.lanes.map(\.ref), events: r.events ?? selection.events))
         onExact?(r)
     }
 

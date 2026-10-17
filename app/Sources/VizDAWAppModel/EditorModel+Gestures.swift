@@ -17,6 +17,11 @@ public struct Gesture: Equatable, Sendable {
     /// target is always sent, even one equal to the forgotten one, and the
     /// document may no longer be at the start state.
     var uncertain = false
+    /// The abort met Busy: `tick()` retries it, and nothing else touches
+    /// the gesture meanwhile.
+    var reverting = false
+    /// Exact mode: the panel opens once the revert has succeeded.
+    var thenExact: ModifyRequest?
 }
 
 extension EditorModel {
@@ -47,7 +52,7 @@ extension EditorModel {
     /// (`nil`: none). Busy is dropped (the next move resends, even the same
     /// target); a refused target leaves the start state on screen, silently.
     public func updateGesture(_ target: EditCommand?) {
-        guard var g = gesture, !g.finishing, target != g.applied || g.uncertain else { return }
+        guard var g = gesture, !g.finishing, !g.reverting, target != g.applied || g.uncertain else { return }
         guard let target else {
             rewind(&g)
             if gesture != nil { gesture = g }
@@ -76,14 +81,15 @@ extension EditorModel {
     /// Mouse-up: `final` becomes the gesture's content and the edit closes
     /// as one undo step; Busy leaves it pending for `tick()`.
     public func endGesture(_ final: EditCommand?) {
-        guard var g = gesture else { return }
+        guard var g = gesture, !g.reverting else { return }
         // Exact mode: the drag was a preview; put it back (before the panel
         // records its baseline), then ask instead of applying.
         if exactMode, !g.finishing, let final,
             let r = ExactMode.request(for: final, lanes: g.lanes, origin: g.origin)
         {
-            cancelGesture()
-            requestExact(r)
+            // The panel opens only once the revert has succeeded (at once, or
+            // from `tick()` after a Busy abort); a failed revert opens none.
+            cancelGesture(thenExact: r)
             return
         }
         g.finishing = true
@@ -94,22 +100,44 @@ extension EditorModel {
 
     /// Escape, or the gesture's lanes vanished: the start state comes back
     /// and the edit closes without an undo step.
-    public func cancelGesture() {
-        guard gesture != nil else { return }
-        gesture = nil
+    /// Busy keeps the gesture in a reverting state that `tick()` retries,
+    /// so an open session edit never outlives its gesture. Returns whether
+    /// the start state is back.
+    @discardableResult
+    public func cancelGesture() -> Bool { cancelGesture(thenExact: nil) }
+
+    @discardableResult
+    private func cancelGesture(thenExact request: ModifyRequest?) -> Bool {
+        guard var g = gesture else { return false }
+        if !g.reverting { g.thenExact = request }
         do {
-            applySnapshot(try session.abortEdit())
+            let s = try session.abortEdit()
+            gesture = nil
+            applySnapshot(s)
+            refreshSelection()
+            if let r = g.thenExact { requestExact(r) }
+            return true
+        } catch VizError.Busy {
+            g.reverting = true
+            gesture = g
+            return false
         } catch {
+            gesture = nil
             report(error)
+            refreshSelection()
+            return false
         }
-        refreshSelection()
     }
 
     /// Retries a mouse-up that met Busy and audition note-offs that failed
     /// (the 60 Hz plugin timer calls it).
     public func tick() {
         if hasPendingNoteOffs { retryNoteOffs() }
-        if gesture?.finishing == true { finish() }
+        if gesture?.reverting == true {
+            cancelGesture()
+        } else if gesture?.finishing == true {
+            finish()
+        }
     }
 
     private func rewind(_ g: inout Gesture) {
