@@ -207,6 +207,8 @@ public final class DocumentModel {
     /// loads finish, plugin-UI gestures become undo steps. Failures go to
     /// the fault popover, not to alerts.
     public func idle() {
+        // A drag's mouse-up that met Busy is retried here (spec §3.8).
+        editor.tick()
         guard let u = try? session.idle() else { return }
         if let s = u.snapshot { apply(s) }
         if u.slotsChanged { slotsVersion += 1 }

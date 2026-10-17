@@ -93,7 +93,7 @@ let grooveLane = LaneKey(3, 30)
         #expect(m.editor.infoFetches == 2)
     }
 
-    @Test func busyReadsKeepTheStaleRowsSilently() throws {
+    @Test func busyReadsKeepTheStaleRowsSilently() async throws {
         let f = editorFake()
         let m = try DocumentModel(session: f)
         _ = m.editor.laneEvents(chords)
@@ -104,6 +104,7 @@ let grooveLane = LaneKey(3, 30)
         #expect(m.editor.status == nil)
         f.readError = .Model(message: "gone")
         #expect(m.editor.laneEvents(chords) == nil)
+        try await Task.sleep(for: .milliseconds(20))
         #expect(m.editor.status == "gone")
     }
 
@@ -180,5 +181,45 @@ let grooveLane = LaneKey(3, 30)
         #expect(BlockRuleSetting.fixedBars(4).rule == .fixedBars(bars: 4))
         #expect(BlockRuleSetting.silenceGap(beats: 0).rule == .silenceGap(ticks: 15_360))
         #expect(BlockRuleSetting.wholeLane.rule == .wholeLane)
+    }
+
+    @Test func aLaneMissingFromTheRevisionsIsCachedNotRefetched() throws {
+        let f = editorFake()
+        f.laneEventTable["3/99"] = LaneEvents(seq: 3, lane: 99, rev: 0, events: [])
+        f.blocksTable["3/99"] = []
+        let m = try DocumentModel(session: f)
+        let lane = LaneKey(3, 99)
+        _ = m.editor.laneEvents(lane)
+        _ = m.editor.laneEvents(lane)
+        _ = m.editor.blocks(lane)
+        _ = m.editor.blocks(lane)
+        #expect(m.editor.eventFetches == 1)
+        #expect(m.editor.blockFetches == 1)
+    }
+
+    @Test func aReadFailureIsPublishedLaterAndOnlyOnce() async throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        f.readError = .Model(message: "lane unreadable")
+        #expect(m.editor.laneEvents(chords) == nil)
+        #expect(m.editor.blocks(chords).isEmpty)
+        #expect(m.editor.status == nil, "nothing observed changes while drawing")
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(m.editor.status == "lane unreadable")
+        m.editor.clearStatus()
+        _ = m.editor.laneEvents(chords)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(m.editor.status == nil, "the same error is not shown again every redraw")
+    }
+
+    @Test func aRefusedSelectionIsRolledBack() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let before = m.editor.selection
+        f.selectionError = .Model(message: "no")
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [], events: [1]))
+        #expect(m.editor.selection == before)
+        #expect(!m.editor.isSelected(event: 1))
+        #expect(m.editor.status == "no")
     }
 }

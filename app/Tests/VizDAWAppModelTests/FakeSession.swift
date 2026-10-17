@@ -346,7 +346,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var sel = SelectionRow(timeRange: nil, lanes: [], events: [])
     var selectionSets: [SelectionRow] = []
     func selection() throws -> SelectionRow { sel }
+    var selectionError: VizError?
     func setSelection(selection: SelectionRow) throws {
+        if let e = selectionError { throw e }
         selectionSets.append(selection)
         sel = selection
     }

@@ -26,6 +26,8 @@ public final class EditorModel {
     public var status: String?
     /// Sequences left by opening a reference; Back returns to the last.
     public private(set) var navigation: [UInt64] = []
+    /// The drag in progress (spec §3.8).
+    public internal(set) var gesture: Gesture?
 
     private struct BlockEntry {
         let rev: UInt64
@@ -35,7 +37,18 @@ public final class EditorModel {
         var stale = false
     }
 
-    @ObservationIgnored private var events: [LaneKey: LaneEvents] = [:]
+    private struct EventEntry {
+        let rev: UInt64
+        let events: LaneEvents
+    }
+
+    /// Stands in for the revision of a lane the snapshot does not list, so
+    /// its cache entry stays valid instead of refetching on every draw.
+    private static let missingRev = UInt64.max
+
+    @ObservationIgnored private var events: [LaneKey: EventEntry] = [:]
+    /// The last failure of a draw-time read, so a repeating one is shown once.
+    @ObservationIgnored private var lastReadFailure: String?
     @ObservationIgnored private var blockCache: [LaneKey: BlockEntry] = [:]
     @ObservationIgnored private var infoCache: [UInt64: (version: UInt64, info: SequenceInfo)] = [:]
     @ObservationIgnored private var sequenceRows: [SeqRow] = []
@@ -74,29 +87,38 @@ public final class EditorModel {
             sequenceRows = s.sequences
         }
         revs = next
+        lastReadFailure = nil
         snapshotVersion = s.version
         drawVersion += 1
         afterSync(s)
     }
 
-    /// Hook for gesture checks (Task 10).
-    func afterSync(_ s: DocSnapshot) {}
+    /// A gesture whose lanes vanished (undo in another window, a plugin
+    /// timer step) is aborted (spec §5).
+    func afterSync(_ s: DocSnapshot) {
+        guard let g = gesture else { return }
+        let alive = Set(s.laneRevs.map { LaneKey($0.seq, $0.lane) })
+        guard !g.lanes.isSubset(of: alive) else { return }
+        cancelGesture()
+        status = "The lane was removed; the drag was cancelled."
+    }
 
     // MARK: Reads
 
     /// A lane's events at its current revision (fetched when it moved).
     /// `Busy` keeps the stale rows silently; other failures go to `status`.
     public func laneEvents(_ key: LaneKey) -> LaneEvents? {
-        if let cached = events[key], cached.rev == revs[key] { return cached }
+        let rev = revs[key] ?? Self.missingRev
+        if let cached = events[key], cached.rev == rev { return cached.events }
         do {
             eventFetches += 1
             let fresh = try session.laneEvents(seq: key.seq, lane: key.lane)
-            events[key] = fresh
+            events[key] = EventEntry(rev: rev, events: fresh)
             return fresh
         } catch VizError.Busy {
-            return events[key]
+            return events[key]?.events
         } catch {
-            report(error)
+            reportFromRead(error)
             return nil
         }
     }
@@ -104,16 +126,17 @@ public final class EditorModel {
     /// A lane's blocks under the layout's rule.
     public func blocks(_ key: LaneKey) -> [BlockRow] {
         let rule = layout.blockRule.rule
-        if let c = blockCache[key], c.rev == revs[key], c.rule == rule, !c.stale { return c.blocks }
+        let rev = revs[key] ?? Self.missingRev
+        if let c = blockCache[key], c.rev == rev, c.rule == rule, !c.stale { return c.blocks }
         do {
             blockFetches += 1
             let b = try session.blocks(seq: key.seq, lane: key.lane, rule: rule)
-            blockCache[key] = BlockEntry(rev: revs[key] ?? 0, rule: rule, blocks: b)
+            blockCache[key] = BlockEntry(rev: rev, rule: rule, blocks: b)
             return b
         } catch VizError.Busy {
             return blockCache[key]?.blocks ?? []
         } catch {
-            report(error)
+            reportFromRead(error)
             return []
         }
     }
@@ -158,11 +181,22 @@ public final class EditorModel {
         }
     }
 
+    /// A failure inside a read that runs while a view draws: observed state
+    /// must not change mid-draw, so `status` is set on the next main-actor
+    /// turn, once per distinct error until the next snapshot.
+    private func reportFromRead(_ error: any Error) {
+        let message = (error as? VizError)?.message ?? error.localizedDescription
+        guard message != lastReadFailure else { return }
+        lastReadFailure = message
+        Task { @MainActor [weak self] in self?.status = message }
+    }
+
     public func clearStatus() { status = nil }
 
     // MARK: Selection (Plan Ruling 19)
 
     public func setSelection(_ s: SelectionRow) {
+        let before = selection
         selection = s
         selectedEvents = Set(s.events)
         drawVersion += 1
@@ -170,6 +204,11 @@ public final class EditorModel {
             try session.setSelection(selection: s)
         } catch {
             report(error)
+            // Swift and Rust must not diverge: show what the session holds.
+            let held = (try? session.selection()) ?? before
+            selection = held
+            selectedEvents = Set(held.events)
+            drawVersion += 1
         }
     }
 
