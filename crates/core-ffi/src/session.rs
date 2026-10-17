@@ -877,7 +877,13 @@ impl Session {
 
     /// Stops; the position is kept.
     pub fn stop(&self) -> Result<(), VizError> {
-        self.transport_call(|| host::stop(self.id))
+        self.transport_call(|| {
+            // Behind a rebuild this session's poll is running (its drain
+            // has taken the host out of the slot): the Stop must not be
+            // lost to an empty slot.
+            let _inner = lock(&self.inner);
+            host::stop(self.id)
+        })
     }
 
     /// Moves the position to `tick`.

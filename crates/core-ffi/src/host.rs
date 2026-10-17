@@ -494,7 +494,10 @@ fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
                 if old.engine.take_ended() {
                     old.want_play = false;
                 }
-                let playing = old.want_play || old.engine.state() == PlayState::Playing;
+                // `want_play` is the user's intent (the engine applies Play
+                // and Stop a block late, so its state can lag it). A song in
+                // its release tail is past its end: a Play would restart it.
+                let playing = old.want_play && old.engine.state() != PlayState::Tail;
                 let drain = !matches!(ev, BackendEvent::DeviceLost);
                 if drain {
                     let _ = old.engine.stop();

@@ -405,3 +405,44 @@ fn a_rebuild_right_after_play_still_resumes_playback() {
         assert!(t(&s).playing, "round {round}: playback lost in the rebuild");
     }
 }
+
+#[test]
+fn a_rebuild_during_the_release_tail_does_not_restart_the_song() {
+    let _g = serial();
+    let (s, song) = demo();
+    let len = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.id == song)
+        .unwrap()
+        .length_ticks;
+    s.locate(len - 200).unwrap();
+    s.play(song).unwrap();
+    // The end is a few ms away; the tail then rings out for about a second.
+    ms(200);
+    assert!(t(&s).playing, "in the tail");
+    simulate_event(BackendEvent::DeviceLost);
+    s.transport().unwrap();
+    ms(60);
+    let st = t(&s);
+    assert!(!st.playing, "the song was restarted");
+    assert!(st.tick > len / 2, "back at {}", st.tick);
+}
+
+#[test]
+fn a_stop_during_the_rebuild_drain_is_not_lost() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    ms(40);
+    simulate_event(BackendEvent::DefaultDeviceChanged);
+    let poller = std::sync::Arc::clone(&s);
+    let poll = std::thread::spawn(move || poller.transport().map(|t| t.playing));
+    ms(100);
+    s.stop().unwrap();
+    assert!(poll.join().unwrap().is_ok());
+    ms(60);
+    assert!(!t(&s).playing, "the Stop was lost to the rebuild");
+}
