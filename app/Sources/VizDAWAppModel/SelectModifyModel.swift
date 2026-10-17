@@ -26,12 +26,21 @@ public final class SelectModifyModel {
     /// Why the panel shows what it shows (a dropped drag axis), else nil.
     public var notice: String? { requestIsStale ? nil : storedNotice }
     @ObservationIgnored private var storedNotice: String?
-    /// The selection and snapshot the request was opened over; a change to
-    /// either means the dragged events are no longer what the user has.
-    @ObservationIgnored private var baseline: (selection: SelectionRow, version: UInt64)?
+    /// The selection the request was opened over. The request is stale
+    /// when the selection moved on, or a dragged event no longer exists
+    /// (other snapshots, e.g. plugin loads, leave it alone).
+    @ObservationIgnored private var baseline: SelectionRow?
     private var requestIsStale: Bool {
         guard let b = baseline, let e = editor else { return false }
-        return e.selection != b.selection || e.snapshotVersion != b.version
+        if e.selection != b { return true }
+        guard let p = pending, let ids = p.events, !p.lanes.isEmpty else { return false }
+        var present = Set<UInt64>()
+        for lane in p.lanes {
+            // An unreadable lane (Busy) is not evidence of a missing event.
+            guard let rows = e.laneEvents(lane)?.events else { return false }
+            present.formUnion(rows.map(\.id))
+        }
+        return !ids.allSatisfy(present.contains)
     }
     /// The dragged events an exact-mode panel acts on (the command carries
     /// no ids, so Apply selects them first).
@@ -41,6 +50,7 @@ public final class SelectModifyModel {
     public static let nothingMessage = "Turn on Select or Modify first."
     public static let noLanesMessage = "Select lanes to search first: drag in a ruler or select a block."
     public static let invalidMessage = "Fix the fields marked in red first."
+    public static let notSelectedMessage = "The dragged notes could not be selected."
     public static let noNameMessage = "Name the template first."
 
     /// Modify Again repeats on the selection in place, whatever the last
@@ -93,7 +103,7 @@ public final class SelectModifyModel {
         filter = nil
         pending = request.events == nil ? nil : request
         storedNotice = request.droppedAxis?.message
-        baseline = editor.map { ($0.selection, $0.snapshotVersion) }
+        baseline = editor?.selection
         present()
     }
 
@@ -143,7 +153,10 @@ public final class SelectModifyModel {
                 SelectionRow(timeRange: before.timeRange, lanes: p.lanes.map(\.ref), events: events))
             // A refused selection (Busy, an error) was rolled back and
             // reported: do not run on the old one.
-            guard Set(editor.selection.events) == Set(events) else { return false }
+            guard Set(editor.selection.events) == Set(events) else {
+                if editor.status == nil { editor.status = Self.notSelectedMessage }
+                return false
+            }
         }
         if config.rule != nil, config.select.mode != .refine, editor.selection.lanes.isEmpty {
             editor.status = Self.noLanesMessage
@@ -156,7 +169,7 @@ public final class SelectModifyModel {
         if ok {
             pending = nil
             storedNotice = nil
-        baseline = nil
+            baseline = nil
         } else if pending != nil {
             editor.setSelection(before)
         }

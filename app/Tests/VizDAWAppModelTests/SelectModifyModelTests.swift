@@ -161,11 +161,11 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
                 var c = SelectModifyConfig.preset(.change)
                 c.modify.op = .change(target: .duration, op: .add, amount: .constant(value: off))
                 return c
-            }(), events: [7, 8], lanes: [LaneKey(3, 31)], range: nil, droppedAxis: .vertical)
+            }(), events: [1, 2], lanes: [LaneKey(3, 31)], range: nil, droppedAxis: .vertical)
         s.open(req)
         #expect(s.notice == DroppedAxis.vertical.message)
         #expect(s.apply())
-        #expect(f.selectionSets.last?.events == [7, 8])
+        #expect(f.selectionSets.last?.events == [1, 2])
         #expect(
             f.edits.last
                 == .selectAndModify(
@@ -206,16 +206,17 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
         f.selectionError = VizError.Busy(message: "busy")
         #expect(!s.apply())
         #expect(f.edits.isEmpty && m.editor.status != nil)
-        withExtendedLifetime(m) {}
     }
 
     @Test func aFailedEditRestoresTheSelection() throws {
         let (f, m, s) = try panel()
-        selectChords(m)
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 31)], events: [2]))
         let before = m.editor.selection
+        let sets = f.selectionSets.count
         s.open(dragRequest())
         f.editError = VizError.Model(message: "no")
         #expect(!s.apply())
+        #expect(f.selectionSets.count == sets + 2)
         #expect(m.editor.selection == before && f.selectionSets.last == before)
     }
 
@@ -265,5 +266,29 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
         let sets = f.selectionSets.count
         #expect(s.apply())
         #expect(f.selectionSets.count == sets)
+    }
+
+    @Test func anUnrelatedSnapshotKeepsTheRequest() throws {
+        let (f, m, s) = try panel()
+        s.open(
+            ModifyRequest(
+                task: .move, config: .preset(.move), events: [1], lanes: [LaneKey(3, 31)], range: nil,
+                droppedAxis: .vertical))
+        let v = m.editor.snapshotVersion
+        f.snap.version += 1
+        m.editor.sync(f.snap)
+        #expect(m.editor.snapshotVersion == v + 1)
+        #expect(s.notice == DroppedAxis.vertical.message)
+        withExtendedLifetime(m) {}
+    }
+
+    @Test func aVanishedEventDropsTheRequest() throws {
+        let (_, m, s) = try panel()
+        s.open(
+            ModifyRequest(
+                task: .move, config: .preset(.move), events: [99], lanes: [LaneKey(3, 31)], range: nil,
+                droppedAxis: .vertical))
+        #expect(s.notice == nil)
+        withExtendedLifetime(m) {}
     }
 }
