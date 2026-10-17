@@ -46,12 +46,224 @@ pub enum Modify {
     },
     /// Change CC, pitch-bend and pressure values (clamped to u32).
     ControllerValue(ValueOp),
+    /// Map pitches: a note or poly pressure whose pitch is a `from` takes
+    /// its `to`.
+    NoteMap {
+        /// `(from, to)` pairs, each 0–127.
+        map: Vec<(u8, u8)>,
+    },
+    /// Change one value of each fitting event by `op` with `amount`.
+    Change {
+        /// Which value.
+        target: ValueTarget,
+        /// How the amount combines with it.
+        op: ChangeOp,
+        /// The amount (percent for `Scale`).
+        amount: Amount,
+    },
+}
+
+/// Which value [`Modify::Change`] edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueTarget {
+    /// Note velocity (16-bit).
+    Velocity,
+    /// Note release velocity (16-bit).
+    ReleaseVelocity,
+    /// Note length in ticks.
+    Duration,
+    /// CC, pitch-bend and pressure values (32-bit).
+    Value,
+}
+
+/// How [`Modify::Change`] combines its amount with each value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChangeOp {
+    /// The amount.
+    Set,
+    /// The value times the amount, in percent.
+    Scale,
+    /// The value plus the amount.
+    Add,
+    /// The value kept inside `min..=max`.
+    Limit {
+        /// Lowest kept.
+        min: i64,
+        /// Highest kept.
+        max: i64,
+    },
+    /// The lowest changed value becomes `low`, the highest `high`, the rest
+    /// in proportion.
+    Compress {
+        /// New lowest.
+        low: i64,
+        /// New highest.
+        high: i64,
+    },
+    /// Notes end where the next changed note of their lane starts
+    /// (durations only).
+    Legato,
+}
+
+/// The shape of a [`Amount::Line`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Curve {
+    /// Straight.
+    Straight,
+    /// Slow, then fast.
+    EaseIn,
+    /// Fast, then slow.
+    EaseOut,
+    /// Slow at both ends.
+    SCurve,
+}
+
+/// The wave of an [`Amount::Oscillator`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Wave {
+    /// Sine, starting in the middle and rising.
+    Sine,
+    /// High for the first half period, low for the second.
+    Square,
+    /// From low up to high at half a period, back down.
+    Triangle,
+    /// From low rising to high, then jumping back.
+    Saw,
+}
+
+/// An amount that may change with each event's position (Plan 4c Ruling 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Amount {
+    /// The same for every event.
+    Constant {
+        /// The amount.
+        value: i64,
+    },
+    /// From `from` at the first changed event to `to` at the last.
+    Line {
+        /// At the first event.
+        from: i64,
+        /// At the last event.
+        to: i64,
+        /// Shape.
+        curve: Curve,
+    },
+    /// A wave between `low` and `high`, measured from the first event.
+    Oscillator {
+        /// Wave.
+        wave: Wave,
+        /// Lowest.
+        low: i64,
+        /// Highest.
+        high: i64,
+        /// Period (> 0).
+        period: Tick,
+        /// Shift of the wave.
+        phase: Tick,
+    },
+    /// A value in `low..=high` per event, fixed by `seed` and the event.
+    Random {
+        /// Lowest.
+        low: i64,
+        /// Highest.
+        high: i64,
+        /// Seed.
+        seed: u64,
+    },
+}
+
+fn lerp(a: i64, b: i64, y: f64) -> i64 {
+    (a as f64 + (b as f64 - a as f64) * y).round() as i64
+}
+
+fn splitmix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+impl Amount {
+    /// The amount for event `id` at `t` when the changed events start
+    /// between `first` and `last`.
+    pub fn at(&self, t: Tick, first: Tick, last: Tick, id: EventId) -> i64 {
+        match *self {
+            Amount::Constant { value } => value,
+            Amount::Line { from, to, curve } => {
+                let span = (last - first).0;
+                let x = if span > 0 {
+                    (t - first).0 as f64 / span as f64
+                } else {
+                    0.0
+                };
+                let y = match curve {
+                    Curve::Straight => x,
+                    Curve::EaseIn => x * x,
+                    Curve::EaseOut => 1.0 - (1.0 - x) * (1.0 - x),
+                    Curve::SCurve => x * x * (3.0 - 2.0 * x),
+                };
+                lerp(from, to, y)
+            }
+            Amount::Oscillator {
+                wave,
+                low,
+                high,
+                period,
+                phase,
+            } => {
+                let p = period.0.max(1);
+                let ph = (t - first).0.saturating_add(phase.0).rem_euclid(p) as f64 / p as f64;
+                let w = match wave {
+                    Wave::Sine => (std::f64::consts::TAU * ph).sin(),
+                    Wave::Square => {
+                        if ph < 0.5 {
+                            1.0
+                        } else {
+                            -1.0
+                        }
+                    }
+                    Wave::Triangle => 1.0 - 4.0 * (ph - 0.5).abs(),
+                    Wave::Saw => 2.0 * ph - 1.0,
+                };
+                lerp(low, high, (w + 1.0) / 2.0)
+            }
+            Amount::Random { low, high, seed } => {
+                let (lo, hi) = if low <= high {
+                    (low, high)
+                } else {
+                    (high, low)
+                };
+                let span = i128::from(hi) - i128::from(lo) + 1;
+                let h = i128::from(splitmix(seed ^ splitmix(id.0)));
+                i64::try_from(i128::from(lo) + h % span).unwrap_or(hi)
+            }
+        }
+    }
 }
 
 /// Pitch changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Transpose {
+    /// By `steps` degrees of a scale ([`scale_step`]).
+    Diatonic {
+        /// Degrees (negative: down).
+        steps: i8,
+        /// Root pitch class 0–11.
+        root: u8,
+        /// 12-bit scale mask.
+        mask: u16,
+    },
+    /// Mirrored around `axis` (clamped at 0 and 127).
+    Invert {
+        /// The pitch that stays.
+        axis: u8,
+    },
     /// By an interval (clamped at 0 and 127).
     Interval {
         /// Semitones.
@@ -139,6 +351,13 @@ impl Modify {
             Modify::ScaleTime { .. } => "Scale Time",
             Modify::Move { .. } => "Move",
             Modify::ControllerValue(_) => "Change Controller Values",
+            Modify::NoteMap { .. } => "Transpose",
+            Modify::Change { target, .. } => match target {
+                ValueTarget::Velocity => "Change Velocity",
+                ValueTarget::ReleaseVelocity => "Change Release Velocity",
+                ValueTarget::Duration => "Change Duration",
+                ValueTarget::Value => "Change Values",
+            },
         }
     }
 }
@@ -234,10 +453,39 @@ fn modify_one(e: &mut Event, m: &Modify) -> Result<()> {
                 *pitch = match t {
                     Transpose::Interval { semitones } => shift_pitch(*pitch, i32::from(*semitones)),
                     Transpose::ToScale { root, mask } => snap_to_scale(*pitch, *root, *mask),
+                    Transpose::Diatonic { steps, root, mask } => {
+                        if *root > 11 || mask & 0x0fff == 0 {
+                            return Err(ModelError::range(
+                                "transpose.scale",
+                                format!("{root}/{mask:#x}"),
+                            ));
+                        }
+                        scale_step(*pitch, i32::from(*steps), *root, *mask)
+                    }
+                    Transpose::Invert { axis } => {
+                        if *axis > 127 {
+                            return Err(ModelError::range("transpose.axis", axis));
+                        }
+                        shift_pitch(0, 2 * i32::from(*axis) - i32::from(*pitch))
+                    }
                 }
             }
             _ => {}
         },
+        Modify::NoteMap { map } => {
+            if map.iter().any(|(a, b)| *a > 127 || *b > 127) {
+                return Err(ModelError::range("note_map", "a pitch above 127"));
+            }
+            if let EventBody::Note { pitch, .. } | EventBody::PolyPressure { pitch, .. } =
+                &mut e.body
+            {
+                if let Some((_, to)) = map.iter().find(|(from, _)| *from == *pitch) {
+                    *pitch = *to;
+                }
+            }
+        }
+        // Applied to the whole set in `apply_modify`.
+        Modify::Change { .. } => {}
         Modify::Quantize(q) => {
             if let EventBody::Note { .. } = e.body {
                 e.tick = quantize_tick(e.tick, q)?;
@@ -283,42 +531,169 @@ fn modify_one(e: &mut Event, m: &Modify) -> Result<()> {
     Ok(())
 }
 
-/// Applies `m` to the events `ids`.
+/// Notes end where the next of `ids` in their lane starts.
+fn legato(d: &mut Document, ids: &[EventId], r: &mut Report) -> Result<()> {
+    let mut by_lane: BTreeMap<_, Vec<(Tick, EventId)>> = BTreeMap::new();
+    for id in ids {
+        let (ev, loc) = d.event(*id)?;
+        if let EventBody::Note { .. } = ev.body {
+            by_lane
+                .entry((loc.seq, loc.lane))
+                .or_default()
+                .push((ev.tick, *id));
+        }
+    }
+    for notes in by_lane.values_mut() {
+        notes.sort();
+        for pair in notes.windows(2) {
+            if let [(t0, id), (t1, _)] = pair {
+                if t1 > t0 {
+                    let len = *t1 - *t0;
+                    edit_events(d, &[*id], r, |e| {
+                        if let EventBody::Note { duration, .. } = &mut e.body {
+                            *duration = len;
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_value(e: &Event, t: ValueTarget) -> Option<i64> {
+    match (t, &e.body) {
+        (ValueTarget::Velocity, EventBody::Note { velocity, .. }) => Some(i64::from(*velocity)),
+        (
+            ValueTarget::ReleaseVelocity,
+            EventBody::Note {
+                release_velocity, ..
+            },
+        ) => Some(i64::from(*release_velocity)),
+        (ValueTarget::Duration, EventBody::Note { duration, .. }) => Some(duration.0),
+        (
+            ValueTarget::Value,
+            EventBody::Cc { value, .. }
+            | EventBody::PitchBend { value }
+            | EventBody::ChannelPressure { value }
+            | EventBody::PolyPressure { value, .. },
+        ) => Some(i64::from(*value)),
+        _ => None,
+    }
+}
+
+fn write_value(e: &mut Event, t: ValueTarget, v: i64) {
+    let v16 = u16::try_from(v.clamp(0, i64::from(u16::MAX))).unwrap_or(u16::MAX);
+    let v32 = u32::try_from(v.clamp(0, i64::from(u32::MAX))).unwrap_or(u32::MAX);
+    match (t, &mut e.body) {
+        (ValueTarget::Velocity, EventBody::Note { velocity, .. }) => *velocity = v16,
+        (
+            ValueTarget::ReleaseVelocity,
+            EventBody::Note {
+                release_velocity, ..
+            },
+        ) => *release_velocity = v16,
+        (ValueTarget::Duration, EventBody::Note { duration, .. }) => *duration = Tick(v.max(0)),
+        (
+            ValueTarget::Value,
+            EventBody::Cc { value, .. }
+            | EventBody::PitchBend { value }
+            | EventBody::ChannelPressure { value }
+            | EventBody::PolyPressure { value, .. },
+        ) => *value = v32,
+        _ => {}
+    }
+}
+
+fn narrow(v: i128) -> i64 {
+    i64::try_from(v).unwrap_or(if v < 0 { i64::MIN } else { i64::MAX })
+}
+
+fn apply_change(
+    d: &mut Document,
+    ids: &[EventId],
+    target: ValueTarget,
+    op: ChangeOp,
+    amount: &Amount,
+    r: &mut Report,
+) -> Result<()> {
+    if let ChangeOp::Legato = op {
+        if target != ValueTarget::Duration {
+            return Err(ModelError::invalid("legato changes note lengths only"));
+        }
+        return legato(d, ids, r);
+    }
+    if let Amount::Oscillator { period, .. } = amount {
+        if period.0 <= 0 {
+            return Err(ModelError::range("amount.period", period.0));
+        }
+    }
+    if let ChangeOp::Limit { min, max } = op {
+        if min > max {
+            return Err(ModelError::range("limit", format!("{min}..{max}")));
+        }
+    }
+    let mut found: Vec<(EventId, Tick, i64)> = Vec::new();
+    for id in ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let (ev, _) = d.event(id)?;
+        if let Some(v) = read_value(ev, target) {
+            found.push((id, ev.tick, v));
+        }
+    }
+    let (Some(first), Some(last)) = (
+        found.iter().map(|f| f.1).min(),
+        found.iter().map(|f| f.1).max(),
+    ) else {
+        return Ok(());
+    };
+    let lo = found.iter().map(|f| f.2).min().unwrap_or(0);
+    let hi = found.iter().map(|f| f.2).max().unwrap_or(0);
+    for (id, tick, v) in found {
+        let a = amount.at(tick, first, last, id);
+        let next = match op {
+            ChangeOp::Set => a,
+            ChangeOp::Scale => narrow(i128::from(v) * i128::from(a) / 100),
+            ChangeOp::Add => v.saturating_add(a),
+            ChangeOp::Limit { min, max } => v.clamp(min, max),
+            ChangeOp::Compress { low, high } => {
+                if hi == lo {
+                    low
+                } else {
+                    narrow(
+                        i128::from(low)
+                            + (i128::from(v) - i128::from(lo))
+                                * (i128::from(high) - i128::from(low))
+                                / (i128::from(hi) - i128::from(lo)),
+                    )
+                }
+            }
+            ChangeOp::Legato => v,
+        };
+        edit_events(d, &[id], r, |e| {
+            write_value(e, target, next);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Applies `m` to the events `ids`; returns the events the selection holds
+/// afterwards.
 pub(crate) fn apply_modify(
     d: &mut Document,
     ids: &[EventId],
     m: &Modify,
     r: &mut Report,
-) -> Result<()> {
-    if let Modify::Legato = m {
-        // Group notes by lane, then extend each to the next start.
-        let mut by_lane: BTreeMap<_, Vec<(Tick, EventId)>> = BTreeMap::new();
-        for id in ids {
-            let (ev, loc) = d.event(*id)?;
-            if let EventBody::Note { .. } = ev.body {
-                by_lane
-                    .entry((loc.seq, loc.lane))
-                    .or_default()
-                    .push((ev.tick, *id));
-            }
-        }
-        for notes in by_lane.values_mut() {
-            notes.sort();
-            for pair in notes.windows(2) {
-                if let [(t0, id), (t1, _)] = pair {
-                    if t1 > t0 {
-                        let len = *t1 - *t0;
-                        edit_events(d, &[*id], r, |e| {
-                            if let EventBody::Note { duration, .. } = &mut e.body {
-                                *duration = len;
-                            }
-                            Ok(())
-                        })?;
-                    }
-                }
-            }
-        }
-        return Ok(());
+) -> Result<Vec<EventId>> {
+    match m {
+        Modify::Legato => legato(d, ids, r)?,
+        Modify::Change { target, op, amount } => apply_change(d, ids, *target, *op, amount, r)?,
+        _ => edit_events(d, ids, r, |e| modify_one(e, m))?,
     }
-    edit_events(d, ids, r, |e| modify_one(e, m))
+    Ok(ids.to_vec())
 }

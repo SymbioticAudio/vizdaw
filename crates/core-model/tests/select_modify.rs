@@ -4,7 +4,10 @@ use core_model::command::{
 use core_model::document::Document;
 use core_model::event::{EventBody, EventKind, EventSpec};
 use core_model::ids::{AnyId, EventId, LaneId, SeqId};
-use core_model::modify::{DurationOp, Modify, ModifyTemplate, Quantize, Transpose, ValueOp};
+use core_model::modify::{
+    Amount, ChangeOp, Curve, DurationOp, Modify, ModifyTemplate, Quantize, Transpose, ValueOp,
+    ValueTarget, Wave,
+};
 use core_model::rule::{Rule, SelectMode, events_matching};
 use core_model::selection::{Selection, ViewFilter};
 use core_model::time::{PPQ, Tick};
@@ -594,4 +597,258 @@ fn a_template_saved_before_to_copy_existed_still_loads() {
         serde_json::from_str(r#"{"rule":null,"mode":"select","modify":"legato"}"#).unwrap();
     assert!(!t.to_copy);
     assert_eq!(t.modify, Some(Modify::Legato));
+}
+
+const C_MAJOR: u16 = 0b1010_1011_0101;
+/// The notes of `doc()` in time order: 60, 64, 67, 72; velocities 10–40.
+const NOTES: [u64; 4] = [0, 1, 2, 4];
+
+fn try_sm(d: &Document, sel: &Selection, modify: Modify) -> core_model::Result<Applied> {
+    apply_in(
+        d,
+        Context {
+            selection: sel,
+            filter: &ViewFilter::default(),
+        },
+        &Command::SelectAndModify {
+            rule: None,
+            mode: SelectMode::Select,
+            modify: Some(modify),
+            to_copy: false,
+        },
+    )
+}
+
+fn notes_after(modify: Modify) -> Document {
+    try_sm(&doc(), &lane_sel(&NOTES), modify).unwrap().doc
+}
+
+fn pitches(d: &Document) -> Vec<u8> {
+    NOTES
+        .iter()
+        .map(|i| match body(d, *i) {
+            EventBody::Note { pitch, .. } => pitch,
+            b => panic!("{b:?}"),
+        })
+        .collect()
+}
+
+fn velocities(d: &Document) -> Vec<u16> {
+    NOTES
+        .iter()
+        .map(|i| match body(d, *i) {
+            EventBody::Note { velocity, .. } => velocity,
+            b => panic!("{b:?}"),
+        })
+        .collect()
+}
+
+fn change(target: ValueTarget, op: ChangeOp, amount: Amount) -> Modify {
+    Modify::Change { target, op, amount }
+}
+
+fn velocity_change(op: ChangeOp, amount: Amount) -> Vec<u16> {
+    velocities(&notes_after(change(ValueTarget::Velocity, op, amount)))
+}
+
+const fn constant(value: i64) -> Amount {
+    Amount::Constant { value }
+}
+
+#[test]
+fn diatonic_inversion_and_note_map() {
+    let d = notes_after(Modify::Transpose(Transpose::Diatonic {
+        steps: 2,
+        root: 0,
+        mask: C_MAJOR,
+    }));
+    assert_eq!(
+        pitches(&d),
+        vec![64, 67, 71, 76],
+        "two degrees up in C major"
+    );
+    let d = notes_after(Modify::Transpose(Transpose::Invert { axis: 64 }));
+    assert_eq!(pitches(&d), vec![68, 64, 61, 56], "mirrored around E4");
+    let d = notes_after(Modify::NoteMap {
+        map: vec![(60, 36), (67, 38)],
+    });
+    assert_eq!(pitches(&d), vec![36, 64, 38, 72]);
+    let sel = lane_sel(&NOTES);
+    for bad in [
+        Modify::Transpose(Transpose::Diatonic {
+            steps: 1,
+            root: 12,
+            mask: C_MAJOR,
+        }),
+        Modify::Transpose(Transpose::Diatonic {
+            steps: 1,
+            root: 0,
+            mask: 0,
+        }),
+        Modify::Transpose(Transpose::Invert { axis: 128 }),
+        Modify::NoteMap {
+            map: vec![(60, 200)],
+        },
+    ] {
+        assert!(try_sm(&doc(), &sel, bad.clone()).is_err(), "{bad:?}");
+    }
+    assert_eq!(Modify::NoteMap { map: vec![] }.name(), "Transpose");
+}
+
+#[test]
+fn constant_value_changes() {
+    assert_eq!(
+        velocity_change(ChangeOp::Add, constant(5)),
+        vec![15, 25, 35, 45]
+    );
+    assert_eq!(
+        velocity_change(ChangeOp::Scale, constant(50)),
+        vec![5, 10, 15, 20]
+    );
+    assert_eq!(
+        velocity_change(ChangeOp::Set, constant(70_000)),
+        vec![65_535; 4]
+    );
+    assert_eq!(velocity_change(ChangeOp::Add, constant(-100)), vec![0; 4]);
+    assert_eq!(
+        velocity_change(ChangeOp::Limit { min: 15, max: 35 }, constant(0)),
+        vec![15, 20, 30, 35]
+    );
+    assert_eq!(
+        velocity_change(
+            ChangeOp::Compress {
+                low: 100,
+                high: 400
+            },
+            constant(0)
+        ),
+        vec![100, 200, 300, 400]
+    );
+}
+
+#[test]
+fn shaped_and_oscillating_amounts_follow_the_event_times() {
+    // The notes start at 0, Q+10, 2Q and 4Q.
+    let line = |curve| {
+        velocity_change(
+            ChangeOp::Set,
+            Amount::Line {
+                from: 0,
+                to: 400,
+                curve,
+            },
+        )
+    };
+    assert_eq!(line(Curve::Straight), vec![0, 100, 200, 400]);
+    assert_eq!(line(Curve::EaseIn), vec![0, 25, 100, 400]);
+    let osc = |wave, period| {
+        velocity_change(
+            ChangeOp::Set,
+            Amount::Oscillator {
+                wave,
+                low: 10,
+                high: 90,
+                period: Tick(period),
+                phase: Tick(0),
+            },
+        )
+    };
+    assert_eq!(osc(Wave::Square, 2 * Q), vec![90, 10, 90, 90]);
+    assert_eq!(osc(Wave::Saw, 4 * Q), vec![10, 30, 50, 10]);
+    let random = || {
+        velocity_change(
+            ChangeOp::Set,
+            Amount::Random {
+                low: 10,
+                high: 20,
+                seed: 7,
+            },
+        )
+    };
+    let a = random();
+    assert_eq!(a, random(), "the same seed gives the same values");
+    assert!(a.iter().all(|v| (10..=20).contains(v)), "{a:?}");
+}
+
+#[test]
+fn release_velocity_duration_and_value_targets() {
+    let d = notes_after(change(
+        ValueTarget::ReleaseVelocity,
+        ChangeOp::Set,
+        constant(7),
+    ));
+    for i in NOTES {
+        assert!(matches!(
+            body(&d, i),
+            EventBody::Note {
+                release_velocity: 7,
+                ..
+            }
+        ));
+    }
+    let d = notes_after(change(
+        ValueTarget::Duration,
+        ChangeOp::Add,
+        constant(-Q / 4),
+    ));
+    let durations: Vec<i64> = NOTES
+        .iter()
+        .map(|i| match body(&d, *i) {
+            EventBody::Note { duration, .. } => duration.0,
+            b => panic!("{b:?}"),
+        })
+        .collect();
+    assert_eq!(durations, vec![Q / 4, Q / 4, 3 * Q / 4, 7 * Q / 4]);
+    let d = notes_after(change(ValueTarget::Duration, ChangeOp::Legato, constant(0)));
+    assert!(matches!(body(&d, 0), EventBody::Note { duration: Tick(t), .. } if t == Q + 10));
+    // The CC (ev3) is the only value target.
+    let d = try_sm(
+        &doc(),
+        &lane_sel(&[0, 3]),
+        change(ValueTarget::Value, ChangeOp::Add, constant(10)),
+    )
+    .unwrap()
+    .doc;
+    assert_eq!(
+        body(&d, 3),
+        EventBody::Cc {
+            index: 7,
+            value: 110
+        }
+    );
+    assert!(matches!(body(&d, 0), EventBody::Note { velocity: 10, .. }));
+}
+
+#[test]
+fn bad_amounts_and_targets_are_refused() {
+    let sel = lane_sel(&NOTES);
+    for bad in [
+        change(ValueTarget::Velocity, ChangeOp::Legato, constant(0)),
+        change(
+            ValueTarget::Velocity,
+            ChangeOp::Limit { min: 5, max: 4 },
+            constant(0),
+        ),
+        change(
+            ValueTarget::Velocity,
+            ChangeOp::Set,
+            Amount::Oscillator {
+                wave: Wave::Sine,
+                low: 0,
+                high: 1,
+                period: Tick(0),
+                phase: Tick(0),
+            },
+        ),
+    ] {
+        assert!(try_sm(&doc(), &sel, bad.clone()).is_err(), "{bad:?}");
+    }
+    assert_eq!(
+        change(ValueTarget::Velocity, ChangeOp::Set, constant(0)).name(),
+        "Change Velocity"
+    );
+    assert_eq!(
+        change(ValueTarget::Value, ChangeOp::Set, constant(0)).name(),
+        "Change Values"
+    );
 }

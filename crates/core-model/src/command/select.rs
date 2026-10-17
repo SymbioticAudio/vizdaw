@@ -55,7 +55,7 @@ pub(crate) fn apply(
             }
             targets = copies;
         }
-        apply_modify(d, &targets, m, r)?;
+        targets = apply_modify(d, &targets, m, r)?;
     }
     Ok(Selection {
         time_range: base.time_range,
