@@ -3,7 +3,9 @@
 //! Built off the audio thread; read on it by binary search. // RT (reads)
 
 use super::TargetIdx;
+use crate::schedule::TargetKind;
 use core_model::automation::{AutomationTarget, unit};
+use core_model::document::{Document, SlotOwner};
 use core_model::ids::{PluginInstanceId, StripId};
 use core_model::mixer::ParamId;
 
@@ -217,5 +219,21 @@ impl Automation {
                 l.instrument = target(id);
             }
         }
+    }
+
+    /// Binds plugin-parameter lanes by the owner of their slot (Plan 4d
+    /// P10): a plugin instrument's lane gets that instrument's target
+    /// whether or not notes are routed to it; an insert's lane stays
+    /// unbound. Returns how many lanes were bound. Not RT.
+    pub fn bind_plugins(&mut self, doc: &Document, targets: &super::TargetTable) -> usize {
+        let mut bound = 0;
+        self.bind_instruments(|id| match doc.find_slot(id) {
+            Some(SlotOwner::Instrument(_)) => targets.find(&TargetKind::PluginInstrument(id)),
+            _ => None,
+        });
+        for l in self.lanes.iter() {
+            bound += usize::from(l.instrument.is_some());
+        }
+        bound
     }
 }

@@ -248,16 +248,8 @@ fn a_plugin_instrument_lane_resolves_its_target_without_routed_notes() {
     );
     let t = table.find(&TargetKind::PluginInstrument(inst));
     assert!(t.is_some());
-    // The same binding Engine::load makes: by the slot's owner.
     let mut sch = sch;
-    let doc = b.doc();
-    sch.automation
-        .bind_instruments(|id| match doc.find_slot(id) {
-            Some(core_model::document::SlotOwner::Instrument(_)) => {
-                table.find(&TargetKind::PluginInstrument(id))
-            }
-            _ => None,
-        });
+    assert_eq!(sch.automation.bind_plugins(b.doc(), &table), 1);
     let by_dest = |p| {
         sch.automation
             .lanes()
@@ -268,4 +260,70 @@ fn a_plugin_instrument_lane_resolves_its_target_without_routed_notes() {
     };
     assert_eq!(by_dest(inst), t);
     assert_eq!(by_dest(ins), None, "an insert is found in the graph");
+}
+
+#[test]
+fn a_failed_automation_only_instrument_is_reported_and_capped_lanes_resolve_nothing() {
+    let mut b = Builder::new();
+    let (_, inst) = b
+        .plugin_dest("Synth", core_engine::graph::TestInstrument::plugin("synth"))
+        .unwrap();
+    let (seq, lane) = b.sequence("S", "Auto", None).unwrap();
+    b.events(
+        seq,
+        lane,
+        vec![auto(
+            0,
+            AutomationTarget::PluginParam(inst, ParamId(0)),
+            0.5,
+        )],
+    )
+    .unwrap();
+    let (_, report) = compile(
+        b.doc(),
+        seq,
+        &CompileOptions::new(SR),
+        &mut |_: &TargetKind| Ok(Err("cannot load".to_string())),
+    )
+    .unwrap();
+    assert_eq!(report.unroutable.len(), 1);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("automation of plugin instance") && w.contains("cannot load")),
+        "{:?}",
+        report.warnings
+    );
+
+    // M2: (created after the insert, the instrument sorts last) its only lane lies past the cap, so nothing resolves.
+    let mut b = Builder::new();
+    let s = b.strip_of(StripKind::Master).unwrap();
+    let ins = b.insert(s, PluginRef::from_legacy("clap:x")).unwrap();
+    let (_, inst) = b
+        .plugin_dest("Synth", core_engine::graph::TestInstrument::plugin("synth"))
+        .unwrap();
+    let (seq, lane) = b.sequence("S", "Auto", None).unwrap();
+    let mut events: Vec<EventSpec> = (0..MAX_AUTO_LANES as u64)
+        .map(|p| auto(0, AutomationTarget::PluginParam(ins, ParamId(p)), 0.5))
+        .collect();
+    events.push(auto(
+        0,
+        AutomationTarget::PluginParam(inst, ParamId(0)),
+        0.5,
+    ));
+    b.events(seq, lane, events).unwrap();
+    let mut asked = 0;
+    let (_, report) = compile(
+        b.doc(),
+        seq,
+        &CompileOptions::new(SR),
+        &mut |_: &TargetKind| {
+            asked += 1;
+            Ok(Err("x".to_string()))
+        },
+    )
+    .unwrap();
+    assert_eq!(report.automation_dropped_lanes, 1);
+    assert_eq!(asked, 0);
 }

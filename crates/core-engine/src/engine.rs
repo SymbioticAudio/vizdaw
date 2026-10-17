@@ -20,7 +20,7 @@ use crate::schedule::{
     TempoTable, compile,
 };
 use crate::transport::PlayState;
-use core_model::document::{DestKind, Document, SlotOwner};
+use core_model::document::{DestKind, Document};
 use core_model::ids::{DestId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
 use core_model::time::Tick;
@@ -409,13 +409,7 @@ impl Engine {
         // Plugin-parameter lanes: the target of a plugin instrument (by
         // the slot's owner, not by routing, Plan 4d P10) and the
         // parameters the plugin declares stepped (Rulings 8, 12).
-        let targets = &self.targets;
-        schedule
-            .automation
-            .bind_instruments(|id| match doc.find_slot(id) {
-                Some(SlotOwner::Instrument(_)) => targets.find(&TargetKind::PluginInstrument(id)),
-                _ => None,
-            });
+        report.automation_instrument_lanes = schedule.automation.bind_plugins(doc, &self.targets);
         let inserts = &self.inserts;
         schedule.automation.mark_stepped(|d| match d {
             crate::schedule::AutoDest::Plugin(id, p) => inserts.param_stepped(id, p),

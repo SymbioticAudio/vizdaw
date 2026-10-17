@@ -501,6 +501,10 @@ fn automation_alone_brings_up_a_plugin_instrument() {
     let (mut engine, _be, made) = engine(4096);
     let report = engine.load(b.doc(), seq).unwrap();
     assert_eq!(report.automation_lanes, 1);
+    assert_eq!(
+        report.automation_instrument_lanes, 1,
+        "bound by Engine::load"
+    );
     assert!(report.unroutable.is_empty(), "{:?}", report.warnings);
     assert_eq!(plugin_targets(&engine), vec![(TargetIdx(0), id)]);
     assert_eq!(made.made(), 1);

@@ -83,6 +83,9 @@ pub struct CompileReport {
     pub automation_missing: usize,
     /// Lanes beyond [`MAX_AUTO_LANES`], dropped.
     pub automation_dropped_lanes: usize,
+    /// Plugin-parameter lanes bound to a plugin instrument's target
+    /// (set by `Engine::load`).
+    pub automation_instrument_lanes: usize,
 }
 
 type Routes = Result<Vec<TargetIdx>, String>;
@@ -152,27 +155,33 @@ pub fn compile(
         // Stable: play order stays on a shared tick.
         pts.sort_by_key(|p| p.0);
     }
+    let (automation, dropped) = Automation::build(raw);
+    report.automation_lanes = automation.lanes().len();
+    report.automation_points = automation.point_count();
+    report.automation_dropped_lanes = dropped;
     // A plugin instrument's parameter lanes need its target even when no
-    // note is routed to it (Plan 4d P10): resolve it here. A failure
-    // leaves the lane unbound; the instrument is then not playing.
+    // note is routed to it (Plan 4d P10): resolve it here, for the lanes
+    // that play. A failure leaves the lane unbound and is reported.
     let mut wanted: Vec<PluginInstanceId> = Vec::new();
-    for (d, _, _) in &raw {
-        if let AutoDest::Plugin(id, _) = d {
-            if matches!(doc.find_slot(*id), Some(SlotOwner::Instrument(_))) && !wanted.contains(id)
+    for l in automation.lanes() {
+        if let AutoDest::Plugin(id, _) = l.dest {
+            if matches!(doc.find_slot(id), Some(SlotOwner::Instrument(_))) && !wanted.contains(&id)
             {
-                wanted.push(*id);
+                wanted.push(id);
             }
         }
     }
     for id in wanted {
         let t0 = Instant::now();
-        let _ = resolve(&TargetKind::PluginInstrument(id))?;
+        let got = resolve(&TargetKind::PluginInstrument(id))?;
         resolving += t0.elapsed();
+        if let Err(why) = got {
+            report.unroutable.push(Unroutable {
+                path: Vec::new(),
+                reason: format!("automation of plugin instance {id}: {why}"),
+            });
+        }
     }
-    let (automation, dropped) = Automation::build(raw);
-    report.automation_lanes = automation.lanes().len();
-    report.automation_points = automation.point_count();
-    report.automation_dropped_lanes = dropped;
 
     for r in flat {
         if matches!(r.body, EventBody::AudioRegion { .. }) {
