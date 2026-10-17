@@ -179,3 +179,34 @@ fn a_closed_editor_ends_its_open_gesture() {
     assert!(s.idle().unwrap().snapshot.is_none());
     s.end_plugin_gestures(999).unwrap();
 }
+
+#[test]
+fn an_undo_while_the_registry_is_busy_is_refused_and_changes_nothing() {
+    let _g = serial();
+    let (_d, s, id) = playing_gain();
+    let synth = s.mixer().unwrap().strips[0].id;
+    s.set_gain(synth, -6.0).unwrap();
+    let before = s.snapshot().unwrap();
+    assert!(before.undo_label.is_some() && before.redo_label.is_none());
+    // The plugin finishes a gesture; no timer tick runs before Cmd-Z.
+    s.set_param(id, WIGGLE, 0.7).unwrap();
+    std::thread::sleep(Duration::from_millis(80));
+    // Cmd-Z inside a nested run loop (an AU v3 editor opening).
+    let inner = vizdaw_ffi::plugins::with(0, |_| {
+        assert!(matches!(s.undo(), Err(vizdaw_ffi::VizError::Busy { .. })));
+        assert!(matches!(s.redo(), Err(vizdaw_ffi::VizError::Busy { .. })));
+        let now = s.snapshot().unwrap();
+        assert_eq!(now.undo_label, before.undo_label);
+        assert_eq!(now.redo_label, None);
+        assert_eq!(now.version, before.version);
+    });
+    assert!(inner.is_ok());
+    // Afterwards the gesture is committed first, then undone.
+    let snap = s.undo().unwrap();
+    assert_eq!(snap.redo_label.as_deref(), Some("Change Plugin Parameter"));
+    assert_eq!(
+        snap.undo_label, before.undo_label,
+        "the fader step survives"
+    );
+    idle_until(&s, |s| param(s, id, GAIN).value == 1.0);
+}

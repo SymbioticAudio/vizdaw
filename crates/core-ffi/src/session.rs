@@ -578,8 +578,16 @@ impl Session {
         true
     }
 
-    /// Undo or redo, then recompile if playing.
+    /// Undo or redo, then recompile if playing. Busy (a nested run loop
+    /// inside a plugin call) is refused before history is touched: the
+    /// gesture commit below could not run, so undo would act on an older
+    /// step and the gesture, committed later, would clear its redo.
     fn step(&self, undo: bool) -> Result<DocSnapshot, VizError> {
+        if plugins::is_busy() {
+            return Err(VizError::Busy {
+                message: "plugin host is busy".into(),
+            });
+        }
         let next = {
             let mut inner = lock(&self.inner);
             // A gesture the plugin finished since the last timer tick is
