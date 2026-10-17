@@ -390,7 +390,9 @@ impl Host {
                 self.faults.push(name.to_string());
             }
         }
-        let _ = self.engine.take_ended();
+        if self.engine.take_ended() {
+            self.want_play = false;
+        }
     }
 
     /// Device events reported since the last call (plus injected ones).
