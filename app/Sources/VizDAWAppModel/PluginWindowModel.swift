@@ -78,6 +78,12 @@ public final class PluginWindowModel {
             }
             row = found
             stripName = name
+            // The instance went (its plugin was turned off): the host
+            // closed its editor. The window shows the placeholder and
+            // opens the editor of the next instance once it runs.
+            if found != nil && !isLive && editorSize != nil {
+                editorSize = nil
+            }
         } catch {
             ok = false
         }

@@ -62,6 +62,25 @@ import VizDAWCore
         #expect(w.isGone)
     }
 
+    @Test func anUnloadedInstanceDropsItsEditorAndTheNextOneOpensAgain() throws {
+        let f = mixerFake()
+        f.editors[10] = EditorSize(width: 400, height: 300, resizable: false)
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        #expect(w.openEditor(parent: 0x1000))
+        // Turned off in the Plugin Manager: the slot stays, a placeholder.
+        f.mixerSnap.strips[0].inserts[0].status = .placeholder(reason: "Disabled in Plugin Manager")
+        w.refresh()
+        #expect(!w.isGone)
+        #expect(w.editorSize == nil)
+        #expect(w.placeholderReason == "Disabled in Plugin Manager")
+        // Turned on again: the new instance's editor opens.
+        f.mixerSnap.strips[0].inserts[0].status = .live
+        w.refresh()
+        #expect(w.openEditor(parent: 0x1000))
+        #expect(w.editorSize?.width == 400)
+        #expect(w.closed())
+    }
+
     @Test func bypassFromTheHeader() throws {
         let f = mixerFake()
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)

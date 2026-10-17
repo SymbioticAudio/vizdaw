@@ -216,6 +216,10 @@ type Done = (PluginInstanceId, u64, Result<Prepared, HostError>);
 /// - After [`PluginHost::commit_gestures`], call `sync` before an undo,
 ///   so the host knows the document has the gesture's values and sends the
 ///   undone ones.
+/// - When [`PluginHost::unloads_due`] (a plugin was made unavailable while
+///   running), call [`PluginHost::unload_unavailable`]; the engine then
+///   drops the instances of [`PluginHost::take_evicted`] and loads
+///   (`service` does both).
 pub struct PluginHost {
     formats: Vec<Box<dyn PluginFormat>>,
     paths: BTreeMap<(Format, String), PathBuf>,
@@ -249,6 +253,10 @@ pub struct PluginHost {
     generation: u64,
     /// Slots kept from loading (safe mode), with the reason they show.
     held: BTreeMap<PluginInstanceId, String>,
+    /// Instances [`PluginHost::unload_unavailable`] unloaded: the engine
+    /// keeps a running instance of a slot it still has, so it must be told
+    /// to drop them ([`PluginHost::take_evicted`]; `service` does).
+    evicted: BTreeSet<PluginInstanceId>,
     /// Gestures closed by [`PluginHost::end_gestures`], reported by the
     /// next `idle` or `service`.
     ended: Vec<Gesture>,
@@ -305,6 +313,7 @@ impl PluginHost {
             finishing: VecDeque::new(),
             generation: 0,
             held: BTreeMap::new(),
+            evicted: BTreeSet::new(),
             ended: Vec::new(),
             gesture_timeout: GESTURE_TIMEOUT,
             shelf: Shelf::new(),
@@ -327,8 +336,10 @@ impl PluginHost {
     }
 
     /// Marks a plugin as unavailable (disabled or blocklisted); its slots
-    /// become placeholders showing `why` (spec §9). `None` makes it
-    /// available again (its slots load at the next `sync`).
+    /// become placeholders showing `why` (spec §9): those not running at
+    /// once, running ones by [`PluginHost::unload_unavailable`] (it needs
+    /// the `History` to keep their state). `None` makes it available again
+    /// (its slots load at the next `sync`).
     pub fn set_unavailable(&mut self, format: Format, id: &str, why: Option<String>) {
         let key = (format, id.to_string());
         match why {
@@ -1069,7 +1080,11 @@ impl PluginHost {
         for id in &r.restart {
             engine.restart_instance(*id);
         }
-        if !r.restart.is_empty() {
+        let evicted = self.take_evicted();
+        for id in &evicted {
+            engine.restart_instance(*id);
+        }
+        if !r.restart.is_empty() || !evicted.is_empty() {
             self.owed_load = true;
         }
         let ready = self.sync(doc);
@@ -1077,6 +1092,7 @@ impl PluginHost {
             !r.loaded.is_empty()
                 || !r.failed.is_empty()
                 || !r.restart.is_empty()
+                || !evicted.is_empty()
                 || f.seq != seq
                 || f.block != engine.block_frames()
                 // Compared only while a load is refused.
@@ -1204,6 +1220,90 @@ impl PluginHost {
             s.want.params.clear();
         }
         Ok(blob)
+    }
+
+    /// Whether a slot still runs (or is loading) a plugin that has become
+    /// unavailable since (disabled in the Plugin Manager): then
+    /// [`PluginHost::unload_unavailable`] is due.
+    pub fn unloads_due(&self) -> bool {
+        self.slots.values().any(|s| self.unloads(s))
+    }
+
+    fn unloads(&self, s: &Slot) -> bool {
+        matches!(s.state, State::Live(_) | State::Loading(_))
+            && self
+                .unavailable
+                .contains_key(&(s.want.plugin.format, s.want.plugin.id.clone()))
+    }
+
+    /// Unloads every instance of a plugin that became unavailable (spec §9:
+    /// turning a plugin off stops it in every open project). Each running
+    /// one has its state captured first, through
+    /// [`PluginHost::capture`] (no undo step), so the document keeps its
+    /// settings; then it goes the way of a removed instance (editor
+    /// closed, processor given back by the engine before it is dropped)
+    /// and its slot stays as a placeholder showing why. A load in progress
+    /// is abandoned. The engine owes a load and must drop the unloaded
+    /// instances first ([`PluginHost::take_evicted`]);
+    /// [`PluginHost::service`] does both. Returns the running instances
+    /// unloaded with what capturing gave: an instance whose state could not
+    /// be captured is unloaded all the same (its last saved state stays in
+    /// the document).
+    pub fn unload_unavailable(
+        &mut self,
+        history: &mut History,
+    ) -> Vec<(PluginInstanceId, Result<StateBlobId, HostError>)> {
+        let due: Vec<PluginInstanceId> = self
+            .slots
+            .iter()
+            .filter(|(_, s)| self.unloads(s))
+            .map(|(id, _)| *id)
+            .collect();
+        if !due.is_empty() {
+            // Placeholders now show why.
+            self.owed_load = true;
+        }
+        let mut out = Vec::new();
+        for id in due {
+            let Some(slot) = self.slots.get(&id) else {
+                continue;
+            };
+            let live = matches!(slot.state, State::Live(_));
+            let key = (slot.want.plugin.format, slot.want.plugin.id.clone());
+            let why = self
+                .held
+                .get(&id)
+                .or_else(|| self.unavailable.get(&key))
+                .cloned()
+                .unwrap_or_default();
+            if live {
+                out.push((id, self.capture(history, id)));
+                self.evicted.insert(id);
+            }
+            // `capture` updated what the slot wants (the captured state).
+            let Some(want) = self.slots.get(&id).map(|s| s.want.clone()) else {
+                continue;
+            };
+            self.remove(id);
+            self.slots.insert(
+                id,
+                Slot {
+                    want,
+                    state: State::Failed(String::new()),
+                },
+            );
+            self.fail(id, why);
+        }
+        out
+    }
+
+    /// The instances [`PluginHost::unload_unavailable`] unloaded since the
+    /// last call, which the engine fed by this host must drop
+    /// (`Engine::restart_instance` before its next load; otherwise it keeps
+    /// playing them). [`PluginHost::service`] does this itself; a caller
+    /// that loads the engine on its own calls it first.
+    pub fn take_evicted(&mut self) -> Vec<PluginInstanceId> {
+        std::mem::take(&mut self.evicted).into_iter().collect()
     }
 
     /// Captures every live instance with state (before saving).

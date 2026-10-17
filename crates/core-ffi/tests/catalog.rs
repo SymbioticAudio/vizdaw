@@ -270,3 +270,162 @@ fn a_corrupt_catalog_is_moved_aside_and_reported() {
     assert!(c.scan(true).is_err());
     assert!(!c.progress().unwrap().running);
 }
+
+// ---------------------------------------------------------------------------
+// Turning a plugin off unloads it from every open project at once; its
+// settings are kept (Task 15).
+
+/// A catalog in its own folder knowing the test bundle (no scan).
+fn known() -> (tempfile::TempDir, Arc<PluginCatalog>) {
+    let (d, clap) = plugins_dir();
+    let c = PluginCatalog::open(config(d.path(), &clap)).unwrap();
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    (d, c)
+}
+
+/// The demo with a Test Gain insert: (session, slot).
+fn demo_with_gain() -> (Arc<Session>, u64) {
+    let s = Session::new_demo().unwrap();
+    let synth = s.mixer().unwrap().strips[0].id;
+    s.add_insert(
+        synth,
+        None,
+        PluginRefRow {
+            format: PluginFormatTag::Clap,
+            id: "vizdaw.test.gain".into(),
+            name: "Test Gain".into(),
+            vendor: "VizDAW".into(),
+            version: "1.0.0".into(),
+        },
+    )
+    .unwrap();
+    let id = s.plugin_slots().unwrap()[0].id;
+    (s, id)
+}
+
+fn slot_status(s: &Session, id: u64) -> SlotStatus {
+    s.plugin_slots()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == id)
+        .unwrap()
+        .status
+}
+
+fn idle_until(sessions: &[&Session], mut done: impl FnMut() -> bool) {
+    let t = Instant::now();
+    while !done() {
+        assert!(t.elapsed() < Duration::from_secs(10), "timed out");
+        for s in sessions {
+            s.idle().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn gain_value(s: &Session, id: u64) -> Option<f64> {
+    s.params(id)
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == 0)
+        .map(|p| p.value)
+}
+
+const DISABLED: &str = "Disabled in Plugin Manager";
+
+fn disabled() -> SlotStatus {
+    SlotStatus::Placeholder {
+        reason: DISABLED.into(),
+    }
+}
+
+#[test]
+fn disabling_a_plugin_unloads_it_from_every_open_project_and_keeps_its_settings() {
+    let _g = serial();
+    let (d, c) = known();
+    let path = d.path().join("p.vizdaw");
+    let (a, ia) = demo_with_gain();
+    a.save_as(path.to_string_lossy().into_owned()).unwrap();
+    let (b, ib) = demo_with_gain();
+    let song = a
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "Song")
+        .unwrap()
+        .id;
+    a.play(song).unwrap();
+    idle_until(&[&a, &b], || {
+        slot_status(&a, ia) == SlotStatus::Live
+            && slot_status(&b, ib) == SlotStatus::Live
+            && a.transport().unwrap().report.is_empty()
+    });
+    // A setting only the plugin holds (a control not committed).
+    a.set_param(ia, 0, 0.25).unwrap();
+    idle_until(&[&a, &b], || gain_value(&a, ia) == Some(0.25));
+    a.save().unwrap();
+    let project = path.join(core_model::file::PROJECT_FILE);
+    let saved = std::fs::read_to_string(&project).unwrap();
+    let undo = |s: &Session| s.snapshot().unwrap().undo_label;
+    let (undo_a, undo_b) = (undo(&a), undo(&b));
+    let loads = vizdaw_ffi::host::loads();
+
+    c.set_enabled(key("vizdaw.test.gain"), false).unwrap();
+    // The next timer step of each project unloads it.
+    a.idle().unwrap();
+    b.idle().unwrap();
+    assert_eq!(slot_status(&a, ia), disabled());
+    assert_eq!(slot_status(&b, ib), disabled());
+    assert!(a.params(ia).unwrap().is_empty(), "no instance");
+    assert!(vizdaw_ffi::host::loads() > loads, "the engine reloaded");
+    let t = a.transport().unwrap();
+    assert!(
+        t.report.iter().any(|l| l.contains(DISABLED)),
+        "{:?}",
+        t.report
+    );
+    assert!(t.faults.is_empty(), "{:?}", t.faults);
+    // No undo step, and the project is the one saved: its state was
+    // captured, nothing else changed.
+    assert_eq!((undo(&a), undo(&b)), (undo_a.clone(), undo_b.clone()));
+    assert!(a.debug_slot_state(ia).unwrap().is_some());
+    assert!(b.debug_slot_state(ib).unwrap().is_some());
+    assert!(!a.snapshot().unwrap().dirty, "same state as saved");
+    a.save().unwrap();
+    assert_eq!(std::fs::read_to_string(&project).unwrap(), saved);
+
+    // Enabled again: both load at once, with their settings.
+    c.set_enabled(key("vizdaw.test.gain"), true).unwrap();
+    idle_until(&[&a, &b], || {
+        slot_status(&a, ia) == SlotStatus::Live && slot_status(&b, ib) == SlotStatus::Live
+    });
+    assert_eq!(gain_value(&a, ia), Some(0.25));
+    idle_until(&[&a, &b], || a.transport().unwrap().report.is_empty());
+    assert_eq!((undo(&a), undo(&b)), (undo_a, undo_b));
+}
+
+#[test]
+fn a_plugin_disabled_while_the_registry_is_busy_is_unloaded_on_the_next_idle() {
+    let _g = serial();
+    let (_d, c) = known();
+    let (s, id) = demo_with_gain();
+    idle_until(&[&s], || slot_status(&s, id) == SlotStatus::Live);
+    // A nested run loop inside a plugin call: the change waits.
+    vizdaw_ffi::plugins::with(0, |_| {
+        c.set_enabled(key("vizdaw.test.gain"), false).unwrap();
+        assert!(s.idle().unwrap().problems.is_empty(), "skipped");
+    })
+    .unwrap();
+    assert_eq!(slot_status(&s, id), SlotStatus::Live, "not applied yet");
+    let u = s.idle().unwrap();
+    assert!(u.slots_changed);
+    assert_eq!(slot_status(&s, id), disabled());
+    assert!(s.snapshot().unwrap().undo_label.is_some(), "only the add");
+    s.undo().unwrap();
+    assert!(
+        s.snapshot().unwrap().undo_label.is_none(),
+        "no step of its own"
+    );
+    c.set_enabled(key("vizdaw.test.gain"), true).unwrap();
+}

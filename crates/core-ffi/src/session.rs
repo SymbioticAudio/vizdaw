@@ -524,6 +524,60 @@ impl Session {
         Ok(())
     }
 
+    /// Unloads the running plugins the catalog turned off since (spec §9:
+    /// the Plugin Manager, or the crash prompt's "Disable"): their state is
+    /// captured first, like a removal's (plugin code runs without the
+    /// session lock, against a copy of the history; the blobs are then
+    /// stored in the real one, no undo step), then the host drops them and
+    /// their slots show "Disabled in Plugin Manager", and the engine is
+    /// reloaded so it no longer plays them. Waits while an edit is open
+    /// (no capture inside a transaction) and while the registry is busy
+    /// (a catalog change made then is applied by the next registry
+    /// access). Returns true when something was unloaded.
+    fn unload_disabled(&self) -> bool {
+        let due = plugins::with(self.id, |p| p.is_some_and(|p| p.unloads_due()));
+        if due != Ok(true) {
+            return false;
+        }
+        let mut scratch = {
+            let inner = lock(&self.inner);
+            if inner.history.in_transaction() {
+                return false;
+            }
+            inner.history.clone()
+        };
+        let Ok(unloaded) = plugins::with(self.id, |p| {
+            p.map(|p| p.unload_unavailable(&mut scratch))
+                .unwrap_or_default()
+        }) else {
+            return false;
+        };
+        let mut inner = lock(&self.inner);
+        for (id, captured) in unloaded {
+            let stored = captured.map_err(|e| e.to_string()).and_then(|blob| {
+                let bytes = scratch
+                    .doc()
+                    .state_blob(blob)
+                    .ok_or_else(|| "captured state missing".to_string())?;
+                inner
+                    .history
+                    .capture_state(id, bytes)
+                    .map_err(|e| e.to_string())
+            });
+            // Reported like a save's capture failure; the document keeps
+            // the state it had.
+            if let Err(e) = stored {
+                let line = format!("{}: state not saved ({e})", slot_name(inner.doc(), id));
+                inner.news.problems.push(line);
+            }
+        }
+        inner.news.slots_changed = true;
+        // The title shows Edited when a captured state is new.
+        inner.news.doc_changed = true;
+        inner.reload_host(self.id);
+        true
+    }
+
     /// Undo or redo, then recompile if playing.
     fn step(&self, undo: bool) -> Result<DocSnapshot, VizError> {
         let next = {
@@ -843,6 +897,7 @@ impl Session {
                 return Ok(nothing());
             }
             plugins::tick_closing();
+            self.unload_disabled();
             let mut inner = lock(&self.inner);
             if inner.reload_owed {
                 inner.reload_host(self.id);

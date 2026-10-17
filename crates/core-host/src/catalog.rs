@@ -426,8 +426,10 @@ impl Catalog {
     }
 
     /// Tells `host` where every plugin lives and which ones are
-    /// unavailable (their slots load as placeholders with the reason, at
-    /// the next load; live instances are not stopped). It clears only
+    /// unavailable (their slots load as placeholders with the reason;
+    /// running instances are captured and unloaded by
+    /// [`PluginHost::unload_unavailable`], which the caller runs since it
+    /// needs the document's history). It clears only
     /// reasons it set itself earlier, never a failure of the host's own.
     /// For one host; with several, use [`Catalog::apply_to`].
     pub fn apply(&mut self, host: &mut PluginHost) {

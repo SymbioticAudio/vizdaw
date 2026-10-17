@@ -323,6 +323,12 @@ impl Host {
             self.factory_owner = owner;
         }
         if let Some(p) = plugins {
+            // Instances unloaded since (a plugin turned off): the engine
+            // must not keep playing them.
+            for id in p.take_evicted() {
+                self.engine.restart_instance(id);
+                restarted = true;
+            }
             let (rate, max) = p.config();
             if rate != self.sample_rate || max < block {
                 // Processors still in the engine are made for the old
@@ -616,9 +622,9 @@ pub fn reload(
     owner: u64,
     doc: &Document,
     looped: bool,
-    plugins: Option<&mut PluginHost>,
+    mut plugins: Option<&mut PluginHost>,
 ) -> Result<(), VizError> {
-    let ready = plugins.is_none_or(|p| {
+    let ready = plugins.as_deref_mut().is_none_or(|p| {
         crate::recovery::before_sync();
         p.sync(doc)
     });
@@ -642,6 +648,14 @@ pub fn reload(
                 h.engine.stop()?;
                 h.owner = 0;
                 return Ok(());
+            }
+            if h.factory_owner == owner {
+                // Instances unloaded since (a plugin turned off): dropped
+                // by this load (or the one `service` runs once loads are
+                // done).
+                for id in plugins.map(PluginHost::take_evicted).unwrap_or_default() {
+                    h.engine.restart_instance(id);
+                }
             }
             if !ready {
                 return Ok(());

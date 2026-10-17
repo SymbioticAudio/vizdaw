@@ -27,7 +27,7 @@ struct PluginManagerView: View {
                     .help(r.row.path)
             }
         }
-        Text("Disabling takes effect the next time a project loads the plugin; remove it from open projects to stop it now.")
+        Text("Turning a plugin off unloads it from all open projects; its settings are kept.")
             .font(.caption).foregroundStyle(.secondary)
             .padding(6)
         }

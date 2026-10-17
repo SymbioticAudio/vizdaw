@@ -385,9 +385,11 @@ impl PluginCatalog {
         })
     }
 
-    /// Turns a plugin on or off (an app preference). Slots naming a
-    /// disabled plugin load as placeholders "Disabled in Plugin Manager";
-    /// enabling it loads the waiting slots of every open document.
+    /// Turns a plugin on or off (an app preference). Turning it off unloads
+    /// it from every open document at their next `Session::idle` (its state
+    /// captured first, no undo step); its slots are placeholders "Disabled
+    /// in Plugin Manager". Enabling it loads the waiting slots of every
+    /// open document.
     pub fn set_enabled(&self, plugin: PluginKey, enabled: bool) -> Result<(), VizError> {
         ffi_guard(|| {
             with(|c| c.set_enabled(plugin.format.into(), &plugin.id, enabled));
