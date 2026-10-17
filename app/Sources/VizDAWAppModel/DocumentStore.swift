@@ -139,6 +139,8 @@ public final class DocumentStore {
         // Plugin windows detach their editors before the session goes.
         willClose?(id)
         if let doc = documents.removeValue(forKey: id) {
+            // A note an editor sounds (a press on a closing piano roll) ends.
+            doc.editor.auditionOffAll()
             if doc.isPlaying { try? doc.session.stop() }
             try? doc.session.close()
         }
