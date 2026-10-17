@@ -247,6 +247,10 @@ struct Host {
     plugins_in_engine: bool,
     seq: SeqId,
     looped: bool,
+    /// Play was asked and not stopped since. The engine applies Play on
+    /// its next audio block, so `engine.state()` can still say Stopped
+    /// right after `play`; a rebuild must resume from this too.
+    want_play: bool,
     device: String,
     sample_rate: f64,
     report: Vec<String>,
@@ -323,6 +327,7 @@ impl Host {
             plugins_in_engine: false,
             seq: SeqId(0),
             looped: false,
+            want_play: false,
             device: device.to_string(),
             sample_rate,
             report: Vec::new(),
@@ -483,7 +488,11 @@ fn handle_events(slot: &mut Option<Host>) -> Result<Option<Rebuild>, VizError> {
                     return Ok(None);
                 };
                 let at = old.engine.transport_tick();
-                let playing = old.engine.state() == PlayState::Playing;
+                // Playback that ended by itself is not resumed.
+                if old.engine.take_ended() {
+                    old.want_play = false;
+                }
+                let playing = old.want_play || old.engine.state() == PlayState::Playing;
                 let drain = !matches!(ev, BackendEvent::DeviceLost);
                 if drain {
                     let _ = old.engine.stop();
@@ -525,6 +534,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     new.engine.locate_tick(at)?;
     if playing {
         new.engine.play()?;
+        new.want_play = true;
     }
     new.owner = owner;
     new.seq = seq;
@@ -659,6 +669,7 @@ pub fn play(
     }
     host.faults.clear();
     host.engine.play()?;
+    host.want_play = true;
     Ok(())
 }
 
@@ -666,7 +677,10 @@ pub fn play(
 pub fn stop(owner: u64) -> Result<(), VizError> {
     let mut slot = lock(&HOST);
     match slot.as_mut() {
-        Some(h) if h.owner == owner => Ok(h.engine.stop()?),
+        Some(h) if h.owner == owner => {
+            h.want_play = false;
+            Ok(h.engine.stop()?)
+        }
         _ => Ok(()),
     }
 }
@@ -745,6 +759,7 @@ pub fn reload(
             // The loaded sequence may have been deleted by the edit.
             if doc.sequence(seq).is_err() {
                 h.engine.stop()?;
+                h.want_play = false;
                 h.owner = 0;
                 return Ok(());
             }
@@ -810,6 +825,7 @@ pub fn release(owner: u64) {
     if let Some(h) = slot.as_mut() {
         if h.owner == owner {
             let _ = h.engine.stop();
+            h.want_play = false;
             h.owner = 0;
         }
     }

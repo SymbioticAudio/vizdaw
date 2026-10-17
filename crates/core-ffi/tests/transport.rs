@@ -387,3 +387,21 @@ fn a_device_rebuild_drains_without_holding_the_host_lock() {
     ms(30);
     assert!(t(&s).playing, "playback resumed after the rebuild");
 }
+
+#[test]
+fn a_rebuild_right_after_play_still_resumes_playback() {
+    // The engine applies Play on its next audio block, so a device event
+    // handled before that must not read "stopped" and drop the Play. The
+    // slower the machine, the wider the window; repeat to hit it here.
+    let _g = serial();
+    let (s, song) = demo();
+    for round in 0..15 {
+        s.stop().unwrap();
+        ms(10);
+        s.play(song).unwrap();
+        simulate_event(BackendEvent::DeviceLost);
+        s.transport().unwrap();
+        ms(40);
+        assert!(t(&s).playing, "round {round}: playback lost in the rebuild");
+    }
+}
