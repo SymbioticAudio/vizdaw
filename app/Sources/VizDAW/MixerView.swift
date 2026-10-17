@@ -57,6 +57,7 @@ struct MixerView: View {
                 }
             }
         }
+        .onDisappear { model.endOpenDrag() }
         .task {
             // Meters at 30 Hz (spec §7); the strips follow the document.
             while !Task.isCancelled {
@@ -75,7 +76,7 @@ struct MixerView: View {
     }
 
     private func browserModel(_ kind: PluginKindTag) -> PluginBrowserModel {
-        PluginBrowserModel(kind: kind) { appPlugins.browser(kind) }
+        model.browserModel(kind) { PluginBrowserModel(kind: kind) { appPlugins.browser(kind) } }
     }
 }
 
@@ -173,7 +174,11 @@ struct StripView: View {
                     get: { model.browser == .insert(strip: strip.id) },
                     set: { if !$0 { model.browser = nil } })
             ) {
-                PluginBrowserView(model: PluginBrowserModel(kind: .effect) { appPlugins.browser(.effect) }) {
+                PluginBrowserView(
+                    model: model.browserModel(.effect) {
+                        PluginBrowserModel(kind: .effect) { appPlugins.browser(.effect) }
+                    }
+                ) {
                     model.pick($0)
                 }
             }
@@ -225,7 +230,7 @@ struct StripView: View {
                     value: Binding(get: { strip.pan }, set: { model.setPan(strip.id, $0) }),
                     in: -1...1
                 ) { editing in
-                    if editing { model.dragStarted("Set Pan") } else { model.dragEnded() }
+                    if editing { model.dragStarted("Set Pan", strip: strip.id) } else { model.dragEnded() }
                 }
                 .controlSize(.mini)
                 Text(MixerMath.panLabel(strip.pan))
@@ -354,7 +359,7 @@ struct SendView: View {
                     set: { p in model.editSend(strip.id, index) { $0.levelDb = MixerMath.faderDb(p) } }),
                 in: 0...1
             ) { editing in
-                if editing { model.dragStarted("Set Send Level") } else { model.dragEnded() }
+                if editing { model.dragStarted("Set Send Level", strip: strip.id) } else { model.dragEnded() }
             }
             .controlSize(.mini)
         }
@@ -376,7 +381,7 @@ struct FaderView: View {
                     set: { model.setGain(strip.id, db: MixerMath.faderDb($0)) }),
                 in: 0...1
             ) { editing in
-                if editing { model.dragStarted("Set Fader") } else { model.dragEnded() }
+                if editing { model.dragStarted("Set Fader", strip: strip.id) } else { model.dragEnded() }
             }
             .frame(width: 140)
             .rotationEffect(.degrees(-90))

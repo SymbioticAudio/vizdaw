@@ -159,6 +159,86 @@ import VizDAWCore
         #expect(doc.alert == nil)
     }
 
+    @Test func aDragIsEndedOnceWhenTheWindowClosesOrTheStripGoes() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        m.dragStarted("Set Fader", strip: 1)
+        m.endOpenDrag()  // window closes
+        m.endOpenDrag()
+        m.dragEnded()
+        #expect(f.calls == ["begin Set Fader", "end"])
+        f.calls = []
+        m.dragStarted("Set Fader", strip: 2)
+        f.mixerSnap.strips.removeAll { $0.id == 2 }
+        m.setGain(1, db: 0)  // refetch sees strip 2 gone
+        #expect(f.calls == ["begin Set Fader", "setGain 1 0.0", "end"])
+        m.dragEnded()
+        #expect(f.calls.filter { $0 == "end" }.count == 1)
+    }
+
+    @Test func aFailedBeginMeansNoEnd() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        f.beginError = .Model(message: "open")
+        m.dragStarted("Set Fader", strip: 1)
+        m.dragEnded()
+        #expect(!f.calls.contains("end"))
+    }
+
+    @Test func aNewDragEndsTheOldOne() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        m.dragStarted("A", strip: 1)
+        m.dragStarted("B", strip: 1)
+        #expect(f.calls == ["begin A", "end", "begin B"])
+    }
+
+    @Test func browserModelsAreReusedWhileOpenAndResetOnClose() throws {
+        let m = try model(mixerFake())
+        m.browser = .instrument
+        let a = m.browserModel(.instrument) { PluginBrowserModel(kind: .instrument) { [] } }
+        let b = m.browserModel(.instrument) { PluginBrowserModel(kind: .instrument) { [] } }
+        #expect(a === b)
+        m.browser = nil
+        let c = m.browserModel(.instrument) { PluginBrowserModel(kind: .instrument) { [] } }
+        #expect(a !== c)
+    }
+
+    @Test func metersSanitiseNonFinitePeaks() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        f.levelsValue.meters = [MeterRow(strip: 1, peakL: .nan, peakR: .infinity)]
+        m.pollLevels()
+        #expect(m.meters[1]?.left == 0)
+        #expect(m.meters[1]?.right == MixerMath.maxMeterPeak)
+        f.levelsValue.meters = [MeterRow(strip: 1, peakL: 0, peakR: 0)]
+        m.pollLevels()
+        #expect(m.meters[1]?.right == MixerMath.maxMeterPeak * MixerMath.meterDecay)
+        #expect(MixerMath.dbLabel(.nan) == "−∞")
+    }
+
+    @Test func aBusyLoadRefetchIsOwedEvenWithoutAVersionChange() throws {
+        let f = mixerFake()
+        f.held = [10]
+        let m = try model(f)
+        f.mixerFetchError = .Busy(message: "b")
+        m.load([10])
+        f.held = []
+        f.mixerFetchError = nil
+        m.refreshIfNeeded()
+        #expect(m.held.isEmpty)
+    }
+
+    @Test func identicalCommandAlertsAreNotReSet() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        f.mixerError = .Model(message: "no")
+        m.setGain(1, db: 0)
+        let first = m.document.alert
+        m.setGain(1, db: 1)
+        #expect(m.document.alert?.id == first?.id)
+    }
+
     @Test func safeModeLoadsAStripsHeldSlots() throws {
         let f = mixerFake()
         f.held = [10]

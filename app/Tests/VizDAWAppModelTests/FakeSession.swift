@@ -128,7 +128,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         levelsCalls += 1
         return levelsValue
     }
-    func beginEdit(label: String) throws { calls.append("begin \(label)") }
+    var beginError: VizError?
+    func beginEdit(label: String) throws {
+        if let e = beginError { throw e }
+        calls.append("begin \(label)")
+    }
     func endEdit() throws -> DocSnapshot { try mixerCall("end") }
     func addBus(name: String) throws -> DocSnapshot { try mixerCall("addBus \(name)") }
     func removeBus(strip: UInt64) throws -> DocSnapshot { try mixerCall("removeBus \(strip)") }

@@ -94,7 +94,7 @@ public final class DocumentStore {
     }
 
     public func close(_ id: UUID) {
-        mixers.removeValue(forKey: id)
+        mixers.removeValue(forKey: id)?.endOpenDrag()
         if let doc = documents.removeValue(forKey: id), doc.isPlaying {
             try? doc.session.stop()
         }

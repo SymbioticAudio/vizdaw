@@ -26,7 +26,7 @@ public enum MixerMath {
 
     /// "−∞", "0.0", "+3.5", "-12.0".
     public static func dbLabel(_ db: Double) -> String {
-        if db <= floorDb { return "−∞" }
+        if db.isNaN || db <= floorDb { return "−∞" }
         let text = String(format: "%.1f", db)
         return db > 0 ? "+" + text : text
     }
@@ -43,6 +43,16 @@ public enum MixerMath {
         let n = Int((abs(pan) * 100).rounded())
         if n == 0 { return "C" }
         return (pan < 0 ? "L" : "R") + "\(n)"
+    }
+
+    /// The largest peak a meter holds (+6 dBFS, the top of its scale).
+    public static let maxMeterPeak: Float = 2
+
+    /// NaN reads as silence for that poll; +inf and huge peaks clamp so a
+    /// held meter always falls again.
+    public static func sanitizedPeak(_ p: Float) -> Float {
+        if p.isNaN || p < 0 { return 0 }
+        return min(p, maxMeterPeak)
     }
 
     /// How much a held meter keeps per 30 Hz poll (it falls about 40 dB
@@ -86,7 +96,9 @@ public final class MixerModel {
     public private(set) var renamingStrip: UInt64?
     public var renameDraft = ""
     /// The open plugin browser.
-    public var browser: BrowserTarget?
+    public var browser: BrowserTarget? {
+        didSet { if browser == nil { browserModels = [:] } }
+    }
     /// Times the mixer was fetched (tests check refetch rules).
     public private(set) var fetches = 0
 
@@ -104,6 +116,24 @@ public final class MixerModel {
             if case .insert = self { return false }
             return true
         }
+    }
+
+    private var dragOpen = false
+    private var dragStrip: UInt64?
+    /// A refetch hit Busy and is still owed.
+    private var refetchOwed = false
+    @ObservationIgnored private var browserModels: [String: PluginBrowserModel] = [:]
+
+    /// The browser model of the open popover: made once per presentation
+    /// (so typed search text survives re-renders) and dropped on close.
+    public func browserModel(
+        _ kind: PluginKindTag, make: () -> PluginBrowserModel
+    ) -> PluginBrowserModel {
+        let key = "\(kind)"
+        if let m = browserModels[key] { return m }
+        let m = make()
+        browserModels[key] = m
+        return m
     }
 
     private var seen: (version: UInt64, slots: Int)
@@ -163,7 +193,7 @@ public final class MixerModel {
     /// Refetches the mixer when the document or its slots changed.
     public func refreshIfNeeded() {
         let now = (document.snapshot.version, document.slotsVersion)
-        guard now != seen else { return }
+        guard now != seen || refetchOwed else { return }
         refetch()
     }
 
@@ -174,8 +204,8 @@ public final class MixerModel {
         for m in l.meters {
             let old = meters[m.strip] ?? MeterLevel(left: 0, right: 0)
             next[m.strip] = MeterLevel(
-                left: max(m.peakL, old.left * MixerMath.meterDecay),
-                right: max(m.peakR, old.right * MixerMath.meterDecay))
+                left: max(MixerMath.sanitizedPeak(m.peakL), old.left * MixerMath.meterDecay),
+                right: max(MixerMath.sanitizedPeak(m.peakR), old.right * MixerMath.meterDecay))
         }
         meters = next
         dspLoad = l.dspLoad
@@ -212,15 +242,26 @@ public final class MixerModel {
     public func cancelRename() { renamingStrip = nil }
 
     /// A drag starts: until `dragEnded`, edits are one undo step.
-    public func dragStarted(_ label: String) {
+    public func dragStarted(_ label: String, strip: UInt64? = nil) {
+        endOpenDrag()
         do {
             try session.beginEdit(label: label)
+            dragOpen = true
+            dragStrip = strip
         } catch {
-            document.alert = AlertItem(error, title: "Edit Failed")
+            raise(AlertItem(error, title: "Edit Failed"))
         }
     }
 
-    public func dragEnded() {
+    public func dragEnded() { endOpenDrag() }
+
+    /// Ends the open drag, if any (the window closing, the dragged strip
+    /// going away or the document closing must not leave the undo
+    /// transaction open).
+    public func endOpenDrag() {
+        guard dragOpen else { return }
+        dragOpen = false
+        dragStrip = nil
         command("Edit Failed") { try $0.endEdit() }
     }
 
@@ -310,7 +351,7 @@ public final class MixerModel {
         do {
             try session.loadPlugins(slots: slots)
         } catch {
-            document.alert = AlertItem(error, title: "Load Failed")
+            raise(AlertItem(error, title: "Load Failed"))
         }
         refetch()
     }
@@ -321,7 +362,7 @@ public final class MixerModel {
         do {
             document.apply(try body(session))
         } catch {
-            document.alert = AlertItem(error, title: title)
+            raise(AlertItem(error, title: title))
         }
         refetch()
     }
@@ -338,12 +379,23 @@ public final class MixerModel {
             held = heldNow
             destinations = dests
             fetches += 1
+            if let d = dragStrip, !snap.strips.contains(where: { $0.id == d }) { endOpenDrag() }
         } catch {
-            if case .Busy = error as? VizError { return }
+            if case .Busy = error as? VizError {
+                refetchOwed = true
+                return
+            }
             if document.alert == nil {
                 document.alert = AlertItem(error, title: "Mixer Unavailable")
             }
         }
+        refetchOwed = false
         seen = (document.snapshot.version, document.slotsVersion)
+    }
+
+    /// Sets `item` unless the same alert is already showing.
+    private func raise(_ item: AlertItem) {
+        if let a = document.alert, a.title == item.title, a.message == item.message { return }
+        document.alert = item
     }
 }
