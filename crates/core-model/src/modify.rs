@@ -758,6 +758,13 @@ fn apply_change(
             }
             ChangeOp::Legato => v,
         };
+        // A note that had a length keeps at least one tick (as a resize
+        // does); only an explicit Set can make it zero.
+        let next = if target == ValueTarget::Duration && v > 0 && op != ChangeOp::Set {
+            next.max(1)
+        } else {
+            next
+        };
         edit_events(d, &[id], r, |e| {
             write_value(e, target, next);
             Ok(())

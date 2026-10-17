@@ -820,6 +820,42 @@ fn release_velocity_duration_and_value_targets() {
     assert!(matches!(body(&d, 0), EventBody::Note { velocity: 10, .. }));
 }
 
+fn durations(d: &Document) -> Vec<i64> {
+    NOTES
+        .iter()
+        .map(|i| match body(d, *i) {
+            EventBody::Note { duration, .. } => duration.0,
+            b => panic!("{b:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn shortening_notes_keeps_at_least_one_tick_unless_set_to_zero() {
+    let dur = |op, amount| durations(&notes_after(change(ValueTarget::Duration, op, amount)));
+    assert_eq!(dur(ChangeOp::Add, constant(-100 * Q)), vec![1; 4]);
+    assert_eq!(dur(ChangeOp::Scale, constant(0)), vec![1; 4]);
+    assert_eq!(
+        dur(ChangeOp::Limit { min: 0, max: 0 }, constant(0)),
+        vec![1; 4]
+    );
+    assert_eq!(
+        dur(ChangeOp::Compress { low: -5, high: 0 }, constant(0)),
+        vec![1; 4]
+    );
+    assert_eq!(dur(ChangeOp::Set, constant(0)), vec![0; 4]);
+    // A zero-length note stays zero when changed relatively.
+    let zero = notes_after(change(ValueTarget::Duration, ChangeOp::Set, constant(0)));
+    let d = try_sm(
+        &zero,
+        &lane_sel(&NOTES),
+        change(ValueTarget::Duration, ChangeOp::Add, constant(-5)),
+    )
+    .unwrap()
+    .doc;
+    assert_eq!(durations(&d), vec![0; 4]);
+}
+
 #[test]
 fn bad_amounts_and_targets_are_refused() {
     let sel = lane_sel(&NOTES);
