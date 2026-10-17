@@ -57,6 +57,36 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
         #expect(f.edits.last == .event(edit: .transposeInScale(events: [1, 2], steps: -2, root: 0, mask: Scale.major.mask)))
     }
 
+    @Test func scaleStepsReadTheKeyAtTheAnchor() throws {
+        let f = rollFake()
+        var info = fourFour(3)
+        info.meter = [
+            MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 1, minor: false),
+            MeterEntryRow(tick: 122_880, num: 4, den: 4, sharps: 0, minor: true),
+        ]
+        f.infoTable[3] = info
+        f.laneEventTable["3/31"] = LaneEvents(
+            seq: 3, lane: 31, rev: 2,
+            events: [noteRow(1, tick: 0), noteRow(2, tick: 122_880 + 15_360)])
+        let m = try DocumentModel(session: f)
+        let e = m.editor
+        var s = NudgeSettings()
+        s.pitch = .scaleSteps(1)
+        let lanes = [LaneRef(seq: 3, lane: 31)]
+
+        e.setSelection(SelectionRow(timeRange: nil, lanes: lanes, events: [2]))
+        #expect(e.nudge(.up, settings: s))
+        #expect(f.edits.last == .event(edit: .transposeInScale(events: [2], steps: 1, root: 9, mask: Scale.naturalMinor.mask)))
+
+        e.setSelection(SelectionRow(timeRange: TickRange(start: 122_880, end: 184_320), lanes: lanes, events: [1]))
+        #expect(e.nudge(.up, settings: s))
+        #expect(f.edits.last == .event(edit: .transposeInScale(events: [1], steps: 1, root: 9, mask: Scale.naturalMinor.mask)))
+
+        e.setSelection(SelectionRow(timeRange: nil, lanes: lanes, events: [1]))
+        #expect(e.nudge(.up, settings: s))
+        #expect(f.edits.last == .event(edit: .transposeInScale(events: [1], steps: 1, root: 7, mask: Scale.major.mask)))
+    }
+
     @Test func nothingSelectedNothingSent() throws {
         let (f, e) = try selected([])
         #expect(!e.nudge(.up, settings: NudgeSettings()))
