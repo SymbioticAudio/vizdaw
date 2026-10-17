@@ -100,6 +100,7 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
         #expect(s.config.select.conditions.isEmpty)
         withExtendedLifetime(m) {}
     }
+
     @Test func templatesSaveLoadRunAndDelete() throws {
         let (f, m, s) = try panel()
         selectChords(m)
@@ -126,6 +127,7 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
         #expect(f.edits.last == .modifyAgain)
         withExtendedLifetime(m) {}
     }
+
     @Test func randomAmountsGetANewSeedAtEachApply() throws {
         let (f, m, s) = try panel()
         selectChords(m)
@@ -172,6 +174,7 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
         #expect(s.notice == nil)
         withExtendedLifetime(m) {}
     }
+
     @Test func exactModeSelectionIsSetBeforeTheCommand() throws {
         let (f, m, s) = try panel()
         s.open(
@@ -181,13 +184,86 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
         #expect(f.selectionSets.last?.events == [1] && f.selectionSets.last?.lanes == [LaneRef(seq: 3, lane: 31)])
         withExtendedLifetime(m) {}
     }
+
     @Test func deleteTemplateTrimsTheName() throws {
         let (f, m, s) = try panel()
         s.deleteTemplate("  Up ")
         #expect(f.edits.last == .settings(edit: .deleteTemplate(name: "Up")))
         withExtendedLifetime(m) {}
     }
+
     @Test func modifyAgainHelpSaysInPlace() {
         #expect(SelectModifyModel.modifyAgainHelp == "Modify Again changes the selection in place.")
+    }
+
+    private func dragRequest() -> ModifyRequest {
+        ModifyRequest(task: .move, config: .preset(.move), events: [1], lanes: [LaneKey(3, 31)], range: nil)
+    }
+
+    @Test func aRefusedSelectionSendsNoEdit() throws {
+        let (f, m, s) = try panel()
+        s.open(dragRequest())
+        f.selectionError = VizError.Busy(message: "busy")
+        #expect(!s.apply())
+        #expect(f.edits.isEmpty && m.editor.status != nil)
+        withExtendedLifetime(m) {}
+    }
+
+    @Test func aFailedEditRestoresTheSelection() throws {
+        let (f, m, s) = try panel()
+        selectChords(m)
+        let before = m.editor.selection
+        s.open(dragRequest())
+        f.editError = VizError.Model(message: "no")
+        #expect(!s.apply())
+        #expect(m.editor.selection == before && f.selectionSets.last == before)
+    }
+
+    @Test func aLaneCheckFailureRestoresTheSelection() throws {
+        let (f, m, s) = try panel()
+        let before = m.editor.selection
+        var req = dragRequest()
+        req.lanes = []
+        req.config = .preset(.selectByRule)
+        s.open(req)
+        #expect(!s.apply())
+        #expect(m.editor.status == SelectModifyModel.noLanesMessage)
+        #expect(m.editor.selection == before && f.selectionSets.last == before && f.edits.isEmpty)
+    }
+
+    @Test func anOpenDragRefusesApplyWithoutTouchingTheSelection() throws {
+        let (f, m, s) = try panel()
+        s.open(dragRequest())
+        #expect(m.editor.beginGesture("Drag", lanes: [LaneKey(3, 31)]))
+        let sets = f.selectionSets.count
+        #expect(!s.apply())
+        #expect(m.editor.status == EditorModel.gestureOpenMessage)
+        #expect(f.selectionSets.count == sets && f.edits.isEmpty)
+    }
+
+    @Test func aSecondApplyActsOnTheCurrentSelection() throws {
+        let (f, m, s) = try panel()
+        s.open(dragRequest())
+        #expect(s.apply())
+        let sets = f.selectionSets.count
+        selectChords(m)
+        let after = f.selectionSets.count
+        #expect(s.apply())
+        #expect(f.selectionSets.count == after && after == sets + 1)
+        #expect(f.edits.count == 2)
+    }
+
+    @Test func aChangedSelectionDropsTheStaleRequest() throws {
+        let (f, m, s) = try panel()
+        s.open(
+            ModifyRequest(
+                task: .move, config: .preset(.move), events: [1], lanes: [LaneKey(3, 31)], range: nil,
+                droppedAxis: .vertical))
+        #expect(s.notice != nil)
+        selectChords(m)
+        #expect(s.notice == nil)
+        let sets = f.selectionSets.count
+        #expect(s.apply())
+        #expect(f.selectionSets.count == sets)
     }
 }

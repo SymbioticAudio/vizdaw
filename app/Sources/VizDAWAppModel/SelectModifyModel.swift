@@ -24,7 +24,15 @@ public final class SelectModifyModel {
     /// A new random seed per Apply (Plan 4c Ruling 3; tests replace it).
     @ObservationIgnored public var nextSeed: () -> UInt64 = { UInt64.random(in: 0...UInt64.max) }
     /// Why the panel shows what it shows (a dropped drag axis), else nil.
-    public private(set) var notice: String?
+    public var notice: String? { requestIsStale ? nil : storedNotice }
+    @ObservationIgnored private var storedNotice: String?
+    /// The selection and snapshot the request was opened over; a change to
+    /// either means the dragged events are no longer what the user has.
+    @ObservationIgnored private var baseline: (selection: SelectionRow, version: UInt64)?
+    private var requestIsStale: Bool {
+        guard let b = baseline, let e = editor else { return false }
+        return e.selection != b.selection || e.snapshotVersion != b.version
+    }
     /// The dragged events an exact-mode panel acts on (the command carries
     /// no ids, so Apply selects them first).
     @ObservationIgnored private var pending: ModifyRequest?
@@ -73,7 +81,8 @@ public final class SelectModifyModel {
         config = .preset(task, range: editor?.selection.timeRange)
         self.filter = filter
         pending = nil
-        notice = nil
+        storedNotice = nil
+        baseline = nil
         present()
     }
 
@@ -83,7 +92,8 @@ public final class SelectModifyModel {
         config = request.config
         filter = nil
         pending = request.events == nil ? nil : request
-        notice = request.droppedAxis?.message
+        storedNotice = request.droppedAxis?.message
+        baseline = editor.map { ($0.selection, $0.snapshotVersion) }
         present()
     }
 
@@ -91,7 +101,8 @@ public final class SelectModifyModel {
         isOpen = false
         isKey = false
         pending = nil
-        notice = nil
+        storedNotice = nil
+        baseline = nil
     }
 
     private func present() {
@@ -120,11 +131,19 @@ public final class SelectModifyModel {
             editor.status = EditorModel.gestureOpenMessage
             return false
         }
+        if requestIsStale {
+            pending = nil
+            storedNotice = nil
+            baseline = nil
+        }
         // An exact-mode panel acts on the dragged events: select them first.
         let before = editor.selection
         if let p = pending, let events = p.events {
             editor.setSelection(
                 SelectionRow(timeRange: before.timeRange, lanes: p.lanes.map(\.ref), events: events))
+            // A refused selection (Busy, an error) was rolled back and
+            // reported: do not run on the old one.
+            guard Set(editor.selection.events) == Set(events) else { return false }
         }
         if config.rule != nil, config.select.mode != .refine, editor.selection.lanes.isEmpty {
             editor.status = Self.noLanesMessage
@@ -136,7 +155,8 @@ public final class SelectModifyModel {
         let ok = editor.edit(reseeded(cmd), filter: filter)
         if ok {
             pending = nil
-            notice = nil
+            storedNotice = nil
+        baseline = nil
         } else if pending != nil {
             editor.setSelection(before)
         }
@@ -172,7 +192,8 @@ public final class SelectModifyModel {
         config = SelectModifyConfig(template: t)
         templateName = t.name
         pending = nil
-        notice = nil
+        storedNotice = nil
+        baseline = nil
         drafts = [:]
         invalid = []
     }
