@@ -188,12 +188,22 @@ impl PluginFormat for AuFormat {
             // The input callbacks are set while uninitialized: some units
             // take their connections only at initialization.
             let feed = Feed::new(max);
-            connect(&unit, &feed)?;
+            // On a failure below, the unit is disposed explicitly before
+            // `feed` and `transport` drop: it must never hold their
+            // addresses (input-callback and host-callback contexts) after
+            // they are freed. Locals would drop the other way round.
+            if let Err(e) = connect(&unit, &feed) {
+                drop(unit);
+                return Err(e);
+            }
             // Tempo and position for tempo-synced units (spec §5); a unit
             // that refuses the callbacks still plays.
             let transport = Arc::new(HostTransport::new(sr));
             let callbacks = unit.set_host_callbacks(&transport).is_ok();
-            unit.initialize().map_err(HostError::ActivateFailed)?;
+            if let Err(e) = unit.initialize() {
+                drop(unit);
+                return Err(HostError::ActivateFailed(e));
+            }
             Ok(Prepared(Box::new(Opened {
                 desc: describe(&c),
                 kind: c.kind,
