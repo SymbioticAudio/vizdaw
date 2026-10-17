@@ -4,8 +4,12 @@
 //! document the revisions were last computed for with the current one:
 //! `im` shares the event maps of unchanged lanes, so a pointer comparison
 //! finds them, and `core-model` keeps no bookkeeping (Plan Ruling 1).
+//! What a lane's rows are computed from counts too: a sequence's tempo map
+//! (region durations) and meter map (fixed-bar blocks) bump all its lanes,
+//! and the media pool (region durations) bumps every lane holding a region.
 
 use core_model::document::Document;
+use core_model::event::EventBody;
 use core_model::ids::{LaneId, SeqId};
 use core_model::lane::Lane;
 use std::collections::BTreeMap;
@@ -55,20 +59,28 @@ impl Revisions {
 
     /// Brings the revisions up to `doc`: lanes that changed since the last
     /// update, and new lanes, get a fresh revision; lanes that are gone
-    /// are dropped. O(1) when no sequence changed (a mixer edit).
+    /// are dropped. O(1) when no sequence and no media item changed (a
+    /// mixer edit).
     pub fn update(&mut self, doc: &Document) {
-        if self.base.sequences().ptr_eq(doc.sequences()) {
+        let same_media = self.base.media().ptr_eq(doc.media()) || self.base.media() == doc.media();
+        if self.base.sequences().ptr_eq(doc.sequences()) && same_media {
             return;
         }
         let mut revs = BTreeMap::new();
         let mut next = self.next;
         for s in doc.sequences().values() {
-            let before = self.base.sequences().get(&s.id);
+            // Tempo and meter shape the rows of every lane of the sequence.
+            let before = self
+                .base
+                .sequences()
+                .get(&s.id)
+                .filter(|b| b.tempo == s.tempo && b.meter == s.meter);
             for l in &s.lanes {
                 let key = (s.id, l.id);
                 let kept = before
                     .and_then(|b| b.lane(l.id))
                     .filter(|old| same_lane(old, l))
+                    .filter(|_| same_media || !holds_regions(l))
                     .and_then(|_| self.revs.get(&key).copied());
                 let rev = kept.unwrap_or_else(|| {
                     let fresh = next;
@@ -125,4 +137,14 @@ pub fn same_lane(a: &Lane, b: &Lane) -> bool {
             .iter()
             .zip(b.takes.iter())
             .all(|(x, y)| x.id == y.id && x.name == y.name && x.events.ptr_eq(&y.events))
+}
+
+/// True when any take of `lane` holds an audio region (its duration depends
+/// on the media pool).
+fn holds_regions(lane: &Lane) -> bool {
+    lane.takes.iter().any(|t| {
+        t.events
+            .values()
+            .any(|e| matches!(e.body, EventBody::AudioRegion { .. }))
+    })
 }

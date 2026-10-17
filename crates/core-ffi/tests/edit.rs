@@ -602,6 +602,26 @@ fn abort_edit_restores_and_closes_the_edit() {
 }
 
 #[test]
+fn an_edit_during_an_open_edit_is_refused_and_changes_nothing() {
+    let f = fixture();
+    let s = Session::from_document(f.doc.clone()).unwrap();
+    s.begin_edit("Move Block".into()).unwrap();
+    s.edit_gesture(move_note(&f, Q, None), None).unwrap();
+    let during = state(&s);
+    assert!(matches!(
+        s.edit(move_note(&f, 2 * Q, None), None),
+        Err(VizError::Model { .. })
+    ));
+    assert_eq!(state(&s), during, "the refused edit changed nothing");
+    let snap = s.end_edit().unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Move Block"));
+    assert_eq!(note_tick(&s, &f), Q, "the gesture's target stands alone");
+    // Closed: edits apply again.
+    s.edit(move_note(&f, Q, None), None).unwrap();
+    assert_eq!(note_tick(&s, &f), 2 * Q);
+}
+
+#[test]
 fn bad_rows_and_values_are_model_errors_and_change_nothing() {
     let f = fixture();
     let s = Session::from_document(f.doc.clone()).unwrap();

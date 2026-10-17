@@ -5,7 +5,7 @@ use core_model::command::Command;
 use core_model::command::lane::LaneCmd;
 use core_model::command::sequence::SequenceCmd;
 use core_model::sequence::KeySlot;
-use vizdaw_ffi::{DocSnapshot, Session};
+use vizdaw_ffi::{DocSnapshot, EditCommand, MeterEntryRow, SequenceEdit, Session, TempoPointRow};
 
 fn id_of(s: &DocSnapshot, name: &str) -> u64 {
     s.sequences.iter().find(|r| r.name == name).unwrap().id
@@ -70,7 +70,7 @@ fn undo_and_redo_give_fresh_revisions() {
 }
 
 #[test]
-fn mixer_and_sequence_level_edits_keep_every_revision() {
+fn mixer_edits_and_renames_keep_every_revision() {
     let s = Session::new_demo().unwrap();
     let before = s.snapshot().unwrap();
     let after = s.add_bus("Verb".into()).unwrap();
@@ -127,4 +127,71 @@ fn rows_carry_arm_routing_and_keyboard_slots() {
     let snap = s.snapshot().unwrap();
     let slot = snap.sequences[0].keyboard_slot.clone().unwrap();
     assert_eq!((slot.key.as_str(), slot.modifiers), ("a", 4));
+}
+
+/// Every lane of `seq` changed; every lane of another sequence did not.
+fn only_sequence_bumped(before: &DocSnapshot, after: &DocSnapshot, seq: u64) {
+    assert_eq!(before.lane_revs.len(), after.lane_revs.len());
+    for (old, new) in before.lane_revs.iter().zip(&after.lane_revs) {
+        assert_eq!((old.seq, old.lane), (new.seq, new.lane));
+        if old.seq == seq {
+            assert_ne!(old.rev, new.rev, "lane {} of the edited sequence", old.lane);
+        } else {
+            assert_eq!(
+                old.rev, new.rev,
+                "lane {} of sequence {}",
+                old.lane, old.seq
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tempo_change_bumps_every_lane_of_that_sequence_only() {
+    // Region durations are computed through the tempo map.
+    let s = Session::new_demo().unwrap();
+    let before = s.snapshot().unwrap();
+    let song = id_of(&before, "Song");
+    let after = s
+        .edit(
+            EditCommand::Sequence {
+                edit: SequenceEdit::SetTempo {
+                    seq: song,
+                    tempo: vec![TempoPointRow {
+                        tick: 0,
+                        bpm: 97.0,
+                        ramp: false,
+                    }],
+                },
+            },
+            None,
+        )
+        .unwrap();
+    only_sequence_bumped(&before, &after, song);
+}
+
+#[test]
+fn a_meter_change_bumps_every_lane_of_that_sequence_only() {
+    // Fixed-bar blocks are computed through the meter map.
+    let s = Session::new_demo().unwrap();
+    let before = s.snapshot().unwrap();
+    let beat = id_of(&before, "Beat");
+    let after = s
+        .edit(
+            EditCommand::Sequence {
+                edit: SequenceEdit::SetMeter {
+                    seq: beat,
+                    meter: vec![MeterEntryRow {
+                        tick: 0,
+                        num: 3,
+                        den: 4,
+                        sharps: 0,
+                        minor: false,
+                    }],
+                },
+            },
+            None,
+        )
+        .unwrap();
+    only_sequence_bumped(&before, &after, beat);
 }

@@ -1717,15 +1717,19 @@ impl Session {
 /// Editor edits (spec §3.2, §3.8).
 #[uniffi::export]
 impl Session {
-    /// Applies an editor command: one undo step, or part of the open edit.
-    /// `filter` hides kinds and lanes from commands that act on the
-    /// selection.
+    /// Applies an editor command as one undo step. `filter` hides kinds and
+    /// lanes from commands that act on the selection. `Model` error while an
+    /// edit `begin_edit` opened is in progress (a drag, a fader): joining it
+    /// would merge the command into that undo step, or lose it on abort.
     pub fn edit(
         &self,
         cmd: crate::edit::EditCommand,
         filter: Option<crate::edit::ViewFilterRow>,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
+            if lock(&self.inner).edit_label.is_some() {
+                return Err(crate::events::bad("finish the open edit first"));
+            }
             let c = crate::edit::to_command(&cmd)?;
             self.execute_with(c, &crate::edit::view_filter(filter.as_ref()))
         })
