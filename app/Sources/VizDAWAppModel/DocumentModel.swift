@@ -91,9 +91,12 @@ public final class DocumentModel {
     public var canUndo: Bool { snapshot.undoLabel != nil }
     public var canRedo: Bool { snapshot.redoLabel != nil }
     public var isPlaying: Bool { transport.playing }
-    /// Transport keys (Space, Return) are off while a name is edited, so
-    /// typing a space types a space.
-    public var transportKeysEnabled: Bool { renamingSeq == nil }
+    /// Transport keys (Space, Return) are off while any name, comment, slot
+    /// or reference field is edited, so typing a space types a space.
+    public var transportKeysEnabled: Bool {
+        renamingSeq == nil && commentDraft == nil && slotDraft == nil
+            && editor.referenceDraft == nil && !editor.textEditing
+    }
     public var canPlay: Bool { selectedSeq != nil || isPlaying }
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
     public var pollInterval: Duration { .seconds(pollSeconds) }

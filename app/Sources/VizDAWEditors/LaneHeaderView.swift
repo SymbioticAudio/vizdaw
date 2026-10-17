@@ -166,15 +166,27 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         addSubview(field)
         window?.makeFirstResponder(field)
         renaming = (seq, lane.id, lane.name, field)
+        editor.textEditing = true
     }
 
     public func controlTextDidEndEditing(_ obj: Notification) {
         guard let r = renaming else { return }
         renaming = nil
+        editor.textEditing = false
         let name = r.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         r.field.removeFromSuperview()
         if !name.isEmpty, name != r.name {
             editor.edit(.lane(edit: .rename(seq: r.seq, lane: r.lane, name: name)))
+        }
+    }
+
+    /// A header torn down mid-rename never gets its end-editing callback;
+    /// give the keyboard back to the transport keys.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil, renaming != nil {
+            renaming = nil
+            editor.textEditing = false
         }
     }
 

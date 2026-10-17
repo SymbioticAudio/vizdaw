@@ -30,6 +30,8 @@ public final class EditorModel {
     public internal(set) var gesture: Gesture?
     /// The reference whose parameters are being edited.
     public var referenceDraft: ReferenceDraft?
+    /// An editor text field (a lane name) has the keyboard.
+    public var textEditing = false
 
     private struct BlockEntry {
         let rev: UInt64

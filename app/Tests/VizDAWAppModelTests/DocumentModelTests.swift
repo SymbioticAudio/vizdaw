@@ -323,4 +323,22 @@ import VizDAWCore
         #expect(s.alert == nil)
         #expect(s.takeAlert() == nil)
     }
+
+    @Test func transportKeysAreOffWhileAnyTextIsEdited() throws {
+        let m = try DocumentModel(session: demoFake())
+        #expect(m.transportKeysEnabled)
+        m.editor.textEditing = true
+        #expect(!m.transportKeysEnabled)
+        m.editor.textEditing = false
+        m.beginComment(3)
+        #expect(!m.transportKeysEnabled)
+        m.commentDraft = nil
+        m.beginSlot(3)
+        #expect(!m.transportKeysEnabled)
+        m.slotDraft = nil
+        m.editor.referenceDraft = ReferenceDraft(row: referenceRow())
+        #expect(!m.transportKeysEnabled)
+        m.editor.referenceDraft = nil
+        #expect(m.transportKeysEnabled)
+    }
 }
