@@ -374,9 +374,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func setUiLayout(json: String) throws { layout = json }
 
     var auditions: [(dest: UInt64, pitch: UInt8, on: Bool)] = []
+    /// What the next `audition` calls throw, oldest first (nil succeeds).
+    var auditionErrors: [VizError?] = []
+    /// What a successful `audition` returns (false: no engine yet).
+    var auditionSent = true
     func audition(dest: UInt64, pitch: UInt8, velocity: UInt16, on: Bool) throws -> Bool {
+        let e = auditionErrors.isEmpty ? nil : auditionErrors.removeFirst()
+        if let e { throw e }
         auditions.append((dest, pitch, on))
-        return true
+        return auditionSent
     }
 }
 

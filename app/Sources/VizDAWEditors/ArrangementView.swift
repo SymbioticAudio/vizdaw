@@ -297,14 +297,14 @@ public final class ArrangementView: EditorCanvas {
         let block = b.block
         let key = b.lane
         if block.kind == .reference, let event = block.events.first {
-            add("Open Sequence") { [unowned self] in self.editor.openReference(block) }
-            add("Parameters…") { [unowned self] in self.editor.editReference(block, in: key) }
-            add("Make Private Copy") { [unowned self] in self.editor.makePrivateCopy(event) }
-            add("Flatten") { [unowned self] in self.editor.flatten(event) }
+            add("Open Sequence") { [weak self] in self?.editor.openReference(block) }
+            add("Parameters…") { [weak self] in self?.editor.editReference(block, in: key) }
+            add("Make Private Copy") { [weak self] in self?.editor.makePrivateCopy(event) }
+            add("Flatten") { [weak self] in self?.editor.flatten(event) }
             let sub = NSMenu()
             for s in EditorModel.rePointTargets(excluding: block.refSeq, among: document.snapshot.sequences) {
                 sub.addItem(
-                    MenuAction(title: s.name) { [unowned self] in self.editor.rePoint(event, to: s.id) }
+                    MenuAction(title: s.name) { [weak self] in self?.editor.rePoint(event, to: s.id) }
                         .item(checked: false))
             }
             let rePoint = NSMenuItem(title: "Re-point To", action: nil, keyEquivalent: "")
@@ -312,15 +312,15 @@ public final class ArrangementView: EditorCanvas {
             menu.addItem(rePoint)
         } else {
             for kind in DetailEditorKind.allCases {
-                add("Open in \(kind.title)") { [unowned self] in
-                    self.editor.openDetail(
+                add("Open in \(kind.title)") { [weak self] in
+                    self?.editor.openDetail(
                         .block(seq: key.seq, lane: key.lane, start: block.start, end: block.end), kind: kind)
                 }
             }
-            add("Make Reference") { [unowned self] in self.editor.makeReference(from: block, in: key) }
+            add("Make Reference") { [weak self] in self?.editor.makeReference(from: block, in: key) }
         }
         menu.addItem(.separator())
-        add("Delete") { [unowned self] in self.editor.edit(.event(edit: .delete(events: block.events))) }
+        add("Delete") { [weak self] in self?.editor.edit(.event(edit: .delete(events: block.events))) }
         return menu
     }
 

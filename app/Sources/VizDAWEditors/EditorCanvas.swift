@@ -40,7 +40,9 @@ public struct CanvasAccessibilityItem {
 
 @MainActor
 final class CanvasElement: NSAccessibilityElement {
-    private var press: (@MainActor () -> Void)?
+    // Written and read on the main thread only; nonisolated so AppKit's
+    // nonisolated accessibility entry point can read it.
+    nonisolated(unsafe) private var press: (@MainActor () -> Void)?
 
     init(_ item: CanvasAccessibilityItem, parent: NSView, frame: CGRect) {
         super.init()
@@ -56,9 +58,10 @@ final class CanvasElement: NSAccessibilityElement {
         setAccessibilitySelected(item.selected)
     }
 
-    override func accessibilityPerformPress() -> Bool {
+    // AppKit declares this nonisolated; VoiceOver calls it on the main thread.
+    nonisolated override func accessibilityPerformPress() -> Bool {
         guard let press else { return false }
-        press()
+        MainActor.assumeIsolated { press() }
         return true
     }
 

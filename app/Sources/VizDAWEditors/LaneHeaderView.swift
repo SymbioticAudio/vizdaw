@@ -133,8 +133,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
     func destinationMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let none = MenuAction(title: "No Destination") { [unowned self] in
-            self.editor.edit(.lane(edit: .setDest(seq: seq, lane: lane.id, dest: nil)))
+        let none = MenuAction(title: "No Destination") { [weak self] in
+            self?.editor.edit(.lane(edit: .setDest(seq: seq, lane: lane.id, dest: nil)))
         }
         menu.addItem(none.item(checked: lane.midiDest == nil))
         let dests: [DestRow]
@@ -152,8 +152,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
             return menu
         }
         for d in dests {
-            let a = MenuAction(title: d.name) { [unowned self] in
-                self.editor.edit(.lane(edit: .setDest(seq: seq, lane: lane.id, dest: d.id)))
+            let a = MenuAction(title: d.name) { [weak self] in
+                self?.editor.edit(.lane(edit: .setDest(seq: seq, lane: lane.id, dest: d.id)))
             }
             menu.addItem(a.item(checked: lane.midiDest == d.id))
         }

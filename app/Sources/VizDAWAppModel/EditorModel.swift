@@ -60,6 +60,13 @@ public final class EditorModel {
     @ObservationIgnored private var sequenceRows: [SeqRow] = []
     @ObservationIgnored private var selectedEvents: Set<UInt64> = []
 
+    /// Audition notes sounding now, note-offs waiting for a retry with the
+    /// attempts left, and whether the no-engine hint was shown (Plan 4b
+    /// Ruling 2).
+    @ObservationIgnored var heldAuditions: Set<AuditionNote> = []
+    @ObservationIgnored var pendingOffs: [AuditionNote: Int] = [:]
+    @ObservationIgnored var auditionHintShown = false
+
     @ObservationIgnored public private(set) var eventFetches = 0
     @ObservationIgnored public private(set) var blockFetches = 0
     @ObservationIgnored public private(set) var infoFetches = 0

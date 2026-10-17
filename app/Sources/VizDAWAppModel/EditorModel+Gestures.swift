@@ -94,8 +94,10 @@ extension EditorModel {
         refreshSelection()
     }
 
-    /// Retries a mouse-up that met Busy (the 60 Hz plugin timer calls it).
+    /// Retries a mouse-up that met Busy and audition note-offs that failed
+    /// (the 60 Hz plugin timer calls it).
     public func tick() {
+        if hasPendingNoteOffs { retryNoteOffs() }
         if gesture?.finishing == true { finish() }
     }
 
