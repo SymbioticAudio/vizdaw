@@ -20,7 +20,7 @@ use crate::schedule::{
     TempoTable, compile,
 };
 use crate::transport::PlayState;
-use core_model::document::{DestKind, Document};
+use core_model::document::{DestKind, Document, SlotOwner};
 use core_model::ids::{DestId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
 use core_model::time::Tick;
@@ -379,7 +379,7 @@ impl Engine {
             }
         };
         let compiled = compile(doc, seq, &opts, &mut resolve);
-        let (schedule, mut report) = match compiled {
+        let (mut schedule, mut report) = match compiled {
             Ok(c) => c,
             Err(e) => {
                 // Targets interned by this load have no sinks yet; forget
@@ -406,6 +406,21 @@ impl Engine {
             }
             self.push(EngineCmd::AddSink(i, sink))?;
         }
+        // Plugin-parameter lanes: the target of a plugin instrument (by
+        // the slot's owner, not by routing, Plan 4d P10) and the
+        // parameters the plugin declares stepped (Rulings 8, 12).
+        let targets = &self.targets;
+        schedule
+            .automation
+            .bind_instruments(|id| match doc.find_slot(id) {
+                Some(SlotOwner::Instrument(_)) => targets.find(&TargetKind::PluginInstrument(id)),
+                _ => None,
+            });
+        let inserts = &self.inserts;
+        schedule.automation.mark_stepped(|d| match d {
+            crate::schedule::AutoDest::Plugin(id, p) => inserts.param_stepped(id, p),
+            _ => false,
+        });
         report.graph = self.compile_graph(doc)?;
         if report.graph.error.is_none() {
             // Schedule and graph both go out below: nothing published

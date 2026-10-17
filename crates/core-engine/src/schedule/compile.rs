@@ -1,15 +1,17 @@
 //! The schedule compiler (non-RT): flatten → route → time → translate →
 //! sort.
 
+use super::automation::{AutoDest, Automation, MAX_AUTO_LANES};
 use super::targets::{BuiltinRoute, TargetIdx, TargetKind, kinds_for};
 use super::tempo::TempoTable;
 use super::{ChaseIndex, Entry, MAX_TARGETS, Schedule, WireMsg};
 use crate::backend::MidiPortInfo;
 use crate::error::EngineError;
 use crate::midi1::{Class, Midi1Msg, When, translate};
-use core_model::document::{DestKind, Document};
+use core_model::automation::{AutomationTarget, velocity_scale_percent};
+use core_model::document::{DestKind, Document, SlotOwner};
 use core_model::event::EventBody;
-use core_model::ids::{DestId, SeqId};
+use core_model::ids::{DestId, PluginInstanceId, SeqId};
 use core_model::query::{PathStep, flatten, seq_length};
 use core_model::selection::ViewFilter;
 use core_model::time::Tick;
@@ -72,6 +74,15 @@ pub struct CompileReport {
     pub compile_time: Duration,
     /// The mixer graph compiled with this schedule (`Engine::load`).
     pub graph: crate::graph::GraphReport,
+    /// Automation lanes (targets) the schedule plays (4d).
+    pub automation_lanes: usize,
+    /// Automation points in those lanes.
+    pub automation_points: usize,
+    /// Automation points whose strip, send, plugin or destination is gone
+    /// (skipped, Plan 4d Ruling 3).
+    pub automation_missing: usize,
+    /// Lanes beyond [`MAX_AUTO_LANES`], dropped.
+    pub automation_dropped_lanes: usize,
 }
 
 type Routes = Result<Vec<TargetIdx>, String>;
@@ -116,7 +127,54 @@ pub fn compile(
     let mut order = 0u64;
     let mut resolving = Duration::ZERO;
 
-    for r in flatten(doc, seq, None, &ViewFilter::default())? {
+    let flat: Vec<_> = flatten(doc, seq, None, &ViewFilter::default())?.collect();
+    // Automation (Plan 4d Rulings 7-9): lanes for the renderer; velocity
+    // scale is applied to the note-ons below.
+    let mut raw: Vec<(AutoDest, u64, f64)> = Vec::new();
+    let mut vscale: BTreeMap<DestId, Vec<(Tick, f64)>> = BTreeMap::new();
+    for r in &flat {
+        let EventBody::Automation { target, value } = r.body else {
+            continue;
+        };
+        if !target_exists(doc, target) {
+            report.automation_missing += 1;
+            continue;
+        }
+        match (AutoDest::of(target), target) {
+            (Some(d), _) => raw.push((d, frame(r.tick), value)),
+            (None, AutomationTarget::VelocityScale(dest)) => {
+                vscale.entry(dest).or_default().push((r.tick, value));
+            }
+            (None, _) => {}
+        }
+    }
+    for pts in vscale.values_mut() {
+        // Stable: play order stays on a shared tick.
+        pts.sort_by_key(|p| p.0);
+    }
+    // A plugin instrument's parameter lanes need its target even when no
+    // note is routed to it (Plan 4d P10): resolve it here. A failure
+    // leaves the lane unbound; the instrument is then not playing.
+    let mut wanted: Vec<PluginInstanceId> = Vec::new();
+    for (d, _, _) in &raw {
+        if let AutoDest::Plugin(id, _) = d {
+            if matches!(doc.find_slot(*id), Some(SlotOwner::Instrument(_))) && !wanted.contains(id)
+            {
+                wanted.push(*id);
+            }
+        }
+    }
+    for id in wanted {
+        let t0 = Instant::now();
+        let _ = resolve(&TargetKind::PluginInstrument(id))?;
+        resolving += t0.elapsed();
+    }
+    let (automation, dropped) = Automation::build(raw);
+    report.automation_lanes = automation.lanes().len();
+    report.automation_points = automation.point_count();
+    report.automation_dropped_lanes = dropped;
+
+    for r in flat {
         if matches!(r.body, EventBody::AudioRegion { .. }) {
             report.skipped_audio += 1;
             continue;
@@ -161,7 +219,10 @@ pub fn compile(
         if group != 0 {
             report.group_folded += 1;
         }
-        let t = translate(&r.body, channel);
+        let scaled = vscale
+            .get(&dest)
+            .and_then(|pts| scale_velocity(&r.body, pts, r.tick));
+        let t = translate(scaled.as_ref().unwrap_or(&r.body), channel);
         report.dropped_per_note += t.drops.per_note;
         report.dropped_note_attributes += usize::from(t.drops.attribute);
         report.dropped_sysex8 += usize::from(t.drops.sysex8);
@@ -275,10 +336,58 @@ pub fn compile(
         loop_range: (bar1 < length_frames).then_some((bar1, length_frames)),
         used_channels,
         chase,
+        automation,
     };
     report.warnings = warnings(&report);
     report.compile_time = started.elapsed().saturating_sub(resolving);
     Ok((schedule, report))
+}
+
+/// Whether an automation target's strip, send, plugin or destination
+/// exists.
+fn target_exists(doc: &Document, t: AutomationTarget) -> bool {
+    let m = doc.mixer();
+    match t {
+        AutomationTarget::StripFader(s)
+        | AutomationTarget::StripPan(s)
+        | AutomationTarget::StripMute(s)
+        | AutomationTarget::StripSolo(s) => m.strip(s).is_ok(),
+        AutomationTarget::SendLevel(s, i) => {
+            m.strip(s).is_ok_and(|x| usize::from(i.0) < x.sends.len())
+        }
+        AutomationTarget::PluginParam(p, _) => doc.plugin_slot(p).is_some(),
+        AutomationTarget::VelocityScale(d) => doc.instruments().contains_key(&d),
+    }
+}
+
+/// A velocity-scale lane's value at `tick` (Plan 4d Ruling 8).
+fn lane_value(points: &[(Tick, f64)], tick: Tick) -> f64 {
+    let n = points.partition_point(|p| p.0 <= tick);
+    match (n.checked_sub(1).and_then(|i| points.get(i)), points.get(n)) {
+        (None, Some(next)) => next.1,
+        (Some(prev), Some(next)) if next.0 > prev.0 => {
+            prev.1 + (next.1 - prev.1) * (tick - prev.0).0 as f64 / (next.0 - prev.0).0 as f64
+        }
+        (Some(prev), _) => prev.1,
+        (None, None) => 0.5,
+    }
+}
+
+/// A note `body` with its velocity scaled by the lane at `tick` (clamped
+/// 1-65 535, Plan 4d Ruling 9); `None` for anything but a note.
+fn scale_velocity(body: &EventBody, points: &[(Tick, f64)], tick: Tick) -> Option<EventBody> {
+    let EventBody::Note { velocity, .. } = body else {
+        return None;
+    };
+    let pct = velocity_scale_percent(lane_value(points, tick));
+    let v = (f64::from(*velocity) * pct / 100.0)
+        .round()
+        .clamp(1.0, 65_535.0) as u16;
+    let mut b = body.clone();
+    if let EventBody::Note { velocity, .. } = &mut b {
+        *velocity = v;
+    }
+    Some(b)
 }
 
 fn mark(used: &mut [u16; MAX_TARGETS], target: TargetIdx, channel: u8) {
@@ -347,6 +456,18 @@ fn warnings(r: &CompileReport) -> Vec<String> {
         w.push(format!(
             "{} audio region(s) skipped (audio playback is not available yet)",
             r.skipped_audio
+        ));
+    }
+    if r.automation_missing > 0 {
+        w.push(format!(
+            "{} automation point(s) skipped: their strip, send, plugin or destination is gone",
+            r.automation_missing
+        ));
+    }
+    if r.automation_dropped_lanes > 0 {
+        w.push(format!(
+            "{} automation lane(s) dropped: at most {MAX_AUTO_LANES} play",
+            r.automation_dropped_lanes
         ));
     }
     w

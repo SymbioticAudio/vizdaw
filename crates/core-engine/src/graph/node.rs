@@ -4,7 +4,8 @@
 use crate::backend::{BlockInfo, InstrumentNode, StereoBuf};
 use crate::graph::delay::DelayLine;
 use crate::graph::dsp;
-use core_model::mixer::{PluginFormat, PluginRef, PluginSlot};
+use core_model::ids::PluginInstanceId;
+use core_model::mixer::{ParamId, PluginFormat, PluginRef, PluginSlot};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -75,6 +76,14 @@ pub trait InsertFactory: Send {
             "{} cannot load until plugin hosting exists",
             slot.plugin.name
         ))
+    }
+
+    /// Whether parameter `param` of instance `slot` is stepped: its
+    /// automation holds instead of ramping (Plan 4d Ruling 8). Unknown
+    /// parameters are not.
+    fn param_stepped(&self, slot: PluginInstanceId, param: ParamId) -> bool {
+        let _ = (slot, param);
+        false
     }
 }
 

@@ -1,9 +1,13 @@
 //! Immutable playback schedules and their compiler.
 
+pub mod automation;
 pub mod compile;
 pub mod targets;
 pub mod tempo;
 
+pub use automation::{
+    AutoDest, AutoLane, AutoPoint, Automation, MAX_AUTO_LANES, MIN_RUN, StripParam,
+};
 pub use compile::{CompileOptions, CompileReport, Unroutable, compile};
 pub use targets::{BuiltinRoute, MAX_TARGETS, TargetIdx, TargetKind, TargetTable};
 pub use tempo::TempoTable;
@@ -56,6 +60,8 @@ pub struct Schedule {
     pub used_channels: [u16; MAX_TARGETS],
     /// Controller state to chase after a locate, swap or wrap.
     pub chase: ChaseIndex,
+    /// Automation lanes (4d).
+    pub automation: Automation,
 }
 
 /// One chased controller value: `msg` takes effect at `frame`.
