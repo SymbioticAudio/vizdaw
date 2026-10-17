@@ -50,7 +50,7 @@ public struct TimeAxis: Equatable, Sendable {
     }
 
     public func visibleRange(width: CGFloat) -> ClosedRange<Int64> {
-        tick(atX: 0)...tick(atX: max(width, 0))
+        tick(atX: 0)...tick(atX: width.isNaN ? 0 : max(width, 0))
     }
 
     /// Zoomed in by `factor` (> 1 zooms in) keeping the tick under `x`.

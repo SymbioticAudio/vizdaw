@@ -35,4 +35,9 @@ import Testing
         #expect(TimeAxis().x(Int64.max).isFinite)
         #expect(TimeAxis().scrolled(toTick: .infinity).originTick == Double(TimeAxis.limit))
     }
+
+    @Test func visibleRangeWithNaNWidthDoesNotTrap() {
+        let r = TimeAxis().visibleRange(width: .nan)
+        #expect(r.lowerBound == r.upperBound)
+    }
 }
