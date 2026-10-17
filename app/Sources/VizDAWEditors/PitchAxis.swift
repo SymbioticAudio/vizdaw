@@ -9,7 +9,9 @@ public struct PitchAxis: Equatable, Sendable {
     public static let pitches = 128
 
     public private(set) var rowHeight: CGFloat
-    public var offset: CGFloat
+    public var offset: CGFloat {
+        didSet { if !offset.isFinite { offset = 0 } }
+    }
 
     public init(rowHeight: CGFloat = 10, offset: CGFloat = 0) {
         self.rowHeight = Self.clampRow(rowHeight)
@@ -31,7 +33,7 @@ public struct PitchAxis: Equatable, Sendable {
 
     /// The unclamped row under `y` (0 is pitch 127's row).
     public func row(atY y: CGFloat) -> Int {
-        guard y.isFinite else { return 67 }
+        guard y.isFinite else { return 67 }  // 67 = pitch 60's row (127 - 60)
         let r = ((y + offset) / rowHeight).rounded(.down)
         return Int(min(max(r, -1_000_000), 1_000_000))
     }
@@ -54,14 +56,16 @@ public struct PitchAxis: Equatable, Sendable {
 
     /// `pitch` centred in a view `height` tall, clamped to the content.
     public func centering(_ pitch: UInt8, height: CGFloat) -> PitchAxis {
+        let h = height.isFinite ? height : 0
         var a = self
-        a.offset = CGFloat(127 - Int(min(pitch, 127))) * rowHeight + rowHeight / 2 - height / 2
-        return a.clamped(height: height)
+        a.offset = CGFloat(127 - Int(min(pitch, 127))) * rowHeight + rowHeight / 2 - h / 2
+        return a.clamped(height: h)
     }
 
     public func clamped(height: CGFloat) -> PitchAxis {
+        let h = height.isFinite ? height : 0
         var a = self
-        a.offset = min(max(offset, 0), max(contentHeight - height, 0))
+        a.offset = min(max(offset, 0), max(contentHeight - h, 0))
         return a
     }
 
@@ -74,12 +78,12 @@ public struct PitchAxis: Equatable, Sendable {
 /// A 32-bit value ↔ y inside a pane `height` tall: the maximum at the top,
 /// `inset` points kept free above and below.
 public struct ValueAxis: Equatable, Sendable {
-    public var height: CGFloat
-    public var inset: CGFloat
+    public var height: CGFloat { didSet { if !height.isFinite { height = 0 } } }
+    public var inset: CGFloat { didSet { if !inset.isFinite { inset = 0 } } }
 
     public init(height: CGFloat, inset: CGFloat = 3) {
-        self.height = height
-        self.inset = inset
+        self.height = height.isFinite ? height : 0
+        self.inset = inset.isFinite ? inset : 0
     }
 
     var span: CGFloat { max(height - 2 * inset, 1) }
@@ -91,6 +95,7 @@ public struct ValueAxis: Equatable, Sendable {
     public func value(atY y: CGFloat) -> UInt32 {
         guard y.isFinite else { return 0 }
         let f = min(max(1 - Double((y - inset) / span), 0), 1)
+        guard f.isFinite else { return 0 }
         return UInt32((f * Double(UInt32.max)).rounded())
     }
 }

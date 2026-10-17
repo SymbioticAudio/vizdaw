@@ -61,4 +61,22 @@ import Testing
         let mid = v.value(atY: v.y(0x8000_0000))
         #expect(mid > 0x7F00_0000 && mid < 0x8100_0000)
     }
+
+    @Test func nonFiniteInputsNeverTrap() {
+        let c = PitchAxis(rowHeight: 10).centering(60, height: .nan)
+        #expect(c.offset.isFinite)
+        _ = c.pitch(atY: 5)
+        var a = PitchAxis(rowHeight: 10, offset: 600)
+        a.offset = .nan
+        #expect(a.offset == 0)
+        _ = a.row(atY: 5)
+        #expect(a.clamped(height: .infinity).offset.isFinite)
+        var v = ValueAxis(height: .nan, inset: .infinity)
+        _ = v.value(atY: 10)
+        _ = v.y(5)
+        v.height = .infinity
+        v.inset = .nan
+        _ = v.value(atY: 10)
+        #expect(v.y(0).isFinite)
+    }
 }

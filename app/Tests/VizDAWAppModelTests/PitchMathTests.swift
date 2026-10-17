@@ -25,12 +25,11 @@ import Testing
     }
 
     @Test func keySignatureRoots() {
-        #expect(ScaleMath.keyRoot(sharps: 0, minor: false) == 0)
-        #expect(ScaleMath.keyRoot(sharps: 1, minor: false) == 7, "G")
-        #expect(ScaleMath.keyRoot(sharps: 2, minor: false) == 2, "D")
-        #expect(ScaleMath.keyRoot(sharps: -1, minor: false) == 5, "F")
-        #expect(ScaleMath.keyRoot(sharps: -3, minor: false) == 3, "E flat")
-        #expect(ScaleMath.keyRoot(sharps: 0, minor: true) == 9, "A minor")
-        #expect(ScaleMath.keyRoot(sharps: 1, minor: true) == 4, "E minor")
+        // Major roots by sharps -7...7: Cb G... in the circle of fifths.
+        let major: [UInt8] = [11, 6, 1, 8, 3, 10, 5, 0, 7, 2, 9, 4, 11, 6, 1]
+        for (i, sharps) in (-7...7).enumerated() {
+            #expect(ScaleMath.keyRoot(sharps: Int8(sharps), minor: false) == major[i], "major \(sharps)")
+            #expect(ScaleMath.keyRoot(sharps: Int8(sharps), minor: true) == (major[i] + 9) % 12, "minor \(sharps)")
+        }
     }
 }
