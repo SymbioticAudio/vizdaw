@@ -253,8 +253,18 @@ public final class SelectModifyModel {
         return apply()
     }
 
+    /// Modify Again acts through the view filter the original Apply had:
+    /// the panel's (opened from a list) while the panel is key, else the
+    /// active list's while a list is the command surface, else the open
+    /// panel's.
+    public var modifyAgainFilter: ViewFilterRow? {
+        if isOpen && isKey { return filter }
+        if let l = document?.listForCommands() { return l.filter.viewFilter }
+        return isOpen ? filter : nil
+    }
+
     @discardableResult
-    public func modifyAgain() -> Bool { editor?.edit(.modifyAgain) ?? false }
+    public func modifyAgain() -> Bool { editor?.edit(.modifyAgain, filter: modifyAgainFilter) ?? false }
 
     // MARK: Editing the select half
 

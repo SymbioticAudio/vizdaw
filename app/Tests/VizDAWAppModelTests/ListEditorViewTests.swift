@@ -136,6 +136,24 @@ private let d4Loud = NoteInRow(pitch: 62, velocity: 0xC924, channel: 0)
         #expect(f.edits.isEmpty, "nothing typed, nothing changed")
     }
 
+    @Test func aCellEditGivesTheKeyboardBackWhileItsWindowIsNotKey() throws {
+        let (f, m, v) = try listView()
+        let w = windowed(v)
+        defer { w.close() }
+        v.beginEditing(row: 0, column: .position)
+        #expect(m.editor.textEditing)
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: w)
+        #expect(!m.editor.textEditing && m.transportKeysEnabled, "the other window's keys work")
+        #expect(m.list(.pane).editing == ListCell(row: "e1", column: .position), "the edit stays open")
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: w)
+        #expect(m.editor.textEditing && !m.transportKeysEnabled, "back in the cell, it has the keyboard again")
+        let editor = try #require(w.firstResponder as? NSTextView)
+        editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        #expect(!m.editor.textEditing && f.edits.isEmpty)
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: w)
+        #expect(!m.editor.textEditing, "no edit open, nothing taken")
+    }
+
     @Test func escapeInARealCellGivesTheKeysBack() throws {
         let (f, m, v) = try listView()
         let w = windowed(v)

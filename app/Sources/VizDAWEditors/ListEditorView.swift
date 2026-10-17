@@ -375,7 +375,15 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
         }
     }
 
+    /// A cell edit stays open in a window that is not key, but gives the
+    /// keyboard back, as the panel's fields do (Plan 4c Ruling 21); it
+    /// takes it again when the window is key again.
     private func windowKeyChanged(_ key: Bool) {
         if window?.firstResponder === table { focusChanged(key) }
+        if !key {
+            model.editor.endTextEditing(textOwner)
+        } else if editingCell != nil {
+            model.editor.beginTextEditing(textOwner)
+        }
     }
 }

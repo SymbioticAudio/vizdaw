@@ -71,9 +71,17 @@ import VizDAWCore
             closing.append(id)
             s.panelClosed(id)
         }
+        let m = try #require(s.model(a))
+        let p = m.selectModify
+        p.open(.change)
+        p.setTextEditing("m0", true)
         s.panelBecameKey(a)
+        #expect(p.isOpen && m.editor.textEditing)
         s.close(a)
         #expect(closing == [a] && s.panelFocus == nil)
+        // Only panelClosed closes the panel model and drops its text owners.
+        #expect(!p.isOpen && !p.isKey)
+        #expect(!m.editor.textEditing && m.editor.textEditors.isEmpty)
     }
 
     @Test func theApplyTargetFollowsTheDraggedRequest() throws {

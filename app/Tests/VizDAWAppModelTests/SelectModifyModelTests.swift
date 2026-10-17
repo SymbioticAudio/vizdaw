@@ -121,6 +121,28 @@ private func selectChords(_ m: DocumentModel, range: TickRange? = nil) {
         #expect(s.config == SelectModifyConfig(template: t) && s.templateName == "Up")
     }
 
+    @Test func modifyAgainUsesTheListsFilterLikeTheOriginalApply() throws {
+        let (f, m, s) = try panel()
+        selectChords(m)
+        let hidden = ViewFilterRow(hiddenKinds: [.cc], hiddenLanes: [])
+        // Launched from a list: the panel holds that list's filter.
+        s.open(.transpose, filter: hidden)
+        s.isKey = true
+        #expect(s.modifyAgain())
+        #expect(f.edits.last == .modifyAgain && f.editFilters.last == hidden)
+        s.close()
+        #expect(s.modifyAgain())
+        #expect(f.editFilters.last == .some(nil), "no list, no panel: nothing hidden")
+        // A list is the command surface: its filter.
+        m.editor.openDetail(.lane(seq: 3, lane: 31), kind: .list)
+        let l = m.list(.pane)
+        l.toggle(.pitchBend)
+        m.activeList = .pane
+        #expect(s.modifyAgain())
+        #expect(f.editFilters.last == l.filter.viewFilter)
+        #expect(f.editFilters.last??.hiddenKinds == [.pitchBend])
+    }
+
     @Test func modifyAgainSendsModifyAgain() throws {
         let (f, m, s) = try panel()
         #expect(s.modifyAgain())
