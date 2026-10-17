@@ -168,10 +168,18 @@ public final class EditorModel {
 
     // MARK: Edits
 
+    /// Shown when an edit, undo or redo arrives while a drag is open (it
+    /// would join the drag's undo step, or be lost when it is cancelled).
+    public static let gestureOpenMessage = "Finish the drag first."
+
     /// Sends one editor command (one undo step). Failures show in
-    /// `status`; returns whether it applied.
+    /// `status`; returns whether it applied. Refused while a gesture is open.
     @discardableResult
     public func edit(_ cmd: EditCommand, filter: ViewFilterRow? = nil) -> Bool {
+        guard gesture == nil else {
+            status = Self.gestureOpenMessage
+            return false
+        }
         do {
             applySnapshot(try session.edit(cmd: cmd, filter: filter))
             refreshSelection()
@@ -211,6 +219,13 @@ public final class EditorModel {
         drawVersion += 1
         do {
             try session.setSelection(selection: s)
+            // The session drops lanes and events that do not exist: hold
+            // exactly what it holds.
+            if let held = try? session.selection(), held != selection {
+                selection = held
+                selectedEvents = Set(held.events)
+                drawVersion += 1
+            }
         } catch {
             report(error)
             // Swift and Rust must not diverge: show what the session holds.

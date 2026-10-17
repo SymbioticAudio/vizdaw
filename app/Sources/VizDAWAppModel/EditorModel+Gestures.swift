@@ -103,6 +103,9 @@ extension EditorModel {
         guard g.applied != nil || g.uncertain else { return }
         do {
             applySnapshot(try session.abortEdit())
+            // applySnapshot may have cancelled the gesture (its lane vanished):
+            // reopening the edit then would leave one open with no gesture.
+            guard gesture != nil else { return }
             try session.beginEdit(label: g.label)
             g.applied = nil
             g.uncertain = false

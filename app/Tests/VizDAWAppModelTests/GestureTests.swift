@@ -171,4 +171,42 @@ private let move2: EditCommand = .event(edit: .move(events: [1], delta: 200, toL
         withExtendedLifetime(m) {}
         #expect(e.gesture == nil)
     }
+
+    @Test func anEditDuringAGestureIsRefusedWithoutASessionCall() throws {
+        let (f, _, e) = try open()
+        e.updateGesture(move1)
+        #expect(!e.edit(move2))
+        #expect(e.status == EditorModel.gestureOpenMessage)
+        #expect(f.edits.isEmpty)
+        #expect(f.calls == ["begin Move Block", "gesture"])
+        #expect(e.gesture != nil, "the drag goes on")
+    }
+
+    @Test func undoAndRedoDuringAGestureAreRefused() throws {
+        let (f, m, e) = try open()
+        e.updateGesture(move1)
+        m.undo()
+        m.redo()
+        #expect(f.undoCalls == 0)
+        #expect(f.redoCalls == 0)
+        #expect(e.status == EditorModel.gestureOpenMessage)
+        #expect(e.gesture != nil)
+        e.endGesture(move1)
+        m.undo()
+        #expect(f.undoCalls == 1, "allowed again once the drag ended")
+    }
+
+    @Test func aRewindWhoseGestureWasCancelledDoesNotReopenTheEdit() throws {
+        let (f, m, e) = try open()
+        e.updateGesture(move1)
+        // The abort's snapshot lacks the gesture's lane: afterSync cancels it.
+        var s = f.snap
+        s.version += 1
+        s.laneRevs.removeAll { $0.lane == 31 }
+        f.bump(s)
+        e.updateGesture(nil)
+        withExtendedLifetime(m) {}
+        #expect(e.gesture == nil)
+        #expect(f.calls.filter { $0 == "begin Move Block" }.count == 1, "no orphan edit: \(f.calls)")
+    }
 }

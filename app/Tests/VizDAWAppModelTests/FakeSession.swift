@@ -59,8 +59,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         state.seq = seq
     }
 
+    var undoCalls = 0
+    var redoCalls = 0
     func redo() throws -> DocSnapshot {
         if let e = stepError { throw e }
+        redoCalls += 1
         return commandResult()
     }
 
@@ -94,6 +97,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func undo() throws -> DocSnapshot {
         if let e = stepError { throw e }
+        undoCalls += 1
         return commandResult()
     }
 
@@ -351,10 +355,12 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var selectionSets: [SelectionRow] = []
     func selection() throws -> SelectionRow { sel }
     var selectionError: VizError?
+    /// What the session keeps of a selection (Rust drops unknown lanes and events).
+    var keepSelection: (SelectionRow) -> SelectionRow = { $0 }
     func setSelection(selection: SelectionRow) throws {
         if let e = selectionError { throw e }
         selectionSets.append(selection)
-        sel = selection
+        sel = keepSelection(selection)
     }
 
     var templates: [(name: String, template: SequenceTemplate)] = []

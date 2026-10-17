@@ -204,13 +204,15 @@ Use the demo project (File > Create Demo Project; its window is titled
     step.
 32. Detail pane: double-click the Chords block: the pane below says "Piano
     Roll arrives in plan 4b" with "40 events in this selection"; Cmd-2
-    switches to List; Option-Cmd-1 opens a "Piano Roll - Untitled" window.
+    switches to List; Option-Cmd-1 opens a "Piano Roll — Untitled" window.
     Option-Cmd-2 also opens a List window. Select Beat in the sidebar, open
     a window on it, then Delete... Beat: the window closes (so does one
     whose lane disappears, for example through Undo). Move and resize one, Save As
     `~/Desktop/editors.vizdaw`, close the project and reopen it: the
-    window comes back (now titled "... - editors") at the same place; the
-    arrangement keeps its block rule, snap and zoom.
+    window comes back (now titled "... — editors") at the same place; the
+    arrangement keeps its block rule, snap and zoom. Window frames and the
+    sidebar order are saved with the project on Save; moving a window alone
+    does not mark the project edited.
 33. Busy: put an AU v3 instrument with a slow editor on a strip (plan 3c
     steps), open its window and, while it is opening, drag a block and
     release: no alert appears; the block lands (perhaps a moment later) and

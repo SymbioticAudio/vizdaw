@@ -45,3 +45,25 @@ public enum RulerSelection {
         return b > a ? TickRange(start: a, end: b) : nil
     }
 }
+
+/// Scroll-wheel deltas (spec §3.5). Trackpads and Magic Mice report precise
+/// deltas in points; a notched mouse wheel reports lines, which are scaled
+/// to points for scrolling and to a ~10% step per notch for ⌘-zoom.
+public enum WheelScroll {
+    /// Points per wheel line.
+    public static let lineHeight: CGFloat = 12
+    /// Zoom factor per point of precise vertical delta.
+    public static let zoomPerPoint = 1.01
+    /// Zoom factor per wheel line (one notch).
+    public static let zoomPerLine = 1.1
+
+    /// The scroll distance in points.
+    public static func points(dx: CGFloat, dy: CGFloat, precise: Bool) -> (dx: CGFloat, dy: CGFloat) {
+        precise ? (dx, dy) : (dx * lineHeight, dy * lineHeight)
+    }
+
+    /// The ⌘-scroll zoom factor for a vertical delta.
+    public static func zoomFactor(dy: CGFloat, precise: Bool) -> Double {
+        pow(precise ? zoomPerPoint : zoomPerLine, Double(dy))
+    }
+}

@@ -61,6 +61,18 @@ final class CanvasElement: NSAccessibilityElement {
         press()
         return true
     }
+
+    /// Elements for `items`, reusing `old` in order so VoiceOver keeps the
+    /// identity of an element whose row is still there.
+    static func reuse(
+        _ old: [CanvasElement], for items: [(item: CanvasAccessibilityItem, frame: CGRect)], parent: NSView
+    ) -> [CanvasElement] {
+        items.enumerated().map { i, entry in
+            guard i < old.count else { return CanvasElement(entry.item, parent: parent, frame: entry.frame) }
+            old[i].update(entry.item, frame: entry.frame)
+            return old[i]
+        }
+    }
 }
 
 /// The shared editor surface (spec §3.5): a ruler on top and, below it,
@@ -442,12 +454,14 @@ open class EditorCanvas: NSView {
 
     open override func scrollWheel(with e: NSEvent) {
         let x = convert(e.locationInWindow, from: nil).x
+        let precise = e.hasPreciseScrollingDeltas
         if e.modifierFlags.contains(.command) {
-            axis = axis.zoomed(by: pow(1.01, Double(e.scrollingDeltaY)), aroundX: x)
+            axis = axis.zoomed(by: WheelScroll.zoomFactor(dy: e.scrollingDeltaY, precise: precise), aroundX: x)
             return
         }
-        axis = axis.scrolled(byPoints: -e.scrollingDeltaX)
-        verticalOffset = clampVertical(verticalOffset - e.scrollingDeltaY)
+        let d = WheelScroll.points(dx: e.scrollingDeltaX, dy: e.scrollingDeltaY, precise: precise)
+        axis = axis.scrolled(byPoints: -d.dx)
+        verticalOffset = clampVertical(verticalOffset - d.dy)
     }
 
     open override func magnify(with e: NSEvent) {
@@ -463,18 +477,8 @@ open class EditorCanvas: NSView {
     open override func accessibilityChildren() -> [Any]? {
         if accessibilityStale {
             accessibilityStale = false
-            let items = accessibilityItems()
-            var next: [CanvasElement] = []
-            for (i, item) in items.enumerated() {
-                let frame = content.convert(item.frame, to: self)
-                if i < a11yElements.count {
-                    a11yElements[i].update(item, frame: frame)
-                    next.append(a11yElements[i])
-                } else {
-                    next.append(CanvasElement(item, parent: self, frame: frame))
-                }
-            }
-            a11yElements = next
+            let items = accessibilityItems().map { ($0, content.convert($0.frame, to: self)) }
+            a11yElements = CanvasElement.reuse(a11yElements, for: items, parent: self)
         }
         return a11yElements
     }

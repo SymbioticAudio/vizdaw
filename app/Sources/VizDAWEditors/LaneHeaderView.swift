@@ -13,6 +13,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
     /// The lane being renamed, fixed when editing began (the shown
     /// sequence may change before it ends).
     private(set) var renaming: (seq: UInt64, lane: UInt64, name: String, field: NSTextField)?
+    /// VoiceOver children, kept so their identity is stable between queries.
+    private var a11yElements: [CanvasElement] = []
 
     public init(document: DocumentModel) {
         self.document = document
@@ -91,6 +93,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
     }
 
     private func row(at y: CGFloat) -> Int? {
+        guard laneHeight > 0, laneHeight.isFinite else { return nil }
         let i = Int(((y - EditorCanvas.rulerHeight + verticalOffset) / laneHeight).rounded(.down))
         return i >= 0 ? i : nil
     }
@@ -201,14 +204,20 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
     public override func accessibilityLabel() -> String? { "Lane Headers" }
 
     public override func accessibilityChildren() -> [Any]? {
-        guard let seq = document.selectedSeq else { return [] }
-        return document.lanes.enumerated().map { i, lane in
+        guard let seq = document.selectedSeq else {
+            a11yElements = []
+            return []
+        }
+        let items = document.lanes.enumerated().map { i, lane in
             let r = NSRect(x: 0, y: rowTop(i), width: bounds.width, height: laneHeight)
             let item = CanvasAccessibilityItem(
                 label: ArrangementA11y.header(lane), frame: r, selected: false,
-                press: { [unowned self] in self.flags(seq, lane.id, mute: !lane.mute) })
-            return CanvasElement(item, parent: self, frame: r)
+                press: { [weak self] in self?.flags(seq, lane.id, mute: !lane.mute) })
+            return (item: item, frame: r)
         }
+        // Reused like EditorCanvas's, so their identity is stable between queries.
+        a11yElements = CanvasElement.reuse(a11yElements, for: items, parent: self)
+        return a11yElements
     }
 }
 

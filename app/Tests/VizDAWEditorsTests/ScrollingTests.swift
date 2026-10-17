@@ -27,4 +27,18 @@ import VizDAWCore
         #expect(r == TickRange(start: 0, end: 30_720))
         #expect(RulerSelection.range(fromTick: 100, toX: 1, axis: a, snap: Snap(), meter: m) == nil)
     }
+
+    @Test func wheelLinesScaleToPointsAndTrackpadPointsPassThrough() {
+        let precise = WheelScroll.points(dx: 3, dy: -5, precise: true)
+        #expect(precise.dx == 3 && precise.dy == -5)
+        let wheel = WheelScroll.points(dx: 1, dy: -2, precise: false)
+        #expect(wheel.dx == 12 && wheel.dy == -24)
+    }
+
+    @Test func oneWheelNotchZoomsAboutTenPercent() {
+        #expect(abs(WheelScroll.zoomFactor(dy: 1, precise: false) - 1.1) < 1e-9)
+        #expect(abs(WheelScroll.zoomFactor(dy: -1, precise: false) - 1 / 1.1) < 1e-9)
+        #expect(abs(WheelScroll.zoomFactor(dy: 1, precise: true) - 1.01) < 1e-9)
+        #expect(WheelScroll.zoomFactor(dy: 0, precise: false) == 1)
+    }
 }

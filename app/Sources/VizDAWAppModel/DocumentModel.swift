@@ -161,13 +161,16 @@ public final class DocumentModel {
     }
 
     /// Undo and Redo do nothing while the plugin host is busy (an AU v3
-    /// editor opening): the core refuses before touching history.
+    /// editor opening): the core refuses before touching history. While a
+    /// drag is open they are refused with a status line (spec §3.8).
     public func undo() {
+        guard gestureClosed() else { return }
         command("Undo Failed", quietWhenBusy: true) { try $0.undo() }
         editor.refreshSelection()
     }
 
     public func redo() {
+        guard gestureClosed() else { return }
         command("Redo Failed", quietWhenBusy: true) { try $0.redo() }
         editor.refreshSelection()
     }
@@ -256,6 +259,15 @@ public final class DocumentModel {
     }
 
     // MARK: Plumbing
+
+    /// False (with a status line) while an editor gesture is open.
+    private func gestureClosed() -> Bool {
+        guard editor.gesture == nil else {
+            editor.status = EditorModel.gestureOpenMessage
+            return false
+        }
+        return true
+    }
 
     private func command(
         _ title: String, quietWhenBusy: Bool = false,

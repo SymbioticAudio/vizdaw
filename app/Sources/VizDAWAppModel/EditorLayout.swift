@@ -42,9 +42,20 @@ public struct EditorLayout: Codable, Equatable, Sendable {
         blockRule = field(.blockRule, d.blockRule)
         lightMode = field(.lightMode, d.lightMode)
         snap = field(.snap, d.snap)
-        laneHeight = field(.laneHeight, d.laneHeight)
-        ticksPerPoint = field(.ticksPerPoint, d.ticksPerPoint)
+        laneHeight = Self.sane(field(.laneHeight, d.laneHeight), Self.laneHeightRange, d.laneHeight)
+        ticksPerPoint = Self.sane(field(.ticksPerPoint, d.ticksPerPoint), Self.ticksPerPointRange, d.ticksPerPoint)
         follow = field(.follow, d.follow)
+    }
+
+    /// Lane heights a hand-edited or corrupt `ui.json` is clamped to.
+    public static let laneHeightRange: ClosedRange<Double> = 16...400
+    /// Zoom levels (`TimeAxis`'s limits) a decoded layout is clamped to.
+    public static let ticksPerPointRange: ClosedRange<Double> = 2...61_440
+
+    /// `v` clamped to `range`; `fallback` when it is not a finite positive number.
+    static func sane(_ v: Double, _ range: ClosedRange<Double>, _ fallback: Double) -> Double {
+        guard v.isFinite, v > 0 else { return fallback }
+        return min(max(v, range.lowerBound), range.upperBound)
     }
 
     /// The layout in `json`, or the default when it is missing or unreadable.

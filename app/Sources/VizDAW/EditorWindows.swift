@@ -14,15 +14,22 @@ enum EditorWindows {
 
     static func show(_ store: DocumentStore, doc: UUID, window: TornWindow) {
         let key = Key(doc: doc, id: window.id)
-        if let c = open[key] {
+        if let c = open[key], !c.closed {
             c.showWindow(nil)
             return
         }
         guard let model = store.model(doc) else { return }
+        weak var made: EditorWindowController?
         let c = EditorWindowController(model: model, window: window) { byUser in
-            open[key] = nil
             if byUser { model.editor.closeWindow(window.id) }
+            // Called from windowWillClose: dropping the last strong reference to the
+            // controller inside its own delegate call frees it mid-close, so defer it.
+            let closing = made
+            DispatchQueue.main.async {
+                if let closing, open[key] === closing { open[key] = nil }
+            }
         }
+        made = c
         open[key] = c
         c.showWindow(nil)
     }
@@ -52,6 +59,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private let id: UUID
     private let onClose: (Bool) -> Void
     private var forDocument = false
+    private(set) var closed = false
 
     init(model: DocumentModel, window w: TornWindow, onClose: @escaping (Bool) -> Void) {
         self.model = model
@@ -67,7 +75,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         win.title = "\(w.detail.kind.title) — \(model.snapshot.title)"
         super.init(window: win)
         win.contentView = NSHostingView(
-            rootView: TornEditorView(model: model, id: w.id) { [weak self] in self?.closeForDocument() })
+            rootView: TornEditorView(model: model, id: w.id) { [weak self] in
+                // onGone runs inside a SwiftUI update of this window's own hosting view;
+                // closing (and freeing) the window there is unsafe, so close on the next hop.
+                DispatchQueue.main.async { [weak self] in self?.closeForDocument() }
+            })
         win.delegate = self
         if let saved {
             win.setFrame(saved, display: false)
@@ -79,11 +91,16 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { nil }
 
     func closeForDocument() {
+        guard !closed else { return }
         forDocument = true
         close()
     }
 
-    func windowWillClose(_ notification: Notification) { onClose(!forDocument) }
+    func windowWillClose(_ notification: Notification) {
+        guard !closed else { return }
+        closed = true
+        onClose(!forDocument)
+    }
     func windowDidMove(_ notification: Notification) { saveFrame() }
     func windowDidEndLiveResize(_ notification: Notification) { saveFrame() }
 

@@ -324,7 +324,6 @@ public final class ArrangementView: EditorCanvas {
         return menu
     }
 
-
     // MARK: Accessibility
 
     public override func accessibilityItems() -> [CanvasAccessibilityItem] {
@@ -338,7 +337,7 @@ public final class ArrangementView: EditorCanvas {
                     CanvasAccessibilityItem(
                         label: ArrangementA11y.label(b, laneName: rows[i].name, meter: meter), frame: r,
                         selected: editor.isSelected(b),
-                        press: { [unowned self] in self.editor.selectBlock(b, in: key, adding: false) }))
+                        press: { [weak self] in self?.editor.selectBlock(b, in: key, adding: false) }))
             }
         }
         return out

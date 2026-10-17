@@ -181,6 +181,27 @@ let grooveLane = LaneKey(3, 30)
         #expect(EditorLayout.decode(l.encoded()) == l)
     }
 
+    @Test func corruptLaneHeightAndZoomFallBackOrClamp() {
+        let d = EditorLayout()
+        let zero = EditorLayout.decode(#"{"laneHeight":0,"ticksPerPoint":0}"#)
+        #expect(zero.laneHeight == d.laneHeight)
+        #expect(zero.ticksPerPoint == d.ticksPerPoint)
+        let negative = EditorLayout.decode(#"{"laneHeight":-5,"ticksPerPoint":-1}"#)
+        #expect(negative.laneHeight == d.laneHeight)
+        #expect(negative.ticksPerPoint == d.ticksPerPoint)
+        let huge = EditorLayout.decode(#"{"laneHeight":1e300,"ticksPerPoint":0.001}"#)
+        #expect(huge.laneHeight == EditorLayout.laneHeightRange.upperBound)
+        #expect(huge.ticksPerPoint == EditorLayout.ticksPerPointRange.lowerBound)
+        // JSON has no NaN literal; a string or a non-conforming value falls back.
+        let nan = EditorLayout.decode(#"{"laneHeight":"NaN","ticksPerPoint":NaN}"#)
+        #expect(nan.laneHeight == d.laneHeight)
+        #expect(nan.ticksPerPoint == d.ticksPerPoint)
+        #expect(EditorLayout.sane(.nan, EditorLayout.laneHeightRange, 48) == 48)
+        #expect(EditorLayout.sane(.infinity, EditorLayout.ticksPerPointRange, 384) == 384)
+        #expect(EditorLayout.sane(0, EditorLayout.laneHeightRange, 48) == 48)
+        #expect(EditorLayout.sane(60, EditorLayout.laneHeightRange, 48) == 60)
+    }
+
     @Test func blockRuleSettingsMapToRules() {
         #expect(BlockRuleSetting.silenceGap(beats: 2).rule == .silenceGap(ticks: 30_720))
         #expect(BlockRuleSetting.fixedBars(4).rule == .fixedBars(bars: 4))
@@ -226,6 +247,22 @@ let grooveLane = LaneKey(3, 30)
         #expect(m.editor.selection == before)
         #expect(!m.editor.isSelected(event: 1))
         #expect(m.editor.status == "no")
+    }
+
+    @Test func theSelectionIsWhatTheSessionKept() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        // Rust drops unknown events (retain_existing): event 99 does not exist.
+        f.keepSelection = { s in
+            var k = s
+            k.events.removeAll { $0 == 99 }
+            return k
+        }
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [], events: [1, 99]))
+        #expect(m.editor.selection.events == [1])
+        #expect(m.editor.isSelected(event: 1))
+        #expect(!m.editor.isSelected(event: 99))
+        #expect(m.editor.status == nil)
     }
 
     @Test func anInfoFailureIsPublishedOnceAndNotRefetchedPerDraw() async throws {

@@ -52,10 +52,10 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .undoRedo) {
             Button(doc?.undoTitle ?? "Undo") { doc?.undo() }
                 .keyboardShortcut("z")
-                .disabled(!(doc?.canUndo ?? false))
+                .disabled(!(doc?.canUndo ?? false) || doc?.editor.gesture != nil)
             Button(doc?.redoTitle ?? "Redo") { doc?.redo() }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
-                .disabled(!(doc?.canRedo ?? false))
+                .disabled(!(doc?.canRedo ?? false) || doc?.editor.gesture != nil)
         }
         CommandGroup(before: .windowList) {
             Button("Mixer") { if let docID { openWindow(id: "mixer", value: docID) } }
@@ -88,7 +88,7 @@ struct AppCommands: Commands {
                 if let doc, let seq = doc.selectedSeq { doc.editor.makeReferenceFromSelection(seq: seq) }
             }
             .keyboardShortcut("r", modifiers: [.command, .option])
-            .disabled(doc?.selectedSeq == nil)
+            .disabled(doc?.selectedSeq == nil || doc?.editor.gesture != nil)
             Button("Back to Parent Sequence") { doc?.editor.back() }
                 .keyboardShortcut("[", modifiers: [.command])
                 .disabled(doc?.editor.navigation.isEmpty ?? true)
