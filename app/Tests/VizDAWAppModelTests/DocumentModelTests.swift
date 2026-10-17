@@ -184,6 +184,54 @@ import VizDAWCore
         #expect(m.alert?.id == first.id)
         #expect(first.message == "Internal error: boom")
     }
+
+    @Test func aBusyPollKeepsTheLastTransportWithoutAnAlert() throws {
+        let f = demoFake()
+        f.state.playing = true
+        f.state.tick = 480
+        let m = try DocumentModel(session: f)
+        // An AU v3 editor opens: the main run loop spins inside plugin code.
+        f.transportError = .Busy(message: "plugin host is busy")
+        f.state.tick = 960
+        m.poll()
+        m.poll()
+        #expect(m.alert == nil)
+        #expect(m.transport.tick == 480)
+        #expect(m.isPlaying)
+        // The spin ends: the next poll reads the transport again.
+        f.transportError = nil
+        m.poll()
+        #expect(m.transport.tick == 960)
+        #expect(m.alert == nil)
+    }
+
+    @Test func aDocumentOpenedWhileBusyStartsStopped() throws {
+        let f = demoFake()
+        f.transportError = .Busy(message: "plugin host is busy")
+        let m = try DocumentModel(session: f)
+        #expect(m.alert == nil)
+        #expect(!m.isPlaying)
+        #expect(m.transport.tick == 0)
+        f.transportError = nil
+        f.state.tick = 240
+        m.poll()
+        #expect(m.transport.tick == 240)
+    }
+
+    @Test func undoAndRedoWhileBusyDoNothingSilently() throws {
+        let f = demoFake()
+        let m = try DocumentModel(session: f)
+        let before = m.snapshot.version
+        f.stepError = .Busy(message: "plugin host is busy")
+        m.undo()
+        m.redo()
+        #expect(m.alert == nil)
+        #expect(m.snapshot.version == before)
+        // Other failures still alert.
+        f.stepError = .Model(message: "nothing to undo")
+        m.undo()
+        #expect(m.alert?.title == "Undo Failed")
+    }
 }
 
 @MainActor

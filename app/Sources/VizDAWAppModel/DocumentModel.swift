@@ -42,9 +42,20 @@ public final class DocumentModel {
     public init(session: any SessionProtocol) throws {
         self.session = session
         snapshot = try session.snapshot()
-        transport = try session.transport()
+        // Busy (an AU v3 editor opening in a nested run loop): start
+        // stopped at the beginning; the next poll reads the real state.
+        do {
+            transport = try session.transport()
+        } catch VizError.Busy {
+            transport = Self.stopped
+        }
         apply(snapshot)
     }
+
+    /// The transport shown until the first successful read.
+    static let stopped = TransportState(
+        playing: false, seq: nil, tick: 0, positionBbu: "1.1.0", seconds: 0,
+        sampleRate: 0, device: "", faults: [], report: [])
 
     // MARK: Derived state
 
@@ -111,9 +122,11 @@ public final class DocumentModel {
         setMute(lane: lane, !row.mute)
     }
 
-    public func undo() { command("Undo Failed") { try $0.undo() } }
+    /// Undo and Redo do nothing while the plugin host is busy (an AU v3
+    /// editor opening): the core refuses before touching history.
+    public func undo() { command("Undo Failed", quietWhenBusy: true) { try $0.undo() } }
 
-    public func redo() { command("Redo Failed") { try $0.redo() } }
+    public func redo() { command("Redo Failed", quietWhenBusy: true) { try $0.redo() } }
 
     public func playStop() {
         do {
@@ -147,9 +160,13 @@ public final class DocumentModel {
     }
 
     /// Reads the transport. A failure shows one alert, not one per poll.
+    /// `Busy` (an AU v3 editor opening in a nested run loop) keeps the last
+    /// transport, silently; the next poll tries again.
     public func poll() {
         do {
             transport = try session.transport()
+        } catch VizError.Busy {
+            return
         } catch {
             if alert == nil { alert = AlertItem(error, title: "Transport Failed") }
         }
@@ -182,9 +199,14 @@ public final class DocumentModel {
 
     // MARK: Plumbing
 
-    private func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) {
+    private func command(
+        _ title: String, quietWhenBusy: Bool = false,
+        _ body: (any SessionProtocol) throws -> DocSnapshot
+    ) {
         do {
             apply(try body(session))
+        } catch VizError.Busy where quietWhenBusy {
+            return
         } catch {
             alert = AlertItem(error, title: title)
         }

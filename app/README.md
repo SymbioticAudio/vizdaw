@@ -106,9 +106,11 @@ multi-output drum instrument).
     offers "Add Outputs"; add one: a new strip plays that output.
 16. Tempo sync: an AU delay set to a note value follows the song's tempo
     (it slows over the last two bars of Song).
-17. Plugin Manager: disable the CLAP effect. Close and reopen the
-    project: its slot is dimmed "Disabled in Plugin Manager" and passes
-    audio. Enable it again: the slot loads. "Rescan All" scans every
+17. Plugin Manager: with the project playing, turn the CLAP effect off.
+    At once, in every open project, its slot turns into the dimmed
+    placeholder "Disabled in Plugin Manager" (an open plugin window for
+    it shows no editor) and audio passes through. Turn it back on: the
+    slot reloads with the settings it had. "Rescan All" scans every
     plugin; a crashing plugin shows "Blocklisted: crashed (signal 11)" and
     "Clear Blocklist" scans it again.
 18. Save, leave two plugin windows open, close the project and reopen

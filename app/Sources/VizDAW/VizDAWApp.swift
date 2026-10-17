@@ -275,7 +275,7 @@ final class RecoveryAlerts: RecoveryQuestions {
         if crashed && !loading.isEmpty {
             alert.addButton(withTitle: "Disable \(names)")
         }
-        switch alert.runModal() {
+        switch Self.run(alert) {
         case .alertFirstButtonReturn: return .pluginsOff
         case .alertSecondButtonReturn: return .normally
         case .alertThirdButtonReturn: return .cancel
@@ -291,6 +291,17 @@ final class RecoveryAlerts: RecoveryQuestions {
         alert.informativeText = "Restoring opens the autosaved version as an unsaved change."
         alert.addButton(withTitle: "Restore Autosave")
         alert.addButton(withTitle: "Open Last Saved")
-        return alert.runModal() == .alertFirstButtonReturn
+        return Self.run(alert) == .alertFirstButtonReturn
+    }
+
+    /// Runs `alert` in front. A launch-time open (a path argument) asks
+    /// from `App.init`, before `applicationDidFinishLaunching` has made the
+    /// app a regular, active app (under `swift run` there is no bundle):
+    /// without this the alert can come up behind other apps' windows.
+    private static func run(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        let app = NSApplication.shared
+        if app.activationPolicy() != .regular { app.setActivationPolicy(.regular) }
+        app.activate()
+        return alert.runModal()
     }
 }

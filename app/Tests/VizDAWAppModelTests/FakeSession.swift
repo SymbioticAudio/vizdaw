@@ -10,6 +10,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         sampleRate: 0, device: "", faults: [], report: [])
     var playError: VizError?
     var transportError: VizError?
+    /// Thrown by `undo()` and `redo()`.
+    var stepError: VizError?
     var savedPath: String?
     var lanesCalls = 0
     var renames: [(UInt64, String)] = []
@@ -56,7 +58,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         state.seq = seq
     }
 
-    func redo() throws -> DocSnapshot { commandResult() }
+    func redo() throws -> DocSnapshot {
+        if let e = stepError { throw e }
+        return commandResult()
+    }
 
     func renameSequence(seq: UInt64, name: String) throws -> DocSnapshot {
         renames.append((seq, name))
@@ -86,7 +91,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = transportError { throw e }
         return state
     }
-    func undo() throws -> DocSnapshot { commandResult() }
+    func undo() throws -> DocSnapshot {
+        if let e = stepError { throw e }
+        return commandResult()
+    }
 
     func idle() throws -> IdleUpdate {
         idleCalls += 1
