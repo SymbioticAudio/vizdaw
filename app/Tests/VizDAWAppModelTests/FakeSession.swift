@@ -298,6 +298,17 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = readError { throw e }
         return infoTable[seq] ?? fourFour(seq)
     }
+
+    /// Blocks by `"seq/lane"`.
+    var blocksTable: [String: [BlockRow]] = [:]
+    var blocksCalls: [String] = []
+    var lastRule: BlockRule?
+    func blocks(seq: UInt64, lane: UInt64, rule: BlockRule) throws -> [BlockRow] {
+        blocksCalls.append("\(seq)/\(lane)")
+        lastRule = rule
+        if let e = readError { throw e }
+        return blocksTable["\(seq)/\(lane)"] ?? []
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {
@@ -374,4 +385,13 @@ func noteRow(_ id: UInt64, tick: Int64, pitch: UInt8 = 60, duration: Int64 = 15_
         media: nil, sourceOffset: 0, frames: 0, gainDb: 0,
         fadeIn: FadeRow(length: 0, shape: .linear), fadeOut: FadeRow(length: 0, shape: .linear),
         text: nil, textKind: nil, data: Data(), eightBit: false)
+}
+
+/// An events block, or a reference block when `ref` is set.
+func blockRow(
+    _ start: Int64, _ end: Int64, events: [UInt64], ref: UInt64? = nil, label: String? = nil
+) -> BlockRow {
+    BlockRow(
+        start: start, end: end, kind: ref == nil ? .events : .reference, events: events,
+        label: label, refSeq: ref, muted: false)
 }

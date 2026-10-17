@@ -1642,6 +1642,16 @@ impl Session {
     pub fn sequence_info(&self, seq: u64) -> Result<crate::events::SequenceInfo, VizError> {
         ffi_guard(|| crate::events::sequence_info(lock(&self.inner).doc(), SeqId(seq)))
     }
+
+    /// The arrangement blocks of lane `lane` under `rule` (spec §3.1).
+    pub fn blocks(
+        &self,
+        seq: u64,
+        lane: u64,
+        rule: crate::blocks::BlockRule,
+    ) -> Result<Vec<crate::blocks::BlockRow>, VizError> {
+        ffi_guard(|| crate::blocks::blocks(lock(&self.inner).doc(), SeqId(seq), LaneId(lane), rule))
+    }
 }
 
 impl Drop for Session {

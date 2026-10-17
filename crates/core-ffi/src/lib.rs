@@ -16,6 +16,7 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod blocks;
 pub mod catalog;
 pub mod editor;
 pub mod error;
@@ -29,6 +30,7 @@ pub mod revs;
 pub mod session;
 pub mod snapshot;
 
+pub use blocks::{BlockKind, BlockRow, BlockRule};
 pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
     ScanProgress,
