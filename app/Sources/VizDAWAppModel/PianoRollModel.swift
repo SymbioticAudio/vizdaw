@@ -150,6 +150,9 @@ public final class PianoRollModel {
         return out
     }
 
+    /// Mute or solo on an output path the mixer has no strip for.
+    public static let noStripMessage = "This output has no mixer strip."
+
     public func setOutputMute(_ output: UInt64, _ on: Bool) {
         mixerEdit(output) { s, strip in try s.setStripMute(strip: strip, mute: on) }
     }
@@ -163,7 +166,10 @@ public final class PianoRollModel {
             editor.status = EditorModel.gestureOpenMessage
             return
         }
-        guard let strip = outputStrips()[output] else { return }
+        guard let strip = outputStrips()[output] else {
+            editor.status = Self.noStripMessage
+            return
+        }
         do {
             guard let session = document?.session else { return }
             editor.applySnapshot(try body(session, strip.id))

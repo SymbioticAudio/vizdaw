@@ -36,15 +36,24 @@ public enum ExpressionGeometry {
     }
 
     /// Stroke points (time-area coordinates) as values, ascending, one per
-    /// `pointSpacing` points; on one tick the later stroke point wins.
+    /// `pointSpacing` points; on one tick the later stroke point wins. Both
+    /// ends of the stroke's range are always kept: the last one replaces
+    /// the kept point before it when that one is within the spacing.
     public static func points(_ stroke: [CGPoint], time: TimeAxis, values: ValueAxis) -> [PerNoteValueRow] {
         let spacing = max(TimeAxis.clampTick(Double(pointSpacing) * time.ticksPerPoint), 1)
         var byTick: [Int64: UInt32] = [:]
         for p in stroke { byTick[time.tick(atX: p.x)] = values.value(atY: p.y) }
+        let sorted = byTick.sorted(by: { $0.key < $1.key })
         var out: [PerNoteValueRow] = []
-        for (tick, value) in byTick.sorted(by: { $0.key < $1.key }) {
-            if let last = out.last, tick - last.tick < spacing { continue }
-            out.append(PerNoteValueRow(tick: tick, value: value))
+        for (i, (tick, value)) in sorted.enumerated() {
+            let row = PerNoteValueRow(tick: tick, value: value)
+            guard let last = out.last, tick - last.tick < spacing else {
+                out.append(row)
+                continue
+            }
+            guard i == sorted.count - 1 else { continue }
+            // The final point: it replaces a close kept point, but never the first.
+            if out.count > 1 { out[out.count - 1] = row } else { out.append(row) }
         }
         return out
     }

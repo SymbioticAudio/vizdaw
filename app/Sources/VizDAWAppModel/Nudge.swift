@@ -38,15 +38,12 @@ public struct NudgeSettings: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        func field<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
-            ((try? c.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
-        }
         let d = NudgeSettings()
-        time = field(.time, d.time)
-        pitch = field(.pitch, d.pitch)
-        followKeySignature = field(.followKeySignature, d.followKeySignature)
-        root = field(.root, d.root) % 12
-        scale = field(.scale, d.scale)
+        time = c.field(.time, d.time)
+        pitch = c.field(.pitch, d.pitch)
+        followKeySignature = c.field(.followKeySignature, d.followKeySignature)
+        root = c.field(.root, d.root) % 12
+        scale = c.field(.scale, d.scale)
     }
 
     /// The time step at `tick` (at least 1).

@@ -117,7 +117,7 @@ public final class ExpressionPaneView: NSView, TimeAxisFollower {
         stroke.append(CGPoint(x: max(p.x, side) - side, y: p.y))
         if !open {
             guard hypot(p.x - s.x, p.y - s.y) > ToolMachine<Int>.deadZone, let lane = model.editLane else { return }
-            open = editor.beginGesture(erasing ? "Erase Expression" : "Draw Expression", lanes: [lane])
+            open = editor.beginGesture(label, lanes: [lane])
         }
         if open { editor.updateGesture(command()) }
     }
@@ -131,9 +131,24 @@ public final class ExpressionPaneView: NSView, TimeAxisFollower {
         guard start != nil else { return }
         if open {
             editor.endGesture(command())
-        } else if let c = command() {
-            editor.edit(c)
+        } else if let c = command(), let lane = model.editLane {
+            // A tap is one step named like a stroke.
+            let pending = editor.gesture != nil
+            guard editor.beginGesture(label, lanes: [lane]) else {
+                if pending { editor.status = EditorModel.gestureOpenMessage }
+                return
+            }
+            editor.endGesture(c)
         }
+    }
+
+    private var label: String { erasing ? "Erase Expression" : "Draw Expression" }
+
+    /// Leaving the window ends the stroke: its release will not come here.
+    public override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        guard newWindow == nil else { return }
+        strokeCancelled()
     }
 
     func strokeCancelled() {

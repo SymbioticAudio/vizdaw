@@ -105,20 +105,23 @@ public final class RegionStripView: NSView, TimeAxisFollower {
 
     public override func mouseDown(with e: NSEvent) {
         window?.makeFirstResponder(self)
-        let p = point(e)
+        pressed(at: point(e), clicks: e.clickCount, modifiers: Modifiers(event: e))
+    }
+
+    public override func mouseDragged(with e: NSEvent) { dragged(to: point(e), modifiers: Modifiers(event: e)) }
+    public override func mouseUp(with e: NSEvent) { released(at: point(e), modifiers: Modifiers(event: e)) }
+
+    // The presses in view coordinates (the events above, and tests).
+
+    func pressed(at p: CGPoint, clicks: Int, modifiers: Modifiers) {
         handle(
             machine.down(
-                RegionStripLayout.hit(p, lines: lines(), time: timeAxis, side: side), at: p, clicks: e.clickCount,
-                modifiers: Modifiers(event: e)))
+                RegionStripLayout.hit(p, lines: lines(), time: timeAxis, side: side), at: p, clicks: clicks,
+                modifiers: modifiers))
     }
 
-    public override func mouseDragged(with e: NSEvent) {
-        handle(machine.drag(to: point(e), modifiers: Modifiers(event: e)))
-    }
-
-    public override func mouseUp(with e: NSEvent) {
-        handle(machine.up(at: point(e), modifiers: Modifiers(event: e)))
-    }
+    func dragged(to p: CGPoint, modifiers: Modifiers) { handle(machine.drag(to: p, modifiers: modifiers)) }
+    func released(at p: CGPoint, modifiers: Modifiers) { handle(machine.up(at: p, modifiers: modifiers)) }
 
     public override func keyDown(with e: NSEvent) {
         if e.keyCode == 53 {  // Escape
@@ -127,6 +130,18 @@ public final class RegionStripView: NSView, TimeAxisFollower {
             if editor.gesture != nil { editor.cancelGesture() }
         } else {
             super.keyDown(with: e)
+        }
+    }
+
+    /// Leaving the window (⌘W mid-drag) ends the press: its release will
+    /// not come here, so the move is cancelled.
+    public override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        guard newWindow == nil else { return }
+        _ = machine.cancel()
+        if moving != nil {
+            moving = nil
+            editor.cancelGesture()
         }
     }
 

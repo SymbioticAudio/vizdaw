@@ -57,6 +57,15 @@ func audioFake() -> FakeSession {
         #expect(m.editor.status == EditorModel.gestureOpenMessage)
     }
 
+    @Test func muteOrSoloOnAnOutputWithoutAStripSaysSo() throws {
+        let f = audioFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.sequence(3), kind: .pianoRoll)
+        m.pianoRoll(.pane).setOutputSolo(99, true)
+        #expect(m.editor.status == PianoRollModel.noStripMessage)
+        #expect(!f.calls.contains { $0.hasPrefix("solo") })
+    }
+
     @Test func theStoreMakesTheDemoWithAudio() throws {
         let s = DocumentStore(makeEmpty: { editorFake() }, makeDemo: { editorFake() }, open: { _ in editorFake() })
         #expect(s.newDemoAudio() == nil, "no maker")

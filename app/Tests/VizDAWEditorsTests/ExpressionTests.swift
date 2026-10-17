@@ -51,6 +51,19 @@ private func note(_ id: UInt64, _ tick: Int64, _ length: Int64, _ points: [PerNo
         #expect(pts[1].value == UInt32.max)
     }
 
+    @Test func theStrokesFinalPointIsAlwaysKept() {
+        // Kept at 0 and 384 (x 4); the stroke ends 1 pt later at x 5 (480):
+        // within the spacing, so it replaces 384 and its value is the last.
+        let stroke = [CGPoint(x: 0, y: 3), CGPoint(x: 4, y: 48), CGPoint(x: 5, y: 93)]
+        let pts = ExpressionGeometry.points(stroke, time: time, values: values)
+        #expect(pts.map(\.tick) == [0, 480])
+        #expect(pts.last?.value == 0)
+        // Ending 1 pt after the first point: both ends stay.
+        let short = ExpressionGeometry.points([CGPoint(x: 0, y: 3), CGPoint(x: 1, y: 93)], time: time, values: values)
+        #expect(short.map(\.tick) == [0, 96])
+        #expect(short.map(\.value) == [UInt32.max, 0])
+    }
+
     @Test func aStrokeIsOneSetPerNoteOverItsRange() {
         let notes = [note(1, 0, 3_000)]
         let stroke = [CGPoint(x: 0, y: 3), CGPoint(x: 10, y: 93)]

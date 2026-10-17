@@ -43,8 +43,33 @@ import VizDAWCore
         m.editor.tool = .pencil
         v.strokeBegan(at: CGPoint(x: 64 + 10, y: 93))
         v.strokeEnded()
-        #expect(f.edits.last == .event(edit: .setPerNote(
+        // A tap is one step named like a stroke, not "Set Per-Note Values".
+        #expect(f.calls.last(where: { $0.hasPrefix("begin") }) == "begin Draw Expression")
+        #expect(f.gestureEdits.last == .event(edit: .setPerNote(
             events: [1], kind: .pitchBend, from: 960, to: 960, points: [PerNoteValueRow(tick: 960, value: 0)])))
+        #expect(f.edits.isEmpty)
+        #expect(m.editor.gesture == nil)
+    }
+
+    @Test func anEraserTapIsNamedLikeAnEraserStroke() throws {
+        let (f, m, v) = try pane()
+        m.editor.tool = .eraser
+        v.strokeBegan(at: CGPoint(x: 64 + 10, y: 3))
+        v.strokeEnded()
+        #expect(f.calls.last(where: { $0.hasPrefix("begin") }) == "begin Erase Expression")
+        #expect(m.editor.gesture == nil)
+    }
+
+    @Test func leavingTheWindowCancelsTheStroke() throws {
+        let (f, m, v) = try pane()
+        v.strokeBegan(at: CGPoint(x: 64 + 10, y: 3))
+        v.strokeMoved(to: CGPoint(x: 64 + 20, y: 48))
+        #expect(m.editor.gesture?.label == "Draw Expression")
+        v.viewWillMove(toWindow: nil)
+        #expect(m.editor.gesture == nil)
+        #expect(f.calls.last == "abort")
+        v.strokeEnded()
+        #expect(f.gestureEdits.count == 1, "the release after it edits nothing")
     }
 
     @Test func theSideColumnIsNotATimeArea() throws {

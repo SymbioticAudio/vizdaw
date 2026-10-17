@@ -204,15 +204,15 @@ Use the demo project (File > Create Demo Project; its window is titled
     Repeats 2 doubles the block, Transpose +5 is audible. Each is one Undo
     step.
 32. Detail pane: double-click the Chords block: the pane below shows the
-    piano roll (see plan 4b); Cmd-2 switches to List; Option-Cmd-1 opens a "Piano Roll — Untitled" window.
-    Option-Cmd-2 also opens a List window. Select Beat in the sidebar, open
-    a window on it, then Delete... Beat: the window closes (so does one
-    whose lane disappears, for example through Undo). Move and resize one, Save As
-    `~/Desktop/editors.vizdaw`, close the project and reopen it: the
-    window comes back (now titled "... — editors") at the same place; the
-    arrangement keeps its block rule, snap and zoom. Window frames and the
-    sidebar order are saved with the project on Save; moving a window alone
-    does not mark the project edited.
+    piano roll (see plan 4b); Cmd-2 switches to List; Option-Cmd-1 opens a
+    "Piano Roll — Untitled" window. Option-Cmd-2 also opens a List window.
+    Select Beat in the sidebar, open a window on it, then Delete... Beat:
+    the window closes (so does one whose lane disappears, for example
+    through Undo). Move and resize one, Save As `~/Desktop/editors.vizdaw`,
+    close the project and reopen it: the window comes back (now titled "...
+    — editors") at the same place; the arrangement keeps its block rule,
+    snap and zoom. Window frames and the sidebar order are saved with the
+    project on Save; moving a window alone does not mark the project edited.
 33. Busy: put an AU v3 instrument with a slow editor on a strip (plan 3c
     steps), open its window and, while it is opening, drag a block and
     release: no alert appears; the block lands (perhaps a moment later) and
@@ -241,11 +241,12 @@ so press Space twice (play, stop) before the sound steps.
     a toolbar (Arrow/Pencil/Eraser, Keyboard, Lanes, Insert Into, Audio,
     Expression, row-height and zoom buttons), a keyboard on the left with
     its C keys labelled (C4, C5), the ruler, and one three-note chord per
-    bar in blue with black-key rows shaded and a line under every C. The
-    Keyboard toggle hides the keys (the column stays). Taller Rows /
-    Shorter Rows (hover help) and the zoom buttons change the rows and the
-    zoom; Cmd-scroll zooms around the pointer; scrolling moves both ways
-    and the keyboard follows. Key labels disappear below 8-point rows.
+    bar in orange (Chords is Song's second lane, after Groove; lane colours
+    follow the lane's position) with black-key rows shaded and a line under
+    every C. The Keyboard toggle hides the keys (the column stays). Taller
+    Rows / Shorter Rows (hover help) and the zoom buttons change the rows
+    and the zoom; Cmd-scroll zooms around the pointer; scrolling moves both
+    ways and the keyboard follows. Key labels disappear below 8-point rows.
 37. Sound: click a note: it is outlined (selected) and sounds while the
     button is held and stops on release. Click a key: it sounds; drag down
     the keyboard: each key plays in turn; release: silence.
@@ -274,12 +275,13 @@ so press Space twice (play, stop) before the sound steps.
 41. Several lanes: double-click a Groove block (it opens Groove), then
     double-click its Bass block. Lanes > Drums adds the Drums lane. It has
     no notes of its own (it only references Beat), so use Insert Into >
-    Drums and the pencil to add a few notes: they are drawn in a second
-    colour (orange) and the Bass notes (blue) are drawn fainter while Drums
-    is the active lane. Press a Bass note: "Insert Into" switches back to
-    Bass and the Bass notes are drawn on top. Overlapping notes of the two
-    lanes: the click picks the one drawn on top. Lanes > Drums again hides
-    it (the target's own lane, Bass, cannot be hidden).
+    Drums and the pencil to add a few notes: they are drawn in blue (Drums
+    is Groove's first lane) and the Bass notes (orange, its second) are
+    drawn fainter while Drums is the active lane. Press a Bass note: "Insert
+    Into" switches back to Bass and the Bass notes are drawn on top.
+    Overlapping notes of the two lanes: the click picks the one drawn on
+    top. Lanes > Drums again hides it (the target's own lane, Bass, cannot
+    be hidden).
 42. Playing: Transport > Loop on, Space; drag a chord note up and hold it
     while the loop restarts: the dragged note keeps sounding until you
     release; the music follows the edit; Stop silences everything.
