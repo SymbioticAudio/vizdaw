@@ -20,7 +20,9 @@ public struct Bbu: Equatable, Sendable {
         self.unit = unit
     }
 
-    /// The position of `tick` (the core's `tick_to_bbu`).
+    /// The position of `tick` (the core's `tick_to_bbu`). Ticks off the 16-tick
+    /// unit grid lose their remainder on display; the list editor's
+    /// `.unchanged` rule relies on that.
     public static func of(_ tick: Int64, meter: [MeterEntryRow]) -> Bbu {
         let b = MeterMath.bar(at: tick, meter)
         let beatT = MeterMath.beatTicks(b.meter)
@@ -28,7 +30,8 @@ public struct Bbu: Equatable, Sendable {
         return Bbu(bar: b.number, beat: inBar / beatT + 1, unit: (inBar % beatT) * unitsPerBeat / beatT)
     }
 
-    /// The first tick of this position (the core's `bbu_to_tick`).
+    /// The first tick of this position (the core's `bbu_to_tick`); sub-unit
+    /// remainders of the original tick are not recoverable.
     public func tick(meter: [MeterEntryRow]) -> Int64 {
         let start = MeterMath.barStart(bar, meter)
         let beatT = MeterMath.beatTicks(MeterMath.bar(at: start, meter).meter)
@@ -71,6 +74,8 @@ public enum PositionInput {
 }
 
 /// Lengths as beats.units of a beat of `beat` ticks (Plan 4c Ruling 15).
+/// Ticks off the unit grid lose their remainder on display; the list
+/// editor's `.unchanged` rule relies on that.
 public enum DurationText {
     public static let maxBeats: Int64 = 1_000_000
 
@@ -109,7 +114,7 @@ public enum Smpte {
     public static func text(seconds: Double, fps: Int) -> String {
         guard seconds.isFinite else { return "--:--:--:--" }
         let f = Int64(max(fps, 1))
-        let frames = Int64(min((abs(seconds) * Double(f)).rounded(.down), 9e15))
+        let frames = Int64(min((abs(seconds) * Double(f) + 1e-6).rounded(.down), 9e15))
         let ff = frames % f
         let total = frames / f
         let sign = seconds < 0 && frames > 0 ? "-" : ""
@@ -192,7 +197,7 @@ extension PitchName {
             pc -= 1
             rest = rest.dropFirst()
         }
-        guard let octave = Int(rest) else { return nil }
+        guard let octave = Int(rest), (-2...10).contains(octave) else { return nil }
         let n = (octave + 1) * 12 + pc
         return (0...127).contains(n) ? UInt8(n) : nil
     }

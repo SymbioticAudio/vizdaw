@@ -96,4 +96,20 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
         #expect(KeyName.parse("Gb major")! == (-6, false))
         #expect(KeyName.parse("H major") == nil && KeyName.parse("C") == nil)
     }
+
+    @Test func hugeOctavesAreRefused() {
+        for bad in ["C99999999999999999999", "C9223372036854775807", "C-9223372036854775808"] {
+            #expect(PitchName.parse(bad) == nil, "\(bad)")
+        }
+    }
+
+    @Test func smpteEveryFrameRoundTrips() {
+        for fps in Smpte.rates {
+            for n in 0..<(fps * 5) {
+                let t = Smpte.text(seconds: Double(n) / Double(fps), fps: fps)
+                let s = Smpte.parse(t, fps: fps)
+                #expect(s != nil && Smpte.text(seconds: s!, fps: fps) == t, "\(fps) \(n) \(t)")
+            }
+        }
+    }
 }
