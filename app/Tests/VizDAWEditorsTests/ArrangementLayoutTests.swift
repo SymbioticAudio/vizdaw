@@ -87,6 +87,15 @@ private let b = LaneKey(3, 31)
         #expect(BlockDrag.label(copy: false) == "Move Block")
     }
 
+    @Test func optionCopiesInTheSameLaneDuplicateTheShiftedEvents() {
+        let rows = [row(1, tick: 0), row(2, tick: Q), row(3, tick: 5 * BAR)]
+        #expect(
+            BlockDrag.command(events: [1, 2], rows: rows, from: a, to: a, delta: BAR, copy: true)
+                == .event(edit: .duplicate(events: [1, 2], ticks: BAR, semitones: 0)))
+        #expect(BlockDrag.command(events: [1, 2], rows: rows, from: a, to: a, delta: 0, copy: true) == nil)
+        #expect(BlockDrag.command(events: [9], rows: rows, from: a, to: a, delta: BAR, copy: true) == nil)
+    }
+
     @Test func draggingASelectedBlockCarriesTheOtherSelectedBlocksOfItsLane() {
         let lane = [block(0, BAR, [1, 2]), block(2 * BAR, 3 * BAR, [3]), block(4 * BAR, 5 * BAR, [4])]
         #expect(BlockDrag.events(pressed: lane[0], laneBlocks: lane, selected: [1, 2, 4]) == [1, 2, 4])

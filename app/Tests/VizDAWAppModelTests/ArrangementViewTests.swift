@@ -125,6 +125,36 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(events.count == 1 && events[0].tick > 0)
     }
 
+    @Test func aSameLaneOptionDragInExactModeOpensMoveToACopy() throws {
+        let f = editorFake()
+        let (m, v) = try arrangement(f)
+        m.editor.exactMode = true
+        f.calls = []
+        v.contentMouseDown(onChords, clicks: 1, modifiers: [.option])
+        v.contentMouseDragged(CGPoint(x: 300, y: 70), modifiers: [.option])
+        v.contentMouseUp(CGPoint(x: 300, y: 70), modifiers: [.option])
+        #expect(f.calls == ["begin Copy Block", "gesture", "abort"], "previewed, then put back")
+        let p = m.selectModify
+        #expect(p.isOpen && p.task == .move && p.config.modify.toCopy)
+        guard case .move(let delta) = p.config.modify.op else {
+            Issue.record("expected a move, got \(p.config.modify.op)")
+            return
+        }
+        #expect(delta > 0)
+    }
+
+    @Test func aCrossLaneOptionDragInExactModeStillCopies() throws {
+        let f = editorFake()
+        let (m, v) = try arrangement(f)
+        m.editor.exactMode = true
+        f.calls = []
+        v.contentMouseDown(onChords, clicks: 1, modifiers: [.option])
+        v.contentMouseDragged(CGPoint(x: 300, y: 20), modifiers: [.option])
+        v.contentMouseUp(CGPoint(x: 300, y: 20), modifiers: [.option])
+        #expect(f.calls == ["begin Copy Block", "gesture", "end"])
+        #expect(!m.selectModify.isOpen)
+    }
+
     @Test func aDragOntoAnotherRowMergesIntoItsLane() throws {
         let f = editorFake()
         let (_, v) = try arrangement(f)

@@ -26,6 +26,18 @@ import VizDAWCore
         #expect(longer.config.modify.op == .change(target: .duration, op: .add, amount: .constant(value: 960)))
     }
 
+    @Test func aSameLaneBlockCopyOpensMoveToACopy() throws {
+        let r = try #require(
+            ExactMode.request(
+                for: .event(edit: .duplicate(events: [1, 2], ticks: 61_440, semitones: 0)), lanes: [chords],
+                origin: .blocks))
+        #expect(r.task == .move && r.config.modify.op == .move(delta: 61_440) && r.config.modify.toCopy)
+        #expect(r.events == [1, 2] && r.droppedAxis == nil)
+        // A copy into another lane applies as usual (Ruling 23).
+        let other = EditCommand.event(edit: .insert(seq: 3, lane: 30, events: []))
+        #expect(ExactMode.request(for: other, lanes: [chords, LaneKey(3, 30)], origin: .blocks) == nil)
+    }
+
     @Test func otherDragsApplyAsUsual() {
         let to = LaneRef(seq: 3, lane: 32)
         #expect(ExactMode.request(for: .event(edit: .move(events: [1], delta: 5, toLane: to)), lanes: [chords], origin: .notes) == nil)

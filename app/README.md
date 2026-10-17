@@ -507,14 +507,18 @@ editors (and at the bottom of the panel).
     3; a diagonal middle drag opens whichever axis is stronger with a
     notice "The vertical part of the drag was left out." or "The horizontal
     part of the drag was left out."; an end-zone drag opens Change Values
-    (Length, Add); an Option-drag opens the same with "To a Copy" chosen; a
-    rubber band opens Select by Rule with Kind, Position and Pitch
-    conditions (Shift-band: Result "Add to the Selection"). Drag a Chords
-    block one bar right in the arrangement: Move opens with "by" 4.0.
-    Region drags (Audio project), a drag into another lane, pencil clicks,
-    the eraser and expression strokes still apply as usual. Escape during
-    a drag opens nothing and leaves no undo step. Turn Exact Mode off: drags
-    apply again.
+    (Length, Add); an Option-drag of a note's start or middle opens
+    Move/Transpose with "To a Copy" chosen (end-zone drags resize and ignore
+    Option); a rubber band opens Select by Rule with Kind, Position and
+    Pitch conditions (Shift-band: Result "Add to the Selection"). Drag a
+    Chords block one bar right in the arrangement: Move opens with "by" 4.0;
+    Option-drag it one bar right in its own lane: Move opens with "by" 4.0
+    and "To a Copy" chosen, and Apply leaves the original and adds the copy
+    as one undo step. An Option-drag of a block into another lane copies at
+    once, as usual. Region drags (Audio project), a drag into another lane,
+    pencil clicks, the eraser and expression strokes still apply as usual.
+    Escape during a drag opens nothing and leaves no undo step. Turn Exact
+    Mode off: drags apply again.
 67. Keyboard and VoiceOver: with the panel in front, Cmd-Z undoes in its
     document, Space in a panel field types a space and playback does not
     start, and Space with no field focused does not play; Space and Return in

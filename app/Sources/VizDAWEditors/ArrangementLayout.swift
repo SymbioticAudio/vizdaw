@@ -102,12 +102,20 @@ public enum BlockDrag {
     }
 
     /// The full target of a drag of `events` from lane `from` by `delta`
-    /// into lane `to`: a move (merging into `to`), or with `copy` an insert
-    /// of the shifted `rows`. Nil when nothing would change.
+    /// into lane `to`: a move (merging into `to`), or with `copy` shifted
+    /// copies of the `rows` — a duplicate in their own lane (so exact mode
+    /// can offer it as Move to a Copy), an insert into another lane. Nil
+    /// when nothing would change.
     public static func command(
         events: [UInt64], rows: [EventRow], from: LaneKey, to: LaneKey, delta: Int64, copy: Bool
     ) -> EditCommand? {
         if delta == 0 && from == to { return nil }
+        if copy && from == to {
+            let present = Set(rows.map(\.id))
+            let copied = events.filter(present.contains)
+            guard !copied.isEmpty else { return nil }
+            return .event(edit: .duplicate(events: copied, ticks: delta, semitones: 0))
+        }
         if copy {
             let ids = Set(events)
             let copies = rows.filter { ids.contains($0.id) }.map { r -> EventRow in
