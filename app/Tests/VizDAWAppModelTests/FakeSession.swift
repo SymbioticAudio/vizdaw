@@ -343,9 +343,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     var edits: [EditCommand] = []
     var editError: VizError?
+    var editFilters: [ViewFilterRow?] = []
     func edit(cmd: EditCommand, filter: ViewFilterRow?) throws -> DocSnapshot {
         if let e = editError { throw e }
         edits.append(cmd)
+        editFilters.append(filter)
         calls.append("edit")
         return commandResult()
     }

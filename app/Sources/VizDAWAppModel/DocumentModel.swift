@@ -11,6 +11,8 @@ public final class DocumentModel {
     public private(set) var snapshot: DocSnapshot
     /// The editors (plan 4a).
     public let editor: EditorModel
+    /// The select-and-modify panel (plan 4c).
+    public let selectModify = SelectModifyModel()
     public private(set) var selectedSeq: UInt64?
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState
@@ -148,6 +150,7 @@ public final class DocumentModel {
         editor.applySnapshot = { [weak self] in self?.apply($0) }
         editor.selectSequence = { [weak self] in self?.select($0) }
         editor.currentSequence = { [weak self] in self?.selectedSeq }
+        selectModify.document = self
         editor.layoutChanged = { [weak self] in self?.pruneLists() }
     }
 
