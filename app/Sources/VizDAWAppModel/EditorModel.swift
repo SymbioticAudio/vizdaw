@@ -58,6 +58,7 @@ public final class EditorModel {
     /// Sequences whose info read failed (not Busy) at a snapshot version.
     @ObservationIgnored private var infoFailures: [UInt64: UInt64] = [:]
     @ObservationIgnored private var sequenceRows: [SeqRow] = []
+    @ObservationIgnored private var laneRowCache: [UInt64: (version: UInt64, rows: [LaneRow])] = [:]
     @ObservationIgnored private var selectedEvents: Set<UInt64> = []
 
     /// Audition notes sounding now, note-offs waiting for a retry with the
@@ -170,6 +171,22 @@ public final class EditorModel {
             infoFailures[seq] = snapshotVersion
             reportFromRead(error)
             return nil
+        }
+    }
+
+    /// The lanes of any sequence (a piano roll may show one the sidebar
+    /// does not), cached per snapshot version; Busy keeps the old rows.
+    public func laneRows(_ seq: UInt64) -> [LaneRow] {
+        if let c = laneRowCache[seq], c.version == snapshotVersion { return c.rows }
+        do {
+            let rows = try session.lanes(seq: seq)
+            laneRowCache[seq] = (snapshotVersion, rows)
+            return rows
+        } catch VizError.Busy {
+            return laneRowCache[seq]?.rows ?? []
+        } catch {
+            reportFromRead(error)
+            return []
         }
     }
 

@@ -83,12 +83,26 @@ extension EditorModel {
             guard let l = t.lane else { return false }
             return !lanes.contains(LaneKey(t.seq, l))
         }
+        /// Extra lanes that are gone leave a piano roll silently (Plan 4b
+        /// Review Focus 5).
+        func cleaned(_ d: DetailState) -> DetailState {
+            guard let extra = d.lanes else { return d }
+            var c = d
+            let kept = extra.filter { lanes.contains(LaneKey(d.target.seq, $0)) }
+            c.lanes = kept.isEmpty ? nil : kept
+            return c
+        }
         let detailGone = layout.detail.map { gone($0.target) } ?? false
         let windowsGone = layout.windows.contains { gone($0.detail.target) }
-        guard detailGone || windowsGone else { return }
+        let lanesGone =
+            (layout.detail.map { cleaned($0) != $0 } ?? false)
+            || layout.windows.contains { cleaned($0.detail) != $0.detail }
+        guard detailGone || windowsGone || lanesGone else { return }
         updateLayout { l in
             if detailGone { l.detail = nil }
             l.windows.removeAll { gone($0.detail.target) }
+            l.detail = l.detail.map(cleaned)
+            for i in l.windows.indices { l.windows[i].detail = cleaned(l.windows[i].detail) }
         }
     }
 

@@ -20,31 +20,31 @@ public struct EditorLayout: Codable, Equatable, Sendable {
     public var ticksPerPoint: Double = 384
     /// Follow playback (page mode, Plan Ruling 18).
     public var follow = true
+    /// Every piano roll's view settings (Plan 4b Ruling 11).
+    public var pianoRoll = PianoRollSettings()
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case version, detail, lastKind, windows, sequenceOrder, blockRule
-        case lightMode, snap, laneHeight, ticksPerPoint, follow
+        case lightMode, snap, laneHeight, ticksPerPoint, follow, pianoRoll
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        func field<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
-            ((try? c.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
-        }
         let d = EditorLayout()
-        version = field(.version, d.version)
-        detail = field(.detail, d.detail)
-        lastKind = field(.lastKind, d.lastKind)
-        windows = field(.windows, d.windows)
-        sequenceOrder = field(.sequenceOrder, d.sequenceOrder)
-        blockRule = field(.blockRule, d.blockRule)
-        lightMode = field(.lightMode, d.lightMode)
-        snap = field(.snap, d.snap)
-        laneHeight = Self.sane(field(.laneHeight, d.laneHeight), Self.laneHeightRange, d.laneHeight)
-        ticksPerPoint = Self.sane(field(.ticksPerPoint, d.ticksPerPoint), Self.ticksPerPointRange, d.ticksPerPoint)
-        follow = field(.follow, d.follow)
+        version = c.field(.version, d.version)
+        detail = c.field(.detail, d.detail)
+        lastKind = c.field(.lastKind, d.lastKind)
+        windows = c.field(.windows, d.windows)
+        sequenceOrder = c.field(.sequenceOrder, d.sequenceOrder)
+        blockRule = c.field(.blockRule, d.blockRule)
+        lightMode = c.field(.lightMode, d.lightMode)
+        snap = c.field(.snap, d.snap)
+        laneHeight = Self.sane(c.field(.laneHeight, d.laneHeight), Self.laneHeightRange, d.laneHeight)
+        ticksPerPoint = Self.sane(c.field(.ticksPerPoint, d.ticksPerPoint), Self.ticksPerPointRange, d.ticksPerPoint)
+        follow = c.field(.follow, d.follow)
+        pianoRoll = c.field(.pianoRoll, d.pianoRoll)
     }
 
     /// Lane heights a hand-edited or corrupt `ui.json` is clamped to.
@@ -71,5 +71,12 @@ public struct EditorLayout: Codable, Equatable, Sendable {
         e.outputFormatting = [.sortedKeys]
         guard let data = try? e.encode(self) else { return "{}" }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// Tolerant decoding: a missing or malformed field keeps `fallback`.
+    func field<T: Decodable>(_ key: Key, _ fallback: T) -> T {
+        ((try? decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
     }
 }

@@ -126,10 +126,15 @@ public enum EditorTarget: Codable, Hashable, Sendable {
 public struct DetailState: Codable, Hashable, Sendable {
     public var kind: DetailEditorKind
     public var target: EditorTarget
+    /// Piano roll: lanes shown besides the target's lane; for a sequence
+    /// target exactly the lanes shown (nil: the default set). Optional, so
+    /// 4a layouts decode (Plan 4b Rulings 9, 11).
+    public var lanes: [UInt64]?
 
-    public init(kind: DetailEditorKind, target: EditorTarget) {
+    public init(kind: DetailEditorKind, target: EditorTarget, lanes: [UInt64]? = nil) {
         self.kind = kind
         self.target = target
+        self.lanes = lanes
     }
 }
 
