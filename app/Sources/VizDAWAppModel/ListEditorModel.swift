@@ -33,6 +33,8 @@ public final class ListEditorModel {
     public private(set) var lastInsertKind: ListKind = .note
     /// Notes played on a MIDI source enter pitch and velocity.
     public var midiIn = false
+    /// Listening to played notes: MIDI In is on and this slot still shows a list.
+    var listens: Bool { midiIn && state?.kind == .list }
 
     private struct RowsKey: Equatable {
         let target: EditorTarget
@@ -223,12 +225,12 @@ public final class ListEditorModel {
         }
     }
 
-    /// The cursor row's tick, else the transport's when it is on this
-    /// list's own sequence and inside the target's range, else the target's
+    /// The cursor row's tick, else the stopped transport's when it lies in
+    /// the target and is on this list's own sequence, else the target's
     /// start (the list's anchor).
     func insertTick() -> Int64 {
         if let r = cursorRow { return r.tick }
-        if let d = document, let t = target, d.transport.seq == t.seq,
+        if let d = document, let t = target, !d.isPlaying, d.transport.seq == t.seq,
             range?.contains(d.transport.tick) ?? true
         {
             return d.transport.tick
@@ -282,7 +284,7 @@ public final class ListEditorModel {
 
     /// Notes played on a MIDI source (Plan 4c Ruling 12).
     public func receive(_ notes: [NoteInRow]) {
-        guard midiIn, let n = notes.last else { return }
+        guard listens, let n = notes.last else { return }
         if let cell = editing {
             guard let r = row(cell.row) else { return }
             if cell.column == .data1, r.kind == .note || r.kind == .polyPressure {

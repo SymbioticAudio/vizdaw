@@ -165,17 +165,17 @@ private func listModel(_ target: EditorTarget = .lane(seq: 3, lane: 31)) throws
         let input = FakeNoteInput()
         let hub = NoteInputHub(input: input)
         input.queued = [d4Loud]
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(input.starts == 0 && input.queued.count == 1, "nobody listens")
         l.midiIn = true
         l.cursor = "e1"
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(input.starts == 1 && hub.isListening)
         #expect(input.queued.isEmpty && f.edits.isEmpty, "notes played before it started are discarded")
         input.queued = [d4Loud]
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(f.edits.count == 1)
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(input.starts == 1, "started once")
     }
 
@@ -184,15 +184,15 @@ private func listModel(_ target: EditorTarget = .lane(seq: 3, lane: 31)) throws
         let input = FakeNoteInput()
         let hub = NoteInputHub(input: input)
         l.midiIn = true
-        hub.poll([m])
+        hub.poll([m], focused: m)
         l.midiIn = false
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(input.stops == 1 && !hub.isListening)
         input.queued = [d4Loud]
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(input.stops == 1 && input.queued.count == 1, "no reads while nobody listens")
         l.midiIn = true
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(input.starts == 2, "sources are scanned again on each start")
     }
 
@@ -203,14 +203,14 @@ private func listModel(_ target: EditorTarget = .lane(seq: 3, lane: 31)) throws
         var clock = Date(timeIntervalSince1970: 1000)
         let hub = NoteInputHub(input: input, retryDelay: 5, now: { clock })
         l.midiIn = true
-        for _ in 0..<100 { hub.poll([m]) }
+        for _ in 0..<100 { hub.poll([m], focused: m) }
         #expect(input.starts == 1, "no retry storm")
         clock.addTimeInterval(6)
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(input.starts == 2)
         input.failStart = false
         clock.addTimeInterval(6)
-        hub.poll([m])
+        hub.poll([m], focused: m)
         #expect(input.starts == 3 && hub.isListening)
     }
 
@@ -250,6 +250,89 @@ private func listModel(_ target: EditorTarget = .lane(seq: 3, lane: 31)) throws
         f.editError = VizError.Model(message: "lane is locked")
         #expect(!l.commit("3", row: "e1", column: .position))
         #expect(m.editor.status == "lane is locked")
+    }
+
+    @Test func aHiddenListNeitherReceivesNotesNorKeepsInputRunning() throws {
+        let (f, m, l) = try listModel()
+        let input = FakeNoteInput()
+        let hub = NoteInputHub(input: input)
+        l.midiIn = true
+        l.cursor = "e1"
+        hub.poll([m], focused: m)
+        #expect(hub.isListening)
+        m.editor.openDetail(.lane(seq: 3, lane: 31), kind: .pianoRoll)
+        input.queued = [d4Loud]
+        hub.poll([m], focused: m)
+        #expect(f.edits.isEmpty && !m.listensForNotes)
+        #expect(input.stops == 1 && !hub.isListening)
+        l.receive([d4Loud])
+        #expect(f.edits.isEmpty, "receive guards too")
+    }
+
+    @Test func notesGoToTheActiveListThenThePane() throws {
+        let (f, m, pane) = try listModel()
+        let w = try #require(m.editor.tearOff(.list, shown: 3))
+        let win = m.list(.window(w.id))
+        pane.midiIn = true
+        win.midiIn = true
+        pane.cursor = "e1"
+        win.cursor = "e2"
+        m.receiveNotes([d4Loud])
+        guard case .event(.replace(1, _))? = f.edits.last else {
+            Issue.record("pane expected")
+            return
+        }
+        m.activeList = .window(w.id)
+        m.receiveNotes([d4Loud])
+        guard case .event(.replace(2, _))? = f.edits.last else {
+            Issue.record("window expected")
+            return
+        }
+        #expect(f.edits.count == 2)
+    }
+
+    @Test func notesGoOnlyToTheFocusedDocument() throws {
+        let (f1, m1, l1) = try listModel()
+        let (f2, m2, l2) = try listModel()
+        let input = FakeNoteInput()
+        let hub = NoteInputHub(input: input)
+        for l in [l1, l2] {
+            l.midiIn = true
+            l.cursor = "e1"
+        }
+        hub.poll([m1, m2], focused: m2)
+        input.queued = [d4Loud]
+        hub.poll([m1, m2], focused: m2)
+        #expect(f1.edits.isEmpty && f2.edits.count == 1)
+    }
+
+    @Test func insertIgnoresAPlayingTransport() throws {
+        let (f, m, l) = try listModel()
+        f.state.playing = true
+        f.state.seq = 3
+        f.state.tick = 30_720
+        m.poll()
+        l.insert(.cc)
+        guard case .event(.insert(_, _, let rows))? = f.edits.last else {
+            Issue.record("no insert")
+            return
+        }
+        #expect(rows.first?.tick == 0)
+    }
+
+    @Test func aFailedInputStartIsReportedOnce() throws {
+        let (_, m, l) = try listModel()
+        let input = FakeNoteInput()
+        input.failStart = true
+        var clock = Date(timeIntervalSince1970: 1000)
+        let hub = NoteInputHub(input: input, retryDelay: 5, now: { clock })
+        l.midiIn = true
+        hub.poll([m], focused: m)
+        #expect(m.editor.status == "MIDI input couldn't start.")
+        m.editor.clearStatus()
+        clock.addTimeInterval(6)
+        hub.poll([m], focused: m)
+        #expect(input.starts == 2 && m.editor.status == nil, "retries stay silent")
     }
 
     @Test func columnsAndSmpteComeFromThePreferences() throws {

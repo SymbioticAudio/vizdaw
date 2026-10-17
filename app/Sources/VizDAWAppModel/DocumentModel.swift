@@ -95,13 +95,20 @@ public final class DocumentModel {
         return l
     }
 
-    public var listensForNotes: Bool { lists.values.contains { $0.midiIn } }
+    /// A list listens while MIDI In is on and its slot still shows a list.
+    public var listensForNotes: Bool { lists.values.contains { $0.listens } }
 
-    /// Played notes go to the active list when it listens, else to a
-    /// listening one.
+    /// Played notes go to the active list when it listens, else the pane's,
+    /// else the first listening window's (by ID, so the choice is stable).
     public func receiveNotes(_ notes: [NoteInRow]) {
-        let active = listForCommands().flatMap { $0.midiIn ? $0 : nil }
-        (active ?? lists.values.first { $0.midiIn })?.receive(notes)
+        var order: [DetailSlot] = []
+        if let a = activeList { order.append(a) }
+        order.append(.pane)
+        order += lists.keys.compactMap { k -> UUID? in
+            if case .window(let id) = k { return id }
+            return nil
+        }.sorted { $0.uuidString < $1.uuidString }.map { .window($0) }
+        order.compactMap { lists[$0] }.first { $0.listens }?.receive(notes)
     }
 
     private struct LanesKey: Equatable {

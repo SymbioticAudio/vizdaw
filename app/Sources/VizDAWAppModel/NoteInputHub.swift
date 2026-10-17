@@ -13,6 +13,7 @@ public final class NoteInputHub {
     private let retryDelay: TimeInterval
     private var started = false
     private var retryAt: Date?
+    private var reported = false
 
     public init(
         input: (any NoteInputProtocol)?, retryDelay: TimeInterval = 5, now: @escaping () -> Date = Date.init
@@ -24,11 +25,14 @@ public final class NoteInputHub {
 
     public var isListening: Bool { started }
 
-    public func poll(_ docs: [DocumentModel]) {
+    /// Played notes go only to `focused` (the command-target document), and
+    /// only if it listens; any listening document keeps the input running.
+    public func poll(_ docs: [DocumentModel], focused: DocumentModel? = nil) {
         guard let input else { return }
         let listening = docs.filter(\.listensForNotes)
         if listening.isEmpty {
             retryAt = nil
+            reported = false
             if started {
                 started = false
                 try? input.stop()
@@ -41,13 +45,18 @@ public final class NoteInputHub {
                 _ = try input.start()
                 started = true
                 retryAt = nil
+                reported = false
                 _ = try? input.take()  // notes played while nobody listened
             } catch {
                 retryAt = now().addingTimeInterval(retryDelay)
+                if !reported {
+                    reported = true
+                    (focused ?? listening.first)?.editor.status = "MIDI input couldn't start."
+                }
             }
             return
         }
         guard let notes = try? input.take(), !notes.isEmpty else { return }
-        for d in listening { d.receiveNotes(notes) }
+        if let focused, focused.listensForNotes { focused.receiveNotes(notes) }
     }
 }
