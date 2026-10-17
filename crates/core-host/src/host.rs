@@ -417,6 +417,45 @@ impl PluginHost {
             .collect()
     }
 
+    /// The plugins a [`sync`](Self::sync) of `doc` would start loading
+    /// now: slots it gains (or whose plugin changed), and slots waiting
+    /// to load again, minus held and unavailable ones. The crash marker
+    /// names them before the sync runs any plugin code (spec §10).
+    pub fn loads_needed(&self, doc: &Document) -> Vec<PluginRef> {
+        let mut wanted: Vec<(PluginInstanceId, &PluginSlot, bool)> = Vec::new();
+        for d in doc.instruments().values() {
+            if let DestKind::PluginInstrument { slot } = &d.kind {
+                wanted.push((slot.id, slot, true));
+            }
+        }
+        for (_, _, slot) in doc.mixer().inserts() {
+            wanted.push((slot.id, slot, false));
+        }
+        wanted
+            .into_iter()
+            .filter(|(id, slot, instrument)| {
+                let p = &slot.plugin;
+                let key = (p.format, p.id.clone());
+                if self.held.contains_key(id)
+                    || self.unavailable.contains_key(&key)
+                    || !self.formats.iter().any(|f| f.format() == p.format)
+                {
+                    return false;
+                }
+                match self.slots.get(id) {
+                    None => true,
+                    Some(s) => {
+                        let same = s.want.plugin.format == p.format
+                            && s.want.plugin.id == p.id
+                            && s.want.instrument == *instrument;
+                        !same || matches!(&s.state, State::Failed(w) if w.is_empty())
+                    }
+                }
+            })
+            .map(|(_, slot, _)| slot.plugin.clone())
+            .collect()
+    }
+
     /// Keeps slot `id` from loading (safe mode, spec §10): until released
     /// it plays as a placeholder showing `why`. `None` releases it; it
     /// loads at the next `sync`. A slot already running is not stopped.

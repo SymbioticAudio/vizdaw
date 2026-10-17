@@ -7,7 +7,7 @@ use crate::guard::{ffi_guard, lock};
 use crate::snapshot::PluginRefRow;
 use core_model::file;
 use core_model::mixer::PluginRef;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,7 +18,7 @@ pub const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(120);
 
 static SUPPORT: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Projects open in this process (their markers are not crashes).
-static OPEN: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+static OPEN: Mutex<BTreeMap<PathBuf, BTreeMap<u64, Vec<PluginRef>>>> = Mutex::new(BTreeMap::new());
 static INTERVAL_MS: AtomicU64 = AtomicU64::new(120_000);
 
 /// Where VizDAW keeps its own files: set by the app, else
@@ -73,15 +73,16 @@ pub fn set_autosave_interval_ms(ms: u64) {
     INTERVAL_MS.store(ms, Ordering::Relaxed);
 }
 
-fn key(project: &Path) -> PathBuf {
+/// The identity of a project here: its canonical path (remembered by the
+/// session, so a moved package still closes the marker it opened).
+pub fn key(project: &Path) -> PathBuf {
     std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
 }
 
-/// `open-projects/<FNV-1a of the project path>.json`.
-fn marker_path(project: &Path) -> PathBuf {
-    let k = key(project);
+/// `open-projects/<FNV-1a of the project key>.json`.
+fn marker_path(key: &Path) -> PathBuf {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in k.to_string_lossy().as_bytes() {
+    for b in key.to_string_lossy().as_bytes() {
         h ^= u64::from(*b);
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
@@ -97,30 +98,81 @@ struct Marker {
     loading: Vec<PluginRef>,
 }
 
-/// Notes that `project` is open here and writes its marker.
-pub fn opened(project: &Path, loading: &[PluginRef]) -> Result<(), String> {
-    lock(&OPEN).insert(key(project));
-    write_marker(project, loading)
-}
-
-/// Rewrites `project`'s marker naming the plugins loading now.
-pub fn write_marker(project: &Path, loading: &[PluginRef]) -> Result<(), String> {
-    let path = marker_path(project);
+/// Writes the one marker of `key`: the plugins every session open on it
+/// is loading.
+fn flush(key: &Path, sessions: &BTreeMap<u64, Vec<PluginRef>>) -> Result<(), String> {
+    let path = marker_path(key);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
+    let mut loading: Vec<PluginRef> = Vec::new();
+    for r in sessions.values().flatten() {
+        if !loading.contains(r) {
+            loading.push(r.clone());
+        }
+    }
     let m = Marker {
-        project: key(project).to_string_lossy().into_owned(),
-        loading: loading.to_vec(),
+        project: key.to_string_lossy().into_owned(),
+        loading,
     };
     let text = serde_json::to_string(&m).map_err(|e| e.to_string())?;
     file::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())
 }
 
-/// A clean close: the marker goes.
-pub fn closed(project: &Path) {
-    lock(&OPEN).remove(&key(project));
-    let _ = std::fs::remove_file(marker_path(project));
+/// The marker as it is on disk (to put back if an open fails).
+pub fn backup(key: &Path) -> Option<Vec<u8>> {
+    std::fs::read(marker_path(key)).ok()
+}
+
+/// Puts a [`backup`] back when no session is open on `key`.
+pub fn restore(key: &Path, saved: Option<Vec<u8>>) {
+    if let Some(bytes) = saved
+        && !lock(&OPEN).contains_key(key)
+    {
+        let path = marker_path(key);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = file::write_atomic(&path, &bytes);
+    }
+}
+
+/// Notes that session `sid` has `key` open and writes the marker.
+pub fn opened(key: &Path, sid: u64, loading: &[PluginRef]) -> Result<(), String> {
+    let mut open = lock(&OPEN);
+    let sessions = open.entry(key.to_path_buf()).or_default();
+    sessions.insert(sid, loading.to_vec());
+    flush(key, sessions)
+}
+
+/// Rewrites `key`'s marker with session `sid`'s loading plugins (merged
+/// with the other sessions open on it). Nothing for a closed session.
+pub fn write_marker(key: &Path, sid: u64, loading: &[PluginRef]) -> Result<(), String> {
+    let mut open = lock(&OPEN);
+    match open.get_mut(key) {
+        Some(sessions) if sessions.contains_key(&sid) => {
+            sessions.insert(sid, loading.to_vec());
+            flush(key, sessions)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A clean close of session `sid`: the marker goes with the last one.
+pub fn closed(key: &Path, sid: u64) {
+    let mut open = lock(&OPEN);
+    let Some(sessions) = open.get_mut(key) else {
+        return;
+    };
+    if sessions.remove(&sid).is_none() {
+        return;
+    }
+    if sessions.is_empty() {
+        open.remove(key);
+        let _ = std::fs::remove_file(marker_path(key));
+    } else {
+        let _ = flush(key, sessions);
+    }
 }
 
 /// Forgets that `project` is open without removing its marker, as a crash
@@ -128,6 +180,28 @@ pub fn closed(project: &Path) {
 #[cfg(feature = "test-hooks")]
 pub fn forget_open(project: &Path) {
     lock(&OPEN).remove(&key(project));
+}
+
+/// Called right before a plugin host sync that may start loads (test
+/// hook: lets a test look at the marker on disk at that moment).
+#[cfg(feature = "test-hooks")]
+static BEFORE_SYNC: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Sets the [`BEFORE_SYNC`] hook (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn set_before_sync_hook(f: Option<fn()>) {
+    *lock(&BEFORE_SYNC) = f;
+}
+
+/// Runs the before-sync hook, if any.
+pub fn before_sync() {
+    #[cfg(feature = "test-hooks")]
+    {
+        let f = *lock(&BEFORE_SYNC);
+        if let Some(f) = f {
+            f();
+        }
+    }
 }
 
 /// What the app must ask before opening a project (spec §10).
@@ -148,8 +222,9 @@ pub struct RecoveryInfo {
 pub fn recovery_check(path: String) -> Result<RecoveryInfo, VizError> {
     ffi_guard(|| {
         let p = PathBuf::from(&path);
-        let marker = std::fs::read_to_string(marker_path(&p)).ok();
-        let crashed = marker.is_some() && !lock(&OPEN).contains(&key(&p));
+        let k = key(&p);
+        let marker = std::fs::read_to_string(marker_path(&k)).ok();
+        let crashed = marker.is_some() && !lock(&OPEN).contains_key(&k);
         let loading = marker
             .filter(|_| crashed)
             .and_then(|t| serde_json::from_str::<Marker>(&t).ok())

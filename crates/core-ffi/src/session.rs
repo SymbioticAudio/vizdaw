@@ -69,6 +69,30 @@ struct Inner {
     /// A plugin changed its own state (not a parameter) since the last
     /// save: unsaved, though the document did not change.
     plugin_dirty: bool,
+    /// The crash marker's identity (the canonical path when it was
+    /// opened), so closing finds it even if the package moved.
+    key: Option<PathBuf>,
+    /// `close` ran: the marker is gone and must not come back.
+    closed: bool,
+}
+
+/// The plugins the crash marker names: those loading now, and with
+/// `ahead` also those the next sync is about to start loading. `None`
+/// while the registry is busy.
+fn marker_names(id: u64, doc: &Document, ahead: bool) -> Option<Vec<PluginRef>> {
+    plugins::with(id, |p| {
+        let Some(p) = p else { return Vec::new() };
+        let mut names: Vec<PluginRef> = p.loading().into_iter().map(|(_, r)| r).collect();
+        if ahead {
+            for r in p.loads_needed(doc) {
+                if !names.contains(&r) {
+                    names.push(r);
+                }
+            }
+        }
+        names
+    })
+    .ok()
 }
 
 /// What plugin timer steps found, handed out by the next `idle`.
@@ -82,7 +106,9 @@ struct News {
 
 impl Inner {
     fn new(doc: Document, path: Option<PathBuf>) -> Inner {
+        let key = path.as_deref().map(recovery::key);
         Inner {
+            key,
             history: History::new(doc.clone()),
             path,
             clean: doc,
@@ -99,6 +125,7 @@ impl Inner {
             last_autosave: Instant::now(),
             autosave_soon: false,
             plugin_dirty: false,
+            closed: false,
         }
     }
 
@@ -120,6 +147,8 @@ impl Inner {
     /// recompiles. A failure (or panic, which also resets the host) never
     /// fails the edit: it becomes a sticky fault.
     fn reload_host(&mut self, id: u64) {
+        // The marker names any plugin the sync starts loading first.
+        self.mark(id, true);
         let (doc, looped) = (self.history.doc(), self.looped);
         let r =
             ffi_guard(|| plugins::with(id, |p| host::reload(id, doc, looped, p)).and_then(|r| r));
@@ -139,6 +168,27 @@ impl Inner {
 
     fn doc(&self) -> &Document {
         self.history.doc()
+    }
+
+    /// Rewrites the crash marker when the plugins loading changed. With
+    /// `ahead` it also names the plugins the next sync will start loading,
+    /// so it is on disk before any of them can run code. Skipped while
+    /// the registry is busy (no sync can run then) and after `close`.
+    fn mark(&mut self, id: u64, ahead: bool) {
+        let (Some(key), false) = (self.key.clone(), self.closed) else {
+            return;
+        };
+        let Some(loading) = marker_names(id, self.history.doc(), ahead) else {
+            return;
+        };
+        if loading != self.marked {
+            if let Err(e) = recovery::write_marker(&key, id, &loading) {
+                self.news
+                    .problems
+                    .push(format!("crash marker not written: {e}"));
+            }
+            self.marked = loading;
+        }
     }
 
     /// The document changed since it was opened or saved, or a plugin
@@ -213,88 +263,93 @@ impl Session {
         plugins_off: bool,
     ) -> Result<Arc<Session>, VizError> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let key = path.as_deref().map(recovery::key);
+        // An earlier crash's marker survives a failed open (retrying
+        // still offers safe mode).
+        let saved = key.as_deref().and_then(recovery::backup);
         // Without a marker the project still opens; recovery is just not
         // offered after a crash.
-        let unmarked = path.as_deref().and_then(|p| recovery::opened(p, &[]).err());
-        let setup = plugins::create(id).and_then(|()| {
-            plugins::with(id, |p| {
-                if let Some(p) = p {
-                    if plugins_off {
-                        for slot in mixer::slot_ids(&doc) {
-                            p.hold(slot, Some(PLUGINS_OFF.to_string()));
-                        }
-                    }
-                    p.sync(&doc);
+        let unmarked = key
+            .as_deref()
+            .and_then(|k| recovery::opened(k, id, &[]).err());
+        let fail = |e: VizError| {
+            plugins::close(id);
+            if let Some(k) = key.as_deref() {
+                recovery::closed(k, id);
+                recovery::restore(k, saved.clone());
+            }
+            Err(e)
+        };
+        // A busy registry fails the open (no plugin host to open with).
+        if let Err(e) = plugins::create(id) {
+            return fail(e);
+        }
+        let held = plugins::with(id, |p| {
+            if let (Some(p), true) = (p, plugins_off) {
+                for slot in mixer::slot_ids(&doc) {
+                    p.hold(slot, Some(PLUGINS_OFF.to_string()));
                 }
-            })
+            }
         });
-        // Safe mode must not open with plugins running: a busy registry
-        // fails the open instead.
-        if let Err(e) = setup {
-            if plugins_off || !matches!(e, VizError::Busy { .. }) {
-                plugins::close(id);
-                if let Some(p) = path.as_deref() {
-                    recovery::closed(p);
+        if let Err(e) = held {
+            return fail(e);
+        }
+        // The marker names the plugins this sync will start loading
+        // before any load can run plugin code.
+        let mut marked = Vec::new();
+        if let Some(k) = key.as_deref() {
+            if let Some(names) = marker_names(id, &doc, true) {
+                // A failure leaves `marked` empty: the next mark retries.
+                if recovery::write_marker(k, id, &names).is_ok() {
+                    marked = names;
                 }
-                return Err(e);
             }
         }
+        recovery::before_sync();
+        let synced = plugins::with(id, |p| {
+            if let Some(p) = p {
+                p.sync(&doc);
+            }
+        });
         let s = Arc::new(Session {
             id,
             inner: Mutex::new(Inner::new(doc, path)),
         });
         {
             let mut inner = lock(&s.inner);
+            inner.marked = marked;
             if let Some(e) = unmarked {
                 inner
                     .news
                     .problems
                     .push(format!("crash marker not written: {e}"));
             }
-            s.mark(&mut inner);
+            // A sync that could not run is retried by `idle`.
+            inner.reload_owed = synced.is_err();
+            inner.mark(id, false);
         }
         Ok(s)
     }
 
-    /// Rewrites the crash marker when the plugins loading changed (before
-    /// any of them can run code on this thread). The list is the host's
-    /// own `loading()`, not the slots that merely report Loading. Skipped
-    /// while the registry is busy (the next tick tries again).
     fn mark(&self, inner: &mut Inner) {
-        let Some(path) = inner.path.clone() else {
-            return;
-        };
-        let Ok(loading) = plugins::with(self.id, |p| {
-            p.map(|p| p.loading().into_iter().map(|(_, r)| r).collect::<Vec<_>>())
-                .unwrap_or_default()
-        }) else {
-            return;
-        };
-        if loading != inner.marked {
-            if let Err(e) = recovery::write_marker(&path, &loading) {
-                inner
-                    .news
-                    .problems
-                    .push(format!("crash marker not written: {e}"));
-            }
-            inner.marked = loading;
-        }
+        inner.mark(self.id, false);
     }
 
     /// Captures every running plugin's state into the document (spec §4:
     /// on save and autosave). Refused inside an open edit. `Busy` when a
     /// plugin call is on the stack: nothing is captured, and the caller
     /// must not write a half-captured file.
-    fn capture_all(&self, inner: &mut Inner) -> Result<(), VizError> {
+    fn capture_all(&self, inner: &mut Inner) -> Result<bool, VizError> {
         let history = &mut inner.history;
         let failed = plugins::with(self.id, |p| {
             p.map(|p| p.capture_all(history)).unwrap_or_default()
         })?;
+        let all = failed.is_empty();
         for (id, e) in failed {
             let line = format!("{}: state not saved ({e})", slot_name(inner.doc(), id));
             inner.news.problems.push(line);
         }
-        Ok(())
+        Ok(all)
     }
 
     /// Autosaves (spec §10) a project with a path and unsaved changes,
@@ -330,12 +385,15 @@ impl Session {
     /// Saves to `path`: plugin states captured first (`Busy`, with
     /// nothing written, when a plugin call is on the stack).
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
-        self.capture_all(inner)?;
+        let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
         file::save(inner.doc(), path)?;
         write_windows(path, &inner.windows);
         inner.clean = inner.doc().clone();
-        inner.plugin_dirty = false;
+        // A plugin whose state could not be captured is still unsaved.
+        if captured {
+            inner.plugin_dirty = false;
+        }
         Ok(())
     }
 
@@ -344,7 +402,7 @@ impl Session {
     /// and finished gestures become undo steps. Returns true when the
     /// document changed. Nothing happens while the registry is busy.
     fn pump(&self, inner: &mut Inner) -> bool {
-        self.mark(inner);
+        inner.mark(self.id, true);
         let report = {
             let doc = inner.doc();
             plugins::with(self.id, |p| p.map(|p| host::service(self.id, doc, p)))
@@ -589,12 +647,24 @@ impl Session {
             let p = with_extension(&path);
             self.save_to(&mut inner, &p)?;
             if inner.path.as_deref() != Some(p.as_path()) {
-                // The marker follows the project to its new place.
-                if let Some(old) = inner.path.take() {
-                    recovery::closed(&old);
+                // The marker follows the project to its new place (not
+                // after `close`).
+                if let Some(old) = inner.key.take() {
+                    recovery::closed(&old, self.id);
                 }
-                let _ = recovery::opened(&p, &inner.marked);
+                inner.marked.clear();
+                if !inner.closed {
+                    let key = recovery::key(&p);
+                    if let Err(e) = recovery::opened(&key, self.id, &[]) {
+                        inner
+                            .news
+                            .problems
+                            .push(format!("crash marker not written: {e}"));
+                    }
+                    inner.key = Some(key);
+                }
                 inner.path = Some(p);
+                self.mark(&mut inner);
             }
             Ok(())
         })
@@ -667,6 +737,7 @@ impl Session {
                 _ => None,
             };
             let looped = inner.looped;
+            inner.mark(self.id, true);
             let played = plugins::with(self.id, |p| {
                 host::play(self.id, inner.doc(), id, start, looped, p)
             })
@@ -1442,8 +1513,10 @@ impl Session {
     /// marker goes. Safe to call more than once.
     pub fn close(&self) -> Result<(), VizError> {
         ffi_guard(|| {
-            if let Some(p) = lock(&self.inner).path.clone() {
-                recovery::closed(&p);
+            let mut inner = lock(&self.inner);
+            inner.closed = true;
+            if let Some(k) = inner.key.clone() {
+                recovery::closed(&k, self.id);
             }
             Ok(())
         })
@@ -1471,8 +1544,8 @@ pub fn simulate_crash(s: Arc<Session>) {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(p) = lock(&self.inner).path.clone() {
-            recovery::closed(&p);
+        if let Some(k) = lock(&self.inner).key.clone() {
+            recovery::closed(&k, self.id);
         }
         // The engine goes first when this session's plugin host feeds it;
         // queued if a plugin call is running (re-entrancy, plugins.rs).

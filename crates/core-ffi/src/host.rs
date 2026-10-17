@@ -556,6 +556,7 @@ pub fn play(
     if let Some(p) = plugins {
         // Slots still loading play as placeholders; `service` loads again
         // once they are in.
+        crate::recovery::before_sync();
         p.sync(doc);
     }
     if host.owner != owner || host.seq != seq || start.is_some() {
@@ -617,7 +618,10 @@ pub fn reload(
     looped: bool,
     plugins: Option<&mut PluginHost>,
 ) -> Result<(), VizError> {
-    let ready = plugins.is_none_or(|p| p.sync(doc));
+    let ready = plugins.is_none_or(|p| {
+        crate::recovery::before_sync();
+        p.sync(doc)
+    });
     let mut slot = lock(&HOST);
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
@@ -717,6 +721,7 @@ pub fn service(owner: u64, doc: &Document, plugins: &mut PluginHost) -> IdleRepo
         _ => {
             // Not playing: slots the catalog released (a plugin enabled
             // again) still load.
+            crate::recovery::before_sync();
             plugins.sync(doc);
             plugins.idle()
         }

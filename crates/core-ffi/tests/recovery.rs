@@ -209,3 +209,83 @@ fn a_plugin_loading_into_an_edited_project_autosaves_at_once() {
         1
     );
 }
+
+/// What the marker on disk said each time a plugin host sync was about to
+/// run (the hook below).
+static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn look() {
+    let support = vizdaw_ffi::recovery::support_dir();
+    let text = markers(&support)
+        .first()
+        .and_then(|m| std::fs::read_to_string(m).ok())
+        .unwrap_or_default();
+    SEEN.lock().unwrap_or_else(|e| e.into_inner()).push(text);
+}
+
+fn seen() -> Vec<String> {
+    std::mem::take(&mut *SEEN.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+#[test]
+fn the_marker_names_a_plugin_before_the_sync_that_loads_it() {
+    let (_g, _support) = serial();
+    let (_d, path, _id) = project();
+    seen();
+    vizdaw_ffi::recovery::set_before_sync_hook(Some(look));
+    let s = Session::open(path.clone()).unwrap();
+    let opening = seen();
+    assert!(
+        opening.iter().any(|t| t.contains("vizdaw.test.gain")),
+        "named before the open's sync: {opening:?}"
+    );
+    vizdaw_ffi::recovery::set_before_sync_hook(None);
+    idle_until(&s, |s| status(s) == SlotStatus::Live);
+    // An edit that adds a plugin: named before the reload's sync.
+    let synth = s.mixer().unwrap().strips[0].id;
+    seen();
+    vizdaw_ffi::recovery::set_before_sync_hook(Some(look));
+    s.add_insert(synth, None, gain()).unwrap();
+    vizdaw_ffi::recovery::set_before_sync_hook(None);
+    let editing = seen();
+    assert!(
+        editing.iter().any(|t| t.contains("vizdaw.test.gain")),
+        "named before the edit's sync: {editing:?}"
+    );
+}
+
+#[test]
+fn two_sessions_on_one_project_share_the_marker() {
+    let (_g, support) = serial();
+    let (_d, path, _id) = project();
+    let a = Session::open(path.clone()).unwrap();
+    let b = Session::open(path.clone()).unwrap();
+    // Neither has ticked: both are still loading.
+    a.close().unwrap();
+    let m = markers(support.path());
+    assert_eq!(m.len(), 1, "the other window still has it open");
+    let text = std::fs::read_to_string(&m[0]).unwrap();
+    assert!(text.contains("vizdaw.test.gain"), "still named: {text}");
+    assert!(!recovery_check(path.clone()).unwrap().crashed);
+    b.close().unwrap();
+    assert!(markers(support.path()).is_empty());
+}
+
+#[test]
+fn a_closed_session_never_brings_its_marker_back() {
+    let (_g, support) = serial();
+    let (d, path, _id) = project();
+    let s = Session::open(path.clone()).unwrap();
+    s.close().unwrap();
+    assert!(markers(support.path()).is_empty());
+    for _ in 0..10 {
+        s.idle().unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let synth = s.mixer().unwrap().strips[0].id;
+    s.add_insert(synth, None, gain()).unwrap();
+    s.save_as(d.path().join("other.vizdaw").to_string_lossy().into_owned())
+        .unwrap();
+    assert!(markers(support.path()).is_empty());
+    assert!(!recovery_check(path).unwrap().crashed);
+}
