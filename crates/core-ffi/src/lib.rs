@@ -18,6 +18,7 @@ uniffi::setup_scaffolding!();
 
 pub mod blocks;
 pub mod catalog;
+pub mod edit;
 pub mod editor;
 pub mod error;
 pub mod events;
@@ -34,6 +35,10 @@ pub use blocks::{BlockKind, BlockRow, BlockRule};
 pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
     ScanProgress,
+};
+pub use edit::{
+    AudioEdit, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneRef, QuantizeRow, ReferenceEdit,
+    SequenceEdit, ViewFilterRow,
 };
 pub use editor::EditorSize;
 pub use error::VizError;

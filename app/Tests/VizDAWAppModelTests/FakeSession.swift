@@ -309,6 +309,36 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         if let e = readError { throw e }
         return blocksTable["\(seq)/\(lane)"] ?? []
     }
+
+    // MARK: Editor edits (plan 4a)
+
+    var edits: [EditCommand] = []
+    var editError: VizError?
+    func edit(cmd: EditCommand, filter: ViewFilterRow?) throws -> DocSnapshot {
+        if let e = editError { throw e }
+        edits.append(cmd)
+        calls.append("edit")
+        return commandResult()
+    }
+
+    var gestureEdits: [EditCommand] = []
+    /// What the next `editGesture` calls throw, oldest first (nil succeeds).
+    var gestureErrors: [VizError?] = []
+    func editGesture(cmd: EditCommand, filter: ViewFilterRow?) throws -> DocSnapshot {
+        let e = gestureErrors.isEmpty ? nil : gestureErrors.removeFirst()
+        if let e {
+            calls.append("gesture refused")
+            throw e
+        }
+        gestureEdits.append(cmd)
+        calls.append("gesture")
+        return commandResult()
+    }
+
+    func abortEdit() throws -> DocSnapshot {
+        calls.append("abort")
+        return commandResult()
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

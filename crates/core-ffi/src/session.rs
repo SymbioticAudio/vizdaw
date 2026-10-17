@@ -76,6 +76,9 @@ struct Inner {
     closed: bool,
     /// Lane revisions (spec §3.1), refreshed whenever a snapshot is built.
     revs: crate::revs::Revisions,
+    /// The label of the edit `begin_edit` opened (`edit_gesture` reopens
+    /// it under the same label).
+    edit_label: Option<String>,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -112,6 +115,7 @@ impl Inner {
         Inner {
             key,
             revs: crate::revs::Revisions::new(&doc),
+            edit_label: None,
             history: History::new(doc.clone()),
             path,
             clean: doc,
@@ -492,6 +496,12 @@ impl Session {
     /// Running plugins it removes are captured first (spec §4), so an undo
     /// brings them back with their state.
     fn execute(&self, cmd: Command) -> Result<DocSnapshot, VizError> {
+        self.execute_with(cmd, &ViewFilter::default())
+    }
+
+    /// [`Session::execute`] with a view filter (editor commands that act
+    /// on the selection).
+    fn execute_with(&self, cmd: Command, filter: &ViewFilter) -> Result<DocSnapshot, VizError> {
         let next = core_model::command::apply(lock(&self.inner).doc(), &cmd)
             .ok()
             .map(|n| n.doc);
@@ -499,7 +509,7 @@ impl Session {
             self.capture_removed(&next)?;
         }
         let mut inner = lock(&self.inner);
-        inner.history.execute(&cmd, &ViewFilter::default())?;
+        inner.history.execute(&cmd, filter)?;
         inner.version += 1;
         inner.reload_host(self.id);
         self.mark(&mut inner);
@@ -1058,7 +1068,12 @@ impl Session {
     /// Opens a continuous edit (a drag): commands until `end_edit` are one
     /// undo step named `label`, and each is heard at once.
     pub fn begin_edit(&self, label: String) -> Result<(), VizError> {
-        ffi_guard(|| Ok(lock(&self.inner).history.begin(label)?))
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.history.begin(label.clone())?;
+            inner.edit_label = Some(label);
+            Ok(())
+        })
     }
 
     /// Closes the edit `begin_edit` opened (nothing happens when none is
@@ -1070,6 +1085,7 @@ impl Session {
                 inner.history.commit()?;
                 inner.version += 1;
             }
+            inner.edit_label = None;
             self.commit_held(&mut inner);
             inner.snapshot()
         })
@@ -1651,6 +1667,73 @@ impl Session {
         rule: crate::blocks::BlockRule,
     ) -> Result<Vec<crate::blocks::BlockRow>, VizError> {
         ffi_guard(|| crate::blocks::blocks(lock(&self.inner).doc(), SeqId(seq), LaneId(lane), rule))
+    }
+}
+
+/// Editor edits (spec §3.2, §3.8).
+#[uniffi::export]
+impl Session {
+    /// Applies an editor command: one undo step, or part of the open edit.
+    /// `filter` hides kinds and lanes from commands that act on the
+    /// selection.
+    pub fn edit(
+        &self,
+        cmd: crate::edit::EditCommand,
+        filter: Option<crate::edit::ViewFilterRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let c = crate::edit::to_command(&cmd)?;
+            self.execute_with(c, &crate::edit::view_filter(filter.as_ref()))
+        })
+    }
+
+    /// Inside the edit `begin_edit` opened (a drag): replaces everything the
+    /// edit did so far with `cmd` (Plan Ruling 7), so each pointer move
+    /// sends the full target. A refused `cmd` leaves the document as it was
+    /// when the edit began, with the edit still open. `Model` error when no
+    /// edit is open.
+    pub fn edit_gesture(
+        &self,
+        cmd: crate::edit::EditCommand,
+        filter: Option<crate::edit::ViewFilterRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let c = crate::edit::to_command(&cmd)?;
+            {
+                let mut inner = lock(&self.inner);
+                let label = match (&inner.edit_label, inner.history.in_transaction()) {
+                    (Some(l), true) => l.clone(),
+                    _ => return Err(crate::events::bad("no edit is open")),
+                };
+                inner.history.abort()?;
+                inner.history.begin(label)?;
+                inner.version += 1;
+            }
+            match self.execute_with(c, &crate::edit::view_filter(filter.as_ref())) {
+                Ok(s) => Ok(s),
+                Err(e) => {
+                    // The rewind changed the document: the engine follows.
+                    lock(&self.inner).reload_host(self.id);
+                    Err(e)
+                }
+            }
+        })
+    }
+
+    /// Closes the open edit and restores the document from before it
+    /// (Escape during a drag). Nothing happens when no edit is open.
+    pub fn abort_edit(&self) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if inner.history.in_transaction() {
+                inner.history.abort()?;
+                inner.version += 1;
+                inner.reload_host(self.id);
+            }
+            inner.edit_label = None;
+            self.commit_held(&mut inner);
+            inner.snapshot()
+        })
     }
 }
 
