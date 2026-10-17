@@ -16,6 +16,8 @@ public enum Edge: Equatable, Sendable {
 /// How a panel field shows and reads its number.
 public enum FieldKind: Equatable, Sendable {
     case count
+    /// A whole number limited to a range (semitones, controller numbers).
+    case bounded(Int64, Int64)
     case percent
     case pitch
     /// A 16-bit velocity as 0–127.
@@ -42,7 +44,7 @@ public struct Field: Equatable, Sendable {
 public enum FieldText {
     public static func text(_ n: Int64, _ k: FieldKind, meter: [MeterEntryRow]) -> String {
         switch k {
-        case .count: return "\(n)"
+        case .count, .bounded: return "\(n)"
         case .percent: return "\(n)%"
         case .pitch: return PitchName.name(UInt8(min(max(n, 0), 127)))
         case .velocity(let e): return e == .delta ? "\(n / 512)" : "\(n >> 9)"
@@ -59,6 +61,9 @@ public enum FieldText {
         switch k {
         case .count:
             guard let v = Int64(t), abs(v) <= 1_000_000 else { return nil }
+            return v
+        case .bounded(let lo, let hi):
+            guard let v = Int64(t), (lo...hi).contains(v) else { return nil }
             return v
         case .percent:
             let p = t.replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespaces)
@@ -101,9 +106,9 @@ extension ConditionTest {
         case .velocity, .releaseVelocity: [Field("from", .velocity(.low)), Field("to", .velocity(.high))]
         case .duration: [Field("from", .length), Field("to", .length)]
         case .value: [Field("from", .value(.low)), Field("to", .value(.high))]
-        case .controller: [Field("from", .count), Field("to", .count)]
+        case .controller: [Field("from", .bounded(0, 127)), Field("to", .bounded(0, 127))]
         case .metric: [Field("grid", .length), Field("offset", .length), Field("within", .length)]
-        case .everyNth: [Field("every", .count), Field("starting at", .count)]
+        case .everyNth: [Field("every", .bounded(1, 1_000_000)), Field("starting at", .count)]
         case .kinds, .dest: []
         }
     }
@@ -170,15 +175,15 @@ extension ModifyRow {
 
     public var fields: [Field] {
         switch self {
-        case .transposeInterval: [Field("semitones", .count)]
-        case .transposeDiatonic: [Field("steps", .count)]
+        case .transposeInterval: [Field("semitones", .bounded(-127, 127))]
+        case .transposeDiatonic: [Field("steps", .bounded(-127, 127))]
         case .transposeInvert: [Field("around", .pitch)]
         case .quantize: [Field("grid", .length), Field("strength", .percent)]
         case let .change(t, op, a): Self.changeFields(t, op, a)
         case .move: [Field("by", .length)]
-        case .scaleTime: [Field("times", .count), Field("divided by", .count), Field("around", .position)]
+        case .scaleTime: [Field("times", .bounded(1, 1_000_000)), Field("divided by", .bounded(1, 1_000_000)), Field("around", .position)]
         case .trimStart: [Field("by", .length)]
-        case .substitute(.controller): [Field("controller", .count)]
+        case .substitute(.controller): [Field("controller", .bounded(0, 127))]
         case .substitute(.pitch): [Field("pitch", .pitch)]
         case .thin, .thicken: [Field("spacing", .length)]
         case .transposeToScale, .noteMap, .setDest, .substitute, .delete: []

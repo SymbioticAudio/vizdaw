@@ -1,6 +1,24 @@
 import Foundation
 import VizDAWCore
 
+/// Which gesture a drag came from; Ruling 23 lets only note and block
+/// drags open the panel.
+public enum GestureOrigin: Equatable, Sendable {
+    case notes, blocks, regionStrip, expression, other
+}
+
+/// The part of a diagonal drag the panel left out.
+public enum DroppedAxis: Equatable, Sendable {
+    case vertical, horizontal
+
+    public var message: String {
+        switch self {
+        case .vertical: "The vertical part of the drag was left out."
+        case .horizontal: "The horizontal part of the drag was left out."
+        }
+    }
+}
+
 /// The panel opened by exact mode or a menu command, with what it acts on.
 public struct ModifyRequest: Equatable, Sendable {
     public var task: PanelTask
@@ -9,45 +27,60 @@ public struct ModifyRequest: Equatable, Sendable {
     public var events: [UInt64]?
     public var lanes: [LaneKey]
     public var range: TickRange?
+    /// Set when a diagonal drag was reduced to its stronger axis.
+    public var droppedAxis: DroppedAxis?
 
-    public init(task: PanelTask, config: SelectModifyConfig, events: [UInt64]?, lanes: [LaneKey], range: TickRange?) {
+    public init(
+        task: PanelTask, config: SelectModifyConfig, events: [UInt64]?, lanes: [LaneKey], range: TickRange?,
+        droppedAxis: DroppedAxis? = nil
+    ) {
         self.task = task
         self.config = config
         self.events = events
         self.lanes = lanes
         self.range = range
+        self.droppedAxis = droppedAxis
     }
 }
 
 /// Exact mode (parent spec §9, Plan 4c Ruling 23): a drag's final command
 /// as the panel pre-filled with its amounts.
 public enum ExactMode {
-    /// The region strip's drag label; its moves apply as usual (Ruling 23).
-    public static let regionMoveLabel = "Move Region"
-
-    /// The panel for a drag that ended with `cmd`, begun as gesture `label`;
-    /// nil when that drag applies as usual (region moves, pencil, eraser,
-    /// cross-lane drags).
-    public static func request(for cmd: EditCommand, lanes: Set<LaneKey>, label: String = "") -> ModifyRequest? {
-        guard label != regionMoveLabel, case .event(let e) = cmd else { return nil }
+    /// The panel for a drag from `origin` that ended with `cmd`; nil when
+    /// that drag applies as usual (region moves, pencil, eraser, expression
+    /// strokes, cross-lane drags).
+    public static func request(for cmd: EditCommand, lanes: Set<LaneKey>, origin: GestureOrigin) -> ModifyRequest? {
+        guard origin == .notes || origin == .blocks, case .event(let e) = cmd else { return nil }
         let sorted = lanes.sorted { ($0.seq, $0.lane) < ($1.seq, $1.lane) }
-        func make(_ task: PanelTask, _ events: [UInt64], _ op: ModifyRow, copy: Bool) -> ModifyRequest {
+        func make(
+            _ task: PanelTask, _ events: [UInt64], _ op: ModifyRow, copy: Bool, dropped: DroppedAxis? = nil
+        ) -> ModifyRequest {
             var c = SelectModifyConfig.preset(task)
             c.modify.op = op
             c.modify.toCopy = copy
-            return ModifyRequest(task: task, config: c, events: events, lanes: sorted, range: nil)
+            return ModifyRequest(task: task, config: c, events: events, lanes: sorted, range: nil, droppedAxis: dropped)
+        }
+        /// A drag in both axes keeps the stronger one: sixteenths moved
+        /// against semitones, time winning ties.
+        func shifted(_ events: [UInt64], _ ticks: Int64, _ semitones: Int8, copy: Bool) -> ModifyRequest? {
+            let timeWins =
+                semitones == 0
+                || (ticks != 0 && Double(abs(ticks)) / Double(MeterMath.ppq / 4) >= Double(abs(Int(semitones))))
+            if timeWins {
+                return make(
+                    .move, events, .move(delta: ticks), copy: copy, dropped: semitones == 0 ? nil : .vertical)
+            }
+            return make(
+                .transpose, events, .transposeInterval(semitones: semitones), copy: copy,
+                dropped: ticks == 0 ? nil : .horizontal)
         }
         switch e {
         case .move(let events, let delta, nil):
             return make(.move, events, .move(delta: delta), copy: false)
         case let .duplicate(events, ticks, semitones):
-            if semitones == 0 { return make(.move, events, .move(delta: ticks), copy: true) }
-            if ticks == 0 { return make(.transpose, events, .transposeInterval(semitones: semitones), copy: true) }
-            return nil
+            return shifted(events, ticks, semitones, copy: true)
         case let .nudge(events, ticks, semitones):
-            if ticks == 0 { return make(.transpose, events, .transposeInterval(semitones: semitones), copy: false) }
-            if semitones == 0 { return make(.move, events, .move(delta: ticks), copy: false) }
-            return nil
+            return shifted(events, ticks, semitones, copy: false)
         case let .resize(events, delta):
             return make(
                 .change, events, .change(target: .duration, op: .add, amount: .constant(value: delta)), copy: false)

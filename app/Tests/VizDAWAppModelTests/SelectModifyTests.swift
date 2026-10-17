@@ -116,4 +116,33 @@ private let meter44 = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor: 
         #expect(OffsetsText.parse("0 120 -60") == [0, 120, -60] && OffsetsText.text([0, 120, -60]) == "0 120 -60")
         #expect(OffsetsText.parse("0 x") == nil)
     }
+
+    @Test func typedNumbersOutsideTheirRangeAreRejected() {
+        func parse(_ s: String, _ k: FieldKind) -> Int64? { FieldText.parse(s, k, meter: meter44) }
+        let semis = ModifyRow.transposeInterval(semitones: 0).fields[0].kind
+        #expect(parse("127", semis) == 127 && parse("-127", semis) == -127)
+        #expect(parse("128", semis) == nil && parse("-200", semis) == nil)
+        #expect(parse("128", ConditionKind.controller.test(range: nil).fields[0].kind) == nil)
+        #expect(parse("0", ConditionKind.everyNth.test(range: nil).fields[0].kind) == nil)
+        #expect(parse("0", ModifyRow.scaleTime(num: 1, den: 1, anchor: 0).fields[0].kind) == nil)
+    }
+
+    @Test func everyKindRoundTripsItsTextOnGrid() {
+        let cases: [(FieldKind, [Int64])] = [
+            (.count, [0, 7, 1000]), (.bounded(-127, 127), [-127, 0, 127]), (.percent, [0, 80, 100, 200]),
+            (.pitch, [0, 60, 127]),
+            (.velocity(.exact), [Int64(Velocity7.up(0)), Int64(Velocity7.up(100)), Int64(Velocity7.up(127))]),
+            (.velocity(.low), [0, 100 << 9, 127 << 9]), (.velocity(.high), [511, (100 << 9) | 511, 0xFFFF]),
+            (.velocity(.delta), [-512, 0, 5120]),
+            (.value(.exact), [Int64(Value7.up(0)), Int64(Value7.up(64)), Int64(Value7.up(127))]),
+            (.value(.low), [0, 64 << 25]), (.value(.high), [0x1FF_FFFF, 0xFFFF_FFFF]), (.value(.delta), [-(1 << 25), 3 << 25]),
+            (.length, [0, q / 4, q, -q, -(q + q / 2)]), (.position, [0, q, 4 * q, 9 * q + q / 2]),
+        ]
+        for (k, ns) in cases {
+            for n in ns {
+                let t = FieldText.text(n, k, meter: meter44)
+                #expect(FieldText.parse(t, k, meter: meter44) == n, "\(k) \(n) -> \(t)")
+            }
+        }
+    }
 }
