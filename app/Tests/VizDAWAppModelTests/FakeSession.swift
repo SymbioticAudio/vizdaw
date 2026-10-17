@@ -352,6 +352,17 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
+    /// `editAll` calls: their labels and commands.
+    var allEdits: [(label: String, cmds: [EditCommand])] = []
+    var editAllError: VizError?
+    func editAll(label: String, cmds: [EditCommand], filter: ViewFilterRow?) throws -> DocSnapshot {
+        if let e = editAllError { throw e }
+        allEdits.append((label, cmds))
+        edits.append(contentsOf: cmds)
+        calls.append("editAll \(label)")
+        return commandResult()
+    }
+
     var gestureEdits: [EditCommand] = []
     /// What the next `editGesture` calls throw, oldest first (nil succeeds).
     var gestureErrors: [VizError?] = []

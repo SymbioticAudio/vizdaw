@@ -820,3 +820,44 @@ fn the_newer_event_variants_refuse_bad_input_and_change_nothing() {
     assert_eq!(state(&s), start);
     assert_eq!(s.snapshot().unwrap().undo_label, None);
 }
+
+#[test]
+fn edit_all_is_one_undo_step_and_all_or_nothing() {
+    let f = fixture();
+    let s = Session::from_document(f.doc.clone()).unwrap();
+    let start = state(&s);
+    let delete = ev(EventEdit::Delete {
+        events: vec![f.note.0, f.cc.0],
+    });
+    let markers = EditCommand::Sequence {
+        edit: SequenceEdit::SetMarkers {
+            seq: f.s.0,
+            markers: vec![],
+        },
+    };
+    let snap = s
+        .edit_all("Delete".into(), vec![delete.clone(), markers], None)
+        .unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Delete"));
+    assert_ne!(state(&s), start);
+    s.undo().unwrap();
+    assert_eq!(state(&s), start, "one undo restores everything");
+
+    // A refused second command leaves nothing of the first.
+    let bad_tempo = EditCommand::Sequence {
+        edit: SequenceEdit::SetTempo {
+            seq: f.s.0,
+            tempo: vec![],
+        },
+    };
+    let before = s.snapshot().unwrap().undo_label;
+    assert!(matches!(
+        s.edit_all("Delete".into(), vec![delete, bad_tempo], None),
+        Err(VizError::Model { .. })
+    ));
+    assert_eq!(state(&s), start, "nothing partial remains");
+    assert_eq!(s.snapshot().unwrap().undo_label, before, "no undo step");
+    // Closed: plain edits apply again.
+    s.edit(move_note(&f, Q, None), None).unwrap();
+    assert_eq!(note_tick(&s, &f), Q);
+}

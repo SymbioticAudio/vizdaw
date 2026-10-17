@@ -250,9 +250,10 @@ public final class ListEditorModel {
             default: return nil
             }
         }
-        for cmd in ListDelete.commands(chosen, seq: t.seq, info: editor.info(t.seq)) {
-            guard editor.edit(cmd) else { return }
-        }
+        // Mixed rows (events, tempo, meter, markers) delete as one undo
+        // step, all or nothing.
+        let cmds = ListDelete.commands(chosen, seq: t.seq, info: editor.info(t.seq))
+        guard editor.edit(all: cmds, label: "Delete") else { return }
         if let first = firsts.first {
             editor.status = first == "tempo" ? "The first tempo change stays." : "The first meter change stays."
         }

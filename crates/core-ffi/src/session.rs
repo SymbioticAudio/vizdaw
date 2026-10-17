@@ -1804,6 +1804,60 @@ impl Session {
         })
     }
 
+    /// Runs `cmds` in order as one undo step named `label`: all of them or
+    /// none (a refused command restores the document from before the
+    /// first, and its error is returned). For a list Delete of mixed rows.
+    pub fn edit_all(
+        &self,
+        label: String,
+        cmds: Vec<crate::edit::EditCommand>,
+        filter: Option<crate::edit::ViewFilterRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            if lock(&self.inner).edit_label.is_some() {
+                return Err(crate::events::bad("finish the open edit first"));
+            }
+            let filter = crate::edit::view_filter(filter.as_ref());
+            let mut core = Vec::with_capacity(cmds.len());
+            for cmd in &cmds {
+                match cmd {
+                    crate::edit::EditCommand::ModifyAgain => {
+                        return Err(crate::events::bad(
+                            "Modify Again repeats a modification; it is not a command",
+                        ));
+                    }
+                    crate::edit::EditCommand::Settings { edit } => {
+                        crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
+                    }
+                    _ => {}
+                }
+                core.push(crate::edit::to_command(cmd)?);
+            }
+            {
+                let mut inner = lock(&self.inner);
+                inner.history.begin(label.clone())?;
+                inner.edit_label = Some(label);
+            }
+            for c in core {
+                if let Err(e) = self.execute_with(c, &filter) {
+                    let mut inner = lock(&self.inner);
+                    inner.edit_label = None;
+                    inner.history.abort()?;
+                    inner.version += 1;
+                    inner.reload_host(self.id);
+                    self.commit_held(&mut inner);
+                    return Err(e);
+                }
+            }
+            let mut inner = lock(&self.inner);
+            inner.edit_label = None;
+            inner.history.commit()?;
+            inner.version += 1;
+            self.commit_held(&mut inner);
+            inner.snapshot()
+        })
+    }
+
     /// Inside the edit `begin_edit` opened (a drag): replaces everything the
     /// edit did so far with `cmd` (Plan Ruling 7), so each pointer move
     /// sends the full target. A refused `cmd` leaves the document as it was

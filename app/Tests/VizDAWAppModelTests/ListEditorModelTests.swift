@@ -224,6 +224,35 @@ private func listModel(_ target: EditorTarget = .lane(seq: 3, lane: 31)) throws
         #expect(m.editor.status == "The first meter change stays.")
     }
 
+    @Test func deletingMixedRowsIsOneUndoStepAllOrNothing() throws {
+        let f = rollFake()
+        var info = fourFour(3)
+        info.markers = [MarkerRow(tick: 0, name: "A"), MarkerRow(tick: 15_360, name: "B")]
+        f.infoTable[3] = info
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.sequence(3), kind: .list)
+        let l = m.list(.pane)
+        l.cursor = "e1"
+        f.editAllError = VizError.Model(message: "refused")
+        l.delete(["e1", "k0"])
+        #expect(f.edits.isEmpty && f.allEdits.isEmpty, "nothing sent one by one")
+        #expect(m.editor.status == "refused")
+        #expect(l.cursor == "e1", "a refused delete keeps the cursor")
+        f.editAllError = nil
+        l.delete(["e1", "k0"])
+        #expect(f.allEdits.count == 1)
+        #expect(f.allEdits.first?.label == "Delete")
+        #expect(
+            f.allEdits.first?.cmds == [
+                .event(edit: .delete(events: [1])),
+                .sequence(edit: .setMarkers(seq: 3, markers: [MarkerRow(tick: 15_360, name: "B")])),
+            ])
+        #expect(l.cursor == nil)
+        // One kind of row is a plain edit, named after itself.
+        l.delete(["e2"])
+        #expect(f.allEdits.count == 1 && f.edits.last == .event(edit: .delete(events: [2])))
+    }
+
     @Test func insertUsesTheTransportOnlyOnItsOwnSequence() throws {
         let (f, m, l) = try listModel()
         f.state.seq = 4

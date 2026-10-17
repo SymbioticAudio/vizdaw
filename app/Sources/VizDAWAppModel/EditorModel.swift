@@ -247,6 +247,26 @@ public final class EditorModel {
         }
     }
 
+    /// Runs `cmds` as one undo step named `label`: all of them or none (a
+    /// refused one leaves the document as it was). One command is a plain
+    /// edit, named after itself.
+    @discardableResult
+    public func edit(all cmds: [EditCommand], label: String, filter: ViewFilterRow? = nil) -> Bool {
+        guard cmds.count > 1 else { return cmds.first.map { edit($0, filter: filter) } ?? true }
+        guard gesture == nil else {
+            status = Self.gestureOpenMessage
+            return false
+        }
+        do {
+            applySnapshot(try session.editAll(label: label, cmds: cmds, filter: filter))
+            refreshSelection()
+            return true
+        } catch {
+            report(error)
+            return false
+        }
+    }
+
     public func report(_ error: any Error) {
         if let e = error as? VizError {
             status = e.message
