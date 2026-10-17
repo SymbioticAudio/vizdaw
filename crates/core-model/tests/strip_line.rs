@@ -312,3 +312,93 @@ fn series_read_and_write_the_32_bit_scale() {
     assert!(Series::Controller(128).check().is_err());
     assert_eq!(Series::of(&EventBody::note(60, 1, Tick(1))), None);
 }
+
+#[test]
+fn reduced_curves_stay_curves() {
+    let tempo = TempoMap::default();
+    let meter = MeterMap::default();
+    let ctx = TimeCtx {
+        tempo: &tempo,
+        meter: &meter,
+    };
+    for (curve, end) in [
+        (Curve::EaseIn, 127),
+        (Curve::EaseOut, 127),
+        (Curve::SCurve, 1000),
+    ] {
+        let l = Line {
+            to: Tick(1920),
+            end,
+            step: Tick(1),
+            ..line(LineShape::Curved { curve })
+        };
+        let samples = l.samples(ctx).unwrap();
+        let kept = reduce(&samples, true);
+        assert!(
+            kept.len() > 3,
+            "{curve:?} collapsed to {} points",
+            kept.len()
+        );
+        assert_eq!(kept.first(), samples.first());
+        assert_eq!(kept.last(), samples.last());
+        for (t, v) in &samples {
+            let i = kept.partition_point(|k| k.0 <= *t).clamp(1, kept.len() - 1);
+            let (a, b) = (kept[i - 1], kept[i]);
+            let y = a.1 as f64 + (b.1 - a.1) as f64 * (t.0 - a.0.0) as f64 / (b.0.0 - a.0.0) as f64;
+            assert!(
+                (y - *v as f64).abs() <= 1.0 + 1e-6,
+                "{curve:?} tick {}: {y} vs {v}",
+                t.0
+            );
+        }
+    }
+}
+
+#[test]
+fn a_zero_length_line_holds_its_end_after_its_tick() {
+    for shape in [
+        LineShape::Straight,
+        LineShape::Curved {
+            curve: Curve::EaseIn,
+        },
+    ] {
+        let l = Line {
+            from: Tick(Q),
+            to: Tick(Q),
+            ..line(shape)
+        };
+        assert_eq!([at(&l, 0), at(&l, Q), at(&l, Q + 1)], [0, 0, 1000]);
+    }
+}
+
+#[test]
+fn clock_and_bar_periods_count_from_the_line_start() {
+    let tempo = TempoMap::default();
+    let meter = MeterMap::default();
+    let ctx = TimeCtx {
+        tempo: &tempo,
+        meter: &meter,
+    };
+    // Starts half-way through bar 1 (4/4): the saw is low there, not mid-way.
+    let l = Line {
+        from: Tick(2 * Q),
+        to: Tick(10 * Q),
+        ..line(LineShape::Oscillator {
+            wave: Wave::Saw,
+            period: Period::Bars(1),
+            phase: 0,
+        })
+    };
+    assert_eq!(l.at(Tick(2 * Q), ctx), 0);
+    assert_eq!(l.at(Tick(4 * Q), ctx), 500);
+    assert_eq!(l.at(Tick(6 * Q), ctx), 0);
+    let ms = Line {
+        from: Tick(Q / 2),
+        ..line(LineShape::Oscillator {
+            wave: Wave::Saw,
+            period: Period::Millis(1000),
+            phase: 0,
+        })
+    };
+    assert_eq!(ms.at(Tick(Q / 2), ctx), 0);
+}

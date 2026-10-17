@@ -22,9 +22,12 @@ pub const MAX_SAMPLES: usize = 100_000;
 pub enum Period {
     /// Musical: this many ticks.
     Ticks(Tick),
-    /// Clock: this many milliseconds, through the sequence's tempo map.
+    /// Clock: this many milliseconds, through the sequence's tempo map,
+    /// counted from the line's `from`.
     Millis(u32),
     /// Following the meter: this many bars, each as long as its meter.
+    /// Like `Millis`, counted from the line's `from`, not from a barline: a
+    /// line that starts mid-bar starts its wave mid-bar.
     Bars(u32),
 }
 
@@ -150,6 +153,8 @@ impl Line {
         let span = self.to.0.saturating_sub(self.from.0);
         let x = if span > 0 {
             (t.0.saturating_sub(self.from.0) as f64 / span as f64).clamp(0.0, 1.0)
+        } else if t > self.from {
+            1.0
         } else {
             0.0
         };
@@ -236,39 +241,64 @@ fn cycles(from: Tick, t: Tick, p: Period, ctx: TimeCtx<'_>) -> f64 {
     }
 }
 
-/// The samples a draw writes (Plan 4d Ruling 16): the first and last
-/// always; between them, on a holding series (`ramps` false) a sample equal
-/// to the previous kept one goes; on a ramping series a sample within one
-/// unit of the straight line from the previous kept sample to the next
-/// sample goes, so a straight line writes two points.
+/// The samples a draw writes (Plan 4d Ruling 16, fix round 1): the first and
+/// last always; between them, on a holding series (`ramps` false) a sample
+/// equal to the previous kept one goes; on a ramping series a sample goes
+/// when the straight line from the last kept sample to the sample after it
+/// stays within one unit of every sample dropped since, so error never adds
+/// up (a straight line writes two points, a curve stays a curve).
 pub fn reduce(samples: &[(Tick, i64)], ramps: bool) -> Vec<(Tick, i64)> {
     let mut out: Vec<(Tick, i64)> = Vec::with_capacity(samples.len());
-    for (i, p) in samples.iter().enumerate() {
-        let (Some(prev), Some(next)) = (out.last().copied(), samples.get(i + 1)) else {
+    if !ramps {
+        for (i, p) in samples.iter().enumerate() {
+            let last = i + 1 == samples.len();
+            if last || out.last().is_none_or(|prev| prev.1 != p.1) {
+                out.push(*p);
+            }
+        }
+        return out;
+    }
+    // Slopes (per tick) of the lines from the anchor that pass within one
+    // unit of every sample seen since it.
+    let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+    let mut prev: Option<(Tick, i64)> = None;
+    for p in samples {
+        let Some(anchor) = out.last().copied() else {
             out.push(*p);
+            prev = Some(*p);
             continue;
         };
-        let drop = if ramps {
-            on_chord(prev, *p, *next)
-        } else {
-            prev.1 == p.1
+        let dt = p.0.0.saturating_sub(anchor.0.0) as f64;
+        let rise = p.1.saturating_sub(anchor.1) as f64;
+        let fits = dt > 0.0 && {
+            let slope = rise / dt;
+            slope >= lo - 1e-9 && slope <= hi + 1e-9
         };
-        if !drop {
-            out.push(*p);
+        if fits {
+            lo = lo.max((rise - 1.0) / dt);
+            hi = hi.min((rise + 1.0) / dt);
+        } else {
+            // Keep the sample before this one and start a new stretch.
+            let keep = prev.filter(|q| *q != anchor).unwrap_or(*p);
+            out.push(keep);
+            let a = keep;
+            let dt = p.0.0.saturating_sub(a.0.0) as f64;
+            let rise = p.1.saturating_sub(a.1) as f64;
+            if dt > 0.0 && keep != *p {
+                lo = (rise - 1.0) / dt;
+                hi = (rise + 1.0) / dt;
+            } else {
+                (lo, hi) = (f64::NEG_INFINITY, f64::INFINITY);
+            }
         }
+        prev = Some(*p);
+    }
+    if let (Some(last), Some(kept)) = (prev, out.last().copied())
+        && last != kept
+    {
+        out.push(last);
     }
     out
-}
-
-/// `p` lies within one unit of the line from `a` to `b`.
-fn on_chord(a: (Tick, i64), p: (Tick, i64), b: (Tick, i64)) -> bool {
-    let dt = i128::from(b.0.0) - i128::from(a.0.0);
-    if dt <= 0 {
-        return false;
-    }
-    let dev = (i128::from(p.1) - i128::from(a.1)) * dt
-        - (i128::from(b.1) - i128::from(a.1)) * (i128::from(p.0.0) - i128::from(a.0.0));
-    dev.abs() <= dt
 }
 
 /// A controller-like series a line draws (Plan 4d Ruling 15).
