@@ -556,16 +556,23 @@ fn tempo_line(
             }
         };
         let map = TempoMap::new(next)?;
-        d.seq_mut(seq)?.tempo = map;
+        if map != d.sequence(seq)?.tempo {
+            d.seq_mut(seq)?.tempo = map;
+        }
     }
     Ok(())
 }
 
 /// Points outside the line stay; inside, the line's reduced samples become
-/// ramping points (the last holds). When the point before the line ramps
-/// into it, a point at `from` holds the tempo the map had there, so the
-/// earlier ramp still ends where it did (Ruling P7); the drawn points then
-/// begin one tick later.
+/// ramping points (the last holds). Tempo outside the line is unchanged
+/// (Rulings P7, P7b):
+/// - when the point before the line ramps into it, a point at `from` holds
+///   the tempo the map had there and the drawn points begin one tick later
+///   (a later sample at that tick wins over the shifted first one);
+/// - when a ramp crosses `to`, a ramping point at `to + 1` holds the tempo
+///   the map had there, so the rest of that ramp is reproduced.
+///
+/// A drawn point that lands on a point of the map outside the line wins.
 fn draw_tempo(
     map: &TempoMap,
     points: &[TempoPoint],
@@ -578,12 +585,8 @@ fn draw_tempo(
         .map(|(t, v)| (t, i64::from(bpm(v).0)))
         .collect();
     let mut drawn = reduce(&held, true);
-    let n = drawn.len();
-    let mut out: Vec<TempoPoint> = points
-        .iter()
-        .copied()
-        .filter(|p| !line.covers(p.tick))
-        .collect();
+    let at = |t: Tick| bpm((map.bpm_at(t) * 1000.0).round() as i64);
+    let mut extra: Vec<TempoPoint> = Vec::new();
     let ramps_in = points
         .iter()
         .rev()
@@ -591,27 +594,46 @@ fn draw_tempo(
         .is_some_and(|p| p.ramp)
         && points.iter().any(|p| p.tick >= line.from);
     if ramps_in {
-        let hold = bpm((map.bpm_at(line.from) * 1000.0).round() as i64);
-        out.push(TempoPoint {
+        extra.push(TempoPoint {
             tick: line.from,
-            bpm: hold,
+            bpm: at(line.from),
             ramp: false,
         });
-        if let Some(first) = drawn.first_mut() {
-            first.0 = first.0 + Tick(1);
+        let after = line.from + Tick(1);
+        if drawn.get(1).is_some_and(|q| q.0 <= after) {
+            drawn.remove(0);
+            drawn.retain(|q| q.0 >= after);
+        } else if let Some(first) = drawn.first_mut() {
+            first.0 = after;
         }
     }
-    out.extend(
-        drawn
-            .into_iter()
-            .enumerate()
-            .map(|(i, (tick, v))| TempoPoint {
-                tick,
-                bpm: bpm(v),
-                ramp: i + 1 < n,
-            }),
-    );
-    // A shifted point may land on a kept one; the kept one wins.
+    let crosses = points
+        .iter()
+        .rev()
+        .find(|p| p.tick <= line.to)
+        .is_some_and(|p| p.ramp)
+        && points.iter().any(|p| p.tick > line.to);
+    let beyond = line.to + Tick(1);
+    if crosses && !points.iter().any(|p| p.tick == beyond) {
+        extra.push(TempoPoint {
+            tick: beyond,
+            bpm: at(beyond),
+            ramp: true,
+        });
+    }
+    let n = drawn.len();
+    let mut out: Vec<TempoPoint> = drawn
+        .into_iter()
+        .enumerate()
+        .map(|(i, (tick, v))| TempoPoint {
+            tick,
+            bpm: bpm(v),
+            ramp: i + 1 < n,
+        })
+        .collect();
+    out.extend(extra);
+    out.extend(points.iter().copied().filter(|p| !line.covers(p.tick)));
+    // On a shared tick the first listed (the drawn one) stays.
     out.sort_by_key(|p| p.tick);
     out.dedup_by_key(|p| p.tick);
     Ok(out)
