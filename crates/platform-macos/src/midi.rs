@@ -28,6 +28,40 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+/// Virtual sources this process created (endpoint, unique ID, name), so
+/// note input never listens to its own output (a feedback loop).
+static OWN_SOURCES: Mutex<Vec<(MIDIEndpointRef, Option<i32>, String)>> = Mutex::new(Vec::new());
+
+fn register_own_source(e: MIDIEndpointRef, name: &str) {
+    // SAFETY: the property key is a static CFString.
+    let id = int_property(e, unsafe { kMIDIPropertyUniqueID });
+    if let Ok(mut own) = OWN_SOURCES.lock() {
+        own.push((e, id, name.to_string()));
+    }
+}
+
+fn unregister_own_source(e: MIDIEndpointRef) {
+    if let Ok(mut own) = OWN_SOURCES.lock() {
+        own.retain(|(o, _, _)| *o != e);
+    }
+}
+
+/// Whether a source (its endpoint ref, unique ID and name) is one of this
+/// process's own virtual sources. The ref or unique ID decides when known;
+/// the name is the fallback when the source's unique ID can't be read.
+fn is_own_source(
+    e: MIDIEndpointRef,
+    id: Option<i32>,
+    name: Option<&str>,
+    own: &[(MIDIEndpointRef, Option<i32>, String)],
+) -> bool {
+    own.iter().any(|(oe, oid, oname)| {
+        *oe == e
+            || (id.is_some() && id == *oid)
+            || (id.is_none() && name.is_some_and(|n| n == oname))
+    })
+}
+
 /// Packets per output ring.
 pub const MIDI_RING_CAPACITY: usize = 4096;
 
@@ -354,6 +388,13 @@ impl MidiSystem {
         Box::new(RingMidiOut { tx })
     }
 
+    /// The unique ID of a virtual source this system created.
+    pub fn virtual_source_unique_id(&self, name: &str) -> Option<i32> {
+        // SAFETY: the property key is a static CFString.
+        self.source(name)
+            .and_then(|e| int_property(e, unsafe { kMIDIPropertyUniqueID }))
+    }
+
     /// The endpoint of a virtual source this system created.
     fn source(&self, name: &str) -> Option<MIDIEndpointRef> {
         self.sources
@@ -384,6 +425,7 @@ impl MidiBackend for MidiSystem {
                     )
                 })?;
                 self.sources.push((name.to_string(), e));
+                register_own_source(e, name);
                 e
             }
         };
@@ -429,6 +471,7 @@ impl Drop for MidiSystem {
         // this point (the sender thread has stopped).
         unsafe {
             for (_, e) in &self.sources {
+                unregister_own_source(*e);
                 MIDIEndpointDispose(*e);
             }
             if let Some(p) = self.out_port {
@@ -626,6 +669,7 @@ pub struct NoteListener {
     client: MIDIClientRef,
     port: MIDIPortRef,
     sources: u32,
+    source_ids: Vec<Option<i32>>,
     _block: RcBlock<dyn Fn(NonNull<MIDIEventList>, *mut c_void)>,
 }
 
@@ -636,8 +680,29 @@ pub struct NoteListener {
 unsafe impl Send for NoteListener {}
 
 impl NoteListener {
-    /// Creates client `name` and connects it to every source present now.
+    /// Creates client `name` and connects it to every source present now,
+    /// except this process's own virtual sources (listening to "VizDAW
+    /// Out" would feed played notes back into the input).
     pub fn connect_all(name: &str, sink: MessageSink) -> Result<NoteListener, BackendError> {
+        NoteListener::connect(name, sink, false)
+    }
+
+    /// Like [`NoteListener::connect_all`] but also listening to this
+    /// process's own virtual sources (tests only: it is how a test can play
+    /// notes into a listener without an external device).
+    #[doc(hidden)]
+    pub fn connect_including_own(
+        name: &str,
+        sink: MessageSink,
+    ) -> Result<NoteListener, BackendError> {
+        NoteListener::connect(name, sink, true)
+    }
+
+    fn connect(
+        name: &str,
+        sink: MessageSink,
+        include_own: bool,
+    ) -> Result<NoteListener, BackendError> {
         let mut client: MIDIClientRef = 0;
         let cf = CFString::from_str(name);
         // SAFETY: `client` is a valid out-pointer; no notification callback.
@@ -680,11 +745,26 @@ impl NoteListener {
         // SAFETY: a pure query.
         let n = unsafe { MIDIGetNumberOfSources() };
         let mut sources = 0u32;
+        let mut source_ids = Vec::new();
+        let own = OWN_SOURCES.lock().map(|o| o.clone()).unwrap_or_default();
         for i in 0..n {
             // SAFETY: `i` is below the count just read.
             let src = unsafe { MIDIGetSource(i) };
             if src == 0 {
                 continue;
+            }
+            // SAFETY: the property keys are static CFStrings.
+            let (name_key, id_key) = unsafe { (kMIDIPropertyName, kMIDIPropertyUniqueID) };
+            let id = int_property(src, id_key);
+            if !include_own {
+                let sname = if id.is_none() {
+                    cfstring_property(src, name_key)
+                } else {
+                    None
+                };
+                if is_own_source(src, id, sname.as_deref(), &own) {
+                    continue;
+                }
             }
             // SAFETY: both objects are live; the port belongs to our client.
             let ok = os("MIDIPortConnectSource", unsafe {
@@ -692,12 +772,14 @@ impl NoteListener {
             });
             if ok.is_ok() {
                 sources = sources.saturating_add(1);
+                source_ids.push(id);
             }
         }
         Ok(NoteListener {
             client,
             port,
             sources,
+            source_ids,
             _block: block,
         })
     }
@@ -705,6 +787,12 @@ impl NoteListener {
     /// How many sources it listens to.
     pub fn sources(&self) -> u32 {
         self.sources
+    }
+
+    /// The unique IDs of the sources it listens to (`None` when a source's
+    /// ID couldn't be read).
+    pub fn source_ids(&self) -> &[Option<i32>] {
+        &self.source_ids
     }
 }
 
@@ -837,6 +925,17 @@ mod tests {
                 .skip(1)
                 .all(|&(t, cc)| t == 1_000 && cc == 123)
         );
+    }
+
+    #[test]
+    fn own_sources_match_by_ref_id_or_name_fallback() {
+        let own = vec![(7, Some(42), "VizDAW Out".to_string())];
+        assert!(is_own_source(7, None, None, &own));
+        assert!(is_own_source(8, Some(42), Some("Other"), &own));
+        assert!(is_own_source(9, None, Some("VizDAW Out"), &own));
+        assert!(!is_own_source(9, Some(43), Some("VizDAW Out"), &own));
+        assert!(!is_own_source(9, None, Some("Keyboard"), &own));
+        assert!(!is_own_source(9, Some(42), None, &[]));
     }
 
     #[test]
