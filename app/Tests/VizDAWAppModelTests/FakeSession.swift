@@ -302,6 +302,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     var infoTable: [UInt64: SequenceInfo] = [:]
     var infoCalls = 0
+    func modifyTemplates() throws -> [ModifyTemplateRow] { [] }
+    func lastModify() throws -> ModifyRow? { nil }
+
     func sequenceInfo(seq: UInt64) throws -> SequenceInfo {
         infoCalls += 1
         if let e = readError { throw e }

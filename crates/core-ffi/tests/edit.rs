@@ -489,7 +489,20 @@ fn commands(f: &Fixture) -> Vec<EditCommand> {
                 fade_out: fade(Q / 4),
             },
         },
+        ev(EventEdit::Replace {
+            event: f.note.0,
+            row: replaced_note(),
+        }),
     ]
+}
+
+/// The fixture's note as a list edit leaves it: later, higher, shorter.
+fn replaced_note() -> EventRow {
+    let mut r = EventRow::blank(0, Q / 2, EventKindRow::Note);
+    r.pitch = 70;
+    r.velocity = 0x7000;
+    r.duration = Q / 2;
+    r
 }
 
 #[test]
@@ -498,8 +511,8 @@ fn every_variant_applies_and_undoes() {
     let all = commands(&f);
     assert_eq!(
         all.len(),
-        50,
-        "every variant (Move twice) but FromSelection, with 4b's four"
+        51,
+        "every variant (Move twice) but FromSelection, with 4b's four and 4c's Replace"
     );
     for cmd in all {
         let s = Session::from_document(f.doc.clone()).unwrap();
@@ -732,4 +745,78 @@ fn per_note_values_read_back_as_offsets() {
             value: 1 << 31,
         }]
     );
+}
+
+/// 4b ledger T3: the 4b variants (and 4c's Replace) refuse bad input at the
+/// FFI and change nothing.
+#[test]
+fn the_newer_event_variants_refuse_bad_input_and_change_nothing() {
+    let f = fixture();
+    let s = Session::from_document(f.doc.clone()).unwrap();
+    let start = state(&s);
+    let bad = vec![
+        ev(EventEdit::TransposeInScale {
+            events: vec![f.note.0],
+            steps: 1,
+            root: 12,
+            mask: 0b1010_1011_0101,
+        }),
+        ev(EventEdit::TransposeInScale {
+            events: vec![f.note.0],
+            steps: 1,
+            root: 0,
+            mask: 0,
+        }),
+        ev(EventEdit::SetPerNote {
+            events: vec![f.note.0],
+            kind: PerNoteKindRow::PitchBend,
+            from: 10,
+            to: 5,
+            points: vec![],
+        }),
+        ev(EventEdit::Resize {
+            events: vec![9_999],
+            delta: 10,
+        }),
+        ev(EventEdit::Duplicate {
+            events: vec![9_999],
+            ticks: 10,
+            semitones: 0,
+        }),
+        ev(EventEdit::Replace {
+            event: f.note.0,
+            row: EventRow::blank(0, 0, EventKindRow::Cc),
+        }),
+        ev(EventEdit::Replace {
+            event: 9_999,
+            row: replaced_note(),
+        }),
+        // A reference to its own sequence would be a cycle.
+        ev(EventEdit::Replace {
+            event: f.reference.0,
+            row: {
+                let mut r = EventRow::blank(0, BAR, EventKindRow::Reference);
+                r.ref_seq = Some(f.s.0);
+                r.ref_loops = 1;
+                r
+            },
+        }),
+        // A destination the document does not have.
+        ev(EventEdit::Replace {
+            event: f.note.0,
+            row: {
+                let mut r = replaced_note();
+                r.dest = Some(9_999);
+                r
+            },
+        }),
+    ];
+    for cmd in bad {
+        assert!(
+            matches!(s.edit(cmd.clone(), None), Err(VizError::Model { .. })),
+            "{cmd:?}"
+        );
+    }
+    assert_eq!(state(&s), start);
+    assert_eq!(s.snapshot().unwrap().undo_label, None);
 }

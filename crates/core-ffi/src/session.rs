@@ -505,6 +505,18 @@ impl Session {
 
     /// [`Session::execute`] with a view filter (editor commands that act
     /// on the selection).
+    /// Modify Again (Plan 4c Ruling 8): the last modification on the
+    /// current selection, one undo step named after it. It removes no
+    /// plugin, so nothing is captured first.
+    fn modify_again_with(&self, filter: &ViewFilter) -> Result<DocSnapshot, VizError> {
+        let mut inner = lock(&self.inner);
+        inner.history.modify_again(filter)?;
+        inner.version += 1;
+        inner.reload_host(self.id);
+        self.mark(&mut inner);
+        inner.snapshot()
+    }
+
     fn execute_with(&self, cmd: Command, filter: &ViewFilter) -> Result<DocSnapshot, VizError> {
         let next = core_model::command::apply(lock(&self.inner).doc(), &cmd)
             .ok()
@@ -1708,6 +1720,21 @@ impl Session {
         })
     }
 
+    /// The select-and-modify templates, by name (4c).
+    pub fn modify_templates(&self) -> Result<Vec<crate::modify::ModifyTemplateRow>, VizError> {
+        ffi_guard(|| Ok(crate::modify::template_rows(lock(&self.inner).doc())))
+    }
+
+    /// The modification Modify Again repeats, if any (4c).
+    pub fn last_modify(&self) -> Result<Option<crate::modify::ModifyRow>, VizError> {
+        ffi_guard(|| {
+            Ok(lock(&self.inner)
+                .history
+                .last_modify()
+                .map(crate::modify::modify_row))
+        })
+    }
+
     /// Tempo, meter, markers, start offset and length of sequence `seq`.
     pub fn sequence_info(&self, seq: u64) -> Result<crate::events::SequenceInfo, VizError> {
         ffi_guard(|| crate::events::sequence_info(lock(&self.inner).doc(), SeqId(seq)))
@@ -1740,8 +1767,12 @@ impl Session {
             if lock(&self.inner).edit_label.is_some() {
                 return Err(crate::events::bad("finish the open edit first"));
             }
+            let filter = crate::edit::view_filter(filter.as_ref());
+            if matches!(cmd, crate::edit::EditCommand::ModifyAgain) {
+                return self.modify_again_with(&filter);
+            }
             let c = crate::edit::to_command(&cmd)?;
-            self.execute_with(c, &crate::edit::view_filter(filter.as_ref()))
+            self.execute_with(c, &filter)
         })
     }
 

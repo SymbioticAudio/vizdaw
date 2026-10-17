@@ -83,6 +83,25 @@ pub enum EditCommand {
         /// The edit.
         edit: AudioEdit,
     },
+    /// Select by rule, then optionally modify the selection or copies (4c).
+    SelectAndModify {
+        /// Rule (None: the selection as it is).
+        rule: Option<crate::modify::RuleRow>,
+        /// How the matches combine with the selection.
+        mode: crate::modify::SelectModeRow,
+        /// Modification (None: select only, no undo step).
+        modify: Option<crate::modify::ModifyRow>,
+        /// Modify copies beside the originals.
+        to_copy: bool,
+    },
+    /// Repeat the last modification on the current selection (4c, Plan
+    /// Ruling 8; `Session.edit` only).
+    ModifyAgain,
+    /// Document settings: modify templates (4c).
+    Settings {
+        /// The edit.
+        edit: crate::modify::SettingsEdit,
+    },
 }
 
 /// Mirrors `core_model::command::EventCmd`.
@@ -208,6 +227,13 @@ pub enum EventEdit {
         to: i64,
         /// The new values (absolute ticks).
         points: Vec<PerNoteValueRow>,
+    },
+    /// Replace an event with a row of the same kind (a list edit, 4c).
+    Replace {
+        /// The event.
+        event: u64,
+        /// What it becomes (its ID is ignored).
+        row: EventRow,
     },
 }
 
@@ -554,6 +580,23 @@ pub fn to_command(c: &EditCommand) -> Result<Command, VizError> {
         EditCommand::Lane { edit } => Command::Lane(lane_cmd(edit)),
         EditCommand::Sequence { edit } => Command::Sequence(sequence_cmd(edit)?),
         EditCommand::Audio { edit } => Command::Audio(audio_cmd(edit)),
+        EditCommand::SelectAndModify {
+            rule,
+            mode,
+            modify,
+            to_copy,
+        } => Command::SelectAndModify {
+            rule: rule.as_ref().map(crate::modify::rule).transpose()?,
+            mode: crate::modify::mode_of(*mode),
+            modify: modify.as_ref().map(crate::modify::modify).transpose()?,
+            to_copy: *to_copy,
+        },
+        EditCommand::ModifyAgain => {
+            return Err(bad(
+                "Modify Again repeats a modification; it is not a command",
+            ));
+        }
+        EditCommand::Settings { edit } => Command::Settings(crate::modify::settings_cmd(edit)?),
     })
 }
 
@@ -660,6 +703,10 @@ fn event_cmd(e: &EventEdit) -> Result<EventCmd, VizError> {
             from: Tick(*from),
             to: Tick(*to),
             points: points.iter().map(|p| (Tick(p.tick), p.value)).collect(),
+        },
+        EventEdit::Replace { event, row } => EventCmd::Replace {
+            event: EventId(*event),
+            spec: spec(row)?,
         },
     })
 }

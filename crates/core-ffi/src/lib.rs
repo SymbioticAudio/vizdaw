@@ -26,6 +26,7 @@ pub mod events;
 pub mod guard;
 pub mod host;
 pub mod mixer;
+pub mod modify;
 pub mod plugins;
 pub mod recovery;
 pub mod revs;
@@ -53,6 +54,10 @@ pub use events::{
 pub use guard::ffi_guard;
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
+};
+pub use modify::{
+    AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,
+    NoteMapEntry, RuleRow, SelectModeRow, SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
 };
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
