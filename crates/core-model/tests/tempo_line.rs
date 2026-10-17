@@ -422,3 +422,72 @@ fn a_draw_that_changes_nothing_records_no_undo_step() {
     .unwrap();
     assert_eq!(h.undo_depth(), 0);
 }
+
+#[test]
+fn drawing_inside_a_held_tempo_leaves_the_tempo_after_the_line_unchanged() {
+    // Ruling P7c: held 120 from bar 1 with a point at bar 5, draw bars 3-4.
+    let bar = 4 * Q;
+    let held = TempoMap::new(vec![
+        TempoPoint {
+            tick: Tick(0),
+            bpm: Bpm::whole(120),
+            ramp: false,
+        },
+        TempoPoint {
+            tick: Tick(4 * bar),
+            bpm: Bpm::whole(90),
+            ramp: false,
+        },
+    ])
+    .unwrap();
+    let d = seq_doc(held);
+    let h = run(
+        &d,
+        &[LaneId(0)],
+        LineOp::Draw,
+        tempo_line(2 * bar, 3 * bar, 100_000, 100_000, LineShape::Flat),
+    )
+    .unwrap();
+    let after = &h.doc().sequence(S).unwrap().tempo;
+    assert_eq!(after.bpm_at(Tick(3 * bar)), 100.0);
+    for t in [3 * bar + 1, 3 * bar + Q, 4 * bar - 1] {
+        assert_eq!(after.bpm_at(Tick(t)), 120.0, "tick {t}");
+    }
+    assert_eq!(after.bpm_at(Tick(4 * bar)), 90.0);
+}
+
+#[test]
+fn a_zero_length_line_inside_a_ramp_keeps_the_tempo_around_it() {
+    let ramp = bar_ramp();
+    let d = seq_doc(ramp.clone());
+    let h = run(
+        &d,
+        &[LaneId(0)],
+        LineOp::Draw,
+        tempo_line(8 * Q, 8 * Q, 200_000, 0, LineShape::Flat),
+    )
+    .unwrap();
+    let after = &h.doc().sequence(S).unwrap().tempo;
+    for t in [
+        0,
+        4 * Q,
+        8 * Q - 1,
+        8 * Q,
+        8 * Q + 2,
+        10 * Q,
+        12 * Q,
+        16 * Q,
+    ] {
+        let want = if t == 8 * Q + 1 {
+            200.0
+        } else {
+            ramp.bpm_at(Tick(t))
+        };
+        assert!((after.bpm_at(Tick(t)) - want).abs() < 1e-3, "tick {t}");
+    }
+    assert_eq!(
+        after.bpm_at(Tick(8 * Q + 1)),
+        200.0,
+        "the drawn point is one tick on"
+    );
+}

@@ -565,12 +565,13 @@ fn tempo_line(
 
 /// Points outside the line stay; inside, the line's reduced samples become
 /// ramping points (the last holds). Tempo outside the line is unchanged
-/// (Rulings P7, P7b):
+/// (Rulings P7, P7c):
 /// - when the point before the line ramps into it, a point at `from` holds
 ///   the tempo the map had there and the drawn points begin one tick later
 ///   (a later sample at that tick wins over the shifted first one);
-/// - when a ramp crosses `to`, a ramping point at `to + 1` holds the tempo
-///   the map had there, so the rest of that ramp is reproduced.
+/// - when the map has points after the drawn range, a point right after
+///   the last drawn tick holds the tempo the map had there (ramping if that
+///   segment did), so the rest of the map is reproduced (Ruling P7c).
 ///
 /// A drawn point that lands on a point of the map outside the line wins.
 fn draw_tempo(
@@ -607,19 +608,21 @@ fn draw_tempo(
             first.0 = after;
         }
     }
-    let crosses = points
-        .iter()
-        .rev()
-        .find(|p| p.tick <= line.to)
-        .is_some_and(|p| p.ramp)
-        && points.iter().any(|p| p.tick > line.to);
-    let beyond = line.to + Tick(1);
-    if crosses && !points.iter().any(|p| p.tick == beyond) {
-        extra.push(TempoPoint {
-            tick: beyond,
-            bpm: at(beyond),
-            ramp: true,
-        });
+    // The tempo after the drawn range stays as it was.
+    if let Some(last) = drawn.last().map(|q| q.0) {
+        let beyond = last + Tick(1);
+        if points.iter().any(|p| p.tick > last) && !points.iter().any(|p| p.tick == beyond) {
+            let ramp = points
+                .iter()
+                .rev()
+                .find(|p| p.tick <= beyond)
+                .is_some_and(|p| p.ramp);
+            extra.push(TempoPoint {
+                tick: beyond,
+                bpm: at(beyond),
+                ramp,
+            });
+        }
     }
     let n = drawn.len();
     let mut out: Vec<TempoPoint> = drawn
