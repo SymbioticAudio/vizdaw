@@ -24,6 +24,7 @@ pub mod host;
 pub mod mixer;
 pub mod plugins;
 pub mod recovery;
+pub mod revs;
 pub mod session;
 pub mod snapshot;
 
@@ -38,10 +39,11 @@ pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
 };
 pub use recovery::RecoveryInfo;
+pub use revs::LaneRev;
 pub use session::{OpenOptions, Session};
 pub use snapshot::{
-    DocSnapshot, IdleUpdate, LaneRow, ParamRow, ParamValue, PluginFormatTag, PluginRefRow, SeqRow,
-    SlotRow, SlotStatus, TransportState,
+    DocSnapshot, IdleUpdate, KeySlotRow, LaneRow, ParamRow, ParamValue, PluginFormatTag,
+    PluginRefRow, SeqRow, SlotRow, SlotStatus, TransportState,
 };
 
 /// The app is quitting: stops and drops the engine host so no plugin

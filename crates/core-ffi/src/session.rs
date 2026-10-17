@@ -74,6 +74,8 @@ struct Inner {
     key: Option<PathBuf>,
     /// `close` ran: the marker is gone and must not come back.
     closed: bool,
+    /// Lane revisions (spec §3.1), refreshed whenever a snapshot is built.
+    revs: crate::revs::Revisions,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -109,6 +111,7 @@ impl Inner {
         let key = path.as_deref().map(recovery::key);
         Inner {
             key,
+            revs: crate::revs::Revisions::new(&doc),
             history: History::new(doc.clone()),
             path,
             clean: doc,
@@ -197,9 +200,11 @@ impl Inner {
         self.plugin_dirty || *self.doc() != self.clean
     }
 
-    fn snapshot(&self) -> Result<DocSnapshot, VizError> {
+    fn snapshot(&mut self) -> Result<DocSnapshot, VizError> {
+        self.revs.update(self.history.doc());
         let doc = self.doc();
         Ok(DocSnapshot {
+            lane_revs: self.revs.rows(),
             version: self.version,
             title: title(self.path.as_deref()),
             dirty: self.unsaved(),
@@ -243,6 +248,15 @@ impl std::fmt::Debug for Session {
         f.debug_struct("Session")
             .field("id", &self.id)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl Session {
+    /// An untitled session for any document (tests build documents with
+    /// `core_engine::fixtures::Builder`). Not exported to Swift.
+    pub fn from_document(doc: Document) -> Result<Arc<Session>, VizError> {
+        ffi_guard(|| Session::with(doc, None, false))
     }
 }
 

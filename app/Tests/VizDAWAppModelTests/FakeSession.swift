@@ -25,7 +25,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     init(_ sequences: [SeqRow], version: UInt64 = 0) {
         snap = DocSnapshot(
             version: version, title: "Untitled", dirty: false, undoLabel: nil,
-            redoLabel: nil, sequences: sequences, warnings: [])
+            redoLabel: nil, sequences: sequences, warnings: [], laneRevs: [])
     }
 
     /// Makes the next command return `s`.
@@ -279,14 +279,14 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {
     SeqRow(
         id: id, name: name, useCount: uses, topLevel: topLevel, lengthTicks: 61_440,
-        laneCount: 1, comment: "")
+        laneCount: 1, comment: "", keyboardSlot: nil)
 }
 
 func lane(_ id: UInt64, _ name: String, mute: Bool = false) -> LaneRow {
     LaneRow(
         id: id, name: name, destination: nil, midiEventCount: 0, regionCount: 0,
         referenceCount: 0, mute: mute, solo: false, looped: false, takeCount: 1,
-        activeTake: "Take 1", isDrum: false)
+        activeTake: "Take 1", isDrum: false, arm: false, midiDest: nil, audioOut: nil)
 }
 
 /// Song (top-level) using Groove, which uses Beat.

@@ -29,6 +29,19 @@ pub struct DocSnapshot {
     pub sequences: Vec<SeqRow>,
     /// Problems worth showing (unresolved references).
     pub warnings: Vec<String>,
+    /// Every lane's revision (spec §3.1): editors refetch a lane's events
+    /// only when its revision changed.
+    pub lane_revs: Vec<crate::revs::LaneRev>,
+}
+
+/// A keyboard slot: one key plus a modifier bitmask (1 = shift,
+/// 2 = control, 4 = option, 8 = command).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct KeySlotRow {
+    /// The key, e.g. "a" or "F5".
+    pub key: String,
+    /// Modifier bitmask.
+    pub modifiers: u8,
 }
 
 /// One sequence.
@@ -48,6 +61,8 @@ pub struct SeqRow {
     pub lane_count: u32,
     /// Comment.
     pub comment: String,
+    /// The key chord that auditions or inserts it.
+    pub keyboard_slot: Option<KeySlotRow>,
 }
 
 /// One lane of a sequence.
@@ -77,6 +92,12 @@ pub struct LaneRow {
     pub active_take: String,
     /// Has a drum layout.
     pub is_drum: bool,
+    /// Record-armed.
+    pub arm: bool,
+    /// The lane's MIDI destination ID.
+    pub midi_dest: Option<u64>,
+    /// The lane's audio output path ID.
+    pub audio_out: Option<u64>,
 }
 
 /// What the transport is doing.
@@ -128,6 +149,10 @@ pub fn seq_rows(doc: &Document) -> Result<Vec<SeqRow>, VizError> {
                 length_ticks: seq_length(doc, s.id)?.0,
                 lane_count: count(s.lanes.len()),
                 comment: s.comment.clone(),
+                keyboard_slot: s.keyboard_slot.as_ref().map(|k| KeySlotRow {
+                    key: k.key.clone(),
+                    modifiers: k.modifiers,
+                }),
             })
         })
         .collect()
@@ -164,6 +189,9 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                 take_count: count(l.takes.len()),
                 active_take: l.active().map(|t| t.name.clone()).unwrap_or_default(),
                 is_drum: l.drum.is_some(),
+                arm: l.arm,
+                midi_dest: l.midi_dest.map(|d| d.0),
+                audio_out: l.audio_out.map(|o| o.0),
             }
         })
         .collect())
