@@ -105,3 +105,39 @@ fn another_session_taking_the_engine_releases_an_audition_note() {
     );
     reset_host();
 }
+
+#[test]
+fn shutdown_ends_a_held_audition_note() {
+    let _g = serial();
+    let (s, song, piano) = demo();
+    s.play(song).unwrap();
+    sleep(Duration::from_millis(50));
+    s.stop().unwrap();
+    sleep(Duration::from_millis(50));
+    drain_offline_log();
+    assert!(s.audition(piano, 77, 0x8000, true).unwrap());
+    sleep(Duration::from_millis(50));
+    // Quit with the note still held: the engine stops before it goes, so
+    // the note-off reaches the output (external MIDI destinations).
+    vizdaw_ffi::shutdown().unwrap();
+    let log = drain_offline_log();
+    assert!(log.iter().any(|(_, m)| m == &vec![0x90, 77, 64]), "{log:?}");
+    assert!(log.iter().any(|(_, m)| m == &vec![0x80, 77, 0]), "{log:?}");
+    reset_host();
+}
+
+#[test]
+fn an_internal_reset_ends_a_held_audition_note() {
+    let _g = serial();
+    let (s, song, piano) = demo();
+    s.play(song).unwrap();
+    sleep(Duration::from_millis(50));
+    drain_offline_log();
+    assert!(s.audition(piano, 78, 0x8000, true).unwrap());
+    sleep(Duration::from_millis(50));
+    // What a closing session with plugins (or an `Internal` error) does.
+    vizdaw_ffi::host::reset();
+    let log = drain_offline_log();
+    assert!(log.iter().any(|(_, m)| m == &vec![0x80, 78, 0]), "{log:?}");
+    reset_host();
+}

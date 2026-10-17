@@ -166,10 +166,16 @@ fn retire(old: Option<Host>) {
     drop(old);
 }
 
-/// Drops the host, stopping its output.
+/// Drops the host: its engine stops first, so played and auditioned
+/// notes end (their note-offs reach external MIDI destinations), then the
+/// output plays them and the host goes, without the host lock (as in
+/// `play`'s handover).
 pub fn reset() {
-    let old = lock(&HOST).take();
-    drop(old);
+    let mut old = lock(&HOST).take();
+    if let Some(h) = old.as_mut() {
+        let _ = h.engine.stop();
+    }
+    retire(old);
 }
 
 /// Renders an offline backend in real time on its own thread.

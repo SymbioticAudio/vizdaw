@@ -125,7 +125,8 @@ pub enum EventCmd {
         mask: u16,
     },
     /// Replace the per-note values of `kind` whose absolute tick lies in
-    /// `from..=to` with the `points` (absolute ticks) inside the note.
+    /// `from..=to` with the `points` (absolute ticks) inside the note
+    /// (`start..end`: a value at the note-off has no effect).
     SetPerNote {
         /// The notes.
         events: Vec<EventId>,
@@ -424,7 +425,9 @@ pub(crate) fn apply(d: &mut Document, cmd: &EventCmd, r: &mut Report) -> Result<
                     kept.extend(
                         points
                             .iter()
-                            .filter(|(t, _)| *t >= *from && *t <= *to && *t >= start && *t <= end)
+                            // A value at the note-off has no effect: only ticks inside
+                            // the note (`start..end`) are kept.
+                            .filter(|(t, _)| *t >= *from && *t <= *to && *t >= start && *t < end)
                             .map(|(t, v)| PerNoteCtl {
                                 kind: *kind,
                                 offset: *t - start,

@@ -503,7 +503,8 @@ fn set_per_note_replaces_values_in_the_range() {
         )
         .unwrap()
     };
-    // Absolute ticks; the point before the note and the one after it are dropped.
+    // Absolute ticks; the point before the note, the one at its note-off
+    // (no effect there) and the one after it are dropped.
     let d = set(
         &d,
         0,
@@ -523,10 +524,18 @@ fn set_per_note_replaces_values_in_the_range() {
             .collect::<Vec<_>>(),
         b => panic!("{b:?}"),
     };
-    assert_eq!(values(&d), vec![(0, 2), (100, 3), (PPQ, 4)]);
+    assert_eq!(values(&d), vec![(0, 2), (100, 3)]);
+    // The last tick inside the note is kept.
+    let d = set(
+        &d,
+        2 * PPQ - 1,
+        2 * PPQ,
+        vec![(2 * PPQ - 1, 4), (2 * PPQ, 6)],
+    );
+    assert_eq!(values(&d), vec![(0, 2), (100, 3), (PPQ - 1, 4)]);
     // Erase the middle one only.
     let d = set(&d, PPQ + 50, PPQ + 150, vec![]);
-    assert_eq!(values(&d), vec![(0, 2), (PPQ, 4)]);
+    assert_eq!(values(&d), vec![(0, 2), (PPQ - 1, 4)]);
     // Another kind is untouched by a pitch-bend write.
     let d = run(
         &d,
@@ -539,7 +548,7 @@ fn set_per_note_replaces_values_in_the_range() {
         }),
     )
     .unwrap();
-    assert_eq!(values(&d), vec![(0, 2), (10, 9), (PPQ, 4)]);
+    assert_eq!(values(&d), vec![(0, 2), (10, 9), (PPQ - 1, 4)]);
     assert!(matches!(
         run(
             &d,
