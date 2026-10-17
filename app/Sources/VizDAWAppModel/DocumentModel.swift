@@ -26,6 +26,10 @@ public final class DocumentModel {
     public var renameDraft = ""
     /// The fault popover is open.
     public var showsFaults = false
+    /// Sidebar sheets and the delete confirmation (plan 4a).
+    public var commentDraft: CommentDraft?
+    public var slotDraft: KeySlotDraft?
+    public var pendingDelete: UInt64?
     public var alert: AlertItem?
     /// Version and selection the current `lanes` were fetched for.
     private var lanesKey: LanesKey?

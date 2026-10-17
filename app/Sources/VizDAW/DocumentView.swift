@@ -29,55 +29,6 @@ struct DocumentView: View {
     }
 }
 
-struct SequenceSidebar: View {
-    @Bindable var model: DocumentModel
-
-    var body: some View {
-        List(selection: Binding(get: { model.selectedSeq }, set: { model.select($0) })) {
-            Section("Top-level") {
-                ForEach(model.topLevel) { row in SequenceRow(model: model, row: row) }
-            }
-            Section("Used as reference") {
-                ForEach(model.referenced) { row in SequenceRow(model: model, row: row) }
-            }
-        }
-        .listStyle(.sidebar)
-    }
-}
-
-struct SequenceRow: View {
-    @Bindable var model: DocumentModel
-    let row: SeqRow
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        HStack {
-            if model.renamingSeq == row.id {
-                TextField("Name", text: $model.renameDraft)
-                    .focused($focused)
-                    .onSubmit { model.commitRename(model.renameDraft) }
-                    .onExitCommand { model.cancelRename() }
-                    .onAppear { focused = true }
-                    .onChange(of: focused) { _, now in
-                        if !now { model.commitRename(model.renameDraft) }
-                    }
-            } else {
-                Text(row.name)
-                    .onTapGesture(count: 2) { model.beginRename(row.id) }
-            }
-            Spacer()
-            if row.useCount > 0 {
-                Text("\(row.useCount)")
-                    .font(.caption.monospacedDigit())
-                    .padding(.horizontal, 6)
-                    .background(Capsule().fill(.quaternary))
-                    .help("Used by \(row.useCount) reference(s)")
-            }
-        }
-        .tag(row.id)
-    }
-}
-
 struct TransportToolbar: ToolbarContent {
     @Bindable var model: DocumentModel
 
