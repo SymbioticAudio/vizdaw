@@ -65,6 +65,16 @@ struct AppCommands: Commands {
                 .keyboardShortcut("p", modifiers: [.command, .option])
             Divider()
         }
+        CommandMenu("Sequence") {
+            Button("Make Reference from Selection") {
+                if let doc, let seq = doc.selectedSeq { doc.editor.makeReferenceFromSelection(seq: seq) }
+            }
+            .keyboardShortcut("r", modifiers: [.command, .option])
+            .disabled(doc?.selectedSeq == nil)
+            Button("Back to Parent Sequence") { doc?.editor.back() }
+                .keyboardShortcut("[", modifiers: [.command])
+                .disabled(doc?.editor.navigation.isEmpty ?? true)
+        }
         CommandMenu("Transport") {
             Button(doc?.isPlaying == true ? "Stop" : "Play") { doc?.playStop() }
                 .keyboardShortcut(.space, modifiers: [])

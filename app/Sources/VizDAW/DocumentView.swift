@@ -15,6 +15,12 @@ struct DocumentView: View {
         }
         .navigationTitle(model.windowTitle)
         .toolbar { TransportToolbar(model: model) }
+        .sheet(
+            item: Binding(
+                get: { model.editor.referenceDraft }, set: { model.editor.referenceDraft = $0 })
+        ) { _ in
+            ReferenceSheet(editor: model.editor)
+        }
         .alert(
             model.alert?.title ?? "",
             isPresented: Binding(

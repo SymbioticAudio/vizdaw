@@ -28,6 +28,8 @@ public final class EditorModel {
     public private(set) var navigation: [UInt64] = []
     /// The drag in progress (spec §3.8).
     public internal(set) var gesture: Gesture?
+    /// The reference whose parameters are being edited.
+    public var referenceDraft: ReferenceDraft?
 
     private struct BlockEntry {
         let rev: UInt64
