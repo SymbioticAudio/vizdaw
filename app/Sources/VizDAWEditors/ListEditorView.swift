@@ -199,6 +199,9 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
             ?? makeField(tableColumn.identifier)
         field.stringValue = ListText.cell(r, column, context)
         field.isEditable = ListText.editable(r, column)
+        // A read-only cell never takes the keyboard (nor turns the
+        // transport keys off).
+        field.isSelectable = field.isEditable
         field.textColor = field.isEditable ? .labelColor : .secondaryLabelColor
         return field
     }
@@ -243,7 +246,9 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
     func fieldTookKeyboard(_ field: NSTextField) {
         let r = table.row(for: field)
         let c = table.column(for: field)
-        guard shown.indices.contains(r), shownColumns.indices.contains(c) else { return }
+        guard shown.indices.contains(r), shownColumns.indices.contains(c),
+            ListText.editable(shown[r], shownColumns[c])
+        else { return }
         began(row: shown[r].id, column: shownColumns[c], field: field)
     }
 
@@ -251,7 +256,9 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
     func began(row: String, column: ListColumn, field: NSTextField) {
         if let e = editingCell {
             guard e.field !== field else { return }
-            ended(movement: .other)
+            // Not reloaded here (inside the new field's becomeFirstResponder):
+            // the table reloads when the new edit ends.
+            ended(movement: .other, reloading: false)
         }
         editingCell = (row, column, field, field.stringValue)
         model.editing = ListCell(row: row, column: column)
@@ -268,13 +275,14 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
     /// Editing ended: commit unless cancelled, then move on (Tab and
     /// Shift-Tab to the next editable cell; Return and Escape back to the
     /// table; a click elsewhere keeps its focus).
-    func ended(movement: NSTextMovement, cancelled: Bool = false) {
+    func ended(movement: NSTextMovement, cancelled: Bool = false, reloading: Bool = true) {
         guard let e = editingCell else { return }
         editingCell = nil
         model.editing = nil
         model.editor.endTextEditing(textOwner)
         let text = e.field.stringValue
         if !cancelled, text != e.original { model.commit(text, row: e.row, column: e.column) }
+        guard reloading else { return }
         reload()
         switch movement {
         case .tab, .backtab: editNext(after: e.row, column: e.column, forward: movement == .tab)

@@ -9,6 +9,9 @@ struct DocumentWindow: View {
     let store: DocumentStore
     @Environment(\.openWindow) private var openWindow
     @Environment(\.controlActiveState) private var activeState
+    /// This window's focus token (the timer's note target).
+    /// (`State` spelled out: the Command Line Tools cannot expand `@State`.)
+    private var focusToken = State(initialValue: UUID())
 
     var body: some View {
         Group {
@@ -43,7 +46,7 @@ struct DocumentWindow: View {
         .onChange(of: store.pending) { openQueued() }
         .onChange(of: activeState) { openQueued() }
         .onChange(of: KeyDoc(id: id, key: activeState == .key), initial: true) { old, new in
-            KeyDoc.changed(store, from: old, to: new)
+            KeyDoc.changed(store, window: focusToken.wrappedValue, from: old, to: new)
         }
     }
 
@@ -70,9 +73,9 @@ struct KeyDoc: Equatable {
     let id: UUID?
     let key: Bool
 
-    @MainActor static func changed(_ store: DocumentStore, from old: KeyDoc, to new: KeyDoc) {
-        if let o = old.id, old.key, !new.key || new.id != o { store.blurDocument(o) }
-        if let n = new.id, new.key { store.focusDocument(n) }
+    @MainActor static func changed(_ store: DocumentStore, window: UUID, from old: KeyDoc, to new: KeyDoc) {
+        if let o = old.id, old.key, !new.key || new.id != o { store.blurDocument(o, window: window) }
+        if let n = new.id, new.key { store.focusDocument(n, window: window) }
     }
 }
 

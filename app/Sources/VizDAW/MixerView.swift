@@ -7,13 +7,16 @@ struct MixerWindow: View {
     @Binding var id: UUID?
     let store: DocumentStore
     @Environment(\.controlActiveState) private var activeState
+    /// This window's focus token (the timer's note target).
+    /// (`State` spelled out: the Command Line Tools cannot expand `@State`.)
+    private var focusToken = State(initialValue: UUID())
 
     var body: some View {
         content
             .onChange(of: KeyDoc(id: id, key: activeState == .key), initial: true) { old, new in
-                KeyDoc.changed(store, from: old, to: new)
+                KeyDoc.changed(store, window: focusToken.wrappedValue, from: old, to: new)
             }
-            .onDisappear { if let id, activeState == .key { store.blurDocument(id) } }
+            .onDisappear { if let id { store.blurDocument(id, window: focusToken.wrappedValue) } }
     }
 
     @ViewBuilder private var content: some View {

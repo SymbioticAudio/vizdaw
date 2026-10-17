@@ -11,7 +11,10 @@ struct ListEditorPane: View {
         VStack(spacing: 0) {
             ListBar(model: model)
             Divider()
+            // A new model (the slot's list was dropped and made again)
+            // gets a new view: the view keeps the model it was made with.
             ListHost(model: model)
+                .id(ObjectIdentifier(model))
         }
     }
 }

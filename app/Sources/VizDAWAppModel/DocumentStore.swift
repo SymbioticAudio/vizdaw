@@ -87,15 +87,21 @@ public final class DocumentStore {
         tornFocus.map(\.doc) ?? panelFocus ?? focused
     }
 
-    /// The document whose own window (document or mixer) is key; the
-    /// timer, which has no SwiftUI focus, asks this.
-    public private(set) var keyDocument: UUID?
+    /// The key window among documents' own windows (document or mixer),
+    /// by a token each window view holds; the timer, which has no SwiftUI
+    /// focus, asks this. Per window, so a document window and its own
+    /// mixer handing focus over never clear each other, in either order.
+    private var keyWindow: (doc: UUID, window: UUID)?
 
-    public func focusDocument(_ doc: UUID) { keyDocument = doc }
+    /// The document whose own window is key.
+    public var keyDocument: UUID? { keyWindow?.doc }
 
-    /// Document `doc`'s window resigned key or closed.
-    public func blurDocument(_ doc: UUID) {
-        if keyDocument == doc { keyDocument = nil }
+    public func focusDocument(_ doc: UUID, window: UUID) { keyWindow = (doc, window) }
+
+    /// Window `window` (of document `doc`) resigned key or closed; only the
+    /// window that last took focus clears it.
+    public func blurDocument(_ doc: UUID, window: UUID) {
+        if keyWindow?.doc == doc, keyWindow?.window == window { keyWindow = nil }
     }
 
     /// The document played notes go to: the command target (Plan 4c
@@ -175,7 +181,7 @@ public final class DocumentStore {
     public func close(_ id: UUID) {
         if tornFocus?.doc == id { tornFocus = nil }
         if panelFocus == id { panelFocus = nil }
-        if keyDocument == id { keyDocument = nil }
+        if keyWindow?.doc == id { keyWindow = nil }
         mixers.removeValue(forKey: id)?.endOpenDrag()
         // Plugin windows detach their editors before the session goes.
         willClose?(id)

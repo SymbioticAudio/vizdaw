@@ -111,7 +111,10 @@ private let d4Loud = NoteInRow(pitch: 62, velocity: 0xC924, channel: 0)
         let (_, _, v) = try listView()
         #expect(v.table.accessibilityLabel() == "Event List")
         #expect(v.tableView(v.table, rowViewForRow: 0)?.accessibilityLabel() == "Note C4, bar 1 beat 1, velocity 64")
-        #expect(v.table.headerView != nil, "column headers are shown and read")
+        #expect(
+            v.table.tableColumns.map(\.headerCell.stringValue)
+                == ["Position", "Length", "Kind", "Destination", "Data 1", "Data 2", "Mute"],
+            "column headers show and read the titles")
         let field = try #require(v.tableView(v.table, viewFor: v.table.tableColumns[4], row: 1) as? NSTextField)
         // A plain text field: its cell is the accessibility element and reads the text.
         #expect(field.cell?.isAccessibilityElement() == true, "no custom cell hides the text")
@@ -183,7 +186,8 @@ private let d4Loud = NoteInRow(pitch: 62, velocity: 0xC924, channel: 0)
         #expect(m.lists[.window(a.id)] == nil)
         m.editor.closeWindow(b.id)
         #expect(m.lists[.window(b.id)] == nil)
-        // A window closed with its document stays in the layout.
+        // A window closed with its document stays in the layout; its close
+        // calls dropList.
         let c = try #require(m.editor.tearOff(.list, shown: 3))
         _ = m.list(.window(c.id))
         m.dropList(.window(c.id))
@@ -207,16 +211,60 @@ private let d4Loud = NoteInRow(pitch: 62, velocity: 0xC924, channel: 0)
         let a = try #require(s.newEmpty())
         let b = try #require(s.newEmpty())
         #expect(s.noteTarget == nil)
-        s.focusDocument(a)
+        let aWindow = UUID()
+        s.focusDocument(a, window: aWindow)
         #expect(s.noteTarget === s.model(a))
         s.focusTorn(TornFocus(doc: b, window: UUID()))
         #expect(s.noteTarget === s.model(b), "a key torn window wins, as for menu commands")
-        s.blurDocument(a)
+        s.blurDocument(a, window: aWindow)
         s.focusPanel(a)
         #expect(s.noteTarget === s.model(b))
         s.close(b)
         #expect(s.noteTarget === s.model(a), "the key panel's document")
         s.blurPanel(a)
         #expect(s.noteTarget == nil)
+    }
+
+    @Test func aDocumentWindowAndItsMixerHandFocusOverInEitherOrder() throws {
+        let s = DocumentStore(makeEmpty: { rollFake() }, makeDemo: { rollFake() }, open: { _ in rollFake() })
+        let a = try #require(s.newEmpty())
+        let docWindow = UUID()
+        let mixer = UUID()
+        s.focusDocument(a, window: docWindow)
+        // The mixer becomes key before the document window hears it resigned.
+        s.focusDocument(a, window: mixer)
+        s.blurDocument(a, window: docWindow)
+        #expect(s.noteTarget === s.model(a), "the late blur of the other window clears nothing")
+        // And back: the mixer resigns first, then the document window takes it.
+        s.blurDocument(a, window: mixer)
+        s.focusDocument(a, window: docWindow)
+        #expect(s.noteTarget === s.model(a))
+        s.blurDocument(a, window: docWindow)
+        #expect(s.noteTarget == nil, "the window that has it clears it")
+    }
+
+    @Test func aReadOnlyCellNeverTakesTheKeyboard() throws {
+        let (_, m, v) = try listView()
+        let w = windowed(v)
+        defer { w.close() }
+        let kind = try #require(v.shownColumns.firstIndex(of: .kind))
+        let field = try #require(v.table.view(atColumn: kind, row: 0, makeIfNecessary: true) as? NSTextField)
+        #expect(!field.isEditable && !field.isSelectable)
+        v.fieldTookKeyboard(field)
+        #expect(!m.editor.textEditing && m.list(.pane).editing == nil)
+    }
+
+    @Test func movingStraightToAnotherCellCommitsAndReloadsWhenThatEditEnds() throws {
+        let (f, m, v) = try listView()
+        let a = NSTextField(string: "1.1.0")
+        v.began(row: "e1", column: .position, field: a)
+        a.stringValue = "3"
+        v.began(row: "e2", column: .position, field: NSTextField(string: "1.2.0"))
+        #expect(f.edits.last == .event(edit: .move(events: [1], delta: 2 * 61_440, toLane: nil)))
+        #expect(v.table.selectedRowIndexes.isEmpty, "the table waits while the next cell edits")
+        #expect(m.editor.textEditing && m.list(.pane).editing == ListCell(row: "e2", column: .position))
+        v.ended(movement: .return)
+        #expect(v.table.selectedRowIndexes == IndexSet(integer: 0), "reloaded when that edit ended: on the moved event")
+        #expect(!m.editor.textEditing)
     }
 }
