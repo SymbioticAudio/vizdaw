@@ -679,6 +679,16 @@ impl Session {
         })
     }
 
+    /// An untitled copy of the demo project with an audio lane (4b Plan
+    /// Ruling 19).
+    #[uniffi::constructor]
+    pub fn new_demo_audio() -> Result<Arc<Session>, VizError> {
+        ffi_guard(|| {
+            let doc = core_engine::fixtures::demo_audio_document()?;
+            Session::with(doc, None, false)
+        })
+    }
+
     /// Opens the `.vizdaw` package at `path`.
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<Session>, VizError> {

@@ -5,8 +5,8 @@
 
 use crate::error::VizError;
 use crate::events::{
-    EventKindRow, EventRow, FadeRow, GroupChannel, MarkerRow, MeterEntryRow, TempoPointRow, bad,
-    fade_of, kind_of, loops, spec,
+    EventKindRow, EventRow, FadeRow, GroupChannel, MarkerRow, MeterEntryRow, PerNoteKindRow,
+    PerNoteValueRow, TempoPointRow, bad, fade_of, kind_of, loops, per_note_kind, spec,
 };
 use crate::snapshot::KeySlotRow;
 use core_model::command::{AudioCmd, Command, EventCmd, LaneCmd, ReferenceCmd, SequenceCmd};
@@ -168,6 +168,46 @@ pub enum EventEdit {
         ticks: i64,
         /// Pitch offset.
         semitones: i8,
+    },
+    /// Copy events in their lanes, moved and transposed (4b).
+    Duplicate {
+        /// The events.
+        events: Vec<u64>,
+        /// Time offset of the copies.
+        ticks: i64,
+        /// Pitch offset of the copies.
+        semitones: i8,
+    },
+    /// Lengthen or shorten notes; each keeps at least 1 tick (4b).
+    Resize {
+        /// The events.
+        events: Vec<u64>,
+        /// Duration change.
+        delta: i64,
+    },
+    /// Move pitches by scale degrees (4b).
+    TransposeInScale {
+        /// The events.
+        events: Vec<u64>,
+        /// Degrees (negative: down).
+        steps: i8,
+        /// Root pitch class 0-11.
+        root: u8,
+        /// 12-bit scale mask.
+        mask: u16,
+    },
+    /// Replace one per-note kind's values in `from..=to` (4b).
+    SetPerNote {
+        /// The notes.
+        events: Vec<u64>,
+        /// Which per-note controller.
+        kind: PerNoteKindRow,
+        /// First tick replaced.
+        from: i64,
+        /// Last tick replaced.
+        to: i64,
+        /// The new values (absolute ticks).
+        points: Vec<PerNoteValueRow>,
     },
 }
 
@@ -583,6 +623,43 @@ fn event_cmd(e: &EventEdit) -> Result<EventCmd, VizError> {
             events: ids(events),
             ticks: Tick(*ticks),
             semitones: *semitones,
+        },
+        EventEdit::Duplicate {
+            events,
+            ticks,
+            semitones,
+        } => EventCmd::Duplicate {
+            events: ids(events),
+            ticks: Tick(*ticks),
+            semitones: *semitones,
+        },
+        EventEdit::Resize { events, delta } => EventCmd::Resize {
+            events: ids(events),
+            delta: Tick(*delta),
+        },
+        EventEdit::TransposeInScale {
+            events,
+            steps,
+            root,
+            mask,
+        } => EventCmd::TransposeInScale {
+            events: ids(events),
+            steps: *steps,
+            root: *root,
+            mask: *mask,
+        },
+        EventEdit::SetPerNote {
+            events,
+            kind,
+            from,
+            to,
+            points,
+        } => EventCmd::SetPerNote {
+            events: ids(events),
+            kind: per_note_kind(*kind),
+            from: Tick(*from),
+            to: Tick(*to),
+            points: points.iter().map(|p| (Tick(p.tick), p.value)).collect(),
         },
     })
 }

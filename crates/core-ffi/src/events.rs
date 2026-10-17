@@ -135,6 +135,16 @@ pub struct PerNotePoint {
     pub value: u32,
 }
 
+/// A per-note value at an absolute tick, as editors write them
+/// (`EventEdit::SetPerNote`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct PerNoteValueRow {
+    /// Absolute tick.
+    pub tick: i64,
+    /// 32-bit value.
+    pub value: u32,
+}
+
 /// One event as a flat record; fields a kind does not use are zero,
 /// empty or `None` (see the module documentation).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -422,13 +432,18 @@ fn per_note_row(p: &PerNoteCtl) -> PerNotePoint {
     }
 }
 
+/// The core per-note kind of a row kind.
+pub(crate) fn per_note_kind(k: PerNoteKindRow) -> PerNoteKind {
+    match k {
+        PerNoteKindRow::Registered { index } => PerNoteKind::Registered(index),
+        PerNoteKindRow::Assignable { index } => PerNoteKind::Assignable(index),
+        PerNoteKindRow::PitchBend => PerNoteKind::PitchBend,
+    }
+}
+
 fn per_note_of(p: &PerNotePoint) -> PerNoteCtl {
     PerNoteCtl {
-        kind: match p.kind {
-            PerNoteKindRow::Registered { index } => PerNoteKind::Registered(index),
-            PerNoteKindRow::Assignable { index } => PerNoteKind::Assignable(index),
-            PerNoteKindRow::PitchBend => PerNoteKind::PitchBend,
-        },
+        kind: per_note_kind(p.kind),
         offset: Tick(p.offset),
         value: p.value,
     }

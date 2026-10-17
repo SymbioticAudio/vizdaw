@@ -13,7 +13,7 @@ use core_model::time::Tick;
 use std::sync::Arc;
 use std::time::Instant;
 use vizdaw_ffi::events::spec;
-use vizdaw_ffi::{EventKindRow, Session, VizError};
+use vizdaw_ffi::{EventKindRow, Session, StripKindRow, VizError};
 
 const BAR: i64 = 4 * Q;
 
@@ -269,4 +269,33 @@ fn lane_events_of_100_000_events_is_fast() {
         took.as_millis() < bound_ms,
         "lane_events took {took:?} (bound {bound_ms} ms)"
     );
+}
+
+#[test]
+fn the_demo_with_audio_has_a_loop_lane_with_two_regions() {
+    const BAR: i64 = 4 * 15_360;
+    let s = vizdaw_ffi::Session::new_demo_audio().unwrap();
+    let snap = s.snapshot().unwrap();
+    let song = snap.sequences.iter().find(|r| r.name == "Song").unwrap().id;
+    let lane = s
+        .lanes(song)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Loop")
+        .unwrap();
+    let output = lane.audio_out.expect("routed to an output path");
+    let regions: Vec<(i64, i64)> = s
+        .lane_events(song, lane.id)
+        .unwrap()
+        .events
+        .iter()
+        .filter(|r| r.kind == EventKindRow::AudioRegion)
+        .map(|r| (r.tick, r.duration))
+        .collect();
+    assert_eq!(regions, vec![(0, 2 * BAR), (4 * BAR, 2 * BAR)]);
+    let strips = s.mixer().unwrap().strips;
+    assert!(strips.iter().any(
+        |st| matches!(st.kind, StripKindRow::AudioPath { path } if path == output)
+            && st.name == "Audio 1-2"
+    ));
 }

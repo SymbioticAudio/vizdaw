@@ -12,8 +12,9 @@ use std::collections::HashMap;
 use vizdaw_ffi::edit::to_command;
 use vizdaw_ffi::{
     AudioEdit, EditCommand, EventEdit, EventKindRow, EventRow, FadeRow, FadeShapeRow, GeneratorRow,
-    GroupChannel, KeySlotRow, LaneEdit, LaneRef, MarkerRow, MeterEntryRow, QuantizeRow,
-    ReferenceEdit, SequenceEdit, Session, TempoPointRow, VizError,
+    GroupChannel, KeySlotRow, LaneEdit, LaneRef, MarkerRow, MeterEntryRow, PerNoteKindRow,
+    PerNotePoint, PerNoteValueRow, QuantizeRow, ReferenceEdit, SequenceEdit, Session,
+    TempoPointRow, VizError,
 };
 
 const BAR: i64 = 4 * Q;
@@ -210,6 +211,31 @@ fn commands(f: &Fixture) -> Vec<EditCommand> {
             events: one(f.note),
             ticks: 10,
             semitones: 2,
+        }),
+        ev(EventEdit::Duplicate {
+            events: one(f.note),
+            ticks: Q,
+            semitones: 3,
+        }),
+        ev(EventEdit::Resize {
+            events: one(f.note),
+            delta: Q / 2,
+        }),
+        ev(EventEdit::TransposeInScale {
+            events: one(f.note),
+            steps: 2,
+            root: 0,
+            mask: 0b1010_1011_0101,
+        }),
+        ev(EventEdit::SetPerNote {
+            events: one(f.note),
+            kind: PerNoteKindRow::PitchBend,
+            from: 0,
+            to: Q,
+            points: vec![PerNoteValueRow {
+                tick: Q / 2,
+                value: 7,
+            }],
         }),
         EditCommand::Reference {
             edit: ReferenceEdit::Insert {
@@ -472,8 +498,8 @@ fn every_variant_applies_and_undoes() {
     let all = commands(&f);
     assert_eq!(
         all.len(),
-        46,
-        "every 4a variant (Move twice) but FromSelection (Task 5)"
+        50,
+        "every variant (Move twice) but FromSelection, with 4b's four"
     );
     for cmd in all {
         let s = Session::from_document(f.doc.clone()).unwrap();
@@ -676,4 +702,34 @@ fn an_event_only_edit_bumps_that_lane_and_no_other() {
             assert_eq!(old.rev, new.rev, "lane {} must not change", old.lane);
         }
     }
+}
+
+#[test]
+fn per_note_values_read_back_as_offsets() {
+    let f = fixture();
+    let s = Session::from_document(f.doc.clone()).unwrap();
+    s.edit(
+        ev(EventEdit::SetPerNote {
+            events: vec![f.note.0],
+            kind: PerNoteKindRow::Registered { index: 74 },
+            from: 0,
+            to: Q,
+            points: vec![PerNoteValueRow {
+                tick: Q / 4,
+                value: 1 << 31,
+            }],
+        }),
+        None,
+    )
+    .unwrap();
+    let rows = s.lane_events(f.s.0, f.l1.0).unwrap().events;
+    let note = rows.iter().find(|r| r.id == f.note.0).unwrap();
+    assert_eq!(
+        note.per_note,
+        vec![PerNotePoint {
+            kind: PerNoteKindRow::Registered { index: 74 },
+            offset: Q / 4,
+            value: 1 << 31,
+        }]
+    );
 }

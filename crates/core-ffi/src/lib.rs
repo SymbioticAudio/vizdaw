@@ -47,8 +47,8 @@ pub use editor::EditorSize;
 pub use error::VizError;
 pub use events::{
     EventKindRow, EventRow, FadeRow, FadeShapeRow, GroupChannel, LaneEvents, MarkerRow,
-    MeterEntryRow, NoteAttributeRow, PerNoteKindRow, PerNotePoint, SequenceInfo, TempoPointRow,
-    TextKindRow,
+    MeterEntryRow, NoteAttributeRow, PerNoteKindRow, PerNotePoint, PerNoteValueRow, SequenceInfo,
+    TempoPointRow, TextKindRow,
 };
 pub use guard::ffi_guard;
 pub use mixer::{
