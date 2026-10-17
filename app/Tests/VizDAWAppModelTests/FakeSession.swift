@@ -274,6 +274,30 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func heldSlots() throws -> [UInt64] { held }
     func close() throws { closeCalls += 1 }
+
+    // MARK: Editor reads (plan 4a)
+
+    /// Lane events by `"seq/lane"`.
+    var laneEventTable: [String: LaneEvents] = [:]
+    var laneEventsCalls: [String] = []
+    /// Thrown by every editor read (`laneEvents`, `blocks`, `sequenceInfo`).
+    var readError: VizError?
+    func laneEvents(seq: UInt64, lane: UInt64) throws -> LaneEvents {
+        laneEventsCalls.append("\(seq)/\(lane)")
+        if let e = readError { throw e }
+        guard let ev = laneEventTable["\(seq)/\(lane)"] else {
+            throw VizError.Model(message: "unknown lane \(lane)")
+        }
+        return ev
+    }
+
+    var infoTable: [UInt64: SequenceInfo] = [:]
+    var infoCalls = 0
+    func sequenceInfo(seq: UInt64) throws -> SequenceInfo {
+        infoCalls += 1
+        if let e = readError { throw e }
+        return infoTable[seq] ?? fourFour(seq)
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {
@@ -330,4 +354,24 @@ func mixerFake() -> FakeSession {
         ],
         buses: [BusRow(id: 2, name: "Bus 1")])
     return f
+}
+
+/// A 4/4, 120 BPM sequence info, 4 bars long.
+func fourFour(_ seq: UInt64, name: String = "S") -> SequenceInfo {
+    SequenceInfo(
+        id: seq, name: name, comment: "", keyboardSlot: nil, startOffset: 0,
+        lengthTicks: 4 * 61_440, tempo: [TempoPointRow(tick: 0, bpm: 120, ramp: false)],
+        meter: [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor: false)], markers: [],
+        generated: false)
+}
+
+/// A note row.
+func noteRow(_ id: UInt64, tick: Int64, pitch: UInt8 = 60, duration: Int64 = 15_360) -> EventRow {
+    EventRow(
+        id: id, tick: tick, kind: .note, mute: false, dest: nil, groupChannel: nil, pitch: pitch,
+        velocity: 0x8000, releaseVelocity: 0, duration: duration, value: 0, value2: 0,
+        attribute: nil, perNote: [], refSeq: nil, refLength: nil, refLoops: 0, refTranspose: 0,
+        media: nil, sourceOffset: 0, frames: 0, gainDb: 0,
+        fadeIn: FadeRow(length: 0, shape: .linear), fadeOut: FadeRow(length: 0, shape: .linear),
+        text: nil, textKind: nil, data: Data(), eightBit: false)
 }

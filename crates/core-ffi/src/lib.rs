@@ -19,6 +19,7 @@ uniffi::setup_scaffolding!();
 pub mod catalog;
 pub mod editor;
 pub mod error;
+pub mod events;
 pub mod guard;
 pub mod host;
 pub mod mixer;
@@ -34,6 +35,11 @@ pub use catalog::{
 };
 pub use editor::EditorSize;
 pub use error::VizError;
+pub use events::{
+    EventKindRow, EventRow, FadeRow, FadeShapeRow, GroupChannel, LaneEvents, MarkerRow,
+    MeterEntryRow, NoteAttributeRow, PerNoteKindRow, PerNotePoint, SequenceInfo, TempoPointRow,
+    TextKindRow,
+};
 pub use guard::ffi_guard;
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,

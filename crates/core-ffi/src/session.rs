@@ -173,6 +173,12 @@ impl Inner {
         self.history.doc()
     }
 
+    /// A lane's current revision (0 for a lane that does not exist).
+    fn lane_rev(&mut self, seq: SeqId, lane: LaneId) -> u64 {
+        self.revs.update(self.history.doc());
+        self.revs.rev(seq, lane).unwrap_or(0)
+    }
+
     /// Rewrites the crash marker when the plugins loading changed. With
     /// `ahead` it also names the plugins the next sync will start loading,
     /// so it is on disk before any of them can run code. Skipped while
@@ -1617,6 +1623,25 @@ pub fn simulate_crash(s: Arc<Session>) {
         recovery::forget_open(&p);
     }
     std::mem::forget(s);
+}
+
+/// Editor reads (spec §3.1).
+#[uniffi::export]
+impl Session {
+    /// The active take of lane `lane` of sequence `seq` as rows in time
+    /// order, with the lane's revision.
+    pub fn lane_events(&self, seq: u64, lane: u64) -> Result<crate::events::LaneEvents, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let rev = inner.lane_rev(SeqId(seq), LaneId(lane));
+            crate::events::lane_events(inner.doc(), SeqId(seq), LaneId(lane), rev)
+        })
+    }
+
+    /// Tempo, meter, markers, start offset and length of sequence `seq`.
+    pub fn sequence_info(&self, seq: u64) -> Result<crate::events::SequenceInfo, VizError> {
+        ffi_guard(|| crate::events::sequence_info(lock(&self.inner).doc(), SeqId(seq)))
+    }
 }
 
 impl Drop for Session {
