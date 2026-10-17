@@ -18,6 +18,15 @@ final class ItemsCanvas: EditorCanvas {
 }
 
 @MainActor
+final class AxisItemsCanvas: EditorCanvas {
+    override func accessibilityItems() -> [CanvasAccessibilityItem] {
+        [CanvasAccessibilityItem(
+            label: "Block", frame: CGRect(x: axis.x(38_400), y: 0, width: 10, height: 10),
+            selected: false, press: nil)]
+    }
+}
+
+@MainActor
 @Suite struct EditorCanvasTests {
     @Test func theRulerSitsAboveTheContentLayers() {
         let c = EditorCanvas(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
@@ -69,5 +78,38 @@ final class ItemsCanvas: EditorCanvas {
         #expect(c.isLinkRunning, "playback still on: it restarts")
         c.setPlaying(false)
         #expect(!c.isLinkRunning)
+    }
+
+    @Test func accessibilityElementsKeepTheirIdentityAndFollowTheAxis() {
+        let c = AxisItemsCanvas(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        c.layout()
+        c.axis = TimeAxis(ticksPerPoint: 384, originTick: 0)
+        let a = c.accessibilityChildren() as? [NSAccessibilityElement] ?? []
+        let b = c.accessibilityChildren() as? [NSAccessibilityElement] ?? []
+        #expect(a.count == 1 && a.first === b.first)
+        #expect(a[0].accessibilityFrameInParentSpace().minX == 100)
+        c.axis = TimeAxis(ticksPerPoint: 384, originTick: 38_400 - 384 * 20)
+        let d = c.accessibilityChildren() as? [NSAccessibilityElement] ?? []
+        #expect(d.first === a.first)
+        #expect(d[0].accessibilityFrameInParentSpace().minX == 20)
+    }
+
+    @Test func aCanvasLeavingItsWindowIsReleased() {
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled],
+            backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        weak var weakCanvas: EditorCanvas?
+        var stopped = false
+        autoreleasepool {
+            let c = EditorCanvas(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+            weakCanvas = c
+            w.contentView?.addSubview(c)
+            c.setPlaying(true)
+            c.removeFromSuperview()
+            stopped = !c.isLinkRunning
+        }
+        #expect(stopped)
+        #expect(weakCanvas == nil, "no display link retains it")
     }
 }

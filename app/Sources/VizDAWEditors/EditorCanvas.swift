@@ -40,14 +40,18 @@ public struct CanvasAccessibilityItem {
 
 @MainActor
 final class CanvasElement: NSAccessibilityElement {
-    private let press: (@MainActor () -> Void)?
+    private var press: (@MainActor () -> Void)?
 
     init(_ item: CanvasAccessibilityItem, parent: NSView, frame: CGRect) {
-        press = item.press
         super.init()
         setAccessibilityRole(.button)
-        setAccessibilityLabel(item.label)
         setAccessibilityParent(parent)
+        update(item, frame: frame)
+    }
+
+    func update(_ item: CanvasAccessibilityItem, frame: CGRect) {
+        press = item.press
+        setAccessibilityLabel(item.label)
         setAccessibilityFrameInParentSpace(frame)
         setAccessibilitySelected(item.selected)
     }
@@ -90,6 +94,7 @@ open class EditorCanvas: NSView {
             guard verticalOffset != oldValue else { return }
             content.needsDisplay = true
             overlay.needsDisplay = true
+            accessibilityStale = true
             onVerticalScroll?(verticalOffset)
         }
     }
@@ -110,9 +115,15 @@ open class EditorCanvas: NSView {
     private var playing = false
     private var rulerAnchor: Int64?
     private var rulerMoved = false
+    private var rulerStartX: CGFloat = 0
     private var dragPoint: CGPoint?
     private var dragModifiers: Modifiers = []
     private var scrollTimer: Timer?
+    /// Set by Escape; the rest of that press (drags, release) is ignored.
+    private var gestureCancelled = false
+    /// VoiceOver children, kept so their identity is stable between queries.
+    private var a11yElements: [CanvasElement] = []
+    private var accessibilityStale = true
 
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -159,6 +170,7 @@ open class EditorCanvas: NSView {
     /// Everything redraws (data changed).
     public func reload() {
         for v in [grid, content, overlay, ruler] { v.needsDisplay = true }
+        accessibilityStale = true
     }
 
     public static func hostNow() -> UInt64 { UInt64(max(CACurrentMediaTime(), 0) * 1e9) }
@@ -277,6 +289,17 @@ open class EditorCanvas: NSView {
         }
     }
 
+    open override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil { windowLost() }
+    }
+
+    private func windowLost() {
+        link?.invalidate()
+        link = nil
+        stopAutoScroll()
+    }
+
     open override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         updateLink()
@@ -310,8 +333,10 @@ open class EditorCanvas: NSView {
         window?.makeFirstResponder(self)
         let p = convert(e.locationInWindow, from: nil)
         dragModifiers = Modifiers(event: e)
+        gestureCancelled = false
         if p.y < Self.rulerHeight {
             rulerAnchor = axis.tick(atX: p.x)
+            rulerStartX = p.x
             rulerMoved = false
             return
         }
@@ -321,6 +346,7 @@ open class EditorCanvas: NSView {
     }
 
     open override func mouseDragged(with e: NSEvent) {
+        guard !gestureCancelled else { return }
         dragPoint = convert(e.locationInWindow, from: nil)
         dragModifiers = Modifiers(event: e)
         startAutoScroll()
@@ -330,6 +356,10 @@ open class EditorCanvas: NSView {
     open override func mouseUp(with e: NSEvent) {
         stopAutoScroll()
         dragPoint = nil
+        if gestureCancelled {
+            gestureCancelled = false
+            return
+        }
         if let anchor = rulerAnchor {
             rulerAnchor = nil
             let range = rulerPreview
@@ -350,7 +380,10 @@ open class EditorCanvas: NSView {
     private func dragStep() {
         guard let p = dragPoint else { return }
         if let anchor = rulerAnchor {
-            rulerMoved = true
+            if !rulerMoved {
+                guard abs(p.x - rulerStartX) > ToolMachine<Int>.deadZone else { return }
+                rulerMoved = true
+            }
             rulerPreview = RulerSelection.range(
                 fromTick: anchor, toX: p.x, axis: axis, snap: snap, meter: meter)
             ruler.needsDisplay = true
@@ -362,7 +395,8 @@ open class EditorCanvas: NSView {
 
     private func startAutoScroll() {
         guard scrollTimer == nil else { return }
-        scrollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+        scrollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] t in
+            guard self != nil else { t.invalidate(); return }
             MainActor.assumeIsolated { self?.autoScrollStep() }
         }
     }
@@ -395,6 +429,8 @@ open class EditorCanvas: NSView {
     open override func cancelOperation(_ sender: Any?) { cancelGestures() }
 
     private func cancelGestures() {
+        gestureCancelled = true
+        dragPoint = nil
         stopAutoScroll()
         if rulerAnchor != nil {
             rulerAnchor = nil
@@ -425,8 +461,21 @@ open class EditorCanvas: NSView {
     open override func accessibilityLabel() -> String? { accessibilityName }
 
     open override func accessibilityChildren() -> [Any]? {
-        accessibilityItems().map { item in
-            CanvasElement(item, parent: self, frame: content.convert(item.frame, to: self))
+        if accessibilityStale {
+            accessibilityStale = false
+            let items = accessibilityItems()
+            var next: [CanvasElement] = []
+            for (i, item) in items.enumerated() {
+                let frame = content.convert(item.frame, to: self)
+                if i < a11yElements.count {
+                    a11yElements[i].update(item, frame: frame)
+                    next.append(a11yElements[i])
+                } else {
+                    next.append(CanvasElement(item, parent: self, frame: frame))
+                }
+            }
+            a11yElements = next
         }
+        return a11yElements
     }
 }
