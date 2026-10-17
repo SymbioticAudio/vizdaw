@@ -139,6 +139,14 @@ pub enum EventCmd {
         /// `(tick, value)` pairs.
         points: Vec<(Tick, u32)>,
     },
+    /// Replace an event's position, routing, mute and body, keeping its ID
+    /// and lane; the kind cannot change (plan 4c: one list edit).
+    Replace {
+        /// The event.
+        event: EventId,
+        /// What it becomes.
+        spec: EventSpec,
+    },
 }
 
 impl EventCmd {
@@ -160,6 +168,7 @@ impl EventCmd {
             EventCmd::Resize { .. } => "Resize Notes",
             EventCmd::TransposeInScale { .. } => "Transpose in Scale",
             EventCmd::SetPerNote { .. } => "Set Per-Note Values",
+            EventCmd::Replace { .. } => "Edit Event",
         }
     }
 }
@@ -281,6 +290,18 @@ pub(crate) fn apply(d: &mut Document, cmd: &EventCmd, r: &mut Report) -> Result<
                 }
             }
         },
+        EventCmd::Replace { event, spec } => {
+            let (kind, loc) = {
+                let (e, l) = d.event(*event)?;
+                (e.body.kind(), l)
+            };
+            if kind != spec.body.kind() {
+                return Err(ModelError::invalid("an edit cannot change an event's kind"));
+            }
+            check_event(d, loc.seq, spec)?;
+            d.replace_event(spec.clone().with_id(*event))?;
+            ensure_drum_row(d, *event, r)?;
+        }
         EventCmd::SetPitch { events, pitch } => edit_events(d, events, r, |e| {
             match &mut e.body {
                 EventBody::Note { pitch: p, .. } | EventBody::PolyPressure { pitch: p, .. } => {

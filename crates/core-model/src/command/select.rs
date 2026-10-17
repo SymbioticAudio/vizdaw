@@ -43,6 +43,14 @@ pub(crate) fn apply(
     };
     let mut targets: Vec<EventId> = chosen.iter().copied().collect();
     if let Some(m) = modify {
+        // Deleting copies would leave the document as it was.
+        if to_copy && matches!(m, Modify::Delete) {
+            return Ok(Selection {
+                time_range: base.time_range,
+                lanes: base.lanes,
+                events: targets.into_iter().collect(),
+            });
+        }
         if to_copy {
             let mut copies = Vec::with_capacity(targets.len());
             for id in &targets {

@@ -563,3 +563,59 @@ fn set_per_note_replaces_values_in_the_range() {
         Err(ModelError::OutOfRange { .. })
     ));
 }
+
+#[test]
+fn replace_swaps_an_event_keeping_its_id_and_kind() {
+    let d = insert(&two_seqs(), 0, 0, vec![note(0, 60)]).unwrap();
+    let mut spec = EventSpec::new(Tick(PPQ), EventBody::note(62, 7, Tick(10)));
+    spec.mute = true;
+    let d2 = run(
+        &d,
+        ev(EventCmd::Replace {
+            event: EventId(0),
+            spec: spec.clone(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(d2.event(EventId(0)).unwrap().0.spec(), spec);
+    assert_eq!(
+        ev(EventCmd::Replace {
+            event: EventId(0),
+            spec: spec.clone()
+        })
+        .name(),
+        "Edit Event"
+    );
+    let cc = EventSpec::new(Tick(0), EventBody::Cc { index: 1, value: 2 });
+    assert!(matches!(
+        run(
+            &d,
+            ev(EventCmd::Replace {
+                event: EventId(0),
+                spec: cc
+            })
+        ),
+        Err(ModelError::Invalid { .. })
+    ));
+    let bad = EventSpec::new(Tick(0), EventBody::note(200, 7, Tick(10)));
+    assert!(matches!(
+        run(
+            &d,
+            ev(EventCmd::Replace {
+                event: EventId(0),
+                spec: bad
+            })
+        ),
+        Err(ModelError::OutOfRange { .. })
+    ));
+    assert!(
+        run(
+            &d,
+            ev(EventCmd::Replace {
+                event: EventId(9),
+                spec
+            })
+        )
+        .is_err()
+    );
+}

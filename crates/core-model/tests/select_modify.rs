@@ -3,10 +3,11 @@ use core_model::command::{
 };
 use core_model::document::Document;
 use core_model::event::{EventBody, EventKind, EventSpec};
+use core_model::history::History;
 use core_model::ids::{AnyId, EventId, LaneId, SeqId};
 use core_model::modify::{
-    Amount, ChangeOp, Curve, DurationOp, Modify, ModifyTemplate, Quantize, Transpose, ValueOp,
-    ValueTarget, Wave,
+    Amount, ChangeOp, Curve, Density, DurationOp, Modify, ModifyTemplate, Quantize, Substitute,
+    Transpose, ValueOp, ValueTarget, Wave,
 };
 use core_model::rule::{Rule, SelectMode, events_matching};
 use core_model::selection::{Selection, ViewFilter};
@@ -851,4 +852,278 @@ fn bad_amounts_and_targets_are_refused() {
         change(ValueTarget::Value, ChangeOp::Set, constant(0)).name(),
         "Change Values"
     );
+}
+
+/// seq0/lane0 with CC7 at ticks `at` (value = tick) and nothing else.
+fn controllers(at: &[i64]) -> Document {
+    let d = apply(
+        &Document::new(),
+        &Command::Sequence(SequenceCmd::New { name: "S".into() }),
+    )
+    .unwrap()
+    .doc;
+    let events = at
+        .iter()
+        .map(|t| {
+            EventSpec::new(
+                Tick(*t),
+                EventBody::Cc {
+                    index: 7,
+                    value: *t as u32,
+                },
+            )
+        })
+        .collect();
+    apply(
+        &d,
+        &Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            events,
+        }),
+    )
+    .unwrap()
+    .doc
+}
+
+fn cc_ticks(d: &Document) -> Vec<(i64, u32)> {
+    d.lane(SeqId(0), LaneId(0))
+        .unwrap()
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::Cc { value, .. } => Some((e.tick.0, value)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn thin_out_keeps_events_at_least_the_spacing_apart() {
+    let d = controllers(&[0, 10, 20, 100, 200]);
+    let a = try_sm(
+        &d,
+        &lane_sel(&[0, 1, 2, 3, 4]),
+        Modify::Density(Density::Thin { spacing: Tick(50) }),
+    )
+    .unwrap();
+    assert_eq!(cc_ticks(&a.doc), vec![(0, 0), (100, 100), (200, 200)]);
+    assert_eq!(ids(a.selection.as_ref().unwrap()), vec![0, 3, 4]);
+}
+
+#[test]
+fn thicken_fills_gaps_on_a_straight_line() {
+    let d = controllers(&[0, 100]);
+    let a = try_sm(
+        &d,
+        &lane_sel(&[0, 1]),
+        Modify::Density(Density::Thicken { spacing: Tick(30) }),
+    )
+    .unwrap();
+    assert_eq!(
+        cc_ticks(&a.doc),
+        vec![(0, 0), (30, 30), (60, 60), (90, 90), (100, 100)]
+    );
+    assert_eq!(a.selection.unwrap().events.len(), 5);
+    assert!(
+        try_sm(
+            &d,
+            &lane_sel(&[0, 1]),
+            Modify::Density(Density::Thin { spacing: Tick(0) })
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn trim_start_keeps_the_end() {
+    // ev2: 67 at 2Q, one quarter long.
+    let d = try_sm(
+        &doc(),
+        &lane_sel(&[2]),
+        Modify::TrimStart { delta: Tick(Q / 4) },
+    )
+    .unwrap()
+    .doc;
+    let (ev, _) = d.event(EventId(2)).unwrap();
+    assert_eq!(ev.tick, Tick(2 * Q + Q / 4));
+    assert!(matches!(ev.body, EventBody::Note { duration: Tick(t), .. } if t == 3 * Q / 4));
+    let d = try_sm(
+        &doc(),
+        &lane_sel(&[2]),
+        Modify::TrimStart { delta: Tick(2 * Q) },
+    )
+    .unwrap()
+    .doc;
+    let (ev, _) = d.event(EventId(2)).unwrap();
+    assert_eq!(ev.tick, Tick(3 * Q - 1), "one tick is left");
+}
+
+#[test]
+fn substitute_changes_kind_or_pitch() {
+    let sub = |s: Substitute, ids: &[u64]| try_sm(&doc(), &lane_sel(ids), Modify::Substitute(s));
+    let d = sub(Substitute::Controller { index: 11 }, &[3]).unwrap().doc;
+    assert_eq!(
+        body(&d, 3),
+        EventBody::Cc {
+            index: 11,
+            value: 100
+        }
+    );
+    let d = sub(Substitute::PitchBend, &[3]).unwrap().doc;
+    assert_eq!(body(&d, 3), EventBody::PitchBend { value: 100 });
+    let d = sub(Substitute::Pitch { pitch: 36 }, &NOTES).unwrap().doc;
+    assert_eq!(pitches(&d), vec![36; 4]);
+    assert!(sub(Substitute::Controller { index: 200 }, &[3]).is_err());
+}
+
+#[test]
+fn delete_removes_the_selection_and_undoes() {
+    let mut h = History::new(doc());
+    h.set_selection(lane_sel(&[0, 1]));
+    h.execute(
+        &Command::SelectAndModify {
+            rule: None,
+            mode: SelectMode::Select,
+            modify: Some(Modify::Delete),
+            to_copy: false,
+        },
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    assert!(h.doc().event(EventId(0)).is_err());
+    assert!(h.selection().events.is_empty());
+    assert_eq!(h.undo_label(), Some("Delete Events"));
+    h.undo().unwrap();
+    assert!(h.doc().event(EventId(0)).is_ok());
+}
+
+#[test]
+fn a_modify_that_changes_nothing_adds_no_undo_step() {
+    let mut h = History::new(doc());
+    // No events selected, no lanes: nothing to change.
+    h.execute(
+        &Command::SelectAndModify {
+            rule: None,
+            mode: SelectMode::Select,
+            modify: Some(Modify::Delete),
+            to_copy: false,
+        },
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    assert_eq!(h.undo_label(), None);
+    assert_eq!(
+        Modify::Density(Density::Thin { spacing: Tick(1) }).name(),
+        "Thin Out"
+    );
+    assert_eq!(Modify::TrimStart { delta: Tick(1) }.name(), "Trim Start");
+}
+
+#[test]
+fn substitute_keeps_the_stored_value_across_controller_kinds() {
+    // Every controller kind stores the same 32-bit range, so the value
+    // carries over exactly, including a full-scale 7-bit value.
+    let full = 127u32 << 25;
+    let d = controllers(&[0]);
+    let d = apply(
+        &d,
+        &Command::Event(EventCmd::SetValue {
+            events: vec![EventId(0)],
+            value: full,
+        }),
+    )
+    .unwrap()
+    .doc;
+    let v = full;
+    for (s, want) in [
+        (Substitute::PitchBend, EventBody::PitchBend { value: v }),
+        (
+            Substitute::ChannelPressure,
+            EventBody::ChannelPressure { value: v },
+        ),
+        (
+            Substitute::Controller { index: 1 },
+            EventBody::Cc { index: 1, value: v },
+        ),
+    ] {
+        let a = try_sm(&d, &lane_sel(&[0]), Modify::Substitute(s)).unwrap();
+        assert_eq!(body(&a.doc, 0), want);
+    }
+}
+
+#[test]
+fn invalid_arguments_are_refused_even_without_notes() {
+    use core_model::ModelError;
+    let d = controllers(&[0]);
+    for m in [
+        Modify::Transpose(Transpose::Diatonic {
+            steps: 1,
+            root: 12,
+            mask: C_MAJOR,
+        }),
+        Modify::Transpose(Transpose::Diatonic {
+            steps: 1,
+            root: 0,
+            mask: 0,
+        }),
+        Modify::Transpose(Transpose::Invert { axis: 128 }),
+        Modify::NoteMap {
+            map: vec![(1, 200)],
+        },
+        Modify::Substitute(Substitute::Controller { index: 200 }),
+        Modify::Substitute(Substitute::Pitch { pitch: 200 }),
+    ] {
+        assert!(
+            matches!(
+                try_sm(&d, &lane_sel(&[0]), m.clone()),
+                Err(ModelError::OutOfRange { .. })
+            ),
+            "{m:?}"
+        );
+    }
+    assert!(matches!(
+        try_sm(
+            &d,
+            &lane_sel(&[0]),
+            Modify::Density(Density::Thin { spacing: Tick(0) })
+        ),
+        Err(ModelError::OutOfRange { .. })
+    ));
+}
+
+#[test]
+fn to_copy_delete_and_no_op_changes_add_no_undo_step() {
+    let mut h = History::new(doc());
+    h.set_selection(lane_sel(&[0, 1]));
+    let before = h.doc().clone();
+    h.execute(
+        &Command::SelectAndModify {
+            rule: None,
+            mode: SelectMode::Select,
+            modify: Some(Modify::Delete),
+            to_copy: true,
+        },
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    assert_eq!(*h.doc(), before);
+    assert_eq!(h.undo_label(), None);
+    assert_eq!(ids(h.selection()), vec![0, 1]);
+    // Thinning a series that is already sparse changes nothing either.
+    let mut h = History::new(controllers(&[0, 100]));
+    h.set_selection(lane_sel(&[0, 1]));
+    h.execute(
+        &Command::SelectAndModify {
+            rule: None,
+            mode: SelectMode::Select,
+            modify: Some(Modify::Density(Density::Thin { spacing: Tick(10) })),
+            to_copy: false,
+        },
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    assert_eq!(h.undo_label(), None);
 }

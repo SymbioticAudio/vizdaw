@@ -5,7 +5,7 @@ use crate::command::event::{edit_events, shift_pitch};
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::event::{Event, EventBody};
-use crate::ids::{DestId, EventId};
+use crate::ids::{AnyId, DestId, EventId};
 use crate::rule::{Rule, SelectMode};
 use crate::time::Tick;
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,17 @@ pub enum Modify {
         /// `(from, to)` pairs, each 0–127.
         map: Vec<(u8, u8)>,
     },
+    /// Move note starts by `delta`, keeping their ends (at least 1 tick).
+    TrimStart {
+        /// Offset of the start.
+        delta: Tick,
+    },
+    /// Turn controller kinds into another, or notes into one pitch.
+    Substitute(Substitute),
+    /// Thin out or thicken controller series.
+    Density(Density),
+    /// Delete the events.
+    Delete,
     /// Change one value of each fitting event by `op` with `amount`.
     Change {
         /// Which value.
@@ -62,6 +73,48 @@ pub enum Modify {
         amount: Amount,
     },
 }
+
+/// What [`Modify::Substitute`] turns events into (Plan 4c Ruling 5).
+///
+/// The model stores every controller kind as a full-range 32-bit value, so
+/// a kind change carries the stored value over unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Substitute {
+    /// CC, pitch bend and channel pressure become CC `index`.
+    Controller {
+        /// Controller number 0–127.
+        index: u8,
+    },
+    /// CC, pitch bend and channel pressure become pitch bend.
+    PitchBend,
+    /// CC, pitch bend and channel pressure become channel pressure.
+    ChannelPressure,
+    /// Notes and poly pressure take `pitch`.
+    Pitch {
+        /// Pitch 0–127.
+        pitch: u8,
+    },
+}
+
+/// Controller-series density changes (Plan 4c Ruling 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Density {
+    /// Remove events closer than `spacing` to the last kept one.
+    Thin {
+        /// Minimum distance (> 0).
+        spacing: Tick,
+    },
+    /// Add straight-line values every `spacing` between neighbours.
+    Thicken {
+        /// Distance between added events (> 0).
+        spacing: Tick,
+    },
+}
+
+/// The most events one Thicken may add.
+const MAX_THICKEN: usize = 100_000;
 
 /// Which value [`Modify::Change`] edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +405,11 @@ impl Modify {
             Modify::Move { .. } => "Move",
             Modify::ControllerValue(_) => "Change Controller Values",
             Modify::NoteMap { .. } => "Transpose",
+            Modify::TrimStart { .. } => "Trim Start",
+            Modify::Substitute(_) => "Substitute",
+            Modify::Density(Density::Thin { .. }) => "Thin Out",
+            Modify::Density(Density::Thicken { .. }) => "Thicken",
+            Modify::Delete => "Delete Events",
             Modify::Change { target, .. } => match target {
                 ValueTarget::Velocity => "Change Velocity",
                 ValueTarget::ReleaseVelocity => "Change Release Velocity",
@@ -454,18 +512,9 @@ fn modify_one(e: &mut Event, m: &Modify) -> Result<()> {
                     Transpose::Interval { semitones } => shift_pitch(*pitch, i32::from(*semitones)),
                     Transpose::ToScale { root, mask } => snap_to_scale(*pitch, *root, *mask),
                     Transpose::Diatonic { steps, root, mask } => {
-                        if *root > 11 || mask & 0x0fff == 0 {
-                            return Err(ModelError::range(
-                                "transpose.scale",
-                                format!("{root}/{mask:#x}"),
-                            ));
-                        }
                         scale_step(*pitch, i32::from(*steps), *root, *mask)
                     }
                     Transpose::Invert { axis } => {
-                        if *axis > 127 {
-                            return Err(ModelError::range("transpose.axis", axis));
-                        }
                         shift_pitch(0, 2 * i32::from(*axis) - i32::from(*pitch))
                     }
                 }
@@ -473,9 +522,6 @@ fn modify_one(e: &mut Event, m: &Modify) -> Result<()> {
             _ => {}
         },
         Modify::NoteMap { map } => {
-            if map.iter().any(|(a, b)| *a > 127 || *b > 127) {
-                return Err(ModelError::range("note_map", "a pitch above 127"));
-            }
             if let EventBody::Note { pitch, .. } | EventBody::PolyPressure { pitch, .. } =
                 &mut e.body
             {
@@ -485,7 +531,45 @@ fn modify_one(e: &mut Event, m: &Modify) -> Result<()> {
             }
         }
         // Applied to the whole set in `apply_modify`.
-        Modify::Change { .. } => {}
+        Modify::Change { .. } | Modify::Density(_) | Modify::Delete => {}
+        Modify::TrimStart { delta } => {
+            if let EventBody::Note { duration, .. } = &mut e.body {
+                if duration.0 > 0 {
+                    let end = e.tick + *duration;
+                    let start = (e.tick + *delta).min(end - Tick(1));
+                    *duration = end - start;
+                    e.tick = start;
+                }
+            }
+        }
+        Modify::Substitute(s) => {
+            let value = match e.body {
+                EventBody::Cc { value, .. }
+                | EventBody::PitchBend { value }
+                | EventBody::ChannelPressure { value } => Some(value),
+                _ => None,
+            };
+            match (s, value) {
+                (Substitute::Controller { index }, Some(value)) => {
+                    e.body = EventBody::Cc {
+                        index: *index,
+                        value,
+                    }
+                }
+                (Substitute::PitchBend, Some(value)) => e.body = EventBody::PitchBend { value },
+                (Substitute::ChannelPressure, Some(value)) => {
+                    e.body = EventBody::ChannelPressure { value }
+                }
+                (Substitute::Pitch { pitch: to }, _) => {
+                    if let EventBody::Note { pitch, .. } | EventBody::PolyPressure { pitch, .. } =
+                        &mut e.body
+                    {
+                        *pitch = *to;
+                    }
+                }
+                _ => {}
+            }
+        }
         Modify::Quantize(q) => {
             if let EventBody::Note { .. } = e.body {
                 e.tick = quantize_tick(e.tick, q)?;
@@ -682,6 +766,140 @@ fn apply_change(
     Ok(())
 }
 
+/// The series a controller event belongs to inside its lane and take.
+fn series(e: &Event) -> Option<(u8, u8)> {
+    match e.body {
+        EventBody::Cc { index, .. } => Some((0, index)),
+        EventBody::PitchBend { .. } => Some((1, 0)),
+        EventBody::ChannelPressure { .. } => Some((2, 0)),
+        EventBody::PolyPressure { pitch, .. } => Some((3, pitch)),
+        _ => None,
+    }
+}
+
+fn series_value(b: &EventBody) -> u32 {
+    match b {
+        EventBody::Cc { value, .. }
+        | EventBody::PitchBend { value }
+        | EventBody::ChannelPressure { value }
+        | EventBody::PolyPressure { value, .. } => *value,
+        _ => 0,
+    }
+}
+
+fn with_value(b: &mut EventBody, v: u32) {
+    if let EventBody::Cc { value, .. }
+    | EventBody::PitchBend { value }
+    | EventBody::ChannelPressure { value }
+    | EventBody::PolyPressure { value, .. } = b
+    {
+        *value = v;
+    }
+}
+
+fn density(
+    d: &mut Document,
+    ids: &[EventId],
+    den: Density,
+    r: &mut Report,
+) -> Result<Vec<EventId>> {
+    let spacing = match den {
+        Density::Thin { spacing } | Density::Thicken { spacing } => spacing,
+    };
+    if spacing.0 <= 0 {
+        return Err(ModelError::range("density.spacing", spacing.0));
+    }
+    let mut groups: BTreeMap<_, Vec<(Tick, EventId)>> = BTreeMap::new();
+    let mut out = Vec::new();
+    for id in ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let (ev, loc) = d.event(id)?;
+        match series(ev) {
+            Some((a, b)) => groups
+                .entry((loc.seq, loc.lane, loc.take, a, b))
+                .or_default()
+                .push((ev.tick, id)),
+            None => out.push(id),
+        }
+    }
+    let mut added = 0usize;
+    for ((seq, lane, take, _, _), mut evs) in groups {
+        evs.sort();
+        match den {
+            Density::Thin { .. } => {
+                let mut last: Option<Tick> = None;
+                for (t, id) in evs {
+                    if last.is_some_and(|l| (t - l).0 < spacing.0) {
+                        d.remove_event(id)?;
+                        r.removed.push(AnyId::Event(id));
+                    } else {
+                        last = Some(t);
+                        out.push(id);
+                    }
+                }
+            }
+            Density::Thicken { .. } => {
+                for pair in evs.windows(2) {
+                    let [(t0, a), (t1, b)] = pair else { continue };
+                    let first = d.event(*a)?.0.clone();
+                    let va = i128::from(series_value(&first.body));
+                    let vb = i128::from(series_value(&d.event(*b)?.0.body));
+                    let gap = i128::from((*t1 - *t0).0);
+                    let mut t = t0.0.saturating_add(spacing.0);
+                    while t < t1.0 {
+                        added += 1;
+                        if added > MAX_THICKEN {
+                            return Err(ModelError::range("density.spacing", spacing.0));
+                        }
+                        let v = va + (vb - va) * i128::from(t - t0.0) / gap;
+                        let mut spec = first.spec();
+                        spec.tick = Tick(t);
+                        with_value(&mut spec.body, u32::try_from(v).unwrap_or(0));
+                        let id = d.counters_mut().alloc_event();
+                        d.insert_event(seq, lane, Some(take), spec.with_id(id))?;
+                        r.created.push(AnyId::Event(id));
+                        out.push(id);
+                        t = t.saturating_add(spacing.0);
+                    }
+                }
+                out.extend(evs.iter().map(|(_, id)| *id));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Refuses arguments that no event could carry, before anything runs, so a
+/// selection without notes still rejects them.
+fn validate(m: &Modify) -> Result<()> {
+    match m {
+        Modify::Transpose(Transpose::Diatonic { root, mask, .. })
+            if *root > 11 || mask & 0x0fff == 0 =>
+        {
+            Err(ModelError::range(
+                "transpose.scale",
+                format!("{root}/{mask:#x}"),
+            ))
+        }
+        Modify::Transpose(Transpose::Invert { axis }) if *axis > 127 => {
+            Err(ModelError::range("transpose.axis", axis))
+        }
+        Modify::NoteMap { map } if map.iter().any(|(a, b)| *a > 127 || *b > 127) => {
+            Err(ModelError::range("note_map", "a pitch above 127"))
+        }
+        Modify::Substitute(Substitute::Controller { index }) if *index > 127 => {
+            Err(ModelError::range("substitute.index", index))
+        }
+        Modify::Substitute(Substitute::Pitch { pitch }) if *pitch > 127 => {
+            Err(ModelError::range("substitute.pitch", pitch))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Applies `m` to the events `ids`; returns the events the selection holds
 /// afterwards.
 pub(crate) fn apply_modify(
@@ -690,8 +908,21 @@ pub(crate) fn apply_modify(
     m: &Modify,
     r: &mut Report,
 ) -> Result<Vec<EventId>> {
+    validate(m)?;
     match m {
         Modify::Legato => legato(d, ids, r)?,
+        Modify::Density(den) => return density(d, ids, *den, r),
+        Modify::Delete => {
+            for id in ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                d.remove_event(id)?;
+                r.removed.push(AnyId::Event(id));
+            }
+            return Ok(Vec::new());
+        }
         Modify::Change { target, op, amount } => apply_change(d, ids, *target, *op, amount, r)?,
         _ => edit_events(d, ids, r, |e| modify_one(e, m))?,
     }
