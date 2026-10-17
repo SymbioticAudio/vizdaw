@@ -34,6 +34,7 @@ pub mod rules;
 pub mod selection;
 pub mod sequence;
 pub mod state;
+pub mod strip;
 pub mod tempo;
 pub mod time;
 

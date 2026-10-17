@@ -230,15 +230,45 @@ pub enum Amount {
     },
 }
 
-fn lerp(a: i64, b: i64, y: f64) -> i64 {
+pub(crate) fn lerp(a: i64, b: i64, y: f64) -> i64 {
     (a as f64 + (b as f64 - a as f64) * y).round() as i64
 }
 
-fn splitmix(mut z: u64) -> u64 {
+pub(crate) fn splitmix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+impl Curve {
+    /// The curve's height (0–1) at `x` (0–1).
+    pub fn apply(self, x: f64) -> f64 {
+        match self {
+            Curve::Straight => x,
+            Curve::EaseIn => x * x,
+            Curve::EaseOut => 1.0 - (1.0 - x) * (1.0 - x),
+            Curve::SCurve => x * x * (3.0 - 2.0 * x),
+        }
+    }
+}
+
+impl Wave {
+    /// The wave (−1 … 1) at phase `ph` (0 … 1 of a period).
+    pub fn value(self, ph: f64) -> f64 {
+        match self {
+            Wave::Sine => (std::f64::consts::TAU * ph).sin(),
+            Wave::Square => {
+                if ph < 0.5 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+            Wave::Triangle => 1.0 - 4.0 * (ph - 0.5).abs(),
+            Wave::Saw => 2.0 * ph - 1.0,
+        }
+    }
 }
 
 impl Amount {
@@ -254,13 +284,7 @@ impl Amount {
                 } else {
                     0.0
                 };
-                let y = match curve {
-                    Curve::Straight => x,
-                    Curve::EaseIn => x * x,
-                    Curve::EaseOut => 1.0 - (1.0 - x) * (1.0 - x),
-                    Curve::SCurve => x * x * (3.0 - 2.0 * x),
-                };
-                lerp(from, to, y)
+                lerp(from, to, curve.apply(x))
             }
             Amount::Oscillator {
                 wave,
@@ -271,19 +295,7 @@ impl Amount {
             } => {
                 let p = period.0.max(1);
                 let ph = (t - first).0.saturating_add(phase.0).rem_euclid(p) as f64 / p as f64;
-                let w = match wave {
-                    Wave::Sine => (std::f64::consts::TAU * ph).sin(),
-                    Wave::Square => {
-                        if ph < 0.5 {
-                            1.0
-                        } else {
-                            -1.0
-                        }
-                    }
-                    Wave::Triangle => 1.0 - 4.0 * (ph - 0.5).abs(),
-                    Wave::Saw => 2.0 * ph - 1.0,
-                };
-                lerp(low, high, (w + 1.0) / 2.0)
+                lerp(low, high, (wave.value(ph) + 1.0) / 2.0)
             }
             Amount::Random { low, high, seed } => {
                 let (lo, hi) = if low <= high {
