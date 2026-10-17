@@ -199,7 +199,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var liveSets: [(UInt64, UInt64, Double)] = []
     var endedGestures: [UInt64] = []
 
-    func params(slot: UInt64) throws -> [ParamRow] { paramTable[slot] ?? [] }
+    func params(slot: UInt64) throws -> [ParamRow] {
+        if readBusy { throw VizError.Busy(message: "plugin host is busy") }
+        return paramTable[slot] ?? []
+    }
     func setParam(slot: UInt64, param: UInt64, value: Double) throws {
         liveSets.append((slot, param, value))
     }
@@ -216,7 +219,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var closedEditors: [UInt64] = []
     var windowsOpen: Set<UInt64> = []
 
+    /// openEditor throws Busy this many more times before working.
+    var openBusy = 0
+    /// mixer() and params() throw Busy while true.
+    var readBusy = false
     func openEditor(slot: UInt64, parent: UInt64) throws -> EditorSize {
+        if openBusy > 0 {
+            openBusy -= 1
+            throw VizError.Busy(message: "plugin host is busy")
+        }
         guard let e = editors[slot] else {
             throw VizError.Engine(message: "editor unavailable: the plugin has no editor")
         }

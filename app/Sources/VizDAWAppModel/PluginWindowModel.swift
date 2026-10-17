@@ -55,35 +55,57 @@ public final class PluginWindowModel {
 
     // MARK: Updates
 
-    /// Rereads the slot, its strip and its parameters.
-    public func refresh() {
-        let mixer = try? session.mixer()
-        row = nil
-        stripName = ""
-        for s in mixer?.strips ?? [] {
-            if let r = ([s.instrument].compactMap { $0 } + s.inserts).first(where: { $0.id == slot }) {
-                row = r
-                stripName = s.name
+    /// The editor open hit `Busy` (or is in progress) and is still owed;
+    /// the owner retries it on the next tick.
+    public private(set) var openOwed = false
+    private var opening = false
+
+    /// Rereads the slot, its strip and its parameters. A failed read (`Busy`
+    /// during another editor's open) keeps what was known and returns false;
+    /// only a successful read without the slot makes the window gone.
+    @discardableResult
+    public func refresh() -> Bool {
+        var ok = true
+        do {
+            let mixer = try session.mixer()
+            var found: SlotRow?
+            var name = ""
+            for s in mixer.strips {
+                if let r = ([s.instrument].compactMap { $0 } + s.inserts).first(where: { $0.id == slot }) {
+                    found = r
+                    name = s.name
+                }
             }
+            row = found
+            stripName = name
+        } catch {
+            ok = false
         }
-        params = (try? session.params(slot: slot)) ?? []
+        if let p = try? session.params(slot: slot) { params = p } else { ok = false }
+        return ok
     }
 
     /// Opens the plugin's editor inside the view at address `parent`;
     /// false (and the reason kept) when it has none or is not running.
+    /// `Busy` leaves the open owed (`openOwed`).
     @discardableResult
     public func openEditor(parent: UInt64) -> Bool {
+        guard !opening else { return false }
         guard isLive else {
             editorProblem = placeholderReason ?? "Loading…"
             return false
         }
+        opening = true
+        defer { opening = false }
         do {
             editorSize = try session.openEditor(slot: slot, parent: parent)
             editorProblem = nil
+            openOwed = false
             return true
         } catch {
             editorSize = nil
             editorProblem = AlertItem(error, title: "").message
+            if case .Busy = error as? VizError { openOwed = true } else { openOwed = false }
             return false
         }
     }
@@ -118,8 +140,9 @@ public final class PluginWindowModel {
     public func closed() -> Bool {
         endOpenDrags()
         try? session.setWindowOpen(slot: slot, open: false)
-        editorSize = nil
+        openOwed = false
         let done = detachEditor()
+        editorSize = nil
         if done { try? session.endPluginGestures(slot: slot) }
         return done
     }

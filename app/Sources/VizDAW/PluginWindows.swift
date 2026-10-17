@@ -58,8 +58,11 @@ enum PluginWindows {
         let c = PluginWindowController(model: window, docID: doc) {
             open[key] = nil
         }
+        // Registered before the editor opens (which can spin the run loop):
+        // a re-entrant show() finds this window.
         open[key] = c
         c.showWindow(nil)
+        c.start()
     }
 
     /// The editor size an open window shows (the `--smoke` run).
@@ -76,8 +79,17 @@ enum PluginWindows {
     /// The timer's step: windows follow their slot (close when it is gone,
     /// open the editor once it runs, reread changed parameters).
     static func tick(_ store: DocumentStore) {
-        pending.removeAll { $0.model.retryClose() }
-        for (key, c) in open {
+        // Closing and opening editors can spin the run loop and re-enter.
+        guard !ticking else { return }
+        ticking = true
+        defer { ticking = false }
+        // Never mutate `pending` or `open` while calling into the session.
+        let items = pending
+        var done: [PluginWindowModel] = []
+        for p in items where p.model.retryClose() { done.append(p.model) }
+        pending.removeAll { p in done.contains { $0 === p.model } }
+        for (key, c) in Array(open) {
+            guard open[key] === c else { continue }
             guard let doc = store.model(key.doc) else {
                 c.close()
                 continue
@@ -89,6 +101,8 @@ enum PluginWindows {
         }
         for doc in store.documents.values { doc.paramsChanged.removeAll() }
     }
+
+    private static var ticking = false
 }
 
 /// One plugin window: header (bypass, status), then the plugin's editor in
@@ -110,6 +124,10 @@ final class PluginWindowController: NSWindowController, NSWindowDelegate {
 
     private(set) var seen: Seen?
 
+    /// Header height in the content view (fixed, see `PluginWindowContent`).
+    static let headerHeight: CGFloat = 37
+    private var applyingSize = false
+
     init(model: PluginWindowModel, docID: UUID, onClose: @escaping @MainActor () -> Void) {
         self.model = model
         self.docID = docID
@@ -120,42 +138,84 @@ final class PluginWindowController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        window.contentView = NSHostingView(
-            rootView: PluginWindowContent(model: model, editorHost: editorHost))
+        let hosting = NSHostingView(rootView: PluginWindowContent(model: model, editorHost: editorHost))
+        // The window, not the SwiftUI content, decides the size.
+        hosting.sizingOptions = []
+        window.contentView = hosting
         window.center()
         model.opened()
-        update(Seen(slots: model.document.slotsVersion, doc: model.document.snapshot.version))
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// The first look at the slot (after the controller is registered).
+    func start() {
+        update(Seen(slots: model.document.slotsVersion, doc: model.document.snapshot.version))
+    }
+
     /// Follows the slot: title, closing when gone, the editor once live.
+    /// `seen` is only set when everything succeeded; a `Busy` read or editor
+    /// open is retried on the next tick.
     func update(_ now: Seen) {
-        seen = now
-        model.refresh()
+        let ok = model.refresh()
         guard let window else { return }
         if model.isGone {
+            seen = now
             close()
             return
         }
         window.title = model.title
+        var sizeWindow = false
         if model.editorSize == nil && model.isLive {
             let address = UInt64(UInt(bitPattern: Unmanaged.passUnretained(editorHost).toOpaque()))
             if model.openEditor(parent: address), let size = model.editorSize {
                 editorHost.setFrameSize(NSSize(width: Int(size.width), height: Int(size.height)))
-                if size.resizable { window.styleMask.insert(.resizable) }
+                if size.resizable {
+                    window.styleMask.insert(.resizable)
+                    window.contentMinSize = NSSize(width: 120, height: Self.headerHeight + 60)
+                } else {
+                    window.styleMask.remove(.resizable)
+                }
+                sizeWindow = true
             }
         }
-        if let content = window.contentView {
-            window.setContentSize(content.fittingSize)
+        seen = (ok && !model.openOwed) ? now : nil
+        if model.editorSize == nil {
+            // Parameters (or a message): a fixed window.
+            window.styleMask.remove(.resizable)
+            sizeWindow = true
         }
+        if sizeWindow { applyContentSize(contentSize()) }
     }
 
+    private func contentSize() -> NSSize {
+        if let s = model.editorSize {
+            return NSSize(width: CGFloat(s.width), height: CGFloat(s.height) + Self.headerHeight)
+        }
+        let n = model.visibleParams.count
+        let h = n == 0 ? 120 : min(420, CGFloat(n) * 30 + 30)
+        return NSSize(width: n == 0 ? 360 : 400, height: h + Self.headerHeight)
+    }
+
+    private func applyContentSize(_ size: NSSize) {
+        guard let window else { return }
+        applyingSize = true
+        window.setContentSize(size)
+        applyingSize = false
+    }
+
+    /// The user resized the window: the editor gets the new content size and
+    /// the window takes the size the plugin answers with.
     func windowDidResize(_ notification: Notification) {
-        guard model.editorSize?.resizable == true else { return }
-        let s = editorHost.frame.size
-        model.resize(width: UInt32(max(1, s.width)), height: UInt32(max(1, s.height)))
+        guard !applyingSize, model.editorSize?.resizable == true, let window else { return }
+        let content = window.contentLayoutRect.size
+        let w = UInt32(max(1, content.width.rounded()))
+        let h = UInt32(max(1, (content.height - Self.headerHeight).rounded()))
+        model.resize(width: w, height: h)
+        if let s = model.editorSize, s.width != w || s.height != h {
+            applyContentSize(NSSize(width: CGFloat(s.width), height: CGFloat(s.height) + Self.headerHeight))
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -185,14 +245,22 @@ struct PluginWindowContent: View {
                 Spacer()
             }
             .padding(6)
+            .frame(height: PluginWindowController.headerHeight - 1)
             Divider()
             if let size = model.editorSize {
-                EditorHost(view: editorHost)
-                    .frame(width: CGFloat(size.width), height: CGFloat(size.height))
+                if size.resizable {
+                    // Follows the window; the controller reports the size.
+                    EditorHost(view: editorHost)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    EditorHost(view: editorHost)
+                        .frame(width: CGFloat(size.width), height: CGFloat(size.height))
+                }
             } else {
                 ParameterList(model: model)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 

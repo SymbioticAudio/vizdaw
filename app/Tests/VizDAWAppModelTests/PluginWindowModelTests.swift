@@ -97,4 +97,34 @@ import VizDAWCore
         w.endOpenDrags()
         #expect(f.calls == ["commitParams 10 0=0.9"], "committed once")
     }
+
+    @Test func aBusyRefreshKeepsTheWindowAndItsParameters() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.opened()
+        f.mixerFetchError = VizError.Busy(message: "busy")
+        f.readBusy = true
+        #expect(!w.refresh())
+        #expect(!w.isGone)
+        #expect(w.visibleParams.count == 1)
+        #expect(w.title == "Synth — Gain")
+        #expect(f.windowsOpen == [10], "still saved as open")
+        f.mixerFetchError = nil
+        f.readBusy = false
+        #expect(w.refresh())
+    }
+
+    @Test func aBusyEditorOpenIsOwedAndRetried() throws {
+        let f = mixerFake()
+        f.editors[10] = EditorSize(width: 400, height: 300, resizable: false)
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        f.openBusy = 1
+        #expect(!w.openEditor(parent: 0x1000))
+        #expect(w.openOwed)
+        #expect(w.editorSize == nil)
+        #expect(w.openEditor(parent: 0x1000))
+        #expect(!w.openOwed)
+        #expect(w.editorSize?.width == 400)
+    }
 }
