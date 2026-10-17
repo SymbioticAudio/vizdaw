@@ -99,6 +99,9 @@ pub struct CatalogRowFfi {
     pub kind: Option<PluginKindTag>,
     /// Status.
     pub status: PluginStatusRow,
+    /// The user's on/off preference, independent of `status` (a
+    /// blocklisted plugin can be switched off too).
+    pub enabled: bool,
     /// Where it lives: a bundle path, or `au:<id>`.
     pub path: String,
 }
@@ -114,6 +117,7 @@ fn row(r: CatalogRow) -> CatalogRowFfi {
             PluginStatus::NotValidated => PluginStatusRow::NotValidated,
             PluginStatus::Missing => PluginStatusRow::Missing,
         },
+        enabled: r.enabled,
         path: r.source.path.to_string_lossy().into_owned(),
     }
 }
@@ -392,10 +396,11 @@ impl PluginCatalog {
         })
     }
 
-    /// Forgets a plugin's blocklist entry and scans its bundle again.
-    pub fn clear_blocklist(&self, plugin: PluginKey) -> Result<(), VizError> {
+    /// Forgets the blocklist entries of `plugins` and scans their bundles
+    /// again (one scan, one save). Fails up front, changing nothing, when
+    /// the scanner is missing or a scan is running.
+    pub fn clear_blocklist(&self, plugins: Vec<PluginKey>) -> Result<(), VizError> {
         ffi_guard(|| {
-            // Fail before forgetting the entry when the scan cannot start.
             if !PathBuf::from(&self.config.scanner).is_file() {
                 return Err(VizError::NotFound {
                     path: self.config.scanner.clone(),
@@ -406,11 +411,19 @@ impl PluginCatalog {
                     message: "a scan is already running".into(),
                 });
             }
-            let src = with(|c| c.clear_blocklist(plugin.format.into(), &plugin.id));
+            let mut sources: Vec<Source> = with(|c| {
+                plugins
+                    .iter()
+                    .filter_map(|k| c.clear_blocklist(k.format.into(), &k.id))
+                    .collect()
+            });
+            sources.sort();
+            sources.dedup();
             self.changed();
-            match src {
-                Some(s) => self.start(vec![s]),
-                None => Ok(()),
+            if sources.is_empty() {
+                Ok(())
+            } else {
+                self.start(sources)
             }
         })
     }

@@ -51,7 +51,7 @@ public final class PluginManagerModel {
             case .missing: "Missing"
             }
         }
-        public var isEnabled: Bool { row.status != .disabled }
+        public var isEnabled: Bool { row.enabled }
         public var isBlocklisted: Bool {
             if case .blocklisted = row.status { return true }
             return false
@@ -99,10 +99,13 @@ public final class PluginManagerModel {
 
     /// Clears the selected blocklist entries; each bundle is scanned again.
     public func clearBlocklist() {
-        for r in selected where r.isBlocklisted && r.hasPlugin { plugins.clearBlocklist(r.key) }
+        let keys = selected.filter { $0.isBlocklisted && $0.hasPlugin }.map(\.key)
+        if !keys.isEmpty { plugins.clearBlocklist(keys) }
     }
 
-    public var canClearBlocklist: Bool { selected.contains { $0.isBlocklisted && $0.hasPlugin } }
+    public var canClearBlocklist: Bool {
+        !plugins.isScanning && selected.contains { $0.isBlocklisted && $0.hasPlugin }
+    }
     public var canRescan: Bool { !selected.isEmpty && !plugins.isScanning }
 
     /// The first selected row's bundle, for Reveal in Finder.

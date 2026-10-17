@@ -8,6 +8,7 @@ struct PluginManagerView: View {
     @Bindable var model: PluginManagerModel
 
     var body: some View {
+        VStack(spacing: 0) {
         Table(model.rows, selection: $model.selection) {
             TableColumn("On") { r in
                 Toggle("Enabled", isOn: Binding(get: { r.isEnabled }, set: { model.setEnabled(r, $0) }))
@@ -22,9 +23,13 @@ struct PluginManagerView: View {
             TableColumn("Type", value: \.kindText).width(80)
             TableColumn("Status") { r in
                 Text(r.statusText)
-                    .foregroundStyle(r.row.status == .ok ? Color.primary : Color.orange)
+                    .foregroundStyle(r.isBlocklisted ? Color.red : (r.row.status == .ok ? Color.primary : Color.orange))
                     .help(r.row.path)
             }
+        }
+        Text("Disabling takes effect the next time a project loads the plugin; remove it from open projects to stop it now.")
+            .font(.caption).foregroundStyle(.secondary)
+            .padding(6)
         }
         .searchable(text: $model.search)
         .toolbar {

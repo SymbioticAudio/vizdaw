@@ -140,6 +140,9 @@ pub struct CatalogRow {
     pub kind: Option<PluginKind>,
     /// Status.
     pub status: PluginStatus,
+    /// The user's preference: false when turned off in the Plugin Manager,
+    /// whatever the status says (a blocklisted plugin can be off too).
+    pub enabled: bool,
     /// Where it lives.
     pub source: Source,
 }
@@ -396,6 +399,9 @@ impl Catalog {
                 plugin: e.plugin.clone(),
                 kind: e.kind,
                 status: self.status_of(e),
+                enabled: !self
+                    .disabled
+                    .contains(&(e.plugin.format, e.plugin.id.clone())),
                 source: e.source.clone(),
             })
             .collect();

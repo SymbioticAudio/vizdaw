@@ -184,7 +184,7 @@ fn disabling_a_plugin_makes_its_slots_placeholders_until_enabled() {
 fn clearing_a_blocklist_entry_scans_the_bundle_again() {
     let _g = serial();
     let (_d, c) = scanned();
-    c.clear_blocklist(key("vizdaw.test.crasher")).unwrap();
+    c.clear_blocklist(vec![key("vizdaw.test.crasher")]).unwrap();
     wait_scan(&c);
     // It crashes again, so it is blocklisted again; the others are back.
     assert!(matches!(
@@ -195,6 +195,45 @@ fn clearing_a_blocklist_entry_scans_the_bundle_again() {
     c.rescan(vec![key("vizdaw.test.gain")]).unwrap();
     wait_scan(&c);
     assert_eq!(status(&c, "vizdaw.test.gain"), PluginStatusRow::Ok);
+}
+
+#[test]
+fn a_batch_clear_scans_once_and_a_blocklisted_plugin_can_be_switched_off() {
+    let _g = serial();
+    let (_d, c) = scanned();
+    let enabled = |id: &str| {
+        c.rows()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.plugin.id == id)
+            .unwrap()
+            .enabled
+    };
+    // Off stays off for a blocklisted plugin, and on again works.
+    c.set_enabled(key("vizdaw.test.crasher"), false).unwrap();
+    assert!(!enabled("vizdaw.test.crasher"));
+    assert!(matches!(
+        status(&c, "vizdaw.test.crasher"),
+        PluginStatusRow::Blocklisted { .. }
+    ));
+    assert!(enabled("vizdaw.test.gain"));
+    c.set_enabled(key("vizdaw.test.crasher"), true).unwrap();
+    assert!(enabled("vizdaw.test.crasher"));
+    // Several keys (one twice, one not blocklisted) start one scan.
+    c.clear_blocklist(vec![
+        key("vizdaw.test.crasher"),
+        key("vizdaw.test.crasher"),
+        key("vizdaw.test.gain"),
+    ])
+    .unwrap();
+    assert!(c.progress().unwrap().running);
+    // A second clear while it runs fails up front.
+    assert!(c.clear_blocklist(vec![key("vizdaw.test.crasher")]).is_err());
+    wait_scan(&c);
+    assert!(matches!(
+        status(&c, "vizdaw.test.crasher"),
+        PluginStatusRow::Blocklisted { .. }
+    ));
 }
 
 #[test]

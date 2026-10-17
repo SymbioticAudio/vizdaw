@@ -103,8 +103,10 @@ public final class AppPlugins {
         perform("Plugin Settings") { try $0.setEnabled(plugin: key, enabled: on) }
     }
 
-    public func clearBlocklist(_ key: PluginKey) {
-        perform("Rescan Failed") { try $0.clearBlocklist(plugin: key) }
+    /// Forgets the blocklist entries of `keys`; their bundles are scanned
+    /// again (one scan).
+    public func clearBlocklist(_ keys: [PluginKey]) {
+        perform("Rescan Failed") { try $0.clearBlocklist(plugins: keys) }
     }
 
     /// The bundle to show in Finder (CLAP), if any.
