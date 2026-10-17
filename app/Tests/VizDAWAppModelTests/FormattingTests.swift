@@ -40,7 +40,7 @@ import VizDAWCore
         let t = TransportState(
             playing: true, seq: 1, tick: 0, positionBbu: "0.4.0", seconds: -0.5,
             sampleRate: 48_000, device: "Offline", faults: [], report: [], hostTimeNs: 0,
-        ticksPerSecond: 30_720)
+            ticksPerSecond: 30_720)
         #expect(Formatting.position(t) == "0.4.0  -0:00.500")
         #expect(Formatting.device(t) == "Offline · 48 kHz")
     }
@@ -55,7 +55,7 @@ import VizDAWCore
         let t = TransportState(
             playing: false, seq: nil, tick: 0, positionBbu: "1.1.0", seconds: 0,
             sampleRate: 0, device: "", faults: [], report: [], hostTimeNs: 0,
-        ticksPerSecond: 30_720)
+            ticksPerSecond: 30_720)
         #expect(Formatting.device(t) == "No output")
     }
 

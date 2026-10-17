@@ -35,15 +35,26 @@ let package = Package(
             dependencies: ["VizDAWCore"],
             path: "Sources/VizDAWAppModel"
         ),
+        // Editors (plan 4a): pure geometry plus the AppKit canvas views.
+        .target(
+            name: "VizDAWEditors",
+            dependencies: ["VizDAWAppModel", "VizDAWCore"],
+            path: "Sources/VizDAWEditors"
+        ),
         .executableTarget(
             name: "VizDAW",
-            dependencies: ["VizDAWAppModel", "VizDAWCore"],
+            dependencies: ["VizDAWAppModel", "VizDAWCore", "VizDAWEditors"],
             path: "Sources/VizDAW"
         ),
         .testTarget(
             name: "VizDAWAppModelTests",
             dependencies: ["VizDAWAppModel", "VizDAWCore"],
             path: "Tests/VizDAWAppModelTests"
+        ),
+        .testTarget(
+            name: "VizDAWEditorsTests",
+            dependencies: ["VizDAWEditors", "VizDAWAppModel", "VizDAWCore"],
+            path: "Tests/VizDAWEditorsTests"
         ),
     ]
 )
