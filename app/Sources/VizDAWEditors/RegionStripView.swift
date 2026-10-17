@@ -151,7 +151,7 @@ public final class RegionStripView: NSView, TimeAxisFollower {
             case let .click(hit, _, _, modifiers):
                 click(hit, adding: modifiers.contains(.shift))
             case let .begin(.region(item), from, _):
-                guard editor.beginGesture("Move Region", lanes: [item.lane]) else { continue }
+                guard editor.beginGesture(ExactMode.regionMoveLabel, lanes: [item.lane]) else { continue }
                 moving = (item, timeAxis.tick(atX: from.x - side))
             case .begin:
                 break
