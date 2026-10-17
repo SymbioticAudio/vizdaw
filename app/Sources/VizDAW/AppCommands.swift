@@ -95,6 +95,11 @@ struct AppCommands: Commands {
             Divider()
             Button("Close Detail Editor") { doc?.editor.closeDetail() }
                 .disabled(doc?.editor.layout.detail == nil)
+            Divider()
+            nudge("Nudge Earlier", .earlier, .leftArrow)
+            nudge("Nudge Later", .later, .rightArrow)
+            nudge("Nudge Up", .up, .upArrow)
+            nudge("Nudge Down", .down, .downArrow)
         }
         CommandMenu("Sequence") {
             Button("Make Reference from Selection") {
@@ -116,6 +121,15 @@ struct AppCommands: Commands {
                 .keyboardShortcut(.return, modifiers: [])
                 .disabled(!(doc?.transportKeysEnabled ?? false))
         }
+    }
+
+    /// ⌥-arrows nudge the selection (Plan 4b Ruling 16); off while a text
+    /// field has the keyboard, so ⌥-arrows there still move the cursor.
+    private func nudge(_ title: String, _ dir: NudgeDirection, _ key: KeyEquivalent) -> some View {
+        Button(title) { doc?.editor.nudge(dir, settings: editingPreferences.nudge) }
+            .keyboardShortcut(key, modifiers: .option)
+            .disabled(
+                doc == nil || !(doc?.transportKeysEnabled ?? false) || (doc?.editor.selection.events.isEmpty ?? true))
     }
 
     private func show(_ id: UUID?) {

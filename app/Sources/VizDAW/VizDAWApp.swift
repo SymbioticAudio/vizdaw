@@ -12,6 +12,9 @@ import VizDAWCore
 /// The Plugin Manager window's model.
 @MainActor let pluginManager = PluginManagerModel(plugins: appPlugins)
 
+/// Editing preferences: the nudge steps (Plan 4b Ruling 16).
+@MainActor let editingPreferences = EditingPreferences()
+
 @main
 struct VizDAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
@@ -48,6 +51,9 @@ struct VizDAWApp: App {
         .defaultSize(width: 760, height: 560)
         Window("Plugin Manager", id: "plugins") {
             PluginManagerView(model: pluginManager)
+        }
+        Settings {
+            EditingSettingsView(prefs: editingPreferences)
         }
     }
 }
