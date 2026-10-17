@@ -170,3 +170,50 @@ fn line_rows_round_trip_and_bad_lines_are_refused() {
     };
     assert!(matches!(s.edit(legato, None), Err(VizError::Model { .. })));
 }
+
+#[test]
+fn a_tempo_line_draws_ramps_in_the_selected_lanes_sequence() {
+    let s = Session::new_demo().unwrap();
+    let song = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "Song")
+        .unwrap()
+        .id;
+    let lane = s.lanes(song).unwrap()[0].id;
+    s.set_selection(SelectionRow {
+        time_range: None,
+        lanes: vec![LaneRef { seq: song, lane }],
+        events: vec![],
+    })
+    .unwrap();
+    let draw = EditCommand::SelectAndModify {
+        rule: None,
+        mode: SelectModeRow::Select,
+        modify: Some(ModifyRow::Line {
+            target: LineTargetRow::Tempo,
+            op: LineOpRow::Draw,
+            line: line(0, 16 * Q, 120_000, 60_000, LineShapeRow::Straight),
+        }),
+        to_copy: false,
+    };
+    let snap = s.edit(draw.clone(), None).unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Draw Tempo"));
+    let tempo = s.sequence_info(song).unwrap().tempo;
+    let inside: Vec<(i64, f64, bool)> = tempo
+        .iter()
+        .filter(|p| p.tick <= 16 * Q)
+        .map(|p| (p.tick, p.bpm, p.ramp))
+        .collect();
+    assert_eq!(inside, vec![(0, 120.0, true), (16 * Q, 60.0, false)]);
+    let EditCommand::SelectAndModify {
+        modify: Some(row), ..
+    } = draw
+    else {
+        unreachable!()
+    };
+    let core = vizdaw_ffi::modify::modify(&row).unwrap();
+    assert_eq!(vizdaw_ffi::modify::modify_row(&core), row);
+}

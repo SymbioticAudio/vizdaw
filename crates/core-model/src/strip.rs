@@ -16,7 +16,7 @@ use crate::modify::{
     narrow, read_value, splitmix, write_value,
 };
 use crate::sequence::Sequence;
-use crate::tempo::TempoMap;
+use crate::tempo::{Bpm, TempoMap, TempoPoint};
 use crate::time::Tick;
 use im::OrdSet;
 use serde::{Deserialize, Serialize};
@@ -418,6 +418,9 @@ pub enum LineTarget {
     /// One series of the events in range; drawing writes it into every
     /// selected lane.
     Series(Series),
+    /// The tempo of the selected lanes' sequences, in milli-BPM (Plan 4d
+    /// Ruling 20).
+    Tempo,
 }
 
 /// What a Strip Chart line does (Plan 4d Rulings 15, 19).
@@ -463,6 +466,7 @@ impl LineChange {
     /// The undo label.
     pub fn name(&self) -> &'static str {
         match (self.op, self.target) {
+            (LineOp::Draw, LineTarget::Tempo) => "Draw Tempo",
             (LineOp::Draw, LineTarget::Series(Series::Automation(_))) => "Draw Automation",
             (LineOp::Draw, LineTarget::Series(Series::Program)) => "Draw Program Changes",
             (LineOp::Draw, LineTarget::Series(_)) => "Draw Controllers",
@@ -470,6 +474,7 @@ impl LineChange {
             (LineOp::Thicken, _) => "Thicken",
             (LineOp::Compress, _) => "Compress",
             (LineOp::Legato, _) => "Legato",
+            (_, LineTarget::Tempo) => "Change Tempo",
             (_, LineTarget::Value(ValueTarget::Velocity)) => "Change Velocity",
             (_, LineTarget::Value(ValueTarget::ReleaseVelocity)) => "Change Release Velocity",
             (_, LineTarget::Value(ValueTarget::Duration)) => "Change Duration",
@@ -502,9 +507,223 @@ pub(crate) fn apply_line(
 ) -> Result<Vec<EventId>> {
     c.check()?;
     match (c.target, c.op) {
+        (LineTarget::Tempo, op) => {
+            tempo_line(d, lanes, op, &c.line)?;
+            Ok(targets.to_vec())
+        }
         (LineTarget::Series(s), LineOp::Draw) => draw_series(d, lanes, s, &c.line, r),
         (target, op) => change_events(d, targets, target, op, &c.line, r),
     }
+}
+
+/// The tempo `v` (milli-BPM) inside 5–999 BPM.
+fn bpm(v: i64) -> Bpm {
+    let v = v.clamp(i64::from(Bpm::MIN.0), i64::from(Bpm::MAX.0));
+    Bpm(u32::try_from(v).unwrap_or(Bpm::MAX.0))
+}
+
+/// Runs a tempo line on the tempo map of every sequence among `lanes`
+/// (Plan 4d Ruling 20).
+fn tempo_line(
+    d: &mut Document,
+    lanes: &OrdSet<(SeqId, LaneId)>,
+    op: LineOp,
+    line: &Line,
+) -> Result<()> {
+    let seqs: BTreeSet<SeqId> = lanes.iter().map(|(s, _)| *s).collect();
+    if seqs.is_empty() {
+        return Err(ModelError::invalid(
+            "select a lane of the sequence whose tempo to change",
+        ));
+    }
+    if line.from.0 < 0 {
+        return Err(ModelError::range("line.from", line.from.0));
+    }
+    for seq in seqs {
+        let s = d.sequence(seq)?;
+        let ctx = TimeCtx::of(s);
+        let points: Vec<TempoPoint> = s.tempo.points().iter().copied().collect();
+        let next = match op {
+            LineOp::Draw => draw_tempo(&s.tempo, &points, line, ctx)?,
+            LineOp::Thin => thin_tempo(&points, line),
+            LineOp::Thicken => thicken_tempo(&s.tempo, &points, line)?,
+            LineOp::Compress => compress_tempo(&points, line),
+            LineOp::Legato => {
+                return Err(ModelError::invalid("legato changes note lengths only"));
+            }
+            LineOp::Set | LineOp::Scale | LineOp::Add | LineOp::LimitMax | LineOp::LimitMin => {
+                change_tempo(&points, op, line, ctx)
+            }
+        };
+        let map = TempoMap::new(next)?;
+        d.seq_mut(seq)?.tempo = map;
+    }
+    Ok(())
+}
+
+/// Points outside the line stay; inside, the line's reduced samples become
+/// ramping points (the last holds). When the point before the line ramps
+/// into it, a point at `from` holds the tempo the map had there, so the
+/// earlier ramp still ends where it did (Ruling P7); the drawn points then
+/// begin one tick later.
+fn draw_tempo(
+    map: &TempoMap,
+    points: &[TempoPoint],
+    line: &Line,
+    ctx: TimeCtx<'_>,
+) -> Result<Vec<TempoPoint>> {
+    let held: Vec<(Tick, i64)> = line
+        .samples(ctx)?
+        .into_iter()
+        .map(|(t, v)| (t, i64::from(bpm(v).0)))
+        .collect();
+    let mut drawn = reduce(&held, true);
+    let n = drawn.len();
+    let mut out: Vec<TempoPoint> = points
+        .iter()
+        .copied()
+        .filter(|p| !line.covers(p.tick))
+        .collect();
+    let ramps_in = points
+        .iter()
+        .rev()
+        .find(|p| p.tick < line.from)
+        .is_some_and(|p| p.ramp)
+        && points.iter().any(|p| p.tick >= line.from);
+    if ramps_in {
+        let hold = bpm((map.bpm_at(line.from) * 1000.0).round() as i64);
+        out.push(TempoPoint {
+            tick: line.from,
+            bpm: hold,
+            ramp: false,
+        });
+        if let Some(first) = drawn.first_mut() {
+            first.0 = first.0 + Tick(1);
+        }
+    }
+    out.extend(
+        drawn
+            .into_iter()
+            .enumerate()
+            .map(|(i, (tick, v))| TempoPoint {
+                tick,
+                bpm: bpm(v),
+                ramp: i + 1 < n,
+            }),
+    );
+    // A shifted point may land on a kept one; the kept one wins.
+    out.sort_by_key(|p| p.tick);
+    out.dedup_by_key(|p| p.tick);
+    Ok(out)
+}
+
+fn change_tempo(
+    points: &[TempoPoint],
+    op: LineOp,
+    line: &Line,
+    ctx: TimeCtx<'_>,
+) -> Vec<TempoPoint> {
+    points
+        .iter()
+        .map(|p| {
+            if !line.covers(p.tick) {
+                return *p;
+            }
+            let v = i64::from(p.bpm.0);
+            let a = line.at(p.tick, ctx);
+            let next = match op {
+                LineOp::Scale => narrow(i128::from(v) * i128::from(a) / 100),
+                LineOp::Add => v.saturating_add(a),
+                LineOp::LimitMax => v.min(a),
+                LineOp::LimitMin => v.max(a),
+                _ => a,
+            };
+            TempoPoint {
+                bpm: bpm(next),
+                ..*p
+            }
+        })
+        .collect()
+}
+
+fn compress_tempo(points: &[TempoPoint], line: &Line) -> Vec<TempoPoint> {
+    let inside: Vec<i64> = points
+        .iter()
+        .filter(|p| line.covers(p.tick))
+        .map(|p| i64::from(p.bpm.0))
+        .collect();
+    let (Some(lo), Some(hi)) = (inside.iter().min().copied(), inside.iter().max().copied()) else {
+        return points.to_vec();
+    };
+    points
+        .iter()
+        .map(|p| {
+            if !line.covers(p.tick) {
+                return *p;
+            }
+            let v = i64::from(p.bpm.0);
+            let next = if hi == lo {
+                line.start
+            } else {
+                narrow(
+                    i128::from(line.start)
+                        + (i128::from(v) - i128::from(lo))
+                            * (i128::from(line.end) - i128::from(line.start))
+                            / (i128::from(hi) - i128::from(lo)),
+                )
+            };
+            TempoPoint {
+                bpm: bpm(next),
+                ..*p
+            }
+        })
+        .collect()
+}
+
+/// Inside the line, a point closer than `step` to the last kept one goes
+/// (the point at tick 0 always stays).
+fn thin_tempo(points: &[TempoPoint], line: &Line) -> Vec<TempoPoint> {
+    let mut out: Vec<TempoPoint> = Vec::with_capacity(points.len());
+    let mut last: Option<Tick> = None;
+    for p in points {
+        if line.covers(p.tick) {
+            if p.tick != Tick::ZERO && last.is_some_and(|l| (p.tick - l).0 < line.step.0) {
+                continue;
+            }
+            last = Some(p.tick);
+        }
+        out.push(*p);
+    }
+    out
+}
+
+/// Points every `step` between neighbouring points inside the line, at the
+/// tempo the map has there (ramping where the earlier point ramps), so the
+/// timing does not change.
+fn thicken_tempo(map: &TempoMap, points: &[TempoPoint], line: &Line) -> Result<Vec<TempoPoint>> {
+    let mut out = points.to_vec();
+    let mut added = 0usize;
+    for pair in points.windows(2) {
+        let [a, b] = pair else { continue };
+        if !(line.covers(a.tick) && line.covers(b.tick)) {
+            continue;
+        }
+        let mut t = a.tick + line.step;
+        while t < b.tick {
+            added += 1;
+            if added > MAX_SAMPLES {
+                return Err(ModelError::range("line.step", line.step.0));
+            }
+            out.push(TempoPoint {
+                tick: t,
+                bpm: bpm((map.bpm_at(t) * 1000.0).round() as i64),
+                ramp: a.ramp,
+            });
+            t = t + line.step;
+        }
+    }
+    out.sort_by_key(|p| p.tick);
+    Ok(out)
 }
 
 /// Replaces series `s` in `[from, to]` of every lane in `lanes` with the
@@ -565,6 +784,8 @@ fn change_events(
     let vt = match target {
         LineTarget::Value(vt) => vt,
         LineTarget::Series(_) => ValueTarget::Value,
+        // `apply_line` runs tempo lines itself.
+        LineTarget::Tempo => return Ok(Vec::new()),
     };
     let mut hit: Vec<(EventId, Tick)> = Vec::new();
     for id in ids.iter().copied().collect::<BTreeSet<_>>() {
@@ -572,6 +793,7 @@ fn change_events(
         let fits = match target {
             LineTarget::Value(vt) => read_value(ev, vt).is_some(),
             LineTarget::Series(s) => Series::of(&ev.body) == Some(s),
+            LineTarget::Tempo => false,
         };
         if fits && line.covers(ev.tick) {
             hit.push((id, ev.tick));

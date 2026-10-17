@@ -174,3 +174,18 @@ private let meter44 = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor: 
         #expect(c.command() == .selectAndModify(rule: nil, mode: .select, modify: osc, toCopy: false))
     }
 }
+
+@Suite struct TempoLineFieldTests {
+    @Test func tempoLinesTypeBeatsPerMinute() {
+        let row = ModifyRow.line(
+            target: .tempo, op: .draw,
+            line: LineRow(from: 0, to: 61_440, start: 120_000, end: 90_500, step: 1_920, shape: .straight))
+        #expect(row.fields[2].kind == .bpm)
+        #expect(FieldText.text(120_000, .bpm, meter: []) == "120.00")
+        #expect(FieldText.parse("90.5", .bpm, meter: []) == 90_500)
+        #expect(FieldText.parse("-12", .bpm, meter: []) == -12_000)
+        #expect(FieldText.parse("1200", .bpm, meter: []) == nil)
+        #expect(ModifyKind.title(row) == "Draw Tempo")
+        #expect(ModifyKind.lineTitle(.tempo, .limitMax) == "Change Tempo")
+    }
+}

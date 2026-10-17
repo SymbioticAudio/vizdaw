@@ -49,6 +49,8 @@ pub enum LineTargetRow {
         /// The series.
         series: SeriesRow,
     },
+    /// The selected lanes' sequences' tempo (milli-BPM).
+    Tempo,
 }
 
 /// What a line does (core `LineOp`).
@@ -183,6 +185,7 @@ fn line_target_of(t: LineTargetRow) -> LineTarget {
     match t {
         LineTargetRow::Value { target } => LineTarget::Value(target_of(target)),
         LineTargetRow::Series { series } => LineTarget::Series(series_of(series)),
+        LineTargetRow::Tempo => LineTarget::Tempo,
     }
 }
 
@@ -194,6 +197,7 @@ fn line_target_row(t: LineTarget) -> LineTargetRow {
         LineTarget::Series(s) => LineTargetRow::Series {
             series: series_row(s),
         },
+        LineTarget::Tempo => LineTargetRow::Tempo,
     }
 }
 

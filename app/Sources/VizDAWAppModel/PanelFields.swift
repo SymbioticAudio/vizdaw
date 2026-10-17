@@ -28,6 +28,8 @@ public enum FieldKind: Equatable, Sendable {
     case length
     /// A tick as bar.beat.unit.
     case position
+    /// Milli-BPM as beats per minute ("120.00"; a change may be negative).
+    case bpm
 }
 
 /// One numeric field of a condition or modification.
@@ -53,6 +55,7 @@ public enum FieldText {
             let m = n == .min ? Int64.max : abs(n)
             return (n < 0 ? "-" : "") + DurationText.text(m, beat: MeterMath.ppq)
         case .position: return Bbu.of(n, meter: meter).text
+        case .bpm: return String(format: "%.2f", Double(n) / 1000)
         }
     }
 
@@ -94,6 +97,10 @@ public enum FieldText {
             return negative ? -d : d
         case .position:
             return PositionInput.parse(t, current: Bbu(bar: 1, beat: 1, unit: 0)).map { $0.tick(meter: meter) }
+        case .bpm:
+            let b = t.lowercased().replacingOccurrences(of: "bpm", with: "").trimmingCharacters(in: .whitespaces)
+            guard let v = Double(b), v.isFinite, abs(v) <= 999 else { return nil }
+            return Int64((v * 1000).rounded())
         }
     }
 }
@@ -177,6 +184,7 @@ extension ModifyRow {
     static func lineUnit(_ t: LineTargetRow, _ op: LineOpRow) -> FieldKind {
         let add = op == .add
         if op == .scale { return .percent }
+        if t == .tempo { return .bpm }
         switch t {
         case .value(.velocity), .value(.releaseVelocity): return .velocity(add ? .delta : .exact)
         case .value(.duration): return .length

@@ -323,6 +323,7 @@ public enum ModifyKind: String, CaseIterable, Sendable {
     /// A line's undo label, as the core names it (Plan 4d Ruling 15).
     public static func lineTitle(_ t: LineTargetRow, _ op: LineOpRow) -> String {
         switch (op, t) {
+        case (.draw, .tempo): "Draw Tempo"
         case (.draw, .series(.automation)): "Draw Automation"
         case (.draw, .series(.program)): "Draw Program Changes"
         case (.draw, .series): "Draw Controllers"
@@ -330,6 +331,7 @@ public enum ModifyKind: String, CaseIterable, Sendable {
         case (.thicken, _): "Thicken"
         case (.compress, _): "Compress"
         case (.legato, _): "Legato"
+        case (_, .tempo): "Change Tempo"
         case (_, .value(.velocity)): "Change Velocity"
         case (_, .value(.releaseVelocity)): "Change Release Velocity"
         case (_, .value(.duration)): "Change Duration"
