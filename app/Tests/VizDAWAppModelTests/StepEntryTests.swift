@@ -75,6 +75,26 @@ import VizDAWCore
         }
     }
 
+    @Test func theEditorStateShowsStepEntryAndTheMarks() throws {
+        let (s, id, m, _) = try demo()
+        func state() -> EditorStateRow? {
+            if case .editor(_, let e)? = ControlStates.state(.editor, id, m) { return e }
+            return nil
+        }
+        #expect(state()?.step == nil)
+        #expect(state()?.marks.locators == Array(repeating: nil, count: 10))
+        _ = run("step.entry", m, s, id)
+        _ = run("step.thirty_second", m, s, id)
+        _ = run("step.rest", m, s, id)
+        #expect(
+            state()?.step
+                == StepEntryStateRow(seq: 3, lane: 30, tick: 15_360, value: "thirty_second", dotted: false,
+                                     triplet: false, steps: 0),
+            "the fake moves without history")
+        _ = run("transport.punch", m, s, id)
+        #expect(state()?.marks.punch == true)
+    }
+
     @Test func aRefusedStepShowsInTheStatusLine() throws {
         let (s, id, m, f) = try demo()
         _ = run("step.entry", m, s, id)

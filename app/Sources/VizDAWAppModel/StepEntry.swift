@@ -125,6 +125,18 @@ public final class StepEntryModel {
         return "Step Entry · \(lane) · \(v)"
     }
 
+    /// The value's snake_case name on the control channel.
+    public static func wireName(_ v: NoteValueRow) -> String {
+        switch v {
+        case .whole: "whole"
+        case .half: "half"
+        case .quarter: "quarter"
+        case .eighth: "eighth"
+        case .sixteenth: "sixteenth"
+        case .thirtySecond: "thirty_second"
+        }
+    }
+
     public static func title(_ v: NoteValueRow) -> String {
         switch v {
         case .whole: "1/1"

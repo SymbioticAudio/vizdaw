@@ -108,8 +108,8 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         w.makeFirstResponder(r)
         let cmdS = KeyStrokeRow(
             keyCode: 1, characters: "s", unmodified: "s",
-            modifiers: ModifiersRow(shift: false, control: false, option: false, command: true), command: "file.save")
-        let space = KeyStrokeRow(keyCode: 49, characters: " ", unmodified: " ", modifiers: none, command: nil)
+            modifiers: ModifiersRow(shift: false, control: false, option: false, command: true))
+        let space = KeyStrokeRow(keyCode: 49, characters: " ", unmodified: " ", modifiers: none)
         let events = ControlUI.keyEvents(w, [space, cmdS])
         #expect(events.map(\.type) == [NSEvent.EventType.keyDown, .keyUp, .keyDown, .keyUp])
         ControlUI.deliver(events, to: w)

@@ -341,6 +341,159 @@ fn drum_grid_paints_and_erases_by_element() {
     app.quit();
 }
 
+/// Polls `state.get editor` until `ok` holds; returns it.
+fn wait_for_editor(
+    app: &mut App,
+    window: &Value,
+    what: &str,
+    ok: impl Fn(&Value) -> bool,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let e = app.call("state.get", json!({"target": "editor", "window": window}));
+        if ok(&e) {
+            return e;
+        }
+        assert!(Instant::now() < deadline, "{what} within {WAIT_MS} ms: {e}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The transport's tick, read until it is `tick`.
+fn wait_for_tick(app: &mut App, window: &Value, tick: i64) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let t = app.call(
+            "state.get",
+            json!({"target": "transport", "window": window}),
+        );
+        if t["tick"].as_i64() == Some(tick) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tick {tick} within {WAIT_MS} ms: {t}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// README steps 99–104 through the channel (plan 4f): keys by the
+/// bindings drive step entry (T on, 4 an eighth, a typed chord, 0 a
+/// rest, Delete takes steps back), P focuses the Position field and a
+/// typed bar moves there, ⌥2 sets a locator and 2 jumps to it, a loaded
+/// bindings file moves that key to X, G toggles snap.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn keys_drive_step_entry_locators_and_bindings() {
+    use core_engine::fixtures::Builder;
+    const Q: i64 = 15_360;
+    let mut app = App::start();
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    b.sequence("Tune", "Keys", Some(synth)).unwrap();
+    let path = app.launched.home.join("Tune.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let window = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    let key = |app: &mut App, k: &str, mods: Value| {
+        app.call(
+            "ui.key",
+            json!({"window": window, "key": k, "modifiers": mods}),
+        );
+    };
+
+    // Step entry: T, then 4 for eighths.
+    key(&mut app, "t", json!([]));
+    wait_for_editor(&mut app, &window, "step entry on", |e| {
+        e["step"]["value"] == "quarter"
+    });
+    key(&mut app, "4", json!([]));
+    wait_for_editor(&mut app, &window, "eighths", |e| {
+        e["step"]["value"] == "eighth"
+    });
+    // A chord (MIDI input's stand-in), then a rest: the position moves on.
+    app.call(
+        "command.run",
+        json!({"id": "step.notes", "params": {"pitches": "C4 E4 G4"}, "window": window}),
+    );
+    wait_for_undo(&mut app, &window, "Step Entry");
+    let sel = app.call(
+        "state.get",
+        json!({"target": "selection", "window": window}),
+    );
+    assert_eq!(
+        sel["events"].as_array().unwrap().len(),
+        3,
+        "the chord is selected: {sel}"
+    );
+    wait_for_tick(&mut app, &window, Q / 2);
+    key(&mut app, "0", json!([]));
+    wait_for_editor(&mut app, &window, "a rest", |e| e["step"]["tick"] == Q);
+    // Delete takes the rest back, then the chord.
+    key(&mut app, "delete", json!([]));
+    wait_for_editor(&mut app, &window, "the rest back", |e| {
+        e["step"]["tick"] == Q / 2
+    });
+    key(&mut app, "delete", json!([]));
+    wait_for_undo(&mut app, &window, "Delete Last Step");
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "t", json!([]));
+    wait_for_editor(&mut app, &window, "step entry off", |e| e["step"].is_null());
+
+    // P gives the Position field the keyboard, a typed bar and Return
+    // move there; ⌥2 sets locator 2 there.
+    wait_for_label(&mut app, &window, "Position");
+    key(&mut app, "p", json!([]));
+    app.call("ui.key", json!({"window": window, "text": "3\n"}));
+    wait_for_tick(&mut app, &window, 8 * Q);
+    key(&mut app, "2", json!(["option"]));
+    wait_for_editor(&mut app, &window, "locator 2", |e| {
+        e["transport"]["locators"][2] == 8 * Q
+    });
+    key(&mut app, "return", json!([]));
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "2", json!([]));
+    wait_for_tick(&mut app, &window, 8 * Q);
+
+    // A bindings file moves Go to Locator 2 to X.
+    let keys = app.launched.home.join("mine.vizkeys");
+    std::fs::write(
+        &keys,
+        r#"{"vizdaw_keys": 1, "bindings": {"locator.go_2": ["X"]}}"#,
+    )
+    .unwrap();
+    app.call(
+        "command.run",
+        json!({"id": "keys.load", "params": {"path": keys}}),
+    );
+    key(&mut app, "return", json!([]));
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "2", json!([]));
+    let t = app.call(
+        "state.get",
+        json!({"target": "transport", "window": window}),
+    );
+    assert_eq!(t["tick"], 0, "2 no longer goes to the locator");
+    key(&mut app, "x", json!([]));
+    wait_for_tick(&mut app, &window, 8 * Q);
+    app.call("command.run", json!({"id": "keys.reset"}));
+
+    // G toggles snap; the division reads snake_case.
+    let e = wait_for_editor(&mut app, &window, "snap on", |e| {
+        e["snap"]["enabled"] == true
+    });
+    assert_eq!(e["snap"]["division"], "quarter");
+    key(&mut app, "g", json!([]));
+    wait_for_editor(&mut app, &window, "snap off", |e| {
+        e["snap"]["enabled"] == false
+    });
+    app.quit();
+}
+
 /// The ID of the tree's button labelled (or titled) exactly "Play".
 fn play_button(nodes: &Value) -> Option<Value> {
     nodes.as_array().into_iter().flatten().find_map(|n| {

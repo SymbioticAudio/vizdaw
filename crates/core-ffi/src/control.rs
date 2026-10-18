@@ -87,13 +87,9 @@ pub struct KeyStrokeRow {
     pub characters: String,
     /// `NSEvent.charactersIgnoringModifiers`.
     pub unmodified: String,
-    /// Held modifiers.
+    /// Held modifiers. (What the stroke runs is the app's: its key
+    /// bindings decide, plan 4f Ruling 5.)
     pub modifiers: ModifiersRow,
-    /// The menu command this stroke is the shortcut of: the app runs it
-    /// on the target window's document and gives the key to the window
-    /// only when the command is unavailable (as AppKit does with a
-    /// disabled menu item).
-    pub command: Option<String>,
 }
 
 /// A mouse button.
@@ -377,6 +373,44 @@ pub struct EditorStateRow {
     pub gesture: bool,
     /// The editors' status line.
     pub status: Option<String>,
+    /// Step entry while it is on (plan 4f).
+    pub step: Option<StepEntryStateRow>,
+    /// The transport's marks (plan 4f Ruling 7).
+    pub marks: TransportMarksRow,
+}
+
+/// Step entry as `state.get editor` shows it (plan 4f).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct StepEntryStateRow {
+    /// The sequence steps go into.
+    pub seq: u64,
+    /// The lane.
+    pub lane: u64,
+    /// Where the next step goes.
+    pub tick: i64,
+    /// The note value, snake_case (`quarter`, `thirty_second`).
+    pub value: String,
+    /// Dotted.
+    pub dotted: bool,
+    /// Triplet.
+    pub triplet: bool,
+    /// Steps Delete Last Step can take back.
+    pub steps: u32,
+}
+
+/// The transport's locators, punch range and record modes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct TransportMarksRow {
+    /// Locators 0–9 (None: not set).
+    pub locators: Vec<Option<i64>>,
+    /// Punch in.
+    pub punch_in: i64,
+    /// Punch out.
+    pub punch_out: i64,
+    /// Punch on.
+    pub punch: bool,
+    /// Overdub on.
+    pub overdub: bool,
 }
 
 /// Kinds of VizDAW window.
@@ -670,7 +704,6 @@ fn modifiers_row(m: Modifiers) -> ModifiersRow {
 
 fn stroke_row(k: KeyStroke) -> KeyStrokeRow {
     KeyStrokeRow {
-        command: registry::command_for_stroke(&k).map(str::to_string),
         key_code: k.key_code,
         characters: k.characters,
         unmodified: k.unmodified,
@@ -953,6 +986,14 @@ pub fn result_json(r: &ControlResult) -> Value {
             "tool": e.tool,
             "snap": { "enabled": e.snap_enabled, "division": e.snap_division },
             "exact_mode": e.exact_mode, "gesture": e.gesture, "status": e.status,
+            "step": e.step.as_ref().map(|s| json!({
+                "seq": s.seq, "lane": s.lane, "tick": s.tick, "value": s.value,
+                "dotted": s.dotted, "triplet": s.triplet, "steps": s.steps,
+            })),
+            "transport": {
+                "locators": e.marks.locators, "punch_in": e.marks.punch_in,
+                "punch_out": e.marks.punch_out, "punch": e.marks.punch, "overdub": e.marks.overdub,
+            },
         }),
         ControlResult::Selection { doc, selection: s } => json!({
             "doc": doc,

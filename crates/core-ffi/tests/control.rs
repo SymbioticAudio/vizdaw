@@ -322,3 +322,51 @@ fn an_empty_label_falls_back_to_the_title_in_the_id() {
         control_element_check("AXButton".into(), Some(String::new()), Some("Play".into()))
     );
 }
+
+#[test]
+fn the_editor_state_shows_step_entry_and_the_transport_marks() {
+    let editor = |step| vizdaw_ffi::EditorStateRow {
+        detail: None,
+        windows: vec![],
+        tool: "arrow".into(),
+        snap_enabled: true,
+        snap_division: "thirty_second".into(),
+        exact_mode: false,
+        gesture: false,
+        status: None,
+        step,
+        marks: vizdaw_ffi::TransportMarksRow {
+            locators: vec![None, Some(61_440)],
+            punch_in: 0,
+            punch_out: 245_760,
+            punch: true,
+            overdub: false,
+        },
+    };
+    let off = result_json(&ControlResult::Editor {
+        doc: "D".into(),
+        editor: editor(None),
+    });
+    assert_eq!(off["step"], Value::Null);
+    assert_eq!(off["snap"]["division"], "thirty_second");
+    assert_eq!(
+        off["transport"],
+        json!({"locators": [null, 61_440], "punch_in": 0, "punch_out": 245_760, "punch": true, "overdub": false})
+    );
+    let on = result_json(&ControlResult::Editor {
+        doc: "D".into(),
+        editor: editor(Some(vizdaw_ffi::StepEntryStateRow {
+            seq: 3,
+            lane: 31,
+            tick: 7_680,
+            value: "eighth".into(),
+            dotted: true,
+            triplet: false,
+            steps: 2,
+        })),
+    });
+    assert_eq!(
+        on["step"],
+        json!({"seq": 3, "lane": 31, "tick": 7_680, "value": "eighth", "dotted": true, "triplet": false, "steps": 2})
+    );
+}

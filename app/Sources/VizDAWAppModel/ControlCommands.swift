@@ -413,12 +413,26 @@ public enum ControlStates {
                     windows: e.layout.windows.map { TornRow(id: $0.id.uuidString, detail: detailRow($0.detail)) },
                     tool: e.tool.rawValue, snapEnabled: e.layout.snap.enabled,
                     snapDivision: e.layout.snap.division.rawValue, exactMode: e.exactMode,
-                    gesture: e.gesture != nil, status: e.status))
+                    gesture: e.gesture != nil, status: e.status, step: stepRow(m.stepEntry),
+                    marks: marksRow(e.layout.transport)))
         case .selection:
             return .selection(doc: doc, selection: m.editor.selection)
         case .windows:
             return nil
         }
+    }
+
+    /// Step entry for `state.get editor` (plan 4f).
+    static func stepRow(_ s: StepEntryModel) -> StepEntryStateRow? {
+        guard let st = s.state, let t = s.target else { return nil }
+        return StepEntryStateRow(
+            seq: t.seq, lane: t.lane, tick: st.tick, value: StepEntryModel.wireName(st.value), dotted: st.dotted,
+            triplet: st.triplet, steps: UInt32(st.history.count))
+    }
+
+    static func marksRow(_ t: TransportMarks) -> TransportMarksRow {
+        TransportMarksRow(
+            locators: t.locators, punchIn: t.punchIn, punchOut: t.punchOut, punch: t.punch, overdub: t.overdub)
     }
 
     /// What a wait reads of document `m` (its transport read fresh: a

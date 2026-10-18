@@ -88,8 +88,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
 
     /// `stepEntry` calls (plan 4f) and how they are answered: by
-    /// `stepAnswer`, else a step's quarter note forward for notes, rests,
-    /// ties and references (with a new snapshot for notes and references).
+    /// `stepAnswer`, else a quarter note forward for notes, rests, ties
+    /// and references (with a new snapshot for notes and references), a
+    /// value key sets the value.
     var stepCalls: [(seq: UInt64, lane: UInt64, state: StepStateRow, input: StepInputRow)] = []
     var stepEntryError: VizError?
     var stepAnswer: ((StepStateRow, StepInputRow) -> StepResultRow)?
@@ -105,6 +106,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         case .rest, .tie:
             s.tick += 15_360
             return StepResultRow(state: s, snapshot: nil, moved: true)
+        case .value(let v):
+            s.value = v
+            return StepResultRow(state: s, snapshot: nil, moved: false)
         default:
             return StepResultRow(state: s, snapshot: nil, moved: false)
         }

@@ -50,9 +50,9 @@ pub use control::{
     AlertRow, ControlArg, ControlCall, ControlErrorCode, ControlFailure, ControlRequest,
     ControlResult, ControlServer, ControlValue, CrashAnswerRow, DetailRow, DocFactsRow,
     EditorStateRow, ElementRefRow, KeyStrokeRow, ModifiersRow, MouseButtonRow, PointerRow,
-    RecoveryAnswersRow, StateTargetRow, TornRow, UiNodeRow, WaitConditionRow, WaitFactsRow,
-    WindowKindRow, WindowRefRow, WindowRow, control_command_ids, control_element_check,
-    control_host_busy, control_wait_met,
+    RecoveryAnswersRow, StateTargetRow, StepEntryStateRow, TornRow, TransportMarksRow, UiNodeRow,
+    WaitConditionRow, WaitFactsRow, WindowKindRow, WindowRefRow, WindowRow, control_command_ids,
+    control_element_check, control_host_busy, control_wait_met,
 };
 pub use drum::{
     DrumBandKindRow, DrumBandRow, DrumCellRow, DrumEdit, DrumGridLayoutRow, DrumGridSettingsRow,
