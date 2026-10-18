@@ -7,6 +7,7 @@
 //! | `vizdaw.test.ducker` | main × (1 − min(1, peak(sidechain))) per block; sidechain on input port 1 |
 //! | `vizdaw.test.synth4` | instrument with 4 stereo outputs: notes on MIDI channel k sound on output k |
 //! | `vizdaw.test.nan` | writes NaN into every block |
+//! | `vizdaw.test.bank` | passes audio through; 24 automatable parameters (ids 100–123) that only store their values |
 //! | `vizdaw.test.crasher` | crashes (SIGSEGV) when activated |
 //! | `vizdaw.test.hanger` | never returns from activate |
 //!
@@ -37,17 +38,20 @@ pub enum Kind {
     Crasher,
     /// Hangs on activate.
     Hanger,
+    /// Pass-through with [`BANK_PARAMS`] automatable parameters.
+    Bank,
 }
 
 impl Kind {
     /// Every kind, in factory order.
-    pub const ALL: [Kind; 6] = [
+    pub const ALL: [Kind; 7] = [
         Kind::Gain,
         Kind::Ducker,
         Kind::Synth4,
         Kind::Nan,
         Kind::Crasher,
         Kind::Hanger,
+        Kind::Bank,
     ];
 
     /// The CLAP plugin id.
@@ -59,6 +63,7 @@ impl Kind {
             Kind::Nan => "vizdaw.test.nan",
             Kind::Crasher => "vizdaw.test.crasher",
             Kind::Hanger => "vizdaw.test.hanger",
+            Kind::Bank => "vizdaw.test.bank",
         }
     }
 
@@ -70,6 +75,7 @@ impl Kind {
             Kind::Nan => "Test NaN",
             Kind::Crasher => "Test Crasher",
             Kind::Hanger => "Test Hanger",
+            Kind::Bank => "Test Bank",
         }
     }
 
@@ -92,6 +98,10 @@ pub const PARAM_LATENCY: u32 = 1;
 /// "Wiggle": setting it to `v` makes the plugin perform a gesture that sets
 /// Gain to `v`, as if a user dragged its knob.
 pub const PARAM_WIGGLE: u32 = 2;
+/// The bank plugin's first parameter id (0 … 1, default 0).
+pub const PARAM_BANK_FIRST: u32 = 100;
+/// How many parameters the bank plugin has (ids `PARAM_BANK_FIRST..+24`).
+pub const BANK_PARAMS: u32 = 24;
 
 /// The entry: one factory exposing every [`Kind`].
 pub struct TestEntry {
@@ -113,7 +123,7 @@ impl Entry for TestEntry {
 }
 
 struct TestFactory {
-    descriptors: [PluginDescriptor; 6],
+    descriptors: [PluginDescriptor; 7],
 }
 
 impl PluginFactoryImpl for TestFactory {

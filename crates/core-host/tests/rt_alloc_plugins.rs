@@ -1,6 +1,7 @@
 //! Zero allocations on the callback and worker threads with real CLAP
 //! plugins in the graph: inserts, a multi-output instrument, a sidechain,
-//! parameter changes in, gestures out and a fault bypass.
+//! parameter changes in, gestures out, a fault bypass, and more ramping
+//! automation on one plugin than its queue holds (the collapse branch).
 
 mod common;
 
@@ -11,12 +12,14 @@ use core_engine::fixtures::{Builder, Q, demo_document};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::rt_check::{self, CountingAlloc};
 use core_host::PluginHost;
+use core_host::adapt::automation_collapses;
 use core_model::automation::AutomationTarget;
 use core_model::command::MixerCmd;
 use core_model::event::{EventBody, EventSpec};
 use core_model::mixer::{AuxSend, ParamId, PluginFormat, StripKind};
 use core_model::time::Tick;
 use std::time::Duration;
+use test_plugins::{BANK_PARAMS, PARAM_BANK_FIRST};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -28,6 +31,7 @@ fn plugins_render_without_allocating() {
     let mut b = Builder::from_doc(doc);
     let builtin = b.strip_of(StripKind::BuiltinSynth).unwrap();
     let gain = b.insert(builtin, plugin("vizdaw.test.gain")).unwrap();
+    let bank = b.insert(builtin, plugin("vizdaw.test.bank")).unwrap();
     let (d, _) = b
         .plugin_dest("Synth4", plugin("vizdaw.test.synth4"))
         .unwrap();
@@ -83,6 +87,27 @@ fn plugins_render_without_allocating() {
         ));
     }
     b.events(song, auto, points).unwrap();
+    // 24 ramping lanes on one plugin (plan 4d follow-up): a long run sends
+    // each parameter about 17 values, 400 in all, more than the adapter's
+    // 256-entry queue, so it collapses to the latest value per parameter.
+    for k in 0..BANK_PARAMS {
+        let lane = b.lane(song, &format!("Bank {k}"), None).unwrap();
+        let ramp = (0..256i64)
+            .map(|j| {
+                EventSpec::new(
+                    Tick(j * Q / 2 + i64::from(k) * 7),
+                    EventBody::Automation {
+                        target: AutomationTarget::PluginParam(
+                            bank,
+                            ParamId(u64::from(PARAM_BANK_FIRST + k)),
+                        ),
+                        value: (j % 2) as f64,
+                    },
+                )
+            })
+            .collect();
+        b.events(song, lane, ramp).unwrap();
+    }
     let doc = b.finish();
 
     let mut host = PluginHost::new(48_000.0, 4096).unwrap();
@@ -91,7 +116,7 @@ fn plugins_render_without_allocating() {
         "vizdaw.test.gain",
         test_plugins::bundle(),
     );
-    for id in ["synth4", "ducker", "nan"] {
+    for id in ["synth4", "ducker", "nan", "bank"] {
         host.register_path(
             PluginFormat::Clap,
             &format!("vizdaw.test.{id}"),
@@ -99,11 +124,11 @@ fn plugins_render_without_allocating() {
         );
     }
     host.sync(&doc);
-    // Generous for a loaded machine; returns as soon as all four are in.
+    // Generous for a loaded machine; returns as soon as all five are in.
     let r = host.wait_ready(Duration::from_secs(60));
     assert_eq!(
         r.loaded.len(),
-        4,
+        5,
         "failed: {:?}; still loading: {:?}",
         r.failed,
         host.loading()
@@ -125,6 +150,7 @@ fn plugins_render_without_allocating() {
         be.block(256);
     }
     rt_check::set_arm_workers(true);
+    let collapses = automation_collapses();
     let before = rt_check::count();
     for i in 0..2000u32 {
         if i % 50 == 0 {
@@ -145,6 +171,10 @@ fn plugins_render_without_allocating() {
     rt_check::set_arm_workers(false);
     assert_eq!(allocs, 0, "allocations while plugins rendered");
     assert!(engine.counters().runs > 2_000, "automation split blocks");
+    assert!(
+        automation_collapses() > collapses,
+        "the bank's queue never filled: the collapse branch did not run"
+    );
     assert!(engine.worker_steps() > 0, "workers rendered nodes");
     assert_eq!(
         engine.plugin_faults().len(),

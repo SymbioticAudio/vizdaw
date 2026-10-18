@@ -462,8 +462,13 @@ fn a_stop_during_the_rebuild_drain_is_not_lost() {
     ms(100);
     s.stop().unwrap();
     assert!(poll.join().unwrap().is_ok());
-    ms(60);
-    assert!(!t(&s).playing, "the Stop was lost to the rebuild");
+    // The engine applies Stop a block late: wait for it (generously, slow
+    // CI) instead of a fixed sleep; a lost Stop keeps playing and fails.
+    assert!(
+        wait_for(&s, |t| !t.playing),
+        "the Stop was lost to the rebuild"
+    );
+    assert!(!t(&s).playing, "the rebuild did not start playing again");
 }
 
 #[test]

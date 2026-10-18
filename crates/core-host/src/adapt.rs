@@ -16,7 +16,18 @@ use core_engine::graph::{EffectNode, ProcessStatus};
 use core_model::automation::param_plain;
 use core_model::ids::PluginInstanceId;
 use core_model::mixer::ParamId;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+
+/// How often a full automation queue collapsed to the latest value per
+/// parameter (diagnostics; the `rt_alloc_plugins` test checks the branch
+/// ran). A relaxed counter: allocation- and lock-free.
+static COLLAPSES: AtomicU64 = AtomicU64::new(0);
+
+/// How often a full automation queue collapsed since the process started.
+pub fn automation_collapses() -> u64 {
+    COLLAPSES.load(Ordering::Relaxed)
+}
 
 /// A parameter's range, for automation (Plan 4d Ruling 12).
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +142,7 @@ impl Core {
         };
         let value = param_plain(normalized, r.min, r.max, r.stepped);
         if self.auto_len >= MAX_PARAM_EVENTS {
+            COLLAPSES.fetch_add(1, Ordering::Relaxed);
             self.collapse();
         }
         let Some(slot) = self.auto.get_mut(self.auto_len) else {
