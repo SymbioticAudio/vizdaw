@@ -31,7 +31,9 @@ pub const COMMAND_NAMES: [&str; 13] = [
 
 /// The deepest `ui.tree` (and the default).
 pub const MAX_TREE_DEPTH: u32 = 64;
-/// The most intermediate points of a drag.
+/// The most intermediate points of a drag. The app remembers the events
+/// it posts (`ControlUI.postedLimit`, with `ControlUI.maxGestureEvents`
+/// = this + 2): raise those with this, or the drag's first press is lost.
 pub const MAX_DRAG_STEPS: u32 = 200;
 /// Intermediate points of a drag when `steps` is absent.
 pub const DEFAULT_DRAG_STEPS: u32 = 16;

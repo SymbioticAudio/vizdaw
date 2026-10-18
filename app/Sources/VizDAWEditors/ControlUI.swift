@@ -147,6 +147,12 @@ public enum ControlUI {
     /// canvas of a background VizDAW was spent on activating the window).
     private static var posted: [TimeInterval] = []
     static let postedLimit = 256
+    /// The most mouse events one channel gesture posts: a drag's
+    /// intermediate points (`core_control::request::MAX_DRAG_STEPS`) plus
+    /// its down and up; a click posts at most 3 × 2. `postedLimit` must
+    /// hold a whole gesture, or a gesture's first down is forgotten before
+    /// AppKit dispatches it and is spent on activating the window (tested).
+    static let maxGestureEvents = 200 + 2
 
     /// Notes `events` as the channel's (`post` does; tests call it).
     static func remember(_ events: [NSEvent]) {
@@ -194,7 +200,9 @@ public enum ControlUI {
         _ window: NSWindow, from: CGPoint, to: CGPoint, steps: Int, modifiers: ModifiersRow
     ) -> [NSEvent] {
         let f = flags(modifiers)
-        let n = max(1, steps)
+        // Within what `remember` keeps: a larger cap gives coarser drags,
+        // never a forgotten first press.
+        let n = min(max(1, steps), postedLimit - 2)
         var out = [mouse(.leftMouseDown, window, from, f, clicks: 1)]
         for k in 1...n {
             let t = CGFloat(k) / CGFloat(n)

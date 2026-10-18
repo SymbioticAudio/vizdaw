@@ -157,6 +157,28 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         #expect(!ControlUI.isChannel(dispatched))
     }
 
+    @Test func theLargestChannelGestureFitsWhatIsRemembered() throws {
+        let (w, _, _) = window()
+        #expect(ControlUI.postedLimit >= ControlUI.maxGestureEvents)
+        #expect(ControlUI.maxGestureEvents >= 3 * 2, "a triple click")
+        let drag = ControlUI.dragEvents(
+            w, from: CGPoint(x: 5, y: 5), to: CGPoint(x: 50, y: 50), steps: 200, modifiers: none)
+        #expect(drag.count == ControlUI.maxGestureEvents)
+        ControlUI.remember(drag)
+        // The press as AppKit dispatches it after `postEvent` (renumbered).
+        let down = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: NSPoint(x: 5, y: 5), modifierFlags: [],
+                timestamp: drag[0].timestamp, windowNumber: w.windowNumber, context: nil, eventNumber: 3,
+                clickCount: 1, pressure: 1))
+        #expect(ControlUI.isChannel(down))
+        // A larger request degrades to a coarser drag that still fits.
+        let huge = ControlUI.dragEvents(
+            w, from: CGPoint(x: 5, y: 5), to: CGPoint(x: 50, y: 50), steps: 100_000, modifiers: none)
+        #expect(huge.count == ControlUI.postedLimit)
+        #expect(huge.first?.type == .leftMouseDown && huge.last?.type == .leftMouseUp)
+    }
+
     @Test func aClickPointNeedsAVisibleFiniteElement() throws {
         let (w, _, _) = window()
         #expect(ControlUI.point(.point(x: .nan, y: 3), in: w) == nil)
