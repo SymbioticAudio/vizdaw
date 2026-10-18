@@ -727,3 +727,91 @@ Run these from a shell in the repository, with `V=target/debug/vizctl`.
 86. Hostile input and quitting: `printf 'garbage\n' | nc -U
     $VIZDAW_CONTROL` answers `parse_error`; `$V call nope` answers
     `unknown_command`; `$V quit`: VizDAW quits and the socket file is gone.
+
+### Drum grid (plan 4e)
+
+Use the demo project. To reach Beat, double-click Song's first Groove
+block, then Groove's Beat block; its lane "Drums" is a drum lane with
+rows Kick, Snare and Closed Hat. Groove's own Drums lane is a plain lane
+that references Beat, not a drum lane. Snap stays on (quarters) unless a
+step says otherwise.
+
+87. Open: click Beat's block and press Cmd-4. The detail pane shows
+    "Drum Grid" with a bar (Paint/Erase, Step Matrix, 1/16, 1/16, 1/32,
+    Vel 100, +, "Drums: Off") and row headers Kick C2, Snare D2 and
+    Closed Hat F#2 under a "Drums" header. Kick lights the cells at beats
+    1 and 3, Snare at 2 and 4, Closed Hat every eighth, brighter on the
+    beats (louder hits). The ruler, zoom (Cmd-scroll) and playhead work
+    as in the other editors. At the default document window width
+    (980 pt) the bar fits on its one line: every control is visible and
+    none is clipped at either edge (check by eye; channel screenshots
+    cannot show the SwiftUI bar yet).
+88. Paint: click an empty Kick cell: it lights; Edit > Undo "Paint Drum
+    Hits" takes it back. Click a lit cell: it goes dark ("Erase Drum
+    Hits"). Drag along the Snare row: every cell the drag passes lights
+    while dragging, and the whole run is one undo step; dragging back
+    towards the start shrinks the run; Escape during the drag leaves
+    nothing. A drag that wanders into other rows stays on its own row.
+89. Settings: Spacing 1/8 makes a drag light every second cell; Length
+    1/16 makes new hits longer; Step 1/8 halves the number of cells, and a
+    cell lights when any hit starts in it. Timeline shows the hits at
+    their true starts and lengths: a click on a hit erases it, a click
+    elsewhere paints one at the grid line before the pointer (G toggles
+    snap; with snap off, exactly where you click).
+90. Erase tool: choose Erase; a drag erases every hit it crosses; a click
+    on an empty cell does nothing and adds no undo step.
+91. Velocity lane: right-click Snare's header > Show Velocity: the row
+    grows a lane with a bar per hit. Painting in that row sets each new
+    hit's velocity from the pointer's height (top 127, bottom 1); a run
+    dragged up and down gives each hit the velocity where the pointer
+    passed it, and the bars and the cells' brightness show it. Vel in the
+    bar sets new hits in rows whose velocity lane is hidden.
+92. Rows: + adds "Open Hat" (A#2) and selects it. Double-click a row name
+    to rename it. Drag a row header up or down to reorder; onto another
+    drum lane to move it there; below the last lane ("Drop a row here to
+    give it a lane of its own") to give it a new lane named after it,
+    its notes going along. Escape during a row-header drag cancels it:
+    nothing moves and no undo step is added. The header menu's Split Row
+    to Own Lane does the same as the last drop; Remove Row deletes the
+    row and its notes. Each is one undo step, and the arrangement shows
+    the new lane.
+93. Drum lanes: in Song, right-click the Chords lane header > Drum Lane:
+    Chords becomes a drum lane with a row per pitch, and Cmd-4 on Song
+    shows it; Drum Lane again makes it a normal lane (its notes stay).
+    Drum > Drum Lane does the same for the selected lane (click its
+    block first). A sequence without drum lanes shows "No Drum Lanes".
+94. Play quantize and nudge: play Beat (Space) and choose "Drums: Off" >
+    1/8 Swing 66%: the hats' offbeats play late (a shuffle) while the
+    list editor still shows them on the grid. Nudge Later a few times:
+    the drums play slightly behind Groove's bass (play Groove); the menu
+    reads "Nudge: +360 ticks". Off and Nudge Earlier undo it; both are
+    saved with the project.
+95. Clean starts: play Song from the middle of a beat (click in the
+    ruler): the first drum hits heard are the ones after the position,
+    never the rest of a hit that began earlier. Play Beat, then mute and
+    unmute Beat's Drums lane while it plays (unmute mid-bar): the drums
+    come back at their next hit; the same with solo. (Groove's Drums lane
+    is a plain lane referencing Beat, not a drum lane, so test the mute
+    on Beat itself.)
+96. Windows and the Drum menu: Option-Cmd-4 opens the grid in its own
+    window; Drum > Add Drum Row, Show Velocity, Split Row to Own Lane and
+    Remove Drum Row act on the grid you last clicked in (its selected
+    row), Drum > Timeline View switches every grid. Save, close and
+    reopen: the bar's settings and the window come back.
+97. VoiceOver (Cmd-F5): the grid is a group "Drum Grid" whose cells read
+    "Kick, bar 1 beat 1, on, velocity 96" or "Snare, bar 1 beat 1 tick
+    3840, off"; the headers are a group "Drum Rows" reading "Kick, C2,
+    Drums, Built-in Drums". Every row header shows its destination; one
+    inherited from the lane is dimmed, one set on the row itself is
+    drawn at full strength. The "Drums" header band reads "Drums ·
+    Built-in Drums"; a row with a destination of its own shows it after
+    its name.
+98. Channel: with `vizctl` (steps 81–86) and VizDAW in the background,
+    `$V run editors.drum_grid_window` on Beat (selected in the sidebar),
+    then `$V find "Snare, bar 1 beat 1 tick 3840, off"` gives a cell ID;
+    `$V click <ID>` paints it (`$V state document` shows undo "Paint Drum
+    Hits") without VizDAW coming to the front. `$V run drum.add_row` adds
+    and selects a row, `$V run drum.remove_row` removes it again, and
+    `$V run drum.timeline '{"on": true}'` switches the view; in a fresh
+    launch, `$V run drum.split_row` before any row was clicked answers
+    `unavailable`.
