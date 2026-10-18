@@ -91,6 +91,45 @@ final class FakeControlHost: ControlHost {
         #expect(failure(run("editors.insert_event", s, id))?.code == .unavailable)
     }
 
+    @Test func undoAndRedoOnABusyCoreAreBusyErrors() throws {
+        let (s, id, m, f) = try demo()
+        var snap = m.snapshot
+        snap.undoLabel = "Edit"
+        snap.redoLabel = "Edit"
+        m.apply(snap)
+        f.stepError = .Busy(message: "plugin host is busy")
+        #expect(failure(run("edit.undo", s, id))?.code == .busy)
+        #expect(failure(run("edit.redo", s, id))?.code == .busy)
+        f.stepError = nil
+        guard case .done = run("edit.undo", s, id) else {
+            Issue.record("undo failed")
+            return
+        }
+        #expect(f.undoCalls == 1)
+    }
+
+    @Test func aMissingAutosaveAnswerFailsBeforeAnythingOpens() {
+        var opened = 0
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() })
+        s.recovery = Recovery(
+            check: { _ in RecoveryInfo(crashed: true, loading: [], autosave: "/p/auto.vizdaw") },
+            openWith: { _, _ in
+                opened += 1
+                return demoFake()
+            },
+            disable: { _ in true }, shiftHeld: { false }, questions: FakeQuestions())
+        let normal = RecoveryAnswersRow(plugins: .normal, restoreAutosave: nil)
+        let e = failure(ControlOpen.open(path: "/p/Song.vizdaw", answers: normal, store: s))
+        #expect(e?.code == .dialogRequired && e?.dialog == "Restore Autosave")
+        #expect(opened == 0 && s.documents.isEmpty, "nothing was opened")
+        let yes = RecoveryAnswersRow(plugins: .normal, restoreAutosave: true)
+        guard case .opened = ControlOpen.open(path: "/p/Song.vizdaw", answers: yes, store: s) else {
+            Issue.record("not opened")
+            return
+        }
+        #expect(opened == 1)
+    }
+
     @Test func aTemplateCommandWithNoTemplatesIsUnavailableNotInvalid() throws {
         let (s, id, m, _) = try demo()
         #expect(m.editor.modifyTemplates().isEmpty, "the menu item would be disabled")

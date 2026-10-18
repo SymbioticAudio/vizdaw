@@ -135,7 +135,14 @@ public enum ControlCommands {
                 return unavailable(undo ? "Nothing to undo." : "Nothing to redo.")
             }
             guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
-            undo ? m.undo() : m.redo()
+            // The session directly (not `m.undo()`, which swallows Busy): a busy
+            // core is the call's `busy` error.
+            do {
+                m.apply(try undo ? m.session.undo() : m.session.redo())
+            } catch {
+                return .failed(.thrown(error, undo ? "Undo Failed" : "Redo Failed"))
+            }
+            m.editor.refreshSelection()
         case "window.mixer":
             host.showMixer(docID)
         case _ where detail[id] != nil:
@@ -253,6 +260,13 @@ public enum ControlOpen {
     public static func open(
         path: String, answers: RecoveryAnswersRow, store: DocumentStore, command: String? = nil
     ) -> ControlOutcome {
+        // The autosave question is settled before anything opens: opening to
+        // find out would load plugins and consume the crash marker.
+        if let r = store.recovery, answers.restoreAutosave == nil, let info = try? r.check(path),
+            info.autosave != nil, !((info.crashed || r.shiftHeld()) && answers.plugins == nil)
+        {
+            return .failed(.dialog("Restore Autosave", "restore_autosave"))
+        }
         let asked = ControlAnswers(answers)
         let saved = store.recovery?.questions
         store.recovery?.questions = asked
