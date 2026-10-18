@@ -43,9 +43,12 @@ final class CanvasElement: NSAccessibilityElement {
     // Written and read on the main thread only; nonisolated so AppKit's
     // nonisolated accessibility entry point can read it.
     nonisolated(unsafe) private var press: (@MainActor () -> Void)?
+    /// The view whose coordinates item frames are given in.
+    private weak var host: NSView?
 
     init(_ item: CanvasAccessibilityItem, parent: NSView, frame: CGRect) {
         super.init()
+        host = parent
         setAccessibilityRole(.button)
         setAccessibilityParent(parent)
         update(item, frame: frame)
@@ -54,8 +57,17 @@ final class CanvasElement: NSAccessibilityElement {
     func update(_ item: CanvasAccessibilityItem, frame: CGRect) {
         press = item.press
         setAccessibilityLabel(item.label)
-        setAccessibilityFrameInParentSpace(frame)
+        setAccessibilityFrameInParentSpace(Self.parentSpace(frame, in: host))
         setAccessibilitySelected(item.selected)
+    }
+
+    /// `frame` (in the parent's own coordinates) in the bottom-left space
+    /// `NSAccessibilityElement` reads whatever the parent's `isFlipped`.
+    /// The canvases are flipped: without this, VoiceOver's outline and the
+    /// control channel's element frames were mirrored top to bottom.
+    static func parentSpace(_ frame: CGRect, in parent: NSView?) -> CGRect {
+        guard let p = parent, p.isFlipped else { return frame }
+        return CGRect(x: frame.minX, y: p.bounds.height - frame.maxY, width: frame.width, height: frame.height)
     }
 
     // AppKit declares this nonisolated; VoiceOver calls it on the main thread.
@@ -150,6 +162,12 @@ open class EditorCanvas: NSView {
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
 
+    /// A click the control channel sends is never a window-activating
+    /// first click (VizDAW may not be the active app; control spec §5.5).
+    open override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        ControlUI.firstMouse || super.acceptsFirstMouse(for: event)
+    }
+
     private func setUp() {
         wantsLayer = true
         layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
@@ -203,6 +221,8 @@ open class EditorCanvas: NSView {
         ruler.frame = NSRect(x: 0, y: 0, width: bounds.width, height: Self.rulerHeight)
         verticalOffset = clampVertical(verticalOffset)
         movePlayhead(now: Self.hostNow())
+        // Element frames depend on the height (see `CanvasElement.parentSpace`).
+        accessibilityStale = true
     }
 
     func clampVertical(_ y: CGFloat) -> CGFloat {

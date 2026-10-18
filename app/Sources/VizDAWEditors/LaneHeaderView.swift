@@ -27,6 +27,12 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
 
     public override var isFlipped: Bool { true }
 
+    /// A click the control channel sends is never a window-activating
+    /// first click (VizDAW may not be the active app; control spec §5.5).
+    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        ControlUI.firstMouse || super.acceptsFirstMouse(for: event)
+    }
+
     var laneHeight: CGFloat { CGFloat(editor.layout.laneHeight) }
 
     private func observe() {

@@ -34,6 +34,12 @@ public final class ExpressionPaneView: NSView, TimeAxisFollower {
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
 
+    /// A click the control channel sends is never a window-activating
+    /// first click (VizDAW may not be the active app; control spec §5.5).
+    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        ControlUI.firstMouse || super.acceptsFirstMouse(for: event)
+    }
+
     private func observe() {
         withObservationTracking {
             _ = editor.drawVersion
