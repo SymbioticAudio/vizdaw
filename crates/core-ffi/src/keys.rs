@@ -194,3 +194,10 @@ impl Keymap {
         })
     }
 }
+
+/// The key code of a key's name (`a`, `F5`, `Space`; the names chords
+/// use, any case), for matching a keyboard slot to a key press.
+#[uniffi::export]
+pub fn key_code_for(name: String) -> Option<u16> {
+    Chord::of_slot(&name, 0).map(|c| c.code)
+}

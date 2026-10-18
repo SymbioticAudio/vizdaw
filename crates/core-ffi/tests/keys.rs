@@ -249,3 +249,16 @@ fn bindings_change_save_load_and_reset() {
         .unwrap();
     assert_eq!(skipped, vec!["no command \"no.such\"".to_string()]);
 }
+
+#[test]
+fn a_slots_key_name_gives_its_key_code() {
+    assert_eq!(vizdaw_ffi::key_code_for("a".into()), Some(0));
+    assert_eq!(vizdaw_ffi::key_code_for("F5".into()), Some(96));
+    assert_eq!(vizdaw_ffi::key_code_for("space".into()), Some(49));
+    assert_eq!(
+        vizdaw_ffi::key_code_for("⌘A".into()),
+        None,
+        "a slot's modifiers are apart"
+    );
+    assert_eq!(vizdaw_ffi::key_code_for("nope".into()), None);
+}
