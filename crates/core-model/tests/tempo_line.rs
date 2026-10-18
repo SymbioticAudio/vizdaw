@@ -491,3 +491,60 @@ fn a_zero_length_line_inside_a_ramp_keeps_the_tempo_around_it() {
         "the drawn point is one tick on"
     );
 }
+
+#[test]
+fn a_tempo_line_keeps_the_selection_it_was_drawn_with() {
+    // The Strip Chart runs a tempo line as a select-and-modify over the
+    // line's time range: the selection afterwards is what it was, not every
+    // event under the line (final review Minor 2).
+    use core_model::command::EventCmd;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::ids::EventId;
+    use core_model::rule::Rule;
+    let d = seq_doc(TempoMap::default());
+    let notes: Vec<EventSpec> = (0..4)
+        .map(|k| EventSpec::new(Tick(k * Q), EventBody::note(60, 0xFFFF, Tick(Q))))
+        .collect();
+    let d = apply(
+        &d,
+        &Command::Event(EventCmd::Insert {
+            seq: S,
+            lane: LaneId(0),
+            events: notes,
+        }),
+    )
+    .unwrap()
+    .doc;
+    let ids: Vec<EventId> = d.sequence(S).unwrap().lanes[0]
+        .takes
+        .iter()
+        .flat_map(|t| t.events.iter().map(|(k, _)| k.1))
+        .collect();
+    assert_eq!(ids.len(), 4);
+    let mut h = History::new(d);
+    h.set_selection(Selection {
+        time_range: None,
+        lanes: [(S, LaneId(0))].into_iter().collect(),
+        events: [ids[1]].into_iter().collect(),
+    });
+    h.execute(
+        &Command::SelectAndModify {
+            rule: Some(Rule::TimeRange {
+                start: Tick(0),
+                end: Tick(8 * Q),
+            }),
+            mode: SelectMode::Select,
+            modify: Some(Modify::Line(LineChange {
+                target: LineTarget::Tempo,
+                op: LineOp::Draw,
+                line: tempo_line(0, 8 * Q, 100_000, 140_000, LineShape::Straight),
+            })),
+            to_copy: false,
+        },
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    assert_eq!(points(&h).last(), Some(&(8 * Q, 140_000, false)));
+    let sel: Vec<EventId> = h.selection().events.iter().copied().collect();
+    assert_eq!(sel, vec![ids[1]], "the notes under the line were selected");
+}

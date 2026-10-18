@@ -671,3 +671,47 @@ fn thin_and_thicken_work_on_program_changes() {
     run(&mut h, &[L0], &[], false, change(LineOp::Thin, 2 * Q)).unwrap();
     assert_eq!(programs(&h), vec![(0, 0), (2 * Q, 50), (4 * Q, 100)]);
 }
+
+#[test]
+fn thickened_program_changes_carry_the_bank() {
+    // Thickening clones the event before each gap, so the new program
+    // changes keep its bank select (parked T4 test gap).
+    let (d, _) = doc();
+    let banked = |t: i64, program: u8, bank| {
+        EventSpec::new(
+            Tick(t),
+            EventBody::Program {
+                program,
+                bank: Some(bank),
+            },
+        )
+    };
+    let d = with_events(&d, vec![banked(0, 0, (1, 2)), banked(4 * Q, 100, (3, 4))]);
+    let mut h = History::new(d);
+    let thick = LineChange {
+        target: LineTarget::Series(Series::Program),
+        op: LineOp::Thicken,
+        line: Line {
+            step: Tick(Q),
+            ..line(0, 4 * Q, 0, 0)
+        },
+    };
+    run(&mut h, &[L0], &[], false, thick).unwrap();
+    let got: Vec<(i64, u8, Option<(u8, u8)>)> = series(&h, L0, Series::Program)
+        .into_iter()
+        .map(|(t, b)| match b {
+            EventBody::Program { program, bank } => (t, program, bank),
+            b => panic!("{b:?}"),
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (0, 0, Some((1, 2))),
+            (Q, 25, Some((1, 2))),
+            (2 * Q, 50, Some((1, 2))),
+            (3 * Q, 75, Some((1, 2))),
+            (4 * Q, 100, Some((3, 4))),
+        ]
+    );
+}

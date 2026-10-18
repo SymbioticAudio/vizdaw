@@ -69,6 +69,12 @@ pub(crate) fn apply(
             targets = copies;
         }
         targets = match m {
+            // A tempo line changes no event: the selection stays what it
+            // was, not every event under the line (final review Minor 2).
+            Modify::Line(c) if c.target == crate::strip::LineTarget::Tempo => {
+                crate::strip::apply_line(d, &base.lanes, &targets, c, r)?;
+                base.events.iter().copied().collect()
+            }
             // A line draws into the selection's lanes (Plan 4d Ruling 16).
             Modify::Line(c) => crate::strip::apply_line(d, &base.lanes, &targets, c, r)?,
             _ => apply_modify(d, &targets, m, r)?,
