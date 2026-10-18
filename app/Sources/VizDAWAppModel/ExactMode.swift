@@ -111,7 +111,7 @@ public enum ExactMode {
         c.modify.op = .line(target: target, op: op, line: line)
         c.modify.toCopy = false
         return ModifyRequest(
-            task: .change, config: c, events: nil, lanes: lanes, range: TickRange(start: line.from, end: line.to + 1))
+            task: .change, config: c, events: nil, lanes: lanes, range: TickRange(start: line.from, end: AutomationLaw.after(line.to)))
     }
 
     /// A rubber band as Select by Rule: notes starting in its range and

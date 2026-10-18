@@ -18,14 +18,14 @@ private func automationEvent(_ id: UInt64, _ target: AutomationTargetRow, _ valu
         let c = listContext()
         #expect(row.kind == .automation)
         #expect(ListText.cell(row, .kind, c) == "Automation")
-        #expect(ListText.cell(row, .data1, c) == "Send 2 · strip 3")
+        #expect(ListText.cell(row, .data1, c) == "Send 2 · Strip 3")
         #expect(ListText.cell(row, .data2, c) == "25.0%")
         #expect(ListText.editable(row, .data2) && !ListText.editable(row, .data1))
-        #expect(ListText.summary(row, c) == "Automation, bar 1 beat 1, Send 2 · strip 3, 25.0%")
+        #expect(ListText.summary(row, c) == "Automation, bar 1 beat 1, Send 2 · Strip 3, 25.0%")
         #expect(!ListKind.automation.isMidi)
         #expect(ListKind(.automation) == .automation && ListKind.automation.eventKind == .automation)
-        #expect(AutomationText.short(.pluginParam(slot: 2, param: 7)) == "Parameter 7 · plugin 2")
-        #expect(AutomationText.short(.velocityScale(dest: 5)) == "Velocity Scale · destination 5")
+        #expect(AutomationText.short(.pluginParam(slot: 2, param: 7)) == "Parameter 7 · Plugin 2")
+        #expect(AutomationText.short(.velocityScale(dest: 5)) == "Velocity Scale · Destination 5")
     }
 
     @Test func typingAPercentReplacesTheValue() throws {

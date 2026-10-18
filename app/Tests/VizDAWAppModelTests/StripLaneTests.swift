@@ -45,6 +45,60 @@ func automationRow(_ id: UInt64, tick: Int64, _ target: AutomationTargetRow, _ v
         #expect(AutomationLaw.text(.velocityScale(dest: 1), 0.75) == "175%")
     }
 
+    @Test func lawEdgesAndTexts() {
+        // Parked T10 gaps: above 12 dB, at and near the floor, NaN, the
+        // 0.5 switch threshold, send and stepped text, non-finite ranges.
+        #expect(AutomationLaw.faderNorm(20) == 1, "above 12 dB is full scale")
+        #expect(AutomationLaw.faderNorm(AutomationLaw.floorDb) == 0 && AutomationLaw.faderNorm(-200) == 0)
+        #expect(AutomationLaw.faderNorm(.nan) == 0 && AutomationLaw.faderDb(.nan) == AutomationLaw.floorDb)
+        #expect(AutomationLaw.pan(.nan) == -1 && AutomationLaw.unit(.infinity) == 1)
+        #expect(AutomationLaw.text(.solo(strip: 1), 0.5) == "On" && AutomationLaw.text(.solo(strip: 1), 0.4999) == "Off")
+        #expect(AutomationLaw.text(.send(strip: 1, index: 0), AutomationLaw.faderNorm(-12)) == "-12.0 dB")
+        #expect(AutomationLaw.text(.send(strip: 1, index: 0), 1) == "12.0 dB")
+        let nearFloor = AutomationLaw.faderNorm(-143.97)
+        #expect(nearFloor > 0)
+        #expect(AutomationLaw.text(.fader(strip: 1), nearFloor) == "-∞ dB", "never -144.0 dB")
+        #expect(AutomationLaw.text(.fader(strip: 1), AutomationLaw.faderNorm(-143.9)) == "-143.9 dB")
+        func param(_ min: Double, _ max: Double, stepped: Bool) -> ParamRow {
+            ParamRow(
+                id: 1, name: "P", module: "", min: min, max: max, default: min, value: min, stepped: stepped,
+                automatable: true, hidden: false)
+        }
+        #expect(AutomationLaw.text(.param(slot: 1, param: 1), 0.63, param: param(0, 4, stepped: true)) == "3")
+        #expect(AutomationLaw.text(.param(slot: 1, param: 1), 0.5, param: param(-.infinity, 1, stepped: true)) == "0")
+        #expect(AutomationLaw.text(.param(slot: 1, param: 1), 1, param: param(0, 1e300, stepped: true)).count > 100)
+        #expect(AutomationLaw.text(.param(slot: 1, param: 1), .nan) == "0.0%")
+        #expect(AutomationText.percent(.nan) == "0.0%" && AutomationText.percent(2) == "100.0%")
+        #expect(AutomationText.short(.stripFader(strip: 4)) == StripNames().title(.fader(strip: 4)))
+    }
+
+    @Test func rulesAtTheLastTickDoNotOverflow() {
+        // Parked T10/T11: an inclusive end at Int64.max.
+        #expect(AutomationLaw.after(.max) == .max && AutomationLaw.after(5) == 6)
+        let rule = StripLane.program.eraseRule(from: .max, to: 0)
+        #expect(rule?.conditions.first?.test == .timeRange(start: 0, end: .max))
+        let line = LineRow(from: 0, to: .max, start: 0, end: 0, step: q, shape: .straight)
+        if case let .selectAndModify(r?, _, _, _) = StripCommands.line(.velocity, op: .set, line: line, selectedOnly: false) {
+            #expect(r.conditions.first?.test == .timeRange(start: 0, end: .max))
+        } else {
+            Issue.record("not a select-and-modify")
+        }
+        let req = ExactMode.request(
+            for: StripCommands.line(.velocity, op: .set, line: line, selectedOnly: false), lanes: [LaneKey(1, 2)],
+            origin: .stripChart)
+        #expect(req?.range == TickRange(start: 0, end: .max))
+        // Erase rules of every erasable lane.
+        #expect(StripLane.pitchBend.eraseRule(from: 0, to: q)?.conditions.map(\.test).last == .kinds(kinds: [.pitchBend]))
+        #expect(
+            StripLane.channelPressure.eraseRule(from: 0, to: q)?.conditions.map(\.test).last
+                == .kinds(kinds: [.channelPressure]))
+        #expect(
+            StripLane.polyPressure(60).eraseRule(from: 0, to: q)?.conditions.map(\.test).suffix(2)
+                == [.kinds(kinds: [.polyPressure]), .pitch(low: 60, high: 60)])
+        #expect(StripLane.program.eraseRule(from: 0, to: q)?.conditions.map(\.test).last == .kinds(kinds: [.program]))
+        #expect(StripLane.releaseVelocity.eraseRule(from: 0, to: q) == nil && StripLane.duration.eraseRule(from: 0, to: q) == nil)
+    }
+
     @Test func targetsRoundTripTheirRows() {
         let all: [AutoTarget] = [
             .fader(strip: 1), .pan(strip: 2), .mute(strip: 3), .solo(strip: 4), .send(strip: 5, index: 2),

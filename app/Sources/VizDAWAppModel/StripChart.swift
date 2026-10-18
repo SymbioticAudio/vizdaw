@@ -200,7 +200,9 @@ public enum StripCommands {
     public static func line(_ lane: StripLane, op: LineOpRow, line: LineRow, selectedOnly: Bool) -> EditCommand {
         .selectAndModify(
             rule: RuleRow(
-                conditions: [ConditionRow(test: .timeRange(start: line.from, end: line.to + 1), negate: false)],
+                conditions: [
+                    ConditionRow(test: .timeRange(start: line.from, end: AutomationLaw.after(line.to)), negate: false)
+                ],
                 matchAll: true),
             mode: selectedOnly ? .refine : .select,
             modify: .line(target: lane.lineTarget, op: op, line: line), toCopy: false)

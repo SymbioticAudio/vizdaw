@@ -93,21 +93,30 @@ public enum AutomationLaw {
         return t == "-0" ? "0" : t
     }
 
+    /// The tick after `t`, for an inclusive end as an exclusive one; the
+    /// last tick stays (no overflow).
+    public static func after(_ t: Int64) -> Int64 { t < .max ? t + 1 : .max }
+
+    /// A normalised value as 0.0–100.0 %.
+    public static func percent(_ v: Double) -> String { String(format: "%.1f%%", unit(v) * 100) }
+
     /// A value as the Strip Chart shows it.
     public static func text(_ t: AutoTarget, _ v: Double, param: ParamRow? = nil) -> String {
         switch t {
         case .fader, .send:
             let db = faderDb(v)
-            return db <= floorDb ? "-∞ dB" : String(format: "%.1f dB", db)
+            // A level that would read "-144.0" is the floor: "-∞".
+            return db < floorDb + 0.05 ? "-∞ dB" : String(format: "%.1f dB", db)
         case .pan:
             let p = Int((pan(v) * 100).rounded())
             return p == 0 ? "C" : (p < 0 ? "L\(-p)" : "R\(p)")
         case .mute, .solo:
             return unit(v) >= 0.5 ? "On" : "Off"
         case .param:
-            guard let p = param else { return String(format: "%.1f%%", unit(v) * 100) }
+            guard let p = param else { return percent(v) }
             let plain = p.min + unit(v) * (p.max - p.min)
-            return p.stepped ? "\(Int(plain.rounded()))" : plainText(plain)
+            // plainText never traps, whatever the range (non-finite, huge).
+            return plainText(p.stepped ? plain.rounded() : plain)
         case .velocityScale:
             return String(format: "%.0f%%", velocityScalePercent(v))
         }
@@ -300,7 +309,9 @@ public enum StripLane: Codable, Hashable, Sendable {
         let hi = max(from, to)
         func rule(_ tests: [ConditionTest]) -> RuleRow {
             RuleRow(
-                conditions: ([.timeRange(start: lo, end: hi + 1)] + tests).map { ConditionRow(test: $0, negate: false) },
+                conditions: ([.timeRange(start: lo, end: AutomationLaw.after(hi))] + tests).map {
+                    ConditionRow(test: $0, negate: false)
+                },
                 matchAll: true)
         }
         switch self {
