@@ -774,6 +774,9 @@ impl Renderer {
         // A mute or solo point inside the run (one shorter than `MIN_RUN`
         // stretched over it) switches at the run boundary nearest to it:
         // the run's start when at most half way in, else the next run's.
+        // A fader, pan or send jump inside such a run (Ruling 11's "two
+        // points on one frame") is not switched hard: it fades over the
+        // run, at most `MIN_RUN` frames (under 1 ms), which avoids a click.
         let mid = pos.saturating_add(u64::from(run / 2));
         if let Some(g) = self.graph.as_deref_mut() {
             for ramp in [false, true] {

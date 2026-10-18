@@ -117,6 +117,88 @@ fn a_fader_ramp_follows_the_lane_between_points() {
         let g = db_to_gain(fader_db(v)) as f32;
         assert!((w - d * g).abs() <= 1e-6, "frame {i}: {w} vs {}", d * g);
     }
+    // Frame-exact: the law at each run's ends, linear between (runs are
+    // the 256-frame blocks), to a relative tolerance a ramp one frame late
+    // exceeds.
+    let gain = |p: u64| unity * (p as f64 / 96_000.0).min(1.0);
+    let model = ramp_model(wet.len(), 256, &[], |i| i as u64, gain);
+    frame_exact(&wet, &dry, &model);
+}
+
+/// Per output frame, the fader gain of piecewise-linear automation: the
+/// output is cut into runs at every `block` frames and at `cuts`; a run
+/// from output frame `a` (schedule frame `pos(a)`) ramps from the law at
+/// `pos(a)` to the law at `pos(a)` plus its length, as the engine does in
+/// `f32`; `value(p)` is the lane's normalised value at schedule frame `p`.
+fn ramp_model(
+    total: usize,
+    block: usize,
+    cuts: &[usize],
+    pos: impl Fn(usize) -> u64,
+    value: impl Fn(u64) -> f64,
+) -> Vec<f32> {
+    // Whole blocks: the last may be rendered past `total`.
+    let blocks = total.div_ceil(block) * block;
+    let mut bounds: Vec<usize> = (0..=blocks)
+        .step_by(block)
+        .chain(cuts.iter().copied())
+        .collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut out = Vec::with_capacity(total);
+    for w in bounds.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let n = b - a;
+        let pa = pos(a);
+        let ga = db_to_gain(fader_db(value(pa))) as f32;
+        let gb = db_to_gain(fader_db(value(pa + n as u64))) as f32;
+        let step = (gb - ga) / n as f32;
+        out.extend((0..n).map(|k| ga + step * k as f32));
+    }
+    out.truncate(total);
+    out
+}
+
+/// `got` is `dry` times `model`, frame by frame, to 2e-6 relative (plus
+/// 1e-12, for `f32` rounding near the gain floor).
+fn frame_exact(got: &[f32], dry: &[f32], model: &[f32]) {
+    let mut checked = 0;
+    for (i, ((w, d), m)) in got.iter().zip(dry).zip(model).enumerate() {
+        let want = d * m;
+        assert!(
+            (w - want).abs() <= 2e-6 * want.abs() + 1e-12,
+            "frame {i}: {w} vs {want}"
+        );
+        checked += usize::from(d.abs() > 1e-3);
+    }
+    assert!(checked > got.len() / 2, "the tone sounds through the ramp");
+}
+
+#[test]
+fn a_fader_ramp_is_cut_at_the_loop_end_and_restarts_after_the_wrap() {
+    let unity = fader_norm(0.0);
+    // Three quarters (72 000 frames) loop over a one-bar ramp: the wrap is
+    // not on a 256-frame block boundary.
+    let looped = |s: &Song| {
+        let mut r = rig(&s.doc, s.seq, 256);
+        r.engine.set_loop_range(Some((0, 72_000))).unwrap();
+        r.engine.play().unwrap();
+        r.render(80_000)
+    };
+    let dry = looped(&song(|_| vec![]));
+    let wet = looped(&song(|s| {
+        vec![
+            (0, AutomationTarget::StripFader(s), 0.0),
+            (BAR, AutomationTarget::StripFader(s), unity),
+        ]
+    }));
+    let gain = |p: u64| unity * (p as f64 / 96_000.0).min(1.0);
+    let model = ramp_model(wet.len(), 256, &[72_000], |i| (i % 72_000) as u64, gain);
+    // The run before the wrap ends at the loop end's value; the one after
+    // starts again from the loop start's.
+    assert!((model[71_999] - db_to_gain(fader_db(gain(71_999))) as f32).abs() < 1e-4);
+    assert_eq!(model[72_000], db_to_gain(fader_db(0.0)) as f32);
+    frame_exact(&wet, &dry, &model);
 }
 
 #[test]
@@ -406,4 +488,184 @@ fn a_plugin_parameter_ramp_is_sent_every_32_frames_until_it_holds() {
         assert_eq!((g.0, g.1), (w.0, w.1));
         assert!((g.2 - w.2).abs() < 1e-12, "{g:?} vs {w:?}");
     }
+}
+
+/// A plugin instrument sounding 0.1 whatever it is sent, counting the
+/// frames it rendered or was told it skipped.
+struct Clock(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl core_engine::backend::InstrumentNode for Clock {
+    fn midi(&mut self, _: u32, _: &[u8]) {}
+    fn render(&mut self, frames: u32, out: &mut core_engine::backend::StereoBuf) {
+        let n = frames as usize;
+        out.left[..n].fill(0.1);
+        out.right[..n].fill(0.1);
+        self.0
+            .fetch_add(u64::from(frames), std::sync::atomic::Ordering::Relaxed);
+    }
+    fn reset(&mut self) {}
+    fn skip(&mut self, frames: u32) {
+        self.0
+            .fetch_add(u64::from(frames), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// An insert that stalls the run starting at schedule frame 24 000 while
+/// playing, until `release` is set (at most 5 s).
+struct Staller(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl core_engine::graph::EffectNode for Staller {
+    fn latency(&self) -> u32 {
+        0
+    }
+    fn process(
+        &mut self,
+        _: u32,
+        _: &mut core_engine::backend::StereoBuf,
+        _: Option<&core_engine::backend::StereoBuf>,
+    ) -> core_engine::graph::ProcessStatus {
+        core_engine::graph::ProcessStatus::Ok
+    }
+    fn reset(&mut self) {}
+    fn process_block(
+        &mut self,
+        _: u32,
+        _: &mut core_engine::backend::StereoBuf,
+        _: Option<&core_engine::backend::StereoBuf>,
+        info: &core_engine::backend::BlockInfo,
+    ) -> core_engine::graph::ProcessStatus {
+        if info.playing && info.frame == 24_000 {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !self.0.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < until
+            {
+                std::hint::spin_loop();
+            }
+        }
+        core_engine::graph::ProcessStatus::Ok
+    }
+}
+
+struct StallRig {
+    clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl core_engine::graph::InsertFactory for StallRig {
+    fn make(
+        &mut self,
+        _: &core_model::mixer::PluginSlot,
+        _: f64,
+        _: u32,
+    ) -> Result<Box<dyn core_engine::graph::EffectNode>, String> {
+        Ok(Box::new(Staller(std::sync::Arc::clone(&self.release))))
+    }
+    fn make_instrument(
+        &mut self,
+        _: &core_model::mixer::PluginSlot,
+        _: f64,
+        _: u32,
+    ) -> Result<Box<dyn core_engine::backend::InstrumentNode>, String> {
+        Ok(Box::new(Clock(std::sync::Arc::clone(&self.clock))))
+    }
+}
+
+#[test]
+fn a_run_missing_its_deadline_skips_the_rest_of_its_block() {
+    use core_engine::graph::{TestInserts, TestInstrument};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let mut b = Builder::new();
+    let (d, _) = b
+        .plugin_dest("Clock", TestInstrument::plugin("synth"))
+        .unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0xFFFF, 4 * BAR)]).unwrap();
+    let strip = b.strip_of(StripKind::Instrument(d)).unwrap();
+    b.insert(strip, TestInserts::plugin("stall")).unwrap();
+    // −20 dB until frame 24 000, then a ramp to 0 dB at frame 24 200: block
+    // 23 of 1024 frames (23 552 … 24 576) runs 23 552 … 24 000 … 24 200 …
+    let low = fader_norm(-20.0);
+    let fader = AutomationTarget::StripFader(strip);
+    let auto = b.lane(seq, "Auto", None).unwrap();
+    b.events(
+        seq,
+        auto,
+        [(0, low), (Q, low), (Q + 128, fader_norm(0.0))]
+            .into_iter()
+            .map(|(t, value)| {
+                EventSpec::new(
+                    Tick(t),
+                    EventBody::Automation {
+                        target: fader,
+                        value,
+                    },
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    let doc = b.finish();
+    let clock = Arc::new(AtomicU64::new(0));
+    let release = Arc::new(AtomicBool::new(false));
+    let mut cfg = EngineConfig::new(SR);
+    cfg.workers = 1;
+    cfg.deadline = Some(0.5);
+    let (mut engine, r) = Engine::new(cfg, Box::new(OfflineSinks::new(16))).unwrap();
+    engine.set_insert_factory(Box::new(StallRig {
+        clock: Arc::clone(&clock),
+        release: Arc::clone(&release),
+    }));
+    engine.set_callback_helps(false);
+    engine.load(&doc, seq).unwrap();
+    let mut be = OfflineBackend::new(SR, 1024);
+    be.start(r).unwrap();
+    be.reserve(1024);
+    engine.play().unwrap();
+    let rendered = std::cell::Cell::new(0u64);
+    let block = |be: &mut OfflineBackend| {
+        be.block(1024);
+        rendered.set(rendered.get() + 1024);
+        be.output(1024).0.to_vec()
+    };
+    for _ in 0..23 {
+        block(&mut be);
+    }
+    assert_eq!(engine.counters().deadline_misses, 0);
+    let runs = engine.counters().runs;
+    let missed = block(&mut be);
+    let c = engine.counters();
+    assert_eq!(c.deadline_misses, 1);
+    assert_eq!(c.runs - runs, 2, "the third run never started");
+    // The first run plays; the missed one and the skipped one are silent.
+    assert!(missed[..448].iter().all(|x| x.abs() > 1e-3), "run 1 sounds");
+    assert!(missed[448..].iter().all(|x| *x == 0.0), "the rest is lost");
+    // The missed run's frames were played by the transport, the skipped
+    // run's were not.
+    assert_eq!(engine.position_frames(), 24_200);
+    // Stopped while the straggler still holds the graph; then it finishes.
+    engine.stop().unwrap();
+    release.store(true, Ordering::Release);
+    let mut recovered = false;
+    for _ in 0..2000 {
+        let c = engine.counters();
+        block(&mut be);
+        let d = engine.counters();
+        if d.busy_blocks == c.busy_blocks && d.deadline_misses == c.deadline_misses {
+            recovered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(recovered, "recovered");
+    // Every frame the device asked for was rendered by the instrument or
+    // passed on as skipped (busy blocks and the skipped run).
+    assert_eq!(clock.load(Ordering::Relaxed), rendered.get());
+    // The missed run's ramp settled once its straggler was done: stopped
+    // blocks hold the ramp's end value instead of ramping again.
+    let steady: Vec<f32> = (0..3).flat_map(|_| block(&mut be)).collect();
+    let level = steady[0];
+    assert!(level.abs() > 1e-3);
+    assert!(steady.iter().all(|x| *x == level), "steady at {level}");
+    assert_eq!(clock.load(Ordering::Relaxed), rendered.get());
 }
