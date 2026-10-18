@@ -115,4 +115,42 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         ControlUI.deliver(events, to: w)
         #expect(r.got == ["key 49   ", "key 1 s cmd"])
     }
+
+    @Test func onlyChannelEventsAreFirstClicks() throws {
+        let (w, c, _) = window()
+        let channel = ControlUI.clickEvents(w, at: CGPoint(x: 5, y: 5), button: .left, count: 1, modifiers: none)
+        #expect(c.acceptsFirstMouse(for: channel[0]))
+        // Delivered (nextEvent needs a running app, so this goes straight to the window).
+        ControlUI.deliver(channel, to: w)
+        // After the channel's events are delivered, a user's click is not one.
+        let user = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: NSPoint(x: 5, y: 5), modifierFlags: [], timestamp: 0,
+                windowNumber: w.windowNumber, context: nil, eventNumber: 7, clickCount: 1, pressure: 1))
+        #expect(!ControlUI.isChannel(user))
+        #expect(!c.acceptsFirstMouse(for: user))
+        #expect(!c.acceptsFirstMouse(for: nil))
+    }
+
+    @Test func aClickPointNeedsAVisibleFiniteElement() throws {
+        let (w, _, _) = window()
+        #expect(ControlUI.point(.point(x: .nan, y: 3), in: w) == nil)
+        #expect(ControlUI.point(.point(x: 3, y: .infinity), in: w) == nil)
+        #expect(ControlUI.point(.point(x: 3, y: 4), in: w) == CGPoint(x: 3, y: 4))
+        let item = try #require(ControlUI.tree(of: w, maxDepth: 64).nodes.first { $0.label == "Block Chords, bars 1 to 2" })
+        let ref = ElementRefRow(
+            id: "", path: item.path, check: controlElementCheck(role: item.role, label: item.label, title: item.title))
+        let e = try #require(ControlUI.element(ref, in: w) as? NSAccessibilityElement)
+        let original = e.accessibilityFrameInParentSpace()
+        func at(_ r: NSRect) -> CGPoint? {
+            e.setAccessibilityFrameInParentSpace(r)
+            return ControlUI.point(.element(element: ref), in: w)
+        }
+        defer { e.setAccessibilityFrameInParentSpace(original) }
+        #expect(at(original) != nil)
+        #expect(at(NSRect(x: original.minX, y: original.minY, width: 0, height: 10)) == nil, "empty")
+        #expect(at(NSRect(x: original.minX, y: original.minY, width: .nan, height: 10)) == nil, "not finite")
+        #expect(at(NSRect(x: original.minX + 5000, y: original.minY, width: 20, height: 20)) == nil, "outside")
+        #expect(at(NSRect(x: original.minX, y: original.minY - 5000, width: 20, height: 20)) == nil, "above")
+    }
 }

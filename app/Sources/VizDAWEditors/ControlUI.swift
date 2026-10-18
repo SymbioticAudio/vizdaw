@@ -101,16 +101,27 @@ public enum ControlUI {
         return check == ref.check ? e : nil
     }
 
+    /// The window's content area in window points with a top-left origin.
+    static func contentRect(of window: NSWindow) -> CGRect {
+        let r = window.contentLayoutRect
+        return CGRect(x: r.minX, y: window.frame.height - r.maxY, width: r.width, height: r.height)
+    }
+
     /// Where `p` lands in `window` (an element's centre); nil when the
-    /// element is gone.
+    /// element is gone, or its frame is not finite, is empty, or has its
+    /// centre outside the window's content (hidden, scrolled away).
     public static func point(_ p: PointerRow, in window: NSWindow) -> CGPoint? {
         switch p {
         case .point(let x, let y):
-            return CGPoint(x: x, y: y)
+            return x.isFinite && y.isFinite ? CGPoint(x: x, y: y) : nil
         case .element(let ref):
             guard let e = element(ref, in: window) else { return nil }
             let f = windowRect(e.accessibilityFrame(), in: window)
-            return CGPoint(x: f.midX, y: f.midY)
+            guard f.minX.isFinite, f.minY.isFinite, f.width.isFinite, f.height.isFinite,
+                f.width > 0, f.height > 0
+            else { return nil }
+            let c = CGPoint(x: f.midX, y: f.midY)
+            return contentRect(of: window).contains(c) ? c : nil
         }
     }
 
@@ -125,7 +136,20 @@ public enum ControlUI {
         return f
     }
 
-    private static var eventNumber = 0
+    /// Channel events carry numbers from here up; the system's own are
+    /// small counters. That is how the editors tell them apart.
+    static let channelEventBase = 1 << 30
+    private static var eventNumber = channelEventBase
+
+    /// Whether `event` was built by the channel.
+    public static func isChannel(_ event: NSEvent?) -> Bool {
+        guard let e = event else { return false }
+        switch e.type {
+        case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp:
+            return e.eventNumber >= channelEventBase
+        default: return false
+        }
+    }
 
     static func mouse(
         _ type: NSEvent.EventType, _ window: NSWindow, _ p: CGPoint, _ flags: NSEvent.ModifierFlags, clicks: Int
@@ -179,17 +203,14 @@ public enum ControlUI {
         }
     }
 
-    /// True while channel mouse events are queued: the editors accept them
-    /// as first clicks, since VizDAW may not be the active app (macOS does
-    /// not let a background app take focus) and AppKit would otherwise
-    /// spend the click on activating the window.
-    public static var firstMouse = false
-
+    /// The editors accept channel mouse events (`isChannel`) as first
+    /// clicks, since VizDAW may not be the active app (macOS does not let a
+    /// background app take focus) and AppKit would otherwise spend the click
+    /// on activating the window. A user's own clicks are not affected.
     /// Orders `window` to the front (without stealing focus from the
     /// active app) and queues `events` behind anything already queued.
     public static func post(_ events: [NSEvent], to window: NSWindow) {
         window.orderFront(nil)
-        firstMouse = true
         for e in events { NSApp.postEvent(e, atStart: false) }
     }
 

@@ -165,7 +165,7 @@ open class EditorCanvas: NSView {
     /// A click the control channel sends is never a window-activating
     /// first click (VizDAW may not be the active app; control spec §5.5).
     open override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        ControlUI.firstMouse || super.acceptsFirstMouse(for: event)
+        ControlUI.isChannel(event) || super.acceptsFirstMouse(for: event)
     }
 
     private func setUp() {
