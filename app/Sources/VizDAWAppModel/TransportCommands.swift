@@ -38,13 +38,23 @@ public enum TransportCommands {
 
     /// Whether `id` can run on `m` now (its menu item is enabled).
     public static func enabled(_ id: String, _ m: DocumentModel) -> Bool {
-        switch id {
+        if typesText(id) && !m.transportKeysEnabled { return false }
+        return switch id {
         case "transport.record", "transport.scrub", "record.keep_pass", "record.discard_pass": false
         case "transport.stop": m.isPlaying
         case "transport.overdub", "transport.punch", "editors.snap": true
         case "transport.play_from_edit_in": m.selectedSeq != nil && m.editor.selection.timeRange != nil
         default: m.selectedSeq != nil
         }
+    }
+
+    static let textFieldHasKeyboard = "A text field has the keyboard."
+
+    /// Commands with a bare (or ⌥/⇧-only) default key wait while a text
+    /// field has the keyboard; the pass commands (no key) and the arm
+    /// arrows do not.
+    static func typesText(_ id: String) -> Bool {
+        !["record.keep_pass", "record.discard_pass", "transport.arm_previous", "transport.arm_next"].contains(id)
     }
 
     /// A toggle's state (its menu item's check mark).
@@ -60,6 +70,7 @@ public enum TransportCommands {
     /// Runs `id` on `m`; `on` sets a toggle (nil flips it).
     @discardableResult
     public static func run(_ id: String, on: Bool? = nil, _ m: DocumentModel) -> KeyOutcome {
+        if typesText(id) && !m.transportKeysEnabled { return .unavailable(textFieldHasKeyboard) }
         switch id {
         case "transport.record", "transport.scrub", "record.keep_pass", "record.discard_pass":
             return .unavailable(notYet)
@@ -110,8 +121,18 @@ public enum TransportCommands {
             return attempt { try m.moveTo(t) }
         case "transport.arm_previous", "transport.arm_next":
             let forward = id == "transport.arm_next"
-            return m.editor.change { try m.session.moveRecordArm(seq: seq, forward: forward) }
-                ? .done : .refused(m.editor.status ?? "Record arm did not move.")
+            guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
+            var busy: String?
+            let moved = m.editor.change {
+                do {
+                    return try m.session.moveRecordArm(seq: seq, forward: forward)
+                } catch VizError.Busy(let message) {
+                    busy = message
+                    throw VizError.Busy(message: message)
+                }
+            }
+            if let busy { return .busy(busy) }
+            return moved ? .done : .refused(m.editor.status ?? "Record arm did not move.")
         default:
             return .unavailable("VizDAW has no handler for \(id).")
         }
@@ -145,6 +166,7 @@ public enum TransportCommands {
     }
 
     private static func refused(_ error: any Error) -> KeyOutcome {
-        .refused(AlertItem(error, title: "").message)
+        if case VizError.Busy(let message) = error { return .busy(message) }
+        return .refused(AlertItem(error, title: "").message)
     }
 }

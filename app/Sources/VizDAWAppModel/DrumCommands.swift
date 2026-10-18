@@ -7,6 +7,8 @@ public enum DrumOutcome: Equatable, Sendable {
     case unavailable(String)
     /// The core refused it: the status line's message.
     case refused(String)
+    /// The core was busy: the channel's `busy` code.
+    case busy(String)
 }
 
 /// The Drum menu (Plan 4e Ruling 13): one implementation for the menu

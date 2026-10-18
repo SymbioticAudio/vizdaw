@@ -145,4 +145,48 @@ import VizDAWCore
         let bad = [ControlArg(name: "path", value: .text(value: "/nonexistent/k.vizkeys"))]
         #expect(failure(run("keys.load", bad, s, nil))?.message.hasPrefix("Load Key Bindings Failed: ") == true)
     }
+
+    @Test func stopReturnsToWhereTheEngineActuallyStarted() throws {
+        let (s, id, m, f) = try demo()
+        f.state.tick = 61_440  // stopped at the sequence's end: Play restarts at bar 1
+        m.poll()
+        _ = run("transport.play_stop", s, id)
+        #expect(m.playStart == 0)
+        _ = run("transport.stop", s, id)
+        #expect(f.state.tick == 0)
+        f.state.seq = 1  // a stale cursor in another sequence is ignored too
+        f.state.tick = 30_000
+        m.poll()
+        _ = run("transport.play_stop", s, id)
+        #expect(m.playStart == 0)
+    }
+
+    @Test func bareKeyCommandsWaitForTextFields() throws {
+        let (s, id, m, f) = try demo()
+        m.beginRename(3)
+        for cmd in ["transport.overdub", "editors.snap", "locator.set_3", "locator.go_1", "transport.next_marker",
+                    "transport.play_selection", "transport.record"] {
+            #expect(failure(run(cmd, s, id)) == .of(.unavailable, "A text field has the keyboard."), "\(cmd)")
+            #expect(!TransportCommands.enabled(cmd, m), "\(cmd)")
+        }
+        #expect(!m.editor.layout.transport.overdub && m.editor.layout.snap.enabled)
+        #expect(m.editor.layout.transport.locator(3) == nil && f.playsFrom.isEmpty)
+        m.cancelRename()
+        #expect(failure(run("locator.set_3", s, id)) == nil)
+    }
+
+    @Test func busyIsBusyAndAnOpenDragBlocksArming() throws {
+        let (s, id, m, f) = try demo()
+        f.span = TickRange(start: 1_000, end: 5_000)
+        f.playError = .Busy(message: "The core is busy.")
+        #expect(failure(run("transport.play_selection", s, id)) == .of(.busy, "The core is busy."))
+        f.playError = nil
+        f.armError = .Busy(message: "The core is busy.")
+        #expect(failure(run("transport.arm_next", s, id)) == .of(.busy, "The core is busy."))
+        f.armError = nil
+        #expect(m.editor.beginGesture("Move", lanes: [LaneKey(3, 30)], origin: .other))
+        let moves = f.armMoves.count
+        #expect(failure(run("transport.arm_next", s, id)) == .of(.unavailable, EditorModel.gestureOpenMessage))
+        #expect(f.armMoves.count == moves)
+    }
 }

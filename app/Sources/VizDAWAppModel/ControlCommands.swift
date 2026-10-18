@@ -260,6 +260,7 @@ public enum ControlCommands {
         case .done: nil
         case .unavailable(let why): unavailable(why)
         case .refused(let why): .failed(.of(.failed, why))
+        case .busy(let why): .failed(.of(.busy, why))
         }
     }
 

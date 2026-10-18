@@ -369,7 +369,11 @@ public final class DocumentModel {
     /// where it started.
     public func startPlaying(from: Int64? = nil, to: Int64? = nil) throws {
         guard let seq = selectedSeq else { throw VizError.Model(message: "Select a sequence to play.") }
-        let start = from ?? transport.tick
+        // The engine restarts at bar 1 from the end, or from another
+        // sequence's position.
+        let length = snapshot.sequences.first { $0.id == seq }?.lengthTicks ?? 0
+        let there = transport.seq == nil || transport.seq == seq
+        let start = from ?? (there && transport.tick < length ? transport.tick : 0)
         if let from {
             try session.playFrom(seq: seq, from: from, to: to)
         } else {
