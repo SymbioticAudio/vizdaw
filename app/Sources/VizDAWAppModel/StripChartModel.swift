@@ -18,11 +18,12 @@ public enum AutomationTargets {
     /// Names and menu groups: per strip its fader, pan (not master), mute,
     /// solo and sends; per plugin slot its automatable, visible parameters;
     /// one velocity scale per destination. Parts the session cannot read
-    /// now (Busy) are left out.
-    public static func load(_ session: any SessionProtocol) -> (names: StripNames, menus: [StripMenu]) {
+    /// now (Busy) make the load throw, so the caller keeps what it had and
+    /// retries; other errors read as empty.
+    public static func load(_ session: any SessionProtocol) throws -> (names: StripNames, menus: [StripMenu]) {
         var n = StripNames()
         var menus: [StripMenu] = []
-        let strips = (try? session.mixer())?.strips ?? []
+        let strips = try Self.read { try session.mixer().strips } ?? []
         for s in strips { n.strips[s.id] = s.name }
         for s in strips {
             n.sends[s.id] = s.sends.map { n.strips[$0.target] ?? "Bus \($0.target)" }
@@ -33,7 +34,7 @@ public enum AutomationTargets {
             menus.append(StripMenu(title: s.name, lanes: lanes))
             for slot in (s.instrument.map { [$0] } ?? []) + s.inserts {
                 n.slots[slot.id] = slot.plugin.name
-                let params = ((try? session.params(slot: slot.id)) ?? []).filter { $0.automatable && !$0.hidden }
+                let params = (try Self.read { try session.params(slot: slot.id) } ?? []).filter { $0.automatable && !$0.hidden }
                 n.params[slot.id] = params
                 if !params.isEmpty {
                     menus.append(
@@ -43,12 +44,17 @@ public enum AutomationTargets {
                 }
             }
         }
-        let dests = (try? session.destinations()) ?? []
+        let dests = try Self.read { try session.destinations() } ?? []
         for d in dests { n.dests[d.id] = d.name }
         if !dests.isEmpty {
             menus.append(StripMenu(title: "Velocity Scale", lanes: dests.map { .automation(.velocityScale(dest: $0.id)) }))
         }
         return (n, menus)
+    }
+
+    /// A read: nil on an ordinary error, Busy rethrown.
+    private static func read<T>(_ body: () throws -> T) throws -> T? {
+        do { return try body() } catch VizError.Busy { throw VizError.Busy(message: "busy") } catch { return nil }
     }
 }
 
@@ -187,9 +193,14 @@ public final class StripChartModel {
         let v = editor.snapshotVersion
         let slots = document?.slotsVersion ?? 0
         if let c = targetsCache, c.version == v, c.slots == slots { return (c.names, c.menus) }
-        let t = AutomationTargets.load(editor.session)
-        targetsCache = (v, slots, t.names, t.menus)
-        return t
+        do {
+            let t = try AutomationTargets.load(editor.session)
+            targetsCache = (v, slots, t.names, t.menus)
+            return t
+        } catch {
+            // Busy: keep what we had; the next call retries.
+            return targetsCache.map { ($0.names, $0.menus) } ?? (StripNames(), [])
+        }
     }
 
     // MARK: Strokes

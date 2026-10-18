@@ -58,13 +58,26 @@ private let q: Int64 = 15_360
                 automatable: true, hidden: true),
         ]
         f.dests = [DestRow(id: 2, name: "Piano", plugin: nil)]
-        let t = AutomationTargets.load(f)
+        let t = try AutomationTargets.load(f)
         #expect(t.menus.map(\.title) == ["Synth", "Gain · Synth", "Bus 1", "Master", "Velocity Scale"])
         #expect(t.menus[0].lanes == [.automation(.fader(strip: 1)), .automation(.pan(strip: 1)), .automation(.mute(strip: 1)), .automation(.solo(strip: 1))])
         #expect(t.menus[1].lanes == [.automation(.param(slot: 10, param: 4))], "hidden parameters are left out")
         #expect(!t.menus[3].lanes.contains(.automation(.pan(strip: 0))), "master has no pan")
         #expect(t.names.title(.param(slot: 10, param: 4)) == "Gain · Gain")
         #expect(t.names.dests[2] == "Piano")
+    }
+
+    @Test func aBusyReadIsNotCachedAndTheNextCallFillsTheMenus() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.lane(seq: 3, lane: 31), kind: .stripChart)
+        let s = StripChartModel.pane(m)
+        f.mixerFetchError = VizError.Busy(message: "busy")
+        #expect(s.menus.isEmpty)
+        f.mixerFetchError = nil
+        #expect(s.menus.map(\.title).first == "Synth", "retried without a version bump")
+        f.mixerFetchError = VizError.Busy(message: "busy")
+        #expect(!s.menus.isEmpty, "a later Busy keeps the previous menus")
     }
 
     @Test func aDrawDragIsOneGestureOnTheShownLane() throws {
