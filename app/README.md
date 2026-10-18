@@ -843,8 +843,11 @@ preferences). Keys are the defaults unless a step changes them.
     to ... Field items (P, E, U) and Arm Previous/Next Lane
     (Option-Shift-Up/Down). The Step menu lists Step Entry (T) and the
     note values 1/1 to 1/32 (1-6), Dotted (.), Triplet (/), Tie (=), Rest
-    (0) and Delete Last Step (Delete, shown as the forward-delete symbol
-    in the menu); Editors > Snap to Grid is G.
+    (0) and Delete Last Step (Delete, shown as ⌫ in the menu); Editors >
+    Snap to Grid is G. Check the glyphs by eye: Delete Last Step shows ⌫
+    (not ⌦), and the note values show the number row's 1-6. Bind a keypad
+    key as a command's first key (Settings > Keys): the menu shows it as
+    its digit; pressing the keypad key runs the command.
 100. Transport keys: S while Song plays stops and goes back to where
     playback actually began; select a time range in the ruler and press
     Option-Space: only the range plays, loop on or off; Shift-Space plays
@@ -860,7 +863,9 @@ preferences). Keys are the defaults unless a step changes them.
     playhead jumps to bar 5 and the keys work again; `9:3:480` (colons,
     commas or spaces separate like dots) lands on bar 9 beat 3 and a half.
     E focuses Edit In: typing `3` selects bar 3 in the ruler; Tab to Edit
-    Out and type `7` and Return: the range runs to bar 7; an Edit Out
+    Out and type `7` and Return: the range runs to bar 7 (Tab and
+    Shift-Tab go round all five fields, so Edit Out and Punch Out, which
+    have no key, are reached from the keyboard); an Edit Out
     before Edit In is refused in the status line. U focuses Punch In; Punch Out
     before Punch In is refused. Escape in a field puts its text back.
     Typing letters into any text field (a field, the sidebar rename, the
@@ -887,10 +892,15 @@ preferences). Keys are the defaults unless a step changes them.
     dotted"), then Delete twice (the rest, then the tie taken back; the
     playhead goes back with them) and once more (the chord goes).
     Clicking in the ruler moves where the next step goes. Number keys
-    choose values only while step entry is on; T turns it off and 1-9
-    are locators again. Step entry ends with a status line when the
-    shown sequence changes (select another sequence) or its lane is
-    deleted. With no MIDI keyboard, `vizctl run step.notes
+    choose values only while step entry is on; T turns it off and 0–9
+    are locators again. Step entry ends with a status line the moment
+    the shown sequence changes (select another sequence) or its lane is
+    deleted: the step bar goes, Step > Step Entry is unchecked, 2 jumps
+    to locator 2 and one T starts step entry in the shown sequence.
+    While playing, step keys only say "Stop playing to enter steps." in
+    the status line (Delete deletes nothing). Holding T, L, O, I, G or
+    Space, or a keyboard slot's key, acts once; holding 0, = or Delete
+    repeats. With no MIDI keyboard, `vizctl run step.notes
     '{"pitches": "C4 E4 G4"}'` enters a chord.
 105. Reserved number row: Settings > Keys > "Number keys always go to
     locators": during step entry 1-6 go to locators and the keypad's 1-6
@@ -900,8 +910,11 @@ preferences). Keys are the defaults unless a step changes them.
     step entry in Song it enters a reference to Groove at the playhead and
     moves on by Groove's length ("Step Entry"). A slot Cmd-S is refused in
     the sheet: "⌘S is the key of “Save”."; a slot whose key is a step-entry
-    command's key (for example 4 or Delete) is refused the same way, naming
-    that command. Return and Escape in the keyboard-slot sheet's field
+    command's key (for example Delete) is refused the same way, naming that
+    command ("Delete is the key of “Delete Last Step”."); a key that is
+    also a global command's (4) names the global one ("Go to Locator 4").
+    A slot Cmd-Q is refused: "⌘Q is the key of “Quit VizDAW”." (so are ⌘H,
+    ⌥⌘H, ⌘M, ⌘, ⌘W and ⌘Tab). Return and Escape in the keyboard-slot sheet's field
     still Save and Cancel.
 107. Keys settings: Settings > Keys lists every command by menu with its
     keys (step entry's marked). Record on Stop, press X: X stops; record
@@ -909,7 +922,9 @@ preferences). Keys are the defaults unless a step changes them.
     Replace moves it, Cancel keeps both as they were. Reset puts a
     command's keys back; Save... writes a `.vizkeys` file; Reset All, then
     Load... brings the saved keys back; a damaged file is refused with its
-    reason and changes nothing. Menus show the new keys at once.
+    reason and changes nothing. Menus show the new keys at once: after
+    recording X for Stop, open the Transport menu: Stop shows X (no
+    relaunch, no other menu opened first).
 108. Channel: `$V key t`, `$V key 4`, `$V run step.notes '{"pitches":
     "60 64"}'`, `$V state editor` shows `"step": {"value": "eighth", ...}`
     and the transport's locators; `$V run keys.load '{"path":
