@@ -230,6 +230,9 @@ fn from_selection(
             format!("{}..{}", a.0, b.0),
         ));
     }
+    crate::rules::check_ticks("selection.time_range", a.0)?;
+    crate::rules::check_ticks("selection.time_range", b.0)?;
+    crate::rules::check_ticks("length", b.0 - a.0)?;
     let lanes: Vec<Lane> = parent
         .lanes
         .iter()

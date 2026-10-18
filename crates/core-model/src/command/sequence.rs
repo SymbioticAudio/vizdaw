@@ -241,11 +241,13 @@ pub(crate) fn apply(d: &mut Document, cmd: &SequenceCmd, r: &mut Report) -> Resu
             if offset.0 < 0 {
                 return Err(ModelError::range("start_offset", offset.0));
             }
+            crate::rules::check_ticks("start_offset", offset.0)?;
             d.seq_mut(*seq)?.start_offset = *offset;
         }
         SequenceCmd::SetLength { seq, length } => {
             if let SeqLength::Locked(t) = length {
                 crate::rules::check_positive("length", *t)?;
+                crate::rules::check_ticks("length", t.0)?;
             }
             d.seq_mut(*seq)?.length = *length;
         }

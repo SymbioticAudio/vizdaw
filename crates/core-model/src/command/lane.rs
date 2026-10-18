@@ -219,6 +219,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
         } => {
             if let Some(t) = length {
                 check_positive("lane.length", *t)?;
+                crate::rules::check_ticks("lane.length", t.0)?;
             }
             let l = d.lane_mut(*seq, *lane)?;
             l.length = *length;
