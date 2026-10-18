@@ -107,4 +107,25 @@ private func chart() throws -> (FakeSession, DocumentModel, StripChartView) {
         #expect(labels == ["Velocity 64, bar 1 beat 1", "Velocity 64, bar 1 beat 2"])
         #expect(v.accessibilityName == "Strip Chart")
     }
+
+    @Test func aStrokeLoadsTheAutomationTargetsOnce() throws {
+        let (f, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        _ = m.stripChart(.pane).names
+        let before = f.mixerCalls
+        v.contentMouseDown(CGPoint(x: 0, y: 30), clicks: 1, modifiers: [])
+        for i in 1...20 {
+            v.contentMouseDragged(CGPoint(x: CGFloat(i) * 8, y: 30 + CGFloat(i)), modifiers: [])
+            _ = m.stripChart(.pane).names
+            _ = v.rowMenu(0)
+        }
+        v.contentMouseUp(CGPoint(x: 160, y: 50), modifiers: [])
+        #expect(f.mixerCalls - before <= 1)
+    }
+
+    @Test func ticksLeftOfTheOriginClampToZero() throws {
+        let (_, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        #expect(v.point(CGPoint(x: -50, y: 30), row: 0).tick == 0)
+    }
 }

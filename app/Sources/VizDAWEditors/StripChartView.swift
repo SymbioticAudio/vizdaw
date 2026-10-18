@@ -132,7 +132,7 @@ public final class StripChartView: EditorCanvas {
     /// snap is on; in Modify mode the operation's amount (Plan 4d Ruling 18).
     func point(_ p: CGPoint, row i: Int) -> StripPoint {
         let raw = axis.tick(atX: p.x)
-        let tick = snap.enabled ? snap.apply(raw, meter: meter) : raw
+        let tick = max(snap.enabled ? snap.apply(raw, meter: meter) : raw, 0)
         let s = scale(i)
         let set = model.settings
         let value = set.mode == .modify && set.op != .compress ? s.amount(atY: p.y, op: set.op) : s.value(atY: p.y)

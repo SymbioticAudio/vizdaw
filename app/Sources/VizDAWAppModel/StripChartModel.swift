@@ -193,6 +193,8 @@ public final class StripChartModel {
         let v = editor.snapshotVersion
         let slots = document?.slotsVersion ?? 0
         if let c = targetsCache, c.version == v, c.slots == slots { return (c.names, c.menus) }
+        // The mixer cannot change mid-gesture; each step bumps the version.
+        if editor.gesture != nil, let c = targetsCache { return (c.names, c.menus) }
         do {
             let t = try AutomationTargets.load(editor.session)
             targetsCache = (v, slots, t.names, t.menus)
