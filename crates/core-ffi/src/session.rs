@@ -2089,15 +2089,35 @@ impl Session {
                 let input = crate::step::input(&input, |r| {
                     core_model::query::seq_length(doc, r).unwrap_or(Tick::ZERO)
                 });
-                let (next, effect) = press(&crate::step::state(&state), input);
+                let st = crate::step::state(&state);
+                // Where each event of a past step began.
+                let began: std::collections::HashMap<core_model::ids::EventId, Tick> = st
+                    .history
+                    .iter()
+                    .flat_map(|h| {
+                        match &h.kind {
+                            core_editor::step::StepKind::Notes(ids) => ids.clone(),
+                            core_editor::step::StepKind::Reference(e) => vec![*e],
+                            _ => Vec::new(),
+                        }
+                        .into_iter()
+                        .map(move |e| (e, h.tick))
+                    })
+                    .collect();
+                let (next, effect) = press(&st, input);
                 // A tie or a step taken back acts only on its events still
-                // in this lane (the state is the app's copy; it may be old).
+                // in this lane and still where the step put them (the state
+                // is the app's copy; it may be old, and undo rewinds the
+                // document's ID counter, so an ID can be reused).
                 let live = |ids: &[core_model::ids::EventId]| -> Vec<core_model::ids::EventId> {
                     ids.iter()
                         .copied()
                         .filter(|e| {
-                            doc.locate(*e)
-                                .is_ok_and(|l| l.seq == seq_id && l.lane == lane_id)
+                            doc.locate(*e).is_ok_and(|l| {
+                                l.seq == seq_id
+                                    && l.lane == lane_id
+                                    && began.get(e) == Some(&l.tick)
+                            })
                         })
                         .collect()
                 };

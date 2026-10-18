@@ -369,3 +369,43 @@ fn a_stale_state_never_touches_another_lanes_notes() {
         .unwrap();
     assert_eq!(s.lane_events(song, chords).unwrap().events, before);
 }
+
+/// Undo rewinds the document's ID counter, so the next insert reuses an
+/// old step's event ID: a step's notes count only while their tick matches.
+#[test]
+fn a_reused_event_id_is_not_the_old_steps_note() {
+    for input in [StepInputRow::Tie, StepInputRow::DeleteLast] {
+        let (s, song, lane) = song();
+        let mut old = step_state_new(0);
+        step(
+            &s,
+            song,
+            lane,
+            &mut old,
+            StepInputRow::Notes {
+                notes: vec![note(60)],
+            },
+        );
+        let StepKindRow::Notes { events: c } = old.history[0].kind.clone() else {
+            panic!()
+        };
+        s.undo().unwrap();
+        let mut fresh = step_state_new(BAR);
+        step(
+            &s,
+            song,
+            lane,
+            &mut fresh,
+            StepInputRow::Notes {
+                notes: vec![note(62)],
+            },
+        );
+        let StepKindRow::Notes { events: d } = fresh.history[0].kind.clone() else {
+            panic!()
+        };
+        assert_eq!(c, d, "the ID was reused");
+        let r = s.step_entry(song, lane, old, input).unwrap();
+        assert!(r.snapshot.is_none(), "nothing of the old step is left");
+        assert_eq!(notes(&s, song, lane), vec![(BAR, 62, Q)], "D untouched");
+    }
+}
