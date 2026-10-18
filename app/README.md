@@ -532,3 +532,101 @@ editors (and at the bottom of the panel).
     panel's controls read their labels (Task, Result, Match, Operation,
     Apply, Comparison, Amount, Curve, Wave, "Pitch from", "Pitch to",
     Remove Condition, Template name).
+
+
+### Strip Chart and automation (plan 4d)
+
+Use the demo project (File > Create Demo Project) unless a step says
+otherwise. Its built-in synth plays through the "Built-in Synth" strip; Song
+holds Groove and Chords. Turn snap on (the default, quarters) unless a step
+says otherwise. "The level" means what you hear and the master meter.
+
+68. Strip Chart: double-click the Chords block and press Cmd-3: the detail
+    pane shows "Strip Chart" with one row titled "Velocity ▾" and a bar
+    (Mode: Draw, Modify, Erase; Shape; Step; Rows: 1). The chords' 36
+    velocities show as bars at their starts; selected notes are accented.
+    Rows + makes a second row "Controller 7 (Volume) ▾" showing the
+    Controller 7 = 100 event at 1.1.0 as a held step.
+69. Draw: in the velocity row drag from bar 1 near the bottom to bar 4 near
+    the top: the bars follow the pointer while dragging and the notes of bars
+    1–4 rise in a straight line; Edit > Undo "Change Velocity" restores them
+    in one step. A drag from right to left works the same way. A single
+    click sets the one note at that grid line. A drag that leaves the row
+    above or below pins its end at the top or bottom.
+70. Shapes: in the controller row choose Shape Curved (Ease In), Flat,
+    Random, Free and Oscillator (Sine, Musical 1/4; then Clock 250 ms; then
+    Bars 1 with a meter change added in the list) and draw over bars 5–8
+    each time: the steps follow the shape; Free follows the pointer; an
+    Oscillator's period stays a quarter, 250 ms, or one bar whatever the
+    bar's length; Step 1/64 gives a denser line than 1/8. Each drawing
+    replaces the controller events in its range ("Draw Controllers").
+71. Modify: Mode Modify, Operation Scale: drawing a flat line at the top
+    over bars 1–4 doubles those velocities, at the middle leaves them,
+    at the bottom zeroes them; Add at the middle changes nothing; Max Limit
+    and Min Limit clip; Compress drawn as a rectangle maps the lowest value
+    in its range to its bottom and the highest to its top; in a Length row,
+    Legato makes each note end at the next; in the controller row Thin
+    (Step 1/4) leaves one event per quarter and Thicken fills between.
+    Option at the press limits the change to the selected notes.
+72. Erase: Mode Erase in the controller row deletes the controller events
+    under the drag; in the velocity row the status says "Erase works on
+    controller, program and automation rows." and nothing changes. Escape
+    during any drag leaves no undo step.
+73. Automation: add a lane "Auto" to Song (lane header menu), select it,
+    press Cmd-3; on the row title choose Automation > Built-in Synth >
+    Fader · Built-in Synth; draw a straight line from bar 1 at the bottom to
+    bar 5 at about two thirds up. Play from bar 1: the chords fade in
+    smoothly (no zipper noise, no clicks), reaching about unity at bar 5;
+    the list (Cmd-2 on Auto) shows two Automation rows "Fader · strip …"
+    with "0.0%" and about "63%".
+74. Stop and move: stop in the middle of the fade: the level stays where it
+    stopped; start an auditioned note (piano keyboard) to hear it. Move the
+    mixer's Built-in Synth fader: the level follows the fader. Play again
+    from bar 1: automation takes over at once. While playing, moving the
+    fader does not hold (automation wins). Delete the Auto lane's points and
+    play: the fader's own value plays.
+    With an insert whose parameter is automated, bypass it during playback
+    and un-bypass it: the parameter jumps to where the automation is now,
+    not to stale values.
+75. Mute, solo, pan and sends: add rows Mute · Built-in Synth and Pan ·
+    Built-in Synth to Auto's Strip Chart; draw mute on for bar 3 only (top
+    half), pan from left to right over bars 1–4: playback mutes exactly for
+    bar 3 (the mute row shows a held block) and pans across; with a bus and
+    a send (mixer), Send 1 automation changes the bus level; Solo on a bus
+    silences what does not feed it.
+76. Plugin parameters: add Apple's AUDelay (or the CLAP test gain if
+    installed) as an insert on Built-in Synth; Automation lists it with its
+    automatable parameters; draw Dry/Wet Mix (or Gain) from 0 to full over
+    bars 1–4 and play: the effect follows; the plugin's own window moves its
+    control while playing; no "Set Plugin Parameters" undo steps appear.
+    Stop: the plugin keeps the last value.
+77. Velocity scale and tempo: a row Automation > Velocity Scale > (the
+    chords' destination) drawn low over bars 1–4 makes those chords softer
+    on playback (the notes' own velocities in the list do not change). A
+    Tempo row drawn as a straight line from 120 down to 60 over bars 5–8 gives
+    a smooth slow-down; the list shows two tempo rows (the first "ramp"),
+    the transport's BPM falls steadily, and the ruler's bar lines spread. Drawing a tempo
+    line inside an existing tempo ramp leaves the tempo before and after the
+    drawn range unchanged.
+78. Panel and exact mode: Modify > Change Values… (Ctrl-Cmd-M), Operation
+    Strip Chart Line: target, operation and shape pickers and the From, To,
+    Start, End and Step fields edit the line numerically; an Automation
+    Target condition lists the targets; Apply acts on the selection (one undo
+    step); Modify Again repeats it. With Exact Mode on (Ctrl-Cmd-E) a Strip
+    Chart drag previews, goes back on release, and opens the panel with the
+    same line and a Position condition; Apply then makes it. The Kind
+    condition's menu offers "Automation". With several lanes selected,
+    Modify acts on every selected lane even though the chart shows only the
+    shown lane.
+79. Scale time: in the piano roll select two chords and Command-drag the end
+    of the last selected note one beat right: both chords stretch around the
+    first one's start ("Scale Time", one undo step); with Exact Mode on the
+    panel opens on Scale Time with the ratio filled in.
+80. Windows and VoiceOver: Option-Cmd-3 opens the Strip Chart in its own
+    window with the same rows; changing rows in one does not change the
+    other; Save, close and reopen the project: rows, bar settings and the
+    window come back. With VoiceOver (Cmd-F5) the chart is a group "Strip
+    Chart" whose values read like "Velocity 56, bar 1 beat 1" or "Fader ·
+    Built-in Synth -6.0 dB, bar 3 beat 1"; the bar's controls read their
+    labels (Mode, Operation, Shape, Curve, Wave, Period Kind, Period,
+    Phase, Step, Rows).
