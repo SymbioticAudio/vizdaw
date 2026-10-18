@@ -266,8 +266,7 @@ impl Server {
             )));
         }
         lock(&s.queue).clear();
-        // Wake the acceptor, then end every connection's read.
-        let _ = UnixStream::connect(&s.path);
+        // The acceptor polls the flag; then end every connection's read.
         if let Some(h) = self.acceptor.take() {
             let _ = h.join();
         }
@@ -285,11 +284,28 @@ impl Drop for Server {
 }
 
 fn accept(s: &Arc<Shared>, listener: &UnixListener) {
-    for stream in listener.incoming() {
+    // Non-blocking so `stop` never depends on the socket path to wake us.
+    if listener.set_nonblocking(true).is_err() {
+        return;
+    }
+    loop {
         if s.stopping.load(Ordering::SeqCst) {
             return;
         }
-        let Ok(stream) = stream else { continue };
+        let stream = match listener.accept() {
+            Ok((st, _)) => st,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+        };
+        if stream.set_nonblocking(false).is_err() {
+            continue;
+        }
         let n = s.connections.fetch_add(1, Ordering::SeqCst);
         if n >= s.config.max_connections {
             s.connections.fetch_sub(1, Ordering::SeqCst);

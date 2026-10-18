@@ -298,3 +298,20 @@ fn parallel_clients_get_their_own_replies() {
     stop.store(true, Ordering::SeqCst);
     app.join().unwrap();
 }
+
+#[test]
+fn stop_returns_even_when_the_socket_directory_is_gone() {
+    let d = private_dir();
+    let path = sock(&d);
+    let mut s = Server::start(&path, Config::default()).unwrap();
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        s.stop();
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+        "stop() hung after its directory was removed"
+    );
+}
