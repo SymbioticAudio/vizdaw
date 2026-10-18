@@ -244,6 +244,9 @@ public enum ControlCommands {
         case _ where DrumCommands.ids.contains(id):
             if let f = failure(DrumCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where fieldKeys[id] != nil:
+            // A bare key: it waits while a text field has the keyboard
+            // (final review M-5), as the other bare-key commands do.
+            guard m.transportKeysEnabled else { return unavailable(TransportCommands.textFieldHasKeyboard) }
             guard host.focus(fieldKeys[id] ?? .position, docID) else {
                 return unavailable("The window shows no transport fields.")
             }

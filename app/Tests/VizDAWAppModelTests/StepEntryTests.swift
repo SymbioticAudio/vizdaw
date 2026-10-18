@@ -251,10 +251,10 @@ import VizDAWCore
         let (s, id, m, f) = try demo()
         _ = run("step.entry", m, s, id)
         m.choose(1)
+        #expect(m.editor.status == StepEntryModel.sequenceChanged, "said when it ends")
         let before = f.stepCalls.count
         #expect(run("step.rest", m, s, id) != nil)
         #expect(f.stepCalls.count == before && !m.stepEntry.isOn)
-        #expect(m.editor.status == StepEntryModel.sequenceChanged)
     }
 
     @Test func stepEntryEndsWhenItsLaneIsGone() throws {
@@ -264,10 +264,10 @@ import VizDAWCore
         var snap = try f.snapshot()
         snap.version += 1
         m.apply(snap)
+        #expect(m.editor.status == StepEntryModel.laneGone, "said when it ends")
         let before = f.stepCalls.count
         #expect(run("step.rest", m, s, id) != nil)
         #expect(f.stepCalls.count == before && !m.stepEntry.isOn)
-        #expect(m.editor.status == StepEntryModel.laneGone)
     }
 
     @Test func stepKeysWinOnlyDuringStepEntry() {
@@ -282,5 +282,99 @@ import VizDAWCore
         keys.reserveNumberRow = true
         #expect(route(18, step: true) == .command("locator.go_1"))
         #expect(route(83, step: true) == .command("step.whole"))
+    }
+    // MARK: Final review fixes
+
+    /// I-1: step entry ends the moment the shown sequence changes, for the
+    /// menu, the keys and the next T alike.
+    @Test func stepEntryEndsAtOnceWhenAnotherSequenceIsShown() throws {
+        let (s, id, m, _) = try demo()
+        _ = run("step.entry", m, s, id)
+        m.choose(1)
+        #expect(!m.stepEntry.isOn && m.editor.status == StepEntryModel.sequenceChanged)
+        #expect(!StepCommands.isOn(StepCommands.entry, m), "the menu's check mark is off")
+        let keys = KeyBindings(defaults: MemoryDefaults())
+        let route = KeyRouter.route(
+            keyCode: 18, modifiers: noMods, typing: false, stepEntry: m.stepEntry.isOn, menus: true, keys: keys,
+            sequences: [])
+        #expect(route == .command("locator.go_1"), "the number row is the locators' again")
+        #expect(run("step.entry", m, s, id) == nil)
+        #expect(m.stepEntry.isOn && m.stepEntry.target?.seq == 1, "one T starts it in the shown sequence")
+    }
+
+    /// I-1: and the moment its lane is gone.
+    @Test func stepEntryEndsAtOnceWhenItsLaneIsGone() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        f.laneTable[3] = f.laneTable[3]?.filter { $0.id != 30 }
+        var snap = try f.snapshot()
+        snap.version += 1
+        m.apply(snap)
+        #expect(!m.stepEntry.isOn && m.editor.status == StepEntryModel.laneGone)
+        #expect(!m.listensForNotes, "MIDI goes back to the lists")
+    }
+
+    /// M-3: while playing, step entry's keys are used up (Delete must not
+    /// reach the editor and delete the selection).
+    @Test func stepKeysWhilePlayingAreUsedUp() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        m.playStop()
+        #expect(m.isPlaying)
+        let before = f.stepCalls.count
+        let failure = run("step.delete_last", m, s, id)
+        #expect(failure == .of(.failed, StepEntryModel.playingMessage))
+        #expect(f.stepCalls.count == before)
+        let outcome = ControlCommands.run("step.delete_last", args: [], doc: (id, m), store: s, host: host)
+        #expect(KeyDispatch.after(outcome, doc: m) == .handled, "the key goes no further")
+    }
+
+    /// M-5: with a sheet's field open, P/E/U and the step commands wait
+    /// (step.notes, the channel's alone, still runs).
+    @Test func fieldAndStepKeysWaitWhileATextFieldHasTheKeyboard() throws {
+        let (s, id, m, f) = try demo()
+        m.beginSlot(3)
+        #expect(!m.transportKeysEnabled)
+        let wait = ControlFailure.of(.unavailable, TransportCommands.textFieldHasKeyboard)
+        #expect(run("step.entry", m, s, id) == wait)
+        #expect(!m.stepEntry.isOn && !StepCommands.enabled(StepCommands.entry, m))
+        for key in ["transport.go_position", "transport.go_edit_in", "transport.go_punch"] {
+            #expect(run(key, m, s, id) == wait, "\(key)")
+        }
+        m.slotDraft = nil
+        _ = run("step.entry", m, s, id)
+        m.beginSlot(3)
+        let before = f.stepCalls.count
+        #expect(run("step.delete_last", m, s, id) == wait)
+        #expect(run("step.entry", m, s, id) == wait && m.stepEntry.isOn, "T does not end it behind the sheet")
+        #expect(f.stepCalls.count == before && !StepCommands.enabled("step.rest", m))
+        #expect(run("step.notes", [ControlArg(name: "pitches", value: .text(value: "C4"))], m, s, id) == nil)
+        #expect(f.stepCalls.count == before + 1)
+    }
+
+    /// Item 7: the engine's state is read before the playing check, and the
+    /// menu's enabled state matches what running would do.
+    @Test func stepEntryReadsTheTransportFirstAndTheMenuMatches() throws {
+        let (s, id, m, f) = try demo()
+        f.state.playing = true
+        #expect(run("step.entry", m, s, id)?.message == StepEntryModel.playingMessage, "not the stale cache")
+        #expect(!StepCommands.enabled(StepCommands.entry, m))
+        f.state.playing = false
+        m.poll()
+        _ = run("step.entry", m, s, id)
+        f.state.playing = true
+        let before = f.stepCalls.count
+        #expect(run("step.rest", m, s, id) == .of(.failed, StepEntryModel.playingMessage))
+        #expect(f.stepCalls.count == before)
+        #expect(!StepCommands.enabled("step.rest", m), "step inputs are off while playing")
+        f.state.playing = false
+        m.poll()
+        _ = run("step.entry", m, s, id)
+        f.laneTable[3] = []
+        var snap = try f.snapshot()
+        snap.version += 1
+        m.apply(snap)
+        #expect(!StepCommands.enabled(StepCommands.entry, m), "no lane to enter into")
+        #expect(run("step.entry", m, s, id) != nil)
     }
 }

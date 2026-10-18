@@ -296,6 +296,7 @@ public final class DocumentModel {
         guard seq != selectedSeq else { return }
         selectedSeq = seq
         refreshLanes()
+        stepEntry.checkTarget()
     }
 
     /// The sidebar chose a sequence: reference navigation starts over.
@@ -513,6 +514,7 @@ public final class DocumentModel {
             renamingSeq = nil
         }
         refreshLanes()
+        stepEntry.checkTarget()
     }
 
     private func refreshLanes() {

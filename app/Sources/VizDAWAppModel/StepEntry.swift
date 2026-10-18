@@ -19,6 +19,9 @@ public final class StepEntryModel {
     /// The sequence and lane steps go into.
     public private(set) var target: LaneRef?
 
+    /// On: `DocumentModel` ends it (`checkTarget`) the moment its target
+    /// is gone, so the step bar, `state.get`, the menu, the keys and MIDI
+    /// agree (final review I-1).
     public var isOn: Bool { state != nil }
 
     /// The lane step entry starts on: the selection's first lane of the
@@ -32,9 +35,9 @@ public final class StepEntryModel {
     /// Turns step entry on at the transport's position.
     public func start() -> KeyOutcome {
         guard let m = document else { return .unavailable("No document.") }
-        guard !m.isPlaying else { return .unavailable(Self.playingMessage) }
-        guard let t = Self.lane(m) else { return .unavailable("Select a sequence with a lane first.") }
         m.poll()
+        guard !m.isPlaying else { return .unavailable(Self.playingMessage) }
+        guard let t = Self.lane(m) else { return .unavailable(Self.noLane) }
         target = t
         state = stepStateNew(tick: m.transport.tick)
         return .done
@@ -49,6 +52,7 @@ public final class StepEntryModel {
     static let offMessage = "Step entry is off (Step > Step Entry)."
     static let sequenceChanged = "Step entry ended: the sequence changed."
     static let laneGone = "Step entry ended: its lane is gone."
+    static let noLane = "Select a sequence with a lane first."
 
     /// Why the target is no longer where steps can go (nil while it is).
     func endReason(_ m: DocumentModel) -> String? {
@@ -58,7 +62,18 @@ public final class StepEntryModel {
         return nil
     }
 
-    /// One input; a step moves the transport to the next position.
+    /// Ends step entry, saying why in the status line, once its target is
+    /// gone (the shown sequence changed, its lane was deleted). The
+    /// document calls it whenever either changes (plan 4f I2 ruling).
+    func checkTarget() {
+        guard let m = document, let why = endReason(m) else { return }
+        stop()
+        m.editor.status = why
+    }
+
+    /// One input; a step moves the transport to the next position. While
+    /// playing it is refused and the key used up (final review M-3: Delete
+    /// must not reach the editor and delete the selection).
     @discardableResult
     public func input(_ i: StepInputRow) -> KeyOutcome {
         guard let m = document, var s = state, let t = target else { return .unavailable(Self.offMessage) }
@@ -67,14 +82,14 @@ public final class StepEntryModel {
             m.editor.status = why
             return .unavailable(why)
         }
+        m.poll()
         guard !m.isPlaying else {
             // A key let go while playing never arrives: forget the held ones.
             s.held = Data()
             s.chord = []
             state = s
-            return .unavailable(Self.playingMessage)
+            return .refused(Self.playingMessage)
         }
-        m.poll()
         s.tick = m.transport.tick
         do {
             let r = try m.session.stepEntry(seq: t.seq, lane: t.lane, state: s, input: i)
@@ -166,8 +181,13 @@ public enum StepCommands: MenuCommands {
 
     public static var ids: Set<String> { Set(values.keys).union(inputs.keys).union([entry, notes]) }
 
+    /// As `run` decides: step entry can start with a lane to enter into
+    /// while stopped, its inputs while it is on and stopped; nothing while
+    /// a text field has the keyboard.
     public static func enabled(_ id: String, _ m: DocumentModel) -> Bool {
-        id == entry ? m.stepEntry.isOn || (m.selectedSeq != nil && !m.isPlaying) : m.stepEntry.isOn
+        guard m.transportKeysEnabled else { return false }
+        if id == entry { return m.stepEntry.isOn || (StepEntryModel.lane(m) != nil && !m.isPlaying) }
+        return m.stepEntry.isOn && !m.isPlaying
     }
 
     /// A menu item's check mark: step entry, the chosen value, dot, triplet.
@@ -188,10 +208,13 @@ public enum StepCommands: MenuCommands {
         run(id, on: on, pitches: nil, m)
     }
 
-    /// Runs `id` on `m`; `pitches` is step.notes' text.
+    /// Runs `id` on `m`; `pitches` is step.notes' text. Every command but
+    /// step.notes (the channel's alone) waits while a text field has the
+    /// keyboard (final review M-5).
     @discardableResult
     public static func run(_ id: String, on: Bool?, pitches: String?, _ m: DocumentModel) -> KeyOutcome {
         let step = m.stepEntry
+        if id != notes && !m.transportKeysEnabled { return .unavailable(TransportCommands.textFieldHasKeyboard) }
         if id == entry {
             let want = on ?? !step.isOn
             guard want != step.isOn else { return .done }

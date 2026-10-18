@@ -226,7 +226,7 @@ struct AppCommands: Commands {
             if let docID, let f = ControlCommands.fieldKeys[id] { _ = AppControlHost.shared.focus(f, docID) }
         }
         .keyboardShortcut(KeyMenu.shortcut(id))
-        .disabled(docID == nil)
+        .disabled(docID == nil || !(doc?.transportKeysEnabled ?? false))
     }
 
     private func report(_ o: KeyOutcome, _ doc: DocumentModel) {
