@@ -128,6 +128,34 @@ private func paint(_ ticks: [Int64], velocity: UInt16 = 100 << 9, row: UInt64 = 
         #expect(rows == ["Kick, C2, Drums, Kit", "Snare, D2, Drums, Kit", "Clap, D#2, Perc, Kit"])
     }
 
+    @Test func escapeInTheRenameFieldCancelsTheRename() throws {
+        let (f, m, c) = try grid()
+        defer { withExtendedLifetime(m) {} }
+        let h = c.headers
+        let top = EditorCanvas.rulerHeight
+        let n = f.edits.count
+        h.mouseDown(at: CGPoint(x: 20, y: top + 50), clicks: 2)
+        let field = try #require(h.renaming?.field)
+        field.stringValue = "Rim"
+        #expect(h.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        #expect(h.renaming == nil && field.superview == nil)
+        #expect(!m.editor.textEditing)
+        h.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification))
+        #expect(f.edits.count == n, "no rename sent")
+        #expect(m.drumGrid(.pane).row(0, 1)?.name == "Snare")
+        // Other commands are left to the field.
+        h.mouseDown(at: CGPoint(x: 20, y: top + 50), clicks: 2)
+        let again = try #require(h.renaming?.field)
+        #expect(!h.control(again, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        // The field editor's own cancel movement does not rename either.
+        again.stringValue = "Rim"
+        h.controlTextDidEndEditing(
+            Notification(
+                name: NSControl.textDidEndEditingNotification, object: again,
+                userInfo: ["NSTextMovement": NSTextMovement.cancel.rawValue]))
+        #expect(f.edits.count == n && h.renaming == nil && !m.editor.textEditing)
+    }
+
     @Test func everyRowHeaderNamesItsDestinationAndDimsAnInheritedOne() throws {
         let (_, m, c) = try grid()
         defer { withExtendedLifetime(m) {} }

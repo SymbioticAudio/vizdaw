@@ -239,7 +239,26 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
         renaming = nil
         editor.endTextEditing("drumRow")
         r.field.removeFromSuperview()
+        let movement = (obj.userInfo?["NSTextMovement"] as? Int).flatMap(NSTextMovement.init(rawValue:))
+        guard movement != .cancel else { return }
         model.rename(r.key, to: r.field.stringValue)
+    }
+
+    /// Escape cancels a rename: the name stays and no edit is sent.
+    public func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        cancelRename()
+        return true
+    }
+
+    /// Ends a rename without renaming.
+    func cancelRename() {
+        guard let r = renaming else { return }
+        renaming = nil
+        editor.endTextEditing("drumRow")
+        r.field.abortEditing()
+        r.field.removeFromSuperview()
+        window?.makeFirstResponder(self)
     }
 
     /// Torn down mid-rename: give the keyboard back to the transport keys.
