@@ -155,4 +155,18 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         #expect(odd.punchIn == -5 && odd.punchOut == 7)
         #expect(EditorLayout.decode(#"{"snap":{"division":"half","triplet":false,"dotted":false,"enabled":true}}"#).transport == TransportMarks())
     }
+
+    @Test func theSmallestTickIsRefusedNotATrap() {
+        let min = "-9223372036854775808"
+        let t = EditorLayout.decode(
+            #"{"transport":{"locators":[\#(min),5],"punchIn":\#(min),"punchOut":7}}"#
+        ).transport
+        #expect(t.locators[0] == nil && t.locators[1] == 5)
+        #expect(t.punchIn == 0 && t.punchOut == 4 * 61_440, "an unreadable range: the defaults")
+        var m = TransportMarks()
+        let a = m.setLocator(0, Int64.min)
+        let b = m.setPunch(in: Int64.min, out: 0)
+        #expect(!a && !b)
+        #expect(m == TransportMarks())
+    }
 }

@@ -43,7 +43,7 @@ public struct TransportMarks: Codable, Equatable, Sendable {
     }
 
     /// `t` when it is within the model's limit.
-    static func sane(_ t: Int64) -> Int64? { abs(t) <= tickLimit ? t : nil }
+    static func sane(_ t: Int64) -> Int64? { (-tickLimit...tickLimit).contains(t) ? t : nil }
 
     /// Locator `n` (0–9), if set.
     public func locator(_ n: Int) -> Int64? {
