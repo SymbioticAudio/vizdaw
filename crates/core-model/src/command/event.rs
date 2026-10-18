@@ -174,7 +174,7 @@ impl EventCmd {
 }
 
 /// Note name such as `C2` for 36 (C-1 is note 0, middle C 60 is `C4`).
-pub(crate) fn note_name(n: u8) -> String {
+pub fn note_name(n: u8) -> String {
     const NAMES: [&str; 12] = [
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     ];
