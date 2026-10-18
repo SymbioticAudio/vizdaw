@@ -39,6 +39,10 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate {
             stack.addArrangedSubview(field)
             if f == .position || f == .editOut { stack.setCustomSpacing(16, after: field) }
         }
+        // Tab and Shift-Tab go round the fields in order (Edit Out and
+        // Punch Out have no key of their own; Ruling 16, final review I-2).
+        let order = TransportField.allCases.compactMap { fields[$0] }
+        for (i, field) in order.enumerated() { field.nextKeyView = order[(i + 1) % order.count] }
         addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -97,11 +101,23 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate {
         if movement != .cancel, text != document.fieldText(f) { document.commitField(f, text) }
         (fields[f] as? TransportTextField)?.armed = false
         refresh()
-        // Enter commits and gives the keyboard back to the keys (Tab moves
-        // on to the next field). Next turn: the field selects its text
-        // again after this notification.
+        // Enter commits and gives the keyboard back to the keys. Next
+        // turn: the field selects its text again after this notification.
         if movement == .return {
             DispatchQueue.main.async { [weak self] in self?.giveKeyboardBack(f) }
+        }
+        // Tab and Shift-Tab move on: AppKit selects the next key view
+        // after this notification, so arm that field now (a field takes the
+        // keyboard only when armed); disarm it next turn if it did not.
+        if movement == .tab || movement == .backtab {
+            let all = TransportField.allCases
+            let i = all.firstIndex(of: f) ?? 0
+            let next = all[(i + (movement == .tab ? 1 : all.count - 1)) % all.count]
+            guard let field = fields[next] as? TransportTextField else { return }
+            field.armed = true
+            DispatchQueue.main.async {
+                if field.currentEditor() == nil { field.armed = false }
+            }
         }
     }
 

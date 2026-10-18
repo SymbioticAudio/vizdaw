@@ -93,6 +93,27 @@ import VizDAWCore
         #expect(TransportCommands.locator("transport.stop") == nil)
     }
 
+    /// Item 6: a locator the marks refuse is a refusal, locators need no
+    /// sequence in the menu either, and Stop reads the engine first.
+    @Test func locatorRefusalsMenusAndStopMatchTheirRun() throws {
+        let (s, id, m, f) = try demo()
+        f.state.tick = 1 << 41
+        #expect(failure(run("locator.set_2", s, id))?.code == .failed, "past the tick limit")
+        #expect(m.editor.layout.transport.locator(2) == nil)
+        let empty = try #require(s.newEmpty())
+        let e = try #require(s.model(empty))
+        #expect(e.selectedSeq == nil)
+        for cmd in ["locator.set_1", "locator.clear_1", "locator.go_1"] {
+            #expect(TransportCommands.enabled(cmd, e), "\(cmd) runs without a sequence")
+        }
+        #expect(failure(run("locator.set_1", s, empty)) == nil)
+        f.state.tick = 0
+        m.poll()
+        f.state.playing = true
+        #expect(failure(run("transport.stop", s, id)) == nil, "not the stale cache")
+        #expect(!f.state.playing)
+    }
+
     @Test func modesToggleOrTakeTheirFlag() throws {
         let (s, id, m, _) = try demo()
         for (cmd, value) in [

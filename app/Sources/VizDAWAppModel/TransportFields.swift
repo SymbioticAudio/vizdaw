@@ -7,6 +7,9 @@ import VizDAWCore
 public enum TransportField: String, CaseIterable, Sendable {
     case position, editIn, editOut, punchIn, punchOut
 
+    /// Why a punch range was refused: it would pass the last position.
+    public static let punchLimit = "The punch range must end by the last position."
+
     public var title: String {
         switch self {
         case .position: "Position"
@@ -84,15 +87,19 @@ extension DocumentModel {
             }
             editor.setSelection(
                 SelectionRow(timeRange: TickRange(start: r.start, end: t), lanes: sel.lanes, events: sel.events))
-        case .punchIn:
-            let out = editor.layout.transport.punchOut
-            editor.updateLayout { $0.transport.setPunch(in: t, out: out > t ? out : t + bar) }
-        case .punchOut:
-            guard t > editor.layout.transport.punchIn else {
+        case .punchIn, .punchOut:
+            var marks = editor.layout.transport
+            if f == .punchOut, t <= marks.punchIn {
                 editor.status = "Punch Out must be after Punch In."
                 return false
             }
-            editor.updateLayout { $0.transport.setPunch(in: $0.transport.punchIn, out: t) }
+            let range = f == .punchIn ? (t, marks.punchOut > t ? marks.punchOut : t + bar) : (marks.punchIn, t)
+            // A range past the last position changes nothing (item 11).
+            guard marks.setPunch(in: range.0, out: range.1) else {
+                editor.status = TransportField.punchLimit
+                return false
+            }
+            editor.updateLayout { $0.transport = marks }
         }
         return true
     }

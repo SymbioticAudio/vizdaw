@@ -92,6 +92,14 @@ private let beat: Int64 = 15_360
         #expect(!v.control(pos, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:))))
     }
 
+    /// Lets the main queue run what is already on it (the fields view
+    /// re-observes there, ruling F4): no fixed sleep (final review M-6).
+    func mainQueueHop() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { c.resume() }
+        }
+    }
+
     @Test func aFocusedFieldKeepsItsTextAndPositionFollowsAfterAnEdit() async throws {
         let (f, m) = try model()
         let v = TransportFieldsView(document: m)
@@ -109,7 +117,7 @@ private let beat: Int64 = 15_360
         for t in [3 * bar, 4 * bar] {
             f.state.tick = t
             m.poll()
-            try await Task.sleep(for: .milliseconds(50))
+            await mainQueueHop()
         }
         #expect(pos.stringValue == "5.1.0")
         w.makeFirstResponder(nil)
@@ -125,9 +133,47 @@ private let beat: Int64 = 15_360
         for t in [6 * bar, 7 * bar] {
             f.state.tick = t
             m.poll()
-            try await Task.sleep(for: .milliseconds(100))
+            await mainQueueHop()
         }
         #expect(pos.stringValue == "8.1.0")
+    }
+
+    /// Item 11: a punch range past the tick limit is refused, not
+    /// reported as set.
+    @Test func aPunchRangePastTheLimitIsRefused() throws {
+        // 255/1 bars are 15 667 200 ticks: bar 70 180 starts within the
+        // limit, and a bar after it is past it.
+        let f = demoFake()
+        var info = fourFour(3)
+        info.meter = [MeterEntryRow(tick: 0, num: 255, den: 1, sharps: 0, minor: false)]
+        f.infoTable[3] = info
+        let m = try DocumentModel(session: f)
+        #expect(m.selectedSeq == 3)
+        let before = m.editor.layout.transport
+        #expect(!m.commitField(.punchIn, "70180"), "Punch Out would pass the limit")
+        #expect(m.editor.layout.transport == before)
+        #expect(m.editor.status == TransportField.punchLimit)
+    }
+
+    /// I-2: Tab moves the keyboard to the next field and Shift-Tab back
+    /// (Edit Out and Punch Out have no key of their own).
+    @Test func tabMovesBetweenTheFields() throws {
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        w.contentView = v
+        let editOut = try #require(v.fields[.editOut])
+        let punchIn = try #require(v.fields[.punchIn])
+        #expect(v.focus(.editIn))
+        (w.firstResponder as? NSTextView)?.insertTab(nil)
+        #expect(editOut.currentEditor() != nil && w.firstResponder === editOut.currentEditor(), "Tab: Edit Out")
+        (w.firstResponder as? NSTextView)?.insertBacktab(nil)
+        #expect(v.fields[.editIn]?.currentEditor() != nil, "Shift-Tab: Edit In again")
+        #expect(v.focus(.punchIn))
+        (w.firstResponder as? NSTextView)?.insertTab(nil)
+        #expect(v.fields[.punchOut]?.currentEditor() != nil, "Tab: Punch Out")
+        #expect(punchIn.currentEditor() == nil)
     }
 
     @Test func fieldKeysFocusTheirField() throws {

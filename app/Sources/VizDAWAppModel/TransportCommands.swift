@@ -56,6 +56,8 @@ public enum TransportCommands {
         case "transport.stop": m.isPlaying
         case "transport.overdub", "transport.punch", "editors.snap": true
         case "transport.play_from_edit_in": m.selectedSeq != nil && m.editor.selection.timeRange != nil
+        // Locators need no sequence, as in `run`.
+        case _ where locator(id) != nil: true
         default: m.selectedSeq != nil
         }
     }
@@ -96,6 +98,7 @@ public enum TransportCommands {
             m.editor.updateLayout { $0.snap.enabled = on ?? !$0.snap.enabled }
             return .done
         case "transport.stop":
+            m.poll()
             guard m.isPlaying else { return .unavailable("Nothing is playing.") }
             return attempt { try m.stopAndReturn() }
         default: break
@@ -159,11 +162,16 @@ public enum TransportCommands {
             return attempt { try m.moveTo(t) }
         case "set":
             m.poll()
-            let t = m.transport.tick
-            m.editor.updateLayout { $0.transport.setLocator(n, t) }
+            var marks = m.editor.layout.transport
+            guard marks.setLocator(n, m.transport.tick) else {
+                return .refused("Locator \(n) cannot be set at this position.")
+            }
+            m.editor.updateLayout { $0.transport = marks }
             return .done
         default:
-            m.editor.updateLayout { $0.transport.setLocator(n, nil) }
+            var marks = m.editor.layout.transport
+            guard marks.setLocator(n, nil) else { return .refused("There is no locator \(n).") }
+            m.editor.updateLayout { $0.transport = marks }
             return .done
         }
     }
