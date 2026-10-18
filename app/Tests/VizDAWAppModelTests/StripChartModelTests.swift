@@ -67,6 +67,26 @@ private let q: Int64 = 15_360
         #expect(t.names.dests[2] == "Piano")
     }
 
+    @Test func savedRowsOfDeletedTargetsAreDropped() throws {
+        // Parked T12: a row saved for a strip or slot that is gone.
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        defer { withExtendedLifetime(m) {} }
+        m.editor.openDetail(.lane(seq: 3, lane: 31), kind: .stripChart)
+        let s = StripChartModel.pane(m)
+        m.editor.updateLayout {
+            $0.detail?.stripRows = [
+                .automation(.fader(strip: 1)), .automation(.fader(strip: 99)), .automation(.param(slot: 77, param: 1)),
+                .controller(7),
+            ]
+        }
+        #expect(s.rows == [.automation(.fader(strip: 1)), .controller(7)])
+        s.setRow(1, to: .pitchBend)
+        #expect(s.rows == [.automation(.fader(strip: 1)), .pitchBend], "edits act on the rows shown")
+        m.editor.updateLayout { $0.detail?.stripRows = [.automation(.mute(strip: 99))] }
+        #expect(s.rows == [.velocity])
+    }
+
     @Test func aBusyReadIsNotCachedAndTheNextCallFillsTheMenus() throws {
         let f = mixerFake()
         let m = try DocumentModel(session: f)

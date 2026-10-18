@@ -136,6 +136,17 @@ public struct StripNames: Equatable, Sendable {
 
     public func param(_ slot: UInt64, _ id: UInt64) -> ParamRow? { params[slot]?.first { $0.id == id } }
 
+    /// Whether `t`'s strip, plugin slot or destination still exists (names
+    /// read from a mixer with no strips know nothing: every target passes).
+    public func knows(_ t: AutoTarget) -> Bool {
+        guard !strips.isEmpty else { return true }
+        switch t {
+        case .fader(let s), .pan(let s), .mute(let s), .solo(let s), .send(let s, _): return strips[s] != nil
+        case .param(let slot, _): return slots[slot] != nil
+        case .velocityScale(let d): return dests[d] != nil
+        }
+    }
+
     func strip(_ s: UInt64) -> String { strips[s] ?? "Strip \(s)" }
 
     public func title(_ t: AutoTarget) -> String {

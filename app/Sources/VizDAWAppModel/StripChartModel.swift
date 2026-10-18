@@ -144,7 +144,18 @@ public final class StripChartModel {
         return rows.first.map { LaneKey(t.seq, $0.id) }
     }
 
-    public var rows: [StripLane] { state?.stripRows ?? [.velocity] }
+    /// The rows, without automation rows whose strip, slot or destination
+    /// was deleted since they were saved (parked T12).
+    public var rows: [StripLane] {
+        let saved = state?.stripRows ?? [.velocity]
+        guard saved.contains(where: { if case .automation = $0 { true } else { false } }) else { return saved }
+        let n = names
+        let kept = saved.filter { lane in
+            if case let .automation(t) = lane { return n.knows(t) }
+            return true
+        }
+        return kept.isEmpty ? [.velocity] : kept
+    }
 
     public func setRow(_ i: Int, to lane: StripLane) {
         updateRows { r in
@@ -166,7 +177,7 @@ public final class StripChartModel {
 
     private func updateRows(_ change: (inout [StripLane]) -> Void) {
         guard var s = state else { return }
-        var r = s.stripRows ?? [.velocity]
+        var r = rows
         change(&r)
         s.stripRows = r
         write(s)
