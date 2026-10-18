@@ -90,6 +90,20 @@ final class FilledView: NSView {
         #expect(pixel(png.data, 20, 38) == "b", "the right way up")
     }
 
+    @Test func aViewThatNeverDrewShowsWhatItDrawsNow() throws {
+        // A view made while its window was occluded has never drawn: its
+        // layer has no contents, yet the snapshot shows it (final review I2).
+        let parent = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        parent.wantsLayer = true
+        let v = FilledView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        v.wantsLayer = true
+        parent.addSubview(v)
+        #expect(v.layer?.contents == nil, "never drawn")
+        let png = try #require(WindowSnapshot.png(of: parent, scale: 1))
+        #expect(pixel(png.data, 20, 10) == "g", "what the view draws")
+        #expect(pixel(png.data, 20, 38) == "b", "the right way up")
+    }
+
     @Test func aSelfDrawnViewInAScrollViewStaysInsideIt() throws {
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
         root.wantsLayer = true

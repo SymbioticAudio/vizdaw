@@ -12,7 +12,8 @@ import QuartzCore
 ///    sublayers (the playhead) on top. AppKit does not redraw an occluded
 ///    window (behind the agent's terminal, or on a locked screen), so its
 ///    layers can hold a stale picture; drawing the views shows what they
-///    hold now.
+///    hold now. A view that has never drawn (opened while its window
+///    was occluded) is drawn too, though its layer has no contents.
 ///
 /// Content the window server composites alone (vibrancy materials, Metal
 /// or video layers, plugin views of other processes) renders flat or empty.
@@ -79,7 +80,11 @@ public enum WindowSnapshot {
     static func redrawSelfDrawn(under root: NSView, ctx: CGContext) {
         func walk(_ v: NSView) {
             for s in v.subviews where !s.isHidden && s.alphaValue > 0 {
-                if s.layer?.contents != nil, drawsItself(s), !(s is NSVisualEffectView) {
+                // Also a view that never drew (made while its window was
+                // occluded): its layer has no contents for step 1 to render.
+                if s.layer != nil, !s.wantsUpdateLayer, !s.bounds.isEmpty, drawsItself(s),
+                    !(s is NSVisualEffectView)
+                {
                     redraw(s, root: root, ctx: ctx)
                 }
                 walk(s)
