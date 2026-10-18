@@ -91,6 +91,8 @@ fn chords_read_and_write_as_menus_show_them() {
     assert_eq!(c("F").menu_key(), "f");
     assert_eq!(c("Keypad1").menu_key(), "1");
     assert_eq!(c("Delete").menu_key(), "\u{8}");
+    assert_eq!(c("ForwardDelete").menu_key(), "\u{f728}");
+    assert_ne!(c("ForwardDelete").menu_key(), c("Delete").menu_key());
     assert_eq!(Chord::of_slot("a", 8), Some(c("⌘A")));
     assert_eq!(Chord::of_slot("F5", 4 | 16), Some(c("⌥F5")));
     assert_eq!(Chord::of_slot("nope", 0), None);

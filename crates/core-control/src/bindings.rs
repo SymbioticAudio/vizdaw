@@ -247,7 +247,7 @@ impl Chord {
             "Space" => ' ',
             "Delete" => '\u{8}',
             "Escape" => '\u{1b}',
-            "ForwardDelete" => '\u{7f}',
+            "ForwardDelete" => '\u{f728}',
             "Home" => '\u{f729}',
             "End" => '\u{f72b}',
             "PageUp" => '\u{f72c}',
