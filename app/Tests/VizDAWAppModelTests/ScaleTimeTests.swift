@@ -16,12 +16,12 @@ private let q: Int64 = 15_360
         #expect(
             d.command(rawTicks: 2 * q, snap: off, meter: [])
                 == .selectAndModify(
-                    rule: nil, mode: .select, modify: .scaleTime(num: 2, den: 1, anchor: q), toCopy: false))
+                    rule: ScaleTimeDrag.notesOnly, mode: .refine, modify: .scaleTime(num: 2, den: 1, anchor: q), toCopy: false))
         #expect(d.command(rawTicks: 0, snap: off, meter: []) == nil, "no change, no step")
         #expect(
             d.command(rawTicks: -100 * q, snap: off, meter: [])
                 == .selectAndModify(
-                    rule: nil, mode: .select, modify: .scaleTime(num: 1, den: UInt32(2 * q), anchor: q), toCopy: false),
+                    rule: ScaleTimeDrag.notesOnly, mode: .refine, modify: .scaleTime(num: 1, den: UInt32(2 * q), anchor: q), toCopy: false),
             "never shorter than a tick")
         #expect(ScaleTimeDrag(notes: []) == nil)
     }
@@ -44,15 +44,20 @@ private let q: Int64 = 15_360
         v.contentMouseUp(right, modifiers: [.command])
         #expect(
             f.gestureEdits.last
-                == .selectAndModify(rule: nil, mode: .select, modify: .scaleTime(num: 3, den: 2, anchor: 0), toCopy: false))
-        #expect(f.calls.contains("begin Scale Time"))
+                == .selectAndModify(
+                    rule: ScaleTimeDrag.notesOnly, mode: .refine, modify: .scaleTime(num: 3, den: 2, anchor: 0),
+                    toCopy: false), "the selected notes only")
+        #expect(f.calls.first == "begin Scale Time" && f.calls.last == "end", "without exact mode it applies")
+        #expect(m.editor.gesture == nil)
     }
 
     @Test func exactModeOpensScaleTimeInThePanel() throws {
         let cmd: EditCommand = .selectAndModify(
-            rule: nil, mode: .select, modify: .scaleTime(num: 3, den: 2, anchor: 0), toCopy: false)
+            rule: ScaleTimeDrag.notesOnly, mode: .refine, modify: .scaleTime(num: 3, den: 2, anchor: 0), toCopy: false)
         let r = try #require(ExactMode.request(for: cmd, lanes: [LaneKey(3, 31)], origin: .notes))
         #expect(r.task == .change && r.config.modify.op == .scaleTime(num: 3, den: 2, anchor: 0))
+        #expect(r.config.select.enabled && r.config.select.mode == .refine)
+        #expect(r.config.select.conditions == ScaleTimeDrag.notesOnly.conditions, "the panel limits it to notes too")
         #expect(r.events == nil, "it acts on the selection (the dragged notes)")
         #expect(ExactMode.request(for: cmd, lanes: [], origin: .blocks) == nil)
     }

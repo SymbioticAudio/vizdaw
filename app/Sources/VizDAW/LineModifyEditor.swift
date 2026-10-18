@@ -14,7 +14,6 @@ struct LineModifyEditor: View {
         ("Draw", .draw), ("Set", .set), ("Scale", .scale), ("Add", .add), ("Max Limit", .limitMax),
         ("Min Limit", .limitMin), ("Compress", .compress), ("Thin", .thin), ("Thicken", .thicken), ("Legato", .legato),
     ]
-    static let basics: [StripLane] = [.velocity, .releaseVelocity, .duration, .pitchBend, .channelPressure, .program, .tempo]
 
     private var targetTitle: String {
         StripLane(target).map { $0.title(model.automationNames) } ?? "Any Value"
@@ -22,13 +21,20 @@ struct LineModifyEditor: View {
 
     var body: some View {
         Menu(targetTitle) {
-            ForEach(Self.basics, id: \.self) { lane in
+            ForEach(LineTargetChoices.basics, id: \.self) { lane in
                 Button(lane.title(model.automationNames)) { model.setLineTarget(lane) }
             }
             Menu("Controller") {
-                ForEach(0..<128, id: \.self) { i in
-                    Button(StripLane.controller(UInt8(i)).title(model.automationNames)) {
-                        model.setLineTarget(.controller(UInt8(i)))
+                ForEach(LineTargetChoices.controllers, id: \.self) { lane in
+                    Button(lane.title(model.automationNames)) { model.setLineTarget(lane) }
+                }
+            }
+            Menu("Poly Pressure") {
+                ForEach(LineTargetChoices.polyPressure, id: \.title) { octave in
+                    Menu(octave.title) {
+                        ForEach(octave.lanes, id: \.self) { lane in
+                            Button(lane.title(model.automationNames)) { model.setLineTarget(lane) }
+                        }
                     }
                 }
             }

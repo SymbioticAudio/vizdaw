@@ -56,9 +56,14 @@ public enum ExactMode {
         if origin == .stripChart { return lineRequest(cmd, lanes: sorted) }
         // The piano roll's scale-time drag acts on the selection (Plan 4d
         // Ruling 23).
-        if origin == .notes, case let .selectAndModify(nil, _, .scaleTime(num, den, anchor)?, _) = cmd {
+        if origin == .notes, case let .selectAndModify(rule, mode, .scaleTime(num, den, anchor)?, _) = cmd {
             var c = SelectModifyConfig.preset(.change)
             c.modify.op = .scaleTime(num: num, den: den, anchor: anchor)
+            if let rule {
+                c.select.enabled = true
+                c.select.mode = mode
+                c.select.conditions = rule.conditions
+            }
             return ModifyRequest(task: .change, config: c, events: nil, lanes: sorted, range: nil)
         }
         guard origin == .notes || origin == .blocks, case .event(let e) = cmd else { return nil }

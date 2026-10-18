@@ -489,7 +489,8 @@ public final class SelectModifyModel {
                 LinePointRow(tick: l.from, value: l.start), LinePointRow(tick: l.to, value: l.end),
             ])
         default:
-            var s = StripChartSettings()
+            // The Strip Chart bar's shape settings are the defaults (parked T15).
+            var s = editor?.layout.stripChart ?? StripChartSettings()
             s.shape = k
             line.shape = s.shapeRow(seed: nextSeed())
         }
@@ -516,12 +517,27 @@ public final class SelectModifyModel {
         guard case .line(let t, let op, var l) = config.modify.op, case let .oscillator(w, _, ph) = l.shape else {
             return
         }
-        var s = StripChartSettings()
+        var s = editor?.layout.stripChart ?? StripChartSettings()
         s.period = k
         l.shape = .oscillator(wave: w, period: s.periodRow, phase: ph)
         config.modify.op = .line(target: t, op: op, line: l)
         drafts = [:]
         invalid = []
+    }
+}
+
+/// The panel's Line target menu (Plan 4d Ruling 24): what the Strip
+/// Chart's row menu offers but automation, which comes from the mixer.
+public enum LineTargetChoices {
+    public static let basics: [StripLane] = [
+        .velocity, .releaseVelocity, .duration, .pitchBend, .channelPressure, .program, .tempo,
+    ]
+    public static let controllers: [StripLane] = (0...127).map { .controller(UInt8($0)) }
+    /// Poly pressure by octave, as the Strip Chart's row menu groups it.
+    public static let polyPressure: [(title: String, lanes: [StripLane])] = (0..<11).map { octave in
+        let lo = UInt8(octave * 12)
+        let hi = UInt8(min(octave * 12 + 11, 127))
+        return (PitchName.name(lo) + "–" + PitchName.name(hi), (lo...hi).map { .polyPressure($0) })
     }
 }
 

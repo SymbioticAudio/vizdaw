@@ -206,6 +206,16 @@ extension ModifyRow {
         return f
     }
 
+    /// `t` moved from range `a` to range `b` in proportion (a zero-width
+    /// `a` maps to `b`'s start), inside `b`.
+    static func remap(_ t: Int64, from a: (Int64, Int64), to b: (Int64, Int64)) -> Int64 {
+        let span = Double(a.1) - Double(a.0)
+        guard span > 0 else { return b.0 }
+        let x = (Double(t) - Double(a.0)) / span
+        let v = (Double(b.0) + x * (Double(b.1) - Double(b.0))).rounded()
+        return Int64(min(max(v, Double(b.0)), Double(b.1)))
+    }
+
     static func lineNumbers(_ l: LineRow) -> [Int64] {
         var n = [l.from, l.to, l.start, l.end, l.step]
         if case .oscillator(_, let p, let ph) = l.shape {
@@ -223,6 +233,12 @@ extension ModifyRow {
         var o = l
         o.from = at(0)
         o.to = max(at(1), at(0))
+        // A Free line's points move with its range (parked T15).
+        if case .free(let points) = l.shape, o.from != l.from || o.to != l.to {
+            o.shape = .free(points: points.map { p in
+                LinePointRow(tick: Self.remap(p.tick, from: (l.from, l.to), to: (o.from, o.to)), value: p.value)
+            })
+        }
         o.start = at(2)
         o.end = at(3)
         o.step = max(at(4), 1)

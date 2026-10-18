@@ -31,10 +31,16 @@ public struct ScaleTimeDrag: Equatable, Sendable {
         guard newSpan != span else { return nil }
         let g = Self.gcd(newSpan, span)
         return .selectAndModify(
-            rule: nil, mode: .select,
+            rule: Self.notesOnly, mode: .refine,
             modify: .scaleTime(num: UInt32(clamping: newSpan / g), den: UInt32(clamping: span / g), anchor: anchor),
             toCopy: false)
     }
+
+    /// The selection's notes only: the anchor and span come from notes, so
+    /// a selected controller or automation point is not scaled with them
+    /// (parked T15).
+    public static let notesOnly = RuleRow(
+        conditions: [ConditionRow(test: .kinds(kinds: [.note]), negate: false)], matchAll: true)
 
     static func gcd(_ a: Int64, _ b: Int64) -> Int64 {
         var (x, y) = (abs(a), abs(b))

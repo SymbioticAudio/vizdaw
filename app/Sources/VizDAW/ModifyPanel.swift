@@ -201,10 +201,7 @@ struct KindsMenu: View {
     let model: SelectModifyModel
     let index: Int
     let kinds: [EventKindRow]
-    static let all: [EventKindRow] = [
-        .note, .cc, .pitchBend, .channelPressure, .polyPressure, .program, .sysEx, .text, .reference, .audioRegion,
-        .automation,
-    ]
+    static let all = PanelKinds.all
 
     var body: some View {
         Menu(kinds.isEmpty ? "No Kind" : kinds.map { ListKind($0).title }.joined(separator: ", ")) {

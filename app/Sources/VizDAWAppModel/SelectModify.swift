@@ -429,3 +429,12 @@ extension Scale {
     /// The named scale with this mask, if any.
     public static func of(mask: UInt16) -> Scale? { allCases.first { $0.mask == mask } }
 }
+
+/// The kinds the panel's Kind condition offers (automation included,
+/// Plan 4d Ruling 24).
+public enum PanelKinds {
+    public static let all: [EventKindRow] = [
+        .note, .cc, .pitchBend, .channelPressure, .polyPressure, .program, .sysEx, .text, .reference, .audioRegion,
+        .automation,
+    ]
+}
