@@ -23,6 +23,7 @@ enum EditorWindows {
         let c = EditorWindowController(model: model, doc: doc, window: window) { byUser in
             if byUser { model.editor.closeWindow(window.id) }
             model.dropPianoRoll(.window(window.id))
+            model.dropStripChart(.window(window.id))
             // Every close (by the user, pruned, with the document) drops its list.
             model.dropList(.window(window.id))
             // Called from windowWillClose: dropping the last strong reference to the

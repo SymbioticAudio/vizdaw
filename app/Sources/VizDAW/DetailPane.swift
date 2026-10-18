@@ -2,7 +2,8 @@ import SwiftUI
 import VizDAWAppModel
 
 /// A detail editor's frame: the editor picker, its target, Open in Window,
-/// and the editor: the piano roll (4b), the list (4c), else a placeholder.
+/// and the editor: the piano roll (4b), the list (4c), the Strip Chart
+/// (4d), else a placeholder.
 struct DetailPane: View {
     let model: DocumentModel
     let state: DetailState
@@ -45,6 +46,8 @@ struct DetailPane: View {
                 PianoRollEditor(model: roll)
             } else if state.kind == .list {
                 ListEditorPane(model: model.list(slot))
+            } else if state.kind == .stripChart {
+                StripChartEditor(model: model.stripChart(slot))
             } else {
                 ContentUnavailableView(
                     "\(state.kind.title) arrives in plan \(state.kind.plan)",

@@ -176,4 +176,17 @@ private let q: Int64 = 15_360
             Issue.record("no line in the panel")
         }
     }
+
+    @Test func aTornWindowHasItsOwnStripChart() throws {
+        let (_, m, s) = try make()
+        s.setRow(0, to: .tempo)
+        let w = try #require(m.editor.tearOff(.stripChart, shown: nil))
+        let ws = m.stripChart(.window(w.id))
+        #expect(ws.rows == [.tempo], "a window starts with the pane's rows")
+        ws.setRow(0, to: .program)
+        #expect(s.rows == [.tempo] && ws.rows == [.program])
+        #expect(m.stripChart(.window(w.id)) === ws)
+        m.dropStripChart(.window(w.id))
+        #expect(m.stripChart(.window(w.id)) !== ws, "a closed window's chart goes")
+    }
 }
