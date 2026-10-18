@@ -22,6 +22,10 @@ pub mod error;
 pub mod keys;
 pub mod params;
 pub mod protocol;
+pub mod registry;
+pub mod request;
+pub mod wait;
 
 pub use error::{ControlError, ErrorCode};
 pub use protocol::{RawRequest, RequestId};
+pub use request::{Command, validate};
