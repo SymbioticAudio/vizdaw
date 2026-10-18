@@ -86,6 +86,15 @@ public final class StepEntryModel {
             if r.moved { try m.moveTo(r.state.tick) }
             return .done
         } catch {
+            switch i {
+            case .noteOn, .noteOff:
+                // A refused key event may never be matched: forget the held keys.
+                var cleared = s
+                cleared.held = Data()
+                cleared.chord = []
+                state = cleared
+            default: break
+            }
             let message = AlertItem(error, title: "").message
             m.editor.status = message
             return .refused(message)

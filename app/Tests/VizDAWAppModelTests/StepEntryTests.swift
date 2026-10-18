@@ -165,6 +165,39 @@ import VizDAWCore
         #expect(held.held.isEmpty && held.chord.isEmpty, "the stale key was let go")
     }
 
+    func holding(_ f: FakeSession) {
+        f.stepAnswer = { state, input in
+            var r = state
+            if case .noteOn(let n) = input { r.held.append(n.pitch) }
+            if case .noteOff(let p) = input { r.held.removeAll { $0 == p } }
+            return StepResultRow(state: r, snapshot: nil, moved: false)
+        }
+    }
+
+    @Test func aNoteOffRefusedForAnyReasonDoesNotStickTheChord() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        holding(f)
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0x8000, channel: 0)])
+        f.stepEntryError = .Model(message: "busy")
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0, channel: 0, on: false)])
+        f.stepEntryError = nil
+        let before = f.stepCalls.count
+        m.stepEntry.receive([NoteInRow(pitch: 64, velocity: 0x8000, channel: 0)])
+        #expect(f.stepCalls.count == before + 1 && f.stepCalls[before].state.held.isEmpty, "the stale key was let go")
+    }
+
+    @Test func togglingStepEntryForgetsAHalfHeldChord() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        holding(f)
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0x8000, channel: 0)])
+        #expect(m.stepEntry.state?.held.isEmpty == false)
+        _ = run("step.entry", m, s, id)
+        _ = run("step.entry", m, s, id)
+        #expect(m.stepEntry.state?.held.isEmpty == true && m.stepEntry.state?.chord.isEmpty == true)
+    }
+
     @Test func stepEntryEndsWhenAnotherSequenceIsShown() throws {
         let (s, id, m, f) = try demo()
         _ = run("step.entry", m, s, id)
