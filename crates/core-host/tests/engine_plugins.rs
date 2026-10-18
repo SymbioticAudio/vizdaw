@@ -463,7 +463,12 @@ fn gain_song(points: &[(i64, f64)]) -> (Document, SeqId, PluginInstanceId) {
     let mut b = Builder::new();
     let d = b.dest("Synth", "builtin:synth", 0).unwrap();
     let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
-    b.notes(seq, notes, &[(0, 60, 0xFFFF, 16 * Q)]).unwrap();
+    b.notes(
+        seq,
+        notes,
+        &(0..16).map(|k| (k * Q, 60, 0xFFFF, Q)).collect::<Vec<_>>(),
+    )
+    .unwrap();
     let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
     let id = b.insert(synth, plugin("vizdaw.test.gain")).unwrap();
     let lane = b.lane(seq, "Auto", None).unwrap();
@@ -544,7 +549,7 @@ fn one_block(fx: &mut core_host::adapt::PluginEffect) -> f32 {
 }
 
 #[test]
-fn a_skipped_insert_drops_the_automation_queued_meanwhile() {
+fn a_skipped_insert_keeps_only_the_latest_automation() {
     use core_engine::graph::EffectNode;
     let mut inst = load("vizdaw.test.gain");
     let proc = inst.activate(SR, 4096).unwrap();
@@ -556,16 +561,187 @@ fn a_skipped_insert_drops_the_automation_queued_meanwhile() {
     // Control: a queued value (normalised 0 = gain 0) is applied on a run.
     fx.automate(0, ParamId(0), 0.0);
     assert!(one_block(&mut fx).abs() < 1e-6);
-    // Bypassed blocks: values pile up, then the engine reports each skip.
-    for _ in 0..300 {
-        fx.automate(0, ParamId(0), 0.0);
+    // Bypassed blocks: values pile up (well past the queue), the engine
+    // reports each skip; the latest, 0.25 (gain 0.5), is where it got to.
+    for k in 0..300 {
+        let v = if k == 299 { 0.25 } else { 0.9 };
+        fx.automate(200, ParamId(0), v);
         fx.skipped();
     }
-    // Back in the chain: only values queued after the return are applied.
-    fx.automate(0, ParamId(0), 0.5); // gain 1.0
+    // Back in the chain with nothing new queued: the latest value applies,
+    // not a stale intermediate one (0.9 would be gain 1.8).
+    assert!((one_block(&mut fx) - 0.5).abs() < 1e-6);
+    // Values queued after the return win over the collapsed one.
+    fx.automate(0, ParamId(0), 0.5);
     assert!((one_block(&mut fx) - 1.0).abs() < 1e-6);
-    // And with nothing queued after a skip, the plugin keeps its value.
+    // The queue emptied: nothing replays.
     fx.automate(0, ParamId(0), 0.0);
     fx.skipped();
+    fx.automate(0, ParamId(0), 0.5);
     assert!((one_block(&mut fx) - 1.0).abs() < 1e-6);
+}
+
+/// Records every parameter change it is given, as (frame, id, value).
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(u32, u64, f64)>>>;
+
+struct Probe(Seen);
+
+impl AudioProcessor for Probe {
+    fn process(&mut self, ctx: &mut ProcessCtx<'_>) -> ProcessStatus {
+        let mut g = self.0.lock().unwrap();
+        for c in ctx.params_in {
+            g.push((c.frame, c.id.0, c.value));
+        }
+        for ch in ctx.outputs.iter_mut() {
+            ch.fill(0.0);
+        }
+        ProcessStatus::Ok
+    }
+
+    fn reset(&mut self) {}
+}
+
+fn probe_effect() -> (core_host::adapt::PluginEffect, Seen) {
+    use core_host::ParamInfo;
+    let par = |id, min, max, stepped| ParamInfo {
+        id: ParamId(id),
+        name: String::new(),
+        module: String::new(),
+        min,
+        max,
+        default: min,
+        stepped,
+        automatable: true,
+        hidden: false,
+    };
+    let port = |name: &str, role| AudioPortInfo {
+        name: name.into(),
+        channels: 2,
+        role,
+    };
+    let info = PluginInfo {
+        plugin: plugin("vizdaw.test.probe"),
+        kind: PluginKind::Effect,
+        inputs: vec![port("In", PortRole::Main)],
+        outputs: vec![port("Out", PortRole::Main)],
+        note_input: false,
+        params: vec![par(3, -12.0, 12.0, false), par(5, 0.0, 4.0, true)],
+        latency: 0,
+        tail: Tail::None,
+    };
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_, audio) = param_queues();
+    let (back, _r) = channel();
+    let fx = core_host::adapt::PluginEffect::new(
+        PluginInstanceId(1),
+        Box::new(Probe(seen.clone())),
+        &info,
+        4096,
+        audio,
+        back,
+    );
+    std::mem::forget(_r);
+    (fx, seen)
+}
+
+#[test]
+fn automation_maps_ranges_steps_and_frames() {
+    use core_engine::graph::EffectNode;
+    let (mut fx, seen) = probe_effect();
+    let mut io = StereoBuf::new(64);
+    // Out of order, a clamped frame, an unknown parameter, and a stepped
+    // one that rounds (0.37 of 0..4 is 1.48, so 1).
+    fx.automate(40, ParamId(3), 0.75); // -12 + 0.75 * 24 = 6
+    fx.automate(10, ParamId(5), 0.37);
+    fx.automate(9_999, ParamId(3), 0.5); // 0, at the last frame
+    fx.automate(20, ParamId(99), 0.5);
+    fx.automate(25, ParamId(5), 0.63); // 2.52 -> 3
+    fx.process_block(64, &mut io, None, &BlockInfo::default());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(10, 5, 1.0), (25, 5, 3.0), (40, 3, 6.0), (63, 3, 0.0),]
+    );
+    // Consumed: the next block carries nothing.
+    seen.lock().unwrap().clear();
+    fx.process_block(64, &mut io, None, &BlockInfo::default());
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_skipped_probe_applies_the_latest_value_at_frame_zero() {
+    use core_engine::graph::EffectNode;
+    let (mut fx, seen) = probe_effect();
+    for k in 0..100 {
+        fx.automate(30, ParamId(3), k as f64 / 100.0);
+        fx.automate(31, ParamId(5), 1.0);
+        fx.skipped();
+    }
+    fx.process_block(64, &mut StereoBuf::new(64), None, &BlockInfo::default());
+    let want = -12.0 + 0.99 * 24.0;
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!((got[0].0, got[0].1), (0, 3));
+    assert!((got[0].2 - want).abs() < 1e-9);
+    assert_eq!(got[1], (0, 5, 4.0));
+}
+
+fn gain_song_bypassed(points: &[(i64, f64)], bypass: bool) -> (Document, SeqId, PluginInstanceId) {
+    let (doc, seq, id) = gain_song(points);
+    // Same ids as the unbypassed song: the bypass flag is the only change.
+    let mut b = Builder::from_doc(doc);
+    b.mixer(MixerCmd::SetBypass { slot: id, bypass }).unwrap();
+    (b.finish(), seq, id)
+}
+
+#[test]
+fn a_bypassed_insert_applies_only_current_automation_on_return() {
+    // The ramp runs for 70 blocks (560 queued values, well past the queue)
+    // while the insert is bypassed; un-bypassing must apply where the ramp
+    // is now, not the stale values piled up (or nothing, if they filled
+    // the queue). Fails when `run_insert` does not tell the node it was
+    // skipped.
+    let points = [(0, 0.0), (4 * Q, 0.5)];
+    let (doc, seq, id) = gain_song_bypassed(&points, true);
+    let (live_doc, _, _) = gain_song_bypassed(&points, false);
+    let (flat_doc, _, _) = gain_song(&[]);
+    // Reference: the same blocks from the same locate, without automation.
+    let mut flat_rig = rig();
+    flat_rig.add(id, "vizdaw.test.gain", false);
+    flat_rig.engine.load(&flat_doc, seq).unwrap();
+    flat_rig.engine.locate_frame(24_000).unwrap();
+    flat_rig.engine.play().unwrap();
+    let mut flat = Vec::new();
+    for _ in 0..3 {
+        flat_rig.be.block(256);
+        flat.extend_from_slice(flat_rig.be.output(256).0);
+    }
+    let mut r = rig();
+    r.add(id, "vizdaw.test.gain", false);
+    r.engine.load(&doc, seq).unwrap();
+    r.engine.play().unwrap();
+    for _ in 0..70 {
+        r.be.block(256);
+    }
+    r.engine.load(&live_doc, seq).unwrap();
+    r.engine.locate_frame(24_000).unwrap();
+    r.engine.play().unwrap();
+    // The first blocks after the return, from the second note's start.
+    let mut wet = Vec::new();
+    for _ in 0..3 {
+        r.be.block(256);
+        wet.extend_from_slice(r.be.output(256).0);
+    }
+    assert!(wet.iter().any(|x| x.abs() > 1e-4), "silent");
+    for (k, w) in wet.chunks(256).enumerate() {
+        let f = &flat[k * 256..(k + 1) * 256];
+        let at = (24_000 + k * 256 + 224) as f64;
+        let gain = (2.0 * 0.5 * (at / 96_000.0).min(1.0)) as f32;
+        for (x, y) in w.iter().zip(f) {
+            assert!(
+                (x - y * gain).abs() <= 1e-5,
+                "block {k}: {x} vs {}",
+                y * gain
+            );
+        }
+    }
 }

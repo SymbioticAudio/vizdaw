@@ -43,8 +43,9 @@ pub trait EffectNode: Send {
     }
 
     /// The block went by without this insert running (bypassed or faulted):
-    /// drops automation queued for it, so stale values are not applied
-    /// when it returns. // RT
+    /// collapses the automation queued for it to the latest value per
+    /// parameter, so stale intermediate values are not applied when it
+    /// returns. // RT
     fn skipped(&mut self) {}
 
     /// [`EffectNode::process`] with the block's transport facts; plugin

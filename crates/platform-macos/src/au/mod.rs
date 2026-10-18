@@ -266,70 +266,149 @@ fn connect(unit: &Unit, feed: &Feed) -> Result<(), HostError> {
     Ok(())
 }
 
-/// The last value the host itself wrote to each watched parameter, so the
-/// gesture listener can tell the plugin's UI from an echo of the host's own
-/// `AudioUnitSetParameter` (AU v3 units bridged to the C API may notify
-/// listeners of those). Fixed at creation: writing is lock- and
-/// allocation-free (RT).
+/// How many recent host writes per parameter the echo filter remembers.
+const WRITE_RING: usize = 16;
+
+/// The recent values the host itself wrote to each watched parameter, so
+/// the gesture listener can tell the plugin's UI from an echo of the host's
+/// own `AudioUnitSetParameter` (AU v3 units bridged to the C API may notify
+/// listeners of those, asynchronously and possibly late or out of order, so
+/// a ramp's echoes can trail the audio thread's newer writes). Fixed at
+/// creation: writing is lock- and allocation-free (RT).
 #[derive(Debug)]
 struct HostWrites {
     /// Watched parameter ids, sorted.
     ids: Box<[u32]>,
-    /// `f32` bits of the last value written per id; NaN when none.
+    /// `WRITE_RING` slots of `f32` bits per id (NaN: empty), oldest
+    /// overwritten first.
     values: Box<[AtomicU32]>,
+    /// The next slot to overwrite, per id.
+    next: Box<[AtomicU32]>,
 }
 
 impl HostWrites {
     fn new(mut ids: Vec<u32>) -> HostWrites {
         ids.sort_unstable();
         ids.dedup();
-        let values = ids
-            .iter()
+        let values = (0..ids.len() * WRITE_RING)
             .map(|_| AtomicU32::new(f32::NAN.to_bits()))
             .collect();
+        let next = ids.iter().map(|_| AtomicU32::new(0)).collect();
         HostWrites {
             ids: ids.into_boxed_slice(),
             values,
+            next,
         }
     }
 
-    fn slot(&self, id: u32) -> Option<&AtomicU32> {
-        self.ids
-            .binary_search(&id)
-            .ok()
-            .and_then(|i| self.values.get(i))
+    fn index(&self, id: u32) -> Option<usize> {
+        self.ids.binary_search(&id).ok()
+    }
+
+    fn ring(&self, i: usize) -> &[AtomicU32] {
+        self.values
+            .get(i * WRITE_RING..(i + 1) * WRITE_RING)
+            .unwrap_or(&[])
     }
 
     /// Whether the listener watches `id` (a writable parameter).
     fn watches(&self, id: u32) -> bool {
-        self.slot(id).is_some()
+        self.index(id).is_some()
     }
 
     /// Notes a value the host wrote. // RT
     fn note(&self, id: u32, value: f32) {
-        if let Some(s) = self.slot(id) {
+        let Some(i) = self.index(id) else {
+            return;
+        };
+        let at = self
+            .next
+            .get(i)
+            .map_or(0, |n| n.fetch_add(1, Ordering::Relaxed)) as usize
+            % WRITE_RING;
+        if let Some(s) = self.ring(i).get(at) {
             s.store(value.to_bits(), Ordering::Relaxed);
         }
     }
 
-    /// Classifies a value notification for `id`, one-shot: the first
-    /// notification equal to the host's last write is its echo (true); any
-    /// notification (echo or user) then clears the slot, so a user moving
-    /// away and back to that value is never mistaken for an echo. Exact
-    /// bits: a unit that quantises the host's value echoes it as a user
-    /// change.
+    /// Classifies a value notification for `id`: it is the echo of a host
+    /// write (true) when it matches any remembered write within a small
+    /// tolerance (a unit may quantise or round-trip the value); that write
+    /// is then consumed, so one write excuses one notification and a user
+    /// moving to the same value later is not mistaken for an echo. A late
+    /// or out-of-order echo still matches its own write. Anything else is
+    /// the user (false) and forgets the writes made before it.
     fn take_echo(&self, id: u32, value: f32) -> bool {
-        let Some(s) = self.slot(id) else {
+        let Some(i) = self.index(id) else {
             return false;
         };
-        let none = f32::NAN.to_bits();
-        let echo = s
-            .compare_exchange(value.to_bits(), none, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok();
-        if !echo {
-            s.store(none, Ordering::Relaxed);
+        let tol = 1e-4 * value.abs().max(1.0);
+        for s in self.ring(i) {
+            let v = f32::from_bits(s.load(Ordering::Relaxed));
+            if (v - value).abs() <= tol
+                && s.compare_exchange(
+                    v.to_bits(),
+                    f32::NAN.to_bits(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return true;
+            }
         }
-        echo
+        // The user: whatever the host wrote before is now superseded, so
+        // the user moving back to such a value is a gesture again.
+        for s in self.ring(i) {
+            s.store(f32::NAN.to_bits(), Ordering::Relaxed);
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod echo_tests {
+    use super::HostWrites;
+
+    #[test]
+    fn late_and_out_of_order_echoes_are_recognised() {
+        let w = HostWrites::new(vec![7]);
+        // A ramp the audio thread wrote ahead of the listener.
+        for k in 0..10 {
+            w.note(7, k as f32 * 0.1);
+        }
+        // Echoes arrive late and shuffled.
+        for k in [3, 0, 9, 1, 8, 2, 7, 4, 6, 5] {
+            assert!(w.take_echo(7, k as f32 * 0.1), "echo {k}");
+        }
+        // Each write excuses one notification only.
+        assert!(!w.take_echo(7, 0.3));
+    }
+
+    #[test]
+    fn a_user_move_is_not_an_echo() {
+        let w = HostWrites::new(vec![7, 9]);
+        w.note(7, 0.25);
+        w.note(7, 0.5);
+        assert!(!w.take_echo(7, 0.9));
+        assert!(!w.take_echo(9, 0.25), "another parameter's writes");
+        assert!(!w.take_echo(3, 0.25), "unwatched");
+        // Writes before a user move are superseded: moving back is a gesture.
+        assert!(!w.take_echo(7, 0.5));
+        // A write after it is an echo again, within tolerance, once.
+        w.note(7, 0.5);
+        assert!(w.take_echo(7, 0.5 + 1e-6));
+        assert!(!w.take_echo(7, 0.5));
+    }
+
+    #[test]
+    fn the_ring_forgets_the_oldest_writes() {
+        let w = HostWrites::new(vec![1]);
+        for k in 0..40 {
+            w.note(1, k as f32);
+        }
+        assert!(w.take_echo(1, 39.0));
+        assert!(!w.take_echo(1, 0.0));
     }
 }
 

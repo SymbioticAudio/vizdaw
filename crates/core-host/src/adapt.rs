@@ -137,6 +137,32 @@ impl Core {
         }
     }
 
+    /// The block went by without the plugin running: collapses the queued
+    /// automation to the latest value per parameter, all at frame 0, so a
+    /// long bypass neither piles values up nor loses where automation got
+    /// to (an unchanged value is never resent). Bounded, no allocation.
+    /// // RT
+    fn collapse(&mut self) {
+        let mut kept = 0;
+        for i in 0..self.auto_len {
+            let Some(&c) = self.auto.get(i) else {
+                break;
+            };
+            let same = self
+                .auto
+                .get(..kept)
+                .and_then(|k| k.iter().position(|k| k.id == c.id));
+            let at = same.unwrap_or(kept);
+            if let Some(slot) = self.auto.get_mut(at) {
+                *slot = ParamChange { frame: 0, ..c };
+            }
+            if same.is_none() {
+                kept += 1;
+            }
+        }
+        self.auto_len = kept;
+    }
+
     /// The parameters the plugin declares stepped. Not RT.
     fn stepped(&self) -> Vec<ParamId> {
         self.ranges
@@ -353,7 +379,7 @@ impl EffectNode for PluginEffect {
     }
 
     fn skipped(&mut self) {
-        self.core.auto_len = 0;
+        self.core.collapse();
     }
 }
 
@@ -517,7 +543,7 @@ impl InstrumentNode for PluginSynth {
     fn render_outputs(&mut self, frames: u32, outs: &mut [StereoBuf], info: &BlockInfo) {
         if self.faulted {
             self.count = 0;
-            self.core.auto_len = 0;
+            self.core.collapse();
             for o in outs.iter_mut() {
                 o.clear(frames);
             }
