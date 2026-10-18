@@ -434,16 +434,20 @@ public final class SelectModifyModel {
 
     // MARK: Strip Chart lines and automation targets (Plan 4d Ruling 24)
 
-    @ObservationIgnored private var targetsCache: (version: UInt64, names: StripNames, menus: [StripMenu])?
+    @ObservationIgnored private var targetsCache: (version: UInt64, slots: Int, names: StripNames, menus: [StripMenu])?
 
+    /// Keyed on the snapshot and the slots version, as the Strip Chart's
+    /// are: a plugin finishing its load changes the targets too.
     private func targets() -> (names: StripNames, menus: [StripMenu]) {
         guard let editor else { return (StripNames(), []) }
-        if let c = targetsCache, c.version == editor.snapshotVersion { return (c.names, c.menus) }
+        let v = editor.snapshotVersion
+        let slots = document?.slotsVersion ?? 0
+        if let c = targetsCache, c.version == v, c.slots == slots { return (c.names, c.menus) }
         // Busy throws: keep what we had (or nothing) and retry on the next read.
         guard let t = try? AutomationTargets.load(editor.session) else {
             return targetsCache.map { ($0.names, $0.menus) } ?? (StripNames(), [])
         }
-        targetsCache = (editor.snapshotVersion, t.names, t.menus)
+        targetsCache = (v, slots, t.names, t.menus)
         return t
     }
 

@@ -209,6 +209,8 @@ public final class StripChartModel {
 
     /// The pointer went down on row `row` at `p` (`selectedOnly`: ⌥).
     public func strokeBegan(row: Int, at p: StripPoint, selectedOnly: Bool) {
+        // A stroke whose mouse-up was lost must not hold its gesture open.
+        if stroke != nil { strokeCancelled() }
         guard rows.indices.contains(row), lane != nil else { return }
         let s = settings
         stroke = StripStroke(
@@ -276,9 +278,6 @@ public final class StripChartModel {
         let sel = editor.selection
         let keep = s.mode == .modify && !sel.lanes.isEmpty
         let lanes = keep ? sel.lanes.map { LaneKey($0.seq, $0.lane) } : [lane]
-        if !keep, sel.lanes != [lane.ref] {
-            editor.setSelection(SelectionRow(timeRange: sel.timeRange, lanes: [lane.ref], events: sel.events))
-        }
         var set = settings
         set.mode = s.mode
         let label =
@@ -289,6 +288,11 @@ public final class StripChartModel {
         guard editor.beginGesture(label, lanes: Set(lanes), origin: .stripChart) else {
             if pending { editor.status = EditorModel.gestureOpenMessage }
             return false
+        }
+        // Only a stroke that draws moves the selection to its lane (final
+        // review Minor 3): a refused one leaves it as it was.
+        if !keep, sel.lanes != [lane.ref] {
+            editor.setSelection(SelectionRow(timeRange: sel.timeRange, lanes: [lane.ref], events: sel.events))
         }
         s.open = true
         return true

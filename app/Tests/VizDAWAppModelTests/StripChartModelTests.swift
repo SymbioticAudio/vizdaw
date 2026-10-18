@@ -133,6 +133,39 @@ private let q: Int64 = 15_360
         s.strokeCancelled()
     }
 
+    @Test func aRefusedStrokeLeavesTheSelectionAlone() throws {
+        // Final review Minor 3: another editor's gesture is open, so the
+        // draw is refused and the selection keeps its lanes.
+        let (f, m, s) = try make()
+        defer { withExtendedLifetime(m) {} }
+        let before = SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 32)], events: [3])
+        m.editor.setSelection(before)
+        #expect(m.editor.beginGesture("Other", lanes: [LaneKey(3, 32)], origin: .notes))
+        let sets = f.selectionSets.count
+        s.strokeBegan(row: 0, at: StripPoint(tick: 0, value: 100), selectedOnly: false)
+        s.strokeMoved(to: StripPoint(tick: q, value: 200))
+        #expect(m.editor.status == EditorModel.gestureOpenMessage)
+        #expect(f.selectionSets.count == sets, "no selection change")
+        #expect(m.editor.selection == before)
+        #expect(m.editor.gesture?.label == "Other")
+        m.editor.cancelGesture()
+    }
+
+    @Test func aNewStrokeCancelsOneWhoseMouseUpWasLost() throws {
+        // Parked T12: a lost mouse-up must not orphan the open gesture.
+        let (f, m, s) = try make()
+        defer { withExtendedLifetime(m) {} }
+        s.strokeBegan(row: 0, at: StripPoint(tick: 0, value: 1), selectedOnly: false)
+        s.strokeMoved(to: StripPoint(tick: q, value: 2))
+        #expect(m.editor.gesture != nil)
+        s.strokeBegan(row: 0, at: StripPoint(tick: 2 * q, value: 3), selectedOnly: false)
+        #expect(f.calls.last == "abort" && m.editor.gesture == nil)
+        s.strokeMoved(to: StripPoint(tick: 3 * q, value: 4))
+        #expect(m.editor.gesture?.label == "Change Velocity", "the new stroke draws")
+        s.strokeEnded(at: StripPoint(tick: 3 * q, value: 4))
+        #expect(m.editor.gesture == nil && f.calls.last == "end")
+    }
+
     @Test func escapeLeavesNoUndoStep() throws {
         let (f, m, s) = try make()
         defer { withExtendedLifetime(m) {} }

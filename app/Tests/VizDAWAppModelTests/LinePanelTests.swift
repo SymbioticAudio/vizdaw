@@ -64,6 +64,24 @@ private let q: Int64 = 15_360
         #expect(p.automationNames.title(.mute(strip: 1)) == "Mute · Synth")
     }
 
+    @Test func automationTargetsRefreshWhenAPluginFinishesLoading() throws {
+        // Final review Minor 4: the panel keys its target cache on the
+        // slots version too, as the Strip Chart does.
+        let (f, m, p) = try panel()
+        defer { withExtendedLifetime(m) {} }
+        #expect(!p.automationMenus.map(\.title).contains("Gain · Synth"), "not loaded yet")
+        f.paramTable[10] = [
+            ParamRow(
+                id: 4, name: "Gain", module: "", min: 0, max: 2, default: 1, value: 1, stepped: false,
+                automatable: true, hidden: false)
+        ]
+        f.idleUpdates = [IdleUpdate(snapshot: nil, slotsChanged: true, paramsChanged: [], problems: [])]
+        m.idle()
+        #expect(m.slotsVersion == 1)
+        #expect(p.automationMenus.map(\.title).contains("Gain · Synth"))
+        #expect(p.automationNames.title(.param(slot: 10, param: 4)) == "Gain · Gain")
+    }
+
     @Test func applyingALineSendsOneSelectAndModify() throws {
         let (f, m, p) = try panel()
         defer { withExtendedLifetime(m) {} }
