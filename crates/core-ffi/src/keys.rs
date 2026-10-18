@@ -200,3 +200,10 @@ impl Keymap {
 pub fn key_code_for(name: String) -> Option<u16> {
     Chord::of_slot(&name, 0).map(|c| c.code)
 }
+
+/// The chord text of a key press (`⇧⌘K`), or None for a key VizDAW does
+/// not bind (the Keys settings' recorder).
+#[uniffi::export]
+pub fn chord_text(key_code: u16, modifiers: ModifiersRow) -> Option<String> {
+    Chord::new(key_code, mods_bits(&modifiers)).map(|c| c.text())
+}

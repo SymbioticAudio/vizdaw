@@ -61,6 +61,9 @@ public protocol ControlHost: AnyObject {
     var nudge: NudgeSettings { get }
     /// The app's key bindings (plan 4f).
     var keys: KeyBindings { get }
+    /// Gives a transport field of document `doc`'s window the keyboard
+    /// (plan 4f Ruling 16); false when the window shows none.
+    func focus(_ field: TransportField, _ doc: UUID) -> Bool
 }
 
 /// Runs registered menu commands (control spec §6) on a document model
@@ -91,10 +94,15 @@ public enum ControlCommands {
         "transport.play_stop", "transport.loop", "transport.return_to_start",
         "keys.save", "keys.load", "keys.reset",
     ]
+    /// The keys that focus a transport field.
+    public static let fieldKeys: [String: TransportField] = [
+        "transport.go_position": .position, "transport.go_edit_in": .editIn, "transport.go_punch": .punchIn,
+    ]
 
     /// Every registry ID `run` handles (a test checks it is all of them).
     public static var handled: Set<String> {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
+            .union(fieldKeys.keys)
             .union(TransportCommands.ids).union(StepCommands.ids)
     }
 
@@ -235,6 +243,10 @@ public enum ControlCommands {
             m.returnToStart()
         case _ where DrumCommands.ids.contains(id):
             if let f = failure(DrumCommands.run(id, on: args.flag("on"), m)) { return f }
+        case _ where fieldKeys[id] != nil:
+            guard host.focus(fieldKeys[id] ?? .position, docID) else {
+                return unavailable("The window shows no transport fields.")
+            }
         case _ where TransportCommands.ids.contains(id):
             if let f = failure(TransportCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where StepCommands.ids.contains(id):

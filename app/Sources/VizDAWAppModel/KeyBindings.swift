@@ -26,6 +26,14 @@ public final class KeyBindings {
     }
     /// What the last load skipped or why it failed, for the Keys page.
     public var message: String?
+    /// A recorded key another command has, waiting for Replace.
+    public private(set) var pending: PendingKey?
+
+    /// A key the Keys page recorded that another command has.
+    public struct PendingKey: Equatable, Sendable {
+        public let id: String
+        public let key: String
+    }
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -51,6 +59,33 @@ public final class KeyBindings {
     public func bind(_ id: String, keys: [String], replace: Bool = false) throws {
         try keymap.bind(id: id, keys: keys, replace: replace)
         changed()
+    }
+
+    /// The Keys page recorded `key` for `id` (plan 4f Ruling 17): it
+    /// becomes the command's only key; one another command has waits in
+    /// `pending` for `confirmReplace`.
+    public func record(_ id: String, key: String) {
+        do {
+            try bind(id, keys: [key])
+            pending = nil
+            message = nil
+        } catch {
+            pending = PendingKey(id: id, key: key)
+            message = AlertItem(error, title: "").message + ". Replace it?"
+        }
+    }
+
+    /// Takes the pending key from the command that has it.
+    public func confirmReplace() {
+        guard let p = pending else { return }
+        pending = nil
+        message = nil
+        try? bind(p.id, keys: [p.key], replace: true)
+    }
+
+    public func cancelReplace() {
+        pending = nil
+        message = nil
     }
 
     public func reset(_ id: String) {

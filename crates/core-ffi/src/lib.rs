@@ -72,7 +72,7 @@ pub use events::{
 };
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
-pub use keys::{BindingRow, Keymap, key_code_for};
+pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
 };

@@ -11,6 +11,7 @@ struct ArrangementPane: View {
     var body: some View {
         VStack(spacing: 0) {
             ArrangementBar(model: model, editor: model.editor)
+            TransportBar(model: model)
             Divider()
             if model.selectedSeq == nil {
                 ContentUnavailableView(
@@ -110,6 +111,37 @@ struct ArrangementBar: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
     }
+}
+
+/// The transport fields and step entry's line (plan 4f Rulings 11, 16).
+struct TransportBar: View {
+    let model: DocumentModel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            TransportFieldsHost(document: model)
+                .frame(height: 22)
+            if let s = model.stepEntry.summary {
+                Text(s)
+                    .font(.caption)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
+                    .accessibilityLabel(s)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.bottom, 4)
+    }
+}
+
+struct TransportFieldsHost: NSViewRepresentable {
+    let document: DocumentModel
+
+    func makeNSView(context: Context) -> TransportFieldsView { TransportFieldsView(document: document) }
+
+    func updateNSView(_ view: TransportFieldsView, context: Context) {}
 }
 
 /// The last failure of an editor action (spec §5: non-modal).

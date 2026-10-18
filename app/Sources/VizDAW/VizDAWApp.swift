@@ -70,7 +70,12 @@ struct VizDAWApp: App {
             PluginManagerView(model: pluginManager)
         }
         Settings {
-            EditingSettingsView(prefs: editingPreferences)
+            TabView {
+                EditingSettingsView(prefs: editingPreferences)
+                    .tabItem { Label("Editing", systemImage: "pencil") }
+                KeysSettingsView(keys: keyBindings)
+                    .tabItem { Label("Keys", systemImage: "keyboard") }
+            }
         }
     }
 }

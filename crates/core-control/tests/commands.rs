@@ -317,6 +317,9 @@ fn every_transport_key_has_a_command() {
         ("O", "transport.overdub"),
         ("I", "transport.punch"),
         ("G", "editors.snap"),
+        ("P", "transport.go_position"),
+        ("E", "transport.go_edit_in"),
+        ("U", "transport.go_punch"),
         ("⌥⇧↑", "transport.arm_previous"),
         ("⌥⇧↓", "transport.arm_next"),
         ("1", "locator.go_1"),
@@ -444,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        105,
-        "44 before plan 4f, plus 48 transport, locator, record and key-binding commands, 13 step entry"
+        108,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.

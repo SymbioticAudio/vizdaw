@@ -262,3 +262,22 @@ fn a_slots_key_name_gives_its_key_code() {
     );
     assert_eq!(vizdaw_ffi::key_code_for("nope".into()), None);
 }
+
+#[test]
+fn a_key_press_reads_as_its_chord() {
+    let m = |shift, option, command| vizdaw_ffi::ModifiersRow {
+        shift,
+        control: false,
+        option,
+        command,
+    };
+    assert_eq!(
+        vizdaw_ffi::chord_text(40, m(true, false, true)).as_deref(),
+        Some("⇧⌘K")
+    );
+    assert_eq!(
+        vizdaw_ffi::chord_text(83, m(false, true, false)).as_deref(),
+        Some("⌥Keypad1")
+    );
+    assert_eq!(vizdaw_ffi::chord_text(0xFFFF, m(false, false, false)), None);
+}

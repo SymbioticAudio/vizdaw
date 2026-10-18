@@ -444,4 +444,11 @@ final class AppControlHost: ControlHost {
 
     var nudge: NudgeSettings { editingPreferences.nudge }
     var keys: KeyBindings { keyBindings }
+
+    func focus(_ field: TransportField, _ doc: UUID) -> Bool {
+        guard let w = ControlWindows.window(of: doc),
+            let v = TransportFieldsView.find(in: w.contentView?.superview ?? w.contentView)
+        else { return false }
+        return v.focus(field)
+    }
 }

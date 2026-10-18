@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import VizDAWAppModel
 import VizDAWCore
+import VizDAWEditors
 
 /// A command's first key as a menu shortcut (plan 4f Ruling 6): menus
 /// show the bindings, so a rebound key shows at once.
@@ -51,6 +52,8 @@ enum KeyMonitor {
     /// What a key press in `w` does: the route, decided as for the
     /// channel's keys (`menus`: AppKit's menus see the key next).
     static func route(_ e: NSEvent, in w: NSWindow, menus: Bool) -> (KeyRoute, (id: UUID, model: DocumentModel)?) {
+        // The Keys settings' recorder takes every key it is shown.
+        if w.firstResponder is KeyCapturing { return (.pass, nil) }
         let typing = w.firstResponder is NSText
         let doc: (id: UUID, model: DocumentModel)? = ControlWindows.tagOf(w).doc.flatMap { d in
             appStore.model(d).map { (d, $0) }

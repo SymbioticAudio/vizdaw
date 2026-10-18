@@ -504,6 +504,27 @@ pub const COMMANDS: &[CommandSpec] = &[
         ..cmd("transport.punch", "Transport", "Punch", Some("I"), true)
     },
     cmd(
+        "transport.go_position",
+        "Transport",
+        "Go to Position Field",
+        Some("P"),
+        true,
+    ),
+    cmd(
+        "transport.go_edit_in",
+        "Transport",
+        "Go to Edit-In Field",
+        Some("E"),
+        true,
+    ),
+    cmd(
+        "transport.go_punch",
+        "Transport",
+        "Go to Punch Fields",
+        Some("U"),
+        true,
+    ),
+    cmd(
         "transport.arm_previous",
         "Transport",
         "Arm Previous Lane",

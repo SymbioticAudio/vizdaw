@@ -8,6 +8,12 @@ final class FakeControlHost: ControlHost {
     var calls: [String] = []
     var nudge = NudgeSettings()
     let keys = KeyBindings(defaults: MemoryDefaults())
+    /// Whether `focus` finds the fields.
+    var fieldsShown = true
+    func focus(_ field: TransportField, _ doc: UUID) -> Bool {
+        calls.append("focus \(field.rawValue)")
+        return fieldsShown
+    }
     func showMixer(_ doc: UUID) { calls.append("mixer") }
     func showPluginManager() { calls.append("plugins") }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { calls.append("tear \(kind.rawValue)") }

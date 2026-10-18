@@ -179,6 +179,10 @@ struct AppCommands: Commands {
             commandToggle("transport.overdub", TransportCommands.self)
             commandToggle("transport.punch", TransportCommands.self)
             Divider()
+            fieldItem("transport.go_position")
+            fieldItem("transport.go_edit_in")
+            fieldItem("transport.go_punch")
+            Divider()
             commandItem("transport.arm_previous", TransportCommands.self)
             commandItem("transport.arm_next", TransportCommands.self)
         }
@@ -214,6 +218,15 @@ struct AppCommands: Commands {
         )
         .keyboardShortcut(KeyMenu.shortcut(id))
         .disabled(doc.map { !kind.enabled(id, $0) } ?? true)
+    }
+
+    /// A key that focuses a transport field (plan 4f Ruling 16).
+    private func fieldItem(_ id: String) -> some View {
+        Button(keyBindings.row(id)?.title ?? id) {
+            if let docID, let f = ControlCommands.fieldKeys[id] { _ = AppControlHost.shared.focus(f, docID) }
+        }
+        .keyboardShortcut(KeyMenu.shortcut(id))
+        .disabled(docID == nil)
     }
 
     private func report(_ o: KeyOutcome, _ doc: DocumentModel) {
