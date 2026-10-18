@@ -77,7 +77,7 @@ impl Drop for Launched {
             return;
         }
         if let Ok(mut c) = Client::connect(&self.socket) {
-            let _ = c.call("quit", json!({}), Duration::from_secs(5));
+            let _ = c.call("app.quit", json!({}), Duration::from_secs(5));
         }
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
