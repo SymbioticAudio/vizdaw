@@ -277,6 +277,34 @@ fn a_press_on_a_hit_erases_and_the_erase_tool_always_does() {
 }
 
 #[test]
+fn a_matrix_erase_drag_erases_every_cell_it_crosses_whatever_the_spacing() {
+    // Step 1/16, spacing 1/8: painting skips every other cell, erasing
+    // does not (final review T3 M2).
+    let s = Settings {
+        spacing: 2 * S16,
+        ..matrix()
+    };
+    let hits = [
+        hit(1, 3),
+        hit(2, S16 + 5),
+        hit(3, 2 * S16),
+        hit(4, 3 * S16 + 9),
+    ];
+    let st = begin(&hits, 0, 0, 1, None, Tool::Erase, &s);
+    let st = extend(&st, &hits, 3 * S16 + 1, 1, None, &s);
+    assert_eq!(st.erased, vec![1, 2, 3, 4]);
+    // Backwards too.
+    let st = begin(&hits, 3 * S16 + 1, 0, 1, None, Tool::Erase, &s);
+    let st = extend(&st, &hits, 1, 1, None, &s);
+    assert_eq!(st.erased, vec![1, 2, 3, 4]);
+    // Painting keeps the stride.
+    let st = begin(&[], 0, 0, 1, None, Tool::Paint, &s);
+    let st = extend(&st, &[], 3 * S16 + 1, 1, None, &s);
+    let ticks: Vec<i64> = st.hits.iter().map(|(t, _)| *t).collect();
+    assert_eq!(ticks, vec![0, 2 * S16]);
+}
+
+#[test]
 fn strokes_stop_at_the_paint_limit_and_the_tick_limit() {
     let s = Settings {
         step: PPQ / 32,
@@ -467,6 +495,31 @@ proptest! {
             prop_assert!(st.hits.is_empty());
         }
         prop_assert!(st.erased.iter().all(|id| hits.iter().any(|h| h.id == *id)));
+    }
+
+    /// A matrix erase drag takes the same hits as a timeline sweep over
+    /// the same cells, whatever the spacing.
+    #[test]
+    fn matrix_erase_equals_the_timeline_sweep_over_its_cells(
+        ticks in prop::collection::vec(-4 * PPQ..(12 * PPQ), 0..24),
+        a in -2 * PPQ..(10 * PPQ),
+        b in -2 * PPQ..(10 * PPQ),
+        step in prop_oneof![Just(PPQ / 32), Just(S16), Just(PPQ / 6), Just(PPQ), Just(4 * PPQ)],
+        spacing in prop_oneof![Just(1i64), Just(S16), Just(2 * S16), Just(PPQ), Just(3 * PPQ)],
+    ) {
+        let hits: Vec<Hit> = ticks
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| Hit { id: i as u64, tick: t, duration: 1, velocity: 1 })
+            .collect();
+        let m = Settings { step, spacing, ..matrix() };
+        let st = begin(&hits, a, 0, 1, None, Tool::Erase, &m);
+        let st = extend(&st, &hits, b, 1, None, &m);
+        let (lo, hi) = (cell_start(a.min(b), step), cell_start(a.max(b), step) + step - 1);
+        let t = Settings { spacing, ..timeline() };
+        let sweep = begin(&hits, lo, lo, 1, None, Tool::Erase, &t);
+        let sweep = extend(&sweep, &hits, hi, 1, None, &t);
+        prop_assert_eq!(st.erased, sweep.erased);
     }
 
     /// Dropping a row anywhere never panics, and a drop into its own lane

@@ -374,7 +374,9 @@ pub struct Stroke {
     /// Painting: `(tick, 16-bit velocity)` of each hit, from `start`
     /// towards the pointer every stride.
     pub hits: Vec<(i64, u16)>,
-    /// Erasing: the IDs of the row's hits the run covers.
+    /// Erasing: the IDs of the row's hits the run covers (Ruling 7; matrix:
+    /// hits in every cell the run spans, whatever the spacing; timeline:
+    /// hits the swept range touches).
     pub erased: Vec<u64>,
 }
 
@@ -421,7 +423,9 @@ pub fn begin(
 
 /// The stroke with the pointer at tick `at`: the run from its start to
 /// the pointer (shrinking when the pointer goes back), each painted hit
-/// keeping the velocity it got when the run first reached it.
+/// keeping the velocity it got when the run first reached it. Painting
+/// puts a hit every stride; erasing takes the hits in every cell the run
+/// spans (matrix) or that the swept range touches (timeline).
 pub fn extend(
     stroke: &Stroke,
     hits: &[Hit],
@@ -455,11 +459,22 @@ pub fn extend(
     };
     if stroke.erase {
         let mut ids: Vec<u64> = match s.view {
-            View::Matrix => hits
-                .iter()
-                .filter(|h| positions.contains(&cell_start(h.tick, s.step)))
-                .map(|h| h.id)
-                .collect(),
+            View::Matrix => {
+                // Every cell the run spans, not only its stride cells
+                // (final review T3 M2), at most MAX_PAINT_HITS cells.
+                let reach = s
+                    .step
+                    .saturating_mul(i64::try_from(MAX_PAINT_HITS - 1).unwrap_or(i64::MAX));
+                let far = end.clamp(
+                    stroke.start.saturating_sub(reach),
+                    stroke.start.saturating_add(reach),
+                );
+                let (lo, hi) = (stroke.start.min(far), stroke.start.max(far));
+                hits.iter()
+                    .filter(|h| (lo..=hi).contains(&cell_start(h.tick, s.step)))
+                    .map(|h| h.id)
+                    .collect()
+            }
             View::Timeline => {
                 let (lo, hi) = (stroke.anchor.min(at), stroke.anchor.max(at));
                 hits.iter()
