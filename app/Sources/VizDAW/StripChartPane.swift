@@ -30,17 +30,6 @@ struct StripChartBar: View {
     let model: StripChartModel
     @Bindable var editor: EditorModel
 
-    private static let q = MeterMath.ppq
-    static let steps: [(String, Int64)] = [
-        ("1/4", q), ("1/8", q / 2), ("1/16", q / 4), ("1/32", q / 8), ("1/64", q / 16), ("1/128", q / 32),
-    ]
-    static let musicalPeriods: [(String, Int64)] = [
-        ("1 Bar of 4/4", 4 * q), ("1/2", 2 * q), ("1/4", q), ("1/8", q / 2), ("1/16", q / 4), ("1/32", q / 8),
-    ]
-    static let clockPeriods: [UInt32] = [25, 50, 100, 250, 500, 1000, 2000, 4000]
-    static let barPeriods: [UInt32] = [1, 2, 4, 8, 16]
-    static let phases: [UInt16] = [0, 125, 250, 500, 750]
-
     private func binding<T>(_ key: WritableKeyPath<StripChartSettings, T>) -> Binding<T> {
         Binding(
             get: { editor.layout.stripChart[keyPath: key] },
@@ -96,7 +85,7 @@ struct StripChartBar: View {
                 }
             }
             Picker("Step", selection: binding(\.step)) {
-                ForEach(Self.steps, id: \.1) { Text($0.0).tag($0.1) }
+                ForEach(StripBarChoices.steps(s.step), id: \.1) { Text($0.0).tag($0.1) }
             }
             .frame(width: 110)
             .help("Distance between drawn points; the spacing of Thin and Thicken")
@@ -137,25 +126,25 @@ struct StripChartBar: View {
         switch s.period {
         case .musical:
             Picker("Every", selection: binding(\.periodTicks)) {
-                ForEach(Self.musicalPeriods, id: \.1) { Text($0.0).tag($0.1) }
+                ForEach(StripBarChoices.musicalPeriods(s.periodTicks), id: \.1) { Text($0.0).tag($0.1) }
             }
             .frame(width: 140)
             .accessibilityLabel("Period")
         case .clock:
             Picker("Every", selection: binding(\.periodMs)) {
-                ForEach(Self.clockPeriods, id: \.self) { Text("\($0) ms").tag($0) }
+                ForEach(StripBarChoices.clockPeriods(s.periodMs), id: \.1) { Text($0.0).tag($0.1) }
             }
             .frame(width: 120)
             .accessibilityLabel("Period")
         case .bars:
             Picker("Every", selection: binding(\.periodBars)) {
-                ForEach(Self.barPeriods, id: \.self) { Text("\($0) bar\($0 == 1 ? "" : "s")").tag($0) }
+                ForEach(StripBarChoices.barPeriods(s.periodBars), id: \.1) { Text($0.0).tag($0.1) }
             }
             .frame(width: 120)
             .accessibilityLabel("Period")
         }
         Picker("Phase", selection: binding(\.phase)) {
-            ForEach(Self.phases, id: \.self) { Text("\(Int($0) * 360 / 1000)°").tag($0) }
+            ForEach(StripBarChoices.phases(s.phase), id: \.1) { Text($0.0).tag($0.1) }
         }
         .frame(width: 100)
         .accessibilityLabel("Phase")

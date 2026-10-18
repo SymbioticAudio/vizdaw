@@ -242,4 +242,36 @@ private let q: Int64 = 15_360
         m.dropStripChart(.window(w.id))
         #expect(m.stripChart(.window(w.id)) !== ws, "a closed window's chart goes")
     }
+
+    @Test func aChartWhoseSlotStopsShowingOneGoes() throws {
+        // Parked T14: a window switched to another editor, or closed, does
+        // not keep its Strip Chart (nor an open stroke) until it closes.
+        let (f, m, _) = try make()
+        let pane = m.stripChart(.pane)
+        let w = try #require(m.editor.tearOff(.stripChart, shown: nil))
+        let ws = m.stripChart(.window(w.id))
+        ws.strokeBegan(row: 0, at: StripPoint(tick: 0, value: 1), selectedOnly: false)
+        ws.strokeMoved(to: StripPoint(tick: q, value: 2))
+        #expect(m.editor.gesture != nil)
+        m.editor.setWindowKind(w.id, .list)
+        #expect(m.editor.gesture == nil && f.calls.last == "abort", "its stroke went with it")
+        m.editor.setWindowKind(w.id, .stripChart)
+        #expect(m.stripChart(.window(w.id)) !== ws)
+        let again = m.stripChart(.window(w.id))
+        m.editor.closeWindow(w.id)
+        #expect(m.stripChart(.window(w.id)) !== again, "closing drops it too")
+        #expect(m.stripChart(.pane) === pane, "the pane's stays while it shows the chart")
+    }
+
+    @Test func barPickersKeepAnOutOfListValue() {
+        #expect(StripBarChoices.steps(MeterMath.ppq / 8).count == StripBarChoices.steps.count)
+        #expect(StripBarChoices.steps(100).last! == ("100 ticks", 100))
+        #expect(StripBarChoices.musicalPeriods(7).last! == ("7 ticks", 7))
+        #expect(StripBarChoices.clockPeriods(333).last! == ("333 ms", 333))
+        #expect(StripBarChoices.clockPeriods(500).count == StripBarChoices.clockPeriods.count)
+        #expect(StripBarChoices.barPeriods(3).last! == ("3 bars", 3))
+        #expect(StripBarChoices.barPeriods(1).first! == ("1 bar", 1))
+        #expect(StripBarChoices.phases(5).last! == ("1.8°", 5))
+        #expect(StripBarChoices.phases(125).map(\.0) == ["0°", "45°", "90°", "180°", "270°"])
+    }
 }

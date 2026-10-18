@@ -87,6 +87,12 @@ public final class DocumentModel {
         stripCharts.removeValue(forKey: slot)?.strokeCancelled()
     }
 
+    /// Strip Charts whose slot no longer shows one (the pane or a window
+    /// switched editor, or the window left the layout) go (parked T14).
+    func pruneStripCharts() {
+        for (slot, c) in stripCharts where c.state?.kind != .stripChart { dropStripChart(slot) }
+    }
+
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()
     /// One list editor per slot, while that slot shows a list.
@@ -172,7 +178,10 @@ public final class DocumentModel {
         editor.currentSequence = { [weak self] in self?.selectedSeq }
         selectModify.document = self
         editor.onExact = { [weak self] r in self?.selectModify.open(r) }
-        editor.layoutChanged = { [weak self] in self?.pruneLists() }
+        editor.layoutChanged = { [weak self] in
+            self?.pruneLists()
+            self?.pruneStripCharts()
+        }
     }
 
     /// The transport shown until the first successful read.

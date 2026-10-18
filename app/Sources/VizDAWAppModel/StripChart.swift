@@ -230,3 +230,45 @@ public enum StripCommands {
         ModifyKind.lineTitle(lane.lineTarget, op)
     }
 }
+
+/// The Strip Chart bar's picker choices (spec §4d). A saved value outside a
+/// list (an older or hand-edited `ui.json`) is added to it, so its picker
+/// never shows blank (parked T14).
+public enum StripBarChoices {
+    private static let q = MeterMath.ppq
+    public static let steps: [(String, Int64)] = [
+        ("1/4", q), ("1/8", q / 2), ("1/16", q / 4), ("1/32", q / 8), ("1/64", q / 16), ("1/128", q / 32),
+    ]
+    public static let musicalPeriods: [(String, Int64)] = [
+        ("1 Bar of 4/4", 4 * q), ("1/2", 2 * q), ("1/4", q), ("1/8", q / 2), ("1/16", q / 4), ("1/32", q / 8),
+    ]
+    public static let clockPeriods: [UInt32] = [25, 50, 100, 250, 500, 1000, 2000, 4000]
+    public static let barPeriods: [UInt32] = [1, 2, 4, 8, 16]
+    public static let phases: [UInt16] = [0, 125, 250, 500, 750]
+
+    /// `list`, plus `current` (labelled by `label`) when it is not in it.
+    public static func with<T: Equatable>(_ list: [(String, T)], _ current: T, label: (T) -> String) -> [(String, T)] {
+        list.contains { $0.1 == current } ? list : list + [(label(current), current)]
+    }
+
+    public static func steps(_ current: Int64) -> [(String, Int64)] { with(steps, current) { "\($0) ticks" } }
+    public static func musicalPeriods(_ current: Int64) -> [(String, Int64)] {
+        with(musicalPeriods, current) { "\($0) ticks" }
+    }
+    public static func clockPeriods(_ current: UInt32) -> [(String, UInt32)] {
+        with(clockPeriods.map { ("\($0) ms", $0) }, current) { "\($0) ms" }
+    }
+    public static func barPeriods(_ current: UInt32) -> [(String, UInt32)] {
+        with(barPeriods.map { (bars($0), $0) }, current, label: bars)
+    }
+    public static func phases(_ current: UInt16) -> [(String, UInt16)] {
+        with(phases.map { (degrees($0), $0) }, current, label: degrees)
+    }
+
+    static func bars(_ n: UInt32) -> String { "\(n) bar\(n == 1 ? "" : "s")" }
+    /// A phase in ‰ of a period as degrees (one decimal when not whole).
+    static func degrees(_ p: UInt16) -> String {
+        let d = Double(p) * 0.36
+        return d == d.rounded() ? "\(Int(d))°" : String(format: "%.1f°", d)
+    }
+}
