@@ -453,3 +453,119 @@ fn a_faulty_plugin_instrument_is_zeroed_and_bypassed_under_its_own_instance() {
         );
     }
 }
+
+use core_engine::graph::InsertFactory;
+use core_model::automation::AutomationTarget;
+
+/// The built-in synth holding C4 for 4 bars through a CLAP gain insert,
+/// with automation `points` (tick, normalised value) of its gain (0-2).
+fn gain_song(points: &[(i64, f64)]) -> (Document, SeqId, PluginInstanceId) {
+    let mut b = Builder::new();
+    let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0xFFFF, 16 * Q)]).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let id = b.insert(synth, plugin("vizdaw.test.gain")).unwrap();
+    let lane = b.lane(seq, "Auto", None).unwrap();
+    let events: Vec<EventSpec> = points
+        .iter()
+        .map(|(t, v)| {
+            EventSpec::new(
+                Tick(*t),
+                EventBody::Automation {
+                    target: AutomationTarget::PluginParam(id, ParamId(0)),
+                    value: *v,
+                },
+            )
+        })
+        .collect();
+    if !events.is_empty() {
+        b.events(seq, lane, events).unwrap();
+    }
+    (b.finish(), seq, id)
+}
+
+#[test]
+fn a_parameter_ramp_reaches_a_clap_gain_insert() {
+    // Without automation the gain stays at its default, 1.0.
+    let (flat_doc, seq, id) = gain_song(&[]);
+    let mut flat_rig = rig();
+    flat_rig.add(id, "vizdaw.test.gain", false);
+    flat_rig.engine.load(&flat_doc, seq).unwrap();
+    let flat = flat_rig.play(98_304);
+    let (doc, seq, id) = gain_song(&[(0, 0.0), (4 * Q, 0.5)]);
+    let mut r = rig();
+    r.add(id, "vizdaw.test.gain", false);
+    let report = r.engine.load(&doc, seq).unwrap();
+    assert!(report.graph.placeholders.is_empty(), "{:?}", report.graph);
+    assert_eq!(report.automation_lanes, 1);
+    let wet = r.play(98_304);
+    assert!(flat.iter().any(|x| x.abs() > 1e-3));
+    // The test gain applies the last value of a block to the whole block:
+    // the one sent at frame 224 of each 256-frame block (a value every 32
+    // frames on a ramp, Plan 4d Ruling 12). Four quarters are 96 000 frames.
+    for (k, (w, f)) in wet.chunks(256).zip(flat.chunks(256)).enumerate() {
+        let at = (k * 256 + 224) as f64;
+        let gain = (2.0 * 0.5 * (at / 96_000.0).min(1.0)) as f32;
+        for (x, y) in w.iter().zip(f) {
+            assert!(
+                (x - y * gain).abs() <= 1e-6,
+                "block {k}: {x} vs {}",
+                y * gain
+            );
+        }
+    }
+    // Automated values are not gestures: nothing comes back.
+    assert!(r.live[0].gestures.drain().is_empty());
+}
+
+#[test]
+fn the_shelf_knows_which_parameters_are_stepped() {
+    let mut r = rig();
+    let id = PluginInstanceId(5);
+    r.add(id, "vizdaw.test.gain", false);
+    let f = r.shelf.factory();
+    assert!(
+        f.param_stepped(id, ParamId(1)),
+        "the latency parameter is stepped"
+    );
+    assert!(!f.param_stepped(id, ParamId(0)));
+    assert!(!f.param_stepped(PluginInstanceId(6), ParamId(1)));
+}
+
+/// Runs one 64-frame block of constant 1.0 through `fx`; returns the left.
+fn one_block(fx: &mut core_host::adapt::PluginEffect) -> f32 {
+    use core_engine::graph::EffectNode;
+    let mut io = StereoBuf::new(64);
+    io.left.fill(1.0);
+    io.right.fill(1.0);
+    fx.process_block(64, &mut io, None, &BlockInfo::default());
+    io.left[63]
+}
+
+#[test]
+fn a_skipped_insert_drops_the_automation_queued_meanwhile() {
+    use core_engine::graph::EffectNode;
+    let mut inst = load("vizdaw.test.gain");
+    let proc = inst.activate(SR, 4096).unwrap();
+    let ((_p, _g), audio) = param_queues();
+    let info = inst.info().clone();
+    let (back, _returned) = channel();
+    let mut fx =
+        core_host::adapt::PluginEffect::new(PluginInstanceId(1), proc, &info, 4096, audio, back);
+    // Control: a queued value (normalised 0 = gain 0) is applied on a run.
+    fx.automate(0, ParamId(0), 0.0);
+    assert!(one_block(&mut fx).abs() < 1e-6);
+    // Bypassed blocks: values pile up, then the engine reports each skip.
+    for _ in 0..300 {
+        fx.automate(0, ParamId(0), 0.0);
+        fx.skipped();
+    }
+    // Back in the chain: only values queued after the return are applied.
+    fx.automate(0, ParamId(0), 0.5); // gain 1.0
+    assert!((one_block(&mut fx) - 1.0).abs() < 1e-6);
+    // And with nothing queued after a skip, the plugin keeps its value.
+    fx.automate(0, ParamId(0), 0.0);
+    fx.skipped();
+    assert!((one_block(&mut fx) - 1.0).abs() < 1e-6);
+}

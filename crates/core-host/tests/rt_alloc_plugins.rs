@@ -11,6 +11,7 @@ use core_engine::fixtures::{Builder, Q, demo_document};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::rt_check::{self, CountingAlloc};
 use core_host::PluginHost;
+use core_model::automation::AutomationTarget;
 use core_model::command::MixerCmd;
 use core_model::event::{EventBody, EventSpec};
 use core_model::mixer::{AuxSend, ParamId, PluginFormat, StripKind};
@@ -61,6 +62,27 @@ fn plugins_render_without_allocating() {
         send: AuxSend::new(verb),
     })
     .unwrap();
+    // Automation of the gain insert's parameter and the built-in fader:
+    // plugin parameter changes and split runs on the armed path.
+    let auto = b.lane(song, "Auto", None).unwrap();
+    let mut points = Vec::new();
+    for k in 0..256i64 {
+        points.push(EventSpec::new(
+            Tick(k * Q / 8),
+            EventBody::Automation {
+                target: AutomationTarget::PluginParam(gain, ParamId(0)),
+                value: (k % 4) as f64 / 4.0,
+            },
+        ));
+        points.push(EventSpec::new(
+            Tick(k * Q / 8 + 1),
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(builtin),
+                value: (k % 5) as f64 / 5.0,
+            },
+        ));
+    }
+    b.events(song, auto, points).unwrap();
     let doc = b.finish();
 
     let mut host = PluginHost::new(48_000.0, 4096).unwrap();
@@ -115,6 +137,7 @@ fn plugins_render_without_allocating() {
     let allocs = rt_check::count() - before;
     rt_check::set_arm_workers(false);
     assert_eq!(allocs, 0, "allocations while plugins rendered");
+    assert!(engine.counters().runs > 2_000, "automation split blocks");
     assert!(engine.worker_steps() > 0, "workers rendered nodes");
     assert_eq!(
         engine.plugin_faults().len(),

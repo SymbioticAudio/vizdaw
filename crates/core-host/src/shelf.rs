@@ -6,8 +6,8 @@ use crate::adapt::{PluginEffect, PluginSynth};
 use core_engine::backend::InstrumentNode;
 use core_engine::graph::{EffectNode, InsertFactory};
 use core_model::ids::PluginInstanceId;
-use core_model::mixer::{PluginFormat, PluginRef, PluginSlot};
-use std::collections::BTreeMap;
+use core_model::mixer::{ParamId, PluginFormat, PluginRef, PluginSlot};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// A ready processor.
@@ -24,6 +24,14 @@ impl Ready {
         match self {
             Ready::Effect(e) => e.id(),
             Ready::Instrument(s) => s.id(),
+        }
+    }
+
+    /// The parameters the plugin declares stepped.
+    pub fn stepped_params(&self) -> Vec<ParamId> {
+        match self {
+            Ready::Effect(e) => e.stepped_params(),
+            Ready::Instrument(s) => s.stepped_params(),
         }
     }
 
@@ -48,6 +56,9 @@ struct Inner {
     ready: BTreeMap<PluginInstanceId, Entry>,
     /// Why an instance is not on the shelf (loading, failed, disabled).
     why: BTreeMap<PluginInstanceId, String>,
+    /// Each instance's stepped parameters, from its last processor put up
+    /// (kept after the engine takes it, Plan 4d Ruling 8).
+    stepped: BTreeMap<PluginInstanceId, BTreeSet<ParamId>>,
 }
 
 /// The shelf, shared between the host and the engine's factory.
@@ -79,8 +90,10 @@ impl Shelf {
         max_frames: u32,
         ready: Ready,
     ) -> Option<Ready> {
+        let stepped: BTreeSet<ParamId> = ready.stepped_params().into_iter().collect();
         let mut g = self.lock();
         g.why.remove(&id);
+        g.stepped.insert(id, stepped);
         g.ready
             .insert(
                 id,
@@ -189,5 +202,13 @@ impl InsertFactory for ShelfFactory {
             Ready::Instrument(s) => Ok(Box::new(s)),
             Ready::Effect(_) => Err("not an instrument".into()),
         }
+    }
+
+    fn param_stepped(&self, slot: PluginInstanceId, param: ParamId) -> bool {
+        self.0
+            .lock()
+            .stepped
+            .get(&slot)
+            .is_some_and(|s| s.contains(&param))
     }
 }

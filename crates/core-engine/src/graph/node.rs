@@ -42,6 +42,11 @@ pub trait EffectNode: Send {
         let _ = (frame, param, normalized);
     }
 
+    /// The block went by without this insert running (bypassed or faulted):
+    /// drops automation queued for it, so stale values are not applied
+    /// when it returns. // RT
+    fn skipped(&mut self) {}
+
     /// [`EffectNode::process`] with the block's transport facts; plugin
     /// processors override this. // RT
     fn process_block(

@@ -751,6 +751,9 @@ fn run_insert(
     info: &BlockInfo,
 ) {
     if bypass || ins.faulted {
+        if let Some(node) = ins.node.as_mut() {
+            node.skipped();
+        }
         if !ins.in_bypass {
             ins.bypass.clear();
             ins.in_bypass = true;
