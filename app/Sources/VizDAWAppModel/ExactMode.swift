@@ -5,6 +5,8 @@ import VizDAWCore
 /// drags open the panel.
 public enum GestureOrigin: Equatable, Sendable {
     case notes, blocks, regionStrip, expression, other
+    /// A Strip Chart line or rectangle (4d).
+    case stripChart
 }
 
 /// The part of a diagonal drag the panel left out.
@@ -50,8 +52,9 @@ public enum ExactMode {
     /// that drag applies as usual (region moves, pencil, eraser, expression
     /// strokes, cross-lane drags).
     public static func request(for cmd: EditCommand, lanes: Set<LaneKey>, origin: GestureOrigin) -> ModifyRequest? {
-        guard origin == .notes || origin == .blocks, case .event(let e) = cmd else { return nil }
         let sorted = lanes.sorted { ($0.seq, $0.lane) < ($1.seq, $1.lane) }
+        if origin == .stripChart { return lineRequest(cmd, lanes: sorted) }
+        guard origin == .notes || origin == .blocks, case .event(let e) = cmd else { return nil }
         func make(
             _ task: PanelTask, _ events: [UInt64], _ op: ModifyRow, copy: Bool, dropped: DroppedAxis? = nil
         ) -> ModifyRequest {
@@ -87,6 +90,21 @@ public enum ExactMode {
         default:
             return nil
         }
+    }
+
+    /// A Strip Chart line or rectangle as the panel set to Change Values
+    /// with the line and its Position condition (Plan 4d Ruling 23).
+    static func lineRequest(_ cmd: EditCommand, lanes: [LaneKey]) -> ModifyRequest? {
+        guard case let .selectAndModify(rule, mode, .line(target, op, line)?, _) = cmd else { return nil }
+        var c = SelectModifyConfig.preset(.change)
+        c.select.enabled = rule != nil
+        c.select.mode = mode
+        c.select.conditions = rule?.conditions ?? []
+        c.modify.enabled = true
+        c.modify.op = .line(target: target, op: op, line: line)
+        c.modify.toCopy = false
+        return ModifyRequest(
+            task: .change, config: c, events: nil, lanes: lanes, range: TickRange(start: line.from, end: line.to + 1))
     }
 
     /// A rubber band as Select by Rule: notes starting in its range and
