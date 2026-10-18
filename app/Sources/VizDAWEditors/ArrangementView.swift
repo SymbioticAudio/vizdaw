@@ -38,7 +38,6 @@ public final class ArrangementView: EditorCanvas {
         }
         onRulerRange = { [unowned self] r in self.editor.selectRange(r, lanes: self.lanes) }
         onRulerClick = { [unowned self] t in self.document.locate(t) }
-        onToggleSnap = { [unowned self] in self.editor.updateLayout { $0.snap.enabled.toggle() } }
         onAxisChange = { [unowned self] a in
             if a.ticksPerPoint != self.editor.layout.ticksPerPoint {
                 self.editor.updateLayout { $0.ticksPerPoint = a.ticksPerPoint }

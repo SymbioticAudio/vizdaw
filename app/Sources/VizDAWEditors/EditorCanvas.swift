@@ -134,7 +134,6 @@ open class EditorCanvas: NSView {
     public var playheadSource: (@MainActor (UInt64) -> Double?)?
     public var onRulerRange: ((TickRange) -> Void)?
     public var onRulerClick: ((Int64) -> Void)?
-    public var onToggleSnap: (() -> Void)?
     public var onAxisChange: ((TimeAxis) -> Void)?
     public var onVerticalScroll: ((CGFloat) -> Void)?
 
@@ -449,13 +448,11 @@ open class EditorCanvas: NSView {
         dragStep()
     }
 
+    /// Escape cancels a gesture. Snap (G) and every other bound key are
+    /// the key bindings' (Editors > Snap to Grid, plan 4f).
     open override func keyDown(with e: NSEvent) {
-        let plain = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            .subtracting([.capsLock, .numericPad, .function]).isEmpty
         if e.keyCode == 53 {  // Escape
             cancelGestures()
-        } else if plain, e.charactersIgnoringModifiers?.lowercased() == "g" {
-            onToggleSnap?()
         } else {
             super.keyDown(with: e)
         }

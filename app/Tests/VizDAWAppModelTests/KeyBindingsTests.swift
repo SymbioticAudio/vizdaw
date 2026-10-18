@@ -120,6 +120,24 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         #expect(route(1, cmdMod) == .pass, "the key the menu shows")
         #expect(route(38, cmdMod) == .command("file.save"), "a second key the menu does not know")
     }
+
+    @Test func aPlainKeyWhoseCommandPassedSkipsTheMainMenu() throws {
+        // Controller ruling F2: with the number row reserved, step entry's
+        // `1` is locator 1's; unset, the locator passes, and the main menu
+        // must not then match it to Step › Whole Note.
+        keys.reserveNumberRow = true
+        let r = route(18, step: true)
+        #expect(r == .command("locator.go_1"))
+        let m = try DocumentModel(session: demoFake())
+        #expect(KeyDispatch.after(.failed(.of(.unavailable, "No locator 1.")), doc: m) == .pass)
+        #expect(KeyDispatch.passed(r, modifiers: noMods) == .window, "to the window's responder")
+        // Ruling F1: a text field's plain keys go to the window too.
+        #expect(KeyDispatch.passed(route(49, typing: true), modifiers: noMods) == .window)
+        // ⌘ and ⌃ keys, unbound keys and slots still reach the menus.
+        #expect(KeyDispatch.passed(.command("file.save"), modifiers: cmdMod) == .menus)
+        #expect(KeyDispatch.passed(route(7), modifiers: noMods) == .menus)
+        #expect(KeyDispatch.passed(.slot(1), modifiers: optMod) == .menus)
+    }
 }
 
 @Suite struct TransportMarksTests {

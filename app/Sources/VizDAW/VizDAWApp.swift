@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         StoreAlerts.watch(appStore)
+        KeyMonitor.start()
         AppSetup.startScan()
         PluginTicker.start(appStore)
     }

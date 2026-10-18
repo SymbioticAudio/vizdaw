@@ -250,15 +250,21 @@ enum ControlChannel {
         }
     }
 
-    /// Key strokes into `w` (control spec §5.5): a menu shortcut runs its
-    /// command on the window's document, as the menu would for the key
-    /// window; an unavailable command, or a stroke that is no shortcut,
-    /// goes to the window's first responder (typing, canvas keys).
+    /// Key strokes into `w` (control spec §5.5, plan 4f Ruling 5): routed
+    /// as the keyboard's are, by the current key bindings. A bound key runs
+    /// its command on the window's document (a menu item's too: the
+    /// channel has no menus, so a dialog it would open is
+    /// `dialog_required`); a keyboard slot plays or enters its sequence; a
+    /// text field's plain keys, an unavailable command and an unbound key
+    /// go to the window's first responder (typing, canvas keys).
     static func keys(_ server: ControlServer, _ token: UInt64, _ strokes: [KeyStrokeRow], _ w: NSWindow) {
         var sent: UInt32 = 0
         for s in strokes {
-            if let id = s.command {
-                let doc = ControlWindows.document(.number(number: Int64(w.windowNumber)))
+            let events = ControlUI.keyEvents(w, [s])
+            guard let down = events.first else { continue }
+            let (route, doc) = KeyMonitor.route(down, in: w, menus: false)
+            switch route {
+            case .command(let id):
                 let outcome = ControlCommands.run(id, args: [], doc: doc, store: appStore, host: AppControlHost.shared)
                 switch outcome {
                 case .failed(let f) where f.code == .unavailable: break
@@ -270,8 +276,13 @@ enum ControlChannel {
                     sent += 1
                     continue
                 }
+            case .slot:
+                if KeyMonitor.perform(route, doc) {
+                    sent += 1
+                    continue
+                }
+            case .typing, .pass: break
             }
-            let events = ControlUI.keyEvents(w, [s])
             ControlUI.deliver(events, to: w)
             sent += UInt32(events.count)
         }

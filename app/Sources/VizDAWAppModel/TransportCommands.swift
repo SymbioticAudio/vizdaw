@@ -5,6 +5,18 @@ import VizDAWCore
 /// every command that runs from keys, menus and the channel alike.
 public typealias KeyOutcome = DrumOutcome
 
+/// A group of commands with menu items (plan 4f): whether one is enabled,
+/// its check mark, and running it (`on` sets a toggle; nil flips it).
+@MainActor
+public protocol MenuCommands {
+    static func enabled(_ id: String, _ m: DocumentModel) -> Bool
+    static func isOn(_ id: String, _ m: DocumentModel) -> Bool
+    static func run(_ id: String, on: Bool?, _ m: DocumentModel) -> KeyOutcome
+}
+
+extension TransportCommands: MenuCommands {}
+extension DrumCommands: MenuCommands {}
+
 /// The transport keys, modes and locators (editors spec §4f, plan 4f
 /// Rulings 7–10): one implementation for the menu items, the keys and
 /// the control channel's `command.run`. None opens a dialog.

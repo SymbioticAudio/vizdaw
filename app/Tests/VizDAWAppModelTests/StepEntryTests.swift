@@ -142,6 +142,21 @@ import VizDAWCore
         #expect(StepCommands.enabled("step.rest", m) && !StepCommands.isOn("step.dot", m))
     }
 
+    @Test func menuItemsRunThroughOneProtocol() throws {
+        let (_, _, m, _) = try demo()
+        let kinds: [(any MenuCommands.Type, String)] = [
+            (TransportCommands.self, "transport.overdub"), (StepCommands.self, StepCommands.entry),
+            (DrumCommands.self, DrumCommands.timeline),
+        ]
+        for (kind, id) in kinds {
+            let before = (kind.enabled(id, m), kind.isOn(id, m))
+            #expect(before == (true, false), "\(id)")
+            let ran = kind.run(id, on: nil, m)
+            let after = kind.isOn(id, m)
+            #expect(ran == .done && after, "\(id) toggled on")
+        }
+    }
+
     @Test func aRefusedNoteOffDoesNotStickTheChord() throws {
         let (s, id, m, f) = try demo()
         _ = run("step.entry", m, s, id)

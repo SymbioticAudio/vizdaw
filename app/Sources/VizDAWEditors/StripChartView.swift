@@ -56,7 +56,6 @@ public final class StripChartView: EditorCanvas {
             self.editor.selectRange(r, lanes: [lane])
         }
         onRulerClick = { [weak self] t in self?.document?.locate(t) }
-        onToggleSnap = { [weak self] in self?.editor.updateLayout { $0.snap.enabled.toggle() } }
         onAxisChange = { [weak self] a in
             guard let self, a.ticksPerPoint != self.model.settings.ticksPerPoint else { return }
             self.model.updateSettings { $0.ticksPerPoint = a.ticksPerPoint }

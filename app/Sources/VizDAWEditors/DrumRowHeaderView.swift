@@ -179,16 +179,22 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
     }
 
     public override func keyDown(with e: NSEvent) {
-        if e.keyCode == 53, dragging != nil {  // Escape
+        if e.keyCode == 53 {  // Escape
             cancelOperation(nil)
         } else {
             super.keyDown(with: e)
         }
     }
 
-    /// Escape: the drag ends and its release drops nothing.
+    /// Escape: a row drag ends and its release drops nothing; without one,
+    /// the grid's stroke (one still waiting on a busy session) is cancelled,
+    /// as Escape in the grid would (parked from plan 4e: the header keeps
+    /// the keyboard after a click).
     public override func cancelOperation(_ sender: Any?) {
-        guard dragging != nil else { return }
+        guard dragging != nil else {
+            model.strokeCancelled()
+            return
+        }
         dragging = nil
         needsDisplay = true
     }

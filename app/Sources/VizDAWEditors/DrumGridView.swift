@@ -57,7 +57,6 @@ public final class DrumGridView: EditorCanvas {
             self.editor.selectRange(r, lanes: self.model.lanes.map { LaneKey(seq, $0.lane) })
         }
         onRulerClick = { [weak self] t in self?.document?.locate(t) }
-        onToggleSnap = { [weak self] in self?.editor.updateLayout { $0.snap.enabled.toggle() } }
         onAxisChange = { [weak self] a in
             guard let self, a.ticksPerPoint != self.editor.layout.drumGrid.ticksPerPoint else { return }
             self.editor.updateLayout { $0.drumGrid.ticksPerPoint = a.ticksPerPoint }

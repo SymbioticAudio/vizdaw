@@ -210,5 +210,12 @@ private func paint(_ ticks: [Int64], velocity: UInt16 = 100 << 9, row: UInt64 = 
         h.mouseUp(at: CGPoint(x: 20, y: top + 95))
         #expect(f.edits.count == n, "the release after Escape drops nothing")
         #expect(h.acceptsFirstResponder)
+        // With the keyboard still on the header, Escape cancels the grid's
+        // open stroke.
+        c.canvas.contentMouseDown(CGPoint(x: 5, y: 50), clicks: 1, modifiers: [])
+        c.canvas.contentMouseDragged(CGPoint(x: 125, y: 70), modifiers: [])
+        #expect(m.editor.gesture != nil)
+        h.keyDown(with: esc)
+        #expect(m.editor.gesture == nil && f.calls.last == "abort")
     }
 }

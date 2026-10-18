@@ -69,7 +69,6 @@ public final class PianoRollView: EditorCanvas {
             self.editor.selectRange(r, lanes: self.model.shownLanes)
         }
         onRulerClick = { [weak self] t in self?.document?.locate(t) }
-        onToggleSnap = { [weak self] in self?.editor.updateLayout { $0.snap.enabled.toggle() } }
         onAxisChange = { [weak self] a in
             guard let self else { return }
             self.onTimeAxis?(a)

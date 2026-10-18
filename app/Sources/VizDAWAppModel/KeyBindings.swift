@@ -178,3 +178,29 @@ public enum KeyDispatch {
         }
     }
 }
+
+/// Where a key press VizDAW did not use goes next (controller rulings F1,
+/// F2).
+public enum KeyPass: Equatable, Sendable {
+    /// AppKit's main menu, then the views: a ⌘ or ⌃ key, a key bound to
+    /// nothing.
+    case menus
+    /// The window alone (its own key equivalents — a sheet's default and
+    /// cancel buttons — then its first responder), past the main menu: a
+    /// text field's plain keys, and a plain key whose command was
+    /// unavailable, which the menu would otherwise match to a different
+    /// command's plain-key item (an unset locator's `1` to Step › Whole
+    /// Note).
+    case window
+}
+
+extension KeyDispatch {
+    /// Where a key press with `route` goes when it was not used up.
+    public static func passed(_ route: KeyRoute, modifiers m: ModifiersRow) -> KeyPass {
+        switch route {
+        case .typing: return .window
+        case .command: return KeyRouter.plain(m) ? .window : .menus
+        case .slot, .pass: return .menus
+        }
+    }
+}

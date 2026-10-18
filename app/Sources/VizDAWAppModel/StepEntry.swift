@@ -140,7 +140,7 @@ public final class StepEntryModel {
 /// The Step menu and step entry's keys (plan 4f Ruling 12): one
 /// implementation for the menu items, the keys and `command.run`.
 @MainActor
-public enum StepCommands {
+public enum StepCommands: MenuCommands {
     public static let entry = "step.entry"
     public static let notes = "step.notes"
     static let values: [String: NoteValueRow] = [
@@ -169,10 +169,16 @@ public enum StepCommands {
         }
     }
 
-    /// Runs `id` on `m`; `on` sets step entry (nil flips it); `pitches`
-    /// is step.notes' text.
+    /// Runs `id` on `m` (a menu item, a key): `on` sets step entry (nil
+    /// flips it).
     @discardableResult
-    public static func run(_ id: String, on: Bool? = nil, pitches: String? = nil, _ m: DocumentModel) -> KeyOutcome {
+    public static func run(_ id: String, on: Bool?, _ m: DocumentModel) -> KeyOutcome {
+        run(id, on: on, pitches: nil, m)
+    }
+
+    /// Runs `id` on `m`; `pitches` is step.notes' text.
+    @discardableResult
+    public static func run(_ id: String, on: Bool?, pitches: String?, _ m: DocumentModel) -> KeyOutcome {
         let step = m.stepEntry
         if id == entry {
             let want = on ?? !step.isOn
