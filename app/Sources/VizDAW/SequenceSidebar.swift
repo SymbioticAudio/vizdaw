@@ -168,6 +168,9 @@ struct KeySlotSheet: View {
                 flag("⇧", \.shift)
                 flag("⌘", \.command)
             }
+            if let problem = model.slotDraft?.problem {
+                Text(problem).font(.caption).foregroundStyle(.red)
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { model.slotDraft = nil }.keyboardShortcut(.cancelAction)

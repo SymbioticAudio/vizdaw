@@ -376,13 +376,76 @@ fn every_transport_key_has_a_command() {
 }
 
 #[test]
+fn step_entry_keys_are_live_only_in_step_entry() {
+    use core_control::bindings::{Chord, Keymap};
+    use core_control::registry::KeyContext;
+    let k = Keymap::default();
+    let key =
+        |t: &str, step: bool, reserve: bool| k.lookup(Chord::parse(t).unwrap(), step, reserve);
+    assert_eq!(key("T", false, false), Some("step.entry"));
+    for (text, id) in [
+        ("1", "step.whole"),
+        ("Keypad1", "step.whole"),
+        ("2", "step.half"),
+        ("3", "step.quarter"),
+        ("4", "step.eighth"),
+        ("5", "step.sixteenth"),
+        ("6", "step.thirty_second"),
+        (".", "step.dot"),
+        ("Keypad.", "step.dot"),
+        ("/", "step.triplet"),
+        ("=", "step.tie"),
+        ("Keypad+", "step.tie"),
+        ("0", "step.rest"),
+        ("Delete", "step.delete_last"),
+    ] {
+        assert_eq!(key(text, true, false), Some(id), "{text}");
+    }
+    assert_eq!(
+        key("1", false, false),
+        Some("locator.go_1"),
+        "outside step entry"
+    );
+    assert_eq!(key(".", false, false), Some("transport.next_marker"));
+    assert_eq!(key("Delete", false, false), None, "the editors' own key");
+    assert_eq!(
+        key("1", true, true),
+        Some("locator.go_1"),
+        "the row reserved"
+    );
+    assert_eq!(key("Keypad1", true, true), Some("step.whole"));
+    let step: Vec<&str> = COMMANDS
+        .iter()
+        .filter(|c| c.context == KeyContext::StepEntry)
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(step.len(), 11);
+    assert_eq!(
+        err("command.run", json!({"id": "step.notes"})).0,
+        ErrorCode::InvalidParams,
+        "the pitches are needed"
+    );
+    assert_eq!(
+        ok(
+            "command.run",
+            json!({"id": "step.notes", "params": {"pitches": "C4 E4"}})
+        ),
+        Command::CommandRun {
+            id: "step.notes".into(),
+            args: vec![("pitches".into(), ArgValue::Text("C4 E4".into()))],
+            window: None,
+        }
+    );
+}
+
+#[test]
 fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     let ids: std::collections::BTreeSet<_> = COMMANDS.iter().map(|c| c.id).collect();
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        92,
-        "44 before plan 4f, plus 48 transport, locator, record and key-binding commands"
+        105,
+        "44 before plan 4f, plus 48 transport, locator, record and key-binding commands, 13 step entry"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -506,9 +569,14 @@ fn shortcuts_name_their_menu_commands() {
     assert_eq!(
         stroke("x", Modifiers::default()),
         None,
-        "a plain letter is typing"
+        "an unbound letter is nothing"
     );
-    for c in COMMANDS {
+    // Global shortcuts name their commands; step entry's keys are not
+    // global (plan 4f: they share keys with the locators).
+    for c in COMMANDS
+        .iter()
+        .filter(|c| c.context == core_control::registry::KeyContext::Global)
+    {
         if let Some(s) = c.shortcut {
             let k = registry::shortcut_stroke(s).unwrap_or_else(|| panic!("{}: {s}", c.id));
             assert_eq!(
@@ -624,6 +692,7 @@ mod fuzz {
             Just("max_depth"),
             Just("on"),
             Just("name"),
+            Just("pitches"),
         ]
         .prop_map(str::to_string)
     }

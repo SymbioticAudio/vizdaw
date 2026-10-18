@@ -29,6 +29,9 @@ public struct KeySlotDraft: Identifiable, Equatable, Sendable {
     public var control = false
     public var option = false
     public var command = false
+    /// Why the last Set was refused (the key is a command's, plan 4f
+    /// Ruling 15).
+    public var problem: String?
     public var id: UInt64 { seq }
 
     var slot: KeySlotRow? {
@@ -98,10 +101,33 @@ extension DocumentModel {
         slotDraft = d
     }
 
+    /// Sets the edited slot; a key that is a command's is refused and the
+    /// draft stays open saying why (parent spec §5).
     public func commitSlot() {
-        guard let d = slotDraft else { return }
+        guard var d = slotDraft else { return }
+        if let slot = d.slot, let clash = keys?.slotClash(slot) {
+            d.problem = "\(KeySlotFormat.text(slot)) is the key of “\(clash)”."
+            slotDraft = d
+            return
+        }
         slotDraft = nil
         editor.edit(.sequence(edit: .setKeyboardSlot(seq: d.seq, slot: d.slot)))
+    }
+
+    /// A sequence's keyboard slot was pressed (parent spec §5): during
+    /// step entry it enters a reference to the sequence and moves on by
+    /// its length; otherwise the sequence becomes the shown one and plays
+    /// from its start.
+    @discardableResult
+    public func pressSlot(_ seq: UInt64) -> KeyOutcome {
+        if stepEntry.isOn { return stepEntry.input(.reference(seq: seq)) }
+        choose(seq)
+        do {
+            try startPlaying(from: 0)
+            return .done
+        } catch {
+            return .refused(AlertItem(error, title: "").message)
+        }
     }
 
     /// Deletes an unused sequence at once; a used one waits for

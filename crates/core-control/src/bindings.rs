@@ -364,6 +364,15 @@ impl Keymap {
             .map(|c| c.id)
     }
 
+    /// The command a keyboard slot's key (`a`, `F5`) with `modifiers` (the
+    /// slot's bitmask) clashes with: the global context first, then step
+    /// entry's, since a slot can be pressed in either.
+    pub fn slot_clash(&self, key: &str, modifiers: u8) -> Option<&'static str> {
+        let chord = Chord::of_slot(key, modifiers)?;
+        self.holder(chord, KeyContext::Global)
+            .or_else(|| self.holder(chord, KeyContext::StepEntry))
+    }
+
     /// The command a key press runs: with step entry on, its own keys
     /// first (except the number row's when `reserve_numbers` keeps the
     /// row for locators), then the global ones.

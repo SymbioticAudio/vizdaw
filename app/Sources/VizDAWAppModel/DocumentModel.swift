@@ -13,6 +13,11 @@ public final class DocumentModel {
     public let editor: EditorModel
     /// The select-and-modify panel (plan 4c).
     public let selectModify = SelectModifyModel()
+    /// Step entry (plan 4f).
+    public let stepEntry = StepEntryModel()
+    /// The app's key bindings (set by `DocumentStore`; keyboard slots are
+    /// checked against them, plan 4f Ruling 15).
+    @ObservationIgnored public var keys: KeyBindings?
     public private(set) var selectedSeq: UInt64?
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState
@@ -184,12 +189,18 @@ public final class DocumentModel {
         return l
     }
 
-    /// A list listens while MIDI In is on and its slot still shows a list.
-    public var listensForNotes: Bool { lists.values.contains { $0.listens } }
+    /// Step entry is on, or a list listens (MIDI In on, its slot still
+    /// showing a list).
+    public var listensForNotes: Bool { stepEntry.isOn || lists.values.contains { $0.listens } }
 
-    /// Played notes go to the active list when it listens, else the pane's,
-    /// else the first listening window's (by ID, so the choice is stable).
+    /// Played notes go to step entry while it is on (plan 4f Ruling 13);
+    /// else to the active list when it listens, else the pane's, else the
+    /// first listening window's (by ID, so the choice is stable).
     public func receiveNotes(_ notes: [NoteInRow]) {
+        if stepEntry.isOn {
+            stepEntry.receive(notes)
+            return
+        }
         var order: [DetailSlot] = []
         if let a = activeList { order.append(a) }
         order.append(.pane)
@@ -224,6 +235,7 @@ public final class DocumentModel {
         editor.selectSequence = { [weak self] in self?.select($0) }
         editor.currentSequence = { [weak self] in self?.selectedSeq }
         selectModify.document = self
+        stepEntry.document = self
         editor.onExact = { [weak self] r in self?.selectModify.open(r) }
         editor.layoutChanged = { [weak self] in
             self?.pruneLists()

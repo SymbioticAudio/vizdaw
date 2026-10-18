@@ -119,13 +119,12 @@ impl Keymap {
             .map(str::to_string)
     }
 
-    /// The global command a keyboard slot's key (`a`, `F5`) with
+    /// The command (global or step entry's) a keyboard slot's key (`a`, `F5`) with
     /// `modifiers` (the slot's bitmask) would clash with (parent spec §5:
     /// such a slot is refused).
     pub fn slot_clash(&self, key: String, modifiers: u8) -> Option<String> {
-        let chord = Chord::of_slot(&key, modifiers)?;
         lock(&self.inner)
-            .holder(chord, KeyContext::Global)
+            .slot_clash(&key, modifiers)
             .map(str::to_string)
     }
 

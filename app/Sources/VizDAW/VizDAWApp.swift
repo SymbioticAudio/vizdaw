@@ -28,6 +28,7 @@ struct VizDAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
+        appStore.keyBindings = keyBindings
         appStore.willClose = {
             PluginWindows.closeDocument($0)
             EditorWindows.closeDocument($0)

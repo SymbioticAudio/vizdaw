@@ -95,7 +95,7 @@ public enum ControlCommands {
     /// Every registry ID `run` handles (a test checks it is all of them).
     public static var handled: Set<String> {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
-            .union(TransportCommands.ids)
+            .union(TransportCommands.ids).union(StepCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -237,6 +237,10 @@ public enum ControlCommands {
             if let f = failure(DrumCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where TransportCommands.ids.contains(id):
             if let f = failure(TransportCommands.run(id, on: args.flag("on"), m)) { return f }
+        case _ where StepCommands.ids.contains(id):
+            if let f = failure(StepCommands.run(id, on: args.flag("on"), pitches: args.text("pitches"), m)) {
+                return f
+            }
         default:
             return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }

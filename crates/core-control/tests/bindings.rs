@@ -368,3 +368,14 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn a_slot_clashes_with_a_global_or_a_step_entry_key() {
+    let k = Keymap::default();
+    assert_eq!(k.slot_clash("s", 8), Some("file.save"), "a global key");
+    assert_eq!(k.slot_clash("=", 0), Some("step.tie"), "a step-only key");
+    assert_eq!(k.slot_clash("/", 0), Some("step.triplet"));
+    assert_eq!(k.slot_clash("4", 0), Some("locator.go_4"), "global first");
+    assert_eq!(k.slot_clash("q", 2), None, "a free key");
+    assert_eq!(k.slot_clash("nope", 0), None, "not a key");
+}

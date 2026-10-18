@@ -153,6 +153,8 @@ public final class DocumentStore {
 
     /// List defaults and columns given to every document (Plan 4c Ruling 19).
     public var listPreferences = ListPreferences()
+    /// The app's key bindings, handed to every document (plan 4f).
+    public var keyBindings: KeyBindings?
 
     public func newDemoAudio() -> UUID? {
         guard let make = makeDemoAudio else { return nil }
@@ -226,6 +228,7 @@ public final class DocumentStore {
         do {
             let model = try DocumentModel(session: make())
             model.listPreferences = listPreferences
+            model.keys = keyBindings
             let id = UUID()
             documents[id] = model
             return id

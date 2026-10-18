@@ -191,6 +191,21 @@ const fn key_only(c: CommandSpec) -> CommandSpec {
     }
 }
 
+/// A step entry key's command (plan 4f Ruling 12): live only during step
+/// entry, with a keypad twin.
+const fn step(
+    id: &'static str,
+    title: &'static str,
+    key: &'static str,
+    keypad: &'static [&'static str],
+) -> CommandSpec {
+    CommandSpec {
+        extra_keys: keypad,
+        context: KeyContext::StepEntry,
+        ..cmd(id, "Step", title, Some(key), true)
+    }
+}
+
 /// A numbered locator's command (plan 4f Ruling 7).
 const fn locator(id: &'static str, title: &'static str, key: &'static str) -> CommandSpec {
     key_only(cmd(id, "Locators", title, Some(key), true))
@@ -502,6 +517,35 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌥⇧↓"),
         true,
     ),
+    CommandSpec {
+        params: ON,
+        ..cmd("step.entry", "Step", "Step Entry", Some("T"), true)
+    },
+    step("step.whole", "Whole Note", "1", &["Keypad1"]),
+    step("step.half", "Half Note", "2", &["Keypad2"]),
+    step("step.quarter", "Quarter Note", "3", &["Keypad3"]),
+    step("step.eighth", "Eighth Note", "4", &["Keypad4"]),
+    step("step.sixteenth", "Sixteenth Note", "5", &["Keypad5"]),
+    step(
+        "step.thirty_second",
+        "Thirty-Second Note",
+        "6",
+        &["Keypad6"],
+    ),
+    step("step.dot", "Dotted", ".", &["Keypad."]),
+    step("step.triplet", "Triplet", "/", &["Keypad/"]),
+    step("step.tie", "Tie", "=", &["Keypad+"]),
+    step("step.rest", "Rest", "0", &["Keypad0"]),
+    step("step.delete_last", "Delete Last Step", "Delete", &[]),
+    CommandSpec {
+        params: &[ParamSpec {
+            name: "pitches",
+            kind: ParamKind::Text,
+            required: true,
+            help: "The chord to enter: note numbers or names (`60 64 67`, `C4 E4 G4`).",
+        }],
+        ..key_only(cmd("step.notes", "Step", "Enter Notes", None, true))
+    },
     key_only(cmd(
         "record.keep_pass",
         "Record",
