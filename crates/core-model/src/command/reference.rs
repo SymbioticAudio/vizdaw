@@ -265,7 +265,7 @@ fn from_selection(
             nl.audio_out = l.audio_out;
             nl.mute = l.mute;
             nl.solo = l.solo;
-            nl.play_quantize = l.play_quantize;
+            nl.play_quantize = l.play_quantize.clone();
             nl.play_shift = l.play_shift;
             nl.drum = l.drum.as_ref().map(|dl| DrumLayout {
                 rows: dl

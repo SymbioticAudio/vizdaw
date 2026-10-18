@@ -208,16 +208,10 @@ fn duplicate_ids_are_rejected() {
 
 #[test]
 fn quantize_spec_applies_strength() {
-    let q = QuantizeSpec {
-        grid: Tick(100),
-        strength: 50,
-    };
+    let q = QuantizeSpec::grid(Tick(100), 50);
     assert_eq!(q.apply(Tick(140)), Tick(120));
     assert_eq!(q.apply(Tick(160)), Tick(180));
-    let zero = QuantizeSpec {
-        grid: Tick(0),
-        strength: 100,
-    };
+    let zero = QuantizeSpec::grid(Tick(0), 100);
     assert_eq!(zero.apply(Tick(7)), Tick(7));
 }
 

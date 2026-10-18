@@ -834,10 +834,7 @@ fn lane_cmd(e: &LaneEdit) -> LaneCmd {
         } => LaneCmd::SetPlayQuantize {
             seq: SeqId(*seq),
             lane: LaneId(*lane),
-            quantize: quantize.map(|q| QuantizeSpec {
-                grid: Tick(q.grid),
-                strength: q.strength,
-            }),
+            quantize: quantize.map(|q| QuantizeSpec::grid(Tick(q.grid), q.strength)),
         },
         LaneEdit::SetPlayShift { seq, lane, shift } => LaneCmd::SetPlayShift {
             seq: SeqId(*seq),

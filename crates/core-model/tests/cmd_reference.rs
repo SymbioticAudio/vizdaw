@@ -648,10 +648,7 @@ fn flatten_warns_about_lost_audio_output_and_owner_quantize() {
         Command::Lane(LaneCmd::SetPlayQuantize {
             seq: SeqId(0),
             lane: LaneId(0),
-            quantize: Some(QuantizeSpec {
-                grid: Tick(Q),
-                strength: 100,
-            }),
+            quantize: Some(QuantizeSpec::grid(Tick(Q), 100)),
         }),
     )
     .unwrap();

@@ -201,10 +201,7 @@ fn length_quantize_and_shift_are_validated() {
             LaneCmd::SetPlayQuantize {
                 seq: id.0,
                 lane: id.1,
-                quantize: Some(QuantizeSpec {
-                    grid: Tick(0),
-                    strength: 100
-                })
+                quantize: Some(QuantizeSpec::grid(Tick(0), 100))
             }
         )
         .is_err()
@@ -215,10 +212,7 @@ fn length_quantize_and_shift_are_validated() {
             LaneCmd::SetPlayQuantize {
                 seq: id.0,
                 lane: id.1,
-                quantize: Some(QuantizeSpec {
-                    grid: Tick(960),
-                    strength: 101
-                })
+                quantize: Some(QuantizeSpec::grid(Tick(960), 101))
             }
         )
         .is_err()

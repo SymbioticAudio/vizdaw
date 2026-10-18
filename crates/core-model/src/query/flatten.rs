@@ -149,7 +149,7 @@ impl<'a> Walk<'a> {
                     continue;
                 }
                 let mut lt = e.tick + base;
-                if let (Some(q), EventBody::Note { .. }) = (lane.play_quantize, &e.body) {
+                if let (Some(q), EventBody::Note { .. }) = (&lane.play_quantize, &e.body) {
                     lt = q.apply(lt);
                 }
                 lt = lt + lane.play_shift;

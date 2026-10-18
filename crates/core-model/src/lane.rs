@@ -1,5 +1,6 @@
 //! Lanes (untyped tracks), takes and drum layouts.
 
+use crate::error::ModelError;
 use crate::event::Event;
 use crate::ids::{DestId, DrumRowId, EventId, LaneId, OutputPathId, TakeId};
 use crate::time::Tick;
@@ -133,25 +134,86 @@ mod events_as_array {
     }
 }
 
-/// Non-destructive quantize: snap note starts toward a grid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The most offsets a play-quantize groove may have.
+pub const MAX_GROOVE: usize = 64;
+
+/// Non-destructive quantize: snap note starts toward a grid, or a groove
+/// (a grid whose lines are moved by a repeating list of offsets).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuantizeSpec {
     /// Grid size in ticks (> 0).
     pub grid: Tick,
     /// Strength 0–100 percent.
     pub strength: u8,
+    /// Groove: grid line `k` (counted from tick 0) moves by
+    /// `groove[k % len]` before the strength applies; each offset is
+    /// shorter than the grid. Empty: a plain grid (and absent in files,
+    /// so projects without a groove read and write as before).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groove: Vec<Tick>,
 }
 
 impl QuantizeSpec {
+    /// A plain grid.
+    pub fn grid(grid: Tick, strength: u8) -> QuantizeSpec {
+        QuantizeSpec {
+            grid,
+            strength,
+            groove: Vec::new(),
+        }
+    }
+
+    /// Swing: every second line of `grid` moves late so that the pair
+    /// splits `percent : 100 − percent` (50 is straight, 66 a triplet
+    /// feel); `percent` is clamped to 50–75; full strength.
+    pub fn swing(grid: Tick, percent: u8) -> QuantizeSpec {
+        let p = i64::from(percent.clamp(50, 75));
+        let late = grid.0.saturating_mul(2).saturating_mul(p - 50) / 100;
+        QuantizeSpec {
+            grid,
+            strength: 100,
+            groove: vec![Tick::ZERO, Tick(late)],
+        }
+    }
+
+    /// Checks the grid (> 0, within ±2^40 ticks), the strength (≤ 100)
+    /// and the groove (at most [`MAX_GROOVE`] offsets, each shorter than
+    /// the grid).
+    pub fn check(&self) -> crate::error::Result<()> {
+        crate::rules::check_positive("play_quantize.grid", self.grid)?;
+        crate::rules::check_ticks("play_quantize.grid", self.grid.0)?;
+        if self.strength > 100 {
+            return Err(ModelError::range("play_quantize.strength", self.strength));
+        }
+        if self.groove.len() > MAX_GROOVE {
+            return Err(ModelError::range("play_quantize.groove", self.groove.len()));
+        }
+        if let Some(o) = self
+            .groove
+            .iter()
+            .find(|o| o.0.unsigned_abs() >= self.grid.0.unsigned_abs())
+        {
+            return Err(ModelError::range("play_quantize.groove", o.0));
+        }
+        Ok(())
+    }
+
     /// Applies the quantize to a tick.
-    pub fn apply(self, t: Tick) -> Tick {
+    pub fn apply(&self, t: Tick) -> Tick {
         if self.grid.0 <= 0 {
             return t;
         }
         let g = self.grid.0;
-        let snapped = (t.0.saturating_add(g / 2)).div_euclid(g).saturating_mul(g);
-        let delta = i128::from(snapped - t.0) * i128::from(self.strength.min(100)) / 100;
+        let k = t.0.saturating_add(g / 2).div_euclid(g);
+        let mut target = k.saturating_mul(g);
+        if !self.groove.is_empty() {
+            let len = i64::try_from(self.groove.len()).unwrap_or(1);
+            let i = usize::try_from(k.rem_euclid(len)).unwrap_or(0);
+            target = target.saturating_add(self.groove.get(i).map_or(0, |o| o.0));
+        }
+        let delta =
+            (i128::from(target) - i128::from(t.0)) * i128::from(self.strength.min(100)) / 100;
         Tick(t.0.saturating_add(i64::try_from(delta).unwrap_or(0)))
     }
 }

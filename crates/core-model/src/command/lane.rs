@@ -232,12 +232,9 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
             quantize,
         } => {
             if let Some(q) = quantize {
-                check_positive("play_quantize.grid", q.grid)?;
-                if q.strength > 100 {
-                    return Err(ModelError::range("play_quantize.strength", q.strength));
-                }
+                q.check()?;
             }
-            d.lane_mut(*seq, *lane)?.play_quantize = *quantize;
+            d.lane_mut(*seq, *lane)?.play_quantize = quantize.clone();
         }
         LaneCmd::SetPlayShift { seq, lane, shift } => {
             d.lane_mut(*seq, *lane)?.play_shift = *shift;

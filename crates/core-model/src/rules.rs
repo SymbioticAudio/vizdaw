@@ -330,11 +330,8 @@ pub fn validate(doc: &Document) -> Vec<String> {
                 push(check_positive("lane.length", len), &lctx);
                 push(check_ticks("lane.length", len.0), &lctx);
             }
-            if let Some(q) = l.play_quantize {
-                push(
-                    need(q.grid.0 > 0 && q.strength <= 100, "play_quantize", q.grid.0),
-                    &lctx,
-                );
+            if let Some(q) = &l.play_quantize {
+                push(q.check(), &lctx);
             }
             if l.take(l.active_take).is_none() {
                 push(
