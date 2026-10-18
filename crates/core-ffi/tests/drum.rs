@@ -7,9 +7,9 @@ use core_model::ids::{LaneId, SeqId};
 use proptest::prelude::*;
 use std::sync::Arc;
 use vizdaw_ffi::drum::{
-    drum_grid_cells, drum_grid_hits_at, drum_grid_layout, drum_grid_spot, drum_next_row,
-    drum_nudged, drum_quantize_choices, drum_quantize_title, drum_row_drop, drum_row_velocity,
-    drum_stroke_begin, drum_stroke_command, drum_stroke_extend,
+    drum_grid_cells, drum_grid_hits_at, drum_grid_layout, drum_grid_settings_sane, drum_grid_spot,
+    drum_next_row, drum_nudged, drum_quantize_choices, drum_quantize_title, drum_row_drop,
+    drum_row_velocity, drum_stroke_begin, drum_stroke_command, drum_stroke_extend,
 };
 use vizdaw_ffi::{
     DrumBandKindRow, DrumBandRow, DrumEdit, DrumGridLayoutRow, DrumGridSettingsRow, DrumHitRow,
@@ -604,6 +604,32 @@ proptest! {
         prop_assert!(drum_nudged(at, to).is_ok());
     }
 
+    /// The exported clamp is exactly `Settings::sane` on any input.
+    #[test]
+    fn settings_sane_export_equals_sane(s in arb_settings()) {
+        let core = core_editor::drum::Settings {
+            view: match s.view {
+                DrumViewRow::Matrix => core_editor::drum::View::Matrix,
+                DrumViewRow::Timeline => core_editor::drum::View::Timeline,
+            },
+            step: s.step,
+            spacing: s.spacing,
+            duration: s.duration,
+            velocity: s.velocity,
+            row_height: s.row_height,
+            velocity_height: s.velocity_height,
+        }
+        .sane();
+        let got = drum_grid_settings_sane(s).unwrap();
+        prop_assert_eq!(got.step, core.step);
+        prop_assert_eq!(got.spacing, core.spacing);
+        prop_assert_eq!(got.duration, core.duration);
+        prop_assert_eq!(got.velocity, core.velocity);
+        prop_assert_eq!(got.row_height.to_bits(), core.row_height.to_bits());
+        prop_assert_eq!(got.velocity_height.to_bits(), core.velocity_height.to_bits());
+        prop_assert_eq!(got.view, s.view);
+    }
+
     /// Hostile drum edits on the fixture: applied (and undone to the start),
     /// or refused with a model error that leaves the document as it was;
     /// never a panic.
@@ -628,4 +654,24 @@ proptest! {
             Err(e) => prop_assert!(false, "unexpected {e:?}"),
         }
     }
+}
+
+/// Hand-edited steps are clamped as the grid paints them (final review I1).
+#[test]
+fn settings_sane_clamps_hostile_steps() {
+    let at = |step: i64, spacing: i64, duration: i64| {
+        drum_grid_settings_sane(DrumGridSettingsRow {
+            step,
+            spacing,
+            duration,
+            ..matrix()
+        })
+        .unwrap()
+    };
+    assert_eq!(at(-5, 0, 0).step, 3_840);
+    assert_eq!(at(-5, 0, 0).spacing, 3_840);
+    assert_eq!(at(-5, 0, 0).duration, Q / 8);
+    assert_eq!(at(1, 1, 1).step, 480);
+    assert_eq!(at(1_000_000_000_000, i64::MAX, i64::MAX).step, 61_440);
+    assert_eq!(at(1_000_000_000_000, i64::MAX, i64::MAX).spacing, Q * 16);
 }

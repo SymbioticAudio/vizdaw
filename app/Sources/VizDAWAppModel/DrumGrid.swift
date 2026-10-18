@@ -20,8 +20,9 @@ public enum DrumView: String, Codable, CaseIterable, Sendable {
 }
 
 /// The drum grid's bar, shared by every drum grid and saved with the
-/// project (Plan 4e Ruling 11). Rust clamps every value it is given;
-/// decoding is tolerant like `EditorLayout`'s.
+/// project (Plan 4e Ruling 11). Decoding is tolerant like `EditorLayout`'s,
+/// and step, spacing and duration are clamped by Rust (`Settings::sane`)
+/// so the grid draws what the strokes paint.
 public struct DrumGridSettings: Codable, Equatable, Sendable {
     public var view: DrumView = .matrix
     /// A matrix cell.
@@ -47,14 +48,24 @@ public struct DrumGridSettings: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = DrumGridSettings()
         view = c.field(.view, d.view)
-        step = max(c.field(.step, d.step), 1)
-        spacing = max(c.field(.spacing, d.spacing), 1)
-        duration = max(c.field(.duration, d.duration), 1)
+        step = c.field(.step, d.step)
+        spacing = c.field(.spacing, d.spacing)
+        duration = c.field(.duration, d.duration)
         velocity = min(max(c.field(.velocity, d.velocity), 1), 127)
         rowHeight = EditorLayout.sane(c.field(.rowHeight, d.rowHeight), 12...64, d.rowHeight)
         velocityHeight = EditorLayout.sane(c.field(.velocityHeight, d.velocityHeight), 16...96, d.velocityHeight)
         ticksPerPoint = EditorLayout.sane(
             c.field(.ticksPerPoint, d.ticksPerPoint), EditorLayout.ticksPerPointRange, d.ticksPerPoint)
+        // The grid draws with the lengths Rust paints with (final review I1).
+        if let sane = try? drumGridSettingsSane(settings: row) {
+            step = sane.step
+            spacing = sane.spacing
+            duration = sane.duration
+        } else {
+            step = max(step, 1)
+            spacing = max(spacing, 1)
+            duration = max(duration, 1)
+        }
     }
 
     /// The settings as Rust takes them.

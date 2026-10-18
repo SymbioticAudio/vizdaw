@@ -379,6 +379,30 @@ fn settings(s: &DrumGridSettingsRow) -> grid::Settings {
     }
 }
 
+fn row_of(s: &grid::Settings) -> DrumGridSettingsRow {
+    DrumGridSettingsRow {
+        view: match s.view {
+            grid::View::Matrix => DrumViewRow::Matrix,
+            grid::View::Timeline => DrumViewRow::Timeline,
+        },
+        step: s.step,
+        spacing: s.spacing,
+        duration: s.duration,
+        velocity: s.velocity,
+        row_height: s.row_height,
+        velocity_height: s.velocity_height,
+    }
+}
+
+/// The settings as every grid function uses them (`Settings::sane`), so a
+/// front end draws with the step, spacing and duration Rust paints with.
+#[uniffi::export]
+pub fn drum_grid_settings_sane(
+    settings: DrumGridSettingsRow,
+) -> Result<DrumGridSettingsRow, VizError> {
+    ffi_guard(|| Ok(row_of(&self::settings(&settings).sane())))
+}
+
 /// What a band of the grid is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum DrumBandKindRow {

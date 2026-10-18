@@ -254,8 +254,13 @@ func drumFake() -> FakeSession {
         let json = #"{"drumGrid":{"view":"timeline","step":-5,"velocity":200,"rowHeight":1e9,"spacing":"x"}}"#
         let l = EditorLayout.decode(json)
         #expect(l.drumGrid.view == .timeline)
-        #expect(l.drumGrid.step == 1 && l.drumGrid.velocity == 127 && l.drumGrid.rowHeight == 64)
+        #expect(l.drumGrid.step == 3_840 && l.drumGrid.velocity == 127 && l.drumGrid.rowHeight == 64)
         #expect(l.drumGrid.spacing == DrumGridSettings().spacing)
+        // Step, spacing and duration are what Rust paints with (`Settings::sane`).
+        let tiny = EditorLayout.decode(#"{"drumGrid":{"step":1,"spacing":-3,"duration":0}}"#).drumGrid
+        #expect(tiny.step == 480 && tiny.spacing == 480 && tiny.duration == q / 8)
+        let huge = EditorLayout.decode(#"{"drumGrid":{"step":1000000000000,"spacing":1000000000000000}}"#).drumGrid
+        #expect(huge.step == 61_440 && huge.spacing == 16 * q)
         #expect(EditorLayout.decode("{}").drumGrid == DrumGridSettings())
         #expect(DrumGridSettings.lengths(including: 999).last?.1 == 999)
         #expect(DrumGridSettings.lengths(including: q).count == DrumGridSettings.lengths.count)
