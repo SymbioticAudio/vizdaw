@@ -1,7 +1,8 @@
-//! The menu-command registry (spec §6): every menu command of the app by
-//! a stable ID, with its menu, title, shortcut, parameters and the dialogs
-//! its parameters answer. `command.run` runs these; plan 4f extends the
-//! registry to every command (menu or not) and drives key bindings from it.
+//! The command registry (spec §6, plan 4f): every command of the app,
+//! menu item or not, by a stable ID, with its menu (or group), title,
+//! default keys, where its keys are live, parameters and the dialogs its
+//! parameters answer. `command.run` runs these; [`crate::bindings`] binds
+//! keys to them.
 
 use crate::error::{ControlError, ErrorCode};
 use crate::keys::{KeyStroke, Modifiers, named_key};
@@ -49,17 +50,44 @@ pub struct DialogSpec {
     pub answered_by: &'static [&'static str],
 }
 
-/// A menu command.
+/// Where a command's keys are live (plan 4f Ruling 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum KeyContext {
+    /// In every VizDAW window that shows a document.
+    Global,
+    /// Only while step entry is on; there it wins over a global key.
+    StepEntry,
+}
+
+impl KeyContext {
+    /// Its name in `commands.list`.
+    pub fn name(self) -> &'static str {
+        match self {
+            KeyContext::Global => "global",
+            KeyContext::StepEntry => "step_entry",
+        }
+    }
+}
+
+/// A command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandSpec {
     /// Stable ID (`transport.play_stop`).
     pub id: &'static str,
-    /// The menu it is in.
+    /// The menu it is in (for a command without a menu item, the group the
+    /// Keys settings list it under).
     pub menu: &'static str,
     /// Its menu title.
     pub title: &'static str,
-    /// Its default shortcut, if any.
+    /// Its default shortcut, if any (shown in its menu item).
     pub shortcut: Option<&'static str>,
+    /// More default keys (a keypad twin); never shown in menus.
+    pub extra_keys: &'static [&'static str],
+    /// It has a menu item (false: keys, the Keys settings and the channel
+    /// only).
+    pub menu_item: bool,
+    /// Where its keys are live.
+    pub context: KeyContext,
     /// It acts on a document (the target window's, else the front one's).
     pub document: bool,
     /// Its parameters.
@@ -89,6 +117,9 @@ const fn cmd(
         menu,
         title,
         shortcut,
+        extra_keys: &[],
+        menu_item: true,
+        context: KeyContext::Global,
         document,
         params: &[],
         dialogs: &[],
@@ -476,14 +507,16 @@ pub fn shortcut_stroke(shortcut: &str) -> Option<KeyStroke> {
     named_key(&key, m).ok()
 }
 
-/// The menu command whose shortcut `stroke` is, if any (control spec
-/// §5.5: `ui.key` runs it on the target window's document, as the menu
-/// would for the key window).
+/// The global command whose default shortcut `stroke` is, if any
+/// (control spec §5.5). Step entry's keys are not global.
 pub fn command_for_stroke(stroke: &KeyStroke) -> Option<&'static str> {
-    COMMANDS.iter().find_map(|c| {
-        let s = shortcut_stroke(c.shortcut?)?;
-        (s.key_code == stroke.key_code && s.modifiers == stroke.modifiers).then_some(c.id)
-    })
+    COMMANDS
+        .iter()
+        .filter(|c| c.context == KeyContext::Global)
+        .find_map(|c| {
+            let s = shortcut_stroke(c.shortcut?)?;
+            (s.key_code == stroke.key_code && s.modifiers == stroke.modifiers).then_some(c.id)
+        })
 }
 
 fn kind_json(k: ParamKind) -> Value {
@@ -518,8 +551,13 @@ pub fn list_json() -> Value {
                 .iter()
                 .map(|d| json!({"name": d.name, "when": d.when, "answered_by": d.answered_by}))
                 .collect();
+            let keys: Vec<String> = crate::bindings::default_chords(c)
+                .iter()
+                .map(crate::bindings::Chord::text)
+                .collect();
             json!({
                 "id": c.id, "menu": c.menu, "title": c.title, "shortcut": c.shortcut,
+                "keys": keys, "menu_item": c.menu_item, "context": c.context.name(),
                 "document": c.document, "params": params, "dialogs": dialogs,
             })
         })

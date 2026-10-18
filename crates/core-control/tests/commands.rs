@@ -367,6 +367,13 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     let list = registry::list_json();
     let first = &list["commands"][0];
     assert_eq!(first["id"], "file.new");
+    assert_eq!(
+        first["keys"],
+        json!(["⌘N"]),
+        "default keys as menus show them"
+    );
+    assert_eq!(first["menu_item"], true);
+    assert_eq!(first["context"], "global");
     assert_eq!(list["commands"].as_array().unwrap().len(), COMMANDS.len());
     let open = list["commands"]
         .as_array()

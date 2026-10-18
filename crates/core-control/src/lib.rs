@@ -3,8 +3,8 @@
 //! JSON-lines requests and replies, their limits and errors, element IDs
 //! and key strokes (this task); command validation, the menu-command
 //! registry and wait conditions (Task 3); the Unix-socket server and
-//! client (Task 4). Platform-neutral Unix code: the app executes what
-//! needs its windows.
+//! client (Task 4); key bindings over the registry (plan 4f).
+//! Platform-neutral Unix code: the app executes what needs its windows.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![cfg_attr(
@@ -17,6 +17,7 @@
     )
 )]
 
+pub mod bindings;
 pub mod client;
 pub mod element;
 pub mod error;

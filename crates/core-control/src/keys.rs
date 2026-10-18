@@ -62,8 +62,9 @@ pub struct KeyStroke {
     pub modifiers: Modifiers,
 }
 
-/// Named keys: name, key code, the character AppKit reports.
-const NAMED: [(&str, u16, char); 26] = [
+/// Named keys: name, key code, the character AppKit reports (the keypad's
+/// keys since plan 4f, which binds step entry to them).
+const NAMED: [(&str, u16, char); 44] = [
     ("return", 36, '\r'),
     ("enter", 76, '\u{3}'),
     ("tab", 48, '\t'),
@@ -90,6 +91,24 @@ const NAMED: [(&str, u16, char); 26] = [
     ("f9", 101, '\u{f70c}'),
     ("f10", 109, '\u{f70d}'),
     ("f11", 103, '\u{f70e}'),
+    ("f12", 111, '\u{f70f}'),
+    ("keypad_0", 82, '0'),
+    ("keypad_1", 83, '1'),
+    ("keypad_2", 84, '2'),
+    ("keypad_3", 85, '3'),
+    ("keypad_4", 86, '4'),
+    ("keypad_5", 87, '5'),
+    ("keypad_6", 88, '6'),
+    ("keypad_7", 89, '7'),
+    ("keypad_8", 91, '8'),
+    ("keypad_9", 92, '9'),
+    ("keypad_decimal", 65, '.'),
+    ("keypad_divide", 75, '/'),
+    ("keypad_multiply", 67, '*'),
+    ("keypad_minus", 78, '-'),
+    ("keypad_plus", 69, '+'),
+    ("keypad_equals", 81, '='),
+    ("keypad_clear", 71, '\u{f739}'),
 ];
 
 /// Unshifted characters of the US ANSI layout and their key codes.
