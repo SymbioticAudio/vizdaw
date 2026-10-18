@@ -128,6 +128,30 @@ private func paint(_ ticks: [Int64], velocity: UInt16 = 100 << 9, row: UInt64 = 
         #expect(rows == ["Kick, C2, Drums, Kit", "Snare, D2, Drums, Kit", "Clap, D#2, Perc, Kit"])
     }
 
+    @Test func aWindowThatNeverDrewSnapshotsItsRowsAndCells() throws {
+        // A torn-off grid opened behind other windows never draws; its
+        // snapshot still shows the hits (final review I2).
+        let (_, m, c) = try grid()
+        defer { withExtendedLifetime(m) {} }
+        let w = NSWindow(contentRect: c.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.contentView = c
+        WindowSnapshot.root(of: w)?.wantsLayer = true  // as every shown window's is
+        #expect(c.canvas.content.layer?.contents == nil, "never drawn")
+        let png = try #require(WindowSnapshot.png(of: w, scale: 1))
+        let rep = try #require(NSBitmapImageRep(data: png.data))
+        func orange(_ x: CGFloat, _ y: CGFloat) -> Bool {
+            let top = w.frame.height - c.frame.height + EditorCanvas.rulerHeight
+            guard let p = rep.colorAt(x: Int(x), y: Int(top + y))?.usingColorSpace(.sRGB) else { return false }
+            return p.redComponent > 0.7 && p.greenComponent > 0.3 && p.greenComponent < 0.7 && p.blueComponent < 0.4
+        }
+        // Kick (content 22–42) at 0 and a beat; Snare (42–62) at a beat.
+        #expect(orange(DrumRowHeaderView.width + 20, 32))
+        #expect(orange(DrumRowHeaderView.width + 180, 32))
+        #expect(orange(DrumRowHeaderView.width + 180, 52))
+        #expect(!orange(DrumRowHeaderView.width + 60, 32), "an empty cell")
+    }
+
     @Test func escapeInTheRenameFieldCancelsTheRename() throws {
         let (f, m, c) = try grid()
         defer { withExtendedLifetime(m) {} }

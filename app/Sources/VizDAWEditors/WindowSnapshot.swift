@@ -95,8 +95,11 @@ public enum WindowSnapshot {
 
     /// Draws `s` where it is in `root` (bottom-left based context).
     static func redraw(_ s: NSView, root: NSView, ctx: CGContext) {
-        // Only what ancestors (scroll views) let show.
-        let visible = s.visibleRect
+        // Only what ancestors (scroll views) let show, within its own
+        // bounds: views do not clip to bounds by default (macOS 14+), so
+        // `visibleRect` can reach past them, and a view that fills its
+        // dirty rect (the ruler) would paint over its siblings.
+        let visible = s.visibleRect.intersection(s.bounds)
         guard !visible.isEmpty else { return }
         func inContext(_ r: CGRect) -> CGRect {
             root.isFlipped ? CGRect(x: r.minX, y: root.bounds.height - r.maxY, width: r.width, height: r.height) : r

@@ -17,6 +17,14 @@ final class FilledView: NSView {
     }
 }
 
+/// Fills whatever it is asked to draw, as `EditorCanvas`'s ruler does.
+final class DirtyFillingView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1).setFill()
+        dirtyRect.fill()
+    }
+}
+
 @MainActor
 @Suite struct WindowSnapshotTests {
     /// The dominant channel at `x`, `y` (row 0 is the top): "r", "g", "b"
@@ -102,6 +110,23 @@ final class FilledView: NSView {
         let png = try #require(WindowSnapshot.png(of: parent, scale: 1))
         #expect(pixel(png.data, 20, 10) == "g", "what the view draws")
         #expect(pixel(png.data, 20, 38) == "b", "the right way up")
+    }
+
+    @Test func aViewThatFillsWhatItIsAskedToDrawStaysInItsBounds() throws {
+        // Views do not clip to their bounds (macOS 14+), so `visibleRect`
+        // can reach past them; a ruler drawn last then painted over every
+        // sibling (the torn-off drum grid showed only its ruler).
+        let parent = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        parent.wantsLayer = true
+        let below = FilledView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        below.wantsLayer = true
+        let strip = DirtyFillingView(frame: NSRect(x: 0, y: 0, width: 40, height: 10))  // the bottom
+        strip.wantsLayer = true
+        parent.addSubview(below)
+        parent.addSubview(strip)
+        let png = try #require(WindowSnapshot.png(of: parent, scale: 1))
+        #expect(pixel(png.data, 20, 10) == "g", "the view under it shows")
+        #expect(pixel(png.data, 20, 35) == "r", "the strip itself")
     }
 
     @Test func aSelfDrawnViewInAScrollViewStaysInsideIt() throws {
