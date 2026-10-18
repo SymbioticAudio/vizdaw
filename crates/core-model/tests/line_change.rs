@@ -697,7 +697,8 @@ fn thickened_program_changes_carry_the_bank() {
         },
     };
     run(&mut h, &[L0], &[], false, thick).unwrap();
-    let got: Vec<(i64, u8, Option<(u8, u8)>)> = series(&h, L0, Series::Program)
+    type Banked = (i64, u8, Option<(u8, u8)>);
+    let got: Vec<Banked> = series(&h, L0, Series::Program)
         .into_iter()
         .map(|(t, b)| match b {
             EventBody::Program { program, bank } => (t, program, bank),
