@@ -1617,6 +1617,8 @@ name = "vizctl"
 version = "0.1.0"
 dependencies = [
  "core-control",
+ "core-engine",
+ "core-model",
  "serde_json",
  "tempfile",
 ]

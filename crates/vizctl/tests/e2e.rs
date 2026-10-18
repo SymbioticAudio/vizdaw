@@ -225,6 +225,122 @@ fn click_play_and_press_space() {
     app.quit();
 }
 
+/// The ID of the first tree node labelled exactly `label`.
+fn labelled(nodes: &Value, label: &str) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        if n["label"].as_str() == Some(label) {
+            Some(n["id"].clone())
+        } else {
+            labelled(&n["children"], label)
+        }
+    })
+}
+
+/// Polls the window's tree until a node is labelled exactly `label`.
+fn wait_for_label(app: &mut App, window: &Value, label: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(id) = labelled(&tree["nodes"], label) {
+            return id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {label:?} within {WAIT_MS} ms in {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Polls `state.get document` until its undo label is `label`.
+fn wait_for_undo(app: &mut App, window: &Value, label: &str) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let doc = app.call("state.get", json!({"target": "document", "window": window}));
+        if doc["undo"].as_str() == Some(label) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "undo is not {label:?} within {WAIT_MS} ms: {doc}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// README steps 87–88 through the channel (plan 4e): a project whose only
+/// sequence has a drum lane opens; Open Drum Grid in Window shows its
+/// cells as elements; a click on an empty cell paints a hit, a click on
+/// it again erases it; Drum > Add Drum Row and Timeline View run by ID.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn drum_grid_paints_and_erases_by_element() {
+    use core_engine::fixtures::{Builder, Q};
+    let mut app = App::start();
+    let mut b = Builder::new();
+    let kit = b.dest("Kit", "builtin:synth", 9).unwrap();
+    let (seq, drums) = b.sequence("Beat", "Drums", Some(kit)).unwrap();
+    b.drum_rows(seq, drums, &[("Kick", 36), ("Snare", 38)])
+        .unwrap();
+    b.notes(seq, drums, &[(0, 36, 0x8000, Q / 4)]).unwrap();
+    let path = app.launched.home.join("Beat.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+
+    let window = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    // In a window of its own, where the rows have room.
+    app.call(
+        "command.run",
+        json!({"id": "editors.drum_grid_window", "window": window}),
+    );
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let window = loop {
+        let w = app.call("state.get", json!({"target": "windows"}));
+        let torn = w["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["kind"] == "editor")
+            .map(|w| w["number"].clone());
+        if let Some(n) = torn {
+            break n;
+        }
+        assert!(Instant::now() < deadline, "no drum grid window in {w}");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    // The Kick's hit at bar 1 is on; the Snare's first cell is off.
+    wait_for_label(&mut app, &window, "Kick, bar 1 beat 1, on, velocity 64");
+    let cell = wait_for_label(&mut app, &window, "Snare, bar 1 beat 1, off");
+    app.call("ui.click", json!({"window": window, "element": cell}));
+    wait_for_undo(&mut app, &window, "Paint Drum Hits");
+    let hit = wait_for_label(&mut app, &window, "Snare, bar 1 beat 1, on, velocity 100");
+    app.call("ui.click", json!({"window": window, "element": hit}));
+    wait_for_undo(&mut app, &window, "Erase Drum Hits");
+
+    // The Drum menu by ID: a row for the next kit note, then the timeline.
+    app.call(
+        "command.run",
+        json!({"id": "drum.add_row", "window": window}),
+    );
+    wait_for_undo(&mut app, &window, "Add Drum Row");
+    wait_for_label(&mut app, &window, "Closed Hat, bar 1 beat 1, off");
+    app.call(
+        "command.run",
+        json!({"id": "drum.timeline", "params": {"on": true}, "window": window}),
+    );
+    wait_for_label(&mut app, &window, "Kick, bar 1 beat 1, on, velocity 64");
+    let tree = app.call("ui.tree", json!({"window": window}));
+    assert!(
+        labelled(&tree["nodes"], "Closed Hat, bar 1 beat 1, off").is_none(),
+        "the timeline lists hits only"
+    );
+    app.quit();
+}
+
 /// The ID of the tree's button labelled (or titled) exactly "Play".
 fn play_button(nodes: &Value) -> Option<Value> {
     nodes.as_array().into_iter().flatten().find_map(|n| {

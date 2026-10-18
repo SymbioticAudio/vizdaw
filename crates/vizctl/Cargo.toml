@@ -11,4 +11,6 @@ core-control = { path = "../core-control" }
 serde_json = "1"
 
 [dev-dependencies]
+core-engine = { path = "../core-engine", features = ["fixtures"] }
+core-model = { path = "../core-model" }
 tempfile = "3"
