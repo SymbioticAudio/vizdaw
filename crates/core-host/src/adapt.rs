@@ -117,24 +117,32 @@ impl Core {
 
     /// Queues automation's value for `param` at `frame` of the next block:
     /// normalised -> plain by the parameter's range (rounded when stepped);
-    /// an unknown parameter, or a full queue, drops it (Plan 4d Ruling 12).
-    /// // RT
-    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) {
+    /// an unknown parameter is dropped (Plan 4d Ruling 12). A full queue
+    /// first collapses to the latest value per parameter, so the newest
+    /// value of every automated parameter always fits (Plan 4d final
+    /// review I1); false only when even that leaves no room (more distinct
+    /// parameters than the queue holds). // RT
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
         let Ok(i) = self.ranges.binary_search_by_key(&param, |r| r.id) else {
-            return;
+            return true;
         };
         let Some(r) = self.ranges.get(i) else {
-            return;
+            return true;
         };
         let value = param_plain(normalized, r.min, r.max, r.stepped);
-        if let Some(slot) = self.auto.get_mut(self.auto_len) {
-            *slot = ParamChange {
-                frame,
-                id: param,
-                value,
-            };
-            self.auto_len += 1;
+        if self.auto_len >= MAX_PARAM_EVENTS {
+            self.collapse();
         }
+        let Some(slot) = self.auto.get_mut(self.auto_len) else {
+            return false;
+        };
+        *slot = ParamChange {
+            frame,
+            id: param,
+            value,
+        };
+        self.auto_len += 1;
+        true
     }
 
     /// The block went by without the plugin running: collapses the queued
@@ -203,7 +211,18 @@ impl Core {
         events: &[MidiEvent],
         info: &BlockInfo,
     ) -> ProcessStatus {
-        let k = self.params.drain_into(&mut self.params_buf[..]);
+        // Automation must always fit beside the host's values (Plan 4d
+        // final review I1): past three quarters of the queue it collapses
+        // to the latest value per parameter, and the host's values take
+        // only the room left (the rest wait in their queue for the next
+        // block).
+        if self.auto_len > MAX_PARAM_EVENTS / 4 * 3 {
+            self.collapse();
+        }
+        let room = MAX_PARAM_EVENTS.saturating_sub(self.auto_len);
+        let k = self
+            .params
+            .drain_into(self.params_buf.get_mut(..room).unwrap_or(&mut []));
         // Automation follows the host's values, so it wins a tie (Plan 4d
         // Ruling 12); then the list is sorted by frame.
         let last = frames.min(self.max_frames).saturating_sub(1);
@@ -374,8 +393,8 @@ impl EffectNode for PluginEffect {
         }
     }
 
-    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) {
-        self.core.automate(frame, param, normalized);
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
+        self.core.automate(frame, param, normalized)
     }
 
     fn skipped(&mut self) {
@@ -536,8 +555,8 @@ impl InstrumentNode for PluginSynth {
         self.render_outputs(frames, std::slice::from_mut(out), &BlockInfo::default());
     }
 
-    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) {
-        self.core.automate(frame, param, normalized);
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
+        self.core.automate(frame, param, normalized)
     }
 
     fn render_outputs(&mut self, frames: u32, outs: &mut [StereoBuf], info: &BlockInfo) {

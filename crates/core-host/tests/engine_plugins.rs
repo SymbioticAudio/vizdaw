@@ -745,3 +745,142 @@ fn a_bypassed_insert_applies_only_current_automation_on_return() {
         }
     }
 }
+
+/// Hands out one probe effect with parameters `0..n` (range 0-1) that
+/// records the latest value it was given per parameter.
+struct ProbeFactory {
+    n: u64,
+    last: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<u64, f64>>>,
+}
+
+struct LastProbe(std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<u64, f64>>>);
+
+impl AudioProcessor for LastProbe {
+    fn process(&mut self, ctx: &mut ProcessCtx<'_>) -> ProcessStatus {
+        let mut g = self.0.lock().unwrap();
+        for c in ctx.params_in {
+            g.insert(c.id.0, c.value);
+        }
+        for ch in ctx.outputs.iter_mut() {
+            ch.fill(0.0);
+        }
+        ProcessStatus::Ok
+    }
+
+    fn reset(&mut self) {}
+}
+
+impl InsertFactory for ProbeFactory {
+    fn make(
+        &mut self,
+        _: &core_model::mixer::PluginSlot,
+        _: f64,
+        max_frames: u32,
+    ) -> Result<Box<dyn core_engine::graph::EffectNode>, String> {
+        use core_host::ParamInfo;
+        let port = |name: &str| AudioPortInfo {
+            name: name.into(),
+            channels: 2,
+            role: PortRole::Main,
+        };
+        let info = PluginInfo {
+            plugin: plugin("vizdaw.test.probe"),
+            kind: PluginKind::Effect,
+            inputs: vec![port("In")],
+            outputs: vec![port("Out")],
+            note_input: false,
+            params: (0..self.n)
+                .map(|id| ParamInfo {
+                    id: ParamId(id),
+                    name: String::new(),
+                    module: String::new(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    stepped: false,
+                    automatable: true,
+                    hidden: false,
+                })
+                .collect(),
+            latency: 0,
+            tail: Tail::None,
+        };
+        let (_, audio) = param_queues();
+        let (back, r) = channel();
+        std::mem::forget(r);
+        Ok(Box::new(core_host::adapt::PluginEffect::new(
+            PluginInstanceId(1),
+            Box::new(LastProbe(self.last.clone())),
+            &info,
+            max_frames,
+            audio,
+            back,
+        )))
+    }
+}
+
+#[test]
+fn many_ramping_parameters_of_one_plugin_all_reach_their_final_values() {
+    // 24 lanes ramping at once queue 24 x 16 = 384 values per 512-frame
+    // block, past the adapter's 256: every parameter must still end where
+    // its ramp ends (Plan 4d final review I1). Lanes 16 and up end
+    // at 8 quarters (192 000 frames, a block boundary) and the others at
+    // 16, so their final value lands in a full run whose queue the
+    // still-ramping lower lanes have filled.
+    const N: u64 = 24;
+    let mut b = Builder::new();
+    let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0xFFFF, 17 * Q)]).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let id = b.insert(synth, plugin("vizdaw.test.probe")).unwrap();
+    let lane = b.lane(seq, "Auto", None).unwrap();
+    let final_of = |p: u64| (p + 1) as f64 / (N + 1) as f64;
+    let mut events = Vec::new();
+    for p in 0..N {
+        let target = AutomationTarget::PluginParam(id, ParamId(p));
+        events.push(EventSpec::new(
+            Tick(0),
+            EventBody::Automation { target, value: 0.0 },
+        ));
+        let end = if p < 16 { 16 * Q } else { 8 * Q };
+        events.push(EventSpec::new(
+            Tick(end),
+            EventBody::Automation {
+                target,
+                value: final_of(p),
+            },
+        ));
+    }
+    b.events(seq, lane, events).unwrap();
+    let doc = b.finish();
+    let last = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let (mut engine, r) = Engine::new(
+        EngineConfig::new(SR),
+        Box::new(OfflineSinks::new(1 << 16).with_tone()),
+    )
+    .unwrap();
+    engine.set_insert_factory(Box::new(ProbeFactory {
+        n: N,
+        last: last.clone(),
+    }));
+    let report = engine.load(&doc, seq).unwrap();
+    assert!(report.graph.placeholders.is_empty(), "{:?}", report.graph);
+    let mut be = OfflineBackend::new(SR, 512);
+    be.start(r).unwrap();
+    be.reserve(512);
+    engine.play().unwrap();
+    // A quarter is 24 000 frames; play past the ramps' end (16 quarters).
+    for _ in 0..800 {
+        be.block(512);
+    }
+    let got = last.lock().unwrap().clone();
+    for p in 0..N {
+        let v = got.get(&p).copied();
+        assert!(
+            v.is_some_and(|v| (v - final_of(p)).abs() < 1e-9),
+            "parameter {p} ended at {v:?}, not {}",
+            final_of(p)
+        );
+    }
+}

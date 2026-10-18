@@ -151,9 +151,11 @@ pub trait InstrumentNode: Send {
 
     /// Automation's value for parameter `param`, normalised 0–1, at `frame`
     /// of the next render; plugin instruments map it to the parameter's
-    /// range (Plan 4d Ruling 12). // RT
-    fn automate(&mut self, frame: u32, param: core_model::mixer::ParamId, normalized: f64) {
+    /// range (Plan 4d Ruling 12). False when the value could not be
+    /// queued, so the renderer sends it again on the next run. // RT
+    fn automate(&mut self, frame: u32, param: core_model::mixer::ParamId, normalized: f64) -> bool {
         let _ = (frame, param, normalized);
+        true
     }
 
     /// Output latency in frames, read on the control thread when the sink

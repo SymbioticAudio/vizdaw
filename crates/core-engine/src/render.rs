@@ -817,9 +817,11 @@ impl Renderer {
             let mut f = 0u32;
             loop {
                 let v = auto.value(lane, pos.saturating_add(u64::from(f)), false);
-                if v.to_bits() != last.to_bits() {
-                    *last = v;
-                    send_param(
+                // Recorded as sent only once the plugin's queue took it, so
+                // a refused value is sent again on the next run (Plan 4d
+                // final review I1).
+                if v.to_bits() != last.to_bits()
+                    && send_param(
                         self.graph.as_deref_mut(),
                         &mut self.sinks,
                         lane.instrument,
@@ -827,7 +829,9 @@ impl Renderer {
                         f,
                         param,
                         v,
-                    );
+                    )
+                {
+                    *last = v;
                 }
                 if lane.stepped {
                     break;
@@ -1154,6 +1158,8 @@ fn reset_controllers(s: &Schedule, o: &mut Out<'_>, offset: u32) {
 
 /// Sends a plugin parameter's automated value: to its plugin
 /// instrument's sink when it has one, else to its insert in the graph.
+/// False when the plugin refused it (its queue is full); a missing target
+/// counts as sent.
 /// // RT
 fn send_param(
     graph: Option<&mut Graph>,
@@ -1163,15 +1169,16 @@ fn send_param(
     frame: u32,
     param: ParamId,
     v: f64,
-) {
+) -> bool {
     if let Some(t) = instrument {
         if let Some(Some(Sink::Instrument(node))) = sinks.get_mut(usize::from(t.0)) {
-            node.automate(frame, param, v);
+            return node.automate(frame, param, v);
         }
-        return;
+        return true;
     }
-    if let Some(node) = graph.and_then(|g| g.insert_mut(id)) {
-        node.automate(frame, param, v);
+    match graph.and_then(|g| g.insert_mut(id)) {
+        Some(node) => node.automate(frame, param, v),
+        None => true,
     }
 }
 

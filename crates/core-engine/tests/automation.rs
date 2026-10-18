@@ -408,8 +408,9 @@ impl core_engine::graph::EffectNode for Recorder {
         core_engine::graph::ProcessStatus::Ok
     }
     fn reset(&mut self) {}
-    fn automate(&mut self, frame: u32, param: core_model::mixer::ParamId, normalized: f64) {
+    fn automate(&mut self, frame: u32, param: core_model::mixer::ParamId, normalized: f64) -> bool {
         self.0.lock().unwrap().push((frame, param.0, normalized));
+        true
     }
 }
 
@@ -672,4 +673,93 @@ fn a_run_missing_its_deadline_skips_the_rest_of_its_block() {
     assert!(level.abs() > 1e-3);
     assert!(steady.iter().all(|x| *x == level), "steady at {level}");
     assert_eq!(clock.load(Ordering::Relaxed), rendered.get());
+}
+
+/// An insert whose parameter queue refuses every value while `full` is
+/// set, recording the ones it takes.
+#[derive(Clone, Default)]
+struct Refuser {
+    full: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    took: std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
+}
+
+impl core_engine::graph::EffectNode for Refuser {
+    fn latency(&self) -> u32 {
+        0
+    }
+    fn process(
+        &mut self,
+        _: u32,
+        _: &mut core_engine::backend::StereoBuf,
+        _: Option<&core_engine::backend::StereoBuf>,
+    ) -> core_engine::graph::ProcessStatus {
+        core_engine::graph::ProcessStatus::Ok
+    }
+    fn reset(&mut self) {}
+    fn automate(&mut self, _: u32, _: core_model::mixer::ParamId, normalized: f64) -> bool {
+        if self.full.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        self.took.lock().unwrap().push(normalized);
+        true
+    }
+}
+
+impl core_engine::graph::InsertFactory for Refuser {
+    fn make(
+        &mut self,
+        _: &core_model::mixer::PluginSlot,
+        _: f64,
+        _: u32,
+    ) -> Result<Box<dyn core_engine::graph::EffectNode>, String> {
+        Ok(Box::new(self.clone()))
+    }
+}
+
+#[test]
+fn a_value_the_plugin_refused_is_sent_again() {
+    // The ramp ends while the plugin's queue is full: its final value was
+    // never taken, so it must come again once there is room, not be
+    // counted as sent (Plan 4d final review I1).
+    use core_engine::graph::TestInserts;
+    use core_model::mixer::ParamId;
+    let mut s = song(|_| vec![]);
+    let mut b = Builder::from_doc(s.doc.clone());
+    let id = b.insert(s.synth, TestInserts::plugin("rec")).unwrap();
+    let auto = b.lane(s.seq, "P", None).unwrap();
+    let target = AutomationTarget::PluginParam(id, ParamId(7));
+    b.events(
+        s.seq,
+        auto,
+        vec![
+            EventSpec::new(Tick(0), EventBody::Automation { target, value: 0.0 }),
+            EventSpec::new(Tick(Q), EventBody::Automation { target, value: 1.0 }),
+        ],
+    )
+    .unwrap();
+    s.doc = b.finish();
+    let node = Refuser::default();
+    node.full.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (mut engine, renderer) = Engine::new(
+        EngineConfig::new(SR),
+        Box::new(OfflineSinks::new(1 << 16).with_tone()),
+    )
+    .unwrap();
+    engine.set_insert_factory(Box::new(node.clone()));
+    engine.load(&s.doc, s.seq).unwrap();
+    let mut be = OfflineBackend::new(SR, 512);
+    be.start(renderer).unwrap();
+    be.reserve(512);
+    let mut r = Rig {
+        engine,
+        be,
+        block: 512,
+    };
+    r.engine.play().unwrap();
+    // Past the ramp's end (a quarter is 24 000 frames), all refused.
+    r.render(30_208);
+    assert!(node.took.lock().unwrap().is_empty());
+    node.full.store(false, std::sync::atomic::Ordering::Relaxed);
+    r.render(1_024);
+    assert_eq!(*node.took.lock().unwrap(), vec![1.0]);
 }

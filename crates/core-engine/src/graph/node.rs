@@ -37,9 +37,11 @@ pub trait EffectNode: Send {
 
     /// Automation's value for parameter `param`, normalised 0–1, at `frame`
     /// of the next block; plugin processors map it to the parameter's range
-    /// (Plan 4d Ruling 12). // RT
-    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) {
+    /// (Plan 4d Ruling 12). False when the value could not be queued, so
+    /// the renderer sends it again on the next run. // RT
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
         let _ = (frame, param, normalized);
+        true
     }
 
     /// The block went by without this insert running (bypassed or faulted):

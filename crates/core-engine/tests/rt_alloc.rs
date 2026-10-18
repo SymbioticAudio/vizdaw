@@ -49,9 +49,10 @@ impl EffectNode for Hooked<dyn EffectNode> {
     fn reset(&mut self) {
         self.1.reset();
     }
-    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) {
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
         let _ = (frame, param, normalized);
         self.0.fetch_add(1, Ordering::Relaxed);
+        true
     }
 }
 
@@ -68,9 +69,10 @@ impl InstrumentNode for Hooked<dyn InstrumentNode> {
     fn render_outputs(&mut self, frames: u32, outs: &mut [StereoBuf], info: &BlockInfo) {
         self.1.render_outputs(frames, outs, info);
     }
-    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) {
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
         let _ = (frame, param, normalized);
         self.0.fetch_add(1, Ordering::Relaxed);
+        true
     }
 }
 
