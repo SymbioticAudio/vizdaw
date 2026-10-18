@@ -61,3 +61,7 @@ jobs:
         run: scripts/swift.sh test
       - name: App bundle
         run: scripts/make-app.sh
+      - name: End to end through the control channel (needs the runner's window server)
+        run: cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1
+        env:
+          VIZDAW_E2E_APP: dist/VizDAW.app

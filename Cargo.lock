@@ -404,6 +404,7 @@ dependencies = [
  "core-host",
  "core-model",
  "platform-macos",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

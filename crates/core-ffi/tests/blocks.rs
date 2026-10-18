@@ -148,7 +148,8 @@ fn silence_gap_blocks_of_100_000_notes() {
 
 #[test]
 fn huge_ticks_and_sizes_do_not_overflow() {
-    let big = i64::MAX - Q;
+    // The furthest a document may hold (the model refuses beyond it).
+    let big = core_model::rules::MAX_TICKS - Q;
     let (doc, seq, l, _) = lane(&[(0, Q), (big, 4 * Q)], &[]);
     for rule in [
         BlockRule::SilenceGap { ticks: i64::MAX },

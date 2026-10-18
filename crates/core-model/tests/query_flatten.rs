@@ -529,7 +529,8 @@ fn huge_fill_length_does_not_overflow() {
     let d = insert(&base(), 1, 1, vec![note(0, 60, 1)]);
     let mut r = reference(0, None, LoopCount::Fill, 0);
     if let EventBody::Reference { length, .. } = &mut r.body {
-        *length = Some(Tick(i64::MAX - 1));
+        // The longest a document may hold (the model refuses beyond it).
+        *length = Some(Tick(core_model::rules::MAX_TICKS - 1));
     }
     let d = insert(&d, 0, 0, vec![r]);
     let n = flatten(
@@ -651,4 +652,50 @@ fn short_loop_over_many_out_of_range_events_emits_only_in_range_passes() {
         out.iter()
             .all(|e| !matches!(e.body, EventBody::Note { pitch: 100, .. }))
     );
+}
+
+#[test]
+fn positions_and_lengths_beyond_the_limit_are_refused() {
+    use core_model::error::ModelError;
+    use core_model::rules::MAX_TICKS;
+    let d = base();
+    let far = EventSpec::new(Tick(MAX_TICKS + 1), EventBody::note(60, 100, Tick(Q)));
+    let long = EventSpec::new(Tick(0), EventBody::note(60, 100, Tick(MAX_TICKS + 1)));
+    let before = EventSpec::new(Tick(-MAX_TICKS - 1), EventBody::note(60, 100, Tick(Q)));
+    for (spec, want) in [(far, "tick"), (long, "duration"), (before, "tick")] {
+        let r = apply(
+            &d,
+            &Command::Event(EventCmd::Insert {
+                seq: SeqId(1),
+                lane: LaneId(1),
+                events: vec![spec],
+            }),
+        );
+        match r {
+            Err(ModelError::OutOfRange { field, .. }) => assert_eq!(field, want),
+            other => panic!(
+                "accepted a tick beyond ±2^40 (wanted {want}): {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+    let mut r = reference(
+        0,
+        None,
+        LoopCount::Count(core_model::rules::MAX_LOOPS + 1),
+        0,
+    );
+    r.tick = Tick(0);
+    let refused = apply(
+        &d,
+        &Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            events: vec![r],
+        }),
+    );
+    match refused {
+        Err(ModelError::OutOfRange { field, .. }) => assert_eq!(field, "reference.loop_count"),
+        other => panic!("accepted 2^20 + 1 loops: {:?}", other.map(|_| ())),
+    }
 }
