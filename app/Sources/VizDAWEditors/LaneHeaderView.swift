@@ -205,9 +205,29 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         editor.endTextEditing("laneName")
         let name = r.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         r.field.removeFromSuperview()
+        let movement = (obj.userInfo?["NSTextMovement"] as? Int).flatMap(NSTextMovement.init(rawValue:))
+        guard movement != .cancel else { return }
         if !name.isEmpty, name != r.name {
             editor.edit(.lane(edit: .rename(seq: r.seq, lane: r.lane, name: name)))
         }
+    }
+
+    /// Escape cancels a rename: the name stays and no edit is sent (the
+    /// gap parked from plan 4e, closed like the drum row header's).
+    public func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        cancelRename()
+        return true
+    }
+
+    /// Ends a rename without renaming.
+    func cancelRename() {
+        guard let r = renaming else { return }
+        renaming = nil
+        editor.endTextEditing("laneName")
+        r.field.abortEditing()
+        r.field.removeFromSuperview()
+        window?.makeFirstResponder(nil)
     }
 
     /// A header torn down mid-rename never gets its end-editing callback;

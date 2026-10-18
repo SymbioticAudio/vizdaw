@@ -114,6 +114,9 @@ public enum ControlCommands {
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }
+        // A result's `status` is this command's own (plan 4f Ruling 2): a
+        // message an earlier action left is cleared first.
+        m.editor.status = nil
         let before = m.alert?.id
         switch id {
         case "file.close":

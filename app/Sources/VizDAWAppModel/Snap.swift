@@ -4,8 +4,21 @@ import VizDAWCore
 /// toggled by one key (Plan Ruling 16). The grid is counted from the start
 /// of the bar a tick is in, so a bar line always snaps.
 public struct Snap: Codable, Equatable, Sendable {
+    /// Written snake_case in `ui.json`, preferences and on the control
+    /// channel (plan 4f Ruling 1); the camel-case `thirtySecond` that
+    /// builds before 4f wrote still reads.
     public enum Division: String, Codable, CaseIterable, Sendable {
-        case bar, half, quarter, eighth, sixteenth, thirtySecond
+        case bar, half, quarter, eighth, sixteenth
+        case thirtySecond = "thirty_second"
+
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            guard let d = Division(rawValue: raw == "thirtySecond" ? Division.thirtySecond.rawValue : raw) else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "no division \(raw)"))
+            }
+            self = d
+        }
 
         public var title: String {
             switch self {

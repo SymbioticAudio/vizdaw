@@ -207,6 +207,30 @@ final class FakeControlHost: ControlHost {
         #expect(ControlStates.facts(m).detailKind == "none")
     }
 
+    @Test func theEditorStateSpellsTheDivisionSnakeCase() throws {
+        let (_, id, m, _) = try demo()
+        m.editor.updateLayout { $0.snap.division = .thirtySecond }
+        guard case .editor(_, let e)? = ControlStates.state(.editor, id, m) else {
+            Issue.record("no editor state")
+            return
+        }
+        #expect(e.snapDivision == "thirty_second")
+    }
+
+    @Test func aCommandReportsOnlyItsOwnStatus() throws {
+        let (s, id, m, _) = try demo()
+        m.editor.status = "An earlier refusal."
+        guard case .done(.ran(_, _, _, _, let status)) = run("modify.exact_mode", s, id) else {
+            Issue.record("not done")
+            return
+        }
+        #expect(status == nil, "a command that says nothing reports no status")
+        #expect(m.editor.status == nil)
+        m.editor.status = "An earlier refusal."
+        let e = try #require(failure(run("sequence.back", s, id)))
+        #expect(e.code == .unavailable && m.editor.status == nil, "an unavailable command clears it too")
+    }
+
     @Test func storeCommandsAnswerWithTheNewDocument() {
         let s = DocumentStore(
             makeEmpty: { throw VizError.Io(message: "disk full") }, makeDemo: { demoFake() },

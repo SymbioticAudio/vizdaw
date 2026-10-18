@@ -261,6 +261,31 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(h.renaming == nil)
     }
 
+    @Test func escapeInTheLaneRenameFieldCancelsTheRename() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        let n = f.edits.count
+        h.beginRename(m.lanes[1], seq: 3, row: 1)
+        let field = try #require(h.renaming?.field)
+        field.stringValue = "Keys"
+        #expect(h.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        #expect(h.renaming == nil && field.superview == nil && !m.editor.textEditing)
+        h.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification))
+        #expect(f.edits.count == n, "no rename sent")
+        // Other commands are left to the field; the field editor's own
+        // cancel movement does not rename either.
+        h.beginRename(m.lanes[1], seq: 3, row: 1)
+        let again = try #require(h.renaming?.field)
+        #expect(!h.control(again, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        again.stringValue = "Keys"
+        h.controlTextDidEndEditing(
+            Notification(
+                name: NSControl.textDidEndEditingNotification, object: again,
+                userInfo: ["NSTextMovement": NSTextMovement.cancel.rawValue]))
+        #expect(f.edits.count == n && h.renaming == nil && !m.editor.textEditing)
+    }
+
     @Test func aHeaderTornDownMidRenameReEnablesTransportKeys() throws {
         let m = try DocumentModel(session: editorFake())
         let h = LaneHeaderView(document: m)

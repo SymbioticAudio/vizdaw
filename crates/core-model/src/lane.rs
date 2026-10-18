@@ -166,7 +166,10 @@ impl QuantizeSpec {
 
     /// Swing: every second line of `grid` moves late so that the pair
     /// splits `percent : 100 − percent` (50 is straight, 66 a triplet
-    /// feel); `percent` is clamped to 50–75; full strength.
+    /// feel); `percent` is clamped to 50–75; full strength. Lines are
+    /// counted from tick 0 of the lane, not from a loop start: a lane that
+    /// loops over an odd number of grid lines swings the other lines on
+    /// its next pass (4e Ruling 10, kept; parked T2 M1).
     pub fn swing(grid: Tick, percent: u8) -> QuantizeSpec {
         let p = i64::from(percent.clamp(50, 75));
         let late = grid.0.saturating_mul(2).saturating_mul(p - 50) / 100;

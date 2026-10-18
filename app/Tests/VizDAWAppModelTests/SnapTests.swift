@@ -62,6 +62,27 @@ import VizDAWCore
         #expect(try JSONDecoder().decode(Snap.self, from: data) == s)
     }
 
+    @Test func theThirtySecondIsSnakeCaseAndTheOldSpellingStillReads() throws {
+        var s = Snap()
+        s.division = .thirtySecond
+        let json = String(decoding: try JSONEncoder().encode(s), as: UTF8.self)
+        #expect(json.contains(#""thirty_second""#) && !json.contains("thirtySecond"))
+        let old = Data(#"{"division":"thirtySecond","triplet":false,"dotted":false,"enabled":true}"#.utf8)
+        #expect(try JSONDecoder().decode(Snap.self, from: old).division == .thirtySecond)
+        // A project saved before plan 4f keeps its grid.
+        let layout = EditorLayout.decode(
+            #"{"snap":{"division":"thirtySecond","triplet":true,"dotted":false,"enabled":true}}"#)
+        #expect(layout.snap.division == .thirtySecond && layout.snap.triplet)
+        #expect(EditorLayout.decode(#"{"snap":{"division":"thirtysecond","triplet":true,"dotted":false,"enabled":true}}"#).snap == Snap(), "unknown: the default")
+        // Nudge preferences written before plan 4f still read.
+        var n = NudgeSettings()
+        n.time = .division(.thirtySecond, triplet: true)
+        let written = String(decoding: try JSONEncoder().encode(n), as: UTF8.self)
+        #expect(written.contains("thirty_second"))
+        let before = Data(written.replacingOccurrences(of: "thirty_second", with: "thirtySecond").utf8)
+        #expect(try JSONDecoder().decode(NudgeSettings.self, from: before).time == .division(.thirtySecond, triplet: true))
+    }
+
     @Test func floorTakesTheGridLineAtOrBefore() {
         let meter = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor: false)]
         var s = Snap()

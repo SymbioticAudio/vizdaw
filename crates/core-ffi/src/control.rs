@@ -368,7 +368,8 @@ pub struct EditorStateRow {
     pub tool: String,
     /// Snap on.
     pub snap_enabled: bool,
-    /// Snap division (`quarter`, ...).
+    /// Snap division, snake_case: `bar`, `half`, `quarter`, `eighth`,
+    /// `sixteenth`, `thirty_second` (plan 4f Ruling 1).
     pub snap_division: String,
     /// Exact mode on.
     pub exact_mode: bool,
