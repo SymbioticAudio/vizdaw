@@ -377,3 +377,10 @@ proptest! {
         prop_assert_eq!(parse_pitches(&name), Ok(vec![n]));
     }
 }
+
+#[test]
+fn a_huge_octave_is_refused_not_a_panic() {
+    for bad in ["C2147483647", "B-2147483648", "C-2147483648", "G2147483646"] {
+        assert!(parse_pitches(bad).is_err(), "{bad:?}");
+    }
+}

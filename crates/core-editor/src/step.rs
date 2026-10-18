@@ -425,8 +425,9 @@ fn parse_pitch(token: &str) -> Result<u8, String> {
     let octave: i32 = octave
         .parse()
         .map_err(|_| format!("{:?} is not a pitch", shown()))?;
-    let n = (octave + 1)
-        .checked_mul(12)
+    let n = octave
+        .checked_add(1)
+        .and_then(|o| o.checked_mul(12))
         .and_then(|o| o.checked_add(class + shift))
         .filter(|n| (0..=127).contains(n))
         .ok_or_else(|| format!("{:?} is out of range", shown()))?;
