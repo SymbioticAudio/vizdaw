@@ -96,11 +96,47 @@ private func pt(_ t: Int64, _ v: Int64) -> StripPoint { StripPoint(tick: t, valu
     }
 
     @Test func eraseDeletesTheRowsSeriesOnly() {
+        // Pinned literally, not against eraseRule itself (parked T11).
+        let rule = RuleRow(
+            conditions: [
+                ConditionRow(test: .timeRange(start: 0, end: q + 1), negate: false),
+                ConditionRow(test: .kinds(kinds: [.pitchBend]), negate: false),
+            ],
+            matchAll: true)
         #expect(
             StripCommands.erase(.pitchBend, from: q, to: 0)
-                == .selectAndModify(
-                    rule: StripLane.pitchBend.eraseRule(from: 0, to: q), mode: .select, modify: .delete, toCopy: false))
+                == .selectAndModify(rule: rule, mode: .select, modify: .delete, toCopy: false))
         #expect(StripCommands.erase(.velocity, from: 0, to: q) == nil)
+    }
+
+    @Test func aBackwardCompressRectangleIsTurnedAround() {
+        // Parked T11: ticks as well as values are ordered.
+        let c = StripCommands.compress(.velocity, from: pt(2 * q, 900), to: pt(q, 100), step: 4, selectedOnly: false)
+        let line = LineRow(from: q, to: 2 * q, start: 100, end: 900, step: 4, shape: .flat)
+        guard case let .selectAndModify(rule, _, .line(_, .compress, got)?, _) = c else {
+            Issue.record("not a compress")
+            return
+        }
+        #expect(got == line)
+        #expect(rule?.conditions.first?.test == .timeRange(start: q, end: 2 * q + 1))
+    }
+
+    @Test func aFlatLineDrawnRightToLeftHoldsThePressedValue() {
+        var s = StripChartSettings()
+        s.shape = .flat
+        let l = StripLineBuilder.line(from: pt(2 * q, 30), to: pt(q, 90), stroke: [], settings: s, seed: 1)
+        #expect(l == LineRow(from: q, to: 2 * q, start: 30, end: 30, step: q / 8, shape: .flat))
+    }
+
+    @Test func exactModeKeepsTheOptionRefine() {
+        let l = LineRow(from: q, to: 2 * q, start: 0, end: 100, step: 1, shape: .straight)
+        let cmd = StripCommands.line(.controller(7), op: .add, line: l, selectedOnly: true)
+        let r = ExactMode.request(for: cmd, lanes: [LaneKey(3, 31)], origin: .stripChart)
+        #expect(r?.config.select.mode == .refine, "⌥ stays a refine in the panel")
+        let plain = ExactMode.request(
+            for: StripCommands.line(.controller(7), op: .add, line: l, selectedOnly: false), lanes: [LaneKey(3, 31)],
+            origin: .stripChart)
+        #expect(plain?.config.select.mode == .select)
     }
 
     @Test func exactModeOpensTheLineInThePanel() {
@@ -123,5 +159,14 @@ private func pt(_ t: Int64, _ v: Int64) -> StripPoint { StripPoint(tick: t, valu
         l.stripChart.op = .thin
         #expect(EditorLayout.decode(l.encoded()).stripChart.op == .thin)
         #expect(EditorLayout.decode("{}").stripChart == StripChartSettings())
+        // Parked T11: zero periods, a phase past 999, a bad zoom.
+        let odd = #"{"periodTicks":0,"periodMs":0,"periodBars":0,"phase":4000,"step":0,"ticksPerPoint":-3}"#
+        let o = try JSONDecoder().decode(StripChartSettings.self, from: Data(odd.utf8))
+        #expect(o.periodTicks == 1 && o.periodMs == 1 && o.periodBars == 1)
+        #expect(o.phase == 999 && o.step == 1)
+        #expect(o.ticksPerPoint == StripChartSettings().ticksPerPoint, "an insane zoom falls back")
+        let far = #"{"ticksPerPoint":1e12}"#
+        let f = try JSONDecoder().decode(StripChartSettings.self, from: Data(far.utf8))
+        #expect(EditorLayout.ticksPerPointRange.contains(f.ticksPerPoint))
     }
 }
