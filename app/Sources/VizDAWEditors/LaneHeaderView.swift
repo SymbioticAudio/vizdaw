@@ -125,6 +125,27 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         }
     }
 
+    /// Right-click or Control-click on a lane: its menu.
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        let p = convert(event.locationInWindow, from: nil)
+        guard let seq = document.selectedSeq, let i = row(at: p.y), document.lanes.indices.contains(i) else {
+            return nil
+        }
+        return laneMenu(seq: seq, lane: document.lanes[i])
+    }
+
+    /// Drum Lane: marks the lane a drum lane (rows for its notes) or a
+    /// normal lane again (Plan 4e Ruling 3).
+    func laneMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let drum = MenuAction(title: "Drum Lane") { [weak self] in
+            self?.editor.markDrumLane(seq: seq, lane: lane.id, on: !lane.isDrum)
+        }
+        menu.addItem(drum.item(checked: lane.isDrum))
+        return menu
+    }
+
     private func flags(_ seq: UInt64, _ lane: UInt64, mute: Bool? = nil, solo: Bool? = nil, arm: Bool? = nil) {
         editor.edit(.lane(edit: .setFlags(seq: seq, lane: lane, mute: mute, solo: solo, arm: arm)))
     }

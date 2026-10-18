@@ -233,6 +233,22 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(m.editor.status == "no destinations")
     }
 
+    @Test func theLaneMenuMarksAndUnmarksADrumLane() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        var lane = m.lanes[1]
+        let item = try #require(h.laneMenu(seq: 3, lane: lane).items.first)
+        #expect(item.title == "Drum Lane" && item.state == .off)
+        _ = item.target?.perform(item.action)
+        #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 31, drum: true)))
+        lane.isDrum = true
+        let on = try #require(h.laneMenu(seq: 3, lane: lane).items.first)
+        #expect(on.state == .on)
+        _ = on.target?.perform(on.action)
+        #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 31, drum: false)))
+    }
+
     @Test func aRenameEndsOnTheLaneItBeganOn() throws {
         let f = editorFake()
         let m = try DocumentModel(session: f)

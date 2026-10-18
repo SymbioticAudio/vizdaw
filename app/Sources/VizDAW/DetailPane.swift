@@ -3,7 +3,7 @@ import VizDAWAppModel
 
 /// A detail editor's frame: the editor picker, its target, Open in Window,
 /// and the editor: the piano roll (4b), the list (4c), the Strip Chart
-/// (4d), else a placeholder.
+/// (4d) or the drum grid (4e).
 struct DetailPane: View {
     let model: DocumentModel
     let state: DetailState
@@ -49,19 +49,9 @@ struct DetailPane: View {
             } else if state.kind == .stripChart {
                 StripChartEditor(model: model.stripChart(slot))
             } else {
-                ContentUnavailableView(
-                    "\(state.kind.title) arrives in plan \(state.kind.plan)",
-                    systemImage: "rectangle.and.pencil.and.ellipsis",
-                    description: Text(summary))
+                DrumGridEditor(model: model.drumGrid(slot))
             }
         }
-    }
-
-    private var summary: String {
-        guard let n = model.editor.eventCount(state.target) else {
-            return "Showing the whole sequence."
-        }
-        return "\(n) event\(n == 1 ? "" : "s") in this \(state.target.lane == nil ? "sequence" : "selection")."
     }
 }
 
