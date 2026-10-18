@@ -141,4 +141,22 @@ private func paint(_ ticks: [Int64], velocity: UInt16 = 100 << 9, row: UInt64 = 
         #expect(b.destination == "Kit" && b.inherited, "no destination of its own: the lane's, dimmed")
         _ = c
     }
+
+    @Test func escapeDuringARowHeaderDragDropsNothing() throws {
+        let (f, m, c) = try grid()
+        defer { withExtendedLifetime(m) {} }
+        let h = c.headers
+        let top = EditorCanvas.rulerHeight
+        let n = f.edits.count
+        h.mouseDown(at: CGPoint(x: 20, y: top + 30), clicks: 1)
+        h.mouseDragged(to: CGPoint(x: 20, y: top + 95))
+        let esc = try #require(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        h.keyDown(with: esc)
+        h.mouseUp(at: CGPoint(x: 20, y: top + 95))
+        #expect(f.edits.count == n, "the release after Escape drops nothing")
+        #expect(h.acceptsFirstResponder)
+    }
 }

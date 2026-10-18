@@ -32,6 +32,8 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
     public required init?(coder: NSCoder) { nil }
 
     public override var isFlipped: Bool { true }
+    /// Takes the keyboard on a press so Escape reaches a row drag.
+    public override var acceptsFirstResponder: Bool { true }
 
     /// A click the control channel sends is never a window-activating first
     /// click (control spec §5.5).
@@ -148,6 +150,7 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
             beginRename(press)
         } else {
             dragging = (press, p.y, false)
+            window?.makeFirstResponder(self)
         }
     }
 
@@ -177,11 +180,17 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
 
     public override func keyDown(with e: NSEvent) {
         if e.keyCode == 53, dragging != nil {  // Escape
-            dragging = nil
-            needsDisplay = true
+            cancelOperation(nil)
         } else {
             super.keyDown(with: e)
         }
+    }
+
+    /// Escape: the drag ends and its release drops nothing.
+    public override func cancelOperation(_ sender: Any?) {
+        guard dragging != nil else { return }
+        dragging = nil
+        needsDisplay = true
     }
 
     public override func menu(for event: NSEvent) -> NSMenu? {
@@ -236,6 +245,7 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
     /// Torn down mid-rename: give the keyboard back to the transport keys.
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil { dragging = nil }
         if window == nil, renaming != nil {
             renaming = nil
             editor.endTextEditing("drumRow")
