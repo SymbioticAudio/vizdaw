@@ -21,6 +21,7 @@
 
 use crate::backend::{BlockInfo, StereoBuf};
 use crate::error::EngineError;
+use crate::graph::controls::{Controls, StripControlSpec};
 use crate::graph::delay::DelayLine;
 use crate::graph::dsp;
 use crate::graph::node::{EffectNode, ProcessStatus};
@@ -29,9 +30,11 @@ use crate::graph::spec::{GraphSpec, InsertSpec, NodeSpec, Tap};
 use crate::pool::{Pool, PoolShared, RtEnv, RtPlatform};
 use crate::render::{Shared, Sink};
 use crate::schedule::MAX_TARGETS;
-use core_model::ids::PluginInstanceId;
+use crate::schedule::automation::{AutoDest, StripParam};
+use core_model::ids::{PluginInstanceId, StripId};
 use crossbeam_queue::ArrayQueue;
 use std::cell::UnsafeCell;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -119,7 +122,11 @@ pub enum InsertInit {
 struct Input {
     from: usize,
     tap: Tap,
+    /// Gain at the end of the run (the static gain without automation).
     gain: f32,
+    /// Gain at the start of the run; differs from `gain` only while a
+    /// control ramps (Plan 4d Ruling 11).
+    start: f32,
 }
 
 struct InsertDef {
@@ -136,6 +143,9 @@ enum NodeDef {
         inserts: Range<usize>,
         gain_l: f32,
         gain_r: f32,
+        /// Gains at the start of the run (see `Input::start`).
+        start_l: f32,
+        start_r: f32,
         audible: bool,
         meter: usize,
     },
@@ -204,6 +214,13 @@ impl NodeState {
 pub struct Graph {
     defs: Box<[NodeDef]>,
     inputs: Box<[Input]>,
+    /// `(node, spec input position)` of every input, for the controls.
+    input_keys: Box<[(usize, usize)]>,
+    /// `(instance, insert index)`, sorted by instance.
+    insert_ids: Box<[(PluginInstanceId, usize)]>,
+    controls: Controls,
+    /// A commit ramps the gains of the next run; `settle` ends it.
+    ramping: bool,
     insert_defs: Box<[InsertDef]>,
     succ: Box<[Box<[usize]>]>,
     indegree: Box<[u32]>,
@@ -299,6 +316,8 @@ impl Graph {
         let n = spec.nodes.len();
         let mut defs = Vec::with_capacity(n);
         let mut inputs = Vec::new();
+        let mut input_keys: Vec<(usize, usize)> = Vec::new();
+        let mut insert_ids: Vec<(PluginInstanceId, usize)> = Vec::new();
         let mut insert_defs = Vec::new();
         let mut nodes = Vec::with_capacity(n);
         let mut inserts = Vec::new();
@@ -343,7 +362,9 @@ impl Graph {
                             from: x.from,
                             tap: x.tap,
                             gain: x.gain,
+                            start: x.gain,
                         });
+                        input_keys.push((i, k));
                         delays.push(DelayLine::new(delay_at(&plan.input_delays, i, k)));
                         edge(x.from, i, &mut succ);
                     }
@@ -358,6 +379,7 @@ impl Graph {
                                     from: x.from,
                                     tap: x.tap,
                                     gain: x.gain,
+                                    start: x.gain,
                                 });
                         if let Some(x) = &sidechain {
                             edge(x.from, i, &mut succ);
@@ -369,6 +391,9 @@ impl Graph {
                             sidechain,
                         });
                         let idx = inserts.len();
+                        if let Some(id) = ins.instance {
+                            insert_ids.push((id, idx));
+                        }
                         let state = match init(idx, ins) {
                             InsertInit::Adopt(old) => {
                                 // A line for the spec latency, swapped in on
@@ -390,6 +415,8 @@ impl Graph {
                         inserts: ins_start..insert_defs.len(),
                         gain_l: s.gain_l,
                         gain_r: s.gain_r,
+                        start_l: s.gain_l,
+                        start_r: s.gain_r,
                         audible: s.audible,
                         meter: s.meter.unwrap_or(i),
                     });
@@ -407,15 +434,21 @@ impl Graph {
             // (No `debug_assert!`: this path is tested, so it must not panic.)
             defs.clear();
             inputs.clear();
+            input_keys.clear();
             succ.clear();
             indegree.clear();
             nodes.clear();
             sources.clear();
             instruments = 0;
         }
+        insert_ids.sort_by_key(|x| x.0);
         Graph {
             defs: defs.into_boxed_slice(),
             inputs: inputs.into_boxed_slice(),
+            input_keys: input_keys.into_boxed_slice(),
+            insert_ids: insert_ids.into_boxed_slice(),
+            controls: Controls::default(),
+            ramping: false,
             insert_defs: insert_defs.into_boxed_slice(),
             succ: succ.into_iter().map(Vec::into_boxed_slice).collect(),
             pending: indegree.iter().map(|_| AtomicU32::new(0)).collect(),
@@ -459,6 +492,137 @@ impl Graph {
         self.instruments
     }
 
+    /// Installs the mixer's controls (after `build`). Not RT.
+    pub fn set_controls(&mut self, specs: &[StripControlSpec]) {
+        let keys: BTreeMap<(usize, usize), usize> = self
+            .input_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (*k, i))
+            .collect();
+        self.controls = Controls::build(specs, |node, k| keys.get(&(node, k)).copied());
+    }
+
+    /// Automation's normalised value for a strip control; it takes effect
+    /// at the next `commit_controls`. // RT
+    pub fn automate_strip(&mut self, strip: StripId, p: StripParam, v: f64) {
+        self.controls.set_strip(strip, p, v);
+    }
+
+    /// Automation's normalised level for send `index` of `strip`. // RT
+    pub fn automate_send(&mut self, strip: StripId, index: u16, v: f64) {
+        self.controls.set_send(strip, index, v);
+    }
+
+    /// Drops the overrides of the controls `driven` says no lane drives;
+    /// the next commit writes their static values. // RT
+    pub fn release_overrides(&mut self, driven: impl Fn(AutoDest) -> bool) {
+        self.controls.release(driven);
+    }
+
+    /// Writes the effective control values into the strip and edge gains.
+    /// With `ramp` the next run moves from the current gains to them (the
+    /// renderer commits a run's start values without, then its end values
+    /// with, Plan 4d Ruling 11); without, they apply at once. // RT
+    pub fn commit_controls(&mut self, ramp: bool) {
+        let defs = &mut self.defs;
+        let inputs = &mut self.inputs;
+        let wrote = self.controls.commit(
+            |node, gl, gr, on| {
+                if let Some(NodeDef::Strip {
+                    gain_l,
+                    gain_r,
+                    start_l,
+                    start_r,
+                    audible,
+                    ..
+                }) = defs.get_mut(node)
+                {
+                    if ramp {
+                        *start_l = *gain_l;
+                        *start_r = *gain_r;
+                    } else {
+                        *start_l = gl;
+                        *start_r = gr;
+                    }
+                    *gain_l = gl;
+                    *gain_r = gr;
+                    *audible = on;
+                }
+            },
+            |i, g| {
+                if let Some(x) = inputs.get_mut(i) {
+                    x.start = if ramp { x.gain } else { g };
+                    x.gain = g;
+                }
+            },
+        );
+        if wrote && ramp {
+            self.ramping = true;
+        }
+    }
+
+    /// After a run: ramps have arrived. // RT
+    pub fn settle(&mut self) {
+        if !std::mem::take(&mut self.ramping) {
+            return;
+        }
+        for d in self.defs.iter_mut() {
+            if let NodeDef::Strip {
+                gain_l,
+                gain_r,
+                start_l,
+                start_r,
+                ..
+            } = d
+            {
+                *start_l = *gain_l;
+                *start_r = *gain_r;
+            }
+        }
+        for x in self.inputs.iter_mut() {
+            x.start = x.gain;
+        }
+    }
+
+    /// The processor of insert instance `id`, between runs (plugin
+    /// automation). // RT
+    pub fn insert_mut(&mut self, id: PluginInstanceId) -> Option<&mut (dyn EffectNode + 'static)> {
+        let i = self.insert_ids.binary_search_by_key(&id, |x| x.0).ok()?;
+        let idx = self.insert_ids.get(i)?.1;
+        self.inserts
+            .get_mut(idx)?
+            .get_mut()
+            .as_mut()?
+            .node
+            .as_deref_mut()
+    }
+
+    /// A strip node's gains and audibility at the end of the run
+    /// (diagnostics and tests). Not RT.
+    pub fn gains(&self, node: usize) -> Option<(f32, f32, bool)> {
+        match self.defs.get(node) {
+            Some(NodeDef::Strip {
+                gain_l,
+                gain_r,
+                audible,
+                ..
+            }) => Some((*gain_l, *gain_r, *audible)),
+            _ => None,
+        }
+    }
+
+    /// The gains of node `node`'s input edges, in spec order (dropped edges
+    /// left out; diagnostics and tests). Not RT.
+    pub fn edge_gains(&self, node: usize) -> Vec<f32> {
+        self.input_keys
+            .iter()
+            .zip(self.inputs.iter())
+            .filter(|(k, _)| k.0 == node)
+            .map(|(_, x)| x.gain)
+            .collect()
+    }
+
     /// Moves adopted inserts out of `old` (the graph this one replaces) and,
     /// when both have the same shape and block size, swaps in `old`'s node
     /// state (buffers and delay lines). Runs between runs. // RT
@@ -483,6 +647,11 @@ impl Graph {
             && self.nodes.len() == old.nodes.len()
         {
             std::mem::swap(&mut self.nodes, &mut old.nodes);
+        }
+        // Automation overrides carry over while their static values stay
+        // (Plan 4d Ruling 13).
+        if self.controls.adopt(&old.controls) {
+            self.commit_controls(false);
         }
     }
 
@@ -609,6 +778,8 @@ unsafe fn render_node(
             inserts,
             gain_l,
             gain_r,
+            start_l,
+            start_r,
             audible,
             meter,
         } => {
@@ -634,9 +805,9 @@ unsafe fn render_node(
                     Some(d) if d.delay() > 0 => {
                         dsp::copy(&mut st.scratch, buf, frames);
                         d.process_buf(&mut st.scratch, frames);
-                        dsp::mix_into(&mut st.pre, &st.scratch, inp.gain, frames);
+                        dsp::mix_into_ramp(&mut st.pre, &st.scratch, inp.start, inp.gain, frames);
                     }
-                    _ => dsp::mix_into(&mut st.pre, buf, inp.gain, frames),
+                    _ => dsp::mix_into_ramp(&mut st.pre, buf, inp.start, inp.gain, frames),
                 }
             }
             for (k, idx) in inserts.clone().enumerate() {
@@ -669,7 +840,12 @@ unsafe fn render_node(
                 run_insert(ins, idef.bypass, frames, &mut st.pre, sc, shared, info);
             }
             dsp::copy(&mut st.post, &st.pre, frames);
-            dsp::scale(&mut st.post, *gain_l, *gain_r, frames);
+            dsp::scale_ramp(
+                &mut st.post,
+                (*start_l, *start_r),
+                (*gain_l, *gain_r),
+                frames,
+            );
             if *audible {
                 let (l, r) = dsp::peaks(&st.post, frames);
                 if let Some(m) = shared.meter(*meter) {
@@ -986,6 +1162,12 @@ impl Runner {
         if let Some(p) = &self.pool {
             p.set_callback_helps(on);
         }
+    }
+
+    /// The graph, between blocks (tests drive automation through it).
+    pub fn graph_mut(&mut self) -> &mut Graph {
+        self.exec.wait_idle();
+        &mut self.graph
     }
 
     /// Hands the workers a new real-time environment.

@@ -3,6 +3,7 @@
 //! PDC planning (`pdc`), the runtime graph and executor (`exec`) and the
 //! mixer translation (`mixer`).
 
+pub mod controls;
 pub mod delay;
 pub mod dsp;
 pub mod exec;
@@ -13,6 +14,7 @@ pub mod spec;
 
 use core_model::ids::PluginInstanceId;
 
+pub use controls::{FeedSpec, SendSpec, StripControlSpec};
 pub use exec::{Graph, InsertInit, Runner, SinkTable};
 pub use mixer::{FeedSource, InstrumentFeed};
 pub use node::{

@@ -621,7 +621,7 @@ impl Engine {
             }
         };
         let mut next_live: BTreeMap<PluginInstanceId, Live> = BTreeMap::new();
-        let graph = Graph::build(&mg.spec, &p, max, |idx, ins| {
+        let mut graph = Graph::build(&mg.spec, &p, max, |idx, ins| {
             let Some(id) = ins.instance else {
                 return InsertInit::Placeholder;
             };
@@ -638,6 +638,7 @@ impl Engine {
                 None => InsertInit::Placeholder,
             }
         });
+        graph.set_controls(&mg.controls);
         report.latency_frames = graph.latency();
         self.push(EngineCmd::SetGraph(Box::new(graph)))?;
         self.live = next_live;

@@ -1,12 +1,13 @@
 //! The mixer → graph translation (spec §6; Plan Rulings 1, 4, 5, 25).
 
+use crate::graph::controls::{FeedSpec, SendSpec, StripControlSpec};
 use crate::graph::dsp::strip_gains;
 use crate::graph::spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};
 use crate::schedule::TargetIdx;
 use core_model::document::Document;
 use core_model::ids::{DestId, StripId};
 use core_model::mixer::{Output, PluginSlot, Strip, StripKind, db_to_gain};
-use core_model::mixer_rules::audible;
+use core_model::mixer_rules::{audible, solo_reach};
 use std::collections::BTreeMap;
 
 /// A graph spec made from a document's mixer.
@@ -18,6 +19,8 @@ pub struct MixerGraph {
     pub strips: Vec<(usize, StripId)>,
     /// Problems worth showing (not errors).
     pub warnings: Vec<String>,
+    /// Every strip's automatable controls (4d, `Graph::set_controls`).
+    pub controls: Vec<StripControlSpec>,
 }
 
 /// Which strip an instrument node feeds.
@@ -153,6 +156,8 @@ pub fn mixer_spec(
         }
     }
     let muted = |s: &Strip| s.mute || !on.contains(&s.id);
+    // What each strip feeds, for automation (Plan 4d Ruling 11).
+    let mut feeds: BTreeMap<StripId, Vec<FeedSpec>> = BTreeMap::new();
     for s in m.strips().values() {
         let Some(from) = node(s.id) else {
             continue;
@@ -163,35 +168,51 @@ pub fn mixer_spec(
                 Output::Master => m.master(),
                 Output::Bus(b) => b,
             };
-            if let Some(t) = node(target)
-                .and_then(|t| t.checked_sub(base))
-                .and_then(|k| strips.get_mut(k))
-            {
-                t.inputs.push(InputSpec {
-                    from,
-                    tap: Tap::Post,
-                    gain: pass,
-                });
+            if let Some(to) = node(target) {
+                if let Some(t) = to.checked_sub(base).and_then(|k| strips.get_mut(k)) {
+                    feeds.entry(s.id).or_default().push(FeedSpec {
+                        to,
+                        input: t.inputs.len(),
+                        send: None,
+                    });
+                    t.inputs.push(InputSpec {
+                        from,
+                        tap: Tap::Post,
+                        gain: pass,
+                    });
+                }
             }
         }
-        for x in s.sends.iter() {
+        for (i, x) in s.sends.iter().enumerate() {
             let level = if x.enabled {
                 db_to_gain(x.level_db) as f32
             } else {
                 0.0
             };
-            if let Some(t) = node(x.target)
-                .and_then(|t| t.checked_sub(base))
-                .and_then(|k| strips.get_mut(k))
-            {
-                t.inputs.push(InputSpec {
-                    from,
-                    tap: if x.pre_fader { Tap::Pre } else { Tap::Post },
-                    gain: pass * level,
-                });
+            if let Some(to) = node(x.target) {
+                if let Some(t) = to.checked_sub(base).and_then(|k| strips.get_mut(k)) {
+                    feeds.entry(s.id).or_default().push(FeedSpec {
+                        to,
+                        input: t.inputs.len(),
+                        send: Some(SendSpec {
+                            index: u16::try_from(i).unwrap_or(u16::MAX),
+                            level_db: x.level_db,
+                            enabled: x.enabled,
+                        }),
+                    });
+                    t.inputs.push(InputSpec {
+                        from,
+                        tap: if x.pre_fader { Tap::Pre } else { Tap::Post },
+                        gain: pass * level,
+                    });
+                }
             }
         }
     }
+    // A soloed strip keeps what it reaches and what reaches it, as
+    // `mixer_rules::audible` does for the static solos.
+    let mut reach = solo_reach(m);
+    let mut controls: Vec<StripControlSpec> = Vec::new();
     for (k, s) in m.strips().values().enumerate() {
         let Some(spec) = strips.get_mut(k) else {
             continue;
@@ -200,6 +221,20 @@ pub fn mixer_spec(
         spec.gain_l = gl;
         spec.gain_r = gr;
         spec.audible = !muted(s);
+        controls.push(StripControlSpec {
+            strip: s.id,
+            node: base + k,
+            gain_db: s.gain_db,
+            pan: s.pan,
+            apply_pan: s.id != m.master(),
+            mute: s.mute,
+            solo: s.solo,
+            feeds: feeds.remove(&s.id).unwrap_or_default(),
+            solo_keeps: reach
+                .remove(&s.id)
+                .map(|x| x.into_iter().collect())
+                .unwrap_or_else(|| vec![s.id]),
+        });
         for slot in s.inserts.iter() {
             let sidechain = slot.sidechain.and_then(|src| {
                 let from = node(src)?;
@@ -241,5 +276,6 @@ pub fn mixer_spec(
         spec: GraphSpec { nodes, master },
         strips: strip_nodes,
         warnings,
+        controls,
     }
 }
