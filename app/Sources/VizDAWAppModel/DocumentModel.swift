@@ -67,6 +67,26 @@ public final class DocumentModel {
         pianoRolls.removeValue(forKey: slot)?.silence()
     }
 
+    /// One Strip Chart per slot (Plan 4d Ruling 21).
+    @ObservationIgnored private var stripCharts: [DetailSlot: StripChartModel] = [:]
+
+    /// The Strip Chart of the detail pane or a torn-off window, made once.
+    public func stripChart(_ slot: DetailSlot) -> StripChartModel {
+        if let m = stripCharts[slot] { return m }
+        let m: StripChartModel
+        switch slot {
+        case .pane: m = .pane(self)
+        case .window(let id): m = .window(id, of: self)
+        }
+        stripCharts[slot] = m
+        return m
+    }
+
+    /// A torn-off window closed: its Strip Chart goes (and its stroke).
+    public func dropStripChart(_ slot: DetailSlot) {
+        stripCharts.removeValue(forKey: slot)?.strokeCancelled()
+    }
+
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()
     /// One list editor per slot, while that slot shows a list.

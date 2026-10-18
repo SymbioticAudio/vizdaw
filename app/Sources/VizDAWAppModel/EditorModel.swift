@@ -382,7 +382,9 @@ public final class EditorModel {
             let k = kind ?? l.lastKind
             l.lastKind = k
             let lanes = l.detail?.target == target ? l.detail?.lanes : nil
-            l.detail = DetailState(kind: k, target: target, lanes: lanes, listFilter: l.detail?.listFilter)
+            l.detail = DetailState(
+                kind: k, target: target, lanes: lanes, listFilter: l.detail?.listFilter,
+                stripRows: l.detail?.stripRows)
         }
     }
 

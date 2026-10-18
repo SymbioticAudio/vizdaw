@@ -133,12 +133,19 @@ public struct DetailState: Codable, Hashable, Sendable {
     /// List editor: its kind and destination filter (nil: the default).
     /// Optional, so earlier layouts decode (Plan 4c Ruling 19).
     public var listFilter: ListFilter?
+    /// Strip Chart: its rows (nil: one velocity row). Optional, so earlier
+    /// layouts decode (Plan 4d Ruling 21).
+    public var stripRows: [StripLane]?
 
-    public init(kind: DetailEditorKind, target: EditorTarget, lanes: [UInt64]? = nil, listFilter: ListFilter? = nil) {
+    public init(
+        kind: DetailEditorKind, target: EditorTarget, lanes: [UInt64]? = nil, listFilter: ListFilter? = nil,
+        stripRows: [StripLane]? = nil
+    ) {
         self.kind = kind
         self.target = target
         self.lanes = lanes
         self.listFilter = listFilter
+        self.stripRows = stripRows
     }
 }
 
