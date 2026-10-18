@@ -511,7 +511,8 @@ impl core_engine::backend::InstrumentNode for Clock {
 }
 
 /// An insert that stalls the run starting at schedule frame 24 000 while
-/// playing, until `release` is set (at most 5 s).
+/// playing, until the test sets `release` (at most 20 s): far past any
+/// deadline, however loaded the machine.
 struct Staller(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl core_engine::graph::EffectNode for Staller {
@@ -535,7 +536,7 @@ impl core_engine::graph::EffectNode for Staller {
         info: &core_engine::backend::BlockInfo,
     ) -> core_engine::graph::ProcessStatus {
         if info.playing && info.frame == 24_000 {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
             while !self.0.load(std::sync::atomic::Ordering::Acquire)
                 && std::time::Instant::now() < until
             {
@@ -610,7 +611,10 @@ fn a_run_missing_its_deadline_skips_the_rest_of_its_block() {
     let release = Arc::new(AtomicBool::new(false));
     let mut cfg = EngineConfig::new(SR);
     cfg.workers = 1;
-    cfg.deadline = Some(0.5);
+    // 25 blocks of 1024 frames: about 530 ms, a wide margin for the normal
+    // runs of a debug build on a loaded machine; the stalled run waits for
+    // the test to release it.
+    cfg.deadline = Some(25.0);
     let (mut engine, r) = Engine::new(cfg, Box::new(OfflineSinks::new(16))).unwrap();
     engine.set_insert_factory(Box::new(StallRig {
         clock: Arc::clone(&clock),

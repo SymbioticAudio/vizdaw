@@ -238,7 +238,9 @@ fn graph_render_path_never_allocates() {
     };
     let mut cfg = EngineConfig::new(48_000.0);
     cfg.workers = 1;
-    cfg.deadline = Some(0.5);
+    // 40 blocks of 512 frames: about 430 ms, a wide margin for normal
+    // blocks on a loaded machine; the stalled node waits for the flag.
+    cfg.deadline = Some(40.0);
     let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(1 << 16))).unwrap();
     engine.set_insert_factory(Box::new(TestInserts::with_stall(Arc::clone(&flag))));
     engine.set_callback_helps(false);

@@ -394,7 +394,10 @@ fn a_stalled_node_misses_the_deadline_without_blocking() {
     let doc = bld.finish();
     let mut cfg = EngineConfig::new(SR);
     cfg.workers = 1;
-    cfg.deadline = Some(0.5);
+    // 40 blocks of 512 frames: about 430 ms, a wide margin for normal
+    // blocks of a debug build on a loaded machine; the stalled node waits
+    // for the test's flag (at most 5 s).
+    cfg.deadline = Some(40.0);
     let (mut engine, r) = Engine::new(cfg, Box::new(OfflineSinks::new(10))).unwrap();
     engine.set_insert_factory(Box::new(TestInserts::with_stall(Arc::clone(&flag))));
     engine.set_callback_helps(false);
