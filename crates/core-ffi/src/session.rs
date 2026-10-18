@@ -663,6 +663,40 @@ impl Session {
         inner.snapshot()
     }
 
+    /// Plays `seq` from `start`, else from where this session's position
+    /// is (a position set while another session held the engine), up to
+    /// `until` or the end.
+    fn start_playing(
+        &self,
+        seq: u64,
+        start: Option<Tick>,
+        until: Option<Tick>,
+    ) -> Result<(), VizError> {
+        let mut inner = lock(&self.inner);
+        let id = seq_id(inner.doc(), seq)?;
+        let start = start.or(match (inner.cursor, inner.cursor_seq) {
+            (Some(t), None) => Some(t),
+            (Some(t), Some(s)) if s == id => Some(t),
+            _ => None,
+        });
+        let looped = inner.looped;
+        inner.mark(self.id, true);
+        let played = plugins::with(self.id, |p| {
+            host::play(self.id, inner.doc(), id, start, until, looped, p)
+        })
+        .and_then(|r| r);
+        if let Err(e) = played {
+            // Retried by `idle` (the engine may hold stale plugins).
+            inner.reload_owed = true;
+            return Err(e);
+        }
+        inner.reload_owed = false;
+        inner.reload_fault = None;
+        inner.cursor = None;
+        inner.cursor_seq = Some(id);
+        Ok(())
+    }
+
     /// Runs a transport call; an `Internal` error drops the engine host so
     /// the next Play starts clean.
     fn transport_call<T>(&self, f: impl FnOnce() -> Result<T, VizError>) -> Result<T, VizError> {
@@ -853,32 +887,89 @@ impl Session {
     /// Plays sequence `seq`, stopping any other session. Resumes where
     /// this session stopped when the same sequence is still loaded.
     pub fn play(&self, seq: u64) -> Result<(), VizError> {
+        self.transport_call(|| self.start_playing(seq, None, None))
+    }
+
+    /// Plays sequence `seq` from `from` (plan 4f Ruling 9): on to its end,
+    /// or up to `to`, where it stops (the loop ignored). `Model` error
+    /// unless `from < to` and both are within ±2^40 ticks.
+    pub fn play_from(&self, seq: u64, from: i64, to: Option<i64>) -> Result<(), VizError> {
         self.transport_call(|| {
-            let mut inner = lock(&self.inner);
-            let id = seq_id(inner.doc(), seq)?;
-            // A position set while another session held the engine.
-            let start = match (inner.cursor, inner.cursor_seq) {
-                (Some(t), None) => Some(t),
-                (Some(t), Some(s)) if s == id => Some(t),
-                _ => None,
-            };
-            let looped = inner.looped;
-            inner.mark(self.id, true);
-            let played = plugins::with(self.id, |p| {
-                host::play(self.id, inner.doc(), id, start, looped, p)
-            })
-            .and_then(|r| r);
-            if let Err(e) = played {
-                // Retried by `idle` (the engine may hold stale plugins).
-                inner.reload_owed = true;
-                return Err(e);
+            core_model::rules::check_ticks("from", from)?;
+            if let Some(to) = to {
+                core_model::rules::check_ticks("to", to)?;
+                if to <= from {
+                    return Err(crate::events::bad("the end must be after the start"));
+                }
             }
-            inner.reload_owed = false;
-            inner.reload_fault = None;
-            inner.cursor = None;
-            inner.cursor_seq = Some(id);
-            Ok(())
+            self.start_playing(seq, Some(Tick(from)), to.map(Tick))
         })
+    }
+
+    /// Where Play Selection plays in `seq`: the selection's range, else
+    /// the span of its selected events in `seq` (plan 4f Ruling 9); None
+    /// when nothing of `seq` is selected.
+    pub fn selection_span(
+        &self,
+        seq: u64,
+    ) -> Result<Option<crate::selection::TickRange>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let id = seq_id(inner.doc(), seq)?;
+            let span =
+                core_editor::transport::selection_span(inner.doc(), inner.history.selection(), id);
+            Ok(span.map(|(a, b)| crate::selection::TickRange {
+                start: a.0,
+                end: b.0,
+            }))
+        })
+    }
+
+    /// The nearest marker of `seq` after (`forward`) or before `tick`.
+    pub fn marker_step(&self, seq: u64, tick: i64, forward: bool) -> Result<Option<i64>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let s = inner.doc().sequence(seq_id(inner.doc(), seq)?)?;
+            Ok(core_editor::transport::marker_step(s, Tick(tick), forward).map(|t| t.0))
+        })
+    }
+
+    /// Moves record arm to the next (`forward`) or previous lane of `seq`
+    /// as one undo step "Move Record Arm" (plan 4f Ruling 10). `Model`
+    /// error at the first or last lane.
+    pub fn move_record_arm(&self, seq: u64, forward: bool) -> Result<DocSnapshot, VizError> {
+        let (lanes, m) = ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let s = inner.doc().sequence(seq_id(inner.doc(), seq)?)?;
+            let armed: Vec<bool> = s.lanes.iter().map(|l| l.arm).collect();
+            let ids: Vec<u64> = s.lanes.iter().map(|l| l.id.0).collect();
+            let m = core_editor::transport::arm_move(&armed, forward).ok_or_else(|| {
+                crate::events::bad(if forward {
+                    "there is no lane after the armed one"
+                } else {
+                    "there is no lane before the armed one"
+                })
+            })?;
+            Ok((ids, m))
+        })?;
+        let lane = |i: usize| lanes.get(i).copied().unwrap_or(0);
+        let flags = |i: usize, arm: bool| crate::edit::EditCommand::Lane {
+            edit: crate::edit::LaneEdit::SetFlags {
+                seq,
+                lane: lane(i),
+                mute: None,
+                solo: None,
+                arm: Some(arm),
+            },
+        };
+        let mut cmds: Vec<_> = m
+            .disarm
+            .iter()
+            .filter(|i| **i != m.arm)
+            .map(|i| flags(*i, false))
+            .collect();
+        cmds.push(flags(m.arm, true));
+        self.edit_all("Move Record Arm".into(), cmds, None)
     }
 
     /// Stops; the position is kept.

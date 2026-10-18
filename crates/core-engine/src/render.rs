@@ -353,8 +353,12 @@ pub enum EngineCmd {
     /// Replace the render graph; it adopts the running graph's inserts and,
     /// with the same shape, its node state.
     SetGraph(Box<Graph>),
-    /// Start playing.
-    Play,
+    /// Start playing; `until` (a schedule frame) stops it there instead
+    /// of at the end, ignoring the loop (Play Selection, plan 4f).
+    Play {
+        /// The frame playing stops at.
+        until: Option<u64>,
+    },
     /// Stop (note-offs are sent).
     Stop,
     /// Move to a schedule frame.
@@ -961,6 +965,10 @@ impl Renderer {
                             new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)),
                         )
                     });
+                    self.transport.end = self
+                        .transport
+                        .end
+                        .map(|e| new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)));
                     if let Err(rtrb::PushError::Full(old)) =
                         self.retire.push(Retired::Schedule(old))
                     {
@@ -993,8 +1001,9 @@ impl Renderer {
                 // New inserts need their automated values.
                 self.auto_last.fill(f64::NAN);
             }
-            EngineCmd::Play => {
+            EngineCmd::Play { until } => {
                 let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
+                self.transport.end = until;
                 self.transport.play(length);
                 self.seek();
                 self.forget_unautomated();

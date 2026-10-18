@@ -222,3 +222,42 @@ fn play_pos_and_boundary_follow_the_loop_and_the_end() {
         ]
     );
 }
+
+/// Play Selection (plan 4f Ruling 9): an end before the sequence end
+/// stops there, the loop ignored; the next Play without one goes on.
+#[test]
+fn an_end_stops_playing_there_and_ignores_the_loop() {
+    let mut t = Transport::new(0);
+    t.loop_range = Some((0, 50));
+    t.end = Some(40);
+    t.locate(10);
+    t.play(1000);
+    assert_eq!(t.play_pos(1000), Some(10));
+    assert_eq!(t.boundary(1000), Some(40), "the end, not the loop end");
+    assert_eq!(
+        block(&mut t, 1000, 64),
+        vec![
+            Step::Play {
+                from: 10,
+                to: 40,
+                offset: 0
+            },
+            Step::End { offset: 30 },
+            Step::Idle { len: 34 },
+        ]
+    );
+    assert_eq!(t.state, PlayState::Stopped);
+    assert!(t.take_ended());
+    assert_eq!(t.pos, 40, "it stays at the end");
+    // An end past the sequence end is the sequence end.
+    t.end = Some(5000);
+    t.locate(990);
+    t.play(1000);
+    assert_eq!(t.boundary(1000), Some(1000));
+    // Without an end the loop is back.
+    t.stop();
+    t.end = None;
+    t.locate(45);
+    t.play(1000);
+    assert_eq!(t.boundary(1000), Some(50));
+}

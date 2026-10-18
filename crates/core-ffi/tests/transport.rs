@@ -524,3 +524,57 @@ fn a_device_rebuild_while_stopped_keeps_the_automated_fader() {
         "the rebuilt engine dropped the override: {after:?}"
     );
 }
+
+/// Play Selection (plan 4f Ruling 9): playing from a tick up to another
+/// stops there by itself, the loop on or not; a plain Play then goes on.
+#[test]
+fn play_from_stops_at_the_end_of_its_range() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.set_loop(true).unwrap();
+    s.play_from(song, BAR, Some(BAR + PPQ / 2)).unwrap();
+    assert!(wait_for(&s, |st| st.playing && st.tick >= BAR));
+    assert!(wait_for(&s, |st| !st.playing), "it stops by itself");
+    let st = t(&s);
+    assert!(st.tick >= BAR && st.tick <= BAR + PPQ, "{}", st.tick);
+    s.play(song).unwrap();
+    assert!(
+        wait_for(&s, |st| st.tick > BAR + PPQ),
+        "a plain Play goes on"
+    );
+    s.stop().unwrap();
+    for (from, to) in [
+        (BAR, Some(BAR)),
+        (BAR, Some(0)),
+        (1 << 41, None),
+        (0, Some(1 << 41)),
+    ] {
+        assert!(
+            matches!(
+                s.play_from(song, from, to),
+                Err(vizdaw_ffi::VizError::Model { .. })
+            ),
+            "{from} {to:?}"
+        );
+    }
+    assert!(s.play_from(9_999, 0, None).is_err(), "no such sequence");
+}
+
+/// A device change while a selection plays resumes with its end (plan 4f
+/// Ruling 9): it still stops there, not at the sequence end.
+#[test]
+fn a_device_change_keeps_play_selections_end() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play_from(song, BAR, Some(BAR + 2 * PPQ)).unwrap();
+    assert!(wait_for(&s, |st| st.playing && st.tick >= BAR));
+    let created = hosts_created();
+    simulate_event(BackendEvent::DeviceLost);
+    t(&s);
+    assert_eq!(hosts_created(), created + 1, "rebuilt");
+    // The new engine applies Play on its first block.
+    assert!(wait_for(&s, |st| st.playing), "resumed");
+    assert!(wait_for(&s, |st| !st.playing), "it still stops at its end");
+    let st = t(&s);
+    assert!(st.tick >= BAR && st.tick <= BAR + 3 * PPQ, "{}", st.tick);
+}

@@ -262,6 +262,9 @@ struct Host {
     /// its next audio block, so `engine.state()` can still say Stopped
     /// right after `play`; a rebuild must resume from this too.
     want_play: bool,
+    /// Where the asked Play stops (Play Selection, plan 4f): a rebuild
+    /// resumes with it.
+    until: Option<Tick>,
     device: String,
     sample_rate: f64,
     report: Vec<String>,
@@ -339,6 +342,7 @@ impl Host {
             seq: SeqId(0),
             looped: false,
             want_play: false,
+            until: None,
             device: device.to_string(),
             sample_rate,
             report: Vec::new(),
@@ -539,7 +543,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
         playing,
         drain,
     } = r;
-    let (owner, seq, looped) = (old.owner, old.seq, old.looped);
+    let (owner, seq, looped, until) = (old.owner, old.seq, old.looped, old.until);
     if drain {
         std::thread::sleep(DRAIN);
     }
@@ -556,8 +560,12 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     new.load(doc, seq, looped)?;
     new.engine.locate_tick(at)?;
     if playing {
-        new.engine.play()?;
+        match until {
+            Some(t) => new.engine.play_until(t)?,
+            None => new.engine.play()?,
+        }
         new.want_play = true;
+        new.until = until;
     }
     new.owner = owner;
     new.seq = seq;
@@ -613,12 +621,14 @@ pub struct HostState {
 
 /// Plays `seq` of `doc` for session `owner`. A different owner, sequence
 /// or an explicit `start` reloads (stopping whoever played); otherwise the
-/// engine resumes where it stopped.
+/// engine resumes where it stopped. `until` stops it there (the loop
+/// ignored; plan 4f Ruling 9).
 pub fn play(
     owner: u64,
     doc: &Document,
     seq: SeqId,
     start: Option<Tick>,
+    until: Option<Tick>,
     looped: bool,
     mut plugins: Option<&mut PluginHost>,
 ) -> Result<(), VizError> {
@@ -691,8 +701,12 @@ pub fn play(
         host.load(doc, seq, looped)?;
     }
     host.faults.clear();
-    host.engine.play()?;
+    match until {
+        Some(t) => host.engine.play_until(t)?,
+        None => host.engine.play()?,
+    }
     host.want_play = true;
+    host.until = until;
     Ok(())
 }
 
@@ -702,6 +716,7 @@ pub fn stop(owner: u64) -> Result<(), VizError> {
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             h.want_play = false;
+            h.until = None;
             Ok(h.engine.stop()?)
         }
         _ => Ok(()),

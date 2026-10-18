@@ -59,6 +59,34 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         state.seq = seq
     }
 
+    /// `playFrom` calls: sequence, start and end (plan 4f).
+    var playsFrom: [(seq: UInt64, from: Int64, to: Int64?)] = []
+    func playFrom(seq: UInt64, from: Int64, to: Int64?) throws {
+        if let e = playError { throw e }
+        playsFrom.append((seq, from, to))
+        state.playing = true
+        state.seq = seq
+        state.tick = from
+    }
+
+    /// What `selectionSpan` answers.
+    var span: TickRange?
+    func selectionSpan(seq: UInt64) throws -> TickRange? { span }
+
+    /// Marker ticks `markerStep` steps between.
+    var markerTicks: [Int64] = []
+    func markerStep(seq: UInt64, tick: Int64, forward: Bool) throws -> Int64? {
+        forward ? markerTicks.filter { $0 > tick }.min() : markerTicks.filter { $0 < tick }.max()
+    }
+
+    var armMoves: [(seq: UInt64, forward: Bool)] = []
+    var armError: VizError?
+    func moveRecordArm(seq: UInt64, forward: Bool) throws -> DocSnapshot {
+        if let e = armError { throw e }
+        armMoves.append((seq, forward))
+        return commandResult()
+    }
+
     var undoCalls = 0
     var redoCalls = 0
     func redo() throws -> DocSnapshot {

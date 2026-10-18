@@ -724,7 +724,14 @@ impl Engine {
 
     /// Starts playback (from the start when at or past the end).
     pub fn play(&mut self) -> Result<(), EngineError> {
-        self.push(EngineCmd::Play)
+        self.push(EngineCmd::Play { until: None })
+    }
+
+    /// Starts playback that stops at `tick` of the loaded sequence, the
+    /// loop ignored (Play Selection, plan 4f Ruling 9).
+    pub fn play_until(&mut self, tick: Tick) -> Result<(), EngineError> {
+        let frame = self.tempo.as_ref().map_or(0, |t| t.tick_to_frame(tick));
+        self.push(EngineCmd::Play { until: Some(frame) })
     }
 
     /// Stops playback; sounding notes get note-offs.
