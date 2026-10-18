@@ -53,9 +53,21 @@ temporary support folder and never scans.
   Drag moves, Option-drag copies, dragging onto another lane merges; G
   toggles snap; Escape cancels a drag; a drag in the ruler selects a time
   range, a click there locates.
-- Space and Return are Transport menu shortcuts, so every text entry the
-  editors add (lane name, sequence name, comment, keyboard slot, reference
-  parameters) switches them off while it is open.
+- Keys follow the key bindings (plan 4f): every command, menu item or
+  not, has a stable ID and can be bound in VizDAW > Settings > Keys;
+  menus show the bound keys. Single unmodified keys drive the transport
+  and the modes (Space, S, R, Y, K, Return, comma and period, L, O, I, T,
+  G); P, E and U focus the Position, Edit In and Punch In fields; 0-9 go
+  to locators, Option-digit sets one and Option-Shift-digit clears it.
+  A text field always keeps the keys it types: a letter typed into any
+  field is never a shortcut, and while a text field (rename, comment,
+  keyboard slot, reference parameters, a panel's field) has the keyboard
+  the single-key and Option/Shift transport, locator and mode commands
+  are unavailable. A plain key VizDAW does not use goes to the window,
+  never to the main menu. In a plugin window plain keys go to the plugin
+  (the single-key transport shortcuts do not work while a plugin window
+  is in front; Command keys do). While an input method is composing,
+  keys go to the text.
 - The editor layout (detail pane, editor windows and their frames, the
   sidebar order, block rule, light mode, snap, zoom) is saved in the
   project's `ui.json` when you save; it is not an undo step.
@@ -115,8 +127,10 @@ VizDAW's own windows: VizDAW need not be the active app and the pointer does
 not move. A `ui.click` on an element is refused (`no_element`) when the
 element's frame is non-finite or empty or its centre lies outside the
 window; only mouse events posted by the channel are accepted as first clicks.
-A key that is a menu shortcut runs that menu command on the window's
-document.
+A key runs what the current key bindings give it (plan 4f): its command
+on the window's document (a menu command's too, with `dialog_required`
+for one that would open a dialog), a sequence's keyboard slot, or, typed
+into a text field or unbound, the window's own handling.
 
 Agents implementing or reviewing VizDAW may run checklist steps this way
 against a throwaway home, read state and attach screenshots; computer-use
@@ -815,3 +829,90 @@ step says otherwise.
     `$V run drum.timeline '{"on": true}'` switches the view; in a fresh
     launch, `$V run drum.split_row` before any row was clicked answers
     `unavailable`.
+
+### Keys and step entry (plan 4f)
+
+Use the demo project in a throwaway home (VizDAW > Settings changes
+preferences). Keys are the defaults unless a step changes them.
+
+99. Menus and defaults: the Transport menu lists Play / Stop (Space),
+    Stop (S), Play Selection (Option-Space), Play from Selection
+    (Shift-Space), Play from Edit-In (Y), Record (R) and Scrub (K), both
+    disabled until sub-project 5, Return to Start (Return), Previous and
+    Next Marker (comma, period), Loop (L), Overdub (O), Punch (I), the Go
+    to ... Field items (P, E, U) and Arm Previous/Next Lane
+    (Option-Shift-Up/Down). The Step menu lists Step Entry (T) and the
+    note values 1/1 to 1/32 (1-6), Dotted (.), Triplet (/), Tie (=), Rest
+    (0) and Delete Last Step (Delete, shown as the forward-delete symbol
+    in the menu); Editors > Snap to Grid is G.
+100. Transport keys: S while Song plays stops and goes back to where
+    playback actually began; select a time range in the ruler and press
+    Option-Space: only the range plays, loop on or off; Shift-Space plays
+    on from its start; with markers in Song (list editor: insert two
+    Marker rows), comma and period jump between them. O and I tick
+    Overdub and Punch (they record nothing yet); R and K do nothing
+    (`$V run transport.record` answers `unavailable` with the reason).
+    Open a plugin's window (Plugins) and type letters: they go to the
+    plugin, not to VizDAW's commands (single-key transport shortcuts do
+    not work while a plugin window is in front; Command keys do). A plain
+    key VizDAW does not use never rings through to the main menu.
+101. Fields: P selects the Position field: type `5` and Return: the
+    playhead jumps to bar 5 and the keys work again; `9:3:480` (colons,
+    commas or spaces separate like dots) lands on bar 9 beat 3 and a half.
+    E focuses Edit In: typing `3` selects bar 3 in the ruler; Tab to Edit
+    Out and type `7` and Return: the range runs to bar 7; an Edit Out
+    before Edit In is refused in the status line. U focuses Punch In; Punch Out
+    before Punch In is refused. Escape in a field puts its text back.
+    Typing letters into any text field (a field, the sidebar rename, the
+    list editor's cells) types them and never runs a key; while such a
+    field has the keyboard, the single-key and Option/Shift transport,
+    locator and mode commands are unavailable (a menu item is dimmed).
+    With a Japanese (or other) input method composing in a field, Return
+    confirms the text and does not press the sheet's button.
+102. Locators: at bar 5 press Option-2; Return goes to bar 1; 2 jumps to
+    bar 5; Option-Shift-2 clears it, and 2 then does nothing (`$V run
+    locator.go_2` answers `unavailable`: "Locator 2 is not set."). Locators
+    are saved with the project.
+103. Record arm: Option-Shift-Down arms Song's first lane (the header's
+    arm button lights), again moves the arm to the next lane (one lane
+    armed), Option-Shift-Up moves it back; past the last lane the status
+    line says there is none. Each move is one undo step "Move Record Arm".
+104. Step entry: select Chords' block, stop, put the playhead on bar 2
+    and press T: the transport bar above the arrangement shows "Step Entry
+    · Chords · 1/4". Press 4 (1/8) and play a chord on a MIDI keyboard:
+    when the last key is released, the chord is entered at bar 2 as one
+    undo step "Step Entry", selected, and the playhead moves on an
+    eighth. Press = (tie: the chord grows by an eighth), 0 (a rest: the
+    playhead moves on, nothing is entered), . (dotted: the bar shows "1/8
+    dotted"), then Delete twice (the rest, then the tie taken back; the
+    playhead goes back with them) and once more (the chord goes).
+    Clicking in the ruler moves where the next step goes. Number keys
+    choose values only while step entry is on; T turns it off and 1-9
+    are locators again. Step entry ends with a status line when the
+    shown sequence changes (select another sequence) or its lane is
+    deleted. With no MIDI keyboard, `vizctl run step.notes
+    '{"pitches": "C4 E4 G4"}'` enters a chord.
+105. Reserved number row: Settings > Keys > "Number keys always go to
+    locators": during step entry 1-6 go to locators and the keypad's 1-6
+    choose values.
+106. Keyboard slots: give Groove the slot Option-G (sidebar > Keyboard
+    Slot...). Option-G selects Groove and plays it from its start; during
+    step entry in Song it enters a reference to Groove at the playhead and
+    moves on by Groove's length ("Step Entry"). A slot Cmd-S is refused in
+    the sheet: "⌘S is the key of “Save”."; a slot whose key is a step-entry
+    command's key (for example 4 or Delete) is refused the same way, naming
+    that command. Return and Escape in the keyboard-slot sheet's field
+    still Save and Cancel.
+107. Keys settings: Settings > Keys lists every command by menu with its
+    keys (step entry's marked). Record on Stop, press X: X stops; record
+    Space for Stop: "Space is the key of “Play / Stop”. Replace it?" -
+    Replace moves it, Cancel keeps both as they were. Reset puts a
+    command's keys back; Save... writes a `.vizkeys` file; Reset All, then
+    Load... brings the saved keys back; a damaged file is refused with its
+    reason and changes nothing. Menus show the new keys at once.
+108. Channel: `$V key t`, `$V key 4`, `$V run step.notes '{"pitches":
+    "60 64"}'`, `$V state editor` shows `"step": {"value": "eighth", ...}`
+    and the transport's locators; `$V run keys.load '{"path":
+    "/tmp/x.vizkeys"}'` loads a bindings file and `$V key` follows it;
+    `$V state editor` reads the snap division snake_case
+    (`thirty_second`).
