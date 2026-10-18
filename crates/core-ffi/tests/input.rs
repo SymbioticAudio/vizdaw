@@ -1,30 +1,31 @@
 //! MIDI note input (plan 4c, Plan Ruling 11): note-ons queue with MIDI 2.0
-//! velocities; note-offs and other messages do not.
+//! velocities, note-offs (plan 4f) without; other messages do not.
 
 use vizdaw_ffi::input::{CAPACITY, upscale_velocity};
 use vizdaw_ffi::{NoteInRow, NoteInput};
 
 #[test]
-fn note_ons_queue_in_order_and_nothing_else_does() {
+fn notes_queue_in_order_and_nothing_else_does() {
     let n = NoteInput::new();
     n.inject(vec![0x90, 60, 127]).unwrap();
-    n.inject(vec![0x80, 60, 0]).unwrap();
+    n.inject(vec![0x80, 60, 40]).unwrap();
     n.inject(vec![0x91, 62, 0]).unwrap();
     n.inject(vec![0xB0, 7, 100]).unwrap();
     n.inject(vec![0x9F, 64, 1]).unwrap();
+    n.inject(vec![0x90, 60]).unwrap();
+    let note = |pitch, velocity, channel, on| NoteInRow {
+        pitch,
+        velocity,
+        channel,
+        on,
+    };
     assert_eq!(
         n.take().unwrap(),
         vec![
-            NoteInRow {
-                pitch: 60,
-                velocity: 0xFFFF,
-                channel: 0
-            },
-            NoteInRow {
-                pitch: 64,
-                velocity: 1 << 9,
-                channel: 15
-            },
+            note(60, 0xFFFF, 0, true),
+            note(60, 0, 0, false),
+            note(62, 0, 1, false),
+            note(64, 1 << 9, 15, true),
         ]
     );
     assert!(n.take().unwrap().is_empty());

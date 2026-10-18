@@ -87,6 +87,29 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
+    /// `stepEntry` calls (plan 4f) and how they are answered: by
+    /// `stepAnswer`, else a step's quarter note forward for notes, rests,
+    /// ties and references (with a new snapshot for notes and references).
+    var stepCalls: [(seq: UInt64, lane: UInt64, state: StepStateRow, input: StepInputRow)] = []
+    var stepEntryError: VizError?
+    var stepAnswer: ((StepStateRow, StepInputRow) -> StepResultRow)?
+    func stepEntry(seq: UInt64, lane: UInt64, state: StepStateRow, input: StepInputRow) throws -> StepResultRow {
+        if let e = stepEntryError { throw e }
+        stepCalls.append((seq, lane, state, input))
+        if let a = stepAnswer { return a(state, input) }
+        var s = state
+        switch input {
+        case .notes, .reference:
+            s.tick += 15_360
+            return StepResultRow(state: s, snapshot: commandResult(), moved: true)
+        case .rest, .tie:
+            s.tick += 15_360
+            return StepResultRow(state: s, snapshot: nil, moved: true)
+        default:
+            return StepResultRow(state: s, snapshot: nil, moved: false)
+        }
+    }
+
     var undoCalls = 0
     var redoCalls = 0
     func redo() throws -> DocSnapshot {

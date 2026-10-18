@@ -1,5 +1,6 @@
 //! MIDI note input (plan 4c, Plan Ruling 11): notes played on any MIDI
-//! source, for the list editor's "play a note to enter it". Recording
+//! source, for the list editor's "play a note to enter it" and step entry
+//! (plan 4f, which also needs the note-offs to tell a chord). Recording
 //! proper is sub-project 5.
 
 use crate::error::VizError;
@@ -7,18 +8,21 @@ use crate::guard::{ffi_guard, lock};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-/// A note-on played on a MIDI source.
+/// A note-on or note-off played on a MIDI source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct NoteInRow {
     /// Note number 0–127.
     pub pitch: u8,
-    /// 16-bit velocity (MIDI 2.0 upscale of the 7-bit one).
+    /// 16-bit velocity (MIDI 2.0 upscale of the 7-bit one); 0 for an off.
     pub velocity: u16,
     /// MIDI channel 0–15.
     pub channel: u8,
+    /// A note-on (false: a note-off, plan 4f).
+    #[uniffi(default = true)]
+    pub on: bool,
 }
 
-/// How many note-ons are kept until taken (the newest win).
+/// How many notes are kept until taken (the newest win).
 pub const CAPACITY: usize = 256;
 
 type Queue = Arc<Mutex<VecDeque<NoteInRow>>>;
@@ -34,20 +38,28 @@ pub fn upscale_velocity(v: u8) -> u16 {
     shifted | (rep << 3) | (rep >> 3)
 }
 
-/// The note-on in a MIDI 1.0 message (velocity 0 is a note-off).
-pub fn note_on(bytes: &[u8]) -> Option<NoteInRow> {
+/// The note-on or note-off in a MIDI 1.0 message (a note-on with velocity
+/// 0 is a note-off).
+pub fn note_event(bytes: &[u8]) -> Option<NoteInRow> {
     match bytes {
         [s, p, v] if s & 0xF0 == 0x90 && *v > 0 => Some(NoteInRow {
             pitch: p & 0x7F,
             velocity: upscale_velocity(*v),
             channel: s & 0x0F,
+            on: true,
+        }),
+        [s, p, _] if s & 0xF0 == 0x80 || s & 0xF0 == 0x90 => Some(NoteInRow {
+            pitch: p & 0x7F,
+            velocity: 0,
+            channel: s & 0x0F,
+            on: false,
         }),
         _ => None,
     }
 }
 
 fn push(q: &Queue, bytes: &[u8]) {
-    if let Some(n) = note_on(bytes) {
+    if let Some(n) = note_event(bytes) {
         let mut q = lock(q);
         if q.len() >= CAPACITY {
             q.pop_front();
@@ -117,7 +129,7 @@ impl NoteInput {
         })
     }
 
-    /// The note-ons since the last call, oldest first.
+    /// The notes played since the last call, oldest first.
     pub fn take(&self) -> Result<Vec<NoteInRow>, VizError> {
         ffi_guard(|| Ok(lock(&self.queue).drain(..).collect()))
     }

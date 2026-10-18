@@ -142,3 +142,110 @@ fn record_arm_moves_between_lanes_as_one_undo_step() {
     s.move_record_arm(song, true).unwrap();
     assert_eq!(&lanes(&s)[..3], &[false, false, true]);
 }
+
+fn cmd() -> vizdaw_ffi::ModifiersRow {
+    vizdaw_ffi::ModifiersRow {
+        command: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_keymap_lists_every_command_with_its_keys() {
+    let k = vizdaw_ffi::Keymap::new();
+    let rows = k.rows();
+    assert_eq!(rows.len(), core_control::registry::COMMANDS.len());
+    let save = rows.iter().find(|r| r.id == "file.save").unwrap();
+    assert_eq!(save.keys, vec!["⌘S"]);
+    assert_eq!(save.defaults, save.keys);
+    assert_eq!(save.menu_key.as_deref(), Some("s"));
+    assert_eq!(save.menu_modifiers, cmd());
+    assert!(save.menu_item && !save.step_entry);
+    let close = rows
+        .iter()
+        .find(|r| r.id == "editors.close_detail")
+        .unwrap();
+    assert!(close.keys.is_empty() && close.menu_key.is_none());
+    assert_eq!(
+        k.lookup(49, Default::default(), false, false).as_deref(),
+        Some("transport.play_stop"),
+        "Space"
+    );
+    assert_eq!(k.lookup(1, cmd(), true, true).as_deref(), Some("file.save"));
+    assert_eq!(k.lookup(0xFFFF, cmd(), false, false), None, "no such key");
+    assert_eq!(k.slot_clash("s".into(), 8).as_deref(), Some("file.save"));
+    assert_eq!(k.slot_clash("q".into(), 2), None);
+    assert_eq!(
+        k.slot_clash("nope".into(), 0),
+        None,
+        "not a key: never pressed"
+    );
+}
+
+#[test]
+fn bindings_change_save_load_and_reset() {
+    let k = vizdaw_ffi::Keymap::new();
+    k.bind("file.save".into(), vec!["⌘K".into()], false)
+        .unwrap();
+    let e = k
+        .bind("edit.undo".into(), vec!["⌘K".into()], false)
+        .unwrap_err();
+    assert_eq!(
+        e,
+        VizError::Model {
+            message: "⌘K is the key of “Save”".into()
+        }
+    );
+    assert!(matches!(
+        k.bind("file.save".into(), vec!["⌘⌘".into()], false),
+        Err(VizError::Model { .. })
+    ));
+    assert_eq!(
+        k.lookup(40, cmd(), false, false).as_deref(),
+        Some("file.save")
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("mine.vizkeys")
+        .to_string_lossy()
+        .into_owned();
+    k.save_file(path.clone()).unwrap();
+    k.reset();
+    assert_eq!(k.lookup(40, cmd(), false, false), None);
+    assert!(k.load_file(path).unwrap().is_empty());
+    assert_eq!(
+        k.lookup(40, cmd(), false, false).as_deref(),
+        Some("file.save")
+    );
+    k.reset_one("file.save".into());
+    assert_eq!(
+        k.lookup(1, cmd(), false, false).as_deref(),
+        Some("file.save")
+    );
+    // Damaged and hostile files: refused whole, the bindings unchanged.
+    let before = k.to_json();
+    let big = dir.path().join("big.vizkeys");
+    std::fs::write(&big, vec![b' '; 300 * 1024]).unwrap();
+    assert!(matches!(
+        k.load_file(big.to_string_lossy().into_owned()),
+        Err(VizError::Model { .. })
+    ));
+    assert!(matches!(
+        k.load_file(dir.path().join("none").to_string_lossy().into_owned()),
+        Err(VizError::Io { .. })
+    ));
+    assert!(matches!(
+        k.load_json("garbage".into()),
+        Err(VizError::Model { .. })
+    ));
+    assert!(matches!(
+        k.save_file("/nonexistent/dir/k.vizkeys".into()),
+        Err(VizError::Io { .. })
+    ));
+    assert_eq!(k.to_json(), before);
+    let skipped = k
+        .load_json(r#"{"vizdaw_keys": 1, "bindings": {"no.such": ["F1"]}}"#.into())
+        .unwrap();
+    assert_eq!(skipped, vec!["no command \"no.such\"".to_string()]);
+}

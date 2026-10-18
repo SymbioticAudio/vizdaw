@@ -2057,6 +2057,165 @@ impl Session {
     }
 }
 
+/// Step entry (plan 4f Rulings 11–15).
+#[uniffi::export]
+impl Session {
+    /// One step entry `input` on lane `lane` of `seq`, from `state` (the
+    /// app's copy). A step that enters notes or a reference, or ties, is
+    /// one undo step "Step Entry"; taking one back is "Delete Last Step".
+    /// Entered events become the selection. A refused edit leaves the
+    /// document and `state` as they were and is the error. `Model` error
+    /// while an edit is open, or for an unknown sequence or lane.
+    pub fn step_entry(
+        &self,
+        seq: u64,
+        lane: u64,
+        state: crate::step::StepStateRow,
+        input: crate::step::StepInputRow,
+    ) -> Result<crate::step::StepResultRow, VizError> {
+        use core_editor::step::{Effect, commit, press};
+        use core_model::command::EventCmd;
+        use core_model::event::{EventBody, EventSpec};
+        ffi_guard(|| {
+            let (seq_id, lane_id, next, effect, live) = {
+                let inner = lock(&self.inner);
+                if inner.edit_label.is_some() {
+                    return Err(crate::events::bad("finish the open edit first"));
+                }
+                let doc = inner.doc();
+                let seq_id = seq_id(doc, seq)?;
+                let lane_id = LaneId(lane);
+                doc.lane(seq_id, lane_id)?;
+                let input = crate::step::input(&input, |r| {
+                    core_model::query::seq_length(doc, r).unwrap_or(Tick::ZERO)
+                });
+                let (next, effect) = press(&crate::step::state(&state), input);
+                // A tie or a step taken back acts only on its events still
+                // in this lane (the state is the app's copy; it may be old).
+                let live = |ids: &[core_model::ids::EventId]| -> Vec<core_model::ids::EventId> {
+                    ids.iter()
+                        .copied()
+                        .filter(|e| {
+                            doc.locate(*e)
+                                .is_ok_and(|l| l.seq == seq_id && l.lane == lane_id)
+                        })
+                        .collect()
+                };
+                let live = match &effect {
+                    Effect::Extend { notes, .. } => live(notes),
+                    Effect::TakeBack {
+                        delete, shorten, ..
+                    } => [live(delete), live(shorten)].concat(),
+                    _ => Vec::new(),
+                };
+                (seq_id, lane_id, next, effect, live)
+            };
+            let cmds: Vec<Command> = match &effect {
+                Effect::Nothing | Effect::Rest { .. } => Vec::new(),
+                Effect::Insert {
+                    tick,
+                    length,
+                    notes,
+                } => vec![Command::Event(EventCmd::Insert {
+                    seq: seq_id,
+                    lane: lane_id,
+                    events: notes
+                        .iter()
+                        .map(|(p, v)| EventSpec::new(*tick, EventBody::note(*p, *v, *length)))
+                        .collect(),
+                })],
+                Effect::InsertReference { tick, seq: r, .. } => {
+                    vec![Command::Event(EventCmd::Insert {
+                        seq: seq_id,
+                        lane: lane_id,
+                        events: vec![EventSpec::new(*tick, EventBody::reference(*r))],
+                    })]
+                }
+                Effect::Extend { by, .. } if !live.is_empty() => {
+                    vec![Command::Event(EventCmd::Resize {
+                        events: live.clone(),
+                        delta: *by,
+                    })]
+                }
+                Effect::Extend { .. } => Vec::new(),
+                Effect::TakeBack {
+                    delete,
+                    shorten,
+                    by,
+                    ..
+                } => {
+                    let mut c = Vec::new();
+                    let gone: Vec<_> = delete
+                        .iter()
+                        .filter(|e| live.contains(e))
+                        .copied()
+                        .collect();
+                    if !gone.is_empty() {
+                        c.push(Command::Event(EventCmd::Delete { events: gone }));
+                    }
+                    let short: Vec<_> = shorten
+                        .iter()
+                        .filter(|e| live.contains(e))
+                        .copied()
+                        .collect();
+                    if !short.is_empty() {
+                        c.push(Command::Event(EventCmd::Resize {
+                            events: short,
+                            delta: -*by,
+                        }));
+                    }
+                    c
+                }
+            };
+            let moved = effect != Effect::Nothing;
+            if cmds.is_empty() {
+                return Ok(crate::step::StepResultRow {
+                    state: crate::step::state_row(&commit(&next, &effect, &[])),
+                    snapshot: None,
+                    moved,
+                });
+            }
+            let label = match effect {
+                Effect::TakeBack { .. } => "Delete Last Step",
+                _ => "Step Entry",
+            };
+            let mut inner = lock(&self.inner);
+            inner.history.begin(label.to_string())?;
+            let mut created = Vec::new();
+            for c in &cmds {
+                match inner.history.execute(c, &ViewFilter::default()) {
+                    Ok(r) => created.extend(r.created.iter().filter_map(|a| match a {
+                        core_model::ids::AnyId::Event(e) => Some(*e),
+                        _ => None,
+                    })),
+                    Err(e) => {
+                        inner.history.abort()?;
+                        return Err(e.into());
+                    }
+                }
+            }
+            inner.history.commit()?;
+            if !created.is_empty() {
+                inner
+                    .history
+                    .set_selection(core_model::selection::Selection {
+                        time_range: None,
+                        lanes: std::iter::once((seq_id, lane_id)).collect(),
+                        events: created.iter().copied().collect(),
+                    });
+            }
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            Ok(crate::step::StepResultRow {
+                state: crate::step::state_row(&commit(&next, &effect, &created)),
+                snapshot: Some(inner.snapshot()?),
+                moved,
+            })
+        })
+    }
+}
+
 /// The selection (spec §3.3), sequence templates and the editor layout.
 #[uniffi::export]
 impl Session {

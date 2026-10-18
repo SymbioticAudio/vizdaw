@@ -146,6 +146,16 @@ private func listModel(_ target: EditorTarget = .lane(seq: 3, lane: 31)) throws
             return
         }
         #expect(row.pitch == 62 && row.velocity == 0xC924)
+        // A note-off (plan 4f) is not a note to enter.
+        let n = f.edits.count
+        l.receive([NoteInRow(pitch: 64, velocity: 0, channel: 0, on: false)])
+        #expect(f.edits.count == n)
+        l.receive([d4Loud, NoteInRow(pitch: 62, velocity: 0, channel: 0, on: false)])
+        guard case .event(.replace(1, let again))? = f.edits.last else {
+            Issue.record("no replace")
+            return
+        }
+        #expect(again.velocity == 0xC924, "the note-on counts, not the off after it")
     }
 
     @Test func openingAReferenceOpensItsSequence() throws {

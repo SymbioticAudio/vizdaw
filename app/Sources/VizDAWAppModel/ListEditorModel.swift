@@ -283,9 +283,10 @@ public final class ListEditorModel {
         return true
     }
 
-    /// Notes played on a MIDI source (Plan 4c Ruling 12).
+    /// Notes played on a MIDI source (Plan 4c Ruling 12); the last
+    /// note-on counts (note-offs are step entry's, plan 4f).
     public func receive(_ notes: [NoteInRow]) {
-        guard listens, let n = notes.last else { return }
+        guard listens, let n = notes.last(where: \.on) else { return }
         if let cell = editing {
             guard let r = row(cell.row) else { return }
             if cell.column == .data1, r.kind == .note || r.kind == .polyPressure {

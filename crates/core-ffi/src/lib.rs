@@ -28,6 +28,7 @@ pub mod events;
 pub mod guard;
 pub mod host;
 pub mod input;
+pub mod keys;
 pub mod mixer;
 pub mod modify;
 pub mod plugins;
@@ -36,6 +37,7 @@ pub mod revs;
 pub mod selection;
 pub mod session;
 pub mod snapshot;
+pub mod step;
 pub mod strip;
 pub mod templates;
 
@@ -70,6 +72,7 @@ pub use events::{
 };
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
+pub use keys::{BindingRow, Keymap};
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
 };
@@ -84,6 +87,10 @@ pub use session::{OpenOptions, Session};
 pub use snapshot::{
     DocSnapshot, IdleUpdate, KeySlotRow, LaneRow, ParamRow, ParamValue, PluginFormatTag,
     PluginRefRow, SeqRow, SlotRow, SlotStatus, TransportState,
+};
+pub use step::{
+    NoteValueRow, StepInputRow, StepKindRow, StepNoteRow, StepRecordRow, StepResultRow,
+    StepStateRow, step_length, step_parse_pitches, step_state_new,
 };
 pub use strip::{
     LineOpRow, LinePointRow, LineRow, LineShapeRow, LineTargetRow, PeriodRow, SeriesRow,
