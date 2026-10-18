@@ -298,20 +298,100 @@ fn the_drum_menu_commands_are_registered() {
 }
 
 #[test]
+fn every_transport_key_has_a_command() {
+    use core_control::bindings::{Chord, Keymap};
+    let k = Keymap::default();
+    let key = |t: &str| k.lookup(Chord::parse(t).unwrap(), false, false);
+    for (text, id) in [
+        ("Space", "transport.play_stop"),
+        ("S", "transport.stop"),
+        ("⌥Space", "transport.play_selection"),
+        ("⇧Space", "transport.play_from_selection"),
+        ("Y", "transport.play_from_edit_in"),
+        ("R", "transport.record"),
+        ("K", "transport.scrub"),
+        ("Return", "transport.return_to_start"),
+        (",", "transport.previous_marker"),
+        (".", "transport.next_marker"),
+        ("L", "transport.loop"),
+        ("O", "transport.overdub"),
+        ("I", "transport.punch"),
+        ("G", "editors.snap"),
+        ("⌥⇧↑", "transport.arm_previous"),
+        ("⌥⇧↓", "transport.arm_next"),
+        ("1", "locator.go_1"),
+        ("0", "locator.go_0"),
+        ("⌥7", "locator.set_7"),
+        ("⌥⇧9", "locator.clear_9"),
+    ] {
+        assert_eq!(key(text), Some(id), "{text}");
+    }
+    let locators: Vec<&str> = COMMANDS
+        .iter()
+        .filter(|c| c.menu == "Locators")
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(locators.len(), 30);
+    assert!(
+        COMMANDS
+            .iter()
+            .filter(|c| ["Locators", "Record", "Key Bindings"].contains(&c.menu))
+            .all(|c| !c.menu_item),
+        "no menu items: keys, the Keys settings and the channel"
+    );
+    let keys: Vec<&str> = COMMANDS
+        .iter()
+        .filter(|c| c.id.starts_with("keys."))
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(keys, vec!["keys.save", "keys.load", "keys.reset"]);
+    assert!(
+        COMMANDS
+            .iter()
+            .filter(|c| c.id.starts_with("keys."))
+            .all(|c| !c.document)
+    );
+    let e = err("command.run", json!({"id": "keys.save"}));
+    assert_eq!(e.0, ErrorCode::DialogRequired);
+    assert_eq!(
+        err(
+            "command.run",
+            json!({"id": "keys.load", "params": {"path": "/tmp/k.json"}})
+        )
+        .0,
+        ErrorCode::InvalidParams,
+        "a .vizkeys file"
+    );
+    assert_eq!(
+        ok(
+            "command.run",
+            json!({"id": "transport.punch", "params": {"on": true}})
+        ),
+        Command::CommandRun {
+            id: "transport.punch".into(),
+            args: vec![("on".into(), ArgValue::Flag(true))],
+            window: None,
+        }
+    );
+}
+
+#[test]
 fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     let ids: std::collections::BTreeSet<_> = COMMANDS.iter().map(|c| c.id).collect();
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        44,
-        "38 before plan 4e, plus the Drum menu's six"
+        92,
+        "44 before plan 4f, plus 48 transport, locator, record and key-binding commands"
     );
     for c in COMMANDS {
+        // snake_case words (a locator's number too), a dot after the group.
         assert!(
             c.id.contains('.')
-                && c.id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b == b'.' || b == b'_'),
+                && c.id.bytes().all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || b == b'.'
+                    || b == b'_'),
             "{}",
             c.id
         );

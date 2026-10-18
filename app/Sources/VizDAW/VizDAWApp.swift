@@ -15,6 +15,10 @@ import VizDAWCore
 /// Editing preferences: the nudge steps (Plan 4b Ruling 16).
 @MainActor let editingPreferences = EditingPreferences(defaults: MemoryDefaults.appStore())
 
+/// The key bindings (plan 4f): menus show them, keys and the channel run
+/// by them.
+@MainActor let keyBindings = KeyBindings(defaults: MemoryDefaults.appStore())
+
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
 @MainActor let noteInputHub = NoteInputHub(input: NoteInput())

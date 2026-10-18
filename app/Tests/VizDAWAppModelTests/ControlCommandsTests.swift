@@ -7,6 +7,7 @@ import VizDAWCore
 final class FakeControlHost: ControlHost {
     var calls: [String] = []
     var nudge = NudgeSettings()
+    let keys = KeyBindings(defaults: MemoryDefaults())
     func showMixer(_ doc: UUID) { calls.append("mixer") }
     func showPluginManager() { calls.append("plugins") }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { calls.append("tear \(kind.rawValue)") }

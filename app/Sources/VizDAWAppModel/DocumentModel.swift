@@ -21,6 +21,8 @@ public final class DocumentModel {
     /// this, not `transport`.
     public private(set) var playKey = PlayKey(playing: false, seq: nil, stoppedTick: 0)
     public private(set) var looping = false
+    /// Where playing last started, for Stop (plan 4f Ruling 8).
+    public private(set) var playStart: Int64?
     /// The sequence whose name is being edited in the sidebar.
     public private(set) var renamingSeq: UInt64?
     /// The edited name (view state lives here: the Command Line Tools
@@ -341,12 +343,42 @@ public final class DocumentModel {
         do {
             if isPlaying {
                 try session.stop()
-            } else if let seq = selectedSeq {
-                try session.play(seq: seq)
+            } else if selectedSeq != nil {
+                try startPlaying()
             }
         } catch {
             alert = AlertItem(error, title: isPlaying ? "Stop Failed" : "Play Failed")
         }
+        poll()
+    }
+
+    /// Plays the shown sequence from `from` (nil: where the transport
+    /// is), up to `to` where it stops (plan 4f Ruling 9), and remembers
+    /// where it started.
+    public func startPlaying(from: Int64? = nil, to: Int64? = nil) throws {
+        guard let seq = selectedSeq else { throw VizError.Model(message: "Select a sequence to play.") }
+        let start = from ?? transport.tick
+        if let from {
+            try session.playFrom(seq: seq, from: from, to: to)
+        } else {
+            try session.play(seq: seq)
+        }
+        playStart = start
+        poll()
+    }
+
+    /// Stops and goes back to where playing started (the Stop key, plan
+    /// 4f Ruling 8).
+    public func stopAndReturn() throws {
+        try session.stop()
+        try session.locate(tick: playStart ?? 0)
+        poll()
+    }
+
+    /// Moves the transport to `tick`, throwing (keys report a refusal in
+    /// the status line instead of an alert).
+    public func moveTo(_ tick: Int64) throws {
+        try session.locate(tick: tick)
         poll()
     }
 

@@ -59,6 +59,8 @@ public protocol ControlHost: AnyObject {
     func tearOff(_ doc: UUID, kind: DetailEditorKind)
     func closeDocument(_ doc: UUID)
     var nudge: NudgeSettings { get }
+    /// The app's key bindings (plan 4f).
+    var keys: KeyBindings { get }
 }
 
 /// Runs registered menu commands (control spec §6) on a document model
@@ -87,11 +89,13 @@ public enum ControlCommands {
         "window.plugin_manager", "editors.close_detail", "editors.insert_event", "modify.again",
         "modify.template", "modify.exact_mode", "sequence.make_reference", "sequence.back",
         "transport.play_stop", "transport.loop", "transport.return_to_start",
+        "keys.save", "keys.load", "keys.reset",
     ]
 
     /// Every registry ID `run` handles (a test checks it is all of them).
     public static var handled: Set<String> {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
+            .union(TransportCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -110,6 +114,19 @@ public enum ControlCommands {
             return ControlOpen.open(path: path, answers: ControlOpen.answers(args), store: store, command: id)
         case "window.plugin_manager":
             host.showPluginManager()
+            return .done(ran(id, nil))
+        case "keys.save", "keys.load":
+            guard let path = args.text("path") else {
+                return .failed(.dialog(id == "keys.save" ? "Save" : "Open", "path"))
+            }
+            do {
+                if id == "keys.save" { try host.keys.save(to: path) } else { try host.keys.load(from: path) }
+            } catch {
+                return .failed(.thrown(error, id == "keys.save" ? "Save Key Bindings Failed" : "Load Key Bindings Failed"))
+            }
+            return .done(ran(id, nil))
+        case "keys.reset":
+            host.keys.resetAll()
             return .done(ran(id, nil))
         default: break
         }
@@ -204,8 +221,8 @@ public enum ControlCommands {
             do {
                 if playing {
                     try m.session.stop()
-                } else if let seq = m.selectedSeq {
-                    try m.session.play(seq: seq)
+                } else {
+                    try m.startPlaying()
                 }
             } catch {
                 return .failed(.thrown(error, playing ? "Stop Failed" : "Play Failed"))
@@ -217,11 +234,9 @@ public enum ControlCommands {
             guard m.returnKeyEnabled else { return unavailable("A text field or list has the keyboard.") }
             m.returnToStart()
         case _ where DrumCommands.ids.contains(id):
-            switch DrumCommands.run(id, on: args.flag("on"), m) {
-            case .done: break
-            case .unavailable(let why): return unavailable(why)
-            case .refused(let why): return .failed(.of(.failed, why))
-            }
+            if let f = failure(DrumCommands.run(id, on: args.flag("on"), m)) { return f }
+        case _ where TransportCommands.ids.contains(id):
+            if let f = failure(TransportCommands.run(id, on: args.flag("on"), m)) { return f }
         default:
             return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }
@@ -234,6 +249,15 @@ public enum ControlCommands {
     }
 
     static func unavailable(_ message: String) -> ControlOutcome { .failed(.of(.unavailable, message)) }
+
+    /// A command's outcome as the channel's failure; nil when it ran.
+    static func failure(_ o: KeyOutcome) -> ControlOutcome? {
+        switch o {
+        case .done: nil
+        case .unavailable(let why): unavailable(why)
+        case .refused(let why): .failed(.of(.failed, why))
+        }
+    }
 
     static func ran(_ id: String, _ doc: UUID?, _ m: DocumentModel? = nil) -> ControlResult {
         .ran(

@@ -233,12 +233,20 @@ public final class EditorModel {
     /// `status`; returns whether it applied. Refused while a gesture is open.
     @discardableResult
     public func edit(_ cmd: EditCommand, filter: ViewFilterRow? = nil) -> Bool {
+        change { try session.edit(cmd: cmd, filter: filter) }
+    }
+
+    /// Applies a session call that edits and returns the document, as
+    /// `edit` does: refused while a drag is open; a failure goes to the
+    /// status line.
+    @discardableResult
+    public func change(_ body: () throws -> DocSnapshot) -> Bool {
         guard gesture == nil else {
             status = Self.gestureOpenMessage
             return false
         }
         do {
-            applySnapshot(try session.edit(cmd: cmd, filter: filter))
+            applySnapshot(try body())
             refreshSelection()
             return true
         } catch {

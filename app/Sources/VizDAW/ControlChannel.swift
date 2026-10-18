@@ -432,4 +432,5 @@ final class AppControlHost: ControlHost {
     }
 
     var nudge: NudgeSettings { editingPreferences.nudge }
+    var keys: KeyBindings { keyBindings }
 }

@@ -176,6 +176,26 @@ const SAVE_PATH: &[ParamSpec] = &[ParamSpec {
     help: "Where to save (answers the Save dialog).",
 }];
 
+const KEYS_PATH: &[ParamSpec] = &[ParamSpec {
+    name: "path",
+    kind: ParamKind::Path("vizkeys"),
+    required: false,
+    help: "The key bindings file (answers the dialog).",
+}];
+
+/// `c` without a menu item: keys, the Keys settings and the channel only.
+const fn key_only(c: CommandSpec) -> CommandSpec {
+    CommandSpec {
+        menu_item: false,
+        ..c
+    }
+}
+
+/// A numbered locator's command (plan 4f Ruling 7).
+const fn locator(id: &'static str, title: &'static str, key: &'static str) -> CommandSpec {
+    key_only(cmd(id, "Locators", title, Some(key), true))
+}
+
 const ON: &[ParamSpec] = &[ParamSpec {
     name: "on",
     kind: ParamKind::Flag,
@@ -322,6 +342,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌥↓"),
         true,
     ),
+    CommandSpec {
+        params: ON,
+        ..cmd("editors.snap", "Editors", "Snap to Grid", Some("G"), true)
+    },
     cmd(
         "modify.select_by_rule",
         "Modify",
@@ -407,10 +431,30 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("Space"),
         true,
     ),
-    CommandSpec {
-        params: ON,
-        ..cmd("transport.loop", "Transport", "Loop", None, true)
-    },
+    cmd("transport.stop", "Transport", "Stop", Some("S"), true),
+    cmd(
+        "transport.play_selection",
+        "Transport",
+        "Play Selection",
+        Some("⌥Space"),
+        true,
+    ),
+    cmd(
+        "transport.play_from_selection",
+        "Transport",
+        "Play from Selection",
+        Some("⇧Space"),
+        true,
+    ),
+    cmd(
+        "transport.play_from_edit_in",
+        "Transport",
+        "Play from Edit-In",
+        Some("Y"),
+        true,
+    ),
+    cmd("transport.record", "Transport", "Record", Some("R"), true),
+    cmd("transport.scrub", "Transport", "Scrub", Some("K"), true),
     cmd(
         "transport.return_to_start",
         "Transport",
@@ -418,6 +462,129 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("Return"),
         true,
     ),
+    cmd(
+        "transport.previous_marker",
+        "Transport",
+        "Previous Marker",
+        Some(","),
+        true,
+    ),
+    cmd(
+        "transport.next_marker",
+        "Transport",
+        "Next Marker",
+        Some("."),
+        true,
+    ),
+    CommandSpec {
+        params: ON,
+        ..cmd("transport.loop", "Transport", "Loop", Some("L"), true)
+    },
+    CommandSpec {
+        params: ON,
+        ..cmd("transport.overdub", "Transport", "Overdub", Some("O"), true)
+    },
+    CommandSpec {
+        params: ON,
+        ..cmd("transport.punch", "Transport", "Punch", Some("I"), true)
+    },
+    cmd(
+        "transport.arm_previous",
+        "Transport",
+        "Arm Previous Lane",
+        Some("⌥⇧↑"),
+        true,
+    ),
+    cmd(
+        "transport.arm_next",
+        "Transport",
+        "Arm Next Lane",
+        Some("⌥⇧↓"),
+        true,
+    ),
+    key_only(cmd(
+        "record.keep_pass",
+        "Record",
+        "Keep Loop Pass",
+        None,
+        true,
+    )),
+    key_only(cmd(
+        "record.discard_pass",
+        "Record",
+        "Discard Since Last Keep",
+        None,
+        true,
+    )),
+    locator("locator.go_0", "Go to Locator 0", "0"),
+    locator("locator.go_1", "Go to Locator 1", "1"),
+    locator("locator.go_2", "Go to Locator 2", "2"),
+    locator("locator.go_3", "Go to Locator 3", "3"),
+    locator("locator.go_4", "Go to Locator 4", "4"),
+    locator("locator.go_5", "Go to Locator 5", "5"),
+    locator("locator.go_6", "Go to Locator 6", "6"),
+    locator("locator.go_7", "Go to Locator 7", "7"),
+    locator("locator.go_8", "Go to Locator 8", "8"),
+    locator("locator.go_9", "Go to Locator 9", "9"),
+    locator("locator.set_0", "Set Locator 0", "⌥0"),
+    locator("locator.set_1", "Set Locator 1", "⌥1"),
+    locator("locator.set_2", "Set Locator 2", "⌥2"),
+    locator("locator.set_3", "Set Locator 3", "⌥3"),
+    locator("locator.set_4", "Set Locator 4", "⌥4"),
+    locator("locator.set_5", "Set Locator 5", "⌥5"),
+    locator("locator.set_6", "Set Locator 6", "⌥6"),
+    locator("locator.set_7", "Set Locator 7", "⌥7"),
+    locator("locator.set_8", "Set Locator 8", "⌥8"),
+    locator("locator.set_9", "Set Locator 9", "⌥9"),
+    locator("locator.clear_0", "Clear Locator 0", "⌥⇧0"),
+    locator("locator.clear_1", "Clear Locator 1", "⌥⇧1"),
+    locator("locator.clear_2", "Clear Locator 2", "⌥⇧2"),
+    locator("locator.clear_3", "Clear Locator 3", "⌥⇧3"),
+    locator("locator.clear_4", "Clear Locator 4", "⌥⇧4"),
+    locator("locator.clear_5", "Clear Locator 5", "⌥⇧5"),
+    locator("locator.clear_6", "Clear Locator 6", "⌥⇧6"),
+    locator("locator.clear_7", "Clear Locator 7", "⌥⇧7"),
+    locator("locator.clear_8", "Clear Locator 8", "⌥⇧8"),
+    locator("locator.clear_9", "Clear Locator 9", "⌥⇧9"),
+    CommandSpec {
+        params: KEYS_PATH,
+        dialogs: &[DialogSpec {
+            name: "Save",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..key_only(cmd(
+            "keys.save",
+            "Key Bindings",
+            "Save Key Bindings…",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        params: KEYS_PATH,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..key_only(cmd(
+            "keys.load",
+            "Key Bindings",
+            "Load Key Bindings…",
+            None,
+            false,
+        ))
+    },
+    key_only(cmd(
+        "keys.reset",
+        "Key Bindings",
+        "Reset Key Bindings",
+        None,
+        false,
+    )),
 ];
 
 /// The command with `id`.
