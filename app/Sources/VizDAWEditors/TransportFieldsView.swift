@@ -59,10 +59,14 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate {
         }
     }
 
-    /// Every field not being typed in shows its position.
+    /// Every field without the keyboard shows its position. All five
+    /// sources are read, so the observation tracks them whichever field
+    /// is being edited.
     func refresh() {
-        for (f, field) in fields where f != editing {
-            field.stringValue = document.fieldText(f)
+        let texts = TransportField.allCases.map { ($0, document.fieldText($0)) }
+        for (f, text) in texts {
+            guard let field = fields[f], f != editing, field.currentEditor() == nil else { continue }
+            field.stringValue = text
         }
     }
 

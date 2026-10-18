@@ -92,6 +92,44 @@ private let beat: Int64 = 15_360
         #expect(!v.control(pos, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:))))
     }
 
+    @Test func aFocusedFieldKeepsItsTextAndPositionFollowsAfterAnEdit() async throws {
+        let (f, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        w.contentView = v
+        let pos = try #require(v.fields[.position])
+        #expect(v.focus(.position))
+        f.state.tick = 2 * bar
+        m.poll()
+        v.refresh()
+        #expect(pos.stringValue == "1.1.0", "focused but untyped: not overwritten")
+        // Revert, then playing moves Position again (the tracking survives).
+        #expect(v.control(pos, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        for t in [3 * bar, 4 * bar] {
+            f.state.tick = t
+            m.poll()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(pos.stringValue == "5.1.0")
+        w.makeFirstResponder(nil)
+        // Commit, then the same.
+        #expect(v.focus(.position))
+        v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+        pos.stringValue = "2"
+        v.controlTextDidEndEditing(
+            Notification(
+                name: NSControl.textDidEndEditingNotification, object: pos,
+                userInfo: ["NSTextMovement": NSTextMovement.return.rawValue]))
+        v.giveKeyboardBack(.position)
+        for t in [6 * bar, 7 * bar] {
+            f.state.tick = t
+            m.poll()
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(pos.stringValue == "8.1.0")
+    }
+
     @Test func fieldKeysFocusTheirField() throws {
         let host = FakeControlHost()
         let f = demoFake()
