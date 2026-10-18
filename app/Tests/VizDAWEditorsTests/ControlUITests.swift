@@ -132,6 +132,31 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         #expect(!c.acceptsFirstMouse(for: nil))
     }
 
+    @Test func aPostedEventRenumberedByAppKitIsStillTheChannels() throws {
+        let (w, c, _) = window()
+        let channel = ControlUI.clickEvents(w, at: CGPoint(x: 5, y: 5), button: .left, count: 1, modifiers: none)
+        ControlUI.remember(channel)
+        // What AppKit dispatches after `postEvent`: same timestamp, a small number.
+        let dispatched = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: NSPoint(x: 5, y: 5), modifierFlags: [],
+                timestamp: channel[0].timestamp, windowNumber: w.windowNumber, context: nil, eventNumber: 1,
+                clickCount: 1, pressure: 1))
+        #expect(ControlUI.isChannel(dispatched))
+        #expect(c.acceptsFirstMouse(for: dispatched))
+        let user = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: NSPoint(x: 5, y: 5), modifierFlags: [],
+                timestamp: channel[0].timestamp + 0.5, windowNumber: w.windowNumber, context: nil, eventNumber: 2,
+                clickCount: 1, pressure: 1))
+        #expect(!ControlUI.isChannel(user), "a user's click at another time is not")
+        // Only the newest are kept.
+        for _ in 0..<(ControlUI.postedLimit / 2 + 1) {
+            ControlUI.remember(ControlUI.clickEvents(w, at: .zero, button: .left, count: 1, modifiers: none))
+        }
+        #expect(!ControlUI.isChannel(dispatched))
+    }
+
     @Test func aClickPointNeedsAVisibleFiniteElement() throws {
         let (w, _, _) = window()
         #expect(ControlUI.point(.point(x: .nan, y: 3), in: w) == nil)

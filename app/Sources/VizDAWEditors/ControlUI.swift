@@ -140,13 +140,28 @@ public enum ControlUI {
     /// small counters. That is how the editors tell them apart.
     static let channelEventBase = 1 << 30
     private static var eventNumber = channelEventBase
+    /// Timestamps of the mouse events the channel posted, newest last (at
+    /// most `postedLimit`). `NSApp.postEvent` renumbers an event, so the
+    /// event AppKit dispatches no longer has the channel's number; its
+    /// timestamp survives (plan 4e Task 9: without this, a click on a
+    /// canvas of a background VizDAW was spent on activating the window).
+    private static var posted: [TimeInterval] = []
+    static let postedLimit = 256
 
-    /// Whether `event` was built by the channel.
+    /// Notes `events` as the channel's (`post` does; tests call it).
+    static func remember(_ events: [NSEvent]) {
+        posted += events.map(\.timestamp)
+        if posted.count > postedLimit { posted.removeFirst(posted.count - postedLimit) }
+    }
+
+    /// Whether `event` was built by the channel: its number (an event
+    /// handed over directly), or its timestamp (one that went through the
+    /// queue).
     public static func isChannel(_ event: NSEvent?) -> Bool {
         guard let e = event else { return false }
         switch e.type {
         case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp:
-            return e.eventNumber >= channelEventBase
+            return e.eventNumber >= channelEventBase || posted.contains { abs($0 - e.timestamp) < 1e-6 }
         default: return false
         }
     }
@@ -210,6 +225,7 @@ public enum ControlUI {
     /// Orders `window` to the front (without stealing focus from the
     /// active app) and queues `events` behind anything already queued.
     public static func post(_ events: [NSEvent], to window: NSWindow) {
+        remember(events)
         window.orderFront(nil)
         for e in events { NSApp.postEvent(e, atStart: false) }
     }
