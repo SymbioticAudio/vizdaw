@@ -167,6 +167,10 @@ struct ConditionRowView: View {
                     KindsMenu(model: model, index: index, kinds: kinds)
                 case .dest(let dest):
                     DestPicker(destinations: model.destinations, selection: dest) { model.setConditionDest($0, at: index) }
+                case .automation(let target):
+                    AutomationTargetPicker(model: model, selection: AutoTarget(target)) {
+                        model.setConditionTarget($0, at: index)
+                    }
                 default:
                     ForEach(Array(c.test.fields.enumerated()), id: \.offset) { j, f in
                         TextField(
@@ -199,6 +203,7 @@ struct KindsMenu: View {
     let kinds: [EventKindRow]
     static let all: [EventKindRow] = [
         .note, .cc, .pitchBend, .channelPressure, .polyPressure, .program, .sysEx, .text, .reference, .audioRegion,
+        .automation,
     ]
 
     var body: some View {
@@ -370,6 +375,8 @@ struct ModifyHalfView: View {
             default:
                 EmptyView()
             }
+        case let .line(target, lineOp, line):
+            LineModifyEditor(model: model, target: target, op: lineOp, line: line)
         case .setDest(let dest):
             DestPicker(destinations: model.destinations, selection: dest) { model.setModifyDest($0) }
         case .substitute(let to):

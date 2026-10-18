@@ -44,6 +44,8 @@ public final class PianoRollView: EditorCanvas {
         /// The notes erased so far and the last pointer position.
         case erase([UInt64], last: CGPoint)
         case band(from: CGPoint, adding: Bool)
+        /// A ⌘-drag of a note's end (Plan 4d Ruling 23).
+        case scale(ScaleTimeDrag, startTick: Int64)
     }
 
     private var drag: Drag?
@@ -308,6 +310,14 @@ public final class PianoRollView: EditorCanvas {
                 zone: n.zone, pressed: n.row, lane: n.lane, events: ids, lowest: pitches.min() ?? n.row.pitch,
                 highest: pitches.max() ?? n.row.pitch, copy: modifiers.contains(.option))
             let touched = Set(lanes.filter { l in l.notes.contains { idSet.contains($0.id) } }.map(\.lane))
+            // ⌘ on the end zone scales the dragged notes' time.
+            if modifiers.contains(.command), n.zone == .end,
+                let sd = ScaleTimeDrag(notes: lanes.flatMap(\.notes).filter { idSet.contains($0.id) })
+            {
+                guard openGesture(ScaleTimeDrag.label, lanes: touched, origin: .notes) else { return }
+                drag = .scale(sd, startTick: axis.tick(atX: from.x))
+                return
+            }
             guard openGesture(d.label, lanes: touched, origin: .notes) else { return }
             drag = .notes(d, startTick: axis.tick(atX: from.x), startY: from.y)
         case (.pencil, .empty(let tick, let pitch)):
@@ -348,6 +358,8 @@ public final class PianoRollView: EditorCanvas {
             return Pencil.command(lane: lane, tick: start, pitch: pitch, length: length)
         case let .erase(erased, last):
             return Eraser.command(Eraser.adding(crossed(from: last, to: p), to: erased))
+        case let .scale(sd, startTick):
+            return sd.command(rawTicks: axis.tick(atX: p.x) - startTick, snap: snap, meter: meter)
         case .band:
             return nil
         }
@@ -361,7 +373,7 @@ public final class PianoRollView: EditorCanvas {
             model.sound(
                 nd.soundingPitch(dy: p.y - startY, rowHeight: pitchAxis.rowHeight), velocity: nd.pressed.velocity,
                 dest: model.dest(of: nd.pressed, in: nd.lane))
-        case .pencil:
+        case .pencil, .scale:
             editor.updateGesture(target(d, at: p))
         case let .erase(erased, last):
             let next = Eraser.adding(crossed(from: last, to: p), to: erased)

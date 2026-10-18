@@ -54,6 +54,13 @@ public enum ExactMode {
     public static func request(for cmd: EditCommand, lanes: Set<LaneKey>, origin: GestureOrigin) -> ModifyRequest? {
         let sorted = lanes.sorted { ($0.seq, $0.lane) < ($1.seq, $1.lane) }
         if origin == .stripChart { return lineRequest(cmd, lanes: sorted) }
+        // The piano roll's scale-time drag acts on the selection (Plan 4d
+        // Ruling 23).
+        if origin == .notes, case let .selectAndModify(nil, _, .scaleTime(num, den, anchor)?, _) = cmd {
+            var c = SelectModifyConfig.preset(.change)
+            c.modify.op = .scaleTime(num: num, den: den, anchor: anchor)
+            return ModifyRequest(task: .change, config: c, events: nil, lanes: sorted, range: nil)
+        }
         guard origin == .notes || origin == .blocks, case .event(let e) = cmd else { return nil }
         func make(
             _ task: PanelTask, _ events: [UInt64], _ op: ModifyRow, copy: Bool, dropped: DroppedAxis? = nil

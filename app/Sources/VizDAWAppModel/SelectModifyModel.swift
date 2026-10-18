@@ -431,4 +431,106 @@ public final class SelectModifyModel {
         invalid.remove("offsets")
         config.modify.op = .quantize(grid: g, strength: st, offsets: o)
     }
+
+    // MARK: Strip Chart lines and automation targets (Plan 4d Ruling 24)
+
+    @ObservationIgnored private var targetsCache: (version: UInt64, names: StripNames, menus: [StripMenu])?
+
+    private func targets() -> (names: StripNames, menus: [StripMenu]) {
+        guard let editor else { return (StripNames(), []) }
+        if let c = targetsCache, c.version == editor.snapshotVersion { return (c.names, c.menus) }
+        // Busy throws: keep what we had (or nothing) and retry on the next read.
+        guard let t = try? AutomationTargets.load(editor.session) else {
+            return targetsCache.map { ($0.names, $0.menus) } ?? (StripNames(), [])
+        }
+        targetsCache = (editor.snapshotVersion, t.names, t.menus)
+        return t
+    }
+
+    /// Target names for the pickers.
+    public var automationNames: StripNames { targets().names }
+    /// The automation targets, grouped as the Strip Chart's row menu groups them.
+    public var automationMenus: [StripMenu] { targets().menus }
+
+    public func setConditionTarget(_ t: AutoTarget, at i: Int) {
+        guard config.select.conditions.indices.contains(i) else { return }
+        config.select.conditions[i].test = .automation(target: t.row)
+    }
+
+    public func setLineTarget(_ lane: StripLane) {
+        guard case let .line(_, op, l) = config.modify.op else { return }
+        let keep = op != .legato || lane == .duration
+        config.modify.op = .line(target: lane.lineTarget, op: keep ? op : .set, line: l)
+        drafts = [:]
+        invalid = []
+    }
+
+    public func setLineOp(_ op: LineOpRow) {
+        guard case let .line(t, _, l) = config.modify.op else { return }
+        let lengths = t == .value(target: .duration)
+        config.modify.op = .line(target: t, op: op == .legato && !lengths ? .set : op, line: l)
+        drafts = [:]
+        invalid = []
+    }
+
+    /// A new shape with its defaults; Free becomes a two-point line from
+    /// Start to End (a drawn line keeps its points).
+    public func setLineShape(_ k: ShapeKind) {
+        guard case let .line(t, op, l) = config.modify.op else { return }
+        var line = l
+        switch k {
+        case .free:
+            if case .free = l.shape { return }
+            line.shape = .free(points: [
+                LinePointRow(tick: l.from, value: l.start), LinePointRow(tick: l.to, value: l.end),
+            ])
+        default:
+            var s = StripChartSettings()
+            s.shape = k
+            line.shape = s.shapeRow(seed: nextSeed())
+        }
+        config.modify.op = .line(target: t, op: op, line: line)
+        drafts = [:]
+        invalid = []
+    }
+
+    public func setLineCurve(_ c: CurveRow) {
+        guard case .line(let t, let op, var l) = config.modify.op, case .curved = l.shape else { return }
+        l.shape = .curved(curve: c)
+        config.modify.op = .line(target: t, op: op, line: l)
+    }
+
+    public func setLineWave(_ w: WaveRow) {
+        guard case .line(let t, let op, var l) = config.modify.op, case let .oscillator(_, p, ph) = l.shape else {
+            return
+        }
+        l.shape = .oscillator(wave: w, period: p, phase: ph)
+        config.modify.op = .line(target: t, op: op, line: l)
+    }
+
+    public func setLinePeriodKind(_ k: PeriodKind) {
+        guard case .line(let t, let op, var l) = config.modify.op, case let .oscillator(w, _, ph) = l.shape else {
+            return
+        }
+        var s = StripChartSettings()
+        s.period = k
+        l.shape = .oscillator(wave: w, period: s.periodRow, phase: ph)
+        config.modify.op = .line(target: t, op: op, line: l)
+        drafts = [:]
+        invalid = []
+    }
+}
+
+extension ShapeKind {
+    /// The kind of a line's shape (the panel's picker).
+    public init(_ s: LineShapeRow) {
+        switch s {
+        case .straight: self = .straight
+        case .curved: self = .curved
+        case .flat: self = .flat
+        case .free: self = .free
+        case .random: self = .random
+        case .oscillator: self = .oscillator
+        }
+    }
 }
