@@ -89,4 +89,30 @@ final class FilledView: NSView {
         #expect(pixel(png.data, 20, 10) == "r", "what the view draws now")
         #expect(pixel(png.data, 20, 38) == "b", "the right way up")
     }
+
+    @Test func aSelfDrawnViewInAScrollViewStaysInsideIt() throws {
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        root.wantsLayer = true
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 60, width: 40, height: 40))  // top-left
+        let doc = FilledView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        doc.wantsLayer = true
+        scroll.documentView = doc
+        root.addSubview(scroll)
+        doc.layer?.display()
+        let png = try #require(WindowSnapshot.png(of: root, scale: 1))
+        #expect(pixel(png.data, 20, 20) == "g", "inside the scroll view")
+        #expect(pixel(png.data, 70, 20) != "g", "right of it")
+        #expect(pixel(png.data, 20, 70) != "g", "below it")
+        #expect(pixel(png.data, 70, 70) != "g")
+    }
+
+    @Test func badScalesReturnNil() {
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 20))
+        v.wantsLayer = true
+        for s in [CGFloat.nan, .infinity, -.infinity, 0, -1, 1e9, 1e300] {
+            #expect(WindowSnapshot.png(of: v, scale: s) == nil, "scale \(s)")
+        }
+        let big = NSView(frame: NSRect(x: 0, y: 0, width: 10_000, height: 10_000))
+        #expect(WindowSnapshot.png(of: big, scale: 1) == nil, "over 64M pixels")
+    }
 }

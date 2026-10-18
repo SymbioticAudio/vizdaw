@@ -25,11 +25,15 @@ public enum WindowSnapshot {
 
     /// `view` as PNG data at `scale` pixels per point, with its size in pixels.
     public static func png(of view: NSView, scale: CGFloat) -> (data: Data, width: Int, height: Int)? {
+        guard scale.isFinite, scale > 0 else { return nil }
         view.layoutSubtreeIfNeeded()
         let size = view.bounds.size
-        let w = max(1, Int((size.width * scale).rounded()))
-        let h = max(1, Int((size.height * scale).rounded()))
-        guard w <= 16_384, h <= 16_384, let space = CGColorSpace(name: CGColorSpace.sRGB),
+        let dw = max(1, (Double(size.width) * Double(scale)).rounded())
+        let dh = max(1, (Double(size.height) * Double(scale)).rounded())
+        // Checked in Double, before any Int conversion can trap.
+        guard dw.isFinite, dh.isFinite, dw <= 16_384, dh <= 16_384, dw * dh <= 64_000_000 else { return nil }
+        let (w, h) = (Int(dw), Int(dh))
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
             let ctx = CGContext(
                 data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
@@ -86,11 +90,16 @@ public enum WindowSnapshot {
 
     /// Draws `s` where it is in `root` (bottom-left based context).
     static func redraw(_ s: NSView, root: NSView, ctx: CGContext) {
-        let r = s.convert(s.bounds, to: root)
-        let rect = root.isFlipped ? CGRect(x: r.minX, y: root.bounds.height - r.maxY, width: r.width, height: r.height) : r
+        // Only what ancestors (scroll views) let show.
+        let visible = s.visibleRect
+        guard !visible.isEmpty else { return }
+        func inContext(_ r: CGRect) -> CGRect {
+            root.isFlipped ? CGRect(x: r.minX, y: root.bounds.height - r.maxY, width: r.width, height: r.height) : r
+        }
+        let rect = inContext(s.convert(s.bounds, to: root))
         ctx.saveGState()
         defer { ctx.restoreGState() }
-        ctx.clip(to: rect)
+        ctx.clip(to: inContext(s.convert(visible, to: root)))
         ctx.translateBy(x: rect.minX, y: rect.minY)
         if s.isFlipped {
             ctx.translateBy(x: 0, y: rect.height)
@@ -99,7 +108,7 @@ public enum WindowSnapshot {
         ctx.translateBy(x: -s.bounds.minX, y: -s.bounds.minY)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: s.isFlipped)
-        s.draw(s.bounds)
+        s.draw(visible)
         NSGraphicsContext.restoreGraphicsState()
         // Its own Core Animation sublayers (not its subviews') on top.
         guard let layer = s.layer else { return }
