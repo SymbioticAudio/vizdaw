@@ -19,6 +19,7 @@ uniffi::setup_scaffolding!();
 pub mod blocks;
 pub mod catalog;
 pub mod clock;
+pub mod control;
 pub mod edit;
 pub mod editor;
 pub mod error;
@@ -41,6 +42,14 @@ pub use blocks::{BlockKind, BlockRow, BlockRule};
 pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
     ScanProgress,
+};
+pub use control::{
+    AlertRow, ControlArg, ControlCall, ControlErrorCode, ControlFailure, ControlRequest,
+    ControlResult, ControlServer, ControlValue, CrashAnswerRow, DetailRow, DocFactsRow,
+    EditorStateRow, ElementRefRow, KeyStrokeRow, ModifiersRow, MouseButtonRow, PointerRow,
+    RecoveryAnswersRow, StateTargetRow, TornRow, UiNodeRow, WaitConditionRow, WaitFactsRow,
+    WindowKindRow, WindowRefRow, WindowRow, control_command_ids, control_element_check,
+    control_host_busy, control_wait_met,
 };
 pub use edit::{
     AudioEdit, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneRef, QuantizeRow, ReferenceEdit,
