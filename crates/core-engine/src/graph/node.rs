@@ -35,6 +35,13 @@ pub trait EffectNode: Send {
     /// Clears internal state (delay memory, envelopes). // RT
     fn reset(&mut self);
 
+    /// Automation's value for parameter `param`, normalised 0–1, at `frame`
+    /// of the next block; plugin processors map it to the parameter's range
+    /// (Plan 4d Ruling 12). // RT
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) {
+        let _ = (frame, param, normalized);
+    }
+
     /// [`EffectNode::process`] with the block's transport facts; plugin
     /// processors override this. // RT
     fn process_block(

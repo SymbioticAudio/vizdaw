@@ -711,10 +711,10 @@ impl Graph {
         self.max_frames = max_frames;
     }
 
-    /// Writes master's output (silence when it is muted) into channels 0–1
-    /// of `out`, which the caller zeroed. Call only after a completed run.
-    /// // RT
-    pub(crate) fn write_master(&self, out: &mut [&mut [f32]], frames: u32) {
+    /// Writes master's output (silence when it is muted) into frames
+    /// `offset..offset + frames` of channels 0–1 of `out`, which the caller
+    /// zeroed. Call only after a completed run. // RT
+    pub(crate) fn write_master(&self, out: &mut [&mut [f32]], offset: usize, frames: u32) {
         let audible = matches!(
             self.defs.get(self.master),
             Some(NodeDef::Strip { audible: true, .. })
@@ -733,7 +733,7 @@ impl Graph {
         let st = unsafe { &*cell.get() };
         let n = frames as usize;
         for (ch, src) in out.iter_mut().zip([&st.post.left, &st.post.right]) {
-            if let (Some(d), Some(s)) = (ch.get_mut(..n), src.get(..n)) {
+            if let (Some(d), Some(s)) = (ch.get_mut(offset..offset + n), src.get(..n)) {
                 d.copy_from_slice(s);
             }
         }
@@ -1242,7 +1242,7 @@ impl Runner {
             deadline,
         ) {
             RunResult::Done => {
-                self.graph.write_master(&mut [left, right], frames);
+                self.graph.write_master(&mut [left, right], 0, frames);
                 true
             }
             RunResult::Missed => false,

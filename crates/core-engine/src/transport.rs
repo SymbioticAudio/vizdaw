@@ -129,6 +129,34 @@ impl Transport {
         }
     }
 
+    /// The schedule frame the next played frame comes from (after a loop
+    /// wrap that is due), or `None` unless playing before the end. // RT
+    pub fn play_pos(&self, length: u64) -> Option<u64> {
+        if self.state != PlayState::Playing {
+            return None;
+        }
+        let lp = self.active_loop();
+        let pos = match lp {
+            Some((s, e)) if self.pos == e => s,
+            _ => self.pos,
+        };
+        let end = match lp {
+            Some((_, e)) if pos < e => e,
+            _ => length,
+        };
+        (pos < end).then_some(pos)
+    }
+
+    /// Where playing from [`Transport::play_pos`] stops or wraps: the loop
+    /// end or the sequence end. // RT
+    pub fn boundary(&self, length: u64) -> Option<u64> {
+        let pos = self.play_pos(length)?;
+        Some(match self.active_loop() {
+            Some((_, e)) if pos < e => e,
+            _ => length,
+        })
+    }
+
     /// True once, after the tail finished. // RT
     pub fn take_ended(&mut self) -> bool {
         std::mem::take(&mut self.ended)

@@ -149,6 +149,13 @@ pub trait InstrumentNode: Send {
         None
     }
 
+    /// Automation's value for parameter `param`, normalised 0–1, at `frame`
+    /// of the next render; plugin instruments map it to the parameter's
+    /// range (Plan 4d Ruling 12). // RT
+    fn automate(&mut self, frame: u32, param: core_model::mixer::ParamId, normalized: f64) {
+        let _ = (frame, param, normalized);
+    }
+
     /// Output latency in frames, read on the control thread when the sink
     /// is created (the DLS synth: 0).
     fn latency(&self) -> u32 {
