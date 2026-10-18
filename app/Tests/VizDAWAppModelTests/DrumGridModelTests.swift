@@ -202,6 +202,54 @@ func drumFake() -> FakeSession {
         #expect(m.editor.status == "gone")
     }
 
+    @Test func aFailedExtendOnMouseUpAbortsTheGesture() throws {
+        let (f, m, g) = try make()
+        defer { withExtendedLifetime(m) {} }
+        g.strokeBegan(lane: 0, row: 1, at: 0, snapped: 0, grab: 1, velocity: nil, erase: false)
+        g.strokeMoved(at: q, grab: 1, velocity: nil)
+        g.extendStroke = { _, _, _, _, _, _ in throw VizError.Model(message: "bad") }
+        g.strokeEnded(at: q, grab: 1, velocity: nil)
+        #expect(f.calls.last == "abort")
+        #expect(g.stroke == nil && m.editor.gesture == nil)
+    }
+
+    @Test func aBusyReadThenAFreshOneDoesNotTrap() throws {
+        let (f, m, g) = try make()
+        defer { withExtendedLifetime(m) {} }
+        let two = g.lanes
+        #expect(two.count == 2)
+        nextSnapshot(f) { _ in }
+        m.editor.edit(.drum(edit: .markLane(seq: 3, lane: 30, drum: true)))
+        var reads = 0
+        f.drumReadHook = {
+            reads += 1
+            if reads == 1 { throw VizError.Busy(message: "busy") }
+            return [two[0]]
+        }
+        // The first read is Busy (the two old lanes); every later one has one lane.
+        g.select(lane: 1, row: 0)
+        #expect(g.selectedRow == DrumRowKey(lane: 41, row: 3))
+        // Fresh data has no lane 1 any more: refused, not a trap.
+        g.strokeBegan(lane: 1, row: 0, at: 0, snapped: 0, grab: 1, velocity: nil, erase: false)
+        #expect(g.stroke == nil)
+        #expect(!g.drop(lane: 1, row: 0, atY: 0))
+        #expect(g.selected == nil)
+    }
+
+    @Test func aFailureForgetsTheRowsReadBeforeIt() throws {
+        let (f, m, g) = try make()
+        defer { withExtendedLifetime(m) {} }
+        #expect(g.lanes.count == 2)
+        f.readError = .Model(message: "gone")
+        nextSnapshot(f) { _ in }
+        m.editor.edit(.drum(edit: .markLane(seq: 3, lane: 30, drum: true)))
+        #expect(g.lanes.isEmpty)
+        f.readError = .Busy(message: "busy")
+        nextSnapshot(f) { _ in }
+        m.editor.edit(.drum(edit: .markLane(seq: 3, lane: 30, drum: false)))
+        #expect(g.lanes.isEmpty, "Busy after a failure must not bring the old rows back")
+    }
+
     @Test func settingsDecodeTolerantly() throws {
         let json = #"{"drumGrid":{"view":"timeline","step":-5,"velocity":200,"rowHeight":1e9,"spacing":"x"}}"#
         let l = EditorLayout.decode(json)

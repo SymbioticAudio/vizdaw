@@ -303,8 +303,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     /// Drum lanes by sequence (plan 4e); a sequence not listed has none.
     var drumTable: [UInt64: [DrumLaneRow]] = [:]
     var drumLanesCalls = 0
+    /// When set, answers `drumLanes` instead of the table.
+    var drumReadHook: (() throws -> [DrumLaneRow])?
     func drumLanes(seq: UInt64) throws -> [DrumLaneRow] {
         drumLanesCalls += 1
+        if let h = drumReadHook { return try h() }
         if let e = readError { throw e }
         return drumTable[seq] ?? []
     }

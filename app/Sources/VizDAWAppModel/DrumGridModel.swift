@@ -35,6 +35,11 @@ public final class DrumGridModel {
     /// its live edits are measured from).
     @ObservationIgnored private var strokeTarget: (seq: UInt64, lane: UInt64, row: UInt64, hits: [DrumHitRow])?
     @ObservationIgnored private var strokeOpen = false
+    /// Rust's stroke extension; replaceable so tests can make it fail.
+    @ObservationIgnored var extendStroke:
+        (DrumStrokeRow, [DrumHitRow], Int64, Int64, UInt8?, DrumGridSettingsRow) throws -> DrumStrokeRow = {
+            try drumStrokeExtend(stroke: $0, hits: $1, at: $2, grab: $3, velocity: $4, settings: $5)
+        }
     @ObservationIgnored private var lanesCache: (seq: UInt64, version: UInt64, lanes: [DrumLaneRow])?
     @ObservationIgnored private var lanesFailure: (seq: UInt64, version: UInt64)?
     @ObservationIgnored private var layoutCache: (shapes: [[Bool]], settings: DrumGridSettingsRow, layout: DrumGridLayoutRow)?
@@ -93,6 +98,8 @@ public final class DrumGridModel {
             return lanesCache?.seq == seq ? lanesCache?.lanes ?? [] : []
         } catch {
             lanesFailure = (seq, v)
+            // A later Busy read must not bring back rows from before the failure.
+            lanesCache = nil
             let message = (error as? VizError)?.message ?? error.localizedDescription
             // Not while a view draws: on the next main-actor turn.
             Task { @MainActor [weak editor] in editor?.status = message }
@@ -122,30 +129,37 @@ public final class DrumGridModel {
     }
 
     public func row(_ lane: Int, _ row: Int) -> DrumRowRow? {
-        guard lanes.indices.contains(lane), lanes[lane].rows.indices.contains(row) else { return nil }
-        return lanes[lane].rows[row]
+        let ls = lanes
+        guard ls.indices.contains(lane), ls[lane].rows.indices.contains(row) else { return nil }
+        return ls[lane].rows[row]
     }
 
     /// Lane and row indexes of `key`.
     public func indexes(_ key: DrumRowKey) -> (lane: Int, row: Int)? {
-        guard let l = lanes.firstIndex(where: { $0.lane == key.lane }),
-            let r = lanes[l].rows.firstIndex(where: { $0.id == key.row })
+        let ls = lanes
+        guard let l = ls.firstIndex(where: { $0.lane == key.lane }),
+            let r = ls[l].rows.firstIndex(where: { $0.id == key.row })
         else { return nil }
         return (l, r)
     }
 
     /// The selected row while it still exists.
     public var selected: (lane: DrumLaneRow, row: DrumRowRow)? {
-        guard let key = selectedRow, let i = indexes(key) else { return nil }
-        return (lanes[i.lane], lanes[i.lane].rows[i.row])
+        guard let key = selectedRow else { return nil }
+        let ls = lanes
+        guard let l = ls.first(where: { $0.lane == key.lane }),
+            let r = l.rows.first(where: { $0.id == key.row })
+        else { return nil }
+        return (l, r)
     }
 
     /// The lane the lane controls act on: the selected row's, else the first.
     public var currentLane: DrumLaneRow? { selected?.lane ?? lanes.first }
 
     public func select(lane: Int, row: Int) {
-        guard let r = self.row(lane, row) else { return }
-        selectedRow = DrumRowKey(lane: lanes[lane].lane, row: r.id)
+        let ls = lanes
+        guard ls.indices.contains(lane), ls[lane].rows.indices.contains(row) else { return }
+        selectedRow = DrumRowKey(lane: ls[lane].lane, row: ls[lane].rows[row].id)
     }
 
     // MARK: Strokes (Plan 4e Rulings 5–7)
@@ -158,8 +172,10 @@ public final class DrumGridModel {
     ) {
         // A stroke whose mouse-up was lost must not hold its gesture open.
         if stroke != nil { strokeCancelled() }
-        guard let seq, let r = self.row(lane, row) else { return }
-        let laneID = lanes[lane].lane
+        let ls = lanes
+        guard let seq, ls.indices.contains(lane), ls[lane].rows.indices.contains(row) else { return }
+        let r = ls[lane].rows[row]
+        let laneID = ls[lane].lane
         selectedRow = DrumRowKey(lane: laneID, row: r.id)
         guard
             let s = try? drumStrokeBegin(
@@ -186,7 +202,11 @@ public final class DrumGridModel {
 
     /// The pointer went up: a click toggles one hit, a drag ends its run.
     public func strokeEnded(at: Int64, grab: Int64, velocity: UInt8?) {
-        guard let s = extended(at: at, grab: grab, velocity: velocity) else { return }
+        guard let s = extended(at: at, grab: grab, velocity: velocity) else {
+            // The extend failed: no gesture may stay open.
+            strokeCancelled()
+            return
+        }
         stroke = nil
         let final = command(s)
         if !strokeOpen {
@@ -209,8 +229,7 @@ public final class DrumGridModel {
 
     private func extended(at: Int64, grab: Int64, velocity: UInt8?) -> DrumStrokeRow? {
         guard let s = stroke, let t = strokeTarget else { return nil }
-        return try? drumStrokeExtend(
-            stroke: s, hits: t.hits, at: at, grab: grab, velocity: velocity, settings: settings.row)
+        return try? extendStroke(s, t.hits, at, grab, velocity, settings.row)
     }
 
     func command(_ s: DrumStrokeRow) -> EditCommand? {
@@ -291,7 +310,8 @@ public final class DrumGridModel {
     @discardableResult
     public func rename(_ key: DrumRowKey, to name: String) -> Bool {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let seq, let i = indexes(key), !name.isEmpty, name != lanes[i.lane].rows[i.row].name else { return false }
+        let current = lanes.first { $0.lane == key.lane }?.rows.first { $0.id == key.row }
+        guard let seq, let current, !name.isEmpty, name != current.name else { return false }
         return drum(.renameRow(seq: seq, lane: key.lane, row: key.row, name: name))
     }
 
@@ -300,9 +320,10 @@ public final class DrumGridModel {
     /// lane or split into a new lane (Rust decides which).
     @discardableResult
     public func drop(lane: Int, row: Int, atY y: Double) -> Bool {
-        guard let seq, let r = self.row(lane, row),
+        let ls = lanes
+        guard let seq, ls.indices.contains(lane), ls[lane].rows.indices.contains(row),
             let cmd = (try? drumRowDrop(
-                layout: layout, lanes: lanes.map(\.lane), seq: seq, laneIndex: UInt32(lane), row: r.id,
+                layout: layout, lanes: ls.map(\.lane), seq: seq, laneIndex: UInt32(lane), row: ls[lane].rows[row].id,
                 rowIndex: UInt32(row), y: y)) ?? nil
         else { return false }
         return editor.edit(cmd)
