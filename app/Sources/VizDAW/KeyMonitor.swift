@@ -20,15 +20,13 @@ enum KeyMenu {
 }
 
 /// Keys by the bindings (plan 4f Ruling 5): every key press in VizDAW
-/// passes here before AppKit's menus see it. A text field keeps its
-/// plain keys (they go straight to its window, past the menus'
-/// single-key shortcuts); in a window showing a document, a bound key
-/// runs its command (or a sequence's keyboard slot) through the same
-/// handlers as the control channel. A ⌘/⌃ key whose command is
-/// unavailable or needs its dialog, and an unbound key, go on to the
-/// menus and the views; a plain key whose command is unavailable goes to
-/// its window alone (controller ruling F2), so the main menu cannot
-/// match it to another command's plain-key item.
+/// passes here before AppKit's menus see it. A text field, or a plugin
+/// window's view, keeps its plain keys; an input method composing keeps
+/// every key. In a window showing a document, a bound key runs its
+/// command (or a sequence's keyboard slot) through the same handlers as
+/// the control channel. A plain key not used up goes to its window alone,
+/// never to the main menu (whose single-key items match by character, not
+/// by key code); a ⌘/⌃ key not used up goes on to the menus.
 @MainActor
 enum KeyMonitor {
     private static var monitor: Any?
@@ -54,8 +52,9 @@ enum KeyMonitor {
     static func route(_ e: NSEvent, in w: NSWindow, menus: Bool) -> (KeyRoute, (id: UUID, model: DocumentModel)?) {
         // The Keys settings' recorder takes every key it is shown.
         if w.firstResponder is KeyCapturing { return (.pass, nil) }
-        let typing = w.firstResponder is NSText
-        let doc: (id: UUID, model: DocumentModel)? = ControlWindows.tagOf(w).doc.flatMap { d in
+        let tag = ControlWindows.tagOf(w)
+        let typing = KeyRouter.typing(textField: w.firstResponder is NSText, window: tag.kind)
+        let doc: (id: UUID, model: DocumentModel)? = tag.doc.flatMap { d in
             appStore.model(d).map { (d, $0) }
         }
         let m = modifiers(e.modifierFlags)
@@ -95,17 +94,26 @@ enum KeyMonitor {
     /// Whether VizDAW used the key press up (AppKit never sees it).
     static func consume(_ e: NSEvent) -> Bool {
         guard let w = e.window ?? NSApp.keyWindow else { return false }
+        // An input method composing: the key is its own (Return confirms
+        // the text, not a sheet's default button; fix round 1 I3).
+        if let input = w.firstResponder as? NSTextInputClient, input.hasMarkedText() {
+            w.sendEvent(e)
+            return true
+        }
         let (r, doc) = route(e, in: w, menus: true)
         if perform(r, doc) { return true }
-        switch KeyDispatch.passed(r, modifiers: modifiers(e.modifierFlags)) {
+        switch KeyDispatch.passed(modifiers: modifiers(e.modifierFlags)) {
         case .menus:
+            // The Keys settings' recorder takes ⌘ and ⌃ keys before the
+            // menus do.
+            if w.firstResponder is KeyCapturing, w.performKeyEquivalent(with: e) { return true }
             return false
         case .window:
-            // Past the main menu (its single-key shortcuts must not take
-            // a letter typed into a field, nor a passed plain key), but
-            // the window's own key equivalents first: Return and Escape
-            // still press a sheet's default and cancel buttons
-            // (controller ruling F1).
+            // Past the main menu (its single-key items match by
+            // character, not by key code), but the window's own key
+            // equivalents first: Return and Escape still press a sheet's
+            // default and cancel buttons (controller ruling F1), and the
+            // recorder takes its key.
             if w.performKeyEquivalent(with: e) { return true }
             w.sendEvent(e)
             return true

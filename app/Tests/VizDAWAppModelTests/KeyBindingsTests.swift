@@ -130,13 +130,30 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         #expect(r == .command("locator.go_1"))
         let m = try DocumentModel(session: demoFake())
         #expect(KeyDispatch.after(.failed(.of(.unavailable, "No locator 1.")), doc: m) == .pass)
-        #expect(KeyDispatch.passed(r, modifiers: noMods) == .window, "to the window's responder")
-        // Ruling F1: a text field's plain keys go to the window too.
-        #expect(KeyDispatch.passed(route(49, typing: true), modifiers: noMods) == .window)
-        // ⌘ and ⌃ keys, unbound keys and slots still reach the menus.
-        #expect(KeyDispatch.passed(.command("file.save"), modifiers: cmdMod) == .menus)
-        #expect(KeyDispatch.passed(route(7), modifiers: noMods) == .menus)
-        #expect(KeyDispatch.passed(.slot(1), modifiers: optMod) == .menus)
+        #expect(KeyDispatch.passed(modifiers: noMods) == .window, "to the window's responder")
+        // Fix round 1 (I1): every plain key VizDAW did not use goes to the
+        // window: the main menu matches its plain-key items by character
+        // (a German Y is a Z), the bindings by key code. An unbound key, a
+        // text field's key, a slot that did not run, ⇧ and ⌥ keys alike.
+        #expect(route(7) == .pass)
+        #expect(KeyDispatch.passed(modifiers: optMod) == .window)
+        let shift = ModifiersRow(shift: true, control: false, option: false, command: false)
+        let ctrl = ModifiersRow(shift: false, control: true, option: false, command: false)
+        #expect(KeyDispatch.passed(modifiers: shift) == .window)
+        // ⌘ and ⌃ keys still reach the menus.
+        #expect(KeyDispatch.passed(modifiers: cmdMod) == .menus)
+        #expect(KeyDispatch.passed(modifiers: ctrl) == .menus)
+    }
+
+    @Test func aPluginWindowsPlainKeysType() {
+        // Fix round 1 (I2): a plugin's view is no NSText, but its plain
+        // keys are its own (its text fields, its on-screen keyboard).
+        #expect(KeyRouter.typing(textField: false, window: .plugin))
+        #expect(KeyRouter.typing(textField: true, window: .document))
+        #expect(!KeyRouter.typing(textField: false, window: .document))
+        let typing = KeyRouter.typing(textField: false, window: .plugin)
+        #expect(route(49, typing: typing) == .typing, "Space is the plugin's")
+        #expect(route(1, cmdMod, typing: typing, menus: false) == .command("file.save"), "⌘ keys still route")
     }
 }
 
