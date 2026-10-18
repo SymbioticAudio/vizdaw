@@ -13,7 +13,7 @@ import VizDAWCore
 @MainActor let pluginManager = PluginManagerModel(plugins: appPlugins)
 
 /// Editing preferences: the nudge steps (Plan 4b Ruling 16).
-@MainActor let editingPreferences = EditingPreferences()
+@MainActor let editingPreferences = EditingPreferences(defaults: MemoryDefaults.appStore())
 
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).

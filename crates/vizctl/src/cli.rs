@@ -120,7 +120,9 @@ fn number(s: &str, what: &str) -> Result<i64, String> {
 
 fn float(s: &str, what: &str) -> Result<f64, String> {
     s.parse::<f64>()
-        .map_err(|_| format!("{what} must be a number, not {s:?}"))
+        .ok()
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| format!("{what} must be a finite number, not {s:?}"))
 }
 
 fn json_arg(s: Option<&String>) -> Result<Value, String> {
@@ -157,7 +159,13 @@ pub fn parse(args: &[String], env_socket: Option<String>) -> Result<Plan, String
     };
     let socket = a.value("--socket")?.or(env_socket);
     let timeout = match a.value("--timeout")? {
-        Some(t) => Duration::from_secs_f64(float(&t, "--timeout")?.clamp(1.0, 3600.0)),
+        Some(t) => {
+            let v = float(&t, "--timeout")?;
+            if v < 0.0 {
+                return Err(format!("--timeout must not be negative, not {t:?}"));
+            }
+            Duration::from_secs_f64(v.clamp(1.0, 3600.0))
+        }
         None => DEFAULT_TIMEOUT,
     };
     let window = match a.value("--window")? {
@@ -331,6 +339,10 @@ pub fn parse(args: &[String], env_socket: Option<String>) -> Result<Plan, String
             }
             if let Some(t) = a.value("--timeout-ms")? {
                 let ms = number(&t, "--timeout-ms")?;
+                if ms < 0 {
+                    return Err(format!("--timeout-ms must not be negative, not {t:?}"));
+                }
+                let ms = ms.min(3_600_000);
                 wait_ms = Some(ms.max(0) as u64);
                 set(&mut p, "timeout_ms", json!(ms));
             }
@@ -443,7 +455,9 @@ pub fn run(args: &[String]) -> i32 {
         Plan::Launch(o) => match launch(&o) {
             Ok(l) => {
                 println!("{}", l.to_json());
-                eprintln!("export VIZDAW_CONTROL={}", l.socket.display());
+                let socket = l.socket.clone();
+                l.detach();
+                eprintln!("export VIZDAW_CONTROL={}", socket.display());
                 0
             }
             Err(e) => {

@@ -38,9 +38,28 @@ pub struct Launched {
     pub home: PathBuf,
     /// Its stdout and stderr.
     pub log: PathBuf,
+    detached: bool,
 }
 
 impl Launched {
+    /// Takes over a started process: dropping the value shuts it down
+    /// unless [`Launched::detach`] is called.
+    pub fn new(child: Child, socket: PathBuf, home: PathBuf, log: PathBuf) -> Launched {
+        Launched {
+            child,
+            socket,
+            home,
+            log,
+            detached: false,
+        }
+    }
+
+    /// Leaves the app running for later commands (what `vizctl launch`
+    /// does); without this, dropping `Launched` quits it, then kills it.
+    pub fn detach(mut self) {
+        self.detached = true;
+    }
+
     /// What `vizctl launch` prints.
     pub fn to_json(&self) -> serde_json::Value {
         json!({
@@ -49,6 +68,26 @@ impl Launched {
             "home": self.home,
             "log": self.log,
         })
+    }
+}
+
+impl Drop for Launched {
+    fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
+        if let Ok(mut c) = Client::connect(&self.socket) {
+            let _ = c.call("quit", json!({}), Duration::from_secs(5));
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -120,6 +159,7 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
     cmd.arg("--control")
         .arg(&socket)
         .arg("--no-scan")
+        .args(["-ApplePersistenceIgnoreState", "YES"])
         .env("HOME", &home)
         .env("VIZDAW_SUPPORT_DIR", &support)
         .env_remove("VIZDAW_CONTROL")
@@ -147,15 +187,11 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
             .ok()
             .and_then(|mut c| c.call("ping", json!({}), Duration::from_secs(5)).ok());
         if ready.is_some() {
-            return Ok(Launched {
-                child,
-                socket,
-                home,
-                log,
-            });
+            return Ok(Launched::new(child, socket, home, log));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
+            let _ = child.wait();
             return Err(format!(
                 "VizDAW's control channel did not answer within {} s; log:\n{}",
                 o.timeout.as_secs(),

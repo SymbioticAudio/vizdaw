@@ -268,3 +268,64 @@ fn restore_autosave_takes_only_true_or_false() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "usage error");
 }
+
+#[test]
+fn bad_timeouts_are_usage_errors_not_panics() {
+    for bad in ["nan", "inf", "-1", "-inf"] {
+        let out = Process::new(env!("CARGO_BIN_EXE_vizctl"))
+            .args(["--socket", "/tmp/none.sock", "--timeout", bad, "ping"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "--timeout {bad}");
+    }
+    for bad in ["-1", "nan", "1.5"] {
+        let out = Process::new(env!("CARGO_BIN_EXE_vizctl"))
+            .args([
+                "--socket",
+                "/tmp/none.sock",
+                "wait",
+                "playing",
+                "--timeout-ms",
+                bad,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "--timeout-ms {bad}");
+    }
+    let (_, p, t) = request("wait playing --timeout-ms 99999999999");
+    assert_eq!(p["timeout_ms"], 3_600_000);
+    assert!(t <= Duration::from_secs(3700));
+}
+
+#[test]
+fn dropping_launched_stops_the_child_unless_detached() {
+    let spawn = || Process::new("/bin/sleep").arg("60").spawn().unwrap();
+    let alive = |pid: u32| {
+        Process::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    let child = spawn();
+    let pid = child.id();
+    drop(vizctl::launch::Launched::new(
+        child,
+        "/tmp/none.sock".into(),
+        "/tmp".into(),
+        "/tmp/none.log".into(),
+    ));
+    assert!(!alive(pid), "killed on drop");
+    let child = spawn();
+    let pid = child.id();
+    vizctl::launch::Launched::new(
+        child,
+        "/tmp/none.sock".into(),
+        "/tmp".into(),
+        "/tmp/n".into(),
+    )
+    .detach();
+    assert!(alive(pid), "detached stays running");
+    let _ = Process::new("/bin/kill").arg(pid.to_string()).output();
+}

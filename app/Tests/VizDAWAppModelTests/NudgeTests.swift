@@ -129,3 +129,26 @@ private let fourFour = [MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor:
         #expect(EditingPreferences(defaults: d).nudge == NudgeSettings())
     }
 }
+
+@Suite @MainActor struct MemoryDefaultsTests {
+    @Test func nudgeSettingsRoundTripWithoutTouchingStandard() {
+        let before = UserDefaults.standard.data(forKey: EditingPreferences.key)
+        let mem = MemoryDefaults()
+        let a = EditingPreferences(defaults: mem)
+        var n = NudgeSettings()
+        n.pitch = .semitones(7)
+        a.nudge = n
+        #expect(EditingPreferences(defaults: mem).nudge.pitch == .semitones(7))
+        #expect(UserDefaults.standard.data(forKey: EditingPreferences.key) == before)
+        let l = ListPreferences(defaults: mem)
+        l.columns = ListColumns()
+        #expect(mem.data(forKey: ListPreferences.key) != nil)
+        mem.removeObject(forKey: ListPreferences.key)
+        #expect(mem.data(forKey: ListPreferences.key) == nil)
+    }
+
+    @Test func appStoreIsMemoryOnlyWithASupportDir() {
+        #expect(MemoryDefaults.appStore(environment: ["VIZDAW_SUPPORT_DIR": "/x"]) is MemoryDefaults)
+        #expect(!(MemoryDefaults.appStore(environment: [:]) is MemoryDefaults))
+    }
+}

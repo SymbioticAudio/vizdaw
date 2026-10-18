@@ -54,7 +54,7 @@ public final class DocumentStore {
             open: { try Session.open(path: $0) }
         )
         s.makeDemoAudio = { try Session.newDemoAudio() }
-        s.listPreferences = ListPreferences(defaults: .standard)
+        s.listPreferences = ListPreferences(defaults: MemoryDefaults.appStore())
         return s
     }
 
