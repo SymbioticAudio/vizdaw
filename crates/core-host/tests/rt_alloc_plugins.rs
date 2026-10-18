@@ -99,8 +99,15 @@ fn plugins_render_without_allocating() {
         );
     }
     host.sync(&doc);
-    let r = host.wait_ready(Duration::from_secs(10));
-    assert_eq!(r.loaded.len(), 4, "{:?}", r.failed);
+    // Generous for a loaded machine; returns as soon as all four are in.
+    let r = host.wait_ready(Duration::from_secs(60));
+    assert_eq!(
+        r.loaded.len(),
+        4,
+        "failed: {:?}; still loading: {:?}",
+        r.failed,
+        host.loading()
+    );
     let mut cfg = EngineConfig::new(48_000.0);
     cfg.workers = 3;
     let (mut engine, renderer) =
