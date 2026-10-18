@@ -24,12 +24,14 @@ public struct EditorLayout: Codable, Equatable, Sendable {
     public var pianoRoll = PianoRollSettings()
     /// Every Strip Chart's bar (Plan 4d Ruling 21).
     public var stripChart = StripChartSettings()
+    /// Every drum grid's bar (Plan 4e Ruling 11).
+    public var drumGrid = DrumGridSettings()
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case version, detail, lastKind, windows, sequenceOrder, blockRule
-        case lightMode, snap, laneHeight, ticksPerPoint, follow, pianoRoll, stripChart
+        case lightMode, snap, laneHeight, ticksPerPoint, follow, pianoRoll, stripChart, drumGrid
     }
 
     public init(from decoder: Decoder) throws {
@@ -48,6 +50,7 @@ public struct EditorLayout: Codable, Equatable, Sendable {
         follow = c.field(.follow, d.follow)
         pianoRoll = c.field(.pianoRoll, d.pianoRoll)
         stripChart = c.field(.stripChart, d.stripChart)
+        drumGrid = c.field(.drumGrid, d.drumGrid)
     }
 
     /// Lane heights a hand-edited or corrupt `ui.json` is clamped to.

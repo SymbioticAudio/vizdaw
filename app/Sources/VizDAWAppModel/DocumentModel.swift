@@ -93,6 +93,51 @@ public final class DocumentModel {
         for (slot, c) in stripCharts where c.state?.kind != .stripChart { dropStripChart(slot) }
     }
 
+    /// One drum grid per slot (Plan 4e Ruling 2).
+    @ObservationIgnored private var drumGrids: [DetailSlot: DrumGridModel] = [:]
+    /// The drum grid last pressed in, which the Drum menu acts on.
+    public var activeDrumGrid: DetailSlot?
+
+    /// The drum grid of the detail pane or a torn-off window, made once.
+    public func drumGrid(_ slot: DetailSlot) -> DrumGridModel {
+        if let m = drumGrids[slot] { return m }
+        let m: DrumGridModel
+        switch slot {
+        case .pane: m = .pane(self)
+        case .window(let id): m = .window(id, of: self)
+        }
+        drumGrids[slot] = m
+        return m
+    }
+
+    /// A torn-off window closed: its drum grid goes (and its stroke).
+    public func dropDrumGrid(_ slot: DetailSlot) {
+        drumGrids.removeValue(forKey: slot)?.strokeCancelled()
+        if activeDrumGrid == slot { activeDrumGrid = nil }
+    }
+
+    /// Drum grids whose slot no longer shows one go.
+    func pruneDrumGrids() {
+        for (slot, g) in drumGrids where g.state?.kind != .drumGrid { dropDrumGrid(slot) }
+    }
+
+    /// The drum grid the Drum menu acts on: the last one pressed in while
+    /// it still shows a drum grid, else the detail pane's when it shows one.
+    public func drumGridForCommands() -> DrumGridModel? {
+        if let slot = activeDrumGrid, let g = drumGrids[slot], g.state?.kind == .drumGrid { return g }
+        guard editor.layout.detail?.kind == .drumGrid else { return nil }
+        return drumGrid(.pane)
+    }
+
+    /// The lane Drum > Drum Lane acts on: the selection's first lane of the
+    /// shown sequence.
+    public var selectedLane: LaneRow? {
+        guard let seq = selectedSeq,
+            let ref = editor.selection.lanes.first(where: { $0.seq == seq })
+        else { return nil }
+        return lanes.first { $0.id == ref.lane }
+    }
+
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()
     /// One list editor per slot, while that slot shows a list.
@@ -181,6 +226,7 @@ public final class DocumentModel {
         editor.layoutChanged = { [weak self] in
             self?.pruneLists()
             self?.pruneStripCharts()
+            self?.pruneDrumGrids()
         }
     }
 
