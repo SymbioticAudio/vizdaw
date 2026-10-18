@@ -821,6 +821,12 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
     })
 }
 
+/// The name an element ID and its check are made of: the label, or the
+/// title when the label is absent or empty (control spec §5.4).
+fn id_label<'a>(label: Option<&'a str>, title: Option<&'a str>) -> &'a str {
+    label.filter(|l| !l.is_empty()).or(title).unwrap_or("")
+}
+
 fn frame(x: f64, y: f64, width: f64, height: f64) -> Value {
     json!({ "x": x, "y": y, "width": width, "height": height })
 }
@@ -835,7 +841,7 @@ fn detail_json(d: &DetailRow) -> Value {
 
 fn node_json(n: &UiNodeRow) -> Value {
     let mut o = Map::new();
-    let name = n.label.as_deref().or(n.title.as_deref()).unwrap_or("");
+    let name = id_label(n.label.as_deref(), n.title.as_deref());
     o.insert("id".into(), json!(el::element_id(&n.path, &n.role, name)));
     o.insert("role".into(), json!(n.role));
     for (k, v) in [
@@ -1108,11 +1114,7 @@ pub fn control_wait_met(condition: WaitConditionRow, facts: WaitFactsRow) -> boo
 /// when it has no label).
 #[uniffi::export]
 pub fn control_element_check(role: String, label: Option<String>, title: Option<String>) -> u32 {
-    let name = label
-        .filter(|l| !l.is_empty())
-        .or(title)
-        .unwrap_or_default();
-    el::check(&role, &name)
+    el::check(&role, id_label(label.as_deref(), title.as_deref()))
 }
 
 /// Every registered menu command ID (the app checks it handles each).

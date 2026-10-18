@@ -292,3 +292,33 @@ fn the_registry_ids_reach_swift() {
         }
     ));
 }
+
+#[test]
+fn an_empty_label_falls_back_to_the_title_in_the_id() {
+    let r = ControlResult::Tree {
+        window: 1,
+        nodes: vec![UiNodeRow {
+            path: vec![0],
+            role: "AXButton".into(),
+            subrole: None,
+            label: Some(String::new()),
+            title: Some("Play".into()),
+            value: None,
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            enabled: true,
+            selected: false,
+            focused: false,
+            actions: vec![],
+        }],
+        truncated: false,
+    };
+    let v = result_json(&r);
+    let e = core_control::element::parse(v["nodes"][0]["id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        e.check,
+        control_element_check("AXButton".into(), Some(String::new()), Some("Play".into()))
+    );
+}
