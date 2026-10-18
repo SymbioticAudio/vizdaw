@@ -505,17 +505,29 @@ impl Graph {
 
     /// Automation's normalised value for a strip control; it takes effect
     /// at the next `commit_controls`. // RT
+    ///
+    /// Only while no run is in flight: after `Exec::try_finish` returned
+    /// true (or `Runner::graph_mut`), never while a straggling worker of a
+    /// missed run may still hold `&Graph` (module protocol).
     pub fn automate_strip(&mut self, strip: StripId, p: StripParam, v: f64) {
         self.controls.set_strip(strip, p, v);
     }
 
     /// Automation's normalised level for send `index` of `strip`. // RT
+    ///
+    /// Only while no run is in flight: after `Exec::try_finish` returned
+    /// true (or `Runner::graph_mut`), never while a straggling worker of a
+    /// missed run may still hold `&Graph` (module protocol).
     pub fn automate_send(&mut self, strip: StripId, index: u16, v: f64) {
         self.controls.set_send(strip, index, v);
     }
 
     /// Drops the overrides of the controls `driven` says no lane drives;
     /// the next commit writes their static values. // RT
+    ///
+    /// Only while no run is in flight: after `Exec::try_finish` returned
+    /// true (or `Runner::graph_mut`), never while a straggling worker of a
+    /// missed run may still hold `&Graph` (module protocol).
     pub fn release_overrides(&mut self, driven: impl Fn(AutoDest) -> bool) {
         self.controls.release(driven);
     }
@@ -523,7 +535,17 @@ impl Graph {
     /// Writes the effective control values into the strip and edge gains.
     /// With `ramp` the next run moves from the current gains to them (the
     /// renderer commits a run's start values without, then its end values
-    /// with, Plan 4d Ruling 11); without, they apply at once. // RT
+    /// with, Plan 4d Ruling 11); without, they apply at once.
+    ///
+    /// Mute and solo never fade: when a strip's audibility changes in a
+    /// ramped commit, its output and send edges step to the new gain at
+    /// the run's start, where its `audible` (meters, master output)
+    /// switches too. Which run boundary a switch point inside a run lands
+    /// on (the nearest) is the caller's choice of value. // RT
+    ///
+    /// Only while no run is in flight: after `Exec::try_finish` returned
+    /// true (or `Runner::graph_mut`), never while a straggling worker of a
+    /// missed run may still hold `&Graph` (module protocol).
     pub fn commit_controls(&mut self, ramp: bool) {
         let defs = &mut self.defs;
         let inputs = &mut self.inputs;
@@ -547,12 +569,14 @@ impl Graph {
                     }
                     *gain_l = gl;
                     *gain_r = gr;
-                    *audible = on;
+                    std::mem::replace(audible, on) != on
+                } else {
+                    false
                 }
             },
-            |i, g| {
+            |i, g, switched| {
                 if let Some(x) = inputs.get_mut(i) {
-                    x.start = if ramp { x.gain } else { g };
+                    x.start = if ramp && !switched { x.gain } else { g };
                     x.gain = g;
                 }
             },
@@ -563,6 +587,10 @@ impl Graph {
     }
 
     /// After a run: ramps have arrived. // RT
+    ///
+    /// Only while no run is in flight: after `Exec::try_finish` returned
+    /// true (or `Runner::graph_mut`), never while a straggling worker of a
+    /// missed run may still hold `&Graph` (module protocol).
     pub fn settle(&mut self) {
         if !std::mem::take(&mut self.ramping) {
             return;
@@ -587,6 +615,10 @@ impl Graph {
 
     /// The processor of insert instance `id`, between runs (plugin
     /// automation). // RT
+    ///
+    /// Only while no run is in flight: after `Exec::try_finish` returned
+    /// true (or `Runner::graph_mut`), never while a straggling worker of a
+    /// missed run may still hold `&Graph` (module protocol).
     pub fn insert_mut(&mut self, id: PluginInstanceId) -> Option<&mut (dyn EffectNode + 'static)> {
         let i = self.insert_ids.binary_search_by_key(&id, |x| x.0).ok()?;
         let idx = self.insert_ids.get(i)?.1;
@@ -609,6 +641,21 @@ impl Graph {
                 ..
             }) => Some((*gain_l, *gain_r, *audible)),
             _ => None,
+        }
+    }
+
+    /// The gains of node `node`'s insert sidechain feeds, in insert order
+    /// (inserts without one left out; diagnostics and tests). Not RT.
+    pub fn sidechain_gains(&self, node: usize) -> Vec<f32> {
+        match self.defs.get(node) {
+            Some(NodeDef::Strip { inserts, .. }) => self
+                .insert_defs
+                .get(inserts.clone())
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|d| d.sidechain.as_ref().map(|x| x.gain))
+                .collect(),
+            _ => Vec::new(),
         }
     }
 

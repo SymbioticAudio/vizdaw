@@ -285,13 +285,16 @@ impl Controls {
     }
 
     /// Writes the effective gains: `strip(node, gain_l, gain_r, audible)`
-    /// per strip and `edge(input, gain)` per fed edge, as the mixer
-    /// translation computes them (`graph::mixer`). Writes nothing (false)
-    /// when no override exists and none was dropped. // RT
+    /// per strip, which returns whether the strip's audibility changed,
+    /// and `edge(input, gain, switched)` per fed edge, `switched` passing
+    /// that change on (mute and solo switch hard, Plan 4d Ruling 11). The
+    /// gains are those the mixer translation computes (`graph::mixer`).
+    /// Writes nothing (false) when no override exists and none was
+    /// dropped. // RT
     pub(crate) fn commit(
         &mut self,
-        mut strip: impl FnMut(usize, f32, f32, bool),
-        mut edge: impl FnMut(usize, f32),
+        mut strip: impl FnMut(usize, f32, f32, bool) -> bool,
+        mut edge: impl FnMut(usize, f32, bool),
     ) -> bool {
         if !self.any_override && !self.dirty {
             return false;
@@ -325,7 +328,7 @@ impl Controls {
                 s.over.pan.unwrap_or(s.base.pan),
                 s.apply_pan,
             );
-            strip(s.node, gl, gr, on);
+            let switched = strip(s.node, gl, gr, on);
             let pass = if on { 1.0 } else { 0.0 };
             for f in self.feeds.get(s.feeds.clone()).unwrap_or(&[]) {
                 let gain = match f.send {
@@ -339,7 +342,7 @@ impl Controls {
                         pass * level
                     }
                 };
-                edge(f.input, gain);
+                edge(f.input, gain, switched);
             }
         }
         true
