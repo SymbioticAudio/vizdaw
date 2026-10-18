@@ -20,6 +20,7 @@ pub mod blocks;
 pub mod catalog;
 pub mod clock;
 pub mod control;
+pub mod drum;
 pub mod edit;
 pub mod editor;
 pub mod error;
@@ -50,6 +51,11 @@ pub use control::{
     RecoveryAnswersRow, StateTargetRow, TornRow, UiNodeRow, WaitConditionRow, WaitFactsRow,
     WindowKindRow, WindowRefRow, WindowRow, control_command_ids, control_element_check,
     control_host_busy, control_wait_met,
+};
+pub use drum::{
+    DrumBandKindRow, DrumBandRow, DrumCellRow, DrumEdit, DrumGridLayoutRow, DrumGridSettingsRow,
+    DrumHitRow, DrumLaneRow, DrumNewRow, DrumPaintHitRow, DrumRowRow, DrumSpotRow, DrumStrokeRow,
+    DrumViewRow, QuantizeChoiceRow,
 };
 pub use edit::{
     AudioEdit, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneRef, QuantizeRow, ReferenceEdit,

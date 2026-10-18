@@ -335,6 +335,7 @@ fn commands(f: &Fixture) -> Vec<EditCommand> {
                 quantize: Some(QuantizeRow {
                     grid: Q / 4,
                     strength: 50,
+                    groove: vec![],
                 }),
             },
         },

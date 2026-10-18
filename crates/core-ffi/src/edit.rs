@@ -1,5 +1,6 @@
 //! Editor commands (spec §3.2): one variant per core command of the
-//! groups 4a needs (Event, Reference, Lane, Sequence, Audio); field types
+//! groups 4a needs (Event, Reference, Lane, Sequence, Audio) and of the
+//! Drum group (4e, `crate::drum`); field types
 //! are FFI records. The view filter travels beside the command
 //! (Plan Ruling 6).
 
@@ -29,12 +30,34 @@ pub struct LaneRef {
 }
 
 /// Non-destructive play quantize.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct QuantizeRow {
     /// Grid in ticks (> 0).
     pub grid: i64,
     /// Strength 0–100.
     pub strength: u8,
+    /// Groove offsets per grid line (empty: a plain grid; Plan 4e
+    /// Ruling 10).
+    #[uniffi(default)]
+    pub groove: Vec<i64>,
+}
+
+/// The core quantize of a row.
+pub fn quantize_of(q: &QuantizeRow) -> QuantizeSpec {
+    QuantizeSpec {
+        grid: Tick(q.grid),
+        strength: q.strength,
+        groove: q.groove.iter().copied().map(Tick).collect(),
+    }
+}
+
+/// A core quantize as a row.
+pub fn quantize_row(q: &QuantizeSpec) -> QuantizeRow {
+    QuantizeRow {
+        grid: q.grid.0,
+        strength: q.strength,
+        groove: q.groove.iter().map(|t| t.0).collect(),
+    }
 }
 
 /// Generator parameters of a generated sequence.
@@ -101,6 +124,11 @@ pub enum EditCommand {
     Settings {
         /// The edit.
         edit: crate::modify::SettingsEdit,
+    },
+    /// Drum-lane edits (4e).
+    Drum {
+        /// The edit.
+        edit: crate::drum::DrumEdit,
     },
 }
 
@@ -598,6 +626,7 @@ pub fn to_command(c: &EditCommand) -> Result<Command, VizError> {
             ));
         }
         EditCommand::Settings { edit } => Command::Settings(crate::modify::settings_cmd(edit)?),
+        EditCommand::Drum { edit } => Command::Drum(crate::drum::drum_cmd(edit)),
     })
 }
 
@@ -834,7 +863,7 @@ fn lane_cmd(e: &LaneEdit) -> LaneCmd {
         } => LaneCmd::SetPlayQuantize {
             seq: SeqId(*seq),
             lane: LaneId(*lane),
-            quantize: quantize.map(|q| QuantizeSpec::grid(Tick(q.grid), q.strength)),
+            quantize: quantize.as_ref().map(quantize_of),
         },
         LaneEdit::SetPlayShift { seq, lane, shift } => LaneCmd::SetPlayShift {
             seq: SeqId(*seq),

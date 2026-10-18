@@ -811,6 +811,12 @@ impl Session {
         ffi_guard(|| lane_rows(lock(&self.inner).doc(), seq))
     }
 
+    /// The drum lanes of sequence `seq` with their rows and each row's
+    /// notes in the active take (the drum grid, 4e).
+    pub fn drum_lanes(&self, seq: u64) -> Result<Vec<crate::drum::DrumLaneRow>, VizError> {
+        ffi_guard(|| crate::drum::drum_lanes(lock(&self.inner).doc(), seq))
+    }
+
     /// Renames sequence `seq` (one undo step).
     pub fn rename_sequence(&self, seq: u64, name: String) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {

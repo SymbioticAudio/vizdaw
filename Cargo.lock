@@ -407,6 +407,7 @@ name = "core-ffi"
 version = "0.1.0"
 dependencies = [
  "core-control",
+ "core-editor",
  "core-engine",
  "core-ffi",
  "core-host",

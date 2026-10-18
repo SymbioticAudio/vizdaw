@@ -19,6 +19,7 @@ test-hooks = []
 
 [dependencies]
 core-control = { path = "../core-control" }
+core-editor = { path = "../core-editor" }
 core-model = { path = "../core-model" }
 core-engine = { path = "../core-engine", features = ["fixtures"] }
 core-host = { path = "../core-host" }

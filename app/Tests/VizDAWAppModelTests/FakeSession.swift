@@ -300,6 +300,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return ev
     }
 
+    /// Drum lanes by sequence (plan 4e); a sequence not listed has none.
+    var drumTable: [UInt64: [DrumLaneRow]] = [:]
+    var drumLanesCalls = 0
+    func drumLanes(seq: UInt64) throws -> [DrumLaneRow] {
+        drumLanesCalls += 1
+        if let e = readError { throw e }
+        return drumTable[seq] ?? []
+    }
+
     var infoTable: [UInt64: SequenceInfo] = [:]
     var infoCalls = 0
     func secondsAt(seq: UInt64, ticks: [Int64]) throws -> [Double] { ticks.map { Double($0) / 30_720 } }
