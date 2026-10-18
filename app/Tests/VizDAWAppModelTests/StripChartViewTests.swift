@@ -123,6 +123,88 @@ private func chart() throws -> (FakeSession, DocumentModel, StripChartView) {
         #expect(f.mixerCalls - before <= 1)
     }
 
+    @Test func anEraseDragDeletesTheRowsSeries() throws {
+        let (f, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        let c = m.stripChart(.pane)
+        c.setRow(0, to: .controller(7))
+        c.updateSettings { $0.mode = .erase }
+        v.contentMouseDown(CGPoint(x: 220, y: 30), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 320, y: 40), modifiers: [])
+        v.contentMouseUp(CGPoint(x: 320, y: 40), modifiers: [])
+        #expect(f.gestureEdits.last == StripCommands.erase(.controller(7), from: q, to: 2 * q))
+        #expect(f.calls.first == "begin Erase Events" && f.calls.last == "end")
+    }
+
+    @Test func pointsFollowTheScrolledOffsetsAndClampAtTheEdges() throws {
+        let (_, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        m.stripChart(.pane).addRow()
+        v.axis = TimeAxis(ticksPerPoint: v.axis.ticksPerPoint, originTick: Double(q))
+        #expect(v.point(CGPoint(x: 0, y: 30), row: 0).tick == q, "the origin scrolled a quarter")
+        v.verticalOffset = 50
+        #expect(v.row(atY: 10) == 0 && v.row(atY: 60) == 1, "rows move up with the offset")
+        #expect(v.rowTop(1) == 46)
+        // Above a row's top and below its bottom: the range's ends.
+        let r = StripLane.velocity.range
+        #expect(v.point(CGPoint(x: 0, y: v.rowTop(0) - 40), row: 0).value == r.upperBound)
+        #expect(v.point(CGPoint(x: 0, y: v.rowTop(0) + 400), row: 0).value == r.lowerBound)
+    }
+
+    @Test func escapeBeforeTheDeadZoneSendsNothing() throws {
+        let (f, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        v.contentMouseDown(CGPoint(x: 220, y: 30), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 221, y: 31), modifiers: [])
+        v.contentCancel()
+        #expect(f.calls.isEmpty && m.editor.gesture == nil)
+        #expect(m.stripChart(.pane).stroke == nil && v.path.isEmpty)
+    }
+
+    @Test func losingTheWindowMidStrokeLeavesNoUndoStep() throws {
+        let (f, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        v.contentMouseDown(CGPoint(x: 220, y: 30), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 320, y: 48), modifiers: [])
+        #expect(m.editor.gesture != nil)
+        v.viewWillMove(toWindow: nil)
+        #expect(f.calls.last == "abort" && m.editor.gesture == nil && v.path.isEmpty)
+    }
+
+    @Test func theStrokePreviewStaysOnItsValuesWhenTheViewScrolls() throws {
+        let (_, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        v.contentMouseDown(CGPoint(x: 220, y: 30), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 320, y: 48), modifiers: [])
+        let before = v.previewPoints
+        v.axis = TimeAxis(ticksPerPoint: v.axis.ticksPerPoint, originTick: v.axis.originTick + 160 * v.axis.ticksPerPoint)
+        v.verticalOffset = 10
+        let after = v.previewPoints
+        #expect(after.count == before.count && after.count == 2)
+        for (a, b) in zip(after, before) {
+            #expect(abs(a.x - (b.x - 160)) < 1 && abs(a.y - (b.y - 10)) < 1e-9)
+        }
+        v.contentCancel()
+    }
+
+    @Test func voiceOverReadsTheValuesOnScreen() throws {
+        let (_, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        // Scrolled two quarters on: neither note is on screen.
+        v.axis = TimeAxis(ticksPerPoint: v.axis.ticksPerPoint, originTick: Double(2 * q))
+        #expect(v.accessibilityItems().isEmpty)
+        v.axis = TimeAxis(ticksPerPoint: v.axis.ticksPerPoint, originTick: Double(q / 2))
+        #expect(v.accessibilityItems().map(\.label) == ["Velocity 64, bar 1 beat 2"])
+    }
+
+    @Test func anEmptyAutomationMenuSaysWhy() throws {
+        let (f, m, v) = try chart()
+        defer { withExtendedLifetime(m) {} }
+        f.readBusy = true
+        let auto = v.rowMenu(0).items.first { $0.title == "Automation" }
+        #expect(auto?.isEnabled == false && auto?.toolTip?.contains("busy") == true)
+    }
+
     @Test func ticksLeftOfTheOriginClampToZero() throws {
         let (_, m, v) = try chart()
         defer { withExtendedLifetime(m) {} }

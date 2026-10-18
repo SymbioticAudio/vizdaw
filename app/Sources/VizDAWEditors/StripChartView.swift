@@ -33,8 +33,10 @@ public final class StripChartView: EditorCanvas {
     /// The press in progress (content coordinates): its row and start.
     private var press: (row: Int, at: CGPoint)?
     private var moved = false
-    /// The stroke's pointer path, drawn as its preview.
-    private(set) var path: [CGPoint] = []
+    /// The stroke's pointer path in lane space (tick, and y below the first
+    /// row's top), drawn as its preview: it stays on the values it was drawn
+    /// over when the view scrolls or zooms mid-stroke.
+    private(set) var path: [(tick: Int64, y: CGFloat)] = []
     /// The target the view last scrolled to.
     private var shownTarget: EditorTarget??
     private let menuTarget = StripRowMenuTarget()
@@ -59,7 +61,6 @@ public final class StripChartView: EditorCanvas {
             guard let self, a.ticksPerPoint != self.model.settings.ticksPerPoint else { return }
             self.model.updateSettings { $0.ticksPerPoint = a.ticksPerPoint }
         }
-        menuTarget.choose = nil
         refresh()
         observe()
     }
@@ -116,6 +117,13 @@ public final class StripChartView: EditorCanvas {
     // MARK: Geometry
 
     func rowTop(_ i: Int) -> CGFloat { CGFloat(i) * rowHeight - verticalOffset }
+
+    /// A content point in lane space, and back (the stroke preview).
+    func lanePoint(_ p: CGPoint) -> (tick: Int64, y: CGFloat) { (axis.tick(atX: p.x), p.y + verticalOffset) }
+    func contentPoint(_ q: (tick: Int64, y: CGFloat)) -> CGPoint { CGPoint(x: axis.x(q.tick), y: q.y - verticalOffset) }
+
+    /// The stroke preview's points where the view now shows them.
+    var previewPoints: [CGPoint] { path.map(contentPoint) }
 
     func row(atY y: CGFloat) -> Int? {
         guard y.isFinite, rowHeight > 0 else { return nil }
@@ -178,23 +186,42 @@ public final class StripChartView: EditorCanvas {
             }
             return
         }
+        // Only the values over the dirty rect, plus one on each side for
+        // the segments that cross its edges (parked T13 culling).
+        let lo = dirty.minX - 3
+        let hi = dirty.maxX + 3
         let line = NSBezierPath()
         var prev: StripValue?
+        var started = false
+        var pastRight = false
         for v in values {
             let p = CGPoint(x: axis.x(v.tick), y: s.y(v.value))
+            if p.x < lo {
+                prev = v
+                continue
+            }
             if let q = prev {
-                if !q.ramp { line.line(to: CGPoint(x: p.x, y: s.y(q.value))) }
+                let qp = CGPoint(x: axis.x(q.tick), y: s.y(q.value))
+                if !started { line.move(to: qp) }
+                if !q.ramp { line.line(to: CGPoint(x: p.x, y: qp.y)) }
                 line.line(to: p)
             } else {
                 line.move(to: CGPoint(x: min(p.x, dirty.minX), y: p.y))
                 line.line(to: p)
             }
+            started = true
             prev = v
             (isSelected(v) ? accent : accent.withAlphaComponent(0.8)).setFill()
             CGRect(x: p.x - 2, y: p.y - 2, width: 4, height: 4).fill()
+            if p.x > hi {
+                pastRight = true
+                break
+            }
         }
-        if let q = prev {
-            line.line(to: CGPoint(x: max(dirty.maxX, axis.x(q.tick)), y: s.y(q.value)))
+        if let q = prev, !pastRight {
+            let y = s.y(q.value)
+            if !started { line.move(to: CGPoint(x: min(axis.x(q.tick), dirty.minX), y: y)) }
+            line.line(to: CGPoint(x: max(dirty.maxX, axis.x(q.tick)), y: y))
         }
         accent.withAlphaComponent(0.8).setStroke()
         line.lineWidth = 1.5
@@ -202,7 +229,8 @@ public final class StripChartView: EditorCanvas {
     }
 
     public override func drawOverlay(in dirty: CGRect) {
-        guard let stroke = model.stroke, let first = path.first, let last = path.last else { return }
+        let points = previewPoints
+        guard let stroke = model.stroke, let first = points.first, let last = points.last else { return }
         let orange = NSColor.systemOrange
         if stroke.compress {
             let r = CGRect(
@@ -217,7 +245,7 @@ public final class StripChartView: EditorCanvas {
         let p = NSBezierPath()
         p.move(to: first)
         if model.settings.shape == .free {
-            for q in path.dropFirst() { p.line(to: q) }
+            for q in points.dropFirst() { p.line(to: q) }
         } else {
             p.line(to: last)
         }
@@ -237,7 +265,7 @@ public final class StripChartView: EditorCanvas {
         }
         press = (i, p)
         moved = false
-        path = [p]
+        path = [lanePoint(p)]
         model.strokeBegan(row: i, at: point(p, row: i), selectedOnly: modifiers.contains(.option))
     }
 
@@ -247,7 +275,7 @@ public final class StripChartView: EditorCanvas {
             guard hypot(p.x - pr.at.x, p.y - pr.at.y) > ToolMachine<Int>.deadZone else { return }
             moved = true
         }
-        path.append(p)
+        path.append(lanePoint(p))
         model.strokeMoved(to: point(p, row: pr.row))
         overlay.needsDisplay = true
     }
@@ -323,6 +351,9 @@ public final class StripChartView: EditorCanvas {
         let groups = model.menus.map { g in submenu(g.title, g.lanes.map { item($0) }) }
         let automation = submenu("Automation", groups)
         automation.isEnabled = !groups.isEmpty
+        if groups.isEmpty {
+            automation.toolTip = "The mixer's targets could not be read just now (busy); open the menu again."
+        }
         menu.addItem(automation)
         menu.addItem(.separator())
         let add = MenuAction(title: "Add Row") { [weak self] in self?.model.addRow() }.item(checked: false)
@@ -341,9 +372,15 @@ public final class StripChartView: EditorCanvas {
     public override func accessibilityItems() -> [CanvasAccessibilityItem] {
         var out: [CanvasAccessibilityItem] = []
         let names = model.names
+        // The values on screen, not the lane's first ones (parked T13).
+        let shown = content.bounds
         for (i, lane) in model.rows.enumerated() {
             let s = scale(i)
-            for v in model.values(lane).prefix(200) {
+            let visible = model.values(lane).lazy.filter { v in
+                let x = self.axis.x(v.tick)
+                return x >= shown.minX - 3 && x <= shown.maxX + 3
+            }
+            for v in visible.prefix(200) {
                 let b = Bbu.of(v.tick, meter: meter)
                 let frame = CGRect(x: axis.x(v.tick) - 3, y: s.y(v.value) - 3, width: 6, height: 6)
                 out.append(
