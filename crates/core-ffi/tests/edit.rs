@@ -888,3 +888,47 @@ fn a_panic_inside_edit_all_aborts_the_step_and_closes_it() {
     s.edit(move_note(&f, Q, None), None).unwrap();
     assert_eq!(note_tick(&s, &f), Q);
 }
+
+/// A panic inside step entry's edit closes its transaction: no undo step,
+/// and edits apply again (final review, Task 5 M2).
+#[test]
+fn a_panic_inside_step_entry_closes_its_transaction() {
+    let s = Session::new_demo().unwrap();
+    let song = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "Song")
+        .unwrap()
+        .id;
+    let lane = s.lanes(song).unwrap()[1].id;
+    let before = s.lane_events(song, lane).unwrap().events;
+    let undo = s.snapshot().unwrap().undo_label;
+    let enter = || {
+        s.step_entry(
+            song,
+            lane,
+            vizdaw_ffi::step_state_new(0),
+            vizdaw_ffi::StepInputRow::Notes {
+                notes: vec![vizdaw_ffi::StepNoteRow {
+                    pitch: 60,
+                    velocity: 100 << 9,
+                }],
+            },
+        )
+    };
+    // Only edit.rs runs step entry, so the label is this test's alone.
+    vizdaw_ffi::session::inject_edit_all_panic(Some("Step Entry"), 0);
+    let r = enter();
+    vizdaw_ffi::session::inject_edit_all_panic(None, 0);
+    assert!(matches!(r, Err(VizError::Internal { .. })), "{r:?}");
+    assert_eq!(s.lane_events(song, lane).unwrap().events, before);
+    assert_eq!(s.snapshot().unwrap().undo_label, undo, "no undo step");
+    let r = enter().unwrap();
+    assert!(r.snapshot.is_some(), "step entry applies again");
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Step Entry")
+    );
+}

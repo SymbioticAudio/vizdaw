@@ -50,7 +50,10 @@ fn config(dir: &Path, clap: &Path) -> CatalogConfig {
         scanner: test_plugins::scanner().to_string_lossy().into_owned(),
         clap_dirs: vec![clap.to_string_lossy().into_owned()],
         include_au: false,
-        timeout_ms: Some(2_000),
+        // Under a loaded machine 2 s was too short for the listing (a
+        // missing plugin, then a panic). The hanger waits the whole
+        // timeout in every scan, so this stays well under 20 s.
+        timeout_ms: Some(8_000),
     }
 }
 

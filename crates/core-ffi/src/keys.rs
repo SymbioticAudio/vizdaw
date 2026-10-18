@@ -176,19 +176,31 @@ impl Keymap {
     }
 
     /// Reads a bindings document from `path` (at most 256 KiB); what it
-    /// skipped.
+    /// skipped. Only a regular file is read, and never past the bound, so
+    /// a device or a FIFO neither hangs nor fills memory.
     pub fn load_file(&self, path: String) -> Result<Vec<String>, VizError> {
+        use std::io::Read;
         ffi_guard(|| {
             let io = |e: std::io::Error| VizError::Io {
                 message: format!("{path}: {e}"),
             };
-            let len = std::fs::metadata(&path).map_err(io)?.len();
-            if len > MAX_JSON as u64 {
-                return Err(model(format!(
-                    "a key bindings file is at most {MAX_JSON} bytes"
-                )));
+            let too_big = || model(format!("a key bindings file is at most {MAX_JSON} bytes"));
+            let meta = std::fs::metadata(&path).map_err(io)?;
+            if !meta.is_file() {
+                return Err(model(format!("{path} is not a key bindings file")));
             }
-            let text = std::fs::read_to_string(&path).map_err(io)?;
+            if meta.len() > MAX_JSON as u64 {
+                return Err(too_big());
+            }
+            let mut text = String::new();
+            std::fs::File::open(&path)
+                .map_err(io)?
+                .take(MAX_JSON as u64 + 1)
+                .read_to_string(&mut text)
+                .map_err(io)?;
+            if text.len() > MAX_JSON {
+                return Err(too_big());
+            }
             self.load_json(text)
         })
     }

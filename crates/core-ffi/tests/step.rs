@@ -409,3 +409,46 @@ fn a_reused_event_id_is_not_the_old_steps_note() {
         assert_eq!(notes(&s, song, lane), vec![(BAR, 62, Q)], "D untouched");
     }
 }
+
+/// A tie records only the notes it lengthened; with none left it is a
+/// rest (final review, Task 5 M1).
+#[test]
+fn a_tie_records_only_the_notes_it_lengthened() {
+    let (s, song, lane) = song();
+    let mut st = step_state_new(0);
+    step(
+        &s,
+        song,
+        lane,
+        &mut st,
+        StepInputRow::Notes {
+            notes: vec![note(60), note(64)],
+        },
+    );
+    let StepKindRow::Notes { events } = st.history[0].kind.clone() else {
+        panic!()
+    };
+    let del = |ids: Vec<u64>| {
+        s.edit(
+            vizdaw_ffi::EditCommand::Event {
+                edit: vizdaw_ffi::EventEdit::Delete { events: ids },
+            },
+            None,
+        )
+        .unwrap();
+    };
+    del(vec![events[1]]);
+    assert!(step(&s, song, lane, &mut st, StepInputRow::Tie));
+    assert_eq!(
+        st.history[1].kind,
+        StepKindRow::Tie {
+            events: vec![events[0]],
+            by: Q
+        },
+        "only the note still there"
+    );
+    del(vec![events[0]]);
+    assert!(!step(&s, song, lane, &mut st, StepInputRow::Tie));
+    assert_eq!(st.history[2].kind, StepKindRow::Rest, "nothing tied");
+    assert_eq!(st.tick, 3 * Q);
+}

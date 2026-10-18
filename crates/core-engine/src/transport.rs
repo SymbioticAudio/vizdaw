@@ -119,12 +119,13 @@ impl Transport {
         self.end.map_or(length, |e| e.min(length))
     }
 
-    /// Starts playing from `pos` (from 0 when at or past `length`).
+    /// Starts playing from `pos` (from 0 when at or past `length`, unless
+    /// an `end` is set: a range past the sequence end then ends at once).
     pub fn play(&mut self, length: u64) {
         if self.state == PlayState::Playing {
             return;
         }
-        if self.pos >= length {
+        if self.pos >= length && self.end.is_none() {
             self.pos = 0;
         }
         self.state = PlayState::Playing;

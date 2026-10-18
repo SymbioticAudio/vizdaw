@@ -281,3 +281,36 @@ fn a_key_press_reads_as_its_chord() {
     );
     assert_eq!(vizdaw_ffi::chord_text(0xFFFF, m(false, false, false)), None);
 }
+
+/// `keys.load` of a device or a FIFO is refused at once; it neither hangs
+/// nor reads without bound (final review, Task 5 M4).
+#[test]
+fn loading_a_device_or_a_fifo_is_refused_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe.vizkeys");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let fifo = fifo.to_string_lossy().into_owned();
+    std::thread::spawn(move || {
+        let k = vizdaw_ffi::Keymap::new();
+        let fifo = k.load_file(fifo);
+        let zero = k.load_file("/dev/zero".into());
+        let _ = tx.send((
+            fifo,
+            zero,
+            k.to_json() == vizdaw_ffi::Keymap::new().to_json(),
+        ));
+    });
+    let (fifo, zero, unchanged) = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("loading a FIFO or /dev/zero hangs");
+    assert!(matches!(fifo, Err(VizError::Model { .. })), "{fifo:?}");
+    assert!(matches!(zero, Err(VizError::Model { .. })), "{zero:?}");
+    assert!(unchanged);
+}

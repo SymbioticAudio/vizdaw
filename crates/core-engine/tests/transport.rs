@@ -261,3 +261,25 @@ fn an_end_stops_playing_there_and_ignores_the_loop() {
     t.play(1000);
     assert_eq!(t.boundary(1000), Some(50));
 }
+
+/// A Play Selection range wholly past the sequence end ends at once; it
+/// does not play the song from bar 1 (final review, Task 3 M1).
+#[test]
+fn an_end_past_the_sequence_end_ends_at_once() {
+    let mut t = Transport::new(0);
+    t.end = Some(3000);
+    t.locate(2000);
+    t.play(1000);
+    assert_eq!(t.pos, 2000, "the start is kept, not reset to bar 1");
+    assert_eq!(t.play_pos(1000), None);
+    assert_eq!(
+        block(&mut t, 1000, 16),
+        vec![Step::End { offset: 0 }, Step::Idle { len: 16 }]
+    );
+    assert_eq!(t.state, PlayState::Stopped);
+    assert!(t.take_ended());
+    // Without an end, a start past the end is still bar 1.
+    t.end = None;
+    t.play(1000);
+    assert_eq!(t.pos, 0);
+}

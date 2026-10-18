@@ -1884,8 +1884,9 @@ impl Session {
 #[cfg(feature = "test-hooks")]
 static EDIT_ALL_PANIC: Mutex<Option<(String, usize)>> = Mutex::new(None);
 
-/// Makes the next `edit_all` named `label` panic before command `step`
-/// (0-based); `None` clears it (test hook, Plan 4d Ruling 1).
+/// Makes the next `edit_all` (or step entry edit) named `label` panic
+/// before command `step` (0-based); `None` clears it (test hook, Plan 4d
+/// Ruling 1).
 #[cfg(feature = "test-hooks")]
 pub fn inject_edit_all_panic(label: Option<&str>, step: usize) {
     *lock(&EDIT_ALL_PANIC) = label.map(|l| (l.to_string(), step));
@@ -2188,6 +2189,16 @@ impl Session {
                 }
             };
             let moved = effect != Effect::Nothing;
+            // A tie records only the notes it lengthened; with none left
+            // it is a rest.
+            let effect = match effect {
+                Effect::Extend { by, .. } if live.is_empty() => Effect::Rest { length: by },
+                Effect::Extend { by, .. } => Effect::Extend {
+                    notes: live.clone(),
+                    by,
+                },
+                e => e,
+            };
             if cmds.is_empty() {
                 return Ok(crate::step::StepResultRow {
                     state: crate::step::state_row(&commit(&next, &effect, &[])),
@@ -2201,19 +2212,37 @@ impl Session {
             };
             let mut inner = lock(&self.inner);
             inner.history.begin(label.to_string())?;
-            let mut created = Vec::new();
-            for c in &cmds {
-                match inner.history.execute(c, &ViewFilter::default()) {
-                    Ok(r) => created.extend(r.created.iter().filter_map(|a| match a {
+            // A panic inside a command must not leave the transaction open
+            // (as in `edit_all`).
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut created = Vec::new();
+                for (i, c) in cmds.iter().enumerate() {
+                    edit_all_hook(label, i);
+                    let r = inner.history.execute(c, &ViewFilter::default())?;
+                    created.extend(r.created.iter().filter_map(|a| match a {
                         core_model::ids::AnyId::Event(e) => Some(*e),
                         _ => None,
-                    })),
-                    Err(e) => {
-                        inner.history.abort()?;
-                        return Err(e.into());
-                    }
+                    }));
                 }
-            }
+                Ok::<_, VizError>(created)
+            }));
+            let created = match run {
+                Ok(Ok(created)) => created,
+                Ok(Err(e)) => {
+                    if inner.history.in_transaction() {
+                        inner.history.abort()?;
+                    }
+                    return Err(e);
+                }
+                Err(payload) => {
+                    if inner.history.in_transaction() {
+                        inner.history.abort()?;
+                    }
+                    return Err(VizError::Internal {
+                        message: crate::guard::panic_message(payload.as_ref()),
+                    });
+                }
+            };
             inner.history.commit()?;
             if !created.is_empty() {
                 inner
