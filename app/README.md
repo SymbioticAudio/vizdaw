@@ -18,7 +18,8 @@ it runs plain `swift`.
 
 Launch arguments: `--demo` opens the demo project; a path ending in
 `.vizdaw` opens that project; `--no-scan` skips the plugin scan at launch;
-`--smoke` plays the demo for 3 s with the mixer open, puts Apple's AUDelay
+`--control PATH` turns on the agent control channel (below); `--smoke`
+plays the demo for 3 s with the mixer open, puts Apple's AUDelay
 on the first strip and opens its window, prints the transport, the mixer
 and the editor size, and exits 0 when all of them worked. `--smoke` uses a
 temporary support folder and never scans.
@@ -63,6 +64,56 @@ temporary support folder and never scans.
 
 Generated files (not in git): `app/Sources/VizDAWCore/vizdaw_ffi.swift`,
 `app/Sources/vizdaw_ffiFFI/include/`, `target/ffi/`, `dist/`.
+
+## Agent control channel
+
+Off by default. `VizDAW --control PATH` (or `VIZDAW_CONTROL=PATH`) listens
+for JSON-lines requests on a Unix socket at PATH (spec
+`docs/superpowers/specs/2026-10-18-control-channel-design.md`). The
+socket's folder must be private (VizDAW makes it 0700 when missing and
+refuses one other users can open); the socket is 0600 and goes when
+VizDAW quits. There is no network port. While the channel is on VizDAW
+opens no dialog of its own: a call that would needs the answer as a
+parameter (`dialog_required` names the dialog and the parameter, for
+example `app.open` asks for `restore_autosave` when an autosave exists),
+and app-level alerts are printed to stderr and listed by `state.get windows`.
+Undo and redo answer `busy` while a plugin call is on the main thread, and
+`modify.template` answers `unavailable` when there are no templates. Model
+edits and loads refuse tick positions or lengths beyond +-2^40.
+
+`vizctl` drives it from a shell:
+
+```bash
+cargo build -p vizctl && scripts/make-app.sh
+target/debug/vizctl launch --app dist/VizDAW.app --demo --env VIZDAW_AUDIO=offline
+export VIZDAW_CONTROL=/tmp/vizctl-.../ctl/vizdaw.sock   # the socket launch printed
+target/debug/vizctl state windows
+target/debug/vizctl run transport.play_stop && target/debug/vizctl wait playing
+target/debug/vizctl screenshot --out /tmp/play.png
+target/debug/vizctl find Play          # element IDs for click, drag and key
+target/debug/vizctl key space && target/debug/vizctl wait stopped
+target/debug/vizctl quit
+```
+
+`launch` runs VizDAW in a throwaway home (its own `HOME`, support folder
+(`VIZDAW_SUPPORT_DIR`) and log under `/tmp`, no plugin scan), never in
+yours. It passes `-ApplePersistenceIgnoreState YES`, and with
+`VIZDAW_SUPPORT_DIR` set the app keeps preferences in memory, so a launched
+VizDAW never reads or writes your real preferences. `vizctl --help` lists
+every command; `vizctl commands` lists the menu commands by ID. `--timeout`
+and `--timeout-ms` must be finite numbers (otherwise exit 2);
+`--restore-autosave` takes only `true` or `false`. Clicks and keys go into
+VizDAW's own windows: VizDAW need not be the active app and the pointer does
+not move. A `ui.click` on an element is refused (`no_element`) when the
+element's frame is non-finite or empty or its centre lies outside the
+window; only mouse events posted by the channel are accepted as first clicks.
+A key that is a menu shortcut runs that menu command on the window's
+document.
+
+Agents implementing or reviewing VizDAW may run checklist steps this way
+against a throwaway home, read state and attach screenshots; computer-use
+tools stay banned. A screenshot does not replace steps that need ears,
+VoiceOver or real devices.
 
 ## Manual smoke test
 
@@ -630,3 +681,38 @@ says otherwise. "The level" means what you hear and the master meter.
     Built-in Synth -6.0 dB, bar 3 beat 1"; the bar's controls read their
     labels (Mode, Operation, Shape, Curve, Wave, Period Kind, Period,
     Phase, Step, Rows).
+
+### Control channel (plan CC)
+
+Run these from a shell in the repository, with `V=target/debug/vizctl`.
+
+81. Off by default, in a throwaway home (never your real one; `vizctl
+    launch` always turns the channel on, so start the binary directly):
+    `HOME=$(mktemp -d) VIZDAW_SUPPORT_DIR=$(mktemp -d)
+    dist/VizDAW.app/Contents/MacOS/VizDAW` without `--control` and with
+    `VIZDAW_CONTROL` unset prints no "control channel on" line, and no
+    socket appears anywhere. Quit it.
+82. `$V launch --app dist/VizDAW.app --demo` prints `pid`, `socket`,
+    `home` and `log`; `ls -l` of the socket's folder shows `drwx------`
+    and the socket `srw-------`; with `VIZDAW_CONTROL` set to it,
+    `$V state windows` lists one "document" window titled "Untitled".
+    A second `$V launch` with the same `--home` fails: "another VizDAW is
+    listening".
+83. `$V run transport.play_stop`, `$V wait playing`, `$V screenshot --out
+    /tmp/play.png`: the PNG shows the arrangement with Groove's purple
+    reference block, the Chords block and the red playhead, even while
+    VizDAW's window is behind other windows. `$V run transport.play_stop`
+    and `$V wait stopped`.
+84. Dialogs: `$V run file.save` answers `dialog_required` with dialog
+    "Save" and no panel appears; `$V run file.save '{"path":
+    "/tmp/Demo.vizdaw"}'` saves (the window title becomes "Demo").
+    `$V open /tmp/Demo.vizdaw` opens a second window.
+85. Input: `$V find Play` gives the toolbar button's ID; `$V click <ID>`
+    plays without the pointer moving or VizDAW coming to the front;
+    `$V key space` stops; `$V drag 600,168 800,168` (points in the
+    arrangement's ruler, from `$V find Arrangement`) selects a range
+    (`$V state selection` shows `time_range`); with VoiceOver on, its
+    outline sits on the block it reads.
+86. Hostile input and quitting: `printf 'garbage\n' | nc -U
+    $VIZDAW_CONTROL` answers `parse_error`; `$V call nope` answers
+    `unknown_command`; `$V quit`: VizDAW quits and the socket file is gone.

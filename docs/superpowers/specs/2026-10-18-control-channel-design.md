@@ -81,7 +81,7 @@ Swift (main thread)
 
 ### 4.3 Deferred answers
 
-Some calls cannot be answered in the tick they arrive: a new document's window appears a few run-loop turns later; posted input events are handled by the event loop; a `wait` holds until its condition. The pump keeps these as deferred answers (token, deadline, step) and steps them every tick; one whose client has gone (`is_waiting` false) is dropped.
+Some calls cannot be answered in the tick they arrive: a new document's window appears a few run-loop turns later; posted input events are handled by the event loop; a `wait` holds until its condition. The pump keeps these as deferred answers (token, deadline, step) and steps them every tick; one whose client has gone (`is_waiting` false) is dropped. The server does not detect a client hanging up mid-call: that call keeps its connection slot until its timeout.
 
 ### 4.4 Lifecycle
 
@@ -121,7 +121,7 @@ UTF-8 only; blank lines are skipped; a reply is one line. Requests on one connec
 
 - `id`: an integer or a string (≤ 128 characters), echoed. A line whose id cannot be read is answered with `"id": null`.
 - `cmd`: lowercase letters, digits, `.` and `_`, ≤ 64 characters.
-- `params`: an object; absent or null is `{}`. Unknown top-level fields are `invalid_request`; unknown parameters are `invalid_params`.
+- `params`: an object; absent or null is `{}`; any other type is `invalid_params`. JSON nested deeper than serde_json's 128-level limit is `parse_error`. Unknown top-level fields are `invalid_request`; unknown parameters are `invalid_params`.
 
 ### 5.3 Errors
 
@@ -232,7 +232,7 @@ The select-and-modify panel is a non-modal window, not a dialog: the `modify.*` 
 - **Conditional dialogs** are decided by the app: Save of a never-saved document needs `path`; opening a project after a crash, or with Shift held, asks "Open with Plugins Off?" (`plugins`: `normal`, `off`, `disable`); a newer autosave asks "Restore Autosave" (`restore_autosave`). A control call installs its own answers for the store's recovery questions; a question without an answer fails the call `dialog_required` naming it, and a document it opened meanwhile is closed again.
 - **Alerts raised by a call** (a document's alert sheet, the store's alert) are taken and returned as the call's `failed` error; nothing is shown.
 - **Alerts not caused by a call** (catalog problems, a launch-argument open's recovery questions) are not shown while the channel is on: they are printed to stderr and listed in `state.get windows` → `alerts` (the newest 20). Recovery questions of such opens are answered Cancel / "last save".
-- **Busy:** before every call the pump asks Rust whether a plugin call is on the main thread's stack (`control_host_busy`); if so the call answers `busy`. A `VizError::Busy` thrown by a command answers `busy`, never an alert.
+- **Busy:** before every call the pump asks Rust whether a plugin call is on the main thread's stack (`control_host_busy`); if so the call answers `busy`. Only transport Play/Stop and undo/redo map a thrown `VizError::Busy` to `busy` (never an alert); other commands rely on the pre-call busy check and otherwise answer `failed`.
 - **Raw input is not a programmatic command:** a `ui.click` on a control that opens a modal panel behaves as a user's click would. The channel keeps answering in modal and tracking modes, so the panel can be read (`state.get windows`, `ui.tree`) and dismissed (`ui.key`).
 
 ## 8. Security
