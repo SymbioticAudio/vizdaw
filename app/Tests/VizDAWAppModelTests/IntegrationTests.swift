@@ -76,3 +76,24 @@ import VizDAWCore
         try? FileManager.default.removeItem(at: support)
     }
 }
+
+/// Step entry through the real library: `state.get editor`'s step row
+/// carries dotted, triplet and the steps taken (final review item 13).
+@MainActor
+@Suite struct StepIntegrationTests {
+    @Test func theStepRowShowsDotTripletAndARealStep() throws {
+        setenv("VIZDAW_AUDIO", "offline", 1)
+        let m = try DocumentModel(session: Session.newDemo())
+        #expect(StepCommands.run(StepCommands.entry, on: true, m) == .done)
+        #expect(StepCommands.run("step.eighth", on: nil, m) == .done)
+        #expect(StepCommands.run("step.dot", on: nil, m) == .done)
+        #expect(StepCommands.run("step.triplet", on: nil, m) == .done)
+        #expect(StepCommands.run(StepCommands.notes, on: nil, pitches: "C4 E4", m) == .done)
+        let row = try #require(ControlStates.stepRow(m))
+        #expect(row.value == "eighth" && row.dotted && row.triplet)
+        #expect(row.steps == 1, "one chord entered")
+        #expect(row.tick == stepLength(value: .eighth, dotted: true, triplet: true), "moved by its length")
+        #expect(m.undoTitle == "Undo Step Entry")
+        try m.session.close()
+    }
+}
