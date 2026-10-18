@@ -24,6 +24,7 @@ struct DocumentWindow: View {
         Group {
             if let id, let model = store.model(id) {
                 DocumentView(model: model, docID: id)
+                    .background(WindowTag(kind: .document, doc: id))
                     .focusedSceneValue(\.documentModel, model)
                     .focusedSceneValue(\.documentID, id)
                     .task(id: PollKey(key: activeState == .key, playing: model.isPlaying)) {
@@ -48,6 +49,8 @@ struct DocumentWindow: View {
             }
         }
         .onAppear {
+            // The control channel opens document windows with it.
+            ControlWindows.openWindow = openWindow
             adopt()
             openQueued()
         }

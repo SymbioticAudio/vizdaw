@@ -40,6 +40,7 @@ final class ModifyPanelController: NSWindowController, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.title = "Select and Modify — \(model.snapshot.title)"
         super.init(window: panel)
+        ControlWindows.tag(panel, .modifyPanel, doc: doc)
         panel.contentView = NSHostingView(
             rootView: SelectModifyPanelView(model: model.selectModify, editor: model.editor))
         panel.delegate = self

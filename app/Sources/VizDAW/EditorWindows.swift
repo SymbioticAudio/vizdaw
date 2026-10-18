@@ -82,6 +82,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         win.isReleasedWhenClosed = false
         win.title = "\(w.detail.kind.title) — \(model.snapshot.title)"
         super.init(window: win)
+        ControlWindows.tag(win, .editor, doc: doc)
         win.contentView = NSHostingView(
             rootView: TornEditorView(model: model, id: w.id) { [weak self] in
                 // onGone runs inside a SwiftUI update of this window's own hosting view;

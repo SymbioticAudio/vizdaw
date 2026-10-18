@@ -20,6 +20,7 @@ struct MixerWindow: View {
 
     var body: some View {
         content
+            .background(WindowTag(kind: .mixer, doc: id))
             .onChange(of: KeyDoc(id: id, key: activeState == .key), initial: true) { old, new in
                 KeyDoc.changed(store, window: focusToken.wrappedValue, from: old, to: new)
             }

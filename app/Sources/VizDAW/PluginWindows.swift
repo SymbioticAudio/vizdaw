@@ -152,6 +152,7 @@ final class PluginWindowController: NSWindowController, NSWindowDelegate {
             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        ControlWindows.tag(window, .plugin, doc: docID)
         window.delegate = self
         let hosting = NSHostingView(rootView: PluginWindowContent(model: model, editorHost: editorHost))
         // The window, not the SwiftUI content, decides the size.

@@ -40,8 +40,15 @@ struct VizDAWApp: App {
         // The catalog and support folder exist before any project can open
         // (launch arguments, Finder opens), so "Disable ‹plugin›" works.
         LaunchArguments.parseFlags(CommandLine.arguments)
+        // The control channel (control spec §8) starts before any document
+        // opens, so launch-time dialogs already go to it instead of the screen.
+        if let path = ControlLaunch.socketPath(
+            arguments: CommandLine.arguments, environment: ProcessInfo.processInfo.environment)
+        {
+            ControlChannel.start(path: path)
+        }
         AppSetup.openCatalog()
-        LaunchArguments.apply(CommandLine.arguments, to: appStore)
+        LaunchArguments.apply(ControlLaunch.strip(CommandLine.arguments), to: appStore)
     }
 
     var body: some Scene {
@@ -77,6 +84,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // A clean quit leaves no crash markers.
         MainActor.assumeIsolated {
+            // Pending control calls are answered before the documents go.
+            ControlChannel.stop()
             appStore.closeAll()
             // Stop the engine so no plugin host is dropped while it renders.
             try? shutdown()
@@ -143,6 +152,11 @@ enum PluginAlerts {
         DispatchQueue.main.async {
             guard let item = plugins.alert else { return }
             plugins.alert = nil
+            // Under the control channel no dialog opens (control spec §7).
+            if ControlChannel.active {
+                ControlChannel.note(item)
+                return
+            }
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = item.title
@@ -274,6 +288,14 @@ enum SmokeRun {
 @MainActor
 final class RecoveryAlerts: RecoveryQuestions {
     func afterCrash(project: String, loading: [PluginRefRow], crashed: Bool) -> CrashChoice {
+        // Under the control channel no dialog opens; app.open answers this
+        // with `plugins` (control spec §7).
+        if ControlChannel.active {
+            ControlChannel.note(AlertItem(
+                title: "Open with Plugins Off?",
+                message: "\(project) was not opened; open it with app.open and `plugins`."))
+            return .cancel
+        }
         let alert = NSAlert()
         alert.alertStyle = .warning
         let names = loading.map(\.name).joined(separator: ", ")
@@ -302,6 +324,12 @@ final class RecoveryAlerts: RecoveryQuestions {
     }
 
     func restoreAutosave(project: String) -> Bool {
+        if ControlChannel.active {
+            ControlChannel.note(AlertItem(
+                title: "Restore Autosave",
+                message: "\(project) opened its last save; app.open with `restore_autosave` chooses."))
+            return false
+        }
         let alert = NSAlert()
         alert.messageText = "“\(project)” has an autosave newer than its last save."
         alert.informativeText = "Restoring opens the autosaved version as an unsaved change."

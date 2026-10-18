@@ -232,6 +232,11 @@ enum StoreAlerts {
 
     private static func present(_ store: DocumentStore) {
         while let item = store.takeAlert() {
+            // Under the control channel no dialog opens (control spec §7).
+            if ControlChannel.active {
+                ControlChannel.note(item)
+                continue
+            }
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = item.title
