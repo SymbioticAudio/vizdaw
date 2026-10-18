@@ -38,7 +38,10 @@ func automationRow(_ id: UInt64, tick: Int64, _ target: AutomationTargetRow, _ v
         let p = ParamRow(
             id: 3, name: "Cutoff", module: "", min: 20, max: 20_020, default: 20, value: 20, stepped: false,
             automatable: true, hidden: false)
-        #expect(AutomationLaw.text(.param(slot: 2, param: 3), 0.5, param: p) == "1e+04")
+        #expect(AutomationLaw.text(.param(slot: 2, param: 3), 0.5, param: p) == "10020")
+        for (x, want) in [(999.0, "999"), (1000, "1000"), (10_020, "10020"), (0.001, "0.001"), (0.0123, "0.0123")] {
+            #expect(AutomationLaw.plainText(x) == want)
+        }
         #expect(AutomationLaw.text(.velocityScale(dest: 1), 0.75) == "175%")
     }
 
@@ -114,6 +117,14 @@ func automationRow(_ id: UInt64, tick: Int64, _ target: AutomationTargetRow, _ v
         for lane in [StripLane.velocity, .controller(3), .tempo, .automation(.solo(strip: 2))] {
             #expect(StripLane(lane.lineTarget) == lane)
         }
+    }
+
+    @Test func tempoSkipsNonFiniteBpm() {
+        let tempo = [
+            TempoPointRow(tick: 0, bpm: .nan, ramp: false), TempoPointRow(tick: 1, bpm: .infinity, ramp: false),
+            TempoPointRow(tick: q, bpm: 100, ramp: false),
+        ]
+        #expect(StripLane.tempo.values([], tempo: tempo).map(\.value) == [100_000])
     }
 
     @Test func scaleClampsOutsideTheRow() {

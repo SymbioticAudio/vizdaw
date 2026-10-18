@@ -79,6 +79,20 @@ public enum AutomationLaw {
     /// A normalised value on the 32-bit scale.
     public static func v32(_ v: Double) -> Int64 { Int64((unit(v) * fullScale).rounded()) }
 
+    /// A plain parameter value, never in exponent form: precision follows
+    /// magnitude and trailing zeros go.
+    static func plainText(_ x: Double) -> String {
+        guard x.isFinite else { return "0" }
+        let a = abs(x)
+        let places = a >= 1000 ? 0 : a >= 100 ? 1 : a >= 10 ? 2 : a >= 1 ? 3 : a >= 0.01 ? 4 : 6
+        var t = String(format: "%.\(places)f", x)
+        if t.contains(".") {
+            while t.hasSuffix("0") { t.removeLast() }
+            if t.hasSuffix(".") { t.removeLast() }
+        }
+        return t == "-0" ? "0" : t
+    }
+
     /// A value as the Strip Chart shows it.
     public static func text(_ t: AutoTarget, _ v: Double, param: ParamRow? = nil) -> String {
         switch t {
@@ -93,7 +107,7 @@ public enum AutomationLaw {
         case .param:
             guard let p = param else { return String(format: "%.1f%%", unit(v) * 100) }
             let plain = p.min + unit(v) * (p.max - p.min)
-            return p.stepped ? "\(Int(plain.rounded()))" : String(format: "%.3g", plain)
+            return p.stepped ? "\(Int(plain.rounded()))" : plainText(plain)
         case .velocityScale:
             return String(format: "%.0f%%", velocityScalePercent(v))
         }
@@ -242,8 +256,10 @@ public enum StripLane: Codable, Hashable, Sendable {
     public func values(_ events: [EventRow], tempo: [TempoPointRow]) -> [StripValue] {
         switch self {
         case .tempo:
-            return tempo.map {
-                StripValue(id: nil, tick: $0.tick, length: 0, value: Int64(($0.bpm * 1000).rounded()), ramp: $0.ramp)
+            // A non-finite bpm is skipped rather than trapping.
+            return tempo.filter { $0.bpm.isFinite }.map {
+                let milli = min(max(($0.bpm * 1000).rounded(), 0), 1e9)
+                return StripValue(id: nil, tick: $0.tick, length: 0, value: Int64(milli), ramp: $0.ramp)
             }
         case .velocity, .releaseVelocity, .duration:
             return events.filter { $0.kind == .note }.map { e in
