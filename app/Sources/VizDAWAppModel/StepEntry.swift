@@ -51,7 +51,7 @@ public final class StepEntryModel {
     static let laneGone = "Step entry ended: its lane is gone."
 
     /// Why the target is no longer where steps can go (nil while it is).
-    private func endReason(_ m: DocumentModel) -> String? {
+    func endReason(_ m: DocumentModel) -> String? {
         guard let t = target else { return nil }
         if m.selectedSeq != t.seq { return Self.sequenceChanged }
         if !m.lanes.contains(where: { $0.id == t.lane }) { return Self.laneGone }

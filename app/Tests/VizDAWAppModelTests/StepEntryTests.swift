@@ -95,6 +95,20 @@ import VizDAWCore
         #expect(state()?.marks.punch == true)
     }
 
+    @Test func theEditorStateFollowsTheTransportAndHidesEndedStepEntry() throws {
+        let (s, id, m, f) = try demo()
+        func step() -> StepEntryStateRow? {
+            if case .editor(_, let e)? = ControlStates.state(.editor, id, m) { return e.step }
+            return nil
+        }
+        _ = run("step.entry", m, s, id)
+        _ = run("step.rest", m, s, id)
+        f.state.tick = 61_440
+        #expect(step()?.tick == 61_440, "the transport's position, not the last input's")
+        m.choose(1)
+        #expect(step() == nil, "ended step entry is not shown")
+    }
+
     @Test func aRefusedStepShowsInTheStatusLine() throws {
         let (s, id, m, f) = try demo()
         _ = run("step.entry", m, s, id)
