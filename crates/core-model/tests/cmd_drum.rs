@@ -1,13 +1,17 @@
 use core_model::ModelError;
+use core_model::command::drum::{DrumHit, MAX_PAINT_HITS};
 use core_model::command::{Command, DrumCmd, EventCmd, LaneCmd, SequenceCmd, apply};
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
 use core_model::event::{EventBody, EventSpec};
+use core_model::history::History;
 use core_model::ids::{
     AnyId, Counters, DestId, DrumRowId, EventId, LaneId, PluginInstanceId, SeqId,
 };
 use core_model::mixer::{PluginRef, PluginSlot};
 use core_model::rules::validate;
+use core_model::selection::ViewFilter;
 use core_model::time::{PPQ, Tick};
+use proptest::prelude::*;
 
 fn run(d: &Document, c: Command) -> core_model::Result<Document> {
     apply(d, &c).map(|a| a.doc)
@@ -393,4 +397,247 @@ fn move_row_reports_moved_events() {
         a.report.moved,
         vec![AnyId::Event(EventId(0)), AnyId::Event(EventId(2))]
     );
+}
+
+/// The row's notes in lane 0's active take: `(tick, pitch, velocity, dest)`.
+fn row_notes(d: &Document, pitch: u8) -> Vec<(i64, u8, u16, Option<DestId>)> {
+    d.lane(SeqId(0), LaneId(0))
+        .unwrap()
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match e.body {
+            EventBody::Note {
+                pitch: p, velocity, ..
+            } if p == pitch => Some((e.tick.0, p, velocity, e.dest)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn paint(row: u64, hits: &[(i64, u16)], window: i64) -> Command {
+    drum(DrumCmd::Paint {
+        seq: SeqId(0),
+        lane: LaneId(0),
+        row: DrumRowId(row),
+        hits: hits
+            .iter()
+            .map(|&(t, v)| DrumHit {
+                tick: Tick(t),
+                velocity: v,
+            })
+            .collect(),
+        window: Tick(window),
+        duration: Tick(PPQ / 8),
+    })
+}
+
+#[test]
+fn showing_a_rows_velocity_is_one_undo_step() {
+    // Carried from plan 4a (Task 5): the command had no core test.
+    let mut h = History::new(kit());
+    let show = |on| {
+        drum(DrumCmd::SetRowShowVelocity {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            row: DrumRowId(1),
+            show: on,
+        })
+    };
+    h.execute(&show(true), &ViewFilter::default()).unwrap();
+    let shown = |d: &Document| {
+        d.lane(SeqId(0), LaneId(0))
+            .unwrap()
+            .drum
+            .as_ref()
+            .unwrap()
+            .rows[1]
+            .show_velocity
+    };
+    assert!(shown(h.doc()));
+    assert_eq!(h.undo_label(), Some("Show Drum Row Velocity"));
+    h.undo().unwrap();
+    assert!(!shown(h.doc()));
+    assert!(
+        run(
+            &kit(),
+            drum(DrumCmd::SetRowShowVelocity {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                row: DrumRowId(9),
+                show: true,
+            })
+        )
+        .is_err(),
+        "an unknown row is refused"
+    );
+}
+
+#[test]
+fn paint_adds_hits_where_the_row_has_none_within_a_window() {
+    let q = PPQ / 4;
+    // Row 0 (C2) has notes at 0 and 2 beats. A window of a 16th skips the
+    // hit at 0, the one a little before beat 2, and the repeated one.
+    let a = apply(
+        &kit(),
+        &paint(
+            0,
+            &[
+                (0, 512),
+                (q, 40_000),
+                (2 * q, 512),
+                (2 * PPQ - 100, 512),
+                (q, 512),
+            ],
+            q,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        row_notes(&a.doc, 36),
+        vec![
+            (0, 36, 100, None),
+            (q, 36, 40_000, None),
+            (2 * q, 36, 512, None),
+            (2 * PPQ, 36, 100, None),
+        ]
+    );
+    assert_eq!(a.report.created.len(), 2, "{:?}", a.report);
+    assert!(validate(&a.doc).is_empty());
+    // A row that names a destination gives its notes that destination.
+    let d = run(
+        &kit(),
+        drum(DrumCmd::AddRow {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            name: "Clap".into(),
+            note: 39,
+            dest: Some(DestId(1)),
+        }),
+    )
+    .unwrap();
+    let d = run(&d, paint(2, &[(0, 900)], q)).unwrap();
+    assert_eq!(row_notes(&d, 39), vec![(0, 39, 900, Some(DestId(1)))]);
+    // The drum view lists it in its own row (no new row was made).
+    assert_eq!(rows(&d, 0).len(), 3);
+}
+
+#[test]
+fn paint_refuses_bad_input_and_changes_nothing() {
+    let max = 1i64 << 40;
+    let bad = [
+        paint(0, &[(0, 0)], 10),
+        paint(0, &[(max + 1, 1)], 10),
+        paint(0, &[(0, 1)], 0),
+        paint(0, &[(0, 1)], max + 1),
+        paint(9, &[(0, 1)], 10),
+        drum(DrumCmd::Paint {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            row: DrumRowId(0),
+            hits: vec![],
+            window: Tick(10),
+            duration: Tick(0),
+        }),
+        drum(DrumCmd::Paint {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            row: DrumRowId(0),
+            hits: vec![],
+            window: Tick(10),
+            duration: Tick(10),
+        }),
+        drum(DrumCmd::Paint {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            row: DrumRowId(0),
+            hits: vec![
+                DrumHit {
+                    tick: Tick(0),
+                    velocity: 1
+                };
+                MAX_PAINT_HITS + 1
+            ],
+            window: Tick(10),
+            duration: Tick(10),
+        }),
+    ];
+    for c in bad {
+        let mut h = History::new(kit());
+        assert!(h.execute(&c, &ViewFilter::default()).is_err(), "{c:?}");
+        assert_eq!(h.doc(), &kit());
+        assert_eq!(h.undo_depth(), 0);
+    }
+    // A paint whose every hit is already there adds no undo step.
+    let mut h = History::new(kit());
+    h.execute(
+        &paint(0, &[(0, 1), (2 * PPQ, 1)], 10),
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    assert_eq!(h.undo_depth(), 0);
+}
+
+fn arb_hits() -> impl Strategy<Value = Vec<(i64, u16)>> {
+    let tick = prop_oneof![
+        -(4 * PPQ)..(8 * PPQ),
+        Just(i64::MIN),
+        Just(i64::MAX),
+        Just((1 << 40) - 1),
+        Just(-(1 << 40)),
+    ];
+    prop::collection::vec((tick, any::<u16>()), 0..40)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Hostile paints (any ticks, velocities, windows, durations, rows,
+    /// lanes) never panic; one that applies leaves a valid document whose
+    /// new notes are the row's, at distinct ticks, none with an older note
+    /// of the row starting within its window, and undo brings the
+    /// original back.
+    #[test]
+    fn hostile_paints_apply_cleanly_or_change_nothing(
+        hits in arb_hits(),
+        window in prop_oneof![-5i64..PPQ, Just(i64::MAX), Just(1i64 << 40)],
+        duration in prop_oneof![-5i64..PPQ, Just(i64::MAX)],
+        row in 0u64..4,
+        lane in 0u64..3,
+    ) {
+        let mut h = History::new(kit());
+        let cmd = drum(DrumCmd::Paint {
+            seq: SeqId(0),
+            lane: LaneId(lane),
+            row: DrumRowId(row),
+            hits: hits.iter().map(|&(t, v)| DrumHit { tick: Tick(t), velocity: v }).collect(),
+            window: Tick(window),
+            duration: Tick(duration),
+        });
+        match h.execute(&cmd, &ViewFilter::default()) {
+            Err(_) => prop_assert_eq!(h.doc(), &kit()),
+            Ok(report) => {
+                prop_assert!(validate(h.doc()).is_empty(), "{:?}", validate(h.doc()));
+                let pitch = if row == 0 { 36 } else { 38 };
+                let before: Vec<i64> = row_notes(&kit(), pitch).iter().map(|n| n.0).collect();
+                let after: Vec<i64> = row_notes(h.doc(), pitch).iter().map(|n| n.0).collect();
+                prop_assert_eq!(after.len(), before.len() + report.created.len());
+                let added: Vec<i64> = after.iter().copied().filter(|t| !before.contains(t)).collect();
+                prop_assert_eq!(added.len(), report.created.len(), "distinct new ticks");
+                for a in &added {
+                    prop_assert!(
+                        !before.iter().any(|b| b >= a && *b < a.saturating_add(window)),
+                        "{a} has an older note within {window}"
+                    );
+                }
+                let text = core_model::file::to_json(h.doc()).unwrap();
+                prop_assert_eq!(&core_model::file::from_json(&text).unwrap(), h.doc());
+                while h.undo_depth() > 0 {
+                    h.undo().unwrap();
+                }
+                prop_assert_eq!(h.doc(), &kit());
+            }
+        }
+    }
 }
