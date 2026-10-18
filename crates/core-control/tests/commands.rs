@@ -252,10 +252,60 @@ fn waits_take_their_own_parameters_and_a_bounded_timeout() {
 }
 
 #[test]
+fn the_drum_menu_commands_are_registered() {
+    let drum: Vec<(&str, &str, bool)> = COMMANDS
+        .iter()
+        .filter(|c| c.menu == "Drum")
+        .map(|c| (c.id, c.title, !c.params.is_empty()))
+        .collect();
+    assert_eq!(
+        drum,
+        vec![
+            ("drum.mark_lane", "Drum Lane", true),
+            ("drum.add_row", "Add Drum Row", false),
+            ("drum.show_velocity", "Show Velocity", true),
+            ("drum.split_row", "Split Row to Own Lane", false),
+            ("drum.remove_row", "Remove Drum Row", false),
+            ("drum.timeline", "Timeline View", true),
+        ]
+    );
+    assert!(
+        COMMANDS
+            .iter()
+            .filter(|c| c.menu == "Drum")
+            .all(|c| c.document && c.dialogs.is_empty())
+    );
+    assert_eq!(
+        ok(
+            "command.run",
+            json!({"id": "drum.timeline", "params": {"on": true}})
+        ),
+        Command::CommandRun {
+            id: "drum.timeline".into(),
+            args: vec![("on".into(), ArgValue::Flag(true))],
+            window: None,
+        }
+    );
+    assert_eq!(
+        err(
+            "command.run",
+            json!({"id": "drum.add_row", "params": {"note": 36}})
+        )
+        .0,
+        ErrorCode::InvalidParams,
+        "Add Drum Row takes no parameters"
+    );
+}
+
+#[test]
 fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     let ids: std::collections::BTreeSet<_> = COMMANDS.iter().map(|c| c.id).collect();
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
-    assert_eq!(COMMANDS.len(), 38);
+    assert_eq!(
+        COMMANDS.len(),
+        44,
+        "38 before plan 4e, plus the Drum menu's six"
+    );
     for c in COMMANDS {
         assert!(
             c.id.contains('.')

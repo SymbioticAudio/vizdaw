@@ -145,6 +145,16 @@ struct AppCommands: Commands {
                 .keyboardShortcut("[", modifiers: [.command])
                 .disabled(doc?.editor.navigation.isEmpty ?? true)
         }
+        CommandMenu("Drum") {
+            drumToggle("Drum Lane", DrumCommands.markLane)
+            Divider()
+            drumItem("Add Drum Row", DrumCommands.addRow)
+            drumToggle("Show Velocity", DrumCommands.showVelocity)
+            drumItem("Split Row to Own Lane", DrumCommands.splitRow)
+            drumItem("Remove Drum Row", DrumCommands.removeRow)
+            Divider()
+            drumToggle("Timeline View", DrumCommands.timeline)
+        }
         CommandMenu("Transport") {
             Button(doc?.isPlaying == true ? "Stop" : "Play") { doc?.playStop() }
                 .keyboardShortcut(.space, modifiers: [])
@@ -164,6 +174,23 @@ struct AppCommands: Commands {
             .keyboardShortcut(key, modifiers: .option)
             .disabled(
                 doc == nil || !(doc?.transportKeysEnabled ?? false) || (doc?.editor.selection.events.isEmpty ?? true))
+    }
+
+    /// A Drum menu command (Plan 4e Ruling 13); a refusal shows in the
+    /// status line like any editor command.
+    private func drumItem(_ title: String, _ id: String) -> some View {
+        Button(title) { if let doc { DrumCommands.run(id, doc) } }
+            .disabled(doc.map { !DrumCommands.enabled(id, $0) } ?? true)
+    }
+
+    private func drumToggle(_ title: String, _ id: String) -> some View {
+        Toggle(
+            title,
+            isOn: Binding(
+                get: { doc.map { DrumCommands.isOn(id, $0) } ?? false },
+                set: { on in if let doc { DrumCommands.run(id, on: on, doc) } })
+        )
+        .disabled(doc.map { !DrumCommands.enabled(id, $0) } ?? true)
     }
 
     /// A Modify menu command: the panel set to its task (Plan 4c Ruling 10).

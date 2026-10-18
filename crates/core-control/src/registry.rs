@@ -348,6 +348,27 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌘["),
         true,
     ),
+    CommandSpec {
+        params: ON,
+        ..cmd("drum.mark_lane", "Drum", "Drum Lane", None, true)
+    },
+    cmd("drum.add_row", "Drum", "Add Drum Row", None, true),
+    CommandSpec {
+        params: ON,
+        ..cmd("drum.show_velocity", "Drum", "Show Velocity", None, true)
+    },
+    cmd(
+        "drum.split_row",
+        "Drum",
+        "Split Row to Own Lane",
+        None,
+        true,
+    ),
+    cmd("drum.remove_row", "Drum", "Remove Drum Row", None, true),
+    CommandSpec {
+        params: ON,
+        ..cmd("drum.timeline", "Drum", "Timeline View", None, true)
+    },
     cmd(
         "transport.play_stop",
         "Transport",

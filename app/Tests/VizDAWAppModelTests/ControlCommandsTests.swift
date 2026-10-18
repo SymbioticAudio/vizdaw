@@ -41,6 +41,41 @@ final class FakeControlHost: ControlHost {
         #expect(Set(controlCommandIds()) == ControlCommands.handled)
     }
 
+    @Test func theDrumMenuRunsOnTheSelectedLaneAndTheDrumGrid() throws {
+        let f = drumFake()
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        // No selected lane, no drum grid: unavailable, nothing sent.
+        #expect(failure(run(DrumCommands.markLane, s, id))?.code == .unavailable)
+        #expect(failure(run(DrumCommands.addRow, s, id))?.message == "Open a drum grid first.")
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 30)], events: []))
+        _ = run(DrumCommands.markLane, [ControlArg(name: "on", value: .flag(value: true))], s, id)
+        #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 30, drum: true)))
+        m.editor.openDetail(.lane(seq: 3, lane: 40), kind: .drumGrid)
+        _ = run(DrumCommands.addRow, s, id)
+        #expect(f.edits.last == .drum(edit: .addRow(seq: 3, lane: 40, name: "Closed Hat", note: 42, dest: nil)))
+        // Row commands need a selected row.
+        m.drumGrid(.pane).selectedRow = nil
+        #expect(failure(run(DrumCommands.splitRow, s, id))?.message == DrumGridModel.noRowMessage)
+        m.drumGrid(.pane).select(lane: 0, row: 1)
+        _ = run(DrumCommands.showVelocity, s, id)
+        #expect(f.edits.last == .drum(edit: .showVelocity(seq: 3, lane: 40, row: 2, show: true)))
+        _ = run(DrumCommands.splitRow, s, id)
+        #expect(f.edits.last == .drum(edit: .splitRow(seq: 3, lane: 40, row: 2)))
+        _ = run(DrumCommands.removeRow, s, id)
+        #expect(f.edits.last == .drum(edit: .removeRow(seq: 3, lane: 40, row: 2)))
+        // Timeline View is a setting: on, then toggled back.
+        _ = run(DrumCommands.timeline, [ControlArg(name: "on", value: .flag(value: true))], s, id)
+        #expect(m.editor.layout.drumGrid.view == .timeline)
+        #expect(DrumCommands.isOn(DrumCommands.timeline, m))
+        _ = run(DrumCommands.timeline, s, id)
+        #expect(m.editor.layout.drumGrid.view == .matrix)
+        // A refusal is the core's message.
+        f.editError = .Model(message: "no")
+        #expect(failure(run(DrumCommands.removeRow, s, id)) == .of(.failed, "no"))
+    }
+
     @Test func playStopPlaysAndStopsTheSelectedSequence() throws {
         let (s, id, m, f) = try demo()
         #expect(m.selectedSeq == 3)

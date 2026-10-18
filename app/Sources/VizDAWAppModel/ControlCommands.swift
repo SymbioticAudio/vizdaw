@@ -91,7 +91,7 @@ public enum ControlCommands {
 
     /// Every registry ID `run` handles (a test checks it is all of them).
     public static var handled: Set<String> {
-        other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys)
+        other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -213,6 +213,12 @@ public enum ControlCommands {
         case "transport.return_to_start":
             guard m.returnKeyEnabled else { return unavailable("A text field or list has the keyboard.") }
             m.returnToStart()
+        case _ where DrumCommands.ids.contains(id):
+            switch DrumCommands.run(id, on: args.flag("on"), m) {
+            case .done: break
+            case .unavailable(let why): return unavailable(why)
+            case .refused(let why): return .failed(.of(.failed, why))
+            }
         default:
             return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }
