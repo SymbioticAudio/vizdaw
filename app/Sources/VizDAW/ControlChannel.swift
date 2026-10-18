@@ -267,7 +267,8 @@ enum ControlChannel {
             case .command(let id):
                 let outcome = ControlCommands.run(id, args: [], doc: doc, store: appStore, host: AppControlHost.shared)
                 switch outcome {
-                case .failed(let f) where f.code == .unavailable: break
+                // Delivered as the keyboard passes it (final review M-2).
+                case .failed(let f) where KeyDispatch.channelDelivers(f.code): break
                 case .failed(let f):
                     _ = try? server.fail(token: token, failure: f)
                     return

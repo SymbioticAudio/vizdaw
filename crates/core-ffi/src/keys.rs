@@ -128,6 +128,18 @@ impl Keymap {
             .map(str::to_string)
     }
 
+    /// The command of `id`'s context other than `id` that has `key` (chord
+    /// text), if any: a recorded key the Keys page offers to take with
+    /// Replace. Panic-free (not throwing, so no guard).
+    pub fn taken_by(&self, id: String, key: String) -> Option<String> {
+        let chord = Chord::parse(&key).ok()?;
+        let context = core_control::registry::find(&id)?.context;
+        lock(&self.inner)
+            .holder(chord, context)
+            .filter(|other| *other != id)
+            .map(str::to_string)
+    }
+
     /// Gives command `id` exactly `keys`; a key another command (of the
     /// same context) has is refused naming it, unless `replace` takes it.
     pub fn bind(&self, id: String, keys: Vec<String>, replace: bool) -> Result<(), VizError> {

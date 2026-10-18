@@ -63,6 +63,46 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         #expect(k.row("file.save")?.keys == ["⌘S"], "a loaded file replaces the bindings")
     }
 
+    /// M-4: a slot may not take a key macOS or the app menu keeps.
+    @Test func aSlotCannotTakeASystemKey() {
+        let k = KeyBindings(defaults: MemoryDefaults())
+        #expect(k.slotClash(KeySlotRow(key: "q", modifiers: 8)) == "Quit VizDAW")
+        #expect(k.slotClash(KeySlotRow(key: "h", modifiers: 12)) == "Hide Others")
+        #expect(k.slotClash(KeySlotRow(key: ",", modifiers: 8)) == "Settings…")
+    }
+
+    /// Item 12: Replace is offered only for a key another command has;
+    /// a reset or a load forgets a pending one.
+    @Test func replaceIsOfferedOnlyForATakenKeyAndResetsForgetIt() throws {
+        let k = KeyBindings(defaults: MemoryDefaults())
+        k.record("no.such", key: "X")
+        #expect(k.pending == nil, "nothing to replace")
+        #expect(k.message?.hasSuffix("Replace it?") == false && k.message?.isEmpty == false)
+        for forget in [{ k.reset("transport.stop") }, { k.resetAll() }] {
+            k.record("transport.stop", key: "Space")
+            #expect(k.pending != nil)
+            forget()
+            #expect(k.pending == nil && k.message == nil)
+        }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vzk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("k.vizkeys").path
+        try k.save(to: path)
+        k.record("transport.stop", key: "Space")
+        try k.load(from: path)
+        #expect(k.pending == nil && k.message == nil, "a load forgets it")
+    }
+
+    /// Item 5: a successful bind clears an old message.
+    @Test func aSuccessfulBindClearsTheMessage() throws {
+        let k = KeyBindings(defaults: MemoryDefaults())
+        k.record("no.such", key: "X")
+        #expect(k.message != nil)
+        try k.bind("transport.stop", keys: ["X"])
+        #expect(k.message == nil)
+    }
+
     @Test func aSlotThatClashesNamesTheCommand() {
         let k = KeyBindings(defaults: MemoryDefaults())
         #expect(k.slotClash(KeySlotRow(key: "s", modifiers: 8)) == "Save")
@@ -143,6 +183,32 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         // ⌘ and ⌃ keys still reach the menus.
         #expect(KeyDispatch.passed(modifiers: cmdMod) == .menus)
         #expect(KeyDispatch.passed(modifiers: ctrl) == .menus)
+    }
+
+    /// Item 8: a held key repeats only commands made to repeat (step
+    /// rest, tie, delete, nudges, undo); toggles, transport keys and slots
+    /// run once.
+    @Test func onlySomeCommandsRunOnKeyRepeat() {
+        for id in ["step.rest", "step.tie", "step.delete_last", "editors.nudge_later", "edit.undo"] {
+            #expect(KeyDispatch.runsOnRepeat(.command(id)), "\(id)")
+        }
+        for id in ["step.entry", "transport.play_stop", "transport.loop", "locator.go_1", "transport.stop",
+                   "step.dot", "editors.snap"] {
+            #expect(!KeyDispatch.runsOnRepeat(.command(id)), "\(id)")
+        }
+        #expect(!KeyDispatch.runsOnRepeat(.slot(1)))
+        #expect(KeyDispatch.runsOnRepeat(.pass) && KeyDispatch.runsOnRepeat(.typing))
+    }
+
+    /// M-2: the channel delivers a key whose command cannot run in this
+    /// window as the keyboard does; a dialog or a refusal is its error.
+    @Test func theChannelDeliversKeysTheKeyboardPasses() {
+        for code in [ControlErrorCode.unavailable, .noDocument, .unknownId] {
+            #expect(KeyDispatch.channelDelivers(code), "\(code)")
+        }
+        for code in [ControlErrorCode.dialogRequired, .failed, .busy] {
+            #expect(!KeyDispatch.channelDelivers(code), "\(code)")
+        }
     }
 
     @Test func aPluginWindowsPlainKeysType() {

@@ -314,3 +314,40 @@ fn loading_a_device_or_a_fifo_is_refused_at_once() {
     assert!(matches!(zero, Err(VizError::Model { .. })), "{zero:?}");
     assert!(unchanged);
 }
+
+/// Which other command has a key (the Keys page offers Replace only for
+/// such a key; final review, Task 10 M3).
+#[test]
+fn taken_by_names_the_other_command_of_the_context() {
+    let k = vizdaw_ffi::Keymap::new();
+    assert_eq!(
+        k.taken_by("transport.stop".into(), "Space".into())
+            .as_deref(),
+        Some("transport.play_stop")
+    );
+    assert_eq!(
+        k.taken_by("transport.play_stop".into(), "Space".into()),
+        None,
+        "its own"
+    );
+    assert_eq!(
+        k.taken_by("transport.stop".into(), "F13".into()),
+        None,
+        "a free key"
+    );
+    assert_eq!(
+        k.taken_by("transport.stop".into(), "⌘⌘".into()),
+        None,
+        "not a key"
+    );
+    assert_eq!(
+        k.taken_by("no.such".into(), "Space".into()),
+        None,
+        "no command"
+    );
+    assert_eq!(
+        k.taken_by("step.rest".into(), "Space".into()),
+        None,
+        "another context's key is no clash"
+    );
+}

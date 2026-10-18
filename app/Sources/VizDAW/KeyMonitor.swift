@@ -101,6 +101,9 @@ enum KeyMonitor {
             return true
         }
         let (r, doc) = route(e, in: w, menus: true)
+        // A held key: toggles, transport keys and slots run once per press
+        // (final review item 8).
+        if e.isARepeat, !KeyDispatch.runsOnRepeat(r) { return true }
         if perform(r, doc) { return true }
         switch KeyDispatch.passed(modifiers: modifiers(e.modifierFlags)) {
         case .menus:

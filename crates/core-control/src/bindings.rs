@@ -20,6 +20,19 @@ pub const OPTION: u8 = 4;
 /// ⌘
 pub const COMMAND: u8 = 8;
 
+/// Keys macOS or the app menu keeps, which a keyboard slot may not take
+/// (it would shadow them in its document's window): key name, modifier
+/// bitmask, title.
+pub const RESERVED: [(&str, u8, &str); 7] = [
+    ("q", COMMAND, "Quit VizDAW"),
+    ("h", COMMAND, "Hide VizDAW"),
+    ("h", COMMAND | OPTION, "Hide Others"),
+    ("m", COMMAND, "Minimize"),
+    (",", COMMAND, "Settings…"),
+    ("w", COMMAND, "Close Window"),
+    ("tab", COMMAND, "Switch Apps"),
+];
+
 /// The most keys one command may have.
 pub const MAX_CHORDS: usize = 4;
 /// The largest bindings document read (bytes).
@@ -366,11 +379,18 @@ impl Keymap {
 
     /// The command a keyboard slot's key (`a`, `F5`) with `modifiers` (the
     /// slot's bitmask) clashes with: the global context first, then step
-    /// entry's, since a slot can be pressed in either.
+    /// entry's, since a slot can be pressed in either. A key macOS or the
+    /// app menu keeps ([`RESERVED`], bound or not) clashes as its title.
     pub fn slot_clash(&self, key: &str, modifiers: u8) -> Option<&'static str> {
         let chord = Chord::of_slot(key, modifiers)?;
         self.holder(chord, KeyContext::Global)
             .or_else(|| self.holder(chord, KeyContext::StepEntry))
+            .or_else(|| {
+                RESERVED
+                    .iter()
+                    .find(|(k, m, _)| Chord::of_slot(k, *m) == Some(chord))
+                    .map(|(_, _, title)| *title)
+            })
     }
 
     /// The command a key press runs: with step entry on, its own keys

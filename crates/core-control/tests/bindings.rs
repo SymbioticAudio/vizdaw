@@ -379,3 +379,22 @@ fn a_slot_clashes_with_a_global_or_a_step_entry_key() {
     assert_eq!(k.slot_clash("q", 2), None, "a free key");
     assert_eq!(k.slot_clash("nope", 0), None, "not a key");
 }
+
+/// A slot cannot take a key macOS or the app menu keeps (final review
+/// M-4): the clash names that key's title.
+#[test]
+fn a_slot_cannot_take_a_system_key() {
+    let k = Keymap::default();
+    assert_eq!(k.slot_clash("q", 8), Some("Quit VizDAW"));
+    assert_eq!(k.slot_clash("h", 8), Some("Hide VizDAW"));
+    assert_eq!(k.slot_clash("h", 12), Some("Hide Others"));
+    assert_eq!(k.slot_clash("m", 8), Some("Minimize"));
+    assert_eq!(k.slot_clash(",", 8), Some("Settings…"));
+    assert_eq!(k.slot_clash("tab", 8), Some("Switch Apps"));
+    assert_eq!(k.slot_clash("w", 8), Some("file.close"), "a command first");
+    let mut k = k;
+    k.bind("file.close", &[], false).unwrap();
+    assert_eq!(k.slot_clash("w", 8), Some("Close Window"), "kept unbound");
+    assert_eq!(k.slot_clash("q", 0), None, "plain Q is free");
+    assert_eq!(k.slot_clash("q", 4), None, "⌥Q is free");
+}

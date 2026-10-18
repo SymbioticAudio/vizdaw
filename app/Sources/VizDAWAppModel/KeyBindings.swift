@@ -35,7 +35,9 @@ public final class KeyBindings {
         public let key: String
     }
 
-    public init(defaults: UserDefaults = .standard) {
+    /// `defaults` has no default, so no test can write the real
+    /// preferences (the app passes `MemoryDefaults.appStore()`).
+    public init(defaults: UserDefaults) {
         self.defaults = defaults
         keymap = Keymap()
         if let json = defaults.string(forKey: Self.key) {
@@ -58,6 +60,7 @@ public final class KeyBindings {
     /// command has is refused naming it, unless `replace` takes it.
     public func bind(_ id: String, keys: [String], replace: Bool = false) throws {
         try keymap.bind(id: id, keys: keys, replace: replace)
+        message = nil
         changed()
     }
 
@@ -70,8 +73,15 @@ public final class KeyBindings {
             pending = nil
             message = nil
         } catch {
-            pending = PendingKey(id: id, key: key)
-            message = AlertItem(error, title: "").message + ". Replace it?"
+            let why = AlertItem(error, title: "").message
+            // Replace only for a key another command has (item 12).
+            if keymap.takenBy(id: id, key: key) != nil {
+                pending = PendingKey(id: id, key: key)
+                message = why + ". Replace it?"
+            } else {
+                pending = nil
+                message = why
+            }
         }
     }
 
@@ -90,12 +100,20 @@ public final class KeyBindings {
 
     public func reset(_ id: String) {
         keymap.resetOne(id: id)
+        forgetPending()
         changed()
     }
 
     public func resetAll() {
         keymap.reset()
+        forgetPending()
         changed()
+    }
+
+    /// A reset or a load replaces what a pending Replace was about.
+    private func forgetPending() {
+        pending = nil
+        message = nil
     }
 
     /// Writes the bindings to `path`.
@@ -104,6 +122,7 @@ public final class KeyBindings {
     /// Replaces the bindings with the file's; `message` lists what it
     /// skipped. A file that is no bindings file changes nothing.
     public func load(from path: String) throws {
+        pending = nil
         do {
             let skipped = try keymap.loadFile(path: path)
             message = skipped.isEmpty ? nil : "Skipped: " + skipped.joined(separator: "; ")
@@ -229,6 +248,34 @@ public enum KeyPass: Equatable, Sendable {
 }
 
 extension KeyDispatch {
+    /// The commands a held key runs again at the key-repeat rate: step
+    /// entry's rest, tie and delete, the nudges, undo and redo. Every
+    /// other command, toggles and transport keys among them, and every
+    /// keyboard slot runs once per press (final review item 8).
+    static let repeating: Set<String> = Set(ControlCommands.nudges.keys).union([
+        "step.rest", "step.tie", "step.delete_last", "edit.undo", "edit.redo",
+    ])
+
+    /// Whether a key repeat (`NSEvent.isARepeat`) of route `r` runs it; a
+    /// repeat that does not is used up. Keys VizDAW does not use repeat
+    /// as usual.
+    public static func runsOnRepeat(_ r: KeyRoute) -> Bool {
+        switch r {
+        case .typing, .pass: true
+        case .slot: false
+        case .command(let id): repeating.contains(id)
+        }
+    }
+
+    /// Whether the channel's `ui.key` delivers a key whose command failed
+    /// with `code` to the window, as the keyboard passes it on (final
+    /// review M-2): unavailable, no document (Settings, the Plugin
+    /// Manager) or no handler. A dialog or a refusal is the call's error
+    /// (Ruling 5).
+    public static func channelDelivers(_ code: ControlErrorCode) -> Bool {
+        [.unavailable, .noDocument, .unknownId].contains(code)
+    }
+
     /// Where a key press with modifiers `m` goes when it was not used up.
     public static func passed(modifiers m: ModifiersRow) -> KeyPass {
         KeyRouter.plain(m) ? .window : .menus
