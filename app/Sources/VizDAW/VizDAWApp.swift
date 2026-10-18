@@ -327,7 +327,8 @@ final class RecoveryAlerts: RecoveryQuestions {
         if ControlChannel.active {
             ControlChannel.note(AlertItem(
                 title: "Restore Autosave",
-                message: "\(project) opened its last save; app.open with `restore_autosave` chooses."))
+                message: "\(project) was opened from its last save; close it and app.open with "
+                    + "`restore_autosave: true` to restore the autosave."))
             return false
         }
         let alert = NSAlert()

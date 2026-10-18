@@ -129,6 +129,23 @@ fn demo_play_screenshot_stop() {
         .clone();
     assert_eq!(doc["selected_seq"], song, "Song is selected");
 
+    // A window number that names no window is `no_window` for every
+    // command (spec §5.3).
+    for (cmd, p) in [
+        (
+            "state.get",
+            json!({"target": "document", "window": 999_999_999}),
+        ),
+        (
+            "command.run",
+            json!({"id": "transport.play_stop", "window": 999_999_999}),
+        ),
+        ("ui.tree", json!({"window": 999_999_999})),
+    ] {
+        let e = app.call_err(cmd, p);
+        assert_eq!(e.code, core_control::ErrorCode::NoWindow, "{cmd}: {e}");
+    }
+
     // A command that would open a dialog fails instead, naming it.
     let e = app.call_err("command.run", json!({"id": "file.save", "window": window}));
     assert_eq!(e.dialog.as_deref(), Some("Save"), "{e}");

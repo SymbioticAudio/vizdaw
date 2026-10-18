@@ -17,6 +17,8 @@ enum ControlChannel {
     /// App-level alerts the channel kept from showing (newest last).
     private(set) static var alerts: [AlertItem] = []
     private static var deferred: [Deferred] = []
+    /// Which documents' alerts were reported already.
+    private static var documentAlerts = ControlAlertLog()
     private static let clock = ContinuousClock()
 
     /// A call answered later: `step(expired)` answers and returns true
@@ -76,6 +78,15 @@ enum ControlChannel {
             guard let call = (try? server.nextCall()) ?? nil else { break }
             execute(call, server)
         }
+        noteDocumentAlerts()
+    }
+
+    /// Reports each document alert once (their sheets do not open while
+    /// the channel is on); a call that raised one has already taken it as
+    /// its failure.
+    static func noteDocumentAlerts() {
+        let current = appStore.documents.sorted { $0.key.uuidString < $1.key.uuidString }.compactMap(\.value.alert)
+        for a in documentAlerts.unreported(current) { note(a) }
     }
 
     static func answer(_ server: ControlServer, _ token: UInt64, _ outcome: ControlOutcome) {
@@ -117,6 +128,7 @@ enum ControlChannel {
             answer(server, token, .failed(.of(.busy, "a plugin call is running on the main thread; try again")))
             return
         }
+        if staleWindow(call.request) { return answer(server, token, noWindow) }
         switch call.request {
         case .runCommand(let id, let args, let window):
             answer(server, token, ControlCommands.run(
@@ -200,6 +212,18 @@ enum ControlChannel {
                 return true
             }
         }
+    }
+
+    /// A window number that names no window is `no_window` for every
+    /// command (control spec §5.3), not `no_document`.
+    static func staleWindow(_ request: ControlRequest) -> Bool {
+        let window: WindowRefRow?
+        switch request {
+        case .runCommand(_, _, let w), .state(_, let w): window = w
+        case .wait(let c, let w, _): window = ControlWindowCheck.waitReadsDocument(c) ? w : nil
+        default: return false
+        }
+        return ControlWindowCheck.namesNoWindow(window) { ControlWindows.window(.number(number: $0)) != nil }
     }
 
     static let noWindow = ControlOutcome.failed(.of(.noWindow, "No such VizDAW window (see state.get windows)."))
@@ -367,6 +391,9 @@ struct WindowTag: NSViewRepresentable {
     final class Marker: NSView {
         var kind: WindowKindRow = .other
         var doc: UUID?
+        // Inert for the user: clicks and VoiceOver pass through it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             if let w = window { ControlWindows.tag(w, kind, doc: doc) }

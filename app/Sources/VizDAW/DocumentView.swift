@@ -24,8 +24,10 @@ struct DocumentView: View {
         }
         .alert(
             model.alert?.title ?? "",
+            // With the control channel on no sheet opens (control spec §7):
+            // the channel reports the alert and it stays on the document.
             isPresented: Binding(
-                get: { model.alert != nil },
+                get: { ControlAlertLog.showsSheet(model.alert, channelOn: ControlChannel.active) },
                 set: { if !$0 { model.alert = nil } }),
             presenting: model.alert
         ) { _ in
