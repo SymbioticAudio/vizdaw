@@ -155,6 +155,10 @@ pub struct Engine {
     /// (cells are keyed by strip, not node, so a structural edit never
     /// moves a strip's peaks to another strip).
     meter_slots: BTreeMap<StripId, usize>,
+    /// The automation overrides of the last published graph.
+    overrides: Option<Arc<crate::graph::OverrideSnapshot>>,
+    /// Overrides another engine held, for the next published graph.
+    seed: Option<Arc<crate::graph::OverrideSnapshot>>,
     /// Latency of the last published graph.
     latency: u64,
     collector_stop: Arc<AtomicBool>,
@@ -269,6 +273,8 @@ impl Engine {
             live: BTreeMap::new(),
             spare: BTreeMap::new(),
             meter_slots: BTreeMap::new(),
+            overrides: None,
+            seed: None,
             latency: 0,
             collector_stop,
             collector_paused,
@@ -639,12 +645,31 @@ impl Engine {
             }
         });
         graph.set_controls(&mg.controls);
+        if let Some(seed) = &self.seed {
+            graph.seed_overrides(seed);
+        }
+        let overrides = graph.override_snapshot();
         report.latency_frames = graph.latency();
         self.push(EngineCmd::SetGraph(Box::new(graph)))?;
+        self.seed = None;
+        self.overrides = Some(overrides);
         self.live = next_live;
         self.latency = report.latency_frames;
         self.meter_slots = slots;
         Ok(report)
+    }
+
+    /// The automation overrides the last published graph held at its last
+    /// commit (Plan 4d Ruling 13); stable once the engine's output stopped.
+    pub fn overrides(&self) -> Option<Arc<crate::graph::OverrideSnapshot>> {
+        self.overrides.clone()
+    }
+
+    /// Starts the next published graph from `snap`, another engine's
+    /// overrides (a device rebuild), for the controls whose static value
+    /// is unchanged.
+    pub fn seed_overrides(&mut self, snap: Arc<crate::graph::OverrideSnapshot>) {
+        self.seed = Some(snap);
     }
 
     /// The block size graphs, inserts and sinks are built for: the

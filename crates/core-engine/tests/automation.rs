@@ -763,3 +763,48 @@ fn a_value_the_plugin_refused_is_sent_again() {
     r.render(1_024);
     assert_eq!(*node.took.lock().unwrap(), vec![1.0]);
 }
+
+#[test]
+fn a_new_engine_seeded_with_the_old_overrides_keeps_the_automated_fader() {
+    // A device rebuild makes a new engine while stopped: seeded with the
+    // old engine's overrides it plays the automated value until the fader
+    // moves (Plan 4d Ruling 13, final review Minor 1).
+    let v = fader_norm(-12.0);
+    let wet = song(|s| vec![(0, AutomationTarget::StripFader(s), v)]);
+    let dry = song(|_| vec![]);
+    let base = held_after_stop(&dry, |_| {});
+    let rebuilt = |doc: &Document| {
+        let mut old = rig(&wet.doc, wet.seq, 256);
+        old.engine.play().unwrap();
+        old.render(2_560);
+        old.engine.stop().unwrap();
+        old.render(256);
+        let snap = old.engine.overrides().unwrap();
+        drop(old);
+        let (mut engine, r) = Engine::new(
+            EngineConfig::new(SR),
+            Box::new(OfflineSinks::new(1 << 16).with_tone()),
+        )
+        .unwrap();
+        engine.seed_overrides(snap);
+        engine.load(doc, wet.seq).unwrap();
+        let mut be = OfflineBackend::new(SR, 256);
+        be.start(r).unwrap();
+        let mut n = Rig {
+            engine,
+            be,
+            block: 256,
+        };
+        n.render(512);
+        n.engine.audition(doc, wet.dest, 64, 0xFFFF, true).unwrap();
+        n.render(256)
+    };
+    scaled(&rebuilt(&wet.doc), &base, db_to_gain(fader_db(v)) as f32);
+    let mut b = Builder::from_doc(wet.doc.clone());
+    b.mixer(MixerCmd::SetGain {
+        strip: wet.synth,
+        gain_db: -3.0,
+    })
+    .unwrap();
+    scaled(&rebuilt(&b.finish()), &base, db_to_gain(-3.0) as f32);
+}

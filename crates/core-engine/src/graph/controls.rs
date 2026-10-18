@@ -10,6 +10,8 @@ use core_model::ids::StripId;
 use core_model::mixer::db_to_gain;
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A send as the mixer set it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -106,6 +108,102 @@ pub struct Controls {
     any_override: bool,
     /// Overrides were dropped: the next commit writes the static values.
     dirty: bool,
+    /// Every commit's overrides, for the control thread.
+    mirror: Arc<OverrideSnapshot>,
+}
+
+/// No override, in an [`OverrideSnapshot`] slot.
+const NONE: u64 = u64::MAX;
+
+fn slot(v: Option<f64>) -> u64 {
+    v.map_or(NONE, f64::to_bits)
+}
+
+fn unslot(a: &AtomicU64) -> Option<f64> {
+    match a.load(Ordering::Relaxed) {
+        NONE => None,
+        b => Some(f64::from_bits(b)),
+    }
+}
+
+#[derive(Debug)]
+struct SnapStrip {
+    strip: StripId,
+    base: Vals,
+    feeds: Range<usize>,
+    /// Fader dB, pan, mute (0/1), solo (0/1).
+    over: [AtomicU64; 4],
+}
+
+#[derive(Debug)]
+struct SnapFeed {
+    send: Option<SendSpec>,
+    over_db: AtomicU64,
+}
+
+/// The automation overrides a graph's controls held at their last commit,
+/// readable off the audio thread: a rebuilt engine starts from them, so a
+/// device change while stopped keeps automated values until the user moves
+/// them (Plan 4d Ruling 13, final review Minor 1). Lock-free; written by
+/// the audio thread at each commit.
+#[derive(Debug, Default)]
+pub struct OverrideSnapshot {
+    strips: Box<[SnapStrip]>,
+    feeds: Box<[SnapFeed]>,
+}
+
+impl OverrideSnapshot {
+    /// Whether any override is held.
+    pub fn is_empty(&self) -> bool {
+        self.strips
+            .iter()
+            .all(|s| s.over.iter().all(|a| unslot(a).is_none()))
+            && self.feeds.iter().all(|f| unslot(&f.over_db).is_none())
+    }
+
+    /// The fader override (dB) of `strip`, if any.
+    pub fn fader_db(&self, strip: StripId) -> Option<f64> {
+        self.strips
+            .iter()
+            .find(|s| s.strip == strip)
+            .and_then(|s| unslot(&s.over[0]))
+    }
+
+    /// Controls holding these overrides, for [`Controls::adopt`]. Not RT.
+    fn controls(&self) -> Controls {
+        let strips = self
+            .strips
+            .iter()
+            .map(|s| CtlStrip {
+                strip: s.strip,
+                node: 0,
+                apply_pan: false,
+                base: s.base,
+                over: Over {
+                    db: unslot(&s.over[0]),
+                    pan: unslot(&s.over[1]),
+                    mute: unslot(&s.over[2]).map(|v| v != 0.0),
+                    solo: unslot(&s.over[3]).map(|v| v != 0.0),
+                },
+                feeds: s.feeds.clone(),
+                keeps: 0..0,
+            })
+            .collect();
+        let feeds = self
+            .feeds
+            .iter()
+            .map(|f| CtlFeed {
+                input: 0,
+                send: f.send,
+                over_db: unslot(&f.over_db),
+            })
+            .collect();
+        Controls {
+            strips,
+            feeds,
+            ..Controls::default()
+        }
+    }
 }
 
 impl Controls {
@@ -162,6 +260,24 @@ impl Controls {
                 keeps: i * words..(i + 1) * words,
             });
         }
+        let mirror = Arc::new(OverrideSnapshot {
+            strips: strips
+                .iter()
+                .map(|s: &CtlStrip| SnapStrip {
+                    strip: s.strip,
+                    base: s.base,
+                    feeds: s.feeds.clone(),
+                    over: std::array::from_fn(|_| AtomicU64::new(NONE)),
+                })
+                .collect(),
+            feeds: feeds
+                .iter()
+                .map(|f: &CtlFeed| SnapFeed {
+                    send: f.send,
+                    over_db: AtomicU64::new(NONE),
+                })
+                .collect(),
+        });
         Controls {
             strips: strips.into_boxed_slice(),
             feeds: feeds.into_boxed_slice(),
@@ -169,6 +285,33 @@ impl Controls {
             audible: vec![0u64; words].into_boxed_slice(),
             any_override: false,
             dirty: false,
+            mirror,
+        }
+    }
+
+    /// The overrides of every commit, for the control thread. Not RT.
+    pub(crate) fn snapshot(&self) -> Arc<OverrideSnapshot> {
+        Arc::clone(&self.mirror)
+    }
+
+    /// Takes the overrides `snap` holds, as [`Controls::adopt`] takes an
+    /// old graph's (another engine's, after a device rebuild); true when
+    /// one was taken. Not RT.
+    pub(crate) fn adopt_snapshot(&mut self, snap: &OverrideSnapshot) -> bool {
+        self.adopt(&snap.controls())
+    }
+
+    /// Mirrors the overrides for the control thread. // RT
+    fn publish(&self) {
+        for (s, m) in self.strips.iter().zip(self.mirror.strips.iter()) {
+            let o = s.over;
+            let b = |v: Option<bool>| v.map(|v| if v { 1.0 } else { 0.0 });
+            for (a, v) in m.over.iter().zip([o.db, o.pan, b(o.mute), b(o.solo)]) {
+                a.store(slot(v), Ordering::Relaxed);
+            }
+        }
+        for (f, m) in self.feeds.iter().zip(self.mirror.feeds.iter()) {
+            m.over_db.store(slot(f.over_db), Ordering::Relaxed);
         }
     }
 
@@ -345,6 +488,7 @@ impl Controls {
                 edge(f.input, gain, switched);
             }
         }
+        self.publish();
         true
     }
 }

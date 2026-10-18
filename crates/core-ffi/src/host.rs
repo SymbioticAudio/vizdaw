@@ -89,6 +89,17 @@ pub fn hosts_created() -> u64 {
     HOSTS_CREATED.load(Ordering::Relaxed)
 }
 
+/// The engine's automation override of `strip`'s fader in dB, if it holds
+/// one (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn fader_override(strip: u64) -> Option<f64> {
+    lock(&HOST)
+        .as_ref()?
+        .engine
+        .overrides()?
+        .fader_db(core_model::ids::StripId(strip))
+}
+
 /// Offline events of hosts retired for another session's document (their
 /// logs go with them), until the next `drain_offline_log`.
 #[cfg(feature = "test-hooks")]
@@ -532,9 +543,16 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     if drain {
         std::thread::sleep(DRAIN);
     }
+    // Read once the old output has stopped (dropped first, below).
+    let overrides = old.engine.overrides();
     drop(old);
     let mut new = Host::create()?;
     new.attach(owner, plugins);
+    // Automated values held while stopped survive the rebuild (Plan 4d
+    // Ruling 13, final review Minor 1).
+    if let Some(o) = overrides {
+        new.engine.seed_overrides(o);
+    }
     new.load(doc, seq, looped)?;
     new.engine.locate_tick(at)?;
     if playing {

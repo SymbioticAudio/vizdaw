@@ -14,7 +14,7 @@ pub mod spec;
 
 use core_model::ids::PluginInstanceId;
 
-pub use controls::{FeedSpec, SendSpec, StripControlSpec};
+pub use controls::{FeedSpec, OverrideSnapshot, SendSpec, StripControlSpec};
 pub use exec::{Graph, InsertInit, Runner, SinkTable};
 pub use mixer::{FeedSource, InstrumentFeed};
 pub use node::{

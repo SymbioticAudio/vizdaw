@@ -503,6 +503,21 @@ impl Graph {
         self.controls = Controls::build(specs, |node, k| keys.get(&(node, k)).copied());
     }
 
+    /// The automation overrides of this graph's controls as of their last
+    /// commit, readable from the control thread. Not RT.
+    pub fn override_snapshot(&self) -> std::sync::Arc<crate::graph::controls::OverrideSnapshot> {
+        self.controls.snapshot()
+    }
+
+    /// Starts from the overrides of another engine's graph (`snap`), for
+    /// the controls whose static value did not change, and commits them
+    /// (before the graph reaches a render thread). Not RT.
+    pub fn seed_overrides(&mut self, snap: &crate::graph::controls::OverrideSnapshot) {
+        if self.controls.adopt_snapshot(snap) {
+            self.commit_controls(false);
+        }
+    }
+
     /// Automation's normalised value for a strip control; it takes effect
     /// at the next `commit_controls`. // RT
     ///

@@ -47,6 +47,21 @@ fn t(s: &Session) -> TransportState {
     s.transport().unwrap()
 }
 
+/// Polls the transport until `ok` holds or 5 s pass (slow CI); returns
+/// whether it held. The engine applies Play and Stop a block late.
+fn wait_for(s: &Session, ok: impl Fn(&TransportState) -> bool) -> bool {
+    let start = Instant::now();
+    loop {
+        if ok(&t(s)) {
+            return true;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            return false;
+        }
+        ms(2);
+    }
+}
+
 /// Note-ons with velocity > 0 on MIDI channel 1 (the chords).
 fn chord_note_ons() -> usize {
     drain_offline_log()
@@ -384,8 +399,10 @@ fn a_device_rebuild_drains_without_holding_the_host_lock() {
         "another host call waited {waited:?} for the drain"
     );
     assert!(poll.join().unwrap().is_ok());
-    ms(30);
-    assert!(t(&s).playing, "playback resumed after the rebuild");
+    assert!(
+        wait_for(&s, |t| t.playing),
+        "playback resumed after the rebuild"
+    );
 }
 
 #[test]
@@ -401,8 +418,10 @@ fn a_rebuild_right_after_play_still_resumes_playback() {
         s.play(song).unwrap();
         simulate_event(BackendEvent::DeviceLost);
         s.transport().unwrap();
-        ms(40);
-        assert!(t(&s).playing, "round {round}: playback lost in the rebuild");
+        assert!(
+            wait_for(&s, |t| t.playing),
+            "round {round}: playback lost in the rebuild"
+        );
     }
 }
 
@@ -436,7 +455,7 @@ fn a_stop_during_the_rebuild_drain_is_not_lost() {
     let _g = serial();
     let (s, song) = demo();
     s.play(song).unwrap();
-    ms(40);
+    assert!(wait_for(&s, |t| t.playing));
     simulate_event(BackendEvent::DefaultDeviceChanged);
     let poller = std::sync::Arc::clone(&s);
     let poll = std::thread::spawn(move || poller.transport().map(|t| t.playing));
@@ -445,4 +464,58 @@ fn a_stop_during_the_rebuild_drain_is_not_lost() {
     assert!(poll.join().unwrap().is_ok());
     ms(60);
     assert!(!t(&s).playing, "the Stop was lost to the rebuild");
+}
+
+#[test]
+fn a_device_rebuild_while_stopped_keeps_the_automated_fader() {
+    // Plan 4d Ruling 13: after Stop the last automated value stays until
+    // the user moves the fader, a device change included (final review
+    // Minor 1).
+    use core_engine::fixtures::Builder;
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::mixer::StripKind;
+    use core_model::time::Tick;
+    use vizdaw_ffi::host::fader_override;
+    let _g = serial();
+    let mut b = Builder::new();
+    let dest = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(dest)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0xFFFF, 16 * BAR)]).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let auto = b.lane(seq, "Auto", None).unwrap();
+    let target = AutomationTarget::StripFader(synth);
+    b.events(
+        seq,
+        auto,
+        vec![EventSpec::new(
+            Tick(0),
+            EventBody::Automation {
+                target,
+                value: fader_norm(-12.0),
+            },
+        )],
+    )
+    .unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    s.play(seq.0).unwrap();
+    let start = Instant::now();
+    while fader_override(synth.0).is_none() {
+        assert!(start.elapsed() < Duration::from_secs(5), "never automated");
+        ms(2);
+    }
+    s.stop().unwrap();
+    assert!(wait_for(&s, |t| !t.playing));
+    let held = fader_override(synth.0).expect("Stop keeps the override");
+    assert!((held + 12.0).abs() < 1e-6, "{held}");
+    let created = hosts_created();
+    simulate_event(BackendEvent::SampleRateChanged(44_100.0));
+    t(&s);
+    assert_eq!(hosts_created(), created + 1, "no rebuild");
+    assert!(!t(&s).playing);
+    let after = fader_override(synth.0);
+    assert!(
+        after.is_some_and(|v| (v + 12.0).abs() < 1e-6),
+        "the rebuilt engine dropped the override: {after:?}"
+    );
 }
