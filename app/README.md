@@ -27,7 +27,8 @@ temporary support folder and never scans.
 ## Plugins
 
 - The catalog lives in `~/Library/Application Support/VizDAW/plugins.json`
-  (`VIZDAW_SUPPORT_DIR` moves the whole folder, crash markers included).
+  (`VIZDAW_SUPPORT_DIR` moves the whole folder, crash markers included;
+  with it set, preferences are kept in memory, not saved).
   At launch VizDAW scans new or changed AU and CLAP plugins in the
   background with `vizdaw-scan` (next to the app's executable in the
   bundle; `scripts/swift.sh` points `VIZDAW_SCANNER` at
@@ -76,7 +77,9 @@ VizDAW quits. There is no network port. While the channel is on VizDAW
 opens no dialog of its own: a call that would needs the answer as a
 parameter (`dialog_required` names the dialog and the parameter, for
 example `app.open` asks for `restore_autosave` when an autosave exists),
-and app-level alerts are printed to stderr and listed by `state.get windows`.
+and alerts (app-level and documents' alerts, which open no sheet) are
+printed to stderr once each and listed by `state.get windows`; a
+document's alert also stays in `state.get document` until it is replaced.
 Undo and redo answer `busy` while a plugin call is on the main thread, and
 `modify.template` answers `unavailable` when there are no templates. Model
 edits and loads refuse tick positions or lengths beyond +-2^40.
@@ -102,7 +105,12 @@ yours. It passes `-ApplePersistenceIgnoreState YES`, and with
 VizDAW never reads or writes your real preferences. `vizctl --help` lists
 every command; `vizctl commands` lists the menu commands by ID. `--timeout`
 and `--timeout-ms` must be finite numbers (otherwise exit 2);
-`--restore-autosave` takes only `true` or `false`. Clicks and keys go into
+`--restore-autosave` takes only `true` or `false`. Exit codes: 0 done, 1
+VizDAW answered with an error, 2 bad usage, 3 no connection, launch failure
+or timeout. `launch` refuses (exit 3) a `--home` where a VizDAW still
+answers, before touching its log, and an existing `--home` that is a link,
+belongs to another user or others can write to; without `--home` it makes a
+new private folder in `/tmp`. Clicks and keys go into
 VizDAW's own windows: VizDAW need not be the active app and the pointer does
 not move. A `ui.click` on an element is refused (`no_element`) when the
 element's frame is non-finite or empty or its centre lies outside the
@@ -368,7 +376,9 @@ so press Space twice (play, stop) before the sound steps.
     are disabled with nothing selected. Choose Scale Steps with "Follow the
     sequence's key signature" on: Option-Up turns C-E-G into D-F-A (C
     major). Turn following off, Root D, Scale Dorian: steps follow D
-    Dorian. Quit and relaunch: the settings are kept. In a lane name field
+    Dorian. Quit and relaunch: the settings are kept (not in a `vizctl`
+    home or with `VIZDAW_SUPPORT_DIR` set: preferences then stay in
+    memory). In a lane name field
     and the Comment... editor Option-arrows move the text cursor, not notes.
 47. Busy: with an AU v3 instrument whose editor opens slowly (plan 3c
     steps), start opening it and at once drag a piano-roll note and
@@ -450,7 +460,8 @@ editors (and at the bottom of the panel).
     BPM; "Undo Move Events"). Type 2.1.0 in a note's End cell: its length
     changes ("Undo Edit Event"); an End before the note's Position is
     refused in the status line. Type 64 in a Release cell: it changes.
-    Quit and relaunch: the column choices and the frame rate are kept.
+    Quit and relaunch: the column choices and the frame rate are kept (not
+    in a `vizctl` home or with `VIZDAW_SUPPORT_DIR` set).
 57. Filters: Show lists every kind (Note, Controller, ... Marker) and the
     destinations Built-in Piano, Built-in Bass and Built-in Drums. Turn off
     Controller: the Controller row disappears and the row count drops; turn
