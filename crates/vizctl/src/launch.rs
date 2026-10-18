@@ -156,10 +156,12 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
         .try_clone()
         .map_err(|e| format!("cannot open {}: {e}", log.display()))?;
     let mut cmd = Command::new(&exe);
-    cmd.arg("--control")
+    // The defaults pair goes first: after `--no-scan` AppKit misreads it
+    // and SwiftUI opens no windows at all.
+    cmd.args(["-ApplePersistenceIgnoreState", "YES"])
+        .arg("--control")
         .arg(&socket)
         .arg("--no-scan")
-        .args(["-ApplePersistenceIgnoreState", "YES"])
         .env("HOME", &home)
         .env("VIZDAW_SUPPORT_DIR", &support)
         .env_remove("VIZDAW_CONTROL")

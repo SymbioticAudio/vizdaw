@@ -101,10 +101,10 @@ public enum ControlUI {
         return check == ref.check ? e : nil
     }
 
-    /// The window's content area in window points with a top-left origin.
+    /// The window's whole area in window points with a top-left origin. Not
+    /// `contentLayoutRect`: that leaves out the toolbar, where Play is.
     static func contentRect(of window: NSWindow) -> CGRect {
-        let r = window.contentLayoutRect
-        return CGRect(x: r.minX, y: window.frame.height - r.maxY, width: r.width, height: r.height)
+        CGRect(origin: .zero, size: window.frame.size)
     }
 
     /// Where `p` lands in `window` (an element's centre); nil when the
