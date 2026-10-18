@@ -142,6 +142,52 @@ import VizDAWCore
         #expect(StepCommands.enabled("step.rest", m) && !StepCommands.isOn("step.dot", m))
     }
 
+    @Test func aRefusedNoteOffDoesNotStickTheChord() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        f.stepAnswer = { state, input in
+            var r = state
+            if case .noteOn(let n) = input { r.held.append(n.pitch) }
+            if case .noteOff(let p) = input { r.held.removeAll { $0 == p } }
+            return StepResultRow(state: r, snapshot: nil, moved: false)
+        }
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0x8000, channel: 0)])
+        m.playStop()
+        #expect(m.isPlaying)
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0, channel: 0, on: false)])
+        m.playStop()
+        let before = f.stepCalls.count
+        m.stepEntry.receive([
+            NoteInRow(pitch: 64, velocity: 0x8000, channel: 0), NoteInRow(pitch: 64, velocity: 0, channel: 0, on: false),
+        ])
+        #expect(f.stepCalls.count == before + 2)
+        let held = f.stepCalls[before].state
+        #expect(held.held.isEmpty && held.chord.isEmpty, "the stale key was let go")
+    }
+
+    @Test func stepEntryEndsWhenAnotherSequenceIsShown() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        m.choose(1)
+        let before = f.stepCalls.count
+        #expect(run("step.rest", m, s, id) != nil)
+        #expect(f.stepCalls.count == before && !m.stepEntry.isOn)
+        #expect(m.editor.status == StepEntryModel.sequenceChanged)
+    }
+
+    @Test func stepEntryEndsWhenItsLaneIsGone() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        f.laneTable[3] = f.laneTable[3]?.filter { $0.id != 30 }
+        var snap = try f.snapshot()
+        snap.version += 1
+        m.apply(snap)
+        let before = f.stepCalls.count
+        #expect(run("step.rest", m, s, id) != nil)
+        #expect(f.stepCalls.count == before && !m.stepEntry.isOn)
+        #expect(m.editor.status == StepEntryModel.laneGone)
+    }
+
     @Test func stepKeysWinOnlyDuringStepEntry() {
         let keys = KeyBindings(defaults: MemoryDefaults())
         func route(_ code: UInt16, step: Bool) -> KeyRoute {

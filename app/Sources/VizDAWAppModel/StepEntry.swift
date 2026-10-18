@@ -47,12 +47,33 @@ public final class StepEntryModel {
 
     static let playingMessage = "Stop playing to enter steps."
     static let offMessage = "Step entry is off (Step > Step Entry)."
+    static let sequenceChanged = "Step entry ended: the sequence changed."
+    static let laneGone = "Step entry ended: its lane is gone."
+
+    /// Why the target is no longer where steps can go (nil while it is).
+    private func endReason(_ m: DocumentModel) -> String? {
+        guard let t = target else { return nil }
+        if m.selectedSeq != t.seq { return Self.sequenceChanged }
+        if !m.lanes.contains(where: { $0.id == t.lane }) { return Self.laneGone }
+        return nil
+    }
 
     /// One input; a step moves the transport to the next position.
     @discardableResult
     public func input(_ i: StepInputRow) -> KeyOutcome {
         guard let m = document, var s = state, let t = target else { return .unavailable(Self.offMessage) }
-        guard !m.isPlaying else { return .unavailable(Self.playingMessage) }
+        if let why = endReason(m) {
+            stop()
+            m.editor.status = why
+            return .unavailable(why)
+        }
+        guard !m.isPlaying else {
+            // A key let go while playing never arrives: forget the held ones.
+            s.held = Data()
+            s.chord = []
+            state = s
+            return .unavailable(Self.playingMessage)
+        }
         m.poll()
         s.tick = m.transport.tick
         do {
@@ -87,6 +108,7 @@ public final class StepEntryModel {
     /// The step bar's line: "Step Entry · Chords · 1/8 dotted".
     public var summary: String? {
         guard let s = state, let t = target, let m = document else { return nil }
+        guard endReason(m) == nil else { return nil }
         let lane = m.lanes.first { $0.id == t.lane }?.name ?? "Lane \(t.lane)"
         var v = Self.title(s.value)
         if s.dotted { v += " dotted" }
