@@ -4,11 +4,11 @@
 //! app. Run it with
 //!
 //! ```text
-//! VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture
+//! VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1
 //! ```
 //!
 //! Every wait is a condition with a generous timeout (slow CI runners);
-//! there is no fixed sleep.
+//! there is no fixed sleep, only short poll intervals.
 
 use core_control::client::{CallError, Client};
 use serde_json::{Value, json};
@@ -183,18 +183,39 @@ fn demo_play_screenshot_stop() {
 fn click_play_and_press_space() {
     let mut app = App::start();
     let window = app.call("app.new_demo", json!({}))["window"].clone();
-    let tree = app.call("ui.tree", json!({"window": window}));
-    let play = vizctl::cli::find_in_tree(&tree, "Play");
-    let id = play["matches"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|n| n["role"] == "AXButton")
-        .unwrap_or_else(|| panic!("no Play button in {play}"))["id"]
-        .clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    // The toolbar may come up after the window (slow runners): poll the
+    // tree for the button labelled exactly "Play".
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let id = loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(id) = play_button(&tree["nodes"]) {
+            break id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no Play button within {WAIT_MS} ms in {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
     app.call("ui.click", json!({"window": window, "element": id}));
     app.wait(&window, json!({"condition": "playing"}));
     app.call("ui.key", json!({"window": window, "key": "space"}));
     app.wait(&window, json!({"condition": "stopped"}));
     app.quit();
+}
+
+/// The ID of the tree's button labelled (or titled) exactly "Play".
+fn play_button(nodes: &Value) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        let exact = |k: &str| n[k].as_str() == Some("Play");
+        if n["role"] == "AXButton" && (exact("label") || exact("title")) {
+            Some(n["id"].clone())
+        } else {
+            play_button(&n["children"])
+        }
+    })
 }

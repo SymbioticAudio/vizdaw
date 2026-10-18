@@ -7,7 +7,8 @@ use core_control::client::Client;
 use core_control::server::MAX_SOCKET_PATH;
 use serde_json::json;
 use std::fs;
-use std::os::unix::fs::DirBuilderExt;
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,7 +18,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub struct LaunchOptions {
     /// `VizDAW.app` or its executable.
     pub app: PathBuf,
-    /// The throwaway home (made if missing); None: a new one in `/tmp`.
+    /// The throwaway home (made 0700 if missing; an existing one must be
+    /// this user's and not writable by others); None: a new one in `/tmp`.
     pub home: Option<PathBuf>,
     /// Open the demo project at launch.
     pub demo: bool,
@@ -100,12 +102,125 @@ pub fn executable(app: &Path) -> PathBuf {
     }
 }
 
-fn private_dir(p: &Path) -> Result<(), String> {
+/// A fresh home in `/tmp`, made 0700 by this process: `mkdir` fails when
+/// the name exists, so a directory someone planted is never used.
+fn fresh_home() -> Result<PathBuf, String> {
+    fresh_dir(|attempt| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        PathBuf::from(format!(
+            "/tmp/vizctl-{}-{nanos}-{attempt}",
+            std::process::id()
+        ))
+    })
+}
+
+/// Makes the first of `name(0)`, `name(1)`, … that does not exist yet,
+/// 0700; never reuses an existing one.
+fn fresh_dir(name: impl Fn(u32) -> PathBuf) -> Result<PathBuf, String> {
+    let mut last = String::new();
+    for attempt in 0..100u32 {
+        let p = name(attempt);
+        match fs::DirBuilder::new().mode(0o700).create(&p) {
+            Ok(()) => return Ok(p),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                last = format!("{} exists", p.display());
+            }
+            Err(e) => return Err(format!("cannot create {}: {e}", p.display())),
+        }
+    }
+    Err(format!("cannot make a new home ({last})"))
+}
+
+/// This user's id, read from a directory made in `dir` for the purpose
+/// (std has no `getuid`; the crate has no unsafe code).
+fn my_uid(dir: &Path) -> Result<u32, String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let probe = dir.join(format!(".vizctl-probe-{}-{nanos}", std::process::id()));
     fs::DirBuilder::new()
-        .recursive(true)
         .mode(0o700)
-        .create(p)
-        .map_err(|e| format!("cannot create {}: {e}", p.display()))
+        .create(&probe)
+        .map_err(|e| format!("cannot check who owns {}: {e}", dir.display()))?;
+    let uid = fs::symlink_metadata(&probe).map(|m| m.uid());
+    let _ = fs::remove_dir(&probe);
+    uid.map_err(|e| format!("cannot check who owns {}: {e}", dir.display()))
+}
+
+/// Checks that an existing `p` is a real directory (not a link) owned by
+/// `uid` that nobody else can write to.
+fn check_owned(p: &Path, m: &fs::Metadata, uid: u32) -> Result<(), String> {
+    if m.file_type().is_symlink() || !m.is_dir() {
+        return Err(format!("{} is not a directory", p.display()));
+    }
+    if m.uid() != uid {
+        return Err(format!("{} belongs to another user", p.display()));
+    }
+    let mode = m.permissions().mode();
+    if mode & 0o022 != 0 {
+        return Err(format!(
+            "{} is writable by other users (mode {:o}); use a private --home",
+            p.display(),
+            mode & 0o777
+        ));
+    }
+    Ok(())
+}
+
+/// The caller's `--home`: made 0700 when missing (its parents as
+/// needed); when it exists it must be this user's own directory, not
+/// writable by others. Returns this user's id.
+fn own_home(p: &Path) -> Result<u32, String> {
+    match fs::symlink_metadata(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(p)
+                .map_err(|e| format!("cannot create {}: {e}", p.display()))?;
+            fs::symlink_metadata(p)
+                .map(|m| m.uid())
+                .map_err(|e| format!("cannot read {}: {e}", p.display()))
+        }
+        Err(e) => Err(format!("cannot read {}: {e}", p.display())),
+        Ok(m) => {
+            if m.file_type().is_symlink() || !m.is_dir() {
+                return Err(format!("{} is not a directory", p.display()));
+            }
+            let uid = my_uid(p)?;
+            check_owned(p, &m, uid)?;
+            Ok(uid)
+        }
+    }
+}
+
+/// A folder inside the home: made 0700, or an existing one of `uid`'s
+/// that nobody else can write to.
+fn private_dir(p: &Path, uid: u32) -> Result<(), String> {
+    match fs::symlink_metadata(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::DirBuilder::new()
+            .mode(0o700)
+            .create(p)
+            .map_err(|e| format!("cannot create {}: {e}", p.display())),
+        Err(e) => Err(format!("cannot read {}: {e}", p.display())),
+        Ok(m) => check_owned(p, &m, uid),
+    }
+}
+
+/// Whether a VizDAW answers on `socket` already.
+fn answers(socket: &Path) -> bool {
+    fs::symlink_metadata(socket).is_ok()
+        && Client::connect(socket)
+            .ok()
+            .and_then(|mut c| c.call("ping", json!({}), Duration::from_secs(5)).ok())
+            .is_some()
 }
 
 /// The last `n` lines of the log, for errors.
@@ -127,21 +242,20 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
             exe.display()
         ));
     }
-    let home = match &o.home {
-        Some(h) => h.clone(),
+    let (home, uid) = match &o.home {
+        Some(h) => (h.clone(), own_home(h)?),
         None => {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0);
-            PathBuf::from(format!("/tmp/vizctl-{}-{nanos}", std::process::id()))
+            let h = fresh_home()?;
+            let uid = fs::symlink_metadata(&h)
+                .map(|m| m.uid())
+                .map_err(|e| format!("cannot read {}: {e}", h.display()))?;
+            (h, uid)
         }
     };
-    private_dir(&home)?;
     let ctl = home.join("ctl");
-    private_dir(&ctl)?;
+    private_dir(&ctl, uid)?;
     let support = home.join("support");
-    private_dir(&support)?;
+    private_dir(&support, uid)?;
     let socket = ctl.join("vizdaw.sock");
     if socket.as_os_str().len() > MAX_SOCKET_PATH {
         return Err(format!(
@@ -149,7 +263,18 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
             socket.display()
         ));
     }
+    // Before the log is touched: a VizDAW still running in this home
+    // keeps its log, and its socket is not mistaken for the new app's.
+    if answers(&socket) {
+        return Err(format!(
+            "another VizDAW is listening on {}",
+            socket.display()
+        ));
+    }
     let log = home.join("vizdaw.log");
+    if fs::symlink_metadata(&log).is_ok_and(|m| !m.is_file()) {
+        return Err(format!("{} is not a regular file", log.display()));
+    }
     let out =
         fs::File::create(&log).map_err(|e| format!("cannot create {}: {e}", log.display()))?;
     let err = out
@@ -201,5 +326,39 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
             ));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_home_never_reuses_a_planted_directory() {
+        let d = tempfile::Builder::new()
+            .prefix("vzf")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let planted = d.path().join("home-0");
+        fs::create_dir(&planted).unwrap();
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o777)).unwrap();
+        let home = fresh_dir(|n| d.path().join(format!("home-{n}"))).unwrap();
+        assert_eq!(home, d.path().join("home-1"), "the planted one is skipped");
+        let m = fs::symlink_metadata(&home).unwrap();
+        assert_eq!(m.permissions().mode() & 0o777, 0o700);
+        // A planted link is skipped too (mkdir does not follow it).
+        std::os::unix::fs::symlink(&planted, d.path().join("link-0")).unwrap();
+        let home = fresh_dir(|n| d.path().join(format!("link-{n}"))).unwrap();
+        assert_eq!(home, d.path().join("link-1"));
+    }
+
+    #[test]
+    fn a_fresh_home_is_in_tmp_and_private() {
+        let home = fresh_home().unwrap();
+        let m = fs::symlink_metadata(&home).unwrap();
+        assert!(home.starts_with("/tmp"));
+        assert!(m.is_dir() && !m.file_type().is_symlink());
+        assert_eq!(m.permissions().mode() & 0o777, 0o700);
+        fs::remove_dir(&home).unwrap();
     }
 }

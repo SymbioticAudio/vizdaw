@@ -1,5 +1,6 @@
 //! Arguments to requests, and the exit codes: 0 done, 1 VizDAW answered
-//! with an error, 2 bad usage, 3 no connection (control spec §10).
+//! with an error, 2 bad usage, 3 no connection, launch failure or
+//! timeout (control spec §10).
 
 use crate::launch::{LaunchOptions, launch};
 use core_control::client::{CallError, Client};
@@ -36,7 +37,8 @@ The socket defaults to $VIZDAW_CONTROL. Results print as JSON on stdout.
   call CMD [PARAMS-JSON]       send any request
 
 Every command except launch takes --window N (a number from `state windows`).
-Exit codes: 0 done, 1 VizDAW answered with an error, 2 bad usage, 3 no connection.";
+Exit codes: 0 done, 1 VizDAW answered with an error, 2 bad usage,
+3 no connection, launch failure or timeout (no reply, closed, bad reply).";
 
 /// A request to send.
 #[derive(Debug, Clone, PartialEq)]

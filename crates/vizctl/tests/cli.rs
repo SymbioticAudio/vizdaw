@@ -329,3 +329,95 @@ fn dropping_launched_stops_the_child_unless_detached() {
     assert!(alive(pid), "detached stays running");
     let _ = Process::new("/bin/kill").arg(pid.to_string()).output();
 }
+
+fn tmp(prefix: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in("/tmp")
+        .unwrap()
+}
+
+fn launch_into(home: &std::path::Path) -> Result<vizctl::launch::Launched, String> {
+    launch(&LaunchOptions {
+        app: "/usr/bin/true".into(),
+        home: Some(home.to_path_buf()),
+        demo: false,
+        timeout: Duration::from_secs(60),
+        env: vec![],
+    })
+}
+
+/// README step 82: a second launch into a home whose VizDAW still runs
+/// fails, exit 3, and leaves that VizDAW's log alone.
+#[test]
+fn launch_refuses_a_home_whose_vizdaw_still_answers() {
+    let d = tmp("vzr");
+    let home = d.path().join("h");
+    let socket = home.join("ctl/vizdaw.sock");
+    let _running = Server::start(&socket, Config::default()).unwrap();
+    let log = home.join("vizdaw.log");
+    std::fs::write(&log, "the running VizDAW's log\n").unwrap();
+    let e = launch_into(&home).unwrap_err();
+    assert!(e.contains("another VizDAW is listening on"), "{e}");
+    assert!(e.contains(socket.to_str().unwrap()), "{e}");
+    let out = Process::new(env!("CARGO_BIN_EXE_vizctl"))
+        .args(["launch", "--app", "/usr/bin/true", "--home"])
+        .arg(&home)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("another VizDAW is listening"),
+        "{out:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "the running VizDAW's log\n",
+        "the running app's log is untouched"
+    );
+}
+
+/// Spec §10: the home is private. An existing `--home` must be a real
+/// directory of this user's that others cannot write to; nothing in it
+/// may be a planted link.
+#[test]
+fn launch_refuses_a_home_others_could_have_planted() {
+    let d = tmp("vzp");
+    // A link as the home.
+    let target = d.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    let link = d.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let e = launch_into(&link).unwrap_err();
+    assert!(e.contains("is not a directory"), "{e}");
+    // A home anyone can write to.
+    let open = d.path().join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let e = launch_into(&open).unwrap_err();
+    assert!(e.contains("writable by other users"), "{e}");
+    // A planted link for the socket folder inside a private home.
+    let home = d.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(&target, home.join("ctl")).unwrap();
+    let e = launch_into(&home).unwrap_err();
+    assert!(e.contains("ctl is not a directory"), "{e}");
+    // A planted link for the log: the file it points at is not truncated.
+    let home2 = d.path().join("home2");
+    std::fs::create_dir(&home2).unwrap();
+    std::fs::set_permissions(&home2, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let victim = d.path().join("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    std::os::unix::fs::symlink(&victim, home2.join("vizdaw.log")).unwrap();
+    let e = launch_into(&home2).unwrap_err();
+    assert!(e.contains("not a regular file"), "{e}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    // The binary exits 3 with the reason.
+    let out = Process::new(env!("CARGO_BIN_EXE_vizctl"))
+        .args(["launch", "--app", "/usr/bin/true", "--home"])
+        .arg(&open)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+}
