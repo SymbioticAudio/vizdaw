@@ -23,11 +23,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The longest socket path macOS accepts (`sun_path` is 104 bytes with
 /// its terminating NUL).
 pub const MAX_SOCKET_PATH: usize = 103;
+
+/// How long `stop` waits for the connections to write their last
+/// replies and close.
+const STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// Limits and timeouts.
 #[derive(Debug, Clone)]
@@ -80,6 +84,10 @@ struct Shared {
     shots: AtomicU64,
     connections: AtomicUsize,
     stopping: AtomicBool,
+    /// Tests: how long a connection waits before writing a reply once
+    /// stopping (a slow thread at quit).
+    #[cfg(test)]
+    stop_reply_delay_ms: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -105,8 +113,8 @@ pub struct Server {
 }
 
 /// Checks (or makes) the socket's private directory and clears a stale
-/// socket; returns the directory.
-fn prepare(path: &Path) -> Result<PathBuf, StartError> {
+/// socket; returns the directory and its identity.
+fn prepare(path: &Path) -> Result<(PathBuf, DirIdentity), StartError> {
     let fail = |m: String| Err(StartError(m));
     if !path.is_absolute() {
         return fail(format!("{} is not an absolute path", path.display()));
@@ -135,10 +143,14 @@ fn prepare(path: &Path) -> Result<PathBuf, StartError> {
         }
         Ok(_) => {}
     }
-    let mode = fs::metadata(dir)
-        .map_err(|e| StartError(format!("cannot read {}: {e}", dir.display())))?
-        .permissions()
-        .mode();
+    // Never follow a link: the directory itself is checked, and its
+    // identity is kept to re-check it once the socket exists.
+    let meta = fs::symlink_metadata(dir)
+        .map_err(|e| StartError(format!("cannot read {}: {e}", dir.display())))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return fail(format!("{} is not a directory", dir.display()));
+    }
+    let mode = meta.permissions().mode();
     if mode & 0o077 != 0 {
         return fail(format!(
             "{} is open to other users (mode {:o}); the socket needs a private directory (chmod 700)",
@@ -146,6 +158,10 @@ fn prepare(path: &Path) -> Result<PathBuf, StartError> {
             mode & 0o777
         ));
     }
+    let identity = DirIdentity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    };
     match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
             if UnixStream::connect(path).is_ok() {
@@ -159,15 +175,56 @@ fn prepare(path: &Path) -> Result<PathBuf, StartError> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return fail(format!("cannot read {}: {e}", path.display())),
     }
-    Ok(dir.to_path_buf())
+    Ok((dir.to_path_buf(), identity))
+}
+
+/// Which directory `prepare` checked (device and inode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+/// Re-checks the socket's directory once the socket is bound (spec §8):
+/// without following links it must still be the directory `prepare`
+/// checked, private, and owned by the socket's owner (this user). A
+/// directory swapped for a link, or loosened, between the checks fails.
+fn verify_dir(dir: &Path, expected: DirIdentity, socket_uid: u32) -> Result<(), String> {
+    let m = fs::symlink_metadata(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    if m.file_type().is_symlink() || !m.is_dir() {
+        return Err(format!("{} is no longer a directory", dir.display()));
+    }
+    if (DirIdentity {
+        dev: m.dev(),
+        ino: m.ino(),
+    }) != expected
+    {
+        return Err(format!(
+            "{} was replaced while the socket was made",
+            dir.display()
+        ));
+    }
+    let mode = m.permissions().mode();
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "{} is open to other users (mode {:o})",
+            dir.display(),
+            mode & 0o777
+        ));
+    }
+    if m.uid() != socket_uid {
+        return Err(format!("{} belongs to another user", dir.display()));
+    }
+    Ok(())
 }
 
 impl Server {
     /// Listens on `path` (spec §8): the directory is created 0700 or must
-    /// already be private and owned by this user; a stale socket is
-    /// removed; the socket is made 0600.
+    /// already be private and owned by this user, and is checked again,
+    /// without following links, once the socket is bound; a stale socket
+    /// is removed; the socket is made 0600.
     pub fn start(path: &Path, config: Config) -> Result<Server, StartError> {
-        let dir = prepare(path)?;
+        let (dir, identity) = prepare(path)?;
         let listener = UnixListener::bind(path)
             .map_err(|e| StartError(format!("cannot listen on {}: {e}", path.display())))?;
         let fail = |m: String| {
@@ -178,12 +235,13 @@ impl Server {
             return fail(format!("cannot make {} private: {e}", path.display()));
         }
         // The socket was made by this process: its owner is this user.
-        match (fs::metadata(path), fs::metadata(&dir)) {
-            (Ok(s), Ok(d)) if s.uid() == d.uid() => {}
-            (Ok(_), Ok(_)) => return fail(format!("{} belongs to another user", dir.display())),
-            (Err(e), _) | (_, Err(e)) => {
-                return fail(format!("cannot read {}: {e}", dir.display()));
-            }
+        let socket_uid = match fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_socket() => m.uid(),
+            Ok(_) => return fail(format!("{} is not the socket just made", path.display())),
+            Err(e) => return fail(format!("cannot read {}: {e}", path.display())),
+        };
+        if let Err(m) = verify_dir(&dir, identity, socket_uid) {
+            return fail(m);
         }
         let shared = Arc::new(Shared {
             config,
@@ -197,6 +255,8 @@ impl Server {
             shots: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
             stopping: AtomicBool::new(false),
+            #[cfg(test)]
+            stop_reply_delay_ms: AtomicU64::new(0),
         });
         let s = Arc::clone(&shared);
         let acceptor = std::thread::Builder::new()
@@ -252,7 +312,8 @@ impl Server {
     }
 
     /// Stops: pending calls are answered `shutting_down`, connections
-    /// close, the socket file goes. Idempotent.
+    /// close (waiting up to half a second for their last replies to be
+    /// written), the socket file goes. Idempotent.
     pub fn stop(&mut self) {
         let s = &self.shared;
         if s.stopping.swap(true, Ordering::SeqCst) {
@@ -272,6 +333,13 @@ impl Server {
         }
         for (_, st) in lock(&s.streams).drain() {
             let _ = st.shutdown(std::net::Shutdown::Read);
+        }
+        // Let the connections write their last replies (`shutting_down`,
+        // `app.quit`'s answer) before the app may exit; bounded, as a
+        // client that reads nothing must not hold up quitting.
+        let deadline = Instant::now() + STOP_GRACE;
+        while s.connections.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
         }
         let _ = fs::remove_file(&s.path);
     }
@@ -420,6 +488,11 @@ fn serve(s: &Arc<Shared>, stream: UnixStream) {
                 handle(s, &line)
             }
         };
+        #[cfg(test)]
+        if s.stopping.load(Ordering::SeqCst) {
+            let ms = s.stop_reply_delay_ms.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(ms));
+        }
         let text = reply_line(id.as_ref(), &outcome);
         if writer
             .write_all(text.as_bytes())
@@ -491,4 +564,104 @@ fn handle(s: &Arc<Shared>, line: &[u8]) -> (Option<RequestId>, Result<Value, Con
     });
     lock(&s.waiting).remove(&token);
     (id, outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::request_line;
+    use std::io::Read;
+
+    fn private_tmp() -> tempfile::TempDir {
+        let d = tempfile::Builder::new()
+            .prefix("vzu")
+            .tempdir_in("/tmp")
+            .unwrap();
+        fs::set_permissions(d.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        d
+    }
+
+    fn identity(p: &Path) -> DirIdentity {
+        let m = fs::symlink_metadata(p).unwrap();
+        DirIdentity {
+            dev: m.dev(),
+            ino: m.ino(),
+        }
+    }
+
+    fn my_uid(d: &Path) -> u32 {
+        fs::symlink_metadata(d).unwrap().uid()
+    }
+
+    #[test]
+    fn verify_dir_accepts_the_checked_private_directory() {
+        let d = private_tmp();
+        let dir = d.path().join("ctl");
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let uid = my_uid(d.path());
+        assert_eq!(verify_dir(&dir, identity(&dir), uid), Ok(()));
+    }
+
+    #[test]
+    fn verify_dir_refuses_a_directory_swapped_for_a_symlink() {
+        let d = private_tmp();
+        let dir = d.path().join("ctl");
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let checked = identity(&dir);
+        let uid = my_uid(d.path());
+        // The swap: the checked directory goes, a link to another private
+        // directory of the user's takes its name.
+        let other = d.path().join("other");
+        fs::DirBuilder::new().mode(0o700).create(&other).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        std::os::unix::fs::symlink(&other, &dir).unwrap();
+        let e = verify_dir(&dir, checked, uid).unwrap_err();
+        assert!(e.contains("no longer a directory"), "{e}");
+        // Even the link's target, a private directory of this user's,
+        // is not the one checked.
+        let e = verify_dir(&other, checked, uid).unwrap_err();
+        assert!(e.contains("replaced"), "{e}");
+    }
+
+    #[test]
+    fn verify_dir_refuses_a_directory_opened_to_others() {
+        let d = private_tmp();
+        let dir = d.path().join("ctl");
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let checked = identity(&dir);
+        let uid = my_uid(d.path());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let e = verify_dir(&dir, checked, uid).unwrap_err();
+        assert!(e.contains("open to other users"), "{e}");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let e = verify_dir(&dir, checked, uid.wrapping_add(1)).unwrap_err();
+        assert!(e.contains("another user"), "{e}");
+    }
+
+    #[test]
+    fn stop_returns_only_after_the_last_replies_are_written() {
+        let d = private_tmp();
+        let path = d.path().join("ctl").join("s.sock");
+        let mut s = Server::start(&path, Config::default()).unwrap();
+        // A connection thread that is slow to write at quit.
+        s.shared.stop_reply_delay_ms.store(200, Ordering::SeqCst);
+        let mut c = UnixStream::connect(&path).unwrap();
+        let line = request_line(&RequestId::Num(1), "app.quit", &json!({}));
+        c.write_all(format!("{line}\n").as_bytes()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while s.next_call().is_none() {
+            assert!(Instant::now() < deadline, "the call never arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        s.stop();
+        // The app may exit right now: the reply must already be there.
+        c.set_nonblocking(true).unwrap();
+        let mut buf = Vec::new();
+        match c.read_to_end(&mut buf) {
+            Ok(_) => {}
+            Err(e) => panic!("no reply when stop() returned: {e}"),
+        }
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("shutting_down"), "{text}");
+    }
 }
