@@ -8,6 +8,7 @@ use crate::ids::{PluginInstanceId, StateBlobId};
 use crate::modify::Modify;
 use crate::rule::SelectMode;
 use crate::selection::{Selection, ViewFilter};
+use std::collections::BTreeMap;
 
 /// Milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -130,6 +131,46 @@ impl History {
             return None;
         }
         self.future.last().map(|v| &v.doc)
+    }
+
+    /// Every media file the history references: the package-relative
+    /// path of each item of the present document, of every undo and redo
+    /// state, and (while a transaction is open) of the states it would
+    /// restore on abort, with the item's content hash when any state
+    /// knows it. Media files are write-once, so a path names one audio.
+    ///
+    /// This is the set of files a project must keep (final review I3):
+    /// Save As carries all of them, so Undo and Redo after Save As find
+    /// their media; plan 5b's retention rule (which files may go to the
+    /// Trash on save or close) is defined over this same set, never over
+    /// the present document alone.
+    pub fn referenced_media_anywhere(&self) -> BTreeMap<String, Option<String>> {
+        let mut out: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let txn = self
+            .txn
+            .iter()
+            .flat_map(|t| std::iter::once(&t.base).chain(t.base_future.iter()));
+        let mut last: Option<&Document> = None;
+        for v in self
+            .past
+            .iter()
+            .chain(std::iter::once(&self.present))
+            .chain(self.future.iter())
+            .chain(txn)
+        {
+            // Neighbouring states usually share their media map.
+            if last.is_some_and(|d| d.media().ptr_eq(v.doc.media())) {
+                continue;
+            }
+            last = Some(&v.doc);
+            for m in v.doc.media().values() {
+                let e = out.entry(m.path.clone()).or_default();
+                if e.is_none() {
+                    e.clone_from(&m.content_hash);
+                }
+            }
+        }
+        out
     }
 
     /// Whether a transaction is open.

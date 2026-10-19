@@ -592,3 +592,22 @@ fn an_import_finishing_during_an_aborted_edit_applies_after_it() {
     );
     s.close().unwrap();
 }
+
+/// Final review I3: Untitled → import → Undo → Save As → Redo leaves the
+/// item online: Save As carries media only the redo history uses.
+#[test]
+fn save_as_carries_media_only_the_redo_history_uses() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(dir.path(), "redo.caf", 1000, 2);
+    let s = Session::new_empty().unwrap();
+    assert_eq!(import(&s, &[&src], None).state, JobStateRow::Done);
+    s.undo().unwrap();
+    assert!(s.media().unwrap().is_empty());
+    let pkg = dir.path().join("Redo.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    assert!(pkg.join("Media/redo.caf").is_file());
+    s.redo().unwrap();
+    let rows = s.media().unwrap();
+    assert_eq!((rows.len(), rows[0].offline), (1, None), "{rows:?}");
+    s.close().unwrap();
+}

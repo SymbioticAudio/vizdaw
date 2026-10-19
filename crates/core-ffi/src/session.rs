@@ -464,7 +464,11 @@ impl Session {
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
         let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
-        crate::media::copy_media(inner.doc(), &inner.root(self.id), path)?;
+        crate::media::copy_media(
+            &inner.history.referenced_media_anywhere(),
+            &inner.root(self.id),
+            path,
+        )?;
         file::save(inner.doc(), path)?;
         write_windows(path, &inner.windows, inner.editor_layout.as_ref());
         inner.clean = inner.doc().clone();

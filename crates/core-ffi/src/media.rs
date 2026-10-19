@@ -153,22 +153,28 @@ pub fn rows(doc: &Document, offline: &BTreeMap<MediaId, OfflineReasonRow>) -> Ve
         .collect()
 }
 
-/// Copies every media file of `doc` from `from` into `to` (Ruling 14)
-/// unless `to` already holds the same audio. A same-named file with other
-/// audio (Save As replacing an older package, review I1) is replaced
-/// atomically: copied to a temp file beside it, then renamed over it.
-/// Files of `to` the document does not reference are left alone. Missing
-/// sources are skipped (they stay offline).
-pub fn copy_media(doc: &Document, from: &Path, to: &Path) -> Result<(), VizError> {
+/// Copies the media files `media` names (package-relative path → content
+/// hash when known; the history's `referenced_media_anywhere`, so undo and
+/// redo states keep their files, final review I3) from `from` into `to`
+/// (Ruling 14) unless `to` already holds the same audio. A same-named file
+/// with other audio (Save As replacing an older package, review I1) is
+/// replaced atomically: copied to a temp file beside it, then renamed over
+/// it. Files of `to` not named are left alone. Missing sources are skipped
+/// (they stay offline).
+pub fn copy_media(
+    media: &BTreeMap<String, Option<String>>,
+    from: &Path,
+    to: &Path,
+) -> Result<(), VizError> {
     if from == to {
         return Ok(());
     }
-    for m in doc.media().values() {
-        let (src, dst) = (from.join(&m.path), to.join(&m.path));
+    for (path, hash) in media {
+        let (src, dst) = (from.join(path), to.join(path));
         if !src.is_file() {
             continue;
         }
-        if dst.exists() && same_audio(&src, &dst, m.content_hash.as_deref()) {
+        if dst.exists() && same_audio(&src, &dst, hash.as_deref()) {
             continue;
         }
         let Some(dir) = dst.parent() else {

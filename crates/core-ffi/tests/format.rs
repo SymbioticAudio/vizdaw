@@ -450,3 +450,29 @@ fn a_format_change_finishing_during_a_drag_is_its_own_step() {
     );
     s.close().unwrap();
 }
+
+/// Final review I3: Untitled → import → format change → Save As → Undo
+/// leaves the original files online (Save As carries media only the
+/// undo history uses; the scratch package is gone).
+#[test]
+fn save_as_after_a_format_change_keeps_the_original_files_for_undo() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(dir.path(), "gtr.caf", 48_000, 4800);
+    let s = Session::new_empty().unwrap();
+    let id = s
+        .import_audio(vec![src.display().to_string()], None)
+        .unwrap();
+    assert_eq!(wait(&s, id).state, JobStateRow::Done);
+    let id = s
+        .set_project_format(fmt(48_000, BitDepthRow::Float32))
+        .unwrap();
+    assert_eq!(wait(&s, id).state, JobStateRow::Done);
+    let pkg = dir.path().join("Gtr.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    assert!(pkg.join("Media/gtr.caf").is_file());
+    s.undo().unwrap();
+    let rows = s.media().unwrap();
+    assert_eq!(rows[0].path, "Media/gtr.caf");
+    assert_eq!(rows[0].offline, None, "{rows:?}");
+    s.close().unwrap();
+}

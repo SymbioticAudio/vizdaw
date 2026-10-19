@@ -394,3 +394,49 @@ fn inserting_a_region_gives_the_lane_an_output_path() {
     );
     assert_eq!(d.outputs().len(), 2);
 }
+
+/// Final review I3: the media referenced anywhere in the history (undo,
+/// present, redo, and an open transaction's start) with their hashes.
+#[test]
+fn referenced_media_anywhere_spans_undo_and_redo() {
+    let mut h = History::new(Document::new());
+    let f = ViewFilter::default();
+    let hashed = |path: &str, hash: &str| {
+        Command::Media(MediaCmd::Add {
+            path: path.into(),
+            sample_rate: 48_000,
+            channels: 2,
+            length_frames: 10,
+            content_hash: Some(hash.into()),
+            name: None,
+            origin: None,
+        })
+    };
+    h.execute(&hashed("Media/a.caf", "aa"), &f).unwrap();
+    h.execute(&add("Media/b.caf", 48_000, 10), &f).unwrap();
+    h.execute(&hashed("Media/c.caf", "cc"), &f).unwrap();
+    // c only in the redo history; a and b in the present.
+    h.undo().unwrap();
+    let all = h.referenced_media_anywhere();
+    let want: Vec<(&str, Option<&str>)> = vec![
+        ("Media/a.caf", Some("aa")),
+        ("Media/b.caf", None),
+        ("Media/c.caf", Some("cc")),
+    ];
+    let got: Vec<(&str, Option<&str>)> = all
+        .iter()
+        .map(|(p, x)| (p.as_str(), x.as_deref()))
+        .collect();
+    assert_eq!(got, want);
+    // Only the undo history: back to an empty pool, everything still
+    // counts.
+    h.undo().unwrap();
+    h.undo().unwrap();
+    assert!(h.doc().media().is_empty());
+    assert_eq!(h.referenced_media_anywhere().len(), 3);
+    // A transaction's start counts while it is open.
+    h.redo().unwrap();
+    h.begin("Drag").unwrap();
+    assert_eq!(h.referenced_media_anywhere().len(), 3);
+    h.abort().unwrap();
+}
