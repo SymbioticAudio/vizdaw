@@ -4,8 +4,10 @@ use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::schedule::{BuiltinRoute, CompileReport};
+use core_media::stream::DiskMode;
 use core_model::document::Document;
 use core_model::ids::SeqId;
+use std::path::Path;
 
 /// Offline sample rate.
 pub const RATE: f64 = 48_000.0;
@@ -15,9 +17,12 @@ pub const BLOCK: u32 = 512;
 /// Plays `seq` to its end and returns the compile report and the log text.
 /// When `looped`, the loop is switched off during the third pass, so three
 /// passes play followed by the tail. `workers` render threads help; the
-/// log does not depend on them.
+/// log does not depend on them. Regions read the media of `package` (the
+/// `.vizdaw` path `doc` came from) through the streamer, serviced before
+/// every block, so faster-than-real-time rendering never starves it.
 pub fn render(
     doc: &Document,
+    package: &Path,
     seq: SeqId,
     route: BuiltinRoute,
     looped: bool,
@@ -28,7 +33,9 @@ pub fn render(
     let mut cfg = EngineConfig::new(RATE);
     cfg.route = route;
     cfg.workers = workers;
+    cfg.disk = DiskMode::Manual;
     let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks)).map_err(|e| e.to_string())?;
+    engine.set_media(crate::project::media_files(doc, package));
     let report = engine.load(doc, seq).map_err(|e| e.to_string())?;
     let mut backend = OfflineBackend::new(RATE, BLOCK);
     backend.start(renderer).map_err(|e| e.to_string())?;
@@ -40,6 +47,7 @@ pub fn render(
     // Bounded: three passes plus the tail, with margin.
     let limit = 4 * length + 10 * RATE as u64;
     while backend.frames() < limit {
+        engine.streamer().service();
         backend.run_frames(u64::from(BLOCK));
         text.push_str(&log.drain_text());
         if looping && backend.frames() >= 2 * length {

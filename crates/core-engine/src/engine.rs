@@ -20,14 +20,15 @@ use crate::schedule::{
     TempoTable, compile,
 };
 use crate::transport::PlayState;
+use core_media::stream::{DiskMode, MediaFile, StreamConfig, Streamer};
 use core_model::document::{DestKind, Document};
-use core_model::ids::{DestId, PluginInstanceId, SeqId, StripId};
+use core_model::ids::{DestId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
 use core_model::time::Tick;
 use rtrb::{Producer, RingBuffer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -63,7 +64,14 @@ pub struct EngineConfig {
     /// Fraction of a block the graph may take (Plan Ruling 18); `None`
     /// waits (offline).
     pub deadline: Option<f64>,
+    /// Who runs disk passes (tests: Manual, serviced between blocks).
+    pub disk: DiskMode,
+    /// Streaming sizes (spec §5.5).
+    pub stream: StreamConfig,
 }
+
+/// How long Play waits for the disk at most (spec §5.5).
+pub const LOCATE_WAIT: Duration = Duration::from_millis(250);
 
 impl EngineConfig {
     /// Defaults: 4096-frame blocks, no MIDI offset, built-in routing, no
@@ -76,6 +84,8 @@ impl EngineConfig {
             route: BuiltinRoute::Builtin,
             workers: 0,
             deadline: None,
+            disk: DiskMode::Thread,
+            stream: StreamConfig::default(),
         }
     }
 }
@@ -165,6 +175,17 @@ pub struct Engine {
     collector_paused: Arc<AtomicBool>,
     collector: Option<JoinHandle<()>>,
     pool: Option<Pool>,
+    /// The disk streamer (5a).
+    streamer: Streamer,
+    /// Media the streamer may read; the rest compile as offline.
+    online: BTreeSet<MediaId>,
+    /// Where the last Locate put the transport (Play waits for the disk
+    /// there; the published position may not have caught up).
+    located: Option<u64>,
+    /// The loop the renderer plays (as the streamer was told), or `None`.
+    active_loop: Option<(u64, u64)>,
+    /// The streamer's (underruns, late) counters at the last `faults`.
+    stream_seen: (AtomicU64, AtomicU64),
 }
 
 impl std::fmt::Debug for Engine {
@@ -244,6 +265,13 @@ impl Engine {
         } else {
             None
         };
+        let (streamer, reader) =
+            Streamer::new(cfg.sample_rate, cfg.stream, cfg.disk).map_err(|e| {
+                EngineError::Thread {
+                    name: "vizdaw-disk",
+                    reason: e.to_string(),
+                }
+            })?;
         let renderer = Renderer::new(
             RenderConfig {
                 sample_rate: cfg.sample_rate,
@@ -255,6 +283,7 @@ impl Engine {
             retire_tx,
             Arc::clone(&shared),
             pool.as_ref().map(Pool::handle),
+            reader,
         );
         let engine = Engine {
             cfg,
@@ -280,6 +309,11 @@ impl Engine {
             collector_paused,
             collector: Some(collector),
             pool,
+            streamer,
+            online: BTreeSet::new(),
+            located: None,
+            active_loop: None,
+            stream_seen: (AtomicU64::new(0), AtomicU64::new(0)),
         };
         Ok((engine, renderer))
     }
@@ -349,7 +383,12 @@ impl Engine {
             sample_rate: self.cfg.sample_rate,
             route: self.cfg.route,
             ports: self.factory.ports(),
-            offline_media: std::collections::BTreeSet::new(),
+            offline_media: doc
+                .media()
+                .keys()
+                .filter(|m| !self.online.contains(m))
+                .copied()
+                .collect(),
         };
         let (sr, max) = (self.cfg.sample_rate, self.block_frames());
         // Indices released by an earlier load are free only once a load
@@ -429,15 +468,24 @@ impl Engine {
             self.release_unpublished = false;
             self.restart.clear();
         }
-        self.tempo = Some(schedule.tempo.clone());
+        self.streamer.set_plan(Arc::from(schedule.audio.needs()));
+        // The renderer maps an explicit loop through the tempo change
+        // (`EngineCmd::SetSchedule`); the streamer gets the same range.
+        let old_tempo = self.tempo.replace(schedule.tempo.clone());
+        if let (Some(old), Some((a, b))) = (old_tempo.as_ref(), self.active_loop) {
+            let map = |f: u64| schedule.tempo.tick_to_frame(old.frame_to_tick(f));
+            self.active_loop = Some((map(a), map(b)));
+        }
         self.length_frames = schedule.length_frames;
         self.loop_range = schedule.loop_range;
         self.push(EngineCmd::SetSchedule(Box::new(schedule)))?;
         if self.default_loop {
             // The length may have changed; the mapped old range would not
             // follow it.
+            self.active_loop = self.loop_range;
             self.push(EngineCmd::SetLoop(self.loop_range))?;
         }
+        self.streamer.set_loop(self.active_loop);
         Ok(report)
     }
 
@@ -723,8 +771,27 @@ impl Engine {
         Ok(sent)
     }
 
+    /// Waits (up to [`LOCATE_WAIT`]) for the streamer at the frame Play
+    /// starts from (spec §5.5); after that, playing rolls anyway. Not
+    /// while already playing (Play changes nothing then).
+    fn prime(&mut self, until: Option<u64>) {
+        let located = self.located.take();
+        if self.state() == PlayState::Playing {
+            return;
+        }
+        let at = located.unwrap_or_else(|| self.transport_frames());
+        let at = if at >= self.length_frames && until.is_none() {
+            0
+        } else {
+            at
+        };
+        let _ = self.streamer.wait_ready(at, LOCATE_WAIT);
+    }
+
     /// Starts playback (from the start when at or past the end).
     pub fn play(&mut self) -> Result<(), EngineError> {
+        self.streamer.set_loop(self.active_loop);
+        self.prime(None);
         self.push(EngineCmd::Play { until: None })
     }
 
@@ -732,16 +799,26 @@ impl Engine {
     /// loop ignored (Play Selection, plan 4f Ruling 9).
     pub fn play_until(&mut self, tick: Tick) -> Result<(), EngineError> {
         let frame = self.tempo.as_ref().map_or(0, |t| t.tick_to_frame(tick));
+        // The transport ignores the loop until the next plain Play.
+        self.streamer.set_loop(None);
+        self.prime(Some(frame));
         self.push(EngineCmd::Play { until: Some(frame) })
     }
 
     /// Stops playback; sounding notes get note-offs.
     pub fn stop(&mut self) -> Result<(), EngineError> {
+        // A Locate made while playing is no longer where the next Play
+        // starts: playing moved on from it.
+        if self.state() != PlayState::Stopped {
+            self.located = None;
+        }
         self.push(EngineCmd::Stop)
     }
 
-    /// Moves to a schedule frame.
+    /// Moves to a schedule frame (the streamer starts filling there).
     pub fn locate_frame(&mut self, frame: u64) -> Result<(), EngineError> {
+        self.streamer.hint(frame);
+        self.located = Some(frame);
         self.push(EngineCmd::Locate(frame))
     }
 
@@ -756,6 +833,8 @@ impl Engine {
         let range = if on { self.loop_range } else { None };
         self.push(EngineCmd::SetLoop(range))?;
         self.default_loop = on;
+        self.active_loop = range;
+        self.streamer.set_loop(range);
         Ok(())
     }
 
@@ -763,6 +842,8 @@ impl Engine {
     pub fn set_loop_range(&mut self, range: Option<(u64, u64)>) -> Result<(), EngineError> {
         self.push(EngineCmd::SetLoop(range))?;
         self.default_loop = false;
+        self.active_loop = range;
+        self.streamer.set_loop(range);
         Ok(())
     }
 
@@ -811,8 +892,43 @@ impl Engine {
     }
 
     /// Reads and clears the fault bits.
+    /// The streamer's counters add `STREAM_UNDERRUN` / `LATE_START` when
+    /// they grew since the last call (lock-free: never waits for a disk
+    /// pass).
     pub fn faults(&self) -> Faults {
-        self.shared.take_faults()
+        let mut f = self.shared.take_faults();
+        let c = self.streamer.counters();
+        let (u, l) = (&self.stream_seen.0, &self.stream_seen.1);
+        if c.underruns > u.swap(c.underruns, Ordering::Relaxed) {
+            f = Faults(f.0 | Faults::STREAM_UNDERRUN.0);
+        }
+        if c.late > l.swap(c.late, Ordering::Relaxed) {
+            f = Faults(f.0 | Faults::LATE_START.0);
+        }
+        f
+    }
+
+    /// The media the streamer may read (online items with their CAF
+    /// paths); the others compile as offline at the next `load`.
+    pub fn set_media(&mut self, files: Vec<MediaFile>) {
+        self.online = files.iter().map(|f| f.id).collect();
+        self.streamer.set_media(files);
+    }
+
+    /// The streamer (tests service it in Manual mode).
+    pub fn streamer(&self) -> &Streamer {
+        &self.streamer
+    }
+
+    /// Media whose reads failed since the last call (each once).
+    pub fn take_stream_errors(&self) -> Vec<(MediaId, String)> {
+        self.streamer.take_errors()
+    }
+
+    /// Mutes every region (the device refused the project rate) or
+    /// unmutes them.
+    pub fn set_regions_muted(&self, on: bool) {
+        self.shared.set_regions_muted(on);
     }
 
     /// Current counters.

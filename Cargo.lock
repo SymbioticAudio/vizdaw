@@ -1702,6 +1702,7 @@ dependencies = [
  "clap",
  "core-engine",
  "core-host",
+ "core-media",
  "core-model",
  "platform-macos",
  "test-plugins",

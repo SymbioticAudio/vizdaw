@@ -3,7 +3,7 @@
 //! threads joined to the device's workgroup.
 
 use crate::args::Args;
-use crate::{plugins, signal};
+use crate::{plugins, project, signal};
 use core_engine::backend::{AudioBackend, AudioConfig, BackendEvent, StreamInfo};
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::pool::RtEnv;
@@ -78,6 +78,9 @@ fn open(
     // Plugins load (and fail, reported) before the first graph.
     let host = plugins::host(doc, catalog, info.sample_rate, engine.block_frames())?;
     engine.set_insert_factory(Box::new(host.factory()));
+    if let Some(package) = &args.project {
+        engine.set_media(project::media_files(doc, package));
+    }
     let report = engine.load(doc, seq).map_err(|e| e.to_string())?;
     for w in report.warnings.iter().chain(&report.graph.warnings) {
         eprintln!("warning: {w}");

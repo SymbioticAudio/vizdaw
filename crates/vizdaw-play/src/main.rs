@@ -68,7 +68,8 @@ fn run(args: &Args) -> Result<ExitCode, String> {
     };
     if let Some(out) = &args.offline {
         let workers = args.workers.unwrap_or(0) as usize;
-        let (report, text) = offline::render(&doc, seq, args.to.into(), args.looped, workers)?;
+        let (report, text) =
+            offline::render(&doc, path, seq, args.to.into(), args.looped, workers)?;
         for w in report.warnings.iter().chain(&report.graph.warnings) {
             eprintln!("warning: {w}");
         }

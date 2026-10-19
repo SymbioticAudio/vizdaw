@@ -49,6 +49,12 @@ impl Faults {
     /// A recompiled graph was invalid (cycle or bad index); the previous
     /// graph keeps playing.
     pub const GRAPH_INVALID: Faults = Faults(1024);
+    /// A region's frames were not streamed in time: they played as
+    /// silence (5a).
+    pub const STREAM_UNDERRUN: Faults = Faults(2048);
+    /// Right after Play or Locate (within [`LATE_SECONDS`]) a region was
+    /// not ready yet and started late (5a).
+    pub const LATE_START: Faults = Faults(4096);
 
     /// True when every bit of `other` is set.
     pub fn contains(self, other: Faults) -> bool {
@@ -74,6 +80,8 @@ impl Faults {
             (Faults::WORKGROUP_JOIN_FAILED, "workgroup-join-failed"),
             (Faults::THREAD_POLICY_FAILED, "thread-policy-failed"),
             (Faults::GRAPH_INVALID, "graph-invalid"),
+            (Faults::STREAM_UNDERRUN, "stream-underrun"),
+            (Faults::LATE_START, "late-start"),
         ]
         .into_iter()
         .filter(|(f, _)| self.contains(*f))
@@ -145,6 +153,8 @@ pub struct DspLoad {
 /// (atomics only).
 #[derive(Debug)]
 pub struct Shared {
+    /// Regions play silence (the device refused the project rate, 5a).
+    regions_muted: AtomicBool,
     position: AtomicU64,
     transport_pos: AtomicU64,
     state: AtomicU8,
@@ -169,6 +179,7 @@ pub struct Shared {
 impl Default for Shared {
     fn default() -> Shared {
         Shared {
+            regions_muted: AtomicBool::new(false),
             position: AtomicU64::new(0),
             transport_pos: AtomicU64::new(0),
             state: AtomicU8::new(0),
@@ -192,6 +203,16 @@ impl Default for Shared {
 }
 
 impl Shared {
+    /// Mutes or unmutes every region (5a Ruling 20).
+    pub fn set_regions_muted(&self, on: bool) {
+        self.regions_muted.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether regions are muted. // RT
+    pub fn regions_muted(&self) -> bool {
+        self.regions_muted.load(Ordering::Relaxed)
+    }
+
     /// Sets fault bits. // RT
     pub fn raise(&self, f: Faults) {
         self.faults.fetch_or(f.0, Ordering::Relaxed);
@@ -392,6 +413,9 @@ pub enum Retired {
 
 /// Capacity of the command ring.
 pub const CMD_CAPACITY: usize = 256;
+/// How long after Play or Locate a miss counts as a late start (spec
+/// §5.5: the transport waits this long for the disk at most).
+pub const LATE_SECONDS: f64 = 0.25;
 /// Capacity of the retire ring: room for a schedule, a graph and a
 /// removed sink per target (3a Plan Ruling 30; 3b Plan Ruling 4).
 pub const RETIRE_CAPACITY: usize = 64;
@@ -417,6 +441,14 @@ pub struct Renderer {
     cmds: Consumer<EngineCmd>,
     retire: Producer<Retired>,
     shared: Arc<Shared>,
+    /// The streamer's real-time side (boxed: the executor's job points at
+    /// it while a run is in flight).
+    reader: Box<core_media::stream::StreamReader>,
+    /// Frames played since the last Play or Locate: misses while it is
+    /// under [`LATE_SECONDS`] count as late starts (5a Ruling 10). Counted
+    /// in frames played, not schedule frames, so a loop wrap back below
+    /// where playing started does not reopen the window (F16).
+    since_start: u64,
     schedule: Option<Box<Schedule>>,
     cursor: usize,
     transport: Transport,
@@ -536,12 +568,15 @@ impl Renderer {
         retire: Producer<Retired>,
         shared: Arc<Shared>,
         pool: Option<Arc<PoolShared>>,
+        reader: core_media::stream::StreamReader,
     ) -> Renderer {
         let mut r = Renderer {
             cfg,
             cmds,
             retire,
             shared,
+            reader: Box::new(reader),
+            since_start: 0,
             schedule: None,
             cursor: 0,
             transport: Transport::new(cfg.sample_rate.max(0.0).round() as u64),
@@ -639,6 +674,11 @@ impl Renderer {
         }
         self.block_ns = time.host_time_ns;
         self.drain_commands();
+        // No run is in flight (`try_finish` succeeded above): the streamer
+        // may count a new epoch (5a Ruling 9) and plan around the playhead
+        // as this block's commands left it (a Locate's new position, never
+        // the stale one: commands are applied only here).
+        self.reader.begin_block(self.transport.pos);
         let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let ns_per_frame = 1e9 / self.cfg.sample_rate.max(1.0);
@@ -662,6 +702,7 @@ impl Renderer {
             let end = offset + run;
             self.automate(length, run);
             let info = self.block_info();
+            let regions = self.region_run(length);
             let mut o = Out {
                 sinks: &mut self.sinks,
                 shared: &self.shared,
@@ -706,7 +747,10 @@ impl Renderer {
                 }
                 at += step.frames();
             }
-            let lost = self.render_graph(out, offset, run, info, deadline);
+            let lost = self.render_graph(out, offset, run, info, regions, deadline);
+            if regions.playing {
+                self.since_start = self.since_start.saturating_add(u64::from(run));
+            }
             offset = end;
             if lost {
                 missed = true;
@@ -734,12 +778,13 @@ impl Renderer {
     /// The next run's length (1 ..= `left`): the rest of the block, cut at
     /// the next automation point (never under `MIN_RUN` frames after the
     /// run's start) and at the loop end or the sequence end while a
-    /// schedule with automation plays (Plan 4d Ruling 10). // RT
+    /// schedule with automation or audio plays (Plan 4d Ruling 10, 5a
+    /// Ruling 12). // RT
     fn next_run(&self, length: u64, left: u32) -> u32 {
         let Some(s) = self.schedule.as_deref() else {
             return left;
         };
-        if s.automation.is_empty() {
+        if s.automation.is_empty() && s.audio.is_empty() {
             return left;
         }
         let Some(pos) = self.transport.play_pos(length) else {
@@ -868,6 +913,7 @@ impl Renderer {
         offset: u32,
         frames: u32,
         info: BlockInfo,
+        regions: crate::graph::RegionRun,
         deadline: Option<Instant>,
     ) -> bool {
         let at = offset as usize;
@@ -890,7 +936,7 @@ impl Renderer {
             &self.shared,
             frames,
             info,
-            crate::graph::RegionRun::NONE,
+            regions,
             deadline,
         ) {
             RunResult::Done => {
@@ -1009,6 +1055,9 @@ impl Renderer {
             EngineCmd::Play { until } => {
                 let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
                 self.transport.end = until;
+                if self.transport.state != PlayState::Playing {
+                    self.since_start = 0;
+                }
                 self.transport.play(length);
                 self.seek();
                 self.forget_unautomated();
@@ -1021,6 +1070,7 @@ impl Renderer {
             EngineCmd::Locate(frame) => {
                 self.release_now(true);
                 self.transport.locate(frame);
+                self.since_start = 0;
                 self.seek();
                 self.auto_last.fill(f64::NAN);
             }
@@ -1062,6 +1112,40 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// The `Regions` nodes' context for the run starting now: the
+    /// schedule's audio from the playhead, late within `LATE_SECONDS` of
+    /// playing after a Play or Locate, muted when the device refused the
+    /// rate. // RT
+    fn region_run(&self, length: u64) -> crate::graph::RegionRun {
+        let Some(s) = self.schedule.as_deref() else {
+            return crate::graph::RegionRun::NONE;
+        };
+        if s.audio.is_empty() {
+            return crate::graph::RegionRun::NONE;
+        }
+        let Some(pos) = self.transport.play_pos(length) else {
+            return crate::graph::RegionRun::NONE;
+        };
+        // SAFETY: the schedule (boxed) and the reader (boxed) change only
+        // in `drain_commands` or `Drop`, after `try_finish` succeeded, so
+        // they outlive every run given this value.
+        unsafe {
+            crate::graph::RegionRun::new(
+                &s.audio,
+                &self.reader,
+                pos,
+                true,
+                self.since_start < self.late_frames(),
+                self.shared.regions_muted(),
+            )
+        }
+    }
+
+    /// [`LATE_SECONDS`] in frames.
+    fn late_frames(&self) -> u64 {
+        (LATE_SECONDS * self.cfg.sample_rate.max(0.0)) as u64
     }
 
     /// The transport facts of the block about to render. // RT
