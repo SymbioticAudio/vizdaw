@@ -1,6 +1,6 @@
 # VizDAW Sub-project 5: Recording and audio tracks — Design
 
-Status: approved in conversation on 2026-10-18 (scope, approach B and plans 5a–5f). This written spec is waiting for review.
+Status: approved in conversation on 2026-10-18 (scope, approach B and plans 5a–5f). The user reviewed the written spec on 2026-10-18 and asked for three changes, which are now included: the project audio format (§4.1), tracking a hardware synth (§6.7), and MIDI input effects (§6.8).
 Parent spec: `2026-10-15-vizdaw-design.md`. Its requirements are binding here and are not repeated in full; this document says how they are built and in what order:
 - §5: media pool, tracks, takes, audio regions and undo of recording passes.
 - §6: recording, and CoreAudio I/O.
@@ -8,7 +8,7 @@ Parent spec: `2026-10-15-vizdaw-design.md`. Its requirements are binding here an
 - §10: offline media.
 - §11, step 5.
 
-This sub-project also takes in MIDI timeline recording, which no earlier sub-project owned, and automation recording.
+This sub-project also takes in MIDI timeline recording, which no earlier sub-project owned, automation recording, and MIDI input effects (D26h).
 
 ## 1. Scope
 
@@ -20,6 +20,9 @@ In scope:
   - Pre-roll and count-in.
   - Automatic latency compensation.
   - Each recording pass becomes one undo step.
+  - Tracking a hardware synth as audio: in one pass, a MIDI lane drives an external synth and an armed audio lane records its return, aligned to the MIDI timeline (§6.7).
+- **Project audio format.** Every project has a sample rate and bit depth, chosen when it is created, and stores all of its media in that format (§4.1).
+- **MIDI input effects (D26h).** A per-lane chain of built-in effects (arpeggiator, transpose, velocity, chord, input quantize) for live input and thru. What is recorded is the chain's output (§6.8).
 - **Monitoring.** Software input monitoring (Auto, Input or Off per lane), auto-input, and MIDI thru.
 - **Automation recording.** The Write, Touch, Latch and Trim modes, written from:
   - the on-screen mixer;
@@ -36,31 +39,35 @@ Out of scope:
 - **Offline (destructive) DSP.** The user prefers non-destructive processing (D26e). Normalize is offered as region gain (§4.4).
 - **Time-stretching and varispeed.** A region always plays at its recorded speed, starting at its mapped tick.
 - **Automatic crossfades.** Overlapping regions follow the parent rule (the later start takes over). Users shape the joins with fades.
-- **MIDI input effects (D26h, e.g. the arpeggiator).** Deferred to a later sub-project. The record path keeps one processing slot where they will plug in (§6.6).
-- **Real-time bounce** of external MIDI instruments (§9.1).
+- **Plugin and third-party MIDI input effects, and groove.** Only the built-in set of §6.8 is included.
+- **Real-time bounce and an external-instrument round trip.** This means an "external instrument" insert that sends MIDI to hardware and returns its audio live, so that bounce and freeze could include hardware synths. It is deferred to a later sub-project. Until then, hardware synths are captured by tracking them as audio (§6.7), and offline bounce leaves external MIDI silent (§9.1).
 - **Disk-space management beyond a warning**, and network/remote media.
 
 ## 2. Decisions (user, 2026-10-18)
 
 - **Scope.** Recording covers MIDI and audio together. Both share one record engine with punch, loop passes, takes, replace/overdub, and one undo step per pass.
-- **Media.** Imported files are converted on import into 32-bit float CAF at the project rate, inside the package's `Media/`. The original file is never changed.
+- **Media.** Imported files are converted on import into CAF in the project's format, inside the package's `Media/`. The original file is never changed.
+- **Project format (review).** A project has a sample rate and a bit depth (16-bit integer, 24-bit integer or 32-bit float). It defaults to 48 kHz / 24-bit, is set when the project is created, and is shown and changeable in Project Settings. All media (imported, recorded, bounced into the project, returned from the external editor) is stored in that format. The engine always processes in float. Changing the rate or depth later offers to convert the existing media.
+- **Bounce (review).** Offline only, with external MIDI silent, as ruled. Hardware synths are recorded by tracking them as audio, which is an explicit use case (§6.7). Real-time bounce and an external-instrument round trip are deferred.
+- **MIDI input effects (review).** Included at a basic level: a per-lane chain with a built-in set (§6.8).
 - **Monitoring.** Software monitoring through the lane's mixer strip (Auto / Input / Off), plus MIDI thru.
 - **Automation recording input.** Full control surfaces: the on-screen controls, MIDI learn, Mackie Control and HUI.
 - **Extras included.** The media pool with offline/relink, the external sample editor, and bounce/export. Freeze is deferred.
 - **Approach B.** AudioToolbox (ExtAudioFile) decodes and converts on import only, behind a `MediaImporter` trait. CAF I/O, streaming, recording and bounce are platform-neutral Rust.
-- **Plans.** One spec, executed as six sequential plans, 5a–5f (§13).
+- **Plans.** One spec, executed as seven sequential plans, 5a–5g (§13).
 
 ## 3. Architecture
 
 ```
 Swift  VizDAWEditors   RegionStripView/ArrangementView: waveforms, fade/gain handles · LaneHeaderView: input, monitor, meter · MediaPoolView
 Swift  VizDAWAppModel  RecordModel · MediaModel · AutomationModeModel · SurfaceSettings · BounceModel · ExternalEditorWatcher
-Swift  VizDAW          Record transport UI, Settings › Audio/Recording/Surfaces, Bounce sheet, Media pool window
+Swift  VizDAW          New Project sheet, Project Settings, record transport UI, Track Synth sheet, input effects popover, Settings › Audio/Recording/Surfaces, Bounce sheet, Media pool window
 FFI    core-ffi        import · media pool · overview · record · monitor · automation gestures · surfaces · bounce
 Rust   core-media      CAF read/write · MediaImporter trait · Streamer (disk thread) · RecordWriter · overviews   (new, platform-neutral)
 Rust   core-surface    MIDI learn · Mackie Control · HUI protocol state machines                                   (new, platform-neutral)
 Rust   core-engine     region segments in the schedule · RegionSource node · input in the renderer · record taps · offline bounce
-Rust   core-model      fade units · media commands · lane input/monitor · strip automation mode · RecordPass command · learn maps
+Rust   core-model      project format · fade units · media commands · lane input/monitor/input effects · destination return latency · strip automation mode · RecordPass · learn maps
+Rust   core-engine     (also) MIDI input effect chain on the real-time thread
 Rust   platform-macos  hal.rs input + duplex + private aggregate · ExtAudioFile importer · CoreMIDI input routing
 ```
 
@@ -71,10 +78,21 @@ Rules carried over from sub-projects 2 and 3, binding everywhere:
 
 ## 4. Model changes (core-model)
 
-### 4.1 Project sample rate
-- `Settings` gains `sample_rate: Option<u32>`: the project rate. It is set from the running device rate the first time media is imported or recorded, and stays `None` for a MIDI-only project.
-- When the device runs at a different rate, the engine first asks the device to switch to the project rate (§5.5).
-- Changing the project rate is a command that converts every media item (§5.1). It is one undo step. Cancelling the conversion cancels the rate change.
+### 4.1 Project audio format
+- `Settings` gains `format: AudioFormat { sample_rate: u32, depth: BitDepth }`, where `BitDepth` is `Int16`, `Int24` or `Float32`.
+  - Allowed rates: 44 100, 48 000, 88 200, 96 000, 176 400 and 192 000 Hz.
+  - Default: **48 000 Hz, 24-bit integer**.
+- **New projects.** File › New opens a small New Project sheet with the rate and depth, pre-filled with the app's "Default project format" preference (initially 48 kHz / 24-bit). The programmatic `project.new { rate?, depth? }` never shows the sheet and uses the preference for anything it leaves out.
+- **Project Settings** (File › Project Settings…, a sheet) shows the format and can change it.
+  - Changing the rate or depth is `SettingsCmd::SetFormat`. When the project has media, it requires converting every media item (§5.1) and is one undo step, "Change Project Format". The undo keeps the old files under the media retention rule (§6.5).
+  - The sheet says how many files and how much audio will be converted. Cancelling the conversion cancels the change.
+  - Lowering the depth to 16-bit dithers (TPDF). Raising it never alters samples.
+- **The engine always processes 32-bit float.** The format governs only the media files and the rate the device is asked to run at (§5.6).
+- **Migration of older projects** (format version bump, together with §4.2) gives a project without `format`:
+  - the rate of the majority of its media items (the first item's on a tie), or 48 kHz if it has none;
+  - and 24-bit.
+
+  On open, any media item whose file is not a VizDAW CAF in the project format is offline (§4.3), and a banner offers "Convert <n> files to the project format". This is the same conversion, as one undo step. Nothing converts without the user's say-so.
 
 ### 4.2 Fades in frames
 - `Fade.length` changes from `Tick` to `length_frames: u64`. Fades belong to the audio, so a tempo change must not change them, and region length and source offset are already in frames.
@@ -90,7 +108,7 @@ Rules carried over from sub-projects 2 and 3, binding everywhere:
 - `RemoveMedia` without a replacement is refused while the item is in use. The UI confirms and lists the affected regions (parent §5).
 - **Offline media is runtime state, not model state.** `core-ffi` keeps an `offline: HashSet<MediaId>` computed on open and on file-system events. A media item is offline when:
   - its file is missing;
-  - or its file is not a readable float CAF;
+  - or its file is not a readable VizDAW CAF in the project format (§4.1);
   - or its content hash differs.
 
   Offline regions play silence and are drawn hatched. Saving never writes this flag.
@@ -106,8 +124,16 @@ Rules carried over from sub-projects 2 and 3, binding everywhere:
   - `LaneInput::Audio { channels: InputChannels }`, where `InputChannels` is `Mono(u16)` or `Stereo(u16)` (the left channel's index; the pair is index and index+1).
   - `LaneInput::Midi { port: Option<String>, channel: Option<u8> }`: `None` means all ports or all channels.
 - `monitor: MonitorMode { Auto, Input, Off }`, default Auto.
+- `input_fx: Vector<InputFx>`: the MIDI input effect chain (§6.8), at most 8 slots, empty by default.
 
-New `LaneCmd` variants set both. These are undoable like the other lane flags. A lane records audio only if its input is `Audio` and MIDI only if `Midi`. A lane may hold both kinds of content, but it records one kind at a time.
+New `LaneCmd` variants set all three. These are undoable like the other lane flags. A lane records audio only if its input is `Audio` and MIDI only if `Midi`. A lane may hold both kinds of content, but it records one kind at a time.
+
+`LaneInput::Audio` also gains `return_of: Option<DestId>`. When set, the lane records the audio return of that external MIDI destination (§6.7).
+
+### 4.5a Destinations
+- An external MIDI destination (an instrument-list entry for a CoreMIDI endpoint) gains `return_latency_ms: f32`, default 0, range 0–500.
+- This is the hardware's own delay from receiving a MIDI note to sound at its audio output: the MIDI interface plus the synth's response.
+- It is set by hand or measured (§6.7). Like other destination edits, it is undoable.
 
 ### 4.6 Strip automation mode
 - `Strip` gains `automation: AutomationMode { Off, Read, Touch, Latch, Write, Trim }`, default `Read`.
@@ -131,22 +157,26 @@ New `LaneCmd` variants set both. These are undoable like the other lane flags. A
 
 ### 5.1 Import
 - **`trait MediaImporter`** lives in core-media:
-  - `fn probe(&self, path) -> Result<SourceInfo>` returns the format name, rate, channels, frames and duration.
-  - `fn convert(&self, path, out: &Path, rate: u32, progress: &dyn Fn(f32), cancel: &AtomicBool) -> Result<ConvertedInfo>`.
-- **The macOS importer** is `platform_macos::media::ExtAudioImporter`. It uses ExtAudioFile with the client format set to float32, deinterleaved, at the target rate, and the highest-quality converter. It accepts every format the system reads (WAV, AIFF, CAF, FLAC, MP3, AAC, ALAC…).
+  - `fn probe(&self, path) -> Result<SourceInfo>` returns the format name, rate, depth, channels, frames and duration.
+  - `fn convert(&self, path, out: &Path, format: AudioFormat, progress: &dyn Fn(f32), cancel: &AtomicBool) -> Result<ConvertedInfo>`.
+- **The macOS importer** is `platform_macos::media::ExtAudioImporter`.
+  - ExtAudioFile decodes to float32 at the target rate with the highest-quality converter. It accepts every format the system reads (WAV, AIFF, CAF, FLAC, MP3, AAC, ALAC…).
+  - core-media's CAF writer then stores the float data in the project depth, dithering (TPDF) only when that depth is 16-bit.
 - **Channels.** Mono and stereo files keep their layout. A file with more than two channels is split into mono files, one media item per channel. Dropping one onto the arrangement makes one lane per channel.
 - **Where files go.** The output is `Media/<stem>.caf`, with a numeric suffix if the name is taken. The conversion writes `Media/.incoming/<uuid>.caf` and renames it into place when complete. An interrupted import leaves nothing in `Media/`.
 - **Threading.** Import runs on a background thread with progress and cancellation. `Session.import_audio(paths, at: Option<(seq, lane, tick)>)` returns a job ID. The finished job applies one undo step that adds the media and, with `at`, inserts regions.
-- **Changing the project rate** runs the same converter CAF→CAF over every item, scaling each region's `source_offset`, `length` and fade lengths by the rate ratio (rounding to the nearest frame).
+- **Changing the project format** runs the same converter CAF→CAF over every item (into new files, since the old ones stay for undo). A rate change also scales each region's `source_offset`, `length` and fade lengths by the rate ratio, rounding to the nearest frame. A depth-only change leaves frame positions alone.
 
 ### 5.2 CAF reader and writer
 - These are platform-neutral Rust in `core_media::caf`.
 - **Writer:**
-  - It writes `desc` (float32, native-endian flag set, interleaved), `chan` and `data`.
+  - It writes `desc` (linear PCM, little-endian, interleaved; float32, or int16/int24 packed as the project depth requires), `chan` and `data`.
+  - It takes float input. It converts to integer with clipping at full scale, counting clipped samples, plus TPDF dither for 16-bit. 24-bit is rounded without dither, because a 24-bit noise floor is below any converter's.
   - While recording, the `data` chunk size is −1, which CAF defines as "to end of file", and an `info` chunk notes `vizdaw-recording`. On a clean close, the real size is written.
   - A crash therefore leaves a valid, readable file.
 - **Reader:**
-  - It accepts only what the writer produces: float32 linear PCM, 1–2 channels, and a `data` size that is either known or −1.
+  - It accepts only what the writer produces: little-endian linear PCM as int16, int24 or float32, 1–2 channels, and a `data` size that is either known or −1.
+  - It converts to float32 on the disk thread when filling stream voices and the RAM cache. The real-time thread only ever sees float.
   - It refuses everything else with a typed error. Other formats go through the importer.
   - Reads are positioned (`pread`) and never memory-mapped. A file truncated or replaced underneath playback must yield errors, not SIGBUS.
 
@@ -173,7 +203,7 @@ New `LaneCmd` variants set both. These are undoable like the other lane flags. A
 
 ### 5.5 Streamer (disk thread)
 - **Two-layer buffering.**
-  - Files of at most **4 MiB** of audio data (about 11 s of stereo at 48 kHz) are read whole into a shared **RAM cache** (`Arc<[f32]>`, LRU, **512 MiB** budget, a Setting). The real-time thread reads them directly.
+  - Files of at most **4 MiB** of audio data (about 11 s of stereo at 48 kHz) are read whole, converted to float, into a shared **RAM cache** (`Arc<[f32]>`, LRU, **512 MiB** budget of float data, a Setting). The real-time thread reads them directly.
   - Larger files are streamed.
 - **Voices.**
   - A fixed pool of **256 stream voices** is allocated when the engine starts. Each voice is a single-producer/single-consumer ring of **2 s** at the project rate per channel, read by the real-time thread and written by the disk thread.
@@ -188,11 +218,11 @@ New `LaneCmd` variants set both. These are undoable like the other lane flags. A
 - **Bounce** uses a synchronous mode in which reads block (§9).
 
 ### 5.6 Device rate
-- When the project rate is set and differs from the device rate, the engine asks the HAL to switch the device's nominal rate.
+- When the project rate differs from the device rate (on open, on New, or on a device change), the engine asks the HAL to switch the device's nominal rate.
 - If the device refuses:
   - MIDI and plugins play at the device rate;
   - audio regions are muted;
-  - a persistent banner offers "Convert media to <device rate>" (§4.1).
+  - a persistent banner says so and offers "Change project rate to <device rate>", which is the §4.1 conversion.
 - There is no real-time resampling.
 
 ## 6. Recording
@@ -211,7 +241,8 @@ New `LaneCmd` variants set both. These are undoable like the other lane flags. A
 
 ### 6.2 Input ring and writer
 - **In the real-time thread.** The renderer copies the input channels that armed lanes use into one **input ring**: interleaved by used channel, **4 s** capacity, single producer and single consumer. Each block is stamped with its timeline frame and with whether recording is active.
-- **The RecordWriter thread** (core-media) drains the ring and writes one CAF per armed audio lane (mono or stereo per `LaneInput`) into `Media/Recorded/<lane name> <yyyy-mm-dd HHmmss>.caf`. It flushes the CAF header every 2 s.
+- **The RecordWriter thread** (core-media) drains the ring and writes one CAF per armed audio lane, in the project format (§4.1) and mono or stereo per `LaneInput`, into `Media/Recorded/<lane name> <yyyy-mm-dd HHmmss>.caf`. It flushes the CAF header every 2 s.
+- **Clipping.** Clipped samples in integer depths are counted per lane and shown as a clip mark on the lane's input meter. A float project never clips on disk.
 - **Ring overflow** (the writer too slow):
   - the lost frames are written as silence, so the timing stays right;
   - `record_overflows` increments;
@@ -229,6 +260,7 @@ New `LaneCmd` variants set both. These are undoable like the other lane flags. A
 - **MIDI.** An incoming event is placed at the timeline position that was audible at its host time:
   - convert the host time to a frame through the clock's host-time mapping;
   - subtract the output latency.
+- **External MIDI output** is scheduled by host time (sub-project 2). 5c makes sure that time is when the event's frame is *heard*, adding the output latency if the existing scheduler does not, and pins this with a test. This shared audible-time clock is what lets §6.7 line up a synth's audio with the MIDI that played it.
 - **Calibration.** The manual checklist includes a loopback calibration: route output to input, record a click, and expect alignment within ±2 frames. A fake device does the same in CI (§12.1).
 
 ### 6.4 Record modes and transport
@@ -283,25 +315,91 @@ At Stop (or at the auto-stop in §6.2):
   - **Input**: always the input.
   - **Off**: never.
 - **MIDI thru.** Incoming MIDI matching an armed lane's `LaneInput::Midi` is sent at once to that lane's destination, through the existing live note path that step entry and audition use.
-- **Processing slot.** Thru and record both pass through one `MidiInputStage` slot. For now it is the identity; D26h's input effects will plug in here later.
+- **Input effects.** Thru and record both pass through the lane's MIDI input effect chain (§6.8).
 
-### 6.7 Record UI
+### 6.7 Tracking a hardware synth as audio
+This is an explicit use case: printing an external synth into the project as audio.
+
+- **Setup.**
+  - A MIDI lane plays to an external destination D, the synth.
+  - An audio lane has `LaneInput::Audio { channels, return_of: Some(D) }`, the interface inputs where the synth's outputs are wired.
+  - The **Track Synth…** command on a MIDI lane whose destination is external does this setup in one undo step:
+    - It creates or reuses that audio lane, named "<D name> audio", just below.
+    - It sets the lane's input, using a channel picker in the sheet.
+    - It arms the audio lane.
+    - It leaves the MIDI lane playing. Optionally, the MIDI lane is armed too, to record the keyboard performance at the same time.
+- **One pass.** In a single Record pass:
+  - the MIDI lane's existing events (or the live performance, if it is armed) play to the synth;
+  - the audio lane records the return.
+  
+  Both kinds of recording share the pass, the history group and the one "Undo Record" step (§6.5). A loop pass makes matching MIDI and audio takes.
+- **Alignment.**
+  - Ordinary latency compensation (§6.3) places the return audio at the frame that was audible when it arrived.
+  - External MIDI leaves at audible time (§6.3).
+  - For a `return_of` lane, the recorded region is additionally shifted earlier by D's `return_latency_ms` (§4.5a).
+  
+  So the audio lines up with the MIDI notes that played it. The residual target is within ±1 ms once the latency is measured.
+- **Measure.** The Track Synth sheet and the destination editor have a **Measure** button:
+  - It sends 5 short notes (pitch 60, velocity 100, 500 ms apart) to D with the transport stopped.
+  - It detects each onset on the return input: the first sample above −40 dBFS after the note.
+  - It sets `return_latency_ms` to the median delay, minus the round-trip latency the HAL reports.
+  - It fails with a message ("No signal on the synth's return input") if fewer than 3 onsets are found within 500 ms of their notes.
+- **Monitoring.** The return lane monitors in Auto by default, so the synth is heard through its strip while tracking. Its MIDI lane's own instrument strip is unaffected, because external destinations have none.
+- **After tracking.** The sheet offers "Mute the MIDI lane after recording" (off by default). If chosen, the mute is part of the pass's undo step. The MIDI is kept either way, so the part can be re-tracked after edits.
+
+### 6.8 MIDI input effects (D26h)
+- **Model.** `Lane.input_fx` (§4.5) is an ordered chain of up to 8 `InputFx { kind: InputFxKind, bypass: bool }`.
+- **The built-in set** (`InputFxKind`):
+  - **Arpeggiator**:
+    - mode Up, Down, Up-Down, Down-Up, As Played, Random or Chord;
+    - rate as a note value from 1/1 to 1/64, straight, dotted or triplet;
+    - octaves 1–4;
+    - gate 5–200 %;
+    - velocity As Played or Fixed (1–127);
+    - Latch (held notes keep playing after release until new notes arrive);
+    - Sync: to transport bars and beats while playing, and free-running at the project's current tempo when stopped.
+  - **Transpose**: ±48 semitones.
+  - **Velocity**: scale (0–400 %), offset (±127), clamp minimum and maximum, or Fixed.
+  - **Chord**: adds up to 6 notes at given semitone intervals (±48) to each note.
+  - **Input Quantize**: grid (the shared snap values) and strength (0–100 %). It moves note starts *only in what is recorded*. Live thru is never delayed, so quantizing does not add latency to what you hear.
+- **Where the chain runs.**
+  - The chain runs on the real-time thread, inside the renderer, per armed or `Input`-monitored MIDI lane, so the arpeggiator is sample-accurate and synced.
+  - Incoming events arrive from CoreMIDI through a lock-free queue, already timestamped (§6.3).
+  - Each effect has fixed-capacity state: up to 32 held notes and 128 sounding notes. Overflow drops the newest note and counts it.
+  - Chain changes are published like other graph updates. A changed or bypassed effect first sends note-offs for every note it is sounding, so no note hangs.
+- **Recording is post-effect.** Main spec §6: "what is recorded is the stage's output".
+  - The recorder receives exactly what thru sent to the destination, with Input Quantize then applied to note starts.
+  - The raw input is not kept.
+  - To record the raw performance, bypass the chain.
+- **Lanes without an armed or monitored state** do not run their chain. Playback of recorded events never passes through input effects.
+- **UI.** An "FX" button on the lane header (lit when the chain is non-empty and not all bypassed) opens a popover:
+  - the chain list: add, remove, drag to reorder, bypass;
+  - the selected effect's parameters.
+
+  Settings are undoable lane edits (one step per gesture).
+
+### 6.9 Record UI
 - **Transport toolbar:**
   - a Record button (R, `transport.record`), shown red while recording;
   - a Record popover with Replace/Overdub, Punch (shows and edits the 4f punch fields), Loop, Count-in, Pre-roll and Passes as takes;
   - a record-time remaining readout, based on disk space and the number of armed channels;
   - pass and keep counters during a loop record.
+- **Lane menu:** Track Synth… (§6.7) on MIDI lanes whose destination is external.
 - **Lane header (`LaneHeaderView`)** keeps its existing R toggle and adds:
   - an input picker (audio channels by the device's channel names, or a MIDI port and channel);
   - a monitor button that cycles A / I / –;
-  - a thin input meter while the lane is armed or monitoring.
+  - a thin input meter while the lane is armed or monitoring, with a clip mark;
+  - the FX button (§6.8);
+  - for a `return_of` lane, a small link badge naming the synth.
 - **Mixer (`MixerView`).** AudioPath strips show the same input picker and monitor button above the inserts.
 - **Settings › Audio:**
   - input device ("Same as output" or a device);
   - latency readout and trim;
   - RAM cache budget;
   - the streaming setting "Disk read-ahead" (2–8 s, default 3 s; ring size follows).
+- **Project Settings** (§4.1): sample rate and bit depth, with conversion.
 - **Settings › Recording:**
+  - default project format for new projects (48 kHz / 24-bit);
   - default count-in and pre-roll;
   - passes as takes;
   - default monitor mode for new lanes;
@@ -423,17 +521,19 @@ Rules common to all modes:
   - **Stems**: each chosen strip, post-fader, one file each;
   - **Selection**: master, limited to the arrangement's time selection.
 - **The range** is the song (start to end) or the time selection, plus a **tail**: render on until the output stays below −96 dBFS for 0.5 s, capped at 10 s (Setting).
-- **External MIDI destinations** cannot be rendered offline. If the bounce range plays to any, the sheet warns ("<n> lanes play external MIDI and will be silent") before rendering. Real-time bounce is out of scope (§1).
+- **External MIDI destinations** cannot be rendered offline. If the bounce range plays to any, the sheet warns before rendering ("<n> lanes play external MIDI and will be silent. Track them as audio first: Track Synth…"). Real-time bounce and an external-instrument round trip are deferred (§1).
 - **Live playback** keeps running on the device while a bounce renders. The two never share a renderer, and plugin instances are separate copies restored from the saved state.
 
 ### 9.2 Format and destination
 - **Format:**
   - WAV, AIFF or CAF;
-  - 16- or 24-bit integer with TPDF dither (on by default), or 32-bit float;
-  - the project rate, or 44.1/48/88.2/96 kHz through `MediaImporter`'s converter, which also does the integer and dither write on macOS (`ExtAudioFile` client float, file format as chosen).
+  - 16- or 24-bit integer with TPDF dither (on by default for 16-bit), or 32-bit float;
+  - any rate the converter supports.
+  - The sheet defaults to the project's rate and depth (§4.1), as WAV.
+  - Files are written through `MediaImporter`'s converter on macOS (`ExtAudioFile` with a float client format and the file format as chosen).
 - **Destination:**
   - a chosen file (the save panel). Programmatic bounce never opens dialogs (§12.1);
-  - and/or "Add to project", which imports the float result as a media item (origin `Bounced`) and places it as a region on a new lane at the range start. This is one undo step.
+  - and/or "Add to project", which stores the result in the project format (§4.1) as a media item (origin `Bounced`) and places it as a region on a new lane at the range start. This is one undo step.
 - **Progress** shows in a sheet, and the bounce can be cancelled. A cancelled or failed bounce deletes its partial file.
 
 ## 10. Editors and media pool (Swift)
@@ -468,12 +568,12 @@ Rules common to all modes:
 ## 11. External sample editor
 - **Settings › Editing** gains "External sample editor" (an application chooser).
 - **"Open in External Editor"** on one region:
-  - writes the region's span (`source_offset`, `length`, with no gain or fades) as 32-bit float WAV to `Media/Edits/<name> edit <n>.wav`, because external editors read WAV more widely than CAF;
+  - writes the region's span (`source_offset`, `length`, with no gain or fades) as WAV at the project rate and depth to `Media/Edits/<name> edit <n>.wav`, because external editors read WAV more widely than CAF;
   - opens it with the chosen app;
   - watches it with a `DispatchSource` file-system-object watch for write, rename or delete events.
 - **Re-importing on change:**
   - A change is accepted once the file's size and modification time have stayed the same for 1 s.
-  - The file is imported (converted to CAF, origin `ExternalEdit { from }`).
+  - The file is imported (converted to CAF in the project format, origin `ExternalEdit { from }`).
   - That region alone is relinked to it: `media` = new, `source_offset` = 0, `length` = the new file's length, with fades clamped. This is one undo step, "External Edit".
   - Other regions using the original are unaffected.
 - **Watching** lasts until the project closes. "Reload External Edit" on a region whose media came from an external edit re-checks the `.wav` by hand later.
@@ -484,7 +584,9 @@ Rules common to all modes:
 ### 12.1 Control-channel additions
 - **Commands.** These follow the rule "programmatic calls never open dialogs"; file paths come as parameters.
   - **Record:** `transport.record` (handler added), `record.keep_pass`, `record.discard_pass`, `record.set { replace, punch, loop, count_in, pre_roll, passes_as_takes }`.
-  - **Lanes:** `lane.set_input`, `lane.set_monitor`.
+  - **Project:** `project.new { rate?, depth? }`, `project.set_format { rate, depth }` (converts, waits for completion).
+  - **Lanes:** `lane.set_input` (including `return_of`), `lane.set_monitor`, `lane.set_input_fx { lane, chain }`, `lane.track_synth { lane, channels, arm_midi?, mute_after? }`.
+  - **Destinations:** `destination.set_return_latency`, `destination.measure_return { dest }`, which returns the measured milliseconds.
   - **Media:** `media.import { paths, seq?, lane?, tick? }`, `media.relink { media, path }`, `media.compact`, `media.rename`.
   - **Regions:** `region.normalize`, `region.open_external` (on CI it uses a configured stub editor command).
   - **Automation:** `automation.set_mode { strips, mode }`, `automation.gesture { target, phase, value? }`, `automation.suspend`.
@@ -495,11 +597,14 @@ Rules common to all modes:
   - `media`: per item its ID, name, path, offline flag, use count and origin;
   - `automation`: mode per strip, touched targets and suspend;
   - `surfaces`: each surface's connection plus the last feedback bytes per surface (for tests);
-  - `input`: device, channels, latency and meters.
+  - `input`: device, channels, latency, meters and clip counts;
+  - `project`: format (rate and depth), and media not in the project format;
+  - per lane: `input_fx` (the chain) and `input.return_of`.
 - **Fake devices for e2e.** `VIZDAW_AUDIO=offline` (existing) gains a fake input, `VIZDAW_AUDIO_INPUT=fake`:
   - channel 1 carries a 440 Hz sine at −12 dBFS;
   - channel 2 carries an impulse every 0.5 s;
   - `VIZDAW_AUDIO_LOOPBACK=<frames>` instead feeds the output back into the input after that many frames. This drives the latency test.
+  - `VIZDAW_FAKE_SYNTH=<delay ms>` adds a fake external MIDI destination, "Fake Synth". Every note-on sent to it renders a 5 ms click on fake input channel 3 that many milliseconds after the note's audible time, and note-off ends a 220 Hz tone started with it. This drives the synth-tracking tests.
 - **Fake MIDI and surfaces.** `midi.inject` feeds bytes as if from a named port, and `surface.inject` feeds a surface directly, so no CoreMIDI virtual ports are needed on CI.
 
 ### 12.2 Errors and faults
@@ -514,7 +619,10 @@ Rules common to all modes:
   - CAF write→read round trip (mono and stereo, sizes −1 and known);
   - truncated-file reads;
   - reader refusal of other formats;
-  - importer conversion on macOS (WAV, AIFF and FLAC fixtures generated in tests, rate change 44.1→48 with length within ±1 frame);
+  - CAF in each depth (int16, int24, float32): round trip within one quantization step, dither present only at 16-bit, clipping counted;
+  - importer conversion on macOS into each project format (WAV, AIFF and FLAC fixtures generated in tests, rate change 44.1→48 with length within ±1 frame);
+  - project-format change: media converted, regions rescaled, undo restores the old files;
+  - migration: an old project takes the majority media rate and 24-bit, and mismatched media are offline until converted;
   - overview levels against a brute-force min/max.
 - **Streaming properties** (proptest), with random region layouts, overlaps, looped lanes, locates and loop wraps:
   - offline renders with the streamer equal renders from fully RAM-cached media, bit-exactly;
@@ -533,7 +641,21 @@ Rules common to all modes:
   - the history group merging edits made during recording;
   - loopback alignment within ±2 frames with the fake device;
   - overflow writes silence and flags;
-  - crash-recovered files are found and offered.
+  - crash-recovered files are found and offered;
+  - recorded files are in the project format.
+- **Synth tracking** (`VIZDAW_FAKE_SYNTH`):
+  - one pass with an armed `return_of` lane: the clicks land on the MIDI note starts within ±1 ms, with `return_latency_ms` set to the fake delay;
+  - Measure finds the fake delay within ±1 ms and fails cleanly with no signal;
+  - Track Synth sets up and arms in one undo step;
+  - a loop pass makes MIDI and audio takes together.
+- **MIDI input effects:**
+  - golden tests per arpeggiator mode, rate (including triplets) and octave count, synced and free-running;
+  - Latch, transpose, velocity, chord and clamps;
+  - chain order matters (transpose then chord ≠ chord then transpose where clamps apply);
+  - bypass and chain changes send note-offs (no hung notes);
+  - capacity overflow is counted;
+  - recording equals thru output, with Input Quantize applied to recorded starts only;
+  - `rt-check` covers the chain.
 - **Automation:** golden tests per mode from scripted gesture sequences (touch, values and release at known frames):
   - Write fallback;
   - Touch return glide;
@@ -563,6 +685,9 @@ Rules common to all modes:
 - **e2e:**
   - record audio from the fake input and check the region and waveform;
   - loop-record 3 passes, keep 2, check the takes;
+  - track the fake synth: check the audio region's clicks line up with the MIDI lane's notes;
+  - `midi.inject` held chord into a lane with an arpeggiator while recording: check the recorded notes are the arpeggio;
+  - `project.new` at 44.1 kHz / 16-bit, import a 48 kHz file: check the media's stored format;
   - Touch-write a fader via `automation.gesture` while playing and check the points;
   - drive a fader and a button from `surface.inject` (MCU) and check the feedback;
   - bounce and check the file.
@@ -572,6 +697,8 @@ Rules common to all modes:
   - aggregate (separate input) device;
   - plugin-window automation;
   - a real MCU or HUI unit if one is available;
+  - tracking a real hardware synth with Measure, and checking alignment by ear and by zooming in;
+  - the arpeggiator against a real keyboard, synced and free-running;
   - external editor round trip;
   - unplugging an interface mid-recording.
 
@@ -581,17 +708,18 @@ Plans run one after another by subagent-driven development under the standing au
 
 | Plan | Deliverable |
 |---|---|
-| **5a — Audio playback** | `core-media` (CAF, `MediaImporter`, streamer, RAM cache); ExtAudioFile importer; `Settings.sample_rate` and device-rate handling; fades in frames with migration; `MediaCmd`; segments in the schedule; `RegionSource` node; offline media as silence; `media.import` and `state.get media`. Imported audio plays, loops, locates and underruns safely. |
+| **5a — Audio playback** | `core-media` (CAF in all three depths, `MediaImporter`, streamer, RAM cache); ExtAudioFile importer; project format (`Settings.format`, New Project sheet, Project Settings, convert on change, migration) and device-rate handling; fades in frames with migration; `MediaCmd`; segments in the schedule; `RegionSource` node; offline media as silence; `media.import` and `state.get media`. Imported audio plays, loops, locates and underruns safely. |
 | **5b — Regions in the editors** | Overviews (build, cache, FFI); waveforms in the arrangement and region strip; fade and gain handles and region menu commands (Normalize); drag-in import; media pool window; offline/relink dialog; media retention (Trash on save/close). |
-| **5c — Recording engine** | HAL input (duplex and private aggregate), mic permission; input ring + `RecordWriter`; latency compensation; `LaneInput`/`MonitorMode`; MIDI timeline recording and thru via `MidiInputStage`; `RecordSpec` modes, punch, loop passes, keep/discard, takes; history groups and `RecordPass`; crash recovery of recordings; fake input and loopback; record e2e. |
-| **5d — Record UI** | Record button and popover, count-in and pre-roll, lane header input picker, monitor button and meter, mixer input controls, Settings › Audio/Recording, record-time readout and disk warnings. |
+| **5c — Recording engine** | HAL input (duplex and private aggregate), mic permission; input ring + `RecordWriter`; latency compensation; `LaneInput`/`MonitorMode`; MIDI timeline recording and thru through the lane's input-effect chain hook (empty until 5g); `RecordSpec` modes, punch, loop passes, keep/discard, takes; history groups and `RecordPass`; crash recovery of recordings; fake input and loopback; return latency on destinations, `return_of` alignment and Measure; fake synth; record and synth-tracking e2e. |
+| **5d — Record UI** | Record button and popover, count-in and pre-roll, lane header input picker, monitor button and meter, mixer input controls, Settings › Audio/Recording, record-time readout and disk warnings; Track Synth sheet and lane menu. |
 | **5e — Automation recording** | Gesture channel (mixer, AU and CLAP plugin windows); `AutomationMode` per strip and UI; Write/Touch/Latch/Trim engine with capture, thinning, lane placement, live preview; `automation.*` commands; golden tests. |
 | **5f — Surfaces, bounce, external editor** | `core-surface` (MIDI learn, MCU + XT, HUI) and Settings › Surfaces; learn UI; bounce/export (offline render, stems, formats, dither, add to project); external sample editor; `surface.*`, `bounce`, `region.open_external`. |
+| **5g — MIDI input effects** | `InputFx` model and commands; real-time chain in the renderer (arpeggiator, transpose, velocity, chord, input quantize) feeding thru and the recorder; FX button and popover; `lane.set_input_fx`; golden tests and e2e. Until this plan lands, the chain is empty and thru/record pass input unchanged. |
 
 ## 14. Rulings made while writing this spec
 
 1. **Fade length in frames, not ticks** (a format bump with migration at the region's start tempo). Fades belong to the audio, and region positions inside the media are already in frames.
-2. **Project sample rate in `Settings`**, set at the first audio. There is no real-time resampling. A device that won't switch mutes regions and offers conversion.
+2. *(Revised per user review.)* **The project has an audio format**, `Settings.format` = sample rate + bit depth (16-bit int, 24-bit int or 32-bit float). It is chosen at New (default 48 kHz / 24-bit), shown and changeable in Project Settings, and all media is stored in it. Changing it converts the media as one undo step. The engine processes float. Old projects migrate to the majority media rate and 24-bit, with mismatched media offline until converted. There is no real-time resampling: a device that won't switch mutes regions and offers to change the project rate.
 3. **Files with more than two channels** split into mono media items, since the engine's buses are stereo.
 4. **Offline media is runtime state**, never saved.
 5. **Media commands move from `RoutingCmd` to a new `MediaCmd`**, with the existing semantics kept.
@@ -614,7 +742,11 @@ Plans run one after another by subagent-driven development under the standing au
 22. **Recorded automation goes into the first lane already automating that target**, or a new lane in the top-level sequence.
 23. **Surface hardware settings and command learn maps** live in app preferences (`surfaces.json`). **Target learn maps** live in the project.
 24. **MCU supports a main unit plus up to 3 extenders.** No fader feedback is sent while a fader is touched.
-25. **Bounce is offline only.** External MIDI destinations are silent, with a warning. Plugins are copies, so live playback continues.
+25. *(Revised per user review.)* **Bounce is offline only.** External MIDI destinations are silent, with a warning that points to Track Synth. Plugins are copies, so live playback continues. **Tracking a hardware synth as audio is an explicit use case** (§6.7): a `return_of` audio lane records the synth's return in the same pass as the MIDI that drives it, aligned by latency compensation plus a measured per-destination `return_latency_ms`. Real-time bounce and an external-instrument round trip are deferred.
 26. **The external editor gets a WAV of the region span** (no gain or fades). The edit replaces that region's media, with offset 0 and the new length.
-27. **MIDI input effects (D26h) are deferred.** A `MidiInputStage` identity slot is reserved for them.
+27. *(Revised per user review.)* **MIDI input effects (D26h) are included**: a per-lane chain of up to 8 built-ins (Arpeggiator, Transpose, Velocity, Chord, Input Quantize) on the real-time thread, active while the lane is armed or monitoring Input. Recording is post-effect, per main spec §6. Input Quantize affects only what is recorded, never live thru. Groove and plugin MIDI effects are deferred. This is a new plan, 5g, run last, because it depends only on 5c's input path.
 28. **Normalize is non-destructive region gain**, computed from the overview peak.
+29. **Default project rate is 48 kHz.** It is the common video and interface default, and its 24-bit pairing is the user's choice.
+30. **16-bit media and bounces get TPDF dither. 24-bit is rounded without dither.** Integer formats clip at full scale and count the clipped samples.
+31. **Synth return latency is per destination, in milliseconds**, so it is rate-independent. Measure uses 5 pings, onsets above −40 dBFS and the median, minus the HAL's reported round trip.
+32. **The external editor's WAV is written in the project format**, and its return is converted back into it.
