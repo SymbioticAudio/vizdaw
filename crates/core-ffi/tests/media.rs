@@ -22,9 +22,21 @@ fn source(dir: &Path, name: &str, frames: usize, ch: u16) -> PathBuf {
 
 /// A 48 kHz CAF of `frames` frames in `depth`.
 fn source_in(dir: &Path, name: &str, frames: usize, ch: u16, depth: BitDepth) -> PathBuf {
+    source_of(dir, name, frames, ch, depth, 0.25)
+}
+
+/// A 48 kHz CAF of `frames` frames in `depth`, every sample `value`.
+fn source_of(
+    dir: &Path,
+    name: &str,
+    frames: usize,
+    ch: u16,
+    depth: BitDepth,
+    value: f32,
+) -> PathBuf {
     let p = dir.join(name);
     let mut w = CafWriter::create(&p, 48_000, ch, depth, WriteMode::Normal).unwrap();
-    w.write(&vec![0.25f32; frames * usize::from(ch)]).unwrap();
+    w.write(&vec![value; frames * usize::from(ch)]).unwrap();
     w.finish().unwrap();
     p
 }
@@ -437,4 +449,73 @@ fn a_stop_during_the_disk_wait_cancels_the_play() {
     assert!(!s.transport().unwrap().playing);
     s.close().unwrap();
     reset_host();
+}
+
+/// Save As (Replace) onto a package whose `Media/<name>.caf` holds other
+/// audio replaces that file (review I1): the saved project plays the
+/// source's audio, online.
+#[test]
+fn save_as_replace_overwrites_a_different_same_named_file() {
+    use core_media::caf::hash_file;
+    let dir = tempfile::tempdir().unwrap();
+    let old_src = dir.path().join("old");
+    let new_src = dir.path().join("new");
+    std::fs::create_dir_all(&old_src).unwrap();
+    std::fs::create_dir_all(&new_src).unwrap();
+    // The same name and length, other audio.
+    let a = source_of(&old_src, "pad.caf", 1000, 2, BitDepth::Float32, 0.5);
+    let b = source_of(&new_src, "pad.caf", 1000, 2, BitDepth::Float32, 0.25);
+    let pkg = dir.path().join("Old.vizdaw");
+    let first = Session::new_empty().unwrap();
+    import(&first, &[&a], None);
+    first.save_as(pkg.display().to_string()).unwrap();
+    first.close().unwrap();
+    let old_hash = hash_file(&pkg.join("Media/pad.caf")).unwrap();
+    // The new project, saved once elsewhere to know its file's hash.
+    let s = Session::new_empty().unwrap();
+    import(&s, &[&b], None);
+    let reference = dir.path().join("Ref.vizdaw");
+    s.save_as(reference.display().to_string()).unwrap();
+    let want = hash_file(&reference.join("Media/pad.caf")).unwrap();
+    assert_ne!(want, old_hash);
+    s.save_as(pkg.display().to_string()).unwrap();
+    assert_eq!(hash_file(&pkg.join("Media/pad.caf")).unwrap(), want);
+    assert_eq!(s.media().unwrap()[0].offline, None);
+    s.close().unwrap();
+    // No temp file is left behind.
+    let names: Vec<String> = std::fs::read_dir(pkg.join("Media"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["pad.caf".to_string()]);
+    let again = Session::open(pkg.display().to_string()).unwrap();
+    assert_eq!(again.media().unwrap()[0].offline, None);
+    again.close().unwrap();
+}
+
+/// Save As onto a package whose same-named file holds the same audio
+/// leaves that file alone (no copy).
+#[test]
+fn save_as_keeps_an_identical_same_named_file() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(dir.path(), "same.caf", 1000, 2);
+    let pkg = dir.path().join("Same.vizdaw");
+    let first = Session::new_empty().unwrap();
+    import(&first, &[&src], None);
+    first.save_as(pkg.display().to_string()).unwrap();
+    first.close().unwrap();
+    let file = pkg.join("Media/same.caf");
+    let before = std::fs::metadata(&file).unwrap();
+    // Another session imports the same source into its own scratch file
+    // (another inode, the same audio).
+    let s = Session::new_empty().unwrap();
+    import(&s, &[&src], None);
+    std::thread::sleep(Duration::from_millis(20));
+    s.save_as(pkg.display().to_string()).unwrap();
+    let after = std::fs::metadata(&file).unwrap();
+    assert_eq!(after.ino(), before.ino());
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_eq!(s.media().unwrap()[0].offline, None);
+    s.close().unwrap();
 }

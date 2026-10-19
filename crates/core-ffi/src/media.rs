@@ -3,7 +3,7 @@
 //! app shows, and copying files into a package on save.
 
 use crate::error::VizError;
-use core_media::caf::CafReader;
+use core_media::caf::{CafReader, hash_file};
 use core_media::import::{CafImporter, MediaImporter};
 use core_media::stream::MediaFile;
 use core_model::document::{Document, MediaOrigin};
@@ -153,26 +153,58 @@ pub fn rows(doc: &Document, offline: &BTreeMap<MediaId, OfflineReasonRow>) -> Ve
         .collect()
 }
 
-/// Copies every media file of `doc` that `to` lacks from `from` (Ruling
-/// 14). Missing sources are skipped (they stay offline).
+/// Copies every media file of `doc` from `from` into `to` (Ruling 14)
+/// unless `to` already holds the same audio. A same-named file with other
+/// audio (Save As replacing an older package, review I1) is replaced
+/// atomically: copied to a temp file beside it, then renamed over it.
+/// Files of `to` the document does not reference are left alone. Missing
+/// sources are skipped (they stay offline).
 pub fn copy_media(doc: &Document, from: &Path, to: &Path) -> Result<(), VizError> {
     if from == to {
         return Ok(());
     }
     for m in doc.media().values() {
         let (src, dst) = (from.join(&m.path), to.join(&m.path));
-        if dst.exists() || !src.is_file() {
+        if !src.is_file() {
             continue;
         }
-        if let Some(dir) = dst.parent() {
-            std::fs::create_dir_all(dir).map_err(io)?;
+        if dst.exists() && same_audio(&src, &dst, m.content_hash.as_deref()) {
+            continue;
         }
+        let Some(dir) = dst.parent() else {
+            return Err(VizError::Io {
+                message: format!("no folder for {}", dst.display()),
+            });
+        };
+        std::fs::create_dir_all(dir).map_err(io)?;
+        let name = dst
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = dir.join(format!(".{name}.{}.vizdaw-tmp", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
         // A hard link when both are on one volume; else a copy.
-        if std::fs::hard_link(&src, &dst).is_err() {
-            std::fs::copy(&src, &dst).map_err(io)?;
+        let placed = std::fs::hard_link(&src, &tmp)
+            .or_else(|_| std::fs::copy(&src, &tmp).map(|_| ()))
+            .and_then(|()| std::fs::rename(&tmp, &dst));
+        if let Err(e) = placed {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io(e));
         }
     }
     Ok(())
+}
+
+/// True when `dst` holds the audio of `src`: by the item's content hash
+/// when known, else by hashing both. An unreadable file never matches.
+fn same_audio(src: &Path, dst: &Path, hash: Option<&str>) -> bool {
+    let Ok(have) = hash_file(dst) else {
+        return false;
+    };
+    match hash {
+        Some(h) => have == h,
+        None => hash_file(src).is_ok_and(|want| want == have),
+    }
 }
 
 fn io(e: std::io::Error) -> VizError {
