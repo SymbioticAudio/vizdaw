@@ -952,7 +952,7 @@ a WAV, an AIFF, an MP3 or AAC, and one at 44.1 kHz.
      bar (Dismiss clears it) and the others import; imported alone, it
      raises an "Import Failed" alert.
 111. It plays: Play from bar 1. The region sounds through the output path
-     strip "Audio 1" in the mixer; its fader, pan, mute and solo work; the
+     strip "Audio 1" (use the plain Create Demo Project) in the mixer; its fader, pan, mute and solo work; the
      region's sound starts at its bar exactly (record the output or
      listen against the click of a MIDI lane).
 112. Loops and locates: loop bars 3–4 over a long region: the loop wraps
@@ -961,8 +961,10 @@ a WAV, an AIFF, an MP3 or AAC, and one at 44.1 kHz.
      sound resumes from there at once. No "Disk too slow: some audio
      played as silence." bar shows on a normal disk (if it does, Dismiss
      clears it).
-113. Formats: File > Project Settings… says how many audio files the
-     change converts (one undo step); choose 48 kHz / 24-bit and press
+113. Formats: use the project from step 109 (44.1 kHz / 16-bit, with a
+     file imported into it; the demo is not in that format). File >
+     Project Settings… says how many audio files the change converts
+     (one undo step); choose 48 kHz / 24-bit and press
      Change: a "Converting media…" bar, then the regions sit where they
      were and sound the same. Edit > Undo ("Change Project Format")
      restores 44.1 kHz and the old files.
@@ -982,3 +984,10 @@ a WAV, an AIFF, an MP3 or AAC, and one at 44.1 kHz.
      first Play a bar says "The audio device runs at … ; this project is
      …. Audio regions are muted." while MIDI still plays, and "Change
      Project Rate to …" converts the project to the device's rate.
+     Afterwards set the device's rate in Audio MIDI Setup back to what it
+     was (the throwaway home does not protect this system setting).
+117. Save As during a job: in a saved project, import a long or large
+     audio file (a few hundred MB, or several files at once) so the
+     "Importing audio…" bar stays up for a while, and at once choose File
+     > Save As…: it is refused with "Wait for the import or conversion
+     to finish, then save." Once the bar ends, Save As works.
