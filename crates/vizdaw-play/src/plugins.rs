@@ -3,6 +3,7 @@
 //! host for live playback.
 
 use crate::args::Args;
+#[cfg(target_os = "macos")]
 use core_host::PluginHost;
 use core_host::catalog::{Catalog, PluginStatus, Source};
 use core_host::scan;
@@ -60,6 +61,7 @@ fn discover(args: &Args) -> Vec<Source> {
     } else {
         args.clap_dirs.clone()
     };
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut found: Vec<Source> = core_host::clap::find_bundles(&dirs)
         .iter()
         .map(|p| Source::clap_bundle(p))
@@ -199,6 +201,7 @@ pub fn edit(doc: &Document, args: &Args, cat: &Catalog) -> Result<Document, Stri
 }
 
 /// A host for `doc`'s plugins, loaded (or failed) before playback starts.
+#[cfg(target_os = "macos")]
 pub fn host(
     doc: &Document,
     cat: &mut Catalog,
