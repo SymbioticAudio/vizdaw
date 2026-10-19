@@ -11,11 +11,11 @@ use crate::midi1::{Class, Midi1Msg, When, translate};
 use core_model::automation::{AutomationTarget, velocity_scale_percent};
 use core_model::document::{DestKind, Document, SlotOwner};
 use core_model::event::EventBody;
-use core_model::ids::{DestId, PluginInstanceId, SeqId};
+use core_model::ids::{DestId, MediaId, PluginInstanceId, SeqId};
 use core_model::query::{PathStep, flatten, seq_length};
 use core_model::selection::ViewFilter;
 use core_model::time::Tick;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 /// Compiler inputs besides the document.
@@ -27,6 +27,8 @@ pub struct CompileOptions {
     pub route: BuiltinRoute,
     /// MIDI destinations that currently exist.
     pub ports: Vec<MidiPortInfo>,
+    /// Media that cannot be read: their regions play silence (5a).
+    pub offline_media: BTreeSet<MediaId>,
 }
 
 impl CompileOptions {
@@ -36,6 +38,7 @@ impl CompileOptions {
             sample_rate,
             route: BuiltinRoute::Builtin,
             ports: Vec::new(),
+            offline_media: BTreeSet::new(),
         }
     }
 }
@@ -66,8 +69,15 @@ pub struct CompileReport {
     pub dropped_sysex8: usize,
     /// Events from UMP groups other than 0 (sent without their group).
     pub group_folded: usize,
-    /// Audio regions skipped (audio playback is not in this engine yet).
-    pub skipped_audio: usize,
+    /// Audio regions that play (uses: a looped or referenced region counts
+    /// once per use).
+    pub audio_regions: usize,
+    /// Segments the regions became.
+    pub audio_segments: usize,
+    /// Regions on lanes without an output path (not played).
+    pub audio_unrouted: usize,
+    /// Segments whose media is offline (silence).
+    pub audio_offline: usize,
     /// One line per kind of problem, for display.
     pub warnings: Vec<String>,
     /// Wall-clock compile time, excluding target (sink) creation.
@@ -121,7 +131,13 @@ pub fn compile(
         if f <= 0.0 { 0 } else { f as u64 }
     };
 
+    let frame_signed = |t: Tick| -> i64 {
+        let f = ((s.tempo.tick_to_seconds(t) - base) * sr).round();
+        // Float-to-int `as` saturates.
+        f as i64
+    };
     let mut report = CompileReport::default();
+    let mut regions = Vec::new();
     let mut routes: BTreeMap<DestId, Routes> = BTreeMap::new();
     let mut used: BTreeMap<DestId, ()> = BTreeMap::new();
     let mut pending: Vec<Pending> = Vec::new();
@@ -185,7 +201,7 @@ pub fn compile(
 
     for r in flat {
         if matches!(r.body, EventBody::AudioRegion { .. }) {
-            report.skipped_audio += 1;
+            regions.push(r);
             continue;
         }
         if !r.body.is_midi() || matches!(r.body, EventBody::Text { .. }) {
@@ -330,6 +346,13 @@ pub fn compile(
         }
     }
 
+    let audio = super::audio::build(
+        doc,
+        &regions,
+        &frame_signed,
+        &opts.offline_media,
+        &mut report,
+    );
     pending.sort_by_key(|p| (p.frame, p.class, p.group, p.order));
     let entries: Box<[Entry]> = pending.iter().map(|p| p.entry).collect();
     report.entries = entries.len();
@@ -346,6 +369,7 @@ pub fn compile(
         used_channels,
         chase,
         automation,
+        audio,
     };
     report.warnings = warnings(&report);
     report.compile_time = started.elapsed().saturating_sub(resolving);
@@ -461,10 +485,16 @@ fn warnings(r: &CompileReport) -> Vec<String> {
             r.dropped_sysex8
         ));
     }
-    if r.skipped_audio > 0 {
+    if r.audio_unrouted > 0 {
         w.push(format!(
-            "{} audio region(s) skipped (audio playback is not available yet)",
-            r.skipped_audio
+            "{} audio region(s) not played: their lane has no output path",
+            r.audio_unrouted
+        ));
+    }
+    if r.audio_offline > 0 {
+        w.push(format!(
+            "{} audio region(s) play silence: their media is offline",
+            r.audio_offline
         ));
     }
     if r.automation_missing > 0 {

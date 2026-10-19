@@ -321,6 +321,7 @@ fn named_destination_routes_by_name_or_unique_id() {
         sample_rate: 48_000.0,
         route: BuiltinRoute::Builtin,
         ports: ports.clone(),
+        offline_media: Default::default(),
     };
     let (s, r, table) = compile_all(&doc, seq, &opts);
     assert!(r.unroutable.is_empty(), "{:?}", r.unroutable);
@@ -343,6 +344,7 @@ fn route_both_duplicates_builtin_events() {
         sample_rate: 48_000.0,
         route: BuiltinRoute::Both,
         ports: vec![],
+        offline_media: Default::default(),
     };
     let (s, _, table) = compile_all(&doc, seq, &opts);
     assert_eq!(
@@ -446,6 +448,7 @@ fn too_many_targets_is_an_error() {
         sample_rate: 48_000.0,
         route: BuiltinRoute::Builtin,
         ports,
+        offline_media: Default::default(),
     };
     let mut table = TargetTable::new();
     let err = compile(&doc, seq, &opts, &mut |k: &TargetKind| {

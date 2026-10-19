@@ -349,6 +349,7 @@ impl Engine {
             sample_rate: self.cfg.sample_rate,
             route: self.cfg.route,
             ports: self.factory.ports(),
+            offline_media: std::collections::BTreeSet::new(),
         };
         let (sr, max) = (self.cfg.sample_rate, self.block_frames());
         // Indices released by an earlier load are free only once a load

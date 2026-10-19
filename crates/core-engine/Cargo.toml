@@ -13,6 +13,7 @@ fixtures = []
 rt-check = []
 
 [dependencies]
+core-media = { path = "../core-media" }
 core-model = { path = "../core-model" }
 crossbeam-queue = "0.3"
 rtrb = "0.4"

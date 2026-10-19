@@ -428,6 +428,7 @@ name = "core-engine"
 version = "0.1.0"
 dependencies = [
  "core-engine",
+ "core-media",
  "core-model",
  "crossbeam-queue",
  "im",

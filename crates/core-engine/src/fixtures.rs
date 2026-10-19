@@ -2,12 +2,12 @@
 //! `fixtures`). Shared by engine tests, `vizdaw-play` and the app (2c).
 
 use core_model::command::{
-    Command, DrumCmd, EventCmd, LaneCmd, MediaCmd, MixerCmd, ReferenceCmd, Report, RoutingCmd,
-    SequenceCmd, apply,
+    AudioCmd, Command, DrumCmd, EventCmd, LaneCmd, MediaCmd, MixerCmd, ReferenceCmd, Report,
+    RoutingCmd, SequenceCmd, apply,
 };
 use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec, Fade, LoopCount};
-use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
+use core_model::ids::{AnyId, DestId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginRef, PluginSlot, StripKind};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::{PPQ, Tick};
@@ -236,6 +236,55 @@ impl Builder {
         ids.first()
             .copied()
             .ok_or_else(|| ModelError::invalid("no event created"))
+    }
+
+    /// Adds a media item `path` of `frames` frames at 48 kHz.
+    pub fn media(&mut self, path: &str, frames: u64, channels: u16) -> Result<MediaId> {
+        let r = self.run(Command::Media(MediaCmd::Add {
+            path: path.into(),
+            sample_rate: 48_000,
+            channels,
+            length_frames: frames,
+            content_hash: None,
+            name: None,
+            origin: None,
+        }))?;
+        created(&r, |id| match id {
+            AnyId::Media(m) => Some(*m),
+            _ => None,
+        })
+    }
+
+    /// Inserts an audio region (the lane gets an output path if it has
+    /// none, 5a Ruling 6).
+    #[allow(clippy::too_many_arguments)]
+    pub fn region(
+        &mut self,
+        seq: SeqId,
+        lane: LaneId,
+        tick: i64,
+        media: MediaId,
+        offset: u64,
+        length: u64,
+        gain_db: f32,
+        fade_in: Fade,
+        fade_out: Fade,
+    ) -> Result<EventId> {
+        let r = self.run(Command::Audio(AudioCmd::Insert {
+            seq,
+            lane,
+            tick: Tick(tick),
+            media,
+            source_offset: offset,
+            length,
+            gain_db,
+            fade_in,
+            fade_out,
+        }))?;
+        created(&r, |id| match id {
+            AnyId::Event(e) => Some(*e),
+            _ => None,
+        })
     }
 
     /// Inserts a reference to `target`.

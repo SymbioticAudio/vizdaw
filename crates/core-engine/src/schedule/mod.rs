@@ -1,10 +1,12 @@
 //! Immutable playback schedules and their compiler.
 
+pub mod audio;
 pub mod automation;
 pub mod compile;
 pub mod targets;
 pub mod tempo;
 
+pub use audio::{AudioSchedule, Segment, fade_curve};
 pub use automation::{
     AutoDest, AutoLane, AutoPoint, Automation, MAX_AUTO_LANES, MIN_RUN, StripParam,
 };
@@ -62,6 +64,8 @@ pub struct Schedule {
     pub chase: ChaseIndex,
     /// Automation lanes (4d).
     pub automation: Automation,
+    /// Audio regions per output path (5a).
+    pub audio: AudioSchedule,
 }
 
 /// One chased controller value: `msg` takes effect at `frame`.
