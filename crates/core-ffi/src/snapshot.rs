@@ -359,6 +359,10 @@ pub struct IdleUpdate {
     /// refetch `Session.media`.
     #[uniffi(default = false)]
     pub media_changed: bool,
+    /// Waveform overviews or sample windows became available: views
+    /// showing `Pending` or `Coarse` waveforms ask again (plan 5b).
+    #[uniffi(default = false)]
+    pub overviews_changed: bool,
 }
 
 /// One plugin parameter and its current value.

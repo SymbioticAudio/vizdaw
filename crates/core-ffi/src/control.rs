@@ -1000,6 +1000,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                     crate::media::OfflineReasonRow::Unreadable => "unreadable",
                     crate::media::OfflineReasonRow::Format => "format",
                     crate::media::OfflineReasonRow::Length => "length",
+                    crate::media::OfflineReasonRow::Changed => "changed",
                 }),
                 "uses": m.uses,
             })).collect::<Vec<_>>(),

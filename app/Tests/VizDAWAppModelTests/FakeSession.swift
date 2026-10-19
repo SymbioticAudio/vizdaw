@@ -338,6 +338,19 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func heldSlots() throws -> [UInt64] { held }
     func close() throws { closeCalls += 1 }
+    /// What `overview` and `regionWaveform` answer (nil: pending silence).
+    var waveformRows: OverviewRows?
+    /// `regionWaveform` calls: event, from, to, columns.
+    var waveformCalls: [(event: UInt64, from: Int64, to: Int64, columns: UInt32)] = []
+    func overview(media: UInt64, fromFrame: UInt64, toFrame: UInt64, columns: UInt32) throws -> OverviewRows {
+        waveformRows ?? OverviewRows(
+            state: .pending, channels: 1, columns: columns, min: Array(repeating: 0, count: Int(columns)),
+            max: Array(repeating: 0, count: Int(columns)))
+    }
+    func regionWaveform(event: UInt64, fromTick: Int64, toTick: Int64, columns: UInt32) throws -> OverviewRows {
+        waveformCalls.append((event, fromTick, toTick, columns))
+        return try overview(media: 0, fromFrame: 0, toFrame: 1, columns: columns)
+    }
     var mediaRows: [MediaRow] = []
     var jobRows: [UInt64: JobRow] = [:]
     var imports: [([String], ImportTargetRow?)] = []

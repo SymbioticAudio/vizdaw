@@ -23,6 +23,9 @@ pub enum OfflineReasonRow {
     Format,
     /// The file's length differs from the item's.
     Length,
+    /// The file no longer holds the audio the project recorded for the
+    /// item: its content hash differs (spec §4.3; plan 5b Ruling 2).
+    Changed,
 }
 
 /// Where a media item came from.

@@ -89,6 +89,11 @@ struct Inner {
     media_seen: Option<(Document, std::path::PathBuf)>,
     /// Imports and conversions (Ruling 15).
     jobs: crate::jobs::Jobs,
+    /// Waveform overviews and their worker (plan 5b Ruling 3).
+    overviews: crate::overviews::Overviews,
+    /// Items whose file failed the content-hash check, with the path and
+    /// hash it was checked for (plan 5b Ruling 2; runtime only).
+    changed: std::collections::BTreeMap<core_model::ids::MediaId, (String, Option<String>)>,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -150,6 +155,8 @@ impl Inner {
             offline: Default::default(),
             media_seen: None,
             jobs: Default::default(),
+            overviews: Default::default(),
+            changed: Default::default(),
         }
     }
 
@@ -162,8 +169,15 @@ impl Inner {
 
     /// Recomputes the offline set when the media pool, the format or the
     /// root changed (or `force`), and hands the online media to the
-    /// engine host. True when the offline set changed.
+    /// engine host and to the overview worker (which re-verifies every
+    /// item when `force`). True when the offline set changed.
     fn refresh_media(&mut self, id: u64, force: bool) -> bool {
+        self.refresh_media_with(id, force, force)
+    }
+
+    /// [`Inner::refresh_media`]; `reverify` makes the overview worker
+    /// check every item again (a recheck), not only new ones.
+    fn refresh_media_with(&mut self, id: u64, force: bool, reverify: bool) -> bool {
         let root = self.root(id);
         let doc = self.history.doc();
         let same = !force
@@ -175,9 +189,38 @@ impl Inner {
         if same {
             return false;
         }
-        let offline = crate::media::check(doc, &root);
+        let mut offline = crate::media::check(doc, &root);
+        // A file that failed the hash check stays offline while the item
+        // still names that file and hash (plan 5b Ruling 2).
+        for (m, (path, hash)) in &self.changed {
+            if let Some(item) = doc.media().get(m) {
+                if item.path == *path && item.content_hash == *hash {
+                    offline
+                        .entry(*m)
+                        .or_insert(crate::media::OfflineReasonRow::Changed);
+                }
+            }
+        }
         let changed = offline != self.offline;
         host::set_media(id, crate::media::files(doc, &root, &offline));
+        // Overviews of online items, and of changed ones so a returning
+        // original is noticed.
+        let wants = doc
+            .media()
+            .values()
+            .filter(|m| match offline.get(&m.id) {
+                None | Some(crate::media::OfflineReasonRow::Changed) => true,
+                Some(_) => false,
+            })
+            .map(|m| crate::overviews::Want {
+                media: m.id,
+                path: m.path.clone(),
+                file: root.join(&m.path),
+                hash: m.content_hash.clone(),
+                package: root.clone(),
+            })
+            .collect();
+        self.overviews.ensure(wants, reverify);
         self.offline = offline;
         self.media_seen = Some((doc.clone(), root));
         changed
@@ -464,11 +507,9 @@ impl Session {
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
         let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
-        crate::media::copy_media(
-            &inner.history.referenced_media_anywhere(),
-            &inner.root(self.id),
-            path,
-        )?;
+        let refs = inner.history.referenced_media_anywhere();
+        crate::media::copy_media(&refs, &inner.root(self.id), path)?;
+        crate::overviews::copy_cache(&refs, &inner.root(self.id), path);
         file::save(inner.doc(), path)?;
         write_windows(path, &inner.windows, inner.editor_layout.as_ref());
         inner.clean = inner.doc().clone();
@@ -1180,6 +1221,7 @@ impl Session {
                 params_changed: Vec::new(),
                 problems: Vec::new(),
                 media_changed: false,
+                overviews_changed: false,
             };
             // A nested run loop inside a plugin call: skip this tick (before
             // taking the session lock, which that call may hold).
@@ -1217,7 +1259,37 @@ impl Session {
                 host::set_media(self.id, files);
                 inner.reload_host(self.id);
             }
-            let media_changed = jobs_changed || owed || stream_failed;
+            // What the overview worker found (plan 5b Ruling 2).
+            let found = inner.overviews.take_news();
+            let mut hash_news = false;
+            for (m, path, hash) in found.mismatched {
+                if inner.changed.get(&m) == Some(&(path.clone(), hash.clone())) {
+                    continue;
+                }
+                let name = inner
+                    .doc()
+                    .media()
+                    .get(&m)
+                    .map_or_else(|| m.to_string(), |x| x.name.clone());
+                inner.news.problems.push(format!(
+                    "{name}: the file no longer holds the audio this project expects; it stays silent until it is relinked or restored"
+                ));
+                inner.changed.insert(m, (path, hash));
+                hash_news = true;
+            }
+            for (m, path) in found.verified {
+                if inner.changed.get(&m).is_some_and(|(p, _)| *p == path) {
+                    inner.changed.remove(&m);
+                    hash_news = true;
+                }
+            }
+            if hash_news {
+                // Not a re-verification: a still-changed file is not read
+                // again in a loop.
+                inner.refresh_media_with(self.id, true, false);
+                inner.reload_host(self.id);
+            }
+            let media_changed = jobs_changed || owed || stream_failed || hash_news;
             let changed = changed || jobs_changed;
             let n = std::mem::take(&mut inner.news);
             Ok(IdleUpdate {
@@ -1230,6 +1302,7 @@ impl Session {
                 params_changed: n.params_changed.into_iter().collect(),
                 problems: n.problems,
                 media_changed,
+                overviews_changed: found.changed,
             })
         })
     }
@@ -1923,6 +1996,7 @@ impl Session {
             for w in inner.jobs.shutdown() {
                 discard(&root, w);
             }
+            inner.overviews.shutdown();
             host::forget_media(self.id);
             if inner.path.is_none() {
                 let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
@@ -2029,6 +2103,22 @@ impl Session {
     /// True when every job thread has ended, applied or not (test hook).
     pub fn debug_jobs_settled(&self) -> bool {
         lock(&self.inner).jobs.settled()
+    }
+
+    /// True when the overview worker has nothing to do (test hook).
+    pub fn debug_overviews_idle(&self) -> bool {
+        lock(&self.inner).overviews.idle()
+    }
+
+    /// Holds the overview worker (`true`) or lets it go (test hook).
+    pub fn debug_hold_overviews(&self, on: bool) {
+        lock(&self.inner).overviews.set_held(on);
+    }
+
+    /// Makes the overview worker's next task panic (test hook, preflight
+    /// M10).
+    pub fn debug_panic_overviews(&self) {
+        lock(&self.inner).overviews.panic_next();
     }
 }
 
@@ -2897,6 +2987,155 @@ fn apply_convert(
     }
 }
 
+/// Waveform overviews (plan 5b Task 4).
+#[uniffi::export]
+impl Session {
+    /// `columns` columns of media item `media` over frames `[from_frame,
+    /// to_frame)` (cut to the file). Never waits for a file: what is not
+    /// loaded answers `Pending` (spec §10.1; plan 5b Ruling 3).
+    pub fn overview(
+        &self,
+        media: u64,
+        from_frame: u64,
+        to_frame: u64,
+        columns: u32,
+    ) -> Result<crate::overviews::OverviewRows, VizError> {
+        ffi_guard(|| {
+            use crate::overviews::{OverviewRows, OverviewStateRow};
+            crate::overviews::check_columns(columns)?;
+            if from_frame >= to_frame {
+                return Err(crate::events::bad("from_frame must be before to_frame"));
+            }
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let id = core_model::ids::MediaId(media);
+            let m = inner
+                .doc()
+                .media()
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| crate::events::bad(&format!("unknown media {media}")))?;
+            if inner.offline.contains_key(&id) {
+                return Ok(OverviewRows::silent(
+                    OverviewStateRow::Offline,
+                    m.channels,
+                    columns,
+                ));
+            }
+            let to = to_frame.min(m.length_frames.max(from_frame + 1));
+            let n = columns as usize;
+            let w = (to - from_frame) as f64 / n as f64;
+            let spans: Vec<Option<(u64, u64)>> = (0..n)
+                .map(|c| {
+                    let a = from_frame + (c as f64 * w).floor() as u64;
+                    let b = (from_frame + ((c + 1) as f64 * w).ceil() as u64).min(to);
+                    (b > a).then_some((a, b))
+                })
+                .collect();
+            let file = inner.root(self.id).join(&m.path);
+            Ok(crate::overviews::columns(
+                &inner.overviews,
+                id,
+                &file,
+                m.channels,
+                &spans,
+                &|_| 1.0,
+            ))
+        })
+    }
+
+    /// `columns` columns of audio region `event` over ticks `[from_tick,
+    /// to_tick)` of its sequence, mapped through the tempo map, scaled by
+    /// the region's gain and shaped by its fades; columns outside the
+    /// region are silent (plan 5b Ruling 4).
+    pub fn region_waveform(
+        &self,
+        event: u64,
+        from_tick: i64,
+        to_tick: i64,
+        columns: u32,
+    ) -> Result<crate::overviews::OverviewRows, VizError> {
+        ffi_guard(|| {
+            use crate::overviews::{OverviewRows, OverviewStateRow};
+            use core_model::event::EventBody;
+            crate::overviews::check_columns(columns)?;
+            if from_tick >= to_tick {
+                return Err(crate::events::bad("from_tick must be before to_tick"));
+            }
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let doc = inner.doc().clone();
+            let (ev, loc) = doc.event(core_model::ids::EventId(event))?;
+            let EventBody::AudioRegion {
+                media,
+                source_offset,
+                length,
+                gain_db,
+                fade_in,
+                fade_out,
+            } = ev.body
+            else {
+                return Err(crate::events::bad(&format!(
+                    "{event} is not an audio region"
+                )));
+            };
+            let m = doc
+                .media()
+                .get(&media)
+                .ok_or_else(|| crate::events::bad(&format!("unknown media {media}")))?;
+            if inner.offline.contains_key(&media) {
+                return Ok(OverviewRows::silent(
+                    OverviewStateRow::Offline,
+                    m.channels,
+                    columns,
+                ));
+            }
+            let tempo = &doc.sequence(loc.seq)?.tempo;
+            let rate = f64::from(m.sample_rate.max(1));
+            let start = tempo.tick_to_seconds(ev.tick);
+            // Region frame at tick `t` (f64 ticks; `as` saturates).
+            let frame =
+                |t: f64| (tempo.tick_to_seconds(core_model::time::Tick(t as i64)) - start) * rate;
+            let n = columns as usize;
+            let (t0, t1) = (from_tick as f64, to_tick as f64);
+            let w = (t1 - t0) / n as f64;
+            let len = length as f64;
+            let spans: Vec<Option<(u64, u64)>> = (0..n)
+                .map(|c| {
+                    let a = frame(t0 + c as f64 * w).max(0.0);
+                    let b = frame(t0 + (c + 1) as f64 * w).min(len);
+                    if a.is_nan() || b.is_nan() || b <= a {
+                        return None;
+                    }
+                    let a = a.floor() as u64;
+                    let b = (b.ceil() as u64).clamp(a + 1, length.max(a + 1));
+                    Some((
+                        source_offset.saturating_add(a),
+                        source_offset.saturating_add(b),
+                    ))
+                })
+                .collect();
+            let lin = 10f32.powf(gain_db / 20.0);
+            let gain = |c: usize| -> f32 {
+                let Some(Some((a, b))) = spans.get(c) else {
+                    return 0.0;
+                };
+                let r = (a + b) / 2 - source_offset.min((a + b) / 2);
+                lin * crate::overviews::fade_gain(r, length, fade_in, fade_out)
+            };
+            let file = inner.root(self.id).join(&m.path);
+            Ok(crate::overviews::columns(
+                &inner.overviews,
+                media,
+                &file,
+                m.channels,
+                &spans,
+                &gain,
+            ))
+        })
+    }
+}
+
 /// Media and jobs (plan 5a Task 10).
 #[uniffi::export]
 impl Session {
@@ -3048,6 +3287,7 @@ impl Session {
                         Some(
                             crate::media::OfflineReasonRow::Missing
                                 | crate::media::OfflineReasonRow::Length
+                                | crate::media::OfflineReasonRow::Changed
                         )
                     )
                 })

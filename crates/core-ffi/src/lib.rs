@@ -34,6 +34,7 @@ pub mod keys;
 pub mod media;
 pub mod mixer;
 pub mod modify;
+pub mod overviews;
 pub mod plugins;
 pub mod recovery;
 pub mod revs;
@@ -86,6 +87,7 @@ pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,
     NoteMapEntry, RuleRow, SelectModeRow, SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
 };
+pub use overviews::{OverviewRows, OverviewStateRow};
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
 pub use selection::{SelectionRow, TickRange};

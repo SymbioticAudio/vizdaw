@@ -482,10 +482,11 @@ fn save_as_replace_overwrites_a_different_same_named_file() {
     assert_eq!(hash_file(&pkg.join("Media/pad.caf")).unwrap(), want);
     assert_eq!(s.media().unwrap()[0].offline, None);
     s.close().unwrap();
-    // No temp file is left behind.
+    // No temp file is left behind (the overview cache folder aside).
     let names: Vec<String> = std::fs::read_dir(pkg.join("Media"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != ".overviews")
         .collect();
     assert_eq!(names, vec!["pad.caf".to_string()]);
     let again = Session::open(pkg.display().to_string()).unwrap();
