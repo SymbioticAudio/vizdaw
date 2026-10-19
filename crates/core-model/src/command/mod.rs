@@ -13,7 +13,7 @@ pub mod sequence;
 pub mod settings;
 mod strips;
 
-pub use audio::AudioCmd;
+pub use audio::{AudioCmd, FadeEdge};
 pub use drum::DrumCmd;
 pub use event::EventCmd;
 pub use lane::LaneCmd;

@@ -61,7 +61,8 @@ pub enum MediaCmd {
         name: String,
     },
     /// Point a media item at another file; refused while a region uses
-    /// frames beyond the new file's end.
+    /// frames beyond the new file's end. A file at another rate rescales
+    /// the item's regions by the rate ratio (5b Ruling 9).
     Relink {
         /// Target.
         media: MediaId,
@@ -149,27 +150,43 @@ pub(crate) fn swap_media(d: &mut Document, swaps: &[MediaSwap], rate: u32) -> Re
             m.content_hash = s.content_hash.clone();
             m.sample_rate = rate;
         }
-        // Float-to-int `as` saturates; ratio 1 maps every value to itself.
-        let scale = |x: u64| (x as f64 * ratio).round() as u64;
-        for id in regions_using(d, s.media) {
-            let mut ev = d.event(id)?.0.clone();
-            if let EventBody::AudioRegion {
-                source_offset,
-                length,
-                fade_in,
-                fade_out,
-                ..
-            } = &mut ev.body
-            {
-                *source_offset = scale(*source_offset).min(s.length_frames - 1);
-                *length = scale(*length).max(1).min(s.length_frames - *source_offset);
-                fade_in.length_frames = scale(fade_in.length_frames);
-                fade_out.length_frames = scale(fade_out.length_frames);
-            }
-            clamp_fades(&mut ev);
-            check_event_fields(d, &ev.spec())?;
-            d.replace_event(ev)?;
+        rescale_regions(d, s.media, ratio, s.length_frames)?;
+    }
+    Ok(())
+}
+
+/// Rescales the regions of `media` by `ratio` (offset, length and fades
+/// rounded to the nearest frame), keeps each length ≥ 1 and the region
+/// inside a file of `len` frames, and clamps the fades (5a Ruling 1).
+/// Shared by Convert, SetFormat and Relink (5b Ruling 9).
+pub(crate) fn rescale_regions(
+    d: &mut Document,
+    media: MediaId,
+    ratio: f64,
+    len: u64,
+) -> Result<()> {
+    // Float-to-int `as` saturates; ratio 1 maps every value to itself.
+    let scale = |x: u64| (x as f64 * ratio).round() as u64;
+    for id in regions_using(d, media) {
+        let mut ev = d.event(id)?.0.clone();
+        if let EventBody::AudioRegion {
+            source_offset,
+            length,
+            fade_in,
+            fade_out,
+            ..
+        } = &mut ev.body
+        {
+            *source_offset = scale(*source_offset).min(len.saturating_sub(1));
+            *length = scale(*length)
+                .max(1)
+                .min(len.saturating_sub(*source_offset));
+            fade_in.length_frames = scale(fade_in.length_frames);
+            fade_out.length_frames = scale(fade_out.length_frames);
         }
+        clamp_fades(&mut ev);
+        check_event_fields(d, &ev.spec())?;
+        d.replace_event(ev)?;
     }
     Ok(())
 }
@@ -241,11 +258,16 @@ pub(crate) fn apply(d: &mut Document, cmd: &MediaCmd, r: &mut Report) -> Result<
             channels,
             sample_rate,
         } => {
-            item(d, *media)?;
+            let old_rate = item(d, *media)?.sample_rate.max(1);
             if *sample_rate == 0 || *channels == 0 {
                 return Err(ModelError::range("media.format", sample_rate));
             }
             check_media_path(path)?;
+            // Another rate rescales the regions (5b Ruling 9), allowing
+            // one frame of rounding past the new end; the same rate allows
+            // none.
+            let ratio = f64::from(*sample_rate) / f64::from(old_rate);
+            let slack = if *sample_rate == old_rate { 0.0 } else { 1.0 };
             for id in regions_using(d, *media) {
                 if let EventBody::AudioRegion {
                     source_offset,
@@ -253,8 +275,8 @@ pub(crate) fn apply(d: &mut Document, cmd: &MediaCmd, r: &mut Report) -> Result<
                     ..
                 } = d.event(id)?.0.body
                 {
-                    let end = source_offset.saturating_add(length);
-                    if end > *length_frames {
+                    let end = (source_offset.saturating_add(length) as f64 * ratio).round();
+                    if end > *length_frames as f64 + slack {
                         return Err(ModelError::range("relink.length_frames", length_frames));
                     }
                 }
@@ -265,6 +287,9 @@ pub(crate) fn apply(d: &mut Document, cmd: &MediaCmd, r: &mut Report) -> Result<
                 m.length_frames = *length_frames;
                 m.channels = *channels;
                 m.sample_rate = *sample_rate;
+            }
+            if *sample_rate != old_rate {
+                rescale_regions(d, *media, ratio, *length_frames)?;
             }
         }
         MediaCmd::Compact => {
