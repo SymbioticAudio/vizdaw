@@ -32,7 +32,9 @@ use core_model::ids::MediaId;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
+};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -157,6 +159,9 @@ struct Voice {
     origin: AtomicU64,
     base: AtomicU64,
     hi: AtomicU64,
+    /// The overwrite guard: frames below it may have been overwritten
+    /// (raised before each chunk's data is written; see [`Voice::guard`]).
+    guard: AtomicU64,
     channels: AtomicU32,
     cap: u64,
     stride: usize,
@@ -171,6 +176,7 @@ impl Voice {
             origin: AtomicU64::new(0),
             base: AtomicU64::new(0),
             hi: AtomicU64::new(0),
+            guard: AtomicU64::new(0),
             channels: AtomicU32::new(1),
             cap: cap.max(1),
             stride,
@@ -186,8 +192,37 @@ impl Voice {
         let lo = self
             .base
             .load(Ordering::Relaxed)
-            .max(hi.saturating_sub(self.cap));
+            .max(hi.saturating_sub(self.cap))
+            .max(self.guard.load(Ordering::Relaxed));
         (lo, hi)
+    }
+
+    /// Disk side, before writing frames below `end`: their slots held
+    /// frames below `end - cap`, which stop being readable now.
+    ///
+    /// The seqlock argument (fix round 1, C1). Writer: `guard` RMW, then
+    /// `fence(Release)`, then the data stores. Reader ([`Voice::valid`]):
+    /// the data loads, then `fence(Acquire)`, then a `guard` load. If any
+    /// data load saw a store made after the writer's fence, the fences
+    /// synchronise (C++ [atomics.fences]), so the guard raise happens
+    /// before the reader's guard load, which therefore sees it (or a
+    /// later value). Overwriting the slot of a frame `f` the reader wants
+    /// means writing frame `f + cap` (or later), which raised the guard
+    /// above `f >= start`, so the copy is rejected. Every slot is an
+    /// `AtomicU32`, so a slot read during its write is no data race
+    /// (relaxed 32-bit loads and stores are plain moves on aarch64 and
+    /// x86_64); it is merely a stale or new value, which the check sorts.
+    fn guard(&self, end: u64) {
+        self.guard
+            .fetch_max(end.saturating_sub(self.cap), Ordering::Relaxed);
+        fence(Ordering::Release);
+    }
+
+    /// Real-time side, after copying frames from `start`: false when a
+    /// slot of the copy may have been overwritten meanwhile. // RT
+    fn valid(&self, start: u64) -> bool {
+        fence(Ordering::Acquire);
+        start >= self.guard.load(Ordering::Relaxed)
     }
 
     fn put(&self, f: u64, ch: usize, x: f32) {
@@ -338,7 +373,8 @@ impl StreamReader {
     /// Copies `left.len()` frames of `media` from `file_frame` for the
     /// segment keyed `(start, origin)` (its need's `start` and
     /// `file_frame`) into `left`/`right` (mono files copy to both).
-    /// Writes nothing on a miss. // RT
+    /// On a miss the outputs are untouched, or silence when the copy
+    /// raced an overwrite (see [`Voice::guard`]). // RT
     pub fn read(
         &self,
         media: MediaId,
@@ -375,7 +411,12 @@ impl StreamReader {
                 *l = v.get(f, 0);
                 *r = if stereo { v.get(f, 1) } else { *l };
             }
-            return Read::Done;
+            if v.valid(file_frame) {
+                return Read::Done;
+            }
+            // The disk overwrote part of it during the copy: silence.
+            left.fill(0.0);
+            right.fill(0.0);
         }
         if s.is_failed(media) {
             Read::Offline
@@ -767,6 +808,8 @@ fn fill(
                 Ok(g) => g as u64,
                 Err(_) => return None,
             };
+            // Raise the overwrite guard before any slot changes.
+            v.guard(at + got);
             for f in 0..got {
                 for c in 0..ch.min(v.stride) {
                     let x = buf.get(f as usize * ch + c).copied().unwrap_or(0.0);
@@ -952,6 +995,9 @@ fn pass(s: &Shared, d: &mut Disk) {
                         v.start.store(n.start, Ordering::Relaxed);
                         v.origin.store(n.file_frame, Ordering::Relaxed);
                         v.base.store(want, Ordering::Relaxed);
+                        // Retired two epochs ago: no reader, so the guard
+                        // may go back down.
+                        v.guard.store(want, Ordering::Relaxed);
                         v.hi.store(want, Ordering::Release);
                         v.media.store(key, Ordering::Release);
                     }
@@ -1490,6 +1536,101 @@ mod tests {
             drop(guard);
             assert_eq!(got, Ok(want));
         });
+    }
+
+    /// Plays in Thread mode for `secs`: forward blocks, and every third
+    /// block a small backward or forward locate (`hint` then
+    /// `begin_block`, as `Engine::locate_frame` does) while the disk
+    /// thread fills. Returns (wrong samples, done reads, misses).
+    fn stress(secs: f64) -> (u64, u64, u64) {
+        const FRAMES: u64 = 600_000;
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", FRAMES, 2);
+        let cfg = StreamConfig {
+            voice_seconds: 0.25,
+            ahead_seconds: 0.4,
+            seam_seconds: 0.05,
+            ready_seconds: 0.01,
+            cache_file_bytes: 0,
+            cache_budget_bytes: 1 << 30,
+            min_read_bytes: 1,
+            stream_voices: 16,
+        };
+        let cap = (cfg.voice_seconds * 48_000.0) as u64;
+        let (s, r) = Streamer::new(48_000.0, cfg, DiskMode::Thread).unwrap();
+        s.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: p,
+        }]);
+        let n = need(0, 0, FRAMES, 0);
+        s.set_plan(Arc::from(vec![n]));
+        let block = 256u64;
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let (mut l, mut rr) = (vec![0.0f32; block as usize], vec![0.0f32; block as usize]);
+        let (mut wrong, mut done, mut miss) = (0u64, 0u64, 0u64);
+        let mut pos = 10_000u64;
+        let until = Instant::now() + Duration::from_secs_f64(secs);
+        let mut k = 0u64;
+        while Instant::now() < until {
+            k += 1;
+            if k % 3 == 0 {
+                let d = next() % cap;
+                pos = if next() % 4 == 0 {
+                    pos + d / 4
+                } else {
+                    pos.saturating_sub(d)
+                };
+                s.hint(pos);
+            }
+            if pos + block > FRAMES - 1_000 {
+                pos = 10_000;
+                s.hint(pos);
+            }
+            r.begin_block(pos);
+            match r.read(n.media, n.start, n.file_frame, pos, &mut l, &mut rr) {
+                Read::Done => {
+                    done += 1;
+                    for i in 0..block as usize {
+                        let f = pos + i as u64;
+                        if l[i] != sample(f, 0) || rr[i] != sample(f, 1) {
+                            wrong += 1;
+                        }
+                    }
+                }
+                _ => miss += 1,
+            }
+            pos += block;
+        }
+        (wrong, done, miss)
+    }
+
+    /// I1/C1: no wrong sample while locates race the disk thread.
+    #[test]
+    fn thread_mode_locates_never_read_overwritten_frames() {
+        let (wrong, done, miss) = stress(2.0);
+        assert_eq!(
+            wrong, 0,
+            "{wrong} wrong samples ({done} done, {miss} missed)"
+        );
+        assert!(done > 0, "never read ({miss} missed)");
+    }
+
+    /// The 20 s variant: `cargo test --release -p core-media -- --ignored`.
+    #[test]
+    #[ignore]
+    fn thread_mode_locates_never_read_overwritten_frames_long() {
+        let (wrong, done, miss) = stress(20.0);
+        assert_eq!(
+            wrong, 0,
+            "{wrong} wrong samples ({done} done, {miss} missed)"
+        );
+        assert!(done > 0, "never read ({miss} missed)");
     }
 
     proptest! {
