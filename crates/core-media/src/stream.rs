@@ -244,6 +244,9 @@ impl Voice {
 #[derive(Default)]
 struct Control {
     media: BTreeMap<MediaId, PathBuf>,
+    /// Media to start over with at the next pass (see
+    /// [`Streamer::set_media`]).
+    reset: BTreeSet<MediaId>,
     needs: Arc<[Need]>,
     loop_range: Option<(u64, u64)>,
     hint: Option<Hint>,
@@ -548,9 +551,23 @@ impl Streamer {
     }
 
     /// The media that may be read (online items); others are never read.
+    ///
+    /// An item whose path changed, that is listed again after it was
+    /// left out (offline, e.g. missing), or that failed and is listed
+    /// again, starts over (final review I2): the next disk pass forgets
+    /// that it failed, drops its file reader and retires its stream and
+    /// cache voices (by the epoch rule, so no real-time read is torn),
+    /// then reopens the file. A restored file therefore plays again, and
+    /// a new path for the same ID (5b Relink) plays the new file.
     pub fn set_media(&self, files: Vec<MediaFile>) {
         let mut c = lock(&self.shared.control);
-        c.media = files.into_iter().map(|f| (f.id, f.path)).collect();
+        let media: BTreeMap<MediaId, PathBuf> = files.into_iter().map(|f| (f.id, f.path)).collect();
+        for (id, path) in &media {
+            if c.media.get(id) != Some(path) || self.shared.is_failed(*id) {
+                c.reset.insert(*id);
+            }
+        }
+        c.media = media;
         drop(c);
         self.shared.wake.notify_all();
     }
@@ -969,6 +986,38 @@ fn evict(s: &Shared, d: &mut Disk, media: MediaId, slot: usize, bytes: u64) {
     sync_counts(s, d);
 }
 
+/// Forgets everything about `media` (see [`Streamer::set_media`]): its
+/// voices are retired first (unpublished; freed or reused only once the
+/// epoch advanced twice), then its reader goes and its failure is
+/// cleared, so the pass reopens the file.
+fn start_over(s: &Shared, d: &mut Disk, media: MediaId) {
+    let key = media.0.wrapping_add(1);
+    let live: Vec<usize> = d
+        .stream
+        .iter()
+        .filter(|(i, r)| {
+            r.is_none()
+                && s.slot(**i)
+                    .is_some_and(|v| v.media.load(Ordering::Acquire) == key)
+        })
+        .map(|(i, _)| *i)
+        .collect();
+    for i in live {
+        retire_stream(s, d, i);
+    }
+    if let Some(&(slot, bytes, _)) = d.cache.get(&media) {
+        evict(s, d, media, slot, bytes);
+    }
+    d.readers.remove(&media);
+    if d.failed.remove(&media) {
+        // Only the disk side writes these slots; the real-time side
+        // reads them.
+        for f in s.failed.iter() {
+            let _ = f.compare_exchange(key, 0, Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
+}
+
 /// One disk pass (see the module docs).
 fn pass(s: &Shared, d: &mut Disk) {
     if s.stalled.load(Ordering::Relaxed) {
@@ -979,7 +1028,7 @@ fn pass(s: &Shared, d: &mut Disk) {
     let rate = s.rate;
     let ahead = (s.cfg.ahead_seconds * rate) as u64;
     let seam = (s.cfg.seam_seconds * rate) as u64;
-    let (media, needs, lp, pos, hint) = {
+    let (media, needs, lp, pos, hint, reset) = {
         let mut c = lock(&s.control);
         let lp = c.loop_range;
         // The published playhead: what the real-time side reads now.
@@ -992,8 +1041,12 @@ fn pass(s: &Shared, d: &mut Disk) {
             c.hint = None;
         }
         let hint = c.hint.map(|h| wrapped(h.frame, lp));
-        (c.media.clone(), Arc::clone(&c.needs), lp, pos, hint)
+        let reset = std::mem::take(&mut c.reset);
+        (c.media.clone(), Arc::clone(&c.needs), lp, pos, hint, reset)
     };
+    for m in reset {
+        start_over(s, d, m);
+    }
     // Media gone from the table leave the cache and the readers.
     let gone: Vec<(MediaId, usize, u64)> = d
         .cache
@@ -1380,6 +1433,159 @@ mod tests {
         assert!(s.take_errors().is_empty(), "reported once");
         assert_eq!(read(&r, &n, 40_000, 64, true), Read::Offline);
         assert_eq!(s.counters().underruns, 0);
+    }
+
+    /// A CAF whose frame f, channel c is `sample(f + shift, c)`.
+    fn file_shifted(dir: &std::path::Path, name: &str, frames: u64, shift: u64) -> PathBuf {
+        let p = dir.join(name);
+        let _ = std::fs::remove_file(&p);
+        let mut w = CafWriter::create(&p, 48_000, 2, BitDepth::Float32, WriteMode::Normal).unwrap();
+        let data: Vec<f32> = (0..frames)
+            .flat_map(|f| (0..2).map(move |c| sample(f + shift, c)))
+            .collect();
+        w.write(&data).unwrap();
+        w.finish().unwrap();
+        p
+    }
+
+    /// Reads `n` frames of `n0` at `file_frame`; on Done, checks them
+    /// against a file shifted by `shift`.
+    fn read_shifted(r: &StreamReader, n0: &Need, file_frame: u64, n: usize, shift: u64) -> Read {
+        let (mut l, mut rr) = (vec![9.0; n], vec![9.0; n]);
+        let got = r.read(
+            n0.media,
+            n0.start,
+            n0.file_frame,
+            file_frame,
+            &mut l,
+            &mut rr,
+        );
+        if got == Read::Done {
+            for k in 0..n {
+                let f = file_frame + k as u64 + shift;
+                assert_eq!((l[k], rr[k]), (sample(f, 0), sample(f, 1)), "at {f}");
+            }
+        }
+        got
+    }
+
+    /// Truncates `p` to `frames` stereo float frames under any open reader.
+    fn truncate(p: &std::path::Path, frames: u64) {
+        let off = CafReader::open(p).unwrap().info().data_offset;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_len(off + frames * 8)
+            .unwrap();
+    }
+
+    /// Final review I2: media that failed mid-play, dropped from the table
+    /// (the session marks it offline), restored and listed again plays
+    /// its audio again.
+    #[test]
+    fn failed_media_listed_again_after_a_restore_plays_again() {
+        for drop_first in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = file(dir.path(), "a.caf", 300_000, 2);
+            let (s, r) = manual(small());
+            let table = vec![MediaFile {
+                id: MediaId(5),
+                path: p.clone(),
+            }];
+            s.set_media(table.clone());
+            let n = need(5, 0, 300_000, 0);
+            s.set_plan(Arc::from(vec![n]));
+            r.begin_block(0);
+            s.service();
+            assert_eq!(read(&r, &n, 0, 64, true), Read::Done);
+            truncate(&p, 1000);
+            let mut pos = 0;
+            for _ in 0..100 {
+                r.begin_block(pos);
+                s.service();
+                pos += 512;
+            }
+            assert_eq!(s.take_errors().len(), 1);
+            assert_eq!(read(&r, &n, pos, 64, true), Read::Offline);
+            if drop_first {
+                s.set_media(Vec::new());
+                s.service();
+            }
+            // The file comes back; the table lists it again.
+            file_shifted(dir.path(), "a.caf", 300_000, 0);
+            s.set_media(table);
+            r.begin_block(pos);
+            s.service();
+            assert_eq!(read(&r, &n, pos, 64, true), Read::Done, "drop {drop_first}");
+            assert!(s.take_errors().is_empty());
+            assert_eq!(s.counters().underruns, 0);
+        }
+    }
+
+    /// Final review I2: a file missing when first needed (a cached one)
+    /// fails; once it exists and is listed again it plays.
+    #[test]
+    fn missing_cached_media_listed_again_plays() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("late.caf");
+        let mut cfg = small();
+        cfg.cache_file_bytes = 4 << 20;
+        let (s, r) = manual(cfg);
+        let table = vec![MediaFile {
+            id: MediaId(2),
+            path: p.clone(),
+        }];
+        s.set_media(table.clone());
+        let n = need(2, 0, 20_000, 0);
+        s.set_plan(Arc::from(vec![n]));
+        r.begin_block(0);
+        s.service();
+        assert_eq!(s.take_errors().len(), 1);
+        assert_eq!(read(&r, &n, 0, 64, true), Read::Offline);
+        file(dir.path(), "late.caf", 20_000, 2);
+        s.set_media(Vec::new());
+        s.set_media(table);
+        s.service();
+        assert_eq!(read(&r, &n, 0, 64, true), Read::Done);
+        assert_eq!(s.counters().cached_files, 1);
+    }
+
+    /// Final review I2: the same media ID at a new path (5b Relink; Save
+    /// As moving the root) reads the new file, streamed or cached.
+    #[test]
+    fn a_new_path_for_the_same_id_reads_the_new_file() {
+        for cached in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let a = file_shifted(dir.path(), "a.caf", 40_000, 0);
+            let b = file_shifted(dir.path(), "b.caf", 40_000, 7_000);
+            let mut cfg = small();
+            if cached {
+                cfg.cache_file_bytes = 4 << 20;
+            }
+            let (s, r) = manual(cfg);
+            s.set_media(vec![MediaFile {
+                id: MediaId(1),
+                path: a,
+            }]);
+            let n = need(1, 0, 40_000, 0);
+            s.set_plan(Arc::from(vec![n]));
+            r.begin_block(1000);
+            s.service();
+            assert_eq!(read_shifted(&r, &n, 1000, 64, 0), Read::Done);
+            s.set_media(vec![MediaFile {
+                id: MediaId(1),
+                path: b,
+            }]);
+            r.begin_block(1000);
+            s.service();
+            assert_eq!(
+                read_shifted(&r, &n, 1000, 64, 7_000),
+                Read::Done,
+                "cached {cached}"
+            );
+            assert_eq!(s.counters().cached_files, usize::from(cached));
+        }
     }
 
     #[test]

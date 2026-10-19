@@ -324,6 +324,115 @@ fn offline_media_plays_silence_and_counts_nothing() {
     );
 }
 
+/// A CAF like `caf`'s whose frame f holds `value(f + shift)`.
+fn caf_shifted(path: &Path, shift: u64) {
+    let _ = std::fs::remove_file(path);
+    let mut w = CafWriter::create(path, 48_000, 2, BitDepth::Float32, WriteMode::Normal).unwrap();
+    let data: Vec<f32> = (0..FILE_FRAMES)
+        .flat_map(|f| [value(f + shift), -value(f + shift)])
+        .collect();
+    w.write(&data).unwrap();
+    w.finish().unwrap();
+}
+
+/// Checks `left` (rendered from schedule frame `from`, the region at 0
+/// offset 0) against `value(f + shift)` times the pan constant `k`.
+fn assert_plays(left: &[f32], from: u64, shift: u64, k: f32) {
+    for (i, x) in left.iter().enumerate() {
+        let f = from + i as u64 + shift;
+        assert!(
+            (x - k * value(f)).abs() < 1e-6,
+            "frame {}: {x}",
+            from + i as u64
+        );
+    }
+}
+
+/// Final review I2: media whose file failed mid-play (the session drops
+/// it from the table), then is restored and rechecked (listed again),
+/// plays its real audio again with no fault, streamed or cached.
+#[test]
+fn media_that_failed_mid_play_plays_again_once_restored() {
+    for cached in [false, true] {
+        let (d, seq) = doc(&[(0, 0, 8 * QF)]);
+        let mut r = rig(&d, seq, cached, true);
+        let path = r._dir.path().join("a.caf");
+        let online = vec![MediaFile {
+            id: MediaId(0),
+            path: path.clone(),
+        }];
+        r.engine.play().unwrap();
+        let left = r.render(4, false);
+        let k = left[0] / value(0);
+        assert!(k > 0.5 && k <= 1.0, "{k}");
+        if cached {
+            // The file goes away; the cache lets go of it (dropped and
+            // listed again), so it is read again and fails.
+            std::fs::remove_file(&path).unwrap();
+            r.engine.set_media(Vec::new());
+            r.engine.load(&d, seq).unwrap();
+            r.render(1, false);
+            r.engine.set_media(online.clone());
+            r.engine.load(&d, seq).unwrap();
+        } else {
+            // The file goes bad under the open reader.
+            let off = core_media::caf::CafReader::open(&path)
+                .unwrap()
+                .info()
+                .data_offset;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(off + 1000 * 8)
+                .unwrap();
+        }
+        r.render(40, false);
+        let errors = r.engine.take_stream_errors();
+        assert_eq!(errors.len(), 1, "cached {cached}: {errors:?}");
+        // The session marks it offline: dropped from the table.
+        r.engine.set_media(Vec::new());
+        r.engine.load(&d, seq).unwrap();
+        assert!(r.render(2, false).iter().all(|x| *x == 0.0));
+        // Restored, rechecked: listed again.
+        caf_shifted(&path, 0);
+        r.engine.set_media(online.clone());
+        r.engine.load(&d, seq).unwrap();
+        let from = r.engine.position_frames();
+        let left = r.render(20, false);
+        assert_plays(&left, from, 0, k);
+        assert!(r.engine.take_stream_errors().is_empty());
+        let f = r.engine.faults();
+        assert!(f.is_empty(), "cached {cached}: {:?}", f.names());
+    }
+}
+
+/// Final review I2: the same media ID at a new path plays the new
+/// file's audio, streamed or cached.
+#[test]
+fn a_new_path_for_the_same_media_plays_the_new_file() {
+    for cached in [false, true] {
+        let (d, seq) = doc(&[(0, 0, 8 * QF)]);
+        let mut r = rig(&d, seq, cached, true);
+        let other = r._dir.path().join("b.caf");
+        caf_shifted(&other, 333);
+        r.engine.play().unwrap();
+        let left = r.render(4, false);
+        let k = left[0] / value(0);
+        assert_plays(&left, 0, 0, k);
+        r.engine.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: other,
+        }]);
+        r.engine.load(&d, seq).unwrap();
+        let from = r.engine.position_frames();
+        let left = r.render(20, false);
+        assert_plays(&left, from, 333, k);
+        let f = r.engine.faults();
+        assert!(f.is_empty(), "cached {cached}: {:?}", f.names());
+    }
+}
+
 #[test]
 fn muted_regions_play_silence() {
     let (d, seq) = doc(&[(0, 0, 8 * QF)]);

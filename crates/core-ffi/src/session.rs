@@ -1191,7 +1191,7 @@ impl Session {
             // Jobs applied when an edit closed (outside `idle`) count too.
             let owed = std::mem::take(&mut inner.news.media_changed);
             let jobs_changed = self.apply_jobs(&mut inner);
-            let mut media_changed = jobs_changed || owed;
+            let mut stream_failed = false;
             for (m, why) in host::take_stream_errors(self.id) {
                 inner
                     .offline
@@ -1200,14 +1200,19 @@ impl Session {
                     .news
                     .problems
                     .push(format!("media {m} went offline: {why}"));
-                media_changed = true;
+                stream_failed = true;
             }
-            if media_changed && !jobs_changed && !owed {
+            if stream_failed {
+                // The failed items leave the engine's table (also after a
+                // job reloaded it above), so a recheck that finds them
+                // back lists them again and the streamer reopens them
+                // (final review I2).
                 let root = inner.root(self.id);
                 let files = crate::media::files(inner.doc(), &root, &inner.offline);
                 host::set_media(self.id, files);
                 inner.reload_host(self.id);
             }
+            let media_changed = jobs_changed || owed || stream_failed;
             let changed = changed || jobs_changed;
             let n = std::mem::take(&mut inner.news);
             Ok(IdleUpdate {
