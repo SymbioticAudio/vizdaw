@@ -1,13 +1,17 @@
 //! Importing audio (sub-project 5 spec §5.1; plan 5a Rulings 7, 8): a
 //! platform [`MediaImporter`] decodes a file to float at the project rate;
 //! this module writes VizDAW CAF files in the project's depth into
-//! `Media/.incoming/` and links them into `Media/` under free names. A
-//! file wider than two channels becomes one mono file per channel. An
-//! error or a cancel removes everything this import wrote.
+//! `Media/.incoming/` and links them into `Media/` under free names (never
+//! a name the caller reserves, plan 5b Ruling 12), with each file's
+//! waveform overview. A file wider than two channels becomes one mono
+//! file per channel. An error or a cancel removes everything this import
+//! wrote.
 
 use crate::MediaError;
 use crate::caf::{CafReader, CafWriter, WriteMode, Written};
+use crate::overview::{Overview, Stamp};
 use core_model::format::AudioFormat;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -223,11 +227,17 @@ fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Links `from` into `media` as `<stem>.caf`, `<stem> 2.caf`, … (the
-/// first free name; neither `link` nor the exclusive rename replaces a
-/// file); returns the name. Where hard links are unavailable the file is
-/// renamed into place instead (the source is then gone).
-fn link_free(from: &Path, media: &Path, stem: &str) -> Result<String, MediaError> {
-    link_free_with(from, media, stem, false)
+/// first free name that `reserved` does not hold as `Media/<name>`;
+/// neither `link` nor the exclusive rename replaces a file); returns the
+/// name. Where hard links are unavailable the file is renamed into place
+/// instead (the source is then gone).
+fn link_free(
+    from: &Path,
+    media: &Path,
+    stem: &str,
+    reserved: &BTreeSet<String>,
+) -> Result<String, MediaError> {
+    link_free_with(from, media, stem, reserved, false)
 }
 
 /// [`link_free`]; `force_fallback` skips the hard link (tests).
@@ -235,14 +245,20 @@ fn link_free_with(
     from: &Path,
     media: &Path,
     stem: &str,
+    reserved: &BTreeSet<String>,
     force_fallback: bool,
 ) -> Result<String, MediaError> {
+    // Volumes resolve names case-insensitively on macOS, so compare so.
+    let reserved: BTreeSet<String> = reserved.iter().map(|r| r.to_lowercase()).collect();
     for n in 1..=10_000u32 {
         let name = if n == 1 {
             format!("{stem}.caf")
         } else {
             format!("{stem} {n}.caf")
         };
+        if reserved.contains(&format!("{MEDIA_DIR}/{name}").to_lowercase()) {
+            continue;
+        }
         let to = media.join(&name);
         let linked = if force_fallback {
             Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
@@ -271,6 +287,33 @@ pub fn import_as(
     package: &Path,
     format: AudioFormat,
     stem: &str,
+    progress: &mut dyn FnMut(f32),
+    cancel: &AtomicBool,
+) -> Result<Vec<Imported>, MediaError> {
+    import_reserved(
+        importer,
+        source,
+        package,
+        format,
+        stem,
+        &BTreeSet::new(),
+        progress,
+        cancel,
+    )
+}
+
+/// [`import_as`] that never names a file `Media/<name>` while that
+/// package-relative path is in `reserved`: paths a project's undo history
+/// references, even when their files are missing (plan 5b Ruling 12).
+/// Each new file's overview is written to `Media/.overviews/`.
+#[allow(clippy::too_many_arguments)]
+pub fn import_reserved(
+    importer: &dyn MediaImporter,
+    source: &Path,
+    package: &Path,
+    format: AudioFormat,
+    stem: &str,
+    reserved: &BTreeSet<String>,
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
 ) -> Result<Vec<Imported>, MediaError> {
@@ -335,6 +378,17 @@ pub fn import_as(
             .into_iter()
             .map(CafWriter::finish)
             .collect::<Result<_, _>>()?;
+        // Each file's overview, built from its incoming copy before it is
+        // linked (the link keeps the inode and mtime, so the stamp holds
+        // for the linked file). A failed build is not fatal; a cancel is.
+        let mut overviews: Vec<Option<Overview>> = Vec::with_capacity(paths.len());
+        for (p, w) in paths.iter().zip(&written) {
+            overviews.push(match crate::overview::build(p, cancel) {
+                Ok(o) if o.hash == w.content_hash => Stamp::of(p).ok().map(|s| o.with_stamp(s)),
+                Err(MediaError::Cancelled) => return Err(MediaError::Cancelled),
+                _ => None,
+            });
+        }
         std::fs::create_dir_all(&media)?;
         let base = clean_stem(stem);
         let original_name = source
@@ -343,13 +397,13 @@ pub fn import_as(
             .unwrap_or_default();
         let mut out = Vec::with_capacity(files);
         let mut linked: Vec<PathBuf> = Vec::new();
-        for (k, (p, w)) in paths.iter().zip(written).enumerate() {
+        for (k, ((p, w), ov)) in paths.iter().zip(written).zip(overviews).enumerate() {
             let s = if split {
                 format!("{base} ch{}", k + 1)
             } else {
                 base.clone()
             };
-            let name = match link_free(p, &media, &s) {
+            let name = match link_free(p, &media, &s, reserved) {
                 Ok(n) => n,
                 Err(e) => {
                     remove_all(&linked);
@@ -357,6 +411,12 @@ pub fn import_as(
                 }
             };
             linked.push(media.join(&name));
+            if let Some(o) = ov {
+                if let Some(at) = Overview::path(package, &o.hash) {
+                    // A cache: a failed write is rebuilt later.
+                    let _ = o.write(&at);
+                }
+            }
             let display = name.trim_end_matches(".caf").to_string();
             out.push(Imported {
                 path: format!("{MEDIA_DIR}/{name}"),
@@ -667,6 +727,130 @@ mod tests {
     }
 
     #[test]
+    fn imports_build_their_overviews() {
+        let d = package();
+        let fake = Fake {
+            channels: 2,
+            frames: 3000,
+            cancel_after: None,
+        };
+        let got = import(&fake, Path::new("tone.wav"), d.path(), BitDepth::Int24).unwrap();
+        let i = &got[0];
+        let at = crate::overview::Overview::path(d.path(), &i.content_hash).unwrap();
+        let o = crate::overview::Overview::read(&at).unwrap();
+        assert_eq!(
+            (o.hash.as_str(), o.frames, o.channels),
+            (i.content_hash.as_str(), 3000, 2)
+        );
+        let file = d.path().join(&i.path);
+        let stamp = crate::overview::Stamp::of(&file).unwrap();
+        assert!(o.has_stamp(&stamp), "the stamp holds for the linked file");
+        // A wide file gets one overview per mono file.
+        let six = Fake {
+            channels: 6,
+            frames: 700,
+            cancel_after: None,
+        };
+        for i in import(&six, Path::new("surround.wav"), d.path(), BitDepth::Int16).unwrap() {
+            let at = crate::overview::Overview::path(d.path(), &i.content_hash).unwrap();
+            assert_eq!(crate::overview::Overview::read(&at).unwrap().channels, 1);
+        }
+    }
+
+    #[test]
+    fn reserved_names_are_never_taken() {
+        let d = package();
+        let fake = Fake {
+            channels: 1,
+            frames: 500,
+            cancel_after: None,
+        };
+        // Neither file exists, but a project's history names both.
+        let reserved: BTreeSet<String> =
+            ["Media/tone.caf".to_string(), "Media/tone 2.caf".to_string()].into();
+        let got = import_reserved(
+            &fake,
+            Path::new("tone.wav"),
+            d.path(),
+            fmt(BitDepth::Int16),
+            "tone",
+            &reserved,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(got[0].path, "Media/tone 3.caf");
+        // Without reservations the first free name is taken.
+        let got = import_as(
+            &fake,
+            Path::new("tone.wav"),
+            d.path(),
+            fmt(BitDepth::Int16),
+            "tone",
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(got[0].path, "Media/tone.caf");
+    }
+
+    #[test]
+    fn reserved_names_compare_case_insensitively() {
+        let d = package();
+        let fake = Fake {
+            channels: 1,
+            frames: 500,
+            cancel_after: None,
+        };
+        let reserved: BTreeSet<String> = ["Media/Kick.caf".to_string()].into();
+        let got = import_reserved(
+            &fake,
+            Path::new("kick.wav"),
+            d.path(),
+            fmt(BitDepth::Int16),
+            "kick",
+            &reserved,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(got[0].path, "Media/kick 2.caf");
+    }
+
+    #[test]
+    fn a_cancel_while_the_overview_builds_leaves_nothing() {
+        let d = package();
+        let fake = Fake {
+            channels: 2,
+            frames: 20_000,
+            cancel_after: None,
+        };
+        let cancel = AtomicBool::new(false);
+        // The last decoded chunk reports 1.0: cancelling then lets the
+        // decode finish and stops the overview build.
+        let r = import_as(
+            &fake,
+            Path::new("t.wav"),
+            d.path(),
+            fmt(BitDepth::Float32),
+            "t",
+            &mut |f| {
+                if f >= 1.0 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+            &cancel,
+        );
+        assert_eq!(r.unwrap_err(), MediaError::Cancelled);
+        let (media, incoming) = listing(d.path());
+        assert!(
+            media.is_empty() && incoming.is_empty(),
+            "{media:?} {incoming:?}"
+        );
+        assert!(!d.path().join(crate::overview::DIR).exists());
+    }
+
+    #[test]
     fn the_fallback_walks_the_free_name_loop() {
         let d = package();
         let media = d.path().join("m");
@@ -674,7 +858,7 @@ mod tests {
         std::fs::write(media.join("s.caf"), "old").unwrap();
         let from = d.path().join("in.caf");
         std::fs::write(&from, "new").unwrap();
-        let name = link_free_with(&from, &media, "s", true).unwrap();
+        let name = link_free_with(&from, &media, "s", &BTreeSet::new(), true).unwrap();
         assert_eq!(name, "s 2.caf");
         assert!(!from.exists());
         assert_eq!(std::fs::read_to_string(media.join("s.caf")).unwrap(), "old");
