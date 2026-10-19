@@ -395,4 +395,11 @@ final class FakeControlHost: ControlHost {
         #expect(ControlJobs.expiredMessage(job(.import, .running)).contains("job 1"))
         #expect(ControlJobs.expiredMessage(job(.import, .running)).contains("still running"))
     }
+
+    @Test func aConvertWhereEveryFileFailsFailsAndAPartialOneWarns() {
+        let bad = job(.convert, .done, problems: ["a.caf: unreadable"])
+        #expect(ControlJobs.answer(bad) == .failed("a.caf: unreadable"))
+        let some = job(.convert, .done, created: [5], problems: ["a.caf: unreadable"])
+        #expect(ControlJobs.answer(some) == .ok(status: "warnings: a.caf: unreadable"))
+    }
 }

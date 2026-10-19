@@ -29,13 +29,13 @@ public enum ControlJobs {
     /// calls that are not jobs).
     public static let waitMs: UInt64 = 600_000
 
-    /// The answer for `j`: an import that created nothing and had problems
+    /// The answer for `j`: an import or conversion that created nothing and had problems
     /// failed; a partial success carries its problems as warnings.
     public static func answer(_ j: JobRow) -> JobAnswer {
         switch j.state {
         case .running: return .wait
         case .done:
-            if j.kind == .import, j.created.isEmpty, !j.problems.isEmpty {
+            if j.kind != .format, j.created.isEmpty, !j.problems.isEmpty {
                 return .failed(j.problems.joined(separator: "; "))
             }
             return .ok(status: j.problems.isEmpty ? nil : "warnings: " + j.problems.joined(separator: "; "))
