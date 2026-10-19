@@ -114,6 +114,9 @@ fn marker_names(id: u64, doc: &Document, ahead: bool) -> Option<Vec<PluginRef>> 
 #[derive(Debug, Default)]
 struct News {
     doc_changed: bool,
+    /// A job was applied outside `idle` (when an edit closed): the next
+    /// `idle` reports `media_changed`.
+    media_changed: bool,
     slots_changed: bool,
     params_changed: std::collections::BTreeSet<u64>,
     problems: Vec<String>,
@@ -1185,8 +1188,10 @@ impl Session {
                 inner.reload_host(self.id);
             }
             let changed = self.pump(&mut inner);
+            // Jobs applied when an edit closed (outside `idle`) count too.
+            let owed = std::mem::take(&mut inner.news.media_changed);
             let jobs_changed = self.apply_jobs(&mut inner);
-            let mut media_changed = jobs_changed;
+            let mut media_changed = jobs_changed || owed;
             for (m, why) in host::take_stream_errors(self.id) {
                 inner
                     .offline
@@ -1197,7 +1202,7 @@ impl Session {
                     .push(format!("media {m} went offline: {why}"));
                 media_changed = true;
             }
-            if media_changed && !jobs_changed {
+            if media_changed && !jobs_changed && !owed {
                 let root = inner.root(self.id);
                 let files = crate::media::files(inner.doc(), &root, &inner.offline);
                 host::set_media(self.id, files);
@@ -1351,6 +1356,7 @@ impl Session {
             }
             inner.edit_label = None;
             self.commit_held(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
         })
     }
@@ -2007,6 +2013,15 @@ impl Session {
     }
 }
 
+/// Test hooks that are not part of the app's interface.
+#[cfg(feature = "test-hooks")]
+impl Session {
+    /// True when every job thread has ended, applied or not (test hook).
+    pub fn debug_jobs_settled(&self) -> bool {
+        lock(&self.inner).jobs.settled()
+    }
+}
+
 /// The `edit_all` that panics (test hook): its label and the 0-based
 /// command it panics before.
 #[cfg(feature = "test-hooks")]
@@ -2125,6 +2140,7 @@ impl Session {
                 inner.version += 1;
                 inner.reload_host(self.id);
                 self.commit_held(&mut inner);
+                self.apply_jobs_after_edit(&mut inner);
                 return Err(e);
             }
             let mut inner = lock(&self.inner);
@@ -2132,6 +2148,7 @@ impl Session {
             inner.history.commit()?;
             inner.version += 1;
             self.commit_held(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
         })
     }
@@ -2181,6 +2198,7 @@ impl Session {
             }
             inner.edit_label = None;
             self.commit_held(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
         })
     }
@@ -2497,8 +2515,19 @@ pub(crate) fn discard(root: &Path, w: crate::jobs::Work) {
 impl Session {
     /// Applies every finished job (one undo step each); true when the
     /// document changed.
+    ///
+    /// Not while an edit (a drag, a fader move) is open (final review
+    /// I1): the job would join that edit's undo step, be refused ("a
+    /// transaction is already open"), or be rolled back by the next
+    /// pointer move. Finished jobs then stay pending (reported Running,
+    /// `busy()` stays true) and apply when the edit closes:
+    /// `end_edit`/`abort_edit` call [`Session::apply_jobs_after_edit`],
+    /// and `idle`/`job` apply them too.
     fn apply_jobs(&self, inner: &mut Inner) -> bool {
         use crate::jobs::{JobStateRow, Work, row};
+        if inner.history.in_transaction() {
+            return false;
+        }
         let mut changed = false;
         for (id, kind, work) in inner.jobs.finished() {
             let root = inner.root(self.id);
@@ -2544,6 +2573,15 @@ impl Session {
             self.mark(inner);
         }
         changed
+    }
+
+    /// Applies the jobs that finished while an edit was open, now that it
+    /// closed; the next `idle` reports the media change.
+    fn apply_jobs_after_edit(&self, inner: &mut Inner) {
+        if self.apply_jobs(inner) {
+            inner.news.media_changed = true;
+            inner.news.doc_changed = true;
+        }
     }
 }
 

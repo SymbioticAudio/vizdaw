@@ -382,3 +382,71 @@ fn a_rate_round_trip_keeps_regions_within_a_frame() {
     assert!(fo2.abs_diff(fo) <= 1, "{fo2}");
     s.close().unwrap();
 }
+
+/// Waits until every job thread of `s` has ended (applied or not).
+fn settled(s: &Session) {
+    let until = Instant::now() + Duration::from_secs(60);
+    while !s.debug_jobs_settled() {
+        assert!(Instant::now() < until, "job threads still running");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Final review I1: a format change that finishes during a drag is not
+/// merged into the drag's undo step, and a pointer move (which rewinds
+/// the drag) does not roll it back; it applies once the drag ends.
+#[test]
+fn a_format_change_finishing_during_a_drag_is_its_own_step() {
+    use vizdaw_ffi::edit::{EditCommand, SequenceEdit};
+    let dir = tempfile::tempdir().unwrap();
+    let (s, seq, _) = demo_with_region(dir.path());
+    let rename = |name: &str| EditCommand::Sequence {
+        edit: SequenceEdit::Rename {
+            seq,
+            name: name.into(),
+        },
+    };
+    s.begin_edit("Drag".into()).unwrap();
+    s.edit_gesture(rename("Moved 1"), None).unwrap();
+    let id = s
+        .set_project_format(fmt(48_000, BitDepthRow::Float32))
+        .unwrap();
+    settled(&s);
+    assert_eq!(s.job(id).unwrap().state, JobStateRow::Running);
+    s.idle().unwrap();
+    // The next pointer move: the format change is not there to lose.
+    s.edit_gesture(rename("Moved 2"), None).unwrap();
+    assert_eq!(s.job(id).unwrap().state, JobStateRow::Running);
+    assert_eq!(
+        s.project_info().unwrap().format,
+        fmt(48_000, BitDepthRow::Int24)
+    );
+    s.end_edit().unwrap();
+    let j = s.job(id).unwrap();
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    assert_eq!(
+        s.project_info().unwrap().format,
+        fmt(48_000, BitDepthRow::Float32)
+    );
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Change Project Format")
+    );
+    // A later pointer move cannot touch it (no edit is open), and one
+    // Undo reverts only the format.
+    assert!(s.edit_gesture(rename("Moved 3"), None).is_err());
+    s.undo().unwrap();
+    assert_eq!(
+        s.project_info().unwrap().format,
+        fmt(48_000, BitDepthRow::Int24)
+    );
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Drag"));
+    assert!(
+        s.snapshot()
+            .unwrap()
+            .sequences
+            .iter()
+            .any(|r| r.name == "Moved 2")
+    );
+    s.close().unwrap();
+}

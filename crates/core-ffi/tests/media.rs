@@ -519,3 +519,76 @@ fn save_as_keeps_an_identical_same_named_file() {
     assert_eq!(s.media().unwrap()[0].offline, None);
     s.close().unwrap();
 }
+
+/// Waits until every job thread of `s` has ended (applied or not).
+fn settled(s: &Session) {
+    let until = Instant::now() + Duration::from_secs(60);
+    while !s.debug_jobs_settled() {
+        assert!(Instant::now() < until, "job threads still running");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Final review I1: an import that finishes while an edit (a drag) is
+/// open waits for it to close, then applies as its own undo step with
+/// its files kept; it is never reported Done before that.
+#[test]
+fn an_import_finishing_during_an_edit_applies_after_it_as_its_own_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(dir.path(), "late.caf", 1000, 2);
+    let s = Session::new_empty().unwrap();
+    s.begin_edit("Drag".into()).unwrap();
+    s.add_bus("Bus".into()).unwrap();
+    let id = s
+        .import_audio(vec![src.display().to_string()], None)
+        .unwrap();
+    settled(&s);
+    // Finished but not applied: still running, nothing in the pool.
+    let j = s.job(id).unwrap();
+    assert_eq!(j.state, JobStateRow::Running, "{j:?}");
+    s.idle().unwrap();
+    assert_eq!(s.job(id).unwrap().state, JobStateRow::Running);
+    assert!(s.media().unwrap().is_empty());
+    // Closing the edit applies it at once (no poll needed).
+    s.end_edit().unwrap();
+    let rows = s.media().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].offline, None);
+    let j = s.job(id).unwrap();
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    // Its files were kept (online means the file is there and reads).
+    let pkg = dir.path().join("Late.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    assert!(pkg.join("Media/late.caf").is_file());
+    // Its own undo step, after the drag's.
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Import Audio")
+    );
+    s.undo().unwrap();
+    assert!(s.media().unwrap().is_empty());
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Drag"));
+    s.close().unwrap();
+}
+
+/// Final review I1: aborting the edit (Escape) also lets the job apply.
+#[test]
+fn an_import_finishing_during_an_aborted_edit_applies_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(dir.path(), "esc.caf", 1000, 2);
+    let s = Session::new_empty().unwrap();
+    s.begin_edit("Drag".into()).unwrap();
+    let id = s
+        .import_audio(vec![src.display().to_string()], None)
+        .unwrap();
+    settled(&s);
+    assert_eq!(s.job(id).unwrap().state, JobStateRow::Running);
+    s.abort_edit().unwrap();
+    assert_eq!(s.media().unwrap().len(), 1);
+    assert_eq!(s.job(id).unwrap().state, JobStateRow::Done);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Import Audio")
+    );
+    s.close().unwrap();
+}

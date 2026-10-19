@@ -156,6 +156,14 @@ impl Jobs {
         self.list.values().any(|j| j.row.is_none())
     }
 
+    /// True when no job thread is still working (finished jobs may still
+    /// wait to be applied; test hook).
+    pub fn settled(&self) -> bool {
+        self.list
+            .values()
+            .all(|j| j.thread.as_ref().is_none_or(JoinHandle::is_finished))
+    }
+
     /// Holds new and waiting job threads before they start (`true`) or
     /// lets them go (test hook).
     pub fn set_held(&self, on: bool) {
