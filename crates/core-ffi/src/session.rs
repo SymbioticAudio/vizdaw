@@ -850,6 +850,7 @@ impl Session {
                     (doc.clone(), doc)
                 }
             };
+            crate::media::sweep_temp(&p);
             let windows = read_windows(&p);
             let layout = read_layout(&p);
             let s = Session::with(doc, Some(p), options.plugins_off)?;
@@ -2031,26 +2032,33 @@ impl Session {
     }
 }
 
-/// The `edit_all` that panics (test hook): its label and the 0-based
-/// command it panics before.
 #[cfg(feature = "test-hooks")]
-static EDIT_ALL_PANIC: Mutex<Option<(String, usize)>> = Mutex::new(None);
+thread_local! {
+    /// The `edit_all` that panics (test hook): its label and the 0-based
+    /// command it panics before. Per thread (final review m8): tests run
+    /// in parallel threads and each calls `edit_all`/`step_entry` on its
+    /// own, so one test's injection never reaches another's call.
+    static EDIT_ALL_PANIC: std::cell::RefCell<Option<(String, usize)>> =
+        const { std::cell::RefCell::new(None) };
+}
 
-/// Makes the next `edit_all` (or step entry edit) named `label` panic
-/// before command `step` (0-based); `None` clears it (test hook, Plan 4d
-/// Ruling 1).
+/// Makes the next `edit_all` (or step entry edit) named `label` called on
+/// this thread panic before command `step` (0-based); `None` clears it
+/// (test hook, Plan 4d Ruling 1).
 #[cfg(feature = "test-hooks")]
 pub fn inject_edit_all_panic(label: Option<&str>, step: usize) {
-    *lock(&EDIT_ALL_PANIC) = label.map(|l| (l.to_string(), step));
+    EDIT_ALL_PANIC.with(|p| *p.borrow_mut() = label.map(|l| (l.to_string(), step)));
 }
 
 /// Panics when `edit_all` `label` reaches the injected `step`.
 #[cfg(feature = "test-hooks")]
 #[allow(clippy::panic)]
 fn edit_all_hook(label: &str, step: usize) {
-    let hit = lock(&EDIT_ALL_PANIC)
-        .as_ref()
-        .is_some_and(|(l, s)| l == label && *s == step);
+    let hit = EDIT_ALL_PANIC.with(|p| {
+        p.borrow()
+            .as_ref()
+            .is_some_and(|(l, s)| l == label && *s == step)
+    });
     if hit {
         panic!("injected edit_all panic");
     }

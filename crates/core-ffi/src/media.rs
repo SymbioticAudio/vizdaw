@@ -187,7 +187,7 @@ pub fn copy_media(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let tmp = dir.join(format!(".{name}.{}.vizdaw-tmp", std::process::id()));
+        let tmp = dir.join(format!(".{name}.{}{TMP_SUFFIX}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         // A hard link when both are on one volume; else a copy.
         let placed = std::fs::hard_link(&src, &tmp)
@@ -199,6 +199,25 @@ pub fn copy_media(
         }
     }
     Ok(())
+}
+
+/// The end of the temp files `copy_media` writes (`.<name>.<pid>` before
+/// it) beside their destination.
+const TMP_SUFFIX: &str = ".vizdaw-tmp";
+
+/// Removes leftover `copy_media` temp files (`Media/.*.vizdaw-tmp`) from
+/// the package at `root`: a Save As that was interrupted (Task 10 m10).
+pub fn sweep_temp(root: &Path) {
+    let Ok(dir) = std::fs::read_dir(root.join("Media")) else {
+        return;
+    };
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.ends_with(TMP_SUFFIX) && e.path().is_file() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// True when `dst` holds the audio of `src`: by the item's content hash

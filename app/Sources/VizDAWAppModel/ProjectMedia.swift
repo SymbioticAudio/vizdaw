@@ -67,34 +67,34 @@ extension DocumentModel {
     }
 
     /// Reads every running job (the plugin timer calls this through
-    /// `idle`); an ended one is applied by the session and refreshes the
-    /// document.
+    /// `idle` while any is listed); an ended one is applied by the session
+    /// and refreshes the document. The outcome is `ControlJobs.answer`'s,
+    /// shared with the control channel: a failure is an alert, warnings a
+    /// Problems banner; a job the user cancelled ends quietly. A job the
+    /// session no longer knows is dropped (only `Busy` is retried), so the
+    /// polling stops once none is left.
     public func pollJobs() {
         var still: [JobRow] = []
         for j in jobs {
-            guard let r = try? session.job(id: j.id) else {
-                still.append(j)
+            let r: JobRow
+            do {
+                r = try session.job(id: j.id)
+            } catch {
+                if case .Busy = error as? VizError { still.append(j) }
                 continue
             }
-            switch r.state {
-            case .running:
+            switch ControlJobs.answer(r) {
+            case .wait:
                 still.append(r)
-            case .done:
-                if r.kind != .format, r.created.isEmpty, !r.problems.isEmpty {
-                    // Nothing was created: an error listing the problems.
+            case .ok:
+                if !r.problems.isEmpty { jobProblems = r.problems }
+                refreshAfterJob()
+            case .failed(let message):
+                if r.state != .cancelled {
                     alert = AlertItem(
                         title: r.kind == .import ? "Import Failed" : "Conversion Failed",
-                        message: r.problems.joined(separator: "\n"))
-                } else if !r.problems.isEmpty {
-                    jobProblems = r.problems
+                        message: message)
                 }
-                refreshAfterJob()
-            case .failed:
-                alert = AlertItem(
-                    title: r.kind == .import ? "Import Failed" : "Conversion Failed",
-                    message: r.message ?? "The job failed.")
-                refreshAfterJob()
-            case .cancelled:
                 refreshAfterJob()
             }
         }

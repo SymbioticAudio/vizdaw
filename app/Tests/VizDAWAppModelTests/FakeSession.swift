@@ -351,7 +351,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
             message: nil, problems: [], created: [])
         return id
     }
+    var jobCalls = 0
+    var jobBusy = false
     func job(id: UInt64) throws -> JobRow {
+        jobCalls += 1
+        if jobBusy { throw VizError.Busy(message: "busy") }
         guard let j = jobRows[id] else { throw VizError.Model(message: "unknown job \(id)") }
         return j
     }

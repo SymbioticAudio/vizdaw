@@ -611,3 +611,25 @@ fn save_as_carries_media_only_the_redo_history_uses() {
     assert_eq!((rows.len(), rows[0].offline), (1, None), "{rows:?}");
     s.close().unwrap();
 }
+
+/// Task 10 m10: leftover Save As temp files are swept when a project
+/// opens.
+#[test]
+fn opening_a_project_sweeps_leftover_temp_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(dir.path(), "keep.caf", 100, 1);
+    let s = Session::new_empty().unwrap();
+    import(&s, &[&src], None);
+    let pkg = dir.path().join("Sweep.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.close().unwrap();
+    let media = pkg.join("Media");
+    std::fs::write(media.join(".keep.caf.12345.vizdaw-tmp"), b"junk").unwrap();
+    std::fs::write(media.join("other.vizdaw-tmp"), b"not ours").unwrap();
+    let again = Session::open(pkg.display().to_string()).unwrap();
+    assert!(!media.join(".keep.caf.12345.vizdaw-tmp").exists());
+    assert!(media.join("other.vizdaw-tmp").exists(), "not a temp name");
+    assert!(media.join("keep.caf").is_file());
+    assert_eq!(again.media().unwrap()[0].offline, None);
+    again.close().unwrap();
+}

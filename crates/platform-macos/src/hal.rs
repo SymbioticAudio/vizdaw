@@ -630,25 +630,23 @@ impl AudioBackend for CoreAudioBackend {
             )?;
             if (now - want).abs() > 0.5 {
                 // The device may refuse or take a moment: ask, then wait up
-                // to 1 s for it to report the new rate (5a Ruling 20).
-                let _ = set(
+                // to 1 s for it to report the new rate (5a Ruling 20). A
+                // refused request is not waited for (Task 11 Minor 1): the
+                // rate read below reports the mismatch at once.
+                let asked = set(
                     device,
                     kAudioDevicePropertyNominalSampleRate,
                     kAudioObjectPropertyScopeGlobal,
                     want,
-                );
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
-                while std::time::Instant::now() < until {
-                    let r: f64 = get(
+                )
+                .is_ok();
+                settle_rate(asked, want, std::time::Duration::from_secs(1), || {
+                    get::<f64>(
                         device,
                         kAudioDevicePropertyNominalSampleRate,
                         kAudioObjectPropertyScopeGlobal,
-                    )?;
-                    if (r - want).abs() <= 0.5 {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
+                    )
+                })?;
             }
         }
         let sample_rate: f64 = get(
@@ -803,6 +801,28 @@ impl Drop for CoreAudioBackend {
     }
 }
 
+/// After asking a device for rate `want`: when it accepted (`asked`),
+/// polls `read` every 20 ms, up to `timeout`, until it reports `want`;
+/// when it refused, returns at once (nothing will change).
+fn settle_rate<E>(
+    asked: bool,
+    want: f64,
+    timeout: std::time::Duration,
+    mut read: impl FnMut() -> Result<f64, E>,
+) -> Result<(), E> {
+    if !asked {
+        return Ok(());
+    }
+    let until = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < until {
+        if (read()? - want).abs() <= 0.5 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,5 +853,27 @@ mod tests {
         unsafe { silence(p) };
         assert_eq!(a, [0.0; 8]);
         assert_eq!(b, [0.0; 8]);
+    }
+
+    /// Task 11 Minor 1: a device that refused the rate is not polled (no
+    /// 1 s wait); one that accepted it is polled until it reports it.
+    #[test]
+    fn a_refused_rate_is_not_waited_for() {
+        let mut reads = 0;
+        let t0 = std::time::Instant::now();
+        let r = settle_rate(false, 48_000.0, std::time::Duration::from_secs(1), || {
+            reads += 1;
+            Ok::<f64, ()>(44_100.0)
+        });
+        assert_eq!((r, reads), (Ok(()), 0));
+        assert!(t0.elapsed() < std::time::Duration::from_millis(100));
+        let mut now = 44_100.0;
+        let r = settle_rate(true, 48_000.0, std::time::Duration::from_secs(1), || {
+            reads += 1;
+            let r = now;
+            now = 48_000.0;
+            Ok::<f64, ()>(r)
+        });
+        assert_eq!((r, reads), (Ok(()), 2));
     }
 }

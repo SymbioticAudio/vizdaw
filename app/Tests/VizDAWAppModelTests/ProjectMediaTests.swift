@@ -72,6 +72,59 @@ struct ProjectMediaTests {
         #expect(!m.banners.contains(.problems(["a.txt: not audio"])))
     }
 
+    // MARK: Final fix wave: pollJobs shares ControlJobs.answer; unknown jobs
+
+    @Test func aFailedJobsAlertIsTheControlAnswer() throws {
+        let f = fake()
+        f.jobStartState = .running
+        let m = try model(f)
+        m.importAudio(paths: ["/a.wav"])
+        let row = JobRow(id: 1, kind: .import, progress: 1, state: .failed, message: "disk full",
+                         problems: ["a.wav: short"], created: [])
+        f.jobRows[1] = row
+        m.pollJobs()
+        guard case .failed(let message) = ControlJobs.answer(row) else {
+            Issue.record("expected a failure")
+            return
+        }
+        #expect(m.alert?.message == message)
+        #expect(m.alert?.message.contains("a.wav: short") == true)
+        #expect(m.alert?.title == "Import Failed")
+        #expect(m.jobs.isEmpty)
+    }
+
+    @Test func aCancelledJobEndsWithoutAnAlert() throws {
+        let f = fake()
+        f.jobStartState = .running
+        let m = try model(f)
+        m.importAudio(paths: ["/a.wav"])
+        f.jobRows[1] = JobRow(id: 1, kind: .import, progress: 1, state: .cancelled, message: nil,
+                              problems: [], created: [])
+        m.pollJobs()
+        #expect(m.alert == nil)
+        #expect(m.jobs.isEmpty)
+    }
+
+    @Test func aJobTheSessionNoLongerKnowsIsDroppedAndPollingStops() throws {
+        let f = fake()
+        f.jobStartState = .running
+        let m = try model(f)
+        m.importAudio(paths: ["/a.wav"])
+        // Busy is transient: the job is kept.
+        f.jobBusy = true
+        m.pollJobs()
+        #expect(m.jobs.count == 1)
+        f.jobBusy = false
+        f.jobRows[1] = nil
+        m.pollJobs()
+        #expect(m.jobs.isEmpty)
+        #expect(!m.banners.contains { if case .job = $0 { true } else { false } })
+        let calls = f.jobCalls
+        m.idle()
+        m.idle()
+        #expect(f.jobCalls == calls)
+    }
+
     @Test func mismatchedMediaOffersConvert() throws {
         let f = fake()
         f.info.mismatched = 3
