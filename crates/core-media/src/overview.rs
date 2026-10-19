@@ -600,10 +600,22 @@ impl Overview {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let r = std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, path));
+        // Flush the bytes before the rename, so a crash never leaves a
+        // valid header over a zeroed body.
+        let r = (|| {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&out)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
         if let Err(e) = r {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
+        }
+        // Best effort: make the rename itself durable.
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
         }
         Ok(())
     }
