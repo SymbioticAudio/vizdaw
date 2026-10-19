@@ -1194,6 +1194,12 @@ impl ControlServer {
         })
     }
 
+    /// Gives `token` `timeout_ms` from now to be answered instead of the
+    /// app timeout (a job that runs long); false when nobody waits.
+    pub fn extend_timeout(&self, token: u64, timeout_ms: u64) -> Result<bool, VizError> {
+        ffi_guard(|| Ok(lock(&self.server).extend(token, Duration::from_millis(timeout_ms))))
+    }
+
     /// Whether a client still waits for `token`.
     pub fn is_waiting(&self, token: u64) -> bool {
         lock(&self.server).is_waiting(token)

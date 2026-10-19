@@ -410,3 +410,37 @@ fn media_and_project_results_as_json() {
     assert_eq!(p["label"], json!("44.1 kHz, 32-bit float"));
     assert_eq!(p["rate_mismatch"], json!(true));
 }
+
+/// A job outlives the app timeout once the app extends its call (fix round 1,
+/// I-1); an unextended call still times out.
+#[test]
+fn an_extended_call_outlives_the_app_timeout() {
+    let d = private_dir();
+    let s = ControlServer::start(socket(&d).to_string_lossy().into_owned(), 300).unwrap();
+    let params = json!({"id": "media.import", "params": {"path": "/tmp/x.wav"}});
+    let h = send(&socket(&d), "command.run", params.clone());
+    let call = next(&s);
+    assert!(s.extend_timeout(call.token, 20_000).unwrap());
+    thread::sleep(Duration::from_millis(900));
+    assert!(
+        s.is_waiting(call.token),
+        "still waiting past the app timeout"
+    );
+    let r = ControlResult::Ran {
+        command: "media.import".into(),
+        doc: Some("D".into()),
+        window: None,
+        undo_label: None,
+        status: None,
+    };
+    assert!(s.reply(call.token, r).unwrap());
+    assert_eq!(h.join().unwrap().unwrap()["command"], "media.import");
+    // Without the extension the same call times out.
+    let h = send(&socket(&d), "command.run", params);
+    let call = next(&s);
+    thread::sleep(Duration::from_millis(900));
+    let e = h.join().unwrap().unwrap_err();
+    assert!(format!("{e:?}").contains("imeout"), "{e:?}");
+    assert!(!s.extend_timeout(call.token, 1000).unwrap());
+    s.stop().unwrap();
+}

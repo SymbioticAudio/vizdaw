@@ -78,6 +78,8 @@ struct Shared {
     dir: PathBuf,
     queue: Mutex<VecDeque<Call>>,
     waiting: Mutex<HashMap<u64, Sender<Outcome>>>,
+    /// Calls the app gave more time (a job): token to the new deadline.
+    extended: Mutex<HashMap<u64, Instant>>,
     streams: Mutex<HashMap<u64, UnixStream>>,
     next_token: AtomicU64,
     next_conn: AtomicU64,
@@ -249,6 +251,7 @@ impl Server {
             dir,
             queue: Mutex::default(),
             waiting: Mutex::default(),
+            extended: Mutex::default(),
             streams: Mutex::default(),
             next_token: AtomicU64::new(1),
             next_conn: AtomicU64::new(1),
@@ -298,6 +301,16 @@ impl Server {
             return false;
         };
         tx.send(outcome).is_ok()
+    }
+
+    /// Gives call `token` `by` from now to be answered instead of the app
+    /// timeout (a job that runs long); false when nobody waits for it.
+    pub fn extend(&self, token: u64, by: Duration) -> bool {
+        if !self.is_waiting(token) {
+            return false;
+        }
+        lock(&self.shared.extended).insert(token, Instant::now() + by);
+        true
     }
 
     /// Whether a client still waits for call `token`.
@@ -553,16 +566,29 @@ fn handle(s: &Arc<Shared>, line: &[u8]) -> (Option<RequestId>, Result<Value, Con
         );
     }
     lock(&s.queue).push_back(Call { token, command });
-    let outcome = rx.recv_timeout(timeout).unwrap_or_else(|_| {
-        Err(ControlError::new(
-            ErrorCode::Timeout,
-            format!(
-                "VizDAW did not answer within {} s (is its main thread blocked?)",
-                timeout.as_secs()
-            ),
-        ))
-    });
+    let mut deadline = Instant::now() + timeout;
+    let outcome = loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(o) => break o,
+            Err(_) => {
+                // The app asked for more time (a job): wait on.
+                let later = lock(&s.extended).remove(&token);
+                if let Some(d) = later.filter(|d| *d > Instant::now()) {
+                    deadline = d;
+                    continue;
+                }
+                break Err(ControlError::new(
+                    ErrorCode::Timeout,
+                    format!(
+                        "VizDAW did not answer within {} s (is its main thread blocked?)",
+                        timeout.as_secs()
+                    ),
+                ));
+            }
+        }
+    };
     lock(&s.waiting).remove(&token);
+    lock(&s.extended).remove(&token);
     (id, outcome)
 }
 

@@ -29,13 +29,17 @@ enum ControlChannel {
         let step: @MainActor (_ expired: Bool) -> Bool
     }
 
+    /// How long a call that started a job waits for it.
+    private static var jobWait = ControlJobs.waitMs
+
     static var active: Bool { server != nil }
 
     /// Starts listening on `path`; a socket that cannot be made ends the
     /// app (exit status 2), so a launching agent sees why at once.
-    static func start(path: String) {
+    static func start(path: String, appTimeoutMs: UInt64 = 60_000, jobWaitMs: UInt64 = ControlJobs.waitMs) {
+        jobWait = jobWaitMs
         do {
-            server = try ControlServer.start(path: path, appTimeoutMs: 60_000)
+            server = try ControlServer.start(path: path, appTimeoutMs: appTimeoutMs)
         } catch {
             FileHandle.standardError.write(Data("vizdaw: \(AlertItem(error, title: "Control").message)\n".utf8))
             exit(2)
@@ -95,14 +99,16 @@ enum ControlChannel {
         case .failed(let f): _ = try? server.fail(token: token, failure: f)
         case .opened(let command, let doc): whenShown(server, token, command: command, doc: doc)
         case .job(let command, let doc, let job):
+            // The server's app timeout is for stalls; a job gets its own.
+            _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
             whenJobEnds(server, token, command: command, doc: doc, job: job)
         }
     }
 
     /// Answers once job `job` of `doc` ended (an import or conversion may
-    /// take minutes; 10 minutes at most).
+    /// take minutes; `jobWait` at most).
     static func whenJobEnds(_ server: ControlServer, _ token: UInt64, command: String, doc: UUID, job: UInt64) {
-        later(token, seconds: 600) { expired in
+        later(token, seconds: Double(jobWait) / 1000) { expired in
             guard let m = appStore.model(doc) else {
                 _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
                 return true
@@ -111,25 +117,26 @@ enum ControlChannel {
                 _ = try? server.fail(token: token, failure: .of(.failed, "the job is unknown"))
                 return true
             }
-            switch j.state {
-            case .running:
+            switch ControlJobs.answer(j) {
+            case .wait:
                 if expired {
                     _ = try? server.fail(
-                        token: token, failure: .of(.timeout, "the job did not finish within 10 minutes"))
+                        token: token, failure: .of(.timeout, ControlJobs.expiredMessage(j)))
                 }
                 return expired
-            case .done:
+            case .ok(let status):
                 m.refreshAfterJob()
                 let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
-                let status = j.problems.isEmpty ? nil : j.problems.joined(separator: "; ")
                 _ = try? server.reply(
                     token: token,
                     result: .ran(
                         command: command, doc: doc.uuidString, window: window, undoLabel: m.snapshot.undoLabel,
                         status: status))
                 return true
-            case .failed, .cancelled:
-                _ = try? server.fail(token: token, failure: .of(.failed, j.message ?? "the job was cancelled"))
+            case .failed(let message):
+                // A failed import may still have changed nothing; a refresh is harmless.
+                m.refreshAfterJob()
+                _ = try? server.fail(token: token, failure: .of(.failed, message))
                 return true
             }
         }

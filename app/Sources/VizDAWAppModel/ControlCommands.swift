@@ -14,6 +14,42 @@ public enum ControlOutcome {
     case job(command: String, doc: UUID, job: UInt64)
 }
 
+/// How a job that ended is answered (fix round 1, I-2).
+public enum JobAnswer: Equatable, Sendable {
+    /// Still running.
+    case wait
+    /// Succeeded; `status` carries warnings.
+    case ok(status: String?)
+    /// Failed, with this message.
+    case failed(String)
+}
+
+public enum ControlJobs {
+    /// How long a job's call waits (the server's app timeout is for
+    /// calls that are not jobs).
+    public static let waitMs: UInt64 = 600_000
+
+    /// The answer for `j`: an import that created nothing and had problems
+    /// failed; a partial success carries its problems as warnings.
+    public static func answer(_ j: JobRow) -> JobAnswer {
+        switch j.state {
+        case .running: return .wait
+        case .done:
+            if j.kind == .import, j.created.isEmpty, !j.problems.isEmpty {
+                return .failed(j.problems.joined(separator: "; "))
+            }
+            return .ok(status: j.problems.isEmpty ? nil : "warnings: " + j.problems.joined(separator: "; "))
+        case .failed, .cancelled:
+            return .failed(([j.message ?? "the job was cancelled"] + j.problems).joined(separator: "; "))
+        }
+    }
+
+    /// The failure when the wait expires with the job still running.
+    public static func expiredMessage(_ j: JobRow) -> String {
+        "job \(j.id) is still running after \(waitMs / 60_000) minutes; it was not cancelled"
+    }
+}
+
 /// The project formats as the channel spells them (5a Ruling 16).
 public enum ControlFormats {
     /// `rate`/`depth` strings to a format, `base` filling what they leave

@@ -360,4 +360,39 @@ final class FakeControlHost: ControlHost {
         }
         #expect(info.format.sampleRate == 48_000)
     }
+
+    // MARK: Fix round 1: how a finished job is answered (I-2)
+
+    func job(
+        _ kind: JobKindRow, _ state: JobStateRow, created: [UInt64] = [], problems: [String] = [],
+        message: String? = nil
+    ) -> JobRow {
+        JobRow(id: 1, kind: kind, progress: 1, state: state, message: message, problems: problems, created: created)
+    }
+
+    @Test func aRunningJobWaits() {
+        #expect(ControlJobs.answer(job(.import, .running)) == .wait)
+    }
+
+    @Test func importingOnlyBadFilesFailsWithTheProblems() {
+        let j = job(.import, .done, problems: ["a.wav: not audio", "b.wav: unreadable"])
+        #expect(ControlJobs.answer(j) == .failed("a.wav: not audio; b.wav: unreadable"))
+    }
+
+    @Test func importingGoodAndBadFilesSucceedsWithWarnings() {
+        let j = job(.import, .done, created: [3], problems: ["b.wav: unreadable"])
+        #expect(ControlJobs.answer(j) == .ok(status: "warnings: b.wav: unreadable"))
+        #expect(ControlJobs.answer(job(.import, .done, created: [3])) == .ok(status: nil))
+    }
+
+    @Test func aFailedJobKeepsItsProblems() {
+        let j = job(.convert, .failed, problems: ["x: disk full"], message: "conversion failed")
+        #expect(ControlJobs.answer(j) == .failed("conversion failed; x: disk full"))
+        #expect(ControlJobs.answer(job(.convert, .cancelled)) == .failed("the job was cancelled"))
+    }
+
+    @Test func anExpiredWaitSaysTheJobStillRunsAndNamesIt() {
+        #expect(ControlJobs.expiredMessage(job(.import, .running)).contains("job 1"))
+        #expect(ControlJobs.expiredMessage(job(.import, .running)).contains("still running"))
+    }
 }
