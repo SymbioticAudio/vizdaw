@@ -396,7 +396,9 @@ impl CafReader {
 
     /// Reads frames from `start` into `out` (interleaved float, as many
     /// whole frames as fit); returns the frames read, fewer at the end or
-    /// when the file is shorter than it was. `scratch` is reused.
+    /// when the file is shorter than it was. `scratch` is reused; on
+    /// return its first `frames read × frame_bytes()` bytes are those
+    /// frames' raw sample bytes (overviews hash them, plan 5b Task 2).
     pub fn read(
         &self,
         start: u64,

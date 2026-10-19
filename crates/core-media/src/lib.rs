@@ -16,6 +16,7 @@
 pub mod caf;
 mod error;
 pub mod import;
+pub mod overview;
 pub mod stream;
 
 pub use error::MediaError;
