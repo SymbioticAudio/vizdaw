@@ -83,6 +83,22 @@ impl IdleReport {
     }
 }
 
+/// Where a slot stands (for the mixer and the Plugin Manager).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotState {
+    /// Loading (or waiting for the next `sync` to load it).
+    Loading,
+    /// Running.
+    Live,
+    /// A placeholder, and why: it failed to load, is unavailable, or is
+    /// held ([`PluginHost::hold`]).
+    Failed(String),
+}
+
+/// How long an open gesture may go without an event from the plugin before
+/// the host closes it (its `End` was lost).
+pub const GESTURE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What the document wants of a slot.
 #[derive(Clone)]
 struct Want {
@@ -147,6 +163,8 @@ struct Live {
     gesture: Vec<(ParamId, f64)>,
     /// Parameters whose gesture is open.
     open: BTreeSet<ParamId>,
+    /// When the plugin last reported a parameter event.
+    last_event: Option<Instant>,
 }
 
 /// A removed instance whose processor is still out.
@@ -198,10 +216,17 @@ type Done = (PluginInstanceId, u64, Result<Prepared, HostError>);
 /// - After [`PluginHost::commit_gestures`], call `sync` before an undo,
 ///   so the host knows the document has the gesture's values and sends the
 ///   undone ones.
+/// - When [`PluginHost::unloads_due`] (a plugin was made unavailable while
+///   running), call [`PluginHost::unload_unavailable`]; the engine then
+///   drops the instances of [`PluginHost::take_evicted`] and loads
+///   (`service` does both).
 pub struct PluginHost {
     formats: Vec<Box<dyn PluginFormat>>,
     paths: BTreeMap<(Format, String), PathBuf>,
     unavailable: BTreeMap<(Format, String), String>,
+    /// Plugins the user turned off ([`PluginHost::set_disabled`]): their
+    /// running instances are unloaded, not only their next loads.
+    disabled: BTreeSet<(Format, String)>,
     sample_rate: f64,
     max_frames: u32,
     slots: BTreeMap<PluginInstanceId, Slot>,
@@ -229,6 +254,16 @@ pub struct PluginHost {
     /// main-thread step.
     finishing: VecDeque<(PluginInstanceId, u64, Prepared)>,
     generation: u64,
+    /// Slots kept from loading (safe mode), with the reason they show.
+    held: BTreeMap<PluginInstanceId, String>,
+    /// Instances [`PluginHost::unload_unavailable`] unloaded: the engine
+    /// keeps a running instance of a slot it still has, so it must be told
+    /// to drop them ([`PluginHost::take_evicted`]; `service` does).
+    evicted: BTreeSet<PluginInstanceId>,
+    /// Gestures closed by [`PluginHost::end_gestures`], reported by the
+    /// next `idle` or `service`.
+    ended: Vec<Gesture>,
+    gesture_timeout: Duration,
     shelf: Shelf,
     back_tx: Sender<Returned>,
     back_rx: Receiver<Returned>,
@@ -270,6 +305,7 @@ impl PluginHost {
             formats: vec![Box::new(ClapFormat::new())],
             paths: BTreeMap::new(),
             unavailable: BTreeMap::new(),
+            disabled: BTreeSet::new(),
             sample_rate,
             max_frames: max_frames.max(1),
             slots: BTreeMap::new(),
@@ -280,6 +316,10 @@ impl PluginHost {
             parked: BTreeSet::new(),
             finishing: VecDeque::new(),
             generation: 0,
+            held: BTreeMap::new(),
+            evicted: BTreeSet::new(),
+            ended: Vec::new(),
+            gesture_timeout: GESTURE_TIMEOUT,
             shelf: Shelf::new(),
             back_tx,
             back_rx,
@@ -299,8 +339,10 @@ impl PluginHost {
         self.paths.insert((format, id.to_string()), path);
     }
 
-    /// Marks a plugin as unavailable (disabled or blocklisted); its slots
-    /// become placeholders showing `why` (spec §9). `None` makes it
+    /// Marks a plugin as unavailable (disabled, blocklisted or missing);
+    /// its slots become placeholders showing `why` (spec §9) when they
+    /// next load: running instances keep running, unless the user turned
+    /// the plugin off ([`PluginHost::set_disabled`]). `None` makes it
     /// available again (its slots load at the next `sync`).
     pub fn set_unavailable(&mut self, format: Format, id: &str, why: Option<String>) {
         let key = (format, id.to_string());
@@ -320,6 +362,21 @@ impl PluginHost {
                     }
                 }
             }
+        }
+    }
+
+    /// Records whether the user turned a plugin off (the Plugin Manager's
+    /// preference, spec §9). Together with [`PluginHost::set_unavailable`]
+    /// this makes its running instances due for
+    /// [`PluginHost::unload_unavailable`]; a plugin unavailable for another
+    /// reason (blocklisted by a rescan, missing) keeps its running
+    /// instances until they next load.
+    pub fn set_disabled(&mut self, format: Format, id: &str, disabled: bool) {
+        let key = (format, id.to_string());
+        if disabled {
+            self.disabled.insert(key);
+        } else {
+            self.disabled.remove(&key);
         }
     }
 
@@ -369,6 +426,109 @@ impl PluginHost {
             Some(State::Failed(w)) => Some(w),
             _ => None,
         }
+    }
+
+    /// Where slot `id` stands, if the document has it.
+    pub fn state(&self, id: PluginInstanceId) -> Option<SlotState> {
+        Some(match &self.slots.get(&id)?.state {
+            State::Loading(_) => SlotState::Loading,
+            State::Live(_) => SlotState::Live,
+            State::Failed(w) if w.is_empty() => SlotState::Loading,
+            State::Failed(w) => SlotState::Failed(w.clone()),
+        })
+    }
+
+    /// The plugins loading now (the crash marker names them, spec §10).
+    pub fn loading(&self) -> Vec<(PluginInstanceId, PluginRef)> {
+        self.slots
+            .iter()
+            .filter(|(_, s)| matches!(s.state, State::Loading(_)))
+            .map(|(id, s)| (*id, s.want.plugin.clone()))
+            .collect()
+    }
+
+    /// The plugins a [`sync`](Self::sync) of `doc` would start loading
+    /// now: slots it gains (or whose plugin changed), and slots waiting
+    /// to load again, minus held and unavailable ones. The crash marker
+    /// names them before the sync runs any plugin code (spec §10).
+    pub fn loads_needed(&self, doc: &Document) -> Vec<PluginRef> {
+        let mut wanted: Vec<(PluginInstanceId, &PluginSlot, bool)> = Vec::new();
+        for d in doc.instruments().values() {
+            if let DestKind::PluginInstrument { slot } = &d.kind {
+                wanted.push((slot.id, slot, true));
+            }
+        }
+        for (_, _, slot) in doc.mixer().inserts() {
+            wanted.push((slot.id, slot, false));
+        }
+        wanted
+            .into_iter()
+            .filter(|(id, slot, instrument)| {
+                let p = &slot.plugin;
+                let key = (p.format, p.id.clone());
+                if self.held.contains_key(id)
+                    || self.unavailable.contains_key(&key)
+                    || !self.formats.iter().any(|f| f.format() == p.format)
+                {
+                    return false;
+                }
+                match self.slots.get(id) {
+                    None => true,
+                    Some(s) => {
+                        let same = s.want.plugin.format == p.format
+                            && s.want.plugin.id == p.id
+                            && s.want.instrument == *instrument;
+                        !same || matches!(&s.state, State::Failed(w) if w.is_empty())
+                    }
+                }
+            })
+            .map(|(_, slot, _)| slot.plugin.clone())
+            .collect()
+    }
+
+    /// Keeps slot `id` from loading (safe mode, spec §10): until released
+    /// it plays as a placeholder showing `why`. `None` releases it; it
+    /// loads at the next `sync`. A slot already running is not stopped.
+    pub fn hold(&mut self, id: PluginInstanceId, why: Option<String>) {
+        match why {
+            Some(w) => {
+                self.held.insert(id, w);
+            }
+            None => {
+                if self.held.remove(&id).is_some() {
+                    if let Some(s) = self.slots.get_mut(&id) {
+                        if matches!(s.state, State::Failed(_)) {
+                            s.state = State::Failed(String::new());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The slots kept from loading.
+    pub fn held(&self) -> Vec<PluginInstanceId> {
+        self.held.keys().copied().collect()
+    }
+
+    /// How long an open gesture may go without an event before it is
+    /// closed ([`GESTURE_TIMEOUT`] by default).
+    pub fn set_gesture_timeout(&mut self, timeout: Duration) {
+        self.gesture_timeout = timeout;
+    }
+
+    /// Closes instance `id`'s open gesture (its editor window closed): what
+    /// it changed so far is reported by the next `idle` or `service`.
+    pub fn end_gestures(&mut self, id: PluginInstanceId) {
+        let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
+            return;
+        };
+        let State::Live(live) = state else {
+            return;
+        };
+        collect_gestures(id, live, &want.params, &mut self.ended);
+        live.open.clear();
+        flush_gesture(id, live, &mut self.ended);
     }
 
     /// Sets a parameter now (a mixer control): sent to the running plugin;
@@ -459,7 +619,7 @@ impl PluginHost {
                             state: State::Failed(String::new()),
                         },
                     );
-                    match unavailable {
+                    match self.held.get(&id).cloned().or(unavailable) {
                         Some(why) => self.fail(id, why),
                         None => self.start_load(id),
                     }
@@ -486,6 +646,10 @@ impl PluginHost {
         let Some(want) = self.slots.get(&id).map(|s| s.want.clone()) else {
             return;
         };
+        if let Some(why) = self.held.get(&id).cloned() {
+            self.fail(id, why);
+            return;
+        }
         if let Some(why) = self
             .unavailable
             .get(&(want.plugin.format, want.plugin.id.clone()))
@@ -541,6 +705,12 @@ impl PluginHost {
             return;
         };
         if let State::Live(mut l) = state {
+            // The editor goes before the instance does (moved to `retiring`
+            // it could no longer be reached): the app frees the parent view
+            // once the slot is gone, and a plugin GUI must not outlive it.
+            if let Some(e) = l.inst.editor() {
+                e.close();
+            }
             let shelved = self.shelf.take_unwanted(|k| k != id);
             let mut back = false;
             for p in shelved.into_iter().filter_map(Ready::into_processor) {
@@ -616,6 +786,7 @@ impl PluginHost {
     /// [`PluginHost::idle`]'s work, leaving the owed load to the caller.
     fn tick(&mut self) -> IdleReport {
         let mut r = self.carry.take().unwrap_or_default();
+        r.gestures.append(&mut self.ended);
         while let Ok((id, generation, result)) = self.done.try_recv() {
             if !self.is_loading(id, generation) {
                 continue;
@@ -694,6 +865,7 @@ impl PluginHost {
             pending: BTreeMap::new(),
             gesture: Vec::new(),
             open: BTreeSet::new(),
+            last_event: None,
         });
         // State first, then the overlay (spec §4).
         if let Some((sid, bytes)) = &want.state {
@@ -839,6 +1011,14 @@ impl PluginHost {
         };
         let ev = live.inst.idle();
         collect_gestures(id, live, &want.params, &mut r.gestures);
+        let stale = live
+            .last_event
+            .is_some_and(|t| t.elapsed() >= self.gesture_timeout);
+        if !live.open.is_empty() && stale {
+            // Its `End` was lost: what it changed so far is one gesture.
+            live.open.clear();
+            flush_gesture(id, live, &mut r.gestures);
+        }
         if ev.params_changed {
             r.params_changed.push(id);
         }
@@ -919,7 +1099,11 @@ impl PluginHost {
         for id in &r.restart {
             engine.restart_instance(*id);
         }
-        if !r.restart.is_empty() {
+        let evicted = self.take_evicted();
+        for id in &evicted {
+            engine.restart_instance(*id);
+        }
+        if !r.restart.is_empty() || !evicted.is_empty() {
             self.owed_load = true;
         }
         let ready = self.sync(doc);
@@ -927,6 +1111,7 @@ impl PluginHost {
             !r.loaded.is_empty()
                 || !r.failed.is_empty()
                 || !r.restart.is_empty()
+                || !evicted.is_empty()
                 || f.seq != seq
                 || f.block != engine.block_frames()
                 // Compared only while a load is refused.
@@ -1056,6 +1241,91 @@ impl PluginHost {
         Ok(blob)
     }
 
+    /// Whether a slot still runs (or is loading) a plugin the user turned
+    /// off since (unavailable and [`PluginHost::set_disabled`]): then
+    /// [`PluginHost::unload_unavailable`] is due.
+    pub fn unloads_due(&self) -> bool {
+        self.slots.values().any(|s| self.unloads(s))
+    }
+
+    fn unloads(&self, s: &Slot) -> bool {
+        let key = (s.want.plugin.format, s.want.plugin.id.clone());
+        matches!(s.state, State::Live(_) | State::Loading(_))
+            && self.disabled.contains(&key)
+            && self.unavailable.contains_key(&key)
+    }
+
+    /// Unloads every instance of a plugin the user turned off (spec §9:
+    /// turning a plugin off stops it in every open project; a blocklisted
+    /// or missing plugin is left running). Each running
+    /// one has its state captured first, through
+    /// [`PluginHost::capture`] (no undo step), so the document keeps its
+    /// settings; then it goes the way of a removed instance (editor
+    /// closed, processor given back by the engine before it is dropped)
+    /// and its slot stays as a placeholder showing why. A load in progress
+    /// is abandoned. The engine owes a load and must drop the unloaded
+    /// instances first ([`PluginHost::take_evicted`]);
+    /// [`PluginHost::service`] does both. Returns the running instances
+    /// unloaded with what capturing gave: an instance whose state could not
+    /// be captured is unloaded all the same (its last saved state stays in
+    /// the document).
+    pub fn unload_unavailable(
+        &mut self,
+        history: &mut History,
+    ) -> Vec<(PluginInstanceId, Result<StateBlobId, HostError>)> {
+        let due: Vec<PluginInstanceId> = self
+            .slots
+            .iter()
+            .filter(|(_, s)| self.unloads(s))
+            .map(|(id, _)| *id)
+            .collect();
+        if !due.is_empty() {
+            // Placeholders now show why.
+            self.owed_load = true;
+        }
+        let mut out = Vec::new();
+        for id in due {
+            let Some(slot) = self.slots.get(&id) else {
+                continue;
+            };
+            let live = matches!(slot.state, State::Live(_));
+            let key = (slot.want.plugin.format, slot.want.plugin.id.clone());
+            let why = self
+                .held
+                .get(&id)
+                .or_else(|| self.unavailable.get(&key))
+                .cloned()
+                .unwrap_or_default();
+            if live {
+                out.push((id, self.capture(history, id)));
+                self.evicted.insert(id);
+            }
+            // `capture` updated what the slot wants (the captured state).
+            let Some(want) = self.slots.get(&id).map(|s| s.want.clone()) else {
+                continue;
+            };
+            self.remove(id);
+            self.slots.insert(
+                id,
+                Slot {
+                    want,
+                    state: State::Failed(String::new()),
+                },
+            );
+            self.fail(id, why);
+        }
+        out
+    }
+
+    /// The instances [`PluginHost::unload_unavailable`] unloaded since the
+    /// last call, which the engine fed by this host must drop
+    /// (`Engine::restart_instance` before its next load; otherwise it keeps
+    /// playing them). [`PluginHost::service`] does this itself; a caller
+    /// that loads the engine on its own calls it first.
+    pub fn take_evicted(&mut self) -> Vec<PluginInstanceId> {
+        std::mem::take(&mut self.evicted).into_iter().collect()
+    }
+
     /// Captures every live instance with state (before saving).
     pub fn capture_all(&mut self, history: &mut History) -> Vec<(PluginInstanceId, HostError)> {
         let ids: Vec<PluginInstanceId> = self.slots.keys().copied().collect();
@@ -1115,6 +1385,9 @@ fn collect_gestures(
 ) {
     let mut events = l.gestures.drain();
     events.extend(l.inst.gestures());
+    if !events.is_empty() {
+        l.last_event = Some(Instant::now());
+    }
     for e in events {
         match e {
             ParamEvent::Begin(p) => {

@@ -4,21 +4,26 @@
 //! UI gestures.
 
 use block2::RcBlock;
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{AnyClass, AnyObject};
+use objc2::{MainThreadMarker, msg_send};
 use objc2_audio_toolbox::{
     AUListenerDispose, AUParameterListenerRef, AUParameterSet, AURenderCallbackStruct,
     AudioComponent, AudioComponentCopyName, AudioComponentDescription, AudioComponentFindNext,
     AudioComponentFlags, AudioComponentGetDescription, AudioComponentGetVersion,
     AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioComponentInstantiate,
     AudioComponentInstantiationOptions, AudioUnit, AudioUnitAddPropertyListener,
-    AudioUnitEventType, AudioUnitGetParameter, AudioUnitGetProperty, AudioUnitGetPropertyInfo,
-    AudioUnitInitialize, AudioUnitParameter, AudioUnitParameterInfo, AudioUnitParameterOptions,
-    AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender, AudioUnitRenderActionFlags,
-    AudioUnitReset, AudioUnitScope, AudioUnitSetParameter, AudioUnitSetProperty,
-    AudioUnitUninitialize, MusicDeviceMIDIEvent, kAudioUnitProperty_ClassInfo,
-    kAudioUnitProperty_ElementCount, kAudioUnitProperty_Latency,
+    AudioUnitCocoaViewInfo, AudioUnitEventType, AudioUnitGetParameter, AudioUnitGetProperty,
+    AudioUnitGetPropertyInfo, AudioUnitInitialize, AudioUnitParameter, AudioUnitParameterInfo,
+    AudioUnitParameterOptions, AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender,
+    AudioUnitRenderActionFlags, AudioUnitReset, AudioUnitScope, AudioUnitSetParameter,
+    AudioUnitSetProperty, AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent,
+    kAudioUnitProperty_ClassInfo, kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount,
+    kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
     kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_ParameterInfo,
-    kAudioUnitProperty_ParameterList, kAudioUnitProperty_SetRenderCallback,
-    kAudioUnitProperty_StreamFormat, kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
+    kAudioUnitProperty_ParameterList, kAudioUnitProperty_RequestViewController,
+    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat,
+    kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
@@ -26,12 +31,14 @@ use objc2_core_audio_types::{
     kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 use objc2_core_foundation::{
-    CFData, CFPropertyList, CFPropertyListCreateData, CFPropertyListCreateWithData,
-    CFPropertyListFormat, CFRetained, CFString,
+    CFBundle, CFData, CFPropertyList, CFPropertyListCreateData, CFPropertyListCreateWithData,
+    CFPropertyListFormat, CFRetained, CFRunLoop, CFString, CFURL, CGPoint, CGRect, CGSize,
+    kCFRunLoopDefaultMode,
 };
+use std::ffi::CString;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -1014,5 +1021,534 @@ pub(crate) fn ui_gesture(unit: &Unit, id: u32, value: f32) {
             0,
         );
         AUEventListenerNotify(ptr::null_mut(), ptr::null_mut(), &end);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transport for AUs (`kAudioUnitProperty_HostCallbacks`, spec §5): the
+// processor stores each block's facts in atomics before rendering; the
+// unit's calls read them on the render thread. // RT
+
+/// The transport facts one unit's host callbacks report.
+#[derive(Debug, Default)]
+pub(crate) struct HostTransport {
+    /// Quarter-note position (f64 bits).
+    beat: AtomicU64,
+    /// Tempo in BPM (f64 bits).
+    tempo: AtomicU64,
+    /// Schedule frame (f64 bits).
+    sample: AtomicU64,
+    /// Stream rate (f64 bits).
+    rate: AtomicU64,
+    playing: AtomicBool,
+    /// Set when playing toggled or the position jumped; cleared when a
+    /// unit reads it.
+    changed: AtomicBool,
+}
+
+impl HostTransport {
+    /// A transport at 120 BPM, stopped at 0, for `rate`.
+    pub(crate) fn new(rate: f64) -> HostTransport {
+        let t = HostTransport::default();
+        t.tempo.store(120f64.to_bits(), Ordering::Relaxed);
+        t.rate.store(rate.to_bits(), Ordering::Relaxed);
+        t
+    }
+
+    /// The stream rate changed (activation). Main thread.
+    pub(crate) fn set_rate(&self, rate: f64) {
+        self.rate.store(rate.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Stores one block's facts (`expected` is the frame the previous
+    /// block's end predicted: anything else is a jump). // RT
+    pub(crate) fn set(&self, playing: bool, frame: u64, beats: f64, tempo: f64, expected: u64) {
+        let was = self.playing.swap(playing, Ordering::Relaxed);
+        if was != playing || frame != expected {
+            self.changed.store(true, Ordering::Relaxed);
+        }
+        self.beat.store(beats.to_bits(), Ordering::Relaxed);
+        let tempo = if tempo.is_finite() && tempo > 0.0 {
+            tempo
+        } else {
+            120.0
+        };
+        self.tempo.store(tempo.to_bits(), Ordering::Relaxed);
+        self.sample
+            .store((frame as f64).to_bits(), Ordering::Relaxed);
+    }
+
+    fn f(a: &AtomicU64) -> f64 {
+        f64::from_bits(a.load(Ordering::Relaxed))
+    }
+
+    /// What `beatAndTempoProc` reports: beat, tempo. // RT
+    pub(crate) fn beat_and_tempo(&self) -> (f64, f64) {
+        (Self::f(&self.beat), Self::f(&self.tempo))
+    }
+
+    /// What `musicalTimeLocationProc` reports: frames to the next whole
+    /// beat, the 4/4 time signature (3b Plan Ruling 11) and the downbeat of
+    /// the current bar. // RT
+    pub(crate) fn musical_time(&self) -> (u32, f32, u32, f64) {
+        let beat = Self::f(&self.beat);
+        let frames_per_beat = 60.0 / Self::f(&self.tempo) * Self::f(&self.rate);
+        let to_next = (beat.ceil() - beat) * frames_per_beat;
+        let downbeat = (beat / 4.0).floor() * 4.0;
+        (to_next.round().max(0.0) as u32, 4.0, 4, downbeat)
+    }
+
+    /// What `transportStateProc2` reports: playing, changed (cleared by the
+    /// read), sample position. // RT
+    pub(crate) fn state(&self) -> (bool, bool, f64) {
+        (
+            self.playing.load(Ordering::Relaxed),
+            self.changed.swap(false, Ordering::Relaxed),
+            Self::f(&self.sample),
+        )
+    }
+}
+
+/// `refcon` is the `HostTransport` the callbacks were installed with.
+unsafe fn transport<'a>(refcon: *mut c_void) -> Option<&'a HostTransport> {
+    // SAFETY: the callbacks are installed with a pointer to a
+    // `HostTransport` that the instance and its processor keep alive (in an
+    // `Arc`) for as long as the unit exists.
+    unsafe { refcon.cast::<HostTransport>().as_ref() }
+}
+
+unsafe extern "C-unwind" fn beat_and_tempo_proc(
+    refcon: *mut c_void,
+    beat: *mut f64,
+    tempo: *mut f64,
+) -> i32 {
+    // SAFETY: see `transport`.
+    let Some(t) = (unsafe { transport(refcon) }) else {
+        return -10863; // kAudioUnitErr_CannotDoInCurrentContext
+    };
+    let (b, bpm) = t.beat_and_tempo();
+    // SAFETY: the unit passes valid out-pointers or null for values it
+    // does not want.
+    unsafe {
+        if let Some(p) = beat.as_mut() {
+            *p = b;
+        }
+        if let Some(p) = tempo.as_mut() {
+            *p = bpm;
+        }
+    }
+    0
+}
+
+unsafe extern "C-unwind" fn musical_time_proc(
+    refcon: *mut c_void,
+    to_next_beat: *mut u32,
+    numerator: *mut f32,
+    denominator: *mut u32,
+    downbeat: *mut f64,
+) -> i32 {
+    // SAFETY: see `transport`.
+    let Some(t) = (unsafe { transport(refcon) }) else {
+        return -10863;
+    };
+    let (next, num, den, down) = t.musical_time();
+    // SAFETY: valid out-pointers or null, as above.
+    unsafe {
+        if let Some(p) = to_next_beat.as_mut() {
+            *p = next;
+        }
+        if let Some(p) = numerator.as_mut() {
+            *p = num;
+        }
+        if let Some(p) = denominator.as_mut() {
+            *p = den;
+        }
+        if let Some(p) = downbeat.as_mut() {
+            *p = down;
+        }
+    }
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C-unwind" fn transport_state_proc2(
+    refcon: *mut c_void,
+    playing: *mut u8,
+    recording: *mut u8,
+    changed: *mut u8,
+    sample: *mut f64,
+    cycling: *mut u8,
+    cycle_start: *mut f64,
+    cycle_end: *mut f64,
+) -> i32 {
+    // SAFETY: see `transport`.
+    let Some(t) = (unsafe { transport(refcon) }) else {
+        return -10863;
+    };
+    let (play, moved, at) = t.state();
+    // SAFETY: valid out-pointers or null, as above.
+    unsafe {
+        if let Some(p) = playing.as_mut() {
+            *p = u8::from(play);
+        }
+        if let Some(p) = recording.as_mut() {
+            *p = 0;
+        }
+        if let Some(p) = changed.as_mut() {
+            *p = u8::from(moved);
+        }
+        if let Some(p) = sample.as_mut() {
+            *p = at;
+        }
+        if let Some(p) = cycling.as_mut() {
+            *p = 0;
+        }
+        if let Some(p) = cycle_start.as_mut() {
+            *p = 0.0;
+        }
+        if let Some(p) = cycle_end.as_mut() {
+            *p = 0.0;
+        }
+    }
+    0
+}
+
+unsafe extern "C-unwind" fn transport_state_proc(
+    refcon: *mut c_void,
+    playing: *mut u8,
+    changed: *mut u8,
+    sample: *mut f64,
+    cycling: *mut u8,
+    cycle_start: *mut f64,
+    cycle_end: *mut f64,
+) -> i32 {
+    // SAFETY: forwards the same pointers (recording not asked).
+    unsafe {
+        transport_state_proc2(
+            refcon,
+            playing,
+            ptr::null_mut(),
+            changed,
+            sample,
+            cycling,
+            cycle_start,
+            cycle_end,
+        )
+    }
+}
+
+fn callbacks(t: &HostTransport) -> HostCallbackInfo {
+    HostCallbackInfo {
+        hostUserData: ptr::from_ref(t).cast_mut().cast::<c_void>(),
+        beatAndTempoProc: Some(beat_and_tempo_proc),
+        musicalTimeLocationProc: Some(musical_time_proc),
+        transportStateProc: Some(transport_state_proc),
+        transportStateProc2: Some(transport_state_proc2),
+    }
+}
+
+impl Unit {
+    /// Installs the host callbacks reading `t` (which must outlive the
+    /// unit: callers keep it in the same `Arc`s as the unit).
+    pub(crate) fn set_host_callbacks(&self, t: &Arc<HostTransport>) -> Result<(), String> {
+        let info = callbacks(t);
+        self.set(
+            "set HostCallbacks",
+            kAudioUnitProperty_HostCallbacks,
+            kAudioUnitScope_Global,
+            0,
+            &info,
+        )
+    }
+}
+
+/// What the callbacks installed for `t` report, called the way a unit
+/// calls them (tests): beat and tempo; frames to the next beat, numerator,
+/// denominator, downbeat; playing, changed, sample.
+#[allow(clippy::type_complexity)]
+pub(crate) fn call_host_callbacks(
+    t: &HostTransport,
+) -> ((f64, f64), (u32, f32, u32, f64), (bool, bool, f64)) {
+    let info = callbacks(t);
+    let (mut b, mut bpm) = (0.0, 0.0);
+    let (mut next, mut num, mut den, mut down) = (0u32, 0f32, 0u32, 0.0);
+    let (mut play, mut rec, mut moved, mut at, mut cyc, mut cs, mut ce) =
+        (0u8, 0u8, 0u8, 0.0, 0u8, 0.0, 0.0);
+    // SAFETY: the callbacks get the pointer they were made for and valid
+    // out-pointers, exactly as a unit would pass them.
+    unsafe {
+        if let Some(f) = info.beatAndTempoProc {
+            f(info.hostUserData, &mut b, &mut bpm);
+        }
+        if let Some(f) = info.musicalTimeLocationProc {
+            f(info.hostUserData, &mut next, &mut num, &mut den, &mut down);
+        }
+        if let Some(f) = info.transportStateProc2 {
+            f(
+                info.hostUserData,
+                &mut play,
+                &mut rec,
+                &mut moved,
+                &mut at,
+                &mut cyc,
+                &mut cs,
+                &mut ce,
+            );
+        }
+    }
+    (
+        (b, bpm),
+        (next, num, den, down),
+        (play != 0, moved != 0, at),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Editors (spec §9; 3b Plan Ruling 7 left them to 3c): the unit's own Cocoa
+// view (AU v2, `kAudioUnitProperty_CocoaUI`), its view controller's view
+// (AU v3, `kAudioUnitProperty_RequestViewController`), or CoreAudioKit's
+// generic view. AppKit: main thread only.
+
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {}
+#[link(name = "CoreAudioKit", kind = "framework")]
+unsafe extern "C" {}
+
+/// Where an editor's view came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewKind {
+    /// The unit's Cocoa view factory (AU v2).
+    Cocoa,
+    /// The unit's view controller (AU v3).
+    Controller,
+    /// CoreAudioKit's `AUGenericView` (a unit without a UI of its own).
+    Generic,
+}
+
+/// A plugin's `NSView`, shown inside a parent view the app owns. Removed
+/// from its parent on drop (before the unit can go: `AuInstance` drops its
+/// editor first).
+pub(crate) struct View {
+    view: Retained<AnyObject>,
+    /// A v3 view controller owns its view: kept while the view is shown.
+    _controller: Option<Retained<AnyObject>>,
+    pub(crate) kind: ViewKind,
+}
+
+impl std::fmt::Debug for View {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("View").field("kind", &self.kind).finish()
+    }
+}
+
+/// The size an editor is asked for when the unit has no preference.
+const PREFERRED: CGSize = CGSize {
+    width: 400.0,
+    height: 300.0,
+};
+
+impl Unit {
+    /// The unit's editor view: its Cocoa view, else its v3 view controller
+    /// (waited for up to `wait` while the main run loop runs), else the
+    /// generic view. Main thread only.
+    pub(crate) fn editor_view(&self, wait: Duration) -> Result<View, String> {
+        if MainThreadMarker::new().is_none() {
+            return Err("plugin editors open on the main thread only".into());
+        }
+        self.cocoa_view()
+            .or_else(|_| self.controller_view(wait))
+            .or_else(|_| self.generic_view())
+    }
+
+    fn cocoa_view(&self) -> Result<View, String> {
+        let mut size = 0u32;
+        // SAFETY: valid unit and out-pointer; no data is written.
+        os("CocoaUI info", unsafe {
+            AudioUnitGetPropertyInfo(
+                self.unit,
+                kAudioUnitProperty_CocoaUI,
+                kAudioUnitScope_Global,
+                0,
+                &mut size,
+                ptr::null_mut(),
+            )
+        })?;
+        let n = size as usize;
+        if n < size_of::<AudioUnitCocoaViewInfo>() {
+            return Err("no Cocoa view".into());
+        }
+        // One URL followed by at least one class name, each a CF object.
+        let mut raw = vec![ptr::null::<c_void>(); n.div_ceil(size_of::<*const c_void>())];
+        // SAFETY: `raw` has room for `size` bytes.
+        os("CocoaUI", unsafe {
+            AudioUnitGetProperty(
+                self.unit,
+                kAudioUnitProperty_CocoaUI,
+                kAudioUnitScope_Global,
+                0,
+                NonNull::new_unchecked(raw.as_mut_ptr().cast::<c_void>()),
+                NonNull::from(&mut size),
+            )
+        })?;
+        // SAFETY: the property hands the host one reference to each CF
+        // object (the URL, then every class name); each non-null entry is
+        // adopted exactly once here, so every path below releases them.
+        let (url, mut names) = unsafe {
+            let mut it = raw.iter().take(n / size_of::<*const c_void>());
+            let url = it
+                .next()
+                .and_then(|u| NonNull::new(u.cast_mut().cast::<CFURL>()))
+                .map(|u| CFRetained::from_raw(u));
+            let names: Vec<CFRetained<CFString>> = it
+                .filter_map(|c| NonNull::new(c.cast_mut().cast::<CFString>()))
+                .map(|c| CFRetained::from_raw(c))
+                .collect();
+            (url, names)
+        };
+        if names.is_empty() {
+            return Err("empty Cocoa view info".into());
+        }
+        let url = url.ok_or("empty Cocoa view info")?;
+        let class = names.swap_remove(0);
+        let bundle = CFBundle::new(None, Some(&url)).ok_or("cannot open the view bundle")?;
+        // SAFETY: loading the plugin's own view bundle runs its
+        // initializers; the plugin is trusted in-process code by then.
+        if !unsafe { bundle.load_executable() } {
+            return Err("cannot load the view bundle".into());
+        }
+        let name = CString::new(class.to_string()).map_err(|e| e.to_string())?;
+        let cls = AnyClass::get(&name).ok_or("no view factory class")?;
+        // SAFETY: the class implements `AUCocoaUIBase` (that is what the
+        // property names); `new` returns an owned factory and
+        // `uiViewForAudioUnit:withSize:` an autoreleased `NSView` for a live
+        // unit.
+        let view: Option<Retained<AnyObject>> = unsafe {
+            let factory: Retained<AnyObject> = msg_send![cls, new];
+            msg_send![&factory, uiViewForAudioUnit: self.unit, withSize: PREFERRED]
+        };
+        Ok(View {
+            view: view.ok_or("the view factory made no view")?,
+            _controller: None,
+            kind: ViewKind::Cocoa,
+        })
+    }
+
+    fn controller_view(&self, wait: Duration) -> Result<View, String> {
+        /// What the completion handler reported.
+        #[derive(Default)]
+        struct Reply {
+            /// The handler ran (with a controller or with nil).
+            answered: bool,
+            /// A retained controller (`Retained::into_raw`), if given.
+            vc: Option<usize>,
+            /// The wait is over: a late controller is not kept.
+            abandoned: bool,
+        }
+        let slot: Arc<Mutex<Reply>> = Arc::new(Mutex::new(Reply::default()));
+        let fill = Arc::clone(&slot);
+        let block = RcBlock::new(move |vc: *mut AnyObject| {
+            let mut r = fill.lock().unwrap_or_else(PoisonError::into_inner);
+            r.answered = true;
+            if r.abandoned {
+                return;
+            }
+            // SAFETY: the unit hands over a valid view controller (or
+            // null); one reference is taken here and adopted below.
+            if let Some(vc) = unsafe { Retained::retain(vc) } {
+                r.vc = Some(Retained::into_raw(vc) as usize);
+            }
+        });
+        let ptr_to_block: *const block2::Block<dyn Fn(*mut AnyObject)> = &*block;
+        self.set(
+            "RequestViewController",
+            kAudioUnitProperty_RequestViewController,
+            kAudioUnitScope_Global,
+            0,
+            &ptr_to_block,
+        )?;
+        let until = std::time::Instant::now() + wait;
+        let raw = loop {
+            {
+                let mut r = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                if r.answered {
+                    // A nil answer: no controller, no more waiting.
+                    break r.vc.take().ok_or("no view controller")?;
+                }
+                if std::time::Instant::now() >= until {
+                    r.abandoned = true;
+                    return Err("no view controller".into());
+                }
+            }
+            // SAFETY: the default mode is a valid static; the main run loop
+            // delivers the unit's completion.
+            let mode = unsafe { kCFRunLoopDefaultMode };
+            CFRunLoop::run_in_mode(mode, 0.02, true);
+        };
+        // SAFETY: `raw` is the reference taken in the block.
+        let vc =
+            unsafe { Retained::from_raw(raw as *mut AnyObject) }.ok_or("no view controller")?;
+        // SAFETY: an `NSViewController`'s `view` is a retained-by-it NSView.
+        let view: Option<Retained<AnyObject>> = unsafe { msg_send![&vc, view] };
+        Ok(View {
+            view: view.ok_or("the view controller has no view")?,
+            _controller: Some(vc),
+            kind: ViewKind::Controller,
+        })
+    }
+
+    fn generic_view(&self) -> Result<View, String> {
+        let cls = AnyClass::get(c"AUGenericView").ok_or("CoreAudioKit is missing")?;
+        // SAFETY: `AUGenericView` is an NSView subclass whose
+        // `initWithAudioUnit:` takes a live unit.
+        let view: Option<Retained<AnyObject>> = unsafe {
+            let obj: Allocated<AnyObject> = msg_send![cls, alloc];
+            msg_send![obj, initWithAudioUnit: self.unit]
+        };
+        Ok(View {
+            view: view.ok_or("no generic view")?,
+            _controller: None,
+            kind: ViewKind::Generic,
+        })
+    }
+}
+
+impl View {
+    /// Adds the view to `parent` (an `NSView *` the caller keeps alive while
+    /// it is shown) at the origin (the bottom-left of an unflipped parent); returns its size in points.
+    pub(crate) fn attach(&self, parent: *mut c_void) -> Result<(u32, u32), String> {
+        if MainThreadMarker::new().is_none() {
+            return Err("plugin editors open on the main thread only".into());
+        }
+        let parent = parent.cast::<AnyObject>();
+        // SAFETY: `parent` is a live `NSView` (the `ParentView` contract);
+        // the view is ours.
+        unsafe {
+            let parent = parent.as_ref().ok_or("no parent view")?;
+            let _: () = msg_send![parent, addSubview: &*self.view];
+            let _: () = msg_send![&*self.view, setFrameOrigin: CGPoint { x: 0.0, y: 0.0 }];
+        }
+        Ok(self.size())
+    }
+
+    /// The view's size in points.
+    pub(crate) fn size(&self) -> (u32, u32) {
+        // SAFETY: `frame` of a live view.
+        let f: CGRect = unsafe { msg_send![&*self.view, frame] };
+        (
+            f.size.width.round().max(1.0) as u32,
+            f.size.height.round().max(1.0) as u32,
+        )
+    }
+}
+
+impl Drop for View {
+    fn drop(&mut self) {
+        if MainThreadMarker::new().is_some() {
+            // SAFETY: removing a live view from its parent (a no-op when it
+            // has none).
+            unsafe {
+                let _: () = msg_send![&*self.view, removeFromSuperview];
+            }
+        }
     }
 }

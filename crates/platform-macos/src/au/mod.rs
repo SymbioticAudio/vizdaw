@@ -7,15 +7,16 @@
 
 mod ffi;
 
+use core_engine::backend::BlockInfo;
 use core_engine::graph::ProcessStatus;
 use core_host::catalog::Source;
 use core_host::{
     AudioPortInfo, AudioProcessor, HostError, InstanceEvents, LoadRequest, ParamEvent, ParamInfo,
-    PluginEditor, PluginFormat, PluginInfo, PluginInstance, PluginKind, PortRole, PrepareJob,
-    Prepared, ProcessCtx, Tail,
+    ParentView, PluginEditor, PluginFormat, PluginInfo, PluginInstance, PluginKind, PortRole,
+    PrepareJob, Prepared, ProcessCtx, Tail,
 };
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
-use ffi::{ComponentInfo, Feed, GestureListener, Unit};
+use ffi::{ComponentInfo, Feed, GestureListener, HostTransport, Unit};
 use objc2_audio_toolbox::{
     AudioUnitParameterOptions, kAudioUnitScope_Input, kAudioUnitScope_Output,
     kAudioUnitType_Effect, kAudioUnitType_MusicDevice, kAudioUnitType_MusicEffect,
@@ -156,6 +157,9 @@ struct Opened {
     kind: u32,
     config: (f64, u32),
     feed: Feed,
+    /// What its host callbacks read (installed when the unit took them).
+    transport: Arc<HostTransport>,
+    callbacks: bool,
 }
 
 /// The AU [`PluginFormat`].
@@ -184,14 +188,30 @@ impl PluginFormat for AuFormat {
             // The input callbacks are set while uninitialized: some units
             // take their connections only at initialization.
             let feed = Feed::new(max);
-            connect(&unit, &feed)?;
-            unit.initialize().map_err(HostError::ActivateFailed)?;
+            // On a failure below, the unit is disposed explicitly before
+            // `feed` and `transport` drop: it must never hold their
+            // addresses (input-callback and host-callback contexts) after
+            // they are freed. Locals would drop the other way round.
+            if let Err(e) = connect(&unit, &feed) {
+                drop(unit);
+                return Err(e);
+            }
+            // Tempo and position for tempo-synced units (spec §5); a unit
+            // that refuses the callbacks still plays.
+            let transport = Arc::new(HostTransport::new(sr));
+            let callbacks = unit.set_host_callbacks(&transport).is_ok();
+            if let Err(e) = unit.initialize() {
+                drop(unit);
+                return Err(HostError::ActivateFailed(e));
+            }
             Ok(Prepared(Box::new(Opened {
                 desc: describe(&c),
                 kind: c.kind,
                 unit,
                 config: (sr, max),
                 feed,
+                transport,
+                callbacks,
             })))
         })
     }
@@ -246,77 +266,159 @@ fn connect(unit: &Unit, feed: &Feed) -> Result<(), HostError> {
     Ok(())
 }
 
-/// The last value the host itself wrote to each watched parameter, so the
-/// gesture listener can tell the plugin's UI from an echo of the host's own
-/// `AudioUnitSetParameter` (AU v3 units bridged to the C API may notify
-/// listeners of those). Fixed at creation: writing is lock- and
-/// allocation-free (RT).
+/// How many recent host writes per parameter the echo filter remembers.
+const WRITE_RING: usize = 16;
+
+/// The recent values the host itself wrote to each watched parameter, so
+/// the gesture listener can tell the plugin's UI from an echo of the host's
+/// own `AudioUnitSetParameter` (AU v3 units bridged to the C API may notify
+/// listeners of those, asynchronously and possibly late or out of order, so
+/// a ramp's echoes can trail the audio thread's newer writes). Fixed at
+/// creation: writing is lock- and allocation-free (RT).
 #[derive(Debug)]
 struct HostWrites {
     /// Watched parameter ids, sorted.
     ids: Box<[u32]>,
-    /// `f32` bits of the last value written per id; NaN when none.
+    /// `WRITE_RING` slots of `f32` bits per id (NaN: empty), oldest
+    /// overwritten first.
     values: Box<[AtomicU32]>,
+    /// The next slot to overwrite, per id.
+    next: Box<[AtomicU32]>,
 }
 
 impl HostWrites {
     fn new(mut ids: Vec<u32>) -> HostWrites {
         ids.sort_unstable();
         ids.dedup();
-        let values = ids
-            .iter()
+        let values = (0..ids.len() * WRITE_RING)
             .map(|_| AtomicU32::new(f32::NAN.to_bits()))
             .collect();
+        let next = ids.iter().map(|_| AtomicU32::new(0)).collect();
         HostWrites {
             ids: ids.into_boxed_slice(),
             values,
+            next,
         }
     }
 
-    fn slot(&self, id: u32) -> Option<&AtomicU32> {
-        self.ids
-            .binary_search(&id)
-            .ok()
-            .and_then(|i| self.values.get(i))
+    fn index(&self, id: u32) -> Option<usize> {
+        self.ids.binary_search(&id).ok()
+    }
+
+    fn ring(&self, i: usize) -> &[AtomicU32] {
+        self.values
+            .get(i * WRITE_RING..(i + 1) * WRITE_RING)
+            .unwrap_or(&[])
     }
 
     /// Whether the listener watches `id` (a writable parameter).
     fn watches(&self, id: u32) -> bool {
-        self.slot(id).is_some()
+        self.index(id).is_some()
     }
 
     /// Notes a value the host wrote. // RT
     fn note(&self, id: u32, value: f32) {
-        if let Some(s) = self.slot(id) {
+        let Some(i) = self.index(id) else {
+            return;
+        };
+        let at = self
+            .next
+            .get(i)
+            .map_or(0, |n| n.fetch_add(1, Ordering::Relaxed)) as usize
+            % WRITE_RING;
+        if let Some(s) = self.ring(i).get(at) {
             s.store(value.to_bits(), Ordering::Relaxed);
         }
     }
 
-    /// Classifies a value notification for `id`, one-shot: the first
-    /// notification equal to the host's last write is its echo (true); any
-    /// notification (echo or user) then clears the slot, so a user moving
-    /// away and back to that value is never mistaken for an echo. Exact
-    /// bits: a unit that quantises the host's value echoes it as a user
-    /// change.
+    /// Classifies a value notification for `id`: it is the echo of a host
+    /// write (true) when it matches any remembered write within a small
+    /// tolerance (a unit may quantise or round-trip the value); that write
+    /// is then consumed, so one write excuses one notification and a user
+    /// moving to the same value later is not mistaken for an echo. A late
+    /// or out-of-order echo still matches its own write. Anything else is
+    /// the user (false) and forgets the writes made before it.
     fn take_echo(&self, id: u32, value: f32) -> bool {
-        let Some(s) = self.slot(id) else {
+        let Some(i) = self.index(id) else {
             return false;
         };
-        let none = f32::NAN.to_bits();
-        let echo = s
-            .compare_exchange(value.to_bits(), none, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok();
-        if !echo {
-            s.store(none, Ordering::Relaxed);
+        let tol = 1e-4 * value.abs().max(1.0);
+        for s in self.ring(i) {
+            let v = f32::from_bits(s.load(Ordering::Relaxed));
+            if (v - value).abs() <= tol
+                && s.compare_exchange(
+                    v.to_bits(),
+                    f32::NAN.to_bits(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return true;
+            }
         }
-        echo
+        // The user: whatever the host wrote before is now superseded, so
+        // the user moving back to such a value is a gesture again.
+        for s in self.ring(i) {
+            s.store(f32::NAN.to_bits(), Ordering::Relaxed);
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod echo_tests {
+    use super::HostWrites;
+
+    #[test]
+    fn late_and_out_of_order_echoes_are_recognised() {
+        let w = HostWrites::new(vec![7]);
+        // A ramp the audio thread wrote ahead of the listener.
+        for k in 0..10 {
+            w.note(7, k as f32 * 0.1);
+        }
+        // Echoes arrive late and shuffled.
+        for k in [3, 0, 9, 1, 8, 2, 7, 4, 6, 5] {
+            assert!(w.take_echo(7, k as f32 * 0.1), "echo {k}");
+        }
+        // Each write excuses one notification only.
+        assert!(!w.take_echo(7, 0.3));
+    }
+
+    #[test]
+    fn a_user_move_is_not_an_echo() {
+        let w = HostWrites::new(vec![7, 9]);
+        w.note(7, 0.25);
+        w.note(7, 0.5);
+        assert!(!w.take_echo(7, 0.9));
+        assert!(!w.take_echo(9, 0.25), "another parameter's writes");
+        assert!(!w.take_echo(3, 0.25), "unwatched");
+        // Writes before a user move are superseded: moving back is a gesture.
+        assert!(!w.take_echo(7, 0.5));
+        // A write after it is an echo again, within tolerance, once.
+        w.note(7, 0.5);
+        assert!(w.take_echo(7, 0.5 + 1e-6));
+        assert!(!w.take_echo(7, 0.5));
+    }
+
+    #[test]
+    fn the_ring_forgets_the_oldest_writes() {
+        let w = HostWrites::new(vec![1]);
+        for k in 0..40 {
+            w.note(1, k as f32);
+        }
+        assert!(w.take_echo(1, 39.0));
+        assert!(!w.take_echo(1, 0.0));
     }
 }
 
 /// A loaded AU (main-thread half).
 pub struct AuInstance {
-    // Declared first so it is dropped first: the listener's registrations
-    // go before the unit is disposed.
+    // Declared first so it is dropped first: its view leaves the window
+    // before anything else of the unit goes.
+    editor: AuEditor,
+    // Dropped next: the listener's registrations go before the unit is
+    // disposed.
     listener: Option<GestureListener>,
     unit: Arc<Unit>,
     kind: u32,
@@ -330,6 +432,9 @@ pub struct AuInstance {
     /// activation at that configuration hands it to the processor without
     /// initializing the unit again.
     ready: Option<Feed>,
+    /// What the unit's host callbacks read.
+    transport: Arc<HostTransport>,
+    callbacks: bool,
     /// Initializations done by `activate` (on the main thread).
     #[cfg(test)]
     main_inits: u32,
@@ -348,8 +453,13 @@ impl AuInstance {
         let latency = Arc::new(AtomicBool::new(false));
         // A unit that cannot report latency changes still works.
         let _ = o.unit.watch_latency(Arc::clone(&latency));
+        let unit = Arc::new(o.unit);
         let mut me = AuInstance {
-            unit: Arc::new(o.unit),
+            editor: AuEditor {
+                unit: Arc::clone(&unit),
+                view: None,
+            },
+            unit,
             kind: o.kind,
             info: PluginInfo {
                 plugin: o.desc.plugin,
@@ -367,6 +477,8 @@ impl AuInstance {
             listener: None,
             writes: Arc::new(HostWrites::new(Vec::new())),
             ready: Some(o.feed),
+            transport: o.transport,
+            callbacks: o.callbacks,
             #[cfg(test)]
             main_inits: 0,
         };
@@ -463,6 +575,12 @@ impl AuInstance {
         };
     }
 
+    /// Whether the unit took VizDAW's host callbacks (tempo, beat
+    /// position, transport state).
+    pub fn host_callbacks_installed(&self) -> bool {
+        self.callbacks
+    }
+
     /// Acts like the plugin's own UI changing parameter `id` (begin
     /// gesture, value, end gesture). For tests: Apple's built-in units have
     /// no scriptable UI.
@@ -511,11 +629,14 @@ impl PluginInstance for AuInstance {
         // is a change after this point (`read_info` reads the latency next).
         self.latency.store(false, Ordering::Release);
         self.config = Some((sample_rate, max_frames));
+        self.transport.set_rate(sample_rate);
         self.read_info();
         self.active = true;
         Ok(Box::new(AuProcessor {
             unit: Arc::clone(&self.unit),
             writes: Arc::clone(&self.writes),
+            transport: Arc::clone(&self.transport),
+            last: None,
             feed,
             sample_time: 0.0,
             out_counts: self
@@ -566,9 +687,8 @@ impl PluginInstance for AuInstance {
     }
 
     fn editor(&mut self) -> Option<&mut dyn PluginEditor> {
-        // AU editors (view controllers, Cocoa UI) arrive with the app's
-        // plugin windows (3c, Plan Ruling 7).
-        None
+        // Every unit has one: its own view, or the generic view.
+        Some(&mut self.editor)
     }
 
     fn idle(&mut self) -> InstanceEvents {
@@ -609,10 +729,82 @@ impl PluginInstance for AuInstance {
     }
 }
 
+/// How long opening an AU v3 editor waits for its view controller.
+pub const V3_VIEW_WAIT: Duration = Duration::from_secs(3);
+
+/// An AU's editor (spec §9): the unit's own view (AU v2 Cocoa UI, AU v3
+/// view controller) or CoreAudioKit's generic view, added to the window's
+/// parent view. Fixed size: AU views size themselves.
+pub struct AuEditor {
+    unit: Arc<Unit>,
+    view: Option<ffi::View>,
+}
+
+impl std::fmt::Debug for AuEditor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuEditor")
+            .field("open", &self.view.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuEditor {
+    /// Where the open view came from: `"cocoa"`, `"controller"` or
+    /// `"generic"` (`None` while closed).
+    pub fn view_kind(&self) -> Option<&'static str> {
+        self.view.as_ref().map(|v| match v.kind {
+            ffi::ViewKind::Cocoa => "cocoa",
+            ffi::ViewKind::Controller => "controller",
+            ffi::ViewKind::Generic => "generic",
+        })
+    }
+}
+
+impl PluginEditor for AuEditor {
+    fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError> {
+        self.close();
+        let view = self
+            .unit
+            .editor_view(V3_VIEW_WAIT)
+            .map_err(HostError::EditorUnavailable)?;
+        let size = view
+            .attach(parent.as_ptr())
+            .map_err(HostError::EditorUnavailable)?;
+        self.view = Some(view);
+        Ok(size)
+    }
+
+    fn resize(&mut self, _width: u32, _height: u32) -> Result<(u32, u32), HostError> {
+        self.view
+            .as_ref()
+            .map(ffi::View::size)
+            .ok_or_else(|| HostError::EditorUnavailable("not open".into()))
+    }
+
+    fn can_resize(&mut self) -> bool {
+        false
+    }
+
+    fn close(&mut self) {
+        self.view = None;
+    }
+}
+
+impl AuInstance {
+    /// The editor, typed (tests read [`AuEditor::view_kind`]).
+    pub fn au_editor(&mut self) -> &mut AuEditor {
+        &mut self.editor
+    }
+}
+
 /// The real-time half of an [`AuInstance`].
 pub struct AuProcessor {
     unit: Arc<Unit>,
     writes: Arc<HostWrites>,
+    /// What the unit's host callbacks read; set before each render.
+    transport: Arc<HostTransport>,
+    /// The previous block's playing frame and length.
+    last: Option<(u64, u32)>,
     feed: Feed,
     sample_time: f64,
     out_counts: Vec<usize>,
@@ -628,6 +820,7 @@ impl std::fmt::Debug for AuProcessor {
 impl AudioProcessor for AuProcessor {
     fn process(&mut self, ctx: &mut ProcessCtx<'_>) -> ProcessStatus {
         let n = ctx.frames.min(self.max_frames);
+        store_block(&self.transport, &mut self.last, ctx.transport, n);
         for p in ctx.params_in {
             if let Ok(id) = u32::try_from(p.id.0) {
                 self.writes.note(id, p.value as f32);
@@ -666,6 +859,76 @@ impl AudioProcessor for AuProcessor {
     fn reset(&mut self) {
         self.unit.reset();
     }
+}
+
+/// Stores one block's transport facts for the host callbacks; a playing
+/// block that does not follow the previous one is a jump. // RT
+fn store_block(t: &HostTransport, last: &mut Option<(u64, u32)>, info: &BlockInfo, n: u32) {
+    let expected = match last {
+        Some((frame, len)) if info.playing => *frame + u64::from(*len),
+        _ => info.frame,
+    };
+    t.set(
+        info.playing,
+        info.frame,
+        info.beats,
+        info.tempo_bpm,
+        expected,
+    );
+    *last = info.playing.then_some((info.frame, n));
+}
+
+/// What an AU's host callbacks report (`kAudioUnitProperty_HostCallbacks`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HostCallbacksSeen {
+    /// Quarter-note position.
+    pub beat: f64,
+    /// Tempo in BPM.
+    pub tempo: f64,
+    /// Frames from the block start to the next whole beat.
+    pub to_next_beat: u32,
+    /// Time signature numerator.
+    pub numerator: f32,
+    /// Time signature denominator.
+    pub denominator: u32,
+    /// Beat of the current bar's downbeat.
+    pub downbeat: f64,
+    /// The transport plays.
+    pub playing: bool,
+    /// Playing toggled or the position jumped since the last read.
+    pub changed: bool,
+    /// Schedule frame of the block start.
+    pub sample: f64,
+}
+
+/// Calls the host callbacks the way a unit does after a processor stored
+/// `blocks` (each with its frame count), at `rate`. For tests: Apple's
+/// built-in units do not ask for the transport.
+pub fn host_callbacks_after(rate: f64, blocks: &[(BlockInfo, u32)]) -> Vec<HostCallbacksSeen> {
+    let t = HostTransport::new(rate);
+    let mut last = None;
+    blocks
+        .iter()
+        .map(|(info, n)| {
+            store_block(&t, &mut last, info, *n);
+            let (
+                (beat, tempo),
+                (to_next_beat, numerator, denominator, downbeat),
+                (playing, changed, sample),
+            ) = ffi::call_host_callbacks(&t);
+            HostCallbacksSeen {
+                beat,
+                tempo,
+                to_next_beat,
+                numerator,
+                denominator,
+                downbeat,
+                playing,
+                changed,
+                sample,
+            }
+        })
+        .collect()
 }
 
 /// Loads a component for the scanner and the tests: instantiate, configure

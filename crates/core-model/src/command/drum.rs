@@ -2,13 +2,28 @@
 //! `(pitch, dest override)`; membership is derived, never stored.
 
 use super::Report;
-use super::event::note_name;
+use super::event::{insert_specs, note_name};
 use crate::document::Document;
 use crate::error::{ModelError, Result};
-use crate::event::EventBody;
+use crate::event::{EventBody, EventSpec};
 use crate::ids::{AnyId, DestId, DrumRowId, EventId, LaneId, SeqId};
 use crate::lane::{DrumLayout, DrumRow, Lane};
+use crate::rules::{check_positive, check_ticks};
+use crate::time::Tick;
 use std::collections::BTreeSet;
+
+/// The most hits one [`DrumCmd::Paint`] may carry (a drum grid stroke
+/// stops growing there).
+pub const MAX_PAINT_HITS: usize = 4096;
+
+/// One hit a paint stroke adds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrumHit {
+    /// Start.
+    pub tick: Tick,
+    /// 16-bit attack velocity (> 0).
+    pub velocity: u16,
+}
 
 /// Drum-lane edits.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +61,17 @@ pub enum DrumCmd {
         row: DrumRowId,
         /// New name.
         name: String,
+    },
+    /// Show or hide the velocity strip of a row.
+    SetRowShowVelocity {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// Row.
+        row: DrumRowId,
+        /// Whether the grid shows the row's velocities.
+        show: bool,
     },
     /// Move a row to display position `to` (clamped).
     ReorderRow {
@@ -88,6 +114,24 @@ pub enum DrumCmd {
         /// Row.
         row: DrumRowId,
     },
+    /// Paint hits into a row (the drum grid's paint tool): a note of the
+    /// row's pitch, carrying the row's destination, at each hit's tick in
+    /// the active take, unless the row already has a note starting in
+    /// `[tick, tick + window)` (a hit painted earlier in the list counts).
+    Paint {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// Row.
+        row: DrumRowId,
+        /// The hits, at most [`MAX_PAINT_HITS`].
+        hits: Vec<DrumHit>,
+        /// A cell: a hit is skipped when a note starts this close after it (> 0).
+        window: Tick,
+        /// Length of each new note (> 0).
+        duration: Tick,
+    },
 }
 
 impl DrumCmd {
@@ -97,10 +141,12 @@ impl DrumCmd {
             DrumCmd::MarkDrumLane { .. } => "Mark as Drum Lane",
             DrumCmd::AddRow { .. } => "Add Drum Row",
             DrumCmd::RenameRow { .. } => "Rename Drum Row",
+            DrumCmd::SetRowShowVelocity { .. } => "Show Drum Row Velocity",
             DrumCmd::ReorderRow { .. } => "Reorder Drum Row",
             DrumCmd::RemoveRow { .. } => "Remove Drum Row",
             DrumCmd::MoveRowToLane { .. } => "Move Drum Row to Lane",
             DrumCmd::SplitRowToLane { .. } => "Split Drum Row to Lane",
+            DrumCmd::Paint { .. } => "Paint Drum Hits",
         }
     }
 }
@@ -273,6 +319,20 @@ pub(crate) fn apply(d: &mut Document, cmd: &DrumCmd, r: &mut Report) -> Result<(
                 .ok_or(ModelError::UnknownId(AnyId::DrumRow(*row)))?;
             x.name = name.clone();
         }
+        DrumCmd::SetRowShowVelocity {
+            seq,
+            lane,
+            row,
+            show,
+        } => {
+            let layout = layout_mut(d, *seq, *lane)?;
+            let x = layout
+                .rows
+                .iter_mut()
+                .find(|x| x.id == *row)
+                .ok_or(ModelError::UnknownId(AnyId::DrumRow(*row)))?;
+            x.show_velocity = *show;
+        }
         DrumCmd::ReorderRow { seq, lane, row, to } => {
             let layout = layout_mut(d, *seq, *lane)?;
             let i = layout
@@ -314,6 +374,66 @@ pub(crate) fn apply(d: &mut Document, cmd: &DrumCmd, r: &mut Report) -> Result<(
             r.created.extend([AnyId::Lane(new_lane), AnyId::Take(take)]);
             move_row(d, *seq, *lane, *row, new_lane, r)?;
         }
+        DrumCmd::Paint {
+            seq,
+            lane,
+            row,
+            hits,
+            window,
+            duration,
+        } => paint(d, *seq, *lane, *row, hits, *window, *duration, r)?,
+    }
+    Ok(())
+}
+
+/// [`DrumCmd::Paint`]: everything is checked before anything changes.
+#[allow(clippy::too_many_arguments)]
+fn paint(
+    d: &mut Document,
+    seq: SeqId,
+    lane: LaneId,
+    row: DrumRowId,
+    hits: &[DrumHit],
+    window: Tick,
+    duration: Tick,
+    r: &mut Report,
+) -> Result<()> {
+    if hits.len() > MAX_PAINT_HITS {
+        return Err(ModelError::range("drum_paint.hits", hits.len()));
+    }
+    check_positive("drum_paint.window", window)?;
+    check_ticks("drum_paint.window", window.0)?;
+    check_positive("drum_paint.duration", duration)?;
+    check_ticks("drum_paint.duration", duration.0)?;
+    for h in hits {
+        check_ticks("drum_paint.tick", h.tick.0)?;
+        if h.velocity == 0 {
+            return Err(ModelError::range("drum_paint.velocity", h.velocity));
+        }
+    }
+    let x = find_row(d, seq, lane, row)?;
+    let l = d.lane(seq, lane)?;
+    let mut starts: BTreeSet<i64> = l
+        .active()
+        .map(|t| {
+            t.events
+                .values()
+                .filter(
+                    |e| matches!(e.body, EventBody::Note { pitch, .. } if x.matches(pitch, e.dest)),
+                )
+                .map(|e| e.tick.0)
+                .collect()
+        })
+        .unwrap_or_default();
+    for h in hits {
+        let end = h.tick.0.saturating_add(window.0);
+        if starts.range(h.tick.0..end).next().is_some() {
+            continue;
+        }
+        let mut spec = EventSpec::new(h.tick, EventBody::note(x.note, h.velocity, duration));
+        spec.dest = x.dest;
+        insert_specs(d, seq, lane, &[spec], r)?;
+        starts.insert(h.tick.0);
     }
     Ok(())
 }

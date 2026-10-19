@@ -476,3 +476,36 @@ fn inserts_of_a_refused_graph_are_kept_for_the_next_load() {
         "the unplaced insert waits for the next load instead of being made again"
     );
 }
+
+#[test]
+fn automation_alone_brings_up_a_plugin_instrument() {
+    use core_model::automation::AutomationTarget;
+    use core_model::mixer::ParamId;
+    let mut b = Builder::new();
+    let (_, id) = b
+        .plugin_dest("Synth", TestInstrument::plugin("synth"))
+        .unwrap();
+    let (seq, lane) = b.sequence("S", "Auto", None).unwrap();
+    b.events(
+        seq,
+        lane,
+        vec![EventSpec::new(
+            Tick(0),
+            EventBody::Automation {
+                target: AutomationTarget::PluginParam(id, ParamId(0)),
+                value: 0.5,
+            },
+        )],
+    )
+    .unwrap();
+    let (mut engine, _be, made) = engine(4096);
+    let report = engine.load(b.doc(), seq).unwrap();
+    assert_eq!(report.automation_lanes, 1);
+    assert_eq!(
+        report.automation_instrument_lanes, 1,
+        "bound by Engine::load"
+    );
+    assert!(report.unroutable.is_empty(), "{:?}", report.warnings);
+    assert_eq!(plugin_targets(&engine), vec![(TargetIdx(0), id)]);
+    assert_eq!(made.made(), 1);
+}

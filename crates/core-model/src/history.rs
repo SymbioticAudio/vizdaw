@@ -113,6 +113,25 @@ impl History {
         self.future.last().map(|v| v.label.as_str())
     }
 
+    /// The document [`History::undo`] would go back to (inside a
+    /// transaction, only its own steps can be undone).
+    pub fn peek_undo(&self) -> Option<&Document> {
+        let floor = self.txn.as_ref().map_or(0, |t| t.start);
+        if self.past.len() <= floor {
+            return None;
+        }
+        self.past.last().map(|v| &v.doc)
+    }
+
+    /// The document [`History::redo`] would bring back (none while a
+    /// transaction is open).
+    pub fn peek_redo(&self) -> Option<&Document> {
+        if self.txn.is_some() {
+            return None;
+        }
+        self.future.last().map(|v| &v.doc)
+    }
+
     /// Whether a transaction is open.
     pub fn in_transaction(&self) -> bool {
         self.txn.is_some()

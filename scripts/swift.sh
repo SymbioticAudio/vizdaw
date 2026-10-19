@@ -9,6 +9,8 @@ fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cmd="$1"
 shift
+# `swift run` has no app bundle: the scanner comes from build-ffi.sh.
+export VIZDAW_SCANNER="${VIZDAW_SCANNER:-$root/target/ffi/vizdaw-scan}"
 
 if xcodebuild -version >/dev/null 2>&1; then
     # Full Xcode (CI runners): default build system, XCTest/Testing in place.

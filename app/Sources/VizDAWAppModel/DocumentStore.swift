@@ -2,6 +2,17 @@ import Foundation
 import Observation
 import VizDAWCore
 
+/// A torn-off editor window that is key (Plan 4b Ruling 18).
+public struct TornFocus: Equatable, Sendable {
+    public let doc: UUID
+    public let window: UUID
+
+    public init(doc: UUID, window: UUID) {
+        self.doc = doc
+        self.window = window
+    }
+}
+
 /// The open documents, one per window, keyed by the window's value.
 @Observable
 @MainActor
@@ -10,11 +21,20 @@ public final class DocumentStore {
     public typealias Open = (String) throws -> any SessionProtocol
 
     public private(set) var documents: [UUID: DocumentModel] = [:]
+    /// Mixer windows' models, made on first use and dropped with their
+    /// document.
+    private var mixers: [UUID: MixerModel] = [:]
     /// Documents created without a window yet (Finder opens, launch
     /// arguments); the next window to appear adopts the first one.
     public private(set) var pending: [UUID] = []
     /// Failures that have no window to show them in.
     public var alert: AlertItem?
+    /// Crash and autosave checks before a project opens (spec §10); none
+    /// in tests that do not set it.
+    public var recovery: Recovery?
+    /// Runs before a document's session closes (the app closes that
+    /// document's plugin windows and releases their editors).
+    public var willClose: ((UUID) -> Void)?
 
     private let makeEmpty: Make
     private let makeDemo: Make
@@ -28,18 +48,118 @@ public final class DocumentStore {
 
     /// The store backed by the Rust library.
     public static func live() -> DocumentStore {
-        DocumentStore(
+        let s = DocumentStore(
             makeEmpty: { try Session.newEmpty() },
             makeDemo: { try Session.newDemo() },
             open: { try Session.open(path: $0) }
         )
+        s.makeDemoAudio = { try Session.newDemoAudio() }
+        s.listPreferences = ListPreferences(defaults: MemoryDefaults.appStore())
+        return s
     }
 
     public func model(_ id: UUID) -> DocumentModel? { documents[id] }
 
+    /// The torn-off editor window that is key, if any. AppKit windows
+    /// publish no SwiftUI focused values, so menu commands ask this first.
+    public private(set) var tornFocus: TornFocus?
+
+    public func focusTorn(_ f: TornFocus) { tornFocus = f }
+
+    /// Window `window` resigned key or closed.
+    public func blurTorn(window: UUID) {
+        if tornFocus?.window == window { tornFocus = nil }
+    }
+
+    /// The document whose select-and-modify panel is key (Plan 4c Ruling 22).
+    public private(set) var panelFocus: UUID?
+
+    public func focusPanel(_ doc: UUID) { panelFocus = doc }
+
+    /// Document `doc`'s panel resigned key or closed.
+    public func blurPanel(_ doc: UUID) {
+        if panelFocus == doc { panelFocus = nil }
+    }
+
+    /// Document `doc`'s panel window became key: it takes the menu
+    /// commands and the transport keys go off.
+    public func panelBecameKey(_ doc: UUID) {
+        focusPanel(doc)
+        model(doc)?.selectModify.isKey = true
+    }
+
+    /// Document `doc`'s panel window resigned key: its fields give the
+    /// keyboard back too (a field stays first responder in a non-key panel).
+    public func panelResignedKey(_ doc: UUID) {
+        blurPanel(doc)
+        guard let p = model(doc)?.selectModify else { return }
+        p.isKey = false
+        p.endTextEditing()
+    }
+
+    /// Document `doc`'s panel window closed (by the user or with its document).
+    public func panelClosed(_ doc: UUID) {
+        blurPanel(doc)
+        model(doc)?.selectModify.close()
+    }
+
+    /// The document menu commands act on: a key torn-off window's, else a
+    /// key select-and-modify panel's, else the focused document window's.
+    public func commandTarget(focused: UUID?) -> UUID? {
+        tornFocus.map(\.doc) ?? panelFocus ?? focused
+    }
+
+    /// The key window among documents' own windows (document or mixer),
+    /// by a token each window view holds; the timer, which has no SwiftUI
+    /// focus, asks this. Per window, so a document window and its own
+    /// mixer handing focus over never clear each other, in either order.
+    private var keyWindow: (doc: UUID, window: UUID)?
+
+    /// The document whose own window is key.
+    public var keyDocument: UUID? { keyWindow?.doc }
+
+    public func focusDocument(_ doc: UUID, window: UUID) { keyWindow = (doc, window) }
+
+    /// Window `window` (of document `doc`) resigned key or closed; only the
+    /// window that last took focus clears it.
+    public func blurDocument(_ doc: UUID, window: UUID) {
+        if keyWindow?.doc == doc, keyWindow?.window == window { keyWindow = nil }
+    }
+
+    /// The document played notes go to: the command target (Plan 4c
+    /// Ruling 11).
+    public var noteTarget: DocumentModel? { commandTarget(focused: keyDocument).flatMap(model) }
+
+    /// Document `id`'s mixer (one per document), or nil once it is closed.
+    public func mixer(_ id: UUID) -> MixerModel? {
+        if let m = mixers[id] { return m }
+        guard let doc = documents[id] else { return nil }
+        do {
+            let m = try MixerModel(document: doc)
+            mixers[id] = m
+            return m
+        } catch {
+            doc.alert = AlertItem(error, title: "Mixer Unavailable")
+            return nil
+        }
+    }
+
     public func newEmpty() -> UUID? { add("New Document Failed", makeEmpty) }
 
     public func newDemo() -> UUID? { add("Demo Project Failed", makeDemo) }
+
+    /// Makes the demo with an audio lane (Plan 4b Ruling 19); set by `live()`.
+    public var makeDemoAudio: Make?
+
+    /// List defaults and columns given to every document (Plan 4c Ruling 19).
+    public var listPreferences = ListPreferences()
+    /// The app's key bindings, handed to every document (plan 4f).
+    public var keyBindings: KeyBindings?
+
+    public func newDemoAudio() -> UUID? {
+        guard let make = makeDemoAudio else { return nil }
+        return add("Demo Project Failed", make)
+    }
 
     /// Opens a `.vizdaw` package; other paths are refused with an alert.
     public func open(path: String) -> UUID? {
@@ -49,7 +169,11 @@ public final class DocumentStore {
                 message: "\((path as NSString).lastPathComponent) is not a .vizdaw project.")
             return nil
         }
-        return add("Open Failed") { try self.openPath(path) }
+        guard let recovery else {
+            return add("Open Failed") { try self.openPath(path) }
+        }
+        guard let options = recovery.options(for: path) else { return nil }
+        return add("Open Failed") { try recovery.openWith(path, options) }
     }
 
     /// Queues a document for the next window to appear.
@@ -76,15 +200,35 @@ public final class DocumentStore {
         return alert
     }
 
+    /// A window closed: its document goes (a clean close: the crash
+    /// marker is removed).
     public func close(_ id: UUID) {
-        if let doc = documents.removeValue(forKey: id), doc.isPlaying {
-            try? doc.session.stop()
+        if tornFocus?.doc == id { tornFocus = nil }
+        if panelFocus == id { panelFocus = nil }
+        if keyWindow?.doc == id { keyWindow = nil }
+        mixers.removeValue(forKey: id)?.endOpenDrag()
+        // Plugin windows detach their editors before the session goes.
+        willClose?(id)
+        if let doc = documents.removeValue(forKey: id) {
+            // A note an editor sounds (a press on a closing piano roll) ends.
+            doc.editor.auditionOffAll()
+            // No list outlives its document (none keeps MIDI input running).
+            doc.dropLists()
+            if doc.isPlaying { try? doc.session.stop() }
+            try? doc.session.close()
         }
+    }
+
+    /// The app quits: every document closes cleanly.
+    public func closeAll() {
+        for id in Array(documents.keys) { close(id) }
     }
 
     private func add(_ title: String, _ make: Make) -> UUID? {
         do {
             let model = try DocumentModel(session: make())
+            model.listPreferences = listPreferences
+            model.keys = keyBindings
             let id = UUID()
             documents[id] = model
             return id

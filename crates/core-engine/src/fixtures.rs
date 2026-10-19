@@ -6,7 +6,7 @@ use core_model::command::{
     apply,
 };
 use core_model::document::{DestKind, Document, Patch};
-use core_model::event::{EventBody, EventSpec, LoopCount};
+use core_model::event::{EventBody, EventSpec, Fade, LoopCount};
 use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginRef, PluginSlot, StripKind};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
@@ -427,5 +427,70 @@ pub fn demo_document() -> Result<Document> {
             (12 * BAR, 90, false),
         ],
     )?;
+    Ok(b.finish())
+}
+
+/// The demo plus an audio lane (4b Plan Ruling 19): output path "Audio
+/// 1-2", media item `Media/loop.wav` (48 kHz stereo, 8 s; the file does not
+/// exist) and lane "Loop" in Song routed to it, with 2-bar regions at bars
+/// 1 and 5 (both inside Song's 120 BPM part).
+pub fn demo_audio_document() -> Result<Document> {
+    let mut b = Builder::from_doc(demo_document()?);
+    let r = b.run(Command::Routing(RoutingCmd::AddOutput {
+        name: "Audio 1-2".into(),
+        reference: "hw:1-2".into(),
+    }))?;
+    let output = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .ok_or_else(|| ModelError::invalid("no output created"))?;
+    let r = b.run(Command::Routing(RoutingCmd::AddMedia {
+        path: "Media/loop.wav".into(),
+        sample_rate: 48_000,
+        channels: 2,
+        length_frames: 384_000,
+        content_hash: None,
+    }))?;
+    let media = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Media(m) => Some(*m),
+            _ => None,
+        })
+        .ok_or_else(|| ModelError::invalid("no media created"))?;
+    let song = b
+        .doc()
+        .sequences()
+        .values()
+        .find(|s| s.name == "Song")
+        .map(|s| s.id)
+        .ok_or_else(|| ModelError::invalid("no Song"))?;
+    let lane = b.lane(song, "Loop", None)?;
+    b.run(Command::Lane(LaneCmd::SetOutput {
+        seq: song,
+        lane,
+        output: Some(output),
+    }))?;
+    for bar in [0, 4] {
+        b.event(
+            song,
+            lane,
+            bar * BAR,
+            EventBody::AudioRegion {
+                media,
+                source_offset: 0,
+                // 4 s at 48 kHz: two bars at 120 BPM.
+                length: 192_000,
+                gain_db: 0.0,
+                fade_in: Fade::default(),
+                fade_out: Fade::default(),
+            },
+        )?;
+    }
     Ok(b.finish())
 }

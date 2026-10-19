@@ -1,7 +1,7 @@
 //! The one plugin type behind every [`Kind`]: its behaviour is chosen at
 //! creation from the plugin id.
 
-use crate::{Kind, PARAM_GAIN, PARAM_LATENCY, PARAM_WIGGLE};
+use crate::{BANK_PARAMS, Kind, PARAM_BANK_FIRST, PARAM_GAIN, PARAM_LATENCY, PARAM_WIGGLE};
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
     PluginAudioPortsImpl,
@@ -49,6 +49,9 @@ impl Plugin for TestPlugin {
         if kind.is_none_or(|k| k == Kind::Synth4) {
             builder.register::<PluginNotePorts>();
         }
+        if kind == Some(Kind::Bank) {
+            builder.register::<PluginParams>();
+        }
     }
 }
 
@@ -64,6 +67,15 @@ pub struct Shared<'a> {
     /// A Wiggle value waiting to become a gesture (f64 bits).
     wiggle: AtomicU64,
     wiggle_pending: AtomicBool,
+    /// The bank plugin's parameter values (f64 bits).
+    bank: [AtomicU64; BANK_PARAMS as usize],
+}
+
+/// The bank slot of parameter `id`.
+fn bank_index(id: u32) -> Option<usize> {
+    id.checked_sub(PARAM_BANK_FIRST)
+        .filter(|i| *i < BANK_PARAMS)
+        .map(|i| i as usize)
 }
 
 impl<'a> Shared<'a> {
@@ -76,6 +88,7 @@ impl<'a> Shared<'a> {
             latency: AtomicU32::new(0),
             wiggle: AtomicU64::new(0),
             wiggle_pending: AtomicBool::new(false),
+            bank: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
@@ -106,7 +119,11 @@ impl<'a> Shared<'a> {
                 self.wiggle.store(value.to_bits(), Ordering::Relaxed);
                 self.wiggle_pending.store(true, Ordering::Release);
             }
-            _ => {}
+            id => {
+                if let Some(slot) = bank_index(id).and_then(|i| self.bank.get(i)) {
+                    slot.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -115,7 +132,9 @@ impl<'a> Shared<'a> {
             PARAM_GAIN => Some(self.gain()),
             PARAM_LATENCY => Some(f64::from(self.want_latency.load(Ordering::Relaxed))),
             PARAM_WIGGLE => Some(f64::from_bits(self.wiggle.load(Ordering::Relaxed))),
-            _ => None,
+            id => bank_index(id)
+                .and_then(|i| self.bank.get(i))
+                .map(|v| f64::from_bits(v.load(Ordering::Relaxed))),
         }
     }
 
@@ -218,10 +237,28 @@ impl PluginNotePortsImpl for MainThread<'_> {
 
 impl PluginMainThreadParams for MainThread<'_> {
     fn count(&self) -> u32 {
-        3
+        match self.shared.kind {
+            Kind::Bank => BANK_PARAMS,
+            _ => 3,
+        }
     }
 
     fn get_info(&self, index: u32, info: &mut ParamInfoWriter) {
+        if self.shared.kind == Kind::Bank {
+            if index < BANK_PARAMS {
+                info.set(&ParamInfo {
+                    id: ClapId::new(PARAM_BANK_FIRST + index),
+                    flags: ParamInfoFlags::IS_AUTOMATABLE,
+                    cookie: Default::default(),
+                    name: b"Bank",
+                    module: b"",
+                    min_value: 0.0,
+                    max_value: 1.0,
+                    default_value: 0.0,
+                });
+            }
+            return;
+        }
         let (id, name, max, def, flags): (u32, &[u8], f64, f64, ParamInfoFlags) = match index {
             0 => (
                 PARAM_GAIN,

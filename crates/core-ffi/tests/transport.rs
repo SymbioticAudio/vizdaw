@@ -1,6 +1,8 @@
 //! Transport through the offline backend in real time. The engine host is
 //! process-wide, so these tests run one at a time.
 
+#![recursion_limit = "256"]
+
 use core_engine::backend::BackendEvent;
 use std::sync::{Mutex, MutexGuard};
 use std::thread::sleep;
@@ -43,6 +45,21 @@ fn demo() -> (std::sync::Arc<Session>, u64) {
 
 fn t(s: &Session) -> TransportState {
     s.transport().unwrap()
+}
+
+/// Polls the transport until `ok` holds or 5 s pass (slow CI); returns
+/// whether it held. The engine applies Play and Stop a block late.
+fn wait_for(s: &Session, ok: impl Fn(&TransportState) -> bool) -> bool {
+    let start = Instant::now();
+    loop {
+        if ok(&t(s)) {
+            return true;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            return false;
+        }
+        ms(2);
+    }
 }
 
 /// Note-ons with velocity > 0 on MIDI channel 1 (the chords).
@@ -346,4 +363,218 @@ fn a_device_event_on_a_released_host_rebuilds_on_the_next_play() {
     assert_eq!(hosts_created(), created + 1, "played on the lost device");
     ms(30);
     assert!(t(&b).playing);
+}
+
+#[test]
+fn shutdown_stops_and_drops_the_engine_host() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    ms(20);
+    assert!(engine_active());
+    vizdaw_ffi::shutdown().unwrap();
+    assert!(!engine_active());
+    // Idempotent, and the session still closes cleanly.
+    vizdaw_ffi::shutdown().unwrap();
+    s.close().unwrap();
+}
+
+#[test]
+fn a_device_rebuild_drains_without_holding_the_host_lock() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    ms(40);
+    simulate_event(BackendEvent::DefaultDeviceChanged);
+    // The owner's poll handles the event on another thread: 300 ms of
+    // drain, then the rebuild.
+    let poller = std::sync::Arc::clone(&s);
+    let poll = std::thread::spawn(move || poller.transport().map(|t| t.playing));
+    ms(100);
+    let t0 = Instant::now();
+    let _ = vizdaw_ffi::host::factory_owner();
+    let waited = t0.elapsed();
+    assert!(
+        waited < Duration::from_millis(150),
+        "another host call waited {waited:?} for the drain"
+    );
+    assert!(poll.join().unwrap().is_ok());
+    assert!(
+        wait_for(&s, |t| t.playing),
+        "playback resumed after the rebuild"
+    );
+}
+
+#[test]
+fn a_rebuild_right_after_play_still_resumes_playback() {
+    // The engine applies Play on its next audio block, so a device event
+    // handled before that must not read "stopped" and drop the Play. The
+    // slower the machine, the wider the window; repeat to hit it here.
+    let _g = serial();
+    let (s, song) = demo();
+    for round in 0..15 {
+        s.stop().unwrap();
+        ms(10);
+        s.play(song).unwrap();
+        simulate_event(BackendEvent::DeviceLost);
+        s.transport().unwrap();
+        assert!(
+            wait_for(&s, |t| t.playing),
+            "round {round}: playback lost in the rebuild"
+        );
+    }
+}
+
+#[test]
+fn a_rebuild_during_the_release_tail_does_not_restart_the_song() {
+    let _g = serial();
+    let (s, song) = demo();
+    let len = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.id == song)
+        .unwrap()
+        .length_ticks;
+    s.locate(len - 200).unwrap();
+    s.play(song).unwrap();
+    // The end is a few ms away; the tail then rings out for about a second.
+    ms(200);
+    assert!(t(&s).playing, "in the tail");
+    simulate_event(BackendEvent::DeviceLost);
+    s.transport().unwrap();
+    ms(60);
+    let st = t(&s);
+    assert!(!st.playing, "the song was restarted");
+    assert!(st.tick > len / 2, "back at {}", st.tick);
+}
+
+#[test]
+fn a_stop_during_the_rebuild_drain_is_not_lost() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    assert!(wait_for(&s, |t| t.playing));
+    simulate_event(BackendEvent::DefaultDeviceChanged);
+    let poller = std::sync::Arc::clone(&s);
+    let poll = std::thread::spawn(move || poller.transport().map(|t| t.playing));
+    ms(100);
+    s.stop().unwrap();
+    assert!(poll.join().unwrap().is_ok());
+    // The engine applies Stop a block late: wait for it (generously, slow
+    // CI) instead of a fixed sleep; a lost Stop keeps playing and fails.
+    assert!(
+        wait_for(&s, |t| !t.playing),
+        "the Stop was lost to the rebuild"
+    );
+    assert!(!t(&s).playing, "the rebuild did not start playing again");
+}
+
+#[test]
+fn a_device_rebuild_while_stopped_keeps_the_automated_fader() {
+    // Plan 4d Ruling 13: after Stop the last automated value stays until
+    // the user moves the fader, a device change included (final review
+    // Minor 1).
+    use core_engine::fixtures::Builder;
+    use core_model::automation::{AutomationTarget, fader_norm};
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::mixer::StripKind;
+    use core_model::time::Tick;
+    use vizdaw_ffi::host::fader_override;
+    let _g = serial();
+    let mut b = Builder::new();
+    let dest = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(dest)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0xFFFF, 16 * BAR)]).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let auto = b.lane(seq, "Auto", None).unwrap();
+    let target = AutomationTarget::StripFader(synth);
+    b.events(
+        seq,
+        auto,
+        vec![EventSpec::new(
+            Tick(0),
+            EventBody::Automation {
+                target,
+                value: fader_norm(-12.0),
+            },
+        )],
+    )
+    .unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    s.play(seq.0).unwrap();
+    let start = Instant::now();
+    while fader_override(synth.0).is_none() {
+        assert!(start.elapsed() < Duration::from_secs(5), "never automated");
+        ms(2);
+    }
+    s.stop().unwrap();
+    assert!(wait_for(&s, |t| !t.playing));
+    let held = fader_override(synth.0).expect("Stop keeps the override");
+    assert!((held + 12.0).abs() < 1e-6, "{held}");
+    let created = hosts_created();
+    simulate_event(BackendEvent::SampleRateChanged(44_100.0));
+    t(&s);
+    assert_eq!(hosts_created(), created + 1, "no rebuild");
+    assert!(!t(&s).playing);
+    let after = fader_override(synth.0);
+    assert!(
+        after.is_some_and(|v| (v + 12.0).abs() < 1e-6),
+        "the rebuilt engine dropped the override: {after:?}"
+    );
+}
+
+/// Play Selection (plan 4f Ruling 9): playing from a tick up to another
+/// stops there by itself, the loop on or not; a plain Play then goes on.
+#[test]
+fn play_from_stops_at_the_end_of_its_range() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.set_loop(true).unwrap();
+    s.play_from(song, BAR, Some(BAR + PPQ / 2)).unwrap();
+    assert!(wait_for(&s, |st| st.playing && st.tick >= BAR));
+    assert!(wait_for(&s, |st| !st.playing), "it stops by itself");
+    let st = t(&s);
+    assert!(st.tick >= BAR && st.tick <= BAR + PPQ, "{}", st.tick);
+    s.play(song).unwrap();
+    assert!(
+        wait_for(&s, |st| st.tick > BAR + PPQ),
+        "a plain Play goes on"
+    );
+    s.stop().unwrap();
+    for (from, to) in [
+        (BAR, Some(BAR)),
+        (BAR, Some(0)),
+        (1 << 41, None),
+        (0, Some(1 << 41)),
+    ] {
+        assert!(
+            matches!(
+                s.play_from(song, from, to),
+                Err(vizdaw_ffi::VizError::Model { .. })
+            ),
+            "{from} {to:?}"
+        );
+    }
+    assert!(s.play_from(9_999, 0, None).is_err(), "no such sequence");
+}
+
+/// A device change while a selection plays resumes with its end (plan 4f
+/// Ruling 9): it still stops there, not at the sequence end.
+#[test]
+fn a_device_change_keeps_play_selections_end() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play_from(song, BAR, Some(BAR + 2 * PPQ)).unwrap();
+    assert!(wait_for(&s, |st| st.playing && st.tick >= BAR));
+    let created = hosts_created();
+    simulate_event(BackendEvent::DeviceLost);
+    t(&s);
+    assert_eq!(hosts_created(), created + 1, "rebuilt");
+    // The new engine applies Play on its first block.
+    assert!(wait_for(&s, |st| st.playing), "resumed");
+    assert!(wait_for(&s, |st| !st.playing), "it still stops at its end");
+    let st = t(&s);
+    assert!(st.tick >= BAR && st.tick <= BAR + 3 * PPQ, "{}", st.tick);
 }

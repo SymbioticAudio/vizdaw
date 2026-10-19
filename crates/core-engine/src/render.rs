@@ -3,11 +3,14 @@
 use crate::backend::{BlockInfo, BlockTime, MidiOut, StereoBuf};
 use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
+use crate::midi1::Midi1Msg;
 use crate::notes::ActiveNotes;
 use crate::pool::PoolShared;
-use crate::schedule::{MAX_TARGETS, Schedule, TargetIdx};
+use crate::schedule::automation::StripParam;
+use crate::schedule::{AutoDest, MAX_AUTO_LANES, MAX_TARGETS, MIN_RUN, Schedule, TargetIdx};
 use crate::transport::{PlayState, Step, Transport};
 use core_model::ids::PluginInstanceId;
+use core_model::mixer::ParamId;
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -95,6 +98,9 @@ pub struct Counters {
     pub busy_blocks: u64,
     /// Inserts bypassed for faults.
     pub plugin_faults: u64,
+    /// Graph runs: one per block unless automation splits it (Plan 4d
+    /// Ruling 10).
+    pub runs: u64,
 }
 
 /// Peak meter of one graph node: the largest |sample| per channel since
@@ -151,6 +157,7 @@ pub struct Shared {
     deadline_misses: AtomicU64,
     busy_blocks: AtomicU64,
     plugin_faults: AtomicU64,
+    runs: AtomicU64,
     load_last: AtomicU32,
     load_peak: AtomicU32,
     /// Block size the renderer was last prepared for.
@@ -174,6 +181,7 @@ impl Default for Shared {
             deadline_misses: AtomicU64::new(0),
             busy_blocks: AtomicU64::new(0),
             plugin_faults: AtomicU64::new(0),
+            runs: AtomicU64::new(0),
             load_last: AtomicU32::new(0),
             load_peak: AtomicU32::new(0),
             prepared: AtomicU32::new(0),
@@ -230,6 +238,7 @@ impl Shared {
             deadline_misses: self.deadline_misses.load(Ordering::Relaxed),
             busy_blocks: self.busy_blocks.load(Ordering::Relaxed),
             plugin_faults: self.plugin_faults.load(Ordering::Relaxed),
+            runs: self.runs.load(Ordering::Relaxed),
         }
     }
 
@@ -344,8 +353,12 @@ pub enum EngineCmd {
     /// Replace the render graph; it adopts the running graph's inserts and,
     /// with the same shape, its node state.
     SetGraph(Box<Graph>),
-    /// Start playing.
-    Play,
+    /// Start playing; `until` (a schedule frame) stops it there instead
+    /// of at the end, ignoring the loop (Play Selection, plan 4f).
+    Play {
+        /// The frame playing stops at.
+        until: Option<u64>,
+    },
     /// Stop (note-offs are sent).
     Stop,
     /// Move to a schedule frame.
@@ -358,6 +371,12 @@ pub enum EngineCmd {
     /// Remove a released target's sink; it goes back through the retire
     /// ring (a plugin instrument is deactivated off the audio thread).
     RemoveSink(TargetIdx),
+    /// Send a note on or off to a target now (editor audition). Tracked
+    /// apart from played notes: Stop, Locate and removing the target
+    /// release it; a schedule swap (every edit recompiles), a loop wrap and
+    /// the end do not, so a note dragged in an editor keeps sounding until
+    /// the editor ends it (4b Plan Ruling 1).
+    Audition(TargetIdx, Midi1Msg),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -402,6 +421,8 @@ pub struct Renderer {
     cursor: usize,
     transport: Transport,
     notes: ActiveNotes,
+    /// Notes sounding because an editor auditions them.
+    audition: ActiveNotes,
     sinks: Box<SinkTable>,
     bufs: Vec<StereoBuf>,
     block_ns: u64,
@@ -414,6 +435,8 @@ pub struct Renderer {
     latency: u64,
     /// Frames of busy blocks the sinks have not been told about.
     pending_skip: u64,
+    /// Per automation lane, the plugin value last sent (NaN: none yet).
+    auto_last: Box<[f64; MAX_AUTO_LANES]>,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -434,13 +457,18 @@ struct Out<'a> {
     ns_per_frame: f64,
     /// MIDI offset plus the graph latency, in ns.
     late_ns: i64,
+    /// Block offset of the run being rendered: instrument sinks get offsets
+    /// relative to it (Plan 4d Ruling 10).
+    base: u32,
 }
 
 impl Out<'_> {
     /// Sends `bytes` to `target` at block offset `offset`. // RT
     fn send(&mut self, target: TargetIdx, offset: u32, bytes: &[u8]) {
         match self.sinks.get_mut(usize::from(target.0)) {
-            Some(Some(Sink::Instrument(node))) => node.midi(offset, bytes),
+            Some(Some(Sink::Instrument(node))) => {
+                node.midi(offset.saturating_sub(self.base), bytes)
+            }
             Some(Some(Sink::Midi(out))) => {
                 let at = self.block_ns as i64
                     + (f64::from(offset) * self.ns_per_frame).round() as i64
@@ -477,13 +505,14 @@ fn skip_sinks(sinks: &mut SinkTable, frames: u64, except: u64) {
     }
 }
 
-/// Hard clamp of channels 0–1 at ±1.0; non-finite samples become 0. Raises
-/// `CLIPPED` when anything was changed (engine ruling). // RT
-fn clamp_master(out: &mut [&mut [f32]], frames: u32, shared: &Shared) {
+/// Hard clamp of frames `offset..offset + frames` of channels 0–1 at ±1.0;
+/// non-finite samples become 0. Raises `CLIPPED` when anything was changed
+/// (engine ruling). // RT
+fn clamp_master(out: &mut [&mut [f32]], offset: usize, frames: u32, shared: &Shared) {
     let n = frames as usize;
     let mut clipped = false;
     for ch in out.iter_mut().take(2) {
-        if let Some(c) = ch.get_mut(..n) {
+        if let Some(c) = ch.get_mut(offset..offset + n) {
             for x in c {
                 if !x.is_finite() {
                     clipped = true;
@@ -517,6 +546,7 @@ impl Renderer {
             cursor: 0,
             transport: Transport::new(cfg.sample_rate.max(0.0).round() as u64),
             notes: ActiveNotes::default(),
+            audition: ActiveNotes::default(),
             sinks: Box::default(),
             bufs: Vec::new(),
             block_ns: 0,
@@ -525,6 +555,7 @@ impl Renderer {
             exec: Exec::new(pool),
             latency: 0,
             pending_skip: 0,
+            auto_last: Box::new([f64::NAN; MAX_AUTO_LANES]),
         };
         r.prepare(cfg.max_frames);
         r
@@ -589,6 +620,11 @@ impl Renderer {
             self.shared.set_load(1.0);
             return;
         }
+        // No run is in flight: the last run's ramps have arrived (Plan 4d
+        // P11).
+        if let Some(g) = self.graph.as_deref_mut() {
+            g.settle();
+        }
         if self.pending_skip > 0 {
             let skip = std::mem::take(&mut self.pending_skip);
             skip_sinks(&mut self.sinks, skip, 0);
@@ -603,53 +639,89 @@ impl Renderer {
         }
         self.block_ns = time.host_time_ns;
         self.drain_commands();
-        let info = self.block_info();
         let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
-        let mut o = Out {
-            sinks: &mut self.sinks,
-            shared: &self.shared,
-            block_ns: time.host_time_ns,
-            ns_per_frame: 1e9 / self.cfg.sample_rate.max(1.0),
-            late_ns,
-        };
+        let ns_per_frame = 1e9 / self.cfg.sample_rate.max(1.0);
+        let mut missed = false;
         let mut offset = 0u32;
         while offset < frames {
-            let step = self.transport.next(length, offset, frames - offset);
-            match step {
-                Step::Play { from, to, offset } => {
-                    if let Some(s) = self.schedule.as_deref() {
-                        if std::mem::take(&mut self.chase_pending) {
-                            s.chase
-                                .state_before(from, |t, m| o.send(t, offset, m.as_slice()));
-                        }
-                        while let Some(e) = s.entries.get(self.cursor) {
-                            if e.frame >= to {
-                                break;
-                            }
-                            let off =
-                                offset + u32::try_from(e.frame.saturating_sub(from)).unwrap_or(0);
-                            let bytes = s.bytes(&e.msg);
-                            o.send(e.target, off, bytes);
-                            self.notes.observe(e.target, bytes);
-                            self.cursor += 1;
-                        }
-                    }
+            // Between runs no worker may still hold the graph or the sinks
+            // (the first run was checked above); then the previous run's
+            // ramps have arrived (Plan 4d P11).
+            if offset > 0 {
+                if !self.exec.try_finish(deadline) {
+                    self.shared.count_deadline_miss();
+                    missed = true;
+                    break;
                 }
-                Step::Wrap { offset, to } => {
-                    release_all(&mut self.notes, &mut o, offset);
-                    if let Some(s) = self.schedule.as_deref() {
-                        reset_controllers(s, &mut o, offset);
-                    }
-                    self.chase_pending = true;
-                    self.cursor = self.schedule.as_ref().map_or(0, |s| s.cursor_at(to));
+                if let Some(g) = self.graph.as_deref_mut() {
+                    g.settle();
                 }
-                Step::End { offset } => release_all(&mut self.notes, &mut o, offset),
-                Step::Idle { .. } => {}
             }
-            offset += step.frames();
+            let run = self.next_run(length, frames - offset);
+            let end = offset + run;
+            self.automate(length, run);
+            let info = self.block_info();
+            let mut o = Out {
+                sinks: &mut self.sinks,
+                shared: &self.shared,
+                block_ns: time.host_time_ns,
+                ns_per_frame,
+                late_ns,
+                base: offset,
+            };
+            let mut at = offset;
+            while at < end {
+                let step = self.transport.next(length, at, end - at);
+                match step {
+                    Step::Play { from, to, offset } => {
+                        if let Some(s) = self.schedule.as_deref() {
+                            if std::mem::take(&mut self.chase_pending) {
+                                s.chase
+                                    .state_before(from, |t, m| o.send(t, offset, m.as_slice()));
+                            }
+                            while let Some(e) = s.entries.get(self.cursor) {
+                                if e.frame >= to {
+                                    break;
+                                }
+                                let off = offset
+                                    + u32::try_from(e.frame.saturating_sub(from)).unwrap_or(0);
+                                let bytes = s.bytes(&e.msg);
+                                o.send(e.target, off, bytes);
+                                self.notes.observe(e.target, bytes);
+                                self.cursor += 1;
+                            }
+                        }
+                    }
+                    Step::Wrap { offset, to } => {
+                        release_all(&mut self.notes, &mut o, offset);
+                        if let Some(s) = self.schedule.as_deref() {
+                            reset_controllers(s, &mut o, offset);
+                        }
+                        self.chase_pending = true;
+                        self.cursor = self.schedule.as_ref().map_or(0, |s| s.cursor_at(to));
+                    }
+                    Step::End { offset } => release_all(&mut self.notes, &mut o, offset),
+                    Step::Idle { .. } => {}
+                }
+                at += step.frames();
+            }
+            let lost = self.render_graph(out, offset, run, info, deadline);
+            offset = end;
+            if lost {
+                missed = true;
+                break;
+            }
         }
-        let missed = self.render_graph(out, frames, info, deadline);
+        if missed && offset < frames {
+            // Plan 4d Ruling 10 as built (P11): the run that missed its
+            // deadline was already played by the transport (its MIDI went
+            // out and its frames advanced); only the later runs of the block
+            // are skipped. The transport does not advance over them, and,
+            // as for a busy block, the sinks are told they passed once the
+            // stragglers are done.
+            self.pending_skip = self.pending_skip.saturating_add(u64::from(frames - offset));
+        }
         self.publish();
         if block_s > 0.0 {
             let load = (started.elapsed().as_secs_f64() / block_s) as f32;
@@ -659,19 +731,149 @@ impl Renderer {
         }
     }
 
+    /// The next run's length (1 ..= `left`): the rest of the block, cut at
+    /// the next automation point (never under `MIN_RUN` frames after the
+    /// run's start) and at the loop end or the sequence end while a
+    /// schedule with automation plays (Plan 4d Ruling 10). // RT
+    fn next_run(&self, length: u64, left: u32) -> u32 {
+        let Some(s) = self.schedule.as_deref() else {
+            return left;
+        };
+        if s.automation.is_empty() {
+            return left;
+        }
+        let Some(pos) = self.transport.play_pos(length) else {
+            return left;
+        };
+        let mut run = u64::from(left);
+        if let Some(c) = s.automation.next_cut(pos) {
+            run = run.min((c - pos).max(u64::from(MIN_RUN)));
+        }
+        if let Some(b) = self.transport.boundary(length) {
+            if b > pos {
+                run = run.min(b - pos);
+            }
+        }
+        u32::try_from(run).unwrap_or(left).clamp(1, left.max(1))
+    }
+
+    /// Applies automation to the next `run` frames while playing (Plan 4d
+    /// Rulings 11, 12): strip and send controls are committed at the run's
+    /// start values, then ramp to its end values (mute and solo switch hard,
+    /// at the run boundary nearest their point); a plugin parameter gets
+    /// its start value and, on a ramp, a value every `max(MIN_RUN, run /
+    /// 16)` frames, each only when it changed. // RT
+    fn automate(&mut self, length: u64, run: u32) {
+        let Some(s) = self.schedule.as_deref() else {
+            return;
+        };
+        let auto = &s.automation;
+        if auto.is_empty() {
+            return;
+        }
+        let Some(pos) = self.transport.play_pos(length) else {
+            return;
+        };
+        let end = pos.saturating_add(u64::from(run));
+        // A mute or solo point inside the run (one shorter than `MIN_RUN`
+        // stretched over it) switches at the run boundary nearest to it:
+        // the run's start when at most half way in, else the next run's.
+        // A fader, pan or send jump inside such a run (Ruling 11's "two
+        // points on one frame") is not switched hard: it fades over the
+        // run, at most `MIN_RUN` frames (under 1 ms), which avoids a click.
+        let mid = pos.saturating_add(u64::from(run / 2));
+        if let Some(g) = self.graph.as_deref_mut() {
+            for ramp in [false, true] {
+                let mut any = false;
+                for lane in auto.lanes() {
+                    let v = match (ramp, lane.dest) {
+                        (false, _) => auto.value(lane, pos, false),
+                        (true, AutoDest::Strip(_, StripParam::Mute | StripParam::Solo)) => {
+                            auto.value(lane, mid, false)
+                        }
+                        (true, _) => auto.value(lane, end, true),
+                    };
+                    match lane.dest {
+                        AutoDest::Strip(id, p) => {
+                            g.automate_strip(id, p, v);
+                            any = true;
+                        }
+                        AutoDest::Send(id, i) => {
+                            g.automate_send(id, i, v);
+                            any = true;
+                        }
+                        AutoDest::Plugin(..) => {}
+                    }
+                }
+                if any {
+                    g.commit_controls(ramp);
+                }
+            }
+        }
+        let every = (run / 16).max(MIN_RUN);
+        for (k, lane) in auto.lanes().iter().enumerate() {
+            let AutoDest::Plugin(id, param) = lane.dest else {
+                continue;
+            };
+            let Some(last) = self.auto_last.get_mut(k) else {
+                break;
+            };
+            let mut f = 0u32;
+            loop {
+                let v = auto.value(lane, pos.saturating_add(u64::from(f)), false);
+                // Recorded as sent only once the plugin's queue took it, so
+                // a refused value is sent again on the next run (Plan 4d
+                // final review I1).
+                if v.to_bits() != last.to_bits()
+                    && send_param(
+                        self.graph.as_deref_mut(),
+                        &mut self.sinks,
+                        lane.instrument,
+                        id,
+                        f,
+                        param,
+                        v,
+                    )
+                {
+                    *last = v;
+                }
+                if lane.stepped {
+                    break;
+                }
+                f = f.saturating_add(every);
+                if f >= run {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Drops the overrides of the controls the schedule no longer
+    /// automates (Plan 4d Ruling 13). // RT
+    fn forget_unautomated(&mut self) {
+        let Some(g) = self.graph.as_deref_mut() else {
+            return;
+        };
+        let auto = self.schedule.as_deref().map(|s| &s.automation);
+        g.release_overrides(|d| auto.is_some_and(|a| a.drives(d)));
+        g.commit_controls(false);
+    }
+
     /// Renders the graph (or, before the first graph arrives, sums the
-    /// instrument sinks) into channels 0–1 and clamps; true when the graph
-    /// missed its deadline. // RT
+    /// instrument sinks) into frames `offset..offset + frames` of channels
+    /// 0–1 and clamps; true when the graph missed its deadline. // RT
     fn render_graph(
         &mut self,
         out: &mut [&mut [f32]],
+        offset: u32,
         frames: u32,
         info: BlockInfo,
         deadline: Option<Instant>,
     ) -> bool {
+        let at = offset as usize;
         let Some(g) = self.graph.as_deref() else {
-            self.mix_direct(out, frames);
-            clamp_master(out, frames, &self.shared);
+            self.mix_direct(out, at, frames);
+            clamp_master(out, at, frames, &self.shared);
             return false;
         };
         if g.max_frames() < frames {
@@ -681,15 +883,16 @@ impl Renderer {
             self.shared.count_xrun();
             return false;
         }
+        self.shared.runs.fetch_add(1, Ordering::Relaxed);
         match self
             .exec
             .run(g, &self.sinks, &self.shared, frames, info, deadline)
         {
             RunResult::Done => {
-                g.write_master(out, frames);
+                g.write_master(out, at, frames);
                 let covered = g.instruments();
                 skip_sinks(&mut self.sinks, u64::from(frames), covered);
-                clamp_master(out, frames, &self.shared);
+                clamp_master(out, at, frames, &self.shared);
                 false
             }
             RunResult::Missed => {
@@ -725,10 +928,11 @@ impl Renderer {
         }
     }
 
-    /// Note-offs, then a controller reset on every channel of the current
-    /// schedule, at block offset 0; the next played frames chase the
-    /// controller state (ruling O23). // RT
-    fn release_now(&mut self) {
+    /// Note-offs (of audition notes too when `auditions`), then a
+    /// controller reset on every channel of the current schedule, at block
+    /// offset 0; the next played frames chase the controller state (ruling
+    /// O23). // RT
+    fn release_now(&mut self, auditions: bool) {
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let mut o = Out {
             sinks: &mut self.sinks,
@@ -736,8 +940,12 @@ impl Renderer {
             block_ns: self.block_ns,
             ns_per_frame: 0.0,
             late_ns,
+            base: 0,
         };
         release_all(&mut self.notes, &mut o, 0);
+        if auditions {
+            release_all(&mut self.audition, &mut o, 0);
+        }
         if let Some(s) = self.schedule.as_deref() {
             reset_controllers(s, &mut o, 0);
         }
@@ -747,7 +955,7 @@ impl Renderer {
     fn apply(&mut self, cmd: EngineCmd) {
         match cmd {
             EngineCmd::SetSchedule(new) => {
-                self.release_now();
+                self.release_now(false);
                 if let Some(old) = self.schedule.take() {
                     let tick = old.tempo.frame_to_tick(self.transport.pos);
                     self.transport.pos = new.tempo.tick_to_frame(tick);
@@ -757,6 +965,10 @@ impl Renderer {
                             new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)),
                         )
                     });
+                    self.transport.end = self
+                        .transport
+                        .end
+                        .map(|e| new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)));
                     if let Err(rtrb::PushError::Full(old)) =
                         self.retire.push(Retired::Schedule(old))
                     {
@@ -767,6 +979,10 @@ impl Renderer {
                 }
                 self.cursor = new.cursor_at(self.transport.pos);
                 self.schedule = Some(new);
+                self.auto_last.fill(f64::NAN);
+                if self.transport.state == PlayState::Playing {
+                    self.forget_unautomated();
+                }
             }
             EngineCmd::SetGraph(mut new) => {
                 if let Some(mut old) = self.graph.take() {
@@ -782,25 +998,32 @@ impl Renderer {
                 self.transport.latency = self.latency;
                 self.graph = Some(new);
                 self.shared.graphs_applied.fetch_add(1, Ordering::Relaxed);
+                // New inserts need their automated values.
+                self.auto_last.fill(f64::NAN);
             }
-            EngineCmd::Play => {
+            EngineCmd::Play { until } => {
                 let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
+                self.transport.end = until;
                 self.transport.play(length);
                 self.seek();
+                self.forget_unautomated();
+                self.auto_last.fill(f64::NAN);
             }
             EngineCmd::Stop => {
-                self.release_now();
+                self.release_now(true);
                 self.transport.stop();
             }
             EngineCmd::Locate(frame) => {
-                self.release_now();
+                self.release_now(true);
                 self.transport.locate(frame);
                 self.seek();
+                self.auto_last.fill(f64::NAN);
             }
             EngineCmd::SetLoop(range) => self.transport.loop_range = range,
             EngineCmd::RemoveSink(idx) => {
                 // Forget its sounding notes: nothing will play them now.
                 self.notes.release(idx, |_| {});
+                self.audition.release(idx, |_| {});
                 let taken = self
                     .sinks
                     .get_mut(usize::from(idx.0))
@@ -811,6 +1034,19 @@ impl Renderer {
                         std::mem::forget(old);
                     }
                 }
+            }
+            EngineCmd::Audition(target, msg) => {
+                let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+                let mut o = Out {
+                    sinks: &mut self.sinks,
+                    shared: &self.shared,
+                    block_ns: self.block_ns,
+                    ns_per_frame: 0.0,
+                    late_ns,
+                    base: 0,
+                };
+                o.send(target, 0, msg.as_slice());
+                self.audition.observe(target, msg.as_slice());
             }
             EngineCmd::AddSink(idx, sink) => {
                 if let Some(slot) = self.sinks.get_mut(usize::from(idx.0)) {
@@ -849,8 +1085,8 @@ impl Renderer {
     }
 
     /// Before the first graph: renders instrument sinks and sums them into
-    /// channels 0–1 (2b behaviour). // RT
-    fn mix_direct(&mut self, out: &mut [&mut [f32]], frames: u32) {
+    /// frames `at..at + frames` of channels 0–1 (2b behaviour). // RT
+    fn mix_direct(&mut self, out: &mut [&mut [f32]], at: usize, frames: u32) {
         let n = frames as usize;
         for (sink, buf) in self.sinks.iter_mut().zip(self.bufs.iter_mut()) {
             let Some(Sink::Instrument(node)) = sink else {
@@ -858,9 +1094,10 @@ impl Renderer {
             };
             node.render(frames, buf);
             for (i, src) in [&buf.left, &buf.right].into_iter().enumerate() {
-                let (Some(dst), Some(src)) =
-                    (out.get_mut(i).and_then(|c| c.get_mut(..n)), src.get(..n))
-                else {
+                let (Some(dst), Some(src)) = (
+                    out.get_mut(i).and_then(|c| c.get_mut(at..at + n)),
+                    src.get(..n),
+                ) else {
                     continue;
                 };
                 for (d, s) in dst.iter_mut().zip(src) {
@@ -925,6 +1162,32 @@ fn reset_controllers(s: &Schedule, o: &mut Out<'_>, offset: u32) {
                 o.send(target, offset, &[0xB0 | ch, 121, 0x00]);
             }
         }
+    }
+}
+
+/// Sends a plugin parameter's automated value: to its plugin
+/// instrument's sink when it has one, else to its insert in the graph.
+/// False when the plugin refused it (its queue is full); a missing target
+/// counts as sent.
+/// // RT
+fn send_param(
+    graph: Option<&mut Graph>,
+    sinks: &mut SinkTable,
+    instrument: Option<TargetIdx>,
+    id: PluginInstanceId,
+    frame: u32,
+    param: ParamId,
+    v: f64,
+) -> bool {
+    if let Some(t) = instrument {
+        if let Some(Some(Sink::Instrument(node))) = sinks.get_mut(usize::from(t.0)) {
+            return node.automate(frame, param, v);
+        }
+        return true;
+    }
+    match graph.and_then(|g| g.insert_mut(id)) {
+        Some(node) => node.automate(frame, param, v),
+        None => true,
     }
 }
 

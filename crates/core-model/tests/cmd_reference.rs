@@ -648,10 +648,7 @@ fn flatten_warns_about_lost_audio_output_and_owner_quantize() {
         Command::Lane(LaneCmd::SetPlayQuantize {
             seq: SeqId(0),
             lane: LaneId(0),
-            quantize: Some(QuantizeSpec {
-                grid: Tick(Q),
-                strength: 100,
-            }),
+            quantize: Some(QuantizeSpec::grid(Tick(Q), 100)),
         }),
     )
     .unwrap();
@@ -730,4 +727,117 @@ fn make_reference_from_selection_keeps_lane_properties() {
     assert!(a.report.moved.contains(&AnyId::Event(EventId(6))));
     assert!(!a.report.moved.contains(&AnyId::Event(cc_id)));
     assert!(validate(&a.doc).is_empty(), "{:?}", validate(&a.doc));
+}
+
+fn out_of_range(r: core_model::Result<Document>, want: &str) {
+    match r {
+        Err(ModelError::OutOfRange { field, .. }) => assert_eq!(field, want),
+        other => panic!("wanted {want} out of range, got {:?}", other.map(|_| ())),
+    }
+}
+
+#[test]
+fn edit_commands_refuse_ticks_beyond_the_limit_and_leave_the_model_unchanged() {
+    use core_model::rules::MAX_TICKS;
+    let d = base();
+    let before = core_model::file::to_json(&d).unwrap();
+    let far = Tick(MAX_TICKS + 1);
+    out_of_range(
+        run(
+            &d,
+            Command::Sequence(SequenceCmd::SetStartOffset {
+                seq: SeqId(0),
+                offset: far,
+            }),
+        ),
+        "start_offset",
+    );
+    out_of_range(
+        run(
+            &d,
+            Command::Sequence(SequenceCmd::SetLength {
+                seq: SeqId(0),
+                length: SeqLength::Locked(far),
+            }),
+        ),
+        "length",
+    );
+    out_of_range(
+        run(
+            &d,
+            Command::Lane(LaneCmd::SetLength {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                length: Some(far),
+                looped: false,
+                locked: false,
+            }),
+        ),
+        "lane.length",
+    );
+    // A selection spanning more than 2^40 (and one starting beyond it).
+    let filter = ViewFilter::default();
+    for range in [(-MAX_TICKS, MAX_TICKS), (MAX_TICKS + 1, MAX_TICKS + 2)] {
+        let sel = selection(range, &[(0, 0)]);
+        let r = apply_in(
+            &d,
+            Context {
+                selection: &sel,
+                filter: &filter,
+            },
+            &rc(ReferenceCmd::FromSelection {
+                seq: SeqId(0),
+                per_lane: false,
+                round_to_bars: false,
+                loop_count: LoopCount::Count(1),
+            }),
+        )
+        .map(|a| a.doc);
+        match r {
+            Err(ModelError::OutOfRange { field, .. }) => {
+                assert!(
+                    field == "length" || field == "selection.time_range",
+                    "{field}"
+                )
+            }
+            other => panic!("accepted {range:?}: {:?}", other.map(|_| ())),
+        }
+    }
+    assert_eq!(core_model::file::to_json(&d).unwrap(), before);
+}
+
+#[test]
+fn a_project_at_the_limit_saves_and_reopens() {
+    use core_model::rules::MAX_TICKS;
+    let d = base();
+    let d = run(
+        &d,
+        Command::Sequence(SequenceCmd::SetStartOffset {
+            seq: SeqId(0),
+            offset: Tick(MAX_TICKS),
+        }),
+    )
+    .unwrap();
+    let d = run(
+        &d,
+        Command::Sequence(SequenceCmd::SetLength {
+            seq: SeqId(0),
+            length: SeqLength::Locked(Tick(MAX_TICKS)),
+        }),
+    )
+    .unwrap();
+    let d = run(
+        &d,
+        Command::Lane(LaneCmd::SetLength {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            length: Some(Tick(MAX_TICKS)),
+            looped: false,
+            locked: false,
+        }),
+    )
+    .unwrap();
+    let text = core_model::file::to_json(&d).unwrap();
+    let back = core_model::file::from_json(&text).expect("reopens");
+    assert_eq!(core_model::file::to_json(&back).unwrap(), text);
 }

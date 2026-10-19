@@ -214,6 +214,22 @@ impl MeterMap {
         )
     }
 
+    /// Bars from tick 0 to `t` as a fraction (negative in the pickup), each
+    /// bar as long as its own meter: what an oscillator that follows the
+    /// meter counts (Plan 4d Ruling 17).
+    pub fn bars_at(&self, t: Tick) -> f64 {
+        let bars = self.with_bars();
+        let (e, bar0) = bars
+            .iter()
+            .take_while(|(e, _)| e.tick <= t)
+            .last()
+            .or_else(|| bars.first())
+            .copied()
+            .unwrap_or((FOUR_FOUR, 1));
+        let bar_t = e.meter.bar_ticks().max(1);
+        (bar0 - 1) as f64 + t.0.saturating_sub(e.tick.0) as f64 / bar_t as f64
+    }
+
     /// The first barline at or after `t`.
     pub fn barline_at_or_after(&self, t: Tick) -> Tick {
         let b = self.barline_at_or_before(t);

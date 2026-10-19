@@ -85,6 +85,13 @@ enum Op {
         ev: usize,
         semis: i8,
     },
+    Automation {
+        seq: usize,
+        lane: usize,
+        beat: i64,
+        strip: u64,
+        value: f64,
+    },
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -106,6 +113,8 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => (i(), i(), any::<bool>(), any::<bool>()).prop_map(|(seq, lane, mute, solo)| Op::LaneMute { seq, lane, mute, solo }),
         1 => (i(), i(), any::<bool>()).prop_map(|(seq, lane, dest)| Op::SetDest { seq, lane, dest }),
         1 => (i(), -12i8..12).prop_map(|(ev, semis)| Op::Transpose { ev, semis }),
+        2 => (i(), i(), 0i64..16, 0u64..4, (0u32..=1000).prop_map(|k| f64::from(k) / 1000.0))
+            .prop_map(|(seq, lane, beat, strip, value)| Op::Automation { seq, lane, beat, strip, value }),
     ]
 }
 
@@ -157,6 +166,28 @@ fn concrete(d: &Document, op: &Op) -> Option<Command> {
                 events: vec![EventSpec::new(
                     Tick(beat * Q),
                     EventBody::note(pitch, 100, Tick(beats * Q)),
+                )],
+            })
+        }
+        Op::Automation {
+            seq,
+            lane,
+            beat,
+            strip,
+            value,
+        } => {
+            let seq = pick(&s, seq)?;
+            Command::Event(EventCmd::Insert {
+                seq,
+                lane: lane_of(d, seq, lane)?,
+                events: vec![EventSpec::new(
+                    Tick(beat * Q),
+                    EventBody::Automation {
+                        target: core_model::automation::AutomationTarget::StripFader(
+                            core_model::ids::StripId(strip),
+                        ),
+                        value,
+                    },
                 )],
             })
         }

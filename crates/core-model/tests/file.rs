@@ -319,6 +319,7 @@ fn unknown_fields_inside_persisted_enums_are_rejected() {
             grid: Tick(PPQ),
             strength: 100,
         })),
+        to_copy: false,
     };
     let d = apply(
         &d,
@@ -333,6 +334,7 @@ fn unknown_fields_inside_persisted_enums_are_rejected() {
         rule: None,
         mode: SelectMode::Add,
         modify: Some(Modify::Transpose(Transpose::Interval { semitones: 1 })),
+        to_copy: false,
     };
     let d = apply(
         &d,

@@ -268,3 +268,44 @@ fn save_refuses_to_overwrite_a_file_it_cannot_read() {
     c.save(&path).unwrap();
     assert_eq!(Catalog::load(&path).unwrap().entries(), c.entries());
 }
+
+#[test]
+fn a_catalog_applied_to_two_hosts_clears_each_ones_marks() {
+    use core_host::catalog::HostMarks;
+    let bundle = test_plugins::bundle();
+    let src = Source::clap_bundle(&bundle);
+    let mut c = Catalog::new();
+    c.record(
+        &src,
+        vec![entry(
+            &src,
+            "vizdaw.test.gain",
+            PluginKind::Effect,
+            ScanStatus::Ok,
+        )],
+    );
+    c.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", false);
+    let mut b = core_engine::fixtures::Builder::new();
+    let (_, gain) = b.plugin_dest("G", plugin("vizdaw.test.gain")).unwrap();
+    let mut hosts: Vec<(PluginHost, HostMarks)> = (0..2)
+        .map(|_| {
+            (
+                PluginHost::new(48_000.0, 512).unwrap(),
+                HostMarks::default(),
+            )
+        })
+        .collect();
+    for (h, m) in &mut hosts {
+        c.apply_to(h, m);
+        h.sync(b.doc());
+        h.wait_ready(std::time::Duration::from_secs(10));
+        assert_eq!(h.failure(gain), Some("Disabled in Plugin Manager"));
+    }
+    c.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", true);
+    for (h, m) in &mut hosts {
+        c.apply_to(h, m);
+        h.sync(b.doc());
+        h.wait_ready(std::time::Duration::from_secs(10));
+        assert!(h.instance(gain).is_some(), "{:?}", h.failure(gain));
+    }
+}

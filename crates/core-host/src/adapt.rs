@@ -13,8 +13,30 @@ use core_engine::backend::{BlockInfo, InstrumentNode, StereoBuf};
 use core_engine::graph::dsp::is_faulty;
 use core_engine::graph::exec::FAULT_LIMIT;
 use core_engine::graph::{EffectNode, ProcessStatus};
+use core_model::automation::param_plain;
 use core_model::ids::PluginInstanceId;
+use core_model::mixer::ParamId;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+
+/// How often a full automation queue collapsed to the latest value per
+/// parameter (diagnostics; the `rt_alloc_plugins` test checks the branch
+/// ran). A relaxed counter: allocation- and lock-free.
+static COLLAPSES: AtomicU64 = AtomicU64::new(0);
+
+/// How often a full automation queue collapsed since the process started.
+pub fn automation_collapses() -> u64 {
+    COLLAPSES.load(Ordering::Relaxed)
+}
+
+/// A parameter's range, for automation (Plan 4d Ruling 12).
+#[derive(Debug, Clone, Copy)]
+struct ParamRange {
+    id: ParamId,
+    min: f64,
+    max: f64,
+    stepped: bool,
+}
 
 /// A processor coming back from the engine.
 pub struct Returned {
@@ -50,6 +72,11 @@ struct Core {
     params_buf: Box<[ParamChange; MAX_PARAM_EVENTS]>,
     out: ParamOut,
     back: Option<Sender<Returned>>,
+    /// Parameter ranges by ID (sorted).
+    ranges: Box<[ParamRange]>,
+    /// Automation's changes for the next block, in arrival order.
+    auto: Box<[ParamChange; MAX_PARAM_EVENTS]>,
+    auto_len: usize,
 }
 
 impl Core {
@@ -80,7 +107,89 @@ impl Core {
             params_buf: Box::new([ParamChange::default(); MAX_PARAM_EVENTS]),
             out: ParamOut::default(),
             back: Some(back),
+            ranges: {
+                let mut r: Vec<ParamRange> = info
+                    .params
+                    .iter()
+                    .map(|p| ParamRange {
+                        id: p.id,
+                        min: p.min,
+                        max: p.max,
+                        stepped: p.stepped,
+                    })
+                    .collect();
+                r.sort_by_key(|p| p.id);
+                r.into_boxed_slice()
+            },
+            auto: Box::new([ParamChange::default(); MAX_PARAM_EVENTS]),
+            auto_len: 0,
         }
+    }
+
+    /// Queues automation's value for `param` at `frame` of the next block:
+    /// normalised -> plain by the parameter's range (rounded when stepped);
+    /// an unknown parameter is dropped (Plan 4d Ruling 12). A full queue
+    /// first collapses to the latest value per parameter, so the newest
+    /// value of every automated parameter always fits (Plan 4d final
+    /// review I1); false only when even that leaves no room (more distinct
+    /// parameters than the queue holds). // RT
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
+        let Ok(i) = self.ranges.binary_search_by_key(&param, |r| r.id) else {
+            return true;
+        };
+        let Some(r) = self.ranges.get(i) else {
+            return true;
+        };
+        let value = param_plain(normalized, r.min, r.max, r.stepped);
+        if self.auto_len >= MAX_PARAM_EVENTS {
+            COLLAPSES.fetch_add(1, Ordering::Relaxed);
+            self.collapse();
+        }
+        let Some(slot) = self.auto.get_mut(self.auto_len) else {
+            return false;
+        };
+        *slot = ParamChange {
+            frame,
+            id: param,
+            value,
+        };
+        self.auto_len += 1;
+        true
+    }
+
+    /// The block went by without the plugin running: collapses the queued
+    /// automation to the latest value per parameter, all at frame 0, so a
+    /// long bypass neither piles values up nor loses where automation got
+    /// to (an unchanged value is never resent). Bounded, no allocation.
+    /// // RT
+    fn collapse(&mut self) {
+        let mut kept = 0;
+        for i in 0..self.auto_len {
+            let Some(&c) = self.auto.get(i) else {
+                break;
+            };
+            let same = self
+                .auto
+                .get(..kept)
+                .and_then(|k| k.iter().position(|k| k.id == c.id));
+            let at = same.unwrap_or(kept);
+            if let Some(slot) = self.auto.get_mut(at) {
+                *slot = ParamChange { frame: 0, ..c };
+            }
+            if same.is_none() {
+                kept += 1;
+            }
+        }
+        self.auto_len = kept;
+    }
+
+    /// The parameters the plugin declares stepped. Not RT.
+    fn stepped(&self) -> Vec<ParamId> {
+        self.ranges
+            .iter()
+            .filter(|r| r.stepped)
+            .map(|r| r.id)
+            .collect()
     }
 
     /// Copies output port `port` into `dst` (a mono port feeds both
@@ -114,7 +223,33 @@ impl Core {
         events: &[MidiEvent],
         info: &BlockInfo,
     ) -> ProcessStatus {
-        let k = self.params.drain_into(&mut self.params_buf[..]);
+        // Automation must always fit beside the host's values (Plan 4d
+        // final review I1): past three quarters of the queue it collapses
+        // to the latest value per parameter, and the host's values take
+        // only the room left (the rest wait in their queue for the next
+        // block).
+        if self.auto_len > MAX_PARAM_EVENTS / 4 * 3 {
+            self.collapse();
+        }
+        let room = MAX_PARAM_EVENTS.saturating_sub(self.auto_len);
+        let k = self
+            .params
+            .drain_into(self.params_buf.get_mut(..room).unwrap_or(&mut []));
+        // Automation follows the host's values, so it wins a tie (Plan 4d
+        // Ruling 12); then the list is sorted by frame.
+        let last = frames.min(self.max_frames).saturating_sub(1);
+        let mut n = k;
+        for c in self.auto.get(..self.auto_len).unwrap_or(&[]) {
+            if let Some(slot) = self.params_buf.get_mut(n) {
+                *slot = ParamChange {
+                    frame: c.frame.min(last),
+                    ..*c
+                };
+                n += 1;
+            }
+        }
+        self.auto_len = 0;
+        sort_params(self.params_buf.get_mut(..n).unwrap_or(&mut []));
         self.out.clear();
         let Some(proc) = self.proc.as_mut() else {
             return ProcessStatus::Error;
@@ -125,7 +260,7 @@ impl Core {
             sidechain,
             outputs: &mut self.outputs,
             events,
-            params_in: self.params_buf.get(..k).unwrap_or(&[]),
+            params_in: self.params_buf.get(..n).unwrap_or(&[]),
             params_out: &mut self.out,
             transport: info,
         };
@@ -211,6 +346,11 @@ impl PluginEffect {
         self.core.id
     }
 
+    /// The parameters the plugin declares stepped.
+    pub fn stepped_params(&self) -> Vec<ParamId> {
+        self.core.stepped()
+    }
+
     /// Unwraps the processor (it is not sent back).
     pub fn into_processor(mut self) -> Option<Box<dyn AudioProcessor>> {
         self.core.proc.take()
@@ -262,6 +402,32 @@ impl EffectNode for PluginEffect {
     fn reset(&mut self) {
         if let Some(p) = self.core.proc.as_mut() {
             p.reset();
+        }
+    }
+
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
+        self.core.automate(frame, param, normalized)
+    }
+
+    fn skipped(&mut self) {
+        self.core.collapse();
+    }
+}
+
+/// Stable insertion sort of parameter changes by frame (no allocation).
+/// // RT
+fn sort_params(p: &mut [ParamChange]) {
+    for i in 1..p.len() {
+        let mut j = i;
+        while j > 0 {
+            let (Some(a), Some(b)) = (p.get(j - 1), p.get(j)) else {
+                break;
+            };
+            if a.frame <= b.frame {
+                break;
+            }
+            p.swap(j - 1, j);
+            j -= 1;
         }
     }
 }
@@ -339,6 +505,11 @@ impl PluginSynth {
         self.core.id
     }
 
+    /// The parameters the plugin declares stepped.
+    pub fn stepped_params(&self) -> Vec<ParamId> {
+        self.core.stepped()
+    }
+
     /// Unwraps the processor (it is not sent back).
     pub fn into_processor(mut self) -> Option<Box<dyn AudioProcessor>> {
         self.core.proc.take()
@@ -396,9 +567,14 @@ impl InstrumentNode for PluginSynth {
         self.render_outputs(frames, std::slice::from_mut(out), &BlockInfo::default());
     }
 
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
+        self.core.automate(frame, param, normalized)
+    }
+
     fn render_outputs(&mut self, frames: u32, outs: &mut [StereoBuf], info: &BlockInfo) {
         if self.faulted {
             self.count = 0;
+            self.core.collapse();
             for o in outs.iter_mut() {
                 o.clear(frames);
             }

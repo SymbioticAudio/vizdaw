@@ -8,18 +8,20 @@ use crate::graph::{
     EffectNode, Graph, GraphReport, InsertFactory, InsertInit, InstrumentFeed, NoInserts, NodeSpec,
     PlanError, plan,
 };
+use crate::midi1::{Midi1Msg, note_on_velocity, release_velocity};
 use crate::pool::{Pool, RtEnv, RtPlatform, StdPlatform};
 use crate::render::{
     CMD_CAPACITY, Counters, DspLoad, EngineCmd, Faults, RETIRE_CAPACITY, RenderConfig, Renderer,
     Retired, Shared, Sink,
 };
+use crate::schedule::targets::kinds_for;
 use crate::schedule::{
     BuiltinRoute, CompileOptions, CompileReport, MAX_TARGETS, TargetIdx, TargetKind, TargetTable,
     TempoTable, compile,
 };
 use crate::transport::PlayState;
 use core_model::document::{DestKind, Document};
-use core_model::ids::{PluginInstanceId, SeqId, StripId};
+use core_model::ids::{DestId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
 use core_model::time::Tick;
 use rtrb::{Producer, RingBuffer};
@@ -153,6 +155,10 @@ pub struct Engine {
     /// (cells are keyed by strip, not node, so a structural edit never
     /// moves a strip's peaks to another strip).
     meter_slots: BTreeMap<StripId, usize>,
+    /// The automation overrides of the last published graph.
+    overrides: Option<Arc<crate::graph::OverrideSnapshot>>,
+    /// Overrides another engine held, for the next published graph.
+    seed: Option<Arc<crate::graph::OverrideSnapshot>>,
     /// Latency of the last published graph.
     latency: u64,
     collector_stop: Arc<AtomicBool>,
@@ -267,6 +273,8 @@ impl Engine {
             live: BTreeMap::new(),
             spare: BTreeMap::new(),
             meter_slots: BTreeMap::new(),
+            overrides: None,
+            seed: None,
             latency: 0,
             collector_stop,
             collector_paused,
@@ -377,7 +385,7 @@ impl Engine {
             }
         };
         let compiled = compile(doc, seq, &opts, &mut resolve);
-        let (schedule, mut report) = match compiled {
+        let (mut schedule, mut report) = match compiled {
             Ok(c) => c,
             Err(e) => {
                 // Targets interned by this load have no sinks yet; forget
@@ -404,6 +412,15 @@ impl Engine {
             }
             self.push(EngineCmd::AddSink(i, sink))?;
         }
+        // Plugin-parameter lanes: the target of a plugin instrument (by
+        // the slot's owner, not by routing, Plan 4d P10) and the
+        // parameters the plugin declares stepped (Rulings 8, 12).
+        report.automation_instrument_lanes = schedule.automation.bind_plugins(doc, &self.targets);
+        let inserts = &self.inserts;
+        schedule.automation.mark_stepped(|d| match d {
+            crate::schedule::AutoDest::Plugin(id, p) => inserts.param_stepped(id, p),
+            _ => false,
+        });
         report.graph = self.compile_graph(doc)?;
         if report.graph.error.is_none() {
             // Schedule and graph both go out below: nothing published
@@ -610,7 +627,7 @@ impl Engine {
             }
         };
         let mut next_live: BTreeMap<PluginInstanceId, Live> = BTreeMap::new();
-        let graph = Graph::build(&mg.spec, &p, max, |idx, ins| {
+        let mut graph = Graph::build(&mg.spec, &p, max, |idx, ins| {
             let Some(id) = ins.instance else {
                 return InsertInit::Placeholder;
             };
@@ -627,12 +644,32 @@ impl Engine {
                 None => InsertInit::Placeholder,
             }
         });
+        graph.set_controls(&mg.controls);
+        if let Some(seed) = &self.seed {
+            graph.seed_overrides(seed);
+        }
+        let overrides = graph.override_snapshot();
         report.latency_frames = graph.latency();
         self.push(EngineCmd::SetGraph(Box::new(graph)))?;
+        self.seed = None;
+        self.overrides = Some(overrides);
         self.live = next_live;
         self.latency = report.latency_frames;
         self.meter_slots = slots;
         Ok(report)
+    }
+
+    /// The automation overrides the last published graph held at its last
+    /// commit (Plan 4d Ruling 13); stable once the engine's output stopped.
+    pub fn overrides(&self) -> Option<Arc<crate::graph::OverrideSnapshot>> {
+        self.overrides.clone()
+    }
+
+    /// Starts the next published graph from `snap`, another engine's
+    /// overrides (a device rebuild), for the controls whose static value
+    /// is unchanged.
+    pub fn seed_overrides(&mut self, snap: Arc<crate::graph::OverrideSnapshot>) {
+        self.seed = Some(snap);
     }
 
     /// The block size graphs, inserts and sinks are built for: the
@@ -647,9 +684,54 @@ impl Engine {
         self.cmds.push(cmd).map_err(|_| EngineError::Busy)
     }
 
+    /// Sends a note on (`on`) or off for `pitch` straight to the targets
+    /// `dest` plays on, without touching the document (editor audition,
+    /// spec §3.2). Returns false when this engine has none of them (the
+    /// loaded sequence does not use that target) or `dest` is unknown.
+    pub fn audition(
+        &mut self,
+        doc: &Document,
+        dest: DestId,
+        pitch: u8,
+        velocity: u16,
+        on: bool,
+    ) -> Result<bool, EngineError> {
+        let Some(d) = doc.instruments().get(&dest) else {
+            return Ok(false);
+        };
+        let channel = match &d.kind {
+            DestKind::MidiEndpoint { channel, .. } => channel & 0x0F,
+            DestKind::PluginInstrument { .. } => 0,
+        };
+        let Ok(kinds) = kinds_for(&d.kind, self.cfg.route, &self.factory.ports()) else {
+            return Ok(false);
+        };
+        let pitch = pitch & 0x7F;
+        let msg = if on {
+            Midi1Msg::three(0x90 | channel, pitch, note_on_velocity(velocity))
+        } else {
+            Midi1Msg::three(0x80 | channel, pitch, release_velocity(velocity))
+        };
+        let mut sent = false;
+        for k in &kinds {
+            if let Some(t) = self.targets.find(k) {
+                self.push(EngineCmd::Audition(t, msg))?;
+                sent = true;
+            }
+        }
+        Ok(sent)
+    }
+
     /// Starts playback (from the start when at or past the end).
     pub fn play(&mut self) -> Result<(), EngineError> {
-        self.push(EngineCmd::Play)
+        self.push(EngineCmd::Play { until: None })
+    }
+
+    /// Starts playback that stops at `tick` of the loaded sequence, the
+    /// loop ignored (Play Selection, plan 4f Ruling 9).
+    pub fn play_until(&mut self, tick: Tick) -> Result<(), EngineError> {
+        let frame = self.tempo.as_ref().map_or(0, |t| t.tick_to_frame(tick));
+        self.push(EngineCmd::Play { until: Some(frame) })
     }
 
     /// Stops playback; sounding notes get note-offs.

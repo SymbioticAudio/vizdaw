@@ -93,6 +93,20 @@ pub fn find_cycle(doc: &Document) -> Option<Vec<SeqId>> {
     None
 }
 
+/// The furthest position and the longest length a document may hold:
+/// 2^40 ticks (about 400 days at 120 BPM). Beyond it the editors' and the
+/// engine's time arithmetic could overflow, so a damaged file or a
+/// hostile edit holding such a value is refused (control spec §11).
+pub const MAX_TICKS: i64 = 1 << 40;
+
+/// The most loops a reference may play.
+pub const MAX_LOOPS: u32 = 1 << 20;
+
+/// Checks that `t` is a position or length within `±MAX_TICKS`.
+pub fn check_ticks(field: &'static str, t: i64) -> Result<()> {
+    need((-MAX_TICKS..=MAX_TICKS).contains(&t), field, t)
+}
+
 fn need(cond: bool, field: &'static str, value: impl std::fmt::Display) -> Result<()> {
     if cond {
         Ok(())
@@ -135,12 +149,14 @@ pub fn check_event_fields(doc: &Document, ev: &EventSpec) -> Result<()> {
         }
     }
     check_group_channel(ev.group_channel)?;
+    check_ticks("tick", ev.tick.0)?;
     match &ev.body {
         EventBody::Note {
             pitch, duration, ..
         } => {
             need(*pitch <= 127, "pitch", pitch)?;
             need(duration.0 >= 0, "duration", duration.0)?;
+            check_ticks("duration", duration.0)?;
         }
         EventBody::Cc { index, .. } => need(*index <= 127, "cc.index", index)?,
         EventBody::PolyPressure { pitch, .. } => need(*pitch <= 127, "pitch", pitch)?,
@@ -166,9 +182,10 @@ pub fn check_event_fields(doc: &Document, ev: &EventSpec) -> Result<()> {
             doc.sequence(*seq)?;
             if let Some(l) = length {
                 need(l.0 > 0, "reference.length", l.0)?;
+                check_ticks("reference.length", l.0)?;
             }
             if let LoopCount::Count(n) = loop_count {
-                need(*n >= 1, "reference.loop_count", n)?;
+                need((1..=MAX_LOOPS).contains(n), "reference.loop_count", n)?;
             }
         }
         EventBody::AudioRegion {
@@ -196,7 +213,14 @@ pub fn check_event_fields(doc: &Document, ev: &EventSpec) -> Result<()> {
             )?;
             need(fade_in.length.0 >= 0, "fade_in.length", fade_in.length.0)?;
             need(fade_out.length.0 >= 0, "fade_out.length", fade_out.length.0)?;
+            check_ticks("fade_in.length", fade_in.length.0)?;
+            check_ticks("fade_out.length", fade_out.length.0)?;
         }
+        EventBody::Automation { value, .. } => need(
+            crate::automation::check_value(*value),
+            "automation.value",
+            value,
+        )?,
         EventBody::PitchBend { .. }
         | EventBody::ChannelPressure { .. }
         | EventBody::Text { .. } => {}
@@ -277,8 +301,10 @@ pub fn validate(doc: &Document) -> Vec<String> {
             need(s.start_offset.0 >= 0, "start_offset", s.start_offset.0),
             &ctx,
         );
+        push(check_ticks("start_offset", s.start_offset.0), &ctx);
         if let crate::sequence::SeqLength::Locked(t) = s.length {
             push(check_positive("length", t), &ctx);
+            push(check_ticks("length", t.0), &ctx);
         }
         if let Some(k) = &s.keyboard_slot {
             if !slots.insert(k.clone()) {
@@ -302,12 +328,10 @@ pub fn validate(doc: &Document) -> Vec<String> {
             }
             if let Some(len) = l.length {
                 push(check_positive("lane.length", len), &lctx);
+                push(check_ticks("lane.length", len.0), &lctx);
             }
-            if let Some(q) = l.play_quantize {
-                push(
-                    need(q.grid.0 > 0 && q.strength <= 100, "play_quantize", q.grid.0),
-                    &lctx,
-                );
+            if let Some(q) = &l.play_quantize {
+                push(q.check(), &lctx);
             }
             if l.take(l.active_take).is_none() {
                 push(

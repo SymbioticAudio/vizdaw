@@ -299,3 +299,52 @@ fn a_user_toggling_away_and_back_to_the_hosts_value_is_two_gestures() {
     );
     assert_eq!(inst.param_value(ParamId(0)), Some(0.0));
 }
+
+#[test]
+fn an_automation_ramp_through_process_is_not_taken_for_the_user() {
+    // Plan 4d final review I2: the audio thread writes a ramp (16 values a
+    // block, a ramp's density) while the main thread drains gestures only
+    // every 33 ms, far more writes apart than the echo filter remembers
+    // per parameter. Whatever the unit notifies of those writes must not
+    // come back as the user.
+    let mut inst = load(DELAY);
+    let mut p = inst.activate(48_000.0, N as u32).unwrap();
+    let mut b = Block::new(2, 2, 0.5);
+    let mut got = Vec::new();
+    let mut drained = Instant::now();
+    for k in 0..400u32 {
+        b.params = (0..16u32)
+            .map(|i| ParamChange {
+                frame: i * 32,
+                id: ParamId(0),
+                value: f64::from((k * 16 + i) % 1000) / 10.0,
+            })
+            .collect();
+        assert_eq!(b.run(p.as_mut()), ProcessStatus::Ok);
+        // Roughly real time: a 512-frame block is 10.7 ms; run faster
+        // than that, but slow enough for asynchronous notifications.
+        std::thread::sleep(Duration::from_millis(2));
+        if drained.elapsed() >= Duration::from_millis(33) {
+            got.extend(inst.gestures());
+            drained = Instant::now();
+        }
+    }
+    // Late notifications too.
+    let end = Instant::now();
+    while end.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(33));
+        got.extend(inst.gestures());
+    }
+    assert_eq!(got, Vec::new(), "the host's own ramp is not the user");
+    // The user moving the knob still comes through.
+    inst.simulate_ui_gesture(ParamId(0), 12.5);
+    assert_eq!(
+        gestures_until_end(&mut inst),
+        vec![
+            ParamEvent::Begin(ParamId(0)),
+            ParamEvent::Value(ParamId(0), 12.5),
+            ParamEvent::End(ParamId(0)),
+        ]
+    );
+    inst.deactivate(p);
+}

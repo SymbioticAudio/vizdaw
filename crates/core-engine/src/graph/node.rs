@@ -4,7 +4,8 @@
 use crate::backend::{BlockInfo, InstrumentNode, StereoBuf};
 use crate::graph::delay::DelayLine;
 use crate::graph::dsp;
-use core_model::mixer::{PluginFormat, PluginRef, PluginSlot};
+use core_model::ids::PluginInstanceId;
+use core_model::mixer::{ParamId, PluginFormat, PluginRef, PluginSlot};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -33,6 +34,21 @@ pub trait EffectNode: Send {
     ) -> ProcessStatus;
     /// Clears internal state (delay memory, envelopes). // RT
     fn reset(&mut self);
+
+    /// Automation's value for parameter `param`, normalised 0–1, at `frame`
+    /// of the next block; plugin processors map it to the parameter's range
+    /// (Plan 4d Ruling 12). False when the value could not be queued, so
+    /// the renderer sends it again on the next run. // RT
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
+        let _ = (frame, param, normalized);
+        true
+    }
+
+    /// The block went by without this insert running (bypassed or faulted):
+    /// collapses the automation queued for it to the latest value per
+    /// parameter, so stale intermediate values are not applied when it
+    /// returns. // RT
+    fn skipped(&mut self) {}
 
     /// [`EffectNode::process`] with the block's transport facts; plugin
     /// processors override this. // RT
@@ -75,6 +91,14 @@ pub trait InsertFactory: Send {
             "{} cannot load until plugin hosting exists",
             slot.plugin.name
         ))
+    }
+
+    /// Whether parameter `param` of instance `slot` is stepped: its
+    /// automation holds instead of ramping (Plan 4d Ruling 8). Unknown
+    /// parameters are not.
+    fn param_stepped(&self, slot: PluginInstanceId, param: ParamId) -> bool {
+        let _ = (slot, param);
+        false
     }
 }
 

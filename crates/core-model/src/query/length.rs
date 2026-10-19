@@ -93,6 +93,14 @@ impl Lengths {
     }
 }
 
+/// Where event `e` of sequence `seq` ends: a note after its duration, a
+/// reference after its uses, a region after its audio, any other event at
+/// its tick.
+pub fn event_end(doc: &Document, seq: SeqId, e: &Event) -> Result<Tick> {
+    let owner = doc.sequence(seq)?;
+    Ok(Lengths::default().event_end(doc, owner, e))
+}
+
 /// The playing length of a sequence (derived lengths are computed, never
 /// stored).
 pub fn seq_length(doc: &Document, seq: SeqId) -> Result<Tick> {

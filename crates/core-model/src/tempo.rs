@@ -138,6 +138,24 @@ impl TempoMap {
             .map_or(120.0, |p| p.bpm.as_f64().max(1.0))
     }
 
+    /// The tempo at `t` in BPM (a ramp interpolates linearly by tick).
+    pub fn bpm_at(&self, t: Tick) -> f64 {
+        let mut out = self.first_bpm();
+        for (start, end, b0, b1) in self.segments() {
+            if t.0 < start {
+                break;
+            }
+            out = match end {
+                Some(e) if t.0 < e && e > start => {
+                    b0 + (b1 - b0) * (t.0 - start) as f64 / (e - start) as f64
+                }
+                Some(_) => b1,
+                None => b0,
+            };
+        }
+        out
+    }
+
     /// Seconds from tick 0 to `t` (negative for negative ticks).
     pub fn tick_to_seconds(&self, t: Tick) -> f64 {
         if t.0 < 0 || self.points.is_empty() {

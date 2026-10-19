@@ -78,6 +78,10 @@ pub struct Transport {
     pub pos: u64,
     /// Loop range `[start, end)`; ignored unless `end > start`.
     pub loop_range: Option<(u64, u64)>,
+    /// Where playing stops before the sequence end (Play Selection, plan
+    /// 4f Ruling 9); while it is set the loop is ignored. Every Play sets
+    /// or clears it.
+    pub end: Option<u64>,
     /// Tail length in frames.
     pub tail_frames: u64,
     /// Graph latency `L`: added to the tail, so `ended` fires only after
@@ -94,6 +98,7 @@ impl Transport {
             state: PlayState::Stopped,
             pos: 0,
             loop_range: None,
+            end: None,
             tail_frames,
             latency: 0,
             tail_left: 0,
@@ -102,15 +107,25 @@ impl Transport {
     }
 
     fn active_loop(&self) -> Option<(u64, u64)> {
+        if self.end.is_some() {
+            return None;
+        }
         self.loop_range.filter(|(s, e)| e > s)
     }
 
-    /// Starts playing from `pos` (from 0 when at or past `length`).
+    /// Where playing ends without a loop: `end` when set (within the
+    /// sequence), else the sequence end. // RT
+    fn last(&self, length: u64) -> u64 {
+        self.end.map_or(length, |e| e.min(length))
+    }
+
+    /// Starts playing from `pos` (from 0 when at or past `length`, unless
+    /// an `end` is set: a range past the sequence end then ends at once).
     pub fn play(&mut self, length: u64) {
         if self.state == PlayState::Playing {
             return;
         }
-        if self.pos >= length {
+        if self.pos >= length && self.end.is_none() {
             self.pos = 0;
         }
         self.state = PlayState::Playing;
@@ -127,6 +142,34 @@ impl Transport {
         if self.state == PlayState::Tail {
             self.state = PlayState::Playing;
         }
+    }
+
+    /// The schedule frame the next played frame comes from (after a loop
+    /// wrap that is due), or `None` unless playing before the end. // RT
+    pub fn play_pos(&self, length: u64) -> Option<u64> {
+        if self.state != PlayState::Playing {
+            return None;
+        }
+        let lp = self.active_loop();
+        let pos = match lp {
+            Some((s, e)) if self.pos == e => s,
+            _ => self.pos,
+        };
+        let end = match lp {
+            Some((_, e)) if pos < e => e,
+            _ => self.last(length),
+        };
+        (pos < end).then_some(pos)
+    }
+
+    /// Where playing from [`Transport::play_pos`] stops or wraps: the loop
+    /// end or the sequence end. // RT
+    pub fn boundary(&self, length: u64) -> Option<u64> {
+        let pos = self.play_pos(length)?;
+        Some(match self.active_loop() {
+            Some((_, e)) if pos < e => e,
+            _ => self.last(length),
+        })
     }
 
     /// True once, after the tail finished. // RT
@@ -160,7 +203,7 @@ impl Transport {
                 }
                 let end = match lp {
                     Some((_, e)) if self.pos < e => e,
-                    _ => length,
+                    _ => self.last(length),
                 };
                 if self.pos >= end {
                     self.state = PlayState::Tail;

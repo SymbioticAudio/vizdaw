@@ -166,3 +166,120 @@ fn notes_and_pedals_are_released() {
     n.release(t, |_| again += 1);
     assert_eq!(again, 0);
 }
+
+#[test]
+fn play_pos_and_boundary_follow_the_loop_and_the_end() {
+    let mut t = Transport::new(100);
+    // Stopped: nothing plays.
+    assert_eq!((t.play_pos(1000), t.boundary(1000)), (None, None));
+    t.play(1000);
+    t.locate(100);
+    // No loop: the sequence end.
+    assert_eq!(
+        (t.play_pos(1000), t.boundary(1000)),
+        (Some(100), Some(1000))
+    );
+    // An empty loop is ignored.
+    t.loop_range = Some((50, 50));
+    assert_eq!(
+        (t.play_pos(1000), t.boundary(1000)),
+        (Some(100), Some(1000))
+    );
+    t.loop_range = Some((10, 50));
+    // Inside the loop: the loop end.
+    t.locate(30);
+    assert_eq!((t.play_pos(1000), t.boundary(1000)), (Some(30), Some(50)));
+    // At the loop end: the wrap that is due, then the loop end again.
+    t.locate(50);
+    assert_eq!((t.play_pos(1000), t.boundary(1000)), (Some(10), Some(50)));
+    // Past the loop end: the sequence end.
+    t.locate(60);
+    assert_eq!((t.play_pos(1000), t.boundary(1000)), (Some(60), Some(1000)));
+    // At or past the end: nothing more plays.
+    t.loop_range = None;
+    t.locate(1000);
+    assert_eq!((t.play_pos(1000), t.boundary(1000)), (None, None));
+    t.state = PlayState::Tail;
+    t.locate(10);
+    t.state = PlayState::Tail;
+    assert_eq!((t.play_pos(1000), t.boundary(1000)), (None, None));
+    // What `next` plays agrees with `play_pos` after a wrap.
+    let mut t = Transport::new(100);
+    t.loop_range = Some((10, 50));
+    t.locate(40);
+    t.play(1000);
+    block(&mut t, 1000, 10);
+    assert_eq!(t.play_pos(1000), Some(10));
+    assert_eq!(
+        block(&mut t, 1000, 5),
+        vec![
+            Step::Wrap { offset: 0, to: 10 },
+            Step::Play {
+                from: 10,
+                to: 15,
+                offset: 0
+            }
+        ]
+    );
+}
+
+/// Play Selection (plan 4f Ruling 9): an end before the sequence end
+/// stops there, the loop ignored; the next Play without one goes on.
+#[test]
+fn an_end_stops_playing_there_and_ignores_the_loop() {
+    let mut t = Transport::new(0);
+    t.loop_range = Some((0, 50));
+    t.end = Some(40);
+    t.locate(10);
+    t.play(1000);
+    assert_eq!(t.play_pos(1000), Some(10));
+    assert_eq!(t.boundary(1000), Some(40), "the end, not the loop end");
+    assert_eq!(
+        block(&mut t, 1000, 64),
+        vec![
+            Step::Play {
+                from: 10,
+                to: 40,
+                offset: 0
+            },
+            Step::End { offset: 30 },
+            Step::Idle { len: 34 },
+        ]
+    );
+    assert_eq!(t.state, PlayState::Stopped);
+    assert!(t.take_ended());
+    assert_eq!(t.pos, 40, "it stays at the end");
+    // An end past the sequence end is the sequence end.
+    t.end = Some(5000);
+    t.locate(990);
+    t.play(1000);
+    assert_eq!(t.boundary(1000), Some(1000));
+    // Without an end the loop is back.
+    t.stop();
+    t.end = None;
+    t.locate(45);
+    t.play(1000);
+    assert_eq!(t.boundary(1000), Some(50));
+}
+
+/// A Play Selection range wholly past the sequence end ends at once; it
+/// does not play the song from bar 1 (final review, Task 3 M1).
+#[test]
+fn an_end_past_the_sequence_end_ends_at_once() {
+    let mut t = Transport::new(0);
+    t.end = Some(3000);
+    t.locate(2000);
+    t.play(1000);
+    assert_eq!(t.pos, 2000, "the start is kept, not reset to bar 1");
+    assert_eq!(t.play_pos(1000), None);
+    assert_eq!(
+        block(&mut t, 1000, 16),
+        vec![Step::End { offset: 0 }, Step::Idle { len: 16 }]
+    );
+    assert_eq!(t.state, PlayState::Stopped);
+    assert!(t.take_ended());
+    // Without an end, a start past the end is still bar 1.
+    t.end = None;
+    t.play(1000);
+    assert_eq!(t.pos, 0);
+}

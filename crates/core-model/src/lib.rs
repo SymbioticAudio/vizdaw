@@ -15,6 +15,7 @@
     )
 )]
 
+pub mod automation;
 pub mod command;
 pub mod document;
 pub mod error;
@@ -33,6 +34,7 @@ pub mod rules;
 pub mod selection;
 pub mod sequence;
 pub mod state;
+pub mod strip;
 pub mod tempo;
 pub mod time;
 

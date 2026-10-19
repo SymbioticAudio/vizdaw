@@ -1,0 +1,380 @@
+import Foundation
+import Testing
+import VizDAWCore
+@testable import VizDAWAppModel
+
+/// Step entry in the app (plan 4f Task 8): turning it on, its keys, MIDI
+/// notes, keyboard slots and their clashes.
+@MainActor
+@Suite struct StepEntryTests {
+    let host = FakeControlHost()
+
+    func demo() throws -> (DocumentStore, UUID, DocumentModel, FakeSession) {
+        let f = demoFake()
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        return (s, id, try #require(s.model(id)), f)
+    }
+
+    func run(_ id: String, _ args: [ControlArg], _ m: DocumentModel, _ s: DocumentStore, _ doc: UUID)
+        -> ControlFailure?
+    {
+        if case .failed(let f) = ControlCommands.run(id, args: args, doc: (doc, m), store: s, host: host) { return f }
+        return nil
+    }
+
+    func run(_ id: String, _ m: DocumentModel, _ s: DocumentStore, _ doc: UUID) -> ControlFailure? {
+        run(id, [], m, s, doc)
+    }
+
+    @Test func stepEntryStartsOnTheSelectedLaneAtThePosition() throws {
+        let (s, id, m, f) = try demo()
+        f.state.tick = 61_440
+        #expect(run("step.entry", m, s, id) == nil)
+        #expect(m.stepEntry.isOn && m.stepEntry.target == LaneRef(seq: 3, lane: 30), "the first lane")
+        #expect(m.stepEntry.state?.tick == 61_440 && m.stepEntry.state?.value == .quarter)
+        #expect(m.stepEntry.summary == "Step Entry · Groove · 1/4")
+        _ = run("step.entry", m, s, id)
+        #expect(!m.stepEntry.isOn, "toggled off")
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 31)], events: []))
+        _ = run("step.entry", [ControlArg(name: "on", value: .flag(value: true))], m, s, id)
+        #expect(m.stepEntry.target == LaneRef(seq: 3, lane: 31), "the selected lane")
+        m.stepEntry.stop()
+        m.playStop()
+        #expect(run("step.entry", m, s, id)?.message == StepEntryModel.playingMessage)
+    }
+
+    @Test func stepKeysSendInputsAndStepsMoveTheTransport() throws {
+        let (s, id, m, f) = try demo()
+        #expect(run("step.rest", m, s, id) == .of(.unavailable, StepEntryModel.offMessage))
+        _ = run("step.entry", m, s, id)
+        _ = run("step.eighth", m, s, id)
+        #expect(f.stepCalls.last?.input == .value(value: .eighth))
+        #expect(f.state.tick == 0, "a value is no step")
+        _ = run("step.rest", m, s, id)
+        #expect(f.stepCalls.last?.input == .rest && f.state.tick == 15_360, "the transport follows")
+        let version = m.snapshot.version
+        _ = run("step.notes", [ControlArg(name: "pitches", value: .text(value: "C4 E4"))], m, s, id)
+        let typed = StepEntryModel.typedVelocity
+        #expect(
+            f.stepCalls.last?.input
+                == .notes(notes: [StepNoteRow(pitch: 60, velocity: typed), StepNoteRow(pitch: 64, velocity: typed)]))
+        #expect(m.snapshot.version > version, "the new document is applied")
+        #expect(f.stepCalls.last?.state.tick == 15_360, "each input starts where the transport is")
+        f.state.tick = 0
+        _ = run("step.tie", m, s, id)
+        #expect(f.stepCalls.last?.state.tick == 0, "moving the transport moves the next step")
+        let e = run("step.notes", [ControlArg(name: "pitches", value: .text(value: "H9"))], m, s, id)
+        #expect(e?.code == .failed && e?.message.contains("not a pitch") == true)
+        for (cmd, input) in [
+            ("step.dot", StepInputRow.dot), ("step.triplet", .triplet), ("step.delete_last", .deleteLast),
+            ("step.whole", .value(value: .whole)), ("step.thirty_second", .value(value: .thirtySecond)),
+        ] {
+            _ = run(cmd, m, s, id)
+            #expect(f.stepCalls.last?.input == input, "\(cmd)")
+        }
+    }
+
+    @Test func theEditorStateShowsStepEntryAndTheMarks() throws {
+        let (s, id, m, _) = try demo()
+        func state() -> EditorStateRow? {
+            if case .editor(_, let e)? = ControlStates.state(.editor, id, m) { return e }
+            return nil
+        }
+        #expect(state()?.step == nil)
+        #expect(state()?.marks.locators == Array(repeating: nil, count: 10))
+        _ = run("step.entry", m, s, id)
+        _ = run("step.thirty_second", m, s, id)
+        _ = run("step.rest", m, s, id)
+        #expect(
+            state()?.step
+                == StepEntryStateRow(seq: 3, lane: 30, tick: 15_360, value: "thirty_second", dotted: false,
+                                     triplet: false, steps: 0),
+            "the fake moves without history")
+        _ = run("transport.punch", m, s, id)
+        #expect(state()?.marks.punch == true)
+    }
+
+    @Test func theEditorStateFollowsTheTransportAndHidesEndedStepEntry() throws {
+        let (s, id, m, f) = try demo()
+        func step() -> StepEntryStateRow? {
+            if case .editor(_, let e)? = ControlStates.state(.editor, id, m) { return e.step }
+            return nil
+        }
+        _ = run("step.entry", m, s, id)
+        _ = run("step.rest", m, s, id)
+        f.state.tick = 61_440
+        #expect(step()?.tick == 61_440, "the transport's position, not the last input's")
+        m.choose(1)
+        #expect(step() == nil, "ended step entry is not shown")
+    }
+
+    @Test func aRefusedStepShowsInTheStatusLine() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        f.stepEntryError = .Model(message: "a reference cannot contain itself")
+        #expect(run("step.rest", m, s, id) == .of(.failed, "a reference cannot contain itself"))
+        #expect(m.editor.status == "a reference cannot contain itself")
+        #expect(m.stepEntry.state?.tick == 0, "the state stays")
+    }
+
+    @Test func playedNotesGoToStepEntryFirst() throws {
+        let (s, id, m, f) = try demo()
+        #expect(!m.listensForNotes)
+        _ = run("step.entry", m, s, id)
+        #expect(m.listensForNotes)
+        let input = FakeNoteInput()
+        let hub = NoteInputHub(input: input)
+        hub.poll([m], focused: m)
+        #expect(input.starts == 1)
+        input.queued = [NoteInRow(pitch: 60, velocity: 0x8000, channel: 0), NoteInRow(pitch: 60, velocity: 0, channel: 0, on: false)]
+        hub.poll([m], focused: m)
+        #expect(f.stepCalls.suffix(2).map(\.input) == [.noteOn(note: StepNoteRow(pitch: 60, velocity: 0x8000)), .noteOff(pitch: 60)])
+        _ = run("step.entry", m, s, id)
+        hub.poll([m], focused: m)
+        #expect(input.stops == 1, "nobody listens any more")
+    }
+
+    @Test func keyboardSlotsPlayTheirSequenceOrEnterAReference() throws {
+        let (s, id, m, f) = try demo()
+        #expect(m.pressSlot(1) == .done)
+        #expect(m.selectedSeq == 1 && f.playsFrom.last?.seq == 1 && f.playsFrom.last?.from == 0)
+        m.playStop()
+        m.choose(3)
+        _ = run("step.entry", m, s, id)
+        #expect(m.pressSlot(1) == .done)
+        #expect(f.stepCalls.last?.input == .reference(seq: 1) && m.selectedSeq == 3, "entered, not played")
+    }
+
+    @Test func aSlotThatIsACommandsKeyIsRefused() throws {
+        let (_, _, m, f) = try demo()
+        m.keys = KeyBindings(defaults: MemoryDefaults())
+        m.beginSlot(3)
+        m.slotDraft?.key = "s"
+        m.slotDraft?.command = true
+        m.commitSlot()
+        #expect(m.slotDraft?.problem == "⌘S is the key of “Save”.")
+        #expect(f.edits.isEmpty, "nothing set")
+        m.slotDraft?.command = false
+        m.slotDraft?.control = true
+        m.commitSlot()
+        #expect(m.slotDraft == nil)
+        m.beginSlot(3)
+        m.slotDraft?.key = "="
+        m.commitSlot()
+        #expect(m.slotDraft?.problem == "= is the key of “Tie”.", "step entry's keys are refused too")
+        m.slotDraft = nil
+        #expect(f.edits.last == .sequence(edit: .setKeyboardSlot(seq: 3, slot: KeySlotRow(key: "s", modifiers: 2))))
+    }
+
+    @Test func checkMarksFollowTheState() throws {
+        let (s, id, m, _) = try demo()
+        #expect(!StepCommands.isOn("step.entry", m) && !StepCommands.enabled("step.rest", m))
+        #expect(StepCommands.enabled("step.entry", m))
+        _ = run("step.entry", m, s, id)
+        #expect(StepCommands.isOn("step.quarter", m) && !StepCommands.isOn("step.eighth", m))
+        #expect(StepCommands.enabled("step.rest", m) && !StepCommands.isOn("step.dot", m))
+    }
+
+    @Test func menuItemsRunThroughOneProtocol() throws {
+        let (_, _, m, _) = try demo()
+        let kinds: [(any MenuCommands.Type, String)] = [
+            (TransportCommands.self, "transport.overdub"), (StepCommands.self, StepCommands.entry),
+            (DrumCommands.self, DrumCommands.timeline),
+        ]
+        for (kind, id) in kinds {
+            let before = (kind.enabled(id, m), kind.isOn(id, m))
+            #expect(before == (true, false), "\(id)")
+            let ran = kind.run(id, on: nil, m)
+            let after = kind.isOn(id, m)
+            #expect(ran == .done && after, "\(id) toggled on")
+        }
+    }
+
+    @Test func aRefusedNoteOffDoesNotStickTheChord() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        f.stepAnswer = { state, input in
+            var r = state
+            if case .noteOn(let n) = input { r.held.append(n.pitch) }
+            if case .noteOff(let p) = input { r.held.removeAll { $0 == p } }
+            return StepResultRow(state: r, snapshot: nil, moved: false)
+        }
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0x8000, channel: 0)])
+        m.playStop()
+        #expect(m.isPlaying)
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0, channel: 0, on: false)])
+        m.playStop()
+        let before = f.stepCalls.count
+        m.stepEntry.receive([
+            NoteInRow(pitch: 64, velocity: 0x8000, channel: 0), NoteInRow(pitch: 64, velocity: 0, channel: 0, on: false),
+        ])
+        #expect(f.stepCalls.count == before + 2)
+        let held = f.stepCalls[before].state
+        #expect(held.held.isEmpty && held.chord.isEmpty, "the stale key was let go")
+    }
+
+    func holding(_ f: FakeSession) {
+        f.stepAnswer = { state, input in
+            var r = state
+            if case .noteOn(let n) = input { r.held.append(n.pitch) }
+            if case .noteOff(let p) = input { r.held.removeAll { $0 == p } }
+            return StepResultRow(state: r, snapshot: nil, moved: false)
+        }
+    }
+
+    @Test func aNoteOffRefusedForAnyReasonDoesNotStickTheChord() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        holding(f)
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0x8000, channel: 0)])
+        f.stepEntryError = .Model(message: "busy")
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0, channel: 0, on: false)])
+        f.stepEntryError = nil
+        let before = f.stepCalls.count
+        m.stepEntry.receive([NoteInRow(pitch: 64, velocity: 0x8000, channel: 0)])
+        #expect(f.stepCalls.count == before + 1 && f.stepCalls[before].state.held.isEmpty, "the stale key was let go")
+    }
+
+    @Test func togglingStepEntryForgetsAHalfHeldChord() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        holding(f)
+        m.stepEntry.receive([NoteInRow(pitch: 60, velocity: 0x8000, channel: 0)])
+        #expect(m.stepEntry.state?.held.isEmpty == false)
+        _ = run("step.entry", m, s, id)
+        _ = run("step.entry", m, s, id)
+        #expect(m.stepEntry.state?.held.isEmpty == true && m.stepEntry.state?.chord.isEmpty == true)
+    }
+
+    @Test func stepEntryEndsWhenAnotherSequenceIsShown() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        m.choose(1)
+        #expect(m.editor.status == StepEntryModel.sequenceChanged, "said when it ends")
+        let before = f.stepCalls.count
+        #expect(run("step.rest", m, s, id) != nil)
+        #expect(f.stepCalls.count == before && !m.stepEntry.isOn)
+    }
+
+    @Test func stepEntryEndsWhenItsLaneIsGone() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        f.laneTable[3] = f.laneTable[3]?.filter { $0.id != 30 }
+        var snap = try f.snapshot()
+        snap.version += 1
+        m.apply(snap)
+        #expect(m.editor.status == StepEntryModel.laneGone, "said when it ends")
+        let before = f.stepCalls.count
+        #expect(run("step.rest", m, s, id) != nil)
+        #expect(f.stepCalls.count == before && !m.stepEntry.isOn)
+    }
+
+    @Test func stepKeysWinOnlyDuringStepEntry() {
+        let keys = KeyBindings(defaults: MemoryDefaults())
+        func route(_ code: UInt16, step: Bool) -> KeyRoute {
+            KeyRouter.route(
+                keyCode: code, modifiers: noMods, typing: false, stepEntry: step, menus: true, keys: keys, sequences: [])
+        }
+        #expect(route(18, step: false) == .command("locator.go_1"))
+        #expect(route(18, step: true) == .command("step.whole"))
+        #expect(route(83, step: true) == .command("step.whole"), "the keypad")
+        keys.reserveNumberRow = true
+        #expect(route(18, step: true) == .command("locator.go_1"))
+        #expect(route(83, step: true) == .command("step.whole"))
+    }
+    // MARK: Final review fixes
+
+    /// I-1: step entry ends the moment the shown sequence changes, for the
+    /// menu, the keys and the next T alike.
+    @Test func stepEntryEndsAtOnceWhenAnotherSequenceIsShown() throws {
+        let (s, id, m, _) = try demo()
+        _ = run("step.entry", m, s, id)
+        m.choose(1)
+        #expect(!m.stepEntry.isOn && m.editor.status == StepEntryModel.sequenceChanged)
+        #expect(!StepCommands.isOn(StepCommands.entry, m), "the menu's check mark is off")
+        let keys = KeyBindings(defaults: MemoryDefaults())
+        let route = KeyRouter.route(
+            keyCode: 18, modifiers: noMods, typing: false, stepEntry: m.stepEntry.isOn, menus: true, keys: keys,
+            sequences: [])
+        #expect(route == .command("locator.go_1"), "the number row is the locators' again")
+        #expect(run("step.entry", m, s, id) == nil)
+        #expect(m.stepEntry.isOn && m.stepEntry.target?.seq == 1, "one T starts it in the shown sequence")
+    }
+
+    /// I-1: and the moment its lane is gone.
+    @Test func stepEntryEndsAtOnceWhenItsLaneIsGone() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        f.laneTable[3] = f.laneTable[3]?.filter { $0.id != 30 }
+        var snap = try f.snapshot()
+        snap.version += 1
+        m.apply(snap)
+        #expect(!m.stepEntry.isOn && m.editor.status == StepEntryModel.laneGone)
+        #expect(!m.listensForNotes, "MIDI goes back to the lists")
+    }
+
+    /// M-3: while playing, step entry's keys are used up (Delete must not
+    /// reach the editor and delete the selection).
+    @Test func stepKeysWhilePlayingAreUsedUp() throws {
+        let (s, id, m, f) = try demo()
+        _ = run("step.entry", m, s, id)
+        m.playStop()
+        #expect(m.isPlaying)
+        let before = f.stepCalls.count
+        let failure = run("step.delete_last", m, s, id)
+        #expect(failure == .of(.failed, StepEntryModel.playingMessage))
+        #expect(f.stepCalls.count == before)
+        let outcome = ControlCommands.run("step.delete_last", args: [], doc: (id, m), store: s, host: host)
+        #expect(KeyDispatch.after(outcome, doc: m) == .handled, "the key goes no further")
+    }
+
+    /// M-5: with a sheet's field open, P/E/U and the step commands wait
+    /// (step.notes, the channel's alone, still runs).
+    @Test func fieldAndStepKeysWaitWhileATextFieldHasTheKeyboard() throws {
+        let (s, id, m, f) = try demo()
+        m.beginSlot(3)
+        #expect(!m.transportKeysEnabled)
+        let wait = ControlFailure.of(.unavailable, TransportCommands.textFieldHasKeyboard)
+        #expect(run("step.entry", m, s, id) == wait)
+        #expect(!m.stepEntry.isOn && !StepCommands.enabled(StepCommands.entry, m))
+        for key in ["transport.go_position", "transport.go_edit_in", "transport.go_punch"] {
+            #expect(run(key, m, s, id) == wait, "\(key)")
+        }
+        m.slotDraft = nil
+        _ = run("step.entry", m, s, id)
+        m.beginSlot(3)
+        let before = f.stepCalls.count
+        #expect(run("step.delete_last", m, s, id) == wait)
+        #expect(run("step.entry", m, s, id) == wait && m.stepEntry.isOn, "T does not end it behind the sheet")
+        #expect(f.stepCalls.count == before && !StepCommands.enabled("step.rest", m))
+        #expect(run("step.notes", [ControlArg(name: "pitches", value: .text(value: "C4"))], m, s, id) == nil)
+        #expect(f.stepCalls.count == before + 1)
+    }
+
+    /// Item 7: the engine's state is read before the playing check, and the
+    /// menu's enabled state matches what running would do.
+    @Test func stepEntryReadsTheTransportFirstAndTheMenuMatches() throws {
+        let (s, id, m, f) = try demo()
+        f.state.playing = true
+        #expect(run("step.entry", m, s, id)?.message == StepEntryModel.playingMessage, "not the stale cache")
+        #expect(!StepCommands.enabled(StepCommands.entry, m))
+        f.state.playing = false
+        m.poll()
+        _ = run("step.entry", m, s, id)
+        f.state.playing = true
+        let before = f.stepCalls.count
+        #expect(run("step.rest", m, s, id) == .of(.failed, StepEntryModel.playingMessage))
+        #expect(f.stepCalls.count == before)
+        #expect(!StepCommands.enabled("step.rest", m), "step inputs are off while playing")
+        f.state.playing = false
+        m.poll()
+        _ = run("step.entry", m, s, id)
+        f.laneTable[3] = []
+        var snap = try f.snapshot()
+        snap.version += 1
+        m.apply(snap)
+        #expect(!StepCommands.enabled(StepCommands.entry, m), "no lane to enter into")
+        #expect(run("step.entry", m, s, id) != nil)
+    }
+}

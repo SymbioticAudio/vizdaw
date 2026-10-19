@@ -43,6 +43,19 @@ pub(crate) fn apply(
     };
     let mut targets: Vec<EventId> = chosen.iter().copied().collect();
     if let Some(m) = modify {
+        if to_copy && matches!(m, Modify::Line(_)) {
+            return Err(crate::error::ModelError::invalid(
+                "a Strip Chart line cannot change copies",
+            ));
+        }
+        // Deleting copies would leave the document as it was.
+        if to_copy && matches!(m, Modify::Delete) {
+            return Ok(Selection {
+                time_range: base.time_range,
+                lanes: base.lanes,
+                events: targets.into_iter().collect(),
+            });
+        }
         if to_copy {
             let mut copies = Vec::with_capacity(targets.len());
             for id in &targets {
@@ -55,7 +68,17 @@ pub(crate) fn apply(
             }
             targets = copies;
         }
-        apply_modify(d, &targets, m, r)?;
+        targets = match m {
+            // A tempo line changes no event: the selection stays what it
+            // was, not every event under the line (final review Minor 2).
+            Modify::Line(c) if c.target == crate::strip::LineTarget::Tempo => {
+                crate::strip::apply_line(d, &base.lanes, &targets, c, r)?;
+                base.events.iter().copied().collect()
+            }
+            // A line draws into the selection's lanes (Plan 4d Ruling 16).
+            Modify::Line(c) => crate::strip::apply_line(d, &base.lanes, &targets, c, r)?,
+            _ => apply_modify(d, &targets, m, r)?,
+        };
     }
     Ok(Selection {
         time_range: base.time_range,

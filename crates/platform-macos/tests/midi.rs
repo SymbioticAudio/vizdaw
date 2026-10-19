@@ -51,3 +51,53 @@ fn destinations_can_be_listed() {
         assert!(!d.name.is_empty());
     }
 }
+
+#[test]
+fn a_note_listener_hears_every_source() {
+    use platform_macos::midi::NoteListener;
+    use std::sync::{Arc, Mutex};
+    let mut sys = MidiSystem::new("VizDAW Keys Test").unwrap();
+    let mut out = sys.open_virtual_source("VizDAW Keys Test Out").unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let got = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let sink = Arc::clone(&got);
+    let listener = NoteListener::connect_including_own(
+        "VizDAW Keys Test In",
+        Box::new(move |b: &[u8]| sink.lock().unwrap().push(b.to_vec())),
+    )
+    .unwrap();
+    assert!(listener.sources() >= 1, "the virtual source counts");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(out.send(now_ns(), &[0x92, 61, 100]));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !got.lock().unwrap().contains(&vec![0x92, 61, 100]) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(got.lock().unwrap().contains(&vec![0x92, 61, 100]));
+}
+
+#[test]
+fn a_note_listener_skips_this_processs_own_virtual_source() {
+    use platform_macos::midi::NoteListener;
+    use std::sync::{Arc, Mutex};
+    let mut sys = MidiSystem::new("VizDAW Loop Test").unwrap();
+    let mut out = sys.open_virtual_source("VizDAW Loop Test Out").unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let own_id = sys.virtual_source_unique_id("VizDAW Loop Test Out");
+    assert!(own_id.is_some());
+    let got = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let sink = Arc::clone(&got);
+    let listener = NoteListener::connect_all(
+        "VizDAW Loop Test In",
+        Box::new(move |b: &[u8]| sink.lock().unwrap().push(b.to_vec())),
+    )
+    .unwrap();
+    assert!(
+        !listener.source_ids().contains(&own_id),
+        "our own virtual source is excluded"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(out.send(now_ns(), &[0x93, 63, 100]));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!got.lock().unwrap().contains(&vec![0x93, 63, 100]));
+}

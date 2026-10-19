@@ -3,15 +3,24 @@
 //! `Renderer::process`.
 
 use core_engine::backend::AudioBackend;
+use core_engine::backend::{BlockInfo, InstrumentNode, StereoBuf};
 use core_engine::engine::{Engine, EngineConfig, find_sequence};
 use core_engine::error::EngineError;
-use core_engine::fixtures::demo_document;
+use core_engine::fixtures::{Builder, demo_document};
+use core_engine::graph::{EffectNode, InsertFactory, ProcessStatus, TestInserts, TestInstrument};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::render::{Faults, RETIRE_CAPACITY};
 use core_engine::rt_check::{self, CountingAlloc};
 use core_engine::schedule::BuiltinRoute;
 use core_engine::transport::PlayState;
+use core_model::automation::AutomationTarget;
+use core_model::document::Document;
+use core_model::event::{EventBody, EventSpec};
+use core_model::ids::SeqId;
+use core_model::mixer::{ParamId, PluginSlot, StripKind};
 use core_model::time::Tick;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -20,6 +29,136 @@ fn armed_block(b: &mut OfflineBackend, frames: u32) {
     rt_check::arm();
     b.block(frames);
     rt_check::disarm();
+}
+
+/// Counts the automated values a plugin processor is given.
+struct Hooked<T: ?Sized>(Arc<AtomicU64>, Box<T>);
+
+impl EffectNode for Hooked<dyn EffectNode> {
+    fn latency(&self) -> u32 {
+        self.1.latency()
+    }
+    fn process(
+        &mut self,
+        frames: u32,
+        io: &mut StereoBuf,
+        sidechain: Option<&StereoBuf>,
+    ) -> ProcessStatus {
+        self.1.process(frames, io, sidechain)
+    }
+    fn reset(&mut self) {
+        self.1.reset();
+    }
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
+        let _ = (frame, param, normalized);
+        self.0.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+}
+
+impl InstrumentNode for Hooked<dyn InstrumentNode> {
+    fn midi(&mut self, offset: u32, msg: &[u8]) {
+        self.1.midi(offset, msg);
+    }
+    fn render(&mut self, frames: u32, out: &mut StereoBuf) {
+        self.1.render(frames, out);
+    }
+    fn reset(&mut self) {
+        self.1.reset();
+    }
+    fn render_outputs(&mut self, frames: u32, outs: &mut [StereoBuf], info: &BlockInfo) {
+        self.1.render_outputs(frames, outs, info);
+    }
+    fn automate(&mut self, frame: u32, param: ParamId, normalized: f64) -> bool {
+        let _ = (frame, param, normalized);
+        self.0.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+}
+
+/// Test plugins whose `automate` hooks count into `inserts` and
+/// `instruments`.
+struct HookedPlugins {
+    inner: TestInserts,
+    inserts: Arc<AtomicU64>,
+    instruments: Arc<AtomicU64>,
+}
+
+impl InsertFactory for HookedPlugins {
+    fn make(
+        &mut self,
+        slot: &PluginSlot,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<Box<dyn EffectNode>, String> {
+        let n = self.inner.make(slot, sample_rate, max_frames)?;
+        Ok(Box::new(Hooked(Arc::clone(&self.inserts), n)))
+    }
+    fn make_instrument(
+        &mut self,
+        slot: &PluginSlot,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<Box<dyn InstrumentNode>, String> {
+        let n = self.inner.make_instrument(slot, sample_rate, max_frames)?;
+        Ok(Box::new(Hooked(Arc::clone(&self.instruments), n)))
+    }
+}
+
+/// The demo with a lane "Auto" in `song`: a fader ramp every 64 ticks over
+/// eight bars, a mute toggled every beat and a pan point every 8 ticks for
+/// a bar (runs of 32 frames); plus a test insert on the synth strip and a
+/// test plugin instrument, each with a parameter ramping over eight bars.
+fn automation_document(doc: &Document, song: SeqId) -> Document {
+    let mut b = Builder::from_doc(doc.clone());
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let insert = b.insert(synth, TestInserts::plugin("gain=1")).unwrap();
+    let (_, instrument) = b
+        .plugin_dest("Test synth", TestInstrument::plugin("synth"))
+        .unwrap();
+    let lane = b.lane(song, "Auto", None).unwrap();
+    let q = 15_360i64;
+    let mut events = Vec::new();
+    for k in 0..(32 * q / 64) {
+        events.push(EventSpec::new(
+            Tick(k * 64),
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(synth),
+                value: (k % 100) as f64 / 100.0,
+            },
+        ));
+    }
+    for k in 0..32 {
+        events.push(EventSpec::new(
+            Tick(k * q),
+            EventBody::Automation {
+                target: AutomationTarget::StripMute(synth),
+                value: (k % 2) as f64,
+            },
+        ));
+    }
+    for k in 0..(4 * q / 8) {
+        events.push(EventSpec::new(
+            Tick(k * 8),
+            EventBody::Automation {
+                target: AutomationTarget::StripPan(synth),
+                value: (k % 3) as f64 / 2.0,
+            },
+        ));
+    }
+    for (k, id) in [(0u64, insert), (1, instrument)] {
+        for (t, v) in [(0, 0.0), (32 * q, 1.0)] {
+            events.push(EventSpec::new(
+                Tick(t),
+                EventBody::Automation {
+                    target: AutomationTarget::PluginParam(id, ParamId(k)),
+                    value: v,
+                },
+            ));
+        }
+    }
+    b.events(song, lane, events).unwrap();
+    b.finish()
 }
 
 /// One test, so no other test thread allocates while the global counter
@@ -161,4 +300,49 @@ fn render_path_never_allocates() {
         0,
         "allocations with a full MIDI queue"
     );
+    drop(b.stop().unwrap());
+    drop(engine);
+
+    // Automation: runs split at points, ramps, mutes, plugin parameters, a
+    // stop, a locate and a recompile while playing (Plan 4d Rulings 10–13).
+    let auto = automation_document(&doc, song);
+    let (mut engine, renderer) = Engine::new(
+        EngineConfig::new(48_000.0),
+        Box::new(OfflineSinks::new(1 << 20).with_tone()),
+    )
+    .unwrap();
+    let inserts = Arc::new(AtomicU64::new(0));
+    let instruments = Arc::new(AtomicU64::new(0));
+    engine.set_insert_factory(Box::new(HookedPlugins {
+        inner: TestInserts::new(),
+        inserts: Arc::clone(&inserts),
+        instruments: Arc::clone(&instruments),
+    }));
+    let report = engine.load(&auto, song).unwrap();
+    assert_eq!(report.automation_instrument_lanes, 1, "{report:?}");
+    let mut b = OfflineBackend::new(48_000.0, 512);
+    b.start(renderer).unwrap();
+    b.reserve(4096);
+    engine.set_loop(true).unwrap();
+    engine.play().unwrap();
+    for i in 0..3_000u32 {
+        match i {
+            1_000 => engine.stop().unwrap(),
+            1_010 => engine.play().unwrap(),
+            1_500 => {
+                engine.load(&auto, song).unwrap();
+            }
+            2_000 => engine.locate_tick(Tick(15_360 * 8)).unwrap(),
+            _ => {}
+        }
+        armed_block(&mut b, 1 + (i * 37) % 1024);
+    }
+    assert!(engine.counters().runs > 3_000, "automation split blocks");
+    assert!(
+        inserts.load(Ordering::Relaxed) > 100 && instruments.load(Ordering::Relaxed) > 100,
+        "plugin automate hooks: inserts {}, instruments {}",
+        inserts.load(Ordering::Relaxed),
+        instruments.load(Ordering::Relaxed)
+    );
+    assert_eq!(rt_check::count() - before, 0, "allocations with automation");
 }

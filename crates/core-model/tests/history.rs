@@ -281,3 +281,22 @@ fn redo_is_refused_inside_an_open_transaction() {
     assert_eq!(name(&h), "A");
     assert_eq!(h.undo_depth(), 1);
 }
+
+#[test]
+fn peeking_shows_what_undo_and_redo_would_bring_back() {
+    let mut h = hist();
+    assert!(h.peek_undo().is_none() && h.peek_redo().is_none());
+    h.execute(&rename("A"), &f()).unwrap();
+    let before = h.peek_undo().unwrap().clone();
+    assert_eq!(before.sequence(SeqId(0)).unwrap().name, "S");
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &before);
+    assert_eq!(h.peek_redo().unwrap().sequence(SeqId(0)).unwrap().name, "A");
+    // Inside a transaction: nothing to redo, and only its own steps undo.
+    h.begin("T").unwrap();
+    assert!(h.peek_redo().is_none());
+    assert!(h.peek_undo().is_none());
+    h.execute(&rename("B"), &f()).unwrap();
+    assert_eq!(h.peek_undo().unwrap().sequence(SeqId(0)).unwrap().name, "S");
+    h.commit().unwrap();
+}

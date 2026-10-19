@@ -46,6 +46,7 @@ struct Script {
     restart: AtomicBool,
     params_changed: AtomicBool,
     state_dirty: AtomicBool,
+    editor_closes: AtomicUsize,
     ui: Mutex<VecDeque<ParamEvent>>,
 }
 
@@ -91,13 +92,33 @@ impl PluginFormat for F {
         };
         Ok(Box::new(I {
             info,
+            editor: E(self.0.clone()),
             script: self.0.clone(),
             active: false,
         }))
     }
 }
 
+/// An editor that counts its closes.
+struct E(Arc<Script>);
+
+impl PluginEditor for E {
+    fn open(&mut self, _p: core_host::ParentView) -> Result<(u32, u32), HostError> {
+        Ok((10, 10))
+    }
+    fn resize(&mut self, w: u32, h: u32) -> Result<(u32, u32), HostError> {
+        Ok((w, h))
+    }
+    fn can_resize(&mut self) -> bool {
+        false
+    }
+    fn close(&mut self) {
+        self.0.editor_closes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 struct I {
+    editor: E,
     info: PluginInfo,
     script: Arc<Script>,
     active: bool,
@@ -145,7 +166,7 @@ impl PluginInstance for I {
         None
     }
     fn editor(&mut self) -> Option<&mut dyn PluginEditor> {
-        None
+        Some(&mut self.editor)
     }
     fn idle(&mut self) -> InstanceEvents {
         InstanceEvents {
@@ -414,4 +435,20 @@ fn params_changed_and_state_dirty_are_reported() {
     let r = rig.tick();
     assert_eq!(r.params_changed, ids);
     assert_eq!(r.state_dirty, ids);
+}
+
+#[test]
+fn a_removed_slots_editor_is_closed_even_while_its_processor_is_out() {
+    let (mut rig, ids) = Rig::new(&["good"]);
+    rig.engine.load(rig.hist.doc(), rig.song).unwrap();
+    rig.tick();
+    assert_eq!(rig.script.editor_closes.load(Ordering::Relaxed), 0);
+    rig.edit(MixerCmd::RemoveInsert { slot: ids[0] });
+    rig.host.sync(rig.hist.doc());
+    assert_eq!(
+        rig.script.editor_closes.load(Ordering::Relaxed),
+        1,
+        "closed when the slot left, before the instance retires"
+    );
+    assert!(rig.host.instance(ids[0]).is_none());
 }

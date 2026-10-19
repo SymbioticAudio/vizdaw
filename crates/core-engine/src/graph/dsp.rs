@@ -36,6 +36,45 @@ pub fn mix_into(dst: &mut StereoBuf, src: &StereoBuf, gain: f32, frames: u32) {
     }
 }
 
+/// `dst += g(i) × src` with `g` moving linearly from `from` at frame 0
+/// toward `to` (reached just after the last frame); equal ends are
+/// exactly [`mix_into`] (Plan 4d Ruling 11). // RT
+pub fn mix_into_ramp(dst: &mut StereoBuf, src: &StereoBuf, from: f32, to: f32, frames: u32) {
+    if from == to {
+        return mix_into(dst, src, to, frames);
+    }
+    let n = len(frames, dst).min(len(frames, src));
+    let step = (to - from) / n.max(1) as f32;
+    for (d, s) in [(&mut dst.left, &src.left), (&mut dst.right, &src.right)] {
+        if let (Some(d), Some(s)) = (d.get_mut(..n), s.get(..n)) {
+            for (i, (a, b)) in d.iter_mut().zip(s).enumerate() {
+                *a += (from + step * i as f32) * *b;
+            }
+        }
+    }
+}
+
+/// The left channel times a gain moving from `from.0` toward `to.0`, the
+/// right from `from.1` toward `to.1`; equal ends are exactly [`scale`].
+/// // RT
+pub fn scale_ramp(buf: &mut StereoBuf, from: (f32, f32), to: (f32, f32), frames: u32) {
+    if from == to {
+        return scale(buf, to.0, to.1, frames);
+    }
+    let n = len(frames, buf);
+    for (c, (a, b)) in [
+        (&mut buf.left, (from.0, to.0)),
+        (&mut buf.right, (from.1, to.1)),
+    ] {
+        let step = (b - a) / n.max(1) as f32;
+        if let Some(c) = c.get_mut(..n) {
+            for (i, x) in c.iter_mut().enumerate() {
+                *x *= a + step * i as f32;
+            }
+        }
+    }
+}
+
 /// Multiplies the left channel by `gl` and the right by `gr`. // RT
 pub fn scale(buf: &mut StereoBuf, gl: f32, gr: f32, frames: u32) {
     let n = len(frames, buf);
@@ -79,7 +118,8 @@ pub fn is_faulty(buf: &StereoBuf, frames: u32) -> bool {
 }
 
 /// Fader × pan as `(left, right)` gains; without pan (master, Plan
-/// Ruling 4) both are the fader gain.
+/// Ruling 4) both are the fader gain. Also used on the audio thread by
+/// automation (it neither allocates nor panics). // RT
 pub fn strip_gains(gain_db: f64, pan: f64, apply_pan: bool) -> (f32, f32) {
     let g = core_model::mixer::db_to_gain(gain_db);
     if apply_pan {

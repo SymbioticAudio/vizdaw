@@ -5,108 +5,35 @@ import VizDAWCore
 /// Sidebar of sequences, table of lanes, transport toolbar.
 struct DocumentView: View {
     @Bindable var model: DocumentModel
+    let docID: UUID
 
     var body: some View {
         NavigationSplitView {
             SequenceSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         } detail: {
-            LaneTable(model: model)
+            EditorSplit(model: model, docID: docID)
         }
         .navigationTitle(model.windowTitle)
         .toolbar { TransportToolbar(model: model) }
+        .sheet(
+            item: Binding(
+                get: { model.editor.referenceDraft }, set: { model.editor.referenceDraft = $0 })
+        ) { _ in
+            ReferenceSheet(editor: model.editor)
+        }
         .alert(
             model.alert?.title ?? "",
+            // With the control channel on no sheet opens (control spec §7):
+            // the channel reports the alert and it stays on the document.
             isPresented: Binding(
-                get: { model.alert != nil },
+                get: { ControlAlertLog.showsSheet(model.alert, channelOn: ControlChannel.active) },
                 set: { if !$0 { model.alert = nil } }),
             presenting: model.alert
         ) { _ in
             Button("OK") { model.alert = nil }
         } message: { item in
             Text(item.message)
-        }
-    }
-}
-
-struct SequenceSidebar: View {
-    @Bindable var model: DocumentModel
-
-    var body: some View {
-        List(selection: Binding(get: { model.selectedSeq }, set: { model.select($0) })) {
-            Section("Top-level") {
-                ForEach(model.topLevel) { row in SequenceRow(model: model, row: row) }
-            }
-            Section("Used as reference") {
-                ForEach(model.referenced) { row in SequenceRow(model: model, row: row) }
-            }
-        }
-        .listStyle(.sidebar)
-    }
-}
-
-struct SequenceRow: View {
-    @Bindable var model: DocumentModel
-    let row: SeqRow
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        HStack {
-            if model.renamingSeq == row.id {
-                TextField("Name", text: $model.renameDraft)
-                    .focused($focused)
-                    .onSubmit { model.commitRename(model.renameDraft) }
-                    .onExitCommand { model.cancelRename() }
-                    .onAppear { focused = true }
-                    .onChange(of: focused) { _, now in
-                        if !now { model.commitRename(model.renameDraft) }
-                    }
-            } else {
-                Text(row.name)
-                    .onTapGesture(count: 2) { model.beginRename(row.id) }
-            }
-            Spacer()
-            if row.useCount > 0 {
-                Text("\(row.useCount)")
-                    .font(.caption.monospacedDigit())
-                    .padding(.horizontal, 6)
-                    .background(Capsule().fill(.quaternary))
-                    .help("Used by \(row.useCount) reference(s)")
-            }
-        }
-        .tag(row.id)
-    }
-}
-
-struct LaneTable: View {
-    let model: DocumentModel
-
-    var body: some View {
-        if model.selectedSeq == nil {
-            ContentUnavailableView(
-                "No Sequence", systemImage: "music.note.list",
-                description: Text("Choose File > Create Demo Project to try VizDAW."))
-        } else {
-            Table(model.lanes) {
-                TableColumn("Mute") { lane in
-                    Toggle(
-                        "Mute",
-                        isOn: Binding(
-                            get: { lane.mute },
-                            set: { model.setMute(lane: lane.id, $0) })
-                    )
-                    .labelsHidden()
-                }
-                .width(40)
-                TableColumn("Name", value: \.name)
-                TableColumn("Destination") { Text($0.destination ?? "—") }
-                TableColumn("MIDI events") { Text("\($0.midiEventCount)").monospacedDigit() }
-                TableColumn("Regions") { Text("\($0.regionCount)").monospacedDigit() }
-                TableColumn("References") { Text("\($0.referenceCount)").monospacedDigit() }
-                TableColumn("Takes (active)") { Text("\($0.takeCount) (\($0.activeTake))") }
-                TableColumn("Loop") { Text($0.looped ? "Yes" : "") }
-                TableColumn("Drum") { Text($0.isDrum ? "Yes" : "") }
-            }
         }
     }
 }
@@ -149,8 +76,7 @@ struct TransportToolbar: ToolbarContent {
                 .help("Faults and compile messages")
                 .popover(isPresented: $model.showsFaults) {
                     VStack(alignment: .leading, spacing: 4) {
-                        let lines = model.transport.faults + model.transport.report
-                        ForEach(Array(lines.enumerated()), id: \.offset) {
+                        ForEach(Array(model.messages.enumerated()), id: \.offset) {
                             Text($0.element)
                         }
                     }

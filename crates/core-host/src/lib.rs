@@ -32,7 +32,7 @@ pub mod scan;
 pub mod shelf;
 
 pub use error::HostError;
-pub use host::{Gesture, IdleReport, PluginHost};
+pub use host::{GESTURE_TIMEOUT, Gesture, IdleReport, PluginHost, SlotState};
 pub use info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Tail};
 pub use instance::{
     AudioProcessor, InstanceEvents, LoadRequest, ParentView, PluginEditor, PluginFormat,

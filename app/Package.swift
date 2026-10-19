@@ -21,6 +21,10 @@ let package = Package(
                 .linkedLibrary("vizdaw_ffi"),
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AudioToolbox"),
+                // Plugin editors: AppKit views and AU generic views (the
+                // static library's own link requests do not reach SwiftPM).
+                .linkedFramework("AppKit"),
+                .linkedFramework("CoreAudioKit"),
                 .linkedFramework("CoreMIDI"),
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("Foundation"),
@@ -31,15 +35,27 @@ let package = Package(
             dependencies: ["VizDAWCore"],
             path: "Sources/VizDAWAppModel"
         ),
+        // Editors (plan 4a): pure geometry plus the AppKit canvas views.
+        .target(
+            name: "VizDAWEditors",
+            dependencies: ["VizDAWAppModel", "VizDAWCore"],
+            path: "Sources/VizDAWEditors"
+        ),
         .executableTarget(
             name: "VizDAW",
-            dependencies: ["VizDAWAppModel", "VizDAWCore"],
+            dependencies: ["VizDAWAppModel", "VizDAWCore", "VizDAWEditors"],
             path: "Sources/VizDAW"
         ),
         .testTarget(
             name: "VizDAWAppModelTests",
-            dependencies: ["VizDAWAppModel", "VizDAWCore"],
+            // VizDAWEditors: arrangement view tests reuse this target's FakeSession.
+            dependencies: ["VizDAWAppModel", "VizDAWCore", "VizDAWEditors"],
             path: "Tests/VizDAWAppModelTests"
+        ),
+        .testTarget(
+            name: "VizDAWEditorsTests",
+            dependencies: ["VizDAWEditors", "VizDAWAppModel", "VizDAWCore"],
+            path: "Tests/VizDAWEditorsTests"
         ),
     ]
 )

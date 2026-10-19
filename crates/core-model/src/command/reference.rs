@@ -230,6 +230,9 @@ fn from_selection(
             format!("{}..{}", a.0, b.0),
         ));
     }
+    crate::rules::check_ticks("selection.time_range", a.0)?;
+    crate::rules::check_ticks("selection.time_range", b.0)?;
+    crate::rules::check_ticks("length", b.0 - a.0)?;
     let lanes: Vec<Lane> = parent
         .lanes
         .iter()
@@ -262,7 +265,7 @@ fn from_selection(
             nl.audio_out = l.audio_out;
             nl.mute = l.mute;
             nl.solo = l.solo;
-            nl.play_quantize = l.play_quantize;
+            nl.play_quantize = l.play_quantize.clone();
             nl.play_shift = l.play_shift;
             nl.drum = l.drum.as_ref().map(|dl| DrumLayout {
                 rows: dl

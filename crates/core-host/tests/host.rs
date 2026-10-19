@@ -877,3 +877,315 @@ fn a_base_value_that_did_not_fit_the_queue_is_sent_again() {
     assert_eq!(script.held(GAIN), 1.0, "the base was sent again");
     drop(engine);
 }
+
+// ---------------------------------------------------------------------------
+// What the app needs (plan 3c): held slots (safe mode), the plugins loading
+// now (crash marker), gestures whose End was lost, closing an editor.
+
+#[test]
+fn held_slots_are_placeholders_until_released() {
+    let (hist, song, gain) = with_gain();
+    let mut host = host(4096);
+    host.hold(gain, Some("Plugins off".into()));
+    assert!(host.sync(hist.doc()), "a held slot does not load");
+    assert_eq!(
+        host.state(gain),
+        Some(core_host::SlotState::Failed("Plugins off".into()))
+    );
+    assert_eq!(host.held(), vec![gain]);
+    let (mut engine, _be) = engine(&host, 4096);
+    let report = engine.load(hist.doc(), song).unwrap();
+    assert_eq!(
+        report.graph.placeholders,
+        vec![(gain, "Plugins off".to_string())]
+    );
+    host.hold(gain, None);
+    assert!(host.held().is_empty());
+    assert!(!host.sync(hist.doc()), "released: it loads");
+    assert_eq!(host.state(gain), Some(core_host::SlotState::Loading));
+    let r = host.wait_ready(WAIT);
+    assert_eq!(r.loaded, vec![gain], "{:?}", r.failed);
+    assert_eq!(host.state(gain), Some(core_host::SlotState::Live));
+    drop(engine);
+}
+
+#[test]
+fn loading_names_the_plugins_in_flight() {
+    let (hist, _song, gain) = with_gain();
+    let mut host = host(4096);
+    assert!(host.loading().is_empty());
+    host.sync(hist.doc());
+    let names: Vec<(PluginInstanceId, String)> = host
+        .loading()
+        .into_iter()
+        .map(|(id, p)| (id, p.id))
+        .collect();
+    assert_eq!(names, vec![(gain, "vizdaw.test.gain".to_string())]);
+    host.wait_ready(WAIT);
+    assert!(host.loading().is_empty());
+    assert_eq!(host.state(PluginInstanceId(999)), None);
+}
+
+#[test]
+fn a_gesture_whose_end_was_lost_closes_after_the_timeout() {
+    let (hist, song, id, mut host, script) = with_fake();
+    host.set_gesture_timeout(Duration::from_millis(50));
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.5)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert!(r.gestures.is_empty(), "still open");
+    std::thread::sleep(Duration::from_millis(80));
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(r.gestures.len(), 1, "closed by the timeout");
+    assert_eq!(r.gestures[0].slot, id);
+    assert_eq!(r.gestures[0].values, vec![(GAIN, 0.5)]);
+    drop(engine);
+}
+
+#[test]
+fn closing_the_editor_ends_its_gesture() {
+    let (hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.25)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert!(r.gestures.is_empty());
+    host.end_gestures(id);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(r.gestures.len(), 1);
+    assert_eq!(r.gestures[0].values, vec![(GAIN, 0.25)]);
+    // A later End of the closed gesture opens nothing.
+    script.emit(&[ParamEvent::End(GAIN)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert!(r.gestures.is_empty());
+    drop(engine);
+}
+
+// ---------------------------------------------------------------------------
+// Turning a plugin off in the Plugin Manager unloads it at once (Task 15).
+
+#[test]
+fn disabling_a_running_plugin_captures_and_unloads_it_and_enabling_restores_it() {
+    use core_host::catalog::{Catalog, CatalogEntry, ScanStatus, Source};
+    const DISABLED: &str = "Disabled in Plugin Manager";
+    let (hist, song, gain) = with_gain();
+    let mut b = Builder::from_doc(hist.doc().clone());
+    let (_, synth) = b.plugin_dest("S", plugin("vizdaw.test.synth4")).unwrap();
+    let mut hist = History::new(b.finish());
+    let src = Source::clap_bundle(&test_plugins::bundle());
+    let mut cat = Catalog::new();
+    let entry = |id: &str, kind| CatalogEntry {
+        source: src.clone(),
+        plugin: plugin(id),
+        kind: Some(kind),
+        info: None,
+        status: ScanStatus::Ok,
+    };
+    cat.record(
+        &src,
+        vec![
+            entry("vizdaw.test.gain", PluginKind::Effect),
+            entry("vizdaw.test.synth4", PluginKind::Instrument),
+        ],
+    );
+    let mut host = host(4096);
+    cat.apply(&mut host);
+    host.sync(hist.doc());
+    let r = host.wait_ready(WAIT);
+    assert_eq!(r.loaded.len(), 2, "{:?}", r.failed);
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    // A value the document never got (a mixer control not committed).
+    host.set_param(gain, ParamId(0), 0.3);
+    for _ in 0..500 {
+        peak(&mut be, 256);
+        host.idle();
+        if host.instance(gain).unwrap().param_value(ParamId(0)) == Some(0.3) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        host.instance(gain).unwrap().param_value(ParamId(0)),
+        Some(0.3)
+    );
+    let depth = hist.undo_depth();
+    let before = hist.doc().clone();
+
+    assert!(!host.unloads_due());
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", false);
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.synth4", false);
+    cat.apply(&mut host);
+    assert!(host.unloads_due(), "running instances of disabled plugins");
+    let unloaded = host.unload_unavailable(&mut hist);
+    let ids: Vec<PluginInstanceId> = unloaded.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&gain) && ids.contains(&synth));
+    let captured = |id| unloaded.iter().find(|(i, _)| *i == id).unwrap().1.as_ref();
+    let blob = *captured(gain).unwrap();
+    assert_eq!(hist.doc().plugin_slot(gain).unwrap().state, Some(blob));
+    // The test synth keeps no state: unloaded all the same.
+    assert!(captured(synth).is_err());
+    assert!(!host.unloads_due());
+    assert_eq!(hist.undo_depth(), depth, "no undo step");
+    // Only the captured state changed.
+    let bytes = hist.doc().state_blob(blob).unwrap();
+    let expect = core_model::state::capture(&before, gain, bytes).unwrap().0;
+    assert_eq!(*hist.doc(), expect);
+    for id in [gain, synth] {
+        assert!(host.instance(id).is_none());
+        assert_eq!(
+            host.state(id),
+            Some(core_host::SlotState::Failed(DISABLED.into()))
+        );
+    }
+    assert_eq!(host.live_count(), 0);
+    // The insert's processor is in the engine (the synth, which no lane
+    // plays, may still be on the shelf: then it is deactivated already).
+    assert!(host.retiring() >= 1);
+    // The engine plays placeholders (an insert's shows why); the processors it gave back are
+    // deactivated with their instances.
+    let report = host
+        .service(&mut engine, hist.doc(), song)
+        .unwrap()
+        .compiled
+        .expect("the engine reloaded");
+    assert!(host.take_evicted().is_empty(), "service told the engine");
+    assert_eq!(
+        report.graph.placeholders,
+        vec![(gain, DISABLED.to_string())]
+    );
+    for _ in 0..500 {
+        peak(&mut be, 256);
+        host.idle();
+        if host.retiring() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(host.retiring(), 0, "the engine dropped them");
+
+    // Enabled again: both load with the captured state.
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", true);
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.synth4", true);
+    cat.apply(&mut host);
+    host.sync(hist.doc());
+    let r = host.wait_ready(WAIT);
+    assert_eq!(r.loaded.len(), 2, "{:?}", r.failed);
+    assert!(r.rejected_state.is_empty());
+    assert_eq!(
+        host.instance(gain).unwrap().param_value(ParamId(0)),
+        Some(0.3),
+        "the setting survived"
+    );
+    let report = engine.load(hist.doc(), song).unwrap();
+    assert!(report.graph.placeholders.is_empty());
+    drop(engine);
+}
+
+#[test]
+fn a_held_slot_stays_held_when_its_plugin_is_enabled_again() {
+    let (hist, _song, gain) = with_gain();
+    let mut host = host(4096);
+    host.hold(gain, Some("Plugins off".into()));
+    host.set_unavailable(
+        PluginFormat::Clap,
+        "vizdaw.test.gain",
+        Some("Disabled in Plugin Manager".into()),
+    );
+    host.sync(hist.doc());
+    assert!(!host.unloads_due());
+    host.set_unavailable(PluginFormat::Clap, "vizdaw.test.gain", None);
+    assert!(host.sync(hist.doc()), "nothing loads");
+    assert_eq!(
+        host.state(gain),
+        Some(core_host::SlotState::Failed("Plugins off".into()))
+    );
+}
+
+#[test]
+fn a_load_in_progress_of_a_disabled_plugin_is_abandoned() {
+    let (mut hist, _song, gain) = with_gain();
+    let mut host = host(4096);
+    host.sync(hist.doc());
+    assert_eq!(host.state(gain), Some(core_host::SlotState::Loading));
+    host.set_unavailable(
+        PluginFormat::Clap,
+        "vizdaw.test.gain",
+        Some("Disabled in Plugin Manager".into()),
+    );
+    assert!(!host.unloads_due(), "unavailable, not turned off");
+    host.set_disabled(PluginFormat::Clap, "vizdaw.test.gain", true);
+    assert!(host.unloads_due());
+    assert!(host.unload_unavailable(&mut hist).is_empty(), "nothing ran");
+    host.wait_ready(WAIT);
+    assert!(host.instance(gain).is_none());
+    assert_eq!(
+        host.state(gain),
+        Some(core_host::SlotState::Failed(
+            "Disabled in Plugin Manager".into()
+        ))
+    );
+}
+
+#[test]
+fn only_turning_a_plugin_off_unloads_it_blocklisted_and_missing_ones_keep_running() {
+    use core_host::catalog::{Catalog, CatalogEntry, ScanStatus, Source};
+    let (mut hist, song, gain) = with_gain();
+    let src = Source::clap_bundle(&test_plugins::bundle());
+    let entry = |status| CatalogEntry {
+        source: src.clone(),
+        plugin: plugin("vizdaw.test.gain"),
+        kind: Some(PluginKind::Effect),
+        info: None,
+        status,
+    };
+    let mut cat = Catalog::new();
+    cat.record(&src, vec![entry(ScanStatus::Ok)]);
+    let mut host = host(4096);
+    cat.apply(&mut host);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    let (mut engine, _be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    let live = |h: &PluginHost| h.state(gain) == Some(core_host::SlotState::Live);
+    assert!(live(&host));
+
+    // A rescan blocklists it (it timed out): it keeps running.
+    cat.record(
+        &src,
+        vec![entry(ScanStatus::Blocklisted {
+            reason: "timed out".into(),
+        })],
+    );
+    cat.apply(&mut host);
+    assert!(!host.unloads_due());
+    host.sync(hist.doc());
+    host.service(&mut engine, hist.doc(), song).unwrap();
+    assert!(live(&host), "{:?}", host.state(gain));
+
+    // Its bundle went missing: it keeps running too.
+    cat.record(&src, vec![entry(ScanStatus::Ok)]);
+    cat.mark_found(&[]);
+    cat.apply(&mut host);
+    assert!(!host.unloads_due());
+    host.service(&mut engine, hist.doc(), song).unwrap();
+    assert!(live(&host));
+
+    // Turned off by the user: unloaded (also while missing).
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", false);
+    cat.apply(&mut host);
+    assert!(host.unloads_due());
+    assert_eq!(host.unload_unavailable(&mut hist).len(), 1);
+    assert!(host.instance(gain).is_none());
+    // On again but still missing: it waits as a placeholder.
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", true);
+    cat.apply(&mut host);
+    assert!(!host.unloads_due());
+    assert_eq!(
+        host.state(gain),
+        Some(core_host::SlotState::Failed("Missing".into()))
+    );
+    drop(engine);
+}

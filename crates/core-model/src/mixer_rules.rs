@@ -311,19 +311,11 @@ pub fn mixer_problems(doc: &Document) -> Vec<String> {
     p
 }
 
-/// Strips that sound under the current solo state (Plan Ruling 5):
-/// every strip when nothing is soloed; otherwise the soloed strips and
-/// every strip downstream or upstream of one through outputs and sends.
-pub fn audible(m: &Mixer) -> BTreeSet<StripId> {
-    let soloed: Vec<StripId> = m
-        .strips()
-        .values()
-        .filter(|s| s.solo)
-        .map(|s| s.id)
-        .collect();
-    if soloed.is_empty() {
-        return m.strips().keys().copied().collect();
-    }
+/// Per strip, the strips audible while it is soloed (Plan Ruling 5):
+/// itself and every strip downstream or upstream of it through outputs
+/// and sends (sidechains excluded). Shared by [`audible`] and the render
+/// graph's automatable solos (Plan 4d Ruling 11).
+pub fn solo_reach(m: &Mixer) -> BTreeMap<StripId, BTreeSet<StripId>> {
     let mut down: BTreeMap<StripId, Vec<StripId>> = BTreeMap::new();
     let mut up: BTreeMap<StripId, Vec<StripId>> = BTreeMap::new();
     for (a, b, k) in routing_edges(m) {
@@ -332,18 +324,40 @@ pub fn audible(m: &Mixer) -> BTreeSet<StripId> {
             up.entry(b).or_default().push(a);
         }
     }
-    let mut set: BTreeSet<StripId> = soloed.iter().copied().collect();
-    for adj in [&down, &up] {
-        let mut stack = soloed.clone();
-        let mut seen: BTreeSet<StripId> = BTreeSet::new();
-        while let Some(n) = stack.pop() {
-            for x in adj.get(&n).into_iter().flatten() {
-                if seen.insert(*x) {
-                    set.insert(*x);
-                    stack.push(*x);
+    m.strips()
+        .keys()
+        .map(|&s| {
+            let mut set = BTreeSet::from([s]);
+            for adj in [&down, &up] {
+                let mut stack = vec![s];
+                let mut seen: BTreeSet<StripId> = BTreeSet::new();
+                while let Some(n) = stack.pop() {
+                    for x in adj.get(&n).into_iter().flatten() {
+                        if seen.insert(*x) {
+                            set.insert(*x);
+                            stack.push(*x);
+                        }
+                    }
                 }
             }
-        }
+            (s, set)
+        })
+        .collect()
+}
+
+/// Strips that sound under the current solo state (Plan Ruling 5):
+/// every strip when nothing is soloed; otherwise the soloed strips and
+/// every strip downstream or upstream of one through outputs and sends.
+pub fn audible(m: &Mixer) -> BTreeSet<StripId> {
+    if !m.strips().values().any(|s| s.solo) {
+        return m.strips().keys().copied().collect();
     }
-    set
+    let reach = solo_reach(m);
+    m.strips()
+        .values()
+        .filter(|s| s.solo)
+        .filter_map(|s| reach.get(&s.id))
+        .flatten()
+        .copied()
+        .collect()
 }

@@ -250,6 +250,15 @@ pub fn load(package: &Path) -> Result<Document> {
     Ok(doc)
 }
 
+/// Loads the autosave copy at `autosave` (a file in the package's
+/// `Autosave/` folder) with the package's plugin state blobs ("Restore
+/// autosave", spec §10).
+pub fn load_autosave(package: &Path, autosave: &Path) -> Result<Document> {
+    let mut doc = from_json(&fs::read_to_string(autosave)?)?;
+    read_states(&mut doc, package);
+    Ok(doc)
+}
+
 /// Autosave copies in the package, newest first.
 pub fn list_autosaves(package: &Path) -> Result<Vec<PathBuf>> {
     let dir = package.join("Autosave");

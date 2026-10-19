@@ -372,6 +372,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-control"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "core-editor"
+version = "0.1.0"
+dependencies = [
+ "core-model",
+ "proptest",
+]
+
+[[package]]
 name = "core-engine"
 version = "0.1.0"
 dependencies = [
@@ -389,11 +406,18 @@ dependencies = [
 name = "core-ffi"
 version = "0.1.0"
 dependencies = [
+ "core-control",
+ "core-editor",
  "core-engine",
  "core-ffi",
+ "core-host",
  "core-model",
  "platform-macos",
+ "proptest",
+ "serde",
+ "serde_json",
  "tempfile",
+ "test-plugins",
  "thiserror",
  "uniffi",
 ]
@@ -925,6 +949,7 @@ dependencies = [
  "core-engine",
  "core-host",
  "core-model",
+ "objc2",
  "objc2-audio-toolbox",
  "objc2-core-audio",
  "objc2-core-audio-types",
@@ -1586,6 +1611,17 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vizctl"
+version = "0.1.0"
+dependencies = [
+ "core-control",
+ "core-engine",
+ "core-model",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "vizdaw-play"

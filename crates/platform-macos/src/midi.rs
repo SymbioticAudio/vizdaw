@@ -15,10 +15,10 @@ use objc2_core_foundation::{CFRetained, CFString};
 use objc2_core_midi::{
     MIDIClientCreate, MIDIClientDispose, MIDIClientRef, MIDIEndpointDispose, MIDIEndpointRef,
     MIDIEventList, MIDIEventPacket, MIDIGetDestination, MIDIGetNumberOfDestinations,
-    MIDIInputPortCreateWithProtocol, MIDIObjectGetIntegerProperty, MIDIObjectGetStringProperty,
-    MIDIObjectRef, MIDIOutputPortCreate, MIDIPortConnectSource, MIDIPortDispose, MIDIPortRef,
-    MIDIProtocolID, MIDIReceivedEventList, MIDISendEventList, MIDISourceCreateWithProtocol,
-    kMIDIPropertyName, kMIDIPropertyUniqueID,
+    MIDIGetNumberOfSources, MIDIGetSource, MIDIInputPortCreateWithProtocol,
+    MIDIObjectGetIntegerProperty, MIDIObjectGetStringProperty, MIDIObjectRef, MIDIOutputPortCreate,
+    MIDIPortConnectSource, MIDIPortDispose, MIDIPortRef, MIDIProtocolID, MIDIReceivedEventList,
+    MIDISendEventList, MIDISourceCreateWithProtocol, kMIDIPropertyName, kMIDIPropertyUniqueID,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::c_void;
@@ -27,6 +27,40 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+/// Virtual sources this process created (endpoint, unique ID, name), so
+/// note input never listens to its own output (a feedback loop).
+static OWN_SOURCES: Mutex<Vec<(MIDIEndpointRef, Option<i32>, String)>> = Mutex::new(Vec::new());
+
+fn register_own_source(e: MIDIEndpointRef, name: &str) {
+    // SAFETY: the property key is a static CFString.
+    let id = int_property(e, unsafe { kMIDIPropertyUniqueID });
+    if let Ok(mut own) = OWN_SOURCES.lock() {
+        own.push((e, id, name.to_string()));
+    }
+}
+
+fn unregister_own_source(e: MIDIEndpointRef) {
+    if let Ok(mut own) = OWN_SOURCES.lock() {
+        own.retain(|(o, _, _)| *o != e);
+    }
+}
+
+/// Whether a source (its endpoint ref, unique ID and name) is one of this
+/// process's own virtual sources. The ref or unique ID decides when known;
+/// the name is the fallback when the source's unique ID can't be read.
+fn is_own_source(
+    e: MIDIEndpointRef,
+    id: Option<i32>,
+    name: Option<&str>,
+    own: &[(MIDIEndpointRef, Option<i32>, String)],
+) -> bool {
+    own.iter().any(|(oe, oid, oname)| {
+        *oe == e
+            || (id.is_some() && id == *oid)
+            || (id.is_none() && name.is_some_and(|n| n == oname))
+    })
+}
 
 /// Packets per output ring.
 pub const MIDI_RING_CAPACITY: usize = 4096;
@@ -354,6 +388,13 @@ impl MidiSystem {
         Box::new(RingMidiOut { tx })
     }
 
+    /// The unique ID of a virtual source this system created.
+    pub fn virtual_source_unique_id(&self, name: &str) -> Option<i32> {
+        // SAFETY: the property key is a static CFString.
+        self.source(name)
+            .and_then(|e| int_property(e, unsafe { kMIDIPropertyUniqueID }))
+    }
+
     /// The endpoint of a virtual source this system created.
     fn source(&self, name: &str) -> Option<MIDIEndpointRef> {
         self.sources
@@ -384,6 +425,7 @@ impl MidiBackend for MidiSystem {
                     )
                 })?;
                 self.sources.push((name.to_string(), e));
+                register_own_source(e, name);
                 e
             }
         };
@@ -429,6 +471,7 @@ impl Drop for MidiSystem {
         // this point (the sender thread has stopped).
         unsafe {
             for (_, e) in &self.sources {
+                unregister_own_source(*e);
                 MIDIEndpointDispose(*e);
             }
             if let Some(p) = self.out_port {
@@ -615,6 +658,155 @@ impl Drop for MidiMonitor {
     }
 }
 
+/// What a [`NoteListener`] hands each received MIDI 1.0 message to (on
+/// CoreMIDI's thread). It must not block.
+pub type MessageSink = Box<dyn Fn(&[u8]) + Send + Sync>;
+
+/// Listens to every MIDI source present when it connects (plan 4c: notes
+/// played into the list editor). It has its own client, so output is never
+/// disturbed; sources added later are picked up by connecting again.
+pub struct NoteListener {
+    client: MIDIClientRef,
+    port: MIDIPortRef,
+    sources: u32,
+    source_ids: Vec<Option<i32>>,
+    _block: RcBlock<dyn Fn(NonNull<MIDIEventList>, *mut c_void)>,
+}
+
+// SAFETY: the client and port are plain CoreMIDI object references, usable
+// from any thread; the block is only called by CoreMIDI (its captures are
+// `Send + Sync`) and is dropped with the listener after the port is
+// disposed.
+unsafe impl Send for NoteListener {}
+
+impl NoteListener {
+    /// Creates client `name` and connects it to every source present now,
+    /// except this process's own virtual sources (listening to "VizDAW
+    /// Out" would feed played notes back into the input).
+    pub fn connect_all(name: &str, sink: MessageSink) -> Result<NoteListener, BackendError> {
+        NoteListener::connect(name, sink, false)
+    }
+
+    /// Like [`NoteListener::connect_all`] but also listening to this
+    /// process's own virtual sources (tests only: it is how a test can play
+    /// notes into a listener without an external device).
+    #[doc(hidden)]
+    pub fn connect_including_own(
+        name: &str,
+        sink: MessageSink,
+    ) -> Result<NoteListener, BackendError> {
+        NoteListener::connect(name, sink, true)
+    }
+
+    fn connect(
+        name: &str,
+        sink: MessageSink,
+        include_own: bool,
+    ) -> Result<NoteListener, BackendError> {
+        let mut client: MIDIClientRef = 0;
+        let cf = CFString::from_str(name);
+        // SAFETY: `client` is a valid out-pointer; no notification callback.
+        os("MIDIClientCreate", unsafe {
+            MIDIClientCreate(&cf, None, ptr::null_mut(), NonNull::from(&mut client))
+        })?;
+        // Scratch buffers reused across callbacks (CoreMIDI calls the block
+        // from one thread at a time, so the lock is never contended).
+        let scratch = Mutex::new((Vec::<Received>::new(), Vec::<u8>::new()));
+        let block = RcBlock::new(move |list: NonNull<MIDIEventList>, _src: *mut c_void| {
+            if let Ok(mut s) = scratch.try_lock() {
+                let (out, sx) = &mut *s;
+                out.clear();
+                decode(list, out, sx);
+                for r in out.iter() {
+                    sink(&r.bytes);
+                }
+            }
+        });
+        let mut port: MIDIPortRef = 0;
+        let pcf = CFString::from_str("VizDAW Notes In");
+        // SAFETY: valid client, out-pointer and block; CoreMIDI copies the
+        // block, and ours lives as long as the port anyway.
+        let made = os("MIDIInputPortCreateWithProtocol", unsafe {
+            MIDIInputPortCreateWithProtocol(
+                client,
+                &pcf,
+                MIDIProtocolID::Protocol_1_0,
+                NonNull::from(&mut port),
+                (&*block as *const block2::DynBlock<_>).cast_mut(),
+            )
+        });
+        if let Err(e) = made {
+            // SAFETY: the client was created above and is not used again.
+            unsafe {
+                MIDIClientDispose(client);
+            }
+            return Err(e);
+        }
+        // SAFETY: a pure query.
+        let n = unsafe { MIDIGetNumberOfSources() };
+        let mut sources = 0u32;
+        let mut source_ids = Vec::new();
+        let own = OWN_SOURCES.lock().map(|o| o.clone()).unwrap_or_default();
+        for i in 0..n {
+            // SAFETY: `i` is below the count just read.
+            let src = unsafe { MIDIGetSource(i) };
+            if src == 0 {
+                continue;
+            }
+            // SAFETY: the property keys are static CFStrings.
+            let (name_key, id_key) = unsafe { (kMIDIPropertyName, kMIDIPropertyUniqueID) };
+            let id = int_property(src, id_key);
+            if !include_own {
+                let sname = if id.is_none() {
+                    cfstring_property(src, name_key)
+                } else {
+                    None
+                };
+                if is_own_source(src, id, sname.as_deref(), &own) {
+                    continue;
+                }
+            }
+            // SAFETY: both objects are live; the port belongs to our client.
+            let ok = os("MIDIPortConnectSource", unsafe {
+                MIDIPortConnectSource(port, src, ptr::null_mut())
+            });
+            if ok.is_ok() {
+                sources = sources.saturating_add(1);
+                source_ids.push(id);
+            }
+        }
+        Ok(NoteListener {
+            client,
+            port,
+            sources,
+            source_ids,
+            _block: block,
+        })
+    }
+
+    /// How many sources it listens to.
+    pub fn sources(&self) -> u32 {
+        self.sources
+    }
+
+    /// The unique IDs of the sources it listens to (`None` when a source's
+    /// ID couldn't be read).
+    pub fn source_ids(&self) -> &[Option<i32>] {
+        &self.source_ids
+    }
+}
+
+impl Drop for NoteListener {
+    fn drop(&mut self) {
+        // SAFETY: the port and client belong to this listener and are not
+        // used again.
+        unsafe {
+            MIDIPortDispose(self.port);
+            MIDIClientDispose(self.client);
+        }
+    }
+}
+
 /// Nanoseconds to host-clock ticks (the timestamps CoreMIDI carries).
 pub fn ns_to_host(ns: u64) -> u64 {
     // SAFETY: pure conversion.
@@ -733,6 +925,17 @@ mod tests {
                 .skip(1)
                 .all(|&(t, cc)| t == 1_000 && cc == 123)
         );
+    }
+
+    #[test]
+    fn own_sources_match_by_ref_id_or_name_fallback() {
+        let own = vec![(7, Some(42), "VizDAW Out".to_string())];
+        assert!(is_own_source(7, None, None, &own));
+        assert!(is_own_source(8, Some(42), Some("Other"), &own));
+        assert!(is_own_source(9, None, Some("VizDAW Out"), &own));
+        assert!(!is_own_source(9, Some(43), Some("VizDAW Out"), &own));
+        assert!(!is_own_source(9, None, Some("Keyboard"), &own));
+        assert!(!is_own_source(9, Some(42), None, &[]));
     }
 
     #[test]

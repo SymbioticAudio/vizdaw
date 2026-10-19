@@ -29,6 +29,9 @@ jobs:
         run: cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Big lane read speed (release, spec 4a §3.1)
+        if: runner.os == 'macOS'
+        run: cargo test --release -p core-ffi --test events lane_events_of_100_000_events_is_fast
       - name: Device test (macOS runners have a null output device)
         if: runner.os == 'macOS'
         run: cargo test -p platform-macos --test hal -- --ignored || echo "no output device on this runner"
@@ -58,3 +61,8 @@ jobs:
         run: scripts/swift.sh test
       - name: App bundle
         run: scripts/make-app.sh
+      - name: End to end through the control channel (needs the runner's window server)
+        timeout-minutes: 20
+        run: cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1
+        env:
+          VIZDAW_E2E_APP: dist/VizDAW.app

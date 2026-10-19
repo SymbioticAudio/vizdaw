@@ -1,5 +1,6 @@
 //! Events: MIDI 2.0 channel-voice data, text, references and audio regions.
 
+use crate::automation::AutomationTarget;
 use crate::ids::{DestId, EventId, MediaId, SeqId};
 use crate::time::Tick;
 use im::Vector;
@@ -174,6 +175,14 @@ pub enum EventBody {
         /// Fade out.
         fade_out: Fade,
     },
+    /// An automation point: drives `target` to `value` from here (editors
+    /// spec §4d); values between points ramp unless the target is stepped.
+    Automation {
+        /// What it drives.
+        target: AutomationTarget,
+        /// Normalised value, finite, 0–1.
+        value: f64,
+    },
 }
 
 /// Event kinds, for rules and view filters.
@@ -200,6 +209,8 @@ pub enum EventKind {
     Reference,
     /// [`EventBody::AudioRegion`].
     AudioRegion,
+    /// [`EventBody::Automation`].
+    Automation,
 }
 
 impl EventBody {
@@ -216,6 +227,7 @@ impl EventBody {
             EventBody::Text { .. } => EventKind::Text,
             EventBody::Reference { .. } => EventKind::Reference,
             EventBody::AudioRegion { .. } => EventKind::AudioRegion,
+            EventBody::Automation { .. } => EventKind::Automation,
         }
     }
 
@@ -242,12 +254,15 @@ impl EventBody {
     }
 
     /// Whether this body is routed to a MIDI destination (everything except
-    /// references, audio regions and text meta-events, which the engine
-    /// ignores for routing).
+    /// references, audio regions, text meta-events and automation, which the
+    /// engine does not route).
     pub fn is_midi(&self) -> bool {
         !matches!(
             self,
-            EventBody::Reference { .. } | EventBody::AudioRegion { .. } | EventBody::Text { .. }
+            EventBody::Reference { .. }
+                | EventBody::AudioRegion { .. }
+                | EventBody::Text { .. }
+                | EventBody::Automation { .. }
         )
     }
 }

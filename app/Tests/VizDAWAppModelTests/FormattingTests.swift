@@ -39,7 +39,8 @@ import VizDAWCore
     @Test func positionCombinesBbuAndTime() {
         let t = TransportState(
             playing: true, seq: 1, tick: 0, positionBbu: "0.4.0", seconds: -0.5,
-            sampleRate: 48_000, device: "Offline", faults: [], report: [])
+            sampleRate: 48_000, device: "Offline", faults: [], report: [], hostTimeNs: 0,
+            ticksPerSecond: 30_720)
         #expect(Formatting.position(t) == "0.4.0  -0:00.500")
         #expect(Formatting.device(t) == "Offline · 48 kHz")
     }
@@ -53,14 +54,15 @@ import VizDAWCore
     @Test func deviceBeforeFirstPlay() {
         let t = TransportState(
             playing: false, seq: nil, tick: 0, positionBbu: "1.1.0", seconds: 0,
-            sampleRate: 0, device: "", faults: [], report: [])
+            sampleRate: 0, device: "", faults: [], report: [], hostTimeNs: 0,
+            ticksPerSecond: 30_720)
         #expect(Formatting.device(t) == "No output")
     }
 
     @Test func windowTitleMarksEdits() {
         var s = DocSnapshot(
             version: 0, title: "demo", dirty: false, undoLabel: nil, redoLabel: nil,
-            sequences: [], warnings: [])
+            sequences: [], warnings: [], laneRevs: [])
         #expect(Formatting.windowTitle(s) == "demo")
         s.dirty = true
         #expect(Formatting.windowTitle(s) == "demo — Edited")
