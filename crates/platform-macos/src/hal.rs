@@ -622,6 +622,35 @@ impl AudioBackend for CoreAudioBackend {
                 n,
             )?;
         }
+        if let Some(want) = cfg.sample_rate {
+            let now: f64 = get(
+                device,
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+            )?;
+            if (now - want).abs() > 0.5 {
+                // The device may refuse or take a moment: ask, then wait up
+                // to 1 s for it to report the new rate (5a Ruling 20).
+                let _ = set(
+                    device,
+                    kAudioDevicePropertyNominalSampleRate,
+                    kAudioObjectPropertyScopeGlobal,
+                    want,
+                );
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while std::time::Instant::now() < until {
+                    let r: f64 = get(
+                        device,
+                        kAudioDevicePropertyNominalSampleRate,
+                        kAudioObjectPropertyScopeGlobal,
+                    )?;
+                    if (r - want).abs() <= 0.5 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
         let sample_rate: f64 = get(
             device,
             kAudioDevicePropertyNominalSampleRate,

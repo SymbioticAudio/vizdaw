@@ -126,6 +126,11 @@ pub struct TransportState {
     pub host_time_ns: u64,
     /// Tempo at `tick` in ticks per second.
     pub ticks_per_second: f64,
+    /// The device runs at another rate than the project: regions are
+    /// muted (5a Ruling 20). Known only once a host exists, i.e. after the
+    /// first Play (F19).
+    #[uniffi(default = false)]
+    pub rate_mismatch: bool,
 }
 
 fn count(n: usize) -> u32 {

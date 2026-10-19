@@ -25,6 +25,7 @@ pub mod edit;
 pub mod editor;
 pub mod error;
 pub mod events;
+pub mod format;
 pub mod guard;
 pub mod host;
 pub mod input;
@@ -72,6 +73,7 @@ pub use events::{
     GroupChannel, LaneEvents, MarkerRow, MeterEntryRow, NoteAttributeRow, PerNoteKindRow,
     PerNotePoint, PerNoteValueRow, SequenceInfo, TempoPointRow, TextKindRow,
 };
+pub use format::{BitDepthRow, ProjectFormatRow, ProjectInfoRow, format_label, project_rates};
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
 pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};

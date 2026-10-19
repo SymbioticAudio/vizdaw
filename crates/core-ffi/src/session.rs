@@ -198,6 +198,10 @@ impl Inner {
     /// recompiles. A failure (or panic, which also resets the host) never
     /// fails the edit: it becomes a sticky fault.
     fn reload_host(&mut self, id: u64) {
+        // A format change (or its undo) moved the project rate: the host
+        // this session plays through goes, so the next Play asks the
+        // device for the new rate (Ruling 20).
+        host::reset_if_owner(id, f64::from(self.doc().settings().format.sample_rate));
         self.refresh_media(id, false);
         // The marker names any plugin the sync starts loading first.
         self.mark(id, true);
@@ -784,6 +788,27 @@ impl Session {
         })
     }
 
+    /// An untitled, empty project in `format` (the New Project sheet;
+    /// spec §4.1).
+    #[uniffi::constructor]
+    pub fn new_project(format: crate::format::ProjectFormatRow) -> Result<Arc<Session>, VizError> {
+        ffi_guard(|| {
+            let f = core_model::format::AudioFormat::from(format);
+            let mut doc = Document::new();
+            if f != doc.settings().format {
+                doc = core_model::command::apply(
+                    &doc,
+                    &Command::Settings(core_model::command::SettingsCmd::SetFormat {
+                        format: f,
+                        swaps: Vec::new(),
+                    }),
+                )?
+                .doc;
+            }
+            Session::with(doc, None, false)
+        })
+    }
+
     /// Opens the `.vizdaw` package at `path`.
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<Session>, VizError> {
@@ -1106,6 +1131,7 @@ impl Session {
                     report: h.report,
                     host_time_ns: h.host_time_ns,
                     ticks_per_second: crate::clock::ticks_per_second(doc, Some(h.seq), h.tick),
+                    rate_mismatch: h.rate_mismatch,
                 },
                 None => {
                     let tick = inner.cursor.unwrap_or(Tick::ZERO);
@@ -1124,6 +1150,7 @@ impl Session {
                         report: Vec::new(),
                         host_time_ns,
                         ticks_per_second: crate::clock::ticks_per_second(doc, seq, tick),
+                        rate_mismatch: false,
                     }
                 }
             })
@@ -2491,17 +2518,22 @@ impl Session {
                         vec![],
                     ),
                 },
-                // Task 11.
-                w @ Work::Convert { .. } => {
-                    discard(&root, w);
-                    row(
-                        id,
-                        kind,
-                        JobStateRow::Failed,
-                        Some("not yet".into()),
-                        vec![],
-                        vec![],
-                    )
+                Work::Convert { format, files, .. } => {
+                    let was_format = format.is_some();
+                    match apply_convert(inner, &root, format, files) {
+                        Ok((converted, problems)) => {
+                            changed |= !converted.is_empty() || was_format;
+                            row(id, kind, JobStateRow::Done, None, problems, converted)
+                        }
+                        Err((e, problems)) => row(
+                            id,
+                            kind,
+                            JobStateRow::Failed,
+                            Some(e.to_string()),
+                            problems,
+                            vec![],
+                        ),
+                    }
                 }
             };
             inner.jobs.finish(id, row);
@@ -2643,6 +2675,173 @@ fn apply_import(
     }
 }
 
+/// `(media, absolute file, stem)` per item to convert.
+type ConvertList = Vec<(core_model::ids::MediaId, PathBuf, String)>;
+
+/// One conversion job's result per media item: the new file, or why it
+/// failed.
+type ConvertFiles = Vec<(
+    core_model::ids::MediaId,
+    Result<core_media::import::Imported, String>,
+)>;
+
+/// What an applied conversion converted (media IDs, per-item problems), or
+/// why nothing was applied (with the per-item problems).
+type ConvertApplied = ImportApplied;
+
+/// `(media, absolute file, stem)` of the items `pick` chooses.
+fn convert_list(
+    inner: &Inner,
+    id: u64,
+    pick: impl Fn(core_model::ids::MediaId) -> bool,
+) -> ConvertList {
+    let root = inner.root(id);
+    inner
+        .doc()
+        .media()
+        .values()
+        .filter(|m| pick(m.id))
+        .map(|m| {
+            let (_, stem) = core_model::document::MediaItem::file_parts(&m.path);
+            (m.id, root.join(&m.path), stem)
+        })
+        .collect()
+}
+
+/// The conversion job's body: each file through the platform importer
+/// into the project's `Media/` in `format`. Every result is a new file
+/// under the first free name after the item's stem; the old files are
+/// only read (media files are write-once: Save As hard-links them between
+/// packages), and stay for undo.
+fn convert_files(
+    root: &Path,
+    items: ConvertList,
+    format: core_model::format::AudioFormat,
+    progress: &std::sync::atomic::AtomicU32,
+    cancel: &std::sync::atomic::AtomicBool,
+    kind: crate::jobs::JobKindRow,
+) -> crate::jobs::Work {
+    let importer = crate::media::importer();
+    let n = items.len().max(1) as f32;
+    let mut files: ConvertFiles = Vec::new();
+    for (k, (media, path, stem)) in items.into_iter().enumerate() {
+        let r = core_media::import::import_as(
+            importer.as_ref(),
+            &path,
+            root,
+            format,
+            &stem,
+            &mut |f| {
+                progress.store(
+                    ((k as f32 + f) / n).to_bits(),
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+            },
+            cancel,
+        );
+        match r {
+            Err(core_media::MediaError::Cancelled) => {
+                discard(
+                    root,
+                    crate::jobs::Work::Convert {
+                        kind,
+                        format: None,
+                        files,
+                    },
+                );
+                return crate::jobs::Work::Cancelled;
+            }
+            Ok(mut v) if v.len() == 1 => files.push((media, Ok(v.remove(0)))),
+            Ok(v) => {
+                discard(
+                    root,
+                    crate::jobs::Work::Import {
+                        files: vec![(stem.clone(), Ok(v))],
+                        target: None,
+                    },
+                );
+                files.push((media, Err(format!("{stem}: has more than two channels"))));
+            }
+            Err(e) => files.push((media, Err(format!("{stem}: {e}")))),
+        }
+    }
+    crate::jobs::Work::Convert {
+        kind,
+        format: (kind == crate::jobs::JobKindRow::Format).then_some(format),
+        files,
+    }
+}
+
+/// Applies a finished conversion. A format change applies only when every
+/// item converted (else nothing, the converted files are removed, and the
+/// failures are the message); a media conversion applies what converted
+/// and lists the rest as problems. Both swap the items to the new files
+/// and rescale their regions in one model step (`swap_media`); the old
+/// files are left as they are.
+fn apply_convert(
+    inner: &mut Inner,
+    root: &Path,
+    format: Option<core_model::format::AudioFormat>,
+    files: ConvertFiles,
+) -> ConvertApplied {
+    use core_model::command::{MediaCmd, MediaSwap, SettingsCmd};
+    let mut swaps = Vec::new();
+    let mut problems = Vec::new();
+    for (m, r) in &files {
+        match r {
+            Ok(i) => swaps.push(MediaSwap {
+                media: *m,
+                path: i.path.clone(),
+                length_frames: i.length_frames,
+                content_hash: Some(i.content_hash.clone()),
+            }),
+            Err(e) => problems.push(e.clone()),
+        }
+    }
+    // Only this job's new files: never referenced by any document yet.
+    let remove = |files: &ConvertFiles| {
+        for (_, r) in files {
+            if let Ok(i) = r {
+                let _ = std::fs::remove_file(root.join(&i.path));
+            }
+        }
+    };
+    let cmd = match format {
+        Some(f) => {
+            if !problems.is_empty() {
+                remove(&files);
+                return Err((
+                    VizError::Model {
+                        message: problems.join("; "),
+                    },
+                    problems,
+                ));
+            }
+            Command::Settings(SettingsCmd::SetFormat { format: f, swaps })
+        }
+        None => {
+            if swaps.is_empty() {
+                return Ok((Vec::new(), problems));
+            }
+            Command::Media(MediaCmd::Convert { swaps })
+        }
+    };
+    match inner.history.execute(&cmd, &ViewFilter::default()) {
+        Ok(_) => Ok((
+            files
+                .iter()
+                .filter(|(_, r)| r.is_ok())
+                .map(|(m, _)| m.0)
+                .collect(),
+            problems,
+        )),
+        Err(e) => {
+            remove(&files);
+            Err((e.into(), problems))
+        }
+    }
+}
+
 /// Media and jobs (plan 5a Task 10).
 #[uniffi::export]
 impl Session {
@@ -2728,6 +2927,137 @@ impl Session {
                         }
                     }
                     crate::jobs::Work::Import { files, target }
+                })
+        })
+    }
+
+    /// The project's format, its mismatched media and the device's rate
+    /// (known once this session has played: the host asks the device at
+    /// Play, Ruling 20 / F19).
+    pub fn project_info(&self) -> Result<crate::format::ProjectInfoRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let mismatched = inner
+                .offline
+                .values()
+                .filter(|r| {
+                    matches!(
+                        r,
+                        crate::media::OfflineReasonRow::Format
+                            | crate::media::OfflineReasonRow::Unreadable
+                    )
+                })
+                .count();
+            let (rate_mismatch, device_rate) = host::device(self.id).unwrap_or((false, 0.0));
+            Ok(crate::format::ProjectInfoRow {
+                format: inner.doc().settings().format.into(),
+                mismatched: u32::try_from(mismatched).unwrap_or(u32::MAX),
+                rate_mismatch,
+                device_rate,
+            })
+        })
+    }
+
+    /// Starts changing the project format: every media file is converted
+    /// into the new format, as new files (a job; spec §4.1, §5.1). Refused
+    /// at once for the same format or an invalid rate; the job fails,
+    /// changing nothing, when a file is missing, of another length or
+    /// cannot be converted. Applied as one undo step "Change Project
+    /// Format"; the engine host then reopens at the new rate.
+    pub fn set_project_format(
+        &self,
+        format: crate::format::ProjectFormatRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let f = core_model::format::AudioFormat::from(format);
+            let mut inner = lock(&self.inner);
+            if !f.is_valid() {
+                return Err(VizError::Model {
+                    message: format!("{} Hz is not a project rate", f.sample_rate),
+                });
+            }
+            if f == inner.doc().settings().format {
+                return Err(VizError::Model {
+                    message: "the project is already in that format".into(),
+                });
+            }
+            inner.refresh_media(self.id, false);
+            let blocked: Vec<String> = inner
+                .doc()
+                .media()
+                .values()
+                .filter(|m| {
+                    matches!(
+                        inner.offline.get(&m.id),
+                        Some(
+                            crate::media::OfflineReasonRow::Missing
+                                | crate::media::OfflineReasonRow::Length
+                        )
+                    )
+                })
+                .map(|m| m.name.clone())
+                .collect();
+            let items = convert_list(&inner, self.id, |_| true);
+            let root = inner.root(self.id);
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Format, move |progress, cancel| {
+                    if !blocked.is_empty() {
+                        return crate::jobs::Work::Convert {
+                            kind: crate::jobs::JobKindRow::Format,
+                            format: Some(f),
+                            files: vec![(
+                                core_model::ids::MediaId(u64::MAX),
+                                Err(format!(
+                                    "missing or changed media must be relinked first: {}",
+                                    blocked.join(", ")
+                                )),
+                            )],
+                        };
+                    }
+                    convert_files(
+                        &root,
+                        items,
+                        f,
+                        progress,
+                        cancel,
+                        crate::jobs::JobKindRow::Format,
+                    )
+                })
+        })
+    }
+
+    /// Starts converting the media that is not in the project format
+    /// (another rate or depth, or not a VizDAW CAF) into it, as new files
+    /// (the banner's "Convert"; a job, one undo step "Convert Media").
+    pub fn convert_media(&self) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let offline = inner.offline.clone();
+            let items = convert_list(&inner, self.id, |m| {
+                matches!(
+                    offline.get(&m),
+                    Some(
+                        crate::media::OfflineReasonRow::Format
+                            | crate::media::OfflineReasonRow::Unreadable
+                    )
+                )
+            });
+            let f = inner.doc().settings().format;
+            let root = inner.root(self.id);
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Convert, move |progress, cancel| {
+                    convert_files(
+                        &root,
+                        items,
+                        f,
+                        progress,
+                        cancel,
+                        crate::jobs::JobKindRow::Convert,
+                    )
                 })
         })
     }

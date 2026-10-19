@@ -23,22 +23,32 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// Offline sample rate.
-pub const OFFLINE_RATE: f64 = 48_000.0;
+/// A rate offline hosts run at instead of the project's (f64 bits; 0:
+/// follow the project, 5a Ruling 20).
+static OFFLINE_RATE_BITS: AtomicU64 = AtomicU64::new(0);
 
-/// The offline rate in use (f64 bits): `OFFLINE_RATE` unless a test set
-/// another (`set_offline_rate`).
-static OFFLINE_RATE_BITS: AtomicU64 = AtomicU64::new(0x40E7_7000_0000_0000);
-
-fn offline_rate() -> f64 {
-    f64::from_bits(OFFLINE_RATE_BITS.load(Ordering::Relaxed))
+/// The offline device's rate for a project at `project` Hz.
+fn offline_rate(project: f64) -> f64 {
+    let r = f64::from_bits(OFFLINE_RATE_BITS.load(Ordering::Relaxed));
+    if r > 0.0 { r } else { project }
 }
 
-/// Makes offline hosts created from now on run at `rate` (test hook: a
-/// device whose rate changed).
+/// Makes offline hosts created from now on run at `rate` whatever the
+/// project's rate (test hook: a device that refused it); 0 follows the
+/// project again.
 #[cfg(feature = "test-hooks")]
 pub fn set_offline_rate(rate: f64) {
     OFFLINE_RATE_BITS.store(rate.to_bits(), Ordering::Relaxed);
+}
+
+/// Two rates are the same within half a hertz.
+fn same_rate(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 0.5
+}
+
+/// The rate a host for `doc` asks the device for: the project rate.
+fn project_rate(doc: &Document) -> f64 {
+    f64::from(doc.settings().format.sample_rate)
 }
 /// Offline block size.
 pub const OFFLINE_BLOCK: u32 = 512;
@@ -245,8 +255,7 @@ struct OfflineDriver {
 }
 
 impl OfflineDriver {
-    fn start(renderer: Renderer) -> Result<OfflineDriver, VizError> {
-        let rate = offline_rate();
+    fn start(renderer: Renderer, rate: f64) -> Result<OfflineDriver, VizError> {
         let mut backend = OfflineBackend::new(rate, OFFLINE_BLOCK);
         backend.start(renderer)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -320,6 +329,12 @@ struct Host {
     epoch: u64,
     device: String,
     sample_rate: f64,
+    /// The project rate this host was opened for (the device was asked
+    /// for it; Ruling 20).
+    project_rate: f64,
+    /// The device runs at another rate than `project_rate`: regions are
+    /// muted.
+    rate_mismatch: bool,
     report: Vec<String>,
     faults: Vec<String>,
     /// Instances the engine bypassed for faults (sticky for this engine,
@@ -334,36 +349,44 @@ struct Host {
 }
 
 impl Host {
-    fn create() -> Result<Host, VizError> {
-        let h = Host::create_any()?;
+    /// A host for a project at `project` Hz: the device is asked for that
+    /// rate; when it runs at another, regions are muted (Ruling 20).
+    fn create(project: f64) -> Result<Host, VizError> {
+        let mut h = Host::create_any(project)?;
         if STALL_DISK.load(Ordering::Relaxed) {
             h.engine.streamer().set_stalled(true);
         }
+        h.project_rate = project;
+        h.rate_mismatch = !same_rate(h.sample_rate, project);
+        h.engine.set_regions_muted(h.rate_mismatch);
         Ok(h)
     }
 
-    fn create_any() -> Result<Host, VizError> {
+    fn create_any(project: f64) -> Result<Host, VizError> {
         HOSTS_CREATED.fetch_add(1, Ordering::Relaxed);
         if offline_mode() {
             let sinks = OfflineSinks::new(1 << 16);
             let log = sinks.log();
-            let rate = offline_rate();
+            let rate = offline_rate(project);
             let (engine, renderer) = Engine::new(EngineConfig::new(rate), Box::new(sinks))?;
-            let output = Output::Offline(OfflineDriver::start(renderer)?);
+            let output = Output::Offline(OfflineDriver::start(renderer, rate)?);
             return Ok(Host::new(engine, output, OFFLINE_DEVICE, rate, Some(log)));
         }
-        Host::create_live()
+        Host::create_live(project)
     }
 
     #[cfg(target_os = "macos")]
-    fn create_live() -> Result<Host, VizError> {
+    fn create_live(project: f64) -> Result<Host, VizError> {
         use core_engine::backend::AudioConfig;
         use platform_macos::hal::CoreAudioBackend;
         use platform_macos::rt::MacRtPlatform;
         use platform_macos::sinks::MacSinks;
         use std::sync::Arc;
         let mut backend = CoreAudioBackend::new();
-        let info = backend.open(&AudioConfig::default())?;
+        let info = backend.open(&AudioConfig {
+            sample_rate: Some(project),
+            ..AudioConfig::default()
+        })?;
         let (engine, renderer) = Engine::with_platform(
             live_config(info.sample_rate),
             Box::new(MacSinks::new()),
@@ -381,7 +404,7 @@ impl Host {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn create_live() -> Result<Host, VizError> {
+    fn create_live(_project: f64) -> Result<Host, VizError> {
         Err(VizError::NoDevice {
             message: "live audio is macOS-only; set VIZDAW_AUDIO=offline".into(),
         })
@@ -407,6 +430,8 @@ impl Host {
             epoch: next_epoch(),
             device: device.to_string(),
             sample_rate,
+            project_rate: sample_rate,
+            rate_mismatch: false,
             report: Vec::new(),
             faults: Vec::new(),
             faulted: std::collections::BTreeSet::new(),
@@ -619,7 +644,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     // Read once the old output has stopped (dropped first, below).
     let overrides = old.engine.overrides();
     drop(old);
-    let mut new = Host::create()?;
+    let mut new = Host::create(project_rate(doc))?;
     new.attach(owner, plugins);
     // Automated values held while stopped survive the rebuild (Plan 4d
     // Ruling 13, final review Minor 1).
@@ -686,6 +711,9 @@ pub struct HostState {
     pub faults: Vec<String>,
     /// Last compile report.
     pub report: Vec<String>,
+    /// The device runs at another rate than the project: regions are
+    /// muted (Ruling 20).
+    pub rate_mismatch: bool,
 }
 
 /// A Play [`play`] prepared; [`finish_play`] waits for the disk and
@@ -712,6 +740,7 @@ pub fn play(
     looped: bool,
     mut plugins: Option<&mut PluginHost>,
 ) -> Result<HostPlay, VizError> {
+    let project = project_rate(doc);
     let mut slot = loop {
         let mut slot = lock(&HOST);
         // Device events nobody polled (the host had no owner, or another
@@ -734,13 +763,13 @@ pub fn play(
             rebuild(r, doc, plugins.as_deref_mut())?;
             continue;
         }
-        // Another session's plugins played here: a fresh engine, so none
-        // of its instances is taken for this document's (same-numbered)
-        // slots.
-        if slot
-            .as_ref()
-            .is_some_and(|h| h.factory_owner != owner && h.plugins_in_engine)
-        {
+        // Another session's plugins played here, or the host was opened for
+        // another project rate: a fresh engine (for plugins: so none of its
+        // instances is taken for this document's same-numbered slots; for
+        // rates: so the device is asked for this project's, Ruling 20).
+        if slot.as_ref().is_some_and(|h| {
+            (h.factory_owner != owner && h.plugins_in_engine) || !same_rate(h.project_rate, project)
+        }) {
             let mut old = slot.take();
             if let Some(h) = old.as_mut() {
                 // Its played and auditioned notes end before the engine
@@ -758,7 +787,7 @@ pub fn play(
         break slot;
     };
     if slot.is_none() {
-        *slot = Some(Host::create()?);
+        *slot = Some(Host::create(project)?);
     }
     let host = slot.as_mut().ok_or_else(|| VizError::Internal {
         message: "engine host missing".into(),
@@ -955,7 +984,36 @@ pub fn state(
         device: h.device.clone(),
         faults: h.faults.clone(),
         report: h.report.clone(),
+        rate_mismatch: h.rate_mismatch,
     }))
+}
+
+/// `(rate_mismatch, device rate)` if `owner` holds the engine.
+pub fn device(owner: u64) -> Option<(bool, f64)> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| (h.rate_mismatch, h.sample_rate))
+}
+
+/// Drops the host if `owner` holds it and it was opened for another
+/// project rate than `project` (a format change, or its undo; Ruling 20):
+/// playback stops and the next Play asks the device for the new rate. The
+/// note-offs drain without the host lock, as in [`reset`].
+pub fn reset_if_owner(owner: u64, project: f64) {
+    let mut slot = lock(&HOST);
+    if !slot
+        .as_ref()
+        .is_some_and(|h| h.owner == owner && !same_rate(h.project_rate, project))
+    {
+        return;
+    }
+    let mut old = slot.take();
+    drop(slot);
+    if let Some(h) = old.as_mut() {
+        let _ = h.engine.stop();
+    }
+    retire(old);
 }
 
 /// Releases the engine if `owner` holds it (a session is closing).

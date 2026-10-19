@@ -354,6 +354,26 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return j
     }
     func cancelJob(id: UInt64) throws {}
+    var info = ProjectInfoRow(
+        format: ProjectFormatRow(sampleRate: 48_000, depth: .int24), mismatched: 0, rateMismatch: false,
+        deviceRate: 0)
+    var formatChanges: [ProjectFormatRow] = []
+    var conversions = 0
+    func projectInfo() throws -> ProjectInfoRow { info }
+    func setProjectFormat(format: ProjectFormatRow) throws -> UInt64 {
+        formatChanges.append(format)
+        info.format = format
+        let id = UInt64(1000 + formatChanges.count)
+        jobRows[id] = JobRow(id: id, kind: .format, progress: 1, state: .done, message: nil, problems: [], created: [])
+        return id
+    }
+    func convertMedia() throws -> UInt64 {
+        conversions += 1
+        info.mismatched = 0
+        let id = UInt64(2000 + conversions)
+        jobRows[id] = JobRow(id: id, kind: .convert, progress: 1, state: .done, message: nil, problems: [], created: [])
+        return id
+    }
 
     // MARK: Editor reads (plan 4a)
 

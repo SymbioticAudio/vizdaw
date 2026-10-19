@@ -24,6 +24,9 @@ pub struct AudioConfig {
     pub device: Option<String>,
     /// Requested buffer size in frames (32–2048); `None` keeps the device's.
     pub buffer_frames: Option<u32>,
+    /// Requested nominal sample rate (the project rate, 5a); `None` keeps
+    /// the device's. `StreamInfo::sample_rate` says what it runs at.
+    pub sample_rate: Option<f64>,
 }
 
 /// What a backend opened.
