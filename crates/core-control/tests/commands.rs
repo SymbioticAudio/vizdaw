@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        108,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry"
+        111,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -741,4 +741,95 @@ mod fuzz {
             }
         }
     }
+}
+
+#[test]
+fn file_new_takes_a_format() {
+    let Command::CommandRun { args, .. } = ok(
+        "command.run",
+        json!({ "id": "file.new", "params": { "rate": "44100", "depth": "16" } }),
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        args,
+        vec![
+            ("rate".to_string(), ArgValue::Text("44100".into())),
+            ("depth".to_string(), ArgValue::Text("16".into()))
+        ]
+    );
+    let (code, msg) = err(
+        "command.run",
+        json!({ "id": "file.new", "params": { "rate": "22050" } }),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+    assert!(msg.contains("rate"), "{msg}");
+}
+
+#[test]
+fn media_import_takes_any_absolute_file_and_a_place() {
+    let Command::CommandRun { args, .. } = ok(
+        "command.run",
+        json!({ "id": "media.import",
+                "params": { "path": "/tmp/a b.wav", "seq": 1, "lane": 2, "tick": 3840 } }),
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        args,
+        vec![
+            ("path".to_string(), ArgValue::Text("/tmp/a b.wav".into())),
+            ("seq".to_string(), ArgValue::Int(1)),
+            ("lane".to_string(), ArgValue::Int(2)),
+            ("tick".to_string(), ArgValue::Int(3840)),
+        ]
+    );
+    // The dialog is answered only by `path`.
+    let (code, _) = err("command.run", json!({ "id": "media.import" }));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    let (code, _) = err(
+        "command.run",
+        json!({ "id": "media.import", "params": { "path": "relative.wav" } }),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+    let (code, _) = err(
+        "command.run",
+        json!({ "id": "media.import", "params": { "path": "/a.wav", "seq": -1 } }),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+}
+
+#[test]
+fn project_settings_is_a_dialog_without_a_format() {
+    let (code, _) = err("command.run", json!({ "id": "file.project_settings" }));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(matches!(
+        ok(
+            "command.run",
+            json!({ "id": "file.project_settings", "params": { "depth": "32f" } })
+        ),
+        Command::CommandRun { .. }
+    ));
+    assert!(matches!(
+        ok("command.run", json!({ "id": "media.convert" })),
+        Command::CommandRun { .. }
+    ));
+}
+
+#[test]
+fn state_get_media_and_project() {
+    assert!(matches!(
+        ok("state.get", json!({ "target": "media" })),
+        Command::StateGet {
+            target: StateTarget::Media,
+            ..
+        }
+    ));
+    assert!(matches!(
+        ok("state.get", json!({ "target": "project" })),
+        Command::StateGet {
+            target: StateTarget::Project,
+            ..
+        }
+    ));
 }

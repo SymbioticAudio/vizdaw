@@ -146,6 +146,18 @@ impl<'a> Params<'a> {
         Ok(Some(p))
     }
 
+    /// An optional absolute path with any extension (a file to import).
+    pub fn opt_file(&self, name: &str) -> Result<Option<PathBuf>, ControlError> {
+        let Some(s) = self.opt_str(name, MAX_PATH)? else {
+            return Ok(None);
+        };
+        let p = PathBuf::from(&s);
+        if s.len() > MAX_PATH || s.contains('\0') || !p.is_absolute() {
+            return Err(self.error(format!("`{name}` must be an absolute path")));
+        }
+        Ok(Some(p))
+    }
+
     /// The optional `window`: a window number, `"key"` or `"main"`.
     pub fn window(&self) -> Result<Option<WindowRef>, ControlError> {
         match self.raw("window") {

@@ -10,6 +10,39 @@ public enum ControlOutcome {
     /// Document `doc` was made or opened; the app answers once its window
     /// is up. `command` is the registry ID (nil for `app.*`).
     case opened(command: String?, doc: UUID)
+    /// A job started (import, conversion): the app answers when it ends.
+    case job(command: String, doc: UUID, job: UInt64)
+}
+
+/// The project formats as the channel spells them (5a Ruling 16).
+public enum ControlFormats {
+    /// `rate`/`depth` strings to a format, `base` filling what they leave
+    /// out; nil when either is not a project rate or depth.
+    public static func parse(
+        rate: String?, depth: String?,
+        base: ProjectFormatRow = ProjectFormatRow(sampleRate: 48_000, depth: .int24)
+    ) -> ProjectFormatRow? {
+        var f = base
+        if let r = rate {
+            guard let n = UInt32(r), projectRates().contains(n) else { return nil }
+            f.sampleRate = n
+        }
+        if let d = depth {
+            switch d {
+            case "16": f.depth = .int16
+            case "24": f.depth = .int24
+            case "32f": f.depth = .float32
+            default: return nil
+            }
+        }
+        return f
+    }
+
+    /// The format a call's arguments ask for, `base` filling what they
+    /// leave out.
+    public static func format(args: [ControlArg], default base: ProjectFormatRow) -> ProjectFormatRow? {
+        parse(rate: args.text("rate"), depth: args.text("depth"), base: base)
+    }
 }
 
 extension ControlFailure {
@@ -37,6 +70,14 @@ extension Array where Element == ControlArg {
     public func text(_ name: String) -> String? {
         for a in self where a.name == name {
             if case .text(let v) = a.value { return v }
+        }
+        return nil
+    }
+
+    /// The integer argument `name`.
+    public func int(_ name: String) -> Int64? {
+        for a in self where a.name == name {
+            if case .int(let v) = a.value { return v }
         }
         return nil
     }
@@ -93,6 +134,7 @@ public enum ControlCommands {
         "modify.template", "modify.exact_mode", "sequence.make_reference", "sequence.back",
         "transport.play_stop", "transport.loop", "transport.return_to_start",
         "keys.save", "keys.load", "keys.reset",
+        "file.project_settings", "media.import", "media.convert",
     ]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
@@ -114,7 +156,11 @@ public enum ControlCommands {
     ) -> ControlOutcome {
         guard handled.contains(id) else { return .failed(.of(.unknownId, "VizDAW has no handler for \(id).")) }
         switch id {
-        case "file.new": return made(id, store.newEmpty(), store)
+        case "file.new":
+            guard let f = ControlFormats.format(args: args, default: store.defaultFormat) else {
+                return .failed(.of(.invalidParams, "`rate` or `depth` is not a project format"))
+            }
+            return made(id, store.newProject(f), store)
         case "file.create_demo": return made(id, store.newDemo(), store)
         case "file.create_demo_audio": return made(id, store.newDemoAudio(), store)
         case "file.open":
@@ -171,6 +217,36 @@ public enum ControlCommands {
                 return .failed(.thrown(error, undo ? "Undo Failed" : "Redo Failed"))
             }
             m.editor.refreshSelection()
+        case "file.project_settings":
+            let base = (try? m.session.projectInfo().format) ?? store.defaultFormat
+            guard let f = ControlFormats.format(args: args, default: base),
+                args.text("rate") != nil || args.text("depth") != nil
+            else {
+                return .failed(args.text("rate") == nil && args.text("depth") == nil
+                    ? .dialog("Project Settings", "rate")
+                    : .of(.invalidParams, "`rate` or `depth` is not a project format"))
+            }
+            do {
+                return .job(command: id, doc: docID, job: try m.session.setProjectFormat(format: f))
+            } catch {
+                return .failed(.thrown(error, "Project Settings Failed"))
+            }
+        case "media.import":
+            guard let path = args.text("path") else { return .failed(.dialog("Open", "path")) }
+            let target = args.int("seq").map {
+                ImportTargetRow(seq: UInt64($0), lane: args.int("lane").map { UInt64($0) }, tick: args.int("tick") ?? 0)
+            }
+            do {
+                return .job(command: id, doc: docID, job: try m.session.importAudio(paths: [path], target: target))
+            } catch {
+                return .failed(.thrown(error, "Import Failed"))
+            }
+        case "media.convert":
+            do {
+                return .job(command: id, doc: docID, job: try m.session.convertMedia())
+            } catch {
+                return .failed(.thrown(error, "Convert Failed"))
+            }
         case "window.mixer":
             host.showMixer(docID)
         case _ where detail[id] != nil:
@@ -420,6 +496,11 @@ public enum ControlStates {
                     marks: marksRow(e.layout.transport)))
         case .selection:
             return .selection(doc: doc, selection: m.editor.selection)
+        case .media:
+            return .media(doc: doc, items: (try? m.session.media()) ?? [])
+        case .project:
+            guard let info = try? m.session.projectInfo() else { return nil }
+            return .project(doc: doc, info: info)
         case .windows:
             return nil
         }

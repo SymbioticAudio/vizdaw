@@ -370,3 +370,43 @@ fn the_editor_state_shows_step_entry_and_the_transport_marks() {
         json!({"seq": 3, "lane": 31, "tick": 7_680, "value": "eighth", "dotted": true, "triplet": false, "steps": 2})
     );
 }
+
+#[test]
+fn media_and_project_results_as_json() {
+    use vizdaw_ffi::{
+        BitDepthRow, MediaOriginRow, MediaRow, OfflineReasonRow, ProjectFormatRow, ProjectInfoRow,
+    };
+    let v = result_json(&ControlResult::Media {
+        doc: "D".into(),
+        items: vec![MediaRow {
+            id: 2,
+            name: "kick".into(),
+            path: "Media/kick.caf".into(),
+            channels: 2,
+            frames: 10,
+            sample_rate: 48_000,
+            origin: MediaOriginRow::Imported,
+            original_name: Some("kick.wav".into()),
+            offline: Some(OfflineReasonRow::Format),
+            uses: 3,
+        }],
+    });
+    assert_eq!(v["items"][0]["offline_reason"], "format");
+    assert_eq!(v["items"][0]["offline"], true);
+    let p = result_json(&ControlResult::Project {
+        doc: "D".into(),
+        info: ProjectInfoRow {
+            format: ProjectFormatRow {
+                sample_rate: 44_100,
+                depth: BitDepthRow::Float32,
+            },
+            mismatched: 1,
+            rate_mismatch: true,
+            device_rate: 48_000.0,
+        },
+    });
+    assert_eq!(p["rate"], json!(44_100));
+    assert_eq!(p["depth"], json!("32f"));
+    assert_eq!(p["label"], json!("44.1 kHz, 32-bit float"));
+    assert_eq!(p["rate_mismatch"], json!(true));
+}

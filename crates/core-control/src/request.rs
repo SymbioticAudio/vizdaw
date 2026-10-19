@@ -51,6 +51,10 @@ pub enum StateTarget {
     Selection,
     /// Every VizDAW window, plus app-level alerts.
     Windows,
+    /// Its media pool (5a).
+    Media,
+    /// Its project format and device rate (5a).
+    Project,
 }
 
 /// Where a click or drag lands.
@@ -223,9 +227,11 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 "editor" => StateTarget::Editor,
                 "selection" => StateTarget::Selection,
                 "windows" => StateTarget::Windows,
+                "media" => StateTarget::Media,
+                "project" => StateTarget::Project,
                 _ => {
                     return Err(p.error(
-                        "`target` must be transport, document, editor, selection or windows",
+                        "`target` must be transport, document, editor, selection, windows, media or project",
                     ));
                 }
             };

@@ -286,4 +286,78 @@ final class FakeControlHost: ControlHost {
         #expect(ControlLaunch.socketPath(arguments: ["VizDAW", "--control"], environment: [:]) == nil)
         #expect(ControlLaunch.strip(["VizDAW", "--control", "/a/x.vizdaw", "--demo"]) == ["VizDAW", "--demo"])
     }
+
+    // MARK: Plan 5a: formats, import, conversion, media and project state
+
+    /// A store with no document, and this suite's host (thin wrapper).
+    func makeStoreAndHost() -> (DocumentStore, FakeControlHost) {
+        (DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() }), host)
+    }
+
+    /// The demo document: store, host, ID, model and fake session (thin
+    /// wrapper over `demo()`).
+    func makeDocument() throws -> (DocumentStore, FakeControlHost, UUID, DocumentModel, FakeSession) {
+        let (s, id, m, f) = try demo()
+        return (s, host, id, m, f)
+    }
+
+    @Test func fileNewTakesRateAndDepth() throws {
+        let (store, host) = makeStoreAndHost()
+        var made: ProjectFormatRow?
+        store.makeProject = { f in made = f; return FakeSession([]) }
+        _ = ControlCommands.run(
+            "file.new", args: [ControlArg(name: "rate", value: .text(value: "96000"))], doc: nil,
+            store: store, host: host)
+        #expect(made == ProjectFormatRow(sampleRate: 96_000, depth: store.defaultFormat.depth))
+    }
+
+    @Test func formatsParseTheChannelsSpelling() {
+        #expect(ControlFormats.parse(rate: "44100", depth: "16") == ProjectFormatRow(sampleRate: 44_100, depth: .int16))
+        #expect(ControlFormats.parse(rate: nil, depth: "32f")?.depth == .float32)
+        #expect(ControlFormats.parse(rate: "nope", depth: nil) == nil)
+    }
+
+    @Test func mediaImportStartsAJobAndAnswersLater() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        let out = ControlCommands.run(
+            "media.import",
+            args: [
+                ControlArg(name: "path", value: .text(value: "/tmp/x.wav")),
+                ControlArg(name: "seq", value: .int(value: 4)),
+                ControlArg(name: "tick", value: .int(value: 960)),
+            ],
+            doc: (id, model), store: store, host: host)
+        guard case .job(let command, let doc, let job) = out else { Issue.record("\(out)"); return }
+        #expect(command == "media.import" && doc == id && job == 1)
+        #expect(fake.imports.first?.0 == ["/tmp/x.wav"])
+        #expect(fake.imports.first?.1 == ImportTargetRow(seq: 4, lane: nil, tick: 960))
+    }
+
+    @Test func projectSettingsChangesTheFormatAsAJob() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        let out = ControlCommands.run(
+            "file.project_settings", args: [ControlArg(name: "depth", value: .text(value: "16"))],
+            doc: (id, model), store: store, host: host)
+        guard case .job = out else { Issue.record("\(out)"); return }
+        #expect(fake.formatChanges == [ProjectFormatRow(sampleRate: 48_000, depth: .int16)])
+    }
+
+    @Test func stateGetMediaAndProject() throws {
+        let (_, _, id, model, fake) = try makeDocument()
+        fake.mediaRows = [
+            MediaRow(
+                id: 3, name: "kick", path: "Media/kick.caf", channels: 2, frames: 10, sampleRate: 48_000,
+                origin: .imported, originalName: "kick.wav", offline: .missing, uses: 1)
+        ]
+        guard case .media(_, let items)? = ControlStates.state(.media, id, model) else {
+            Issue.record("media")
+            return
+        }
+        #expect(items.map(\.id) == [3])
+        guard case .project(_, let info)? = ControlStates.state(.project, id, model) else {
+            Issue.record("project")
+            return
+        }
+        #expect(info.format.sampleRate == 48_000)
+    }
 }

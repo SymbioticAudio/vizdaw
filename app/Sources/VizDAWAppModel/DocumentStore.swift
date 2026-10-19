@@ -36,6 +36,33 @@ public final class DocumentStore {
     /// document's plugin windows and releases their editors).
     public var willClose: ((UUID) -> Void)?
 
+    /// Makes a project in a format (set by `live()`; tests set a fake).
+    public var makeProject: ((ProjectFormatRow) throws -> any SessionProtocol)?
+
+    /// The app's preferences (in memory in tests; `live()` sets the real
+    /// store, which is itself in memory under `VIZDAW_SUPPORT_DIR`).
+    public var defaults: UserDefaults = MemoryDefaults()
+
+    /// The "Default project format" preference (5a Ruling 18), e.g.
+    /// "48000/24"; 48 kHz / 24-bit when unset or damaged.
+    public var defaultFormat: ProjectFormatRow {
+        get {
+            let s = defaults.string(forKey: "defaultProjectFormat") ?? ""
+            let p = s.split(separator: "/").map(String.init)
+            return ControlFormats.parse(rate: p.first, depth: p.count > 1 ? p[1] : nil)
+                ?? ProjectFormatRow(sampleRate: 48_000, depth: .int24)
+        }
+        set {
+            let d: String =
+                switch newValue.depth {
+                case .int16: "16"
+                case .int24: "24"
+                case .float32: "32f"
+                }
+            defaults.set("\(newValue.sampleRate)/\(d)", forKey: "defaultProjectFormat")
+        }
+    }
+
     private let makeEmpty: Make
     private let makeDemo: Make
     private let openPath: Open
@@ -54,6 +81,8 @@ public final class DocumentStore {
             open: { try Session.open(path: $0) }
         )
         s.makeDemoAudio = { try Session.newDemoAudio() }
+        s.makeProject = { try Session.newProject(format: $0) }
+        s.defaults = MemoryDefaults.appStore()
         s.listPreferences = ListPreferences(defaults: MemoryDefaults.appStore())
         return s
     }
@@ -145,6 +174,12 @@ public final class DocumentStore {
     }
 
     public func newEmpty() -> UUID? { add("New Document Failed", makeEmpty) }
+
+    /// A new project in `format` (the New Project sheet, `file.new`).
+    public func newProject(_ format: ProjectFormatRow) -> UUID? {
+        guard let make = makeProject else { return newEmpty() }
+        return add("New Document Failed") { try make(format) }
+    }
 
     public func newDemo() -> UUID? { add("Demo Project Failed", makeDemo) }
 

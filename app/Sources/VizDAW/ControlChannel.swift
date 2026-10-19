@@ -94,6 +94,44 @@ enum ControlChannel {
         case .done(let r): _ = try? server.reply(token: token, result: r)
         case .failed(let f): _ = try? server.fail(token: token, failure: f)
         case .opened(let command, let doc): whenShown(server, token, command: command, doc: doc)
+        case .job(let command, let doc, let job):
+            whenJobEnds(server, token, command: command, doc: doc, job: job)
+        }
+    }
+
+    /// Answers once job `job` of `doc` ended (an import or conversion may
+    /// take minutes; 10 minutes at most).
+    static func whenJobEnds(_ server: ControlServer, _ token: UInt64, command: String, doc: UUID, job: UInt64) {
+        later(token, seconds: 600) { expired in
+            guard let m = appStore.model(doc) else {
+                _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
+                return true
+            }
+            guard let j = try? m.session.job(id: job) else {
+                _ = try? server.fail(token: token, failure: .of(.failed, "the job is unknown"))
+                return true
+            }
+            switch j.state {
+            case .running:
+                if expired {
+                    _ = try? server.fail(
+                        token: token, failure: .of(.timeout, "the job did not finish within 10 minutes"))
+                }
+                return expired
+            case .done:
+                m.refreshAfterJob()
+                let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
+                let status = j.problems.isEmpty ? nil : j.problems.joined(separator: "; ")
+                _ = try? server.reply(
+                    token: token,
+                    result: .ran(
+                        command: command, doc: doc.uuidString, window: window, undoLabel: m.snapshot.undoLabel,
+                        status: status))
+                return true
+            case .failed, .cancelled:
+                _ = try? server.fail(token: token, failure: .of(.failed, j.message ?? "the job was cancelled"))
+                return true
+            }
         }
     }
 
@@ -272,7 +310,7 @@ enum ControlChannel {
                 case .failed(let f):
                     _ = try? server.fail(token: token, failure: f)
                     return
-                case .done, .opened:
+                case .done, .opened, .job:
                     if case .opened(_, let doc) = outcome { ControlWindows.openDocument(doc) }
                     sent += 1
                     continue

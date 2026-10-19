@@ -502,6 +502,17 @@ public final class DocumentModel {
         }
     }
 
+    /// After a job applied (an import or conversion): the document, its
+    /// lanes and the media rows are new.
+    public func refreshAfterJob() {
+        if let s = try? session.snapshot() { apply(s) }
+        mediaVersion += 1
+    }
+
+    /// Bumped when the media pool or its offline state changed (views
+    /// showing media refetch).
+    public private(set) var mediaVersion = 0
+
     /// Takes a new snapshot: keeps the selection if the sequence still
     /// exists (else the first top-level one), refetches lanes if needed.
     func apply(_ s: DocSnapshot) {

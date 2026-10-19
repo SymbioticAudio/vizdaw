@@ -114,6 +114,10 @@ pub enum StateTargetRow {
     Selection,
     /// Windows and app alerts.
     Windows,
+    /// Media pool.
+    Media,
+    /// Project format and device rate.
+    Project,
 }
 
 /// The after-crash answer.
@@ -148,6 +152,11 @@ pub enum ControlValue {
     Flag {
         /// The flag.
         value: bool,
+    },
+    /// An integer.
+    Int {
+        /// The integer.
+        value: i64,
     },
 }
 
@@ -497,6 +506,20 @@ pub struct UiNodeRow {
 /// What a call came to.
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ControlResult {
+    /// `state.get media`.
+    Media {
+        /// Document ID.
+        doc: String,
+        /// The pool.
+        items: Vec<crate::media::MediaRow>,
+    },
+    /// `state.get project`.
+    Project {
+        /// Document ID.
+        doc: String,
+        /// Format, mismatched media, device rate.
+        info: crate::format::ProjectInfoRow,
+    },
     /// `command.run`.
     Ran {
         /// Registry ID.
@@ -761,6 +784,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                     value: match v {
                         ArgValue::Text(value) => ControlValue::Text { value },
                         ArgValue::Flag(value) => ControlValue::Flag { value },
+                        ArgValue::Int(value) => ControlValue::Int { value },
                     },
                 })
                 .collect(),
@@ -773,6 +797,8 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 StateTarget::Editor => StateTargetRow::Editor,
                 StateTarget::Selection => StateTargetRow::Selection,
                 StateTarget::Windows => StateTargetRow::Windows,
+                StateTarget::Media => StateTargetRow::Media,
+                StateTarget::Project => StateTargetRow::Project,
             },
             window: window_row(window),
         },
@@ -939,6 +965,7 @@ fn transport_json(doc: &str, t: &TransportState) -> Value {
         "doc": doc, "playing": t.playing, "seq": t.seq, "tick": t.tick,
         "position": t.position_bbu, "seconds": t.seconds, "sample_rate": t.sample_rate,
         "device": t.device, "faults": t.faults, "report": t.report,
+        "rate_mismatch": t.rate_mismatch,
     })
 }
 
@@ -955,6 +982,41 @@ pub fn result_json(r: &ControlResult) -> Value {
             "command": command, "doc": doc, "window": window, "undo": undo_label, "status": status,
         }),
         ControlResult::Transport { doc, state } => transport_json(doc, state),
+        ControlResult::Media { doc, items } => json!({
+            "doc": doc,
+            "items": items.iter().map(|m| json!({
+                "id": m.id, "name": m.name, "path": m.path, "channels": m.channels,
+                "frames": m.frames, "rate": m.sample_rate,
+                "origin": match m.origin {
+                    crate::media::MediaOriginRow::Imported => "imported",
+                    crate::media::MediaOriginRow::Recorded => "recorded",
+                    crate::media::MediaOriginRow::Bounced => "bounced",
+                    crate::media::MediaOriginRow::ExternalEdit => "external_edit",
+                },
+                "original_name": m.original_name,
+                "offline": m.offline.is_some(),
+                "offline_reason": m.offline.map(|r| match r {
+                    crate::media::OfflineReasonRow::Missing => "missing",
+                    crate::media::OfflineReasonRow::Unreadable => "unreadable",
+                    crate::media::OfflineReasonRow::Format => "format",
+                    crate::media::OfflineReasonRow::Length => "length",
+                }),
+                "uses": m.uses,
+            })).collect::<Vec<_>>(),
+        }),
+        ControlResult::Project { doc, info } => json!({
+            "doc": doc,
+            "rate": info.format.sample_rate,
+            "depth": match info.format.depth {
+                crate::format::BitDepthRow::Int16 => "16",
+                crate::format::BitDepthRow::Int24 => "24",
+                crate::format::BitDepthRow::Float32 => "32f",
+            },
+            "label": crate::format::format_label(info.format),
+            "mismatched": info.mismatched,
+            "rate_mismatch": info.rate_mismatch,
+            "device_rate": info.device_rate,
+        }),
         ControlResult::Document {
             doc,
             path,

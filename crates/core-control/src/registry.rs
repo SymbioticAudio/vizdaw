@@ -20,6 +20,15 @@ pub enum ParamKind {
     Flag,
     /// One of these strings.
     Choice(&'static [&'static str]),
+    /// An integer in `min..=max`.
+    Int {
+        /// Smallest.
+        min: i64,
+        /// Largest.
+        max: i64,
+    },
+    /// An absolute path with any extension.
+    File,
 }
 
 /// One parameter of a command.
@@ -103,6 +112,8 @@ pub enum ArgValue {
     Text(String),
     /// A flag.
     Flag(bool),
+    /// An integer.
+    Int(i64),
 }
 
 const fn cmd(
@@ -218,9 +229,67 @@ const ON: &[ParamSpec] = &[ParamSpec {
     help: "Set on or off; absent toggles.",
 }];
 
+/// The project rates and depths as the channel spells them (5a Ruling 16).
+const RATES: &[&str] = &["44100", "48000", "88200", "96000", "176400", "192000"];
+const DEPTHS: &[&str] = &["16", "24", "32f"];
+
+const FORMAT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "rate",
+        kind: ParamKind::Choice(RATES),
+        required: false,
+        help: "Sample rate in Hz.",
+    },
+    ParamSpec {
+        name: "depth",
+        kind: ParamKind::Choice(DEPTHS),
+        required: false,
+        help: "Bit depth: 16, 24 or 32f (float).",
+    },
+];
+
+const IMPORT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The audio file to import (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Sequence to place a region in (without it, the file only enters the media pool).",
+    },
+    ParamSpec {
+        name: "lane",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Lane for a mono or stereo file; without it, new lanes.",
+    },
+    ParamSpec {
+        name: "tick",
+        kind: ParamKind::Int {
+            min: -(1 << 40),
+            max: 1 << 40,
+        },
+        required: false,
+        help: "Where the region starts (negative imports at 0).",
+    },
+];
+
 /// Every menu command, in menu order.
 pub const COMMANDS: &[CommandSpec] = &[
-    cmd("file.new", "File", "New", Some("⌘N"), false),
+    CommandSpec {
+        params: FORMAT_PARAMS,
+        ..cmd("file.new", "File", "New", Some("⌘N"), false)
+    },
     CommandSpec {
         params: OPEN_PARAMS,
         dialogs: OPEN_DIALOGS,
@@ -240,6 +309,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         false,
     ),
+    CommandSpec {
+        params: IMPORT_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("media.import", "File", "Import Audio…", Some("⇧⌘I"), true)
+    },
     cmd("file.close", "File", "Close", Some("⌘W"), true),
     CommandSpec {
         params: SAVE_PATH,
@@ -260,6 +339,32 @@ pub const COMMANDS: &[CommandSpec] = &[
             answered_by: &["path"],
         }],
         ..cmd("file.save_as", "File", "Save As…", Some("⇧⌘S"), true)
+    },
+    CommandSpec {
+        params: FORMAT_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Project Settings",
+            when: "always",
+            always: true,
+            answered_by: &["rate", "depth"],
+        }],
+        ..cmd(
+            "file.project_settings",
+            "File",
+            "Project Settings…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        menu_item: false,
+        ..cmd(
+            "media.convert",
+            "File",
+            "Convert Media to Project Format",
+            None,
+            true,
+        )
     },
     cmd("edit.undo", "Edit", "Undo", Some("⌘Z"), true),
     cmd("edit.redo", "Edit", "Redo", Some("⇧⌘Z"), true),
@@ -674,6 +779,10 @@ pub fn validate_args(
                 .opt_path(s.name, ext)?
                 .map(|path| ArgValue::Text(path.to_string_lossy().into_owned())),
             ParamKind::Flag => p.opt_bool(s.name)?.map(ArgValue::Flag),
+            ParamKind::Int { min, max } => p.opt_int(s.name, min, max)?.map(ArgValue::Int),
+            ParamKind::File => p
+                .opt_file(s.name)?
+                .map(|path| ArgValue::Text(path.to_string_lossy().into_owned())),
             ParamKind::Choice(values) => match p.opt_str(s.name, MAX_PATH)? {
                 None => None,
                 Some(v) if values.contains(&v.as_str()) => Some(ArgValue::Text(v)),
@@ -757,6 +866,8 @@ fn kind_json(k: ParamKind) -> Value {
         ParamKind::Path(ext) => json!({"type": "path", "extension": ext}),
         ParamKind::Flag => json!({"type": "bool"}),
         ParamKind::Choice(values) => json!({"type": "choice", "values": values}),
+        ParamKind::Int { min, max } => json!({"type": "int", "min": min, "max": max}),
+        ParamKind::File => json!({"type": "path"}),
     }
 }
 
