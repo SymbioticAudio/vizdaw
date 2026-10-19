@@ -2,7 +2,7 @@
 //! by `graph::mixer` or directly by tests.
 
 use crate::schedule::TargetIdx;
-use core_model::ids::{PluginInstanceId, StripId};
+use core_model::ids::{OutputPathId, PluginInstanceId, StripId};
 
 /// Which buffer of a source strip an edge reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,6 +94,12 @@ pub enum NodeSpec {
     },
     /// A mixer strip.
     Strip(StripSpec),
+    /// The audio regions of output path `path` (5a), rendering into its
+    /// node's output buffer; no latency.
+    Regions {
+        /// The output path.
+        path: OutputPathId,
+    },
 }
 
 /// A whole graph; `master`'s output goes to the device.
@@ -157,6 +163,10 @@ impl GraphSpec {
                     h.u64(u64::from(target.0));
                     h.u64(u64::from(*latency));
                     h.u64(u64::from(*outputs));
+                }
+                NodeSpec::Regions { path } => {
+                    h.u64(3);
+                    h.u64(path.0);
                 }
                 NodeSpec::Strip(s) => {
                     h.u64(2);

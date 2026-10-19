@@ -884,10 +884,15 @@ impl Renderer {
             return false;
         }
         self.shared.runs.fetch_add(1, Ordering::Relaxed);
-        match self
-            .exec
-            .run(g, &self.sinks, &self.shared, frames, info, deadline)
-        {
+        match self.exec.run(
+            g,
+            &self.sinks,
+            &self.shared,
+            frames,
+            info,
+            crate::graph::RegionRun::NONE,
+            deadline,
+        ) {
             RunResult::Done => {
                 g.write_master(out, at, frames);
                 let covered = g.instruments();

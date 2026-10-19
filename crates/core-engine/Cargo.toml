@@ -24,3 +24,4 @@ core-engine = { path = ".", features = ["fixtures"] }
 im = "15"
 proptest = "1"
 insta = "1"
+tempfile = "3"

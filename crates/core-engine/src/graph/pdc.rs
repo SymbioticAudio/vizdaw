@@ -73,7 +73,7 @@ pub fn plan(spec: &GraphSpec, max_delay: u64) -> Result<Plan, PlanError> {
         .iter()
         .map(|x| match x {
             NodeSpec::Strip(s) => s.inserts.len(),
-            NodeSpec::Instrument { .. } => 0,
+            NodeSpec::Instrument { .. } | NodeSpec::Regions { .. } => 0,
         })
         .sum();
     if n > MAX_NODES || inserts > MAX_INSERTS {
@@ -85,6 +85,7 @@ pub fn plan(spec: &GraphSpec, max_delay: u64) -> Result<Plan, PlanError> {
     for x in &spec.nodes {
         let lats: Vec<u32> = match x {
             NodeSpec::Instrument { latency, .. } => vec![*latency],
+            NodeSpec::Regions { .. } => Vec::new(),
             NodeSpec::Strip(s) => s.inserts.iter().map(|k| k.latency).collect(),
         };
         for l in lats {
@@ -136,6 +137,7 @@ pub fn plan(spec: &GraphSpec, max_delay: u64) -> Result<Plan, PlanError> {
                     *x = u64::from(*latency);
                 }
             }
+            NodeSpec::Regions { .. } => {}
             NodeSpec::Strip(s) => {
                 let mut tin = s
                     .inputs

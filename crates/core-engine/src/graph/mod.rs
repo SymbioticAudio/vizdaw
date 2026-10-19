@@ -10,18 +10,21 @@ pub mod exec;
 pub mod mixer;
 pub mod node;
 pub mod pdc;
+pub mod regions;
 pub mod spec;
 
 use core_model::ids::PluginInstanceId;
 
 pub use controls::{FeedSpec, OverrideSnapshot, SendSpec, StripControlSpec};
 pub use exec::{Graph, InsertInit, Runner, SinkTable};
+pub use mixer::mixer_spec;
 pub use mixer::{FeedSource, InstrumentFeed};
 pub use node::{
     EffectNode, InsertFactory, NoInserts, ProcessStatus, TestInserts, TestInstrument, TestMode,
     TestNode,
 };
 pub use pdc::{MAX_INSERTS, MAX_NODES, Plan, PlanError, plan};
+pub use regions::RegionRun;
 pub use spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};
 
 /// What compiling the mixer graph did (`CompileReport::graph`, Plan

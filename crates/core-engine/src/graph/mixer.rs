@@ -5,7 +5,7 @@ use crate::graph::dsp::strip_gains;
 use crate::graph::spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};
 use crate::schedule::TargetIdx;
 use core_model::document::Document;
-use core_model::ids::{DestId, StripId};
+use core_model::ids::{DestId, OutputPathId, StripId};
 use core_model::mixer::{Output, PluginSlot, Strip, StripKind, db_to_gain};
 use core_model::mixer_rules::{audible, solo_reach};
 use std::collections::BTreeMap;
@@ -94,6 +94,22 @@ pub fn mixer_spec(
         .map(|s| StripSpec::new(Some(s.id)))
         .collect();
     let master = node(m.master()).unwrap_or(base);
+    // One Regions node per AudioPath strip, after the strips (5a Ruling
+    // 11), as that strip's first input (before any feed adds inputs).
+    let mut region_paths: Vec<OutputPathId> = Vec::new();
+    for (k, s) in m.strips().values().enumerate() {
+        if let StripKind::AudioPath(path) = s.kind {
+            let from = base + m.strips().len() + region_paths.len();
+            region_paths.push(path);
+            if let Some(spec) = strips.get_mut(k) {
+                spec.inputs.push(InputSpec {
+                    from,
+                    tap: Tap::Post,
+                    gain: 1.0,
+                });
+            }
+        }
+    }
     let builtin_strip = m.find_kind(StripKind::BuiltinSynth).and_then(node);
     let mut fed: Vec<usize> = Vec::new();
     for (i, f) in instruments.iter().enumerate() {
@@ -272,6 +288,11 @@ pub fn mixer_spec(
         })
         .collect();
     nodes.extend(strips.into_iter().map(NodeSpec::Strip));
+    nodes.extend(
+        region_paths
+            .into_iter()
+            .map(|path| NodeSpec::Regions { path }),
+    );
     MixerGraph {
         spec: GraphSpec { nodes, master },
         strips: strip_nodes,
