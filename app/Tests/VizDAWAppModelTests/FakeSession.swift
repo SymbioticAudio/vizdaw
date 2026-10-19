@@ -346,14 +346,18 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func importAudio(paths: [String], target: ImportTargetRow?) throws -> UInt64 {
         imports.append((paths, target))
         let id = UInt64(imports.count)
-        jobRows[id] = JobRow(id: id, kind: .import, progress: 1, state: .done, message: nil, problems: [], created: [])
+        jobRows[id] = JobRow(
+            id: id, kind: .import, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
+            message: nil, problems: [], created: [])
         return id
     }
     func job(id: UInt64) throws -> JobRow {
         guard let j = jobRows[id] else { throw VizError.Model(message: "unknown job \(id)") }
         return j
     }
-    func cancelJob(id: UInt64) throws {}
+    var cancelled: [UInt64] = []
+    var jobStartState: JobStateRow = .done
+    func cancelJob(id: UInt64) throws { cancelled.append(id) }
     var info = ProjectInfoRow(
         format: ProjectFormatRow(sampleRate: 48_000, depth: .int24), mismatched: 0, rateMismatch: false,
         deviceRate: 0)

@@ -92,6 +92,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PluginTicker.start(appStore)
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            for m in appStore.documents.values { m.recheckMedia() }
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // A clean quit leaves no crash markers.
         MainActor.assumeIsolated {

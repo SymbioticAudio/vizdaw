@@ -46,6 +46,14 @@ public final class DocumentModel {
     public private(set) var laneFetches = 0
     /// Plugins that failed to load or refused their state (newest last).
     public private(set) var pluginProblems: [String] = []
+    /// The project's format, mismatched media and device rate (5a).
+    public internal(set) var projectInfo: ProjectInfoRow?
+    /// Running imports and conversions, oldest first.
+    public internal(set) var jobs: [JobRow] = []
+    /// A finished job's per-file problems, until dismissed.
+    public internal(set) var jobProblems: [String] = []
+    /// The disk warning was dismissed for this playback.
+    var diskWarningDismissed = false
     /// Bumped when plugin slots change (loaded, failed, restarted): views
     /// that show slots refetch.
     public private(set) var slotsVersion = 0
@@ -231,6 +239,7 @@ public final class DocumentModel {
         clock.update(transport, pollInterval: Self.pollSeconds(playing: transport.playing))
         updatePlayKey()
         apply(snap)
+        projectInfo = try? session.projectInfo()
         editor.applySnapshot = { [weak self] in self?.apply($0) }
         editor.selectSequence = { [weak self] in self?.select($0) }
         editor.currentSequence = { [weak self] in self?.selectedSeq }
@@ -433,6 +442,8 @@ public final class DocumentModel {
             transport = try session.transport()
             clock.update(transport, pollInterval: pollSeconds)
             updatePlayKey()
+            if transport.rateMismatch != (projectInfo?.rateMismatch ?? false) { refreshProjectInfo() }
+            if !transport.faults.contains("stream-underrun") { diskWarningDismissed = false }
         } catch VizError.Busy {
             return
         } catch {
@@ -448,6 +459,11 @@ public final class DocumentModel {
         editor.tick()
         guard let u = try? session.idle() else { return }
         if let s = u.snapshot { apply(s) }
+        if u.mediaChanged {
+            mediaVersion += 1
+            refreshProjectInfo()
+        }
+        if !jobs.isEmpty { pollJobs() }
         if u.slotsChanged { slotsVersion += 1 }
         if !u.paramsChanged.isEmpty { paramsChanged.formUnion(u.paramsChanged) }
         if !u.problems.isEmpty {
@@ -507,11 +523,12 @@ public final class DocumentModel {
     public func refreshAfterJob() {
         if let s = try? session.snapshot() { apply(s) }
         mediaVersion += 1
+        refreshProjectInfo()
     }
 
     /// Bumped when the media pool or its offline state changed (views
     /// showing media refetch).
-    public private(set) var mediaVersion = 0
+    public internal(set) var mediaVersion = 0
 
     /// Takes a new snapshot: keeps the selection if the sequence still
     /// exists (else the first top-level one), refetches lanes if needed.

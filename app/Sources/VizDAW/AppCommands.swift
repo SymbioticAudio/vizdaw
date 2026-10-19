@@ -2,6 +2,7 @@ import AppKit
 import Observation
 import SwiftUI
 import VizDAWAppModel
+import VizDAWCore
 
 struct DocumentModelKey: FocusedValueKey {
     typealias Value = DocumentModel
@@ -43,10 +44,24 @@ struct AppCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New") { show(store.newEmpty()) }
-                .keyboardShortcut(KeyMenu.shortcut("file.new"))
+            Button("New") {
+                if let f = FormatPanel.run(
+                    title: "New Project", message: "Every audio file of the project is stored in this format.",
+                    initial: store.defaultFormat, ok: "Create")
+                {
+                    store.defaultFormat = f
+                    show(store.newProject(f))
+                }
+            }
+            .keyboardShortcut(KeyMenu.shortcut("file.new"))
             Button("Open…") { if let path = Panels.chooseProject() { show(store.open(path: path)) } }
                 .keyboardShortcut(KeyMenu.shortcut("file.open"))
+            Button("Import Audio…") {
+                let paths = Panels.chooseAudio()
+                doc?.importAudio(paths: paths)
+            }
+            .keyboardShortcut(KeyMenu.shortcut("media.import"))
+            .disabled(doc == nil)
             Button("Create Demo Project") { show(store.newDemo()) }
             Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
         }
@@ -58,6 +73,9 @@ struct AppCommands: Commands {
                 .disabled(doc == nil)
             Button("Save As…") { save(as: true) }
                 .keyboardShortcut(KeyMenu.shortcut("file.save_as"))
+                .disabled(doc == nil)
+            Divider()
+            Button("Project Settings…") { projectSettings() }
                 .disabled(doc == nil)
         }
         CommandGroup(replacing: .undoRedo) {
@@ -269,6 +287,24 @@ struct AppCommands: Commands {
         Button("\(task.title)…") { doc?.selectModify.open(task) }
             .keyboardShortcut(KeyMenu.shortcut(id))
             .disabled(doc == nil)
+    }
+
+    private func projectSettings() {
+        guard let m = doc, let info = m.projectInfo ?? (try? m.session.projectInfo()) else { return }
+        let media = (try? m.session.media()) ?? []
+        let files = media.count
+        let seconds = media.reduce(0.0) { $0 + Double($1.frames) / Double(max($1.sampleRate, 1)) }
+        let minutes = seconds >= 60 ? String(format: "%.0f min", seconds / 60) : String(format: "%.0f s", seconds)
+        let note =
+            files == 0
+            ? "The project has no audio files yet."
+            : "Changing the format converts \(files) audio file\(files == 1 ? "" : "s") (\(minutes) of audio) into new files (one undo step)."
+        guard
+            let f = FormatPanel.run(
+                title: "Project Settings", message: "Format: \(formatLabel(format: info.format)). \(note)",
+                initial: info.format, ok: "Change")
+        else { return }
+        if f != info.format { m.changeFormat(f) }
     }
 
     private func show(_ id: UUID?) {

@@ -12,7 +12,10 @@ struct DocumentView: View {
             SequenceSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         } detail: {
-            EditorSplit(model: model, docID: docID)
+            VStack(spacing: 0) {
+                ProjectBanners(model: model)
+                EditorSplit(model: model, docID: docID)
+            }
         }
         .navigationTitle(model.windowTitle)
         .toolbar { TransportToolbar(model: model) }
