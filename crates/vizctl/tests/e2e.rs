@@ -505,3 +505,122 @@ fn play_button(nodes: &Value) -> Option<Value> {
         }
     })
 }
+
+/// A 48 kHz stereo float CAF of `frames` frames of a 0.25 constant (the
+/// app's importer reads CAF like any other format).
+fn audio_file(path: &std::path::Path, frames: usize) {
+    let mut w = core_media::caf::CafWriter::create(
+        path,
+        48_000,
+        2,
+        core_model::format::BitDepth::Float32,
+        core_media::caf::WriteMode::Normal,
+    )
+    .unwrap();
+    w.write(&vec![0.25f32; 2 * frames]).unwrap();
+    w.finish().unwrap();
+}
+
+/// README steps 109–116 through the channel (plan 5a): a 44.1 kHz/16-bit
+/// project stores an imported 48 kHz file in its own format; the demo
+/// imports into a new lane, plays the region without disk faults, and
+/// changes its format with the media converted.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn audio_import_plays_and_reports_media() {
+    let mut app = App::start();
+    let src = app.launched.home.join("tone.caf");
+    audio_file(&src, 96_000);
+
+    // A new project in a chosen format.
+    let made = app.call(
+        "command.run",
+        json!({"id": "file.new", "params": {"rate": "44100", "depth": "16"}}),
+    );
+    let window = made["window"].clone();
+    let p = app.call("state.get", json!({"target": "project", "window": window}));
+    assert_eq!(
+        (p["rate"].clone(), p["depth"].clone()),
+        (json!(44_100), json!("16")),
+        "{p}"
+    );
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": src}, "window": window}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let m = app.call("state.get", json!({"target": "media", "window": window}));
+    let item = &m["items"][0];
+    assert_eq!(item["name"], "tone", "{m}");
+    assert_eq!(item["rate"], 44_100);
+    assert_eq!(item["offline"], false);
+    assert!(
+        item["frames"].as_u64().unwrap().abs_diff(88_200) <= 1,
+        "converted to 44.1 kHz: {item}"
+    );
+
+    // The demo: import into a new lane at bar 1 and play it.
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w2 = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w2}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let lanes_before = doc["lanes"].as_array().unwrap().len();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": src, "seq": seq, "tick": 0}, "window": w2}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w2}));
+    let lanes = doc["lanes"].as_array().unwrap();
+    assert_eq!(lanes.len(), lanes_before + 1, "{doc}");
+    assert_eq!(lanes.last().unwrap()["regions"], 1, "{doc}");
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": w2}),
+    );
+    app.wait(&w2, json!({"condition": "playing"}));
+    app.wait(
+        &w2,
+        json!({"condition": "tick_at_least", "tick": 2 * 15_360}),
+    );
+    let t = app.call("state.get", json!({"target": "transport", "window": w2}));
+    let faults: Vec<String> = t["faults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        !faults.iter().any(|f| f == "stream-underrun"),
+        "the region streamed in time: {t}"
+    );
+    assert_eq!(t["rate_mismatch"], false, "{t}");
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": w2}),
+    );
+    app.wait(&w2, json!({"condition": "stopped"}));
+
+    // Project Settings: 24-bit to float, every file converted.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.project_settings", "params": {"depth": "32f"}, "window": w2}),
+    );
+    assert_eq!(r["undo"], "Change Project Format", "{r}");
+    let p = app.call("state.get", json!({"target": "project", "window": w2}));
+    assert_eq!(
+        (p["depth"].clone(), p["mismatched"].clone()),
+        (json!("32f"), json!(0)),
+        "{p}"
+    );
+    let m = app.call("state.get", json!({"target": "media", "window": w2}));
+    let tone = m["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "tone")
+        .unwrap()
+        .clone();
+    assert_eq!(tone["offline"], false, "{m}");
+    app.quit();
+}

@@ -931,3 +931,54 @@ preferences). Keys are the defaults unless a step changes them.
     "/tmp/x.vizkeys"}'` loads a bindings file and `$V key` follows it;
     `$V state editor` reads the snap division snake_case
     (`thirty_second`).
+
+### Audio playback (plan 5a)
+
+Use a throwaway home (`vizctl launch`) and a few audio files of your own:
+a WAV, an AIFF, an MP3 or AAC, and one at 44.1 kHz.
+
+109. New project: File > New opens a "New Project" dialog ("Every audio
+     file of the project is stored in this format.") with Sample rate and
+     Bit depth pop-ups, pre-filled with 48 kHz / 24-bit; choose 44.1 kHz
+     and 16-bit and press Create. The next File > New offers 44.1 kHz /
+     16-bit. File > Project Settings… shows "Format: 44.1 kHz, 16-bit.
+     The project has no audio files yet."
+110. Import Audio: open the demo, select a lane, put the playhead on bar
+     3 and choose File > Import Audio… (⇧⌘I) with one stereo WAV. A bar
+     shows "Importing audio…" with progress and a Cancel button, then the
+     region sits on that lane at bar 3. Undo removes it (one step,
+     "Import Audio"). Import two files at once: each gets a new lane
+     "Audio n". A text file renamed `.wav` in the batch is listed by a
+     bar (Dismiss clears it) and the others import; imported alone, it
+     raises an "Import Failed" alert.
+111. It plays: Play from bar 1. The region sounds through the output path
+     strip "Audio 1" in the mixer; its fader, pan, mute and solo work; the
+     region's sound starts at its bar exactly (record the output or
+     listen against the click of a MIDI lane).
+112. Loops and locates: loop bars 3–4 over a long region: the loop wraps
+     with no gap or click beyond the region's own audio at the seam.
+     Click in the ruler in the middle of a region while playing: the
+     sound resumes from there at once. No "Disk too slow: some audio
+     played as silence." bar shows on a normal disk (if it does, Dismiss
+     clears it).
+113. Formats: File > Project Settings… says how many audio files the
+     change converts (one undo step); choose 48 kHz / 24-bit and press
+     Change: a "Converting media…" bar, then the regions sit where they
+     were and sound the same. Edit > Undo ("Change Project Format")
+     restores 44.1 kHz and the old files.
+114. Media in another format: in a saved project, replace a file in its
+     `Media/` folder (Finder > Show Package Contents) with a CAF at
+     another rate, then switch back to VizDAW: a bar says "1 media file
+     is not in the project format (…) and stay silent."; that region is
+     silent. "Convert 1 File": the bar goes and the region plays.
+     `$V state media` lists the item with `"offline": false` afterwards.
+115. Missing media: rename a media file in Finder and switch back: its
+     region is silent and `$V state media` shows `"offline_reason":
+     "missing"`; rename it back and switch again: it plays.
+116. Device rate: in Audio MIDI Setup set the output to 44.1 kHz, open a
+     48 kHz project and press Play: VizDAW switches the device to 48 kHz
+     (Audio MIDI Setup shows it). With a device that cannot run at 48 kHz
+     (or set the project to 192 kHz on a 48 kHz-only device), after the
+     first Play a bar says "The audio device runs at … ; this project is
+     …. Audio regions are muted." while MIDI still plays, and "Change
+     Project Rate to …" converts the project to the device's rate.
