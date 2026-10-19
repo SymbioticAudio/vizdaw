@@ -3,6 +3,7 @@
 
 use crate::error::{ModelError, Result};
 use crate::event::Event;
+use crate::format::AudioFormat;
 use crate::ids::{
     AnyId, Counters, DestId, EventId, LaneId, MediaId, OutputPathId, PluginInstanceId, SeqId,
     StateBlobId, StripId, TakeId,
@@ -27,6 +28,9 @@ pub struct Settings {
     pub autosave_keep: u32,
     /// Named select-and-modify templates.
     pub templates: OrdMap<String, ModifyTemplate>,
+    /// The project's audio format: every media file is stored in it
+    /// (sub-project 5 spec §4.1).
+    pub format: AudioFormat,
 }
 
 impl Default for Settings {
@@ -35,6 +39,7 @@ impl Default for Settings {
             history_depth: 200,
             autosave_keep: 10,
             templates: OrdMap::new(),
+            format: AudioFormat::DEFAULT,
         }
     }
 }
@@ -135,8 +140,56 @@ pub struct MediaItem {
     pub channels: u16,
     /// Length in sample frames.
     pub length_frames: u64,
-    /// Optional content hash.
+    /// BLAKE3 hex of the CAF's audio bytes; `None` in projects older than
+    /// version 3 (5a Ruling 4).
     pub content_hash: Option<String>,
+    /// Display name (defaults to the file stem).
+    pub name: String,
+    /// Where the media came from.
+    pub origin: MediaOrigin,
+}
+
+/// Where a media item came from (sub-project 5 spec §4.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MediaOrigin {
+    /// Imported (converted) from a file.
+    Imported {
+        /// The original file's name.
+        original_name: String,
+    },
+    /// Recorded in a recording pass.
+    Recorded {
+        /// The pass number.
+        pass: u32,
+    },
+    /// A bounce placed into the project.
+    Bounced,
+    /// Returned by the external sample editor.
+    ExternalEdit {
+        /// The item the edit started from.
+        from: MediaId,
+    },
+}
+
+impl Default for MediaOrigin {
+    fn default() -> MediaOrigin {
+        MediaOrigin::Imported {
+            original_name: String::new(),
+        }
+    }
+}
+
+impl MediaItem {
+    /// `path`'s file name and stem (`("a.caf", "a")`).
+    pub fn file_parts(path: &str) -> (String, String) {
+        let file = path.rsplit('/').next().unwrap_or(path).to_string();
+        let stem = match file.rsplit_once('.') {
+            Some((s, _)) if !s.is_empty() => s.to_string(),
+            _ => file.clone(),
+        };
+        (file, stem)
+    }
 }
 
 /// Where an event lives.

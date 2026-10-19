@@ -1,5 +1,5 @@
 use core_model::ModelError;
-use core_model::document::{Document, DocumentRepr, MediaItem, Settings};
+use core_model::document::{Document, DocumentRepr, MediaItem, MediaOrigin, Settings};
 use core_model::event::{EventBody, EventSpec, LoopCount};
 use core_model::ids::{Counters, DestId, EventId, LaneId, MediaId, SeqId, TakeId};
 use core_model::lane::Lane;
@@ -39,6 +39,8 @@ fn doc_with_refs(n: u64, refs: &[(u64, u64)]) -> Document {
             channels: 1,
             length_frames: 1000,
             content_hash: None,
+            name: "a".into(),
+            origin: MediaOrigin::default(),
         }],
         sequences: seqs,
         mixer: None,

@@ -125,11 +125,11 @@ fn every_kind() -> (Document, SeqId, LaneId) {
                 length: 48_000,
                 gain_db: -3.5,
                 fade_in: Fade {
-                    length: Tick(Q / 4),
+                    length_frames: 12_000,
                     shape: FadeShape::EqualPower,
                 },
                 fade_out: Fade {
-                    length: Tick(Q / 8),
+                    length_frames: 6_000,
                     shape: FadeShape::SCurve,
                 },
             },
@@ -431,11 +431,11 @@ fn the_other_variants_round_trip_too() {
             length: 48_000,
             gain_db: 0.0,
             fade_in: Fade {
-                length: Tick(Q / 2),
+                length_frames: 24_000,
                 shape: FadeShape::Linear,
             },
             fade_out: Fade {
-                length: Tick(Q / 2),
+                length_frames: 24_000,
                 shape: FadeShape::Exponential,
             },
         },

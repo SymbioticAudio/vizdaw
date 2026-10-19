@@ -121,7 +121,7 @@ fn json_round_trip_keeps_the_mixer() {
     let d = Document::new();
     let text = to_json(&d).unwrap();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], 3);
     assert_eq!(v["document"]["mixer"]["master"], 0);
     assert_eq!(v["document"]["counters"]["strip"], 1);
     assert_eq!(from_json(&text).unwrap(), d);

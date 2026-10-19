@@ -1,11 +1,12 @@
 use core_model::ModelError;
 use core_model::command::{Command, EventCmd, SequenceCmd, SettingsCmd, apply};
-use core_model::document::{DestKind, Document};
+use core_model::document::{DestKind, Document, MediaOrigin};
 use core_model::event::{EventBody, EventSpec};
 use core_model::file::{
-    FORMAT, Migration, VERSION, autosave, from_json, list_autosaves, load, run_migrations, save,
-    to_json,
+    FORMAT, Migration, VERSION, autosave, from_json, list_autosaves, load, migrate_v1_to_v2,
+    migrate_v2_to_v3, run_migrations, save, to_json,
 };
+use core_model::format::{AudioFormat, BitDepth};
 use core_model::history::Timestamp;
 use core_model::ids::{DestId, LaneId, OutputPathId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{Output, PluginFormat, PluginRef, StripKind};
@@ -238,10 +239,10 @@ fn golden(name: &str) {
     let text = fixture(name);
     // Version-1 input: loading migrates it.
     let d = from_json(&text).unwrap();
-    let v2 = to_json(&d).unwrap();
-    assert!(v2.contains("\"version\": 2"), "{name}");
-    // Canonical: a version-2 file re-serializes byte for byte.
-    assert_eq!(to_json(&from_json(&v2).unwrap()).unwrap(), v2, "{name}");
+    let v3 = to_json(&d).unwrap();
+    assert!(v3.contains("\"version\": 3"), "{name}");
+    // Canonical: a version-3 file re-serializes byte for byte.
+    assert_eq!(to_json(&from_json(&v3).unwrap()).unwrap(), v3, "{name}");
     insta::assert_json_snapshot!(name, summary(&d));
 }
 
@@ -413,7 +414,7 @@ fn v1_plugin_instruments_migrate_to_slots_and_strips() {
     );
     assert_eq!((d.counters().strip, d.counters().plugin), (3, 1));
     let v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], 3);
     assert_eq!(
         v["document"]["instruments"][0]["kind"]["plugin_instrument"]["slot"]["plugin"]["format"],
         "au"
@@ -429,5 +430,127 @@ fn v1_plugin_instruments_migrate_to_slots_and_strips() {
     assert_eq!(
         d.plugin_slot(PluginInstanceId(0)).unwrap().plugin.id,
         "clap:perc"
+    );
+}
+
+/// `(fade in, fade out)` frames of every region of `d`.
+fn region_fades(d: &Document) -> Vec<(u64, u64)> {
+    d.all_events()
+        .filter_map(|(_, e)| match e.body {
+            EventBody::AudioRegion {
+                fade_in, fade_out, ..
+            } => Some((fade_in.length_frames, fade_out.length_frames)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn version_2_projects_migrate_to_version_3() {
+    let d = from_json(&fixture("mixed_lanes")).unwrap();
+    assert_eq!(
+        d.settings().format,
+        AudioFormat {
+            sample_rate: 48_000,
+            depth: BitDepth::Int24
+        }
+    );
+    let m = d.media().values().next().unwrap();
+    assert_eq!(m.name, "vox");
+    assert_eq!(
+        m.origin,
+        MediaOrigin::Imported {
+            original_name: "vox.wav".into()
+        }
+    );
+    // 960 ticks at 120 BPM = 1/16 beat = 31.25 ms = 1500 frames at 48 kHz.
+    assert_eq!(region_fades(&d), vec![(1500, 0)]);
+    let text = to_json(&d).unwrap();
+    assert!(text.contains("\"version\": 3"));
+    assert!(text.contains("\"length_frames\": 1500"));
+    assert!(text.contains("\"depth\": \"int24\""));
+}
+
+/// A version-2 `minimal` project whose media pool has items at `rates`.
+fn v2_with_media(rates: &[u64]) -> Value {
+    let mut v = migrate_v1_to_v2(serde_json::from_str(&fixture("minimal")).unwrap()).unwrap();
+    v["document"]["media"] = Value::Array(
+        rates
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                json!({ "id": i, "path": format!("Media/m{i}.wav"), "sample_rate": r,
+                        "channels": 2, "length_frames": 10, "content_hash": null })
+            })
+            .collect(),
+    );
+    v
+}
+
+#[test]
+fn the_migrated_rate_is_the_most_common_allowed_media_rate() {
+    let rate = |rates: &[u64]| {
+        migrate_v2_to_v3(v2_with_media(rates)).unwrap()["document"]["settings"]["format"]
+            ["sample_rate"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(rate(&[]), 48_000);
+    assert_eq!(rate(&[44_100, 48_000, 44_100]), 44_100);
+    // A tie goes to the first item's rate.
+    assert_eq!(rate(&[96_000, 44_100]), 96_000);
+    // The most common rate is not an allowed project rate.
+    assert_eq!(rate(&[22_050, 22_050, 44_100]), 48_000);
+}
+
+#[test]
+fn migrated_fades_are_clamped_to_the_region() {
+    let mut v: Value = serde_json::from_str(&fixture("mixed_lanes")).unwrap();
+    // The region is 48 000 frames (1 s, two beats at 120 BPM).
+    let body = &mut v["document"]["sequences"][0]["lanes"][0]["takes"][0]["events"][2]["body"];
+    assert_eq!(body["type"], "audio_region");
+    body["fade_in"]["length"] = json!(2 * PPQ);
+    body["fade_out"]["length"] = json!(3 * PPQ);
+    let d = from_json(&v.to_string()).unwrap();
+    assert_eq!(region_fades(&d), vec![(48_000, 0)]);
+}
+
+#[test]
+fn a_project_format_must_use_an_allowed_rate() {
+    let mut v: Value = serde_json::from_str(&to_json(&small_doc()).unwrap()).unwrap();
+    v["document"]["settings"]["format"]["sample_rate"] = json!(22_050);
+    match from_json(&v.to_string()) {
+        Err(ModelError::Corrupt { problems }) => {
+            assert!(
+                problems.iter().any(|p| p.contains("settings.format")),
+                "{problems:?}"
+            )
+        }
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn new_documents_default_to_48k_24_bit() {
+    assert_eq!(Document::new().settings().format, AudioFormat::DEFAULT);
+    assert_eq!(
+        AudioFormat::DEFAULT,
+        AudioFormat {
+            sample_rate: 48_000,
+            depth: BitDepth::Int24
+        }
+    );
+    assert_eq!(AudioFormat::DEFAULT.label(), "48 kHz, 24-bit");
+    assert_eq!(
+        AudioFormat {
+            sample_rate: 44_100,
+            depth: BitDepth::Float32
+        }
+        .label(),
+        "44.1 kHz, 32-bit float"
+    );
+    assert_eq!(
+        AudioFormat::RATES,
+        [44_100, 48_000, 88_200, 96_000, 176_400, 192_000]
     );
 }

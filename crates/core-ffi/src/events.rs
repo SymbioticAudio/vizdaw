@@ -179,7 +179,8 @@ pub enum FadeShapeRow {
 /// A fade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct FadeRow {
-    /// Length in ticks.
+    /// Length in frames of the region's media (5a Ruling 1; ticks before
+    /// file format 3).
     pub length: i64,
     /// Shape.
     pub shape: FadeShapeRow,
@@ -500,7 +501,7 @@ fn text_kind_of(k: TextKindRow) -> TextKind {
 /// A fade as a row.
 pub fn fade_row(f: Fade) -> FadeRow {
     FadeRow {
-        length: f.length.0,
+        length: i64::try_from(f.length_frames).unwrap_or(i64::MAX),
         shape: match f.shape {
             FadeShape::Linear => FadeShapeRow::Linear,
             FadeShape::EqualPower => FadeShapeRow::EqualPower,
@@ -513,7 +514,8 @@ pub fn fade_row(f: Fade) -> FadeRow {
 /// A fade from a row.
 pub fn fade_of(f: &FadeRow) -> Fade {
     Fade {
-        length: Tick(f.length),
+        // A negative length is no fade.
+        length_frames: u64::try_from(f.length).unwrap_or(0),
         shape: match f.shape {
             FadeShapeRow::Linear => FadeShape::Linear,
             FadeShapeRow::EqualPower => FadeShape::EqualPower,

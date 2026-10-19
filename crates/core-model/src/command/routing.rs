@@ -2,7 +2,7 @@
 //! in use is refused unless a replacement is given.
 
 use super::{Report, strips};
-use crate::document::{DestKind, Destination, Document, MediaItem, OutputPath, Patch};
+use crate::document::{DestKind, Destination, Document, MediaItem, MediaOrigin, OutputPath, Patch};
 use crate::error::{ModelError, Result};
 use crate::event::EventBody;
 use crate::ids::{AnyId, DestId, LaneId, MediaId, OutputPathId, SeqId};
@@ -367,6 +367,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             }
             check_media_path(path)?;
             let id = d.counters_mut().alloc_media();
+            let (file, stem) = MediaItem::file_parts(path);
             d.media_mut().insert(
                 id,
                 MediaItem {
@@ -376,6 +377,10 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                     channels: *channels,
                     length_frames: *length_frames,
                     content_hash: content_hash.clone(),
+                    name: stem,
+                    origin: MediaOrigin::Imported {
+                        original_name: file,
+                    },
                 },
             );
             r.created.push(AnyId::Media(id));

@@ -211,10 +211,8 @@ pub fn check_event_fields(doc: &Document, ev: &EventSpec) -> Result<()> {
                 "region.gain_db",
                 gain_db,
             )?;
-            need(fade_in.length.0 >= 0, "fade_in.length", fade_in.length.0)?;
-            need(fade_out.length.0 >= 0, "fade_out.length", fade_out.length.0)?;
-            check_ticks("fade_in.length", fade_in.length.0)?;
-            check_ticks("fade_out.length", fade_out.length.0)?;
+            let fades = fade_in.length_frames.saturating_add(fade_out.length_frames);
+            need(fades <= *length, "region.fades", fades)?;
         }
         EventBody::Automation { value, .. } => need(
             crate::automation::check_value(*value),
@@ -272,6 +270,11 @@ pub fn validate(doc: &Document) -> Vec<String> {
             push(Err(ModelError::range("counters.output", o.id)), "output");
         }
     }
+    let f = doc.settings().format;
+    push(
+        need(f.is_valid(), "settings.format", f.sample_rate),
+        "settings",
+    );
     for m in doc.media().values() {
         if m.id.0 >= c.media {
             push(Err(ModelError::range("counters.media", m.id)), "media");
