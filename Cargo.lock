@@ -1010,6 +1010,7 @@ dependencies = [
  "block2",
  "core-engine",
  "core-host",
+ "core-media",
  "core-model",
  "objc2",
  "objc2-audio-toolbox",
@@ -1018,6 +1019,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-midi",
  "rtrb",
+ "tempfile",
 ]
 
 [[package]]
