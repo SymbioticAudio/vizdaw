@@ -14,6 +14,7 @@ use core_model::document::Document;
 use core_model::event::Fade;
 use core_model::format::BitDepth;
 use core_model::ids::{MediaId, SeqId};
+use core_model::time::Tick;
 use proptest::prelude::*;
 use std::path::Path;
 
@@ -228,6 +229,85 @@ fn misses_after_a_loop_wrap_count_as_underruns() {
     assert!(f.contains(Faults::STREAM_UNDERRUN), "{:?}", f.names());
     assert!(!f.contains(Faults::LATE_START), "{:?}", f.names());
     assert_eq!(r.engine.state(), PlayState::Playing);
+}
+
+/// Fix round 1, I1: during Play Selection the transport ignores the
+/// loop, so an edit (`load`), `set_loop` or `set_loop_range` must not
+/// give the streamer a loop; the next plain Play loops seamlessly.
+fn selection_then_edit(edit: impl FnOnce(&mut Rig, &Document, SeqId)) {
+    let (d, seq) = doc(&[(0, 0, 16 * QF)]);
+    let mut r = rig(&d, seq, false, true);
+    r.engine.set_loop_range(Some((0, 8 * QF))).unwrap();
+    r.engine.play_until(Tick(16 * Q)).unwrap();
+    edit(&mut r, &d, seq);
+    let lp = r.engine.streamer().loop_range();
+    assert_eq!(lp, None, "the streamer loops during Play Selection");
+    // 400 blocks run past the loop end (192 000) without wrapping.
+    let left = r.render(400, false);
+    let k = left[0] / value(0);
+    assert!(k > 0.5 && k <= 1.0, "{k}");
+    for (i, x) in left.iter().enumerate() {
+        assert!((x - k * value(i as u64)).abs() < 1e-6, "selection {i}: {x}");
+    }
+    let f = r.engine.faults();
+    assert!(f.is_empty(), "{:?}", f.names());
+    // A plain Play from the start loops again, seamlessly.
+    r.engine.stop().unwrap();
+    r.engine.locate_frame(0).unwrap();
+    r.engine.play().unwrap();
+    let (ls, le) = r.engine.streamer().loop_range().expect("loop restored");
+    assert_eq!(ls, 0);
+    let blocks = (le + 2 * QF) as usize / BLOCK as usize;
+    let left = r.render(blocks, false);
+    for (i, x) in left.iter().enumerate() {
+        let f = i as u64 % le;
+        assert!((x - k * value(f)).abs() < 1e-6, "loop {i}: {x}");
+    }
+    let f = r.engine.faults();
+    assert!(f.is_empty(), "{:?}", f.names());
+}
+
+#[test]
+fn an_edit_during_play_selection_keeps_the_streamer_unlooped() {
+    selection_then_edit(|r, d, seq| {
+        r.engine.load(d, seq).unwrap();
+    });
+}
+
+#[test]
+fn set_loop_during_play_selection_keeps_the_streamer_unlooped() {
+    selection_then_edit(|r, _, _| r.engine.set_loop(true).unwrap());
+}
+
+#[test]
+fn set_loop_range_during_play_selection_keeps_the_streamer_unlooped() {
+    selection_then_edit(|r, _, _| r.engine.set_loop_range(Some((0, 8 * QF))).unwrap());
+}
+
+/// Fix round 1, I2: Stop, Locate and Play back to back while playing (no
+/// block between, so the published state still reads Playing) still wait
+/// for the disk at the new position. In Manual mode the wait is what
+/// services the disk: skipping it would start late.
+#[test]
+fn stop_locate_play_while_playing_waits_for_the_disk() {
+    let (d, seq) = doc(&[(0, 0, 8 * QF)]);
+    let mut r = rig(&d, seq, false, true);
+    r.engine.play().unwrap();
+    let left = r.render(4, false);
+    let k = left[0] / value(0);
+    r.engine.faults();
+    r.engine.stop().unwrap();
+    r.engine.locate_frame(5 * QF).unwrap();
+    r.engine.play().unwrap();
+    assert!(r.engine.streamer().ready(5 * QF));
+    // The first block from the new position, disk not serviced.
+    let left = r.render(1, true);
+    for (i, x) in left.iter().enumerate() {
+        let f = 5 * QF + i as u64;
+        assert!((x - k * value(f)).abs() < 1e-6, "frame {i}: {x}");
+    }
+    let f = r.engine.faults();
+    assert!(f.is_empty(), "{:?}", f.names());
 }
 
 #[test]

@@ -182,8 +182,19 @@ pub struct Engine {
     /// Where the last Locate put the transport (Play waits for the disk
     /// there; the published position may not have caught up).
     located: Option<u64>,
-    /// The loop the renderer plays (as the streamer was told), or `None`.
+    /// The loop the renderer plays outside Play Selection, or `None`.
     active_loop: Option<(u64, u64)>,
+    /// Play Selection is playing (as commanded: set by `play_until`,
+    /// cleared by `play` and `stop`): the transport ignores the loop, so
+    /// the streamer gets none (see [`Engine::sync_stream_loop`]).
+    selection: bool,
+    /// The last transport command left playing (`play`/`play_until`, and
+    /// no `stop` since), as this engine commanded it, not as the renderer
+    /// has published yet.
+    commanded_playing: bool,
+    /// A Stop or Locate was sent since the last Play: the next Play waits
+    /// for the disk.
+    moved_since_play: bool,
     /// The streamer's (underruns, late) counters at the last `faults`.
     stream_seen: (AtomicU64, AtomicU64),
 }
@@ -313,6 +324,9 @@ impl Engine {
             online: BTreeSet::new(),
             located: None,
             active_loop: None,
+            selection: false,
+            commanded_playing: false,
+            moved_since_play: false,
             stream_seen: (AtomicU64::new(0), AtomicU64::new(0)),
         };
         Ok((engine, renderer))
@@ -485,7 +499,7 @@ impl Engine {
             self.active_loop = self.loop_range;
             self.push(EngineCmd::SetLoop(self.loop_range))?;
         }
-        self.streamer.set_loop(self.active_loop);
+        self.sync_stream_loop();
         Ok(report)
     }
 
@@ -771,12 +785,27 @@ impl Engine {
         Ok(sent)
     }
 
+    /// Tells the streamer the loop the transport plays: none during Play
+    /// Selection (the transport ignores the loop then), else the stored
+    /// one. Every path that changes the loop or the selection goes
+    /// through here (fix round 1, I1).
+    fn sync_stream_loop(&self) {
+        self.streamer.set_loop(if self.selection {
+            None
+        } else {
+            self.active_loop
+        });
+    }
+
     /// Waits (up to [`LOCATE_WAIT`]) for the streamer at the frame Play
-    /// starts from (spec §5.5); after that, playing rolls anyway. Not
-    /// while already playing (Play changes nothing then).
+    /// starts from (spec §5.5); after that, playing rolls anyway. The
+    /// wait is skipped only while playing on as this engine commanded it
+    /// (a Play, no Stop or Locate since) and the renderer agrees; the
+    /// published state alone lags the commands just sent (fix round 1,
+    /// I2).
     fn prime(&mut self, until: Option<u64>) {
         let located = self.located.take();
-        if self.state() == PlayState::Playing {
+        if self.commanded_playing && !self.moved_since_play && self.state() == PlayState::Playing {
             return;
         }
         let at = located.unwrap_or_else(|| self.transport_frames());
@@ -790,9 +819,13 @@ impl Engine {
 
     /// Starts playback (from the start when at or past the end).
     pub fn play(&mut self) -> Result<(), EngineError> {
-        self.streamer.set_loop(self.active_loop);
+        self.selection = false;
+        self.sync_stream_loop();
         self.prime(None);
-        self.push(EngineCmd::Play { until: None })
+        self.push(EngineCmd::Play { until: None })?;
+        self.commanded_playing = true;
+        self.moved_since_play = false;
+        Ok(())
     }
 
     /// Starts playback that stops at `tick` of the loaded sequence, the
@@ -800,26 +833,34 @@ impl Engine {
     pub fn play_until(&mut self, tick: Tick) -> Result<(), EngineError> {
         let frame = self.tempo.as_ref().map_or(0, |t| t.tick_to_frame(tick));
         // The transport ignores the loop until the next plain Play.
-        self.streamer.set_loop(None);
+        self.selection = true;
+        self.sync_stream_loop();
         self.prime(Some(frame));
-        self.push(EngineCmd::Play { until: Some(frame) })
+        self.push(EngineCmd::Play { until: Some(frame) })?;
+        self.commanded_playing = true;
+        self.moved_since_play = false;
+        Ok(())
     }
 
     /// Stops playback; sounding notes get note-offs.
     pub fn stop(&mut self) -> Result<(), EngineError> {
-        // A Locate made while playing is no longer where the next Play
-        // starts: playing moved on from it.
-        if self.state() != PlayState::Stopped {
-            self.located = None;
-        }
-        self.push(EngineCmd::Stop)
+        self.push(EngineCmd::Stop)?;
+        // `located` is kept until a Play consumes it: a Locate made while
+        // playing was applied there, so priming there is harmless.
+        self.commanded_playing = false;
+        self.moved_since_play = true;
+        self.selection = false;
+        self.sync_stream_loop();
+        Ok(())
     }
 
     /// Moves to a schedule frame (the streamer starts filling there).
     pub fn locate_frame(&mut self, frame: u64) -> Result<(), EngineError> {
         self.streamer.hint(frame);
         self.located = Some(frame);
-        self.push(EngineCmd::Locate(frame))
+        self.push(EngineCmd::Locate(frame))?;
+        self.moved_since_play = true;
+        Ok(())
     }
 
     /// Moves to a tick of the loaded sequence.
@@ -834,7 +875,7 @@ impl Engine {
         self.push(EngineCmd::SetLoop(range))?;
         self.default_loop = on;
         self.active_loop = range;
-        self.streamer.set_loop(range);
+        self.sync_stream_loop();
         Ok(())
     }
 
@@ -843,7 +884,7 @@ impl Engine {
         self.push(EngineCmd::SetLoop(range))?;
         self.default_loop = false;
         self.active_loop = range;
-        self.streamer.set_loop(range);
+        self.sync_stream_loop();
         Ok(())
     }
 

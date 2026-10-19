@@ -573,6 +573,15 @@ impl Streamer {
         sh.wake.notify_all();
     }
 
+    /// The loop the real-time side wraps at, as last set (`None`: not
+    /// looping).
+    pub fn loop_range(&self) -> Option<(u64, u64)> {
+        let _c = lock(&self.shared.control);
+        let le = self.shared.loop_end.load(Ordering::Acquire);
+        let ls = self.shared.loop_start.load(Ordering::Acquire);
+        (le != 0).then_some((ls, le))
+    }
+
     /// Playback is about to start at (or move to) `frame`: plan around it
     /// now.
     /// The hint is planned alongside the published playhead (never
