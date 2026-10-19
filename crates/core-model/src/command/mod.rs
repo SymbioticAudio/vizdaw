@@ -4,6 +4,7 @@ pub mod audio;
 pub mod drum;
 pub mod event;
 pub mod lane;
+pub mod media;
 pub mod mixer;
 pub mod reference;
 pub mod routing;
@@ -16,6 +17,7 @@ pub use audio::AudioCmd;
 pub use drum::DrumCmd;
 pub use event::EventCmd;
 pub use lane::LaneCmd;
+pub use media::{MediaCmd, MediaSwap};
 pub use mixer::MixerCmd;
 pub use reference::ReferenceCmd;
 pub use routing::RoutingCmd;
@@ -78,8 +80,10 @@ pub enum Command {
     Reference(ReferenceCmd),
     /// Audio-region edits.
     Audio(AudioCmd),
-    /// Destination, output and media edits.
+    /// Destination and output edits.
     Routing(RoutingCmd),
+    /// Media-pool edits.
+    Media(MediaCmd),
     /// Mixer edits.
     Mixer(MixerCmd),
     /// Document-settings edits.
@@ -108,6 +112,7 @@ impl Command {
             Command::Reference(c) => c.name(),
             Command::Audio(c) => c.name(),
             Command::Routing(c) => c.name(),
+            Command::Media(c) => c.name(),
             Command::Mixer(c) => c.name(),
             Command::Settings(c) => c.name(),
             Command::SelectAndModify { modify, .. } => {
@@ -163,6 +168,10 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
         }
         Command::Routing(c) => {
             routing::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::Media(c) => {
+            media::apply(&mut d, c, &mut report)?;
             None
         }
         Command::Mixer(c) => {

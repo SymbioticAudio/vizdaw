@@ -1,7 +1,7 @@
 use core_model::ModelError;
 use core_model::command::{
-    AudioCmd, Command, Context, DrumCmd, EventCmd, LaneCmd, ReferenceCmd, RoutingCmd, SequenceCmd,
-    apply, apply_in,
+    AudioCmd, Command, Context, DrumCmd, EventCmd, LaneCmd, MediaCmd, ReferenceCmd, RoutingCmd,
+    SequenceCmd, apply, apply_in,
 };
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
 use core_model::event::{EventBody, EventKind, EventSpec, Fade, LoopCount};
@@ -604,21 +604,27 @@ fn flattening_a_two_level_nested_reference() {
 #[test]
 fn flatten_warns_about_lost_audio_output_and_owner_quantize() {
     let mut d = base();
-    for c in [
-        RoutingCmd::AddOutput {
+    d = run(
+        &d,
+        Command::Routing(RoutingCmd::AddOutput {
             name: "Main".into(),
             reference: "bus:0".into(),
-        },
-        RoutingCmd::AddMedia {
+        }),
+    )
+    .unwrap();
+    d = run(
+        &d,
+        Command::Media(MediaCmd::Add {
             path: "Media/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 48_000,
             content_hash: None,
-        },
-    ] {
-        d = run(&d, Command::Routing(c)).unwrap();
-    }
+            name: None,
+            origin: None,
+        }),
+    )
+    .unwrap();
     let d = run(
         &d,
         Command::Lane(LaneCmd::SetOutput {

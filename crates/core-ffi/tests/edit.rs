@@ -3,6 +3,7 @@
 
 use core_engine::fixtures::{Builder, Q};
 use core_model::command::Command;
+use core_model::command::MediaCmd;
 use core_model::command::lane::LaneCmd;
 use core_model::command::routing::RoutingCmd;
 use core_model::document::Document;
@@ -55,12 +56,14 @@ fn fixture() -> Fixture {
         _ => None,
     });
     let r = b
-        .run(Command::Routing(RoutingCmd::AddMedia {
+        .run(Command::Media(MediaCmd::Add {
             path: "Media/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 480_000,
             content_hash: None,
+            name: None,
+            origin: None,
         }))
         .unwrap();
     let media = created(&r, |id| match id {

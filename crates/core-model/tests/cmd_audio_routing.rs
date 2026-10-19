@@ -1,5 +1,7 @@
 use core_model::ModelError;
-use core_model::command::{AudioCmd, Command, EventCmd, LaneCmd, RoutingCmd, SequenceCmd, apply};
+use core_model::command::{
+    AudioCmd, Command, EventCmd, LaneCmd, MediaCmd, RoutingCmd, SequenceCmd, apply,
+};
 use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
 use core_model::ids::{AnyId, DestId, EventId, LaneId, MediaId, OutputPathId, SeqId};
@@ -13,6 +15,10 @@ fn run(d: &Document, c: Command) -> core_model::Result<Document> {
 
 fn routing(c: RoutingCmd) -> Command {
     Command::Routing(c)
+}
+
+fn media(c: MediaCmd) -> Command {
+    Command::Media(c)
 }
 
 fn audio(c: AudioCmd) -> Command {
@@ -57,22 +63,23 @@ fn base() -> Document {
             name: "Aux".into(),
             reference: "bus:1".into(),
         },
-        RoutingCmd::AddMedia {
-            path: "Media/a.wav".into(),
-            sample_rate: 48_000,
-            channels: 2,
-            length_frames: 96_000,
-            content_hash: None,
-        },
-        RoutingCmd::AddMedia {
-            path: "Media/b.wav".into(),
-            sample_rate: 48_000,
-            channels: 2,
-            length_frames: 96_000,
-            content_hash: None,
-        },
     ] {
         d = run(&d, routing(c)).unwrap();
+    }
+    for path in ["Media/a.wav", "Media/b.wav"] {
+        d = run(
+            &d,
+            media(MediaCmd::Add {
+                path: path.into(),
+                sample_rate: 48_000,
+                channels: 2,
+                length_frames: 96_000,
+                content_hash: None,
+                name: None,
+                origin: None,
+            }),
+        )
+        .unwrap();
     }
     d
 }
@@ -135,12 +142,14 @@ fn add_items_allocate_ids_and_validate() {
     assert!(
         run(
             &d,
-            routing(RoutingCmd::AddMedia {
+            media(MediaCmd::Add {
                 path: "x".into(),
                 sample_rate: 0,
                 channels: 1,
                 length_frames: 1,
-                content_hash: None
+                content_hash: None,
+                name: None,
+                origin: None,
             })
         )
         .is_err()
@@ -314,7 +323,7 @@ fn removing_outputs_and_media_in_use() {
     assert_eq!(
         run(
             &d,
-            routing(RoutingCmd::RemoveMedia {
+            media(MediaCmd::Remove {
                 media: MediaId(0),
                 replacement: None
             })
@@ -325,7 +334,7 @@ fn removing_outputs_and_media_in_use() {
     );
     let d = run(
         &d,
-        routing(RoutingCmd::RemoveMedia {
+        media(MediaCmd::Remove {
             media: MediaId(0),
             replacement: Some(MediaId(1)),
         }),
@@ -572,12 +581,14 @@ fn media_paths_must_be_relative_and_normalized() {
     ] {
         let r = run(
             &Document::new(),
-            routing(RoutingCmd::AddMedia {
+            media(MediaCmd::Add {
                 path: bad.into(),
                 sample_rate: 48_000,
                 channels: 2,
                 length_frames: 1,
                 content_hash: None,
+                name: None,
+                origin: None,
             }),
         );
         assert!(
@@ -587,12 +598,14 @@ fn media_paths_must_be_relative_and_normalized() {
     }
     let d = run(
         &Document::new(),
-        routing(RoutingCmd::AddMedia {
+        media(MediaCmd::Add {
             path: "Media/sub/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 1,
             content_hash: None,
+            name: None,
+            origin: None,
         }),
     )
     .unwrap();
@@ -604,12 +617,14 @@ fn validate_rejects_bad_media_paths_from_files() {
     use core_model::file::{from_json, to_json};
     let d = run(
         &Document::new(),
-        routing(RoutingCmd::AddMedia {
+        media(MediaCmd::Add {
             path: "Media/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 1,
             content_hash: None,
+            name: None,
+            origin: None,
         }),
     )
     .unwrap();

@@ -2,8 +2,8 @@
 //! `fixtures`). Shared by engine tests, `vizdaw-play` and the app (2c).
 
 use core_model::command::{
-    Command, DrumCmd, EventCmd, LaneCmd, MixerCmd, ReferenceCmd, Report, RoutingCmd, SequenceCmd,
-    apply,
+    Command, DrumCmd, EventCmd, LaneCmd, MediaCmd, MixerCmd, ReferenceCmd, Report, RoutingCmd,
+    SequenceCmd, apply,
 };
 use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec, Fade, LoopCount};
@@ -448,12 +448,14 @@ pub fn demo_audio_document() -> Result<Document> {
             _ => None,
         })
         .ok_or_else(|| ModelError::invalid("no output created"))?;
-    let r = b.run(Command::Routing(RoutingCmd::AddMedia {
+    let r = b.run(Command::Media(MediaCmd::Add {
         path: "Media/loop.wav".into(),
         sample_rate: 48_000,
         channels: 2,
         length_frames: 384_000,
         content_hash: None,
+        name: None,
+        origin: None,
     }))?;
     let media = r
         .created

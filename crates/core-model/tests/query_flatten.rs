@@ -1,5 +1,5 @@
 use core_model::command::{
-    AudioCmd, Command, DrumCmd, EventCmd, LaneCmd, RoutingCmd, SequenceCmd, apply,
+    AudioCmd, Command, DrumCmd, EventCmd, LaneCmd, MediaCmd, SequenceCmd, apply,
 };
 use core_model::document::{DestKind, Destination, Document, DocumentRepr, Settings};
 use core_model::event::{EventBody, EventKind, EventSpec, Fade, LoopCount};
@@ -549,12 +549,14 @@ fn huge_fill_length_does_not_overflow() {
 fn with_region(d: &Document, seq: u64, lane: u64, beat: i64) -> Document {
     let d = run(
         d,
-        Command::Routing(RoutingCmd::AddMedia {
+        Command::Media(MediaCmd::Add {
             path: "Media/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 96_000,
             content_hash: None,
+            name: None,
+            origin: None,
         }),
     );
     run(

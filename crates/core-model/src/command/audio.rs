@@ -132,6 +132,15 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
             fade_in,
             fade_out,
         } => {
+            // A region plays on its lane's output path: a lane without one
+            // takes the first, or a new "Audio 1" (5a Ruling 6).
+            if d.lane(*seq, *lane)?.audio_out.is_none() {
+                let out = match d.outputs().keys().next().copied() {
+                    Some(o) => o,
+                    None => super::routing::add_output(d, "Audio 1", "audio:1-2", r),
+                };
+                d.lane_mut(*seq, *lane)?.audio_out = Some(out);
+            }
             let spec = EventSpec::new(
                 *tick,
                 EventBody::AudioRegion {
