@@ -174,16 +174,86 @@ fn clean_stem(stem: &str) -> String {
     if s.is_empty() { "Audio".into() } else { s }
 }
 
+/// Whether `e` means the volume cannot hard-link (exFAT, SMB, …) or the
+/// link crosses volumes, so a rename into place is the way (Ruling F7).
+fn no_hard_links(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    if let Some(c) = e.raw_os_error() {
+        return c == libc::EXDEV || c == libc::ENOTSUP || c == libc::EPERM;
+    }
+    #[cfg(not(unix))]
+    let _ = e;
+    false
+}
+
+/// Moves `from` to `to`, failing with `AlreadyExists` (and changing
+/// nothing) if `to` exists. macOS: `renamex_np(RENAME_EXCL)`.
+#[cfg(target_os = "macos")]
+fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    };
+    let (f, t) = (c(from)?, c(to)?);
+    // SAFETY: both pointers are valid NUL-terminated strings for the call.
+    let r = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Moves `from` to `to`, failing with `AlreadyExists` (and changing
+/// nothing) if `to` exists: copy into a new file, then remove the source.
+#[cfg(not(target_os = "macos"))]
+fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    if let Err(e) = std::io::copy(&mut src, &mut dst) {
+        let _ = std::fs::remove_file(to);
+        return Err(e);
+    }
+    drop(dst);
+    std::fs::remove_file(from)
+}
+
 /// Links `from` into `media` as `<stem>.caf`, `<stem> 2.caf`, … (the
-/// first free name; `link` never replaces a file); returns the name.
+/// first free name; neither `link` nor the exclusive rename replaces a
+/// file); returns the name. Where hard links are unavailable the file is
+/// renamed into place instead (the source is then gone).
 fn link_free(from: &Path, media: &Path, stem: &str) -> Result<String, MediaError> {
+    link_free_with(from, media, stem, false)
+}
+
+/// [`link_free`]; `force_fallback` skips the hard link (tests).
+fn link_free_with(
+    from: &Path,
+    media: &Path,
+    stem: &str,
+    force_fallback: bool,
+) -> Result<String, MediaError> {
     for n in 1..=10_000u32 {
         let name = if n == 1 {
             format!("{stem}.caf")
         } else {
             format!("{stem} {n}.caf")
         };
-        match std::fs::hard_link(from, media.join(&name)) {
+        let to = media.join(&name);
+        let linked = if force_fallback {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        } else {
+            std::fs::hard_link(from, &to)
+        };
+        let done = match linked {
+            Err(e) if force_fallback || no_hard_links(&e) => rename_excl(from, &to),
+            other => other,
+        };
+        match done {
             Ok(()) => return Ok(name),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e.into()),
@@ -572,5 +642,45 @@ mod tests {
             &AtomicBool::new(false),
         );
         assert!(matches!(at_44k, Err(MediaError::Unsupported(_))));
+    }
+
+    #[test]
+    fn rename_excl_moves_into_a_free_name() {
+        let d = package();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        std::fs::write(&a, "x").unwrap();
+        rename_excl(&a, &b).unwrap();
+        assert!(!a.exists());
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "x");
+    }
+
+    #[test]
+    fn rename_excl_never_replaces() {
+        let d = package();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        std::fs::write(&a, "new").unwrap();
+        std::fs::write(&b, "old").unwrap();
+        let e = rename_excl(&a, &b).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "old");
+    }
+
+    #[test]
+    fn the_fallback_walks_the_free_name_loop() {
+        let d = package();
+        let media = d.path().join("m");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("s.caf"), "old").unwrap();
+        let from = d.path().join("in.caf");
+        std::fs::write(&from, "new").unwrap();
+        let name = link_free_with(&from, &media, "s", true).unwrap();
+        assert_eq!(name, "s 2.caf");
+        assert!(!from.exists());
+        assert_eq!(std::fs::read_to_string(media.join("s.caf")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(media.join("s 2.caf")).unwrap(),
+            "new"
+        );
     }
 }

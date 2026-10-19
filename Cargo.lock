@@ -478,6 +478,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "core-model",
+ "libc",
  "proptest",
  "tempfile",
  "thiserror",
