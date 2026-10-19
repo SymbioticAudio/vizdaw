@@ -7,7 +7,7 @@ use crate::error::VizError;
 use crate::guard::lock;
 use crate::plugins;
 use core_engine::backend::{AudioBackend, BackendEvent};
-use core_engine::engine::{Engine, EngineConfig};
+use core_engine::engine::{Engine, EngineConfig, PendingPlay};
 use core_engine::graph::NoInserts;
 use core_engine::offline::{EventLog, OfflineBackend, OfflineSinks};
 use core_engine::render::Renderer;
@@ -17,6 +17,7 @@ use core_host::{IdleReport, PluginHost};
 use core_model::document::Document;
 use core_model::ids::{DestId, SeqId};
 use core_model::time::Tick;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -49,6 +50,54 @@ static FORCE_OFFLINE: AtomicBool = AtomicBool::new(false);
 /// Engine loads made by the host (test hook counter).
 static LOADS: AtomicU64 = AtomicU64::new(0);
 static HOSTS_CREATED: AtomicU64 = AtomicU64::new(0);
+/// Hands out [`Host::epoch`] values (process-wide, so a new host never
+/// reuses an old one's).
+static EPOCHS: AtomicU64 = AtomicU64::new(1);
+/// New hosts' disks stall (the `stall_disk` test hook).
+static STALL_DISK: AtomicBool = AtomicBool::new(false);
+
+fn next_epoch() -> u64 {
+    EPOCHS.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Each session's online media, handed to the engine before every load
+/// (5a Task 10).
+static MEDIA: Mutex<BTreeMap<u64, Vec<core_media::stream::MediaFile>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Sets session `owner`'s online media; reloads use it.
+pub fn set_media(owner: u64, files: Vec<core_media::stream::MediaFile>) {
+    lock(&MEDIA).insert(owner, files);
+}
+
+/// Forgets session `owner`'s media (it closed).
+pub fn forget_media(owner: u64) {
+    lock(&MEDIA).remove(&owner);
+}
+
+fn media_of(owner: u64) -> Vec<core_media::stream::MediaFile> {
+    lock(&MEDIA).get(&owner).cloned().unwrap_or_default()
+}
+
+/// Media whose reads failed while `owner` played (each once).
+pub fn take_stream_errors(owner: u64) -> Vec<(core_model::ids::MediaId, String)> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.take_stream_errors())
+        .unwrap_or_default()
+}
+
+/// Stalls the disk of the current host and of hosts created from now on
+/// (`true`), as a disk that never answers: a Play waits its full
+/// `LOCATE_WAIT` (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn stall_disk(on: bool) {
+    STALL_DISK.store(on, Ordering::Relaxed);
+    if let Some(h) = lock(&HOST).as_ref() {
+        h.engine.streamer().set_stalled(on);
+    }
+}
 
 /// How long a still-running device gets to play the note-offs before a
 /// rebuild (as in `vizdaw-play`'s live loop).
@@ -265,6 +314,10 @@ struct Host {
     /// Where the asked Play stops (Play Selection, plan 4f): a rebuild
     /// resumes with it.
     until: Option<Tick>,
+    /// Changed by every Play, Stop and release: a Play that waited for
+    /// the disk without the lock goes on only if nothing came meanwhile
+    /// ([`finish_play`]).
+    epoch: u64,
     device: String,
     sample_rate: f64,
     report: Vec<String>,
@@ -282,6 +335,14 @@ struct Host {
 
 impl Host {
     fn create() -> Result<Host, VizError> {
+        let h = Host::create_any()?;
+        if STALL_DISK.load(Ordering::Relaxed) {
+            h.engine.streamer().set_stalled(true);
+        }
+        Ok(h)
+    }
+
+    fn create_any() -> Result<Host, VizError> {
         HOSTS_CREATED.fetch_add(1, Ordering::Relaxed);
         if offline_mode() {
             let sinks = OfflineSinks::new(1 << 16);
@@ -343,6 +404,7 @@ impl Host {
             looped: false,
             want_play: false,
             until: None,
+            epoch: next_epoch(),
             device: device.to_string(),
             sample_rate,
             report: Vec::new(),
@@ -388,9 +450,16 @@ impl Host {
         restarted
     }
 
-    fn load(&mut self, doc: &Document, seq: SeqId, looped: bool) -> Result<(), VizError> {
+    fn load(
+        &mut self,
+        owner: u64,
+        doc: &Document,
+        seq: SeqId,
+        looped: bool,
+    ) -> Result<(), VizError> {
         LOADS.fetch_add(1, Ordering::Relaxed);
         self.plugins_in_engine |= has_slots(doc);
+        self.engine.set_media(media_of(owner));
         let report = self.engine.load(doc, seq)?;
         self.report = report_lines(&report);
         self.engine.set_loop(looped)?;
@@ -557,7 +626,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     if let Some(o) = overrides {
         new.engine.seed_overrides(o);
     }
-    new.load(doc, seq, looped)?;
+    new.load(owner, doc, seq, looped)?;
     new.engine.locate_tick(at)?;
     if playing {
         match until {
@@ -619,10 +688,21 @@ pub struct HostState {
     pub report: Vec<String>,
 }
 
-/// Plays `seq` of `doc` for session `owner`. A different owner, sequence
-/// or an explicit `start` reloads (stopping whoever played); otherwise the
-/// engine resumes where it stopped. `until` stops it there (the loop
-/// ignored; plan 4f Ruling 9).
+/// A Play [`play`] prepared; [`finish_play`] waits for the disk and
+/// sends it.
+#[derive(Debug)]
+#[must_use = "the Play is sent by `finish_play`"]
+pub struct HostPlay {
+    owner: u64,
+    epoch: u64,
+    pending: PendingPlay,
+}
+
+/// Plays `seq` of `doc` for session `owner`, up to the disk wait (spec
+/// §5.5): the caller drops every lock and calls [`finish_play`]. A
+/// different owner, sequence or an explicit `start` reloads (stopping
+/// whoever played); otherwise the engine resumes where it stopped.
+/// `until` stops it there (the loop ignored; plan 4f Ruling 9).
 pub fn play(
     owner: u64,
     doc: &Document,
@@ -631,7 +711,7 @@ pub fn play(
     until: Option<Tick>,
     looped: bool,
     mut plugins: Option<&mut PluginHost>,
-) -> Result<(), VizError> {
+) -> Result<HostPlay, VizError> {
     let mut slot = loop {
         let mut slot = lock(&HOST);
         // Device events nobody polled (the host had no owner, or another
@@ -692,22 +772,41 @@ pub fn play(
     }
     if host.owner != owner || host.seq != seq || start.is_some() {
         host.engine.stop()?;
-        host.load(doc, seq, looped)?;
+        host.load(owner, doc, seq, looped)?;
         host.engine.locate_tick(start.unwrap_or(Tick::ZERO))?;
         host.owner = owner;
         host.seq = seq;
     } else if restarted {
         // Resumed with restarted instances: compile their placeholders.
-        host.load(doc, seq, looped)?;
+        host.load(owner, doc, seq, looped)?;
     }
     host.faults.clear();
-    match until {
-        Some(t) => host.engine.play_until(t)?,
-        None => host.engine.play()?,
-    }
+    // The intent is Play from here on: a rebuild during the wait resumes
+    // playing, and a Stop during it cancels this Play.
+    let pending = host.engine.begin_play(until);
     host.want_play = true;
     host.until = until;
-    Ok(())
+    host.epoch = next_epoch();
+    Ok(HostPlay {
+        owner,
+        epoch: host.epoch,
+        pending,
+    })
+}
+
+/// Waits for the disk (up to `LOCATE_WAIT`, without any lock: the UI's
+/// polls and every other host call go on meanwhile), then sends the
+/// Play, unless a Stop, another Play, a release or a new engine came in
+/// the meantime (they win; a rebuilt engine resumes on its own).
+pub fn finish_play(p: HostPlay) -> Result<(), VizError> {
+    p.pending.wait();
+    let mut slot = lock(&HOST);
+    match slot.as_mut() {
+        Some(h) if h.owner == p.owner && h.epoch == p.epoch => {
+            Ok(h.engine.finish_play(p.pending)?)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Stops if `owner` is playing.
@@ -717,6 +816,7 @@ pub fn stop(owner: u64) -> Result<(), VizError> {
         Some(h) if h.owner == owner => {
             h.want_play = false;
             h.until = None;
+            h.epoch = next_epoch();
             Ok(h.engine.stop()?)
         }
         _ => Ok(()),
@@ -797,6 +897,7 @@ pub fn reload(
             // The loaded sequence may have been deleted by the edit.
             if doc.sequence(seq).is_err() {
                 h.engine.stop()?;
+                h.epoch = next_epoch();
                 h.want_play = false;
                 h.owner = 0;
                 return Ok(());
@@ -812,7 +913,7 @@ pub fn reload(
             if !ready {
                 return Ok(());
             }
-            h.load(doc, seq, looped)
+            h.load(owner, doc, seq, looped)
         }
         _ => Ok(()),
     }
@@ -864,6 +965,7 @@ pub fn release(owner: u64) {
         if h.owner == owner {
             let _ = h.engine.stop();
             h.want_play = false;
+            h.epoch = next_epoch();
             h.owner = 0;
         }
     }

@@ -348,8 +348,12 @@ pub struct IdleUpdate {
     /// Slots whose parameter list or values changed outside a gesture.
     pub params_changed: Vec<u64>,
     /// New problems: plugins that failed to load or refused their saved
-    /// state.
+    /// state; media that failed to read.
     pub problems: Vec<String>,
+    /// The media rows changed (a job finished, media went offline):
+    /// refetch `Session.media`.
+    #[uniffi(default = false)]
+    pub media_changed: bool,
 }
 
 /// One plugin parameter and its current value.

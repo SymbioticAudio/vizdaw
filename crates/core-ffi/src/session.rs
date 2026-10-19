@@ -82,6 +82,13 @@ struct Inner {
     /// The editors' layout, opaque JSON from the app, saved in `ui.json`
     /// (plan 4a Ruling 12).
     editor_layout: Option<serde_json::Value>,
+    /// Offline media and why (Ruling 22; runtime only, never saved).
+    offline: std::collections::BTreeMap<core_model::ids::MediaId, crate::media::OfflineReasonRow>,
+    /// The document whose media and format `offline` was computed for, and
+    /// the root it was checked under.
+    media_seen: Option<(Document, std::path::PathBuf)>,
+    /// Imports and conversions (Ruling 15).
+    jobs: crate::jobs::Jobs,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -137,7 +144,40 @@ impl Inner {
             autosave_soon: false,
             plugin_dirty: false,
             closed: false,
+            offline: Default::default(),
+            media_seen: None,
+            jobs: Default::default(),
         }
+    }
+
+    /// The media root: the package, or the untitled scratch package.
+    fn root(&self, id: u64) -> std::path::PathBuf {
+        self.path
+            .clone()
+            .unwrap_or_else(|| crate::media::scratch_root(id))
+    }
+
+    /// Recomputes the offline set when the media pool, the format or the
+    /// root changed (or `force`), and hands the online media to the
+    /// engine host. True when the offline set changed.
+    fn refresh_media(&mut self, id: u64, force: bool) -> bool {
+        let root = self.root(id);
+        let doc = self.history.doc();
+        let same = !force
+            && self.media_seen.as_ref().is_some_and(|(d, r)| {
+                *r == root
+                    && d.settings().format == doc.settings().format
+                    && (d.media().ptr_eq(doc.media()) || d.media() == doc.media())
+            });
+        if same {
+            return false;
+        }
+        let offline = crate::media::check(doc, &root);
+        let changed = offline != self.offline;
+        host::set_media(id, crate::media::files(doc, &root, &offline));
+        self.offline = offline;
+        self.media_seen = Some((doc.clone(), root));
+        changed
     }
 
     /// The sequence a position set without the engine belongs to: the one
@@ -158,6 +198,7 @@ impl Inner {
     /// recompiles. A failure (or panic, which also resets the host) never
     /// fails the edit: it becomes a sticky fault.
     fn reload_host(&mut self, id: u64) {
+        self.refresh_media(id, false);
         // The marker names any plugin the sync starts loading first.
         self.mark(id, true);
         let (doc, looped) = (self.history.doc(), self.looped);
@@ -355,6 +396,7 @@ impl Session {
             // A sync that could not run is retried by `idle`.
             inner.reload_owed = synced.is_err();
             inner.mark(id, false);
+            inner.refresh_media(id, true);
         }
         Ok(s)
     }
@@ -415,6 +457,7 @@ impl Session {
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
         let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
+        crate::media::copy_media(inner.doc(), &inner.root(self.id), path)?;
         file::save(inner.doc(), path)?;
         write_windows(path, &inner.windows, inner.editor_layout.as_ref());
         inner.clean = inner.doc().clone();
@@ -685,16 +728,22 @@ impl Session {
             host::play(self.id, inner.doc(), id, start, until, looped, p)
         })
         .and_then(|r| r);
-        if let Err(e) = played {
-            // Retried by `idle` (the engine may hold stale plugins).
-            inner.reload_owed = true;
-            return Err(e);
-        }
+        let pending = match played {
+            Ok(p) => p,
+            Err(e) => {
+                // Retried by `idle` (the engine may hold stale plugins).
+                inner.reload_owed = true;
+                return Err(e);
+            }
+        };
         inner.reload_owed = false;
         inner.reload_fault = None;
         inner.cursor = None;
         inner.cursor_seq = Some(id);
-        Ok(())
+        // The disk wait (up to 250 ms) holds no lock: this session's
+        // transport poll and every other session go on meanwhile.
+        drop(inner);
+        host::finish_play(pending)
     }
 
     /// Runs a transport call; an `Internal` error drops the engine host so
@@ -795,9 +844,19 @@ impl Session {
 
     /// Saves to `path` (`.vizdaw` appended if missing) and makes it the
     /// current path.
+    /// `Busy` while an import or conversion has not been applied: its
+    /// files are under the current media root, which Save As moves away
+    /// from (plan 5a Ruling 15).
     pub fn save_as(&self, path: String) -> Result<(), VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
+            // A job that just finished applies first, under the old root.
+            self.apply_jobs(&mut inner);
+            if inner.jobs.busy() {
+                return Err(VizError::Busy {
+                    message: "Wait for the import or conversion to finish, then save.".into(),
+                });
+            }
             let p = with_extension(&path);
             self.save_to(&mut inner, &p)?;
             if inner.path.as_deref() != Some(p.as_path()) {
@@ -818,6 +877,10 @@ impl Session {
                     inner.key = Some(key);
                 }
                 inner.path = Some(p);
+                // The scratch package of an untitled session is done with.
+                let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
+                inner.refresh_media(self.id, true);
+                inner.reload_host(self.id);
                 self.mark(&mut inner);
             }
             Ok(())
@@ -1081,6 +1144,7 @@ impl Session {
                 slots_changed: false,
                 params_changed: Vec::new(),
                 problems: Vec::new(),
+                media_changed: false,
             };
             // A nested run loop inside a plugin call: skip this tick (before
             // taking the session lock, which that call may hold).
@@ -1094,6 +1158,25 @@ impl Session {
                 inner.reload_host(self.id);
             }
             let changed = self.pump(&mut inner);
+            let jobs_changed = self.apply_jobs(&mut inner);
+            let mut media_changed = jobs_changed;
+            for (m, why) in host::take_stream_errors(self.id) {
+                inner
+                    .offline
+                    .insert(m, crate::media::OfflineReasonRow::Unreadable);
+                inner
+                    .news
+                    .problems
+                    .push(format!("media {m} went offline: {why}"));
+                media_changed = true;
+            }
+            if media_changed && !jobs_changed {
+                let root = inner.root(self.id);
+                let files = crate::media::files(inner.doc(), &root, &inner.offline);
+                host::set_media(self.id, files);
+                inner.reload_host(self.id);
+            }
+            let changed = changed || jobs_changed;
             let n = std::mem::take(&mut inner.news);
             Ok(IdleUpdate {
                 snapshot: if changed || n.doc_changed {
@@ -1104,6 +1187,7 @@ impl Session {
                 slots_changed: n.slots_changed,
                 params_changed: n.params_changed.into_iter().collect(),
                 problems: n.problems,
+                media_changed,
             })
         })
     }
@@ -1727,6 +1811,15 @@ impl Session {
         })
     }
 
+    /// Holds this session's job threads before they start (`true`), or
+    /// lets them go (test hook).
+    pub fn debug_hold_jobs(&self, on: bool) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).jobs.set_held(on);
+            Ok(())
+        })
+    }
+
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
@@ -1783,6 +1876,14 @@ impl Session {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
             inner.closed = true;
+            let root = inner.root(self.id);
+            for w in inner.jobs.shutdown() {
+                discard(&root, w);
+            }
+            host::forget_media(self.id);
+            if inner.path.is_none() {
+                let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
+            }
             if let Some(k) = inner.key.clone() {
                 recovery::closed(&k, self.id);
             }
@@ -2340,5 +2441,313 @@ impl Drop for Session {
         // The engine goes first when this session's plugin host feeds it;
         // queued if a plugin call is running (re-entrancy, plugins.rs).
         plugins::close_session(self.id);
+    }
+}
+
+/// Removes the files of a job that was never applied (`root` is the
+/// session's media root).
+pub(crate) fn discard(root: &Path, w: crate::jobs::Work) {
+    use crate::jobs::Work;
+    let files: Vec<String> = match w {
+        Work::Import { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .map(|i| i.path)
+            .collect(),
+        Work::Convert { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .map(|i| i.path)
+            .collect(),
+        Work::Cancelled => Vec::new(),
+    };
+    for f in files {
+        let _ = std::fs::remove_file(root.join(f));
+    }
+}
+
+impl Session {
+    /// Applies every finished job (one undo step each); true when the
+    /// document changed.
+    fn apply_jobs(&self, inner: &mut Inner) -> bool {
+        use crate::jobs::{JobStateRow, Work, row};
+        let mut changed = false;
+        for (id, kind, work) in inner.jobs.finished() {
+            let root = inner.root(self.id);
+            let row = match work {
+                Work::Cancelled => row(id, kind, JobStateRow::Cancelled, None, vec![], vec![]),
+                Work::Import { files, target } => match apply_import(inner, &root, files, target) {
+                    Ok((created, problems)) => {
+                        changed |= !created.is_empty();
+                        row(id, kind, JobStateRow::Done, None, problems, created)
+                    }
+                    Err((e, problems)) => row(
+                        id,
+                        kind,
+                        JobStateRow::Failed,
+                        Some(e.to_string()),
+                        problems,
+                        vec![],
+                    ),
+                },
+                // Task 11.
+                w @ Work::Convert { .. } => {
+                    discard(&root, w);
+                    row(
+                        id,
+                        kind,
+                        JobStateRow::Failed,
+                        Some("not yet".into()),
+                        vec![],
+                        vec![],
+                    )
+                }
+            };
+            inner.jobs.finish(id, row);
+        }
+        if changed {
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(inner);
+        }
+        changed
+    }
+}
+
+/// One import job's result per source file: `(file name, the items it
+/// became or why it failed)`.
+type ImportFiles = Vec<(String, Result<Vec<core_media::import::Imported>, String>)>;
+
+/// What an applied import made (media IDs, per-file problems), or why
+/// nothing was applied (with the per-file problems).
+type ImportApplied = Result<(Vec<u64>, Vec<String>), (VizError, Vec<String>)>;
+
+/// One finished import (Ruling 19): the media items and, with a target,
+/// their regions (into the given lane for a single mono/stereo file, else
+/// one new "Audio n" lane per item), as one undo step "Import Audio".
+/// On an error nothing is applied and the written files are removed.
+fn apply_import(
+    inner: &mut Inner,
+    root: &Path,
+    files: ImportFiles,
+    target: Option<crate::jobs::ImportTargetRow>,
+) -> ImportApplied {
+    use core_model::command::{AudioCmd, MediaCmd};
+    use core_model::document::MediaOrigin;
+    use core_model::event::Fade;
+    let mut problems = Vec::new();
+    let mut items = Vec::new();
+    for (name, r) in files {
+        match r {
+            Ok(v) => items.push(v),
+            Err(e) => problems.push(format!("{name}: {e}")),
+        }
+    }
+    let written: Vec<std::path::PathBuf> =
+        items.iter().flatten().map(|i| root.join(&i.path)).collect();
+    if items.is_empty() {
+        return Ok((Vec::new(), problems));
+    }
+    let single = items.len() == 1 && items.first().is_some_and(|v| v.len() == 1);
+    let filter = ViewFilter::default();
+    let h = &mut inner.history;
+    let fail = |e: VizError, problems: Vec<String>| {
+        for p in &written {
+            let _ = std::fs::remove_file(p);
+        }
+        (e, problems)
+    };
+    if let Err(e) = h.begin("Import Audio") {
+        return Err(fail(e.into(), problems));
+    }
+    let run = (|| -> Result<Vec<u64>, VizError> {
+        let mut created = Vec::new();
+        for item in items.iter().flatten() {
+            let r = h.execute(
+                &Command::Media(MediaCmd::Add {
+                    path: item.path.clone(),
+                    sample_rate: item.sample_rate,
+                    channels: item.channels,
+                    length_frames: item.length_frames,
+                    content_hash: Some(item.content_hash.clone()),
+                    name: Some(item.name.clone()),
+                    origin: Some(MediaOrigin::Imported {
+                        original_name: item.original_name.clone(),
+                    }),
+                }),
+                &filter,
+            )?;
+            let media = r
+                .created
+                .iter()
+                .find_map(|id| match id {
+                    core_model::ids::AnyId::Media(m) => Some(*m),
+                    _ => None,
+                })
+                .ok_or_else(|| VizError::Internal {
+                    message: "no media created".into(),
+                })?;
+            created.push(media.0);
+            let Some(t) = target else { continue };
+            let seq = SeqId(t.seq);
+            let lane = match t.lane {
+                Some(l) if single => LaneId(l),
+                _ => {
+                    let n = h.doc().sequence(seq)?.lanes.len() + 1;
+                    let r = h.execute(
+                        &Command::Lane(LaneCmd::Add {
+                            seq,
+                            name: format!("Audio {n}"),
+                            index: None,
+                        }),
+                        &filter,
+                    )?;
+                    r.created
+                        .iter()
+                        .find_map(|id| match id {
+                            core_model::ids::AnyId::Lane(l) => Some(*l),
+                            _ => None,
+                        })
+                        .ok_or_else(|| VizError::Internal {
+                            message: "no lane created".into(),
+                        })?
+                }
+            };
+            h.execute(
+                &Command::Audio(AudioCmd::Insert {
+                    seq,
+                    lane,
+                    tick: Tick(t.tick.max(0)),
+                    media,
+                    source_offset: 0,
+                    length: item.length_frames,
+                    gain_db: 0.0,
+                    fade_in: Fade::default(),
+                    fade_out: Fade::default(),
+                }),
+                &filter,
+            )?;
+        }
+        Ok(created)
+    })();
+    match run {
+        Ok(created) => match h.commit() {
+            Ok(()) => Ok((created, problems)),
+            Err(e) => Err(fail(e.into(), problems)),
+        },
+        Err(e) => {
+            let _ = h.abort();
+            Err(fail(e, problems))
+        }
+    }
+}
+
+/// Media and jobs (plan 5a Task 10).
+#[uniffi::export]
+impl Session {
+    /// The media pool, with offline items and use counts.
+    pub fn media(&self) -> Result<Vec<crate::media::MediaRow>, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            Ok(crate::media::rows(inner.doc(), &inner.offline))
+        })
+    }
+
+    /// Checks every media file again (the app became active, or the user
+    /// asked); true when the offline set changed.
+    pub fn recheck_media(&self) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let changed = inner.refresh_media(self.id, true);
+            if changed {
+                inner.reload_host(self.id);
+            }
+            Ok(changed)
+        })
+    }
+
+    /// Starts importing `paths` (converted into the project format; spec
+    /// §5.1) as a job; `target` places regions (Ruling 19). Returns the
+    /// job ID; `job` reports it and applies it when done.
+    pub fn import_audio(
+        &self,
+        paths: Vec<String>,
+        target: Option<crate::jobs::ImportTargetRow>,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if let Some(t) = target {
+                let doc = inner.doc();
+                doc.sequence(SeqId(t.seq))?;
+                if let Some(l) = t.lane {
+                    doc.lane(SeqId(t.seq), LaneId(l))?;
+                }
+            }
+            let root = inner.root(self.id);
+            let format = inner.doc().settings().format;
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Import, move |progress, cancel| {
+                    let importer = crate::media::importer();
+                    let n = paths.len().max(1) as f32;
+                    let mut files: ImportFiles = Vec::new();
+                    for (k, p) in paths.iter().enumerate() {
+                        let path = std::path::PathBuf::from(p);
+                        let name = path
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| p.clone());
+                        let r = core_media::import::import_file(
+                            importer.as_ref(),
+                            &path,
+                            &root,
+                            format,
+                            &mut |f| {
+                                progress.store(
+                                    ((k as f32 + f) / n).to_bits(),
+                                    std::sync::atomic::Ordering::Relaxed,
+                                )
+                            },
+                            cancel,
+                        );
+                        match r {
+                            Err(core_media::MediaError::Cancelled) => {
+                                // Remove what earlier files of this batch wrote.
+                                for (_, done) in &files {
+                                    if let Ok(items) = done {
+                                        for i in items {
+                                            let _ = std::fs::remove_file(root.join(&i.path));
+                                        }
+                                    }
+                                }
+                                return crate::jobs::Work::Cancelled;
+                            }
+                            r => files.push((name, r.map_err(|e| e.to_string()))),
+                        }
+                    }
+                    crate::jobs::Work::Import { files, target }
+                })
+        })
+    }
+
+    /// Job `id`, applying it first when it just finished.
+    pub fn job(&self, id: u64) -> Result<crate::jobs::JobRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            inner.jobs.row(id).ok_or_else(|| VizError::Model {
+                message: format!("unknown job {id}"),
+            })
+        })
+    }
+
+    /// Asks job `id` to stop (nothing it did is applied).
+    pub fn cancel_job(&self, id: u64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).jobs.cancel(id);
+            Ok(())
+        })
     }
 }

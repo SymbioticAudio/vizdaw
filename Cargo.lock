@@ -448,6 +448,7 @@ dependencies = [
  "core-engine",
  "core-ffi",
  "core-host",
+ "core-media",
  "core-model",
  "platform-macos",
  "proptest",

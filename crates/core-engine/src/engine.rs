@@ -20,7 +20,7 @@ use crate::schedule::{
     TempoTable, compile,
 };
 use crate::transport::PlayState;
-use core_media::stream::{DiskMode, MediaFile, StreamConfig, Streamer};
+use core_media::stream::{DiskMode, MediaFile, StreamConfig, StreamWaiter, Streamer};
 use core_model::document::{DestKind, Document};
 use core_model::ids::{DestId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
@@ -87,6 +87,30 @@ impl EngineConfig {
             disk: DiskMode::Thread,
             stream: StreamConfig::default(),
         }
+    }
+}
+
+/// A Play between [`Engine::begin_play`] and [`Engine::finish_play`].
+#[derive(Debug)]
+#[must_use = "a Play is sent by `Engine::finish_play`"]
+pub struct PendingPlay {
+    /// Where to wait for the disk (`None`: no wait).
+    wait: Option<(StreamWaiter, u64)>,
+    until: Option<Tick>,
+}
+
+impl PendingPlay {
+    /// Waits up to [`LOCATE_WAIT`] for the disk at the frame Play starts
+    /// from (spec §5.5); after that, playing rolls anyway. Needs no lock.
+    pub fn wait(&self) {
+        if let Some((w, at)) = &self.wait {
+            let _ = w.wait_ready(*at, LOCATE_WAIT);
+        }
+    }
+
+    /// True when [`PendingPlay::wait`] may wait at all.
+    pub fn waits(&self) -> bool {
+        self.wait.is_some()
     }
 }
 
@@ -797,46 +821,65 @@ impl Engine {
         });
     }
 
-    /// Waits (up to [`LOCATE_WAIT`]) for the streamer at the frame Play
-    /// starts from (spec §5.5); after that, playing rolls anyway. The
-    /// wait is skipped only while playing on as this engine commanded it
-    /// (a Play, no Stop or Locate since) and the renderer agrees; the
-    /// published state alone lags the commands just sent (fix round 1,
-    /// I2).
-    fn prime(&mut self, until: Option<u64>) {
+    /// Where Play's disk wait (spec §5.5) must look: the frame Play
+    /// starts from, or `None` when the wait is skipped: only while
+    /// playing on as this engine commanded it (a Play, no Stop or Locate
+    /// since) and the renderer agrees; the published state alone lags the
+    /// commands just sent (fix round 1, I2).
+    fn prime_at(&mut self, until: Option<u64>) -> Option<u64> {
         let located = self.located.take();
         if self.commanded_playing && !self.moved_since_play && self.state() == PlayState::Playing {
-            return;
+            return None;
         }
         let at = located.unwrap_or_else(|| self.transport_frames());
-        let at = if at >= self.length_frames && until.is_none() {
+        Some(if at >= self.length_frames && until.is_none() {
             0
         } else {
             at
-        };
-        let _ = self.streamer.wait_ready(at, LOCATE_WAIT);
+        })
     }
 
-    /// Starts playback (from the start when at or past the end).
+    /// Starts playback (from the start when at or past the end), waiting
+    /// up to [`LOCATE_WAIT`] for the disk first.
     pub fn play(&mut self) -> Result<(), EngineError> {
-        self.selection = false;
-        self.sync_stream_loop();
-        self.prime(None);
-        self.push(EngineCmd::Play { until: None })?;
-        self.commanded_playing = true;
-        self.moved_since_play = false;
-        Ok(())
+        let p = self.begin_play(None);
+        p.wait();
+        self.finish_play(p)
     }
 
     /// Starts playback that stops at `tick` of the loaded sequence, the
     /// loop ignored (Play Selection, plan 4f Ruling 9).
     pub fn play_until(&mut self, tick: Tick) -> Result<(), EngineError> {
-        let frame = self.tempo.as_ref().map_or(0, |t| t.tick_to_frame(tick));
-        // The transport ignores the loop until the next plain Play.
-        self.selection = true;
+        let p = self.begin_play(Some(tick));
+        p.wait();
+        self.finish_play(p)
+    }
+
+    /// The first half of [`Engine::play`] (`until`: [`Engine::play_until`])
+    /// for a host that must not wait for the disk under its own lock
+    /// (plan 5a Task 10): sets the loop the streamer plans for and says
+    /// where to wait. The caller runs [`PendingPlay::wait`] without the
+    /// lock, then [`Engine::finish_play`], unless a Stop, another Play or
+    /// a new engine came meanwhile (then it drops it).
+    pub fn begin_play(&mut self, until: Option<Tick>) -> PendingPlay {
+        // Play Selection: the transport ignores the loop until the next
+        // plain Play.
+        self.selection = until.is_some();
         self.sync_stream_loop();
-        self.prime(Some(frame));
-        self.push(EngineCmd::Play { until: Some(frame) })?;
+        let frame = until.map(|t| self.tempo.as_ref().map_or(0, |m| m.tick_to_frame(t)));
+        let at = self.prime_at(frame);
+        PendingPlay {
+            wait: at.map(|a| (self.streamer.waiter(), a)),
+            until,
+        }
+    }
+
+    /// Sends the Play [`Engine::begin_play`] prepared.
+    pub fn finish_play(&mut self, p: PendingPlay) -> Result<(), EngineError> {
+        let until = p
+            .until
+            .map(|t| self.tempo.as_ref().map_or(0, |m| m.tick_to_frame(t)));
+        self.push(EngineCmd::Play { until })?;
         self.commanded_playing = true;
         self.moved_since_play = false;
         Ok(())

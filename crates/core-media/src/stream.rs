@@ -293,6 +293,8 @@ struct Shared {
     control: Mutex<Control>,
     wake: Condvar,
     stop: AtomicBool,
+    /// Passes do nothing ([`Streamer::set_stalled`]).
+    stalled: AtomicBool,
     errors: Mutex<Vec<(MediaId, String)>>,
     retired: Mutex<Vec<(*mut Voice, u64)>>,
 }
@@ -509,6 +511,7 @@ impl Streamer {
             control: Mutex::new(Control::default()),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
+            stalled: AtomicBool::new(false),
             errors: Mutex::new(Vec::new()),
             retired: Mutex::new(Vec::new()),
         });
@@ -587,58 +590,36 @@ impl Streamer {
     /// The hint is planned alongside the published playhead (never
     /// instead of it) until the playhead reaches it.
     pub fn hint(&self, frame: u64) {
-        let from = self.shared.position.load(Ordering::Relaxed);
-        lock(&self.shared.control).hint = Some(Hint {
-            frame,
-            from,
-            at: Instant::now(),
-        });
-        self.shared.wake.notify_all();
+        hint(&self.shared, frame);
     }
 
     /// True when every need playing in `[frame, frame + ready_seconds)`
     /// has its frames (failed and unknown media count as ready).
     pub fn ready(&self, frame: u64) -> bool {
-        let s = &self.shared;
-        let c = lock(&s.control);
-        let end = frame.saturating_add((s.cfg.ready_seconds * s.rate) as u64);
-        c.needs
-            .iter()
-            .filter(|n| n.start < end && n.end() > frame)
-            .filter(|n| c.media.contains_key(&n.media) && !s.is_failed(n.media))
-            .all(|n| {
-                let from = n.file_frame + (frame.max(n.start) - n.start);
-                let to = n.file_frame + (end.min(n.end()) - n.start);
-                (0..s.slots.len()).any(|i| {
-                    s.slot(i).is_some_and(|v| {
-                        let key_ok = v.media.load(Ordering::Acquire) == n.media.0.wrapping_add(1)
-                            && (v.start.load(Ordering::Relaxed) == ANY
-                                || (v.start.load(Ordering::Relaxed) == n.start
-                                    && v.origin.load(Ordering::Relaxed) == n.file_frame));
-                        let (lo, hi) = v.range();
-                        key_ok && lo <= from && to <= hi
-                    })
-                })
-            })
+        ready(&self.shared, frame)
     }
 
     /// Hints `frame` and waits up to `timeout` for [`Streamer::ready`]
     /// (Manual mode runs passes itself). True when ready.
     pub fn wait_ready(&self, frame: u64, timeout: Duration) -> bool {
-        self.hint(frame);
-        let until = Instant::now() + timeout;
-        loop {
-            if self.shared.manual {
-                self.service();
-            }
-            if self.ready(frame) {
-                return true;
-            }
-            if Instant::now() >= until {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(2));
+        self.waiter().wait_ready(frame, timeout)
+    }
+
+    /// A handle that waits for the disk on its own, so a caller can
+    /// wait without holding whatever guards this streamer (an engine
+    /// host's lock; plan 5a Task 10).
+    pub fn waiter(&self) -> StreamWaiter {
+        StreamWaiter {
+            shared: Arc::clone(&self.shared),
+            disk: Arc::clone(&self.disk),
         }
+    }
+
+    /// Stalls the disk (`true`): passes do nothing, as on a disk that
+    /// never answers, until it is cleared (a test aid).
+    pub fn set_stalled(&self, on: bool) {
+        self.shared.stalled.store(on, Ordering::Relaxed);
+        self.shared.wake.notify_all();
     }
 
     /// One disk pass (what the disk thread runs).
@@ -662,6 +643,76 @@ impl Streamer {
     pub fn take_errors(&self) -> Vec<(MediaId, String)> {
         std::mem::take(&mut *lock(&self.shared.errors))
     }
+}
+
+/// Waits for a [`Streamer`]'s disk without the streamer itself (see
+/// [`Streamer::waiter`]). Once the streamer is gone its disk thread is
+/// too, so a wait then just times out.
+#[derive(Clone)]
+pub struct StreamWaiter {
+    shared: Arc<Shared>,
+    disk: Arc<Mutex<Disk>>,
+}
+
+impl std::fmt::Debug for StreamWaiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamWaiter").finish_non_exhaustive()
+    }
+}
+
+impl StreamWaiter {
+    /// As [`Streamer::wait_ready`].
+    pub fn wait_ready(&self, frame: u64, timeout: Duration) -> bool {
+        hint(&self.shared, frame);
+        let until = Instant::now() + timeout;
+        loop {
+            if self.shared.manual {
+                pass(&self.shared, &mut lock(&self.disk));
+            }
+            if ready(&self.shared, frame) {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+/// See [`Streamer::hint`].
+fn hint(s: &Shared, frame: u64) {
+    let from = s.position.load(Ordering::Relaxed);
+    lock(&s.control).hint = Some(Hint {
+        frame,
+        from,
+        at: Instant::now(),
+    });
+    s.wake.notify_all();
+}
+
+/// See [`Streamer::ready`].
+fn ready(s: &Shared, frame: u64) -> bool {
+    let c = lock(&s.control);
+    let end = frame.saturating_add((s.cfg.ready_seconds * s.rate) as u64);
+    c.needs
+        .iter()
+        .filter(|n| n.start < end && n.end() > frame)
+        .filter(|n| c.media.contains_key(&n.media) && !s.is_failed(n.media))
+        .all(|n| {
+            let from = n.file_frame + (frame.max(n.start) - n.start);
+            let to = n.file_frame + (end.min(n.end()) - n.start);
+            (0..s.slots.len()).any(|i| {
+                s.slot(i).is_some_and(|v| {
+                    let key_ok = v.media.load(Ordering::Acquire) == n.media.0.wrapping_add(1)
+                        && (v.start.load(Ordering::Relaxed) == ANY
+                            || (v.start.load(Ordering::Relaxed) == n.start
+                                && v.origin.load(Ordering::Relaxed) == n.file_frame));
+                    let (lo, hi) = v.range();
+                    key_ok && lo <= from && to <= hi
+                })
+            })
+        })
 }
 
 /// The playhead `p` after a loop wrap that is due: at the loop end the
@@ -920,6 +971,9 @@ fn evict(s: &Shared, d: &mut Disk, media: MediaId, slot: usize, bytes: u64) {
 
 /// One disk pass (see the module docs).
 fn pass(s: &Shared, d: &mut Disk) {
+    if s.stalled.load(Ordering::Relaxed) {
+        return;
+    }
     d.pass += 1;
     collect(s);
     let rate = s.rate;

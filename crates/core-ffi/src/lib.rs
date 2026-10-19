@@ -28,7 +28,9 @@ pub mod events;
 pub mod guard;
 pub mod host;
 pub mod input;
+pub mod jobs;
 pub mod keys;
+pub mod media;
 pub mod mixer;
 pub mod modify;
 pub mod plugins;
@@ -72,7 +74,9 @@ pub use events::{
 };
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
+pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
+pub use media::{MediaOriginRow, MediaRow, OfflineReasonRow};
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
 };
