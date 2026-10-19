@@ -32,7 +32,7 @@ use core_model::ids::MediaId;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -45,6 +45,9 @@ pub const CACHE_VOICES: usize = 256;
 pub const SLOTS: usize = STREAM_VOICES + CACHE_VOICES;
 /// The key of a cache voice (any need of its media).
 const ANY: u64 = u64::MAX;
+/// How long a hint the published playhead never reached stays planned
+/// (and holds the overwrite floor back).
+const HINT_TTL: Duration = Duration::from_secs(1);
 /// Failed media the real-time side can tell apart (beyond this they
 /// count as misses).
 const FAILED_SLOTS: usize = 64;
@@ -208,7 +211,30 @@ struct Control {
     media: BTreeMap<MediaId, PathBuf>,
     needs: Arc<[Need]>,
     loop_range: Option<(u64, u64)>,
-    hint: Option<u64>,
+    hint: Option<Hint>,
+}
+
+/// A locate the real-time side may not have applied yet.
+#[derive(Debug, Clone, Copy)]
+struct Hint {
+    /// Where playback goes.
+    frame: u64,
+    /// The published playhead when it was given.
+    from: u64,
+    /// When it was given.
+    at: Instant,
+}
+
+impl Hint {
+    /// True once the published playhead `pos` has reached the hint: it
+    /// is in the hint's window, and (for a hint behind where playback
+    /// was) it got there by jumping back, not by playing on.
+    /// `pos` is wrapped at the loop `lp`, and so is the hint here.
+    fn reached(&self, pos: u64, ahead: u64, lp: Option<(u64, u64)>) -> bool {
+        let (frame, from) = (wrapped(self.frame, lp), wrapped(self.from, lp));
+        let in_window = pos >= frame && pos < frame.saturating_add(ahead.max(1));
+        in_window && (frame >= from || pos < from)
+    }
 }
 
 struct Shared {
@@ -218,8 +244,16 @@ struct Shared {
     slots: Box<[AtomicPtr<Voice>]>,
     epoch: AtomicU64,
     position: AtomicU64,
+    /// The loop the real-time side wraps at (`loop_end` 0: none); set
+    /// with `loop_end` cleared first and stored last.
+    loop_start: AtomicU64,
+    loop_end: AtomicU64,
     underruns: AtomicU64,
     late: AtomicU64,
+    /// `Disk::cache.len()`, for lock-free counters.
+    cached_files: AtomicUsize,
+    /// Stream voices in use, for lock-free counters.
+    stream_voices: AtomicUsize,
     failed: Box<[AtomicU64]>,
     control: Mutex<Control>,
     wake: Condvar,
@@ -284,10 +318,21 @@ impl std::fmt::Debug for StreamReader {
 impl StreamReader {
     /// A block starts at schedule frame `position` (the playhead the disk
     /// side plans around; pass the current position also while stopped).
-    /// // RT
+    /// While looping, a block starting exactly at the loop end plays from
+    /// the loop start (the transport wraps first), so that is published;
+    /// past the loop end the transport plays on unwrapped. // RT
     pub fn begin_block(&self, position: u64) {
-        self.shared.position.store(position, Ordering::Relaxed);
-        self.shared.epoch.fetch_add(1, Ordering::AcqRel);
+        let s = &self.shared;
+        let e1 = s.loop_end.load(Ordering::Acquire);
+        let ls = s.loop_start.load(Ordering::Acquire);
+        let e2 = s.loop_end.load(Ordering::Acquire);
+        let p = if e1 != 0 && e1 == e2 && ls < e1 && position == e1 {
+            ls
+        } else {
+            position
+        };
+        s.position.store(p, Ordering::Relaxed);
+        s.epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Copies `left.len()` frames of `media` from `file_frame` for the
@@ -413,8 +458,12 @@ impl Streamer {
                 .collect(),
             epoch: AtomicU64::new(0),
             position: AtomicU64::new(0),
+            loop_start: AtomicU64::new(0),
+            loop_end: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
             late: AtomicU64::new(0),
+            cached_files: AtomicUsize::new(0),
+            stream_voices: AtomicUsize::new(0),
             failed: (0..FAILED_SLOTS).map(|_| AtomicU64::new(0)).collect(),
             control: Mutex::new(Control::default()),
             wake: Condvar::new(),
@@ -470,14 +519,30 @@ impl Streamer {
 
     /// The loop range, while looping.
     pub fn set_loop(&self, range: Option<(u64, u64)>) {
-        lock(&self.shared.control).loop_range = range.filter(|(s, e)| e > s);
-        self.shared.wake.notify_all();
+        let sh = &self.shared;
+        let range = range.filter(|(s, e)| e > s);
+        let mut c = lock(&sh.control);
+        c.loop_range = range;
+        sh.loop_end.store(0, Ordering::Release);
+        if let Some((ls, le)) = range {
+            sh.loop_start.store(ls, Ordering::Release);
+            sh.loop_end.store(le, Ordering::Release);
+        }
+        drop(c);
+        sh.wake.notify_all();
     }
 
     /// Playback is about to start at (or move to) `frame`: plan around it
     /// now.
+    /// The hint is planned alongside the published playhead (never
+    /// instead of it) until the playhead reaches it.
     pub fn hint(&self, frame: u64) {
-        lock(&self.shared.control).hint = Some(frame);
+        let from = self.shared.position.load(Ordering::Relaxed);
+        lock(&self.shared.control).hint = Some(Hint {
+            frame,
+            from,
+            at: Instant::now(),
+        });
         self.shared.wake.notify_all();
     }
 
@@ -532,13 +597,14 @@ impl Streamer {
     }
 
     /// Counters since the streamer started.
+    /// Lock-free: never waits for a disk pass.
     pub fn counters(&self) -> StreamCounters {
-        let d = lock(&self.disk);
+        let s = &self.shared;
         StreamCounters {
-            underruns: self.shared.underruns.load(Ordering::Relaxed),
-            late: self.shared.late.load(Ordering::Relaxed),
-            cached_files: d.cache.len(),
-            stream_voices: d.stream.values().filter(|r| r.is_none()).count(),
+            underruns: s.underruns.load(Ordering::Relaxed),
+            late: s.late.load(Ordering::Relaxed),
+            cached_files: s.cached_files.load(Ordering::Relaxed),
+            stream_voices: s.stream_voices.load(Ordering::Relaxed),
         }
     }
 
@@ -548,10 +614,26 @@ impl Streamer {
     }
 }
 
-/// The windows a pass fills, around playhead `p`.
-fn windows(p: u64, lp: Option<(u64, u64)>, ahead: u64, seam: u64) -> Vec<(u64, u64)> {
+/// The playhead `p` after a loop wrap that is due: at the loop end the
+/// transport plays from the loop start.
+fn wrapped(p: u64, lp: Option<(u64, u64)>) -> u64 {
     match lp {
-        Some((ls, le)) if p < le => {
+        Some((ls, le)) if p == le => ls,
+        _ => p,
+    }
+}
+
+/// The windows a pass fills, around playhead `p`. At the loop end that is
+/// the loop start; past it (a locate there) playback runs on unwrapped,
+/// and the seam stays planned.
+fn windows(p: u64, lp: Option<(u64, u64)>, ahead: u64, seam: u64) -> Vec<(u64, u64)> {
+    let p = wrapped(p, lp);
+    match lp {
+        Some((ls, le)) if p >= le => vec![
+            (p, p.saturating_add(ahead)),
+            (ls, ls.saturating_add(seam).min(le)),
+        ],
+        Some((ls, le)) => {
             let mut w = vec![(p, p.saturating_add(ahead).min(le))];
             let over = p.saturating_add(ahead).saturating_sub(le);
             if over > 0 {
@@ -613,6 +695,14 @@ fn retire_stream(s: &Shared, d: &mut Disk, i: usize) {
         s.epoch.load(Ordering::Acquire)
     };
     d.stream.insert(i, Some(at));
+    sync_counts(s, d);
+}
+
+/// Publishes the disk-side counts for [`Streamer::counters`].
+fn sync_counts(s: &Shared, d: &Disk) {
+    s.cached_files.store(d.cache.len(), Ordering::Relaxed);
+    let used = d.stream.values().filter(|r| r.is_none()).count();
+    s.stream_voices.store(used, Ordering::Relaxed);
 }
 
 /// A free stream slot (a never-used one gets a voice), or `None`.
@@ -760,6 +850,7 @@ fn ensure_cached(s: &Shared, d: &mut Disk, media: MediaId, path: &std::path::Pat
     }
     d.cache.insert(media, (slot, bytes, d.pass));
     d.cache_bytes += bytes;
+    sync_counts(s, d);
     true
 }
 
@@ -772,20 +863,30 @@ fn evict(s: &Shared, d: &mut Disk, media: MediaId, slot: usize, bytes: u64) {
     }
     d.cache.remove(&media);
     d.cache_bytes = d.cache_bytes.saturating_sub(bytes);
+    sync_counts(s, d);
 }
 
 /// One disk pass (see the module docs).
 fn pass(s: &Shared, d: &mut Disk) {
     d.pass += 1;
     collect(s);
-    let (media, needs, lp, hint) = {
+    let rate = s.rate;
+    let ahead = (s.cfg.ahead_seconds * rate) as u64;
+    let seam = (s.cfg.seam_seconds * rate) as u64;
+    let (media, needs, lp, pos, hint) = {
         let mut c = lock(&s.control);
-        (
-            c.media.clone(),
-            Arc::clone(&c.needs),
-            c.loop_range,
-            c.hint.take(),
-        )
+        let lp = c.loop_range;
+        // The published playhead: what the real-time side reads now.
+        let pos = wrapped(s.position.load(Ordering::Relaxed), lp);
+        // A hint stays planned until the playhead reaches it (or it
+        // goes stale), so the voices still playing are kept meanwhile.
+        if c.hint
+            .is_some_and(|h| h.reached(pos, ahead, lp) || h.at.elapsed() >= HINT_TTL)
+        {
+            c.hint = None;
+        }
+        let hint = c.hint.map(|h| wrapped(h.frame, lp));
+        (c.media.clone(), Arc::clone(&c.needs), lp, pos, hint)
     };
     // Media gone from the table leave the cache and the readers.
     let gone: Vec<(MediaId, usize, u64)> = d
@@ -798,11 +899,10 @@ fn pass(s: &Shared, d: &mut Disk) {
         evict(s, d, m, slot, b);
     }
     d.readers.retain(|m, _| media.contains_key(m));
-    let p = hint.unwrap_or_else(|| s.position.load(Ordering::Relaxed));
-    let rate = s.rate;
-    let ahead = (s.cfg.ahead_seconds * rate) as u64;
-    let seam = (s.cfg.seam_seconds * rate) as u64;
-    let win = windows(p, lp, ahead, seam);
+    let mut win = windows(pos, lp, ahead, seam);
+    if let Some(h) = hint {
+        win.extend(windows(h, lp, ahead, seam));
+    }
     // Stream slots used this pass, with the file frame to fill up to.
     let mut used: BTreeMap<usize, (Need, u64)> = BTreeMap::new();
     for n in needs.iter() {
@@ -856,6 +956,7 @@ fn pass(s: &Shared, d: &mut Disk) {
                         v.media.store(key, Ordering::Release);
                     }
                     d.stream.insert(i, None);
+                    sync_counts(s, d);
                     i
                 }
             };
@@ -888,11 +989,17 @@ fn pass(s: &Shared, d: &mut Disk) {
             continue;
         };
         let (base, hi) = (v.base.load(Ordering::Relaxed), v.hi.load(Ordering::Acquire));
-        let under = (p >= n.start && p < n.end()).then(|| n.file_frame + (p - n.start));
-        let floor = match under {
-            Some(f) if f >= base && f <= hi => f,
-            _ => base,
-        };
+        // The floor is the lowest frame of this voice the real-time side
+        // may read: under the published playhead, or under the hint
+        // should the locate land first (never past the playhead).
+        let floor = [Some(pos), hint]
+            .into_iter()
+            .flatten()
+            .filter(|&p| p >= n.start && p < n.end())
+            .map(|p| n.file_frame + (p - n.start))
+            .filter(|&f| f >= base && f <= hi)
+            .min()
+            .unwrap_or(base);
         let space = (floor + v.cap).saturating_sub(hi);
         let count = space.min(until.saturating_sub(hi));
         let fb = 4 * v.stride as u64;
@@ -977,6 +1084,11 @@ mod tests {
             assert!(l.iter().all(|x| *x == 9.0), "a miss wrote");
         }
         got
+    }
+
+    /// The hint the disk side still plans around.
+    fn pending_hint(s: &Streamer) -> Option<u64> {
+        lock(&s.shared.control).hint.map(|h| h.frame)
     }
 
     fn manual(cfg: StreamConfig) -> (Streamer, StreamReader) {
@@ -1199,6 +1311,187 @@ mod tests {
         assert_ne!(read(&r, &n, 100_000, 8, true), Read::Offline);
     }
 
+    /// F1: the windows of a playhead at or past the loop end.
+    #[test]
+    fn windows_wrap_at_the_loop_end_and_keep_the_seam_past_it() {
+        let lp = Some((1_000, 5_000));
+        // Before the loop end: cut there and continued at the loop start.
+        assert_eq!(
+            windows(4_900, lp, 800, 300),
+            vec![(4_900, 5_000), (1_000, 1_700), (1_000, 1_300)]
+        );
+        // At the loop end the transport wraps first: plan as at the start.
+        assert_eq!(windows(5_000, lp, 800, 300), windows(1_000, lp, 800, 300));
+        assert_eq!(
+            windows(5_000, lp, 800, 300),
+            vec![(1_000, 1_800), (1_000, 1_300)]
+        );
+        // Past the loop end the transport plays on unwrapped; the seam
+        // stays planned.
+        assert_eq!(
+            windows(6_000, lp, 800, 300),
+            vec![(6_000, 6_800), (1_000, 1_300)]
+        );
+        assert_eq!(windows(6_000, None, 800, 300), vec![(6_000, 6_800)]);
+    }
+
+    /// F1: a block that starts exactly at the loop end (the renderer cuts
+    /// runs there) plays from the loop start, and the seam survives it.
+    #[test]
+    fn a_block_starting_at_the_loop_end_reads_the_seam_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 300_000, 1);
+        let (s, r) = manual(small());
+        s.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: p,
+        }]);
+        let n = need(0, 0, 300_000, 0);
+        s.set_plan(Arc::from(vec![n]));
+        s.set_loop(Some((10_000, 200_000)));
+        let mut pos = 196_000;
+        while pos < 200_000 {
+            r.begin_block(pos);
+            s.service();
+            let k = 500.min(200_000 - pos);
+            assert_eq!(read(&r, &n, pos, k as usize, false), Read::Done, "at {pos}");
+            pos += k;
+        }
+        r.begin_block(200_000);
+        assert_eq!(s.shared.position.load(Ordering::Relaxed), 10_000);
+        // The wrap never waits on the disk, and a pass during the block
+        // overwrites nothing it reads.
+        assert_eq!(read(&r, &n, 10_000, 512, false), Read::Done);
+        s.service();
+        assert_eq!(read(&r, &n, 10_000, 512, false), Read::Done);
+        let mut at = 10_512;
+        for _ in 0..30 {
+            r.begin_block(at);
+            assert_eq!(read(&r, &n, at, 512, false), Read::Done, "at {at}");
+            s.service();
+            assert_eq!(read(&r, &n, at, 512, false), Read::Done, "at {at}");
+            at += 512;
+        }
+        // Past the loop end (a locate there) the transport plays on
+        // unwrapped, so that is what is published.
+        r.begin_block(200_005);
+        assert_eq!(s.shared.position.load(Ordering::Relaxed), 200_005);
+        s.set_loop(None);
+        r.begin_block(200_000);
+        assert_eq!(s.shared.position.load(Ordering::Relaxed), 200_000);
+    }
+
+    /// F2: a locate hint before the real-time side applies it keeps the
+    /// voices it is still playing.
+    #[test]
+    fn a_far_hint_keeps_the_voices_still_playing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 300_000, 2);
+        let (s, r) = manual(small());
+        s.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: p,
+        }]);
+        let n = need(0, 0, 300_000, 0);
+        s.set_plan(Arc::from(vec![n]));
+        let a = 20_000;
+        r.begin_block(a);
+        s.service();
+        assert_eq!(read(&r, &n, a, 512, true), Read::Done);
+        s.hint(150_000);
+        s.service();
+        // Same block, the locate not applied yet.
+        assert_eq!(read(&r, &n, a, 512, true), Read::Done);
+        let mut at = a + 512;
+        for _ in 0..4 {
+            r.begin_block(at);
+            s.service();
+            assert_eq!(read(&r, &n, at, 512, true), Read::Done, "at {at}");
+            at += 512;
+        }
+        assert_eq!(pending_hint(&s), Some(150_000));
+        // The locate lands: prefilled, and the hint is done.
+        r.begin_block(150_000);
+        assert_eq!(read(&r, &n, 150_000, 512, true), Read::Done);
+        s.service();
+        assert_eq!(pending_hint(&s), None);
+        assert_eq!(read(&r, &n, 150_000, 512, true), Read::Done);
+        assert_eq!(s.counters().underruns, 0);
+    }
+
+    /// F2: a forward hint inside the ring being played never moves the
+    /// overwrite floor past the published playhead.
+    #[test]
+    fn a_hint_inside_the_playing_ring_never_overwrites_the_playhead() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 300_000, 2);
+        let (s, r) = manual(small());
+        s.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: p,
+        }]);
+        let n = need(0, 0, 300_000, 0);
+        s.set_plan(Arc::from(vec![n]));
+        let a = 20_000;
+        r.begin_block(a);
+        s.service();
+        assert_eq!(read(&r, &n, a, 512, true), Read::Done);
+        s.hint(a + 1_000);
+        s.service();
+        assert_eq!(read(&r, &n, a, 1_512, true), Read::Done);
+        r.begin_block(a + 1_000);
+        assert_eq!(read(&r, &n, a + 1_000, 512, true), Read::Done);
+        s.service();
+        assert_eq!(read(&r, &n, a + 1_000, 512, true), Read::Done);
+        assert_eq!(pending_hint(&s), None);
+    }
+
+    /// F3: the counters never wait for a disk pass (which holds the disk
+    /// lock across file reads).
+    #[test]
+    fn counters_never_wait_for_the_disk_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = small();
+        cfg.cache_file_bytes = 100_000;
+        let (s, r) = manual(cfg);
+        s.set_media(vec![
+            MediaFile {
+                id: MediaId(0),
+                path: file(dir.path(), "a.caf", 300_000, 2),
+            },
+            MediaFile {
+                id: MediaId(1),
+                path: file(dir.path(), "b.caf", 1_000, 2),
+            },
+        ]);
+        s.set_plan(Arc::from(vec![
+            need(0, 0, 300_000, 0),
+            need(1, 0, 1_000, 0),
+        ]));
+        r.begin_block(0);
+        s.service();
+        r.count_miss(false);
+        r.count_miss(true);
+        let want = StreamCounters {
+            underruns: 1,
+            late: 1,
+            cached_files: 1,
+            stream_voices: 1,
+        };
+        assert_eq!(s.counters(), want);
+        let guard = lock(&s.disk);
+        let s = &s;
+        std::thread::scope(|sc| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            sc.spawn(move || {
+                let _ = tx.send(s.counters());
+            });
+            let got = rx.recv_timeout(Duration::from_secs(2));
+            drop(guard);
+            assert_eq!(got, Ok(want));
+        });
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig { cases: 24, .. ProptestConfig::default() })]
 
@@ -1227,6 +1520,7 @@ mod tests {
                 match what {
                     0 => pos = n * 37 % 90_000,
                     1 => {}
+                    2 => s.hint(n * 53 % 90_000),
                     _ => s.service(),
                 }
                 r.begin_block(pos);
