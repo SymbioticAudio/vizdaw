@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import Testing
@@ -162,5 +163,45 @@ private let box = CGRect(x: 0, y: 10, width: 160, height: 40)
         #expect(
             RegionA11y.label(r, name: "kick", laneName: "Audio 3", meter: meter, offline: true)
                 == "Region kick on Audio 3, bars 1 to 2, gain +3.0 dB, offline, muted")
+    }
+}
+
+/// Final review V1, V2, V4: where the gain line and the offline labels go.
+@MainActor
+@Suite struct RegionDrawingLayoutTests {
+    @Test func theGainLineSitsBelowTheSelectionOutline() {
+        for rect in [box, CGRect(x: 30, y: 2, width: 120, height: 18)] {
+            let g = RegionDrawing.gainLineRect(in: rect)
+            // The selected outline is stroked on the path inset by 0.5.
+            let outlineBottom = rect.minY + 0.5 + RegionDrawing.outlineWidth(selected: true) / 2
+            #expect(g.minY >= outlineBottom, "\(g) under the outline")
+            #expect(g.maxY <= rect.minY + RegionHandles.band, "\(g) inside the gain band")
+            #expect(g.height >= 1.5 && g.minX > rect.minX && g.maxX < rect.maxX)
+        }
+    }
+
+    @Test func theOfflinePillClearsTheGainBandAndTheFadeIn() {
+        let size = CGSize(width: 36, height: 12)
+        let plain = RegionDrawing.offlineLabelRect(region(), in: box, size: size)
+        #expect(plain?.minX == box.minX + 4)
+        #expect((plain?.minY ?? 0) >= box.minY + RegionHandles.band)
+        // After the fade-in handle, so the fade-in line never runs under it.
+        let r = region(fadeIn: 12_000)
+        let faded = RegionDrawing.offlineLabelRect(r, in: box, size: size)
+        #expect((faded?.minX ?? 0) > RegionHandles.fadeInX(r, in: box) + RegionHandles.size / 2)
+        // An 18-point strip region has no room: the strip labels it itself.
+        #expect(RegionDrawing.offlineLabelRect(region(), in: CGRect(x: 0, y: 2, width: 160, height: 18), size: size) == nil)
+        #expect(RegionDrawing.offlineLabelRect(region(), in: CGRect(x: 0, y: 0, width: 30, height: 40), size: size) == nil)
+    }
+
+    @Test func theStripLabelSaysOfflineBelowTheGainLine() {
+        #expect(RegionDrawing.stripLabel("Audio 3", offline: true) == "Audio 3 — Offline")
+        #expect(RegionDrawing.stripLabel("Audio 3", offline: false) == "Audio 3")
+        #expect(RegionDrawing.stripLabel("", offline: true) == "Offline")
+        let strip = CGRect(x: 70, y: 24, width: 120, height: 18)
+        let at = RegionDrawing.stripLabelOrigin(in: strip)
+        #expect(at.y >= RegionDrawing.gainLineRect(in: strip).maxY)
+        let line = NSFont.systemFont(ofSize: 10).boundingRectForFont.height
+        #expect(at.y + line <= strip.maxY + 1, "the label fits the 18-point row")
     }
 }

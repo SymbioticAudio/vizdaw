@@ -69,6 +69,15 @@ public enum RegionStripLayout {
             height: rowHeight - 4)
     }
 
+    /// True when a region of `line` (at `index`) covers `title`, where the
+    /// line's title would be drawn: the title is then left out, never
+    /// drawn over the region (final review V1).
+    public static func titleCovered(_ title: CGRect, line: RegionLine, index: Int, time: TimeAxis, side: CGFloat)
+        -> Bool
+    {
+        line.items.contains { rect($0.row, line: index, time: time, side: side).intersects(title) }
+    }
+
     public static func muteRect(line: Int) -> CGRect { CGRect(x: 4, y: top(line) + 3, width: 18, height: 16) }
     public static func soloRect(line: Int) -> CGRect { CGRect(x: 24, y: top(line) + 3, width: 18, height: 16) }
 

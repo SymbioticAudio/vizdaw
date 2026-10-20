@@ -63,7 +63,10 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
                 switch control {
                 case .name:
                     NSString(string: lane.name).draw(
-                        in: r, withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)])
+                        in: r,
+                        withAttributes: [
+                            .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.labelColor,
+                        ])
                 case .mute: toggle("M", on: lane.mute, color: .systemYellow, in: r)
                 case .solo: toggle("S", on: lane.solo, color: .systemGreen, in: r)
                 case .arm: toggle("R", on: lane.arm, color: .systemRed, in: r)

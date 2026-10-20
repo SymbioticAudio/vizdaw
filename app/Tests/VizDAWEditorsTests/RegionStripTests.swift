@@ -37,6 +37,17 @@ private func region(_ id: UInt64, _ tick: Int64, _ length: Int64 = 2 * q) -> Eve
         #expect(RegionStripLayout.height(lines: 2) == 45)
     }
 
+    /// Final review V1: the line's title is left out where a region covers
+    /// it.
+    @Test func theLineTitleGivesWayToARegion() {
+        let side: CGFloat = 64
+        let title = CGRect(x: side + 4, y: 4, width: 30, height: 12)
+        let early = RegionLine(output: 7, title: "Au", items: [RegionItem(lane: a, row: region(1, 0))])
+        let late = RegionLine(output: 7, title: "Au", items: [RegionItem(lane: a, row: region(1, 8 * q))])
+        #expect(RegionStripLayout.titleCovered(title, line: early, index: 0, time: time, side: side))
+        #expect(!RegionStripLayout.titleCovered(title, line: late, index: 0, time: time, side: side))
+    }
+
     @Test func hitsFindButtonsAndRegions() {
         let lines = RegionStripLayout.lines(
             [(lane: a, output: 7, regions: [region(1, q)]), (lane: c, output: nil, regions: [region(9, 0)])],

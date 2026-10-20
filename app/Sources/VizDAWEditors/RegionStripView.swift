@@ -132,14 +132,24 @@ public final class RegionStripView: NSView, TimeAxisFollower {
                         height: max(r.height - RegionHandles.band - 1, 1))
                 RegionDrawing.draw(
                     item.row, in: r, rows: rows, waveRect: wave, offline: offline,
-                    selected: editor.isSelected(event: item.row.id), handles: editor.tool == .arrow)
-                NSString(string: model.row(item.lane)?.name ?? "").draw(
-                    at: CGPoint(x: r.minX + 4, y: r.minY + 2),
-                    withAttributes: [.font: small, .foregroundColor: NSColor.labelColor])
+                    selected: editor.isSelected(event: item.row.id), handles: editor.tool == .arrow,
+                    offlineLabel: false)
+                RegionDrawing.drawStripLabel(
+                    RegionDrawing.stripLabel(model.row(item.lane)?.name ?? "", offline: offline), in: r,
+                    offline: offline, font: small)
             }
-            NSString(string: line.title).draw(
-                at: CGPoint(x: side + 4, y: RegionStripLayout.rowHeight * CGFloat(i) + 4),
-                withAttributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor])
+            // The line's title, unless a region sits where it would go
+            // (final review V1).
+            let titleAttrs: [NSAttributedString.Key: Any] = [
+                .font: small, .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+            let title = NSString(string: line.title)
+            let titleRect = CGRect(
+                origin: CGPoint(x: side + 4, y: RegionStripLayout.rowHeight * CGFloat(i) + 4),
+                size: title.size(withAttributes: titleAttrs))
+            if !RegionStripLayout.titleCovered(titleRect, line: line, index: i, time: timeAxis, side: side) {
+                title.draw(at: titleRect.origin, withAttributes: titleAttrs)
+            }
             NSGraphicsContext.restoreGraphicsState()
         }
         if let r = readout { RegionDrawing.readout(r.text, at: r.at) }

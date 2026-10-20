@@ -78,7 +78,9 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
                 let l = lanes[Int(lane)]
                 NSString(string: "\(l.name) · \(l.destination ?? "No Destination")").draw(
                     in: r.insetBy(dx: 6, dy: 3),
-                    withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+                    withAttributes: [
+                        .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor,
+                    ])
             case let .row(lane, row):
                 guard let d = model.row(Int(lane), Int(row)) else { continue }
                 if model.selectedRow == DrumRowKey(lane: lanes[Int(lane)].lane, row: d.id) {
@@ -89,7 +91,8 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
                 // lane's) is dimmed (Ruling F2).
                 let cap = Self.caption(d)
                 let text = NSMutableAttributedString(
-                    string: cap.name, attributes: [.font: NSFont.systemFont(ofSize: 11)])
+                    string: cap.name,
+                    attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor])
                 if let dest = cap.destination {
                     text.append(
                         NSAttributedString(
