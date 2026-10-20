@@ -27,6 +27,7 @@ pub mod midi1;
 pub mod notes;
 pub mod offline;
 pub mod pool;
+pub mod record;
 pub mod render;
 pub mod rt_check;
 pub mod schedule;

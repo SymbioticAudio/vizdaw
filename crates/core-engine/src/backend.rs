@@ -6,6 +6,29 @@ use crate::render::Renderer;
 
 /// Largest block any node or renderer is prepared for.
 pub const MAX_FRAMES: u32 = 4096;
+/// The most device input channels the renderer takes (spec §6.1).
+pub const MAX_INPUT_CHANNELS: usize = 64;
+
+/// One block of device input (spec §6.1, §6.3), planar.
+#[derive(Debug, Clone, Copy)]
+pub struct InputBlock<'a> {
+    /// Device input channel `c` is `channels[c]` (at least the block's
+    /// frames long); empty while input is closed.
+    pub channels: &'a [&'a [f32]],
+    /// How much earlier than the output block's first frame is heard its
+    /// input's first frame was captured, in frames: the output and input
+    /// buffers' sample-time difference plus the output and input
+    /// latencies, as the device reports them (spec §6.3).
+    pub delay_frames: i64,
+}
+
+impl InputBlock<'static> {
+    /// No input.
+    pub const NONE: InputBlock<'static> = InputBlock {
+        channels: &[],
+        delay_frames: 0,
+    };
+}
 
 /// Timing of one block: its first frame reaches the output at
 /// `host_time_ns`.
@@ -27,6 +50,13 @@ pub struct AudioConfig {
     /// Requested nominal sample rate (the project rate, 5a); `None` keeps
     /// the device's. `StreamInfo::sample_rate` says what it runs at.
     pub sample_rate: Option<f64>,
+    /// Open input too (spec §6.1: only while a lane is armed or
+    /// monitored).
+    pub input_enabled: bool,
+    /// The input device by name; `None`: the output device (one duplex
+    /// stream). Another device is joined to the output in a private
+    /// aggregate device.
+    pub input_device: Option<String>,
 }
 
 /// What a backend opened.
@@ -40,6 +70,15 @@ pub struct StreamInfo {
     pub buffer_frames: u32,
     /// Output channel count.
     pub channels: u32,
+    /// Input channels (0 when input is closed).
+    pub input_channels: u32,
+    /// The input channels' names, as the device gives them.
+    pub input_channel_names: Vec<String>,
+    /// Input latency in frames: device + stream latency + safety offset
+    /// (spec §6.1).
+    pub input_latency_frames: u32,
+    /// Output latency in frames, the same way.
+    pub output_latency_frames: u32,
 }
 
 /// Something that happened to the device, reported by

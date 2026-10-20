@@ -664,6 +664,11 @@ impl AudioBackend for CoreAudioBackend {
             sample_rate,
             buffer_frames,
             channels,
+            // Input and the latencies come with plan 5c Task 11.
+            input_channels: 0,
+            input_channel_names: Vec::new(),
+            input_latency_frames: 0,
+            output_latency_frames: 0,
         };
         self.device = Some(device);
         self.info = Some(info.clone());

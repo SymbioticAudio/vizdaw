@@ -1051,6 +1051,24 @@ impl Engine {
     pub fn plugin_faults(&self) -> Vec<PluginInstanceId> {
         self.shared.take_plugin_faults()
     }
+
+    /// Installs a record tap (spec §6.2): from the next block that plays,
+    /// the renderer captures input and MIDI for it. Replaces a tap already
+    /// installed. Returns the control side.
+    pub fn start_recording(
+        &mut self,
+        req: &crate::record::RecordRequest,
+    ) -> Result<crate::record::RecordHandles, EngineError> {
+        let (tap, handles) = crate::record::tap(req, self.latency);
+        self.push(EngineCmd::Record(Some(Box::new(tap))))?;
+        Ok(handles)
+    }
+
+    /// Removes the record tap: the block that applies this captures no
+    /// more, and the tap's status reads closed.
+    pub fn stop_recording(&mut self) -> Result<(), EngineError> {
+        self.push(EngineCmd::Record(None))
+    }
 }
 
 impl Drop for Engine {

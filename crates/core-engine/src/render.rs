@@ -1,11 +1,12 @@
 //! The real-time renderer and the state it publishes.
 
-use crate::backend::{BlockInfo, BlockTime, MidiOut, StereoBuf};
+use crate::backend::{BlockInfo, BlockTime, InputBlock, MidiOut, StereoBuf};
 use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
 use crate::midi1::Midi1Msg;
 use crate::notes::ActiveNotes;
 use crate::pool::PoolShared;
+use crate::record::RecordTap;
 use crate::schedule::automation::StripParam;
 use crate::schedule::{AutoDest, MAX_AUTO_LANES, MAX_TARGETS, MIN_RUN, Schedule, TargetIdx};
 use crate::transport::{PlayState, Step, Transport};
@@ -398,6 +399,10 @@ pub enum EngineCmd {
     /// the end do not, so a note dragged in an editor keeps sounding until
     /// the editor ends it (4b Plan Ruling 1).
     Audition(TargetIdx, Midi1Msg),
+    /// Install a record tap, or remove the one installed (it goes back
+    /// through the retire ring; dropping it tells the control side the
+    /// recording's input ended). Spec §6.2.
+    Record(Option<Box<RecordTap>>),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -409,6 +414,8 @@ pub enum Retired {
     Graph(Box<Graph>),
     /// A removed sink.
     Sink(Sink),
+    /// A removed record tap.
+    Tap(Box<RecordTap>),
 }
 
 /// Capacity of the command ring.
@@ -469,6 +476,8 @@ pub struct Renderer {
     pending_skip: u64,
     /// Per automation lane, the plugin value last sent (NaN: none yet).
     auto_last: Box<[f64; MAX_AUTO_LANES]>,
+    /// The recording's tap (spec §6.2), while one is installed.
+    tap: Option<Box<RecordTap>>,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -591,6 +600,7 @@ impl Renderer {
             latency: 0,
             pending_skip: 0,
             auto_last: Box::new([f64::NAN; MAX_AUTO_LANES]),
+            tap: None,
         };
         r.prepare(cfg.max_frames);
         r
@@ -623,18 +633,43 @@ impl Renderer {
     /// Renders one block of `frames` frames into planar `out` channels.
     /// Channels 0–1 get master, the rest zeros. // RT
     pub fn process(&mut self, out: &mut [&mut [f32]], frames: u32, time: BlockTime) {
+        self.process_input(out, frames, time, InputBlock::NONE);
+    }
+
+    /// [`Renderer::process`] with this block's device input (spec §6.1):
+    /// a record tap takes it, and monitored lanes hear it. // RT
+    pub fn process_input(
+        &mut self,
+        out: &mut [&mut [f32]],
+        frames: u32,
+        time: BlockTime,
+        input: InputBlock<'_>,
+    ) {
         #[cfg(feature = "rt-check")]
         crate::rt_check::arm();
-        self.process_inner(out, frames, time);
+        self.process_inner(out, frames, time, &input);
         #[cfg(feature = "rt-check")]
         crate::rt_check::disarm();
+    }
+
+    /// The tap's end of a block (see [`RecordTap::end_block`]). // RT
+    fn end_tap(&mut self, input: &InputBlock<'_>, frames: u32, advanced: bool) {
+        if let Some(t) = self.tap.as_deref_mut() {
+            t.end_block(input.channels, frames, advanced);
+        }
     }
 
     fn latency_ns(&self) -> i64 {
         (self.latency as f64 * 1e9 / self.cfg.sample_rate.max(1.0)).round() as i64
     }
 
-    fn process_inner(&mut self, out: &mut [&mut [f32]], frames: u32, time: BlockTime) {
+    fn process_inner(
+        &mut self,
+        out: &mut [&mut [f32]],
+        frames: u32,
+        time: BlockTime,
+        input: &InputBlock<'_>,
+    ) {
         let started = Instant::now();
         let block_s = f64::from(frames) / self.cfg.sample_rate.max(1.0);
         let deadline = self
@@ -653,6 +688,8 @@ impl Renderer {
             self.pending_skip = self.pending_skip.saturating_add(u64::from(frames));
             // The block was lost to the graph: report it as full load.
             self.shared.set_load(1.0);
+            // Its input is still recorded; the transport did not move.
+            self.end_tap(input, frames, false);
             return;
         }
         // No run is in flight: the last run's ramps have arrived (Plan 4d
@@ -670,16 +707,26 @@ impl Renderer {
         if frames > self.cfg.max_frames || out.iter().any(|c| c.len() < n) {
             skip_sinks(&mut self.sinks, u64::from(frames), 0);
             self.shared.count_xrun();
+            self.end_tap(input, frames, false);
             return;
         }
         self.block_ns = time.host_time_ns;
         self.drain_commands();
+        let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
+        if let Some(t) = self.tap.as_deref_mut() {
+            match (self.transport.state, self.transport.play_pos(length)) {
+                (PlayState::Playing, Some(at)) => t.begin_block(at, input.delay_frames),
+                // At the end already: the block's `Step::End` stops the tap.
+                (PlayState::Playing, None) => {}
+                // Stopped or in the tail: the run ends here (pre-flight M2).
+                _ => t.stop(0, self.transport.pos),
+            }
+        }
         // No run is in flight (`try_finish` succeeded above): the streamer
         // may count a new epoch (5a Ruling 9) and plan around the playhead
         // as this block's commands left it (a Locate's new position, never
         // the stale one: commands are applied only here).
         self.reader.begin_block(self.transport.pos);
-        let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let ns_per_frame = 1e9 / self.cfg.sample_rate.max(1.0);
         let mut missed = false;
@@ -735,6 +782,9 @@ impl Renderer {
                         }
                     }
                     Step::Wrap { offset, to } => {
+                        if let Some(t) = self.tap.as_deref_mut() {
+                            t.wrap(offset, to);
+                        }
                         release_all(&mut self.notes, &mut o, offset);
                         if let Some(s) = self.schedule.as_deref() {
                             reset_controllers(s, &mut o, offset);
@@ -742,7 +792,14 @@ impl Renderer {
                         self.chase_pending = true;
                         self.cursor = self.schedule.as_ref().map_or(0, |s| s.cursor_at(to));
                     }
-                    Step::End { offset } => release_all(&mut self.notes, &mut o, offset),
+                    Step::End { offset } => {
+                        // The run ends where the sequence does (pre-flight
+                        // M2).
+                        if let Some(t) = self.tap.as_deref_mut() {
+                            t.stop(offset, self.transport.pos);
+                        }
+                        release_all(&mut self.notes, &mut o, offset);
+                    }
                     Step::Idle { .. } => {}
                 }
                 at += step.frames();
@@ -766,6 +823,7 @@ impl Renderer {
             // stragglers are done.
             self.pending_skip = self.pending_skip.saturating_add(u64::from(frames - offset));
         }
+        self.end_tap(input, frames, !missed);
         self.publish();
         if block_s > 0.0 {
             let load = (started.elapsed().as_secs_f64() / block_s) as f32;
@@ -964,6 +1022,7 @@ impl Renderer {
                 }
                 Ok(EngineCmd::SetGraph(_)) => self.graph.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::RemoveSink(_)) => self.retire.slots() == 0,
+                Ok(EngineCmd::Record(_)) => self.tap.is_some() && self.retire.slots() == 0,
                 Ok(_) => false,
                 Err(_) => break,
             };
@@ -1030,6 +1089,9 @@ impl Renderer {
                 }
                 self.cursor = new.cursor_at(self.transport.pos);
                 self.schedule = Some(new);
+                if let Some(t) = self.tap.as_deref_mut() {
+                    t.resync();
+                }
                 self.auto_last.fill(f64::NAN);
                 if self.transport.state == PlayState::Playing {
                     self.forget_unautomated();
@@ -1102,6 +1164,15 @@ impl Renderer {
                 };
                 o.send(target, 0, msg.as_slice());
                 self.audition.observe(target, msg.as_slice());
+            }
+            EngineCmd::Record(new) => {
+                if let Some(old) = std::mem::replace(&mut self.tap, new) {
+                    old.close();
+                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Tap(old)) {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
             }
             EngineCmd::AddSink(idx, sink) => {
                 if let Some(slot) = self.sinks.get_mut(usize::from(idx.0)) {

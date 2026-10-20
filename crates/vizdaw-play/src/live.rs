@@ -65,6 +65,7 @@ fn open(
         device: args.device.clone(),
         buffer_frames: args.buffer,
         sample_rate: None,
+        ..AudioConfig::default()
     };
     let info = backend
         .open(&cfg)
