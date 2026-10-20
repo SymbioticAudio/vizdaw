@@ -78,7 +78,8 @@ impl RecordStatus {
     }
 
     /// The device's input delay at the first captured block (spec §6.3),
-    /// once one was captured.
+    /// once one was captured; refreshed when playing resumes after a stop
+    /// (it then holds for the frames after the resume mark).
     pub fn delay(&self) -> Option<i64> {
         let d = self.delay.load(Ordering::Acquire);
         (d != i64::MIN).then_some(d)
@@ -149,6 +150,9 @@ pub struct RecordTap {
     stopped: bool,
     /// The block offset it stopped at, in the block that stopped.
     stop_at: Option<u32>,
+    /// The `(run, frame)` of the last mark pushed: a wrap repeating it adds
+    /// nothing (a roll exactly at the loop end is no wrap too).
+    last_mark: Option<(u64, u64)>,
 }
 
 impl Drop for RecordTap {
@@ -184,6 +188,7 @@ pub fn tap(req: &RecordRequest, latency: u64) -> (RecordTap, RecordHandles) {
             remark: false,
             stopped: false,
             stop_at: None,
+            last_mark: None,
         },
         RecordHandles {
             ring: reader,
@@ -217,15 +222,24 @@ impl RecordTap {
         self.range.is_none_or(|(a, b)| frame >= a && frame < b)
     }
 
+    /// Pushes a mark; a wrap that repeats the last mark is dropped (review
+    /// fix M3: a roll exactly at the loop end would also mark a wrap at run
+    /// 0). Other repeats stay: a resume after a stop must be marked. // RT
     fn mark(&mut self, run: u64, frame: u64, wrap: bool) {
+        if wrap && self.last_mark == Some((run, frame)) {
+            return;
+        }
         if self.marks.push(Mark { run, frame, wrap }).is_err() {
             self.status.lost_marks.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.last_mark = Some((run, frame));
         }
     }
 
     /// At a block's start while playing: rolls (run 0 plays `frame`), or
     /// marks where the transport is after a block it did not advance
-    /// through or after a stop. // RT
+    /// through, after a jump or after a stop. A resume after a stop takes
+    /// the device's input delay as it is then (review fix M4). // RT
     pub fn begin_block(&mut self, frame: u64, delay: i64) {
         if !self.rolling {
             self.rolling = true;
@@ -233,6 +247,9 @@ impl RecordTap {
             self.status.delay.store(delay, Ordering::Release);
             self.mark(0, frame, false);
         } else if self.remark || self.stopped {
+            if self.stopped {
+                self.status.delay.store(delay, Ordering::Release);
+            }
             self.mark(self.run, frame, false);
         }
         self.remark = false;
@@ -264,7 +281,8 @@ impl RecordTap {
     }
 
     /// The schedule changed under the transport (an edit while recording
-    /// recompiled it): the next block marks where it is. // RT
+    /// recompiled it), or the transport jumped (a Locate): the next block
+    /// marks where it is. // RT
     pub fn resync(&mut self) {
         if self.rolling {
             self.remark = true;

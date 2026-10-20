@@ -308,3 +308,86 @@ fn the_sequence_end_ends_the_run_with_a_mark() {
         vec![(0, 256), (256, 44)]
     );
 }
+
+/// Review fix M1: a Locate applied while recording is a cut, marked where
+/// the transport lands, even though the session refuses it (Ruling 17).
+#[test]
+fn a_locate_while_recording_is_marked() {
+    let (mut engine, mut b) = setup(FakeInput::Signals, 256, OfflineSinks::new(10_000));
+    let mut h = engine.start_recording(&request(vec![0], 48_000)).unwrap();
+    engine.locate_frame(1000).unwrap();
+    engine.play().unwrap();
+    b.run_frames(512);
+    engine.locate_frame(5000).unwrap();
+    b.run_frames(256);
+    assert_eq!(marks(&mut h), vec![(0, 1000), (512, 5000)]);
+    assert_eq!(h.status.run(), 768);
+}
+
+/// Review fixes M1 and M2: Stop, Locate and Play drained in one block mark
+/// the stop where playback stopped, then the located frame.
+#[test]
+fn stop_locate_play_in_one_block_marks_the_stop_and_the_jump() {
+    let (mut engine, mut b) = setup(FakeInput::Signals, 256, OfflineSinks::new(10_000));
+    let mut h = engine.start_recording(&request(vec![0], 48_000)).unwrap();
+    engine.locate_frame(1000).unwrap();
+    engine.play().unwrap();
+    b.run_frames(512);
+    engine.stop().unwrap();
+    engine.locate_frame(5000).unwrap();
+    engine.play().unwrap();
+    b.run_frames(256);
+    assert_eq!(marks(&mut h), vec![(0, 1000), (512, 1512), (512, 5000)]);
+    assert_eq!(h.status.run(), 768);
+}
+
+/// Review fix M2: a stop with a return to start in the same block marks
+/// where playback stopped, not the located frame.
+#[test]
+fn a_stop_mark_is_where_playback_stopped() {
+    let (mut engine, mut b) = setup(FakeInput::Signals, 256, OfflineSinks::new(10_000));
+    let mut h = engine.start_recording(&request(vec![0], 48_000)).unwrap();
+    engine.locate_frame(1000).unwrap();
+    engine.play().unwrap();
+    b.run_frames(512);
+    engine.stop().unwrap();
+    engine.locate_frame(0).unwrap();
+    b.run_frames(512);
+    assert_eq!(marks(&mut h), vec![(0, 1000), (512, 1512)]);
+    assert_eq!(h.status.run(), 512);
+}
+
+/// Review fix M3: rolling exactly at the loop end marks the roll once, not
+/// a roll and a wrap at run 0.
+#[test]
+fn rolling_at_the_loop_end_marks_once() {
+    let (mut engine, mut b) = setup(FakeInput::Signals, 256, OfflineSinks::new(10_000));
+    engine.set_loop_range(Some((1000, 1700))).unwrap();
+    engine.locate_frame(1700).unwrap();
+    let mut h = engine.start_recording(&request(vec![0], 48_000)).unwrap();
+    engine.play().unwrap();
+    b.run_frames(256 * 4);
+    let m = full_marks(&mut h);
+    assert_eq!(
+        m.iter()
+            .map(|m| (m.run, m.frame, m.wrap))
+            .collect::<Vec<_>>(),
+        vec![(0, 1000, false), (700, 1000, true)]
+    );
+}
+
+/// Review fix M4: playing again after a stop takes the device's input delay
+/// as it is then.
+#[test]
+fn a_resume_refreshes_the_input_delay() {
+    let (mut t, h) = core_engine::record::tap(&request(vec![0], 4800), 0);
+    let ch = [0.0f32; 256];
+    let input: [&[f32]; 1] = [&ch];
+    t.begin_block(100, 7);
+    t.end_block(&input, 256, true);
+    assert_eq!(h.status.delay(), Some(7));
+    t.stop(0, 356);
+    t.end_block(&input, 256, true);
+    t.begin_block(356, 9);
+    assert_eq!(h.status.delay(), Some(9));
+}

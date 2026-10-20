@@ -1126,12 +1126,25 @@ impl Renderer {
                 self.auto_last.fill(f64::NAN);
             }
             EngineCmd::Stop => {
+                // The stop is marked where playback stopped, before any
+                // later command of this block moves the transport (review
+                // fix M2).
+                if self.transport.state == PlayState::Playing {
+                    if let Some(t) = self.tap.as_deref_mut() {
+                        t.stop(0, self.transport.pos);
+                    }
+                }
                 self.release_now(true);
                 self.transport.stop();
             }
             EngineCmd::Locate(frame) => {
                 self.release_now(true);
                 self.transport.locate(frame);
+                // A jump while recording is a cut: the next block marks
+                // where the transport landed (review fix M1).
+                if let Some(t) = self.tap.as_deref_mut() {
+                    t.resync();
+                }
                 self.since_start = 0;
                 self.seek();
                 self.auto_last.fill(f64::NAN);

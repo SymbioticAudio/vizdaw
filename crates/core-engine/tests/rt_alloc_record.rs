@@ -59,6 +59,10 @@ fn recording_never_allocates() {
         if i % 100 == 0 {
             log.drain();
         }
+        if i == 2500 {
+            // A jump while recording is marked (review fix M1).
+            engine.locate_frame(5000).unwrap();
+        }
         if i == 2000 {
             // A new tap replaces the old one while playing.
             h = engine
@@ -77,6 +81,9 @@ fn recording_never_allocates() {
     // The transport stops (the tap marks it, pre-flight M2), then the tap
     // goes: the removed tap is retired, never freed here.
     engine.stop().unwrap();
+    armed_block(&mut b, 512);
+    // Playing again resumes the tap (a resume mark and a fresh delay).
+    engine.play().unwrap();
     armed_block(&mut b, 512);
     engine.stop_recording().unwrap();
     armed_block(&mut b, 512);
