@@ -3357,7 +3357,20 @@ impl Session {
                 }
             }
             // Normalize removes no plugin: nothing to capture first.
-            inner.history.execute(&cmd, &ViewFilter::default())?;
+            let report = inner.history.execute(&cmd, &ViewFilter::default())?;
+            // The model's notes ("silent", "gain limited") name the event
+            // ID: the user reads the media name in the next `idle`'s
+            // problems (final review m3 / T5 m2).
+            for w in report.warnings {
+                let named = measure.iter().find_map(|x| {
+                    w.strip_prefix(&x.id.to_string())
+                        .map(|rest| format!("Normalize: a region of {}{rest}", x.name))
+                });
+                inner
+                    .news
+                    .problems
+                    .push(named.unwrap_or_else(|| format!("Normalize: {w}")));
+            }
             inner.version += 1;
             inner.reload_host(self.id);
             self.mark(&mut inner);

@@ -97,6 +97,33 @@ fn save_trashes_what_nothing_references() {
     s.close().unwrap();
 }
 
+/// Final review T7: an overview write a crash interrupted leaves a
+/// `.<hash>.vzov.<pid>-<n>.tmp`; retention deletes it once it is an hour
+/// old, never a write that may still be in progress.
+#[test]
+fn save_deletes_stale_overview_temporaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg, _trash) = saved(dir.path(), &["a.caf"]);
+    let ovs = pkg.join("Media/.overviews");
+    let stale = ovs.join(format!(".{}.vzov.1-0.tmp", "0".repeat(64)));
+    let fresh = ovs.join(format!(".{}.vzov.1-1.tmp", "1".repeat(64)));
+    for f in [&stale, &fresh] {
+        std::fs::write(f, "x").unwrap();
+    }
+    let old = std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    s.save().unwrap();
+    assert!(!stale.exists(), "a stale temporary is deleted");
+    assert!(fresh.is_file(), "a recent one may still be renamed");
+    assert!(problems(&s).is_empty());
+    s.close().unwrap();
+}
+
 /// Review Focus 1.
 #[test]
 fn retention_never_trashes_what_undo_redo_or_disk_documents_reference() {

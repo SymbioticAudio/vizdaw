@@ -186,6 +186,13 @@ fn fades_follow_the_cursor() {
     let (t, f) = at(&d, 1.99);
     let (_, fi, fo, ..) = region(&run(&d, fade_to(t, FadeEdge::In)).unwrap());
     assert_eq!((fi.length_frames, fo.length_frames), (f, 96_000 - f));
+    // A fade out from 0.05 s leaves no room for the whole fade in
+    // (4800 frames): it shrinks to end at the cursor.
+    let (t, f) = at(&d, 0.05);
+    assert!(f < 4800, "{f}");
+    let (_, fi, fo, ..) = region(&run(&d, fade_to(t, FadeEdge::Out)).unwrap());
+    assert_eq!((fi.length_frames, fo.length_frames), (f, 96_000 - f));
+    assert_eq!(fi.shape, FadeShape::Linear);
     // The cursor at the region's start, or past its end: nothing to do.
     assert!(matches!(
         run(&d, fade_to(Tick(0), FadeEdge::In)),

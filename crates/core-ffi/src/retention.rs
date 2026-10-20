@@ -136,6 +136,9 @@ pub fn run(
                 if !hashes.contains(h) {
                     let _ = std::fs::remove_file(e.path());
                 }
+            } else if stale_tmp(&name, &e.path()) {
+                // A write a crash interrupted: never renamed into place.
+                let _ = std::fs::remove_file(e.path());
             }
         }
     }
@@ -147,6 +150,23 @@ pub fn run(
         }
     }
     out
+}
+
+/// How old an overview's temporary file must be before retention deletes
+/// it: a write in progress renames it within moments.
+pub const STALE_TMP: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// True when `name` (at `path`) is an overview write's temporary file
+/// (`.<name>.<pid>-<n>.tmp`) last modified more than [`STALE_TMP`] ago.
+fn stale_tmp(name: &str, path: &Path) -> bool {
+    name.starts_with('.')
+        && name.ends_with(".tmp")
+        && std::fs::symlink_metadata(path)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_TMP)
 }
 
 /// The `(device, inode)` of the file at `path` (following links), `None`

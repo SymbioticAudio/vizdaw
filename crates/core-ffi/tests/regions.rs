@@ -102,6 +102,68 @@ fn normalize_reaches_the_peak_from_the_overview() {
     s.close().unwrap();
 }
 
+/// Final review m3 (T5 m2): the model's notes reach the user, by media
+/// name, in the next `idle`'s problems: a quiet region's gain is limited,
+/// a silent one in a mixed selection is skipped.
+#[test]
+fn normalize_reports_limited_and_silent_regions() {
+    let dir = tempfile::tempdir().unwrap();
+    let quiet = caf(&dir.path().join("quiet.caf"), 2, &vec![1e-6; 9600]);
+    let silent = caf(&dir.path().join("silent.caf"), 2, &vec![0.0; 9600]);
+    let (s, seq, lane, _) = demo_with(&quiet);
+    let id = s
+        .import_audio(
+            vec![silent.display().to_string()],
+            Some(ImportTargetRow {
+                seq,
+                lane: Some(lane),
+                tick: 100_000,
+            }),
+        )
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(60);
+    while s.job(id).unwrap().state == JobStateRow::Running {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let regions: Vec<u64> = s
+        .lane_events(seq, lane)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == EventKindRow::AudioRegion)
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(regions.len(), 2, "{regions:?}");
+    while !s.idle().unwrap().problems.is_empty() {}
+    let until = Instant::now() + Duration::from_secs(60);
+    loop {
+        match s.normalize_regions(regions.clone(), -1.0) {
+            Ok(_) => break,
+            Err(VizError::Busy { .. }) => {
+                assert!(Instant::now() < until, "the overviews never came");
+                s.idle().unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert_eq!(region(&s, seq, lane).gain_db, 24.0);
+    let p = s.idle().unwrap().problems;
+    assert!(
+        p.iter()
+            .any(|l| l == "Normalize: a region of quiet: gain limited to +24.0 dB"),
+        "{p:?}"
+    );
+    assert!(
+        p.iter()
+            .any(|l| l == "Normalize: a region of silent is silent: not normalized"),
+        "{p:?}"
+    );
+    assert!(s.idle().unwrap().problems.is_empty(), "reported once");
+    s.close().unwrap();
+}
+
 #[test]
 fn normalize_measures_only_what_the_region_plays() {
     let dir = tempfile::tempdir().unwrap();
