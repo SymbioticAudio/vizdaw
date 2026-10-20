@@ -31,6 +31,19 @@ public struct ArrangementGeometry: Equatable, Sendable {
 
     /// The lanes plus one spare row (the "Add Lane" row of the headers).
     public func contentHeight(rows: Int) -> CGFloat { CGFloat(rows + 1) * laneHeight }
+
+    /// An audio region's rectangle in row `row`: its own span, a point
+    /// inside the block band.
+    public func regionRect(_ r: EventRow, row: Int, axis: TimeAxis) -> CGRect {
+        let len = max(r.duration, 0)
+        let end = r.tick > Int64.max - len ? Int64.max : r.tick + len
+        let x0 = axis.x(r.tick)
+        let x1 = axis.x(end)
+        let inset = Self.blockInset + 1
+        return CGRect(
+            x: x0, y: rowTop(row) + inset, width: max(x1 - x0, Self.minBlockWidth),
+            height: max(laneHeight - 2 * inset, 1))
+    }
 }
 
 public struct BlockHit: Equatable, Sendable {
@@ -48,6 +61,8 @@ public struct BlockHit: Equatable, Sendable {
 public enum ArrangementHit: Equatable, Sendable {
     case block(BlockHit)
     case empty(lane: LaneKey?, tick: Int64)
+    /// A region's fade or gain handle (plan 5b).
+    case handle(RegionHandleHit)
 }
 
 public enum ArrangementHitTest {

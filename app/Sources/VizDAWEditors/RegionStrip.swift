@@ -24,6 +24,8 @@ public enum RegionHit: Equatable, Sendable {
     case mute(UInt64)
     case solo(UInt64)
     case region(RegionItem)
+    /// A region's fade or gain handle, with the region's rectangle (plan 5b).
+    case handle(RegionItem, RegionHandle, CGRect)
     case none
 }
 
@@ -85,6 +87,18 @@ public enum RegionStripLayout {
             return .region(item)
         }
         return .none
+    }
+
+    /// A region handle under `p`, if any (checked before `hit`).
+    public static func handleHit(_ p: CGPoint, lines: [RegionLine], time: TimeAxis, side: CGFloat) -> RegionHit? {
+        guard p.x >= side, p.y.isFinite, p.y >= -2 else { return nil }
+        let i = max(Int((p.y / rowHeight).rounded(.down)), 0)
+        guard i < lines.count else { return nil }
+        for item in lines[i].items.reversed() {
+            let r = rect(item.row, line: i, time: time, side: side)
+            if let h = RegionHandles.hit(p, row: item.row, in: r) { return .handle(item, h, r) }
+        }
+        return nil
     }
 
     /// A region drag's full target: its start snapped (nil: no change).

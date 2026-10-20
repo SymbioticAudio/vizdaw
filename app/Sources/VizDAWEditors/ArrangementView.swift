@@ -26,6 +26,10 @@ public final class ArrangementView: EditorCanvas {
     }
 
     private var drag: Drag?
+    /// A fade or gain handle being dragged (plan 5b Ruling 7).
+    private var handleDrag: (hit: RegionHandleHit, from: CGPoint)?
+    /// The gain readout while the gain band is dragged.
+    private var readout: (text: String, at: CGPoint)?
 
     public init(document: DocumentModel) {
         self.document = document
@@ -70,6 +74,9 @@ public final class ArrangementView: EditorCanvas {
             _ = editor.selection
             _ = document.lanes
             _ = document.selectedSeq
+            // Waveforms arrive and media go offline or come back.
+            _ = document.overviewVersion
+            _ = document.mediaVersion
             // Not `transport`: it changes on every poll; the playhead moves
             // without redrawing.
             _ = document.playKey
@@ -123,11 +130,11 @@ public final class ArrangementView: EditorCanvas {
         for (i, key, blocks) in blocks(in: dirty) {
             NSColor.separatorColor.setFill()
             CGRect(x: dirty.minX, y: geometry.rowTop(i + 1) - 0.5, width: dirty.width, height: 1).fill()
-            for b in blocks { draw(b, row: i, key: key) }
+            for b in blocks { draw(b, row: i, key: key, dirty: dirty) }
         }
     }
 
-    private func draw(_ b: BlockRow, row: Int, key: LaneKey) {
+    private func draw(_ b: BlockRow, row: Int, key: LaneKey, dirty: CGRect) {
         let r = geometry.blockRect(b, row: row, axis: axis)
         let selected = editor.isSelected(b)
         let color: NSColor = b.kind == .reference ? .systemPurple : .systemBlue
@@ -140,6 +147,7 @@ public final class ArrangementView: EditorCanvas {
         shape.lineWidth = selected ? 2 : 1
         if b.muted { shape.setLineDash([3, 2], count: 2, phase: 0) }
         shape.stroke()
+        if !light, b.kind == .events { drawRegions(b, row: row, key: key, dirty: dirty) }
         guard !light, r.width > 24 else { return }
         if b.kind == .reference {
             let text = NSString(string: "↻ " + (b.label ?? ""))
@@ -175,13 +183,102 @@ public final class ArrangementView: EditorCanvas {
         }
     }
 
+    /// The audio regions of an events block: waveform, fades, gain and
+    /// handles (spec §10.1–10.2).
+    private func drawRegions(_ b: BlockRow, row: Int, key: LaneKey, dirty: CGRect) {
+        let ids = Set(b.events)
+        let media = document.media
+        for r in regionRows(key) where ids.contains(r.id) {
+            let rect = geometry.regionRect(r, row: row, axis: axis)
+            let vis = rect.intersection(dirty).intersection(content.bounds)
+            guard !vis.isNull, vis.width > 0 else { continue }
+            let offline = media.offline(r.media) != nil
+            var rows: OverviewRows?
+            if !offline {
+                let from = axis.tick(atX: vis.minX)
+                rows = media.waveform(
+                    event: r.id, fromTick: from, toTick: max(axis.tick(atX: vis.maxX), from + 1),
+                    columns: Int(vis.width.rounded(.up)))
+            }
+            let wave = CGRect(
+                x: vis.minX, y: rect.minY + RegionHandles.band, width: vis.width,
+                height: max(rect.height - RegionHandles.band - 2, 1))
+            RegionDrawing.draw(
+                r, in: rect, rows: rows, waveRect: wave, offline: offline, selected: editor.isSelected(event: r.id),
+                handles: editor.tool == .arrow)
+        }
+    }
+
+    /// The audio regions of a lane's active take.
+    private func regionRows(_ key: LaneKey) -> [EventRow] {
+        editor.laneEvents(key)?.events.filter { $0.kind == .audioRegion } ?? []
+    }
+
     // MARK: Gestures
 
     private func hit(_ p: CGPoint) -> ArrangementHit {
+        if let h = handleHit(p) { return .handle(h) }
+        return blockHit(p)
+    }
+
+    private func blockHit(_ p: CGPoint) -> ArrangementHit {
         let keys = lanes
         var map: [LaneKey: [BlockRow]] = [:]
         if let row = geometry.row(atY: p.y, count: keys.count) { map[keys[row]] = editor.blocks(keys[row]) }
         return ArrangementHitTest.hit(p, lanes: keys, blocks: map, geometry: geometry, axis: axis)
+    }
+
+    /// A region's fade or gain handle under `p` (arrow tool, normal
+    /// drawing; plan 5b Ruling 7).
+    private func handleHit(_ p: CGPoint) -> RegionHandleHit? {
+        guard editor.tool == .arrow, !light else { return nil }
+        let keys = lanes
+        guard let row = geometry.row(atY: p.y, count: keys.count) else { return nil }
+        for r in regionRows(keys[row]).reversed() {
+            let rect = geometry.regionRect(r, row: row, axis: axis)
+            if let h = RegionHandles.hit(p, row: r, in: rect) {
+                return RegionHandleHit(lane: keys[row], row: r, handle: h, rect: rect)
+            }
+        }
+        return nil
+    }
+
+    /// The fade whose shape a context menu at `p` sets.
+    private func fadeArea(_ p: CGPoint) -> (row: EventRow, handle: RegionHandle)? {
+        guard !light else { return nil }
+        let keys = lanes
+        guard let row = geometry.row(atY: p.y, count: keys.count) else { return nil }
+        for r in regionRows(keys[row]).reversed() {
+            if let h = RegionHandles.fadeArea(p, row: r, in: geometry.regionRect(r, row: row, axis: axis)) {
+                return (r, h)
+            }
+        }
+        return nil
+    }
+
+    private func handleTarget(_ d: (hit: RegionHandleHit, from: CGPoint), to: CGPoint, modifiers: Modifiers)
+        -> EditCommand?
+    {
+        RegionHandles.target(
+            d.hit.row, d.hit.handle, rect: d.hit.rect, dx: to.x - d.from.x, dy: to.y - d.from.y,
+            fine: modifiers.contains(.shift))
+    }
+
+    private func showReadout(_ d: (hit: RegionHandleHit, from: CGPoint), to: CGPoint, modifiers: Modifiers) {
+        guard d.hit.handle == .gain else { return }
+        let g = RegionHandles.gain(d.hit.row, dy: to.y - d.from.y, fine: modifiers.contains(.shift))
+        readout = (RegionHandles.gainLabel(g), CGPoint(x: to.x + 12, y: to.y - 20))
+        overlay.needsDisplay = true
+    }
+
+    private func clearReadout() {
+        guard readout != nil else { return }
+        readout = nil
+        overlay.needsDisplay = true
+    }
+
+    public override func drawOverlay(in dirty: CGRect) {
+        if let r = readout { RegionDrawing.readout(r.text, at: r.at) }
     }
 
     public override func contentMouseDown(_ p: CGPoint, clicks: Int, modifiers: Modifiers) {
@@ -201,6 +298,8 @@ public final class ArrangementView: EditorCanvas {
     public override func contentCancel() {
         handle(machine.cancel())
         drag = nil
+        handleDrag = nil
+        clearReadout()
         if editor.gesture != nil { editor.cancelGesture() }
     }
 
@@ -215,20 +314,37 @@ public final class ArrangementView: EditorCanvas {
                 var to = from
                 if i + 1 < effects.count, case let .move(_, _, p, _) = effects[i + 1] { to = p }
                 beginDrag(b, from: from, to: to, copy: modifiers.contains(.option))
-            case let .move(_, _, to, _):
+            case let .begin(.handle(h), from, _):
+                guard editor.beginGesture(RegionHandles.label(h.handle), lanes: [h.lane], origin: .other) else {
+                    continue
+                }
+                handleDrag = (h, from)
+            case let .move(_, _, to, modifiers):
                 if let d = drag {
                     editor.setGestureLanes(touched(d, to: to))
                     editor.updateGesture(target(d, to: to))
+                } else if let h = handleDrag {
+                    showReadout(h, to: to, modifiers: modifiers)
+                    editor.updateGesture(handleTarget(h, to: to, modifiers: modifiers))
                 }
-            case let .end(_, _, to, _):
+            case let .end(_, _, to, modifiers):
                 if let d = drag {
                     drag = nil
                     editor.setGestureLanes(touched(d, to: to))
                     editor.endGesture(target(d, to: to))
+                } else if let h = handleDrag {
+                    handleDrag = nil
+                    clearReadout()
+                    editor.endGesture(handleTarget(h, to: to, modifiers: modifiers))
                 }
             case .cancel:
                 if drag != nil {
                     drag = nil
+                    editor.cancelGesture()
+                }
+                if handleDrag != nil {
+                    handleDrag = nil
+                    clearReadout()
                     editor.cancelGesture()
                 }
             case .begin(.empty, _, _):
@@ -251,6 +367,10 @@ public final class ArrangementView: EditorCanvas {
             editor.selectBlock(b.block, in: b.lane, adding: modifiers.contains(.shift))
         case .empty:
             if !modifiers.contains(.shift) { editor.clearSelection() }
+        case .handle(let h) where h.handle == .gain && modifiers.contains(.option):
+            if let c = RegionHandles.resetGain(h.row) { editor.edit(c) }
+        case .handle(let h):
+            editor.setSelection(SelectionRow(timeRange: nil, lanes: [h.lane.ref], events: [h.row.id]))
         }
     }
 
@@ -287,7 +407,10 @@ public final class ArrangementView: EditorCanvas {
 
     public override func menu(for event: NSEvent) -> NSMenu? {
         let p = content.convert(event.locationInWindow, from: nil)
-        guard case .block(let b) = hit(p) else { return nil }
+        if let area = fadeArea(p) {
+            return RegionDrawing.fadeShapeMenu(area.row, area.handle) { [weak self] c in self?.editor.edit(c) }
+        }
+        guard case .block(let b) = blockHit(p) else { return nil }
         if !editor.isSelected(b.block) { editor.selectBlock(b.block, in: b.lane, adding: false) }
         let menu = NSMenu()
         func add(_ title: String, _ run: @escaping @MainActor () -> Void) {
@@ -337,6 +460,20 @@ public final class ArrangementView: EditorCanvas {
                         label: ArrangementA11y.label(b, laneName: rows[i].name, meter: meter), frame: r,
                         selected: editor.isSelected(b),
                         press: { [weak self] in self?.editor.selectBlock(b, in: key, adding: false) }))
+            }
+            let media = document.media
+            for r in regionRows(key) {
+                let rect = geometry.regionRect(r, row: i, axis: axis)
+                guard rect.intersects(content.bounds) else { continue }
+                out.append(
+                    CanvasAccessibilityItem(
+                        label: RegionA11y.label(
+                            r, name: media.row(r.media)?.name ?? "audio", laneName: rows[i].name, meter: meter,
+                            offline: media.offline(r.media) != nil),
+                        frame: rect, selected: editor.isSelected(event: r.id),
+                        press: { [weak self] in
+                            self?.editor.setSelection(SelectionRow(timeRange: nil, lanes: [key.ref], events: [r.id]))
+                        }))
             }
         }
         return out
