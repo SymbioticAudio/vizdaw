@@ -154,4 +154,73 @@ private let top: CGFloat = 51
         let labels = (v.accessibilityChildren() ?? []).compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
         #expect(labels.contains("Region loop on Loop, bar 1, gain +3.0 dB, offline"))
     }
+
+    // MARK: Review fix round 1
+
+    /// Review I1: the handles are drawn for the arrow tool only, so a tool
+    /// change redraws the arrangement.
+    @Test func aToolChangeRedrawsTheArrangement() async throws {
+        let (m, v, _) = try regionArrangement()
+        await settle()
+        let before = v.refreshes
+        await settle()
+        #expect(v.refreshes == before, "nothing else refreshes it")
+        m.editor.tool = .pencil
+        await settle()
+        #expect(v.refreshes == before + 1, "the pencil hides the handles")
+        m.editor.tool = .arrow
+        await settle()
+        #expect(v.refreshes == before + 2, "the arrow shows them again")
+    }
+
+    /// Review m1: a double-click on a region's handles still opens its
+    /// block.
+    @Test func doubleClickingOnAHandleOpensTheBlock() throws {
+        let (m, v, f) = try regionArrangement()
+        let p = CGPoint(x: 1, y: top + 2)
+        v.contentMouseDown(p, clicks: 1, modifiers: [])
+        v.contentMouseUp(p, modifiers: [])
+        v.contentMouseDown(p, clicks: 2, modifiers: [])
+        v.contentMouseUp(p, modifiers: [])
+        #expect(m.editor.layout.detail?.target == .block(seq: 3, lane: 31, start: 0, end: 61_440))
+        #expect(!f.calls.contains { $0.hasPrefix("begin") }, "no fade gesture")
+    }
+
+    /// Review m2: ⇧-click on a handle adds the region to the selection.
+    @Test func shiftClickingAHandleAddsTheRegion() throws {
+        let (m, v, _) = try regionArrangement()
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneRef(seq: 3, lane: 30)], events: [99]))
+        v.contentMouseDown(CGPoint(x: 80, y: top + 1), clicks: 1, modifiers: [.shift])
+        v.contentMouseUp(CGPoint(x: 80, y: top + 1), modifiers: [.shift])
+        #expect(m.editor.selection.events == [99, 1])
+        #expect(m.editor.selection.lanes == [LaneRef(seq: 3, lane: 30), LaneRef(seq: 3, lane: 31)])
+        v.contentMouseDown(CGPoint(x: 80, y: top + 1), clicks: 1, modifiers: [])
+        v.contentMouseUp(CGPoint(x: 80, y: top + 1), modifiers: [])
+        #expect(m.editor.selection.events == [1], "a plain click replaces it")
+    }
+
+    /// Review m7: leaving the window (⌘W) mid handle-drag cancels the
+    /// gesture.
+    @Test func leavingTheWindowMidHandleDragCancelsIt() throws {
+        let (m, v, f) = try regionArrangement()
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 300), styleMask: [.titled],
+            backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        w.contentView?.addSubview(v)
+        v.contentMouseDown(CGPoint(x: 80, y: top + 1), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 80, y: top - 19), modifiers: [])
+        #expect(m.editor.gesture != nil)
+        v.removeFromSuperview()
+        #expect(m.editor.gesture == nil)
+        #expect(f.calls.last == "abort")
+        // The next press starts afresh.
+        w.contentView?.addSubview(v)
+        f.calls = []
+        v.contentMouseDown(CGPoint(x: 80, y: top + 1), clicks: 1, modifiers: [])
+        v.contentMouseDragged(CGPoint(x: 80, y: top - 19), modifiers: [])
+        v.contentMouseUp(CGPoint(x: 80, y: top - 19), modifiers: [])
+        #expect(f.calls == ["begin Region Gain", "gesture", "end"])
+        v.removeFromSuperview()
+    }
 }

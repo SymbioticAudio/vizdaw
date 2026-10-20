@@ -328,10 +328,14 @@ open class EditorCanvas: NSView {
         if newWindow == nil { windowLost() }
     }
 
+    /// Leaving the window (⌘W mid-drag) ends the press: its release will
+    /// not come here, so an open gesture is cancelled as Escape does
+    /// (review m7).
     private func windowLost() {
         link?.invalidate()
         link = nil
         stopAutoScroll()
+        cancelGestures()
     }
 
     open override func viewDidMoveToWindow() {

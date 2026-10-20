@@ -74,6 +74,8 @@ public final class ArrangementView: EditorCanvas {
             _ = editor.selection
             _ = document.lanes
             _ = document.selectedSeq
+            // Handles are drawn for the arrow tool only (review I1).
+            _ = editor.tool
             // Waveforms arrive and media go offline or come back.
             _ = document.overviewVersion
             _ = document.mediaVersion
@@ -88,7 +90,12 @@ public final class ArrangementView: EditorCanvas {
         }
     }
 
+    /// How many observed changes have refreshed the view (a test seam:
+    /// AppKit keeps no reliable needsDisplay flag off screen).
+    private(set) var refreshes = 0
+
     func refresh() {
+        refreshes += 1
         geometry.laneHeight = CGFloat(editor.layout.laneHeight)
         if editor.layout.ticksPerPoint != axis.ticksPerPoint {
             axis = TimeAxis(ticksPerPoint: editor.layout.ticksPerPoint, originTick: axis.originTick)
@@ -282,7 +289,9 @@ public final class ArrangementView: EditorCanvas {
     }
 
     public override func contentMouseDown(_ p: CGPoint, clicks: Int, modifiers: Modifiers) {
-        handle(machine.down(hit(p), at: p, clicks: clicks, modifiers: modifiers))
+        // A double-click opens the block even on a region's handles
+        // (review m1).
+        handle(machine.down(clicks >= 2 ? blockHit(p) : hit(p), at: p, clicks: clicks, modifiers: modifiers))
     }
 
     public override func contentMouseDragged(_ p: CGPoint, modifiers: Modifiers) {
@@ -370,7 +379,11 @@ public final class ArrangementView: EditorCanvas {
         case .handle(let h) where h.handle == .gain && modifiers.contains(.option):
             if let c = RegionHandles.resetGain(h.row) { editor.edit(c) }
         case .handle(let h):
-            editor.setSelection(SelectionRow(timeRange: nil, lanes: [h.lane.ref], events: [h.row.id]))
+            // ⇧ adds, as in the region strip (review m2).
+            var s = modifiers.contains(.shift) ? editor.selection : SelectionRow(timeRange: nil, lanes: [], events: [])
+            if !s.events.contains(h.row.id) { s.events.append(h.row.id) }
+            if !s.lanes.contains(h.lane.ref) { s.lanes.append(h.lane.ref) }
+            editor.setSelection(s)
         }
     }
 
