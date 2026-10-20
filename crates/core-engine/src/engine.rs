@@ -22,7 +22,7 @@ use crate::schedule::{
 use crate::transport::PlayState;
 use core_media::stream::{DiskMode, MediaFile, StreamConfig, StreamWaiter, Streamer};
 use core_model::document::{DestKind, Document};
-use core_model::ids::{DestId, MediaId, PluginInstanceId, SeqId, StripId};
+use core_model::ids::{DestId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginFormat, PluginSlot};
 use core_model::time::Tick;
 use rtrb::{Producer, RingBuffer};
@@ -480,15 +480,47 @@ impl Engine {
         // plays.
         let spec = self.input_spec.clone();
         let mut midi_routes: Vec<crate::input::MidiRoute> = Vec::with_capacity(spec.midi.len());
+        // Thru that cannot play is reported, not dropped (fix round 1, M1).
+        let mut thru_unroutable: Vec<(LaneId, String)> = Vec::new();
         if compiled.is_ok() {
             for m in &spec.midi {
                 let d = m.dest.and_then(|d| doc.instruments().get(&d));
-                let kinds = d
-                    .and_then(|d| kinds_for(&d.kind, opts.route, &opts.ports).ok())
-                    .unwrap_or_default();
+                let kinds = match (m.dest, d) {
+                    (None, _) => Vec::new(),
+                    (Some(id), None) => {
+                        if m.thru {
+                            thru_unroutable
+                                .push((m.lane, format!("destination {id} is not in the project")));
+                        }
+                        Vec::new()
+                    }
+                    (Some(_), Some(d)) => match kinds_for(&d.kind, opts.route, &opts.ports) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            if m.thru {
+                                thru_unroutable.push((m.lane, e));
+                            }
+                            Vec::new()
+                        }
+                    },
+                };
                 let mut targets = [None, None];
                 for (slot, k) in targets.iter_mut().zip(&kinds) {
-                    *slot = resolve(k).ok().and_then(Result::ok);
+                    *slot = match resolve(k) {
+                        Ok(Ok(t)) => Some(t),
+                        Ok(Err(e)) => {
+                            if m.thru {
+                                thru_unroutable.push((m.lane, e));
+                            }
+                            None
+                        }
+                        Err(e) => {
+                            if m.thru {
+                                thru_unroutable.push((m.lane, e.to_string()));
+                            }
+                            None
+                        }
+                    };
                 }
                 let dest_channel = match d.map(|d| &d.kind) {
                     Some(DestKind::MidiEndpoint { channel, .. }) => channel & 0x0F,
@@ -538,6 +570,12 @@ impl Engine {
             crate::schedule::AutoDest::Plugin(id, p) => inserts.param_stepped(id, p),
             _ => false,
         });
+        for (lane, why) in &thru_unroutable {
+            report
+                .warnings
+                .push(format!("MIDI thru of lane {lane} not played: {why}"));
+        }
+        report.thru_unroutable = thru_unroutable;
         report.graph = self.compile_graph(doc)?;
         if report.graph.error.is_none() {
             // Schedule and graph both go out below: nothing published

@@ -407,3 +407,149 @@ fn after_a_stop_only_messages_heard_before_it_are_recorded() {
     }
     assert_eq!(got, vec![(1000, 60)]);
 }
+
+/// Fix round 1, M2: Auto monitoring switches when the punch points are
+/// heard (the playhead minus the graph latency `L`), not `L` frames early.
+#[test]
+fn auto_monitoring_switches_at_the_audible_punch_points() {
+    use core_engine::graph::TestInserts;
+    use core_model::mixer::StripKind;
+    const L: u64 = 2400;
+    let d = doc();
+    let mut bb = Builder::from_doc(d.doc.clone());
+    let strip = bb.strip_of(StripKind::BuiltinSynth).unwrap();
+    bb.insert(strip, TestInserts::plugin(&format!("latency={L}")))
+        .unwrap();
+    let latent = bb.finish();
+    let (mut engine, renderer) =
+        Engine::new(EngineConfig::new(SR), Box::new(OfflineSinks::new(10_000))).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.set_inputs(InputSpec {
+        midi: vec![],
+        monitor: vec![MonitorRoute {
+            path: d.path,
+            left: 0,
+            right: 0,
+            mode: MonitorMode::Auto,
+            armed: true,
+        }],
+    });
+    engine.load(&latent, d.seq).unwrap();
+    assert_eq!(engine.latency_frames(), L);
+    let mut b = OfflineBackend::new(SR, 256).with_input(FakeInput::Signals);
+    b.start(renderer).unwrap();
+    b.run_frames(256 * 4);
+    // Punch in at 40 000, playing from L frames before it.
+    engine.locate_frame(40_000 - L).unwrap();
+    let _h = engine
+        .start_recording(&RecordRequest {
+            channels: vec![0],
+            range: Some((40_000, 45_000)),
+            ring_frames: 48_000,
+        })
+        .unwrap();
+    engine.play().unwrap();
+    let peaks: Vec<f32> = (0..60).map(|_| b.block(256)).collect();
+    // Block k renders playhead 37 600 + 256·k and is heard L later. The
+    // punch-in is heard from playhead 42 400 (block 19), whose input is
+    // heard from output frame 4864 + L = 7264 (block 28); the punch-out
+    // from playhead 47 400 (block 39: output block 48).
+    for (k, p) in peaks.iter().enumerate() {
+        match k {
+            11..=27 | 49.. => assert!(*p < 0.001, "block {k}: {p} ({peaks:?})"),
+            29..=47 => assert!(*p > 0.05, "block {k}: {p} ({peaks:?})"),
+            _ => {}
+        }
+    }
+}
+
+/// Fix round 1, M1: a thru destination that cannot play is reported in
+/// the load's report, not dropped silently.
+#[test]
+fn a_thru_destination_that_cannot_play_is_reported() {
+    let mut b = Builder::new();
+    let gone = b.dest("Gone", "Unplugged Port", 0).unwrap();
+    let (seq, keys) = b.sequence("Bar", "Keys", None).unwrap();
+    let doc = b.finish();
+    let (mut engine, _renderer) =
+        Engine::new(EngineConfig::new(SR), Box::new(OfflineSinks::new(100))).unwrap();
+    let spec = |dest| InputSpec {
+        midi: vec![MidiInputSpec {
+            lane: keys,
+            port: None,
+            channel: None,
+            dest,
+            thru: true,
+            armed: true,
+        }],
+        monitor: vec![],
+    };
+    engine.set_inputs(spec(Some(gone)));
+    let r = engine.load(&doc, seq).unwrap();
+    assert_eq!(r.thru_unroutable.len(), 1, "{r:?}");
+    assert_eq!(r.thru_unroutable[0].0, keys);
+    assert!(
+        r.thru_unroutable[0].1.contains("Unplugged Port"),
+        "{:?}",
+        r.thru_unroutable
+    );
+    assert!(
+        r.warnings.iter().any(|w| w.contains("thru")),
+        "{:?}",
+        r.warnings
+    );
+    // A destination no longer in the document.
+    engine.set_inputs(spec(Some(DestId(9999))));
+    let r = engine.load(&doc, seq).unwrap();
+    assert_eq!(r.thru_unroutable.len(), 1, "{r:?}");
+    // No thru, or no destination: nothing to report.
+    let mut quiet = spec(Some(gone));
+    quiet.midi[0].thru = false;
+    engine.set_inputs(quiet);
+    assert!(engine.load(&doc, seq).unwrap().thru_unroutable.is_empty());
+    engine.set_inputs(spec(None));
+    assert!(engine.load(&doc, seq).unwrap().thru_unroutable.is_empty());
+}
+
+/// Fix round 1, M1: thru past the target limit is reported too.
+#[test]
+fn thru_past_the_target_limit_is_reported() {
+    use core_engine::backend::MidiPortInfo;
+    use core_engine::schedule::MAX_TARGETS;
+    let ports: Vec<MidiPortInfo> = (0..=MAX_TARGETS)
+        .map(|i| MidiPortInfo {
+            name: format!("Port {i}"),
+            unique_id: None,
+        })
+        .collect();
+    let mut b = Builder::new();
+    let (seq, keys) = b.sequence("Many", "Keys", None).unwrap();
+    for i in 0..MAX_TARGETS {
+        let name = format!("Port {i}");
+        let d = b.dest(&name, &name, 0).unwrap();
+        let l = b.lane(seq, &name, Some(d)).unwrap();
+        b.notes(seq, l, &[(0, 60, 0x8000, Q)]).unwrap();
+    }
+    let extra = format!("Port {MAX_TARGETS}");
+    let over = b.dest(&extra, &extra, 0).unwrap();
+    let doc = b.finish();
+    let (mut engine, _renderer) = Engine::new(
+        EngineConfig::new(SR),
+        Box::new(OfflineSinks::new(100).with_ports(ports)),
+    )
+    .unwrap();
+    engine.set_inputs(InputSpec {
+        midi: vec![MidiInputSpec {
+            lane: keys,
+            port: None,
+            channel: None,
+            dest: Some(over),
+            thru: true,
+            armed: true,
+        }],
+        monitor: vec![],
+    });
+    let r = engine.load(&doc, seq).unwrap();
+    assert_eq!(r.thru_unroutable.len(), 1, "{r:?}");
+    assert_eq!(r.thru_unroutable[0].0, keys);
+}

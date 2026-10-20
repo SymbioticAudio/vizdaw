@@ -96,6 +96,9 @@ pub struct CompileReport {
     /// Plugin-parameter lanes bound to a plugin instrument's target
     /// (set by `Engine::load`).
     pub automation_instrument_lanes: usize,
+    /// Lanes whose MIDI thru cannot play, and why (set by `Engine::load`
+    /// from the live input routes, spec §6.6; each also has a warning).
+    pub thru_unroutable: Vec<(core_model::ids::LaneId, String)>,
 }
 
 type Routes = Result<Vec<TargetIdx>, String>;

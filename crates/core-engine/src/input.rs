@@ -139,7 +139,10 @@ pub struct MidiInputSpec {
     pub channel: Option<u8>,
     /// Where thru goes (the lane's destination).
     pub dest: Option<DestId>,
-    /// Thru is on (the lane's monitor is not Off).
+    /// Thru is on. The control side decides: spec §6.6 plays thru on an
+    /// armed lane unless its monitor is Off (`armed && monitor != Off`);
+    /// plan 5c Ruling 9 also lets a lane monitored Input listen unarmed.
+    /// The engine plays thru whenever this is set.
     pub thru: bool,
     /// The lane is armed: it records while a tap rolls.
     pub armed: bool,

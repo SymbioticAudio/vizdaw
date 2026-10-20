@@ -1259,8 +1259,11 @@ impl Renderer {
         };
         let playing = self.transport.state == PlayState::Playing;
         let pos = self.transport.play_pos(length);
+        // The record range is where the punch points are heard: the frame
+        // rendered now is heard `L` (the graph latency) later, so the
+        // frame heard now is `p − L` (fix round 1, M2).
         let in_range = match (self.tap.as_deref(), pos) {
-            (Some(t), Some(p)) => t.rolling() && t.in_range(p),
+            (Some(t), Some(p)) => t.rolling() && t.in_range(p.saturating_sub(self.latency)),
             _ => false,
         };
         let mut heard = 0u64;
