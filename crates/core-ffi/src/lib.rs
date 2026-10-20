@@ -38,6 +38,7 @@ pub mod overviews;
 pub mod plugins;
 pub mod recovery;
 pub mod relink;
+pub mod retention;
 pub mod revs;
 pub mod selection;
 pub mod session;

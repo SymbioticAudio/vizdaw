@@ -94,6 +94,9 @@ struct Inner {
     /// Items whose file failed the content-hash check, with the path and
     /// hash it was checked for (plan 5b Ruling 2; runtime only).
     changed: std::collections::BTreeMap<core_model::ids::MediaId, (String, Option<String>)>,
+    /// The folder standing for the Trash (test hook; `None`: the
+    /// environment's or the platform's).
+    trash_dir: Option<PathBuf>,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -157,7 +160,24 @@ impl Inner {
             jobs: Default::default(),
             overviews: Default::default(),
             changed: Default::default(),
+            trash_dir: None,
         }
+    }
+
+    /// The retention rule on `package` (plan 5b Ruling 11). Skipped while
+    /// a job is not applied yet (its files are in no document), unless
+    /// `jobs_done` (the jobs were shut down and their files removed).
+    /// Failures become problems for the next `idle`; at `close` no `idle`
+    /// follows, so `close` also writes them to stderr (preflight M5).
+    fn tidy(&mut self, package: &Path, jobs_done: bool) {
+        if !jobs_done && self.jobs.busy() {
+            return;
+        }
+        let dir = crate::retention::trash_dir(self.trash_dir.as_deref());
+        let out = crate::retention::run(&self.history.referenced_media_anywhere(), package, &|p| {
+            crate::retention::trash(dir.as_deref(), p)
+        });
+        self.news.problems.extend(out.problems);
     }
 
     /// Every package-relative path a history state references: no job
@@ -555,6 +575,9 @@ impl Session {
         crate::overviews::copy_cache(&refs, &inner.root(self.id), path);
         file::save(inner.doc(), path)?;
         write_windows(path, &inner.windows, inner.editor_layout.as_ref());
+        // Reads `project.json` and the autosaves under the save lock
+        // (preflight M4: whole-document reads, not media-file reads).
+        inner.tidy(path, false);
         inner.clean = inner.doc().clone();
         // A plugin whose state could not be captured is still unsaved.
         if captured {
@@ -2053,6 +2076,19 @@ impl Session {
                 discard(&root, w, &keep);
             }
             inner.overviews.shutdown();
+            if let Some(p) = inner.path.clone() {
+                // The jobs were shut down and their files removed above,
+                // and the overview worker has stopped. Under the save
+                // lock, as after a save (an autosave may be writing).
+                let _g = lock(&SAVE_LOCK);
+                let before = inner.news.problems.len();
+                inner.tidy(&p, true);
+                // No `idle` follows a close: the problems would be lost
+                // (preflight M5).
+                for line in inner.news.problems.iter().skip(before) {
+                    eprintln!("VizDAW: {line}");
+                }
+            }
             host::forget_media(self.id);
             if inner.path.is_none() {
                 let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
@@ -2180,6 +2216,12 @@ impl Session {
     /// Forgets every loaded overview (test hook).
     pub fn debug_forget_overviews(&self) {
         lock(&self.inner).overviews.forget_all();
+    }
+
+    /// The folder this session's retention moves files into instead of
+    /// the Trash (test hook; `None`: back to the default).
+    pub fn debug_set_trash_dir(&self, dir: Option<String>) {
+        lock(&self.inner).trash_dir = dir.map(PathBuf::from);
     }
 
     /// Makes the overview worker's next task panic (test hook, preflight

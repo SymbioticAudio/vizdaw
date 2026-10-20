@@ -3,7 +3,8 @@
 //! and the Audio Unit plugin host (`au`).
 //!
 //! All `unsafe` lives in `hal.rs`, `dls.rs`, `midi.rs`, `rt.rs`,
-//! `media.rs` and `au/ffi.rs`, with a `// SAFETY:` comment per block.
+//! `media.rs`, `trash.rs` and `au/ffi.rs`, with a `// SAFETY:` comment per
+//! block.
 #![cfg(target_os = "macos")]
 #![deny(missing_docs)]
 #![cfg_attr(
@@ -23,3 +24,4 @@ pub mod media;
 pub mod midi;
 pub mod rt;
 pub mod sinks;
+pub mod trash;

@@ -11,6 +11,12 @@ cmd="$1"
 shift
 # `swift run` has no app bundle: the scanner comes from build-ffi.sh.
 export VIZDAW_SCANNER="${VIZDAW_SCANNER:-$root/target/ffi/vizdaw-scan}"
+# Swift tests use the FFI built without test hooks: their retention
+# passes move unused media into a per-run folder, never the user's Trash
+# (plan 5b Ruling 11, preflight M15).
+if [[ "$cmd" == "test" ]]; then
+    export VIZDAW_TRASH_DIR="${TMPDIR:-/tmp}/vizdaw-swift-trash-$$"
+fi
 
 if xcodebuild -version >/dev/null 2>&1; then
     # Full Xcode (CI runners): default build system, XCTest/Testing in place.
