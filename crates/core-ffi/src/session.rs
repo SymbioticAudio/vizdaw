@@ -951,9 +951,11 @@ impl Session {
                     inner.key = Some(key);
                 }
                 inner.path = Some(p);
+                // The overview worker moves to the new package first, so it
+                // writes nothing more into the scratch package (review m3).
+                inner.refresh_media(self.id, true);
                 // The scratch package of an untitled session is done with.
                 let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
-                inner.refresh_media(self.id, true);
                 inner.reload_host(self.id);
                 self.mark(&mut inner);
             }
@@ -1262,25 +1264,35 @@ impl Session {
             // What the overview worker found (plan 5b Ruling 2).
             let found = inner.overviews.take_news();
             let mut hash_news = false;
-            for (m, path, hash) in found.mismatched {
-                if inner.changed.get(&m) == Some(&(path.clone(), hash.clone())) {
-                    continue;
-                }
-                let name = inner
-                    .doc()
-                    .media()
-                    .get(&m)
-                    .map_or_else(|| m.to_string(), |x| x.name.clone());
-                inner.news.problems.push(format!(
-                    "{name}: the file no longer holds the audio this project expects; it stays silent until it is relinked or restored"
-                ));
-                inner.changed.insert(m, (path, hash));
-                hash_news = true;
-            }
-            for (m, path) in found.verified {
-                if inner.changed.get(&m).is_some_and(|(p, _)| *p == path) {
-                    inner.changed.remove(&m);
-                    hash_news = true;
+            // In the order found: the latest finding for an item wins
+            // (review m1).
+            for f in found.found {
+                match f {
+                    crate::overviews::Finding::Mismatch {
+                        media: m,
+                        path,
+                        hash,
+                    } => {
+                        if inner.changed.get(&m) == Some(&(path.clone(), hash.clone())) {
+                            continue;
+                        }
+                        let name = inner
+                            .doc()
+                            .media()
+                            .get(&m)
+                            .map_or_else(|| m.to_string(), |x| x.name.clone());
+                        inner.news.problems.push(format!(
+                            "{name}: the file no longer holds the audio this project expects; it stays silent until it is relinked or restored"
+                        ));
+                        inner.changed.insert(m, (path, hash));
+                        hash_news = true;
+                    }
+                    crate::overviews::Finding::Verified { media: m, path } => {
+                        if inner.changed.get(&m).is_some_and(|(p, _)| *p == path) {
+                            inner.changed.remove(&m);
+                            hash_news = true;
+                        }
+                    }
                 }
             }
             if hash_news {
@@ -3022,7 +3034,15 @@ impl Session {
                     columns,
                 ));
             }
-            let to = to_frame.min(m.length_frames.max(from_frame + 1));
+            // Past the end there is nothing to read or wait for (review I1).
+            if from_frame >= m.length_frames {
+                return Ok(OverviewRows::silent(
+                    OverviewStateRow::Ready,
+                    m.channels,
+                    columns,
+                ));
+            }
+            let to = to_frame.min(m.length_frames);
             let n = columns as usize;
             let w = (to - from_frame) as f64 / n as f64;
             let spans: Vec<Option<(u64, u64)>> = (0..n)
@@ -3102,9 +3122,13 @@ impl Session {
             let len = length as f64;
             let spans: Vec<Option<(u64, u64)>> = (0..n)
                 .map(|c| {
-                    let a = frame(t0 + c as f64 * w).max(0.0);
-                    let b = frame(t0 + (c + 1) as f64 * w).min(len);
-                    if a.is_nan() || b.is_nan() || b <= a {
+                    let (a, b) = (frame(t0 + c as f64 * w), frame(t0 + (c + 1) as f64 * w));
+                    // NaN before clamping: `max`/`min` would hide it.
+                    if a.is_nan() || b.is_nan() {
+                        return None;
+                    }
+                    let (a, b) = (a.max(0.0), b.min(len));
+                    if b <= a {
                         return None;
                     }
                     let a = a.floor() as u64;

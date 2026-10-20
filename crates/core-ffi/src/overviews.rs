@@ -52,12 +52,16 @@ pub struct OverviewRows {
 }
 
 impl OverviewRows {
-    /// All-zero columns.
+    /// All-zero columns. `channels` comes from the document, which may
+    /// claim any count: it is clamped to what a media file can hold, and
+    /// `columns` to [`MAX_COLUMNS`] (review I2).
     pub fn silent(state: OverviewStateRow, channels: u16, columns: u32) -> OverviewRows {
-        let n = usize::from(channels.max(1)) * columns as usize;
+        let channels = channels.clamp(1, core_media::caf::MAX_CHANNELS);
+        let columns = columns.min(MAX_COLUMNS);
+        let n = usize::from(channels) * columns as usize;
         OverviewRows {
             state,
-            channels: channels.max(1),
+            channels,
             columns,
             min: vec![0.0; n],
             max: vec![0.0; n],
@@ -98,20 +102,44 @@ pub struct Want {
     pub package: PathBuf,
 }
 
+/// One verification the worker made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Finding {
+    /// The file no longer holds the audio expected.
+    Mismatch {
+        /// The item.
+        media: MediaId,
+        /// The path checked.
+        path: String,
+        /// The hash expected.
+        hash: Option<String>,
+    },
+    /// The file was read (or its cache matched) and holds the audio
+    /// expected.
+    Verified {
+        /// The item.
+        media: MediaId,
+        /// The path checked.
+        path: String,
+    },
+}
+
 /// What the worker found since the last [`Overviews::take_news`].
 #[derive(Debug, Default)]
 pub struct News {
     /// Some overview or sample window became available: redraw.
     pub changed: bool,
-    /// Files that no longer hold the audio expected: `(item, path, hash)`.
-    pub mismatched: Vec<(MediaId, String, Option<String>)>,
-    /// Files read and found to hold the expected audio: `(item, path)`.
-    pub verified: Vec<(MediaId, String)>,
+    /// Verifications in the order they were made, so a later finding for
+    /// an item outranks an earlier one (review m1).
+    pub found: Vec<Finding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct WindowKey {
     media: MediaId,
+    /// The item's window generation when asked: a window of an older one
+    /// is never served.
+    generation: u64,
     file: PathBuf,
     from: u64,
     to: u64,
@@ -131,6 +159,8 @@ struct State {
     /// Items queued or done for their current want.
     handled: BTreeSet<MediaId>,
     by_hash: BTreeMap<String, Arc<Overview>>,
+    /// Bumped whenever an item's key is dropped: its windows go with it.
+    generations: BTreeMap<MediaId, u64>,
     /// Each item's overview hash (the expected one, or the one a build
     /// computed for an item without a hash).
     keys: BTreeMap<MediaId, String>,
@@ -153,6 +183,26 @@ struct Shared {
 
 fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl State {
+    /// Forgets `media`'s overview key and every sample window read or
+    /// asked for it (review m2).
+    fn drop_key(&mut self, media: MediaId) {
+        self.keys.remove(&media);
+        let g = self.generations.entry(media).or_default();
+        *g = g.wrapping_add(1);
+        self.windows.retain(|(k, _)| k.media != media);
+        self.asked.retain(|k| k.media != media);
+        self.queue
+            .retain(|t| !matches!(t, Task::Window(k) if k.media == media));
+    }
+}
+
+/// True when two wants name the same file and audio: the package (Save
+/// As) does not count.
+fn same_audio(a: &Want, b: &Want) -> bool {
+    a.path == b.path && a.hash == b.hash
 }
 
 /// A session's overviews and their worker.
@@ -197,10 +247,28 @@ impl Overviews {
         s.handled
             .retain(|m| !again && prev.contains_key(m) && prev.get(m) == next.get(m));
         let handled = s.handled.clone();
-        // An item checked again, or naming another file or hash, answers
-        // `Pending` until its new overview is loaded: never the previous
-        // file's (preflight I1).
-        s.keys.retain(|m, _| handled.contains(m));
+        // An item naming another file or hash answers `Pending` until its
+        // new overview is loaded: never the previous file's (preflight I1).
+        // An item with a content hash whose path and hash are unchanged
+        // keeps its overview (content-addressed) while it is checked again
+        // (a recheck, a Save As); one without a hash keeps it only while
+        // its want is untouched.
+        let gone: Vec<MediaId> = s
+            .keys
+            .keys()
+            .copied()
+            .filter(|m| {
+                let keep = match (prev.get(m), next.get(m)) {
+                    (Some(p), Some(n)) if n.hash.is_some() => same_audio(p, n),
+                    (Some(_), Some(_)) => handled.contains(m),
+                    _ => false,
+                };
+                !keep
+            })
+            .collect();
+        for m in gone {
+            s.drop_key(m);
+        }
         s.queue.retain(|t| match t {
             Task::Ensure(w) => handled.contains(&w.media),
             Task::Window(_) => true,
@@ -237,8 +305,10 @@ impl Overviews {
         step: u64,
     ) -> Option<Arc<Bins>> {
         let mut s = lock(&self.shared.state);
+        let generation = s.generations.get(&media).copied().unwrap_or(0);
         if let Some((_, b)) = s.windows.iter().find(|(k, _)| {
             k.media == media
+                && k.generation == generation
                 && k.file.as_path() == file
                 && k.step == step
                 && k.from <= from
@@ -248,6 +318,7 @@ impl Overviews {
         }
         let key = WindowKey {
             media,
+            generation,
             file: file.to_path_buf(),
             from,
             to,
@@ -398,16 +469,21 @@ fn work(sh: &Shared, task: Task) {
                     s.by_hash.insert(h.clone(), ov);
                     if current {
                         s.keys.insert(w.media, h);
-                        s.news.verified.push((w.media, w.path.clone()));
+                        s.news.found.push(Finding::Verified {
+                            media: w.media,
+                            path: w.path.clone(),
+                        });
                         s.news.changed = true;
                     }
                 }
                 Ensured::Mismatch => {
                     if current {
-                        s.keys.remove(&w.media);
-                        s.news
-                            .mismatched
-                            .push((w.media, w.path.clone(), w.hash.clone()));
+                        s.drop_key(w.media);
+                        s.news.found.push(Finding::Mismatch {
+                            media: w.media,
+                            path: w.path.clone(),
+                            hash: w.hash.clone(),
+                        });
                     }
                 }
                 Ensured::Again => {
@@ -423,7 +499,8 @@ fn work(sh: &Shared, task: Task) {
             let mut s = lock(&sh.state);
             s.busy = false;
             s.asked.remove(&k);
-            if let Ok(b) = r {
+            let current = s.generations.get(&k.media).copied().unwrap_or(0) == k.generation;
+            if let (Ok(b), true) = (r, current) {
                 s.windows.push_back((k, Arc::new(b)));
                 while s.windows.len() > WINDOWS {
                     s.windows.pop_front();
@@ -488,7 +565,11 @@ fn ensure_one(sh: &Shared, w: &Want) -> Ensured {
         if let Some(st) = stamp {
             ov = ov.with_stamp(st);
         }
-        let _ = ov.write(&p);
+        // A want gone meanwhile (a Save As moved the package away, the
+        // item was relinked) writes nothing: its package may be removed.
+        if lock(&sh.state).wanted.get(&w.media) == Some(w) {
+            let _ = ov.write(&p);
+        }
     } else if let Some(st) = stamp {
         ov = ov.with_stamp(st);
     }
@@ -515,6 +596,8 @@ pub fn columns(
         .iter()
         .flatten()
         .fold((u64::MAX, 0u64), |(a, b), (x, y)| (a.min(*x), b.max(*y)));
+    // Nothing past the file's end is read (review I1).
+    let hi = hi.min(ov.frames);
     let mut state = OverviewStateRow::Ready;
     let mut bins = None;
     if lo < hi && n > 0 {
@@ -582,9 +665,23 @@ pub fn copy_cache(media: &BTreeMap<String, Option<String>>, from: &Path, to: &Pa
         if dst.exists() || !src.is_file() {
             continue;
         }
-        if let Some(dir) = dst.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        let Some(dir) = dst.parent() else { continue };
+        if std::fs::create_dir_all(dir).is_err() {
+            continue;
         }
-        let _ = std::fs::copy(&src, &dst);
+        // Through a temp name and a rename, as `Overview::write` does, so
+        // a failed copy never leaves a partial overview under its name.
+        let name = dst
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = dir.join(format!(".{name}.{}-copy.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let placed = std::fs::hard_link(&src, &tmp)
+            .or_else(|_| std::fs::copy(&src, &tmp).map(|_| ()))
+            .and_then(|()| std::fs::rename(&tmp, &dst));
+        if placed.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }

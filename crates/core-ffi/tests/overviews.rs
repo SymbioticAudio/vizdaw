@@ -614,3 +614,142 @@ fn a_panicking_overview_task_leaves_the_worker_alive() {
     );
     s.close().unwrap();
 }
+
+/// Review I1: a request past the end of the file answers at once and asks
+/// the worker for nothing, so it never loops through `overviews_changed`.
+#[test]
+fn a_request_past_the_end_answers_at_once_and_asks_for_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(&dir.path().join("e.caf"), 2, BitDepth::Float32, &ramp(9600));
+    let s = Session::new_empty().unwrap();
+    import(&s, &src, None);
+    settle(&s);
+    let m = s.media().unwrap()[0].clone();
+    for (from, to) in [(9600, 9700), (50_000, 60_000), (u64::MAX - 1, u64::MAX)] {
+        let o = s.overview(m.id, from, to, 100).unwrap();
+        assert_eq!(o.state, OverviewStateRow::Ready, "{from}..{to}");
+        assert!(o.min.iter().chain(&o.max).all(|v| *v == 0.0));
+        assert!(s.debug_overviews_idle(), "nothing queued for {from}..{to}");
+        assert!(!s.idle().unwrap().overviews_changed);
+    }
+    s.close().unwrap();
+}
+
+/// Sets `channels` of every media item in a project's JSON to `n`.
+fn set_channels(v: &mut serde_json::Value, n: u64) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if m.contains_key("content_hash") && m.contains_key("channels") {
+                m.insert("channels".into(), n.into());
+            }
+            m.values_mut().for_each(|x| set_channels(x, n));
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| set_channels(x, n)),
+        _ => {}
+    }
+}
+
+/// Review I2: a project claiming 65 535 channels never sizes a read by it.
+#[test]
+fn a_hostile_channel_count_never_sizes_a_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(&dir.path().join("c.caf"), 2, BitDepth::Float32, &ramp(3000));
+    let s = Session::new_empty().unwrap();
+    import(&s, &src, None);
+    let pkg = dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.close().unwrap();
+    let pj = pkg.join("project.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&pj).unwrap()).unwrap();
+    set_channels(&mut v, 65_535);
+    std::fs::write(&pj, serde_json::to_string(&v).unwrap()).unwrap();
+    let s = Session::open(pkg.display().to_string()).unwrap();
+    let m = s.media().unwrap()[0].clone();
+    assert!(m.offline.is_some(), "the file has 2 channels, not 65 535");
+    let o = s.overview(m.id, 0, 1, 8192).unwrap();
+    assert_eq!(o.state, OverviewStateRow::Offline);
+    assert!((1..=2).contains(&o.channels), "{}", o.channels);
+    assert_eq!(o.min.len(), usize::from(o.channels) * 8192);
+    assert_eq!(o.max.len(), o.min.len());
+    s.close().unwrap();
+}
+
+/// Controller ruling (fix round 1): a recheck, or a Save As, that leaves an
+/// item's path and content hash as they were keeps its waveform drawn.
+#[test]
+fn a_recheck_of_an_unchanged_file_keeps_its_waveform() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(&dir.path().join("k.caf"), 2, BitDepth::Float32, &ramp(9600));
+    let s = Session::new_empty().unwrap();
+    import(&s, &src, None);
+    s.save_as(dir.path().join("A.vizdaw").display().to_string())
+        .unwrap();
+    settle(&s);
+    let m = s.media().unwrap()[0].clone();
+    assert_eq!(
+        s.overview(m.id, 0, 9600, 10).unwrap().state,
+        OverviewStateRow::Ready
+    );
+    s.debug_hold_overviews(true);
+    s.recheck_media().unwrap();
+    assert_eq!(
+        s.overview(m.id, 0, 9600, 10).unwrap().state,
+        OverviewStateRow::Ready,
+        "a recheck"
+    );
+    s.save_as(dir.path().join("B.vizdaw").display().to_string())
+        .unwrap();
+    assert_eq!(
+        s.overview(m.id, 0, 9600, 10).unwrap().state,
+        OverviewStateRow::Ready,
+        "a Save As"
+    );
+    s.debug_hold_overviews(false);
+    settle(&s);
+    assert_eq!(
+        s.overview(m.id, 0, 9600, 10).unwrap().state,
+        OverviewStateRow::Ready
+    );
+    s.close().unwrap();
+}
+
+/// Review m1: a verification followed by a mismatch, both found before one
+/// `idle`, leaves the item `Changed`.
+#[test]
+fn a_replacement_between_two_rechecks_is_not_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(
+        &dir.path().join("r.caf"),
+        2,
+        BitDepth::Float32,
+        &vec![0.25; 9600],
+    );
+    let s = Session::new_empty().unwrap();
+    import(&s, &src, None);
+    let pkg = dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    settle(&s);
+    // Waits for the worker without `idle`, so findings pile up.
+    let drain = |s: &Session| {
+        let until = Instant::now() + Duration::from_secs(60);
+        while !s.debug_overviews_idle() {
+            assert!(Instant::now() < until, "the worker never settled");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    s.recheck_media().unwrap();
+    drain(&s);
+    let file = pkg.join(&s.media().unwrap()[0].path);
+    std::fs::remove_file(&file).unwrap();
+    caf(&file, 2, BitDepth::Int24, &vec![0.5; 9600]);
+    s.recheck_media().unwrap();
+    drain(&s);
+    s.idle().unwrap();
+    settle(&s);
+    assert_eq!(
+        s.media().unwrap()[0].offline,
+        Some(OfflineReasonRow::Changed)
+    );
+    s.close().unwrap();
+}
