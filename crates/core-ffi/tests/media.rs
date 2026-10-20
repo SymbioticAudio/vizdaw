@@ -5,6 +5,8 @@
 // document's persistent maps (E0275 at the default limit).
 #![recursion_limit = "256"]
 
+mod common;
+
 use core_media::caf::{CafWriter, WriteMode};
 use core_model::format::BitDepth;
 use std::path::{Path, PathBuf};
@@ -46,7 +48,7 @@ fn source_of(
 static PLAYING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn wait(s: &Session, id: u64) -> JobRow {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         let j = s.job(id).unwrap();
         if j.state != JobStateRow::Running {
@@ -336,7 +338,7 @@ fn save_as_succeeds_once_the_job_is_done() {
     s.debug_hold_jobs(false).unwrap();
     // Save As right away: a job that finished but was not applied yet is
     // applied first (its files are under the old root).
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         match s.save_as(pkg.display().to_string()) {
             Ok(()) => break,
@@ -523,7 +525,7 @@ fn save_as_keeps_an_identical_same_named_file() {
 
 /// Waits until every job thread of `s` has ended (applied or not).
 fn settled(s: &Session) {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     while !s.debug_jobs_settled() {
         assert!(Instant::now() < until, "job threads still running");
         std::thread::sleep(Duration::from_millis(5));

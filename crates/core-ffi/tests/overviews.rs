@@ -1,6 +1,8 @@
 //! Waveform overviews in the session (plan 5b Task 4, Rulings 2–4, 17):
 //! built in the background, served at any zoom, verified by content hash.
 
+mod common;
+
 use core_media::caf::{CafReader, CafWriter, WriteMode};
 use core_model::format::BitDepth;
 use std::path::{Path, PathBuf};
@@ -45,7 +47,7 @@ fn samples(path: &Path) -> Vec<f32> {
 }
 
 fn wait(s: &Session, id: u64) -> JobRow {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         let j = s.job(id).unwrap();
         if j.state != JobStateRow::Running {
@@ -67,7 +69,7 @@ fn import(s: &Arc<Session>, path: &Path, target: Option<ImportTargetRow>) -> Job
 
 /// Runs `idle` until the overview worker has been idle across two ticks.
 fn settle(s: &Session) {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         s.idle().unwrap();
         if s.debug_overviews_idle() {
@@ -732,7 +734,7 @@ fn a_replacement_between_two_rechecks_is_not_lost() {
     settle(&s);
     // Waits for the worker without `idle`, so findings pile up.
     let drain = |s: &Session| {
-        let until = Instant::now() + Duration::from_secs(60);
+        let until = Instant::now() + common::wait_limit();
         while !s.debug_overviews_idle() {
             assert!(Instant::now() < until, "the worker never settled");
             std::thread::sleep(Duration::from_millis(5));

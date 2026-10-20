@@ -2,6 +2,8 @@
 //! media files nothing can bring back go to the Trash; everything an undo
 //! or redo state, the saved project or an autosave names stays.
 
+mod common;
+
 use core_media::caf::{CafWriter, WriteMode, hash_file};
 use core_model::command::{Command, MediaCmd, apply};
 use core_model::format::BitDepth;
@@ -25,7 +27,7 @@ fn import(s: &Arc<Session>, path: &Path) {
     let id = s
         .import_audio(vec![path.display().to_string()], None)
         .unwrap();
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         let j = s.job(id).unwrap();
         if j.state != JobStateRow::Running {
@@ -252,7 +254,7 @@ fn close_tidies_and_an_unapplied_job_holds_it_back() {
         "held back while a job runs"
     );
     s.debug_hold_jobs(false).unwrap();
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     while s.job(id).unwrap().state == JobStateRow::Running {
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(5));

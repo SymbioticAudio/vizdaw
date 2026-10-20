@@ -2,6 +2,8 @@
 //! remove, compact, users, relinking by file and by folder, and names no
 //! job may take.
 
+mod common;
+
 use core_media::caf::{CafWriter, WriteMode, hash_file};
 use core_model::command::{Command, MediaCmd, apply};
 use core_model::document::Document;
@@ -51,7 +53,7 @@ fn wav_at(path: &Path, rate: u32, channels: u16, frames: u32) {
 }
 
 fn wait(s: &Session, id: u64) -> JobRow {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         let j = s.job(id).unwrap();
         if j.state != JobStateRow::Running {
@@ -970,7 +972,7 @@ fn an_in_place_relink_never_adopts_an_unapplied_jobs_file() {
     s.begin_edit("Drag".into()).unwrap();
     s.debug_hold_jobs(false).unwrap();
     let settle = |s: &Session| {
-        let until = Instant::now() + Duration::from_secs(60);
+        let until = Instant::now() + common::wait_limit();
         while !s.debug_jobs_settled() {
             assert!(Instant::now() < until, "jobs still running");
             std::thread::sleep(Duration::from_millis(5));
@@ -1046,7 +1048,7 @@ fn non_regular_files_are_refused_promptly() {
 
 /// Runs `idle` until the overview worker has been idle across two ticks.
 fn settle(s: &Session) {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         s.idle().unwrap();
         if s.debug_overviews_idle() {
@@ -1208,7 +1210,7 @@ fn a_job_applied_when_a_search_starts_is_reported() {
     let s = Session::new_empty().unwrap();
     while s.idle().unwrap().media_changed {}
     s.import_audio(vec![a.display().to_string()], None).unwrap();
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         // Refused (nothing is missing), but only after applying what
         // finished.

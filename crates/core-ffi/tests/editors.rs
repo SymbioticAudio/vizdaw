@@ -4,6 +4,8 @@
 //! real editor needs AppKit on the main thread: platform-macos's
 //! `au_editor` test and the manual checklist cover that.
 
+mod common;
+
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{force_offline, reset_host};
@@ -37,7 +39,7 @@ fn with_insert(p: PluginRefRow) -> (Arc<Session>, u64) {
     let id = s.plugin_slots().unwrap()[0].id;
     let t = Instant::now();
     while s.plugin_slots().unwrap()[0].status != SlotStatus::Live {
-        assert!(t.elapsed() < Duration::from_secs(10));
+        assert!(t.elapsed() < common::au_wait_limit());
         s.idle().unwrap();
         std::thread::sleep(Duration::from_millis(2));
     }

@@ -1,6 +1,8 @@
 //! Region menu commands (plan 5b Task 5, Rulings 5 and 6): Normalize from
 //! the overview, fades to the cursor, Remove Fades.
 
+mod common;
+
 use core_media::caf::{CafReader, CafWriter, WriteMode, hash_file};
 use core_model::format::BitDepth;
 use std::path::{Path, PathBuf};
@@ -33,7 +35,7 @@ fn demo_with(src: &Path) -> (Arc<Session>, u64, u64, u64) {
             }),
         )
         .unwrap();
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     while s.job(id).unwrap().state == JobStateRow::Running {
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(5));
@@ -121,7 +123,7 @@ fn normalize_reports_limited_and_silent_regions() {
             }),
         )
         .unwrap();
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     while s.job(id).unwrap().state == JobStateRow::Running {
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(5));
@@ -136,7 +138,7 @@ fn normalize_reports_limited_and_silent_regions() {
         .collect();
     assert_eq!(regions.len(), 2, "{regions:?}");
     while !s.idle().unwrap().problems.is_empty() {}
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         match s.normalize_regions(regions.clone(), -1.0) {
             Ok(_) => break,
@@ -235,7 +237,7 @@ fn normalize_is_busy_while_no_overview_can_be_loaded() {
         Err(VizError::Busy { .. })
     ));
     s.debug_hold_overviews(false);
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         s.idle().unwrap();
         if s.normalize_regions(vec![ev], -1.0).is_ok() {
@@ -288,7 +290,7 @@ fn normalize_never_measures_the_previous_file() {
             depth: BitDepthRow::Float32,
         })
         .unwrap();
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     while s.job(id).unwrap().state == JobStateRow::Running {
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(5));
@@ -323,7 +325,7 @@ fn normalize_never_measures_the_previous_file() {
     ));
     assert_eq!(region(&s, seq, lane).gain_db, 0.0);
     s.debug_hold_overviews(false);
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         s.idle().unwrap();
         if s.normalize_regions(vec![ev], -1.0).is_ok() {

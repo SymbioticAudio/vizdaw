@@ -2,6 +2,8 @@
 //! convert every file and rescale regions, converting an old project's
 //! media.
 
+mod common;
+
 use core_media::caf::{CafReader, CafWriter, WriteMode};
 use core_model::format::BitDepth;
 use std::path::{Path, PathBuf};
@@ -28,7 +30,7 @@ fn caf(dir: &Path, name: &str, rate: u32, frames: usize) -> PathBuf {
 }
 
 fn wait(s: &Session, id: u64) -> JobRow {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     loop {
         let j = s.job(id).unwrap();
         if j.state != JobStateRow::Running {
@@ -385,7 +387,7 @@ fn a_rate_round_trip_keeps_regions_within_a_frame() {
 
 /// Waits until every job thread of `s` has ended (applied or not).
 fn settled(s: &Session) {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + common::wait_limit();
     while !s.debug_jobs_settled() {
         assert!(Instant::now() < until, "job threads still running");
         std::thread::sleep(Duration::from_millis(5));
