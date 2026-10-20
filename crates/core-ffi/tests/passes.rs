@@ -469,11 +469,46 @@ fn a_stop_and_resume_cuts_the_region() {
         mark(2 * BEAT, 3 * BEAT, false),
         mark(2 * BEAT, BEAT, false),
     ];
+    // The resumed pass replays beats 1–3: it replaces what the first one
+    // recorded there (review m1: never two regions over each other).
+    let p = c.run().unwrap();
+    let got = active_frames(&p, d.mic, &d);
+    assert_no_overlap(&got);
+    assert_eq!(got, vec![(BEAT, 2 * BEAT, 2 * BEAT)]);
+    // Resumed where it stopped: one region, the file plays on.
+    c.marks[2] = mark(2 * BEAT, 3 * BEAT, false);
+    let p = c.run().unwrap();
+    assert_eq!(active_frames(&p, d.mic, &d), vec![(BEAT, 0, 4 * BEAT)]);
+    // Resumed after a jump forward: two regions, apart.
+    c.marks[2] = mark(2 * BEAT, 5 * BEAT, false);
     let p = c.run().unwrap();
     assert_eq!(
         active_frames(&p, d.mic, &d),
-        vec![(BEAT, 0, 2 * BEAT), (BEAT, 2 * BEAT, 2 * BEAT)]
+        vec![(BEAT, 0, 2 * BEAT), (5 * BEAT, 2 * BEAT, 2 * BEAT)]
     );
+}
+
+#[test]
+fn a_region_never_starts_before_the_punch_in() {
+    // Review m3: a punch-in between two ticks rounds the region's tick up.
+    let d = doc(None);
+    let seq = d.doc.sequence(d.seq).unwrap();
+    let t = TempoTable::build(&seq.tempo, Tick(0), 48_000.0);
+    for s in 2 * BEAT..2 * BEAT + 8 {
+        let mut c = audio_case(&d, 0, 4 * BEAT);
+        c.marks = vec![mark(0, 0, false)];
+        c.range = RecordRange {
+            start: s,
+            end: Some(3 * BEAT),
+        };
+        let p = c.run().unwrap();
+        let (tick, offset, length) = active_regions(&p, d.mic)[0];
+        let at = t.tick_to_frame(Tick(tick));
+        assert!(at >= s, "punch-in {s}: region at {at}");
+        // Still the capture's pairing: file frame f was heard at frame f.
+        assert_eq!(at, offset, "punch-in {s}");
+        assert_eq!(offset + length, 3 * BEAT, "punch-in {s}");
+    }
 }
 
 #[test]
@@ -499,12 +534,19 @@ fn a_stop_mark_at_the_song_end_ends_the_region_there() {
     }
 }
 
-#[test]
-fn a_final_pass_under_a_beat_is_no_take_unless_kept() {
-    // Pre-flight M3 (Ruling): Stop 100 frames after a wrap.
-    let d = doc(None);
+fn take_names(p: &RecordPass, lane: LaneId) -> Vec<String> {
+    p.lanes
+        .iter()
+        .filter(|l| l.lane == lane)
+        .flat_map(|l| l.takes.iter().map(|(n, _)| n.clone()))
+        .collect()
+}
+
+/// A loop of two beats from beat 1, played once and then `tail` frames of
+/// a second pass.
+fn sliver_case(d: &Doc, tail: u64) -> Case<'_> {
     let len = 2 * BEAT;
-    let mut c = audio_case(&d, BEAT, len + 100);
+    let mut c = audio_case(d, BEAT, len + tail);
     c.looped = true;
     c.range = RecordRange {
         start: BEAT,
@@ -512,26 +554,85 @@ fn a_final_pass_under_a_beat_is_no_take_unless_kept() {
     };
     c.marks = vec![mark(0, BEAT, false), mark(len, BEAT, true)];
     c.midi_lanes = vec![d.keys];
-    let names = |p: &RecordPass, lane: LaneId| -> Vec<String> {
-        p.lanes
-            .iter()
-            .filter(|l| l.lane == lane)
-            .flat_map(|l| l.takes.iter().map(|(n, _)| n.clone()))
-            .collect()
-    };
+    c
+}
+
+#[test]
+fn a_short_pass_after_a_wrap_is_no_take() {
+    // Pre-flight M3 (Ruling): Stop 100 frames after a wrap.
+    let d = doc(None);
+    let mut c = sliver_case(&d, 100);
     let p = c.run().unwrap();
-    assert_eq!(names(&p, d.mic), vec!["Take 2"]);
-    assert_eq!(names(&p, d.keys), vec!["Take 2"]);
-    // Kept explicitly: it stays.
+    assert_eq!(take_names(&p, d.mic), vec!["Take 2"]);
+    assert_eq!(take_names(&p, d.keys), vec!["Take 2"]);
+    // A fate the caller set to Kept keeps it.
     c.fates = vec![PassFate::Undecided, PassFate::Kept];
     let p = c.run().unwrap();
-    assert_eq!(names(&p, d.mic), vec!["Take 2", "Take 3"]);
+    assert_eq!(take_names(&p, d.mic), vec!["Take 2", "Take 3"]);
     // A whole beat is a pass.
-    c.fates.clear();
-    c.end_run = len + BEAT;
-    c.audio[0].media = file(len + BEAT);
+    let mut c = sliver_case(&d, BEAT);
     let p = c.run().unwrap();
-    assert_eq!(names(&p, d.mic), vec!["Take 2", "Take 3"]);
+    assert_eq!(take_names(&p, d.mic), vec!["Take 2", "Take 3"]);
+    // The pass before it discarded: the short one is all there is, kept.
+    c = sliver_case(&d, 100);
+    c.fates = vec![PassFate::Discarded];
+    let p = c.run().unwrap();
+    assert_eq!(take_names(&p, d.mic), vec!["Take 2"]);
+    assert_eq!(p.lanes[0].takes.len(), 1);
+    let take = &p.lanes.iter().find(|l| l.lane == d.mic).unwrap().takes[0].1;
+    assert_eq!(take.regions[0].source_offset, 2 * BEAT);
+}
+
+#[test]
+fn an_only_pass_under_a_beat_is_kept() {
+    // Review I1: loop recording stopped within a beat of its start.
+    let d = doc(None);
+    let mut c = audio_case(&d, BEAT, 100);
+    c.looped = true;
+    c.range = RecordRange {
+        start: BEAT,
+        end: Some(3 * BEAT),
+    };
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![midi(d.keys, 10, on(60, 100))];
+    let p = c.run().unwrap();
+    assert_eq!(take_names(&p, d.mic), vec!["Take 2"]);
+    assert_eq!(take_names(&p, d.keys), vec!["Take 2"]);
+    assert_eq!(p.media.len(), 1, "the file is referenced");
+    let keys = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    assert_eq!(keys.takes[0].1.events.len(), 1);
+}
+
+#[test]
+fn merged_midi_keeps_what_was_played_after_the_last_wrap() {
+    // Review I1: without passes as takes nothing becomes a take, so the
+    // short last pass's MIDI stays (audio still makes takes, and drops it).
+    let d = doc(None);
+    let mut c = sliver_case(&d, 100);
+    c.takes = false;
+    let len = (2 * BEAT) as i64;
+    c.midi = vec![
+        midi(d.keys, 10, on(60, 100)),
+        midi(d.keys, 20, off(60)),
+        midi(d.keys, len + 10, on(64, 100)),
+        midi(d.keys, len + 20, off(64)),
+    ];
+    let p = c.run().unwrap();
+    let keys = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    assert!(keys.takes.is_empty());
+    let pitches: Vec<u8> = keys
+        .active
+        .events
+        .iter()
+        .map(|e| match e.body {
+            EventBody::Note { pitch, .. } => pitch,
+            _ => 0,
+        })
+        .collect();
+    assert_eq!(pitches, vec![60, 64]);
+    // Replace clears the short pass's window too.
+    assert_eq!(keys.clear.len(), 2, "{:?}", keys.clear);
+    assert_eq!(take_names(&p, d.mic), vec!["Take 2"]);
 }
 
 proptest::proptest! {
