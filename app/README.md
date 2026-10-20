@@ -991,3 +991,79 @@ a WAV, an AIFF, an MP3 or AAC, and one at 44.1 kHz.
      "Importing audio…" bar stays up for a while, and at once choose File
      > Save As…: it is refused with "Wait for the import or conversion
      to finish, then save." Once the bar ends, Save As works.
+
+### Regions in the editors (plan 5b)
+
+Use a throwaway home (`vizctl launch`), a few audio files of your own
+(one long, one stereo WAV), and the Finder.
+
+118. Waveforms: open the demo and Import Audio… a stereo WAV onto a lane.
+     Within a second its region in the arrangement shows the waveform of
+     both channels. Zoom in until single samples show (the waveform may
+     look blocky for a moment, then sharp) and out until the whole song
+     fits: it stays drawn, scrolling never stalls. Open the Piano Roll on
+     the sequence: the region strip draws the same waveform.
+119. Fades: with the arrow tool, drag the region's top-left corner square
+     to the right: the waveform ramps in and a line shows the fade; Edit
+     > Undo says "Undo Fade In". Drag the top-right square to the left
+     ("Fade Out"). Right-click inside a fade: "Fade In: Linear …
+     S-Curve" with the current shape checked; choose S-Curve and listen.
+     A region narrower than about 24 points shows no handles.
+120. Gain: drag the region's top edge up: a readout shows "+3.0 dB" and
+     the waveform grows; release: one step "Region Gain". With ⇧ the
+     steps are finer. ⌥-click the top edge: back to "0.0 dB".
+121. Region menu: select the region; Region > Normalize… offers -0.3;
+     enter -1: the loudest peak reaches -1 dBFS (the waveform touches
+     near the top), one step "Normalize". Put the playhead inside the
+     region: Region > Fade In to Cursor and Fade Out from Cursor set the
+     fades there; Remove Fades clears them. With nothing selected the
+     items are disabled; with the playhead outside the region the status
+     line says "the cursor is not inside a selected audio region".
+122. Drag-in: drag a WAV from the Finder onto a lane at bar 3: a bar
+     "Importing audio…", then a region at bar 3 (snapped to the grid).
+     Drop two files below the last lane: two new lanes "Audio n". Drop a
+     file on the Piano Roll's region strip: it lands on that region's
+     lane. A text file renamed `.wav` among them is listed in a Problems
+     bar.
+123. Media Pool: Window > Media Pool lists Name, Duration, Channels,
+     Origin, Uses, Used and Offline. Select Unused selects items no
+     region uses; Compact removes them (one undo step). Rename… renames
+     (the arrangement's VoiceOver label follows). Reveal in Finder shows
+     the file. Import… adds files to the pool only. Delete on an item
+     in use first lists its regions ("Song › Audio 3, bar 1"), then
+     removes the item and those regions as one step. Double-click a row
+     (or Select Regions): its sequence shows with its regions selected.
+124. Offline and Relink: save, close, move one media file out of the
+     package (Show Package Contents > Media), reopen: the "missing or
+     changed" sheet lists it as Missing and its region is hatched and
+     says "Offline". Locate… the moved file: the bar "Relinking media…",
+     then the region plays again (the file is copied into Media/ as
+     "<name> 2.caf"). Leave Offline closes the sheet; File > Relink
+     Media… reopens it while something is offline. Search Folder… on the
+     folder holding the moved file finds it even renamed. Replace a
+     media file with another of the same length and format (copy one in
+     under its name) and switch back to VizDAW: after a moment the item
+     is "Changed" and silent; put the original back: it plays.
+125. Retention: in a saved project, import a file, Undo, Save: the file
+     is still in Media/. Make any other edit and Save: the file is now
+     in the Finder's Trash (Put Back restores it). Compact an unused
+     item and Save: its file stays (Undo could bring it back) until
+     another edit and Save. Once, run `cargo test -p platform-macos --
+     --ignored a_file_goes_to_the_real_trash`: a
+     "vizdaw-trash-check-<pid>.txt" appears in the Trash (delete it).
+126. Overview cache: quit, delete the package's `Media/.overviews`
+     folder, reopen: waveforms come back within a second or two; a
+     garbage file put there in place of a `.vzov` is replaced the same
+     way.
+127. Channel: with a region selected, `$V run region.normalize
+     '{"peak_db": "-0.3"}'` answers with `"undo": "Normalize"`; `$V run
+     region.normalize` fails naming the "Normalize" dialog; `$V run
+     media.relink '{"media": 1, "path": "/abs/file.wav"}'` waits for the
+     job; `$V state media` shows `used_percent` and, for a changed file,
+     `"offline_reason": "changed"`; `$V run window.media_pool` opens the
+     pool and `$V state windows` lists it as `media_pool`.
+128. Look and access: switch macOS between Light and Dark appearance:
+     regions, waveforms, handles and the offline hatching follow the
+     system colours. With VoiceOver, regions read "Region <name> on
+     <lane>, bar n, gain …"; the Relink sheet's buttons read "Locate
+     <name>", "Search Folder…" and "Leave Offline".

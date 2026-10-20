@@ -45,12 +45,17 @@ impl App {
             .tempdir_in("/tmp")
             .unwrap()
             .keep();
+        // Media retention moves files here, never to the real Trash (plan 5b).
+        let trash = home.join("Trash").display().to_string();
         let launched = launch(&LaunchOptions {
             app,
             home: Some(home),
             demo: false,
             timeout: Duration::from_secs(180),
-            env: vec![("VIZDAW_AUDIO".into(), "offline".into())],
+            env: vec![
+                ("VIZDAW_AUDIO".into(), "offline".into()),
+                ("VIZDAW_TRASH_DIR".into(), trash),
+            ],
         })
         .unwrap_or_else(|e| panic!("launch: {e}"));
         let client = Client::connect(&launched.socket).unwrap();
@@ -622,5 +627,201 @@ fn audio_import_plays_and_reports_media() {
         .unwrap()
         .clone();
     assert_eq!(tone["offline"], false, "{m}");
+    app.quit();
+}
+
+/// The first node whose label starts with `prefix` and contains `needle`:
+/// its ID and label.
+fn labelled_like(nodes: &Value, prefix: &str, needle: &str) -> Option<(Value, String)> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        let l = n["label"].as_str().unwrap_or("");
+        if l.starts_with(prefix) && l.contains(needle) {
+            Some((n["id"].clone(), l.to_string()))
+        } else {
+            labelled_like(&n["children"], prefix, needle)
+        }
+    })
+}
+
+/// Polls the window's tree until such a node exists.
+fn wait_for_label_like(
+    app: &mut App,
+    window: &Value,
+    prefix: &str,
+    needle: &str,
+) -> (Value, String) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(found) = labelled_like(&tree["nodes"], prefix, needle) {
+            return found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {prefix:?}…{needle:?} within {WAIT_MS} ms in {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// README steps 121, 123–125 and 127 through the channel (plan 5b):
+/// a region selected by its element is normalized (hostile levels are
+/// refused, a missing one names the dialog); Save As carries the
+/// overview cache; an import undone and replaced by another edit goes to
+/// the trash folder on save, not before; a moved file is relinked and
+/// copied back under a free name; the media pool window opens by ID.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn regions_normalize_relink_and_trash() {
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let trash = home.join("Trash");
+    // 2 s of stereo at 0.25 (−12.04 dBFS), and a short extra file.
+    let tone = home.join("tone.caf");
+    audio_file(&tone, 96_000);
+    let extra = home.join("extra.caf");
+    audio_file(&extra, 4_800);
+
+    // The demo, with the tone in a new lane at bar 1.
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": tone, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let m = app.call("state.get", json!({"target": "media", "window": w}));
+    let item = m["items"][0].clone();
+    assert_eq!(
+        (item["name"].clone(), item["used_percent"].clone()),
+        (json!("tone"), json!(100.0)),
+        "{m}"
+    );
+    let media = item["id"].as_u64().unwrap();
+
+    // Select the region by its element.
+    let (region, label) = wait_for_label_like(&mut app, &w, "Region tone on ", "gain 0.0 dB");
+    app.call("ui.click", json!({"window": w, "element": region}));
+    let sel = app.call("state.get", json!({"target": "selection", "window": w}));
+    assert_eq!(sel["events"].as_array().unwrap().len(), 1, "{label}: {sel}");
+
+    // Normalize: no level names the dialog; nonsense is refused; -1 dB.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.normalize", "window": w}),
+    );
+    assert_eq!(e.dialog.as_deref(), Some("Normalize"), "{e}");
+    for bad in [json!("loud"), json!("nan"), json!("1"), json!(-1)] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "region.normalize", "params": {"peak_db": bad}, "window": w}),
+        );
+        assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{bad}: {e}");
+    }
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.normalize", "params": {"peak_db": "-1"}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Normalize", "{r}");
+    // −1 − (−12.04) = +11.04 dB.
+    wait_for_label_like(&mut app, &w, "Region tone on ", "gain +11.0 dB");
+
+    // Save As carries the media and the overview cache.
+    let pkg = home.join("Regions.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": pkg}, "window": w}),
+    );
+    assert!(pkg.join("Media/tone.caf").is_file());
+    let caches = std::fs::read_dir(pkg.join("Media/.overviews"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "vzov"))
+        .count();
+    assert_eq!(caches, 1, "the overview came along");
+
+    // An import, undone: redo can bring it back, so Save keeps its file.
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": extra}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    assert!(pkg.join("Media/extra.caf").is_file());
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    app.call("command.run", json!({"id": "file.save", "window": w}));
+    assert!(
+        pkg.join("Media/extra.caf").is_file(),
+        "the redo history needs it"
+    );
+    // Another edit drops the redo history; Save moves the orphan to the
+    // trash folder. (An autosave written meanwhile would rightly keep it,
+    // so none is left lying around.)
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.rename", "params": {"media": media, "name": "Tone"}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Rename Media", "{r}");
+    let _ = std::fs::remove_dir_all(pkg.join("Autosave"));
+    app.call("command.run", json!({"id": "file.save", "window": w}));
+    assert!(
+        !pkg.join("Media/extra.caf").exists(),
+        "nothing references it"
+    );
+    assert!(trash.join("extra.caf").is_file(), "moved, never unlinked");
+
+    // Relink: the tone moves out; without a path the dialog is named; the
+    // relink copies it back under a free name (`tone.caf` is still the
+    // undo history's).
+    let moved = home.join("moved/tone.caf");
+    std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    std::fs::rename(pkg.join("Media/tone.caf"), &moved).unwrap();
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "media.relink", "params": {"media": media}, "window": w}),
+    );
+    assert_eq!(e.dialog.as_deref(), Some("Relink"), "{e}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "media.relink", "params": {"media": 999_999, "path": moved}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.relink", "params": {"media": media, "path": moved}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Relink Media", "{r}");
+    let m = app.call("state.get", json!({"target": "media", "window": w}));
+    let item = &m["items"][0];
+    assert_eq!(
+        (
+            item["name"].clone(),
+            item["path"].clone(),
+            item["offline"].clone()
+        ),
+        (json!("Tone"), json!("Media/tone 2.caf"), json!(false)),
+        "{m}"
+    );
+
+    // The media pool window, by ID.
+    app.call(
+        "command.run",
+        json!({"id": "window.media_pool", "window": w}),
+    );
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        if ws["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["kind"] == "media_pool")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no media pool window in {ws}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
     app.quit();
 }
