@@ -235,6 +235,18 @@ impl CafWriter {
         self.frames
     }
 
+    /// Samples clipped so far.
+    pub fn clipped(&self) -> u64 {
+        self.clipped
+    }
+
+    /// Flushes what was written to the disk (a recording does this every
+    /// 2 s, spec §6.2); the data size stays −1 until [`CafWriter::finish`].
+    pub fn sync(&self) -> Result<(), MediaError> {
+        self.file.sync_data()?;
+        Ok(())
+    }
+
     /// Patches the data size and syncs the file.
     pub fn finish(mut self) -> Result<Written, MediaError> {
         let bytes = self.frames * (self.depth.bytes() as u64) * u64::from(self.channels);
