@@ -670,6 +670,24 @@ fn the_short_pass_rule_is_decided_per_lane() {
     assert_eq!(take_names(&p, mic).len(), 1, "audio recorded in pass 0");
 }
 
+#[test]
+fn a_lone_controller_in_pass_0_does_not_stand_in_for_a_note() {
+    // Re-review 2 m5: a sustain pedal resting through the count-in is no
+    // take; the note just after the wrap is kept.
+    let d = doc(None);
+    let mut c = sliver_case(&d, 100);
+    c.audio.clear();
+    let len = (2 * BEAT) as i64;
+    c.midi = vec![
+        midi(d.keys, 10, Midi1Msg::three(0xB0, 64, 127)),
+        midi(d.keys, len + 10, on(60, 100)),
+    ];
+    let p = c.run().unwrap();
+    let k = p.lanes.iter().find(|l| l.lane == d.keys).unwrap();
+    assert_eq!(k.takes.len(), 2, "{:?}", k.takes);
+    assert_eq!(k.takes[1].1.events.len(), 1, "the note is kept");
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
 

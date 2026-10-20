@@ -45,7 +45,10 @@
 //! one playing at Stop) that played less than one beat (one quarter note,
 //! [`PPQ`] ticks) of timeline is dropped, per lane, unless it holds that
 //! lane's only content: it is kept when the lane recorded something in it
-//! and in no earlier pass that is not discarded. Stopping just after a
+//! and in no earlier pass that is not discarded. For MIDI only notes count
+//! as content: a controller, pressure or bend alone (a sustain pedal
+//! resting through a count-in) neither stands in nor keeps a sliver.
+//! Stopping just after a
 //! wrap therefore leaves no sliver of a take, and the sliver does not
 //! become the lane's active take, while a MIDI lane silent until the wrap
 //! keeps the note played just after it. The rule never drops pass 0 or
@@ -556,7 +559,13 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         let mut events = midi_events(&heard, &pieces, &c.range, &tempo);
         events.retain(|p, _| kept.contains(p));
         if takes_from_passes {
-            let takes = as_takes(&|p| events.get(&p).is_some_and(|e| !e.is_empty()));
+            // Only notes count as content (re-review 2 m5): a controller
+            // alone (a sustain pedal resting through a count-in) is none.
+            let takes = as_takes(&|p| {
+                events
+                    .get(&p)
+                    .is_some_and(|e| e.iter().any(|x| matches!(x.body, EventBody::Note { .. })))
+            });
             if takes.is_empty() {
                 continue;
             }
