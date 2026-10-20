@@ -10,7 +10,9 @@ use crate::events::{
     PerNoteValueRow, TempoPointRow, bad, fade_of, kind_of, loops, per_note_kind, spec,
 };
 use crate::snapshot::KeySlotRow;
-use core_model::command::{AudioCmd, Command, EventCmd, LaneCmd, ReferenceCmd, SequenceCmd};
+use core_model::command::{
+    AudioCmd, Command, EventCmd, FadeEdge, LaneCmd, ReferenceCmd, SequenceCmd,
+};
 use core_model::ids::{DestId, EventId, LaneId, MediaId, OutputPathId, SeqId, TakeId};
 use core_model::lane::QuantizeSpec;
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
@@ -587,6 +589,22 @@ pub enum AudioEdit {
         /// Fade out.
         fade_out: FadeRow,
     },
+    /// Fade In to Cursor (`fade_in`) or Fade Out from Cursor, on every
+    /// region `at` lies inside; other events are ignored (plan 5b
+    /// Ruling 6).
+    FadeTo {
+        /// The events.
+        events: Vec<u64>,
+        /// The cursor tick.
+        at: i64,
+        /// The fade in (else the fade out).
+        fade_in: bool,
+    },
+    /// Remove Fades from every region; other events are ignored.
+    RemoveFades {
+        /// The events.
+        events: Vec<u64>,
+    },
 }
 
 fn ids(v: &[u64]) -> Vec<EventId> {
@@ -1039,6 +1057,22 @@ fn audio_cmd(e: &AudioEdit) -> AudioCmd {
             event: EventId(*event),
             fade_in: fade_of(fade_in),
             fade_out: fade_of(fade_out),
+        },
+        AudioEdit::FadeTo {
+            events,
+            at,
+            fade_in,
+        } => AudioCmd::FadeTo {
+            events: ids(events),
+            at: Tick(*at),
+            edge: if *fade_in {
+                FadeEdge::In
+            } else {
+                FadeEdge::Out
+            },
+        },
+        AudioEdit::RemoveFades { events } => AudioCmd::RemoveFades {
+            events: ids(events),
         },
     }
 }

@@ -2127,6 +2127,11 @@ impl Session {
         lock(&self.inner).overviews.set_held(on);
     }
 
+    /// Forgets every loaded overview (test hook).
+    pub fn debug_forget_overviews(&self) {
+        lock(&self.inner).overviews.forget_all();
+    }
+
     /// Makes the overview worker's next task panic (test hook, preflight
     /// M10).
     pub fn debug_panic_overviews(&self) {
@@ -2996,6 +3001,174 @@ fn apply_convert(
             remove(&files);
             Err((e.into(), problems))
         }
+    }
+}
+
+/// One region [`Session::normalize_regions`] measures, and what it was
+/// measured against.
+struct Measured {
+    id: core_model::ids::EventId,
+    media: core_model::ids::MediaId,
+    /// The item's path and hash when measured (preflight M4: checked
+    /// again before the command applies).
+    path: String,
+    hash: Option<String>,
+    name: String,
+    file: std::path::PathBuf,
+    /// The overview in memory, if it is this file's (preflight I1).
+    overview: Option<Arc<core_media::overview::Overview>>,
+    /// The frames the region plays.
+    from: u64,
+    to: u64,
+}
+
+/// "Busy" for Normalize.
+fn still_building(name: &str) -> VizError {
+    VizError::Busy {
+        message: format!("The waveform of {name} is still being built; try again in a moment."),
+    }
+}
+
+/// Region menu commands that need the overviews (plan 5b Task 5).
+#[uniffi::export]
+impl Session {
+    /// Normalize… (spec §4.4; plan 5b Ruling 5): sets each region among
+    /// `events` so its loudest sample reaches `peak_db` (−96…0 dBFS), as
+    /// one undo step "Normalize". Events that are not regions are ignored.
+    /// `Model` error for a bad target, no region, offline media or an open
+    /// edit; `Busy` while a region's overview is still being built, or when
+    /// an item's file changed while it was measured. No file is read under
+    /// the session lock (preflight M4).
+    pub fn normalize_regions(
+        &self,
+        events: Vec<u64>,
+        peak_db: f32,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            use core_media::overview::{Overview, Stamp, exact_peak};
+            use core_model::event::EventBody;
+            if !(peak_db.is_finite() && (-96.0..=0.0).contains(&peak_db)) {
+                return Err(crate::events::bad(
+                    "the peak must be a level from -96 to 0 dB",
+                ));
+            }
+            // Under the lock: what to measure and the overviews in memory.
+            let (root, mut measure) = {
+                let mut inner = lock(&self.inner);
+                if inner.edit_label.is_some() {
+                    return Err(crate::events::bad("finish the open edit first"));
+                }
+                inner.refresh_media(self.id, false);
+                let root = inner.root(self.id);
+                let doc = inner.doc().clone();
+                let mut measure = Vec::new();
+                for e in &events {
+                    let id = core_model::ids::EventId(*e);
+                    let (ev, _) = doc.event(id)?;
+                    let EventBody::AudioRegion {
+                        media,
+                        source_offset,
+                        length,
+                        ..
+                    } = ev.body
+                    else {
+                        continue;
+                    };
+                    let m = doc
+                        .media()
+                        .get(&media)
+                        .ok_or_else(|| crate::events::bad(&format!("unknown media {media}")))?;
+                    if inner.offline.contains_key(&media) {
+                        return Err(crate::events::bad(&format!(
+                            "{} is offline: relink it first",
+                            m.name
+                        )));
+                    }
+                    // Only an overview of the audio the item names now.
+                    let overview = inner.overviews.get(media).filter(|o| {
+                        m.content_hash
+                            .as_deref()
+                            .is_none_or(|h| h == o.hash.as_str())
+                    });
+                    measure.push(Measured {
+                        id,
+                        media,
+                        path: m.path.clone(),
+                        hash: m.content_hash.clone(),
+                        name: m.name.clone(),
+                        file: root.join(&m.path),
+                        overview,
+                        from: source_offset,
+                        to: source_offset.saturating_add(length),
+                    });
+                }
+                (root, measure)
+            };
+            if measure.is_empty() {
+                return Err(crate::events::bad("select audio regions to normalize"));
+            }
+            // Without the lock: the cached overview file when it is this
+            // file's (so Normalize works right after an import), and the
+            // edge samples.
+            for x in &mut measure {
+                if x.overview.is_some() {
+                    continue;
+                }
+                x.overview = x.hash.as_deref().and_then(|h| {
+                    let o = Overview::read(&Overview::path(&root, h)?).ok()?;
+                    let st = Stamp::of(&x.file).ok()?;
+                    (o.hash == h && o.has_stamp(&st)).then(|| Arc::new(o))
+                });
+                if x.overview.is_none() {
+                    return Err(still_building(&x.name));
+                }
+            }
+            let io = |e: core_media::MediaError| VizError::Io {
+                message: e.to_string(),
+            };
+            let mut regions = Vec::with_capacity(measure.len());
+            for x in &measure {
+                let Some(ov) = &x.overview else {
+                    return Err(still_building(&x.name));
+                };
+                let r = core_media::caf::CafReader::open(&x.file).map_err(io)?;
+                let mut exact = |a: u64, b: u64| exact_peak(&r, a, b);
+                regions.push((x.id, ov.peak(x.from, x.to, &mut exact).map_err(io)?));
+            }
+            // Under the lock again: apply only if every item still names
+            // the file measured and every region the frames measured.
+            let cmd = Command::Audio(core_model::command::AudioCmd::Normalize { regions, peak_db });
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() {
+                return Err(crate::events::bad("finish the open edit first"));
+            }
+            inner.refresh_media(self.id, false);
+            let doc = inner.doc().clone();
+            for x in &measure {
+                let same_region = matches!(
+                    doc.event(x.id).map(|(ev, _)| &ev.body),
+                    Ok(EventBody::AudioRegion { media, source_offset, length, .. })
+                        if *media == x.media
+                            && *source_offset == x.from
+                            && source_offset.saturating_add(*length) == x.to
+                );
+                let same_file = doc
+                    .media()
+                    .get(&x.media)
+                    .is_some_and(|m| m.path == x.path && m.content_hash == x.hash);
+                if !(same_region && same_file) || inner.offline.contains_key(&x.media) {
+                    return Err(VizError::Busy {
+                        message: "The audio changed while it was measured; try again.".into(),
+                    });
+                }
+            }
+            // Normalize removes no plugin: nothing to capture first.
+            inner.history.execute(&cmd, &ViewFilter::default())?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
     }
 }
 

@@ -362,6 +362,31 @@ impl Overviews {
         (s.held || s.queue.is_empty()) && !s.busy
     }
 
+    /// Drops every loaded overview and sample window and asks for every
+    /// wanted item again (test hook: what a fresh session holds before its
+    /// worker ran).
+    #[cfg(feature = "test-hooks")]
+    pub fn forget_all(&self) {
+        let mut s = lock(&self.shared.state);
+        let loaded: Vec<MediaId> = s.keys.keys().copied().collect();
+        for m in loaded {
+            s.drop_key(m);
+        }
+        s.by_hash.clear();
+        s.windows.clear();
+        s.asked.clear();
+        s.queue.clear();
+        s.handled.clear();
+        let wanted: Vec<Want> = s.wanted.values().cloned().collect();
+        for w in wanted {
+            s.handled.insert(w.media);
+            s.queue.push_back(Task::Ensure(w));
+        }
+        drop(s);
+        self.start();
+        self.shared.wake.notify_all();
+    }
+
     /// Holds the worker before its next request (`true`), or lets it go
     /// (test hook).
     pub fn set_held(&self, on: bool) {

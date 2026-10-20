@@ -351,6 +351,14 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         waveformCalls.append((event, fromTick, toTick, columns))
         return try overview(media: 0, fromFrame: 0, toFrame: 1, columns: columns)
     }
+    /// `normalizeRegions` calls; `normalizeError` is thrown instead.
+    var normalizations: [(events: [UInt64], peakDb: Float)] = []
+    var normalizeError: VizError?
+    func normalizeRegions(events: [UInt64], peakDb: Float) throws -> DocSnapshot {
+        if let e = normalizeError { throw e }
+        normalizations.append((events, peakDb))
+        return commandResult()
+    }
     var mediaRows: [MediaRow] = []
     var jobRows: [UInt64: JobRow] = [:]
     var imports: [([String], ImportTargetRow?)] = []
