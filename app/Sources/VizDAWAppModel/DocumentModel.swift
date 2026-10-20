@@ -57,6 +57,18 @@ public final class DocumentModel {
     /// Bumped when plugin slots change (loaded, failed, restarted): views
     /// that show slots refetch.
     public private(set) var slotsVersion = 0
+    /// Bumped when waveform overviews or sample windows became available
+    /// (plan 5b): views drawing `Pending` or `Coarse` waveforms redraw.
+    public internal(set) var overviewVersion = 0
+    @ObservationIgnored private var mediaModel: MediaModel?
+
+    /// The media pool (plan 5b), made once.
+    public var media: MediaModel {
+        if let m = mediaModel { return m }
+        let m = MediaModel(document: self)
+        mediaModel = m
+        return m
+    }
     /// Slots whose parameters changed outside a gesture (their windows
     /// refetch), cleared by whoever handles them.
     public var paramsChanged: Set<UInt64> = []
@@ -251,6 +263,10 @@ public final class DocumentModel {
             self?.pruneStripCharts()
             self?.pruneDrumGrids()
         }
+        // A project that opens with missing or changed media offers the
+        // relink sheet (plan 5b Ruling 14; the app never shows it while
+        // the control channel is on).
+        media.offerRelinkIfNeeded()
     }
 
     /// The transport shown until the first successful read.
@@ -462,7 +478,9 @@ public final class DocumentModel {
         if u.mediaChanged {
             mediaVersion += 1
             refreshProjectInfo()
+            media.offerRelinkIfNeeded()
         }
+        if u.overviewsChanged { overviewVersion += 1 }
         if !jobs.isEmpty { pollJobs() }
         if u.slotsChanged { slotsVersion += 1 }
         if !u.paramsChanged.isEmpty { paramsChanged.formUnion(u.paramsChanged) }

@@ -15,6 +15,26 @@ public enum ProjectBanner: Equatable, Sendable {
     case problems([String])
 }
 
+extension ProjectBanner {
+    /// A running job's bar text.
+    public static func jobText(_ kind: JobKindRow) -> String {
+        switch kind {
+        case .import: "Importing audio…"
+        case .relink: "Relinking media…"
+        case .convert, .format: "Converting media…"
+        }
+    }
+
+    /// The alert title of a failed job.
+    public static func failureTitle(_ kind: JobKindRow) -> String {
+        switch kind {
+        case .import: "Import Failed"
+        case .relink: "Relink Failed"
+        case .convert, .format: "Conversion Failed"
+        }
+    }
+}
+
 extension DocumentModel {
     /// Where Import Audio puts files (Ruling 19): the selected lane of the
     /// shown sequence for one file, else new lanes; the transport's tick
@@ -32,17 +52,23 @@ extension DocumentModel {
         guard !paths.isEmpty else { return }
         let target = Self.importTarget(
             seq: selectedSeq, selection: editor.selection.lanes, files: paths.count, tick: transport.tick)
-        start(.import, "Import Failed") { try $0.importAudio(paths: paths, target: target) }
+        importAudio(paths: paths, target: target)
+    }
+
+    /// Imports `paths` at `target` (a drop; nil: into the pool only).
+    public func importAudio(paths: [String], target: ImportTargetRow?) {
+        guard !paths.isEmpty else { return }
+        startJob(.import, "Import Failed") { try $0.importAudio(paths: paths, target: target) }
     }
 
     /// Project Settings: converts every file into `format` (a job).
     public func changeFormat(_ format: ProjectFormatRow) {
-        start(.format, "Project Settings Failed") { try $0.setProjectFormat(format: format) }
+        startJob(.format, "Project Settings Failed") { try $0.setProjectFormat(format: format) }
     }
 
     /// The banner's Convert.
     public func convertMedia() {
-        start(.convert, "Convert Failed") { try $0.convertMedia() }
+        startJob(.convert, "Convert Failed") { try $0.convertMedia() }
     }
 
     /// The device-rate banner's button: the project takes the device's rate.
@@ -56,7 +82,8 @@ extension DocumentModel {
         try? session.cancelJob(id: id)
     }
 
-    private func start(_ kind: JobKindRow, _ title: String, _ body: (any SessionProtocol) throws -> UInt64) {
+    /// Starts a job and lists it; a refusal is an alert titled `title`.
+    func startJob(_ kind: JobKindRow, _ title: String, _ body: (any SessionProtocol) throws -> UInt64) {
         do {
             let id = try body(session)
             jobs.append(JobRow(id: id, kind: kind, progress: 0, state: .running, message: nil, problems: [], created: []))
@@ -91,9 +118,7 @@ extension DocumentModel {
                 refreshAfterJob()
             case .failed(let message):
                 if r.state != .cancelled {
-                    alert = AlertItem(
-                        title: r.kind == .import ? "Import Failed" : "Conversion Failed",
-                        message: message)
+                    alert = AlertItem(title: ProjectBanner.failureTitle(r.kind), message: message)
                 }
                 refreshAfterJob()
             }
@@ -110,6 +135,7 @@ extension DocumentModel {
         if (try? session.recheckMedia()) == true {
             mediaVersion += 1
             refreshProjectInfo()
+            media.offerRelinkIfNeeded()
         }
     }
 

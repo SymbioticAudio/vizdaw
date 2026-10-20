@@ -673,6 +673,32 @@ func noteRow(_ id: UInt64, tick: Int64, pitch: UInt8 = 60, duration: Int64 = 15_
         text: nil, textKind: nil, data: Data(), eightBit: false)
 }
 
+/// An audio region of media `media`: `frames` frames shown over
+/// `duration` ticks.
+func regionRow(
+    _ id: UInt64, tick: Int64, duration: Int64, frames: UInt64, media: UInt64 = 7, gainDb: Float = 0,
+    fadeIn: Int64 = 0, fadeOut: Int64 = 0
+) -> EventRow {
+    var r = noteRow(id, tick: tick, duration: duration)
+    r.kind = .audioRegion
+    r.media = media
+    r.frames = frames
+    r.gainDb = gainDb
+    r.fadeIn = FadeRow(length: fadeIn, shape: .linear)
+    r.fadeOut = FadeRow(length: fadeOut, shape: .linear)
+    return r
+}
+
+/// A media-pool row.
+func mediaRow(
+    _ id: UInt64, _ name: String, frames: UInt64 = 96_000, uses: UInt32 = 0, offline: OfflineReasonRow? = nil,
+    used: Float = 0
+) -> MediaRow {
+    MediaRow(
+        id: id, name: name, path: "Media/\(name).caf", channels: 2, frames: frames, sampleRate: 48_000,
+        origin: .imported, originalName: "\(name).wav", offline: offline, uses: uses, usedPercent: used)
+}
+
 /// An events block, or a reference block when `ref` is set.
 func blockRow(
     _ start: Int64, _ end: Int64, events: [UInt64], ref: UInt64? = nil, label: String? = nil
