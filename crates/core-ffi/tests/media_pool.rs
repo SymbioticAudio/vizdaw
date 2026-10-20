@@ -916,3 +916,130 @@ fn a_relink_to_an_empty_file_is_refused() {
     assert_eq!(row(&s, id).path, path);
     s.close().unwrap();
 }
+
+/// Fix round 1, review m1: an in-place relink never adopts a file a job
+/// has written but not applied: when that job then fails, its cleanup
+/// would remove the file the relinked item plays.
+#[test]
+fn an_in_place_relink_never_adopts_an_unapplied_jobs_file() {
+    use vizdaw_ffi::LaneEdit;
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(
+        &dir.path().join("x.caf"),
+        48_000,
+        2,
+        4800,
+        BitDepth::Int24,
+        0.25,
+    );
+    let (s, pkg, id) = saved_demo_with(dir.path(), &src);
+    std::fs::remove_file(pkg.join(row(&s, id).path)).unwrap();
+    s.recheck_media().unwrap();
+    assert_eq!(row(&s, id).offline, Some(OfflineReasonRow::Missing));
+    let seq = s.snapshot().unwrap().sequences[0].id;
+    let lane_edit = |edit: LaneEdit| s.edit(EditCommand::Lane { edit }, None).unwrap();
+    lane_edit(LaneEdit::Add {
+        seq,
+        name: "Target".into(),
+        index: None,
+    });
+    let lane = s.lanes(seq).unwrap().last().unwrap().id;
+    // An import into that lane; the lane goes before it applies, so the
+    // import fails and removes the file it wrote.
+    let k = caf(
+        &dir.path().join("k.caf"),
+        48_000,
+        2,
+        4800,
+        BitDepth::Int24,
+        0.5,
+    );
+    s.debug_hold_jobs(true).unwrap();
+    let imp = s
+        .import_audio(
+            vec![k.display().to_string()],
+            Some(ImportTargetRow {
+                seq,
+                lane: Some(lane),
+                tick: 0,
+            }),
+        )
+        .unwrap();
+    lane_edit(LaneEdit::Remove { seq, lane });
+    // An open edit keeps finished jobs from applying.
+    s.begin_edit("Drag".into()).unwrap();
+    s.debug_hold_jobs(false).unwrap();
+    let settle = |s: &Session| {
+        let until = Instant::now() + Duration::from_secs(60);
+        while !s.debug_jobs_settled() {
+            assert!(Instant::now() < until, "jobs still running");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    settle(&s);
+    let linked = pkg.join("Media/k.caf");
+    assert!(linked.is_file(), "the import linked its file");
+    let r = s.relink_media(id, linked.display().to_string()).unwrap();
+    settle(&s);
+    s.end_edit().unwrap();
+    assert_eq!(s.job(imp).unwrap().state, JobStateRow::Failed);
+    let j = s.job(r).unwrap();
+    assert_eq!(j.created, vec![id], "{j:?}");
+    let got = row(&s, id);
+    assert_eq!(got.offline, None, "{got:?}");
+    assert_ne!(got.path, "Media/k.caf", "a copy, not the import's file");
+    assert!(pkg.join(&got.path).is_file());
+    s.close().unwrap();
+}
+
+/// Fix round 1, review m2: a FIFO, a folder or another non-regular file
+/// is refused at once (a FIFO would block the job forever), and later
+/// jobs still run.
+#[test]
+fn non_regular_files_are_refused_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(
+        &dir.path().join("x.caf"),
+        48_000,
+        2,
+        4800,
+        BitDepth::Float32,
+        0.25,
+    );
+    let (s, pkg, id) = saved_demo_with(dir.path(), &src);
+    let fifo_dir = dir.path().join("fifo");
+    std::fs::create_dir_all(&fifo_dir).unwrap();
+    let fifo = fifo_dir.join("x.caf");
+    let ok = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "mkfifo");
+    let t = Instant::now();
+    // Locate…: refused before any job starts.
+    let e = s.relink_media(id, fifo.display().to_string());
+    assert!(matches!(e, Err(VizError::Model { .. })), "{e:?}");
+    let e = s.relink_media(id, fifo_dir.display().to_string());
+    assert!(matches!(e, Err(VizError::Model { .. })), "{e:?}");
+    // Import: the FIFO fails alone.
+    let j = wait(
+        &s,
+        s.import_audio(vec![fifo.display().to_string()], None)
+            .unwrap(),
+    );
+    assert!(j.created.is_empty() && j.problems.len() == 1, "{j:?}");
+    // Search: a FIFO named like the missing item is not a candidate.
+    std::fs::remove_file(pkg.join(row(&s, id).path)).unwrap();
+    s.recheck_media().unwrap();
+    let j = wait(&s, s.search_media(fifo_dir.display().to_string()).unwrap());
+    assert!(
+        j.created.is_empty() && j.problems[0].starts_with("x: not found"),
+        "{j:?}"
+    );
+    assert!(t.elapsed() < Duration::from_secs(20), "{:?}", t.elapsed());
+    // Later jobs still run.
+    let j = wait(&s, s.relink_media(id, src.display().to_string()).unwrap());
+    assert_eq!(j.created, vec![id], "{j:?}");
+    s.close().unwrap();
+}

@@ -176,6 +176,16 @@ impl Inner {
         self.history.referenced_media_anywhere()
     }
 
+    /// [`Inner::reserved_names`] in lower case: the files a job's cleanup
+    /// never removes (Task 6 review m1), compared as macOS volumes
+    /// resolve names.
+    fn kept(&self) -> std::collections::BTreeSet<String> {
+        self.named_media()
+            .into_keys()
+            .map(|p| p.to_lowercase())
+            .collect()
+    }
+
     /// `Busy` while a Format, Convert or Relink job has not been applied:
     /// each captures the project format and the items' files when it
     /// starts, so another such job may not start meanwhile (5a Task 11
@@ -2038,8 +2048,9 @@ impl Session {
             let mut inner = lock(&self.inner);
             inner.closed = true;
             let root = inner.root(self.id);
+            let keep = inner.kept();
             for w in inner.jobs.shutdown() {
-                discard(&root, w);
+                discard(&root, w, &keep);
             }
             inner.overviews.shutdown();
             host::forget_media(self.id);
@@ -2652,9 +2663,23 @@ impl Drop for Session {
     }
 }
 
+/// Removes the file `rel` a job wrote under `root`, unless `keep` (lower
+/// case, [`Inner::kept`]) holds it: a history state references it, so it
+/// is no longer only the job's (Task 6 review m1).
+fn remove_unkept(root: &Path, rel: &str, keep: &std::collections::BTreeSet<String>) {
+    if !keep.contains(&rel.to_lowercase()) {
+        let _ = std::fs::remove_file(root.join(rel));
+    }
+}
+
 /// Removes the files of a job that was never applied (`root` is the
-/// session's media root).
-pub(crate) fn discard(root: &Path, w: crate::jobs::Work) {
+/// session's media root), except those `keep` holds ([`remove_unkept`];
+/// job threads, which cannot see the history, pass an empty set).
+pub(crate) fn discard(
+    root: &Path,
+    w: crate::jobs::Work,
+    keep: &std::collections::BTreeSet<String>,
+) {
     use crate::jobs::Work;
     let files: Vec<String> = match w {
         Work::Import { files, .. } => files
@@ -2678,7 +2703,7 @@ pub(crate) fn discard(root: &Path, w: crate::jobs::Work) {
         Work::Cancelled => Vec::new(),
     };
     for f in files {
-        let _ = std::fs::remove_file(root.join(f));
+        remove_unkept(root, &f, keep);
     }
 }
 
@@ -2789,8 +2814,8 @@ fn apply_import(
             Err(e) => problems.push(format!("{name}: {e}")),
         }
     }
-    let written: Vec<std::path::PathBuf> =
-        items.iter().flatten().map(|i| root.join(&i.path)).collect();
+    let written: Vec<String> = items.iter().flatten().map(|i| i.path.clone()).collect();
+    let keep = inner.kept();
     if items.is_empty() {
         return Ok((Vec::new(), problems));
     }
@@ -2799,7 +2824,7 @@ fn apply_import(
     let h = &mut inner.history;
     let fail = |e: VizError, problems: Vec<String>| {
         for p in &written {
-            let _ = std::fs::remove_file(p);
+            remove_unkept(root, p, &keep);
         }
         (e, problems)
     };
@@ -2920,7 +2945,7 @@ fn apply_relink(
         // audio (Task 1 carry); `relink_file` refuses one already.
         if f.file.length_frames == 0 {
             if f.made {
-                let _ = std::fs::remove_file(root.join(&f.file.path));
+                remove_unkept(root, &f.file.path, &inner.kept());
             }
             problems.push(format!("{name}: the file holds no audio"));
             continue;
@@ -2940,7 +2965,7 @@ fn apply_relink(
             }
             Err(e) => {
                 if f.made {
-                    let _ = std::fs::remove_file(root.join(&f.file.path));
+                    remove_unkept(root, &f.file.path, &inner.kept());
                 }
                 let why = match e {
                     core_model::ModelError::OutOfRange {
@@ -3007,21 +3032,23 @@ fn convert_files(
     let n = items.len().max(1) as f32;
     let mut files: ConvertFiles = Vec::new();
     for (k, (media, path, stem)) in items.into_iter().enumerate() {
-        let r = core_media::import::import_reserved(
-            importer.as_ref(),
-            &path,
-            root,
-            format,
-            &stem,
-            reserved,
-            &mut |f| {
-                progress.store(
-                    ((k as f32 + f) / n).to_bits(),
-                    std::sync::atomic::Ordering::Relaxed,
-                )
-            },
-            cancel,
-        );
+        let r = crate::relink::regular_file(&path).and_then(|()| {
+            core_media::import::import_reserved(
+                importer.as_ref(),
+                &path,
+                root,
+                format,
+                &stem,
+                reserved,
+                &mut |f| {
+                    progress.store(
+                        ((k as f32 + f) / n).to_bits(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                },
+                cancel,
+            )
+        });
         match r {
             Err(core_media::MediaError::Cancelled) => {
                 discard(
@@ -3031,6 +3058,7 @@ fn convert_files(
                         format: None,
                         files,
                     },
+                    &std::collections::BTreeSet::new(),
                 );
                 return crate::jobs::Work::Cancelled;
             }
@@ -3042,6 +3070,7 @@ fn convert_files(
                         files: vec![(stem.clone(), Ok(v))],
                         target: None,
                     },
+                    &std::collections::BTreeSet::new(),
                 );
                 files.push((media, Err(format!("{stem}: has more than two channels"))));
             }
@@ -3082,10 +3111,11 @@ fn apply_convert(
         }
     }
     // Only this job's new files: never referenced by any document yet.
+    let keep = inner.kept();
     let remove = |files: &ConvertFiles| {
         for (_, r) in files {
             if let Ok(i) = r {
-                let _ = std::fs::remove_file(root.join(&i.path));
+                remove_unkept(root, &i.path, &keep);
             }
         }
     };
@@ -3515,21 +3545,23 @@ impl Session {
                             .file_stem()
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        let r = core_media::import::import_reserved(
-                            importer.as_ref(),
-                            &path,
-                            &root,
-                            format,
-                            &stem,
-                            &reserved,
-                            &mut |f| {
-                                progress.store(
-                                    ((k as f32 + f) / n).to_bits(),
-                                    std::sync::atomic::Ordering::Relaxed,
-                                )
-                            },
-                            cancel,
-                        );
+                        let r = crate::relink::regular_file(&path).and_then(|()| {
+                            core_media::import::import_reserved(
+                                importer.as_ref(),
+                                &path,
+                                &root,
+                                format,
+                                &stem,
+                                &reserved,
+                                &mut |f| {
+                                    progress.store(
+                                        ((k as f32 + f) / n).to_bits(),
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    )
+                                },
+                                cancel,
+                            )
+                        });
                         match r {
                             Err(core_media::MediaError::Cancelled) => {
                                 // Remove what earlier files of this batch wrote.
@@ -3833,12 +3865,16 @@ impl Session {
                     "relink needs the absolute path of a file",
                 ));
             }
+            // Never a FIFO, socket, device or folder: opening one could
+            // block the job for good (Task 6 review m2).
+            crate::relink::regular_file(&src).map_err(|e| crate::events::bad(&e.to_string()))?;
             let mut inner = lock(&self.inner);
             self.apply_jobs(&mut inner);
             inner.media_jobs_idle()?;
             let root = inner.root(self.id);
             let format = inner.doc().settings().format;
             let named = inner.named_media();
+            let unapplied = inner.jobs.unapplied();
             let id = core_model::ids::MediaId(media);
             inner
                 .jobs
@@ -3850,6 +3886,7 @@ impl Session {
                         &src,
                         format,
                         &named,
+                        &unapplied,
                         &mut |f| progress.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed),
                         cancel,
                     );
@@ -3908,6 +3945,7 @@ impl Session {
             let root = inner.root(self.id);
             let format = inner.doc().settings().format;
             let named = inner.named_media();
+            let unapplied = inner.jobs.unapplied();
             inner
                 .jobs
                 .spawn(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
@@ -3919,6 +3957,7 @@ impl Session {
                         lost,
                         format,
                         &named,
+                        &unapplied,
                         progress,
                         cancel,
                     )

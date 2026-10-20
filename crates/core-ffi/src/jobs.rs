@@ -6,7 +6,7 @@ use crate::error::VizError;
 use core_media::import::Imported;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 
 /// What a job does.
@@ -119,6 +119,12 @@ pub struct Jobs {
     /// While set, job threads wait before they start (test hook:
     /// `Session::debug_hold_jobs`).
     held: Arc<AtomicBool>,
+    /// Jobs started and not applied yet (running, or finished and
+    /// waiting). Shared with job threads: a relink adopts a file in
+    /// `Media/` in place only while no other job is unapplied, so it
+    /// never adopts a file such a job wrote and may still remove (Task 6
+    /// review m1).
+    unapplied: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for Jobs {
@@ -143,6 +149,7 @@ impl Jobs {
         let cancel = Arc::new(AtomicBool::new(false));
         let (p, c) = (Arc::clone(&progress), Arc::clone(&cancel));
         let held = Arc::clone(&self.held);
+        self.unapplied.fetch_add(1, Ordering::SeqCst);
         let thread = std::thread::Builder::new()
             .name(format!("vizdaw-job-{id}"))
             .spawn(move || {
@@ -151,8 +158,11 @@ impl Jobs {
                 }
                 work(&p, &c)
             })
-            .map_err(|e| VizError::Io {
-                message: format!("job thread: {e}"),
+            .map_err(|e| {
+                self.unapplied.fetch_sub(1, Ordering::SeqCst);
+                VizError::Io {
+                    message: format!("job thread: {e}"),
+                }
             })?;
         self.list.insert(
             id,
@@ -210,6 +220,7 @@ impl Jobs {
                 match j.thread.take().map(JoinHandle::join) {
                     Some(Ok(w)) => out.push((*id, j.kind, w)),
                     _ => {
+                        self.unapplied.fetch_sub(1, Ordering::SeqCst);
                         j.row = Some(row(
                             *id,
                             j.kind,
@@ -228,8 +239,16 @@ impl Jobs {
     /// Records how job `id` ended.
     pub fn finish(&mut self, id: u64, row: JobRow) {
         if let Some(j) = self.list.get_mut(&id) {
+            if j.row.is_none() {
+                self.unapplied.fetch_sub(1, Ordering::SeqCst);
+            }
             j.row = Some(row);
         }
+    }
+
+    /// The count of unapplied jobs, for job threads (see `unapplied`).
+    pub fn unapplied(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.unapplied)
     }
 
     /// Job `id` as a row.

@@ -12,7 +12,7 @@ use core_model::format::AudioFormat;
 use core_model::ids::MediaId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 /// Folder levels a search descends.
 const DEPTH: u32 = 8;
@@ -43,6 +43,20 @@ fn in_media(root: &Path, src: &Path) -> Option<String> {
     (f.parent()? == media && !name.starts_with('.')).then(|| format!("Media/{name}"))
 }
 
+/// `Ok` when `path` (symlinks followed) is a regular file: never a FIFO,
+/// socket, device or folder (Task 6 review m2).
+pub fn regular_file(path: &Path) -> Result<(), MediaError> {
+    let m = std::fs::metadata(path)?;
+    if m.is_file() {
+        Ok(())
+    } else {
+        Err(MediaError::Unsupported(format!(
+            "{} is not a regular file",
+            path.display()
+        )))
+    }
+}
+
 /// The error for a file without audio (Task 1 carry: never the model's
 /// region-length refusal).
 fn no_audio() -> MediaError {
@@ -65,18 +79,26 @@ fn free_for(named: &BTreeMap<String, Option<String>>, rel: &str, hash: &str) -> 
 /// state names for other audio, else a new file imported (converted) from
 /// it under a free name no history state names. `named` is every
 /// package-relative path the history references, with its content hash
-/// (`History::referenced_media_anywhere`). A file without audio is
-/// refused.
+/// (`History::referenced_media_anywhere`). `unapplied` counts the
+/// session's unapplied jobs, this one included: while another is
+/// unapplied, the file is always copied, since it may be one that job
+/// wrote and still removes when it fails or is cancelled (Task 6 review
+/// m1). Anything but a regular file is refused before it is opened (a
+/// FIFO would block; review m2), as is a file without audio.
+#[allow(clippy::too_many_arguments)]
 pub fn relink_file(
     importer: &dyn MediaImporter,
     root: &Path,
     src: &Path,
     format: AudioFormat,
     named: &BTreeMap<String, Option<String>>,
+    unapplied: &AtomicUsize,
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
 ) -> Result<RelinkFile, MediaError> {
-    if let Some(rel) = in_media(root, src) {
+    regular_file(src)?;
+    let alone = unapplied.load(Ordering::SeqCst) <= 1;
+    if let Some(rel) = in_media(root, src).filter(|_| alone) {
         if let Ok(r) = CafReader::open(src) {
             let i = r.info().clone();
             if i.sample_rate == format.sample_rate && i.depth == format.depth {
@@ -169,6 +191,7 @@ pub fn search(
     lost: Vec<Lost>,
     format: AudioFormat,
     named: &BTreeMap<String, Option<String>>,
+    unapplied: &AtomicUsize,
     progress: &AtomicU32,
     cancel: &AtomicBool,
 ) -> Work {
@@ -239,13 +262,14 @@ pub fn search(
             &f,
             format,
             named,
+            unapplied,
             &mut |p| progress.store(((base + p) / n).to_bits(), Ordering::Relaxed),
             cancel,
         );
         done += 1.0;
         match r {
             Err(MediaError::Cancelled) => {
-                crate::session::discard(root, Work::Relink { files: out });
+                crate::session::discard(root, Work::Relink { files: out }, &BTreeSet::new());
                 return Work::Cancelled;
             }
             r => out.push((l.media, r.map_err(|e| format!("{}: {e}", l.name)))),
