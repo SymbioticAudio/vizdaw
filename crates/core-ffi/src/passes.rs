@@ -1,0 +1,553 @@
+//! Placing a recording (sub-project 5 spec §6.3–§6.5; plan 5c Rulings
+//! 11–17): turns what the engine captured (input files, marks, recorded
+//! MIDI) into the [`RecordPass`] the model applies at Stop. Pure: no I/O,
+//! no locks, no engine.
+//!
+//! **Heard runs.** The renderer counts output frames from the roll (run
+//! frames) and marks which schedule frame each run plays after the roll,
+//! every loop wrap and every resync. The output played at run `x` is heard
+//! at run `x + L` (the graph latency), so the timeline position heard at
+//! run `u` is `S(u)`, where `S` maps runs to schedule frames through the
+//! marks. A MIDI message recorded at output run `r` was played against
+//! `S(r − L)`; input file frame `k` was captured while `S(k − D)` was
+//! heard, `D` being the device's input delay minus the latency trim plus
+//! `L`.
+//!
+//! **Passes.** The roll and every wrap start a pass. A pass's window is the
+//! timeline it played, inside the record range. Discarded passes are
+//! dropped; every other pass with something in its window is kept (plan
+//! 5c Ruling 13), except a short last pass (below).
+//!
+//! **Cuts and joins (pre-flight M1).** A non-wrap mark whose frame is
+//! below where the piece before it had got to (the transport stood still
+//! through an xrun, or a Locate went back inside it) cuts that piece where
+//! the timeline reached the mark's frame, so regions never overlap. A stop
+//! and the resume after it are marks on one run: the piece before ends at
+//! the stop, and the cut is judged on the stop's frame. Pieces that follow
+//! each other in the file and within one frame on the timeline (a schedule
+//! swap moves the frame by ±1) stay one region.
+//!
+//! **Ruling (pre-flight M3, adopted for plan 5c Task 7): a short last
+//! pass is no take.** When loop recording, the final pass (the one playing
+//! at Stop) is discarded when it played less than one beat (one quarter
+//! note, [`PPQ`] ticks) of timeline, unless it was explicitly kept
+//! (`PassFate::Kept`). Stopping just after a wrap therefore leaves no
+//! sliver of a take, and the sliver does not become the lane's active
+//! take. Earlier passes are never discarded by length.
+//!
+//! Control-side code: nothing here runs on the real-time thread.
+
+use core_engine::midi1::Midi1Msg;
+use core_engine::record::{Mark, RecordedMidi};
+use core_engine::schedule::TempoTable;
+use core_model::command::{LaneRecord, RecordPass, RecordedContent, RecordedMedia, RecordedRegion};
+use core_model::document::Document;
+use core_model::event::{EventBody, EventSpec};
+use core_model::ids::{LaneId, SeqId};
+use core_model::time::{PPQ, Tick};
+use std::collections::BTreeMap;
+
+/// The record range in schedule frames (spec §6.4): the punch range, the
+/// loop range (narrowed by the punch), or from where recording started on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordRange {
+    /// First frame.
+    pub start: u64,
+    /// One past the last frame; `None`: until Stop.
+    pub end: Option<u64>,
+}
+
+impl RecordRange {
+    fn clip(&self, a: i64, b: i64) -> Option<(i64, i64)> {
+        let lo = a.max(i64::try_from(self.start).unwrap_or(i64::MAX));
+        let hi = match self.end {
+            Some(e) => b.min(i64::try_from(e).unwrap_or(i64::MAX)),
+            None => b,
+        };
+        (lo < hi).then_some((lo, hi))
+    }
+}
+
+/// What the user decided about a pass (`record.keep_pass`,
+/// `record.discard_pass`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PassFate {
+    /// Nothing: it is kept at Stop.
+    #[default]
+    Undecided,
+    /// Kept: a later discard leaves it.
+    Kept,
+    /// Dropped.
+    Discarded,
+}
+
+/// Applies a keep (`keep`) or a discard to the passes that completed:
+/// a keep keeps every undecided one, a discard drops every undecided one
+/// (those since the last keep). The pass still playing is not touched
+/// (plan 5c Ruling 13).
+pub fn decide(fates: &mut Vec<PassFate>, completed: usize, keep: bool) {
+    if fates.len() < completed {
+        fates.resize(completed, PassFate::Undecided);
+    }
+    for f in fates.iter_mut().take(completed) {
+        if *f == PassFate::Undecided {
+            *f = if keep {
+                PassFate::Kept
+            } else {
+                PassFate::Discarded
+            };
+        }
+    }
+}
+
+/// One armed audio lane's finished file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioTake {
+    /// The lane.
+    pub lane: LaneId,
+    /// The file (package-relative path, format, frames, hash, name, pass).
+    pub media: RecordedMedia,
+}
+
+/// Everything a finished recording captured.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Captured<'a> {
+    /// The document as it is at Stop.
+    pub doc: &'a Document,
+    /// The sequence recorded into.
+    pub seq: SeqId,
+    /// The marks, oldest first.
+    pub marks: &'a [Mark],
+    /// Output run frames played until the tap closed.
+    pub end_run: u64,
+    /// The graph latency `L` (frames).
+    pub latency: u64,
+    /// The device's input delay minus the latency trim (frames).
+    pub input_delay: i64,
+    /// The record range.
+    pub range: RecordRange,
+    /// Loop recording: every wrap ends a pass.
+    pub looped: bool,
+    /// Replace (else overdub).
+    pub replace: bool,
+    /// Kept passes become takes (spec §6.4).
+    pub passes_as_takes: bool,
+    /// Each pass's fate, by pass number (missing: undecided).
+    pub fates: &'a [PassFate],
+    /// The armed audio lanes' files.
+    pub audio: &'a [AudioTake],
+    /// The armed MIDI lanes.
+    pub midi_lanes: &'a [LaneId],
+    /// What they recorded.
+    pub midi: &'a [RecordedMidi],
+    /// Input was lost somewhere (silence was written).
+    pub with_gaps: bool,
+}
+
+/// A stretch of runs `[run, end)` that played schedule frames from
+/// `frame` on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Piece {
+    pass: usize,
+    /// The run of the mark that started it (`run` reaches back further
+    /// for the first piece).
+    from: i64,
+    run: i64,
+    end: i64,
+    frame: i64,
+}
+
+impl Piece {
+    fn at(&self, u: i64) -> i64 {
+        self.frame + (u - self.run)
+    }
+}
+
+/// The pieces the marks describe, numbered by pass: marks on one run keep
+/// the last frame (and a wrap); the first piece reaches back before the
+/// roll (pre-roll handles); the last ends at heard run `end`.
+fn pieces(marks: &[Mark], end: i64) -> Vec<Piece> {
+    // Each merged mark with the first frame marked on its run (a stop's,
+    // before the resume's).
+    let mut m: Vec<(Mark, u64)> = Vec::with_capacity(marks.len());
+    for x in marks {
+        match m.last_mut() {
+            Some((last, _)) if last.run == x.run => {
+                last.frame = x.frame;
+                last.wrap |= x.wrap;
+            }
+            _ => m.push((*x, x.frame)),
+        }
+    }
+    let mut out: Vec<Piece> = Vec::with_capacity(m.len());
+    let mut pass = 0usize;
+    for (i, (x, first)) in m.iter().enumerate() {
+        if i > 0 && x.wrap {
+            pass += 1;
+        }
+        let at = i64::try_from(x.run).unwrap_or(i64::MAX);
+        if !x.wrap
+            && let Some(prev) = out.last_mut()
+        {
+            // Pre-flight M1: cut where the timeline reached the mark's
+            // frame when the mark is more than a frame behind (a ±1
+            // schedule swap joins instead).
+            let cut = i64::try_from(*first).unwrap_or(i64::MAX);
+            if cut < prev.at(at) - 1 && cut >= prev.at(prev.from) {
+                prev.end = prev.end.min(prev.run + (cut - prev.frame));
+            }
+        }
+        let run = if i == 0 { i64::MIN / 4 } else { at };
+        let next = m.get(i + 1).map_or(end.max(at), |(n, _)| {
+            i64::try_from(n.run).unwrap_or(i64::MAX)
+        });
+        let frame = i64::try_from(x.frame).unwrap_or(i64::MAX);
+        out.push(Piece {
+            pass,
+            from: at,
+            run,
+            end: next,
+            // The frame at `run`: a piece reaching back keeps its slope.
+            frame: frame - (at - run),
+        });
+    }
+    out
+}
+
+fn piece_of(pieces: &[Piece], u: i64) -> Option<&Piece> {
+    pieces.iter().find(|p| u >= p.run && u < p.end)
+}
+
+/// The timeline `[t0, t1)` piece `p` played, inside the range.
+fn window(p: &Piece, range: &RecordRange) -> Option<(i64, i64)> {
+    range.clip(p.at(p.run), p.at(p.end))
+}
+
+/// MIDI 2.0 min-center-max upscale of a `bits`-bit value to 32 bits.
+fn up32(v: u32, bits: u32) -> u32 {
+    let scale = 32 - bits;
+    let shifted = v << scale;
+    let center = 1u32 << (bits - 1);
+    if v <= center {
+        return shifted;
+    }
+    let repeat_bits = bits - 1;
+    let mask = (1u32 << repeat_bits) - 1;
+    let mut repeat = v & mask;
+    repeat = if scale > repeat_bits {
+        repeat << (scale - repeat_bits)
+    } else {
+        repeat >> (repeat_bits - scale)
+    };
+    let mut out = shifted;
+    while repeat != 0 {
+        out |= repeat;
+        repeat >>= repeat_bits;
+    }
+    out
+}
+
+/// The event a non-note channel message records as.
+fn body_of(msg: Midi1Msg) -> Option<EventBody> {
+    let [s, a, b] = msg.bytes;
+    Some(match s & 0xF0 {
+        0xA0 => EventBody::PolyPressure {
+            pitch: a & 0x7F,
+            value: up32(u32::from(b & 0x7F), 7),
+        },
+        0xB0 => EventBody::Cc {
+            index: a & 0x7F,
+            value: up32(u32::from(b & 0x7F), 7),
+        },
+        0xC0 => EventBody::Program {
+            program: a & 0x7F,
+            bank: None,
+        },
+        0xD0 => EventBody::ChannelPressure {
+            value: up32(u32::from(a & 0x7F), 7),
+        },
+        0xE0 => EventBody::PitchBend {
+            value: up32(u32::from(a & 0x7F) | (u32::from(b & 0x7F) << 7), 14),
+        },
+        _ => return None,
+    })
+}
+
+/// One recorded message in heard runs.
+#[derive(Debug, Clone, Copy)]
+struct Heard {
+    u: i64,
+    msg: Midi1Msg,
+}
+
+/// A lane's MIDI per pass: events placed on the timeline, notes paired
+/// with their offs (cut at the pass window's end).
+fn midi_events(
+    heard: &[Heard],
+    pieces: &[Piece],
+    range: &RecordRange,
+    tempo: &TempoTable,
+) -> BTreeMap<usize, Vec<EventSpec>> {
+    let mut out: BTreeMap<usize, Vec<EventSpec>> = BTreeMap::new();
+    let tick = |f: i64| tempo.frame_to_tick(u64::try_from(f.max(0)).unwrap_or(0));
+    for (i, h) in heard.iter().enumerate() {
+        let Some(p) = piece_of(pieces, h.u) else {
+            continue;
+        };
+        let Some((t0, t1)) = window(p, range) else {
+            continue;
+        };
+        let t = p.at(h.u);
+        if t < t0 || t >= t1 {
+            continue;
+        }
+        let [s, pitch, vel] = h.msg.bytes;
+        let body = match s & 0xF0 {
+            0x90 if vel > 0 => {
+                let ch = s & 0x0F;
+                // The off: the next note-off of this pitch and channel in
+                // the same pass; else the window's end.
+                let off = heard.iter().skip(i + 1).find(|o| {
+                    let [os, op, ov] = o.msg.bytes;
+                    os & 0x0F == ch
+                        && op == pitch
+                        && (os & 0xF0 == 0x80 || (os & 0xF0 == 0x90 && ov == 0))
+                });
+                let (end, release) = match off.and_then(|o| piece_of(pieces, o.u).map(|q| (o, q))) {
+                    Some((o, q)) if q.pass == p.pass => (
+                        q.at(o.u).min(t1),
+                        crate::input::upscale_velocity(o.msg.bytes[2]),
+                    ),
+                    _ => (t1, 0),
+                };
+                let mut b = EventBody::note(
+                    pitch & 0x7F,
+                    crate::input::upscale_velocity(vel),
+                    Tick((tick(end).0 - tick(t).0).max(0)),
+                );
+                if let EventBody::Note {
+                    release_velocity, ..
+                } = &mut b
+                {
+                    *release_velocity = release;
+                }
+                b
+            }
+            0x80 | 0x90 => continue,
+            _ => match body_of(h.msg) {
+                Some(b) => b,
+                None => continue,
+            },
+        };
+        out.entry(p.pass)
+            .or_default()
+            .push(EventSpec::new(tick(t), body));
+    }
+    out
+}
+
+/// A lane's audio regions per pass: one per piece, joined when pieces
+/// continue each other, cut to the file and the window.
+fn audio_regions(
+    frames: u64,
+    pieces: &[Piece],
+    range: &RecordRange,
+    d: i64,
+    tempo: &TempoTable,
+) -> BTreeMap<usize, Vec<RecordedRegion>> {
+    let mut out: BTreeMap<usize, Vec<RecordedRegion>> = BTreeMap::new();
+    let len = i64::try_from(frames).unwrap_or(i64::MAX);
+    let mut last: Option<(usize, i64, i64)> = None; // (pass, timeline end, file end)
+    for p in pieces {
+        let Some((t0, t1)) = window(p, range) else {
+            continue;
+        };
+        // Heard run → file frame: k = u + D.
+        let k_at = |t: i64| (t - p.frame) + p.run + d;
+        let (mut t0, mut k0) = (t0, k_at(t0));
+        if k0 < 0 {
+            t0 -= k0;
+            k0 = 0;
+        }
+        let t1 = t1.min(t0 + (len - k0));
+        if t1 <= t0 {
+            continue;
+        }
+        let regions = out.entry(p.pass).or_default();
+        let joined = match (last, regions.last_mut()) {
+            // Pre-flight M1: within a frame on the timeline, continuous in
+            // the file.
+            (Some((pass, te, ke)), Some(r))
+                if pass == p.pass && (te - t0).abs() <= 1 && ke == k0 =>
+            {
+                r.length += u64::try_from(t1 - t0).unwrap_or(0);
+                true
+            }
+            _ => false,
+        };
+        if !joined {
+            // The region starts on a tick: the file offset follows the
+            // frame that tick plays at, so the audio lands exactly.
+            let mut tick = tempo.frame_to_tick(u64::try_from(t0).unwrap_or(0));
+            let mut f = i64::try_from(tempo.tick_to_frame(tick)).unwrap_or(t0);
+            // After a cut, a tick rounded down must not reach back under
+            // the region before it.
+            if let Some((pass, te, _)) = last
+                && pass == p.pass
+                && te <= t0
+            {
+                while f < te && f < t1 {
+                    tick = Tick(tick.0 + 1);
+                    f = i64::try_from(tempo.tick_to_frame(tick)).unwrap_or(t1);
+                }
+            }
+            let (start, k) = if k0 + (f - t0) >= 0 {
+                (f, k0 + (f - t0))
+            } else {
+                (t0, k0)
+            };
+            let length = t1 - start;
+            if length <= 0 {
+                continue;
+            }
+            regions.push(RecordedRegion {
+                media: 0,
+                tick,
+                source_offset: u64::try_from(k).unwrap_or(0),
+                length: u64::try_from(length).unwrap_or(0),
+            });
+        }
+        last = Some((p.pass, t1, k0 + (t1 - t0)));
+    }
+    out
+}
+
+/// The pass to apply, or `None` when nothing was recorded.
+pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
+    let seq = c.doc.sequence(c.seq).map_err(|e| e.to_string())?;
+    let rate = f64::from(c.doc.settings().format.sample_rate);
+    let tempo = TempoTable::build(&seq.tempo, Tick(-seq.start_offset.0), rate);
+    let lat = i64::try_from(c.latency).unwrap_or(0);
+    let heard_end = i64::try_from(c.end_run).unwrap_or(i64::MAX) - lat;
+    let pieces = pieces(c.marks, heard_end);
+    if pieces.is_empty() {
+        return Ok(None);
+    }
+    let d = c.input_delay.saturating_add(lat);
+    let fate = |pass: usize| c.fates.get(pass).copied().unwrap_or_default();
+    let passes = pieces.last().map_or(0, |p| p.pass + 1);
+    let tick_at = |f: i64| tempo.frame_to_tick(u64::try_from(f.max(0)).unwrap_or(0));
+    // The Ruling (pre-flight M3, module docs): a final loop pass that
+    // played less than a beat is discarded unless explicitly kept.
+    let short_last = c.looped && passes > 0 && fate(passes - 1) != PassFate::Kept && {
+        let played: i64 = pieces
+            .iter()
+            .filter(|x| x.pass == passes - 1)
+            .map(|x| (tick_at(x.at(x.end.max(x.from))).0 - tick_at(x.at(x.from)).0).max(0))
+            .sum();
+        played < PPQ
+    };
+    let kept: Vec<usize> = (0..passes)
+        .filter(|p| fate(*p) != PassFate::Discarded)
+        .filter(|p| !(short_last && *p == passes - 1))
+        .filter(|p| {
+            pieces
+                .iter()
+                .any(|x| x.pass == *p && window(x, &c.range).is_some())
+        })
+        .collect();
+    let windows: Vec<(Tick, Tick)> = pieces
+        .iter()
+        .filter(|p| kept.contains(&p.pass))
+        .filter_map(|p| window(p, &c.range))
+        .map(|(a, b)| (tick_at(a), tick_at(b)))
+        .filter(|(a, b)| a < b)
+        .collect();
+    let takes_from_passes = c.looped && c.passes_as_takes;
+    let mut media = Vec::new();
+    let mut lanes: BTreeMap<LaneId, LaneRecord> = BTreeMap::new();
+    let lane_record = |lane: LaneId| LaneRecord {
+        seq: c.seq,
+        lane,
+        clear: Vec::new(),
+        active: RecordedContent::default(),
+        takes: Vec::new(),
+    };
+    let take_name = |lane: LaneId, k: usize| {
+        let n = seq.lane(lane).map_or(1, |l| l.takes.len()) + 1 + k;
+        format!("Take {n}")
+    };
+    for a in c.audio {
+        let mut regions = audio_regions(a.media.length_frames, &pieces, &c.range, d, &tempo);
+        regions.retain(|p, _| kept.contains(p));
+        if regions.is_empty() {
+            continue;
+        }
+        let index = media.len();
+        media.push(a.media.clone());
+        let rec = lanes.entry(a.lane).or_insert_with(|| lane_record(a.lane));
+        if c.looped {
+            for (k, p) in kept.iter().enumerate() {
+                let mut content = RecordedContent::default();
+                for r in regions.get(p).into_iter().flatten() {
+                    content.regions.push(RecordedRegion { media: index, ..*r });
+                }
+                rec.takes.push((take_name(a.lane, k), content));
+            }
+        } else {
+            for r in regions.values().flatten() {
+                rec.active
+                    .regions
+                    .push(RecordedRegion { media: index, ..*r });
+            }
+        }
+    }
+    for lane in c.midi_lanes {
+        let heard: Vec<Heard> = c
+            .midi
+            .iter()
+            .filter(|m| m.lane == *lane)
+            .map(|m| Heard {
+                u: m.run - lat,
+                msg: m.msg,
+            })
+            .collect();
+        let mut events = midi_events(&heard, &pieces, &c.range, &tempo);
+        events.retain(|p, _| kept.contains(p));
+        if takes_from_passes {
+            if kept.is_empty() {
+                continue;
+            }
+            let rec = lanes.entry(*lane).or_insert_with(|| lane_record(*lane));
+            for (k, p) in kept.iter().enumerate() {
+                let content = RecordedContent {
+                    events: events.remove(p).unwrap_or_default(),
+                    regions: Vec::new(),
+                };
+                rec.takes.push((take_name(*lane, k), content));
+            }
+        } else {
+            let all: Vec<EventSpec> = events.into_values().flatten().collect();
+            if all.is_empty() && !c.replace {
+                continue;
+            }
+            let rec = lanes.entry(*lane).or_insert_with(|| lane_record(*lane));
+            if c.replace {
+                rec.clear = windows.clone();
+            }
+            rec.active.events = all;
+        }
+    }
+    let lanes: Vec<LaneRecord> = lanes
+        .into_values()
+        .filter(|l| !l.clear.is_empty() || !l.active.is_empty() || !l.takes.is_empty())
+        .collect();
+    if lanes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(RecordPass {
+        with_gaps: c.with_gaps,
+        media,
+        lanes,
+    }))
+}

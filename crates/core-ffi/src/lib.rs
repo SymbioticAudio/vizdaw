@@ -35,6 +35,7 @@ pub mod media;
 pub mod mixer;
 pub mod modify;
 pub mod overviews;
+pub mod passes;
 pub mod plugins;
 pub mod recovery;
 pub mod relink;
