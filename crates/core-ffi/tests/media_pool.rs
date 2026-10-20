@@ -1043,3 +1043,182 @@ fn non_regular_files_are_refused_promptly() {
     assert_eq!(j.created, vec![id], "{j:?}");
     s.close().unwrap();
 }
+
+/// Runs `idle` until the overview worker has been idle across two ticks.
+fn settle(s: &Session) {
+    let until = Instant::now() + Duration::from_secs(60);
+    loop {
+        s.idle().unwrap();
+        if s.debug_overviews_idle() {
+            s.idle().unwrap();
+            if s.debug_overviews_idle() {
+                return;
+            }
+        }
+        assert!(Instant::now() < until, "the overview worker never settled");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Final review I1: searching a folder that holds the package never
+/// brings a `Changed` item back with the changed audio in its own file,
+/// nor with a copy of it under the same name elsewhere: a changed item
+/// matches only by content hash.
+#[test]
+fn search_never_relinks_a_changed_item_to_the_changed_audio() {
+    let dir = tempfile::tempdir().unwrap();
+    let srcdir = tempfile::tempdir().unwrap();
+    let src = caf(
+        &srcdir.path().join("x.caf"),
+        48_000,
+        2,
+        9600,
+        BitDepth::Float32,
+        0.25,
+    );
+    let s = Session::new_empty().unwrap();
+    import(&s, &src, None);
+    let pkg = dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    settle(&s);
+    let item = s.media().unwrap()[0].clone();
+    // The same name and length, other audio, in place (in the project
+    // format, so only the content differs).
+    let file = pkg.join(&item.path);
+    let original = srcdir.path().join("original.caf");
+    std::fs::rename(&file, &original).unwrap();
+    caf(&file, 48_000, 2, 9600, BitDepth::Int24, 0.5);
+    // And a copy of the changed audio by the same name beside the package.
+    std::fs::copy(&file, dir.path().join(file.file_name().unwrap())).unwrap();
+    s.recheck_media().unwrap();
+    settle(&s);
+    assert_eq!(row(&s, item.id).offline, Some(OfflineReasonRow::Changed));
+    let before = media_files(&pkg);
+    let j = wait(
+        &s,
+        s.search_media(dir.path().display().to_string()).unwrap(),
+    );
+    assert!(j.created.is_empty(), "{j:?}");
+    assert_eq!(j.problems.len(), 1, "{j:?}");
+    assert!(j.problems[0].contains("not found in"), "{j:?}");
+    assert_eq!(row(&s, item.id).offline, Some(OfflineReasonRow::Changed));
+    assert_eq!(media_files(&pkg), before, "nothing copied in");
+    // The original audio, under any name, still brings it back.
+    std::fs::create_dir_all(dir.path().join("deep")).unwrap();
+    std::fs::copy(&original, dir.path().join("deep/other.caf")).unwrap();
+    let j = wait(
+        &s,
+        s.search_media(dir.path().display().to_string()).unwrap(),
+    );
+    assert_eq!(j.created, vec![item.id], "{j:?}");
+    assert_eq!(row(&s, item.id).offline, None);
+    s.close().unwrap();
+}
+
+/// Task 6 review m5: two missing items of one audio share the one file a
+/// search finds.
+#[test]
+fn search_relinks_every_item_of_a_found_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = caf(
+        &dir.path().join("in/a.caf"),
+        48_000,
+        2,
+        4800,
+        BitDepth::Float32,
+        0.25,
+    );
+    let s = Session::new_empty().unwrap();
+    import(&s, &a, None);
+    import(&s, &a, None);
+    let pkg = dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    let rows = s.media().unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(
+        hash_file(&pkg.join(&rows[0].path)).unwrap(),
+        hash_file(&pkg.join(&rows[1].path)).unwrap()
+    );
+    let folder = dir.path().join("found");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::rename(pkg.join(&rows[0].path), folder.join("only.caf")).unwrap();
+    std::fs::remove_file(pkg.join(&rows[1].path)).unwrap();
+    s.recheck_media().unwrap();
+    let j = wait(&s, s.search_media(folder.display().to_string()).unwrap());
+    assert!(j.problems.is_empty(), "{j:?}");
+    let mut created = j.created.clone();
+    created.sort_unstable();
+    let mut want = vec![rows[0].id, rows[1].id];
+    want.sort_unstable();
+    assert_eq!(created, want, "{j:?}");
+    for r in &rows {
+        assert_eq!(row(&s, r.id).offline, None);
+    }
+    s.close().unwrap();
+}
+
+/// Final review I2 / Task 6 review m9: a search of a wide tree can be
+/// cancelled, and close never waits for the walk.
+#[test]
+fn a_search_can_be_cancelled_mid_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(
+        &dir.path().join("in/a.caf"),
+        48_000,
+        2,
+        4800,
+        BitDepth::Float32,
+        0.25,
+    );
+    let (s, pkg, id) = saved_demo_with(dir.path(), &src);
+    std::fs::remove_file(pkg.join(row(&s, id).path)).unwrap();
+    s.recheck_media().unwrap();
+    // A wide tree of near-empty folders.
+    let tree = dir.path().join("tree");
+    for a in 0..40 {
+        for b in 0..40 {
+            std::fs::create_dir_all(tree.join(format!("{a}/{b}/x/y"))).unwrap();
+        }
+    }
+    let job = s.search_media(tree.display().to_string()).unwrap();
+    s.cancel_job(job).unwrap();
+    let t = Instant::now();
+    let j = wait(&s, job);
+    assert_eq!(j.state, JobStateRow::Cancelled, "{j:?}");
+    assert!(t.elapsed() < Duration::from_secs(20), "{:?}", t.elapsed());
+    assert_eq!(row(&s, id).offline, Some(OfflineReasonRow::Missing));
+    let t = Instant::now();
+    s.close().unwrap();
+    assert!(t.elapsed() < Duration::from_secs(20), "{:?}", t.elapsed());
+}
+
+/// Task 6 review m7: a job that finished before a relink, search or
+/// conversion starts is applied there and still reported by `idle`.
+#[test]
+fn a_job_applied_when_a_search_starts_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = caf(
+        &dir.path().join("in/a.caf"),
+        48_000,
+        2,
+        4800,
+        BitDepth::Float32,
+        0.25,
+    );
+    let s = Session::new_empty().unwrap();
+    while s.idle().unwrap().media_changed {}
+    s.import_audio(vec![a.display().to_string()], None).unwrap();
+    let until = Instant::now() + Duration::from_secs(60);
+    loop {
+        // Refused (nothing is missing), but only after applying what
+        // finished.
+        assert!(s.search_media(dir.path().display().to_string()).is_err());
+        if !s.media().unwrap().is_empty() {
+            break;
+        }
+        assert!(Instant::now() < until, "the import never finished");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(s.idle().unwrap().media_changed);
+    s.close().unwrap();
+}

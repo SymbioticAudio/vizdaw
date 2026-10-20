@@ -152,7 +152,7 @@ pub fn run(
 /// The `(device, inode)` of the file at `path` (following links), `None`
 /// when it cannot be read.
 #[cfg(unix)]
-fn file_id(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn file_id(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
 }
@@ -160,7 +160,7 @@ fn file_id(path: &Path) -> Option<(u64, u64)> {
 /// Without inode numbers a file cannot be matched safely: every
 /// candidate counts as unreadable and is kept (nothing is trashed).
 #[cfg(not(unix))]
-fn file_id(_path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn file_id(_path: &Path) -> Option<(u64, u64)> {
     None
 }
 

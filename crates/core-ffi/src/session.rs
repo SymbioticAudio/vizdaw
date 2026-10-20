@@ -2817,8 +2817,9 @@ impl Session {
         changed
     }
 
-    /// Applies the jobs that finished while an edit was open, now that it
-    /// closed; the next `idle` reports the media change.
+    /// Applies the jobs that finished (while an edit was open, now that it
+    /// closed, or before a new job starts; Task 6 review m7); the next
+    /// `idle` reports the media and document change.
     fn apply_jobs_after_edit(&self, inner: &mut Inner) {
         if self.apply_jobs(inner) {
             inner.news.media_changed = true;
@@ -3665,7 +3666,7 @@ impl Session {
         ffi_guard(|| {
             let f = core_model::format::AudioFormat::from(format);
             let mut inner = lock(&self.inner);
-            self.apply_jobs(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.media_jobs_idle()?;
             if !f.is_valid() {
                 return Err(VizError::Model {
@@ -3732,7 +3733,7 @@ impl Session {
     pub fn convert_media(&self) -> Result<u64, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
-            self.apply_jobs(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.media_jobs_idle()?;
             inner.refresh_media(self.id, false);
             let offline = inner.offline.clone();
@@ -3911,7 +3912,7 @@ impl Session {
             // block the job for good (Task 6 review m2).
             crate::relink::regular_file(&src).map_err(|e| crate::events::bad(&e.to_string()))?;
             let mut inner = lock(&self.inner);
-            self.apply_jobs(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.media_jobs_idle()?;
             let root = inner.root(self.id);
             let format = inner.doc().settings().format;
@@ -3956,9 +3957,10 @@ impl Session {
                 ));
             }
             let mut inner = lock(&self.inner);
-            self.apply_jobs(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.media_jobs_idle()?;
             inner.refresh_media(self.id, false);
+            let root = inner.root(self.id);
             let lost: Vec<crate::relink::Lost> = inner
                 .doc()
                 .media()
@@ -3979,12 +3981,13 @@ impl Session {
                     stem: core_model::document::MediaItem::file_parts(&m.path).1,
                     hash: m.content_hash.clone(),
                     seconds: m.length_frames as f64 / f64::from(m.sample_rate.max(1)),
+                    file: root.join(&m.path),
+                    changed: matches!(inner.offline.get(&m.id), Some(OfflineReasonRow::Changed)),
                 })
                 .collect();
             if lost.is_empty() {
                 return Err(crate::events::bad("no media item is missing"));
             }
-            let root = inner.root(self.id);
             let format = inner.doc().settings().format;
             let named = inner.named_media();
             let unapplied = inner.jobs.unapplied();
