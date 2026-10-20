@@ -22,7 +22,8 @@ struct ProjectBanners: View {
             switch b {
             case .job(let id, let kind, let progress):
                 ProgressView(value: Double(progress)).frame(width: 120)
-                Text(kind == .import ? "Importing audio…" : "Converting media…")
+                    .accessibilityLabel(ProjectBanner.jobText(kind))
+                Text(ProjectBanner.jobText(kind))
                 Spacer()
                 Button("Cancel") { model.cancelJob(id) }
             case .mismatched(let count, let label):

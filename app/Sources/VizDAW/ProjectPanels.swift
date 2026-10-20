@@ -38,7 +38,64 @@ enum FormatPanel {
     }
 }
 
+/// A modal question with one text field (Rename Media, Normalize).
+@MainActor
+enum TextPanel {
+    /// The text entered; nil when cancelled.
+    static func run(title: String, message: String, initial: String, ok: String, label: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: ok)
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(string: initial)
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        field.setAccessibilityLabel(label)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return field.stringValue
+    }
+}
+
+/// A modal yes/no question (deleting media in use).
+@MainActor
+enum ConfirmPanel {
+    static func run(title: String, message: String, ok: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: ok)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+}
+
 extension Panels {
+    /// The file to relink a media item to (Locate…).
+    static func chooseRelink(name: String) -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.audio]
+        panel.prompt = "Relink"
+        panel.message = "Choose the audio file for “\(name)”."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// A folder to search for missing media (Search Folder…).
+    static func chooseFolder() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Search"
+        panel.message = "Choose a folder to search for the missing audio files."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
     /// Audio files to import (any the system reads).
     static func chooseAudio() -> [String] {
         let panel = NSOpenPanel()

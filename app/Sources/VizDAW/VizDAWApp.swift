@@ -45,6 +45,7 @@ struct VizDAWApp: App {
         // The catalog and support folder exist before any project can open
         // (launch arguments, Finder opens), so "Disable ‹plugin›" works.
         LaunchArguments.parseFlags(CommandLine.arguments)
+        MediaModel.channelIsOn = { ControlChannel.active }
         // The control channel (control spec §8) starts before any document
         // opens, so launch-time dialogs already go to it instead of the screen.
         if let path = ControlLaunch.socketPath(
@@ -66,6 +67,10 @@ struct VizDAWApp: App {
             MixerWindow(id: $id, store: appStore)
         }
         .defaultSize(width: 760, height: 560)
+        WindowGroup("Media Pool", id: "media-pool", for: UUID.self) { $id in
+            MediaPoolWindow(id: $id, store: appStore)
+        }
+        .defaultSize(width: 760, height: 420)
         Window("Plugin Manager", id: "plugins") {
             PluginManagerView(model: pluginManager)
         }

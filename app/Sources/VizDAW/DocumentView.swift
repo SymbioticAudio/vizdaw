@@ -25,6 +25,13 @@ struct DocumentView: View {
         ) { _ in
             ReferenceSheet(editor: model.editor)
         }
+        .sheet(
+            isPresented: Binding(
+                get: { model.media.showsRelinkSheet(channelOn: ControlChannel.active) },
+                set: { if !$0 { model.media.leaveOffline() } })
+        ) {
+            RelinkSheet(media: model.media)
+        }
         .alert(
             model.alert?.title ?? "",
             // With the control channel on no sheet opens (control spec §7):

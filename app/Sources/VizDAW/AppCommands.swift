@@ -77,6 +77,9 @@ struct AppCommands: Commands {
             Divider()
             Button("Project Settings…") { projectSettings() }
                 .disabled(doc == nil)
+            Button("Relink Media…") { doc?.media.relinkShown = true }
+                .keyboardShortcut(KeyMenu.shortcut("media.relink"))
+                .disabled(doc?.media.relinkable.isEmpty ?? true)
         }
         CommandGroup(replacing: .undoRedo) {
             Button(doc?.undoTitle ?? "Undo") { doc?.undo() }
@@ -92,6 +95,9 @@ struct AppCommands: Commands {
                 .disabled(docID == nil)
             Button("Plugin Manager") { openWindow(id: "plugins") }
                 .keyboardShortcut(KeyMenu.shortcut("window.plugin_manager"))
+            Button("Media Pool") { if let docID { openWindow(id: "media-pool", value: docID) } }
+                .keyboardShortcut(KeyMenu.shortcut("window.media_pool"))
+                .disabled(docID == nil)
             Divider()
         }
         CommandMenu("Editors") {
@@ -164,6 +170,14 @@ struct AppCommands: Commands {
             Button("Back to Parent Sequence") { doc?.editor.back() }
                 .keyboardShortcut(KeyMenu.shortcut("sequence.back"))
                 .disabled(doc?.editor.navigation.isEmpty ?? true)
+        }
+        CommandMenu("Region") {
+            Button(keyBindings.row(RegionCommands.normalize)?.title ?? "Normalize…") { if let doc { normalize(doc) } }
+                .keyboardShortcut(KeyMenu.shortcut(RegionCommands.normalize))
+                .disabled(doc.map { !RegionCommands.enabled(RegionCommands.normalize, $0) } ?? true)
+            commandItem(RegionCommands.fadeIn, RegionCommands.self)
+            commandItem(RegionCommands.fadeOut, RegionCommands.self)
+            commandItem(RegionCommands.removeFades, RegionCommands.self)
         }
         CommandMenu("Drum") {
             drumToggle("Drum Lane", DrumCommands.markLane)
@@ -287,6 +301,22 @@ struct AppCommands: Commands {
         Button("\(task.title)…") { doc?.selectModify.open(task) }
             .keyboardShortcut(KeyMenu.shortcut(id))
             .disabled(doc == nil)
+    }
+
+    /// Region › Normalize…: asks for the peak level, then normalizes the
+    /// selected regions (Ruling 18's default level).
+    private func normalize(_ doc: DocumentModel) {
+        guard
+            let text = TextPanel.run(
+                title: "Normalize",
+                message: "Set the gain of each selected region so its loudest sample reaches this peak level (dB).",
+                initial: String(RegionCommands.defaultPeakDb), ok: "Normalize", label: "Peak level in dB")
+        else { return }
+        guard let peak = RegionCommands.parsePeak(text) else {
+            doc.alert = AlertItem(title: "Normalize", message: "Enter a level from −96 to 0 dB, like -0.3.")
+            return
+        }
+        report(RegionCommands.normalize(peakDb: peak, doc), doc)
     }
 
     private func projectSettings() {

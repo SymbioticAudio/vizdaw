@@ -30,6 +30,9 @@ public final class MediaModel {
     @ObservationIgnored private var cache: (version: Int, rows: [MediaRow])?
     /// The pool window's selected items.
     public var selection: Set<UInt64> = []
+    /// Whether the control channel is on; the app sets it at launch. The
+    /// model cannot see the app's channel itself.
+    @ObservationIgnored public static var channelIsOn: @MainActor () -> Bool = { false }
     /// The relink sheet is up (Ruling 14).
     public var relinkShown = false
 
@@ -203,8 +206,16 @@ public final class MediaModel {
     /// idle or recheck finds more (`Changed` is known only after the worker
     /// re-hashed the file; preflight I3). Items that went back online are
     /// forgotten, so a new loss is offered again.
-    public func offerRelinkIfNeeded() {
+    ///
+    /// Items are marked offered only when the sheet can actually be shown:
+    /// under the control channel the sheet is suppressed (Ruling 14), so
+    /// they stay unoffered and are offered once the channel is off.
+    public func offerRelinkIfNeeded(channelOn: Bool = MediaModel.channelIsOn()) {
         let ids = Set(relinkable.map(\.id))
+        guard !channelOn else {
+            offered.formIntersection(ids)
+            return
+        }
         let fresh = ids.subtracting(offered)
         offered = ids
         if !fresh.isEmpty { relinkShown = true }
@@ -212,6 +223,13 @@ public final class MediaModel {
 
     /// "Leave Offline".
     public func leaveOffline() { relinkShown = false }
+
+    /// Whether the document window shows the relink sheet: asked for,
+    /// something left to relink, and never while the control channel is
+    /// on (Ruling 14).
+    public func showsRelinkSheet(channelOn: Bool) -> Bool {
+        relinkShown && !channelOn && !relinkable.isEmpty
+    }
 
     /// Region `event`'s waveform over ticks `[fromTick, toTick)` in
     /// `columns` columns (at most 8192); nil when it cannot be read
