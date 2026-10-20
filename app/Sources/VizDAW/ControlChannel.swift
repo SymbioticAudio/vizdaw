@@ -478,6 +478,7 @@ final class AppControlHost: ControlHost {
 
     func showMixer(_ doc: UUID) { ControlWindows.openWindow?(id: "mixer", value: doc) }
     func showPluginManager() { ControlWindows.openWindow?(id: "plugins") }
+    func showMediaPool(_ doc: UUID) { ControlWindows.openWindow?(id: "media-pool", value: doc) }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { EditorWindows.tearOff(appStore, doc: doc, kind: kind) }
 
     func closeDocument(_ doc: UUID) {

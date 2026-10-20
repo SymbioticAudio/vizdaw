@@ -284,6 +284,44 @@ const IMPORT_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// A media item by ID (plan 5b).
+const MEDIA_ID: ParamSpec = ParamSpec {
+    name: "media",
+    kind: ParamKind::Int {
+        min: 0,
+        max: i64::MAX / 2,
+    },
+    required: false,
+    help: "The media item (see state.get media).",
+};
+
+const RELINK_PARAMS: &[ParamSpec] = &[
+    MEDIA_ID,
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The file to relink the item to (answers the Relink dialog).",
+    },
+];
+
+const RENAME_PARAMS: &[ParamSpec] = &[
+    MEDIA_ID,
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The item's new name (answers the Rename Media dialog).",
+    },
+];
+
+const NORMALIZE_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "peak_db",
+    kind: ParamKind::Text,
+    required: false,
+    help: "The peak level in dBFS, -96 to 0, as text (\"-0.3\"); answers the Normalize dialog.",
+}];
+
 /// Every menu command, in menu order.
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
@@ -366,6 +404,27 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         )
     },
+    CommandSpec {
+        params: RELINK_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Relink",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("media.relink", "File", "Relink Media…", None, true)
+    },
+    key_only(cmd("media.compact", "Media", "Compact Media", None, true)),
+    CommandSpec {
+        params: RENAME_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Rename Media",
+            when: "always",
+            always: true,
+            answered_by: &["name"],
+        }],
+        ..key_only(cmd("media.rename", "Media", "Rename Media…", None, true))
+    },
     cmd("edit.undo", "Edit", "Undo", Some("⌘Z"), true),
     cmd("edit.redo", "Edit", "Redo", Some("⇧⌘Z"), true),
     cmd("window.mixer", "Window", "Mixer", Some("⌥⌘M"), true),
@@ -376,6 +435,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌥⌘P"),
         false,
     ),
+    cmd("window.media_pool", "Window", "Media Pool", None, true),
     cmd(
         "editors.piano_roll",
         "Editors",
@@ -544,6 +604,31 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: ON,
         ..cmd("drum.timeline", "Drum", "Timeline View", None, true)
     },
+    CommandSpec {
+        params: NORMALIZE_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Normalize",
+            when: "always",
+            always: true,
+            answered_by: &["peak_db"],
+        }],
+        ..cmd("region.normalize", "Region", "Normalize…", None, true)
+    },
+    cmd(
+        "region.fade_in_to_cursor",
+        "Region",
+        "Fade In to Cursor",
+        None,
+        true,
+    ),
+    cmd(
+        "region.fade_out_from_cursor",
+        "Region",
+        "Fade Out from Cursor",
+        None,
+        true,
+    ),
+    cmd("region.remove_fades", "Region", "Remove Fades", None, true),
     cmd(
         "transport.play_stop",
         "Transport",

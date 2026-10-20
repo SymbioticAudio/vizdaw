@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        111,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media"
+        119,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -814,6 +814,113 @@ fn project_settings_is_a_dialog_without_a_format() {
         ok("command.run", json!({ "id": "media.convert" })),
         Command::CommandRun { .. }
     ));
+}
+
+/// Plan 5b: the media pool's and the Region menu's commands take their
+/// dialogs' answers as parameters; hostile values are refused by type
+/// and range before they reach the app.
+#[test]
+fn media_and_region_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    // Dialogs without their answers.
+    for (id, dialog) in [
+        ("media.relink", "Relink"),
+        ("media.rename", "Rename Media"),
+        ("region.normalize", "Normalize"),
+    ] {
+        let (code, message) = err("command.run", run(id, json!({})));
+        assert_eq!(code, ErrorCode::DialogRequired, "{id}");
+        assert!(message.contains(dialog), "{id}: {message}");
+    }
+    // The good forms.
+    let Command::CommandRun { args, .. } = ok(
+        "command.run",
+        run(
+            "media.relink",
+            json!({ "media": 3, "path": "/tmp/x y.wav" }),
+        ),
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        args,
+        vec![
+            ("media".to_string(), ArgValue::Int(3)),
+            ("path".to_string(), ArgValue::Text("/tmp/x y.wav".into())),
+        ]
+    );
+    for (id, params) in [
+        ("media.rename", json!({ "media": 0, "name": "Kick" })),
+        ("region.normalize", json!({ "peak_db": "-0.3" })),
+        ("media.compact", json!({})),
+        ("window.media_pool", json!({})),
+        ("region.fade_in_to_cursor", json!({})),
+        ("region.fade_out_from_cursor", json!({})),
+        ("region.remove_fades", json!({})),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params)),
+                Command::CommandRun { .. }
+            ),
+            "{id}"
+        );
+    }
+    // Hostile values.
+    for (id, params) in [
+        ("media.relink", json!({ "media": -1, "path": "/a.wav" })),
+        (
+            "media.relink",
+            json!({ "media": i64::MAX, "path": "/a.wav" }),
+        ),
+        ("media.relink", json!({ "media": 1.5, "path": "/a.wav" })),
+        ("media.relink", json!({ "media": "3", "path": "/a.wav" })),
+        (
+            "media.relink",
+            json!({ "media": 3, "path": "relative.wav" }),
+        ),
+        ("media.relink", json!({ "media": 3, "path": "" })),
+        ("media.relink", json!({ "media": 3, "path": 7 })),
+        (
+            "media.rename",
+            json!({ "media": 3, "name": "x".repeat(100_000) }),
+        ),
+        ("media.rename", json!({ "media": 3, "name": ["x"] })),
+        ("region.normalize", json!({ "peak_db": -1 })),
+        ("region.normalize", json!({ "peak_db": null, "extra": 1 })),
+        ("media.compact", json!({ "media": 1 })),
+        ("region.remove_fades", json!({ "events": [1] })),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    // Where they appear.
+    let spec = |id: &str| registry::find(id).unwrap();
+    assert_eq!(
+        (spec("media.relink").menu, spec("media.relink").menu_item),
+        ("File", true)
+    );
+    assert_eq!(
+        (spec("media.rename").menu, spec("media.rename").menu_item),
+        ("Media", false)
+    );
+    assert_eq!(
+        (spec("media.compact").menu, spec("media.compact").menu_item),
+        ("Media", false)
+    );
+    assert_eq!(spec("window.media_pool").menu, "Window");
+    for id in [
+        "region.normalize",
+        "region.fade_in_to_cursor",
+        "region.fade_out_from_cursor",
+        "region.remove_fades",
+    ] {
+        assert_eq!(
+            (spec(id).menu, spec(id).menu_item, spec(id).document),
+            ("Region", true, true),
+            "{id}"
+        );
+    }
 }
 
 #[test]

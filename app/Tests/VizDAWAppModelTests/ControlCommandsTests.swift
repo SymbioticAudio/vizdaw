@@ -18,6 +18,7 @@ final class FakeControlHost: ControlHost {
     func showPluginManager() { calls.append("plugins") }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { calls.append("tear \(kind.rawValue)") }
     func closeDocument(_ doc: UUID) { calls.append("close") }
+    func showMediaPool(_ doc: UUID) { calls.append("media pool") }
 }
 
 @MainActor
@@ -359,6 +360,97 @@ final class FakeControlHost: ControlHost {
             return
         }
         #expect(info.format.sampleRate == 48_000)
+    }
+
+    // MARK: Plan 5b: the media pool and the Region menu
+
+    func args(_ pairs: [(String, ControlValue)]) -> [ControlArg] {
+        pairs.map { ControlArg(name: $0.0, value: $0.1) }
+    }
+
+    @Test func relinkTakesTheItemAndTheFileAndAnswersWhenTheJobEnds() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        fake.mediaRows = [mediaRow(3, "kick", offline: .missing)]
+        model.refreshAfterJob()
+        let run = { (a: [ControlArg]) in
+            ControlCommands.run("media.relink", args: a, doc: (id, model), store: store, host: host)
+        }
+        #expect(failure(run([]))?.code == .dialogRequired)
+        #expect(failure(run(args([("path", .text(value: "/x/kick.wav"))])))?.code == .invalidParams)
+        #expect(
+            failure(run(args([("path", .text(value: "/x/kick.wav")), ("media", .int(value: 99))])))?.code
+                == .invalidParams)
+        let out = run(args([("path", .text(value: "/x/kick.wav")), ("media", .int(value: 3))]))
+        guard case .job(let command, _, _) = out else {
+            Issue.record("\(out)")
+            return
+        }
+        #expect(command == "media.relink")
+        #expect(fake.relinks.first?.media == 3 && fake.relinks.first?.path == "/x/kick.wav")
+    }
+
+    @Test func renameAndCompactRunWithoutDialogs() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        fake.mediaRows = [mediaRow(3, "kick")]
+        model.refreshAfterJob()
+        let run = { (cmd: String, a: [ControlArg]) in
+            ControlCommands.run(cmd, args: a, doc: (id, model), store: store, host: host)
+        }
+        #expect(failure(run("media.rename", args([("media", .int(value: 3))])))?.code == .dialogRequired)
+        #expect(
+            failure(run("media.rename", args([("media", .int(value: 3)), ("name", .text(value: "   "))])))?.code
+                == .invalidParams)
+        #expect(
+            failure(run("media.rename", args([("media", .int(value: 7)), ("name", .text(value: "x"))])))?.code
+                == .invalidParams)
+        #expect(failure(run("media.rename", args([("name", .text(value: "x"))])))?.code == .invalidParams)
+        guard case .done = run("media.rename", args([("media", .int(value: 3)), ("name", .text(value: "Kick"))]))
+        else {
+            Issue.record("rename")
+            return
+        }
+        #expect(fake.renamed.map(\.1) == ["Kick"])
+        guard case .done = run("media.compact", []) else {
+            Issue.record("compact")
+            return
+        }
+        #expect(fake.compactions == 1)
+        fake.poolError = .Model(message: "nothing to compact")
+        #expect(failure(run("media.compact", []))?.message.contains("nothing to compact") == true)
+        guard case .done = run("window.media_pool", []) else {
+            Issue.record("window")
+            return
+        }
+        #expect(host.calls.contains("media pool"))
+    }
+
+    @Test func regionCommandsActOnTheSelectionAndCheckThePeak() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        let run = { (cmd: String, a: [ControlArg]) in
+            ControlCommands.run(cmd, args: a, doc: (id, model), store: store, host: host)
+        }
+        #expect(failure(run(RegionCommands.normalize, []))?.code == .dialogRequired)
+        for bad in ["nan", "inf", "1", "-97", "abc", "", "-1e999"] {
+            #expect(
+                failure(run(RegionCommands.normalize, args([("peak_db", .text(value: bad))])))?.code
+                    == .invalidParams, "\(bad)")
+        }
+        // No selection: unavailable, nothing sent.
+        #expect(failure(run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])))?.code == .unavailable)
+        #expect(failure(run(RegionCommands.removeFades, []))?.code == .unavailable)
+        model.editor.setSelection(SelectionRow(timeRange: nil, lanes: [], events: [5]))
+        guard case .done = run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])) else {
+            Issue.record("normalize")
+            return
+        }
+        #expect(fake.normalizations.last?.peakDb == -1)
+        fake.normalizeError = .Busy(message: "still being built")
+        #expect(failure(run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])))?.code == .busy)
+        guard case .done = run(RegionCommands.fadeIn, []) else {
+            Issue.record("fade")
+            return
+        }
+        #expect(fake.edits.last == .audio(edit: .fadeTo(events: [5], at: 0, fadeIn: true)))
     }
 
     // MARK: Fix round 1: how a finished job is answered (I-2)

@@ -135,6 +135,8 @@ public protocol ControlHost: AnyObject {
     func showPluginManager()
     func tearOff(_ doc: UUID, kind: DetailEditorKind)
     func closeDocument(_ doc: UUID)
+    /// Opens document `doc`'s media pool window (plan 5b).
+    func showMediaPool(_ doc: UUID)
     var nudge: NudgeSettings { get }
     /// The app's key bindings (plan 4f).
     var keys: KeyBindings { get }
@@ -171,6 +173,7 @@ public enum ControlCommands {
         "transport.play_stop", "transport.loop", "transport.return_to_start",
         "keys.save", "keys.load", "keys.reset",
         "file.project_settings", "media.import", "media.convert",
+        "media.relink", "media.compact", "media.rename", "window.media_pool",
     ]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
@@ -180,7 +183,7 @@ public enum ControlCommands {
     /// Every registry ID `run` handles (a test checks it is all of them).
     public static var handled: Set<String> {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
-            .union(fieldKeys.keys)
+            .union(fieldKeys.keys).union(RegionCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids)
     }
 
@@ -285,6 +288,39 @@ public enum ControlCommands {
             }
         case "window.mixer":
             host.showMixer(docID)
+        case "window.media_pool":
+            host.showMediaPool(docID)
+        case "media.relink":
+            guard let path = args.text("path") else { return .failed(.dialog("Relink", "path")) }
+            guard let media = args.int("media").map(UInt64.init), m.media.row(media) != nil else {
+                return .failed(.of(.invalidParams, "media.relink: `media` must name a media item (see state.get media)"))
+            }
+            do {
+                return .job(command: id, doc: docID, job: try m.session.relinkMedia(media: media, path: path))
+            } catch {
+                return .failed(.thrown(error, "Relink Failed"))
+            }
+        case "media.compact":
+            guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+            m.media.compact()
+        case "media.rename":
+            guard let name = args.text("name") else { return .failed(.dialog("Rename Media", "name")) }
+            guard let media = args.int("media").map(UInt64.init), m.media.row(media) != nil else {
+                return .failed(.of(.invalidParams, "media.rename: `media` must name a media item (see state.get media)"))
+            }
+            guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .failed(.of(.invalidParams, "media.rename: the name is empty"))
+            }
+            guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+            m.media.rename(media, to: name)
+        case RegionCommands.normalize:
+            guard let text = args.text("peak_db") else { return .failed(.dialog("Normalize", "peak_db")) }
+            guard let peak = RegionCommands.parsePeak(text) else {
+                return .failed(.of(.invalidParams, "`peak_db` must be a level from -96 to 0 dB, like \"-0.3\""))
+            }
+            if let f = failure(RegionCommands.normalize(peakDb: peak, m)) { return f }
+        case _ where RegionCommands.ids.contains(id):
+            if let f = failure(RegionCommands.run(id, m)) { return f }
         case _ where detail[id] != nil:
             m.editor.showDetail(detail[id] ?? .pianoRoll, shown: m.selectedSeq)
         case _ where torn[id] != nil:

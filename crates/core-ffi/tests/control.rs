@@ -394,6 +394,24 @@ fn media_and_project_results_as_json() {
     });
     assert_eq!(v["items"][0]["offline_reason"], "format");
     assert_eq!(v["items"][0]["offline"], true);
+    assert_eq!(v["items"][0]["used_percent"], json!(40.0));
+    let changed = result_json(&ControlResult::Media {
+        doc: "D".into(),
+        items: vec![MediaRow {
+            id: 3,
+            name: "pad".into(),
+            path: "Media/pad.caf".into(),
+            channels: 2,
+            frames: 10,
+            sample_rate: 48_000,
+            origin: MediaOriginRow::Imported,
+            original_name: None,
+            offline: Some(OfflineReasonRow::Changed),
+            uses: 0,
+            used_percent: 0.0,
+        }],
+    });
+    assert_eq!(changed["items"][0]["offline_reason"], "changed");
     let p = result_json(&ControlResult::Project {
         doc: "D".into(),
         info: ProjectInfoRow {

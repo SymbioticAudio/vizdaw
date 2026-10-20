@@ -441,6 +441,8 @@ pub enum WindowKindRow {
     Settings,
     /// Anything else (menus' windows are not listed).
     Other,
+    /// A media pool window (plan 5b).
+    MediaPool,
 }
 
 /// A VizDAW window.
@@ -1003,6 +1005,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                     crate::media::OfflineReasonRow::Changed => "changed",
                 }),
                 "uses": m.uses,
+                "used_percent": m.used_percent,
             })).collect::<Vec<_>>(),
         }),
         ControlResult::Project { doc, info } => json!({
@@ -1110,6 +1113,7 @@ fn window_kind(k: WindowKindRow) -> &'static str {
         WindowKindRow::PluginManager => "plugin_manager",
         WindowKindRow::Settings => "settings",
         WindowKindRow::Other => "other",
+        WindowKindRow::MediaPool => "media_pool",
     }
 }
 
