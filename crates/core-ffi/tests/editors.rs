@@ -33,6 +33,7 @@ fn plugin(format: PluginFormatTag, id: &str) -> PluginRefRow {
 
 /// The demo with `p` on the built-in synth, running: (session, slot).
 fn with_insert(p: PluginRefRow) -> (Arc<Session>, u64) {
+    common::assert_exe_dir_small();
     let s = Session::new_demo().unwrap();
     let synth = s.mixer().unwrap().strips[0].id;
     s.add_insert(synth, None, p).unwrap();

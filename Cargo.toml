@@ -10,3 +10,10 @@ rust-version = "1.85"
 [profile.release]
 # core-ffi catches panics at the FFI boundary; aborting would kill the app.
 panic = "unwind"
+
+# macOS's default "unpacked" split-debuginfo leaves every build's object files
+# in target/debug/deps, which grows to hundreds of thousands of entries;
+# CoreFoundation enumerates a test binary's directory as its main bundle, so
+# Audio Unit tests then stall for minutes. "packed" keeps one .dSYM per binary.
+[profile.dev]
+split-debuginfo = "packed"
