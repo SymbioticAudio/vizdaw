@@ -46,6 +46,24 @@ struct Txn {
     executed: bool,
 }
 
+/// A history group (sub-project 5 spec §4.7): every step made between
+/// [`History::begin_group`] and [`History::end_group`] becomes one step.
+/// Unlike a transaction, steps inside it stay undoable and redoable one by
+/// one until it ends, and transactions (drags, edits) may open inside it.
+#[derive(Debug, Clone)]
+struct Group {
+    /// `past.len()` when it opened: undo inside it stops there.
+    start: usize,
+    /// The redo stack when it opened (restored when it made no step).
+    base_future: Vec<Version>,
+    /// Redo inside it may not reach below this many future versions:
+    /// those were undone before it opened (0 once it made a step, which
+    /// clears the redo stack).
+    redo_floor: usize,
+    /// Whether any step was made inside it.
+    executed: bool,
+}
+
 /// Undo/redo stacks plus the selection and the last modification.
 #[derive(Debug, Clone)]
 pub struct History {
@@ -55,6 +73,7 @@ pub struct History {
     last_modify: Option<Modify>,
     selection: Selection,
     txn: Option<Txn>,
+    group: Option<Group>,
 }
 
 impl History {
@@ -71,6 +90,7 @@ impl History {
             last_modify: None,
             selection: Selection::default(),
             txn: None,
+            group: None,
         }
     }
 
@@ -114,11 +134,28 @@ impl History {
         self.future.last().map(|v| v.label.as_str())
     }
 
+    /// The lowest `past.len()` undo may reach: inside a transaction or a
+    /// group, only their own steps can be undone.
+    fn undo_floor(&self) -> usize {
+        let t = self.txn.as_ref().map_or(0, |t| t.start);
+        let g = self.group.as_ref().map_or(0, |g| g.start);
+        t.max(g)
+    }
+
+    /// Whether redo may run: never inside a transaction; inside a group,
+    /// only steps undone inside it.
+    fn can_redo(&self) -> bool {
+        self.txn.is_none()
+            && self
+                .group
+                .as_ref()
+                .is_none_or(|g| self.future.len() > g.redo_floor)
+    }
+
     /// The document [`History::undo`] would go back to (inside a
     /// transaction, only its own steps can be undone).
     pub fn peek_undo(&self) -> Option<&Document> {
-        let floor = self.txn.as_ref().map_or(0, |t| t.start);
-        if self.past.len() <= floor {
+        if self.past.len() <= self.undo_floor() {
             return None;
         }
         self.past.last().map(|v| &v.doc)
@@ -127,7 +164,7 @@ impl History {
     /// The document [`History::redo`] would bring back (none while a
     /// transaction is open).
     pub fn peek_redo(&self) -> Option<&Document> {
-        if self.txn.is_some() {
+        if !self.can_redo() {
             return None;
         }
         self.future.last().map(|v| &v.doc)
@@ -149,7 +186,8 @@ impl History {
         let txn = self
             .txn
             .iter()
-            .flat_map(|t| std::iter::once(&t.base).chain(t.base_future.iter()));
+            .flat_map(|t| std::iter::once(&t.base).chain(t.base_future.iter()))
+            .chain(self.group.iter().flat_map(|g| g.base_future.iter()));
         let mut last: Option<&Document> = None;
         for v in self
             .past
@@ -178,8 +216,13 @@ impl History {
         self.txn.is_some()
     }
 
+    /// Whether a group is open.
+    pub fn in_group(&self) -> bool {
+        self.group.is_some()
+    }
+
     fn trim(&mut self) {
-        if self.txn.is_some() {
+        if self.txn.is_some() || self.group.is_some() {
             return;
         }
         let depth =
@@ -222,6 +265,7 @@ impl History {
             if let Some(t) = self.txn.as_mut() {
                 t.executed = true;
             }
+            self.group_stepped();
             self.trim();
         }
         let sel = applied.selection.unwrap_or_else(|| self.selection.clone());
@@ -249,8 +293,7 @@ impl History {
     /// Steps back one version. Inside a transaction, only the transaction's
     /// own steps can be undone.
     pub fn undo(&mut self) -> Result<()> {
-        let floor = self.txn.as_ref().map_or(0, |t| t.start);
-        if self.past.len() <= floor {
+        if self.past.len() <= self.undo_floor() {
             return Err(ModelError::invalid("nothing to undo"));
         }
         let prev = self
@@ -262,9 +305,10 @@ impl History {
         Ok(())
     }
 
-    /// Steps forward one version. Refused while a transaction is open.
+    /// Steps forward one version. Refused while a transaction is open,
+    /// and inside a group for steps undone before it opened.
     pub fn redo(&mut self) -> Result<()> {
-        if self.txn.is_some() {
+        if !self.can_redo() {
             return Err(ModelError::invalid("nothing to redo"));
         }
         let next = self
@@ -312,6 +356,63 @@ impl History {
             Vec::new()
         } else {
             t.base_future
+        };
+        if t.executed {
+            self.group_stepped();
+        }
+        self.trim();
+        Ok(())
+    }
+
+    /// A step was made: an open group made one, and its redo stack is gone.
+    fn group_stepped(&mut self) {
+        if let Some(g) = self.group.as_mut() {
+            g.executed = true;
+            g.redo_floor = 0;
+        }
+    }
+
+    /// Opens a group (a recording pass, spec §4.7): every step until
+    /// [`History::end_group`] becomes one. Refused while a group or a
+    /// transaction is open.
+    pub fn begin_group(&mut self) -> Result<()> {
+        if self.group.is_some() {
+            return Err(ModelError::invalid("a group is already open"));
+        }
+        if self.txn.is_some() {
+            return Err(ModelError::invalid("finish the open edit first"));
+        }
+        self.group = Some(Group {
+            start: self.past.len(),
+            base_future: self.future.clone(),
+            redo_floor: self.future.len(),
+            executed: false,
+        });
+        Ok(())
+    }
+
+    /// Closes the group: its steps become one step named `label` ("Undo
+    /// Record"); a group that made none adds nothing and keeps the redo
+    /// stack it found. Refused while a transaction is open (the step
+    /// would cut it in two) or when no group is open.
+    pub fn end_group(&mut self, label: impl Into<String>) -> Result<()> {
+        if self.txn.is_some() {
+            return Err(ModelError::invalid("finish the open edit first"));
+        }
+        let g = self
+            .group
+            .take()
+            .ok_or_else(|| ModelError::invalid("no open group"))?;
+        if self.past.len() > g.start {
+            self.past.truncate(g.start + 1);
+            self.present.label = label.into();
+            self.present.at = Timestamp::now();
+        }
+        // Versions undone inside the group are intermediate states.
+        self.future = if g.executed {
+            Vec::new()
+        } else {
+            g.base_future
         };
         self.trim();
         Ok(())

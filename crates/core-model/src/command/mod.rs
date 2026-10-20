@@ -6,6 +6,7 @@ pub mod event;
 pub mod lane;
 pub mod media;
 pub mod mixer;
+pub mod record;
 pub mod reference;
 pub mod routing;
 mod select;
@@ -19,6 +20,7 @@ pub use event::EventCmd;
 pub use lane::LaneCmd;
 pub use media::{MediaCmd, MediaSwap};
 pub use mixer::MixerCmd;
+pub use record::{LaneRecord, RecordPass, RecordedContent, RecordedMedia, RecordedRegion};
 pub use reference::ReferenceCmd;
 pub use routing::RoutingCmd;
 pub use sequence::SequenceCmd;
@@ -88,6 +90,8 @@ pub enum Command {
     Mixer(MixerCmd),
     /// Document-settings edits.
     Settings(SettingsCmd),
+    /// A finished recording pass, applied whole (sub-project 5 spec §4.7).
+    Record(RecordPass),
     /// Select events by rule, then optionally modify them (or copies).
     SelectAndModify {
         /// Rule; `None` uses the current selection as is.
@@ -115,6 +119,7 @@ impl Command {
             Command::Media(c) => c.name(),
             Command::Mixer(c) => c.name(),
             Command::Settings(c) => c.name(),
+            Command::Record(p) => p.name(),
             Command::SelectAndModify { modify, .. } => {
                 modify.as_ref().map_or("Select", Modify::name)
             }
@@ -180,6 +185,10 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
         }
         Command::Settings(c) => {
             settings::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::Record(p) => {
+            record::apply(&mut d, p, &mut report)?;
             None
         }
         Command::SelectAndModify {
