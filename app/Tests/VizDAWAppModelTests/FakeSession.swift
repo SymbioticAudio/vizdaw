@@ -351,6 +351,49 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         waveformCalls.append((event, fromTick, toTick, columns))
         return try overview(media: 0, fromFrame: 0, toFrame: 1, columns: columns)
     }
+    // MARK: Media pool (plan 5b Task 6)
+
+    var renamed: [(UInt64, String)] = []
+    var removedMedia: [UInt64] = []
+    var compactions = 0
+    var relinks: [(media: UInt64, path: String)] = []
+    var searches: [String] = []
+    /// What `mediaUsers` answers, per item.
+    var usersTable: [UInt64: [MediaUseRow]] = [:]
+    /// Thrown by the pool's edits.
+    var poolError: VizError?
+    func renameMedia(media: UInt64, name: String) throws -> DocSnapshot {
+        if let e = poolError { throw e }
+        renamed.append((media, name))
+        return commandResult()
+    }
+    func removeMedia(media: UInt64) throws -> DocSnapshot {
+        if let e = poolError { throw e }
+        removedMedia.append(media)
+        return commandResult()
+    }
+    func compactMedia() throws -> DocSnapshot {
+        if let e = poolError { throw e }
+        compactions += 1
+        return commandResult()
+    }
+    func mediaUsers(media: UInt64) throws -> [MediaUseRow] { usersTable[media] ?? [] }
+    func mediaFile(media: UInt64) throws -> String { "/tmp/pool/\(media).caf" }
+    func relinkMedia(media: UInt64, path: String) throws -> UInt64 {
+        relinks.append((media, path))
+        let id = UInt64(3000 + relinks.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .relink, progress: 1, state: jobStartState, message: nil, problems: [], created: [media])
+        return id
+    }
+    func searchMedia(folder: String) throws -> UInt64 {
+        searches.append(folder)
+        let id = UInt64(4000 + searches.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .relink, progress: 1, state: jobStartState, message: nil, problems: [], created: [])
+        return id
+    }
+
     /// `normalizeRegions` calls; `normalizeError` is thrown instead.
     var normalizations: [(events: [UInt64], peakDb: Float)] = []
     var normalizeError: VizError?

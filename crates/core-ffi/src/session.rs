@@ -160,6 +160,39 @@ impl Inner {
         }
     }
 
+    /// Every package-relative path a history state references: no job
+    /// may give a new file one of these names, even when the file is
+    /// missing (plan 5b Ruling 12; final review r2). Their users
+    /// (`import_reserved`, `relink`) compare them without case, as macOS
+    /// volumes resolve names (preflight I2).
+    fn reserved_names(&self) -> std::collections::BTreeSet<String> {
+        self.named_media().into_keys().collect()
+    }
+
+    /// [`Inner::reserved_names`] with the content hash each path names (a
+    /// relink uses a file already in `Media/` in place only when no state
+    /// names its path for other audio; preflight M7).
+    fn named_media(&self) -> std::collections::BTreeMap<String, Option<String>> {
+        self.history.referenced_media_anywhere()
+    }
+
+    /// `Busy` while a Format, Convert or Relink job has not been applied:
+    /// each captures the project format and the items' files when it
+    /// starts, so another such job may not start meanwhile (5a Task 11
+    /// review Minor 4; preflight M3). An import does not block them.
+    fn media_jobs_idle(&self) -> Result<(), VizError> {
+        use crate::jobs::JobKindRow;
+        if self
+            .jobs
+            .pending(&[JobKindRow::Format, JobKindRow::Convert, JobKindRow::Relink])
+        {
+            return Err(VizError::Busy {
+                message: "Wait for the media job to finish.".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// The media root: the package, or the untitled scratch package.
     fn root(&self, id: u64) -> std::path::PathBuf {
         self.path
@@ -2112,6 +2145,12 @@ impl Session {
 /// Test hooks that are not part of the app's interface.
 #[cfg(feature = "test-hooks")]
 impl Session {
+    /// The engine host's media table for this session: `(media, absolute
+    /// path)` of every file reloads play (test hook, preflight M2).
+    pub fn debug_engine_media(&self) -> Vec<(u64, String)> {
+        host::debug_media(self.id)
+    }
+
     /// True when every job thread has ended, applied or not (test hook).
     pub fn debug_jobs_settled(&self) -> bool {
         lock(&self.inner).jobs.settled()
@@ -2629,6 +2668,13 @@ pub(crate) fn discard(root: &Path, w: crate::jobs::Work) {
             .filter_map(|(_, r)| r.ok())
             .map(|i| i.path)
             .collect(),
+        // Only files the job wrote; a file it found in `Media/` stays.
+        Work::Relink { files } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .filter(|r| r.made)
+            .map(|r| r.file.path)
+            .collect(),
         Work::Cancelled => Vec::new(),
     };
     for f in files {
@@ -2671,6 +2717,11 @@ impl Session {
                         vec![],
                     ),
                 },
+                Work::Relink { files } => {
+                    let (done, problems) = apply_relink(inner, &root, files);
+                    changed |= !done.is_empty();
+                    row(id, kind, JobStateRow::Done, None, problems, done)
+                }
                 Work::Convert { format, files, .. } => {
                     let was_format = format.is_some();
                     match apply_convert(inner, &root, format, files) {
@@ -2837,6 +2888,74 @@ fn apply_import(
     }
 }
 
+/// Applies a finished relink job: one undo step "Relink Media" per item
+/// (Ruling 9). A refused relink (the file is too short) removes the file
+/// the job made and becomes a problem. Returns the relinked items and
+/// the problems.
+fn apply_relink(
+    inner: &mut Inner,
+    root: &Path,
+    files: Vec<(
+        core_model::ids::MediaId,
+        Result<crate::jobs::RelinkFile, String>,
+    )>,
+) -> (Vec<u64>, Vec<String>) {
+    use core_model::command::MediaCmd;
+    let mut done = Vec::new();
+    let mut problems = Vec::new();
+    for (m, r) in files {
+        let f = match r {
+            Ok(f) => f,
+            Err(e) => {
+                problems.push(e);
+                continue;
+            }
+        };
+        let name = inner
+            .doc()
+            .media()
+            .get(&m)
+            .map_or_else(|| m.to_string(), |x| x.name.clone());
+        // Never the model's region-length refusal for a file without
+        // audio (Task 1 carry); `relink_file` refuses one already.
+        if f.file.length_frames == 0 {
+            if f.made {
+                let _ = std::fs::remove_file(root.join(&f.file.path));
+            }
+            problems.push(format!("{name}: the file holds no audio"));
+            continue;
+        }
+        let cmd = Command::Media(MediaCmd::Relink {
+            media: m,
+            path: f.file.path.clone(),
+            content_hash: Some(f.file.content_hash.clone()),
+            length_frames: f.file.length_frames,
+            channels: f.file.channels,
+            sample_rate: f.file.sample_rate,
+        });
+        match inner.history.execute(&cmd, &ViewFilter::default()) {
+            Ok(_) => {
+                inner.changed.remove(&m);
+                done.push(m.0);
+            }
+            Err(e) => {
+                if f.made {
+                    let _ = std::fs::remove_file(root.join(&f.file.path));
+                }
+                let why = match e {
+                    core_model::ModelError::OutOfRange {
+                        field: "relink.length_frames",
+                        ..
+                    } => "the file is shorter than the regions using this item".to_string(),
+                    other => other.to_string(),
+                };
+                problems.push(format!("{name}: {why}"));
+            }
+        }
+    }
+    (done, problems)
+}
+
 /// `(media, absolute file, stem)` per item to convert.
 type ConvertList = Vec<(core_model::ids::MediaId, PathBuf, String)>;
 
@@ -2879,6 +2998,7 @@ fn convert_files(
     root: &Path,
     items: ConvertList,
     format: core_model::format::AudioFormat,
+    reserved: &std::collections::BTreeSet<String>,
     progress: &std::sync::atomic::AtomicU32,
     cancel: &std::sync::atomic::AtomicBool,
     kind: crate::jobs::JobKindRow,
@@ -2887,12 +3007,13 @@ fn convert_files(
     let n = items.len().max(1) as f32;
     let mut files: ConvertFiles = Vec::new();
     for (k, (media, path, stem)) in items.into_iter().enumerate() {
-        let r = core_media::import::import_as(
+        let r = core_media::import::import_reserved(
             importer.as_ref(),
             &path,
             root,
             format,
             &stem,
+            reserved,
             &mut |f| {
                 progress.store(
                     ((k as f32 + f) / n).to_bits(),
@@ -3377,6 +3498,7 @@ impl Session {
             }
             let root = inner.root(self.id);
             let format = inner.doc().settings().format;
+            let reserved = inner.reserved_names();
             inner
                 .jobs
                 .spawn(crate::jobs::JobKindRow::Import, move |progress, cancel| {
@@ -3389,11 +3511,17 @@ impl Session {
                             .file_name()
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_else(|| p.clone());
-                        let r = core_media::import::import_file(
+                        let stem = path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let r = core_media::import::import_reserved(
                             importer.as_ref(),
                             &path,
                             &root,
                             format,
+                            &stem,
+                            &reserved,
                             &mut |f| {
                                 progress.store(
                                     ((k as f32 + f) / n).to_bits(),
@@ -3463,6 +3591,8 @@ impl Session {
         ffi_guard(|| {
             let f = core_model::format::AudioFormat::from(format);
             let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            inner.media_jobs_idle()?;
             if !f.is_valid() {
                 return Err(VizError::Model {
                     message: format!("{} Hz is not a project rate", f.sample_rate),
@@ -3492,6 +3622,7 @@ impl Session {
                 .collect();
             let items = convert_list(&inner, self.id, |_| true);
             let root = inner.root(self.id);
+            let reserved = inner.reserved_names();
             inner
                 .jobs
                 .spawn(crate::jobs::JobKindRow::Format, move |progress, cancel| {
@@ -3512,6 +3643,7 @@ impl Session {
                         &root,
                         items,
                         f,
+                        &reserved,
                         progress,
                         cancel,
                         crate::jobs::JobKindRow::Format,
@@ -3526,6 +3658,8 @@ impl Session {
     pub fn convert_media(&self) -> Result<u64, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            inner.media_jobs_idle()?;
             inner.refresh_media(self.id, false);
             let offline = inner.offline.clone();
             let items = convert_list(&inner, self.id, |m| {
@@ -3539,6 +3673,7 @@ impl Session {
             });
             let f = inner.doc().settings().format;
             let root = inner.root(self.id);
+            let reserved = inner.reserved_names();
             inner
                 .jobs
                 .spawn(crate::jobs::JobKindRow::Convert, move |progress, cancel| {
@@ -3546,6 +3681,7 @@ impl Session {
                         &root,
                         items,
                         f,
+                        &reserved,
                         progress,
                         cancel,
                         crate::jobs::JobKindRow::Convert,
@@ -3570,6 +3706,223 @@ impl Session {
         ffi_guard(|| {
             lock(&self.inner).jobs.cancel(id);
             Ok(())
+        })
+    }
+}
+
+impl Session {
+    /// A media-pool edit as one undo step; refused while an edit (a drag)
+    /// is open.
+    fn pool_edit(&self, cmd: Command) -> Result<DocSnapshot, VizError> {
+        if lock(&self.inner).edit_label.is_some() {
+            return Err(crate::events::bad("finish the open edit first"));
+        }
+        self.execute(cmd)
+    }
+
+    /// The item `media`, or a `Model` error.
+    fn media_item(&self, media: u64) -> Result<core_model::document::MediaItem, VizError> {
+        lock(&self.inner)
+            .doc()
+            .media()
+            .get(&core_model::ids::MediaId(media))
+            .cloned()
+            .ok_or_else(|| crate::events::bad(&format!("unknown media {media}")))
+    }
+}
+
+/// The media pool window (spec §10.3; plan 5b Task 6).
+#[uniffi::export]
+impl Session {
+    /// Renames media item `media` (display name only; trimmed, not empty):
+    /// one undo step "Rename Media".
+    pub fn rename_media(&self, media: u64, name: String) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return Err(crate::events::bad("a media name cannot be empty"));
+            }
+            self.media_item(media)?;
+            self.pool_edit(Command::Media(core_model::command::MediaCmd::Rename {
+                media: core_model::ids::MediaId(media),
+                name,
+            }))
+        })
+    }
+
+    /// Removes media item `media` and every region using it, as one undo
+    /// step "Remove Media" (the app asks first; Ruling 13).
+    pub fn remove_media(&self, media: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            use core_model::command::{EventCmd, MediaCmd};
+            let id = core_model::ids::MediaId(media);
+            self.media_item(media)?;
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() {
+                return Err(crate::events::bad("finish the open edit first"));
+            }
+            let users = core_model::command::media::regions_using(inner.doc(), id);
+            let filter = ViewFilter::default();
+            inner.history.begin("Remove Media")?;
+            let run = (|| -> Result<(), VizError> {
+                if !users.is_empty() {
+                    inner
+                        .history
+                        .execute(&Command::Event(EventCmd::Delete { events: users }), &filter)?;
+                }
+                inner.history.execute(
+                    &Command::Media(MediaCmd::Remove {
+                        media: id,
+                        replacement: None,
+                    }),
+                    &filter,
+                )?;
+                Ok(())
+            })();
+            match run {
+                Ok(()) => inner.history.commit()?,
+                Err(e) => {
+                    inner.history.abort()?;
+                    return Err(e);
+                }
+            }
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+
+    /// Removes every item no region uses: one undo step "Compact Media".
+    /// The files go to the Trash by the retention rule once no undo or
+    /// redo state needs them (Ruling 11).
+    pub fn compact_media(&self) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.pool_edit(Command::Media(core_model::command::MediaCmd::Compact)))
+    }
+
+    /// The regions using media item `media`.
+    pub fn media_users(&self, media: u64) -> Result<Vec<crate::media::MediaUseRow>, VizError> {
+        ffi_guard(|| {
+            self.media_item(media)?;
+            Ok(crate::media::users(
+                lock(&self.inner).doc(),
+                core_model::ids::MediaId(media),
+            ))
+        })
+    }
+
+    /// The absolute path of media item `media`'s file (Reveal in Finder).
+    pub fn media_file(&self, media: u64) -> Result<String, VizError> {
+        ffi_guard(|| {
+            let m = self.media_item(media)?;
+            let root = lock(&self.inner).root(self.id);
+            Ok(root.join(&m.path).to_string_lossy().into_owned())
+        })
+    }
+
+    /// Relinks media item `media` to the file at `path` (absolute; spec
+    /// §10.3 "Locate…"): a job of kind `Relink` that imports (converts)
+    /// the file into `Media/` unless it already is a VizDAW CAF in the
+    /// project format there, then applies one undo step "Relink Media".
+    pub fn relink_media(&self, media: u64, path: String) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let item = self.media_item(media)?;
+            let src = PathBuf::from(&path);
+            if path.is_empty() || !src.is_absolute() {
+                return Err(crate::events::bad(
+                    "relink needs the absolute path of a file",
+                ));
+            }
+            let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            inner.media_jobs_idle()?;
+            let root = inner.root(self.id);
+            let format = inner.doc().settings().format;
+            let named = inner.named_media();
+            let id = core_model::ids::MediaId(media);
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
+                    let importer = crate::media::importer();
+                    let r = crate::relink::relink_file(
+                        importer.as_ref(),
+                        &root,
+                        &src,
+                        format,
+                        &named,
+                        &mut |f| progress.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed),
+                        cancel,
+                    );
+                    match r {
+                        Err(core_media::MediaError::Cancelled) => crate::jobs::Work::Cancelled,
+                        r => crate::jobs::Work::Relink {
+                            files: vec![(id, r.map_err(|e| format!("{}: {e}", item.name)))],
+                        },
+                    }
+                })
+        })
+    }
+
+    /// Searches `folder` (absolute) for every item offline as missing,
+    /// changed in length or changed in content (spec §10.3 "Search
+    /// folder…", Ruling 10): a job of kind `Relink`, one undo step per
+    /// item relinked, a problem per item not found.
+    pub fn search_media(&self, folder: String) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            use crate::media::OfflineReasonRow;
+            let dir = PathBuf::from(&folder);
+            if folder.is_empty() || !dir.is_absolute() {
+                return Err(crate::events::bad(
+                    "search needs the absolute path of a folder",
+                ));
+            }
+            let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            inner.media_jobs_idle()?;
+            inner.refresh_media(self.id, false);
+            let lost: Vec<crate::relink::Lost> = inner
+                .doc()
+                .media()
+                .values()
+                .filter(|m| {
+                    matches!(
+                        inner.offline.get(&m.id),
+                        Some(
+                            OfflineReasonRow::Missing
+                                | OfflineReasonRow::Length
+                                | OfflineReasonRow::Changed
+                        )
+                    )
+                })
+                .map(|m| crate::relink::Lost {
+                    media: m.id,
+                    name: m.name.clone(),
+                    stem: core_model::document::MediaItem::file_parts(&m.path).1,
+                    hash: m.content_hash.clone(),
+                    seconds: m.length_frames as f64 / f64::from(m.sample_rate.max(1)),
+                })
+                .collect();
+            if lost.is_empty() {
+                return Err(crate::events::bad("no media item is missing"));
+            }
+            let root = inner.root(self.id);
+            let format = inner.doc().settings().format;
+            let named = inner.named_media();
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
+                    let importer = crate::media::importer();
+                    crate::relink::search(
+                        importer.as_ref(),
+                        &root,
+                        &dir,
+                        lost,
+                        format,
+                        &named,
+                        progress,
+                        cancel,
+                    )
+                })
         })
     }
 }

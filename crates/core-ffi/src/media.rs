@@ -64,6 +64,71 @@ pub struct MediaRow {
     pub offline: Option<OfflineReasonRow>,
     /// Regions using it (any take).
     pub uses: u32,
+    /// How much of its audio regions play, 0–100 (plan 5b Ruling 13).
+    #[uniffi(default = 0.0)]
+    pub used_percent: f32,
+}
+
+/// One region using a media item (the pool's "select regions" and the
+/// delete confirmation; plan 5b Ruling 13).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MediaUseRow {
+    /// Sequence.
+    pub seq: u64,
+    /// Lane.
+    pub lane: u64,
+    /// The region.
+    pub event: u64,
+    /// Its start tick.
+    pub tick: i64,
+    /// The sequence's name.
+    pub sequence: String,
+    /// The lane's name.
+    pub lane_name: String,
+}
+
+/// The regions using `media`, in sequence, lane and time order.
+pub fn users(doc: &Document, media: MediaId) -> Vec<MediaUseRow> {
+    let mut out: Vec<MediaUseRow> = doc
+        .all_events()
+        .filter(|(_, e)| matches!(e.body, EventBody::AudioRegion { media: m, .. } if m == media))
+        .map(|(loc, e)| {
+            let seq = doc.sequence(loc.seq).ok();
+            MediaUseRow {
+                seq: loc.seq.0,
+                lane: loc.lane.0,
+                event: e.id.0,
+                tick: e.tick.0,
+                sequence: seq.map(|s| s.name.clone()).unwrap_or_default(),
+                lane_name: doc
+                    .lane(loc.seq, loc.lane)
+                    .map(|l| l.name.clone())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    out.sort_by_key(|u| (u.seq, u.lane, u.tick, u.event));
+    out
+}
+
+/// The share of `len` frames the spans cover, 0–100.
+fn used_percent(spans: Option<&Vec<(u64, u64)>>, len: u64) -> f32 {
+    let Some(spans) = spans else { return 0.0 };
+    if len == 0 {
+        return 0.0;
+    }
+    let mut v = spans.clone();
+    v.sort_unstable();
+    let (mut total, mut end) = (0u64, 0u64);
+    for (a, b) in v {
+        let (a, b) = (a.min(len), b.min(len));
+        if b <= end {
+            continue;
+        }
+        total += b - a.max(end);
+        end = b;
+    }
+    (total as f64 / len as f64 * 100.0) as f32
 }
 
 /// Where an untitled session keeps its media (Ruling 14).
@@ -123,9 +188,20 @@ pub fn files(
 /// The media pool as rows.
 pub fn rows(doc: &Document, offline: &BTreeMap<MediaId, OfflineReasonRow>) -> Vec<MediaRow> {
     let mut uses: BTreeMap<MediaId, u32> = BTreeMap::new();
+    let mut spans: BTreeMap<MediaId, Vec<(u64, u64)>> = BTreeMap::new();
     for (_, e) in doc.all_events() {
-        if let EventBody::AudioRegion { media, .. } = e.body {
+        if let EventBody::AudioRegion {
+            media,
+            source_offset,
+            length,
+            ..
+        } = e.body
+        {
             *uses.entry(media).or_default() += 1;
+            spans
+                .entry(media)
+                .or_default()
+                .push((source_offset, source_offset.saturating_add(length)));
         }
     }
     doc.media()
@@ -151,6 +227,7 @@ pub fn rows(doc: &Document, offline: &BTreeMap<MediaId, OfflineReasonRow>) -> Ve
                 original_name,
                 offline: offline.get(&m.id).copied(),
                 uses: uses.get(&m.id).copied().unwrap_or(0),
+                used_percent: used_percent(spans.get(&m.id), m.length_frames),
             }
         })
         .collect()

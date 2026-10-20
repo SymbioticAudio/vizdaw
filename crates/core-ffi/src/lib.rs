@@ -37,6 +37,7 @@ pub mod modify;
 pub mod overviews;
 pub mod plugins;
 pub mod recovery;
+pub mod relink;
 pub mod revs;
 pub mod selection;
 pub mod session;
@@ -79,7 +80,7 @@ pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
 pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
-pub use media::{MediaOriginRow, MediaRow, OfflineReasonRow};
+pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
 };

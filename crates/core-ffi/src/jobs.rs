@@ -18,6 +18,8 @@ pub enum JobKindRow {
     Convert,
     /// Change the project format.
     Format,
+    /// Relink media (a chosen file, or a folder search; plan 5b).
+    Relink,
 }
 
 /// Where a job is.
@@ -82,8 +84,23 @@ pub enum Work {
         /// `(media, converted file or error)`.
         files: Vec<(core_model::ids::MediaId, Result<Imported, String>)>,
     },
+    /// Relink targets per media item (plan 5b Rulings 9, 10).
+    Relink {
+        /// `(item, its new file or why not)`.
+        files: Vec<(core_model::ids::MediaId, Result<RelinkFile, String>)>,
+    },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,
+}
+
+/// A file in `Media/` a media item is to be relinked to.
+#[derive(Debug)]
+pub struct RelinkFile {
+    /// The file.
+    pub file: Imported,
+    /// The job wrote it (else it was already in `Media/`, and it is never
+    /// removed when the relink is not applied).
+    pub made: bool,
 }
 
 struct Job {
@@ -154,6 +171,13 @@ impl Jobs {
     /// and waiting for the next `idle`/`job`).
     pub fn busy(&self) -> bool {
         self.list.values().any(|j| j.row.is_none())
+    }
+
+    /// True while a job of one of `kinds` has not been applied yet.
+    pub fn pending(&self, kinds: &[JobKindRow]) -> bool {
+        self.list
+            .values()
+            .any(|j| j.row.is_none() && kinds.contains(&j.kind))
     }
 
     /// True when no job thread is still working (finished jobs may still

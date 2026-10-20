@@ -85,6 +85,15 @@ pub fn forget_media(owner: u64) {
     lock(&MEDIA).remove(&owner);
 }
 
+/// Session `owner`'s media table as `(media, path)` (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_media(owner: u64) -> Vec<(u64, String)> {
+    media_of(owner)
+        .into_iter()
+        .map(|f| (f.id.0, f.path.to_string_lossy().into_owned()))
+        .collect()
+}
+
 fn media_of(owner: u64) -> Vec<core_media::stream::MediaFile> {
     lock(&MEDIA).get(&owner).cloned().unwrap_or_default()
 }

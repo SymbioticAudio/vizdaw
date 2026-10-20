@@ -389,6 +389,7 @@ fn media_and_project_results_as_json() {
             original_name: Some("kick.wav".into()),
             offline: Some(OfflineReasonRow::Format),
             uses: 3,
+            used_percent: 40.0,
         }],
     });
     assert_eq!(v["items"][0]["offline_reason"], "format");
