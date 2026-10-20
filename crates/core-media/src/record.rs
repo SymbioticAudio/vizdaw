@@ -241,6 +241,9 @@ pub struct FailedLane {
     pub path: PathBuf,
     /// Why.
     pub error: String,
+    /// What landed before the failure, when the file could still be
+    /// closed: its whole frames and the hash of exactly those bytes.
+    pub written: Option<Written>,
 }
 
 /// What a finished writer wrote.
@@ -289,13 +292,13 @@ pub struct RecordWriter {
     paths: Vec<PathBuf>,
 }
 
-/// The lock of a mutex even if a panic poisoned it.
 fn made_paths(paths: &[PathBuf]) {
     for p in paths {
         let _ = std::fs::remove_file(p);
     }
 }
 
+/// The lock of a mutex even if a panic poisoned it.
 fn guard<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -313,9 +316,7 @@ impl RecordWriter {
     pub fn start(reader: RingReader, cfg: WriterConfig) -> Result<RecordWriter, MediaError> {
         let mut lanes: Vec<Lane> = Vec::new();
         let made = |lanes: &[Lane]| {
-            for l in lanes {
-                let _ = std::fs::remove_file(&l.path);
-            }
+            made_paths(&lanes.iter().map(|l| l.path.clone()).collect::<Vec<_>>());
         };
         for l in &cfg.lanes {
             let n = l.channels.len();
@@ -407,6 +408,7 @@ impl RecordWriter {
                     .map(|p| FailedLane {
                         path: p.clone(),
                         error: "the record writer stopped unexpectedly".into(),
+                        written: None,
                     })
                     .collect(),
                 gap_frames: self.shared.gaps.load(Ordering::Relaxed),
@@ -546,8 +548,19 @@ fn run(mut reader: RingReader, mut lanes: Vec<Lane>, s: &Shared) -> WriterResult
     let mut failed = Vec::new();
     for l in lanes {
         let path = l.path.clone();
-        match l.writer.finish() {
-            Ok(written) => out.push(LaneWritten { path, written }),
+        match l.writer.finish_partial() {
+            Ok((written, false)) => out.push(LaneWritten { path, written }),
+            Ok((written, true)) => {
+                let why = "a write failed (the disk is full?)".to_string();
+                if error.is_none() {
+                    error = Some(format!("{}: {why}", path.display()));
+                }
+                failed.push(FailedLane {
+                    path,
+                    error: why,
+                    written: Some(written),
+                });
+            }
             Err(e) => {
                 if error.is_none() {
                     error = Some(format!("{}: {e}", path.display()));
@@ -555,6 +568,7 @@ fn run(mut reader: RingReader, mut lanes: Vec<Lane>, s: &Shared) -> WriterResult
                 failed.push(FailedLane {
                     path,
                     error: e.to_string(),
+                    written: None,
                 });
             }
         }
@@ -608,7 +622,8 @@ mod tests {
             let mut writer =
                 CafWriter::create(&path, 48_000, 1, BitDepth::Int16, WriteMode::Recording).unwrap();
             if n == "b.caf" {
-                writer.break_file_for_test(&path);
+                writer.write(&[0.5; 40]).unwrap();
+                writer.fail_writes_for_test();
             }
             lanes.push(Lane {
                 writer,
@@ -632,5 +647,15 @@ mod tests {
         assert_eq!(res.lanes[0].path, dir.path().join("a.caf"));
         assert_eq!(res.failed.len(), 1);
         assert_eq!(res.failed[0].path, dir.path().join("b.caf"));
+        // The 40 frames that landed before the failure, hashed exactly.
+        let w = res.failed[0].written.as_ref().unwrap();
+        assert_eq!(w.frames, 40);
+        let p = dir.path().join("b.caf");
+        let info = crate::caf::CafReader::open(&p).unwrap().info().clone();
+        assert_eq!((info.frames, info.size_known), (40, true));
+        let raw = std::fs::read(&p).unwrap();
+        let data = &raw[info.data_offset as usize..];
+        assert_eq!(data.len(), 80);
+        assert_eq!(w.content_hash, blake3::hash(data).to_hex().to_string());
     }
 }
