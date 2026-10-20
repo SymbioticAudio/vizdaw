@@ -34,24 +34,26 @@
 //! jump back would drop the earlier piece's tail without notice.
 //!
 //! **Region starts.** A region starts on a tick, and its file offset
-//! follows the frame that tick plays at. The tick is rounded up when
-//! rounding it to the nearest would start the region before the punch-in
-//! or under the region before it.
+//! follows the frame that tick plays at. The tick is the one nearest the
+//! start frame (`TempoTable::frame_to_tick` rounds to the nearest), then
+//! stepped up a tick at a time while it would start the region before the
+//! punch-in or under the region before it.
 //!
 //! **Ruling (pre-flight M3, adopted for plan 5c Task 7; narrowed by the
-//! Task 7 review I1): a short last pass after a wrap is no take.** When
-//! loop recording makes takes of passes, the final pass (the one playing
-//! at Stop) is dropped when it played less than one beat (one quarter
-//! note, [`PPQ`] ticks) of timeline and an earlier pass that is not
-//! discarded and recorded something exists, so another take stands in for
-//! it. Stopping just after a wrap therefore leaves no sliver of a take,
-//! and the sliver does not become the lane's active take. The rule never
-//! drops pass 0 or an only pass, and never applies when MIDI passes merge
-//! into the active take (`passes_as_takes` off: no take is made, so the
-//! notes stay; audio still makes takes when looped). The playing pass's
-//! fate is never decided by `decide`, so only a caller-set
-//! `PassFate::Kept` exempts it. Earlier passes are never dropped by
-//! length.
+//! Task 7 review I1 and re-review): a short last pass after a wrap is no
+//! take.** When loop recording makes takes of passes, the final pass (the
+//! one playing at Stop) that played less than one beat (one quarter note,
+//! [`PPQ`] ticks) of timeline is dropped, per lane, unless it holds that
+//! lane's only content: it is kept when the lane recorded something in it
+//! and in no earlier pass that is not discarded. Stopping just after a
+//! wrap therefore leaves no sliver of a take, and the sliver does not
+//! become the lane's active take, while a MIDI lane silent until the wrap
+//! keeps the note played just after it. The rule never drops pass 0 or
+//! an only pass that recorded something, and never applies when MIDI passes merge into the active
+//! take (`passes_as_takes` off: no take is made, so the notes stay; audio
+//! still makes takes when looped). The playing pass's fate is never
+//! decided by `decide`, so only a caller-set `PassFate::Kept` exempts it.
+//! Earlier passes are never dropped by length.
 //!
 //! Control-side code: nothing here runs on the real-time thread.
 
@@ -408,9 +410,9 @@ fn audio_regions(
             // frame that tick plays at, so the audio lands exactly.
             let mut tick = tempo.frame_to_tick(u64::try_from(t0).unwrap_or(0));
             let mut f = i64::try_from(tempo.tick_to_frame(tick)).unwrap_or(t0);
-            // Rounded down, the tick must not start the region before
-            // the punch-in (review m3) or, after a cut, under the region
-            // before it.
+            // The nearest tick may lie before `t0`: step it up while it
+            // would start the region before the punch-in (review m3) or,
+            // after a cut, under the region before it.
             let mut lo = i64::try_from(range.start).unwrap_or(i64::MAX).min(t0);
             if let Some((pass, te, _)) = last
                 && pass == p.pass
@@ -467,15 +469,11 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         })
         .collect();
     // The Ruling (pre-flight M3 as narrowed by review I1, module docs): a
-    // final loop pass under a beat is no take when an earlier pass stands
-    // in for it.
+    // final loop pass under a beat is no take when an earlier pass of the
+    // same lane stands in for it.
     let last = passes.saturating_sub(1);
-    let short_last = c.looped
-        && last > 0
-        && kept.len() >= 2
-        && kept.last() == Some(&last)
-        && fate(last) != PassFate::Kept
-        && {
+    let short_last =
+        c.looped && last > 0 && kept.last() == Some(&last) && fate(last) != PassFate::Kept && {
             let played: i64 = pieces
                 .iter()
                 .filter(|x| x.pass == last)
@@ -483,12 +481,16 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
                 .sum();
             played < PPQ
         };
-    // The passes that become takes.
-    let as_takes: Vec<usize> = kept
-        .iter()
-        .copied()
-        .filter(|p| !(short_last && *p == last))
-        .collect();
+    // The passes that become a lane's takes, `has(p)` saying whether the
+    // lane recorded something in pass `p`: the short last pass is kept only
+    // when it holds the lane's only content (re-review I1).
+    let as_takes = |has: &dyn Fn(usize) -> bool| -> Vec<usize> {
+        let drop = short_last && (!has(last) || kept.iter().any(|p| *p != last && has(*p)));
+        kept.iter()
+            .copied()
+            .filter(|p| !(drop && *p == last))
+            .collect()
+    };
     let windows: Vec<(Tick, Tick)> = pieces
         .iter()
         .filter(|p| kept.contains(&p.pass))
@@ -511,10 +513,14 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         format!("Take {n}")
     };
     // Audio makes a take of every pass when looped (spec §6.4).
-    let audio_kept = if c.looped { &as_takes } else { &kept };
     for a in c.audio {
         let mut regions = audio_regions(a.media.length_frames, &pieces, &c.range, d, &tempo);
-        regions.retain(|p, _| audio_kept.contains(p));
+        let takes = if c.looped {
+            as_takes(&|p| regions.get(&p).is_some_and(|r| !r.is_empty()))
+        } else {
+            kept.clone()
+        };
+        regions.retain(|p, _| takes.contains(p));
         if regions.is_empty() {
             continue;
         }
@@ -522,7 +528,7 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         media.push(a.media.clone());
         let rec = lanes.entry(a.lane).or_insert_with(|| lane_record(a.lane));
         if c.looped {
-            for (k, p) in as_takes.iter().enumerate() {
+            for (k, p) in takes.iter().enumerate() {
                 let mut content = RecordedContent::default();
                 for r in regions.get(p).into_iter().flatten() {
                     content.regions.push(RecordedRegion { media: index, ..*r });
@@ -550,11 +556,12 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         let mut events = midi_events(&heard, &pieces, &c.range, &tempo);
         events.retain(|p, _| kept.contains(p));
         if takes_from_passes {
-            if as_takes.is_empty() {
+            let takes = as_takes(&|p| events.get(&p).is_some_and(|e| !e.is_empty()));
+            if takes.is_empty() {
                 continue;
             }
             let rec = lanes.entry(*lane).or_insert_with(|| lane_record(*lane));
-            for (k, p) in as_takes.iter().enumerate() {
+            for (k, p) in takes.iter().enumerate() {
                 let content = RecordedContent {
                     events: events.remove(p).unwrap_or_default(),
                     regions: Vec::new(),

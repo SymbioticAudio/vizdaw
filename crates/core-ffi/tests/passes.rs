@@ -635,6 +635,41 @@ fn merged_midi_keeps_what_was_played_after_the_last_wrap() {
     assert_eq!(take_names(&p, d.mic), vec!["Take 2"]);
 }
 
+#[test]
+fn the_short_pass_rule_is_decided_per_lane() {
+    // Re-review I1: a MIDI lane silent through pass 0 (a count-in) with one
+    // note just after the wrap keeps that note's pass, while a lane that
+    // recorded in pass 0 still drops the sliver.
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("Song", "Keys", Some(synth)).unwrap();
+    let pads = b.lane(seq, "Pads", Some(synth)).unwrap();
+    let mic = b.lane(seq, "Mic", None).unwrap();
+    let d = Doc {
+        doc: b.finish(),
+        seq,
+        keys,
+        mic,
+    };
+    let mut c = sliver_case(&d, 100);
+    let len = (2 * BEAT) as i64;
+    c.midi_lanes = vec![keys, pads];
+    c.midi = vec![
+        midi(pads, 10, on(48, 100)),
+        midi(pads, 20, off(48)),
+        midi(keys, len + 10, on(60, 100)),
+    ];
+    let p = c.run().unwrap();
+    let lane = |id: LaneId| p.lanes.iter().find(|l| l.lane == id).unwrap();
+    let k = lane(keys);
+    assert_eq!(k.takes.len(), 2, "{:?}", k.takes);
+    assert!(k.takes[0].1.events.is_empty());
+    assert_eq!(k.takes[1].1.events.len(), 1, "the note is kept");
+    assert_eq!(lane(pads).takes.len(), 1);
+    assert_eq!(lane(pads).takes[0].1.events.len(), 1);
+    assert_eq!(take_names(&p, mic).len(), 1, "audio recorded in pass 0");
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
 
