@@ -2971,6 +2971,11 @@ fn apply_relink(
     use core_model::command::MediaCmd;
     let mut done = Vec::new();
     let mut problems = Vec::new();
+    // Files this job wrote for relinks that were refused: removed only
+    // after the whole batch, and only if no state names them, since a
+    // search gives every item of one hash the same file (5b final review
+    // m2).
+    let mut refused: Vec<String> = Vec::new();
     for (m, r) in files {
         let f = match r {
             Ok(f) => f,
@@ -2988,7 +2993,7 @@ fn apply_relink(
         // audio (Task 1 carry); `relink_file` refuses one already.
         if f.file.length_frames == 0 {
             if f.made {
-                remove_unkept(root, &f.file.path, &inner.kept());
+                refused.push(f.file.path.clone());
             }
             problems.push(format!("{name}: the file holds no audio"));
             continue;
@@ -3008,7 +3013,7 @@ fn apply_relink(
             }
             Err(e) => {
                 if f.made {
-                    remove_unkept(root, &f.file.path, &inner.kept());
+                    refused.push(f.file.path.clone());
                 }
                 let why = match e {
                     core_model::ModelError::OutOfRange {
@@ -3020,6 +3025,10 @@ fn apply_relink(
                 problems.push(format!("{name}: {why}"));
             }
         }
+    }
+    let keep = inner.kept();
+    for p in refused {
+        remove_unkept(root, &p, &keep);
     }
     (done, problems)
 }
@@ -3216,6 +3225,23 @@ struct Measured {
     to: u64,
 }
 
+/// A Normalize note as the user reads it: the model names a region by its
+/// event ID (`"ev12: gain limited …"`, `"ev4 is silent: …"`); the region's
+/// media name replaces the ID only when the ID matches whole, never as a
+/// prefix of a longer one (5b final review m1: `ev1` must not take
+/// `ev12`'s note).
+pub(crate) fn normalize_warning(w: &str, regions: &[(core_model::ids::EventId, &str)]) -> String {
+    for (id, name) in regions {
+        let id = id.to_string();
+        if let Some(rest) = w.strip_prefix(id.as_str()) {
+            if rest.starts_with(':') || rest.starts_with(' ') {
+                return format!("Normalize: a region of {name}{rest}");
+            }
+        }
+    }
+    format!("Normalize: {w}")
+}
+
 /// "Busy" for Normalize.
 fn still_building(name: &str) -> VizError {
     VizError::Busy {
@@ -3361,15 +3387,11 @@ impl Session {
             // The model's notes ("silent", "gain limited") name the event
             // ID: the user reads the media name in the next `idle`'s
             // problems (final review m3 / T5 m2).
+            let names: Vec<(core_model::ids::EventId, &str)> =
+                measure.iter().map(|x| (x.id, x.name.as_str())).collect();
             for w in report.warnings {
-                let named = measure.iter().find_map(|x| {
-                    w.strip_prefix(&x.id.to_string())
-                        .map(|rest| format!("Normalize: a region of {}{rest}", x.name))
-                });
-                inner
-                    .news
-                    .problems
-                    .push(named.unwrap_or_else(|| format!("Normalize: {w}")));
+                let line = normalize_warning(&w, &names);
+                inner.news.problems.push(line);
             }
             inner.version += 1;
             inner.reload_host(self.id);
@@ -4021,5 +4043,34 @@ impl Session {
                     )
                 })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_warning;
+    use core_model::ids::EventId;
+
+    /// 5b final review m1: a note about `ev12` is never named after
+    /// `ev1`'s media, whichever comes first.
+    #[test]
+    fn a_normalize_note_names_the_region_its_id_matches_whole() {
+        let regions = [(EventId(1), "kick"), (EventId(12), "snare")];
+        assert_eq!(
+            normalize_warning("ev12: gain limited to +24.0 dB", &regions),
+            "Normalize: a region of snare: gain limited to +24.0 dB"
+        );
+        assert_eq!(
+            normalize_warning("ev1 is silent: not normalized", &regions),
+            "Normalize: a region of kick is silent: not normalized"
+        );
+        assert_eq!(
+            normalize_warning("ev123: gain limited to +24.0 dB", &regions),
+            "Normalize: ev123: gain limited to +24.0 dB"
+        );
+        assert_eq!(
+            normalize_warning("nothing to normalize", &regions),
+            "Normalize: nothing to normalize"
+        );
     }
 }

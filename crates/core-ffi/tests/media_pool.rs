@@ -1156,6 +1156,15 @@ fn search_relinks_every_item_of_a_found_hash() {
     for r in &rows {
         assert_eq!(row(&s, r.id).offline, None);
     }
+    // 5b final review m2: one copy serves both items.
+    let after = s.media().unwrap();
+    assert_eq!(after[0].path, after[1].path, "{after:?}");
+    let cafs = std::fs::read_dir(pkg.join("Media"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "caf"))
+        .count();
+    assert_eq!(cafs, 1, "one file in Media/");
     s.close().unwrap();
 }
 

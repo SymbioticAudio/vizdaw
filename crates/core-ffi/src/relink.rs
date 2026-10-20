@@ -335,6 +335,9 @@ pub fn search(
     let n = found.iter().flatten().count().max(1) as f32;
     let mut done = 0f32;
     let mut out = Vec::with_capacity(lost.len());
+    // One file in `Media/` per found file (5b final review m2, Task 6
+    // N1): items of one hash share the copy made for the first of them.
+    let mut copies: BTreeMap<PathBuf, Result<RelinkFile, String>> = BTreeMap::new();
     for (l, f) in lost.iter().zip(found) {
         let Some(f) = f else {
             out.push((
@@ -343,6 +346,11 @@ pub fn search(
             ));
             continue;
         };
+        if let Some(r) = copies.get(&f) {
+            out.push((l.media, r.clone().map_err(|e| format!("{}: {e}", l.name))));
+            done += 1.0;
+            continue;
+        }
         let base = done;
         let r = relink_file(
             importer,
@@ -360,7 +368,11 @@ pub fn search(
                 crate::session::discard(root, Work::Relink { files: out }, &BTreeSet::new());
                 return Work::Cancelled;
             }
-            r => out.push((l.media, r.map_err(|e| format!("{}: {e}", l.name)))),
+            r => {
+                let r = r.map_err(|e| e.to_string());
+                copies.insert(f, r.clone());
+                out.push((l.media, r.map_err(|e| format!("{}: {e}", l.name))));
+            }
         }
     }
     Work::Relink { files: out }

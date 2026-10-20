@@ -94,7 +94,7 @@ pub enum Work {
 }
 
 /// A file in `Media/` a media item is to be relinked to.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RelinkFile {
     /// The file.
     pub file: Imported,
