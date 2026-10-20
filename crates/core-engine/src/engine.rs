@@ -221,6 +221,13 @@ pub struct Engine {
     moved_since_play: bool,
     /// The streamer's (underruns, late) counters at the last `faults`.
     stream_seen: (AtomicU64, AtomicU64),
+    /// What lanes listen to (spec §6.6); resolved at every load.
+    input_spec: crate::input::InputSpec,
+    /// Feeds the renderer's MIDI input queue.
+    midi_tx: crate::input::MidiSender,
+    /// The routes last sent to the renderer: a load sends them only when
+    /// they change, so a load still retires just a schedule and a graph.
+    inputs_sent: crate::input::InputRoutes,
 }
 
 impl std::fmt::Debug for Engine {
@@ -300,6 +307,7 @@ impl Engine {
         } else {
             None
         };
+        let (midi_tx, midi_rx) = crate::input::midi_queue();
         let (streamer, reader) =
             Streamer::new(cfg.sample_rate, cfg.stream, cfg.disk).map_err(|e| {
                 EngineError::Thread {
@@ -319,6 +327,7 @@ impl Engine {
             Arc::clone(&shared),
             pool.as_ref().map(Pool::handle),
             reader,
+            midi_rx,
         );
         let engine = Engine {
             cfg,
@@ -352,6 +361,9 @@ impl Engine {
             commanded_playing: false,
             moved_since_play: false,
             stream_seen: (AtomicU64::new(0), AtomicU64::new(0)),
+            input_spec: crate::input::InputSpec::default(),
+            midi_tx,
+            inputs_sent: crate::input::InputRoutes::default(),
         };
         Ok((engine, renderer))
     }
@@ -414,7 +426,7 @@ impl Engine {
         // Room for removing and adding every possible sink plus the graph,
         // the schedule and the loop, so no push below can fail after
         // targets were interned.
-        if self.cmds.slots() < 2 * MAX_TARGETS + 3 {
+        if self.cmds.slots() < 2 * MAX_TARGETS + 4 {
             return Err(EngineError::Busy);
         }
         let opts = CompileOptions {
@@ -463,6 +475,33 @@ impl Engine {
             }
         };
         let compiled = compile(doc, seq, &opts, &mut resolve);
+        // The targets live input plays on (spec §6.6): interned like the
+        // schedule's, so thru reaches a destination the sequence never
+        // plays.
+        let spec = self.input_spec.clone();
+        let mut midi_routes: Vec<crate::input::MidiRoute> = Vec::with_capacity(spec.midi.len());
+        if compiled.is_ok() {
+            for m in &spec.midi {
+                let d = m.dest.and_then(|d| doc.instruments().get(&d));
+                let kinds = d
+                    .and_then(|d| kinds_for(&d.kind, opts.route, &opts.ports).ok())
+                    .unwrap_or_default();
+                let mut targets = [None, None];
+                for (slot, k) in targets.iter_mut().zip(&kinds) {
+                    *slot = resolve(k).ok().and_then(Result::ok);
+                }
+                let dest_channel = match d.map(|d| &d.kind) {
+                    Some(DestKind::MidiEndpoint { channel, .. }) => channel & 0x0F,
+                    _ => 0,
+                };
+                midi_routes.push(crate::input::MidiRoute {
+                    spec: m.clone(),
+                    targets,
+                    dest_channel,
+                    chain: crate::input::InputChain,
+                });
+            }
+        }
         let (mut schedule, mut report) = match compiled {
             Ok(c) => c,
             Err(e) => {
@@ -517,6 +556,20 @@ impl Engine {
         self.length_frames = schedule.length_frames;
         self.loop_range = schedule.loop_range;
         self.push(EngineCmd::SetSchedule(Box::new(schedule)))?;
+        let monitor: Box<[crate::input::MonitorRoute]> = spec
+            .monitor
+            .iter()
+            .take(crate::input::MAX_MONITOR_ROUTES)
+            .copied()
+            .collect();
+        let routes = crate::input::InputRoutes {
+            midi: midi_routes.into_boxed_slice(),
+            monitor,
+        };
+        if routes != self.inputs_sent {
+            self.inputs_sent = routes.clone();
+            self.push(EngineCmd::SetInputs(Box::new(routes)))?;
+        }
         if self.default_loop {
             // The length may have changed; the mapped old range would not
             // follow it.
@@ -1068,6 +1121,23 @@ impl Engine {
     /// more, and the tap's status reads closed.
     pub fn stop_recording(&mut self) -> Result<(), EngineError> {
         self.push(EngineCmd::Record(None))
+    }
+
+    /// What lanes listen to (spec §6.6); the next [`Engine::load`]
+    /// resolves and publishes it.
+    pub fn set_inputs(&mut self, spec: crate::input::InputSpec) {
+        self.input_spec = spec;
+    }
+
+    /// What lanes listen to, as last set.
+    pub fn inputs(&self) -> &crate::input::InputSpec {
+        &self.input_spec
+    }
+
+    /// Feeds this engine's MIDI input queue (CoreMIDI sources,
+    /// `midi.inject`).
+    pub fn midi_sender(&self) -> crate::input::MidiSender {
+        self.midi_tx.clone()
     }
 }
 

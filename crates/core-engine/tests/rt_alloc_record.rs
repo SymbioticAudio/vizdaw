@@ -7,9 +7,14 @@
 use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
+use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, MonitorRoute, port_key};
+use core_engine::midi1::Midi1Msg;
 use core_engine::offline::{FakeInput, OfflineBackend, OfflineSinks};
 use core_engine::record::RecordRequest;
 use core_engine::rt_check::{self, CountingAlloc};
+use core_model::command::{Command, LaneCmd, RoutingCmd};
+use core_model::ids::AnyId;
+use core_model::lane::MonitorMode;
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -29,11 +34,51 @@ fn recording_never_allocates() {
     let (seq, lane) = bld.sequence("Bar", "Notes", Some(synth)).unwrap();
     bld.notes(seq, lane, &[(0, 60, 0x8000, Q), (2 * Q, 67, 0x8000, Q)])
         .unwrap();
+    let r = bld
+        .run(Command::Routing(RoutingCmd::AddOutput {
+            name: "Audio 1".into(),
+            reference: "audio:1-2".into(),
+        }))
+        .unwrap();
+    let path = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .unwrap();
+    bld.run(Command::Lane(LaneCmd::SetOutput {
+        seq,
+        lane,
+        output: Some(path),
+    }))
+    .unwrap();
     let doc = bld.finish();
     let sinks = OfflineSinks::new(1 << 20).with_tone();
     let log = sinks.log();
     let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    // A MIDI lane with thru and recording, and a monitored input.
+    let inputs = InputSpec {
+        midi: vec![MidiInputSpec {
+            lane,
+            port: None,
+            channel: None,
+            dest: Some(synth),
+            thru: true,
+            armed: true,
+        }],
+        monitor: vec![MonitorRoute {
+            path,
+            left: 0,
+            right: 1,
+            mode: MonitorMode::Input,
+            armed: true,
+        }],
+    };
+    engine.set_inputs(inputs.clone());
     engine.load(&doc, seq).unwrap();
+    let midi = engine.midi_sender();
     let mut b = OfflineBackend::new(48_000.0, 512).with_input(FakeInput::Loopback(1000));
     b.start(renderer).unwrap();
     b.reserve(4096);
@@ -58,6 +103,24 @@ fn recording_never_allocates() {
         }
         if i % 100 == 0 {
             log.drain();
+            while h.midi.pop().is_ok() {}
+        }
+        if i % 7 == 0 {
+            let on = i % 14 == 0;
+            let msg = Midi1Msg::three(if on { 0x90 } else { 0x80 }, 60 + (i % 12) as u8, 90);
+            midi.send(MidiIn {
+                port: port_key("Keys"),
+                host_ns: 0,
+                msg,
+            });
+        }
+        if i == 1500 {
+            // Routes change (a reload): thru notes end, the old routes
+            // retire.
+            let mut changed = inputs.clone();
+            changed.monitor[0].mode = MonitorMode::Off;
+            engine.set_inputs(changed);
+            engine.load(&doc, seq).unwrap();
         }
         if i == 2500 {
             // A jump while recording is marked (review fix M1).

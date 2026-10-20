@@ -2,7 +2,9 @@
 
 use crate::backend::{BlockInfo, BlockTime, InputBlock, MidiOut, StereoBuf};
 use crate::graph::exec::{Exec, RunResult, SinkTable};
+use crate::graph::regions::InputCopy;
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
+use crate::input::{InputRoutes, MIDI_IN_PER_BLOCK, MidiIn, on_channel};
 use crate::midi1::Midi1Msg;
 use crate::notes::ActiveNotes;
 use crate::pool::PoolShared;
@@ -403,6 +405,9 @@ pub enum EngineCmd {
     /// through the retire ring; dropping it tells the control side the
     /// recording's input ended). Spec §6.2.
     Record(Option<Box<RecordTap>>),
+    /// Replace the live input routes (spec §6.6); notes sounding through
+    /// thru end first.
+    SetInputs(Box<InputRoutes>),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -416,6 +421,8 @@ pub enum Retired {
     Sink(Sink),
     /// A removed record tap.
     Tap(Box<RecordTap>),
+    /// Replaced input routes.
+    Inputs(Box<InputRoutes>),
 }
 
 /// Capacity of the command ring.
@@ -478,6 +485,15 @@ pub struct Renderer {
     auto_last: Box<[f64; MAX_AUTO_LANES]>,
     /// The recording's tap (spec §6.2), while one is installed.
     tap: Option<Box<RecordTap>>,
+    /// MIDI from sources (spec §6.6).
+    midi_in: Consumer<MidiIn>,
+    /// The live input routes.
+    inputs: Option<Box<InputRoutes>>,
+    /// Notes sounding through thru (boxed: the renderer moves between
+    /// threads by value).
+    thru: Box<ActiveNotes>,
+    /// This block's input, for monitoring.
+    input_copy: Box<InputCopy>,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -578,6 +594,7 @@ impl Renderer {
         shared: Arc<Shared>,
         pool: Option<Arc<PoolShared>>,
         reader: core_media::stream::StreamReader,
+        midi_in: Consumer<MidiIn>,
     ) -> Renderer {
         let mut r = Renderer {
             cfg,
@@ -601,6 +618,10 @@ impl Renderer {
             pending_skip: 0,
             auto_last: Box::new([f64::NAN; MAX_AUTO_LANES]),
             tap: None,
+            midi_in,
+            inputs: None,
+            thru: Box::default(),
+            input_copy: Box::new(InputCopy::new(0, 0)),
         };
         r.prepare(cfg.max_frames);
         r
@@ -615,6 +636,7 @@ impl Renderer {
         self.bufs = (0..MAX_TARGETS)
             .map(|_| StereoBuf::new(max_frames))
             .collect();
+        *self.input_copy = InputCopy::new(crate::backend::MAX_INPUT_CHANNELS, max_frames);
         if let Some(g) = self.graph.as_mut() {
             g.prepare(max_frames);
         }
@@ -722,6 +744,8 @@ impl Renderer {
                 _ => t.stop(0, self.transport.pos),
             }
         }
+        self.live_midi();
+        let monitored = self.copy_monitored(input, frames);
         // No run is in flight (`try_finish` succeeded above): the streamer
         // may count a new epoch (5a Ruling 9) and plan around the playhead
         // as this block's commands left it (a Locate's new position, never
@@ -749,7 +773,7 @@ impl Renderer {
             let end = offset + run;
             self.automate(length, run);
             let info = self.block_info();
-            let regions = self.region_run(length);
+            let regions = self.region_run(length, monitored, offset);
             let mut o = Out {
                 sinks: &mut self.sinks,
                 shared: &self.shared,
@@ -1023,6 +1047,7 @@ impl Renderer {
                 Ok(EngineCmd::SetGraph(_)) => self.graph.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::RemoveSink(_)) => self.retire.slots() == 0,
                 Ok(EngineCmd::Record(_)) => self.tap.is_some() && self.retire.slots() == 0,
+                Ok(EngineCmd::SetInputs(_)) => self.inputs.is_some() && self.retire.slots() == 0,
                 Ok(_) => false,
                 Err(_) => break,
             };
@@ -1154,6 +1179,7 @@ impl Renderer {
                 // Forget its sounding notes: nothing will play them now.
                 self.notes.release(idx, |_| {});
                 self.audition.release(idx, |_| {});
+                self.thru.release(idx, |_| {});
                 let taken = self
                     .sinks
                     .get_mut(usize::from(idx.0))
@@ -1187,6 +1213,27 @@ impl Renderer {
                     }
                 }
             }
+            EngineCmd::SetInputs(new) => {
+                // Notes thru started end: a lane disarmed or re-routed
+                // must not leave one hanging.
+                let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+                let mut o = Out {
+                    sinks: &mut self.sinks,
+                    shared: &self.shared,
+                    block_ns: self.block_ns,
+                    ns_per_frame: 0.0,
+                    late_ns,
+                    base: 0,
+                };
+                release_all(&mut self.thru, &mut o, 0);
+                if let Some(old) = self.inputs.replace(new) {
+                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Inputs(old))
+                    {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+            }
             EngineCmd::AddSink(idx, sink) => {
                 if let Some(slot) = self.sinks.get_mut(usize::from(idx.0)) {
                     if let Some(old) = slot.replace(sink) {
@@ -1202,7 +1249,34 @@ impl Renderer {
     /// schedule's audio from the playhead, late within `LATE_SECONDS` of
     /// playing after a Play or Locate, muted when the device refused the
     /// rate. // RT
-    fn region_run(&self, length: u64) -> crate::graph::RegionRun {
+    fn region_run(&self, length: u64, monitored: bool, offset: u32) -> crate::graph::RegionRun {
+        let base = self.audio_run(length);
+        if !monitored {
+            return base;
+        }
+        let Some(routes) = self.inputs.as_deref() else {
+            return base;
+        };
+        let playing = self.transport.state == PlayState::Playing;
+        let pos = self.transport.play_pos(length);
+        let in_range = match (self.tap.as_deref(), pos) {
+            (Some(t), Some(p)) => t.rolling() && t.in_range(p),
+            _ => false,
+        };
+        let mut heard = 0u64;
+        for (k, r) in routes.monitor.iter().enumerate().take(64) {
+            if r.heard(playing, in_range) {
+                heard |= 1u64 << k;
+            }
+        }
+        // SAFETY: the routes (boxed) and the input copy (boxed) change only
+        // in `drain_commands`, `copy_monitored` or `prepare`, after
+        // `try_finish` succeeded, so they outlive every run given this.
+        unsafe { base.with_monitor(&self.input_copy, &routes.monitor, heard, offset) }
+    }
+
+    /// The schedule's audio from the playhead (none while stopped). // RT
+    fn audio_run(&self, length: u64) -> crate::graph::RegionRun {
         let Some(s) = self.schedule.as_deref() else {
             return crate::graph::RegionRun::NONE;
         };
@@ -1224,6 +1298,78 @@ impl Renderer {
                 self.since_start < self.late_frames(),
                 self.shared.regions_muted(),
             )
+        }
+    }
+
+    /// Copies the input channels monitor routes name; true when there is
+    /// one. // RT
+    fn copy_monitored(&mut self, input: &InputBlock<'_>, frames: u32) -> bool {
+        let Some(routes) = self.inputs.as_deref() else {
+            return false;
+        };
+        if routes.monitor.is_empty() {
+            return false;
+        }
+        let r = &routes.monitor;
+        self.input_copy.fill(input.channels, frames, |c| {
+            r.iter()
+                .any(|m| usize::from(m.left) == c || usize::from(m.right) == c)
+        });
+        true
+    }
+
+    /// Takes the queued MIDI input: each message a lane listens to goes
+    /// through its input chain to thru (its destination, now) and, while a
+    /// tap rolls and the lane is armed, to the recorder, stamped at the
+    /// run frame heard when it arrived (spec §6.3, §6.6). // RT
+    fn live_midi(&mut self) {
+        let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+        let sr = self.cfg.sample_rate;
+        let block_ns = self.block_ns;
+        let mut o = Out {
+            sinks: &mut self.sinks,
+            shared: &self.shared,
+            block_ns,
+            ns_per_frame: 0.0,
+            late_ns,
+            base: 0,
+        };
+        let thru = &mut self.thru;
+        let mut tap = self.tap.as_deref_mut();
+        let mut routes = self.inputs.as_deref_mut();
+        for _ in 0..MIDI_IN_PER_BLOCK {
+            let Ok(ev) = self.midi_in.pop() else {
+                break;
+            };
+            let Some(routes) = routes.as_deref_mut() else {
+                continue;
+            };
+            let offset = if ev.host_ns == 0 {
+                0
+            } else {
+                let ns = i128::from(ev.host_ns) - i128::from(block_ns);
+                (ns as f64 * sr / 1e9).round() as i64
+            };
+            for r in routes.midi.iter_mut() {
+                if !r.matches(&ev) {
+                    continue;
+                }
+                let (spec, targets, ch) = (&r.spec, r.targets, r.dest_channel);
+                r.chain.process(ev.msg, &mut |m| {
+                    if spec.thru {
+                        let m = on_channel(m, ch);
+                        for t in targets.iter().flatten() {
+                            o.send(*t, 0, m.as_slice());
+                            thru.observe(*t, m.as_slice());
+                        }
+                    }
+                    if spec.armed {
+                        if let Some(t) = tap.as_deref_mut() {
+                            t.midi(spec.lane, offset, m);
+                        }
+                    }
+                });
+            }
         }
     }
 

@@ -23,6 +23,7 @@ pub mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
 pub mod graph;
+pub mod input;
 pub mod midi1;
 pub mod notes;
 pub mod offline;
