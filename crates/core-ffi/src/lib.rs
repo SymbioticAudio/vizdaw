@@ -38,6 +38,7 @@ pub mod modify;
 pub mod overviews;
 pub mod passes;
 pub mod plugins;
+pub mod record;
 pub mod recovery;
 pub mod relink;
 pub mod retention;
@@ -93,6 +94,7 @@ pub use modify::{
     NoteMapEntry, RuleRow, SelectModeRow, SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
 };
 pub use overviews::{OverviewRows, OverviewStateRow};
+pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latency_trim};
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
 pub use selection::{SelectionRow, TickRange};

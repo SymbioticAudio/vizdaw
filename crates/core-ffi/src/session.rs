@@ -97,6 +97,18 @@ struct Inner {
     /// The folder standing for the Trash (test hook; `None`: the
     /// environment's or the platform's).
     trash_dir: Option<PathBuf>,
+    /// The recording in progress (plan 5c Task 9).
+    recording: Option<crate::record::Recording>,
+    /// A recording is being finished (its files are closing without the
+    /// lock): no new one may start.
+    finishing: bool,
+    /// A finished recording's pass (or `None` when nothing landed), with
+    /// its files, waiting for an open edit to end.
+    pending_pass: Option<(Option<core_model::command::RecordPass>, Vec<String>)>,
+    /// Recorded files no document references that the Trash must not take
+    /// (a pass that could not be applied): crash recovery offers them at
+    /// the next open.
+    keep_recordings: std::collections::BTreeSet<String>,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -161,7 +173,25 @@ impl Inner {
             overviews: Default::default(),
             changed: Default::default(),
             trash_dir: None,
+            recording: None,
+            finishing: false,
+            pending_pass: None,
+            keep_recordings: Default::default(),
         }
+    }
+
+    /// Recorded files the Trash must leave: those being written, those of
+    /// a pass waiting to apply, and those kept after a failed pass (plan
+    /// 5c Ruling 15).
+    fn recorded_keep(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.keep_recordings.iter().cloned().collect();
+        if let Some(r) = &self.recording {
+            out.extend(r.files());
+        }
+        if let Some((_, files)) = &self.pending_pass {
+            out.extend(files.iter().cloned());
+        }
+        out
     }
 
     /// The retention rule on `package` (plan 5b Ruling 11). Skipped while
@@ -174,7 +204,11 @@ impl Inner {
             return;
         }
         let dir = crate::retention::trash_dir(self.trash_dir.as_deref());
-        let out = crate::retention::run(&self.history.referenced_media_anywhere(), package, &|p| {
+        let mut refs = self.history.referenced_media_anywhere();
+        for p in self.recorded_keep() {
+            refs.entry(p).or_insert(None);
+        }
+        let out = crate::retention::run(&refs, package, &|p| {
             crate::retention::trash(dir.as_deref(), p)
         });
         self.news.problems.extend(out.problems);
@@ -834,6 +868,9 @@ impl Session {
         until: Option<Tick>,
     ) -> Result<(), VizError> {
         let mut inner = lock(&self.inner);
+        if inner.recording.is_some() || inner.finishing {
+            return Err(recording_busy());
+        }
         let id = seq_id(inner.doc(), seq)?;
         let start = start.or(match (inner.cursor, inner.cursor_seq) {
             (Some(t), None) => Some(t),
@@ -990,6 +1027,10 @@ impl Session {
     pub fn save_as(&self, path: String) -> Result<(), VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
+            // Recordings are written under the current root.
+            if inner.recording.is_some() || inner.finishing {
+                return Err(recording_busy());
+            }
             // A job that just finished applies first, under the old root.
             self.apply_jobs(&mut inner);
             if inner.jobs.busy() {
@@ -1180,6 +1221,10 @@ impl Session {
     /// Stops; the position is kept.
     pub fn stop(&self) -> Result<(), VizError> {
         self.transport_call(|| {
+            // Stop while recording finishes the pass (spec §6.5).
+            if lock(&self.inner).recording.is_some() {
+                return self.finish_recording(None);
+            }
             // Behind a rebuild this session's poll is running (its drain
             // has taken the host out of the slot): the Stop must not be
             // lost to an empty slot.
@@ -1192,6 +1237,9 @@ impl Session {
     pub fn locate(&self, tick: i64) -> Result<(), VizError> {
         self.transport_call(|| {
             let mut inner = lock(&self.inner);
+            if inner.recording.is_some() {
+                return Err(recording_busy());
+            }
             if !host::locate(self.id, Tick(tick))? {
                 inner.cursor = Some(Tick(tick));
                 inner.cursor_seq = inner.selected_seq();
@@ -1204,6 +1252,9 @@ impl Session {
     pub fn set_loop(&self, on: bool) -> Result<(), VizError> {
         self.transport_call(|| {
             let mut inner = lock(&self.inner);
+            if inner.recording.is_some() {
+                return Err(recording_busy());
+            }
             inner.looped = on;
             host::set_loop(self.id, on)
         })
@@ -1298,7 +1349,9 @@ impl Session {
             }
             plugins::tick_closing();
             self.unload_disabled();
+            self.service_recording()?;
             let mut inner = lock(&self.inner);
+            self.apply_pending_pass(&mut inner);
             if inner.reload_owed {
                 inner.reload_host(self.id);
             }
@@ -2068,6 +2121,11 @@ impl Session {
     /// marker goes. Safe to call more than once.
     pub fn close(&self) -> Result<(), VizError> {
         ffi_guard(|| {
+            // A recording ends cleanly first: its files are finished, its
+            // pass applied (what is not saved then goes to the Trash).
+            if lock(&self.inner).recording.is_some() {
+                self.finish_recording(None)?;
+            }
             let mut inner = lock(&self.inner);
             inner.closed = true;
             let root = inner.root(self.id);
@@ -2091,7 +2149,25 @@ impl Session {
             }
             host::forget_media(self.id);
             if inner.path.is_none() {
-                let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
+                let scratch = crate::media::scratch_root(self.id);
+                // Recordings are never unlinked: an untitled project's go
+                // to the Trash before its scratch package is removed
+                // (plan 5c Ruling 15).
+                let dir = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                if let Ok(rd) = std::fs::read_dir(scratch.join(crate::record::RECORDED_DIR)) {
+                    for e in rd.flatten() {
+                        if e.path().is_file() {
+                            if let Err(why) = crate::retention::trash(dir.as_deref(), &e.path()) {
+                                eprintln!(
+                                    "VizDAW: {}: not moved to the Trash ({why})",
+                                    e.path().display()
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(scratch);
             }
             if let Some(k) = inner.key.clone() {
                 recovery::closed(&k, self.id);
@@ -2831,6 +2907,7 @@ impl Session {
             inner.news.media_changed = true;
             inner.news.doc_changed = true;
         }
+        self.apply_pending_pass(inner);
     }
 }
 
@@ -3248,6 +3325,13 @@ pub(crate) fn normalize_warning(w: &str, regions: &[(core_model::ids::EventId, &
     format!("Normalize: {w}")
 }
 
+/// `Busy` while a recording runs or finishes.
+fn recording_busy() -> VizError {
+    VizError::Busy {
+        message: "Stop recording first.".into(),
+    }
+}
+
 /// "Busy" for Normalize.
 fn still_building(name: &str) -> VizError {
     VizError::Busy {
@@ -3404,6 +3488,399 @@ impl Session {
             self.mark(&mut inner);
             inner.snapshot()
         })
+    }
+}
+
+/// Recording (plan 5c Task 9; spec §6.2–§6.5).
+#[uniffi::export]
+impl Session {
+    /// Records into sequence `seq` from where its position is (spec §6.4):
+    /// the transport rolls (from `pre_roll_bars` bars earlier), each armed
+    /// lane with an audio input records its channels into its own file
+    /// under `Media/Recorded/`, armed MIDI lanes record what they hear, and
+    /// at Stop everything recorded becomes one undo step "Record". `Model`
+    /// when no armed lane has an input, an audio lane names a channel the
+    /// input does not have, the spec is out of range, or count-in is asked
+    /// for (plan 5d plays it); `Busy` while recording, while an edit is
+    /// open, or when the disk is almost full.
+    pub fn record(&self, seq: u64, spec: crate::record::RecordSpecRow) -> Result<(), VizError> {
+        self.transport_call(|| self.start_recording(seq, spec))
+    }
+
+    /// `record.keep_pass`: keeps every loop pass completed so far (they
+    /// survive a later discard). `Model` unless loop recording.
+    pub fn keep_pass(&self) -> Result<(), VizError> {
+        ffi_guard(|| self.press_pass(true))
+    }
+
+    /// `record.discard_pass`: drops every loop pass completed since the
+    /// last keep. `Model` unless loop recording.
+    pub fn discard_pass(&self) -> Result<(), VizError> {
+        ffi_guard(|| self.press_pass(false))
+    }
+
+    /// What recording is doing (`state.get record`).
+    pub fn record_state(&self) -> Result<crate::record::RecordStateRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            Ok(match inner.recording.as_mut() {
+                Some(r) => {
+                    r.drain();
+                    r.row()
+                }
+                None => crate::record::RecordStateRow {
+                    recording: false,
+                    seq: None,
+                    spec: None,
+                    pass: 0,
+                    kept: 0,
+                    discarded: 0,
+                    lanes: Vec::new(),
+                    frames: 0,
+                    overflows: 0,
+                    gap_frames: 0,
+                    free_bytes: crate::record::free_bytes(&inner.root(self.id)),
+                },
+            })
+        })
+    }
+}
+
+impl Session {
+    fn press_pass(&self, keep: bool) -> Result<(), VizError> {
+        let mut inner = lock(&self.inner);
+        match inner.recording.as_mut() {
+            Some(r) => r.press(keep),
+            None => Err(crate::events::bad("nothing is recording")),
+        }
+    }
+
+    /// [`Session::record`].
+    fn start_recording(
+        &self,
+        seq: u64,
+        spec: crate::record::RecordSpecRow,
+    ) -> Result<(), VizError> {
+        use crate::record::{AudioLane, LOW_DISK_STOP, LOW_DISK_WARN, Plan, Recording};
+        use core_engine::record::RecordRequest;
+        use core_media::record::{RING_SECONDS, WriterConfig, WriterLane};
+        use core_model::lane::LaneInput;
+        let mut inner = lock(&self.inner);
+        if inner.recording.is_some() || inner.finishing {
+            return Err(VizError::Busy {
+                message: "A recording is already running.".into(),
+            });
+        }
+        if inner.history.in_transaction() || inner.history.in_group() {
+            return Err(VizError::Busy {
+                message: "Finish the open edit first.".into(),
+            });
+        }
+        if spec.count_in_bars > 4 || spec.pre_roll_bars > 8 {
+            return Err(crate::events::bad(
+                "count-in is 0–4 bars and pre-roll 0–8 bars",
+            ));
+        }
+        if spec.count_in_bars > 0 {
+            return Err(crate::events::bad(
+                "count-in arrives with the record controls (plan 5d); record with a count-in of 0",
+            ));
+        }
+        if let Some(p) = &spec.punch {
+            core_model::rules::check_ticks("punch", p.start)?;
+            core_model::rules::check_ticks("punch", p.end)?;
+            if p.start >= p.end {
+                return Err(crate::events::bad("the punch range is empty"));
+            }
+        }
+        let doc = inner.doc().clone();
+        let id = seq_id(&doc, seq)?;
+        let s = doc.sequence(id)?;
+        let mut audio: Vec<(
+            core_model::ids::LaneId,
+            String,
+            core_model::lane::InputChannels,
+        )> = Vec::new();
+        let mut midi_lanes = Vec::new();
+        for l in s.lanes.iter().filter(|l| l.arm) {
+            match &l.input {
+                Some(LaneInput::Audio { channels }) => {
+                    audio.push((l.id, l.name.clone(), *channels))
+                }
+                Some(LaneInput::Midi { .. }) => midi_lanes.push(l.id),
+                None => {}
+            }
+        }
+        if audio.is_empty() && midi_lanes.is_empty() {
+            return Err(crate::events::bad("arm a lane that has an input to record"));
+        }
+        let root = inner.root(self.id);
+        if !audio.is_empty() {
+            match crate::record::free_bytes(&root) {
+                Some(f) if f < LOW_DISK_STOP => {
+                    return Err(VizError::Busy {
+                        message: "The disk is almost full: free some space to record.".into(),
+                    });
+                }
+                Some(f) if f < LOW_DISK_WARN => inner
+                    .news
+                    .problems
+                    .push("Recording: less than 1 GB of disk space is left.".into()),
+                _ => {}
+            }
+        }
+        // Where it starts: the position as heard, then the pre-roll.
+        let format = doc.settings().format;
+        let rate = f64::from(format.sample_rate);
+        let origin = Tick(-s.start_offset.0);
+        let tempo = core_engine::schedule::TempoTable::build(&s.tempo, origin, rate);
+        let at = match host::position(self.id) {
+            Some((sq, t)) if sq == id => t,
+            _ => match (inner.cursor, inner.cursor_seq) {
+                (Some(t), None) => t,
+                (Some(t), Some(sq)) if sq == id => t,
+                _ => Tick::ZERO,
+            },
+        };
+        let bar = s.meter.entry_at(at).meter.bar_ticks();
+        let play_from = Tick(
+            at.0.saturating_sub(bar.saturating_mul(i64::from(spec.pre_roll_bars)))
+                .max(origin.0),
+        );
+        let frame = |t: i64| tempo.tick_to_frame(Tick(t));
+        let punch = spec.punch.as_ref().map(|p| (frame(p.start), frame(p.end)));
+        let looped = spec.looped.then(|| {
+            let end = core_model::query::seq_length(&doc, id).unwrap_or(Tick::ZERO);
+            (frame(0), frame(end.0))
+        });
+        let range = match (looped, punch) {
+            (Some((a, b)), Some((pa, pb))) => crate::passes::RecordRange {
+                start: a.max(pa),
+                end: Some(b.min(pb)),
+            },
+            (Some((a, b)), None) => crate::passes::RecordRange {
+                start: a,
+                end: Some(b),
+            },
+            (None, Some((pa, pb))) => crate::passes::RecordRange {
+                start: pa,
+                end: Some(pb),
+            },
+            (None, None) => crate::passes::RecordRange {
+                start: frame(at.0),
+                end: None,
+            },
+        };
+        if range.end.is_some_and(|e| e <= range.start) {
+            return Err(crate::events::bad(
+                "the record range is empty (an empty loop, or a punch outside it)",
+            ));
+        }
+        // The engine plays (this loads the sequence and locates); the tap
+        // goes in before the Play, so the roll is the first block captured.
+        inner.mark(self.id, true);
+        let played = plugins::with(self.id, |p| {
+            host::play(self.id, &doc, id, Some(play_from), None, spec.looped, p)
+        })
+        .and_then(|r| r);
+        let pending = match played {
+            Ok(p) => p,
+            Err(e) => {
+                inner.reload_owed = true;
+                return Err(e);
+            }
+        };
+        let fail = |e: VizError| {
+            let _ = host::stop_recording(self.id);
+            Err(e)
+        };
+        // A device at another rate than the project's would record at the
+        // wrong speed and place MIDI wrongly (5a Ruling 20: no resampling).
+        if let Some((true, rate)) = host::device(self.id) {
+            return fail(crate::events::bad(&format!(
+                "the device runs at {rate} Hz, not the project's {} Hz: change one of them to record",
+                format.sample_rate
+            )));
+        }
+        let inputs = host::input_info(self.id).map_or(0, |(_, i)| i.channels);
+        for (_, name, ch) in &audio {
+            if ch.last().is_none_or(|c| u32::from(c) >= inputs) {
+                return fail(crate::events::bad(&format!(
+                    "lane {name} records input {}, but the audio input has {inputs} channel(s)",
+                    u32::from(ch.first()) + 1
+                )));
+            }
+        }
+        let mut device: Vec<u16> = audio
+            .iter()
+            .flat_map(|(_, _, ch)| {
+                let a = ch.first();
+                [a, ch.last().unwrap_or(a)]
+            })
+            .collect();
+        device.sort_unstable();
+        device.dedup();
+        let req = RecordRequest {
+            channels: if audio.is_empty() {
+                Vec::new()
+            } else {
+                device.clone()
+            },
+            range: Some((range.start, range.end.unwrap_or(u64::MAX))),
+            ring_frames: (RING_SECONDS * rate) as usize,
+        };
+        let handles = match host::start_recording(self.id, &req) {
+            Ok(h) => h,
+            Err(e) => return fail(e),
+        };
+        let mut reserved = inner.reserved_names();
+        let now = std::time::SystemTime::now();
+        let mut lanes = Vec::new();
+        let mut writer_lanes = Vec::new();
+        for (lane, name, ch) in &audio {
+            let rel = crate::record::recorded_path(&root, name, now, &reserved);
+            reserved.insert(rel.clone());
+            let index = |c: u16| device.iter().position(|d| *d == c).unwrap_or(0);
+            let mut chans = vec![index(ch.first())];
+            if let Some(r) = ch.last().filter(|r| *r != ch.first()) {
+                chans.push(index(r));
+            }
+            writer_lanes.push(WriterLane {
+                path: root.join(&rel),
+                channels: chans,
+            });
+            lanes.push(AudioLane {
+                lane: *lane,
+                path: rel,
+                channels: ch.count(),
+            });
+        }
+        let writer = (!lanes.is_empty()).then_some(WriterConfig {
+            rate: format.sample_rate,
+            depth: format.depth,
+            lanes: writer_lanes,
+        });
+        let plan = Plan {
+            seq: id,
+            spec: spec.clone(),
+            range,
+            audio: lanes,
+            midi_lanes,
+            root,
+            format,
+            pass_number: crate::record::next_pass(&doc),
+        };
+        let recording = match Recording::start(plan, handles, writer) {
+            Ok(r) => r,
+            Err(e) => {
+                return fail(VizError::Io {
+                    message: format!("the recording could not start: {e}"),
+                });
+            }
+        };
+        if let Err(e) = inner.history.begin_group() {
+            return fail(e.into());
+        }
+        inner.recording = Some(recording);
+        inner.looped = spec.looped;
+        inner.reload_owed = false;
+        inner.reload_fault = None;
+        inner.cursor = None;
+        inner.cursor_seq = Some(id);
+        drop(inner);
+        host::finish_play(pending)
+    }
+
+    /// Ends the recording in progress (spec §6.5): the engine stops and
+    /// drops its tap, the files are finished without the session lock,
+    /// then the pass is applied as the last step of the recording's group,
+    /// which closes as one undo step. `reason` is told to the user.
+    fn finish_recording(&self, reason: Option<String>) -> Result<(), VizError> {
+        let rec = {
+            let mut inner = lock(&self.inner);
+            let Some(r) = inner.recording.take() else {
+                return Ok(());
+            };
+            inner.finishing = true;
+            let _ = host::stop_recording(self.id);
+            r
+        };
+        let done = rec.finish(crate::record::FINISH_WAIT);
+        let mut inner = lock(&self.inner);
+        inner.finishing = false;
+        if let Some(why) = reason {
+            inner
+                .news
+                .problems
+                .push(format!("Recording stopped: {why}."));
+        }
+        let files = done.files();
+        let doc = inner.doc().clone();
+        let pass = match crate::record::build(&done, &doc) {
+            Ok(p) => p,
+            Err(e) => {
+                inner.news.problems.push(format!(
+                    "The recording could not be placed: {e}. Its files are kept."
+                ));
+                inner.keep_recordings.extend(files.iter().cloned());
+                None
+            }
+        };
+        inner.pending_pass = Some((pass, files));
+        self.apply_pending_pass(&mut inner);
+        Ok(())
+    }
+
+    /// Applies a finished recording's pass and closes its group, unless
+    /// an edit is still open (then `end_edit` or the next `idle` does).
+    fn apply_pending_pass(&self, inner: &mut Inner) {
+        if inner.history.in_transaction() {
+            return;
+        }
+        let Some((pass, files)) = inner.pending_pass.take() else {
+            return;
+        };
+        let label = pass
+            .as_ref()
+            .map_or("Record", core_model::command::RecordPass::name);
+        if let Some(p) = pass {
+            if let Err(e) = inner
+                .history
+                .execute(&Command::Record(p), &ViewFilter::default())
+            {
+                inner.news.problems.push(format!(
+                    "The recording could not be added ({e}). Its files are kept."
+                ));
+                inner.keep_recordings.extend(files);
+            }
+        }
+        let _ = inner.history.end_group(label);
+        inner.version += 1;
+        inner.news.doc_changed = true;
+        inner.news.media_changed = true;
+        inner.reload_host(self.id);
+        self.mark(inner);
+    }
+
+    /// `idle`'s recording step: ends the recording when the input went
+    /// away, the disk failed or filled, or the transport stopped by itself.
+    fn service_recording(&self) -> Result<(), VizError> {
+        let ending = {
+            let mut inner = lock(&self.inner);
+            let stopped = host::transport_stopped(self.id).unwrap_or(false);
+            let mut problems = Vec::new();
+            let e = inner
+                .recording
+                .as_mut()
+                .and_then(|r| r.check(stopped, &mut problems));
+            inner.news.problems.extend(problems);
+            e
+        };
+        match ending {
+            None => Ok(()),
+            Some(crate::record::Ending::Ended) => self.finish_recording(None),
+            Some(crate::record::Ending::Because(why)) => self.finish_recording(Some(why)),
+        }
     }
 }
 

@@ -11,6 +11,7 @@ use core_engine::engine::{Engine, EngineConfig, PendingPlay};
 use core_engine::graph::NoInserts;
 use core_engine::input::{InputSpec, MidiInputSpec, MidiSender, MonitorRoute, port_key};
 use core_engine::offline::{EventLog, FakeInput, OfflineBackend, OfflineSinks};
+use core_engine::record::{RecordHandles, RecordRequest};
 use core_engine::render::Renderer;
 use core_engine::schedule::CompileReport;
 use core_engine::transport::PlayState;
@@ -925,6 +926,11 @@ pub fn play(
     }
     if host.owner != owner || host.seq != seq || start.is_some() {
         host.engine.stop()?;
+        if host.owner != owner {
+            // Another session's recording ends here: its tap must not
+            // capture this one's playback.
+            host.engine.stop_recording()?;
+        }
         host.load(owner, doc, seq, looped)?;
         host.engine.locate_tick(start.unwrap_or(Tick::ZERO))?;
         host.owner = owner;
@@ -1232,6 +1238,54 @@ pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
         latency_frames: h.engine.latency_frames(),
         faulted: h.faulted.iter().copied().collect(),
     })
+}
+
+/// Installs a record tap in `owner`'s engine (spec §6.2): the next block
+/// that plays starts capturing. Fails only when `owner` does not hold the
+/// engine or its command queue is full.
+pub fn start_recording(owner: u64, req: &RecordRequest) -> Result<RecordHandles, VizError> {
+    let mut slot = lock(&HOST);
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => Ok(h.engine.start_recording(req)?),
+        _ => Err(VizError::Engine {
+            message: "this document does not hold the audio engine".into(),
+        }),
+    }
+}
+
+/// Stops `owner`'s transport and removes its record tap (nothing when
+/// another session holds the engine: its tap went with the old engine,
+/// or that session's Play removed it).
+pub fn stop_recording(owner: u64) -> Result<(), VizError> {
+    let mut slot = lock(&HOST);
+    match slot.as_mut() {
+        Some(h) if h.owner == owner => {
+            h.want_play = false;
+            h.until = None;
+            h.epoch = next_epoch();
+            h.engine.stop()?;
+            Ok(h.engine.stop_recording()?)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether `owner`'s renderer has its transport stopped (the end of a
+/// song without a loop), when it holds the engine. Right after a Play this
+/// still reads stopped until the renderer applies it.
+pub fn transport_stopped(owner: u64) -> Option<bool> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.state() == PlayState::Stopped)
+}
+
+/// Where `owner`'s transport is heard, when it holds the engine.
+pub fn position(owner: u64) -> Option<(SeqId, Tick)> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| (h.seq, h.engine.position_tick()))
 }
 
 /// `owner`'s input, when it holds the engine.

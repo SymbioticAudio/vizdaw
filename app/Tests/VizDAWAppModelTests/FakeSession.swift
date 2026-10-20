@@ -145,7 +145,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     func setLoop(on: Bool) throws {}
     func snapshot() throws -> DocSnapshot { snap }
-    func stop() throws { state.playing = false }
+    func stop() throws {
+        state.playing = false
+        recordRow.recording = false
+    }
     func transport() throws -> TransportState {
         if let e = transportError { throw e }
         return state
@@ -363,6 +366,29 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
 
     func inputInfo() throws -> InputInfoRow { inputRow }
+
+    // MARK: Recording (plan 5c Task 9)
+
+    var recordCalls: [(seq: UInt64, spec: RecordSpecRow)] = []
+    var recordError: VizError?
+    var passPresses: [Bool] = []
+    var recordRow = RecordStateRow(
+        recording: false, seq: nil, spec: nil, pass: 0, kept: 0, discarded: 0, lanes: [], frames: 0,
+        overflows: 0, gapFrames: 0, freeBytes: nil)
+
+    func record(seq: UInt64, spec: RecordSpecRow) throws {
+        if let e = recordError { throw e }
+        recordCalls.append((seq, spec))
+        recordRow.recording = true
+        recordRow.seq = seq
+        recordRow.spec = spec
+        state.playing = true
+        state.seq = seq
+    }
+
+    func keepPass() throws { passPresses.append(true) }
+    func discardPass() throws { passPresses.append(false) }
+    func recordState() throws -> RecordStateRow { recordRow }
 
     // MARK: Media pool (plan 5b Task 6)
 
