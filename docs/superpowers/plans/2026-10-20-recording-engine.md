@@ -1212,7 +1212,7 @@ git log -1 --oneline && git show --stat HEAD
 - Produces:
   - `command::record::{RecordedMedia, RecordedRegion, RecordedContent, LaneRecord, RecordPass}`; `RecordPass { with_gaps, media, lanes }` and `name()` ("Record" / "Record (with gaps)"); `MAX_PASS_TAKES` 256;
   - `Command::Record(RecordPass)`: adds the media, then per lane clears the replace range's MIDI (`clear`), adds content to the active take or makes "Take n" takes (`takes`), and selects the last (`active`); any bad part refuses the whole pass;
-  - `History::begin_group()`, `end_group(label) -> Result<bool>`, `in_group()` (Ruling 16).
+  - `History::begin_group()`, `end_group(label) -> Result<()>`, `in_group()` (Ruling 16).
 
 Spec §4.7. One pass applies whole or not at all; the group makes the pass and every edit made while recording one undo step.
 

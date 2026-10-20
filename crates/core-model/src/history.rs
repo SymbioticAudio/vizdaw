@@ -265,7 +265,11 @@ impl History {
             if let Some(t) = self.txn.as_mut() {
                 t.executed = true;
             }
-            self.group_stepped();
+            // Inside a transaction the group is marked at commit: an
+            // aborted drag must leave it (and its redo floor) untouched.
+            if self.txn.is_none() {
+                self.group_stepped();
+            }
             self.trim();
         }
         let sel = applied.selection.unwrap_or_else(|| self.selection.clone());
@@ -358,6 +362,7 @@ impl History {
             t.base_future
         };
         if t.executed {
+            // The only place a transaction's steps count for the group.
             self.group_stepped();
         }
         self.trim();

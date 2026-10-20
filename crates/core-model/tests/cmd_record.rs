@@ -358,6 +358,113 @@ fn a_group_that_made_nothing_keeps_the_redo_stack() {
     ));
 }
 
+#[test]
+fn an_aborted_drag_in_a_group_keeps_the_redo_stack_before_it() {
+    let f = ViewFilter::default();
+    let rename = |name: &str| {
+        Command::Lane(LaneCmd::Rename {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            name: name.into(),
+        })
+    };
+    let mut h = History::new(doc());
+    h.execute(&rename("Before"), &f).unwrap();
+    h.undo().unwrap();
+    h.begin_group().unwrap();
+    h.begin("Drag").unwrap();
+    h.execute(&rename("Drag"), &f).unwrap();
+    h.abort().unwrap();
+    assert!(h.peek_redo().is_none(), "not reachable inside the group");
+    assert!(h.redo().is_err());
+    h.end_group("Record").unwrap();
+    assert_eq!(h.undo_depth(), 0, "nothing folded");
+    assert_eq!(h.redo_label(), Some("Rename Lane"));
+    h.redo().unwrap();
+    assert_eq!(h.doc().lane(SeqId(0), LaneId(0)).unwrap().name, "Before");
+}
+
+#[test]
+fn a_pass_with_too_many_takes_is_refused_whole() {
+    use core_model::command::record::MAX_PASS_TAKES;
+    let d = doc();
+    let mut l = lane_record(0);
+    l.takes = (0..=MAX_PASS_TAKES)
+        .map(|i| (format!("Take {}", i + 2), RecordedContent::default()))
+        .collect();
+    let mut h = History::new(d.clone());
+    let pass = RecordPass {
+        lanes: vec![l],
+        ..RecordPass::default()
+    };
+    assert!(
+        h.execute(&Command::Record(pass), &ViewFilter::default())
+            .is_err()
+    );
+    assert_eq!(h.doc(), &d);
+    assert_eq!(h.undo_depth(), 0);
+}
+
+#[test]
+fn media_paths_are_write_once() {
+    let f = ViewFilter::default();
+    let with = |paths: &[&str]| RecordPass {
+        media: paths
+            .iter()
+            .map(|p| RecordedMedia {
+                path: (*p).into(),
+                ..media(10)
+            })
+            .collect(),
+        ..RecordPass::default()
+    };
+    let mut h = History::new(doc());
+    // Repeated inside one pass.
+    assert!(
+        h.execute(
+            &Command::Record(with(&["Media/Recorded/a.caf", "Media/Recorded/a.caf"])),
+            &f
+        )
+        .is_err()
+    );
+    h.execute(&Command::Record(with(&["Media/Recorded/a.caf"])), &f)
+        .unwrap();
+    let before = h.doc().clone();
+    // Already in the pool.
+    assert!(
+        h.execute(
+            &Command::Record(with(&["Media/Recorded/b.caf", "Media/Recorded/a.caf"])),
+            &f
+        )
+        .is_err()
+    );
+    assert_eq!(h.doc(), &before);
+    assert_eq!(h.undo_depth(), 1);
+}
+
+#[test]
+fn media_in_an_open_group_stays_referenced() {
+    let f = ViewFilter::default();
+    let path = "Media/Recorded/B 2026-10-20 120000.caf";
+    let pass = RecordPass {
+        media: vec![media(10)],
+        ..RecordPass::default()
+    };
+    // Made and undone inside the group.
+    let mut h = History::new(doc());
+    h.begin_group().unwrap();
+    h.execute(&Command::Record(pass.clone()), &f).unwrap();
+    h.undo().unwrap();
+    assert!(h.referenced_media_anywhere().contains_key(path));
+    h.end_group("Record").unwrap();
+    // Undone before the group opened.
+    let mut h = History::new(doc());
+    h.execute(&Command::Record(pass), &f).unwrap();
+    h.undo().unwrap();
+    h.begin_group().unwrap();
+    assert!(h.referenced_media_anywhere().contains_key(path));
+}
+
 #[derive(Debug, Clone)]
 enum Part {
     Clear(i64, i64),

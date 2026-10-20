@@ -183,6 +183,13 @@ pub(crate) fn apply(d: &mut Document, pass: &RecordPass, r: &mut Report) -> Resu
     let mut ids = Vec::with_capacity(pass.media.len());
     for m in &pass.media {
         check_media(m)?;
+        // Media paths are write-once: a path names one audio.
+        if d.media().values().any(|i| i.path == m.path) {
+            return Err(ModelError::invalid(format!(
+                "media path {} is already in the pool",
+                m.path
+            )));
+        }
         let id = d.counters_mut().alloc_media();
         d.media_mut().insert(
             id,
