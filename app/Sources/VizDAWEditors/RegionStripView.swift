@@ -25,7 +25,34 @@ public final class RegionStripView: NSView, TimeAxisFollower {
         self.model = model
         super.init(frame: .zero)
         wantsLayer = true
+        registerForDraggedTypes([.fileURL])
         observe()
+    }
+
+    // MARK: Dropping audio files (spec §10.2; plan 5b Ruling 8)
+
+    public override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        model.seq != nil && !AudioDrop.paths(sender.draggingPasteboard).isEmpty ? .copy : []
+    }
+
+    public override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    public override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        drop(AudioDrop.paths(sender.draggingPasteboard), at: convert(sender.draggingLocation, from: nil))
+    }
+
+    /// Imports `paths` dropped at `p`: into the lane of the region under
+    /// it, else the piano roll's edit lane (new lanes without one).
+    @discardableResult
+    func drop(_ paths: [String], at p: CGPoint) -> Bool {
+        guard !paths.isEmpty, let seq = model.seq else { return false }
+        let lane = RegionStripLayout.dropLane(p, lines: lines(), time: timeAxis, side: side) ?? model.editLane
+        let tick = AudioDrop.tick(timeAxis.tick(atX: p.x - side), snap: editor.layout.snap, meter: meter)
+        model.document?.importAudio(
+            paths: paths, target: ImportTargetRow(seq: seq, lane: lane?.seq == seq ? lane?.lane : nil, tick: tick))
+        return true
     }
 
     public required init?(coder: NSCoder) { nil }

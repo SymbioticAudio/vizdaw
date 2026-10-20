@@ -89,6 +89,12 @@ public enum RegionStripLayout {
         return .none
     }
 
+    /// The lane of the region under `p`: where a drop there goes.
+    public static func dropLane(_ p: CGPoint, lines: [RegionLine], time: TimeAxis, side: CGFloat) -> LaneKey? {
+        if case .region(let item) = hit(p, lines: lines, time: time, side: side) { return item.lane }
+        return nil
+    }
+
     /// A region handle under `p`, if any (checked before `hit`).
     public static func handleHit(_ p: CGPoint, lines: [RegionLine], time: TimeAxis, side: CGFloat) -> RegionHit? {
         guard p.x >= side, p.y.isFinite, p.y >= -2 else { return nil }

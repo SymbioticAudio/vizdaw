@@ -34,6 +34,7 @@ public final class ArrangementView: EditorCanvas {
     public init(document: DocumentModel) {
         self.document = document
         super.init(frame: .zero)
+        registerForDraggedTypes([.fileURL])
         axis = TimeAxis(ticksPerPoint: document.editor.layout.ticksPerPoint)
         playheadSource = { [unowned self] now in
             let t = self.document.transport
@@ -414,6 +415,34 @@ public final class ArrangementView: EditorCanvas {
         return BlockDrag.command(
             events: d.events, rows: d.rows, from: d.hit.lane, to: targetLane(d, to: to), delta: delta,
             copy: d.copy)
+    }
+
+    // MARK: Dropping audio files (spec §10.2; plan 5b Ruling 8)
+
+    public override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        seq != nil && !AudioDrop.paths(sender.draggingPasteboard).isEmpty ? .copy : []
+    }
+
+    public override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    public override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        drop(AudioDrop.paths(sender.draggingPasteboard), at: content.convert(sender.draggingLocation, from: nil))
+    }
+
+    /// Imports `paths` dropped at `p` (content coordinates): into the lane
+    /// under it, or new lanes below the last one.
+    @discardableResult
+    func drop(_ paths: [String], at p: CGPoint) -> Bool {
+        let keys = lanes
+        guard !paths.isEmpty,
+            let target = AudioDrop.target(
+                seq: seq, lanes: keys, row: geometry.row(atY: p.y, count: keys.count), tick: axis.tick(atX: p.x),
+                snap: snap, meter: meter)
+        else { return false }
+        document.importAudio(paths: paths, target: target)
+        return true
     }
 
     // MARK: Context menus (spec §4a subsequence workflow)
