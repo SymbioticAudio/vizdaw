@@ -234,12 +234,24 @@ pub struct LaneWritten {
     pub written: Written,
 }
 
+/// A lane file that could not be finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedLane {
+    /// Its path.
+    pub path: PathBuf,
+    /// Why.
+    pub error: String,
+}
+
 /// What a finished writer wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterResult {
     /// Each lane's file, in [`WriterConfig::lanes`] order (a lane whose
     /// file failed is missing; see `error`).
     pub lanes: Vec<LaneWritten>,
+    /// Lanes whose file could not be finished: the file is still on disk
+    /// (recording-mode or short) and must be kept and reported.
+    pub failed: Vec<FailedLane>,
     /// Frames written as silence because their blocks were lost.
     pub gap_frames: u64,
     /// Why writing stopped early (a full disk), if it did.
@@ -274,9 +286,16 @@ struct Shared {
 pub struct RecordWriter {
     thread: Option<JoinHandle<WriterResult>>,
     shared: Arc<Shared>,
+    paths: Vec<PathBuf>,
 }
 
 /// The lock of a mutex even if a panic poisoned it.
+fn made_paths(paths: &[PathBuf]) {
+    for p in paths {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 fn guard<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -315,11 +334,18 @@ impl RecordWriter {
                 }
             }
             match CafWriter::create(&l.path, cfg.rate, n as u16, cfg.depth, WriteMode::Recording) {
-                Ok(writer) => lanes.push(Lane {
-                    writer,
-                    path: l.path.clone(),
-                    channels: l.channels.clone(),
-                }),
+                Ok(writer) => {
+                    if let Err(e) = writer.sync() {
+                        let _ = std::fs::remove_file(&l.path);
+                        made(&lanes);
+                        return Err(e);
+                    }
+                    lanes.push(Lane {
+                        writer,
+                        path: l.path.clone(),
+                        channels: l.channels.clone(),
+                    });
+                }
                 Err(e) => {
                     made(&lanes);
                     return Err(e);
@@ -333,6 +359,7 @@ impl RecordWriter {
             clipped: (0..lanes.len()).map(|_| AtomicU64::new(0)).collect(),
             error: Mutex::new(None),
         });
+        let paths: Vec<PathBuf> = lanes.iter().map(|l| l.path.clone()).collect();
         let s = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("vizdaw-record".into())
@@ -341,8 +368,12 @@ impl RecordWriter {
             Ok(t) => Ok(RecordWriter {
                 thread: Some(t),
                 shared,
+                paths,
             }),
-            Err(e) => Err(MediaError::Io(format!("record writer thread: {e}"))),
+            Err(e) => {
+                made_paths(&paths);
+                Err(MediaError::Io(format!("record writer thread: {e}")))
+            }
         }
     }
 
@@ -370,6 +401,14 @@ impl RecordWriter {
             Some(Ok(r)) => r,
             _ => WriterResult {
                 lanes: Vec::new(),
+                failed: self
+                    .paths
+                    .iter()
+                    .map(|p| FailedLane {
+                        path: p.clone(),
+                        error: "the record writer stopped unexpectedly".into(),
+                    })
+                    .collect(),
                 gap_frames: self.shared.gaps.load(Ordering::Relaxed),
                 error: Some("the record writer stopped unexpectedly".into()),
             },
@@ -504,6 +543,7 @@ fn run(mut reader: RingReader, mut lanes: Vec<Lane>, s: &Shared) -> WriterResult
     s.gaps.store(gaps, Ordering::Relaxed);
     s.frames.store(next, Ordering::Relaxed);
     let mut out = Vec::with_capacity(lanes.len());
+    let mut failed = Vec::new();
     for l in lanes {
         let path = l.path.clone();
         match l.writer.finish() {
@@ -512,11 +552,16 @@ fn run(mut reader: RingReader, mut lanes: Vec<Lane>, s: &Shared) -> WriterResult
                 if error.is_none() {
                     error = Some(format!("{}: {e}", path.display()));
                 }
+                failed.push(FailedLane {
+                    path,
+                    error: e.to_string(),
+                });
             }
         }
     }
     WriterResult {
         lanes: out,
+        failed,
         gap_frames: gaps,
         error,
     }
@@ -547,4 +592,45 @@ fn free_bytes_impl(path: &Path) -> Option<u64> {
 #[cfg(not(unix))]
 fn free_bytes_impl(_path: &Path) -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lane_whose_file_fails_is_reported_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut w, r) = input_ring(2, 4800);
+        let mut lanes = Vec::new();
+        for n in ["a.caf", "b.caf"] {
+            let path = dir.path().join(n);
+            let mut writer =
+                CafWriter::create(&path, 48_000, 1, BitDepth::Int16, WriteMode::Recording).unwrap();
+            if n == "b.caf" {
+                writer.break_file_for_test(&path);
+            }
+            lanes.push(Lane {
+                writer,
+                path,
+                channels: vec![usize::from(n == "b.caf")],
+            });
+        }
+        assert!(w.push(0, 100, |_, _| 0.25));
+        w.set_end(100);
+        w.close();
+        let shared = Shared {
+            stop_by: Mutex::new(Some(Instant::now())),
+            frames: AtomicU64::new(0),
+            gaps: AtomicU64::new(0),
+            clipped: (0..2).map(|_| AtomicU64::new(0)).collect(),
+            error: Mutex::new(None),
+        };
+        let res = run(r, lanes, &shared);
+        assert!(res.error.is_some());
+        assert_eq!(res.lanes.len(), 1);
+        assert_eq!(res.lanes[0].path, dir.path().join("a.caf"));
+        assert_eq!(res.failed.len(), 1);
+        assert_eq!(res.failed[0].path, dir.path().join("b.caf"));
+    }
 }

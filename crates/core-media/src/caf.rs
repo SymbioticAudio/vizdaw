@@ -103,6 +103,8 @@ pub struct CafWriter {
     frames: u64,
     clipped: u64,
     hasher: blake3::Hasher,
+    /// A write failed: the file may hold bytes the counts leave out.
+    poisoned: bool,
     dither: Tpdf,
     bytes: Vec<u8>,
 }
@@ -181,6 +183,7 @@ impl CafWriter {
             frames: 0,
             clipped: 0,
             hasher: blake3::Hasher::new(),
+            poisoned: false,
             dither: Tpdf(0x9E37_79B9_7F4A_7C15),
             bytes: Vec::new(),
         })
@@ -224,8 +227,15 @@ impl CafWriter {
                 }
             }
         }
+        if self.poisoned {
+            return Err(MediaError::Io("an earlier write failed".into()));
+        }
+        // Hash only what reached the file.
+        if let Err(e) = self.file.write_all(&self.bytes) {
+            self.poisoned = true;
+            return Err(e.into());
+        }
         self.hasher.update(&self.bytes);
-        self.file.write_all(&self.bytes)?;
         self.frames += (interleaved.len() / ch) as u64;
         Ok(())
     }
@@ -233,6 +243,20 @@ impl CafWriter {
     /// Frames written so far.
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// Test hook: makes every later write fail (the file is swapped for a
+    /// read-only handle), as a full disk would.
+    #[cfg(test)]
+    pub(crate) fn break_file_for_test(&mut self, path: &Path) {
+        if let Ok(f) = File::open(path) {
+            self.file = f;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hash_hex_for_test(&self) -> String {
+        self.hasher.finalize().to_hex().to_string()
     }
 
     /// Samples clipped so far.
@@ -251,9 +275,19 @@ impl CafWriter {
     pub fn finish(mut self) -> Result<Written, MediaError> {
         let bytes = self.frames * (self.depth.bytes() as u64) * u64::from(self.channels);
         let size = i64::try_from(bytes.saturating_add(4)).unwrap_or(-1);
+        // Data first, so a crash cannot persist a size beyond the data.
+        let synced = self.file.sync_data();
         self.file.seek(SeekFrom::Start(self.size_at))?;
         self.file.write_all(&size.to_be_bytes())?;
         self.file.sync_all()?;
+        if self.poisoned {
+            // The size now covers whole frames written; the take is
+            // readable, but its hash and counts are not to be trusted.
+            return Err(MediaError::Io(
+                "a write failed; the file holds only the frames before it".into(),
+            ));
+        }
+        synced?;
         Ok(Written {
             frames: self.frames,
             content_hash: self.hasher.finalize().to_hex().to_string(),
@@ -589,6 +623,26 @@ mod tests {
         let r = CafReader::open(&dir.path().join("t.caf")).unwrap();
         f.set_len(off + 100 * 4).unwrap();
         assert_eq!(r.read(0, &mut out, &mut Vec::new()).unwrap(), 100);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_hash_over_missing_bytes_and_finish_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("full.caf");
+        let mut w =
+            CafWriter::create(&p, 48_000, 1, BitDepth::Int16, WriteMode::Recording).unwrap();
+        w.write(&[0.25; 100]).unwrap();
+        w.break_file_for_test(&p);
+        assert!(w.write(&[0.5; 100]).is_err());
+        assert_eq!(w.frames(), 100);
+        let mut good = blake3::Hasher::new();
+        good.update(&std::fs::read(&p).unwrap()[w_data_offset(&p)..]);
+        assert_eq!(w.hash_hex_for_test(), good.finalize().to_hex().to_string());
+        assert!(w.finish().is_err(), "a poisoned writer does not finish Ok");
+    }
+
+    fn w_data_offset(p: &Path) -> usize {
+        CafReader::open(p).unwrap().info().data_offset as usize
     }
 
     #[test]
