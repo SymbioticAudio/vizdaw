@@ -4,7 +4,7 @@ use super::Report;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::ids::{AnyId, DestId, LaneId, OutputPathId, SeqId, TakeId};
-use crate::lane::{Lane, QuantizeSpec, Take};
+use crate::lane::{Lane, LaneInput, MonitorMode, QuantizeSpec, Take};
 use crate::rules::check_positive;
 use crate::time::Tick;
 
@@ -125,6 +125,24 @@ pub enum LaneCmd {
         /// Take (must exist in the lane).
         take: TakeId,
     },
+    /// Set what the lane records (sub-project 5 spec §4.5).
+    SetInput {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// The input (checked by [`LaneInput::check`]) or none.
+        input: Option<LaneInput>,
+    },
+    /// Set when the lane's input is heard (spec §6.6).
+    SetMonitor {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// The mode.
+        monitor: MonitorMode,
+    },
 }
 
 impl LaneCmd {
@@ -143,6 +161,8 @@ impl LaneCmd {
             LaneCmd::SetPlayShift { .. } => "Set Play Shift",
             LaneCmd::AddTake { .. } => "Add Take",
             LaneCmd::SetActiveTake { .. } => "Set Active Take",
+            LaneCmd::SetInput { .. } => "Set Lane Input",
+            LaneCmd::SetMonitor { .. } => "Set Lane Monitor",
         }
     }
 }
@@ -253,6 +273,15 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
                 return Err(ModelError::UnknownId(AnyId::Take(*take)));
             }
             l.active_take = *take;
+        }
+        LaneCmd::SetInput { seq, lane, input } => {
+            if let Some(i) = input {
+                i.check()?;
+            }
+            d.lane_mut(*seq, *lane)?.input = input.clone();
+        }
+        LaneCmd::SetMonitor { seq, lane, monitor } => {
+            d.lane_mut(*seq, *lane)?.monitor = *monitor;
         }
     }
     Ok(())

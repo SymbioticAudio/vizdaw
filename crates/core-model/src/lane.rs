@@ -42,6 +42,15 @@ pub struct Lane {
     pub takes: Vector<Take>,
     /// The take that plays.
     pub active_take: TakeId,
+    /// What the lane records (sub-project 5 spec §4.5): audio from device
+    /// input channels or MIDI from a port. `None` records nothing; absent
+    /// in files, so lanes without one read and write as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<LaneInput>,
+    /// When the lane's input is heard (spec §6.6); `Auto` is absent in
+    /// files.
+    #[serde(default, skip_serializing_if = "MonitorMode::is_auto")]
+    pub monitor: MonitorMode,
 }
 
 impl Lane {
@@ -63,6 +72,8 @@ impl Lane {
             drum: None,
             takes: Vector::unit(Take::new(take, "Take 1")),
             active_take: take,
+            input: None,
+            monitor: MonitorMode::Auto,
         }
     }
 
@@ -79,6 +90,116 @@ impl Lane {
     /// Index of a take by ID.
     pub fn take_index(&self, id: TakeId) -> Option<usize> {
         self.takes.iter().position(|t| t.id == id)
+    }
+}
+
+/// The highest device input channel a lane may name (0-based): a stereo
+/// pair's second channel is at most this.
+pub const MAX_INPUT_CHANNEL: u16 = 255;
+/// The longest MIDI port name a lane input may name, in bytes.
+pub const MAX_PORT_NAME: usize = 255;
+
+/// The device input channels an audio lane records (spec §4.5), 0-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputChannels {
+    /// One channel.
+    Mono(u16),
+    /// This channel and the next, as left and right.
+    Stereo(u16),
+}
+
+impl InputChannels {
+    /// 1 or 2.
+    pub fn count(self) -> u16 {
+        match self {
+            InputChannels::Mono(_) => 1,
+            InputChannels::Stereo(_) => 2,
+        }
+    }
+
+    /// The first (left) channel.
+    pub fn first(self) -> u16 {
+        match self {
+            InputChannels::Mono(c) | InputChannels::Stereo(c) => c,
+        }
+    }
+
+    /// The last channel (the right one of a pair), or `None` past
+    /// `u16::MAX`.
+    pub fn last(self) -> Option<u16> {
+        self.first().checked_add(self.count() - 1)
+    }
+}
+
+/// What a lane records (spec §4.5). A lane records audio only with an
+/// `Audio` input and MIDI only with a `Midi` one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum LaneInput {
+    /// Audio from device input channels.
+    Audio {
+        /// Which channels.
+        channels: InputChannels,
+    },
+    /// MIDI from a port.
+    Midi {
+        /// The source's name; `None`: every source.
+        port: Option<String>,
+        /// The MIDI channel 0–15; `None`: every channel.
+        channel: Option<u8>,
+    },
+}
+
+impl LaneInput {
+    /// Checks the channels (at most [`MAX_INPUT_CHANNEL`]), the port name
+    /// (not empty, at most [`MAX_PORT_NAME`] bytes, no control characters)
+    /// and the MIDI channel (0–15).
+    pub fn check(&self) -> crate::error::Result<()> {
+        match self {
+            LaneInput::Audio { channels } => {
+                if channels.last().is_none_or(|c| c > MAX_INPUT_CHANNEL) {
+                    return Err(ModelError::range("input.channels", channels.first()));
+                }
+            }
+            LaneInput::Midi { port, channel } => {
+                if let Some(p) = port {
+                    if p.is_empty() || p.len() > MAX_PORT_NAME || p.chars().any(char::is_control) {
+                        return Err(ModelError::range("input.port", p.len()));
+                    }
+                }
+                if channel.is_some_and(|c| c > 15) {
+                    return Err(ModelError::range("input.channel", channel.unwrap_or(0)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// True for an audio input.
+    pub fn is_audio(&self) -> bool {
+        matches!(self, LaneInput::Audio { .. })
+    }
+}
+
+/// When a lane's input is heard (spec §6.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorMode {
+    /// While the lane is armed and the transport is stopped, or while it
+    /// records inside the record range (auto-input).
+    #[default]
+    Auto,
+    /// Always.
+    Input,
+    /// Never.
+    Off,
+}
+
+impl MonitorMode {
+    /// True for [`MonitorMode::Auto`] (the default, absent in files).
+    pub fn is_auto(&self) -> bool {
+        *self == MonitorMode::Auto
     }
 }
 

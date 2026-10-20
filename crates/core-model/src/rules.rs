@@ -336,6 +336,9 @@ pub fn validate(doc: &Document) -> Vec<String> {
             if let Some(q) = &l.play_quantize {
                 push(q.check(), &lctx);
             }
+            if let Some(i) = &l.input {
+                push(i.check(), &lctx);
+            }
             if l.take(l.active_take).is_none() {
                 push(
                     Err(ModelError::UnknownId(AnyId::Take(l.active_take))),
