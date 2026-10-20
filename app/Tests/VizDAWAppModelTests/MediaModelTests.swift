@@ -23,6 +23,21 @@ import VizDAWCore
         #expect(m.media.row(nil) == nil)
     }
 
+    /// Task 8 review: a failed read keeps the last rows but is not cached
+    /// under the new version, so the next read tries again.
+    @Test func aFailedReadIsNotCached() throws {
+        let f = demoFake()
+        f.mediaRows = [mediaRow(1, "kick")]
+        let m = try model(f)
+        #expect(m.media.rows.map(\.id) == [1])
+        f.mediaRows = [mediaRow(1, "kick"), mediaRow(2, "snare")]
+        f.mediaError = VizError.Io(message: "busy disk")
+        m.refreshAfterJob()
+        #expect(m.media.rows.map(\.id) == [1], "the last rows while the read fails")
+        f.mediaError = nil
+        #expect(m.media.rows.map(\.id) == [1, 2], "read again, no version bump needed")
+    }
+
     @Test func poolRowsSayWhatTheWindowShows() {
         #expect(MediaModel.duration(frames: 96_000, rate: 48_000) == "0:02.0")
         #expect(MediaModel.duration(frames: 48_000 * 61 + 2_400, rate: 48_000) == "1:01.1")

@@ -292,7 +292,7 @@ public enum ControlCommands {
             host.showMediaPool(docID)
         case "media.relink":
             guard let path = args.text("path") else { return .failed(.dialog("Relink", "path")) }
-            guard let media = args.int("media").map(UInt64.init), m.media.row(media) != nil else {
+            guard let media = args.int("media").flatMap({ UInt64(exactly: $0) }), m.media.row(media) != nil else {
                 return .failed(.of(.invalidParams, "media.relink: `media` must name a media item (see state.get media)"))
             }
             do {
@@ -305,7 +305,7 @@ public enum ControlCommands {
             m.media.compact()
         case "media.rename":
             guard let name = args.text("name") else { return .failed(.dialog("Rename Media", "name")) }
-            guard let media = args.int("media").map(UInt64.init), m.media.row(media) != nil else {
+            guard let media = args.int("media").flatMap({ UInt64(exactly: $0) }), m.media.row(media) != nil else {
                 return .failed(.of(.invalidParams, "media.rename: `media` must name a media item (see state.get media)"))
             }
             guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

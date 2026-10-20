@@ -64,6 +64,9 @@ struct MediaPoolView: View {
             } primaryAction: { ids in
                 if let id = ids.first { media.selectUsers(id) }
             }
+            // The Delete key (and Edit > Delete) deletes the selected item,
+            // asking first as the button does (Task 12 review M3).
+            .onDeleteCommand { if let id = selected { delete(id) } }
             .accessibilityLabel("Media items")
             Divider()
             HStack(spacing: 8) {
@@ -77,7 +80,8 @@ struct MediaPoolView: View {
                 Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil)
                 Button("Reveal in Finder") { if let id = selected { reveal(id) } }.disabled(selected == nil)
                 Button("Import…") { media.importIntoPool(Panels.chooseAudio()) }
-                Button("Delete") { if let id = selected { delete(id) } }.disabled(selected == nil)
+                Button("Delete", role: .destructive) { if let id = selected { delete(id) } }
+                    .disabled(selected == nil)
             }
             .padding(8)
         }
@@ -90,7 +94,7 @@ struct MediaPoolView: View {
         Button("Relink…") { relink(id) }
         Button("Reveal in Finder") { reveal(id) }
         Divider()
-        Button("Delete") { delete(id) }
+        Button("Delete", role: .destructive) { delete(id) }
     }
 
     private func rename(_ id: UInt64) {

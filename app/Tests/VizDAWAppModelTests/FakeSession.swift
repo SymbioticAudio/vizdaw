@@ -405,7 +405,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var mediaRows: [MediaRow] = []
     var jobRows: [UInt64: JobRow] = [:]
     var imports: [([String], ImportTargetRow?)] = []
-    func media() throws -> [MediaRow] { mediaRows }
+    var mediaError: VizError?
+    func media() throws -> [MediaRow] {
+        if let e = mediaError { throw e }
+        return mediaRows
+    }
     func recheckMedia() throws -> Bool { false }
     func importAudio(paths: [String], target: ImportTargetRow?) throws -> UInt64 {
         imports.append((paths, target))

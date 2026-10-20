@@ -368,7 +368,7 @@ final class FakeControlHost: ControlHost {
         pairs.map { ControlArg(name: $0.0, value: $0.1) }
     }
 
-    @Test func relinkTakesTheItemAndTheFileAndAnswersWhenTheJobEnds() throws {
+    @Test func relinkTakesTheItemAndTheFileAndStartsAJob() throws {
         let (store, host, id, model, fake) = try makeDocument()
         fake.mediaRows = [mediaRow(3, "kick", offline: .missing)]
         model.refreshAfterJob()
@@ -379,6 +379,10 @@ final class FakeControlHost: ControlHost {
         #expect(failure(run(args([("path", .text(value: "/x/kick.wav"))])))?.code == .invalidParams)
         #expect(
             failure(run(args([("path", .text(value: "/x/kick.wav")), ("media", .int(value: 99))])))?.code
+                == .invalidParams)
+        // A negative id is refused, never a trap (Task 9 review M1).
+        #expect(
+            failure(run(args([("path", .text(value: "/x/kick.wav")), ("media", .int(value: -3))])))?.code
                 == .invalidParams)
         let out = run(args([("path", .text(value: "/x/kick.wav")), ("media", .int(value: 3))]))
         guard case .job(let command, _, _) = out else {
@@ -397,6 +401,9 @@ final class FakeControlHost: ControlHost {
             ControlCommands.run(cmd, args: a, doc: (id, model), store: store, host: host)
         }
         #expect(failure(run("media.rename", args([("media", .int(value: 3))])))?.code == .dialogRequired)
+        #expect(
+            failure(run("media.rename", args([("media", .int(value: -3)), ("name", .text(value: "x"))])))?.code
+                == .invalidParams)
         #expect(
             failure(run("media.rename", args([("media", .int(value: 3)), ("name", .text(value: "   "))])))?.code
                 == .invalidParams)

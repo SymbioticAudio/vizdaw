@@ -39,13 +39,14 @@ public final class MediaModel {
     init(document: DocumentModel) { self.document = document }
 
     /// The pool. Refetched when the media version moved; a failed read
-    /// keeps the last rows. Safe to read while drawing (the cache is not
+    /// keeps the last rows and is not cached, so the next read tries again
+    /// (Task 8 review). Safe to read while drawing (the cache is not
     /// observed state).
     public var rows: [MediaRow] {
         guard let document else { return cache?.rows ?? [] }
         let v = document.mediaVersion
         if let c = cache, c.version == v { return c.rows }
-        let r = (try? document.session.media()) ?? cache?.rows ?? []
+        guard let r = try? document.session.media() else { return cache?.rows ?? [] }
         cache = (v, r)
         return r
     }
