@@ -2198,6 +2198,12 @@ impl Session {
         host::debug_media(self.id)
     }
 
+    /// The input routes the engine was last given for this session (test
+    /// hook, plan 5c Task 8).
+    pub fn debug_engine_inputs(&self) -> Option<core_engine::input::InputSpec> {
+        host::debug_inputs(self.id)
+    }
+
     /// True when every job thread has ended, applied or not (test hook).
     pub fn debug_jobs_settled(&self) -> bool {
         lock(&self.inner).jobs.settled()
@@ -3397,6 +3403,62 @@ impl Session {
             inner.reload_host(self.id);
             self.mark(&mut inner);
             inner.snapshot()
+        })
+    }
+}
+
+/// Live input (plan 5c Task 8; spec §6.1, §6.6, §12.1).
+#[uniffi::export]
+impl Session {
+    /// What the audio input offers while this document holds the engine
+    /// (nothing before its first Play or Record).
+    pub fn input_info(&self) -> Result<crate::live::InputInfoRow, VizError> {
+        ffi_guard(|| {
+            Ok(match host::input_info(self.id) {
+                Some((device, i)) => crate::live::InputInfoRow {
+                    device,
+                    channels: i.channels,
+                    names: i.names,
+                    input_latency_frames: i.input_latency_frames,
+                    output_latency_frames: i.output_latency_frames,
+                },
+                None => crate::live::InputInfoRow {
+                    device: String::new(),
+                    channels: 0,
+                    names: Vec::new(),
+                    input_latency_frames: 0,
+                    output_latency_frames: 0,
+                },
+            })
+        })
+    }
+
+    /// Feeds `bytes` (channel messages, one after another) to the engine
+    /// as if source `port` sent them now (`midi.inject`): lanes listening
+    /// to that source play them thru and, armed and recording, record
+    /// them. False when this document does not hold the engine (nothing
+    /// is sent). `Model` for bytes that are not channel messages or a bad
+    /// port name; `Busy` when the input queue is full.
+    pub fn inject_midi(&self, port: String, bytes: Vec<u8>) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let msgs = crate::live::parse_injection(&port, &bytes)?;
+            let Some(tx) = host::midi_sender(self.id) else {
+                return Ok(false);
+            };
+            let key = core_engine::input::port_key(&port);
+            for msg in msgs {
+                let sent = tx.send(core_engine::input::MidiIn {
+                    port: key,
+                    host_ns: 0,
+                    msg,
+                });
+                if !sent {
+                    return Err(VizError::Busy {
+                        message: "the MIDI input queue is full".into(),
+                    });
+                }
+            }
+            Ok(true)
         })
     }
 }

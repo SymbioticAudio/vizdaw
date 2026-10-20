@@ -9,13 +9,15 @@ use crate::plugins;
 use core_engine::backend::{AudioBackend, BackendEvent};
 use core_engine::engine::{Engine, EngineConfig, PendingPlay};
 use core_engine::graph::NoInserts;
-use core_engine::offline::{EventLog, OfflineBackend, OfflineSinks};
+use core_engine::input::{InputSpec, MidiInputSpec, MidiSender, MonitorRoute, port_key};
+use core_engine::offline::{EventLog, FakeInput, OfflineBackend, OfflineSinks};
 use core_engine::render::Renderer;
 use core_engine::schedule::CompileReport;
 use core_engine::transport::PlayState;
 use core_host::{IdleReport, PluginHost};
 use core_model::document::Document;
 use core_model::ids::{DestId, SeqId};
+use core_model::lane::{LaneInput, MonitorMode};
 use core_model::time::Tick;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -65,6 +67,90 @@ static HOSTS_CREATED: AtomicU64 = AtomicU64::new(0);
 static EPOCHS: AtomicU64 = AtomicU64::new(1);
 /// New hosts' disks stall (the `stall_disk` test hook).
 static STALL_DISK: AtomicBool = AtomicBool::new(false);
+/// The fake input offline hosts get: `Some(choice)` set by the
+/// `set_fake_input` test hook, `None` read from the environment.
+static FAKE_INPUT: Mutex<Option<Option<FakeInput>>> = Mutex::new(None);
+
+/// The fake input of offline hosts created from now on (spec §12.1):
+/// `VIZDAW_AUDIO_LOOPBACK=<frames>` loops the output back, else
+/// `VIZDAW_AUDIO_INPUT=fake` gives the test signals; neither is no input.
+/// Tests choose with the `set_fake_input` hook instead. Never a device:
+/// an offline host opens no audio hardware, so no microphone permission
+/// is asked (plan 5c Global Constraints).
+pub fn fake_input() -> Option<FakeInput> {
+    if let Some(v) = *lock(&FAKE_INPUT) {
+        return v;
+    }
+    if let Some(n) = std::env::var("VIZDAW_AUDIO_LOOPBACK")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+    {
+        return Some(FakeInput::Loopback(n));
+    }
+    std::env::var("VIZDAW_AUDIO_INPUT")
+        .is_ok_and(|v| v == "fake")
+        .then_some(FakeInput::Signals)
+}
+
+/// Makes offline hosts created from now on use `input` (test hook; it
+/// wins over the environment).
+#[cfg(feature = "test-hooks")]
+pub fn set_fake_input(input: Option<FakeInput>) {
+    *lock(&FAKE_INPUT) = Some(input);
+}
+
+/// What a host's audio input offers (spec §6.1, §12.1 `state.get input`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InputInfo {
+    /// Input channels (0: no input).
+    pub channels: u32,
+    /// Their names.
+    pub names: Vec<String>,
+    /// Input latency in frames.
+    pub input_latency_frames: u32,
+    /// Output latency in frames.
+    pub output_latency_frames: u32,
+}
+
+/// What the lanes of `seq` listen to (spec §6.6): armed or Input-monitored
+/// lanes with an input. MIDI lanes play thru unless their monitor is Off;
+/// audio lanes are heard through their output path (the document's first
+/// when they have none) unless it is Off.
+pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
+    let mut spec = InputSpec::default();
+    let Ok(s) = doc.sequence(seq) else {
+        return spec;
+    };
+    let first_out = doc.outputs().keys().next().copied();
+    for l in &s.lanes {
+        if !(l.arm || l.monitor == MonitorMode::Input) {
+            continue;
+        }
+        match &l.input {
+            Some(LaneInput::Midi { port, channel }) => spec.midi.push(MidiInputSpec {
+                lane: l.id,
+                port: port.as_deref().map(port_key),
+                channel: *channel,
+                dest: l.midi_dest,
+                thru: l.monitor != MonitorMode::Off,
+                armed: l.arm,
+            }),
+            Some(LaneInput::Audio { channels }) if l.monitor != MonitorMode::Off => {
+                if let Some(path) = l.audio_out.or(first_out) {
+                    spec.monitor.push(MonitorRoute {
+                        path,
+                        left: channels.first(),
+                        right: channels.last().unwrap_or(channels.first()),
+                        mode: l.monitor,
+                        armed: l.arm,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    spec
+}
 
 fn next_epoch() -> u64 {
     EPOCHS.fetch_add(1, Ordering::Relaxed)
@@ -264,8 +350,22 @@ struct OfflineDriver {
 }
 
 impl OfflineDriver {
-    fn start(renderer: Renderer, rate: f64) -> Result<OfflineDriver, VizError> {
+    fn start(
+        renderer: Renderer,
+        rate: f64,
+        input: Option<FakeInput>,
+    ) -> Result<(OfflineDriver, InputInfo), VizError> {
         let mut backend = OfflineBackend::new(rate, OFFLINE_BLOCK);
+        if let Some(k) = input {
+            backend = backend.with_input(k);
+        }
+        let info = backend.open(&core_engine::backend::AudioConfig::default())?;
+        let inputs = InputInfo {
+            channels: info.input_channels,
+            names: info.input_channel_names,
+            input_latency_frames: info.input_latency_frames,
+            output_latency_frames: info.output_latency_frames,
+        };
         backend.start(renderer)?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -285,10 +385,13 @@ impl OfflineDriver {
             .map_err(|e| VizError::Engine {
                 message: format!("offline thread: {e}"),
             })?;
-        Ok(OfflineDriver {
-            stop,
-            thread: Some(thread),
-        })
+        Ok((
+            OfflineDriver {
+                stop,
+                thread: Some(thread),
+            },
+            inputs,
+        ))
     }
 }
 
@@ -355,6 +458,8 @@ struct Host {
     /// Events queued by the `simulate_event` test hook.
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     injected: Vec<BackendEvent>,
+    /// What the output's input offers.
+    inputs: InputInfo,
 }
 
 impl Host {
@@ -378,8 +483,16 @@ impl Host {
             let log = sinks.log();
             let rate = offline_rate(project);
             let (engine, renderer) = Engine::new(EngineConfig::new(rate), Box::new(sinks))?;
-            let output = Output::Offline(OfflineDriver::start(renderer, rate)?);
-            return Ok(Host::new(engine, output, OFFLINE_DEVICE, rate, Some(log)));
+            let (driver, inputs) = OfflineDriver::start(renderer, rate, fake_input())?;
+            let mut h = Host::new(
+                engine,
+                Output::Offline(driver),
+                OFFLINE_DEVICE,
+                rate,
+                Some(log),
+            );
+            h.inputs = inputs;
+            return Ok(h);
         }
         Host::create_live(project)
     }
@@ -446,6 +559,7 @@ impl Host {
             faulted: std::collections::BTreeSet::new(),
             log,
             injected: Vec::new(),
+            inputs: InputInfo::default(),
         }
     }
 
@@ -494,6 +608,7 @@ impl Host {
         LOADS.fetch_add(1, Ordering::Relaxed);
         self.plugins_in_engine |= has_slots(doc);
         self.engine.set_media(media_of(owner));
+        self.engine.set_inputs(input_spec(doc, seq));
         let report = self.engine.load(doc, seq)?;
         self.report = report_lines(&report);
         self.engine.set_loop(looped)?;
@@ -1117,4 +1232,29 @@ pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
         latency_frames: h.engine.latency_frames(),
         faulted: h.faulted.iter().copied().collect(),
     })
+}
+
+/// `owner`'s input, when it holds the engine.
+pub fn input_info(owner: u64) -> Option<(String, InputInfo)> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| (h.device.clone(), h.inputs.clone()))
+}
+
+/// The MIDI input of `owner`'s engine, when it holds it.
+pub fn midi_sender(owner: u64) -> Option<MidiSender> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.midi_sender())
+}
+
+/// The input routes `owner`'s engine was last given (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_inputs(owner: u64) -> Option<InputSpec> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.inputs().clone())
 }

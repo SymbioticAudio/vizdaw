@@ -446,6 +446,112 @@ pub enum LaneEdit {
         /// Take.
         take: u64,
     },
+    /// Set what the lane records (sub-project 5 spec §4.5).
+    SetInput {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// The input, or none.
+        input: Option<LaneInputRow>,
+    },
+    /// Set when the lane's input is heard (spec §6.6).
+    SetMonitor {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// The mode.
+        monitor: MonitorModeRow,
+    },
+}
+
+/// What a lane records (mirrors `core_model::lane::LaneInput`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum LaneInputRow {
+    /// Device input channel `first` (0-based), and the next one too when
+    /// `stereo`.
+    Audio {
+        /// The first (left) channel.
+        first: u16,
+        /// A pair.
+        stereo: bool,
+    },
+    /// MIDI.
+    Midi {
+        /// The source's name; none: every source.
+        port: Option<String>,
+        /// The channel 0–15; none: every channel.
+        channel: Option<u8>,
+    },
+}
+
+impl From<&LaneInputRow> for core_model::lane::LaneInput {
+    fn from(r: &LaneInputRow) -> Self {
+        use core_model::lane::{InputChannels, LaneInput};
+        match r {
+            LaneInputRow::Audio { first, stereo } => LaneInput::Audio {
+                channels: if *stereo {
+                    InputChannels::Stereo(*first)
+                } else {
+                    InputChannels::Mono(*first)
+                },
+            },
+            LaneInputRow::Midi { port, channel } => LaneInput::Midi {
+                port: port.clone(),
+                channel: *channel,
+            },
+        }
+    }
+}
+
+impl From<&core_model::lane::LaneInput> for LaneInputRow {
+    fn from(i: &core_model::lane::LaneInput) -> Self {
+        use core_model::lane::{InputChannels, LaneInput};
+        match i {
+            LaneInput::Audio { channels } => LaneInputRow::Audio {
+                first: channels.first(),
+                stereo: matches!(channels, InputChannels::Stereo(_)),
+            },
+            LaneInput::Midi { port, channel } => LaneInputRow::Midi {
+                port: port.clone(),
+                channel: *channel,
+            },
+        }
+    }
+}
+
+/// When a lane's input is heard (mirrors `core_model::lane::MonitorMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MonitorModeRow {
+    /// Armed and stopped, or recording inside the record range.
+    Auto,
+    /// Always.
+    Input,
+    /// Never.
+    Off,
+}
+
+impl From<MonitorModeRow> for core_model::lane::MonitorMode {
+    fn from(m: MonitorModeRow) -> Self {
+        use core_model::lane::MonitorMode;
+        match m {
+            MonitorModeRow::Auto => MonitorMode::Auto,
+            MonitorModeRow::Input => MonitorMode::Input,
+            MonitorModeRow::Off => MonitorMode::Off,
+        }
+    }
+}
+
+impl From<core_model::lane::MonitorMode> for MonitorModeRow {
+    fn from(m: core_model::lane::MonitorMode) -> Self {
+        use core_model::lane::MonitorMode;
+        match m {
+            MonitorMode::Auto => MonitorModeRow::Auto,
+            MonitorMode::Input => MonitorModeRow::Input,
+            MonitorMode::Off => MonitorModeRow::Off,
+        }
+    }
 }
 
 /// Mirrors `core_model::command::SequenceCmd`.
@@ -897,6 +1003,16 @@ fn lane_cmd(e: &LaneEdit) -> LaneCmd {
             seq: SeqId(*seq),
             lane: LaneId(*lane),
             take: TakeId(*take),
+        },
+        LaneEdit::SetInput { seq, lane, input } => LaneCmd::SetInput {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            input: input.as_ref().map(Into::into),
+        },
+        LaneEdit::SetMonitor { seq, lane, monitor } => LaneCmd::SetMonitor {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            monitor: (*monitor).into(),
         },
     }
 }

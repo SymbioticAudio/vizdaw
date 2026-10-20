@@ -351,6 +351,19 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         waveformCalls.append((event, fromTick, toTick, columns))
         return try overview(media: 0, fromFrame: 0, toFrame: 1, columns: columns)
     }
+    // MARK: Live input (plan 5c Task 8)
+
+    var injected: [(port: String, bytes: Data)] = []
+    var inputRow = InputInfoRow(
+        device: "", channels: 0, names: [], inputLatencyFrames: 0, outputLatencyFrames: 0)
+
+    func injectMidi(port: String, bytes: Data) throws -> Bool {
+        injected.append((port, bytes))
+        return true
+    }
+
+    func inputInfo() throws -> InputInfoRow { inputRow }
+
     // MARK: Media pool (plan 5b Task 6)
 
     var renamed: [(UInt64, String)] = []
@@ -611,7 +624,8 @@ func lane(_ id: UInt64, _ name: String, mute: Bool = false) -> LaneRow {
     LaneRow(
         id: id, name: name, destination: nil, midiEventCount: 0, regionCount: 0,
         referenceCount: 0, mute: mute, solo: false, looped: false, takeCount: 1,
-        activeTake: "Take 1", isDrum: false, arm: false, midiDest: nil, audioOut: nil)
+        activeTake: "Take 1", isDrum: false, arm: false, midiDest: nil, audioOut: nil, input: nil,
+        monitor: .auto)
 }
 
 /// Song (top-level) using Groove, which uses Beat.

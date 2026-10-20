@@ -98,6 +98,10 @@ pub struct LaneRow {
     pub midi_dest: Option<u64>,
     /// The lane's audio output path ID.
     pub audio_out: Option<u64>,
+    /// What the lane records (plan 5c).
+    pub input: Option<crate::edit::LaneInputRow>,
+    /// When its input is heard (plan 5c).
+    pub monitor: crate::edit::MonitorModeRow,
 }
 
 /// What the transport is doing.
@@ -203,6 +207,8 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                 arm: l.arm,
                 midi_dest: l.midi_dest.map(|d| d.0),
                 audio_out: l.audio_out.map(|o| o.0),
+                input: l.input.as_ref().map(Into::into),
+                monitor: l.monitor.into(),
             }
         })
         .collect())

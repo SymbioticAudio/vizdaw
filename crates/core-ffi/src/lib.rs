@@ -31,6 +31,7 @@ pub mod host;
 pub mod input;
 pub mod jobs;
 pub mod keys;
+pub mod live;
 pub mod media;
 pub mod mixer;
 pub mod modify;
@@ -67,8 +68,8 @@ pub use drum::{
     DrumViewRow, QuantizeChoiceRow,
 };
 pub use edit::{
-    AudioEdit, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneRef, QuantizeRow, ReferenceEdit,
-    SequenceEdit, ViewFilterRow,
+    AudioEdit, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneInputRow, LaneRef,
+    MonitorModeRow, QuantizeRow, ReferenceEdit, SequenceEdit, ViewFilterRow,
 };
 pub use editor::EditorSize;
 pub use error::VizError;
@@ -82,6 +83,7 @@ pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
 pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
+pub use live::InputInfoRow;
 pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
