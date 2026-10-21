@@ -954,3 +954,142 @@ fn a_kept_take_follows_save_as() {
     s.close().unwrap();
     assert!(pkg.join(&rel).is_file());
 }
+
+// Task 9 review fix round 1.
+
+fn format_44k() -> vizdaw_ffi::ProjectFormatRow {
+    vizdaw_ffi::ProjectFormatRow {
+        sample_rate: 44_100,
+        depth: vizdaw_ffi::BitDepthRow::Int24,
+    }
+}
+
+/// Review I-1: the project format does not change under a recording (the
+/// take would be planned at the new rate), while it finishes, or while
+/// its pass waits for an edit to end.
+#[test]
+fn the_format_does_not_change_while_recording() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let busy = |r: Result<u64, VizError>| matches!(r, Err(VizError::Busy { .. }));
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    assert!(busy(s.set_project_format(format_44k())), "recording");
+    // Finishing (held, on another thread).
+    set_hold_finish(true);
+    let stopper = {
+        let s = Arc::clone(&s);
+        std::thread::spawn(move || s.stop())
+    };
+    wait_until("the pass to be finishing", || {
+        !s.record_state().unwrap().recording
+    });
+    assert!(busy(s.set_project_format(format_44k())), "finishing");
+    set_hold_finish(false);
+    stopper.join().unwrap().unwrap();
+    // Pending behind a drag.
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.begin_edit("Drag".into()).unwrap();
+    s.stop().unwrap();
+    assert!(busy(s.set_project_format(format_44k())), "pending");
+    s.end_edit().unwrap();
+    assert_eq!(s.project_info().unwrap().format.sample_rate, 48_000);
+    s.close().unwrap();
+}
+
+/// Review I-1, the other way: no recording starts while a Format job has
+/// not been applied.
+#[test]
+fn no_recording_starts_while_the_format_changes() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.debug_hold_jobs(true).unwrap();
+    let job = s.set_project_format(format_44k()).unwrap();
+    let r = s.record(d.seq.0, spec());
+    s.debug_hold_jobs(false).unwrap();
+    match r {
+        Err(VizError::Busy { message }) => assert!(message.contains("format"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!s.record_state().unwrap().recording);
+    wait_until("the format job", || {
+        s.idle().unwrap();
+        s.job(job).unwrap().state == vizdaw_ffi::JobStateRow::Done
+    });
+    s.close().unwrap();
+}
+
+/// Review I-2: one package is open in one session at a time (a second
+/// session's save would trash the first one's recording).
+#[test]
+fn a_package_opens_in_one_session_at_a_time() {
+    let g = serial(None);
+    let d = doc(8, false, true);
+    let a = untitled(&g, d.doc.clone());
+    let p = g.dir.path().join("P.vizdaw");
+    a.save_as(p.display().to_string()).unwrap();
+    let already = |r: Result<Arc<Session>, VizError>| match r {
+        Err(VizError::Busy { message }) => message.contains("already open"),
+        _ => false,
+    };
+    assert!(already(Session::open(p.display().to_string())));
+    // Any spelling of the same package.
+    let other_case = g.dir.path().join("p.VIZDAW");
+    if other_case.exists() {
+        assert!(already(Session::open(other_case.display().to_string())));
+    }
+    // Save As onto it from another session.
+    let b = untitled(&g, d.doc.clone());
+    assert!(matches!(
+        b.save_as(p.display().to_string()),
+        Err(VizError::Busy { .. })
+    ));
+    let q = g.dir.path().join("Q.vizdaw");
+    b.save_as(q.display().to_string()).unwrap();
+    assert!(already(Session::open(q.display().to_string())));
+    a.close().unwrap();
+    // Closed: it opens again; Save As moved b off its untitled state.
+    let a2 = Session::open(p.display().to_string()).unwrap();
+    b.close().unwrap();
+    drop(b);
+    let b2 = Session::open(q.display().to_string()).unwrap();
+    // Dropped without close: released too.
+    drop(a2);
+    let a3 = Session::open(p.display().to_string()).unwrap();
+    // Save As away from P releases it.
+    a3.save_as(g.dir.path().join("R.vizdaw").display().to_string())
+        .unwrap();
+    Session::open(p.display().to_string())
+        .unwrap()
+        .close()
+        .unwrap();
+    a3.close().unwrap();
+    b2.close().unwrap();
+}
+
+/// Review minor (b): an unreadable `Media/Recorded` at an untitled close
+/// may hold recordings: the scratch package stays.
+#[test]
+fn an_unreadable_recorded_folder_is_never_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.stop().unwrap();
+    let file = std::path::PathBuf::from(s.media_file(s.media().unwrap()[0].id).unwrap());
+    let folder = file.parent().unwrap().to_path_buf();
+    let package = file.ancestors().nth(3).unwrap().to_path_buf();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+    s.close().unwrap();
+    let _ = std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755));
+    let kept = file.is_file();
+    let pkg_left = package.exists();
+    let _ = std::fs::remove_dir_all(&package);
+    assert!(kept, "the recording stays");
+    assert!(pkg_left, "the scratch package stays");
+}

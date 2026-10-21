@@ -90,12 +90,16 @@ fn open_windows_are_saved_with_the_project() {
     let path = dir.path().join("w.vizdaw");
     s.save_as(path.to_string_lossy().into_owned()).unwrap();
     assert!(path.join("ui.json").exists());
+    // One session per package (Task 9 review I-2): the first lets go.
+    s.close().unwrap();
     let again = Session::open(path.to_string_lossy().into_owned()).unwrap();
     assert_eq!(again.open_windows().unwrap(), vec![id]);
     again.set_window_open(id, false).unwrap();
     again.save().unwrap();
+    again.close().unwrap();
     let third = Session::open(path.to_string_lossy().into_owned()).unwrap();
     assert!(third.open_windows().unwrap().is_empty());
+    third.close().unwrap();
     // A project without the file (older, or written elsewhere) opens none.
     std::fs::remove_file(path.join("ui.json")).unwrap();
     let fourth = Session::open(path.to_string_lossy().into_owned()).unwrap();

@@ -489,6 +489,10 @@ impl Session {
         plugins_off: bool,
     ) -> Result<Arc<Session>, VizError> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        // One session per package (review I-2).
+        if let Some(p) = path.as_deref() {
+            claim_package(p, id)?;
+        }
         let key = path.as_deref().map(recovery::key);
         // An earlier crash's marker survives a failed open (retrying
         // still offers safe mode).
@@ -499,6 +503,7 @@ impl Session {
             .as_deref()
             .and_then(|k| recovery::opened(k, id, &[]).err());
         let fail = |e: VizError| {
+            release_packages(id);
             plugins::close(id);
             if let Some(k) = key.as_deref() {
                 recovery::closed(k, id);
@@ -1056,6 +1061,9 @@ impl Session {
                 });
             }
             let p = with_extension(&path);
+            // Another window's package (review I-2): its retention would
+            // not know this session's files.
+            check_package(&p, self.id)?;
             self.save_to(&mut inner, &p)?;
             if inner.path.as_deref() != Some(p.as_path()) {
                 // The marker follows the project to its new place (not
@@ -1074,6 +1082,8 @@ impl Session {
                     }
                     inner.key = Some(key);
                 }
+                release_packages(self.id);
+                let _ = claim_package(&p, self.id);
                 inner.path = Some(p);
                 // The overview worker moves to the new package first, so it
                 // writes nothing more into the scratch package (review m3).
@@ -2148,16 +2158,31 @@ impl Session {
     /// marker goes. Safe to call more than once.
     pub fn close(&self) -> Result<(), VizError> {
         ffi_guard(|| {
-            // A pass another thread is finishing lands first (pre-flight
-            // I1): its files are in no document yet.
-            self.wait_finished()?;
-            // A recording ends cleanly first: its files are finished, its
-            // pass applied (what is not saved then goes to the Trash).
-            if lock(&self.inner).recording.is_some() {
-                self.finish_recording(None)?;
+            // What finishing a pass here says: no `idle` follows a close
+            // (review minor c).
+            let before = lock(&self.inner).news.problems.len();
+            let mut inner = loop {
+                // A pass another thread is finishing lands first
+                // (pre-flight I1): its files are in no document yet.
+                self.wait_finished()?;
+                // A recording ends cleanly first: its files are finished,
+                // its pass applied (what is not saved then goes to the
+                // Trash).
+                if lock(&self.inner).recording.is_some() {
+                    self.finish_recording(None)?;
+                }
+                // Another thread may have started finishing meanwhile
+                // (review minor a): checked again under the lock kept.
+                let inner = lock(&self.inner);
+                if !inner.finishing && inner.recording.is_none() {
+                    break inner;
+                }
+            };
+            for line in inner.news.problems.iter().skip(before) {
+                eprintln!("VizDAW: {line}");
             }
-            let mut inner = lock(&self.inner);
             inner.closed = true;
+            release_packages(self.id);
             let root = inner.root(self.id);
             let keep = inner.kept();
             for w in inner.jobs.shutdown() {
@@ -2185,15 +2210,25 @@ impl Session {
                 // (plan 5c Ruling 15).
                 let dir = crate::retention::trash_dir(inner.trash_dir.as_deref());
                 let mut left = 0usize;
-                if let Ok(rd) = std::fs::read_dir(scratch.join(crate::record::RECORDED_DIR)) {
-                    for e in rd.flatten() {
-                        if e.path().is_file() {
-                            if let Err(why) = crate::retention::trash(dir.as_deref(), &e.path()) {
-                                eprintln!(
-                                    "VizDAW: {}: not moved to the Trash ({why})",
-                                    e.path().display()
-                                );
-                                left += 1;
+                let recorded = scratch.join(crate::record::RECORDED_DIR);
+                match std::fs::read_dir(&recorded) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    // Unreadable: recordings may be in it (review minor b).
+                    Err(e) => {
+                        eprintln!("VizDAW: {}: not read ({e})", recorded.display());
+                        left += 1;
+                    }
+                    Ok(rd) => {
+                        for e in rd.flatten() {
+                            if e.path().is_file() {
+                                if let Err(why) = crate::retention::trash(dir.as_deref(), &e.path())
+                                {
+                                    eprintln!(
+                                        "VizDAW: {}: not moved to the Trash ({why})",
+                                        e.path().display()
+                                    );
+                                    left += 1;
+                                }
                             }
                         }
                     }
@@ -2232,6 +2267,7 @@ pub fn simulate_crash(s: Arc<Session>) {
     if let Some(p) = lock(&s.inner).path.clone() {
         recovery::forget_open(&p);
     }
+    release_packages(s.id);
     std::mem::forget(s);
 }
 
@@ -2832,6 +2868,7 @@ impl Drop for Session {
         if recording {
             let _ = host::stop_recording(self.id);
         }
+        release_packages(self.id);
         if let Some(k) = key {
             recovery::closed(&k, self.id);
         }
@@ -3379,6 +3416,57 @@ pub(crate) fn normalize_warning(w: &str, regions: &[(core_model::ids::EventId, &
     format!("Normalize: {w}")
 }
 
+/// The packages open in this process, by [`package_key`], with the
+/// session holding each (review I-2: a second session on one package
+/// would move the first one's recordings to the Trash at its save).
+static PACKAGES: Mutex<std::collections::BTreeMap<String, u64>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// `path` as one package is named whatever the spelling: canonical (its
+/// folder's, for a package not made yet), in lower case as macOS volumes
+/// resolve names.
+fn package_key(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        match (std::fs::canonicalize(dir), path.file_name()) {
+            (Ok(d), Some(n)) => d.join(n),
+            _ => path.to_path_buf(),
+        }
+    });
+    canonical.to_string_lossy().to_lowercase()
+}
+
+/// `Busy` when another session holds `path`.
+fn check_package(path: &Path, sid: u64) -> Result<(), VizError> {
+    match lock(&PACKAGES).get(&package_key(path)) {
+        Some(other) if *other != sid => {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            Err(VizError::Busy {
+                message: format!("{name} is already open in another window."),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Makes session `sid` the holder of `path` (`Busy` when another is).
+fn claim_package(path: &Path, sid: u64) -> Result<(), VizError> {
+    check_package(path, sid)?;
+    lock(&PACKAGES).insert(package_key(path), sid);
+    Ok(())
+}
+
+/// Session `sid` holds no package any more.
+fn release_packages(sid: u64) {
+    lock(&PACKAGES).retain(|_, s| *s != sid);
+}
+
 /// Adds fault name `f` to `faults` once.
 fn add_fault(faults: &mut Vec<String>, f: &str) {
     if !faults.iter().any(|x| x == f) {
@@ -3562,8 +3650,11 @@ impl Session {
     /// at Stop everything recorded becomes one undo step "Record". `Model`
     /// when no armed lane has an input, an audio lane names a channel the
     /// input does not have, the spec is out of range, or count-in is asked
-    /// for (plan 5d plays it); `Busy` while recording, while an edit is
-    /// open, or when the disk is almost full.
+    /// for (plan 5d plays it); `Busy` while recording or finishing a pass,
+    /// while an edit is open, while a project format change has not been
+    /// applied (review I-1), or when the disk is almost full. While it
+    /// records (plan 5c Ruling 17) Play, Locate, Set Loop, another Record,
+    /// Save As and a format change are `Busy`; Stop finishes the pass.
     pub fn record(&self, seq: u64, spec: crate::record::RecordSpecRow) -> Result<(), VizError> {
         self.transport_call(|| self.start_recording(seq, spec))
     }
@@ -3637,6 +3728,13 @@ impl Session {
         if inner.history.in_transaction() || inner.history.in_group() {
             return Err(VizError::Busy {
                 message: "Finish the open edit first.".into(),
+            });
+        }
+        // Review I-1: the take would be planned at the old rate and land
+        // in a project at the new one.
+        if inner.jobs.pending(&[crate::jobs::JobKindRow::Format]) {
+            return Err(VizError::Busy {
+                message: "Wait for the project format change to finish, then record.".into(),
             });
         }
         if spec.count_in_bars > 4 || spec.pre_roll_bars > 8 {
@@ -4344,6 +4442,11 @@ impl Session {
         ffi_guard(|| {
             let f = core_model::format::AudioFormat::from(format);
             let mut inner = lock(&self.inner);
+            // A take is planned and filed at the project rate (review
+            // I-1): not while one records, finishes or waits to land.
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                return Err(recording_busy());
+            }
             self.apply_jobs_after_edit(&mut inner);
             inner.media_jobs_idle()?;
             if !f.is_valid() {

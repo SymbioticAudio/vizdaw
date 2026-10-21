@@ -96,6 +96,8 @@ fn save_after_rename_writes_the_new_name_and_clears_dirty() {
     assert!(s.rename_sequence(beat, "Kit".into()).unwrap().dirty);
     s.save().unwrap();
     assert!(!s.snapshot().unwrap().dirty);
+    // One session per package (Task 9 review I-2): the first lets go.
+    s.close().unwrap();
     let reopened = Session::open(saved.to_string_lossy().into_owned()).unwrap();
     assert!(has(&reopened.snapshot().unwrap(), "Kit"));
     // Undo after saving makes the document dirty again.

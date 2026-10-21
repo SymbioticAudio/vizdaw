@@ -254,20 +254,24 @@ fn the_marker_names_a_plugin_before_the_sync_that_loads_it() {
     );
 }
 
+/// One session per package (Task 9 review I-2, which replaced "two
+/// sessions on one project share the marker"): a second open is refused
+/// and leaves the first one's marker alone.
 #[test]
-fn two_sessions_on_one_project_share_the_marker() {
+fn a_second_session_on_one_project_is_refused_and_keeps_the_marker() {
     let (_g, support) = serial();
     let (_d, path, _id) = project();
     let a = Session::open(path.clone()).unwrap();
-    let b = Session::open(path.clone()).unwrap();
-    // Neither has ticked: both are still loading.
-    a.close().unwrap();
+    assert!(matches!(
+        Session::open(path.clone()),
+        Err(vizdaw_ffi::VizError::Busy { .. })
+    ));
     let m = markers(support.path());
-    assert_eq!(m.len(), 1, "the other window still has it open");
+    assert_eq!(m.len(), 1, "the first window still has it open");
     let text = std::fs::read_to_string(&m[0]).unwrap();
     assert!(text.contains("vizdaw.test.gain"), "still named: {text}");
     assert!(!recovery_check(path.clone()).unwrap().crashed);
-    b.close().unwrap();
+    a.close().unwrap();
     assert!(markers(support.path()).is_empty());
 }
 

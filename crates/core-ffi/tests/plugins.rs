@@ -274,8 +274,12 @@ fn the_live_engine_uses_the_default_worker_count() {
 fn reentering_the_registry_is_busy_not_a_panic() {
     let _g = serial();
     let (_d, path, _song, id) = project("vizdaw.test.gain");
+    // A second package of the same project (Task 9 review I-2: one
+    // session per package).
+    let (_d2, path2, _song2, id2) = project("vizdaw.test.gain");
+    assert_eq!(id, id2);
     let a = open(&path);
-    let b = open(&path);
+    let b = open(&path2);
     idle_until(&b, |s| slot(s, id).status == SlotStatus::Live);
     let hosts = vizdaw_ffi::plugins::host_count();
     let mut b = Some(b);

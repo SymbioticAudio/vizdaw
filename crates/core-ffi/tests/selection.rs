@@ -254,6 +254,8 @@ fn the_editor_layout_is_saved_in_ui_json() {
     s.save_as(path.to_string_lossy().into_owned()).unwrap();
     let text = std::fs::read_to_string(path.join("ui.json")).unwrap();
     assert!(text.contains("open_plugin_windows"), "{text}");
+    // One session per package (Task 9 review I-2): the first lets go.
+    s.close().unwrap();
     let reopened = Session::open(path.to_string_lossy().into_owned()).unwrap();
     let json: serde_json::Value =
         serde_json::from_str(&reopened.ui_layout().unwrap().unwrap()).unwrap();
