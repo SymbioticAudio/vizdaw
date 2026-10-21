@@ -106,9 +106,16 @@ struct Inner {
     /// its files, waiting for an open edit to end.
     pending_pass: Option<(Option<core_model::command::RecordPass>, Vec<String>)>,
     /// Recorded files no document references that the Trash must not take
-    /// (a pass that could not be applied): crash recovery offers them at
-    /// the next open.
+    /// (a pass that could not be applied, a take whose lane went or whose
+    /// file the writer could not close; pre-flight I3): crash recovery
+    /// offers them at the next open.
     keep_recordings: std::collections::BTreeSet<String>,
+    /// The files of the pass being finished without the session lock
+    /// (pre-flight I1): a save meanwhile must leave them.
+    finishing_files: Vec<String>,
+    /// Transport fault names the last recording raised (`record-overflow`,
+    /// `input-lost`; pre-flight M11), until the next one starts.
+    record_faults: Vec<String>,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -177,14 +184,17 @@ impl Inner {
             finishing: false,
             pending_pass: None,
             keep_recordings: Default::default(),
+            finishing_files: Vec::new(),
+            record_faults: Vec::new(),
         }
     }
 
-    /// Recorded files the Trash must leave: those being written, those of
-    /// a pass waiting to apply, and those kept after a failed pass (plan
-    /// 5c Ruling 15).
+    /// Recorded files the Trash must leave: those being written or
+    /// finished, those of a pass waiting to apply, and those kept after a
+    /// failed pass (plan 5c Ruling 15; pre-flight I1, I3).
     fn recorded_keep(&self) -> Vec<String> {
         let mut out: Vec<String> = self.keep_recordings.iter().cloned().collect();
+        out.extend(self.finishing_files.iter().cloned());
         if let Some(r) = &self.recording {
             out.extend(r.files());
         }
@@ -1027,8 +1037,10 @@ impl Session {
     pub fn save_as(&self, path: String) -> Result<(), VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
-            // Recordings are written under the current root.
-            if inner.recording.is_some() || inner.finishing {
+            // Recordings are written under the current root, and a pass
+            // waiting for an edit to end names paths under it (pre-flight
+            // I1).
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
                 return Err(recording_busy());
             }
             // A job that just finished applies first, under the old root.
@@ -1221,9 +1233,11 @@ impl Session {
     /// Stops; the position is kept.
     pub fn stop(&self) -> Result<(), VizError> {
         self.transport_call(|| {
-            // Stop while recording finishes the pass (spec §6.5).
+            // Stop while recording finishes the pass (spec §6.5), then
+            // stops as any Stop does (pre-flight M4: a rebuild running
+            // meanwhile must not resume playing).
             if lock(&self.inner).recording.is_some() {
-                return self.finish_recording(None);
+                self.finish_recording(None)?;
             }
             // Behind a rebuild this session's poll is running (its drain
             // has taken the host out of the slot): the Stop must not be
@@ -1294,6 +1308,9 @@ impl Session {
                     device: h.device,
                     faults: {
                         h.faults.extend(inner.reload_fault.clone());
+                        for f in &inner.record_faults {
+                            add_fault(&mut h.faults, f);
+                        }
                         h.faults
                     },
                     report: h.report,
@@ -1314,7 +1331,12 @@ impl Session {
                         seconds: seq.map_or(0.0, |s| seconds(doc, s, tick)),
                         sample_rate: 0.0,
                         device: String::new(),
-                        faults: inner.reload_fault.iter().cloned().collect(),
+                        faults: inner
+                            .reload_fault
+                            .iter()
+                            .chain(&inner.record_faults)
+                            .cloned()
+                            .collect(),
                         report: Vec::new(),
                         host_time_ns,
                         ticks_per_second: crate::clock::ticks_per_second(doc, seq, tick),
@@ -2121,6 +2143,9 @@ impl Session {
     /// marker goes. Safe to call more than once.
     pub fn close(&self) -> Result<(), VizError> {
         ffi_guard(|| {
+            // A pass another thread is finishing lands first (pre-flight
+            // I1): its files are in no document yet.
+            self.wait_finished()?;
             // A recording ends cleanly first: its files are finished, its
             // pass applied (what is not saved then goes to the Trash).
             if lock(&self.inner).recording.is_some() {
@@ -2154,6 +2179,7 @@ impl Session {
                 // to the Trash before its scratch package is removed
                 // (plan 5c Ruling 15).
                 let dir = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                let mut left = 0usize;
                 if let Ok(rd) = std::fs::read_dir(scratch.join(crate::record::RECORDED_DIR)) {
                     for e in rd.flatten() {
                         if e.path().is_file() {
@@ -2162,12 +2188,20 @@ impl Session {
                                     "VizDAW: {}: not moved to the Trash ({why})",
                                     e.path().display()
                                 );
-                                continue;
+                                left += 1;
                             }
                         }
                     }
                 }
-                let _ = std::fs::remove_dir_all(scratch);
+                if left == 0 {
+                    let _ = std::fs::remove_dir_all(scratch);
+                } else {
+                    // Never unlinked (pre-flight I2): the package stays.
+                    eprintln!(
+                        "VizDAW: {left} recording(s) were left in {}",
+                        scratch.display()
+                    );
+                }
             }
             if let Some(k) = inner.key.clone() {
                 recovery::closed(&k, self.id);
@@ -2298,6 +2332,12 @@ impl Session {
     /// Forgets every loaded overview (test hook).
     pub fn debug_forget_overviews(&self) {
         lock(&self.inner).overviews.forget_all();
+    }
+
+    /// Holds (`true`) or releases the finishing of every recording pass
+    /// (test hook, pre-flight I1; see [`crate::record::set_hold_finish`]).
+    pub fn debug_hold_finish(&self, on: bool) {
+        crate::record::set_hold_finish(on);
     }
 
     /// The folder this session's retention moves files into instead of
@@ -2778,7 +2818,16 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(k) = lock(&self.inner).key.clone() {
+        let (key, recording) = {
+            let inner = lock(&self.inner);
+            (inner.key.clone(), inner.recording.is_some())
+        };
+        // Dropped while recording without `close`: the tap goes with the
+        // writer, whose files stay for the recovery offer.
+        if recording {
+            let _ = host::stop_recording(self.id);
+        }
+        if let Some(k) = key {
             recovery::closed(&k, self.id);
         }
         // The engine goes first when this session's plugin host feeds it;
@@ -3325,6 +3374,13 @@ pub(crate) fn normalize_warning(w: &str, regions: &[(core_model::ids::EventId, &
     format!("Normalize: {w}")
 }
 
+/// Adds fault name `f` to `faults` once.
+fn add_fault(faults: &mut Vec<String>, f: &str) {
+    if !faults.iter().any(|x| x == f) {
+        faults.push(f.to_string());
+    }
+}
+
 /// `Busy` while a recording runs or finishes.
 fn recording_busy() -> VizError {
     VizError::Busy {
@@ -3540,6 +3596,8 @@ impl Session {
                     overflows: 0,
                     gap_frames: 0,
                     free_bytes: crate::record::free_bytes(&inner.root(self.id)),
+                    underruns: 0,
+                    late_starts: 0,
                 },
             })
         })
@@ -3563,7 +3621,7 @@ impl Session {
     ) -> Result<(), VizError> {
         use crate::record::{AudioLane, LOW_DISK_STOP, LOW_DISK_WARN, Plan, Recording};
         use core_engine::record::RecordRequest;
-        use core_media::record::{RING_SECONDS, WriterConfig, WriterLane};
+        use core_media::record::{WriterConfig, WriterLane};
         use core_model::lane::LaneInput;
         let mut inner = lock(&self.inner);
         if inner.recording.is_some() || inner.finishing {
@@ -3703,12 +3761,10 @@ impl Session {
             )));
         }
         let inputs = host::input_info(self.id).map_or(0, |(_, i)| i.channels);
+        let faults = host::faults(self.id);
         for (_, name, ch) in &audio {
-            if ch.last().is_none_or(|c| u32::from(c) >= inputs) {
-                return fail(crate::events::bad(&format!(
-                    "lane {name} records input {}, but the audio input has {inputs} channel(s)",
-                    u32::from(ch.first()) + 1
-                )));
+            if let Some(why) = crate::record::channel_refusal(name, *ch, inputs, &faults) {
+                return fail(crate::events::bad(&why));
             }
         }
         let mut device: Vec<u16> = audio
@@ -3727,7 +3783,7 @@ impl Session {
                 device.clone()
             },
             range: Some((range.start, range.end.unwrap_or(u64::MAX))),
-            ring_frames: (RING_SECONDS * rate) as usize,
+            ring_frames: crate::record::ring_frames(rate),
         };
         let handles = match host::start_recording(self.id, &req) {
             Ok(h) => h,
@@ -3751,6 +3807,7 @@ impl Session {
             });
             lanes.push(AudioLane {
                 lane: *lane,
+                name: name.clone(),
                 path: rel,
                 channels: ch.count(),
             });
@@ -3761,6 +3818,7 @@ impl Session {
             lanes: writer_lanes,
         });
         let plan = Plan {
+            owner: self.id,
             seq: id,
             spec: spec.clone(),
             range,
@@ -3782,13 +3840,33 @@ impl Session {
             return fail(e.into());
         }
         inner.recording = Some(recording);
+        inner.record_faults.clear();
         inner.looped = spec.looped;
         inner.reload_owed = false;
         inner.reload_fault = None;
         inner.cursor = None;
         inner.cursor_seq = Some(id);
         drop(inner);
-        host::finish_play(pending)
+        // A Play that cannot be sent ends the recording it started
+        // (pre-flight M4): nothing would ever roll or end it.
+        if let Err(e) = host::finish_play(pending) {
+            let _ = self.finish_recording(None);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Waits while another thread finishes a pass (up to
+    /// [`crate::record::FINISH_WAIT`] and some), `Busy` after.
+    fn wait_finished(&self) -> Result<(), VizError> {
+        let until = Instant::now() + crate::record::FINISH_WAIT * 4;
+        while lock(&self.inner).finishing {
+            if Instant::now() >= until {
+                return Err(recording_busy());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(())
     }
 
     /// Ends the recording in progress (spec §6.5): the engine stops and
@@ -3802,6 +3880,8 @@ impl Session {
                 return Ok(());
             };
             inner.finishing = true;
+            // In the keep set while the lock is down (pre-flight I1).
+            inner.finishing_files = r.files();
             let _ = host::stop_recording(self.id);
             r
         };
@@ -3814,10 +3894,25 @@ impl Session {
                 .problems
                 .push(format!("Recording stopped: {why}."));
         }
+        // Input lost on the way (pre-flight I4, M11).
+        if let Some(line) = crate::record::gaps_problem(&done) {
+            inner.news.problems.push(line);
+            if done.written.as_ref().is_some_and(|w| w.gap_frames > 0)
+                || done.status.lost_blocks() > 0
+            {
+                add_fault(&mut inner.record_faults, crate::record::RECORD_OVERFLOW);
+            }
+        }
         let files = done.files();
         let doc = inner.doc().clone();
         let pass = match crate::record::build(&done, &doc) {
-            Ok(p) => p,
+            Ok(p) => {
+                // Takes no region uses (pre-flight I3).
+                let left = crate::record::leftovers(&done, &doc, p.as_ref());
+                inner.news.problems.extend(left.problems);
+                inner.keep_recordings.extend(left.keep);
+                p
+            }
             Err(e) => {
                 inner.news.problems.push(format!(
                     "The recording could not be placed: {e}. Its files are kept."
@@ -3827,6 +3922,7 @@ impl Session {
             }
         };
         inner.pending_pass = Some((pass, files));
+        inner.finishing_files.clear();
         self.apply_pending_pass(&mut inner);
         Ok(())
     }
@@ -3868,12 +3964,15 @@ impl Session {
         let ending = {
             let mut inner = lock(&self.inner);
             let stopped = host::transport_stopped(self.id).unwrap_or(false);
-            let mut problems = Vec::new();
+            let (mut problems, mut faults) = (Vec::new(), Vec::new());
             let e = inner
                 .recording
                 .as_mut()
-                .and_then(|r| r.check(stopped, &mut problems));
+                .and_then(|r| r.check(stopped, &mut problems, &mut faults));
             inner.news.problems.extend(problems);
+            for f in faults {
+                add_fault(&mut inner.record_faults, &f);
+            }
             e
         };
         match ending {

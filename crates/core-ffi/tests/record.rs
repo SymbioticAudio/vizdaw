@@ -27,20 +27,40 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{force_offline, reset_host, set_fake_input};
-use vizdaw_ffi::record::set_free_bytes;
+use vizdaw_ffi::record::{set_free_bytes, set_hold_finish, set_ring_frames};
 use vizdaw_ffi::{
     EventKindRow, EventRow, MediaOriginRow, RecordSpecRow, Session, TickRange, VizError,
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
-fn serial(input: Option<FakeInput>) -> MutexGuard<'static, ()> {
+/// One test at a time, with its own folder standing for the Trash.
+struct Serial {
+    _g: MutexGuard<'static, ()>,
+    dir: tempfile::TempDir,
+}
+
+fn serial(input: Option<FakeInput>) -> Serial {
     let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     force_offline();
     set_fake_input(input);
     set_free_bytes(None);
+    set_ring_frames(None);
+    set_hold_finish(false);
     reset_host();
-    g
+    Serial {
+        _g: g,
+        dir: tempfile::tempdir().unwrap(),
+    }
+}
+
+/// An untitled session whose Trash is the test's folder: closing it moves
+/// its recordings there (pre-flight I2 keeps them in the scratch package
+/// when the Trash refuses, which would leave them in `$TMPDIR`).
+fn untitled(g: &Serial, doc: Document) -> Arc<Session> {
+    let s = Session::from_document(doc).unwrap();
+    s.debug_set_trash_dir(Some(g.dir.path().join("Trash").display().to_string()));
+    s
 }
 
 /// 120 BPM at 48 kHz: one beat (Q ticks) is 24 000 frames.
@@ -181,9 +201,9 @@ fn read(path: &str) -> (core_media::caf::CafInfo, Vec<f32>) {
 
 #[test]
 fn recording_the_fake_input_is_one_undo_step_in_the_project_format() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     s.locate(4 * Q).unwrap();
     s.record(d.seq.0, spec()).unwrap();
     let st = s.record_state().unwrap();
@@ -227,7 +247,7 @@ fn recording_the_fake_input_is_one_undo_step_in_the_project_format() {
 
 #[test]
 fn files_follow_the_project_format() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, true);
     let mut doc = d.doc.clone();
     doc = core_model::command::apply(
@@ -242,7 +262,7 @@ fn files_follow_the_project_format() {
     )
     .unwrap()
     .doc;
-    let s = Session::from_document(doc).unwrap();
+    let s = untitled(&g, doc);
     s.record(d.seq.0, spec()).unwrap();
     wait_until("audio", || frames(&s) >= 4410);
     s.stop().unwrap();
@@ -267,7 +287,7 @@ fn click(path: &Path, frames: usize, at: usize) {
 
 #[test]
 fn a_looped_back_click_lands_within_two_frames_of_where_it_played() {
-    let _g = serial(Some(FakeInput::Loopback(1000)));
+    let g = serial(Some(FakeInput::Loopback(1000)));
     let d = doc(8, false, true);
     // A region on "Src" from beat 1 whose click is 12 000 frames in: it
     // plays at timeline frame 36 000.
@@ -285,7 +305,7 @@ fn a_looped_back_click_lands_within_two_frames_of_where_it_played() {
         Fade::default(),
     )
     .unwrap();
-    let s = Session::from_document(b.finish()).unwrap();
+    let s = untitled(&g, b.finish());
     click(Path::new(&s.media_file(media.0).unwrap()), 48_000, 12_000);
     s.recheck_media().unwrap();
     assert_eq!(s.media().unwrap()[0].offline, None);
@@ -316,11 +336,11 @@ fn takes(s: &Session, seq: u64, lane: u64) -> (u32, String) {
 
 #[test]
 fn loop_passes_with_keep_and_discard_become_takes() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     // One bar at 120 BPM: a pass every two seconds (pre-flight M14: wide
     // enough that a keep or discard lands in the pass it was meant for).
     let d = doc(1, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     s.record(
         d.seq.0,
         RecordSpecRow {
@@ -362,9 +382,9 @@ fn notes(s: &Session, seq: u64, lane: u64) -> Vec<(i64, u8)> {
 
 #[test]
 fn midi_recorded_in_a_punch_replaces_only_that_range() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let d = doc(8, true, false);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     // Punch beats 4–8: the old note at beat 5 goes, the one at beat 1 stays.
     s.record(
         d.seq.0,
@@ -402,9 +422,9 @@ fn midi_recorded_in_a_punch_replaces_only_that_range() {
 
 #[test]
 fn edits_made_while_recording_join_the_record_step() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     let before = s.lanes(d.seq.0).unwrap();
     s.record(d.seq.0, spec()).unwrap();
     s.rename_sequence(d.seq.0, "Renamed".into()).unwrap();
@@ -424,15 +444,15 @@ fn edits_made_while_recording_join_the_record_step() {
 
 #[test]
 fn bad_requests_are_refused_and_recording_holds_the_transport() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, false);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     let model = |r: Result<(), VizError>| matches!(r, Err(VizError::Model { .. }));
     assert!(model(s.record(d.seq.0, spec())), "nothing armed");
     assert!(model(s.record(999, spec())), "no such sequence");
     s.close().unwrap();
     let d = doc(8, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     for bad in [
         RecordSpecRow {
             count_in_bars: 1,
@@ -488,7 +508,7 @@ fn bad_requests_are_refused_and_recording_holds_the_transport() {
     )
     .unwrap()
     .doc;
-    let s = Session::from_document(doc).unwrap();
+    let s = untitled(&g, doc);
     assert!(model(s.record(d.seq.0, spec())));
     assert!(!s.record_state().unwrap().recording);
     assert!(s.media().unwrap().is_empty());
@@ -497,9 +517,9 @@ fn bad_requests_are_refused_and_recording_holds_the_transport() {
 
 #[test]
 fn a_full_disk_ends_the_pass_and_keeps_what_was_recorded() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     set_free_bytes(Some(50 << 20));
     assert!(matches!(
         s.record(d.seq.0, spec()),
@@ -535,9 +555,9 @@ fn a_full_disk_ends_the_pass_and_keeps_what_was_recorded() {
 
 #[test]
 fn a_device_that_goes_away_ends_the_pass_cleanly() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     s.record(d.seq.0, spec()).unwrap();
     wait_until("audio", || frames(&s) >= 4800);
     // The output (and its renderer, with the tap) goes.
@@ -555,15 +575,18 @@ fn a_device_that_goes_away_ends_the_pass_cleanly() {
     );
     assert_eq!(regions(&s, d.seq.0, d.mic.0).len(), 1);
     assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Record"));
+    // Pre-flight M11: the transport says the input was lost.
+    let faults = s.transport().unwrap().faults;
+    assert!(faults.iter().any(|f| f == "input-lost"), "{faults:?}");
     s.close().unwrap();
 }
 
 #[test]
 fn saving_while_recording_never_trashes_the_file_being_written() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let dir = tempfile::tempdir().unwrap();
     let d = doc(8, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     s.debug_set_trash_dir(Some(dir.path().join("Trash").display().to_string()));
     let pkg = dir.path().join("P.vizdaw");
     s.save_as(pkg.display().to_string()).unwrap();
@@ -590,10 +613,10 @@ fn saving_while_recording_never_trashes_the_file_being_written() {
 
 #[test]
 fn closing_an_untitled_recording_moves_it_to_the_trash() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let dir = tempfile::tempdir().unwrap();
     let d = doc(8, false, true);
-    let s: Arc<Session> = Session::from_document(d.doc.clone()).unwrap();
+    let s: Arc<Session> = untitled(&g, d.doc.clone());
     s.debug_set_trash_dir(Some(dir.path().join("Trash").display().to_string()));
     s.record(d.seq.0, spec()).unwrap();
     wait_until("audio", || frames(&s) >= 4800);
@@ -611,9 +634,9 @@ fn closing_an_untitled_recording_moves_it_to_the_trash() {
 /// the one "Record" step.
 #[test]
 fn a_pass_finished_during_a_drag_lands_when_it_ends() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     s.record(d.seq.0, spec()).unwrap();
     wait_until("audio", || frames(&s) >= 4800);
     s.begin_edit("Drag".into()).unwrap();
@@ -633,11 +656,11 @@ fn a_pass_finished_during_a_drag_lands_when_it_ends() {
 /// (no resampling: it would play back at the wrong speed).
 #[test]
 fn a_device_at_another_rate_refuses_recording() {
-    let _g = serial(Some(FakeInput::Signals));
+    let g = serial(Some(FakeInput::Signals));
     vizdaw_ffi::host::set_offline_rate(44_100.0);
     reset_host();
     let d = doc(8, false, true);
-    let s = Session::from_document(d.doc.clone()).unwrap();
+    let s = untitled(&g, d.doc.clone());
     let r = s.record(d.seq.0, spec());
     vizdaw_ffi::host::set_offline_rate(0.0);
     match r {
@@ -646,6 +669,259 @@ fn a_device_at_another_rate_refuses_recording() {
     }
     assert!(!s.record_state().unwrap().recording);
     assert!(s.snapshot().unwrap().undo_label.is_none());
+    s.close().unwrap();
+    reset_host();
+}
+
+// Pre-flight items (plan 5c pre-flight I1–I4, M5, M11).
+
+fn trash_names(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pre-flight I1: a save while Stop finishes the pass (its files closing
+/// without the session lock) never sends the take to the Trash, and Save
+/// As waits for it.
+#[test]
+fn a_save_while_the_pass_finishes_keeps_its_file() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    let rel = s.record_state().unwrap().lanes[0].path.clone().unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    set_hold_finish(true);
+    let stopper = {
+        let s = Arc::clone(&s);
+        std::thread::spawn(move || s.stop())
+    };
+    wait_until("the pass to be finishing", || {
+        !s.record_state().unwrap().recording
+    });
+    s.save().unwrap();
+    assert!(pkg.join(&rel).is_file(), "the file being finished stays");
+    let other = g.dir.path().join("Q.vizdaw");
+    assert!(matches!(
+        s.save_as(other.display().to_string()),
+        Err(VizError::Busy { .. })
+    ));
+    set_hold_finish(false);
+    stopper.join().unwrap().unwrap();
+    assert!(pkg.join(&rel).is_file());
+    let m = &s.media().unwrap()[0];
+    assert_eq!(m.offline, None, "online after the pass landed");
+    s.save().unwrap();
+    assert!(pkg.join(&rel).is_file());
+    assert!(trash_names(&g.dir.path().join("Trash")).is_empty());
+    s.close().unwrap();
+}
+
+/// Pre-flight I1: Save As is refused while a finished pass waits for an
+/// open edit to end (it would land on paths the new package never got).
+#[test]
+fn save_as_waits_for_a_pending_pass() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.begin_edit("Drag".into()).unwrap();
+    s.stop().unwrap();
+    let pkg = g.dir.path().join("P.vizdaw");
+    assert!(matches!(
+        s.save_as(pkg.display().to_string()),
+        Err(VizError::Busy { .. })
+    ));
+    s.end_edit().unwrap();
+    s.save_as(pkg.display().to_string()).unwrap();
+    let m = &s.media().unwrap()[0];
+    assert_eq!(m.offline, None);
+    assert!(Path::new(&s.media_file(m.id).unwrap()).starts_with(&pkg));
+    s.close().unwrap();
+}
+
+/// Pre-flight I2: closing an untitled project whose recordings cannot go
+/// to the Trash (none in test builds) leaves its scratch package.
+#[test]
+fn an_untitled_close_that_cannot_trash_keeps_the_recordings() {
+    let _g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = Session::from_document(d.doc.clone()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.stop().unwrap();
+    let file = std::path::PathBuf::from(s.media_file(s.media().unwrap()[0].id).unwrap());
+    assert!(file.is_file());
+    s.close().unwrap();
+    let kept = file.is_file();
+    // Media/Recorded/<file> in the scratch package.
+    let package = file.ancestors().nth(3).unwrap().to_path_buf();
+    assert!(
+        package.extension().is_some_and(|e| e == "vizdaw"),
+        "{package:?}"
+    );
+    let _ = std::fs::remove_dir_all(&package);
+    assert!(kept, "never unlinked");
+}
+
+/// Pre-flight I3: a take whose lane was removed while recording is kept
+/// (and said so), never trashed by the next save.
+#[test]
+fn a_take_whose_lane_was_removed_is_kept_and_reported() {
+    use vizdaw_ffi::edit::{EditCommand, LaneEdit};
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    let rel = s.record_state().unwrap().lanes[0].path.clone().unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::Remove {
+                seq: d.seq.0,
+                lane: d.mic.0,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    s.stop().unwrap();
+    let problems = s.idle().unwrap().problems;
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("Mic: ") && p.contains("its lane was removed")),
+        "{problems:?}"
+    );
+    s.save().unwrap();
+    assert!(pkg.join(&rel).is_file(), "kept for the recovery offer");
+    s.close().unwrap();
+    assert!(pkg.join(&rel).is_file());
+    assert!(trash_names(&g.dir.path().join("Trash")).is_empty());
+}
+
+/// Pre-flight I4: input the ring could not hold is silence, the step says
+/// "Record (with gaps)" and the user is told.
+#[test]
+fn lost_input_is_silence_and_the_step_says_with_gaps() {
+    let g = serial(Some(FakeInput::Signals));
+    // A one-frame ring (room for 61 frames with its headers): the offline
+    // driver renders at least 2 ms (96 frames) a block, so blocks are
+    // lost.
+    set_ring_frames(Some(1));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("a second", || frames(&s) >= 48_000);
+    let st = s.record_state().unwrap();
+    assert!(st.overflows > 0, "{st:?}");
+    // Pre-flight M11: the transport says so while it records.
+    wait_until("the record-overflow fault", || {
+        s.idle().unwrap();
+        s.transport()
+            .unwrap()
+            .faults
+            .iter()
+            .any(|f| f == "record-overflow")
+    });
+    let run = frames(&s);
+    s.stop().unwrap();
+    set_ring_frames(None);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Record (with gaps)")
+    );
+    let m = &s.media().unwrap()[0];
+    // Padded to the run: as long as what played.
+    assert!(m.frames >= run, "{} < {run}", m.frames);
+    let (_, data) = read(&s.media_file(m.id).unwrap());
+    // Lost blocks are silence (the writer pads them at the end).
+    let zeros = data.iter().filter(|x| **x == 0.0).count();
+    assert!(zeros * 100 >= data.len() * 99, "{zeros} of {}", data.len());
+    let problems = s.idle().unwrap().problems;
+    assert!(
+        problems.iter().any(|p| p.starts_with("Recording: ")
+            && p.ends_with("s of input could not be written in time and is silence.")),
+        "{problems:?}"
+    );
+    s.close().unwrap();
+}
+
+/// Pre-flight M5: another window playing ends the pass, and says so.
+#[test]
+fn another_window_playing_ends_the_pass_and_says_so() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let other = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    other.play(d.seq.0).unwrap();
+    let mut problems = Vec::new();
+    wait_until("the pass to end", || {
+        problems.extend(s.idle().unwrap().problems);
+        !s.record_state().unwrap().recording
+    });
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("another window started playing")),
+        "{problems:?}"
+    );
+    assert_eq!(regions(&s, d.seq.0, d.mic.0).len(), 1, "kept");
+    other.stop().unwrap();
+    other.close().unwrap();
+    s.close().unwrap();
+}
+
+/// Pre-flight M11: the streamer's underruns and late starts while
+/// recording are in the record state.
+#[test]
+fn stream_misses_while_recording_are_counted() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let mut b = Builder::from_doc(d.doc.clone());
+    let media = b.media("Media/click.caf", 480_000, 1).unwrap();
+    b.region(
+        d.seq,
+        d.src,
+        0,
+        media,
+        0,
+        480_000,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+    let s = untitled(&g, b.finish());
+    click(Path::new(&s.media_file(media.0).unwrap()), 480_000, 12_000);
+    s.recheck_media().unwrap();
+    let st = s.record_state().unwrap();
+    assert_eq!((st.underruns, st.late_starts), (0, 0));
+    vizdaw_ffi::host::stall_disk(true);
+    let r = s.record(d.seq.0, spec());
+    let mut st = s.record_state().unwrap();
+    if r.is_ok() {
+        wait_until("a stream miss", || {
+            st = s.record_state().unwrap();
+            st.underruns + st.late_starts > 0
+        });
+    }
+    vizdaw_ffi::host::stall_disk(false);
+    r.unwrap();
+    assert!(st.underruns + st.late_starts > 0, "{st:?}");
+    s.stop().unwrap();
     s.close().unwrap();
     reset_host();
 }

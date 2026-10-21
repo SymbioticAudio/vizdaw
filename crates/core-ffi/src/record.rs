@@ -9,7 +9,7 @@ use crate::passes::{AudioTake, Captured, PassFate, RecordRange, decide, plan};
 use core_engine::record::{
     Mark, MarkReader, MidiReader, RecordHandles, RecordStatus, RecordedMidi,
 };
-use core_media::record::{RecordWriter, WriterConfig, WriterResult};
+use core_media::record::{RING_SECONDS, RecordWriter, WriterConfig, WriterResult};
 use core_model::command::{RecordPass, RecordedMedia};
 use core_model::document::{Document, MediaItem, MediaOrigin};
 use core_model::format::AudioFormat;
@@ -17,7 +17,7 @@ use core_model::ids::{LaneId, SeqId};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Where recordings go in a package (spec §6.2).
@@ -52,6 +52,35 @@ pub fn set_record_latency_trim(frames: i32) {
 /// The latency trim in frames.
 pub fn latency_trim() -> i64 {
     TRIM.load(Ordering::Relaxed)
+}
+
+/// Holds [`Recording::finish`] before the writer finishes (test hook,
+/// pre-flight I1).
+static HOLD_FINISH: AtomicBool = AtomicBool::new(false);
+/// A ring length in frames instead of [`RING_SECONDS`] of input (test
+/// hook, pre-flight I4; 0: none).
+static RING_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+/// Holds (`true`) or releases the finishing of every pass (test hook,
+/// pre-flight I1): Stop then waits with the session unlocked.
+#[cfg(feature = "test-hooks")]
+pub fn set_hold_finish(on: bool) {
+    HOLD_FINISH.store(on, Ordering::Relaxed);
+}
+
+/// Makes input rings `frames` long (test hook, pre-flight I4: a ring
+/// shorter than a block loses every block; `None`: the default).
+#[cfg(feature = "test-hooks")]
+pub fn set_ring_frames(frames: Option<usize>) {
+    RING_FRAMES.store(frames.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// The input ring's length in frames at `rate` ([`RING_SECONDS`]).
+pub fn ring_frames(rate: f64) -> usize {
+    match RING_FRAMES.load(Ordering::Relaxed) {
+        0 => (RING_SECONDS * rate) as usize,
+        n => n,
+    }
 }
 
 /// Makes free-space checks read `bytes` (test hook; `None`: the disk's).
@@ -132,6 +161,12 @@ pub struct RecordStateRow {
     pub gap_frames: u64,
     /// Free space on the project's volume.
     pub free_bytes: Option<u64>,
+    /// Stream underruns while recording (pre-flight M11).
+    #[uniffi(default)]
+    pub underruns: u64,
+    /// Late stream starts while recording (pre-flight M11).
+    #[uniffi(default)]
+    pub late_starts: u64,
 }
 
 /// One armed audio lane's file.
@@ -139,6 +174,8 @@ pub struct RecordStateRow {
 pub struct AudioLane {
     /// The lane.
     pub lane: LaneId,
+    /// Its name when recording started (for messages).
+    pub name: String,
     /// Package-relative path.
     pub path: String,
     /// Channels in the file (1 or 2).
@@ -156,6 +193,8 @@ pub enum Ending {
 
 /// A recording in progress.
 pub struct Recording {
+    /// The session recording.
+    pub owner: u64,
     /// The sequence.
     pub seq: SeqId,
     /// What was asked.
@@ -185,6 +224,8 @@ pub struct Recording {
     fates: Vec<PassFate>,
     disk_checked: Instant,
     warned_low: bool,
+    /// The streamer's `(underruns, late starts)` when it started.
+    stream_base: (u64, u64),
 }
 
 impl std::fmt::Debug for Recording {
@@ -230,12 +271,162 @@ impl Finished {
     pub fn files(&self) -> Vec<String> {
         self.audio.iter().map(|a| a.path.clone()).collect()
     }
+
+    /// What landed in `a`'s file: all of it, or what the writer wrote
+    /// before the file failed; `None` when it could not be closed.
+    pub fn written_of(&self, a: &AudioLane) -> Option<&core_media::caf::Written> {
+        let w = self.written.as_ref()?;
+        if let Some(l) = w.lanes.iter().find(|l| l.path.ends_with(&a.path)) {
+            return Some(&l.written);
+        }
+        w.failed
+            .iter()
+            .find(|l| l.path.ends_with(&a.path))
+            .and_then(|l| l.written.as_ref())
+    }
+
+    /// Why `a`'s file could not be finished, if it could not.
+    fn failure_of(&self, a: &AudioLane) -> Option<String> {
+        let Some(w) = self.written.as_ref() else {
+            return Some("the record writer did not run".into());
+        };
+        if w.lanes.iter().any(|l| l.path.ends_with(&a.path)) {
+            return None;
+        }
+        Some(
+            w.failed
+                .iter()
+                .find(|l| l.path.ends_with(&a.path))
+                .map_or_else(|| "the record writer lost it".into(), |l| l.error.clone()),
+        )
+    }
+}
+
+/// Transport fault name: input was lost because the ring was full
+/// (pre-flight M11; spec §12.2 `record_overflow`).
+pub const RECORD_OVERFLOW: &str = "record-overflow";
+/// Transport fault name: the input went away while recording
+/// (pre-flight M11; spec §12.2 `input_lost`).
+pub const INPUT_LOST: &str = "input-lost";
+
+/// What a finished pass leaves besides what it placed (pre-flight I3).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Leftovers {
+    /// Files no region uses that must stay for the recovery offer: their
+    /// lane was removed, or the writer could not close them.
+    pub keep: Vec<String>,
+    /// What to tell the user, one line per lane.
+    pub problems: Vec<String>,
+}
+
+/// The files of `f` that `pass` (what [`build`] made of it in `doc`)
+/// leaves without a region, and the lines saying why (pre-flight I3). A
+/// file whose lane is gone, or that the writer could not close, is kept
+/// for the recovery offer; one that only recorded nothing in the record
+/// range (a punch never reached, discarded passes) may go. A file the
+/// writer failed on is always reported.
+pub fn leftovers(f: &Finished, doc: &Document, pass: Option<&RecordPass>) -> Leftovers {
+    let mut out = Leftovers::default();
+    for a in &f.audio {
+        let placed = pass.is_some_and(|p| p.media.iter().any(|m| m.path == a.path));
+        let failure = f.failure_of(a);
+        let written = f.written_of(a).map_or(0, |w| w.frames);
+        if placed {
+            if let Some(why) = failure {
+                out.problems.push(format!(
+                    "{}: the recording was cut short ({why}); what was written before is in the take.",
+                    a.name
+                ));
+            }
+            continue;
+        }
+        if doc.lane(f.seq, a.lane).is_err() {
+            if written > 0 || failure.is_some() {
+                out.keep.push(a.path.clone());
+                out.problems.push(format!(
+                    "{}: the recording could not be placed: its lane was removed. It is kept and offered at the next open.",
+                    a.name
+                ));
+            }
+            continue;
+        }
+        match (failure, f.written_of(a).is_some()) {
+            // Nothing could be read back: kept as it is on disk.
+            (Some(why), false) => {
+                out.keep.push(a.path.clone());
+                out.problems.push(format!(
+                    "{}: the recording could not be finished ({why}). It is kept and offered at the next open.",
+                    a.name
+                ));
+            }
+            (Some(why), true) => out.problems.push(format!(
+                "{}: the recording could not be finished ({why}); nothing of it fell in the record range.",
+                a.name
+            )),
+            (None, _) => {}
+        }
+    }
+    out
+}
+
+/// The line telling the user input was lost (pre-flight I4), when it
+/// was: the seconds written as silence, or the MIDI or positions lost.
+pub fn gaps_problem(f: &Finished) -> Option<String> {
+    let gap = f.written.as_ref().map_or(0, |w| w.gap_frames);
+    if gap > 0 || f.status.lost_blocks() > 0 {
+        let secs = gap as f64 / f64::from(f.format.sample_rate.max(1));
+        return Some(format!(
+            "Recording: {secs:.1} s of input could not be written in time and is silence."
+        ));
+    }
+    if f.status.lost_midi() > 0 {
+        return Some(format!(
+            "Recording: {} MIDI messages could not be recorded in time.",
+            f.status.lost_midi()
+        ));
+    }
+    if f.status.lost_marks() > 0 {
+        return Some(
+            "Recording: the transport moved faster than it could be followed; the take may be placed inexactly."
+                .into(),
+        );
+    }
+    None
+}
+
+/// The start of the fault the host reports when macOS refused audio
+/// input (Task 11's `DENIED_MESSAGE`).
+pub const DENIED_PREFIX: &str = "VizDAW may not use audio input";
+
+/// Why lane `name` cannot record input `channels` from an input with
+/// `inputs` channels, if it cannot (pre-flight M6: with no input because
+/// access was denied, the host's fault says why).
+pub fn channel_refusal(
+    name: &str,
+    channels: core_model::lane::InputChannels,
+    inputs: u32,
+    faults: &[String],
+) -> Option<String> {
+    if channels.last().is_some_and(|c| u32::from(c) < inputs) {
+        return None;
+    }
+    if inputs == 0 {
+        if let Some(f) = faults.iter().find(|f| f.starts_with(DENIED_PREFIX)) {
+            return Some(f.clone());
+        }
+    }
+    Some(format!(
+        "lane {name} records input {}, but the audio input has {inputs} channel(s)",
+        u32::from(channels.first()) + 1
+    ))
 }
 
 /// What a recording records (everything [`Recording::start`] needs
 /// besides the tap).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
+    /// The session recording.
+    pub owner: u64,
     /// The sequence.
     pub seq: SeqId,
     /// What was asked.
@@ -275,6 +466,8 @@ impl Recording {
             None => None,
         };
         Ok(Recording {
+            stream_base: crate::host::stream_counters(plan.owner).unwrap_or((0, 0)),
+            owner: plan.owner,
             seq: plan.seq,
             spec: plan.spec,
             range: plan.range,
@@ -334,12 +527,34 @@ impl Recording {
     }
 
     /// Whether it must end now: the tap closed under it (the device went
-    /// away), the writer failed (a full disk), free space fell below
-    /// [`LOW_DISK_STOP`], or the transport stopped by itself. Pushes a
-    /// warning once below [`LOW_DISK_WARN`].
-    pub fn check(&mut self, transport_stopped: bool, problems: &mut Vec<String>) -> Option<Ending> {
+    /// away, or another window played), the writer failed (a full disk),
+    /// free space fell below [`LOW_DISK_STOP`], or the transport stopped
+    /// by itself. Pushes a warning once below [`LOW_DISK_WARN`], and the
+    /// transport fault names (pre-flight M11) of what happened to
+    /// `faults`: `record-overflow` when input was lost, `input-lost`
+    /// when the input went away.
+    pub fn check(
+        &mut self,
+        transport_stopped: bool,
+        problems: &mut Vec<String>,
+        faults: &mut Vec<String>,
+    ) -> Option<Ending> {
         self.drain();
+        let gaps = self
+            .writer
+            .as_ref()
+            .is_some_and(|w| w.status().gap_frames > 0);
+        if self.status.lost_blocks() > 0 || gaps {
+            faults.push(RECORD_OVERFLOW.into());
+        }
         if self.status.closed() {
+            // Pre-flight M5: another session's Play removed the tap.
+            if crate::host::holder().is_some_and(|o| o != self.owner) {
+                return Some(Ending::Because(
+                    "another window started playing; what was recorded is kept".into(),
+                ));
+            }
+            faults.push(INPUT_LOST.into());
             return Some(Ending::Because(
                 "the audio device went away; what was recorded is kept".into(),
             ));
@@ -372,6 +587,13 @@ impl Recording {
     /// `state.get record` while it runs.
     pub fn row(&self) -> RecordStateRow {
         let w = self.writer.as_ref().map(RecordWriter::status);
+        // Since it started (pre-flight M11); 0 once the engine is gone.
+        let stream = crate::host::stream_counters(self.owner).map_or((0, 0), |(u, l)| {
+            (
+                u.saturating_sub(self.stream_base.0),
+                l.saturating_sub(self.stream_base.1),
+            )
+        });
         let completed = self.passes().saturating_sub(1);
         let count = |f: PassFate| {
             self.fates
@@ -412,6 +634,8 @@ impl Recording {
             overflows: self.status.lost_blocks(),
             gap_frames: w.map_or(0, |w| w.gap_frames),
             free_bytes: free_bytes(&self.root),
+            underruns: stream.0,
+            late_starts: stream.1,
         }
     }
 
@@ -420,6 +644,9 @@ impl Recording {
     /// lets the writer finish its files. Blocks: call without the session
     /// lock.
     pub fn finish(mut self, wait: Duration) -> Finished {
+        while HOLD_FINISH.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let until = Instant::now() + wait;
         while !self.status.closed() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(2));
@@ -452,28 +679,28 @@ impl Recording {
 pub fn build(f: &Finished, doc: &Document) -> Result<Option<RecordPass>, String> {
     let lanes_alive = |l: &LaneId| doc.lane(f.seq, *l).is_ok();
     let mut audio = Vec::new();
-    if let Some(w) = &f.written {
-        for a in f.audio.iter().filter(|a| lanes_alive(&a.lane)) {
-            let Some(lw) = w.lanes.iter().find(|l| l.path.ends_with(&a.path)) else {
-                continue;
-            };
-            if lw.written.frames == 0 {
-                continue;
-            }
-            let (_, stem) = MediaItem::file_parts(&a.path);
-            audio.push(AudioTake {
-                lane: a.lane,
-                media: RecordedMedia {
-                    path: a.path.clone(),
-                    sample_rate: f.format.sample_rate,
-                    channels: a.channels,
-                    length_frames: lw.written.frames,
-                    content_hash: lw.written.content_hash.clone(),
-                    name: stem,
-                    pass: f.pass_number,
-                },
-            });
+    for a in f.audio.iter().filter(|a| lanes_alive(&a.lane)) {
+        // A file the writer could not finish still holds what landed
+        // before it failed (pre-flight I3): that part is placed.
+        let Some(written) = f.written_of(a) else {
+            continue;
+        };
+        if written.frames == 0 {
+            continue;
         }
+        let (_, stem) = MediaItem::file_parts(&a.path);
+        audio.push(AudioTake {
+            lane: a.lane,
+            media: RecordedMedia {
+                path: a.path.clone(),
+                sample_rate: f.format.sample_rate,
+                channels: a.channels,
+                length_frames: written.frames,
+                content_hash: written.content_hash.clone(),
+                name: stem,
+                pass: f.pass_number,
+            },
+        });
     }
     let midi_lanes: Vec<LaneId> = f.midi_lanes.iter().copied().filter(lanes_alive).collect();
     let gaps = f.written.as_ref().is_some_and(|w| w.gap_frames > 0)
@@ -568,13 +795,240 @@ pub fn recorded_path(
     reserved: &BTreeSet<String>,
 ) -> String {
     let base = format!("{} {}", file_safe(name), stamp(at));
-    let taken =
-        |rel: &str| root.join(rel).exists() || reserved.iter().any(|r| r.eq_ignore_ascii_case(rel));
+    // As 5b's free-name loop (`core_media::import`): reserved paths are
+    // compared in lower case, as macOS volumes resolve names.
+    let reserved: BTreeSet<String> = reserved.iter().map(|r| r.to_lowercase()).collect();
+    let taken = |rel: &str| root.join(rel).exists() || reserved.contains(&rel.to_lowercase());
     let mut rel = format!("{RECORDED_DIR}/{base}.caf");
-    let mut k = 2;
-    while taken(&rel) {
+    let mut k = 2u32;
+    // The writer creates without replacing, so a name taken after this
+    // check fails the start rather than overwriting.
+    while taken(&rel) && k <= 10_000 {
         rel = format!("{RECORDED_DIR}/{base} {k}.caf");
         k += 1;
     }
     rel
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_engine::fixtures::Builder;
+    use core_engine::record::{RecordRequest, tap};
+    use core_media::caf::Written;
+    use core_media::record::{FailedLane, LaneWritten};
+    use core_model::lane::InputChannels;
+
+    fn written(frames: u64) -> Written {
+        Written {
+            frames,
+            content_hash: format!("hash{frames}"),
+            clipped: 0,
+        }
+    }
+
+    /// A pass of 2048 frames from schedule frame 0 on lanes "A" and "B"
+    /// (`b_alive`: "B" is still in the document), written as `w`.
+    fn finished(
+        w: impl FnOnce(&Path) -> WriterResult,
+        b_alive: bool,
+        range: RecordRange,
+    ) -> (Finished, Document) {
+        let mut b = Builder::new();
+        let (seq, a) = b.sequence("S", "A", None).unwrap();
+        let lane_b = if b_alive {
+            b.lane(seq, "B", None).unwrap()
+        } else {
+            LaneId(9_999)
+        };
+        let doc = b.finish();
+        let req = RecordRequest {
+            channels: vec![0],
+            range: None,
+            ring_frames: 8192,
+        };
+        let (mut t, h) = tap(&req, 0);
+        let input = vec![0.25f32; 512];
+        for k in 0..4u64 {
+            t.begin_block(k * 512, 0);
+            t.end_block(&[&input], 512, true);
+        }
+        let root = PathBuf::from("/nowhere/P.vizdaw");
+        let lane = |lane: LaneId, name: &str| AudioLane {
+            lane,
+            name: name.into(),
+            path: format!("{RECORDED_DIR}/{name}.caf"),
+            channels: 1,
+        };
+        let f = Finished {
+            seq,
+            spec: RecordSpecRow {
+                replace: true,
+                punch: None,
+                looped: false,
+                count_in_bars: 0,
+                pre_roll_bars: 0,
+                passes_as_takes: true,
+            },
+            range,
+            audio: vec![lane(a, "A"), lane(lane_b, "B")],
+            midi_lanes: Vec::new(),
+            written: Some(w(&root)),
+            marks: vec![Mark {
+                run: 0,
+                frame: 0,
+                wrap: false,
+            }],
+            midi: Vec::new(),
+            fates: Vec::new(),
+            status: Arc::clone(&h.status),
+            format: doc.settings().format,
+            pass_number: 1,
+        };
+        drop(t);
+        (f, doc)
+    }
+
+    const ALL: RecordRange = RecordRange {
+        start: 0,
+        end: None,
+    };
+
+    fn result(root: &Path, b: Result<Written, Option<Written>>) -> WriterResult {
+        let path = |n: &str| root.join(format!("{RECORDED_DIR}/{n}.caf"));
+        let mut lanes = vec![LaneWritten {
+            path: path("A"),
+            written: written(2048),
+        }];
+        let mut failed = Vec::new();
+        match b {
+            Ok(w) => lanes.push(LaneWritten {
+                path: path("B"),
+                written: w,
+            }),
+            Err(w) => failed.push(FailedLane {
+                path: path("B"),
+                error: "a write failed".into(),
+                written: w,
+            }),
+        }
+        WriterResult {
+            lanes,
+            failed,
+            gap_frames: 0,
+            error: None,
+        }
+    }
+
+    fn media_paths(p: &RecordPass) -> Vec<(String, u64)> {
+        p.media
+            .iter()
+            .map(|m| (m.path.clone(), m.length_frames))
+            .collect()
+    }
+
+    #[test]
+    fn a_file_the_writer_cut_short_is_placed_as_far_as_it_got() {
+        let (f, doc) = finished(|r| result(r, Err(Some(written(1024)))), true, ALL);
+        let pass = build(&f, &doc).unwrap().unwrap();
+        assert_eq!(
+            media_paths(&pass),
+            vec![
+                (format!("{RECORDED_DIR}/A.caf"), 2048),
+                (format!("{RECORDED_DIR}/B.caf"), 1024)
+            ]
+        );
+        let left = leftovers(&f, &doc, Some(&pass));
+        assert!(left.keep.is_empty());
+        assert_eq!(left.problems.len(), 1, "{:?}", left.problems);
+        assert!(left.problems[0].starts_with("B: the recording was cut short (a write failed)"));
+    }
+
+    #[test]
+    fn a_file_the_writer_could_not_close_is_kept_and_reported() {
+        let (f, doc) = finished(|r| result(r, Err(None)), true, ALL);
+        let pass = build(&f, &doc).unwrap().unwrap();
+        assert_eq!(pass.media.len(), 1, "only A");
+        let left = leftovers(&f, &doc, Some(&pass));
+        assert_eq!(left.keep, vec![format!("{RECORDED_DIR}/B.caf")]);
+        assert!(left.problems[0].starts_with("B: the recording could not be finished"));
+        assert!(left.problems[0].contains("kept and offered at the next open"));
+    }
+
+    #[test]
+    fn a_take_whose_lane_went_is_kept() {
+        let (f, doc) = finished(|r| result(r, Ok(written(2048))), false, ALL);
+        let pass = build(&f, &doc).unwrap().unwrap();
+        assert_eq!(pass.media.len(), 1, "only A");
+        let left = leftovers(&f, &doc, Some(&pass));
+        assert_eq!(left.keep, vec![format!("{RECORDED_DIR}/B.caf")]);
+        assert!(left.problems[0].contains("its lane was removed"));
+    }
+
+    #[test]
+    fn a_take_with_nothing_in_the_record_range_may_go() {
+        let range = RecordRange {
+            start: 1_000_000,
+            end: None,
+        };
+        let (f, doc) = finished(|r| result(r, Ok(written(2048))), true, range);
+        assert_eq!(build(&f, &doc).unwrap(), None);
+        assert_eq!(leftovers(&f, &doc, None), Leftovers::default());
+    }
+
+    #[test]
+    fn lost_input_is_told_in_seconds() {
+        let (mut f, _) = finished(|r| result(r, Ok(written(2048))), true, ALL);
+        assert_eq!(gaps_problem(&f), None);
+        if let Some(w) = f.written.as_mut() {
+            w.gap_frames = 72_000;
+        }
+        assert_eq!(
+            gaps_problem(&f).as_deref(),
+            Some("Recording: 1.5 s of input could not be written in time and is silence.")
+        );
+    }
+
+    #[test]
+    fn a_denied_input_refuses_with_the_reason() {
+        let denied = format!("{DENIED_PREFIX}. Allow it in System Settings.");
+        let faults = vec!["xrun".to_string(), denied.clone()];
+        assert_eq!(
+            channel_refusal("Mic", InputChannels::Mono(0), 0, &faults),
+            Some(denied)
+        );
+        assert_eq!(
+            channel_refusal("Mic", InputChannels::Stereo(1), 3, &faults),
+            None
+        );
+        assert_eq!(
+            channel_refusal("Mic", InputChannels::Stereo(2), 3, &faults).as_deref(),
+            Some("lane Mic records input 3, but the audio input has 3 channel(s)")
+        );
+        assert_eq!(
+            channel_refusal("Mic", InputChannels::Mono(0), 0, &[]).as_deref(),
+            Some("lane Mic records input 1, but the audio input has 0 channel(s)")
+        );
+    }
+
+    #[test]
+    fn recorded_names_skip_reserved_paths_in_any_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400 * 365);
+        let first = recorded_path(dir.path(), "Mic", at, &BTreeSet::new());
+        assert_eq!(first, "Media/Recorded/Mic 1971-01-01 000000.caf");
+        let reserved: BTreeSet<String> = [first.to_uppercase()].into();
+        assert_eq!(
+            recorded_path(dir.path(), "Mic", at, &reserved),
+            "Media/Recorded/Mic 1971-01-01 000000 2.caf"
+        );
+        std::fs::create_dir_all(dir.path().join(RECORDED_DIR)).unwrap();
+        std::fs::write(dir.path().join(&first), b"x").unwrap();
+        assert_eq!(
+            recorded_path(dir.path(), "Mic", at, &BTreeSet::new()),
+            "Media/Recorded/Mic 1971-01-01 000000 2.caf"
+        );
+        assert_eq!(file_safe("../a/b:c"), "-a-b-c");
+        assert_eq!(file_safe(" .. "), "Lane");
+    }
 }

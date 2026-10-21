@@ -1280,6 +1280,29 @@ pub fn transport_stopped(owner: u64) -> Option<bool> {
         .map(|h| h.engine.state() == PlayState::Stopped)
 }
 
+/// The session holding the engine, if any.
+pub fn holder() -> Option<u64> {
+    lock(&HOST).as_ref().map(|h| h.owner).filter(|o| *o != 0)
+}
+
+/// The streamer's `(underruns, late starts)` so far in `owner`'s engine,
+/// when it holds it (pre-flight M11).
+pub fn stream_counters(owner: u64) -> Option<(u64, u64)> {
+    lock(&HOST).as_ref().filter(|h| h.owner == owner).map(|h| {
+        let c = h.engine.streamer().counters();
+        (c.underruns, c.late)
+    })
+}
+
+/// The sticky faults of `owner`'s host, when it holds the engine.
+pub fn faults(owner: u64) -> Vec<String> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.faults.clone())
+        .unwrap_or_default()
+}
+
 /// Where `owner`'s transport is heard, when it holds the engine.
 pub fn position(owner: u64) -> Option<(SeqId, Tick)> {
     lock(&HOST)
