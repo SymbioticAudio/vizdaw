@@ -345,6 +345,21 @@ import VizDAWCore
         #expect(!m.record.isRecording)
     }
 
+    // Task 15: a pass that ends by itself (the sequence's end) while no
+    // poll runs (the window not key and the transport stopped) leaves the
+    // last report saying "recording"; the commands read the core first.
+    @Test func aPassThatEndedByItselfIsNotRecordingForTheCommands() throws {
+        let (s, id, m, f) = try demo()
+        #expect(run("transport.record", [], m, s, id) == nil)
+        #expect(m.record.isRecording)
+        f.recordRow.recording = false
+        f.state.playing = false
+        #expect(run("record.set", [("loop", .flag(value: true))], m, s, id) == nil)
+        #expect(m.looping)
+        #expect(run("transport.record", [], m, s, id) == nil)
+        #expect(f.recordCalls.count == 2 && m.record.isRecording)
+    }
+
     // Review M3: the core's refusal of the payload is invalid_params.
     @Test func aPayloadTheCoreRefusesIsInvalidParams() throws {
         let (s, id, m, f) = try demo()

@@ -27,10 +27,11 @@ struct DocumentWindow: View {
                     .background(WindowTag(kind: .document, doc: id))
                     .focusedSceneValue(\.documentModel, model)
                     .focusedSceneValue(\.documentID, id)
-                    .task(id: PollKey(key: activeState == .key, playing: model.isPlaying)) {
+                    .task(id: PollKey(key: activeState == .key, playing: model.isPlaying || model.record.isRecording)) {
                         // Background playback keeps polling so device
-                        // events are handled (O27).
-                        guard activeState == .key || model.isPlaying else { return }
+                        // events are handled (O27), and so does a
+                        // recording until the poll sees it finished.
+                        guard activeState == .key || model.isPlaying || model.record.isRecording else { return }
                         while !Task.isCancelled {
                             model.poll()
                             try? await Task.sleep(for: model.pollInterval)

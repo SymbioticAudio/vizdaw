@@ -315,6 +315,7 @@ public enum ControlCommands {
             guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
             m.media.rename(media, to: name)
         case "record.set":
+            m.record.refresh()  // a pass can end by itself with no poll since (Task 15)
             guard !m.record.isRecording else { return unavailable("Stop recording first.") }
             guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
             // Validate everything before applying anything (the loop, which

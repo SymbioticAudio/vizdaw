@@ -51,6 +51,8 @@ public final class RecordModel {
     /// stops (which finishes the pass).
     public func toggle() -> KeyOutcome {
         guard let m = document else { return .unavailable("No document is open.") }
+        // A pass can end by itself with no poll since (Task 15).
+        refresh()
         if isRecording {
             do {
                 try m.session.stop()
