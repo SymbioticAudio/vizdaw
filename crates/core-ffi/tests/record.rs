@@ -26,7 +26,7 @@ use core_model::time::Tick;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use vizdaw_ffi::host::{force_offline, reset_host, set_fake_input};
+use vizdaw_ffi::host::{force_offline, reset_host, set_fake_input, set_fake_microphone_denied};
 use vizdaw_ffi::record::{set_free_bytes, set_hold_finish, set_ring_frames};
 use vizdaw_ffi::{
     EventKindRow, EventRow, MediaOriginRow, RecordSpecRow, Session, TickRange, VizError,
@@ -47,6 +47,7 @@ fn serial(input: Option<FakeInput>) -> Serial {
     set_free_bytes(None);
     set_ring_frames(None);
     set_hold_finish(false);
+    set_fake_microphone_denied(false);
     reset_host();
     Serial {
         _g: g,
@@ -512,6 +513,40 @@ fn bad_requests_are_refused_and_recording_holds_the_transport() {
     assert!(model(s.record(d.seq.0, spec())));
     assert!(!s.record_state().unwrap().recording);
     assert!(s.media().unwrap().is_empty());
+    s.close().unwrap();
+}
+
+/// Pre-flight M6 (plan 5c Task 11): with the microphone refused (a fake
+/// state: the real permission is never read), Record refuses with why, not
+/// with a channel count, every time: the reason outlives the faults Play
+/// clears.
+#[test]
+fn a_refused_microphone_is_why_record_refuses() {
+    let g = serial(None);
+    set_fake_microphone_denied(true);
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    for _ in 0..2 {
+        match s.record(d.seq.0, spec()) {
+            Err(VizError::Model { message }) => assert!(
+                message.starts_with("VizDAW may not use audio input"),
+                "{message}"
+            ),
+            r => panic!("{r:?}"),
+        }
+        assert!(!s.record_state().unwrap().recording);
+    }
+    assert!(s.media().unwrap().is_empty());
+    s.close().unwrap();
+    // Allowed (and no input): the channel count is the reason.
+    set_fake_microphone_denied(false);
+    let s = untitled(&g, d.doc.clone());
+    match s.record(d.seq.0, spec()) {
+        Err(VizError::Model { message }) => {
+            assert!(message.contains("0 channel(s)"), "{message}")
+        }
+        r => panic!("{r:?}"),
+    }
     s.close().unwrap();
 }
 

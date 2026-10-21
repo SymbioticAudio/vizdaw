@@ -324,6 +324,64 @@ fn a_monitored_input_is_heard_through_its_path() {
     s.close().unwrap();
 }
 
+/// Spec §6.1: audio input is wanted only while an audio lane is armed or
+/// monitors its input.
+#[test]
+fn audio_input_is_wanted_only_for_armed_or_monitored_audio_lanes() {
+    use core_model::command::{Command, LaneCmd, apply};
+    use core_model::lane::{InputChannels, LaneInput, MonitorMode};
+    use vizdaw_ffi::host::wants_audio_input;
+    let doc = core_engine::fixtures::demo_document().unwrap();
+    let song = core_engine::engine::find_sequence(&doc, "Song").unwrap();
+    let lane = doc.sequence(song).unwrap().lanes[0].id;
+    assert!(!wants_audio_input(&doc, song));
+    let run =
+        |d: &core_model::document::Document, c: LaneCmd| apply(d, &Command::Lane(c)).unwrap().doc;
+    let audio = run(
+        &doc,
+        LaneCmd::SetInput {
+            seq: song,
+            lane,
+            input: Some(LaneInput::Audio {
+                channels: InputChannels::Mono(0),
+            }),
+        },
+    );
+    assert!(!wants_audio_input(&audio, song), "an input alone");
+    let monitored = run(
+        &audio,
+        LaneCmd::SetMonitor {
+            seq: song,
+            lane,
+            monitor: MonitorMode::Input,
+        },
+    );
+    assert!(wants_audio_input(&monitored, song));
+    let armed = run(
+        &audio,
+        LaneCmd::SetFlags {
+            seq: song,
+            lane,
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        },
+    );
+    assert!(wants_audio_input(&armed, song));
+    let midi = run(
+        &armed,
+        LaneCmd::SetInput {
+            seq: song,
+            lane,
+            input: Some(LaneInput::Midi {
+                port: None,
+                channel: None,
+            }),
+        },
+    );
+    assert!(!wants_audio_input(&midi, song), "MIDI needs no audio input");
+}
+
 #[test]
 fn lane_edits_reach_the_engines_inputs_at_load() {
     let _g = serial(Some(FakeInput::Signals));

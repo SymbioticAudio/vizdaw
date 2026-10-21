@@ -100,6 +100,75 @@ pub fn set_fake_input(input: Option<FakeInput>) {
     *lock(&FAKE_INPUT) = Some(input);
 }
 
+/// The input device live hosts open (`None`: the output device's own
+/// input; spec §6.1 Settings › Audio "Input device").
+static INPUT_DEVICE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Chooses the audio input device by name (`None`: "Same as output").
+/// Takes effect when the next host opens its input.
+#[uniffi::export]
+pub fn set_audio_input_device(name: Option<String>) {
+    *lock(&INPUT_DEVICE) = name.filter(|n| !n.is_empty());
+}
+
+/// Whether the lanes of `seq` need audio input: an armed or
+/// Input-monitored lane with an audio input (spec §6.1: input opens only
+/// while one is).
+pub fn wants_audio_input(doc: &Document, seq: SeqId) -> bool {
+    doc.sequence(seq).is_ok_and(|s| {
+        s.lanes.iter().any(|l| {
+            (l.arm || l.monitor == MonitorMode::Input)
+                && l.input.as_ref().is_some_and(LaneInput::is_audio)
+        })
+    })
+}
+
+/// Whether a live host may open audio input now. Never in test builds
+/// (plan 5c Global Constraints: tests open no device and never ask for
+/// the microphone); otherwise unless macOS refused it, which is reported.
+#[cfg(all(feature = "test-hooks", target_os = "macos"))]
+fn live_input_allowed(_faults: &mut Vec<String>) -> bool {
+    false
+}
+
+#[cfg(all(not(feature = "test-hooks"), target_os = "macos"))]
+fn live_input_allowed(faults: &mut Vec<String>) -> bool {
+    admit_input(platform_macos::permission::microphone(), faults)
+}
+
+/// What the microphone permission lets input do (spec §6.1): open unless
+/// macOS refused it. A refusal is reported once in `faults` as
+/// `DENIED_MESSAGE`, which Record then refuses with (pre-flight M6;
+/// `record::channel_refusal` looks for its start). Undetermined opens:
+/// the first open is what asks.
+#[cfg(target_os = "macos")]
+pub fn admit_input(
+    access: platform_macos::permission::MicAccess,
+    faults: &mut Vec<String>,
+) -> bool {
+    use platform_macos::permission::{DENIED_MESSAGE, MicAccess};
+    if access == MicAccess::Denied {
+        if !faults.iter().any(|f| f == DENIED_MESSAGE) {
+            faults.push(DENIED_MESSAGE.to_string());
+        }
+        return false;
+    }
+    true
+}
+
+/// The permission offline hosts pretend macOS gave (test hook): when
+/// set, arming an audio lane reports the refusal as a live host would,
+/// without reading or asking for the real one.
+#[cfg(feature = "test-hooks")]
+static FAKE_MIC_DENIED: AtomicBool = AtomicBool::new(false);
+
+/// Makes offline hosts behave as if macOS refused the microphone (test
+/// hook; pre-flight M6).
+#[cfg(feature = "test-hooks")]
+pub fn set_fake_microphone_denied(denied: bool) {
+    FAKE_MIC_DENIED.store(denied, Ordering::Relaxed);
+}
+
 /// What a host's audio input offers (spec §6.1, §12.1 `state.get input`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InputInfo {
@@ -111,6 +180,18 @@ pub struct InputInfo {
     pub input_latency_frames: u32,
     /// Output latency in frames.
     pub output_latency_frames: u32,
+}
+
+impl InputInfo {
+    /// What an opened stream's input offers.
+    pub fn of(info: &core_engine::backend::StreamInfo) -> InputInfo {
+        InputInfo {
+            channels: info.input_channels,
+            names: info.input_channel_names.clone(),
+            input_latency_frames: info.input_latency_frames,
+            output_latency_frames: info.output_latency_frames,
+        }
+    }
 }
 
 /// What the lanes of `seq` listen to (spec §6.6): armed or Input-monitored
@@ -361,12 +442,7 @@ impl OfflineDriver {
             backend = backend.with_input(k);
         }
         let info = backend.open(&core_engine::backend::AudioConfig::default())?;
-        let inputs = InputInfo {
-            channels: info.input_channels,
-            names: info.input_channel_names,
-            input_latency_frames: info.input_latency_frames,
-            output_latency_frames: info.output_latency_frames,
-        };
+        let inputs = InputInfo::of(&info);
         backend.start(renderer)?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -461,6 +537,13 @@ struct Host {
     injected: Vec<BackendEvent>,
     /// What the output's input offers.
     inputs: InputInfo,
+    /// A live output has its input open.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    input_open: bool,
+    /// Why a live output's input could not open: not tried again (each
+    /// try restarts the device) until no lane wants input any more.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    input_failed: Option<String>,
 }
 
 impl Host {
@@ -500,16 +583,13 @@ impl Host {
 
     #[cfg(target_os = "macos")]
     fn create_live(project: f64) -> Result<Host, VizError> {
-        use core_engine::backend::AudioConfig;
         use platform_macos::hal::CoreAudioBackend;
         use platform_macos::rt::MacRtPlatform;
         use platform_macos::sinks::MacSinks;
         use std::sync::Arc;
         let mut backend = CoreAudioBackend::new();
-        let info = backend.open(&AudioConfig {
-            sample_rate: Some(project),
-            ..AudioConfig::default()
-        })?;
+        // Output only: `ensure_input` opens input once a lane needs it.
+        let info = backend.open(&live_audio_config(project, false))?;
         let (engine, renderer) = Engine::with_platform(
             live_config(info.sample_rate),
             Box::new(MacSinks::new()),
@@ -517,13 +597,17 @@ impl Host {
         )?;
         engine.set_rt_env(rt_env(&backend, info.buffer_frames, info.sample_rate));
         backend.start(renderer)?;
-        Ok(Host::new(
+        let mut h = Host::new(
             engine,
             Output::Hal(backend),
             &info.device_name,
             info.sample_rate,
             None,
-        ))
+        );
+        // The output's latency is known before any input opens (Task 8
+        // left live hosts with an empty `InputInfo`).
+        h.inputs = InputInfo::of(&info);
+        Ok(h)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -561,6 +645,63 @@ impl Host {
             log,
             injected: Vec::new(),
             inputs: InputInfo::default(),
+            input_open: false,
+            input_failed: None,
+        }
+    }
+
+    /// Opens or closes a live output's input to match `want` (spec §6.1),
+    /// restarting the device with the same renderer. Offline outputs keep
+    /// their fake input.
+    fn ensure_input(&mut self, want: bool) -> Result<(), VizError> {
+        match &mut self.output {
+            Output::Offline(_) => {
+                #[cfg(all(feature = "test-hooks", target_os = "macos"))]
+                if want && FAKE_MIC_DENIED.load(Ordering::Relaxed) {
+                    admit_input(
+                        platform_macos::permission::MicAccess::Denied,
+                        &mut self.faults,
+                    );
+                }
+                let _ = want;
+                Ok(())
+            }
+            #[cfg(target_os = "macos")]
+            Output::Hal(b) => {
+                let want = want && live_input_allowed(&mut self.faults);
+                if !want {
+                    self.input_failed = None;
+                } else if let Some(f) = &self.input_failed {
+                    // Reported again after Play cleared the faults.
+                    if !self.faults.contains(f) {
+                        self.faults.push(f.clone());
+                    }
+                    return Ok(());
+                }
+                if want == self.input_open {
+                    return Ok(());
+                }
+                let mut r = b.stop()?;
+                let info = match b.open(&live_audio_config(self.project_rate, want)) {
+                    Ok(i) => i,
+                    Err(e) if want => {
+                        let f = format!("audio input could not open: {e}");
+                        self.faults.push(f.clone());
+                        self.input_failed = Some(f);
+                        b.open(&live_audio_config(self.project_rate, false))?
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if info.buffer_frames > r.config().max_frames {
+                    r.prepare(info.buffer_frames);
+                }
+                b.start(r)?;
+                self.engine
+                    .set_rt_env(rt_env(b, info.buffer_frames, info.sample_rate));
+                self.input_open = info.input_channels > 0;
+                self.inputs = InputInfo::of(&info);
+                Ok(())
+            }
         }
     }
 
@@ -661,6 +802,18 @@ impl Host {
                 Ok(())
             }
         }
+    }
+}
+
+/// A live output's configuration: the project rate, input when `input`
+/// (from the chosen input device).
+#[cfg(target_os = "macos")]
+fn live_audio_config(project: f64, input: bool) -> core_engine::backend::AudioConfig {
+    core_engine::backend::AudioConfig {
+        sample_rate: Some(project),
+        input_enabled: input,
+        input_device: lock(&INPUT_DEVICE).clone(),
+        ..core_engine::backend::AudioConfig::default()
     }
 }
 
@@ -771,6 +924,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     drop(old);
     let mut new = Host::create(project_rate(doc))?;
     new.attach(owner, plugins);
+    new.ensure_input(wants_audio_input(doc, seq))?;
     // Automated values held while stopped survive the rebuild (Plan 4d
     // Ruling 13, final review Minor 1).
     if let Some(o) = overrides {
@@ -924,6 +1078,8 @@ pub fn play(
         crate::recovery::before_sync();
         p.sync(doc);
     }
+    host.faults.clear();
+    host.ensure_input(wants_audio_input(doc, seq))?;
     if host.owner != owner || host.seq != seq || start.is_some() {
         host.engine.stop()?;
         if host.owner != owner {
@@ -939,7 +1095,6 @@ pub fn play(
         // Resumed with restarted instances: compile their placeholders.
         host.load(owner, doc, seq, looped)?;
     }
-    host.faults.clear();
     // The intent is Play from here on: a rebuild during the wait resumes
     // playing, and a Stop during it cancels this Play.
     let pending = host.engine.begin_play(until);
@@ -1072,6 +1227,8 @@ pub fn reload(
             if !ready {
                 return Ok(());
             }
+            // An edit armed or disarmed a lane: input follows (spec §6.1).
+            h.ensure_input(wants_audio_input(doc, seq))?;
             h.load(owner, doc, seq, looped)
         }
         _ => Ok(()),
@@ -1334,4 +1491,51 @@ pub fn debug_inputs(owner: u64) -> Option<InputSpec> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.inputs().clone())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use platform_macos::permission::{DENIED_MESSAGE, MicAccess};
+
+    /// Pre-flight M6: a refused microphone keeps input closed and is
+    /// reported once, with the words Record refuses with; granted or not
+    /// yet asked opens (the first open asks). Fake states only: the real
+    /// permission is never read here.
+    #[test]
+    fn a_refused_microphone_is_reported_once_with_the_record_wording() {
+        assert!(DENIED_MESSAGE.starts_with(crate::record::DENIED_PREFIX));
+        let mut faults = vec!["xrun".to_string()];
+        assert!(admit_input(MicAccess::Granted, &mut faults));
+        assert!(admit_input(MicAccess::Undetermined, &mut faults));
+        assert_eq!(faults, ["xrun"]);
+        assert!(!admit_input(MicAccess::Denied, &mut faults));
+        assert!(!admit_input(MicAccess::Denied, &mut faults));
+        assert_eq!(faults, ["xrun", DENIED_MESSAGE]);
+    }
+
+    /// Task 8 note: a stream's input (and its latencies) reach the host's
+    /// `InputInfo` whatever the backend.
+    #[test]
+    fn a_streams_input_is_what_the_host_reports() {
+        let info = core_engine::backend::StreamInfo {
+            device_name: "Out".into(),
+            sample_rate: 48_000.0,
+            buffer_frames: 256,
+            channels: 2,
+            input_channels: 2,
+            input_channel_names: vec!["In 1".into(), "In 2".into()],
+            input_latency_frames: 40,
+            output_latency_frames: 60,
+        };
+        assert_eq!(
+            InputInfo::of(&info),
+            InputInfo {
+                channels: 2,
+                names: vec!["In 1".into(), "In 2".into()],
+                input_latency_frames: 40,
+                output_latency_frames: 60,
+            }
+        );
+    }
 }
