@@ -347,3 +347,41 @@ fn a_kept_take_survives_saves_in_later_sessions() {
     assert!(s.recovered_recordings().unwrap().is_empty());
     s.close().unwrap();
 }
+
+/// Task 10 review M3: a keep list that cannot be read never lets a save
+/// trash a take: every recording in `Media/Recorded/` is kept (and the
+/// list rewritten with them), and the user is told.
+#[test]
+fn an_unreadable_keep_list_keeps_every_recording() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (s, pkg, seq) = project(dir.path());
+    let rel = kept_take(&s, seq);
+    s.save().unwrap();
+    s.close().unwrap();
+    // The take no longer reads as audio, and the list is garbage.
+    let mut bytes = std::fs::read(pkg.join(&rel)).unwrap();
+    bytes[..4].copy_from_slice(b"junk");
+    std::fs::write(pkg.join(&rel), &bytes).unwrap();
+    std::fs::write(pkg.join("recordings.json"), b"{not json").unwrap();
+    let s = Session::open(pkg.display().to_string()).unwrap();
+    s.debug_set_trash_dir(Some(dir.path().join("Trash").display().to_string()));
+    let problems = s.idle().unwrap().problems;
+    assert!(
+        problems.iter().any(
+            |p| p == "The list of kept recordings could not be read; all recordings were kept."
+        ),
+        "{problems:?}"
+    );
+    s.save().unwrap();
+    assert!(pkg.join(&rel).is_file(), "kept, never trashed by a save");
+    s.close().unwrap();
+    // The rewritten list keeps it in later sessions too.
+    let s = Session::open(pkg.display().to_string()).unwrap();
+    s.debug_set_trash_dir(Some(dir.path().join("Trash").display().to_string()));
+    assert!(s.idle().unwrap().problems.is_empty());
+    s.save().unwrap();
+    assert!(pkg.join(&rel).is_file());
+    assert_eq!(s.recovered_recordings().unwrap(), vec![rel.clone()]);
+    s.close().unwrap();
+}

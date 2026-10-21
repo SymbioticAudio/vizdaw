@@ -162,9 +162,10 @@ enum AppSetup {
     static func recoverUntitled() {
         guard !LaunchArguments.smokeRun else { return }
         guard let line = (try? recoverUntitledRecordings()) ?? nil else { return }
-        if appStore.alert == nil {
-            appStore.alert = AlertItem(title: "Recordings Moved to the Trash", message: line)
-        }
+        // Also in the log; queued behind any alert already showing (Task
+        // 10 review M1).
+        FileHandle.standardError.write(Data("VizDAW: \(line)\n".utf8))
+        appStore.postAlert(AlertItem(title: "Recordings Moved to the Trash", message: line))
     }
 
     /// After launch: the scan and the catalog's alerts.

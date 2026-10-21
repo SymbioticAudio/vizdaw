@@ -324,6 +324,22 @@ import VizDAWCore
         #expect(s.takeAlert() == nil)
     }
 
+    /// Task 10 review M1: an alert posted while another is showing (the
+    /// launch's lost-recordings line) waits its turn, never dropped.
+    @Test func postedAlertsQueueBehindTheOneShowing() {
+        let s = store()
+        _ = s.open(path: "/Users/me/Music")
+        s.postAlert(AlertItem(title: "Recordings Moved to the Trash", message: "1 recording"))
+        s.postAlert(AlertItem(title: "Third", message: "3"))
+        #expect(s.takeAlert()?.title == "Open Failed")
+        #expect(s.alert?.title == "Recordings Moved to the Trash")
+        #expect(s.takeAlert()?.message == "1 recording")
+        #expect(s.takeAlert()?.title == "Third")
+        #expect(s.takeAlert() == nil)
+        s.postAlert(AlertItem(title: "Alone", message: ""))
+        #expect(s.alert?.title == "Alone")
+    }
+
     @Test func transportKeysAreOffWhileAnyTextIsEdited() throws {
         let m = try DocumentModel(session: demoFake())
         #expect(m.transportKeysEnabled)

@@ -1037,13 +1037,14 @@ impl Session {
             let windows = read_windows(&p);
             let layout = read_layout(&p);
             // Plan 5c Task 10: kept takes, and what a crash left.
-            let kept = crate::record::read_kept(&p);
+            let (kept, unread) = crate::record::kept_at_open(&p, &doc);
             let recovered = crate::record::offered(&p, &doc, &kept);
             let s = Session::with(doc, Some(p), options.plugins_off)?;
             {
                 let mut inner = lock(&s.inner);
                 inner.keep_recordings = kept;
                 inner.recovered = recovered;
+                inner.news.problems.extend(unread);
                 inner.windows = windows;
                 inner.editor_layout = layout;
                 inner.clean = clean;

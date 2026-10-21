@@ -229,10 +229,25 @@ public final class DocumentStore {
         return takePending() ?? newEmpty()
     }
 
-    /// The store-level alert, cleared (the app shows it once).
+    /// Alerts posted while another was showing, oldest first.
+    private var queuedAlerts: [AlertItem] = []
+
+    /// Shows `item` now, or after the alerts already showing or waiting
+    /// (Task 10 review M1: never dropped).
+    public func postAlert(_ item: AlertItem) {
+        if alert == nil && queuedAlerts.isEmpty {
+            alert = item
+        } else {
+            queuedAlerts.append(item)
+        }
+    }
+
+    /// The store-level alert, cleared (the app shows it once); the next
+    /// posted one takes its place.
     public func takeAlert() -> AlertItem? {
-        defer { alert = nil }
-        return alert
+        let current = alert ?? (queuedAlerts.isEmpty ? nil : queuedAlerts.removeFirst())
+        alert = queuedAlerts.isEmpty ? nil : queuedAlerts.removeFirst()
+        return current
     }
 
     /// A window closed: its document goes (a clean close: the crash

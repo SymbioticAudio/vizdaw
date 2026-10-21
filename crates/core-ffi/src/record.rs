@@ -925,14 +925,43 @@ fn keepable(rel: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && !n.starts_with('.') && !n.contains(['/', '\\']))
 }
 
-/// The kept takes `package`'s keep file names (none when it has none or
-/// it cannot be read).
-pub fn read_kept(package: &Path) -> BTreeSet<String> {
-    std::fs::read_to_string(package.join(KEEP_FILE))
+/// The kept takes `package`'s keep file names (none when it has none);
+/// `None` when it exists but cannot be read or parsed.
+pub fn read_kept(package: &Path) -> Option<BTreeSet<String>> {
+    let text = match std::fs::read_to_string(package.join(KEEP_FILE)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(BTreeSet::new()),
+        Err(_) => return None,
+        Ok(t) => t,
+    };
+    serde_json::from_str::<KeepFile>(&text)
         .ok()
-        .and_then(|t| serde_json::from_str::<KeepFile>(&t).ok())
         .map(|k| k.keep.into_iter().filter(|p| keepable(p)).collect())
-        .unwrap_or_default()
+}
+
+/// The problem told when the keep file cannot be read (Task 10 review M3).
+pub const KEEP_UNREADABLE: &str =
+    "The list of kept recordings could not be read; all recordings were kept.";
+
+/// What to keep at open in `package` (Task 10 review M3): the keep
+/// file's takes, or, when it cannot be read, every file in
+/// `Media/Recorded/` that `doc` does not name (rewritten into the list at
+/// the next save, so no later save trashes them either), with the problem
+/// to tell.
+pub fn kept_at_open(package: &Path, doc: &Document) -> (BTreeSet<String>, Option<String>) {
+    if let Some(k) = read_kept(package) {
+        return (k, None);
+    }
+    let named = named_lower(doc);
+    let all = std::fs::read_dir(package.join(RECORDED_DIR))
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .filter_map(|e| Some(format!("{RECORDED_DIR}/{}", e.file_name().to_str()?)))
+                .filter(|rel| keepable(rel) && !named.contains(&rel.to_lowercase()))
+                .collect()
+        })
+        .unwrap_or_default();
+    (all, Some(KEEP_UNREADABLE.to_string()))
 }
 
 /// Writes `package`'s keep file: the kept takes that are files in it, or
