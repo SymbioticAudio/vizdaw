@@ -9,7 +9,7 @@ use crate::plugins;
 use core_engine::backend::{AudioBackend, BackendEvent};
 use core_engine::engine::{Engine, EngineConfig, PendingPlay};
 use core_engine::graph::NoInserts;
-use core_engine::input::{InputSpec, MidiInputSpec, MidiSender, MonitorRoute, port_key};
+use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, MidiSender, MonitorRoute, port_key};
 use core_engine::offline::{EventLog, FakeInput, OfflineBackend, OfflineSinks};
 use core_engine::record::{RecordHandles, RecordRequest};
 use core_engine::render::Renderer;
@@ -98,6 +98,96 @@ pub fn fake_input() -> Option<FakeInput> {
 #[cfg(feature = "test-hooks")]
 pub fn set_fake_input(input: Option<FakeInput>) {
     *lock(&FAKE_INPUT) = Some(input);
+}
+
+/// Where the CoreMIDI sources' messages go: the newest host's engine
+/// (spec §6.6).
+static MIDI_TO: Mutex<Option<MidiSender>> = Mutex::new(None);
+
+/// Source messages dropped because `MIDI_TO` was busy (pre-flight M8:
+/// CoreMIDI's thread never waits for it).
+static MIDI_SOURCE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// The record listener on the CoreMIDI sources (plan 5c Task 12): one
+/// client and port per process, reconnected, never recreated (pre-flight
+/// M7). Live builds only.
+#[cfg(all(target_os = "macos", not(feature = "test-hooks")))]
+static SOURCES: Mutex<Option<platform_macos::midi::SourceListener>> = Mutex::new(None);
+
+/// A message from CoreMIDI source `port` at `host_ns` for the engine. It
+/// runs on CoreMIDI's high-priority thread, so it never blocks or
+/// allocates: a busy `MIDI_TO` drops the message and counts it
+/// (pre-flight M8), and the sender itself only tries its lock.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "test-hooks")),
+    allow(dead_code)
+)]
+fn midi_from_source(port: u32, host_ns: u64, bytes: &[u8]) {
+    let Some(msg) = core_engine::input::channel_message(bytes) else {
+        return;
+    };
+    let to = match MIDI_TO.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            MIDI_SOURCE_DROPS.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    if let Some(tx) = to.as_ref() {
+        let _ = tx.send(MidiIn { port, host_ns, msg });
+    }
+}
+
+/// How many source messages were dropped because the engine's MIDI input
+/// was busy (pre-flight M8; the engine's own queue counts its drops in
+/// `MidiSender::dropped`).
+pub fn midi_source_drops() -> u64 {
+    MIDI_SOURCE_DROPS.load(Ordering::Relaxed)
+}
+
+/// Hands `bytes` to the engine as if CoreMIDI source `name` sent them at
+/// `host_ns` (test hook: tests connect no CoreMIDI listener).
+#[cfg(feature = "test-hooks")]
+pub fn debug_midi_from_source(name: &str, host_ns: u64, bytes: &[u8]) {
+    midi_from_source(port_key(name), host_ns, bytes);
+}
+
+/// Connects the record listener to the MIDI sources present now: armed
+/// MIDI lanes hear them (spec §6.6), stamped with their host time (spec
+/// §6.3). The first call makes the process's one listener; later calls
+/// connect the sources plugged in since (pre-flight M7). Only for a live
+/// host (callers make sure); never in test builds, which connect nothing
+/// (`debug_midi_from_source` and `midi.inject` stand in).
+fn connect_midi_sources() {
+    #[cfg(all(target_os = "macos", not(feature = "test-hooks")))]
+    {
+        let mut slot = lock(&SOURCES);
+        match slot.as_mut() {
+            Some(l) => {
+                l.reconnect();
+            }
+            None => {
+                if let Ok(l) = platform_macos::midi::SourceListener::connect_all(
+                    "VizDAW Record Input",
+                    Box::new(midi_from_source),
+                ) {
+                    *slot = Some(l);
+                }
+            }
+        }
+    }
+}
+
+/// Picks up MIDI sources plugged in since the live host started (Record
+/// with an armed MIDI lane). Only when the host is live (an
+/// `Output::Hal`): offline hosts, the e2e's among them, never connect the
+/// machine's real MIDI sources (pre-flight M7).
+pub fn listen_to_midi_sources() {
+    let live = lock(&HOST).as_ref().is_some_and(Host::is_live);
+    if live {
+        connect_midi_sources();
+    }
 }
 
 /// The input device live hosts open (`None`: the output device's own
@@ -572,6 +662,7 @@ impl Host {
     /// rate; when it runs at another, regions are muted (Ruling 20).
     fn create(project: f64) -> Result<Host, VizError> {
         let mut h = Host::create_any(project)?;
+        *lock(&MIDI_TO) = Some(h.engine.midi_sender());
         if STALL_DISK.load(Ordering::Relaxed) {
             h.engine.streamer().set_stalled(true);
         }
@@ -579,6 +670,15 @@ impl Host {
         h.rate_mismatch = !same_rate(h.sample_rate, project);
         h.engine.set_regions_muted(h.rate_mismatch);
         Ok(h)
+    }
+
+    /// Whether this host plays through a device (not offline).
+    fn is_live(&self) -> bool {
+        match self.output {
+            Output::Offline(_) => false,
+            #[cfg(target_os = "macos")]
+            Output::Hal(_) => true,
+        }
     }
 
     fn create_any(project: f64) -> Result<Host, VizError> {
@@ -618,6 +718,9 @@ impl Host {
         )?;
         engine.set_rt_env(rt_env(&backend, info.buffer_frames, info.sample_rate));
         backend.start(renderer)?;
+        // MIDI sources play into the newest engine from now on (`create`
+        // points `MIDI_TO` at it); only a live host connects them (M7).
+        connect_midi_sources();
         let mut h = Host::new(
             engine,
             Output::Hal(backend),
@@ -1595,6 +1698,24 @@ pub fn debug_inputs(owner: u64) -> Option<InputSpec> {
 mod tests {
     use super::*;
     use platform_macos::permission::{DENIED_MESSAGE, MicAccess};
+
+    /// Pre-flight M8: CoreMIDI's thread never waits for the engine's MIDI
+    /// input. With its lock held elsewhere a source's message is dropped
+    /// and counted, and the call returns at once.
+    #[test]
+    fn a_held_midi_input_lock_drops_and_counts_instead_of_blocking() {
+        let held = lock(&MIDI_TO);
+        let before = midi_source_drops();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            midi_from_source(port_key("Keystation"), 0, &[0x90, 60, 100]);
+            let _ = tx.send(());
+        });
+        let returned = rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(held);
+        assert!(returned, "midi_from_source blocked on a held lock");
+        assert!(midi_source_drops() > before);
+    }
 
     /// Pre-flight M6: a refused microphone keeps input closed and is
     /// reported once, with the words Record refuses with; granted or not

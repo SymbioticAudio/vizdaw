@@ -4160,6 +4160,11 @@ impl Session {
                 "the record range is empty (an empty loop, or a punch outside it)",
             ));
         }
+        // MIDI sources plugged in since the engine started are heard too
+        // (a live host only: pre-flight M7).
+        if !midi_lanes.is_empty() {
+            host::listen_to_midi_sources();
+        }
         // The engine plays (this loads the sequence and locates); the tap
         // goes in before the Play, so the roll is the first block captured.
         inner.mark(self.id, true);

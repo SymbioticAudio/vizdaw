@@ -382,6 +382,50 @@ fn audio_input_is_wanted_only_for_armed_or_monitored_audio_lanes() {
     assert!(!wants_audio_input(&midi, song), "MIDI needs no audio input");
 }
 
+/// Plan 5c Task 12: what CoreMIDI sources send reaches the newest
+/// engine, filtered by the lane's source.
+#[test]
+fn source_messages_reach_the_engine() {
+    use vizdaw_ffi::host::debug_midi_from_source;
+    let _g = serial(Some(FakeInput::Signals));
+    let s = Session::new_demo().unwrap();
+    let seq = song(&s);
+    let chords = lane(&s, seq, "Chords").id;
+    edit(
+        &s,
+        LaneEdit::SetInput {
+            seq,
+            lane: chords,
+            input: Some(LaneInputRow::Midi {
+                port: Some("Keystation".into()),
+                channel: Some(0),
+            }),
+        },
+    )
+    .unwrap();
+    arm(&s, seq, chords);
+    take_engine(&s, seq);
+    std::thread::sleep(Duration::from_millis(50));
+    drain_offline_log();
+    // Another channel, another source: not this lane's; a SysEx: dropped.
+    debug_midi_from_source("Keystation", 0, &[0x91, 72, 90]);
+    debug_midi_from_source("Other", 0, &[0x90, 72, 90]);
+    debug_midi_from_source("Keystation", 0, &[0xF0, 1, 0xF7]);
+    debug_midi_from_source("Keystation", 0, &[0x90, 74, 90]);
+    let until = Instant::now() + common::wait_limit();
+    let mut log = Vec::new();
+    while !log
+        .iter()
+        .any(|(_, b): &(u64, Vec<u8>)| b == &vec![0x90, 74, 90])
+    {
+        assert!(Instant::now() < until, "never arrived: {log:?}");
+        std::thread::sleep(Duration::from_millis(5));
+        log.extend(drain_offline_log());
+    }
+    assert!(!log.iter().any(|(_, b)| b.get(1) == Some(&72)), "{log:?}");
+    s.close().unwrap();
+}
+
 #[test]
 fn lane_edits_reach_the_engines_inputs_at_load() {
     let _g = serial(Some(FakeInput::Signals));

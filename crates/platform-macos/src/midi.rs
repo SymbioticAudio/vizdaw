@@ -17,8 +17,9 @@ use objc2_core_midi::{
     MIDIEventList, MIDIEventPacket, MIDIGetDestination, MIDIGetNumberOfDestinations,
     MIDIGetNumberOfSources, MIDIGetSource, MIDIInputPortCreateWithProtocol,
     MIDIObjectGetIntegerProperty, MIDIObjectGetStringProperty, MIDIObjectRef, MIDIOutputPortCreate,
-    MIDIPortConnectSource, MIDIPortDispose, MIDIPortRef, MIDIProtocolID, MIDIReceivedEventList,
-    MIDISendEventList, MIDISourceCreateWithProtocol, kMIDIPropertyName, kMIDIPropertyUniqueID,
+    MIDIPortConnectSource, MIDIPortDisconnectSource, MIDIPortDispose, MIDIPortRef, MIDIProtocolID,
+    MIDIReceivedEventList, MIDISendEventList, MIDISourceCreateWithProtocol, kMIDIPropertyName,
+    kMIDIPropertyUniqueID,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::c_void;
@@ -524,6 +525,24 @@ fn ump_words(t: u32) -> usize {
 /// length (`wordCount` words, not the declared 64), so no packet or list is
 /// ever read as a whole struct.
 fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec<u8>) {
+    decode_each(list, sysex, &mut |host_time, host_ns, bytes| {
+        out.push(Received {
+            host_time,
+            host_ns,
+            bytes: bytes.to_vec(),
+        })
+    });
+}
+
+/// Decodes the type-2 and type-3 UMPs of an event list, handing each
+/// message (host ticks, host nanoseconds, bytes) to `each` without
+/// allocating: channel messages are built on the stack and SysEx in
+/// `sysex`, whose capacity is kept across calls.
+fn decode_each(
+    list: NonNull<MIDIEventList>,
+    sysex: &mut Vec<u8>,
+    each: &mut impl FnMut(u64, u64, &[u8]),
+) {
     let list = list.as_ptr();
     // SAFETY: `list` is a valid event list for the call; the header fields
     // are read through raw field pointers without forming a reference.
@@ -556,11 +575,7 @@ fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec
                 0x2 => {
                     let b = [(w0 >> 16) as u8, (w0 >> 8) as u8 & 0x7F, w0 as u8 & 0x7F];
                     let len = channel_len(b[0]);
-                    out.push(Received {
-                        host_time: time_stamp,
-                        host_ns,
-                        bytes: b.get(..len).unwrap_or(&b).to_vec(),
-                    });
+                    each(time_stamp, host_ns, b.get(..len).unwrap_or(&b));
                     i += 1;
                 }
                 0x3 => {
@@ -582,11 +597,8 @@ fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec
                     sysex.extend_from_slice(bytes.get(..count.min(6)).unwrap_or(&[]));
                     if u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_END) == status {
                         sysex.push(0xF7);
-                        out.push(Received {
-                            host_time: time_stamp,
-                            host_ns,
-                            bytes: std::mem::take(sysex),
-                        });
+                        each(time_stamp, host_ns, sysex);
+                        sysex.clear();
                     }
                     i += 2;
                 }
@@ -807,6 +819,207 @@ impl Drop for NoteListener {
     }
 }
 
+/// What a [`SourceListener`] hands each received MIDI 1.0 message to (on
+/// CoreMIDI's thread): the source's key (`core_engine::input::port_key`
+/// of its name), its host time in nanoseconds and its bytes. It must not
+/// block.
+pub type SourceSink = Box<dyn Fn(u32, u64, &[u8]) + Send + Sync>;
+
+/// A source as a reconnect sees it: its endpoint and its name.
+type SourceEntry = (MIDIEndpointRef, String);
+
+/// What a reconnect changes, given the sources connected and the ones
+/// present now: the indices into `connected` to disconnect (gone, or
+/// renamed so their key changed) and into `present` to connect (new, or
+/// renamed). A source present under the same name stays connected as it
+/// is, so it is never connected twice (pre-flight M7).
+fn plan_reconnect(connected: &[SourceEntry], present: &[SourceEntry]) -> (Vec<usize>, Vec<usize>) {
+    let gone = connected
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !present.contains(c))
+        .map(|(i, _)| i)
+        .collect();
+    let new = present
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !connected.contains(p))
+        .map(|(i, _)| i)
+        .collect();
+    (gone, new)
+}
+
+/// Listens to the MIDI sources for recording, telling them apart and
+/// keeping each message's timestamp (plan 5c Task 12: lane inputs name a
+/// source; spec §6.3: MIDI lands where it was heard). Like
+/// [`NoteListener`] it has its own client and skips this process's own
+/// virtual sources. It keeps that one client and input port for its
+/// whole life (Apple: one client per process); sources added later are
+/// connected by [`SourceListener::reconnect`] (pre-flight M7).
+pub struct SourceListener {
+    client: MIDIClientRef,
+    port: MIDIPortRef,
+    /// Tests: listen only to this process's own virtual sources, never to
+    /// a real device.
+    own_only: bool,
+    connected: Vec<SourceEntry>,
+    names: Vec<String>,
+    _block: RcBlock<dyn Fn(NonNull<MIDIEventList>, *mut c_void)>,
+}
+
+// SAFETY: as for `NoteListener`: plain CoreMIDI object references, a block
+// only CoreMIDI calls (its captures are `Send + Sync`), dropped after the
+// port is disposed.
+unsafe impl Send for SourceListener {}
+
+impl SourceListener {
+    /// Creates client `name` and connects it to every source present now
+    /// except this process's own virtual sources.
+    pub fn connect_all(name: &str, sink: SourceSink) -> Result<SourceListener, BackendError> {
+        SourceListener::connect(name, sink, false)
+    }
+
+    /// Like [`SourceListener::connect_all`] but listening only to this
+    /// process's own virtual sources (tests only: a test plays into the
+    /// listener without connecting any real device).
+    #[doc(hidden)]
+    pub fn connect_own_only(name: &str, sink: SourceSink) -> Result<SourceListener, BackendError> {
+        SourceListener::connect(name, sink, true)
+    }
+
+    fn connect(
+        name: &str,
+        sink: SourceSink,
+        own_only: bool,
+    ) -> Result<SourceListener, BackendError> {
+        let mut client: MIDIClientRef = 0;
+        let cf = CFString::from_str(name);
+        // SAFETY: `client` is a valid out-pointer; no notification callback.
+        os("MIDIClientCreate", unsafe {
+            MIDIClientCreate(&cf, None, ptr::null_mut(), NonNull::from(&mut client))
+        })?;
+        // SysEx scratch reused across callbacks (CoreMIDI calls the block
+        // from one thread at a time, so the lock is never contended; were
+        // it ever, the list is skipped rather than waited for). Channel
+        // messages reach the sink without any allocation.
+        let scratch = Mutex::new(Vec::<u8>::with_capacity(256));
+        let block = RcBlock::new(move |list: NonNull<MIDIEventList>, src: *mut c_void| {
+            // The connection's refCon is the source's key.
+            let key = src as usize as u32;
+            if let Ok(mut sx) = scratch.try_lock() {
+                decode_each(list, &mut sx, &mut |_, host_ns, bytes| {
+                    sink(key, host_ns, bytes)
+                });
+            }
+        });
+        let mut port: MIDIPortRef = 0;
+        let pcf = CFString::from_str("VizDAW Record In");
+        // SAFETY: valid client, out-pointer and block; CoreMIDI copies the
+        // block, and ours lives as long as the port anyway.
+        let made = os("MIDIInputPortCreateWithProtocol", unsafe {
+            MIDIInputPortCreateWithProtocol(
+                client,
+                &pcf,
+                MIDIProtocolID::Protocol_1_0,
+                NonNull::from(&mut port),
+                (&*block as *const block2::DynBlock<_>).cast_mut(),
+            )
+        });
+        if let Err(e) = made {
+            // SAFETY: the client was created above and is not used again.
+            unsafe {
+                MIDIClientDispose(client);
+            }
+            return Err(e);
+        }
+        let mut l = SourceListener {
+            client,
+            port,
+            own_only,
+            connected: Vec::new(),
+            names: Vec::new(),
+            _block: block,
+        };
+        l.reconnect();
+        Ok(l)
+    }
+
+    /// The sources this listener should hear now: every present source but
+    /// this process's own (or, `own_only`, only those).
+    fn present(&self) -> Vec<SourceEntry> {
+        // SAFETY: a pure query.
+        let n = unsafe { MIDIGetNumberOfSources() };
+        let own = OWN_SOURCES.lock().map(|o| o.clone()).unwrap_or_default();
+        let mut present = Vec::new();
+        for i in 0..n {
+            // SAFETY: `i` is below the count just read.
+            let src = unsafe { MIDIGetSource(i) };
+            if src == 0 {
+                continue;
+            }
+            // SAFETY: the property keys are static CFStrings.
+            let (name_key, id_key) = unsafe { (kMIDIPropertyName, kMIDIPropertyUniqueID) };
+            let id = int_property(src, id_key);
+            let sname = cfstring_property(src, name_key).unwrap_or_default();
+            if is_own_source(src, id, Some(sname.as_str()), &own) != self.own_only {
+                continue;
+            }
+            present.push((src, sname));
+        }
+        present
+    }
+
+    /// Connects the sources that appeared since the last connect (and
+    /// forgets the ones gone) on the same client and port; the ones still
+    /// present stay connected untouched. Returns how many it connected.
+    pub fn reconnect(&mut self) -> usize {
+        let present = self.present();
+        let (gone, new) = plan_reconnect(&self.connected, &present);
+        for &i in gone.iter().rev() {
+            let (src, _) = self.connected.remove(i);
+            // SAFETY: the port is ours; a source that went away fails
+            // harmlessly (its connection went with it).
+            unsafe {
+                MIDIPortDisconnectSource(self.port, src);
+            }
+        }
+        let mut added = 0;
+        for i in new {
+            let Some((src, sname)) = present.get(i).cloned() else {
+                continue;
+            };
+            let key = core_engine::input::port_key(&sname);
+            // SAFETY: both objects are live; the port belongs to our client;
+            // the refCon is a plain integer CoreMIDI hands back unread.
+            let ok = os("MIDIPortConnectSource", unsafe {
+                MIDIPortConnectSource(self.port, src, key as usize as *mut c_void)
+            });
+            if ok.is_ok() {
+                self.connected.push((src, sname));
+                added += 1;
+            }
+        }
+        self.names = self.connected.iter().map(|(_, n)| n.clone()).collect();
+        added
+    }
+
+    /// The names of the sources it listens to.
+    pub fn sources(&self) -> &[String] {
+        &self.names
+    }
+}
+
+impl Drop for SourceListener {
+    fn drop(&mut self) {
+        // SAFETY: the port and client belong to this listener and are not
+        // used again.
+        unsafe {
+            MIDIPortDispose(self.port);
+            MIDIClientDispose(self.client);
+        }
+    }
+}
+
 /// Nanoseconds to host-clock ticks (the timestamps CoreMIDI carries).
 pub fn ns_to_host(ns: u64) -> u64 {
     // SAFETY: pure conversion.
@@ -936,6 +1149,21 @@ mod tests {
         assert!(!is_own_source(9, Some(43), Some("VizDAW Out"), &own));
         assert!(!is_own_source(9, None, Some("Keyboard"), &own));
         assert!(!is_own_source(9, Some(42), None, &[]));
+    }
+
+    /// Pre-flight M7: a reconnect connects only what is new (or renamed:
+    /// its key changed) and drops only what is gone; a source present
+    /// under the same name is left alone, never connected twice.
+    #[test]
+    fn a_reconnect_touches_only_new_gone_or_renamed_sources() {
+        let e = |r: MIDIEndpointRef, n: &str| (r, n.to_string());
+        let connected = [e(1, "A"), e(2, "B"), e(3, "C")];
+        let present = [e(1, "A"), e(3, "C renamed"), e(4, "D")];
+        let (gone, new) = plan_reconnect(&connected, &present);
+        assert_eq!(gone, [1, 2]);
+        assert_eq!(new, [1, 2]);
+        assert_eq!(plan_reconnect(&present, &present), (vec![], vec![]));
+        assert_eq!(plan_reconnect(&[], &present).1, [0, 1, 2]);
     }
 
     #[test]
