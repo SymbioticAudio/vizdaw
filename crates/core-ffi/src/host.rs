@@ -969,7 +969,7 @@ impl Host {
                 let info = match b.open(&live_audio_config(self.project_rate, want)) {
                     Ok(i) => i,
                     Err(e) if want => {
-                        let f = format!("audio input could not open: {e}");
+                        let f = format!("{}: {e}", crate::record::INPUT_FAILED_PREFIX);
                         self.faults.push(f.clone());
                         self.input_failed = Some(f);
                         b.open(&live_audio_config(self.project_rate, false))?

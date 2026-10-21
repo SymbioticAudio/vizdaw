@@ -421,9 +421,14 @@ pub fn gaps_problem(f: &Finished) -> Option<String> {
 /// input (Task 11's `DENIED_MESSAGE`).
 pub const DENIED_PREFIX: &str = "VizDAW may not use audio input";
 
+/// The start of the fault the host reports when the audio input failed
+/// to open (the device was busy, or refused the rate).
+pub const INPUT_FAILED_PREFIX: &str = "audio input could not open";
+
 /// Why lane `name` cannot record input `channels` from an input with
 /// `inputs` channels, if it cannot (pre-flight M6: with no input because
-/// access was denied, the host's fault says why).
+/// access was denied or the input failed to open, the host's fault says
+/// why).
 pub fn channel_refusal(
     name: &str,
     channels: core_model::lane::InputChannels,
@@ -434,8 +439,12 @@ pub fn channel_refusal(
         return None;
     }
     if inputs == 0 {
-        if let Some(f) = faults.iter().find(|f| f.starts_with(DENIED_PREFIX)) {
-            return Some(f.clone());
+        // Why there is no input: a denial first (it is why an open
+        // fails), then a failed open (final review M4).
+        for prefix in [DENIED_PREFIX, INPUT_FAILED_PREFIX] {
+            if let Some(f) = faults.iter().find(|f| f.starts_with(prefix)) {
+                return Some(f.clone());
+            }
         }
     }
     Some(format!(
@@ -1283,6 +1292,29 @@ mod tests {
         assert_eq!(
             channel_refusal("Mic", InputChannels::Mono(0), 0, &[]).as_deref(),
             Some("lane Mic records input 1, but the audio input has 0 channel(s)")
+        );
+    }
+
+    /// Final review M4: an input that failed to open says so, rather
+    /// than "0 channel(s)".
+    #[test]
+    fn an_input_that_failed_to_open_refuses_with_the_reason() {
+        let failed = format!("{INPUT_FAILED_PREFIX}: device busy");
+        let faults = vec!["xrun".to_string(), failed.clone()];
+        assert_eq!(
+            channel_refusal("Mic", InputChannels::Mono(0), 0, &faults),
+            Some(failed.clone())
+        );
+        // With channels open, too few is still a channel count.
+        assert_eq!(
+            channel_refusal("Mic", InputChannels::Stereo(2), 3, &faults).as_deref(),
+            Some("lane Mic records input 3, but the audio input has 3 channel(s)")
+        );
+        // A denial is the reason first: it is why the open failed.
+        let denied = format!("{DENIED_PREFIX}. Allow it in System Settings.");
+        assert_eq!(
+            channel_refusal("Mic", InputChannels::Mono(0), 0, &[failed, denied.clone()]),
+            Some(denied)
         );
     }
 
