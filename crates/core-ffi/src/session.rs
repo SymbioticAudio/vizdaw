@@ -1033,15 +1033,18 @@ impl Session {
                     (doc.clone(), doc)
                 }
             };
+            let s = Session::with(doc, Some(p.clone()), options.plugins_off)?;
+            // Only once the package is this session's (final review M1,
+            // M2): a refused open leaves another session's imports alone,
+            // and nothing is read while a close is still writing it.
             crate::media::sweep_temp(&p);
             let windows = read_windows(&p);
             let layout = read_layout(&p);
-            // Plan 5c Task 10: kept takes, and what a crash left.
-            let (kept, unread) = crate::record::kept_at_open(&p, &doc);
-            let recovered = crate::record::offered(&p, &doc, &kept);
-            let s = Session::with(doc, Some(p), options.plugins_off)?;
             {
                 let mut inner = lock(&s.inner);
+                // Plan 5c Task 10: kept takes, and what a crash left.
+                let (kept, unread) = crate::record::kept_at_open(&p, inner.doc());
+                let recovered = crate::record::offered(&p, inner.doc(), &kept);
                 inner.keep_recordings = kept;
                 inner.recovered = recovered;
                 inner.news.problems.extend(unread);
@@ -2218,7 +2221,6 @@ impl Session {
                 eprintln!("VizDAW: {line}");
             }
             inner.closed = true;
-            release_packages(self.id);
             let root = inner.root(self.id);
             let keep = inner.kept();
             for w in inner.jobs.shutdown() {
@@ -2234,6 +2236,7 @@ impl Session {
                 // Takes kept since the last save stay kept (plan 5c Task
                 // 10), saved or not.
                 inner.write_kept(&p);
+                before_close_tidy();
                 inner.tidy(&p, true);
                 // No `idle` follows a close: the problems would be lost
                 // (preflight M5).
@@ -2285,6 +2288,10 @@ impl Session {
             if let Some(k) = inner.key.clone() {
                 recovery::closed(&k, self.id);
             }
+            // Last (final review M1): an open of this package meanwhile
+            // would read a keep file being rewritten and offer files the
+            // tidy is moving to the Trash.
+            release_packages(self.id);
             Ok(())
         })
     }
@@ -2479,6 +2486,31 @@ fn edit_all_hook(label: &str, step: usize) {
 
 #[cfg(not(feature = "test-hooks"))]
 fn edit_all_hook(_label: &str, _step: usize) {}
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    /// What runs on this thread right before `close` tidies its package
+    /// (test hook, final review M1).
+    static BEFORE_CLOSE_TIDY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` the next time `close` on this thread is about to tidy its
+/// package; `None` clears it (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn set_before_close_tidy_hook(f: Option<Box<dyn FnOnce()>>) {
+    BEFORE_CLOSE_TIDY.with(|h| *h.borrow_mut() = f);
+}
+
+#[cfg(feature = "test-hooks")]
+fn before_close_tidy() {
+    if let Some(f) = BEFORE_CLOSE_TIDY.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn before_close_tidy() {}
 
 /// Editor edits (spec §3.2, §3.8).
 #[uniffi::export]

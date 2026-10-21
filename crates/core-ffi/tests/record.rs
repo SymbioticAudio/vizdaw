@@ -1251,6 +1251,67 @@ fn concurrent_opens_of_one_package_give_it_to_one() {
     }
 }
 
+/// Final review M1: the package stays claimed until `close` has finished
+/// writing it (the keep file, the tidy): an open meanwhile is refused.
+#[test]
+fn close_holds_the_package_until_it_is_tidied() {
+    let g = serial(None);
+    let d = doc(8, false, true);
+    let p = g.dir.path().join("P.vizdaw");
+    let a = untitled(&g, d.doc.clone());
+    a.save_as(p.display().to_string()).unwrap();
+    let during: Arc<Mutex<Option<Result<Arc<Session>, VizError>>>> = Arc::default();
+    {
+        let during = during.clone();
+        let at = p.display().to_string();
+        vizdaw_ffi::session::set_before_close_tidy_hook(Some(Box::new(move || {
+            *during.lock().unwrap() = Some(Session::open(at));
+        })));
+    }
+    a.close().unwrap();
+    vizdaw_ffi::session::set_before_close_tidy_hook(None);
+    let got = during.lock().unwrap().take().expect("the hook ran");
+    let refused =
+        matches!(&got, Err(VizError::Busy { message }) if message.contains("already open"));
+    if let Ok(b) = &got {
+        b.close().unwrap();
+    }
+    assert!(refused, "an open during close's tidy: {got:?}");
+    // Closed: it opens again.
+    Session::open(p.display().to_string())
+        .unwrap()
+        .close()
+        .unwrap();
+}
+
+/// Final review M2: an open refused because the package is open elsewhere
+/// leaves that session's import temp files alone.
+#[test]
+fn a_refused_open_leaves_the_temp_files() {
+    let g = serial(None);
+    let d = doc(8, false, true);
+    let p = g.dir.path().join("P.vizdaw");
+    let a = untitled(&g, d.doc.clone());
+    a.save_as(p.display().to_string()).unwrap();
+    let media = p.join("Media");
+    std::fs::create_dir_all(&media).unwrap();
+    let tmp = media.join(".take.wav.1.vizdaw-tmp");
+    std::fs::write(&tmp, b"in flight").unwrap();
+    assert!(matches!(
+        Session::open(p.display().to_string()),
+        Err(VizError::Busy { .. })
+    ));
+    assert!(
+        tmp.is_file(),
+        "the refused open swept the other session's temp file"
+    );
+    a.close().unwrap();
+    // The open that claims it sweeps it.
+    let b = Session::open(p.display().to_string()).unwrap();
+    assert!(!tmp.exists());
+    b.close().unwrap();
+}
+
 /// A panic while opening (after the package was claimed, before the
 /// session exists) does not leave the package claimed.
 #[test]
