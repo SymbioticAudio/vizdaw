@@ -322,6 +322,127 @@ const NORMALIZE_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "The peak level in dBFS, -96 to 0, as text (\"-0.3\"); answers the Normalize dialog.",
 }];
 
+/// An ID parameter (a sequence, a lane), required.
+const fn id_param(name: &'static str, help: &'static str) -> ParamSpec {
+    ParamSpec {
+        name,
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: true,
+        help,
+    }
+}
+
+/// `record.set` (plan 5c Ruling 18): every option of the next Record.
+const RECORD_SET_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace what the record range holds (true) or overdub it (false); sets transport.overdub.",
+    },
+    ParamSpec {
+        name: "punch",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Record only between the punch fields (sets transport.punch).",
+    },
+    ParamSpec {
+        name: "loop",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Loop recording over the transport loop (sets transport.loop).",
+    },
+    ParamSpec {
+        name: "count_in",
+        kind: ParamKind::Int { min: 0, max: 4 },
+        required: false,
+        help: "Bars of count-in (Record refuses more than 0 until plan 5d plays it).",
+    },
+    ParamSpec {
+        name: "pre_roll",
+        kind: ParamKind::Int { min: 0, max: 8 },
+        required: false,
+        help: "Bars of pre-roll.",
+    },
+    ParamSpec {
+        name: "passes_as_takes",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Kept loop passes become takes.",
+    },
+];
+
+const RECOVER_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "action",
+    kind: ParamKind::Choice(&["import", "trash"]),
+    required: true,
+    help: "Import the recordings a crash left onto new lanes, or move them to the Trash.",
+}];
+
+const SET_INPUT_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The lane's sequence."),
+    id_param("lane", "The lane."),
+    ParamSpec {
+        name: "kind",
+        kind: ParamKind::Choice(&["none", "audio", "midi"]),
+        required: true,
+        help: "What the lane records: nothing, audio or MIDI.",
+    },
+    ParamSpec {
+        name: "channel",
+        kind: ParamKind::Int { min: 1, max: 256 },
+        required: false,
+        help: "Audio: the input channel, from 1 (default 1).",
+    },
+    ParamSpec {
+        name: "stereo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Audio: the channel and the next as a pair.",
+    },
+    ParamSpec {
+        name: "port",
+        kind: ParamKind::Text,
+        required: false,
+        help: "MIDI: the source's name (absent: every source).",
+    },
+    ParamSpec {
+        name: "midi_channel",
+        kind: ParamKind::Int { min: 1, max: 16 },
+        required: false,
+        help: "MIDI: the channel 1–16 (absent: every channel).",
+    },
+];
+
+const SET_MONITOR_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The lane's sequence."),
+    id_param("lane", "The lane."),
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(&["auto", "input", "off"]),
+        required: true,
+        help: "When the lane's input is heard: auto (armed, stopped or recording in range), input (always) or off.",
+    },
+];
+
+const INJECT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "port",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI source the bytes come from, as lanes name it.",
+    },
+    ParamSpec {
+        name: "bytes",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Channel messages as hex bytes, e.g. \"90 3c 64 80 3c 00\".",
+    },
+];
+
 /// Every menu command, in menu order.
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
@@ -771,6 +892,38 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         true,
     )),
+    CommandSpec {
+        params: RECORD_SET_PARAMS,
+        ..key_only(cmd("record.set", "Record", "Record Options", None, true))
+    },
+    CommandSpec {
+        params: RECOVER_PARAMS,
+        ..key_only(cmd(
+            "record.recover",
+            "Record",
+            "Recover Recordings",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: SET_INPUT_PARAMS,
+        ..key_only(cmd("lane.set_input", "Lane", "Set Lane Input", None, true))
+    },
+    CommandSpec {
+        params: SET_MONITOR_PARAMS,
+        ..key_only(cmd(
+            "lane.set_monitor",
+            "Lane",
+            "Set Lane Monitor",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: INJECT_PARAMS,
+        ..key_only(cmd("midi.inject", "MIDI", "Inject MIDI", None, true))
+    },
     locator("locator.go_0", "Go to Locator 0", "0"),
     locator("locator.go_1", "Go to Locator 1", "1"),
     locator("locator.go_2", "Go to Locator 2", "2"),

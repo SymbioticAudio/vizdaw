@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        119,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four"
+        124,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -939,4 +939,123 @@ fn state_get_media_and_project() {
             ..
         }
     ));
+}
+
+/// Plan 5c Task 14: the record and lane commands take their parameters
+/// by type and range; hostile values never reach the app.
+#[test]
+fn record_and_lane_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("record.set", json!({})),
+        (
+            "record.set",
+            json!({ "replace": false, "punch": true, "loop": true, "count_in": 0, "pre_roll": 8, "passes_as_takes": false }),
+        ),
+        ("record.recover", json!({ "action": "import" })),
+        ("record.recover", json!({ "action": "trash" })),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 3, "stereo": true }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "midi", "port": "Keys", "midi_channel": 16 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "none" }),
+        ),
+        (
+            "lane.set_monitor",
+            json!({ "seq": 1, "lane": 2, "mode": "input" }),
+        ),
+        (
+            "midi.inject",
+            json!({ "port": "Keys", "bytes": "90 3c 64" }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("record.set", json!({ "count_in": 5 })),
+        ("record.set", json!({ "pre_roll": -1 })),
+        ("record.set", json!({ "loop": "yes" })),
+        ("record.set", json!({ "takes": true })),
+        ("record.recover", json!({})),
+        ("record.recover", json!({ "action": "delete" })),
+        ("lane.set_input", json!({ "lane": 2, "kind": "audio" })),
+        ("lane.set_input", json!({ "seq": 1, "lane": 2 })),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "video" }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 0 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 257 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "midi", "midi_channel": 17 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": -1, "lane": 2, "kind": "none" }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "midi", "port": "x".repeat(100_000) }),
+        ),
+        ("lane.set_monitor", json!({ "seq": 1, "lane": 2 })),
+        (
+            "lane.set_monitor",
+            json!({ "seq": 1, "lane": 2, "mode": "loud" }),
+        ),
+        ("midi.inject", json!({ "port": "Keys" })),
+        ("midi.inject", json!({ "bytes": "90 3c 64" })),
+        (
+            "midi.inject",
+            json!({ "port": "Keys", "bytes": [0x90, 60, 100] }),
+        ),
+        (
+            "midi.inject",
+            json!({ "port": "Keys", "bytes": "9".repeat(100_000) }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let spec = |id: &str| registry::find(id).unwrap();
+    for id in [
+        "record.set",
+        "record.recover",
+        "lane.set_input",
+        "lane.set_monitor",
+        "midi.inject",
+    ] {
+        assert!(!spec(id).menu_item && spec(id).document, "{id}");
+    }
+}
+
+#[test]
+fn state_get_record_and_input() {
+    for (name, target) in [
+        ("record", StateTarget::Record),
+        ("input", StateTarget::Input),
+    ] {
+        match ok("state.get", json!({ "target": name })) {
+            Command::StateGet { target: t, .. } => assert_eq!(t, target),
+            other => panic!("{other:?}"),
+        }
+    }
 }

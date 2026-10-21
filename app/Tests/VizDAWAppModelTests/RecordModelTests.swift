@@ -215,3 +215,143 @@ import VizDAWCore
         #expect(m.editor.status == nil)
     }
 }
+
+/// The record and lane commands over the control channel (plan 5c Task
+/// 14): `record.set` sets the transport's modes and the record options,
+/// `record.recover` answers the offer, `lane.set_input` and
+/// `lane.set_monitor` edit lanes (channels from 1), `midi.inject` sends
+/// hex bytes, and `state.get record` / `input` read the core.
+@MainActor
+@Suite struct RecordControlTests {
+    let host = FakeControlHost()
+
+    func demo() throws -> (DocumentStore, UUID, DocumentModel, FakeSession) {
+        let f = demoFake()
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        return (s, id, try #require(s.model(id)), f)
+    }
+
+    func run(_ id: String, _ pairs: [(String, ControlValue)], _ m: DocumentModel, _ s: DocumentStore, _ doc: UUID)
+        -> ControlFailure?
+    {
+        let args = pairs.map { ControlArg(name: $0.0, value: $0.1) }
+        if case .failed(let f) = ControlCommands.run(id, args: args, doc: (doc, m), store: s, host: host) { return f }
+        return nil
+    }
+
+    @Test func recordSetSetsTheModesAndOptions() throws {
+        let (s, id, m, _) = try demo()
+        #expect(
+            run(
+                "record.set",
+                [
+                    ("replace", .flag(value: false)), ("punch", .flag(value: true)), ("loop", .flag(value: true)),
+                    ("pre_roll", .int(value: 2)), ("passes_as_takes", .flag(value: false)),
+                ], m, s, id) == nil)
+        #expect(m.editor.layout.transport.overdub && m.editor.layout.transport.punch && m.looping)
+        #expect(m.record.preRollBars == 2 && !m.record.passesAsTakes)
+        let spec = m.record.spec()
+        #expect(!spec.replace && spec.looped && spec.punch != nil && !spec.passesAsTakes)
+        // Loop already on stays on.
+        _ = run("record.set", [("loop", .flag(value: true))], m, s, id)
+        #expect(m.looping)
+    }
+
+    @Test func laneInputsAndMonitorsAreLaneEdits() throws {
+        let (s, id, m, f) = try demo()
+        #expect(
+            run(
+                "lane.set_input",
+                [
+                    ("seq", .int(value: 3)), ("lane", .int(value: 31)), ("kind", .text(value: "audio")),
+                    ("channel", .int(value: 3)), ("stereo", .flag(value: true)),
+                ], m, s, id) == nil)
+        #expect(f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: .audio(first: 2, stereo: true))))
+        _ = run(
+            "lane.set_input",
+            [
+                ("seq", .int(value: 3)), ("lane", .int(value: 31)), ("kind", .text(value: "midi")),
+                ("port", .text(value: "Keys")), ("midi_channel", .int(value: 16)),
+            ], m, s, id)
+        #expect(f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: .midi(port: "Keys", channel: 15))))
+        _ = run(
+            "lane.set_input", [("seq", .int(value: 3)), ("lane", .int(value: 31)), ("kind", .text(value: "none"))],
+            m, s, id)
+        #expect(f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: nil)))
+        _ = run(
+            "lane.set_monitor", [("seq", .int(value: 3)), ("lane", .int(value: 31)), ("mode", .text(value: "off"))],
+            m, s, id)
+        #expect(f.edits.last == .lane(edit: .setMonitor(seq: 3, lane: 31, monitor: .off)))
+        // The core's refusal is the call's failure.
+        f.editError = .Model(message: "input.channels out of range")
+        #expect(
+            run(
+                "lane.set_input",
+                [("seq", .int(value: 3)), ("lane", .int(value: 31)), ("kind", .text(value: "audio"))], m, s, id)?
+                .message.contains("input.channels") == true)
+    }
+
+    @Test func midiInjectSendsHexBytes() throws {
+        let (s, id, m, f) = try demo()
+        #expect(run("midi.inject", [("port", .text(value: "Keys")), ("bytes", .text(value: "90 3c 64"))], m, s, id) == nil)
+        #expect(f.injected.last?.port == "Keys" && f.injected.last?.bytes == Data([0x90, 0x3C, 0x64]))
+        for bad in ["", "9g", "900", "90,3c", String(repeating: "90 ", count: 1025)] {
+            #expect(
+                run("midi.inject", [("port", .text(value: "Keys")), ("bytes", .text(value: bad))], m, s, id)?.code
+                    == .invalidParams, "\(bad.prefix(10))")
+        }
+        #expect(ControlLanes.hexBytes("f0 7E f7") == Data([0xF0, 0x7E, 0xF7]))
+    }
+
+    @Test func hostileLaneParamsAreInvalid() throws {
+        let (s, id, m, f) = try demo()
+        let before = f.edits.count
+        let lane: [(String, ControlValue)] = [("seq", .int(value: 3)), ("lane", .int(value: 31))]
+        for extra: [(String, ControlValue)] in [
+            [("kind", .text(value: "video"))], [("kind", .text(value: "audio")), ("channel", .int(value: 0))],
+            [("kind", .text(value: "audio")), ("channel", .int(value: 257))],
+            [("kind", .text(value: "midi")), ("midi_channel", .int(value: 17))],
+            [("kind", .text(value: "midi")), ("midi_channel", .int(value: 0))], [],
+        ] {
+            #expect(run("lane.set_input", lane + extra, m, s, id)?.code == .invalidParams)
+        }
+        #expect(run("lane.set_monitor", lane + [("mode", .text(value: "loud"))], m, s, id)?.code == .invalidParams)
+        #expect(run("lane.set_monitor", [("seq", .int(value: -1)), ("lane", .int(value: 31)), ("mode", .text(value: "off"))], m, s, id)?.code == .invalidParams)
+        #expect(f.edits.count == before)
+        // Wrong types are ignored as absent, so the required ids are missing.
+        #expect(run("lane.set_monitor", [("seq", .text(value: "3")), ("lane", .int(value: 31)), ("mode", .text(value: "off"))], m, s, id)?.code == .invalidParams)
+        #expect(ControlLanes.monitor("OFF") == nil && ControlLanes.monitor(nil) == nil)
+        #expect(run("midi.inject", [("port", .text(value: "Keys"))], m, s, id)?.code == .invalidParams)
+        #expect(f.injected.isEmpty)
+    }
+
+    @Test func recordWhileRecordingStopsAndRecordSetIsRefusedThen() throws {
+        let (s, id, m, f) = try demo()
+        #expect(run("transport.record", [], m, s, id) == nil)
+        #expect(f.recordCalls.count == 1 && m.record.isRecording)
+        #expect(run("record.set", [("loop", .flag(value: true))], m, s, id)?.code == .unavailable)
+        #expect(run("transport.record", [], m, s, id) == nil)
+        #expect(!m.record.isRecording)
+    }
+
+    @Test func recoverAnswersTheOfferAndStateGetReadsTheCore() throws {
+        let (s, id, m, f) = try demo()
+        #expect(run("record.recover", [("action", .text(value: "import"))], m, s, id)?.code == .unavailable)
+        f.recovered = [RecoveredFileRow(path: "Media/Recorded/a.caf", frames: 10, sizeKnown: false, readable: true)]
+        #expect(run("record.recover", [("action", .text(value: "trash"))], m, s, id) == nil)
+        #expect(f.recoverAnswers == [false])
+        f.recordRow.frames = 4800
+        guard case .record(_, let st)? = ControlStates.state(.record, id, m) else {
+            Issue.record("record")
+            return
+        }
+        #expect(st.frames == 4800)
+        f.inputRow.channels = 3
+        guard case .inputState(_, let info)? = ControlStates.state(.input, id, m) else {
+            Issue.record("input")
+            return
+        }
+        #expect(info.channels == 3)
+    }
+}

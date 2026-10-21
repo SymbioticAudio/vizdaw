@@ -463,3 +463,107 @@ fn an_extended_call_outlives_the_app_timeout() {
     assert!(!s.extend_timeout(call.token, 1000).unwrap());
     s.stop().unwrap();
 }
+
+/// Plan 5c Task 14: `state.get record` and `input` as JSON.
+#[test]
+fn record_and_input_results_as_json() {
+    use vizdaw_ffi::{InputInfoRow, RecordLaneRow, RecordSpecRow, RecordStateRow, TickRange};
+    let v = result_json(&ControlResult::Record {
+        doc: "D".into(),
+        state: RecordStateRow {
+            recording: true,
+            seq: Some(3),
+            spec: Some(RecordSpecRow {
+                replace: false,
+                punch: Some(TickRange { start: 0, end: 10 }),
+                looped: true,
+                count_in_bars: 0,
+                pre_roll_bars: 1,
+                passes_as_takes: true,
+            }),
+            pass: 2,
+            kept: 1,
+            discarded: 0,
+            lanes: vec![RecordLaneRow {
+                lane: 7,
+                audio: true,
+                path: Some("Media/Recorded/Mic.caf".into()),
+                clipped: 4,
+            }],
+            frames: 96_000,
+            overflows: 0,
+            gap_frames: 0,
+            free_bytes: Some(1 << 30),
+            underruns: 5,
+            late_starts: 6,
+            recovered: vec!["Media/Recorded/old.caf".into()],
+            recovered_files: vec![],
+        },
+    });
+    assert_eq!(v["recording"], json!(true));
+    assert_eq!(v["spec"]["loop"], json!(true));
+    assert_eq!(v["spec"]["punch"], json!({"start": 0, "end": 10}));
+    assert_eq!(v["pass"], json!(2));
+    assert_eq!(v["lanes"][0]["clipped"], json!(4));
+    assert_eq!(v["recovered"][0], json!("Media/Recorded/old.caf"));
+    // Pre-flight M11: the stream counters ride along.
+    assert_eq!(v["underruns"], json!(5));
+    assert_eq!(v["late_starts"], json!(6));
+    assert_eq!(v["overflows"], json!(0));
+    assert_eq!(v["recovered_files"], json!([]));
+    let i = result_json(&ControlResult::InputState {
+        doc: "D".into(),
+        info: InputInfoRow {
+            device: "Offline".into(),
+            channels: 3,
+            names: vec!["Fake In 1".into()],
+            input_latency_frames: 512,
+            output_latency_frames: 512,
+        },
+    });
+    assert_eq!(i["channels"], json!(3));
+    assert_eq!(i["input_latency"], json!(512));
+}
+
+/// Plan 5c Task 14: document lanes show their takes, input and monitor
+/// (channels counted from 1), and the transport carries the record faults.
+#[test]
+fn lanes_show_takes_input_and_monitor() {
+    use vizdaw_ffi::{LaneInputRow, MonitorModeRow};
+    let session = Session::new_demo().unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let seq = snapshot.sequences[0].id;
+    let one = session.lanes(seq).unwrap().remove(0);
+    let mut lanes = vec![one.clone(), one.clone(), one];
+    lanes[0].input = Some(LaneInputRow::Audio {
+        first: 2,
+        stereo: true,
+    });
+    lanes[0].monitor = MonitorModeRow::Input;
+    lanes[1].input = Some(LaneInputRow::Midi {
+        port: Some("Keys".into()),
+        channel: Some(15),
+    });
+    lanes[2].input = None;
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot,
+        selected_seq: Some(seq),
+        lanes,
+        alert: None,
+    });
+    let l = v["lanes"].as_array().unwrap();
+    assert_eq!(
+        l[0]["input"],
+        json!({"kind": "audio", "channel": 3, "stereo": true})
+    );
+    assert_eq!(l[0]["monitor"], json!("input"));
+    assert_eq!(
+        l[1]["input"],
+        json!({"kind": "midi", "port": "Keys", "midi_channel": 16})
+    );
+    assert_eq!(l[2]["input"], Value::Null);
+    assert_eq!(l[2]["monitor"], json!("auto"));
+    assert!(l[2]["takes"].is_number() && l[2]["active_take"].is_string());
+}

@@ -174,6 +174,7 @@ public enum ControlCommands {
         "keys.save", "keys.load", "keys.reset",
         "file.project_settings", "media.import", "media.convert",
         "media.relink", "media.compact", "media.rename", "window.media_pool",
+        "record.set", "record.recover", "lane.set_input", "lane.set_monitor", "midi.inject",
     ]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
@@ -313,6 +314,56 @@ public enum ControlCommands {
             }
             guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
             m.media.rename(media, to: name)
+        case "record.set":
+            guard !m.record.isRecording else { return unavailable("Stop recording first.") }
+            if let replace = args.flag("replace") { m.editor.updateLayout { $0.transport.overdub = !replace } }
+            if let punch = args.flag("punch") { m.editor.updateLayout { $0.transport.punch = punch } }
+            if let on = args.flag("loop"), on != m.looping { m.toggleLoop() }
+            if let n = args.int("count_in") { m.record.countInBars = UInt8(clamping: n) }
+            if let n = args.int("pre_roll") { m.record.preRollBars = UInt8(clamping: n) }
+            if let on = args.flag("passes_as_takes") { m.record.passesAsTakes = on }
+        case "record.recover":
+            let found = (try? m.session.recoveredRecordings()) ?? []
+            guard !found.isEmpty else { return unavailable("There are no recovered recordings.") }
+            guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+            do {
+                m.apply(try m.session.recoverRecordings(import: args.text("action") == "import"))
+            } catch {
+                return .failed(.thrown(error, "Recovery Failed"))
+            }
+        case "lane.set_input", "lane.set_monitor":
+            guard let seq = args.int("seq").flatMap({ UInt64(exactly: $0) }),
+                let lane = args.int("lane").flatMap({ UInt64(exactly: $0) })
+            else { return .failed(.of(.invalidParams, "\(id): `seq` and `lane` name the lane")) }
+            guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+            let edit: LaneEdit
+            if id == "lane.set_input" {
+                guard let input = ControlLanes.input(args) else {
+                    return .failed(.of(.invalidParams, "lane.set_input: `kind` is none, audio or midi"))
+                }
+                edit = .setInput(seq: seq, lane: lane, input: input.value)
+            } else {
+                guard let mode = ControlLanes.monitor(args.text("mode")) else {
+                    return .failed(.of(.invalidParams, "lane.set_monitor: `mode` is auto, input or off"))
+                }
+                edit = .setMonitor(seq: seq, lane: lane, monitor: mode)
+            }
+            do {
+                m.apply(try m.session.edit(cmd: .lane(edit: edit), filter: nil))
+            } catch {
+                return .failed(.thrown(error, id == "lane.set_input" ? "Set Input Failed" : "Set Monitor Failed"))
+            }
+        case "midi.inject":
+            guard let port = args.text("port"), let bytes = ControlLanes.hexBytes(args.text("bytes") ?? "") else {
+                return .failed(.of(.invalidParams, "midi.inject: `bytes` are hex bytes such as \"90 3c 64\""))
+            }
+            do {
+                guard try m.session.injectMidi(port: port, bytes: bytes) else {
+                    return unavailable("Play or record first: this document does not hold the audio engine.")
+                }
+            } catch {
+                return .failed(.thrown(error, "MIDI Injection Failed"))
+            }
         case RegionCommands.normalize:
             guard let text = args.text("peak_db") else { return .failed(.dialog("Normalize", "peak_db")) }
             guard let peak = RegionCommands.parsePeak(text) else {
@@ -578,6 +629,13 @@ public enum ControlStates {
         case .project:
             guard let info = try? m.session.projectInfo() else { return nil }
             return .project(doc: doc, info: info)
+        case .record:
+            m.record.refresh()
+            guard let s = try? m.session.recordState() else { return nil }
+            return .record(doc: doc, state: s)
+        case .input:
+            guard let info = try? m.session.inputInfo() else { return nil }
+            return .inputState(doc: doc, info: info)
         case .windows:
             return nil
         }
@@ -630,5 +688,56 @@ public enum ControlLaunch {
         a.remove(at: i)
         if i < a.endIndex { a.remove(at: i) }
         return a
+    }
+}
+
+/// The lane commands' parameters (plan 5c Task 14): `lane.set_input`'s
+/// kind and channels (counted from 1 on the channel, from 0 in the core),
+/// `lane.set_monitor`'s mode, and `midi.inject`'s hex bytes.
+public enum ControlLanes {
+    /// A box so "no input" (nil) differs from a refusal.
+    public struct Input: Equatable {
+        public let value: LaneInputRow?
+    }
+
+    /// The input `args` ask for, or nil when `kind` is missing or wrong.
+    public static func input(_ args: [ControlArg]) -> Input? {
+        switch args.text("kind") {
+        case "none":
+            return Input(value: nil)
+        case "audio":
+            let channel = args.int("channel") ?? 1
+            guard (1...256).contains(channel) else { return nil }
+            return Input(value: .audio(first: UInt16(channel - 1), stereo: args.flag("stereo") ?? false))
+        case "midi":
+            let ch = args.int("midi_channel")
+            if let ch, !(1...16).contains(ch) { return nil }
+            return Input(value: .midi(port: args.text("port"), channel: ch.map { UInt8($0 - 1) }))
+        default:
+            return nil
+        }
+    }
+
+    /// The monitor mode `text` names.
+    public static func monitor(_ text: String?) -> MonitorModeRow? {
+        switch text {
+        case "auto": .auto
+        case "input": .input
+        case "off": .off
+        default: nil
+        }
+    }
+
+    /// `text` as bytes: hex pairs separated by spaces (`"90 3c 64"`), at
+    /// most 1024; nil for anything else.
+    public static func hexBytes(_ text: String) -> Data? {
+        let parts = text.split(whereSeparator: \.isWhitespace)
+        guard !parts.isEmpty, parts.count <= 1024 else { return nil }
+        var out = Data()
+        for p in parts {
+            guard p.count <= 2, let b = UInt8(p, radix: 16) else { return nil }
+            out.append(b)
+        }
+        return out
     }
 }

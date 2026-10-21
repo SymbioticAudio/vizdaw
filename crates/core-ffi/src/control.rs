@@ -118,6 +118,10 @@ pub enum StateTargetRow {
     Media,
     /// Project format and device rate.
     Project,
+    /// Recording (plan 5c).
+    Record,
+    /// Audio input (plan 5c).
+    Input,
 }
 
 /// The after-crash answer.
@@ -522,6 +526,20 @@ pub enum ControlResult {
         /// Format, mismatched media, device rate.
         info: crate::format::ProjectInfoRow,
     },
+    /// `state.get record` (plan 5c).
+    Record {
+        /// Document ID.
+        doc: String,
+        /// What recording is doing.
+        state: crate::record::RecordStateRow,
+    },
+    /// `state.get input` (plan 5c).
+    InputState {
+        /// Document ID.
+        doc: String,
+        /// What the input offers.
+        info: crate::live::InputInfoRow,
+    },
     /// `command.run`.
     Ran {
         /// Registry ID.
@@ -801,6 +819,8 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 StateTarget::Windows => StateTargetRow::Windows,
                 StateTarget::Media => StateTargetRow::Media,
                 StateTarget::Project => StateTargetRow::Project,
+                StateTarget::Record => StateTargetRow::Record,
+                StateTarget::Input => StateTargetRow::Input,
             },
             window: window_row(window),
         },
@@ -962,6 +982,26 @@ fn tree_json(nodes: &[UiNodeRow]) -> Vec<Value> {
     roots
 }
 
+/// A lane's input as the channel spells it (`channel`s from 1).
+fn lane_input_json(i: &crate::edit::LaneInputRow) -> Value {
+    match i {
+        crate::edit::LaneInputRow::Audio { first, stereo } => {
+            json!({"kind": "audio", "channel": u32::from(*first) + 1, "stereo": stereo})
+        }
+        crate::edit::LaneInputRow::Midi { port, channel } => json!({
+            "kind": "midi", "port": port, "midi_channel": channel.map(|c| u32::from(c) + 1),
+        }),
+    }
+}
+
+fn monitor_name(m: crate::edit::MonitorModeRow) -> &'static str {
+    match m {
+        crate::edit::MonitorModeRow::Auto => "auto",
+        crate::edit::MonitorModeRow::Input => "input",
+        crate::edit::MonitorModeRow::Off => "off",
+    }
+}
+
 fn transport_json(doc: &str, t: &TransportState) -> Value {
     json!({
         "doc": doc, "playing": t.playing, "seq": t.seq, "tick": t.tick,
@@ -1008,6 +1048,31 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "used_percent": m.used_percent,
             })).collect::<Vec<_>>(),
         }),
+        ControlResult::Record { doc, state: r } => json!({
+            "doc": doc, "recording": r.recording, "seq": r.seq,
+            "spec": r.spec.as_ref().map(|s| json!({
+                "replace": s.replace,
+                "punch": s.punch.as_ref().map(|p| json!({"start": p.start, "end": p.end})),
+                "loop": s.looped, "count_in": s.count_in_bars, "pre_roll": s.pre_roll_bars,
+                "passes_as_takes": s.passes_as_takes,
+            })),
+            "pass": r.pass, "kept": r.kept, "discarded": r.discarded,
+            "lanes": r.lanes.iter().map(|l| json!({
+                "lane": l.lane, "audio": l.audio, "path": l.path, "clipped": l.clipped,
+            })).collect::<Vec<_>>(),
+            "frames": r.frames, "overflows": r.overflows, "gap_frames": r.gap_frames,
+            "underruns": r.underruns, "late_starts": r.late_starts,
+            "free_bytes": r.free_bytes, "recovered": r.recovered,
+            "recovered_files": r.recovered_files.iter().map(|f| json!({
+                "path": f.path, "frames": f.frames, "size_known": f.size_known,
+                "readable": f.readable,
+            })).collect::<Vec<_>>(),
+        }),
+        ControlResult::InputState { doc, info } => json!({
+            "doc": doc, "device": info.device, "channels": info.channels,
+            "names": info.names, "input_latency": info.input_latency_frames,
+            "output_latency": info.output_latency_frames,
+        }),
         ControlResult::Project { doc, info } => json!({
             "doc": doc,
             "rate": info.format.sample_rate,
@@ -1039,6 +1104,9 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "id": l.id, "name": l.name, "destination": l.destination,
                 "events": l.midi_event_count, "regions": l.region_count,
                 "references": l.reference_count, "mute": l.mute, "solo": l.solo, "arm": l.arm,
+                "takes": l.take_count, "active_take": l.active_take,
+                "input": l.input.as_ref().map(lane_input_json),
+                "monitor": monitor_name(l.monitor),
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
             "alert": alert.as_ref().map(alert_json),

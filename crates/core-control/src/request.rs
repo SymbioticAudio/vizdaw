@@ -55,6 +55,10 @@ pub enum StateTarget {
     Media,
     /// Its project format and device rate (5a).
     Project,
+    /// What recording is doing (plan 5c).
+    Record,
+    /// What the audio input offers (plan 5c).
+    Input,
 }
 
 /// Where a click or drag lands.
@@ -229,9 +233,11 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 "windows" => StateTarget::Windows,
                 "media" => StateTarget::Media,
                 "project" => StateTarget::Project,
+                "record" => StateTarget::Record,
+                "input" => StateTarget::Input,
                 _ => {
                     return Err(p.error(
-                        "`target` must be transport, document, editor, selection, windows, media or project",
+                        "`target` must be transport, document, editor, selection, windows, media, project, record or input",
                     ));
                 }
             };
