@@ -325,6 +325,156 @@ fn a_looped_back_click_lands_within_two_frames_of_where_it_played() {
     s.close().unwrap();
 }
 
+/// Final review I1: a graph latency change mid-pass (a latent plugin's
+/// latency switched on) leaves what was recorded after it aligned. A
+/// looped-back click before and after the change each land within two
+/// frames of where they played, and MIDI played after the change lands
+/// where the transport was heard then, not the latency later.
+#[test]
+fn a_latency_change_mid_pass_keeps_what_follows_aligned() {
+    const LATENCY: i64 = 12_000;
+    let g = serial(Some(FakeInput::Loopback(1000)));
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    let d = doc(8, true, true);
+    // A region on "Src" from beat 1 with clicks 12 000 and 144 000 frames
+    // in: they play at timeline frames 36 000 and 168 000.
+    let mut b = Builder::from_doc(d.doc.clone());
+    let media = b.media("Media/clicks.caf", 192_000, 1).unwrap();
+    b.region(
+        d.seq,
+        d.src,
+        Q,
+        media,
+        0,
+        192_000,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+    let s = untitled(&g, b.finish());
+    {
+        let path = s.media_file(media.0).unwrap();
+        let path = Path::new(&path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut v = vec![0.0f32; 192_000];
+        for at in [12_000, 144_000] {
+            for x in v.iter_mut().skip(at).take(8) {
+                *x = 0.9;
+            }
+        }
+        let mut w = CafWriter::create(path, 48_000, 1, BitDepth::Int24, WriteMode::Normal).unwrap();
+        w.write(&v).unwrap();
+        w.finish().unwrap();
+    }
+    s.recheck_media().unwrap();
+    // A Test Gain on the master, with no latency yet.
+    let master = s.mixer().unwrap().strips.last().unwrap().id;
+    s.add_insert(
+        master,
+        None,
+        vizdaw_ffi::PluginRefRow {
+            format: vizdaw_ffi::PluginFormatTag::Clap,
+            id: "vizdaw.test.gain".into(),
+            name: "Test Gain".into(),
+            vendor: "VizDAW".into(),
+            version: "1.0.0".into(),
+        },
+    )
+    .unwrap();
+    let slot = s.plugin_slots().unwrap()[0].id;
+    wait_until("the gain to load", || {
+        s.idle().unwrap();
+        s.plugin_slots().unwrap()[0].status == vizdaw_ffi::SlotStatus::Live
+    });
+    s.record(d.seq.0, spec()).unwrap();
+    let tick = |s: &Session| s.transport().unwrap().tick;
+    // Plays a quiet note now: `(tick before, tick after)` as heard.
+    let play = |s: &Session, pitch: u8| {
+        let before = tick(s);
+        assert!(s.inject_midi("Keys".into(), vec![0x90, pitch, 10]).unwrap());
+        let after = tick(s);
+        (before, after)
+    };
+    wait_until("the first click to come back", || {
+        s.idle().unwrap();
+        frames(&s) >= 48_000
+    });
+    let early = play(&s, 60);
+    wait_until("a beat on", || frames(&s) >= 72_000);
+    assert!(s.inject_midi("Keys".into(), vec![0x80, 60, 0]).unwrap());
+    // The latency switches on.
+    s.set_param(slot, 1, LATENCY as f64).unwrap();
+    wait_until("the latency to apply", || {
+        s.idle().unwrap();
+        s.levels().unwrap().latency_frames == LATENCY as u64
+    });
+    let changed_at = frames(&s);
+    // Before the second click plays (rendered at run 168 000).
+    assert!(
+        changed_at < 140_000,
+        "the latency changed late: {changed_at}"
+    );
+    wait_until("the new graph to be heard", || {
+        s.idle().unwrap();
+        frames(&s) >= changed_at + 2 * LATENCY as u64
+    });
+    let late = play(&s, 62);
+    wait_until("a beat on", || {
+        frames(&s) >= changed_at + 2 * LATENCY as u64 + 24_000
+    });
+    assert!(s.inject_midi("Keys".into(), vec![0x80, 62, 0]).unwrap());
+    wait_until("the second click to come back", || {
+        s.idle().unwrap();
+        frames(&s) >= 168_000 + LATENCY as u64 + 1000 + 4800
+    });
+    s.stop().unwrap();
+    // Audio: each click lands where it played.
+    let r = regions(&s, d.seq.0, d.mic.0);
+    assert!(!r.is_empty());
+    let (_, data) = read(&s.media_file(r[0].media.unwrap()).unwrap());
+    let mut clicks = Vec::new();
+    for (k, x) in data.iter().enumerate() {
+        if *x > 0.5 && clicks.last().is_none_or(|c: &usize| k > c + 100) {
+            clicks.push(k);
+        }
+    }
+    assert_eq!(clicks.len(), 2, "{clicks:?}");
+    let mut landed = Vec::new();
+    for k in clicks {
+        let k = k as i64;
+        let region = r
+            .iter()
+            .find(|e| {
+                let from = e.source_offset as i64;
+                from <= k && k < from + e.frames as i64
+            })
+            .unwrap_or_else(|| panic!("no region holds file frame {k}: {r:?}"));
+        landed.push(region.tick * BEAT / Q + (k - region.source_offset as i64));
+    }
+    for (at, want) in landed.iter().zip([36_000i64, 168_000]) {
+        assert!(
+            (at - want).abs() <= 2,
+            "a click landed at {at}, not {want}: {r:?}"
+        );
+    }
+    // MIDI: each note where the transport was heard as it was played
+    // (within a block or two either way; the latency is 480 ticks).
+    let got = notes(&s, d.seq.0, d.keys.0);
+    let slack = 2048 * Q / BEAT;
+    for (pitch, (before, after)) in [(60u8, early), (62, late)] {
+        let (t, _) = *got
+            .iter()
+            .find(|(_, p)| *p == pitch)
+            .unwrap_or_else(|| panic!("note {pitch} not recorded: {got:?}"));
+        assert!(
+            before - slack <= t && t <= after + slack,
+            "note {pitch} landed at tick {t}, played between {before} and {after}"
+        );
+    }
+    s.close().unwrap();
+}
+
 /// Takes of `lane` as `(name, region source offsets)`.
 fn takes(s: &Session, seq: u64, lane: u64) -> (u32, String) {
     let row = s
@@ -1260,7 +1410,8 @@ fn close_holds_the_package_until_it_is_tidied() {
     let p = g.dir.path().join("P.vizdaw");
     let a = untitled(&g, d.doc.clone());
     a.save_as(p.display().to_string()).unwrap();
-    let during: Arc<Mutex<Option<Result<Arc<Session>, VizError>>>> = Arc::default();
+    type Opened = Option<Result<Arc<Session>, VizError>>;
+    let during: Arc<Mutex<Opened>> = Arc::default();
     {
         let during = during.clone();
         let at = p.display().to_string();

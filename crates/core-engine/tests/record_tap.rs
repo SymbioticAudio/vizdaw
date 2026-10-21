@@ -440,3 +440,37 @@ fn midi_from_before_a_resume_is_dropped() {
         ]
     );
 }
+
+/// Final review I1: every mark carries the graph latency in effect from
+/// it on. The renderer's latency at install is the roll's; a change while
+/// rolling marks the next block with the new one; an unchanged latency
+/// marks nothing; wraps carry the latency then.
+#[test]
+fn marks_carry_the_graph_latency_and_a_change_is_marked() {
+    let (mut t, mut h) = core_engine::record::tap(&request(vec![0], 4800), 0);
+    let ch = [0.0f32; 256];
+    let input: [&[f32]; 1] = [&ch];
+    // Installed into a renderer whose graph has 64 frames of latency.
+    t.set_latency(64);
+    t.begin_block(1000, 0);
+    t.end_block(&input, 256, true);
+    t.set_latency(64);
+    t.begin_block(1256, 0);
+    t.end_block(&input, 256, true);
+    // A graph with 2048 frames of latency is swapped in.
+    t.set_latency(2048);
+    t.begin_block(1512, 0);
+    t.wrap(100, 1000);
+    t.end_block(&input, 256, true);
+    let m = full_marks(&mut h);
+    assert_eq!(
+        m.iter()
+            .map(|m| (m.run, m.frame, m.wrap, m.latency))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 1000, false, 64),
+            (512, 1512, false, 2048),
+            (612, 1000, true, 2048)
+        ]
+    );
+}

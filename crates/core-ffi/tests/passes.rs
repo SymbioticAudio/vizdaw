@@ -57,12 +57,19 @@ fn file(frames: u64) -> RecordedMedia {
 }
 
 fn mark(run: u64, frame: u64, wrap: bool) -> Mark {
-    Mark { run, frame, wrap }
+    Mark {
+        run,
+        frame,
+        wrap,
+        latency: 0,
+    }
 }
 
 struct Case<'a> {
     marks: Vec<Mark>,
     end_run: u64,
+    /// Added to every mark's latency: the graph latency through the whole
+    /// recording.
     latency: u64,
     input_delay: i64,
     range: RecordRange,
@@ -96,12 +103,19 @@ impl<'a> Case<'a> {
     }
 
     fn run(&self) -> Option<RecordPass> {
+        let marks: Vec<Mark> = self
+            .marks
+            .iter()
+            .map(|m| Mark {
+                latency: m.latency + self.latency,
+                ..*m
+            })
+            .collect();
         plan(&Captured {
             doc: &self.d.doc,
             seq: self.d.seq,
-            marks: &self.marks,
+            marks: &marks,
             end_run: self.end_run,
-            latency: self.latency,
             input_delay: self.input_delay,
             range: self.range,
             looped: self.looped,
@@ -763,4 +777,75 @@ fn midi_stamped_at_or_after_the_song_end_is_dropped() {
         assert_eq!(ticks.len(), want, "latency {latency}: {ticks:?}");
         assert_eq!(ticks[0], 3 * Q);
     }
+}
+
+fn latent(run: u64, frame: u64, latency: u64) -> Mark {
+    Mark {
+        run,
+        frame,
+        wrap: false,
+        latency,
+    }
+}
+
+/// Final review I1: the graph latency rose from 0 to 4 800 frames at
+/// run 2 beats (a latent plugin came in). What follows is placed with
+/// the new latency: the audio after the change starts where the new
+/// graph was first heard, and a note played while its delay filled lands
+/// where the next piece starts.
+#[test]
+fn a_latency_rise_places_what_follows_with_the_new_latency() {
+    let d = doc(None);
+    let mut c = audio_case(&d, 0, 8 * BEAT);
+    c.marks = vec![latent(0, 0, 0), latent(2 * BEAT, 2 * BEAT, 4800)];
+    c.midi_lanes = vec![d.keys];
+    let b = BEAT as i64;
+    c.midi = vec![
+        midi(d.keys, b, on(60, 100)),
+        midi(d.keys, b + 100, off(60)),
+        // In the gap the rise opened: lands at the next start.
+        midi(d.keys, 2 * b + 1000, on(61, 100)),
+        midi(d.keys, 2 * b + 2000, off(61)),
+        // Played at beat 4 as heard.
+        midi(d.keys, 4 * b + 4800, on(62, 100)),
+        midi(d.keys, 4 * b + 4900, off(62)),
+    ];
+    let p = c.run().unwrap();
+    assert_eq!(
+        active_regions(&p, d.mic),
+        vec![(0, 0, 2 * BEAT), (2 * Q, 2 * BEAT + 4800, 6 * BEAT - 4800)]
+    );
+    let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
+    let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
+    assert_eq!(ticks, vec![Q, 2 * Q, 4 * Q]);
+}
+
+/// Final review I1: the latency fell from 4 800 frames to 0 at run 2
+/// beats (a latent plugin was removed). The new graph is heard over the
+/// old one's tail, so the timeline in that tail was never heard; what
+/// follows is placed with no latency.
+#[test]
+fn a_latency_fall_places_what_follows_with_the_new_latency() {
+    let d = doc(None);
+    let mut c = audio_case(&d, 0, 8 * BEAT);
+    c.marks = vec![latent(0, 0, 4800), latent(2 * BEAT, 2 * BEAT, 0)];
+    c.midi_lanes = vec![d.keys];
+    let b = BEAT as i64;
+    c.midi = vec![
+        midi(d.keys, b + 4800, on(60, 100)),
+        midi(d.keys, b + 4900, off(60)),
+        // Heard over the old tail: the new graph's.
+        midi(d.keys, 2 * b + 1200, on(61, 100)),
+        midi(d.keys, 2 * b + 1300, off(61)),
+        midi(d.keys, 4 * b, on(62, 100)),
+        midi(d.keys, 4 * b + 100, off(62)),
+    ];
+    let p = c.run().unwrap();
+    assert_eq!(
+        active_regions(&p, d.mic),
+        vec![(0, 4800, 2 * BEAT - 4800), (2 * Q, 2 * BEAT, 6 * BEAT)]
+    );
+    let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
+    let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
+    assert_eq!(ticks, vec![Q, 2 * Q + 1200 * Q / BEAT as i64, 4 * Q]);
 }

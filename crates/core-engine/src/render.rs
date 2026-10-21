@@ -1134,6 +1134,11 @@ impl Renderer {
                 // The compensated audio of the last notes arrives L frames
                 // late: the tail waits for it before `ended`.
                 self.transport.latency = self.latency;
+                // What a recording captures from here on is heard with the
+                // new latency (final review I1).
+                if let Some(t) = self.tap.as_deref_mut() {
+                    t.set_latency(self.latency);
+                }
                 self.graph = Some(new);
                 self.shared.graphs_applied.fetch_add(1, Ordering::Relaxed);
                 // New inserts need their automated values.
@@ -1204,7 +1209,12 @@ impl Renderer {
                 o.send(target, 0, msg.as_slice());
                 self.audition.observe(target, msg.as_slice());
             }
-            EngineCmd::Record(new) => {
+            EngineCmd::Record(mut new) => {
+                // The latency the graph has now, whatever it was when the
+                // tap was made (final review I1).
+                if let Some(t) = new.as_deref_mut() {
+                    t.set_latency(self.latency);
+                }
                 if let Some(old) = std::mem::replace(&mut self.tap, new) {
                     old.close();
                     if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Tap(old)) {

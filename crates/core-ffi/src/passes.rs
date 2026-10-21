@@ -7,11 +7,18 @@
 //! frames) and marks which schedule frame each run plays after the roll,
 //! every loop wrap and every resync. The output played at run `x` is heard
 //! at run `x + L` (the graph latency), so the timeline position heard at
-//! run `u` is `S(u)`, where `S` maps runs to schedule frames through the
-//! marks. A MIDI message recorded at output run `r` was played against
-//! `S(r − L)`; input file frame `k` was captured while `S(k − D)` was
-//! heard, `D` being the device's input delay minus the latency trim plus
-//! `L`.
+//! run `u` is `S(u − L)`, where `S` maps runs to schedule frames through
+//! the marks. A MIDI message recorded at output run `r` was played against
+//! `S(r − L)`; input file frame `k` was captured while `S(k − D − L)` was
+//! heard, `D` being the device's input delay minus the latency trim.
+//!
+//! **Latency per piece (final review I1).** Each mark carries the `L` in
+//! effect from it on (a graph swap that changes it marks where it took
+//! effect), so each piece is moved into heard runs by its own `L`. Where
+//! `L` grew, the heard runs between the pieces played the new graph's
+//! empty delay: no audio is placed from them, and a message played then
+//! lands where the next piece starts. Where `L` shrank, the newer piece is
+//! heard over the older one's tail, which it cuts.
 //!
 //! **Passes.** The roll and every wrap start a pass. A pass's window is the
 //! timeline it played, inside the record range. Discarded passes are
@@ -139,12 +146,11 @@ pub struct Captured<'a> {
     pub doc: &'a Document,
     /// The sequence recorded into.
     pub seq: SeqId,
-    /// The marks, oldest first.
+    /// The marks, oldest first, each with the graph latency `L` from it
+    /// on.
     pub marks: &'a [Mark],
     /// Output run frames played until the tap closed.
     pub end_run: u64,
-    /// The graph latency `L` (frames).
-    pub latency: u64,
     /// The device's input delay minus the latency trim (frames).
     pub input_delay: i64,
     /// The record range.
@@ -167,17 +173,20 @@ pub struct Captured<'a> {
     pub with_gaps: bool,
 }
 
-/// A stretch of runs `[run, end)` that played schedule frames from
+/// A stretch of heard runs `[run, end)` that played schedule frames from
 /// `frame` on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Piece {
     pass: usize,
-    /// The run of the mark that started it (`run` reaches back further
-    /// for the first piece).
+    /// The heard run of the mark that started it (`run` reaches back
+    /// further for the first piece).
     from: i64,
     run: i64,
     end: i64,
     frame: i64,
+    /// Where a message is placed in this piece from: before `run` only
+    /// after a latency rise, whose gap is this piece's (at its start).
+    catch: i64,
 }
 
 impl Piece {
@@ -186,20 +195,27 @@ impl Piece {
     }
 }
 
-/// The pieces the marks describe, numbered by pass: marks on one run keep
-/// the last frame (and a wrap); the first piece reaches back before the
-/// roll (pre-roll handles); the last ends at heard run `end`.
-fn pieces(marks: &[Mark], end: i64) -> Vec<Piece> {
+/// The pieces the marks describe in heard runs, numbered by pass: marks
+/// on one run keep the last frame and latency (and a wrap); the first
+/// piece reaches back before the roll (pre-roll handles); the last ends
+/// at output run `end_run`, as heard. Each piece is moved by its own
+/// latency (module docs).
+fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
     let mut m: Vec<Mark> = Vec::with_capacity(marks.len());
     for x in marks {
         match m.last_mut() {
             Some(last) if last.run == x.run => {
                 last.frame = x.frame;
                 last.wrap |= x.wrap;
+                last.latency = x.latency;
             }
             _ => m.push(*x),
         }
     }
+    let lat = |x: &Mark| i64::try_from(x.latency).unwrap_or(0);
+    // In output runs, the last piece ends where its output was heard by
+    // the end.
+    let end = end_run - m.last().map_or(0, lat);
     let mut out: Vec<Piece> = Vec::with_capacity(m.len());
     let mut pass = 0usize;
     for (i, x) in m.iter().enumerate() {
@@ -232,13 +248,42 @@ fn pieces(marks: &[Mark], end: i64) -> Vec<Piece> {
             end: next,
             // The frame at `run`: a piece reaching back keeps its slope.
             frame: frame - (at - run),
+            catch: run,
         });
+    }
+    // Into heard runs, each by its own latency (final review I1).
+    let mut prev: Option<(&mut Piece, i64)> = None;
+    for (p, x) in out.iter_mut().zip(&m) {
+        let l = lat(x);
+        p.from += l;
+        p.run += l;
+        p.end += l;
+        p.catch += l;
+        if let Some((q, ql)) = prev {
+            let rise = l - ql;
+            if q.end > p.from {
+                // The latency shrank: the newer piece is heard over the
+                // older one's tail.
+                q.end = p.from.max(q.from);
+            } else if rise > 0 {
+                // It grew: what is played in the gap it opened lands at
+                // this piece's start (a cut before it stays a cut).
+                p.catch = (p.from - rise).max(q.end);
+            }
+        }
+        prev = Some((p, l));
     }
     out
 }
 
+/// The piece a message heard at run `u` was played in.
 fn piece_of(pieces: &[Piece], u: i64) -> Option<&Piece> {
-    pieces.iter().find(|p| u >= p.run && u < p.end)
+    pieces.iter().find(|p| u >= p.catch && u < p.end)
+}
+
+/// Where in piece `p` a message heard at run `u` lands.
+fn place(p: &Piece, u: i64) -> i64 {
+    p.at(u.max(p.run))
 }
 
 /// The timeline `[t0, t1)` piece `p` played, inside the range.
@@ -320,7 +365,7 @@ fn midi_events(
         let Some((t0, t1)) = window(p, range) else {
             continue;
         };
-        let t = p.at(h.u);
+        let t = place(p, h.u);
         if t < t0 || t >= t1 {
             continue;
         }
@@ -338,7 +383,7 @@ fn midi_events(
                 });
                 let (end, release) = match off.and_then(|o| piece_of(pieces, o.u).map(|q| (o, q))) {
                     Some((o, q)) if q.pass == p.pass => (
-                        q.at(o.u).min(t1),
+                        place(q, o.u).min(t1),
                         crate::input::upscale_velocity(o.msg.bytes[2]),
                     ),
                     _ => (t1, 0),
@@ -453,13 +498,11 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
     let seq = c.doc.sequence(c.seq).map_err(|e| e.to_string())?;
     let rate = f64::from(c.doc.settings().format.sample_rate);
     let tempo = TempoTable::build(&seq.tempo, Tick(-seq.start_offset.0), rate);
-    let lat = i64::try_from(c.latency).unwrap_or(0);
-    let heard_end = i64::try_from(c.end_run).unwrap_or(i64::MAX) - lat;
-    let pieces = pieces(c.marks, heard_end);
+    let pieces = pieces(c.marks, i64::try_from(c.end_run).unwrap_or(i64::MAX));
     if pieces.is_empty() {
         return Ok(None);
     }
-    let d = c.input_delay.saturating_add(lat);
+    let d = c.input_delay;
     let fate = |pass: usize| c.fates.get(pass).copied().unwrap_or_default();
     let passes = pieces.last().map_or(0, |p| p.pass + 1);
     let tick_at = |f: i64| tempo.frame_to_tick(u64::try_from(f.max(0)).unwrap_or(0));
@@ -552,7 +595,7 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
             .iter()
             .filter(|m| m.lane == *lane)
             .map(|m| Heard {
-                u: m.run - lat,
+                u: m.run,
                 msg: m.msg,
             })
             .collect();

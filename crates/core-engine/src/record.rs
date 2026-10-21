@@ -9,8 +9,10 @@
 //! where, and the run stops growing until it plays again (pre-flight M2:
 //! the planner ends the last piece there). The control side
 //! (core-ffi) turns runs into timeline positions with the marks, the
-//! device's input delay and the graph latency, so the real-time side does
-//! no mapping at all. // RT where marked
+//! device's input delay and the graph latency each mark carries (a graph
+//! swap that changes the latency mid-pass marks where it took effect:
+//! final review I1), so the real-time side does no mapping at all. // RT
+//! where marked
 
 use crate::midi1::Midi1Msg;
 use core_media::record::{RingReader, RingWriter, input_ring};
@@ -38,6 +40,9 @@ pub struct Mark {
     /// Playing at `run`; nothing plays after it until the next mark), or
     /// the resume after one.
     pub wrap: bool,
+    /// The graph latency `L` (frames) from this mark until the next: the
+    /// output played at run `x` is heard at `x + L`.
+    pub latency: u64,
 }
 
 /// A MIDI message an armed lane recorded, at the output run frame that
@@ -67,8 +72,6 @@ pub struct RecordStatus {
     lost_blocks: AtomicU64,
     lost_marks: AtomicU64,
     lost_midi: AtomicU64,
-    /// The graph latency `L` when recording started, in frames.
-    pub latency: u64,
 }
 
 impl RecordStatus {
@@ -158,6 +161,9 @@ pub struct RecordTap {
     /// The `(run, frame)` of the last mark pushed: a wrap repeating it adds
     /// nothing (a roll exactly at the loop end is no wrap too).
     last_mark: Option<(u64, u64)>,
+    /// The graph latency the marks carry (the renderer's, kept current by
+    /// [`RecordTap::set_latency`]).
+    latency: u64,
 }
 
 impl Drop for RecordTap {
@@ -166,7 +172,9 @@ impl Drop for RecordTap {
     }
 }
 
-/// A tap and its control side. Allocates; call off the real-time thread.
+/// A tap and its control side, its marks carrying graph latency `latency`
+/// until the renderer says otherwise. Allocates; call off the real-time
+/// thread.
 pub fn tap(req: &RecordRequest, latency: u64) -> (RecordTap, RecordHandles) {
     let (ring, reader) = input_ring(req.channels.len().max(1), req.ring_frames.max(1));
     let (mark_tx, mark_rx) = RingBuffer::new(MARK_CAPACITY);
@@ -178,7 +186,6 @@ pub fn tap(req: &RecordRequest, latency: u64) -> (RecordTap, RecordHandles) {
         lost_blocks: AtomicU64::new(0),
         lost_marks: AtomicU64::new(0),
         lost_midi: AtomicU64::new(0),
-        latency,
     });
     (
         RecordTap {
@@ -195,6 +202,7 @@ pub fn tap(req: &RecordRequest, latency: u64) -> (RecordTap, RecordHandles) {
             stop_at: None,
             resumed_at: None,
             last_mark: None,
+            latency,
         },
         RecordHandles {
             ring: reader,
@@ -235,7 +243,17 @@ impl RecordTap {
         if wrap && self.last_mark == Some((run, frame)) {
             return;
         }
-        if self.marks.push(Mark { run, frame, wrap }).is_err() {
+        let latency = self.latency;
+        if self
+            .marks
+            .push(Mark {
+                run,
+                frame,
+                wrap,
+                latency,
+            })
+            .is_err()
+        {
             self.status.lost_marks.fetch_add(1, Ordering::Relaxed);
         } else {
             self.last_mark = Some((run, frame));
@@ -293,6 +311,17 @@ impl RecordTap {
     pub fn resync(&mut self) {
         if self.rolling {
             self.remark = true;
+        }
+    }
+
+    /// The graph latency is `latency` from the next block on (the renderer
+    /// installed the tap, or swapped in a graph): a change while rolling
+    /// marks where it took effect, so what follows is placed with its own
+    /// latency (final review I1). // RT
+    pub fn set_latency(&mut self, latency: u64) {
+        if latency != self.latency {
+            self.latency = latency;
+            self.resync();
         }
     }
 
