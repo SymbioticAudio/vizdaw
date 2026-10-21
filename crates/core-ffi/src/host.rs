@@ -373,6 +373,18 @@ pub fn inject_reload_fault(f: Option<ReloadFault>) {
     *lock(&RELOAD_FAULT) = f;
 }
 
+/// Makes the next `stop_recording` fail as if the engine's stop could not
+/// be sent (test hook, Task 11 re-review m1).
+#[cfg(feature = "test-hooks")]
+static STOP_RECORDING_FAULT: AtomicBool = AtomicBool::new(false);
+
+/// Makes the next `stop_recording` that reaches the engine fail before
+/// the engine stops (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn inject_stop_recording_fault(on: bool) {
+    STOP_RECORDING_FAULT.store(on, Ordering::Relaxed);
+}
+
 /// Closed sessions' plugin hosts still waiting for processors (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn closing_hosts_waiting() -> usize {
@@ -1467,10 +1479,28 @@ pub fn stop_recording(owner: u64) -> Result<(), VizError> {
             h.want_play = false;
             h.until = None;
             h.epoch = next_epoch();
-            h.engine.stop()?;
-            h.engine.stop_recording()?;
-            // The tap is out: input follows the lanes again.
-            h.end_record_hold()
+            // Every step runs whatever an earlier one says (Task 11
+            // re-review m1): the pass is over for the session either way,
+            // so the input hold always goes and the deferred change
+            // applies; the first error is returned.
+            let stopped: Result<(), VizError> = {
+                #[cfg(feature = "test-hooks")]
+                let injected = STOP_RECORDING_FAULT.swap(false, Ordering::Relaxed);
+                #[cfg(not(feature = "test-hooks"))]
+                let injected = false;
+                if injected {
+                    Err(VizError::Engine {
+                        message: "injected stop_recording fault".into(),
+                    })
+                } else {
+                    h.engine.stop().map_err(VizError::from)
+                }
+            };
+            let removed = h.engine.stop_recording().map_err(VizError::from);
+            // The tap is out (or the session gave up on it): input follows
+            // the lanes again.
+            let held = h.end_record_hold();
+            stopped.and(removed).and(held)
         }
         _ => Ok(()),
     }

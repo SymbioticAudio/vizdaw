@@ -48,6 +48,7 @@ fn serial(input: Option<FakeInput>) -> Serial {
     set_ring_frames(None);
     set_hold_finish(false);
     set_fake_microphone_denied(false);
+    vizdaw_ffi::host::inject_stop_recording_fault(false);
     reset_host();
     Serial {
         _g: g,
@@ -595,6 +596,43 @@ fn input_stays_open_until_the_pass_ends() {
     let tail = &data[data.len() - 4_800..];
     let peak = tail.iter().fold(0.0f32, |a, x| a.max(x.abs()));
     assert!(peak > 0.2, "silent tail: {peak}");
+    s.close().unwrap();
+}
+
+/// Task 11 re-review m1: a pass whose engine stop fails still lets go of
+/// the input, so the next lane edit reaches it at once.
+#[test]
+fn a_failed_stop_releases_the_input() {
+    use vizdaw_ffi::edit::{EditCommand, LaneEdit};
+    use vizdaw_ffi::host::inject_stop_recording_fault;
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    assert_eq!(s.debug_input_open(), Some(true));
+    inject_stop_recording_fault(true);
+    s.stop().unwrap();
+    inject_stop_recording_fault(false);
+    assert!(!s.record_state().unwrap().recording);
+    let arm = |on: bool| {
+        s.edit(
+            EditCommand::Lane {
+                edit: LaneEdit::SetFlags {
+                    seq: d.seq.0,
+                    lane: d.mic.0,
+                    mute: None,
+                    solo: None,
+                    arm: Some(on),
+                },
+            },
+            None,
+        )
+        .unwrap();
+    };
+    arm(false);
+    assert_eq!(s.debug_input_open(), Some(false), "disarm held back");
+    arm(true);
+    assert_eq!(s.debug_input_open(), Some(true), "arm held back");
     s.close().unwrap();
 }
 
