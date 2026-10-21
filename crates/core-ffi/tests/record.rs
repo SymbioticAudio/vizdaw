@@ -1093,3 +1093,95 @@ fn an_unreadable_recorded_folder_is_never_removed() {
     assert!(kept, "the recording stays");
     assert!(pkg_left, "the scratch package stays");
 }
+
+// Task 9 re-review fix round 2: the package claim is airtight.
+
+/// Two opens of one package at the same moment: exactly one gets it.
+#[test]
+fn concurrent_opens_of_one_package_give_it_to_one() {
+    let g = serial(None);
+    let d = doc(8, false, true);
+    let p = g.dir.path().join("P.vizdaw");
+    let first = untitled(&g, d.doc.clone());
+    first.save_as(p.display().to_string()).unwrap();
+    first.close().unwrap();
+    drop(first);
+    for round in 0..20 {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let opens: Vec<_> = (0..2)
+            .map(|_| {
+                let (b, path) = (Arc::clone(&barrier), p.display().to_string());
+                std::thread::spawn(move || {
+                    b.wait();
+                    Session::open(path)
+                })
+            })
+            .collect();
+        let got: Vec<_> = opens.into_iter().map(|t| t.join().unwrap()).collect();
+        let ok: Vec<&Arc<Session>> = got.iter().filter_map(|r| r.as_ref().ok()).collect();
+        assert_eq!(ok.len(), 1, "round {round}: {got:?}");
+        assert!(
+            got.iter().any(
+                |r| matches!(r, Err(VizError::Busy { message }) if message.contains("already open"))
+            ),
+            "round {round}"
+        );
+        ok[0].close().unwrap();
+    }
+}
+
+/// A panic while opening (after the package was claimed, before the
+/// session exists) does not leave the package claimed.
+#[test]
+fn a_panic_while_opening_releases_the_package() {
+    let g = serial(None);
+    let d = doc(8, false, true);
+    let p = g.dir.path().join("P.vizdaw");
+    let first = untitled(&g, d.doc.clone());
+    first.save_as(p.display().to_string()).unwrap();
+    first.close().unwrap();
+    drop(first);
+    fn boom() {
+        panic!("injected panic before the open's sync");
+    }
+    vizdaw_ffi::recovery::set_before_sync_hook(Some(boom));
+    let r = Session::open(p.display().to_string());
+    vizdaw_ffi::recovery::set_before_sync_hook(None);
+    assert!(matches!(r, Err(VizError::Internal { .. })), "{r:?}");
+    let s = Session::open(p.display().to_string()).expect("not left claimed");
+    s.close().unwrap();
+}
+
+/// Save As claims its target before writing anything: onto an open
+/// package nothing is written; a closed session cannot Save As.
+#[test]
+fn save_as_claims_before_it_writes() {
+    let g = serial(None);
+    let d = doc(8, false, true);
+    let p = g.dir.path().join("P.vizdaw");
+    let a = untitled(&g, d.doc.clone());
+    a.save_as(p.display().to_string()).unwrap();
+    // A package that is open but not on disk yet stands for "claimed":
+    // the target exists only as a claim here, so check nothing is
+    // written into an open package.
+    let marker = p.join("project.json");
+    let before = std::fs::metadata(&marker).unwrap().modified().unwrap();
+    let b = untitled(&g, d.doc.clone());
+    b.rename_sequence(d.seq.0, "B".into()).unwrap();
+    assert!(matches!(
+        b.save_as(p.display().to_string()),
+        Err(VizError::Busy { .. })
+    ));
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().modified().unwrap(),
+        before
+    );
+    let text = std::fs::read_to_string(&marker).unwrap();
+    assert!(!text.contains("\"B\""), "nothing written");
+    // Closed: no Save As (it would claim a package for a closed window).
+    b.close().unwrap();
+    let q = g.dir.path().join("Q.vizdaw");
+    assert!(b.save_as(q.display().to_string()).is_err());
+    assert!(!q.exists());
+    a.close().unwrap();
+}

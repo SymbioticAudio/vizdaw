@@ -288,8 +288,12 @@ fn a_closed_session_never_brings_its_marker_back() {
     }
     let synth = s.mixer().unwrap().strips[0].id;
     s.add_insert(synth, None, gain()).unwrap();
-    s.save_as(d.path().join("other.vizdaw").to_string_lossy().into_owned())
-        .unwrap();
+    // A closed window cannot Save As (Task 9 re-review m-3: it would
+    // claim a package for a closed window); no marker comes back.
+    let other = d.path().join("other.vizdaw");
+    assert!(s.save_as(other.to_string_lossy().into_owned()).is_err());
+    assert!(!other.exists());
+    s.save().unwrap();
     assert!(markers(support.path()).is_empty());
     assert!(!recovery_check(path).unwrap().crashed);
 }

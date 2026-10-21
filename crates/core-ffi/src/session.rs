@@ -489,10 +489,9 @@ impl Session {
         plugins_off: bool,
     ) -> Result<Arc<Session>, VizError> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        // One session per package (review I-2).
-        if let Some(p) = path.as_deref() {
-            claim_package(p, id)?;
-        }
+        // One session per package (review I-2); released by the guard
+        // until the session exists.
+        let claim = path.as_deref().map(|p| claim_package(p, id)).transpose()?;
         let key = path.as_deref().map(recovery::key);
         // An earlier crash's marker survives a failed open (retrying
         // still offers safe mode).
@@ -503,7 +502,6 @@ impl Session {
             .as_deref()
             .and_then(|k| recovery::opened(k, id, &[]).err());
         let fail = |e: VizError| {
-            release_packages(id);
             plugins::close(id);
             if let Some(k) = key.as_deref() {
                 recovery::closed(k, id);
@@ -546,6 +544,10 @@ impl Session {
             id,
             inner: Mutex::new(Inner::new(doc, path)),
         });
+        // The session releases it from now on (close, drop, Save As).
+        if let Some(c) = claim {
+            c.keep();
+        }
         {
             let mut inner = lock(&s.inner);
             inner.marked = marked;
@@ -1060,10 +1062,15 @@ impl Session {
                     message: "Wait for the import or conversion to finish, then save.".into(),
                 });
             }
+            // A closed window holds no package (re-review m-3).
+            if inner.closed {
+                return Err(crate::events::bad("this project was closed"));
+            }
             let p = with_extension(&path);
             // Another window's package (review I-2): its retention would
-            // not know this session's files.
-            check_package(&p, self.id)?;
+            // not know this session's files. Claimed before anything is
+            // written (re-review m-2); a failed save releases it.
+            let claim = claim_package(&p, self.id)?;
             self.save_to(&mut inner, &p)?;
             if inner.path.as_deref() != Some(p.as_path()) {
                 // The marker follows the project to its new place (not
@@ -1082,8 +1089,13 @@ impl Session {
                     }
                     inner.key = Some(key);
                 }
-                release_packages(self.id);
-                let _ = claim_package(&p, self.id);
+                // The old package goes, unless it is the same one spelled
+                // another way.
+                if let Some(old) = inner.path.clone() {
+                    if package_key(&old) != claim.key {
+                        release_package(&old, self.id);
+                    }
+                }
                 inner.path = Some(p);
                 // The overview worker moves to the new package first, so it
                 // writes nothing more into the scratch package (review m3).
@@ -1093,6 +1105,7 @@ impl Session {
                 inner.reload_host(self.id);
                 self.mark(&mut inner);
             }
+            claim.keep();
             Ok(())
         })
     }
@@ -3439,27 +3452,82 @@ fn package_key(path: &Path) -> String {
     canonical.to_string_lossy().to_lowercase()
 }
 
-/// `Busy` when another session holds `path`.
-fn check_package(path: &Path, sid: u64) -> Result<(), VizError> {
-    match lock(&PACKAGES).get(&package_key(path)) {
-        Some(other) if *other != sid => {
-            let name = path.file_name().map_or_else(
-                || path.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            );
-            Err(VizError::Busy {
-                message: format!("{name} is already open in another window."),
-            })
-        }
-        _ => Ok(()),
+/// "Already open" for `path`.
+fn already_open(path: &Path) -> VizError {
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    VizError::Busy {
+        message: format!("{name} is already open in another window."),
     }
 }
 
-/// Makes session `sid` the holder of `path` (`Busy` when another is).
-fn claim_package(path: &Path, sid: u64) -> Result<(), VizError> {
-    check_package(path, sid)?;
-    lock(&PACKAGES).insert(package_key(path), sid);
-    Ok(())
+/// A claim on a package (re-review m-1): released when dropped unless
+/// [`PackageClaim::keep`] hands it to the session (which releases it at
+/// `close`, drop or a Save As elsewhere). A panic or an early return
+/// between claiming and the session existing therefore releases it.
+#[must_use = "dropping the claim releases the package"]
+struct PackageClaim {
+    key: String,
+    sid: u64,
+    /// This claim inserted the entry (a session re-claiming its own
+    /// package releases nothing on drop).
+    armed: bool,
+}
+
+impl PackageClaim {
+    /// The session holds the package from now on.
+    fn keep(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PackageClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut m = lock(&PACKAGES);
+            if m.get(&self.key) == Some(&self.sid) {
+                m.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Claims `path` for session `sid`, checked and inserted as one step under
+/// the registry lock (re-review m-2: two concurrent opens cannot both
+/// pass); the path is resolved before the lock is taken (m-3). `Busy`
+/// when another session holds it.
+fn claim_package(path: &Path, sid: u64) -> Result<PackageClaim, VizError> {
+    let key = package_key(path);
+    let mut m = lock(&PACKAGES);
+    match m.entry(key.clone()) {
+        std::collections::btree_map::Entry::Occupied(e) if *e.get() != sid => {
+            Err(already_open(path))
+        }
+        std::collections::btree_map::Entry::Occupied(_) => Ok(PackageClaim {
+            key,
+            sid,
+            armed: false,
+        }),
+        std::collections::btree_map::Entry::Vacant(e) => {
+            e.insert(sid);
+            Ok(PackageClaim {
+                key,
+                sid,
+                armed: true,
+            })
+        }
+    }
+}
+
+/// Session `sid` lets go of `path` (resolved before the lock).
+fn release_package(path: &Path, sid: u64) {
+    let key = package_key(path);
+    let mut m = lock(&PACKAGES);
+    if m.get(&key) == Some(&sid) {
+        m.remove(&key);
+    }
 }
 
 /// Session `sid` holds no package any more.
