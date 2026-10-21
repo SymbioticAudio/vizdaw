@@ -24,7 +24,7 @@ use objc2_core_midi::{
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -524,7 +524,47 @@ fn ump_words(t: u32) -> usize {
 /// `list` points at an event list CoreMIDI handed us. Packets are variable
 /// length (`wordCount` words, not the declared 64), so no packet or list is
 /// ever read as a whole struct.
-fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec<u8>) {
+/// The longest SysEx (F0 to F7) the record listener reassembles: 64 KiB.
+/// Longer ones are dropped and counted (Task 12 review M4); recording
+/// keeps channel messages only, so nothing it needs is lost.
+pub const MAX_SOURCE_SYSEX: usize = 64 * 1024;
+
+/// SysEx being reassembled across packets and callbacks.
+struct Sysex {
+    buf: Vec<u8>,
+    /// The longest message kept, F0 and F7 included.
+    cap: usize,
+    /// The message in progress overflowed: its remaining packets are
+    /// skipped until it ends or a new one starts.
+    discarding: bool,
+    /// Messages dropped for overflowing, since the owner last took them.
+    dropped: u64,
+}
+
+impl Sysex {
+    /// No bound (monitors and the note listener).
+    fn unbounded() -> Sysex {
+        Sysex {
+            buf: Vec::new(),
+            cap: usize::MAX,
+            discarding: false,
+            dropped: 0,
+        }
+    }
+
+    /// At most `cap` bytes, all allocated now: reassembly never
+    /// allocates on CoreMIDI's thread.
+    fn bounded(cap: usize) -> Sysex {
+        Sysex {
+            buf: Vec::with_capacity(cap),
+            cap,
+            discarding: false,
+            dropped: 0,
+        }
+    }
+}
+
+fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Sysex) {
     decode_each(list, sysex, &mut |host_time, host_ns, bytes| {
         out.push(Received {
             host_time,
@@ -537,10 +577,12 @@ fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec
 /// Decodes the type-2 and type-3 UMPs of an event list, handing each
 /// message (host ticks, host nanoseconds, bytes) to `each` without
 /// allocating: channel messages are built on the stack and SysEx in
-/// `sysex`, whose capacity is kept across calls.
+/// `sysex`, whose capacity is kept across calls. A SysEx longer than
+/// `sysex.cap` is dropped and counted in `sysex.dropped`; decoding picks
+/// up again at the next message.
 fn decode_each(
     list: NonNull<MIDIEventList>,
-    sysex: &mut Vec<u8>,
+    sysex: &mut Sysex,
     each: &mut impl FnMut(u64, u64, &[u8]),
 ) {
     let list = list.as_ptr();
@@ -590,15 +632,33 @@ fn decode_each(
                         (w1 >> 8) as u8,
                         w1 as u8,
                     ];
-                    if u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_START) == status {
-                        sysex.clear();
-                        sysex.push(0xF0);
+                    let starts =
+                        u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_START) == status;
+                    let ends =
+                        u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_END) == status;
+                    if starts {
+                        // A new message resyncs after an overflowed one.
+                        sysex.discarding = false;
+                        sysex.buf.clear();
+                        sysex.buf.push(0xF0);
                     }
-                    sysex.extend_from_slice(bytes.get(..count.min(6)).unwrap_or(&[]));
-                    if u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_END) == status {
-                        sysex.push(0xF7);
-                        each(time_stamp, host_ns, sysex);
-                        sysex.clear();
+                    if sysex.discarding {
+                        sysex.discarding = !ends;
+                    } else {
+                        let part = bytes.get(..count.min(6)).unwrap_or(&[]);
+                        // The F7 still to come counts toward the bound.
+                        if sysex.buf.len() + part.len() + 1 > sysex.cap {
+                            sysex.buf.clear();
+                            sysex.dropped = sysex.dropped.saturating_add(1);
+                            sysex.discarding = !ends;
+                        } else {
+                            sysex.buf.extend_from_slice(part);
+                            if ends {
+                                sysex.buf.push(0xF7);
+                                each(time_stamp, host_ns, &sysex.buf);
+                                sysex.buf.clear();
+                            }
+                        }
                     }
                     i += 2;
                 }
@@ -622,7 +682,7 @@ impl MidiMonitor {
         let source = system.source(name).ok_or(BackendError::NoDevice)?;
         let received = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received);
-        let pending = Mutex::new(Vec::new());
+        let pending = Mutex::new(Sysex::unbounded());
         let block = RcBlock::new(move |list: NonNull<MIDIEventList>, _src: *mut c_void| {
             if let (Ok(mut out), Ok(mut sx)) = (sink.lock(), pending.lock()) {
                 decode(list, &mut out, &mut sx);
@@ -723,7 +783,7 @@ impl NoteListener {
         })?;
         // Scratch buffers reused across callbacks (CoreMIDI calls the block
         // from one thread at a time, so the lock is never contended).
-        let scratch = Mutex::new((Vec::<Received>::new(), Vec::<u8>::new()));
+        let scratch = Mutex::new((Vec::<Received>::new(), Sysex::unbounded()));
         let block = RcBlock::new(move |list: NonNull<MIDIEventList>, _src: *mut c_void| {
             if let Ok(mut s) = scratch.try_lock() {
                 let (out, sx) = &mut *s;
@@ -864,6 +924,8 @@ pub struct SourceListener {
     own_only: bool,
     connected: Vec<SourceEntry>,
     names: Vec<String>,
+    /// Messages the callback dropped: SysEx over [`MAX_SOURCE_SYSEX`].
+    dropped: Arc<AtomicU64>,
     _block: RcBlock<dyn Fn(NonNull<MIDIEventList>, *mut c_void)>,
 }
 
@@ -898,11 +960,14 @@ impl SourceListener {
         os("MIDIClientCreate", unsafe {
             MIDIClientCreate(&cf, None, ptr::null_mut(), NonNull::from(&mut client))
         })?;
-        // SysEx scratch reused across callbacks (CoreMIDI calls the block
-        // from one thread at a time, so the lock is never contended; were
-        // it ever, the list is skipped rather than waited for). Channel
-        // messages reach the sink without any allocation.
-        let scratch = Mutex::new(Vec::<u8>::with_capacity(256));
+        // SysEx scratch reused across callbacks, bounded and allocated
+        // here (Task 12 review M4). CoreMIDI calls the block from one
+        // thread at a time, so the lock is never contended; were it ever,
+        // the list is skipped (and counted) rather than waited for.
+        // Channel messages reach the sink without any allocation.
+        let scratch = Mutex::new(Sysex::bounded(MAX_SOURCE_SYSEX));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
         let block = RcBlock::new(move |list: NonNull<MIDIEventList>, src: *mut c_void| {
             // The connection's refCon is the source's key.
             let key = src as usize as u32;
@@ -910,6 +975,11 @@ impl SourceListener {
                 decode_each(list, &mut sx, &mut |_, host_ns, bytes| {
                     sink(key, host_ns, bytes)
                 });
+                if sx.dropped > 0 {
+                    counted.fetch_add(std::mem::take(&mut sx.dropped), Ordering::Relaxed);
+                }
+            } else {
+                counted.fetch_add(1, Ordering::Relaxed);
             }
         });
         let mut port: MIDIPortRef = 0;
@@ -938,6 +1008,7 @@ impl SourceListener {
             own_only,
             connected: Vec::new(),
             names: Vec::new(),
+            dropped,
             _block: block,
         };
         l.reconnect();
@@ -1007,6 +1078,12 @@ impl SourceListener {
     pub fn sources(&self) -> &[String] {
         &self.names
     }
+
+    /// How many received messages it dropped (SysEx longer than
+    /// [`MAX_SOURCE_SYSEX`]).
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for SourceListener {
@@ -1068,7 +1145,7 @@ mod tests {
         let start = unsafe { guard.sub(bytes) }.cast::<u32>();
         unsafe { ptr::copy_nonoverlapping(words.as_ptr(), start, words.len()) };
         let mut out = Vec::new();
-        let mut sysex = Vec::new();
+        let mut sysex = Sysex::unbounded();
         let list = NonNull::new(start.cast::<MIDIEventList>()).unwrap();
         decode(list, &mut out, &mut sysex);
         // SAFETY: the mapping is ours and nothing points into it any more.
@@ -1149,6 +1226,90 @@ mod tests {
         assert!(!is_own_source(9, Some(43), Some("VizDAW Out"), &own));
         assert!(!is_own_source(9, None, Some("Keyboard"), &own));
         assert!(!is_own_source(9, Some(42), None, &[]));
+    }
+
+    /// An event list as CoreMIDI lays it out: protocol, packet count,
+    /// then each packet's timestamp (0), word count and words.
+    fn event_list(packets: &[Vec<u32>]) -> Vec<u32> {
+        let mut l = vec![1, packets.len() as u32];
+        for p in packets {
+            l.extend([0, 0, p.len() as u32]);
+            l.extend(p);
+        }
+        l
+    }
+
+    /// One SysEx7 UMP (status, up to 6 bytes).
+    fn sysex7(status: u8, bytes: &[u8]) -> [u32; 2] {
+        let mut b = [0u8; 6];
+        b[..bytes.len()].copy_from_slice(bytes);
+        let w0 = 0x3000_0000
+            | u32::from(status) << 20
+            | (bytes.len() as u32) << 16
+            | u32::from(b[0]) << 8
+            | u32::from(b[1]);
+        let w1 = u32::from_be_bytes([b[2], b[3], b[4], b[5]]);
+        [w0, w1]
+    }
+
+    /// A SysEx of `len` data bytes as packets of at most 64 words.
+    fn sysex_packets(len: usize) -> Vec<Vec<u32>> {
+        let data = vec![0x11u8; len];
+        let chunks: Vec<&[u8]> = data.chunks(6).collect();
+        let mut words = Vec::new();
+        for (i, c) in chunks.iter().enumerate() {
+            let status = match (i, chunks.len()) {
+                (_, 1) => SYSEX_COMPLETE,
+                (0, _) => SYSEX_START,
+                (i, n) if i + 1 == n => SYSEX_END,
+                _ => SYSEX_CONTINUE,
+            };
+            words.extend(sysex7(status, c));
+        }
+        words.chunks(64).map(<[u32]>::to_vec).collect()
+    }
+
+    fn decode_source(packets: &[Vec<u32>], sx: &mut Sysex) -> Vec<Vec<u8>> {
+        let mut list = event_list(packets);
+        let mut got = Vec::new();
+        let p = NonNull::new(list.as_mut_ptr().cast::<MIDIEventList>()).unwrap();
+        decode_each(p, sx, &mut |_, _, b| got.push(b.to_vec()));
+        got
+    }
+
+    /// Task 12 review M4: the source path's SysEx buffer is bounded. A
+    /// SysEx longer than the bound is dropped and counted, and decoding
+    /// resyncs at the next message: a note after it and a SysEx after
+    /// that arrive. The buffer never grows past its preallocated bound;
+    /// one exactly at the bound is still delivered.
+    #[test]
+    fn an_oversized_sysex_is_dropped_and_counted_and_the_next_messages_arrive() {
+        let mut sx = Sysex::bounded(MAX_SOURCE_SYSEX);
+        let cap = sx.buf.capacity();
+        assert!(cap >= MAX_SOURCE_SYSEX);
+        let mut packets = sysex_packets(MAX_SOURCE_SYSEX + 4096);
+        packets.push(vec![0x2090_3C40]);
+        packets.extend(sysex_packets(3));
+        let got = decode_source(&packets, &mut sx);
+        assert_eq!(got.len(), 2, "only the note and the small SysEx");
+        assert_eq!(got[0], [0x90, 0x3C, 0x40]);
+        assert_eq!(got[1], [0xF0, 0x11, 0x11, 0x11, 0xF7]);
+        assert_eq!(sx.dropped, 1);
+        assert_eq!(sx.buf.capacity(), cap, "the buffer grew");
+        // An oversized one cut short by a new SysEx: the new one arrives.
+        let mut cut = sysex_packets(MAX_SOURCE_SYSEX + 600);
+        cut.pop();
+        cut.extend(sysex_packets(9));
+        let got = decode_source(&cut, &mut sx);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].len(), 11);
+        assert_eq!(sx.dropped, 2);
+        // F0 + data + F7 exactly at the bound is kept.
+        let got = decode_source(&sysex_packets(MAX_SOURCE_SYSEX - 2), &mut sx);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].len(), MAX_SOURCE_SYSEX);
+        assert_eq!(sx.dropped, 2);
+        assert_eq!(sx.buf.capacity(), cap);
     }
 
     /// Pre-flight M7: a reconnect connects only what is new (or renamed:

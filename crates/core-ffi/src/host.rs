@@ -139,11 +139,28 @@ fn midi_from_source(port: u32, host_ns: u64, bytes: &[u8]) {
     }
 }
 
-/// How many source messages were dropped because the engine's MIDI input
-/// was busy (pre-flight M8; the engine's own queue counts its drops in
-/// `MidiSender::dropped`).
+/// How many source messages were dropped: the engine's MIDI input was
+/// busy (pre-flight M8) or a SysEx was over the listener's bound (Task
+/// 12 review M4). The engine's own queue counts its drops in
+/// `MidiSender::dropped`.
 pub fn midi_source_drops() -> u64 {
-    MIDI_SOURCE_DROPS.load(Ordering::Relaxed)
+    MIDI_SOURCE_DROPS
+        .load(Ordering::Relaxed)
+        .saturating_add(listener_drops())
+}
+
+/// SysEx the record listener dropped for being over its bound (Task 12
+/// review M4).
+#[cfg(all(target_os = "macos", not(feature = "test-hooks")))]
+fn listener_drops() -> u64 {
+    lock(&SOURCES)
+        .as_ref()
+        .map_or(0, platform_macos::midi::SourceListener::dropped)
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "test-hooks"))]
+fn listener_drops() -> u64 {
+    0
 }
 
 /// Hands `bytes` to the engine as if CoreMIDI source `name` sent them at
