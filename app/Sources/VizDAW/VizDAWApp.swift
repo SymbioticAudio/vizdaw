@@ -92,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         StoreAlerts.watch(appStore)
+        AppSetup.recoverUntitled()
         KeyMonitor.start()
         AppSetup.startScan()
         PluginTicker.start(appStore)
@@ -153,6 +154,17 @@ enum AppSetup {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? setSupportDir(path: dir.path)
         appPlugins.start(config: AppPlugins.config(supportDir: dir, scanner: scanner), scan: false)
+    }
+
+    /// Recordings untitled projects lost in a crash go to the Trash, with
+    /// one alert naming them (plan 5c Task 10, pre-flight I5). Not in
+    /// `--smoke` runs, which must leave the user's files alone.
+    static func recoverUntitled() {
+        guard !LaunchArguments.smokeRun else { return }
+        guard let line = (try? recoverUntitledRecordings()) ?? nil else { return }
+        if appStore.alert == nil {
+            appStore.alert = AlertItem(title: "Recordings Moved to the Trash", message: line)
+        }
     }
 
     /// After launch: the scan and the catalog's alerts.

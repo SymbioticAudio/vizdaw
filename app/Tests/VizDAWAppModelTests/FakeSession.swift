@@ -374,7 +374,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var passPresses: [Bool] = []
     var recordRow = RecordStateRow(
         recording: false, seq: nil, spec: nil, pass: 0, kept: 0, discarded: 0, lanes: [], frames: 0,
-        overflows: 0, gapFrames: 0, freeBytes: nil)
+        overflows: 0, gapFrames: 0, freeBytes: nil, recovered: [])
 
     func record(seq: UInt64, spec: RecordSpecRow) throws {
         if let e = recordError { throw e }
@@ -389,6 +389,18 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func keepPass() throws { passPresses.append(true) }
     func discardPass() throws { passPresses.append(false) }
     func recordState() throws -> RecordStateRow { recordRow }
+
+    var recovered: [RecoveredFileRow] = []
+    var recoverAnswers: [Bool] = []
+
+    func recoveredRecordings() throws -> [String] { recovered.map(\.path) }
+    func recoveredFiles() throws -> [RecoveredFileRow] { recovered }
+
+    func recoverRecordings(import: Bool) throws -> DocSnapshot {
+        recoverAnswers.append(`import`)
+        recovered = []
+        return commandResult()
+    }
 
     // MARK: Media pool (plan 5b Task 6)
 

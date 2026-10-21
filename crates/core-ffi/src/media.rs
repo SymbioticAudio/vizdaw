@@ -131,10 +131,46 @@ fn used_percent(spans: Option<&Vec<(u64, u64)>>, len: u64) -> f32 {
     (total as f64 / len as f64 * 100.0) as f32
 }
 
+/// The folder under [`scratch_parent`] holding untitled sessions'
+/// packages, `<pid>-<session>.vizdaw` each.
+pub const UNTITLED_DIR: &str = "VizDAW-untitled";
+
+/// The scratch folder's test override ([`set_scratch_dir`]).
+static SCRATCH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Where untitled sessions' packages go (plan 5c Task 10, pre-flight I5):
+/// the test override, else in test builds (`test-hooks`) a per-process
+/// temporary folder, so tests never touch the real `$TMPDIR`'s
+/// `VizDAW-untitled`; else `$VIZDAW_SCRATCH_DIR` when absolute (`vizctl
+/// launch`, the Swift tests), else `$TMPDIR`.
+pub fn scratch_parent() -> PathBuf {
+    if let Some(p) = crate::guard::lock(&SCRATCH).clone() {
+        return p;
+    }
+    #[cfg(feature = "test-hooks")]
+    {
+        std::env::temp_dir().join(format!("vizdaw-test-scratch-{}", std::process::id()))
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        std::env::var_os("VIZDAW_SCRATCH_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(std::env::temp_dir)
+    }
+}
+
+/// Makes `dir` the scratch folder, `None`: back to the default (test
+/// hook; process-wide, so a test that sets it runs alone in its binary).
+#[cfg(feature = "test-hooks")]
+pub fn set_scratch_dir(dir: Option<PathBuf>) {
+    *crate::guard::lock(&SCRATCH) = dir;
+}
+
 /// Where an untitled session keeps its media (Ruling 14).
 pub fn scratch_root(session: u64) -> PathBuf {
-    std::env::temp_dir()
-        .join("VizDAW-untitled")
+    scratch_parent()
+        .join(UNTITLED_DIR)
         .join(format!("{}-{session}.vizdaw", std::process::id()))
 }
 

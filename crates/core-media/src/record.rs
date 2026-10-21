@@ -608,6 +608,35 @@ fn free_bytes_impl(_path: &Path) -> Option<u64> {
     None
 }
 
+/// Whether process `pid` may still be running: false only when the
+/// system says no such process exists (`kill(pid, 0)` fails with
+/// `ESRCH`). A process another user owns counts as running, and so does
+/// every pid where the system cannot say: callers only ever leave a
+/// running process's files alone.
+pub fn process_exists(pid: u32) -> bool {
+    process_exists_impl(pid)
+}
+
+#[cfg(unix)]
+fn process_exists_impl(pid: u32) -> bool {
+    let Ok(p) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
+    if p <= 0 {
+        // 0 and negative pids name process groups, never one process.
+        return true;
+    }
+    // SAFETY: signal 0 sends nothing; `kill` only checks that `p` exists
+    // and may be signalled.
+    let r = unsafe { libc::kill(p, 0) };
+    r == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn process_exists_impl(_pid: u32) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

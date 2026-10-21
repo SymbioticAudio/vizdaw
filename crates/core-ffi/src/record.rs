@@ -167,6 +167,29 @@ pub struct RecordStateRow {
     /// Late stream starts while recording (pre-flight M11).
     #[uniffi(default)]
     pub late_starts: u64,
+    /// Recordings found after a crash and not yet imported or moved to
+    /// the Trash (package-relative; plan 5c Task 10).
+    #[uniffi(default)]
+    pub recovered: Vec<String>,
+    /// The same files with what each holds (pre-flight M9).
+    #[uniffi(default)]
+    pub recovered_files: Vec<RecoveredFileRow>,
+}
+
+/// A recording offered for recovery (plan 5c Task 10; pre-flight M9).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RecoveredFileRow {
+    /// Package-relative path, under `Media/Recorded/`.
+    pub path: String,
+    /// Whole frames it holds (0 when unreadable).
+    pub frames: u64,
+    /// Its size was written when it was finished: a take that was
+    /// finished cleanly and that nothing names (undone, then saved; or
+    /// kept after a failed pass). False: a crash left it unfinished.
+    pub size_known: bool,
+    /// It reads as a VizDAW CAF (an unreadable kept file is still
+    /// offered: recovery never deletes a recording on its own).
+    pub readable: bool,
 }
 
 /// One armed audio lane's file.
@@ -636,6 +659,8 @@ impl Recording {
             free_bytes: free_bytes(&self.root),
             underruns: stream.0,
             late_starts: stream.1,
+            recovered: Vec::new(),
+            recovered_files: Vec::new(),
         }
     }
 
@@ -808,6 +833,227 @@ pub fn recorded_path(
         k += 1;
     }
     rel
+}
+
+/// The recordings a crash left in `package` (spec §6.5 "Crash
+/// recovery"): regular `.caf` files directly in `Media/Recorded/` (not
+/// hidden) that carry the `vizdaw-recording` mark and that no media item
+/// of `doc` names, package-relative and sorted. A file that is not a
+/// readable VizDAW CAF is never offered.
+pub fn recovered(package: &Path, doc: &Document) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(package.join(RECORDED_DIR)) else {
+        return Vec::new();
+    };
+    let named = named_lower(doc);
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            if name.starts_with('.') || !name.to_lowercase().ends_with(".caf") {
+                return None;
+            }
+            let rel = format!("{RECORDED_DIR}/{name}");
+            if named.contains(&rel.to_lowercase()) || !e.file_type().ok()?.is_file() {
+                return None;
+            }
+            let r = core_media::caf::CafReader::open(&e.path()).ok()?;
+            (r.info().recording && r.info().frames > 0).then_some(rel)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The media paths `doc` names, in lower case (as macOS volumes resolve
+/// names).
+fn named_lower(doc: &Document) -> BTreeSet<String> {
+    doc.media()
+        .values()
+        .map(|m| m.path.to_lowercase())
+        .collect()
+}
+
+/// What the file at `rel` in `package` holds.
+pub fn recovered_row(package: &Path, rel: &str) -> RecoveredFileRow {
+    match core_media::caf::CafReader::open(&package.join(rel)) {
+        Ok(r) => RecoveredFileRow {
+            path: rel.to_string(),
+            frames: r.info().frames,
+            size_known: r.info().size_known,
+            readable: true,
+        },
+        Err(_) => RecoveredFileRow {
+            path: rel.to_string(),
+            frames: 0,
+            size_known: false,
+            readable: false,
+        },
+    }
+}
+
+/// What recovery offers at open: [`recovered`] and the kept takes
+/// (`kept`, from [`read_kept`]) that are still files no media item of
+/// `doc` names, sorted by path.
+pub fn offered(package: &Path, doc: &Document, kept: &BTreeSet<String>) -> Vec<RecoveredFileRow> {
+    let named = named_lower(doc);
+    let mut paths: BTreeSet<String> = recovered(package, doc).into_iter().collect();
+    for k in kept {
+        if !named.contains(&k.to_lowercase()) && package.join(k).is_file() {
+            paths.insert(k.clone());
+        }
+    }
+    paths.iter().map(|p| recovered_row(package, p)).collect()
+}
+
+/// The package file listing the takes kept for the recovery offer (a
+/// take no region uses, a pass that could not be applied): they go with
+/// the project, so a save in a later session never moves them to the
+/// Trash (plan 5c Task 10).
+pub const KEEP_FILE: &str = "recordings.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeepFile {
+    keep: Vec<String>,
+}
+
+/// A path a keep file may name: a non-hidden file directly in
+/// `Media/Recorded/` (the file is edited by hand at worst; nothing it
+/// names outside that folder is ever touched).
+fn keepable(rel: &str) -> bool {
+    rel.strip_prefix(RECORDED_DIR)
+        .and_then(|r| r.strip_prefix('/'))
+        .is_some_and(|n| !n.is_empty() && !n.starts_with('.') && !n.contains(['/', '\\']))
+}
+
+/// The kept takes `package`'s keep file names (none when it has none or
+/// it cannot be read).
+pub fn read_kept(package: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(package.join(KEEP_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str::<KeepFile>(&t).ok())
+        .map(|k| k.keep.into_iter().filter(|p| keepable(p)).collect())
+        .unwrap_or_default()
+}
+
+/// Writes `package`'s keep file: the kept takes that are files in it, or
+/// no file when there are none. Returns what it wrote.
+pub fn write_kept(package: &Path, kept: &BTreeSet<String>) -> Result<BTreeSet<String>, String> {
+    let keep: BTreeSet<String> = kept
+        .iter()
+        .filter(|p| keepable(p) && package.join(p).is_file())
+        .cloned()
+        .collect();
+    let path = package.join(KEEP_FILE);
+    if keep.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(keep),
+        };
+    }
+    let text = serde_json::to_string_pretty(&KeepFile {
+        keep: keep.iter().cloned().collect(),
+    })
+    .map_err(|e| e.to_string())?;
+    core_model::file::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(keep)
+}
+
+/// Pre-flight I5: moves the recordings an untitled project lost to the
+/// Trash (`trash`, else the platform's). They are the recording-mode CAFs
+/// holding frames in `<parent>/VizDAW-untitled/<pid>-<n>.vizdaw/Media/Recorded/`
+/// whose `pid` is not this process and no longer exists. A running
+/// VizDAW's packages are never touched, and nothing is ever unlinked.
+/// Returns the one line to tell the user, `None` when there were none.
+pub fn trash_orphaned_untitled(parent: &Path, trash: Option<&Path>) -> Option<String> {
+    let mut packages: Vec<PathBuf> = std::fs::read_dir(parent.join(crate::media::UNTITLED_DIR))
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| {
+            let name = e.file_name();
+            let pid = name
+                .to_str()
+                .and_then(|n| n.strip_suffix(".vizdaw"))
+                .and_then(|n| n.split_once('-'))
+                .and_then(|(pid, _)| pid.parse::<u32>().ok());
+            pid.is_some_and(|p| p != std::process::id() && !core_media::record::process_exists(p))
+        })
+        .map(|e| e.path())
+        .collect();
+    packages.sort();
+    let (mut moved, mut left) = (Vec::new(), Vec::new());
+    for pkg in packages {
+        let Ok(rd) = std::fs::read_dir(pkg.join(RECORDED_DIR)) else {
+            continue;
+        };
+        let mut files: Vec<(String, PathBuf)> = rd
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter_map(|e| Some((e.file_name().to_str()?.to_string(), e.path())))
+            .filter(|(n, p)| {
+                !n.starts_with('.')
+                    && core_media::caf::CafReader::open(p)
+                        .is_ok_and(|r| r.info().recording && r.info().frames > 0)
+            })
+            .collect();
+        files.sort();
+        for (name, path) in files {
+            match crate::retention::trash(trash, &path) {
+                Ok(()) => moved.push(name),
+                Err(e) => left.push(format!("{} ({e})", path.display())),
+            }
+        }
+    }
+    let count = |n: usize, was: &str, were: &str| {
+        if n == 1 {
+            format!("1 recording from an untitled project VizDAW lost {was}")
+        } else {
+            format!("{n} recordings from an untitled project VizDAW lost {were}")
+        }
+    };
+    let mut parts = Vec::new();
+    if !moved.is_empty() {
+        parts.push(format!(
+            "{}: {}.",
+            count(
+                moved.len(),
+                "was moved to the Trash",
+                "were moved to the Trash"
+            ),
+            moved.join(", ")
+        ));
+    }
+    if !left.is_empty() {
+        parts.push(format!(
+            "{}: {}.",
+            count(
+                left.len(),
+                "could not be moved to the Trash and is still in place",
+                "could not be moved to the Trash and are still in place"
+            ),
+            left.join(", ")
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut line = parts.join(" ");
+    line.pop();
+    Some(line)
+}
+
+/// Pre-flight I5, for the app to call once at launch: moves the
+/// recordings untitled projects lost in a crash to the Trash
+/// ([`trash_orphaned_untitled`] on [`crate::media::scratch_parent`]) and
+/// returns the line to show, if any.
+#[uniffi::export]
+pub fn recover_untitled_recordings() -> Result<Option<String>, VizError> {
+    crate::guard::ffi_guard(|| {
+        Ok(trash_orphaned_untitled(
+            &crate::media::scratch_parent(),
+            crate::retention::trash_dir(None).as_deref(),
+        ))
+    })
 }
 
 #[cfg(test)]

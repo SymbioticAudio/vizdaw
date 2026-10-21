@@ -16,6 +16,9 @@ export VIZDAW_SCANNER="${VIZDAW_SCANNER:-$root/target/ffi/vizdaw-scan}"
 # (plan 5b Ruling 11, preflight M15).
 if [[ "$cmd" == "test" ]]; then
     export VIZDAW_TRASH_DIR="${TMPDIR:-/tmp}/vizdaw-swift-trash-$$"
+    # Untitled projects' scratch packages too: never the real
+    # $TMPDIR/VizDAW-untitled (plan 5c Task 10, pre-flight I5).
+    export VIZDAW_SCRATCH_DIR="${TMPDIR:-/tmp}/vizdaw-swift-scratch-$$"
 fi
 
 if xcodebuild -version >/dev/null 2>&1; then

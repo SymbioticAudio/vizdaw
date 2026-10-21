@@ -116,6 +116,9 @@ struct Inner {
     /// Transport fault names the last recording raised (`record-overflow`,
     /// `input-lost`; pre-flight M11), until the next one starts.
     record_faults: Vec<String>,
+    /// Recordings a crash left (and kept takes), offered and not yet
+    /// answered (plan 5c Task 10): the Trash leaves them until they are.
+    recovered: Vec<crate::record::RecoveredFileRow>,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -186,14 +189,17 @@ impl Inner {
             keep_recordings: Default::default(),
             finishing_files: Vec::new(),
             record_faults: Vec::new(),
+            recovered: Vec::new(),
         }
     }
 
     /// Recorded files the Trash must leave: those being written or
-    /// finished, those of a pass waiting to apply, and those kept after a
-    /// failed pass (plan 5c Ruling 15; pre-flight I1, I3).
+    /// finished, those of a pass waiting to apply, those kept after a
+    /// failed pass, and those offered for recovery (plan 5c Ruling 15,
+    /// Task 10; pre-flight I1, I3).
     fn recorded_keep(&self) -> Vec<String> {
         let mut out: Vec<String> = self.keep_recordings.iter().cloned().collect();
+        out.extend(self.recovered.iter().map(|r| r.path.clone()));
         out.extend(self.finishing_files.iter().cloned());
         if let Some(r) = &self.recording {
             out.extend(r.files());
@@ -222,6 +228,16 @@ impl Inner {
             crate::retention::trash(dir.as_deref(), p)
         });
         self.news.problems.extend(out.problems);
+    }
+
+    /// Writes `package`'s keep file from the kept takes (plan 5c Task 10);
+    /// a failure is a problem for the next `idle`.
+    fn write_kept(&mut self, package: &Path) {
+        if let Err(e) = crate::record::write_kept(package, &self.keep_recordings) {
+            self.news
+                .problems
+                .push(format!("The list of kept recordings was not saved ({e})."));
+        }
     }
 
     /// Every package-relative path a history state references: no job
@@ -631,6 +647,7 @@ impl Session {
         crate::overviews::copy_cache(&refs, &inner.root(self.id), path);
         file::save(inner.doc(), path)?;
         write_windows(path, &inner.windows, inner.editor_layout.as_ref());
+        inner.write_kept(path);
         // Reads `project.json` and the autosaves under the save lock
         // (preflight M4: whole-document reads, not media-file reads).
         inner.tidy(path, false);
@@ -1019,9 +1036,14 @@ impl Session {
             crate::media::sweep_temp(&p);
             let windows = read_windows(&p);
             let layout = read_layout(&p);
+            // Plan 5c Task 10: kept takes, and what a crash left.
+            let kept = crate::record::read_kept(&p);
+            let recovered = crate::record::offered(&p, &doc, &kept);
             let s = Session::with(doc, Some(p), options.plugins_off)?;
             {
                 let mut inner = lock(&s.inner);
+                inner.keep_recordings = kept;
+                inner.recovered = recovered;
                 inner.windows = windows;
                 inner.editor_layout = layout;
                 inner.clean = clean;
@@ -2208,6 +2230,9 @@ impl Session {
                 // lock, as after a save (an autosave may be writing).
                 let _g = lock(&SAVE_LOCK);
                 let before = inner.news.problems.len();
+                // Takes kept since the last save stay kept (plan 5c Task
+                // 10), saved or not.
+                inner.write_kept(&p);
                 inner.tidy(&p, true);
                 // No `idle` follows a close: the problems would be lost
                 // (preflight M5).
@@ -3762,9 +3787,226 @@ impl Session {
                     free_bytes: crate::record::free_bytes(&inner.root(self.id)),
                     underruns: 0,
                     late_starts: 0,
+                    recovered: Vec::new(),
+                    recovered_files: Vec::new(),
                 },
             })
+            .map(|mut row| {
+                row.recovered = inner.recovered.iter().map(|r| r.path.clone()).collect();
+                row.recovered_files = inner.recovered.clone();
+                row
+            })
         })
+    }
+
+    /// Recordings a crash left in this project, and takes kept for this
+    /// offer, offered at open (spec §6.5: "Recovered recordings: import
+    /// into a new lane / move to Trash"); empty once answered.
+    pub fn recovered_recordings(&self) -> Result<Vec<String>, VizError> {
+        ffi_guard(|| {
+            Ok(lock(&self.inner)
+                .recovered
+                .iter()
+                .map(|r| r.path.clone())
+                .collect())
+        })
+    }
+
+    /// [`Session::recovered_recordings`] with what each file holds: its
+    /// frames, whether its size was written (a finished take nothing
+    /// names) or not (a crash leftover), and whether it reads at all
+    /// (pre-flight M9).
+    pub fn recovered_files(&self) -> Result<Vec<crate::record::RecoveredFileRow>, VizError> {
+        ffi_guard(|| Ok(lock(&self.inner).recovered.clone()))
+    }
+
+    /// Answers the offer: `import` puts each readable offered file on a
+    /// new lane of the first top-level sequence at bar 1, as one undo step
+    /// "Recover Recordings" (an unreadable one stays kept and is
+    /// reported); otherwise each moves to the Trash (never unlinked; a file
+    /// the Trash refuses stays kept and is reported). `Model` when there
+    /// is nothing to recover; `Busy` while a recording runs, finishes or
+    /// waits to be applied, or while an edit is open.
+    pub fn recover_recordings(&self, import: bool) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if inner.recovered.is_empty() {
+                return Err(crate::events::bad("there are no recovered recordings"));
+            }
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                return Err(recording_busy());
+            }
+            if inner.history.in_transaction() || inner.history.in_group() {
+                return Err(VizError::Busy {
+                    message: "Finish the open edit first.".into(),
+                });
+            }
+            let root = inner.root(self.id);
+            let files: Vec<String> = std::mem::take(&mut inner.recovered)
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            if !import {
+                let dir = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                for rel in files {
+                    match crate::retention::trash(dir.as_deref(), &root.join(&rel)) {
+                        Ok(()) => {
+                            inner.keep_recordings.remove(&rel);
+                        }
+                        Err(e) => {
+                            inner
+                                .news
+                                .problems
+                                .push(format!("{rel}: not moved to the Trash ({e})"));
+                            // Still in place: kept, offered at the next open.
+                            inner.keep_recordings.insert(rel);
+                        }
+                    }
+                }
+                if let Some(p) = inner.path.clone() {
+                    inner.write_kept(&p);
+                }
+                return inner.snapshot();
+            }
+            let (imported, problems) = match recover_into_lanes(&mut inner, &root, &files) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Offered again: nothing was applied.
+                    inner.recovered = files
+                        .iter()
+                        .map(|f| crate::record::recovered_row(&root, f))
+                        .collect();
+                    return Err(e);
+                }
+            };
+            inner.news.problems.extend(problems);
+            for rel in &files {
+                if imported.contains(rel) {
+                    inner.keep_recordings.remove(rel);
+                } else {
+                    // Unreadable: kept, offered at the next open.
+                    inner.keep_recordings.insert(rel.clone());
+                }
+            }
+            if imported.is_empty() {
+                return inner.snapshot();
+            }
+            inner.version += 1;
+            inner.news.doc_changed = true;
+            inner.news.media_changed = true;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+}
+
+/// [`Session::recover_recordings`]'s import: one transaction "Recover
+/// Recordings" adding each readable file as a recorded media item and a
+/// region at bar 1 on its own new lane (named after the file) in the
+/// first top-level sequence. Returns the files imported and a problem for
+/// each one that could not be read.
+fn recover_into_lanes(
+    inner: &mut Inner,
+    root: &Path,
+    files: &[String],
+) -> Result<(Vec<String>, Vec<String>), VizError> {
+    use core_model::command::{AudioCmd, MediaCmd};
+    use core_model::document::{MediaItem, MediaOrigin};
+    use core_model::event::Fade;
+    use core_model::ids::AnyId;
+    let seq = seq_rows(inner.doc())?
+        .iter()
+        .find(|r| r.top_level)
+        .map(|r| SeqId(r.id))
+        .ok_or_else(|| crate::events::bad("the project has no sequence to recover into"))?;
+    let pass = crate::record::next_pass(inner.doc());
+    let mut problems = Vec::new();
+    let mut found = Vec::new();
+    for rel in files {
+        let path = root.join(rel);
+        let info = core_media::caf::CafReader::open(&path).map(|r| r.info().clone());
+        match (info, core_media::caf::hash_file(&path)) {
+            (Ok(i), Ok(h)) if i.frames > 0 => found.push((rel.clone(), i, h)),
+            (Ok(_), Ok(_)) => problems.push(format!("{rel}: it holds no audio; it is kept")),
+            (Err(e), _) | (_, Err(e)) => problems.push(format!("{rel}: {e}; it is kept")),
+        }
+    }
+    if found.is_empty() {
+        return Ok((Vec::new(), problems));
+    }
+    let filter = ViewFilter::default();
+    let h = &mut inner.history;
+    h.begin("Recover Recordings")?;
+    let run = (|| -> Result<(), VizError> {
+        for (rel, info, hash) in &found {
+            let (_, stem) = MediaItem::file_parts(rel);
+            let r = h.execute(
+                &Command::Media(MediaCmd::Add {
+                    path: rel.clone(),
+                    sample_rate: info.sample_rate,
+                    channels: info.channels,
+                    length_frames: info.frames,
+                    content_hash: Some(hash.clone()),
+                    name: Some(stem.clone()),
+                    origin: Some(MediaOrigin::Recorded { pass }),
+                }),
+                &filter,
+            )?;
+            let media = r
+                .created
+                .iter()
+                .find_map(|id| match id {
+                    AnyId::Media(m) => Some(*m),
+                    _ => None,
+                })
+                .ok_or_else(|| VizError::Internal {
+                    message: "no media created".into(),
+                })?;
+            let r = h.execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq,
+                    name: stem,
+                    index: None,
+                }),
+                &filter,
+            )?;
+            let lane = r
+                .created
+                .iter()
+                .find_map(|id| match id {
+                    AnyId::Lane(l) => Some(*l),
+                    _ => None,
+                })
+                .ok_or_else(|| VizError::Internal {
+                    message: "no lane created".into(),
+                })?;
+            h.execute(
+                &Command::Audio(AudioCmd::Insert {
+                    seq,
+                    lane,
+                    tick: Tick::ZERO,
+                    media,
+                    source_offset: 0,
+                    length: info.frames,
+                    gain_db: 0.0,
+                    fade_in: Fade::default(),
+                    fade_out: Fade::default(),
+                }),
+                &filter,
+            )?;
+        }
+        Ok(())
+    })();
+    match run {
+        Ok(()) => {
+            h.commit()?;
+            Ok((found.into_iter().map(|(r, _, _)| r).collect(), problems))
+        }
+        Err(e) => {
+            let _ = h.abort();
+            Err(e)
+        }
     }
 }
 
