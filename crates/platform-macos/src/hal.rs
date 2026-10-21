@@ -284,25 +284,102 @@ fn get_asbd(stream: AudioObjectID) -> Result<AudioStreamBasicDescription, Backen
     Ok(f)
 }
 
+/// The latency properties of devices and streams (the seam the latency
+/// arithmetic is tested through).
+trait LatencyProps {
+    /// A `u32` property of `obj` (`None`: unknown).
+    fn value(
+        &self,
+        obj: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope,
+    ) -> Option<u32>;
+    /// The streams of `dev` in `scope`, in order.
+    fn streams(&self, dev: AudioObjectID, scope: AudioObjectPropertyScope) -> Vec<AudioObjectID>;
+}
+
+/// The HAL's latency properties.
+struct HalProps;
+
+impl LatencyProps for HalProps {
+    fn value(
+        &self,
+        obj: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope,
+    ) -> Option<u32> {
+        get(obj, selector, scope).ok()
+    }
+
+    fn streams(&self, dev: AudioObjectID, scope: AudioObjectPropertyScope) -> Vec<AudioObjectID> {
+        get_ids(dev, kAudioDevicePropertyStreams, scope).unwrap_or_default()
+    }
+}
+
 /// The latency of `dev` in `scope`, in frames: device latency + safety
 /// offset + the first stream's latency (spec §6.1). Unknown parts count
 /// 0.
 fn latency(dev: AudioObjectID, scope: AudioObjectPropertyScope) -> u32 {
-    let device: u32 = get(dev, kAudioDevicePropertyLatency, scope).unwrap_or(0);
-    let safety: u32 = get(dev, kAudioDevicePropertySafetyOffset, scope).unwrap_or(0);
-    let stream: u32 = get_ids(dev, kAudioDevicePropertyStreams, scope)
-        .ok()
-        .and_then(|v| v.first().copied())
+    latency_with(&HalProps, dev, scope)
+}
+
+fn latency_with(p: &impl LatencyProps, dev: AudioObjectID, scope: AudioObjectPropertyScope) -> u32 {
+    let device = p
+        .value(dev, kAudioDevicePropertyLatency, scope)
+        .unwrap_or(0);
+    let safety = p
+        .value(dev, kAudioDevicePropertySafetyOffset, scope)
+        .unwrap_or(0);
+    let stream = p
+        .streams(dev, scope)
+        .first()
         .and_then(|st| {
-            get(
-                st,
+            p.value(
+                *st,
                 kAudioStreamPropertyLatency,
                 kAudioObjectPropertyScopeGlobal,
             )
-            .ok()
         })
         .unwrap_or(0);
     device.saturating_add(safety).saturating_add(stream)
+}
+
+/// The input latency of a stream opened on `device`, whose input comes
+/// from `input_device` inside an aggregate when there is one (Task 11
+/// review I2): the chosen input device's own latency, never the
+/// aggregate's first input stream (which belongs to the output device
+/// whenever that has inputs).
+fn input_latency_with(
+    p: &impl LatencyProps,
+    device: AudioObjectID,
+    input_device: Option<AudioObjectID>,
+) -> u32 {
+    latency_with(
+        p,
+        input_device.unwrap_or(device),
+        kAudioObjectPropertyScopeInput,
+    )
+}
+
+/// Whether a stream lost its device (`DeviceLost`): the device it runs on
+/// or a sub-device of its aggregate (the aggregate may outlive either).
+fn device_lost(
+    alive: impl Fn(AudioObjectID) -> bool,
+    device: AudioObjectID,
+    subs: [Option<AudioObjectID>; 2],
+) -> bool {
+    !alive(device) || subs.into_iter().flatten().any(|d| !alive(d))
+}
+
+/// Makes aggregate UIDs unique within the process too (one per open).
+static AGGREGATES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The UID of the next private aggregate (Task 11 review M4): the process
+/// and a count, so neither another VizDAW nor a destroy that failed makes
+/// a duplicate.
+fn next_aggregate_uid() -> String {
+    let n = AGGREGATES.fetch_add(1, Ordering::Relaxed);
+    format!("org.vizdaw.input.{}.{n}", std::process::id())
 }
 
 /// The names of `dev`'s first `n` input channels (the device's element
@@ -389,7 +466,7 @@ fn create_aggregate(
     let (Some(out_uid), Some(in_uid)) = (uid_of(output), uid_of(input)) else {
         return Err(BackendError::NoDevice);
     };
-    let uid = format!("org.vizdaw.input.{}", std::process::id());
+    let uid = next_aggregate_uid();
     let desc = aggregate_description(&uid, &out_uid, &in_uid);
     let mut id: AudioObjectID = 0;
     // SAFETY: `desc` is a valid dictionary of CFString keys for the call
@@ -430,8 +507,9 @@ pub fn input_delay(
 }
 
 /// Copies input channels `offset..offset + inputs.len()` (counted across
-/// every buffer of `list`) into the planar `inputs`, `frames` frames; the
-/// rest of each is left alone. // RT
+/// every buffer of `list`) into the planar `inputs`, `frames` frames. A
+/// channel this cycle's list does not carry (fewer buffers, or no data)
+/// is silence, never the last cycle's input again. // RT
 ///
 /// # Safety
 ///
@@ -442,6 +520,11 @@ unsafe fn deinterleave(
     inputs: &mut [Box<[f32]>],
     frames: usize,
 ) {
+    for dst in inputs.iter_mut() {
+        for d in dst.iter_mut().take(frames) {
+            *d = 0.0;
+        }
+    }
     // SAFETY: forwarded from the caller.
     let bufs = unsafe { buffers(list) };
     let mut global = 0usize;
@@ -823,9 +906,18 @@ impl CoreAudioBackend {
         Some(Arc::new(wg))
     }
 
+    /// The devices inside the aggregate made for input (none without
+    /// one): the output and the input device, each listened to for loss.
+    fn sub_devices(&self) -> [Option<AudioObjectID>; 2] {
+        match self.aggregate {
+            Some(_) => [self.output, self.input_device],
+            None => [None, None],
+        }
+    }
+
     fn listen(&mut self, device: AudioObjectID, follow_default: bool) {
         let flags = Arc::into_raw(Arc::new(Flags::default()));
-        if let Some(input) = self.input_device {
+        for sub in self.sub_devices().into_iter().flatten() {
             let mut a = addr(
                 kAudioDevicePropertyDeviceIsAlive,
                 kAudioObjectPropertyScopeGlobal,
@@ -833,7 +925,7 @@ impl CoreAudioBackend {
             // SAFETY: as below; removed in `unlisten`.
             unsafe {
                 AudioObjectAddPropertyListener(
-                    input,
+                    sub,
                     NonNull::from(&mut a),
                     Some(listener),
                     flags.cast_mut().cast::<c_void>(),
@@ -874,7 +966,7 @@ impl CoreAudioBackend {
         let Some(l) = self.listening.take() else {
             return;
         };
-        if let Some(input) = self.input_device {
+        for sub in self.sub_devices().into_iter().flatten() {
             let mut a = addr(
                 kAudioDevicePropertyDeviceIsAlive,
                 kAudioObjectPropertyScopeGlobal,
@@ -882,7 +974,7 @@ impl CoreAudioBackend {
             // SAFETY: removes exactly the listener added in `listen`.
             unsafe {
                 AudioObjectRemovePropertyListener(
-                    input,
+                    sub,
                     NonNull::from(&mut a),
                     Some(listener),
                     l.flags.cast_mut().cast::<c_void>(),
@@ -919,8 +1011,9 @@ impl CoreAudioBackend {
         if let Some(agg) = self.aggregate.take() {
             // SAFETY: the aggregate was made by this backend and nothing
             // runs on it any more.
-            unsafe {
-                AudioHardwareDestroyAggregateDevice(agg);
+            let status = unsafe { AudioHardwareDestroyAggregateDevice(agg) };
+            if status != 0 {
+                eprintln!("warning: AudioHardwareDestroyAggregateDevice failed ({status})");
             }
         }
         self.input_device = None;
@@ -1065,7 +1158,7 @@ impl AudioBackend for CoreAudioBackend {
                 .map(|src| input_names(src, input_channels))
                 .unwrap_or_default(),
             input_latency_frames: if input_channels > 0 {
-                latency(device, kAudioObjectPropertyScopeInput)
+                input_latency_with(&HalProps, device, self.input_device)
             } else {
                 0
             },
@@ -1157,8 +1250,8 @@ impl AudioBackend for CoreAudioBackend {
         // SAFETY: `flags` lives until `unlisten`.
         let flags = unsafe { &*l.flags };
         if flags.dead.swap(false, Ordering::Relaxed) {
-            // The input device inside an aggregate counts too: the
-            // aggregate may outlive it.
+            // Either device inside an aggregate counts too: the aggregate
+            // may outlive it.
             let alive = |d: AudioObjectID| {
                 get::<u32>(
                     d,
@@ -1168,7 +1261,7 @@ impl AudioBackend for CoreAudioBackend {
                 .unwrap_or(0)
                     != 0
             };
-            if !alive(device) || self.input_device.is_some_and(|d| !alive(d)) {
+            if device_lost(alive, device, self.sub_devices()) {
                 ev.push(BackendEvent::DeviceLost);
             }
         }
@@ -1512,5 +1605,144 @@ mod tests {
         // Accepted, but never reports the rate within the wait.
         let mut stuck = FakeRate::new(44_100.0, true, u32::MAX);
         assert!(match_rate(&mut stuck, "Mic", 48_000.0, t).is_err());
+    }
+
+    /// Latency properties standing in for a device tree: `(object,
+    /// selector, scope) -> value` and `(device, scope) -> streams`.
+    #[derive(Default)]
+    struct FakeProps {
+        values: Vec<(
+            AudioObjectID,
+            AudioObjectPropertySelector,
+            AudioObjectPropertyScope,
+            u32,
+        )>,
+        streams: Vec<(AudioObjectID, AudioObjectPropertyScope, Vec<AudioObjectID>)>,
+    }
+
+    impl LatencyProps for FakeProps {
+        fn value(
+            &self,
+            obj: AudioObjectID,
+            selector: AudioObjectPropertySelector,
+            scope: AudioObjectPropertyScope,
+        ) -> Option<u32> {
+            self.values
+                .iter()
+                .find(|v| v.0 == obj && v.1 == selector && v.2 == scope)
+                .map(|v| v.3)
+        }
+
+        fn streams(
+            &self,
+            dev: AudioObjectID,
+            scope: AudioObjectPropertyScope,
+        ) -> Vec<AudioObjectID> {
+            self.streams
+                .iter()
+                .find(|s| s.0 == dev && s.1 == scope)
+                .map(|s| s.2.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    /// Task 11 review I2: with a separate input device, the input latency
+    /// is that device's own, not the aggregate's first input stream (the
+    /// output device's, when it has inputs).
+    #[test]
+    fn the_input_latency_is_the_chosen_input_devices() {
+        let (agg, input) = (10, 20);
+        let (inp, glob) = (
+            kAudioObjectPropertyScopeInput,
+            kAudioObjectPropertyScopeGlobal,
+        );
+        let p = FakeProps {
+            values: vec![
+                // The aggregate: its first input stream is the output
+                // device's (latency 100).
+                (agg, kAudioDevicePropertyLatency, inp, 5),
+                (agg, kAudioDevicePropertySafetyOffset, inp, 3),
+                (101, kAudioStreamPropertyLatency, glob, 100),
+                (102, kAudioStreamPropertyLatency, glob, 7),
+                // The input device itself.
+                (input, kAudioDevicePropertyLatency, inp, 11),
+                (input, kAudioDevicePropertySafetyOffset, inp, 2),
+                (201, kAudioStreamPropertyLatency, glob, 7),
+            ],
+            streams: vec![(agg, inp, vec![101, 102]), (input, inp, vec![201])],
+        };
+        assert_eq!(input_latency_with(&p, agg, Some(input)), 11 + 2 + 7);
+        // Duplex (no aggregate): the device's own.
+        assert_eq!(input_latency_with(&p, agg, None), 5 + 3 + 100);
+        // Unknown parts count 0.
+        assert_eq!(input_latency_with(&FakeProps::default(), 1, Some(2)), 0);
+    }
+
+    /// Task 11 review M1: a channel this cycle's list does not carry is
+    /// silence, not the last cycle's input repeated.
+    #[test]
+    fn channels_missing_from_a_cycle_are_silent() {
+        let mut a = [1.0f32, 2.0, 3.0];
+        let list = TwoBuffers {
+            n: 2,
+            bufs: [
+                AudioBuffer {
+                    mNumberChannels: 1,
+                    mDataByteSize: 12,
+                    mData: a.as_mut_ptr().cast(),
+                },
+                // A buffer without data.
+                AudioBuffer {
+                    mNumberChannels: 1,
+                    mDataByteSize: 12,
+                    mData: ptr::null_mut(),
+                },
+            ],
+        };
+        let mut list = list;
+        let p = NonNull::from(&mut list).cast::<AudioBufferList>();
+        // Last cycle's input, in all three channels and past `frames`.
+        let mut inputs: Box<[Box<[f32]>]> =
+            (0..3).map(|_| vec![9.0; 4].into_boxed_slice()).collect();
+        // SAFETY: `list` is a valid two-buffer list for the call.
+        unsafe { deinterleave(p, 0, &mut inputs, 3) };
+        assert_eq!(&*inputs[0], &[1.0, 2.0, 3.0, 9.0]);
+        assert_eq!(&*inputs[1], &[0.0, 0.0, 0.0, 9.0], "no data");
+        assert_eq!(&*inputs[2], &[0.0, 0.0, 0.0, 9.0], "no buffer");
+        // A list with no buffers at all.
+        let mut empty = TwoBuffers {
+            n: 0,
+            bufs: list.bufs,
+        };
+        let p = NonNull::from(&mut empty).cast::<AudioBufferList>();
+        // SAFETY: as above (no buffers are read).
+        unsafe { deinterleave(p, 0, &mut inputs, 3) };
+        assert_eq!(&inputs[0][..3], &[0.0; 3]);
+    }
+
+    /// Task 11 review M4: every aggregate gets its own UID, naming the
+    /// process.
+    #[test]
+    fn aggregate_uids_are_unique() {
+        let (a, b) = (next_aggregate_uid(), next_aggregate_uid());
+        assert_ne!(a, b);
+        let pid = format!("org.vizdaw.input.{}.", std::process::id());
+        assert!(a.starts_with(&pid) && b.starts_with(&pid), "{a} {b}");
+    }
+
+    /// Task 11 review M5: the stream is lost when its device, or either
+    /// device inside its aggregate, is gone.
+    #[test]
+    fn losing_either_sub_device_loses_the_stream() {
+        let gone = |dead: &'static [AudioObjectID]| move |d| !dead.contains(&d);
+        let subs = [Some(1), Some(2)];
+        assert!(!device_lost(gone(&[]), 10, subs));
+        assert!(device_lost(gone(&[1]), 10, subs), "the output");
+        assert!(device_lost(gone(&[2]), 10, subs), "the input");
+        assert!(device_lost(gone(&[10]), 10, subs), "the aggregate");
+        assert!(
+            !device_lost(gone(&[1, 2]), 10, [None, None]),
+            "no aggregate"
+        );
     }
 }

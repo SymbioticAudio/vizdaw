@@ -550,6 +550,54 @@ fn a_refused_microphone_is_why_record_refuses() {
     s.close().unwrap();
 }
 
+/// Task 11 review I1: an edit during a pass that no longer wants audio
+/// input (the only audio lane disarmed) neither closes nor restarts the
+/// input under the pass; the change applies once the pass ends.
+#[test]
+fn input_stays_open_until_the_pass_ends() {
+    use vizdaw_ffi::edit::{EditCommand, LaneEdit};
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    assert_eq!(s.debug_input_open(), Some(true));
+    let changes = s.debug_input_changes().unwrap();
+    wait_until("half a second of audio", || frames(&s) >= 24_000);
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetFlags {
+                seq: d.seq.0,
+                lane: d.mic.0,
+                mute: None,
+                solo: None,
+                arm: Some(false),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(s.debug_input_open(), Some(true), "closed under the pass");
+    assert_eq!(s.debug_input_changes(), Some(changes), "restarted mid-pass");
+    wait_until("a second of audio", || frames(&s) >= 48_000);
+    assert!(s.record_state().unwrap().recording);
+    s.stop().unwrap();
+    assert!(!s.record_state().unwrap().recording);
+    assert_eq!(
+        s.debug_input_open(),
+        Some(false),
+        "the change applies after"
+    );
+    // The take is whole: the fake sine runs to its last frame.
+    let media = s.media().unwrap();
+    assert_eq!(media.len(), 1);
+    let (_, data) = read(&s.media_file(media[0].id).unwrap());
+    assert!(data.len() >= 48_000);
+    let tail = &data[data.len() - 4_800..];
+    let peak = tail.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+    assert!(peak > 0.2, "silent tail: {peak}");
+    s.close().unwrap();
+}
+
 #[test]
 fn a_full_disk_ends_the_pass_and_keeps_what_was_recorded() {
     let g = serial(Some(FakeInput::Signals));

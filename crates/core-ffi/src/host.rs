@@ -537,9 +537,18 @@ struct Host {
     injected: Vec<BackendEvent>,
     /// What the output's input offers.
     inputs: InputInfo,
-    /// A live output has its input open.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// A live output has its input open (an offline one: the input it
+    /// would have open).
     input_open: bool,
+    /// Times the input was opened or closed (test hook counter).
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    input_changes: u64,
+    /// A record tap is in (Task 11 review I1): the input stays as it is
+    /// until it goes, so an edit never restarts or closes the device under
+    /// a pass.
+    record_hold: bool,
+    /// What the input should become once the hold ends.
+    pending_input: Option<bool>,
     /// Why a live output's input could not open: not tried again (each
     /// try restarts the device) until no lane wants input any more.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -646,6 +655,9 @@ impl Host {
             injected: Vec::new(),
             inputs: InputInfo::default(),
             input_open: false,
+            input_changes: 0,
+            record_hold: false,
+            pending_input: None,
             input_failed: None,
         }
     }
@@ -653,7 +665,32 @@ impl Host {
     /// Opens or closes a live output's input to match `want` (spec §6.1),
     /// restarting the device with the same renderer. Offline outputs keep
     /// their fake input.
+    /// While a record tap is in, the change waits for it to go
+    /// ([`Host::end_record_hold`]).
     fn ensure_input(&mut self, want: bool) -> Result<(), VizError> {
+        if self.record_hold {
+            self.pending_input = Some(want);
+            return Ok(());
+        }
+        let was = self.input_open;
+        let r = self.apply_input(want);
+        if self.input_open != was {
+            self.input_changes += 1;
+        }
+        r
+    }
+
+    /// Ends the hold a record tap put on the input and applies what was
+    /// asked meanwhile.
+    fn end_record_hold(&mut self) -> Result<(), VizError> {
+        self.record_hold = false;
+        match self.pending_input.take() {
+            Some(want) => self.ensure_input(want),
+            None => Ok(()),
+        }
+    }
+
+    fn apply_input(&mut self, want: bool) -> Result<(), VizError> {
         match &mut self.output {
             Output::Offline(_) => {
                 #[cfg(all(feature = "test-hooks", target_os = "macos"))]
@@ -663,7 +700,8 @@ impl Host {
                         &mut self.faults,
                     );
                 }
-                let _ = want;
+                // The fake input stays; what would be open is tracked.
+                self.input_open = want;
                 Ok(())
             }
             #[cfg(target_os = "macos")]
@@ -1079,6 +1117,11 @@ pub fn play(
         p.sync(doc);
     }
     host.faults.clear();
+    if host.owner != owner {
+        // Another session's recording ends below: its hold goes with it.
+        host.record_hold = false;
+        host.pending_input = None;
+    }
     host.ensure_input(wants_audio_input(doc, seq))?;
     if host.owner != owner || host.seq != seq || start.is_some() {
         host.engine.stop()?;
@@ -1403,7 +1446,11 @@ pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
 pub fn start_recording(owner: u64, req: &RecordRequest) -> Result<RecordHandles, VizError> {
     let mut slot = lock(&HOST);
     match slot.as_mut() {
-        Some(h) if h.owner == owner => Ok(h.engine.start_recording(req)?),
+        Some(h) if h.owner == owner => {
+            let handles = h.engine.start_recording(req)?;
+            h.record_hold = true;
+            Ok(handles)
+        }
         _ => Err(VizError::Engine {
             message: "this document does not hold the audio engine".into(),
         }),
@@ -1421,7 +1468,9 @@ pub fn stop_recording(owner: u64) -> Result<(), VizError> {
             h.until = None;
             h.epoch = next_epoch();
             h.engine.stop()?;
-            Ok(h.engine.stop_recording()?)
+            h.engine.stop_recording()?;
+            // The tap is out: input follows the lanes again.
+            h.end_record_hold()
         }
         _ => Ok(()),
     }
@@ -1474,6 +1523,25 @@ pub fn input_info(owner: u64) -> Option<(String, InputInfo)> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| (h.device.clone(), h.inputs.clone()))
+}
+
+/// Whether `owner`'s host has (or, offline, would have) its input open
+/// (test hook, Task 11 review I1).
+#[cfg(feature = "test-hooks")]
+pub fn debug_input_open(owner: u64) -> Option<bool> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.input_open)
+}
+
+/// How many times `owner`'s host opened or closed its input (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_input_changes(owner: u64) -> Option<u64> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.input_changes)
 }
 
 /// The MIDI input of `owner`'s engine, when it holds it.

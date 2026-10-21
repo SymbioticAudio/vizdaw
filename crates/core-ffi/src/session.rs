@@ -2394,6 +2394,18 @@ impl Session {
         host::debug_inputs(self.id)
     }
 
+    /// Whether the engine host has its audio input open for this session
+    /// (test hook, Task 11 review I1).
+    pub fn debug_input_open(&self) -> Option<bool> {
+        host::debug_input_open(self.id)
+    }
+
+    /// How many times the engine host opened or closed its input (test
+    /// hook).
+    pub fn debug_input_changes(&self) -> Option<u64> {
+        host::debug_input_changes(self.id)
+    }
+
     /// True when every job thread has ended, applied or not (test hook).
     pub fn debug_jobs_settled(&self) -> bool {
         lock(&self.inner).jobs.settled()
