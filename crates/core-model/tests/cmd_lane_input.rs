@@ -185,3 +185,23 @@ fn a_damaged_input_in_a_file_is_refused() {
         json!({"audio": {"channels": {"quad": 0}}});
     assert!(from_json(&serde_json::to_string(&v).unwrap()).is_err());
 }
+
+/// Final review T2: the range error names the channel out of range — the
+/// right one of a pair past the last channel, not the pair's first.
+#[test]
+fn the_range_error_names_the_channel_out_of_range() {
+    let d = doc();
+    for (channels, named) in [
+        (InputChannels::Mono(MAX_INPUT_CHANNEL + 1), "256"),
+        (InputChannels::Stereo(MAX_INPUT_CHANNEL), "256"),
+        (InputChannels::Stereo(u16::MAX), "65536"),
+    ] {
+        match apply(&d, &set_input(Some(LaneInput::Audio { channels }))) {
+            Err(ModelError::OutOfRange { field, value }) => {
+                assert_eq!(field, "input.channels");
+                assert_eq!(value, named, "{channels:?}");
+            }
+            other => panic!("{channels:?}: {other:?}"),
+        }
+    }
+}

@@ -159,7 +159,12 @@ impl LaneInput {
         match self {
             LaneInput::Audio { channels } => {
                 if channels.last().is_none_or(|c| c > MAX_INPUT_CHANNEL) {
-                    return Err(ModelError::range("input.channels", channels.first()));
+                    // The channel out of range: the last one, or the one
+                    // past `u16::MAX` (final review T2).
+                    let bad = channels
+                        .last()
+                        .map_or(u32::from(channels.first()) + 1, u32::from);
+                    return Err(ModelError::range("input.channels", bad));
                 }
             }
             LaneInput::Midi { port, channel } => {
