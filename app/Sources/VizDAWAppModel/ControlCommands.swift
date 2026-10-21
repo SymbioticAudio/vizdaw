@@ -316,9 +316,21 @@ public enum ControlCommands {
             m.media.rename(media, to: name)
         case "record.set":
             guard !m.record.isRecording else { return unavailable("Stop recording first.") }
+            guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
+            // Validate everything before applying anything (the loop, which
+            // can fail, goes first).
+            if let n = args.int("count_in"), !(0...4).contains(n) {
+                return .failed(.of(.invalidParams, "record.set: `count_in` is 0 to 4"))
+            }
+            if let n = args.int("pre_roll"), !(0...8).contains(n) {
+                return .failed(.of(.invalidParams, "record.set: `pre_roll` is 0 to 8"))
+            }
+            if let on = args.flag("loop"), on != m.looping {
+                m.toggleLoop()
+                if m.looping != on { break }  // the failure alert becomes the call's failure
+            }
             if let replace = args.flag("replace") { m.editor.updateLayout { $0.transport.overdub = !replace } }
             if let punch = args.flag("punch") { m.editor.updateLayout { $0.transport.punch = punch } }
-            if let on = args.flag("loop"), on != m.looping { m.toggleLoop() }
             if let n = args.int("count_in") { m.record.countInBars = UInt8(clamping: n) }
             if let n = args.int("pre_roll") { m.record.preRollBars = UInt8(clamping: n) }
             if let on = args.flag("passes_as_takes") { m.record.passesAsTakes = on }
@@ -361,6 +373,9 @@ public enum ControlCommands {
                 guard try m.session.injectMidi(port: port, bytes: bytes) else {
                     return unavailable("Play or record first: this document does not hold the audio engine.")
                 }
+            } catch VizError.Model(let message) {
+                // The core refused the payload or the port name.
+                return .failed(.of(.invalidParams, "midi.inject: \(message)"))
             } catch {
                 return .failed(.thrown(error, "MIDI Injection Failed"))
             }
@@ -630,7 +645,6 @@ public enum ControlStates {
             guard let info = try? m.session.projectInfo() else { return nil }
             return .project(doc: doc, info: info)
         case .record:
-            m.record.refresh()
             guard let s = try? m.session.recordState() else { return nil }
             return .record(doc: doc, state: s)
         case .input:
@@ -702,6 +716,16 @@ public enum ControlLanes {
 
     /// The input `args` ask for, or nil when `kind` is missing or wrong.
     public static func input(_ args: [ControlArg]) -> Input? {
+        // Params that belong to another kind are mistakes, not extras.
+        let names = Set(args.map(\.name))
+        let audioOnly: Set<String> = ["channel", "stereo"]
+        let midiOnly: Set<String> = ["port", "midi_channel"]
+        switch args.text("kind") {
+        case "none" where !names.isDisjoint(with: audioOnly.union(midiOnly)): return nil
+        case "audio" where !names.isDisjoint(with: midiOnly): return nil
+        case "midi" where !names.isDisjoint(with: audioOnly): return nil
+        default: break
+        }
         switch args.text("kind") {
         case "none":
             return Input(value: nil)
@@ -735,7 +759,7 @@ public enum ControlLanes {
         guard !parts.isEmpty, parts.count <= 1024 else { return nil }
         var out = Data()
         for p in parts {
-            guard p.count <= 2, let b = UInt8(p, radix: 16) else { return nil }
+            guard p.count == 2, let b = UInt8(p, radix: 16) else { return nil }
             out.append(b)
         }
         return out

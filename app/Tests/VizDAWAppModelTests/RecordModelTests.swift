@@ -309,18 +309,28 @@ import VizDAWCore
         let before = f.edits.count
         let lane: [(String, ControlValue)] = [("seq", .int(value: 3)), ("lane", .int(value: 31))]
         for extra: [(String, ControlValue)] in [
-            [("kind", .text(value: "video"))], [("kind", .text(value: "audio")), ("channel", .int(value: 0))],
+            [("kind", .text(value: "video"))],
+            [("kind", .text(value: "audio")), ("channel", .int(value: 0))],
             [("kind", .text(value: "audio")), ("channel", .int(value: 257))],
             [("kind", .text(value: "midi")), ("midi_channel", .int(value: 17))],
             [("kind", .text(value: "midi")), ("midi_channel", .int(value: 0))], [],
         ] {
             #expect(run("lane.set_input", lane + extra, m, s, id)?.code == .invalidParams)
         }
-        #expect(run("lane.set_monitor", lane + [("mode", .text(value: "loud"))], m, s, id)?.code == .invalidParams)
-        #expect(run("lane.set_monitor", [("seq", .int(value: -1)), ("lane", .int(value: 31)), ("mode", .text(value: "off"))], m, s, id)?.code == .invalidParams)
+        #expect(
+            run("lane.set_monitor", lane + [("mode", .text(value: "loud"))], m, s, id)?.code == .invalidParams)
+        #expect(
+            run(
+                "lane.set_monitor",
+                [("seq", .int(value: -1)), ("lane", .int(value: 31)), ("mode", .text(value: "off"))], m, s, id)?
+                .code == .invalidParams)
         #expect(f.edits.count == before)
         // Wrong types are ignored as absent, so the required ids are missing.
-        #expect(run("lane.set_monitor", [("seq", .text(value: "3")), ("lane", .int(value: 31)), ("mode", .text(value: "off"))], m, s, id)?.code == .invalidParams)
+        #expect(
+            run(
+                "lane.set_monitor",
+                [("seq", .text(value: "3")), ("lane", .int(value: 31)), ("mode", .text(value: "off"))], m, s, id)?
+                .code == .invalidParams)
         #expect(ControlLanes.monitor("OFF") == nil && ControlLanes.monitor(nil) == nil)
         #expect(run("midi.inject", [("port", .text(value: "Keys"))], m, s, id)?.code == .invalidParams)
         #expect(f.injected.isEmpty)
@@ -333,6 +343,88 @@ import VizDAWCore
         #expect(run("record.set", [("loop", .flag(value: true))], m, s, id)?.code == .unavailable)
         #expect(run("transport.record", [], m, s, id) == nil)
         #expect(!m.record.isRecording)
+    }
+
+    // Review M3: the core's refusal of the payload is invalid_params.
+    @Test func aPayloadTheCoreRefusesIsInvalidParams() throws {
+        let (s, id, m, f) = try demo()
+        f.injectError = .Model(message: "byte 0xf0 does not start a channel message")
+        for bytes in ["f0 7e f7", "3c 64", "90 3c"] {
+            let failure = run("midi.inject", [("port", .text(value: "Keys")), ("bytes", .text(value: bytes))], m, s, id)
+            #expect(failure?.code == .invalidParams, "\(bytes)")
+        }
+        // An engine fault stays failed.
+        f.injectError = .Engine(message: "no engine")
+        #expect(
+            run("midi.inject", [("port", .text(value: "Keys")), ("bytes", .text(value: "90 3c 64"))], m, s, id)?.code
+                == .failed)
+    }
+
+    // Review M4: hex pairs only.
+    @Test func hexBytesWantPairs() {
+        #expect(ControlLanes.hexBytes("9 3c 64") == nil)
+        #expect(ControlLanes.hexBytes("90 3 64") == nil)
+        #expect(ControlLanes.hexBytes("90 3c 64") == Data([0x90, 0x3C, 0x64]))
+    }
+
+    // Review M5: record.set validates first, applies all or nothing, and waits for a gesture.
+    @Test func recordSetAppliesAllOrNothing() throws {
+        let (s, id, m, f) = try demo()
+        let overdub = m.editor.layout.transport.overdub
+        // Out of range: refused before any option is applied.
+        #expect(
+            run("record.set", [("replace", .flag(value: !overdub)), ("count_in", .int(value: 9))], m, s, id)?.code
+                == .invalidParams)
+        #expect(
+            run("record.set", [("replace", .flag(value: !overdub)), ("pre_roll", .int(value: -1))], m, s, id)?.code
+                == .invalidParams)
+        #expect(m.editor.layout.transport.overdub == overdub && m.record.countInBars == 0)
+        // The loop fails: nothing else changed.
+        f.loopError = .Engine(message: "no loop")
+        #expect(
+            run(
+                "record.set",
+                [("loop", .flag(value: true)), ("replace", .flag(value: !overdub)), ("pre_roll", .int(value: 3))],
+                m, s, id) != nil)
+        #expect(m.editor.layout.transport.overdub == overdub && m.record.preRollBars == 0 && !m.looping)
+        f.loopError = nil
+        // An open gesture refuses it.
+        #expect(m.editor.beginGesture("Move", lanes: [], origin: .other))
+        #expect(
+            run("record.set", [("replace", .flag(value: !overdub))], m, s, id)?.code == .unavailable)
+        #expect(m.editor.layout.transport.overdub == overdub)
+    }
+
+    // Review M6: params that do not belong to the kind are refused.
+    @Test func laneInputParamsMustFitTheKind() throws {
+        let (s, id, m, f) = try demo()
+        let lane: [(String, ControlValue)] = [("seq", .int(value: 3)), ("lane", .int(value: 31))]
+        for extra: [(String, ControlValue)] in [
+            [("kind", .text(value: "audio")), ("port", .text(value: "Keys"))],
+            [("kind", .text(value: "audio")), ("midi_channel", .int(value: 2))],
+            [("kind", .text(value: "midi")), ("channel", .int(value: 2))],
+            [("kind", .text(value: "midi")), ("stereo", .flag(value: true))],
+            [("kind", .text(value: "none")), ("channel", .int(value: 2))],
+            [("kind", .text(value: "none")), ("port", .text(value: "Keys"))],
+        ] {
+            #expect(run("lane.set_input", lane + extra, m, s, id)?.code == .invalidParams)
+        }
+        #expect(f.edits.isEmpty)
+        #expect(
+            run("lane.set_input", lane + [("kind", .text(value: "audio")), ("channel", .int(value: 2))], m, s, id)
+                == nil)
+    }
+
+    // Review M7: state.get record reads once and leaves the status line alone.
+    @Test func stateGetRecordIsSideEffectFree() throws {
+        let (_, id, m, f) = try demo()
+        let before = f.recordStateCalls
+        m.editor.status = "kept"
+        _ = ControlStates.state(.record, id, m)
+        #expect(f.recordStateCalls == before + 1)
+        f.recordStateError = .Engine(message: "no state")
+        #expect(ControlStates.state(.record, id, m) == nil)
+        #expect(m.editor.status == "kept")
     }
 
     @Test func recoverAnswersTheOfferAndStateGetReadsTheCore() throws {

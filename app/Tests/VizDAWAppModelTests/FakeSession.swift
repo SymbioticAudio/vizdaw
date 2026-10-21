@@ -143,7 +143,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
-    func setLoop(on: Bool) throws {}
+    var loopError: VizError?
+    func setLoop(on: Bool) throws { if let e = loopError { throw e } }
     func snapshot() throws -> DocSnapshot { snap }
     func stop() throws {
         state.playing = false
@@ -360,7 +361,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var inputRow = InputInfoRow(
         device: "", channels: 0, names: [], inputLatencyFrames: 0, outputLatencyFrames: 0)
 
+    var injectError: VizError?
+
     func injectMidi(port: String, bytes: Data) throws -> Bool {
+        if let e = injectError { throw e }
         injected.append((port, bytes))
         return true
     }
@@ -389,7 +393,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func keepPass() throws { passPresses.append(true) }
     func discardPass() throws { passPresses.append(false) }
     var recordStateError: VizError?
+    var recordStateCalls = 0
     func recordState() throws -> RecordStateRow {
+        recordStateCalls += 1
         if let e = recordStateError { throw e }
         return recordRow
     }
