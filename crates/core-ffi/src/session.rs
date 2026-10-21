@@ -614,7 +614,12 @@ impl Session {
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
         let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
-        let refs = inner.history.referenced_media_anywhere();
+        let mut refs = inner.history.referenced_media_anywhere();
+        // Recordings kept for the recovery offer go with the project
+        // (pre-flight I3): Save As removes an untitled scratch package.
+        for p in inner.recorded_keep() {
+            refs.entry(p).or_insert(None);
+        }
         crate::media::copy_media(&refs, &inner.root(self.id), path)?;
         crate::overviews::copy_cache(&refs, &inner.root(self.id), path);
         file::save(inner.doc(), path)?;

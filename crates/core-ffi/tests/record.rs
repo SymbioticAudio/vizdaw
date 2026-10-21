@@ -925,3 +925,32 @@ fn stream_misses_while_recording_are_counted() {
     s.close().unwrap();
     reset_host();
 }
+
+/// Pre-flight I3: a kept take (its lane was removed) of an untitled
+/// project goes with it into the package Save As makes.
+#[test]
+fn a_kept_take_follows_save_as() {
+    use vizdaw_ffi::edit::{EditCommand, LaneEdit};
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    let rel = s.record_state().unwrap().lanes[0].path.clone().unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::Remove {
+                seq: d.seq.0,
+                lane: d.mic.0,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    s.stop().unwrap();
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    assert!(pkg.join(&rel).is_file(), "copied with the project");
+    s.close().unwrap();
+    assert!(pkg.join(&rel).is_file());
+}
