@@ -100,8 +100,8 @@ pub fn set_fake_input(input: Option<FakeInput>) {
     *lock(&FAKE_INPUT) = Some(input);
 }
 
-/// Where the CoreMIDI sources' messages go: the newest host's engine
-/// (spec §6.6).
+/// Where the CoreMIDI sources' messages go: the installed host's engine
+/// (spec §6.6; set by `install`, Task 12 review M1).
 static MIDI_TO: Mutex<Option<MidiSender>> = Mutex::new(None);
 
 /// Source messages dropped because `MIDI_TO` was busy (pre-flight M8:
@@ -153,13 +153,65 @@ pub fn debug_midi_from_source(name: &str, host_ns: u64, bytes: &[u8]) {
     midi_from_source(port_key(name), host_ns, bytes);
 }
 
+/// Connect attempts, counted in every build (Task 12 review M3: tests
+/// pin that offline hosts never try).
+static MIDI_CONNECTS: AtomicU64 = AtomicU64::new(0);
+
+/// Why the sources' MIDI input is unavailable: the last connect failed
+/// (Task 12 review M2). Reported as a fault, again after each Play clears
+/// the faults, until a connect works.
+static MIDI_UNAVAILABLE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The error connects report instead of trying (test hook).
+#[cfg(feature = "test-hooks")]
+static MIDI_CONNECT_FAILURE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Makes MIDI source connects fail with `why` (`None`: they work again
+/// and no failure is remembered; test hook, Task 12 review M2).
+#[cfg(feature = "test-hooks")]
+pub fn set_midi_connect_failure(why: Option<String>) {
+    if why.is_none() {
+        *lock(&MIDI_UNAVAILABLE) = None;
+    }
+    *lock(&MIDI_CONNECT_FAILURE) = why;
+}
+
+/// How many times a host tried to connect the MIDI sources (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn midi_source_connects() -> u64 {
+    MIDI_CONNECTS.load(Ordering::Relaxed)
+}
+
+/// Connects as a live host would, reporting a failure on the current
+/// host (test hook: offline hosts never connect).
+#[cfg(feature = "test-hooks")]
+pub fn debug_connect_midi_sources() {
+    connect_and_report();
+}
+
 /// Connects the record listener to the MIDI sources present now: armed
 /// MIDI lanes hear them (spec §6.6), stamped with their host time (spec
 /// §6.3). The first call makes the process's one listener; later calls
 /// connect the sources plugged in since (pre-flight M7). Only for a live
-/// host (callers make sure); never in test builds, which connect nothing
-/// (`debug_midi_from_source` and `midi.inject` stand in).
-fn connect_midi_sources() {
+/// host (callers make sure); test builds connect nothing
+/// (`debug_midi_from_source` and `midi.inject` stand in). Never called
+/// with the host lock held: a cold CoreMIDI server can take seconds to
+/// create the client (Task 12 review). Returns the fault to report when
+/// the input is unavailable.
+fn connect_midi_sources() -> Option<String> {
+    MIDI_CONNECTS.fetch_add(1, Ordering::Relaxed);
+    let fault = try_connect_midi_sources()
+        .err()
+        .map(|e| format!("MIDI input is unavailable: {e}"));
+    *lock(&MIDI_UNAVAILABLE) = fault.clone();
+    fault
+}
+
+fn try_connect_midi_sources() -> Result<(), String> {
+    #[cfg(feature = "test-hooks")]
+    if let Some(why) = lock(&MIDI_CONNECT_FAILURE).clone() {
+        return Err(why);
+    }
     #[cfg(all(target_os = "macos", not(feature = "test-hooks")))]
     {
         let mut slot = lock(&SOURCES);
@@ -168,14 +220,32 @@ fn connect_midi_sources() {
                 l.reconnect();
             }
             None => {
-                if let Ok(l) = platform_macos::midi::SourceListener::connect_all(
+                let l = platform_macos::midi::SourceListener::connect_all(
                     "VizDAW Record Input",
                     Box::new(midi_from_source),
-                ) {
-                    *slot = Some(l);
-                }
+                )
+                .map_err(|e| e.to_string())?;
+                *slot = Some(l);
             }
         }
+    }
+    Ok(())
+}
+
+/// Reports `fault` (a MIDI input that could not open) on `h` once.
+fn note_midi_fault(h: &mut Host, fault: Option<String>) {
+    if let Some(f) = fault
+        && !h.faults.contains(&f)
+    {
+        h.faults.push(f);
+    }
+}
+
+/// Connects without the host lock, then reports a failure on the host.
+fn connect_and_report() {
+    let fault = connect_midi_sources();
+    if let Some(h) = lock(&HOST).as_mut() {
+        note_midi_fault(h, fault);
     }
 }
 
@@ -186,8 +256,45 @@ fn connect_midi_sources() {
 pub fn listen_to_midi_sources() {
     let live = lock(&HOST).as_ref().is_some_and(Host::is_live);
     if live {
-        connect_midi_sources();
+        connect_and_report();
     }
+}
+
+/// Holds the next rebuild between dropping the old host and making its
+/// new one (test hook, Task 12 review M1).
+#[cfg(feature = "test-hooks")]
+static REBUILD_GATE: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> =
+    Mutex::new(None);
+
+/// The test's side of [`hold_next_rebuild`].
+#[cfg(feature = "test-hooks")]
+pub struct RebuildGate {
+    reached: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(feature = "test-hooks")]
+impl RebuildGate {
+    /// Waits until the rebuild is held; false after `limit`.
+    pub fn wait_reached(&self, limit: Duration) -> bool {
+        self.reached.recv_timeout(limit).is_ok()
+    }
+
+    /// Lets the rebuild go on.
+    pub fn release(&self) {
+        let _ = self.release.send(());
+    }
+}
+
+/// Makes the next rebuild wait, its old host dropped and its new one not
+/// yet made, until the gate is released (test hook: races a Play into
+/// the empty slot deterministically).
+#[cfg(feature = "test-hooks")]
+pub fn hold_next_rebuild() -> RebuildGate {
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *lock(&REBUILD_GATE) = Some((reached_tx, release_rx));
+    RebuildGate { reached, release }
 }
 
 /// The input device live hosts open (`None`: the output device's own
@@ -501,6 +608,15 @@ pub fn engine_active() -> bool {
         .is_some_and(|h| h.engine.state() != PlayState::Stopped)
 }
 
+/// Puts `h` in the host slot and points the CoreMIDI sources at its
+/// engine. Only an installed host gets them: a rebuild's host that lost
+/// the slot to a Play is dropped without ever taking them (Task 12
+/// review M1).
+fn install(slot: &mut Option<Host>, h: Host) {
+    *lock(&MIDI_TO) = Some(h.engine.midi_sender());
+    *slot = Some(h);
+}
+
 /// Lets a stopped host's still-running output play its note-offs, then
 /// drops it (output first, then the engine). Call without the host lock.
 fn retire(old: Option<Host>) {
@@ -521,6 +637,8 @@ fn retire(old: Option<Host>) {
 /// `play`'s handover).
 pub fn reset() {
     let mut old = lock(&HOST).take();
+    // No engine: nothing hears the sources until the next host.
+    *lock(&MIDI_TO) = None;
     if let Some(h) = old.as_mut() {
         let _ = h.engine.stop();
     }
@@ -662,7 +780,6 @@ impl Host {
     /// rate; when it runs at another, regions are muted (Ruling 20).
     fn create(project: f64) -> Result<Host, VizError> {
         let mut h = Host::create_any(project)?;
-        *lock(&MIDI_TO) = Some(h.engine.midi_sender());
         if STALL_DISK.load(Ordering::Relaxed) {
             h.engine.streamer().set_stalled(true);
         }
@@ -718,9 +835,6 @@ impl Host {
         )?;
         engine.set_rt_env(rt_env(&backend, info.buffer_frames, info.sample_rate));
         backend.start(renderer)?;
-        // MIDI sources play into the newest engine from now on (`create`
-        // points `MIDI_TO` at it); only a live host connects them (M7).
-        connect_midi_sources();
         let mut h = Host::new(
             engine,
             Output::Hal(backend),
@@ -1075,7 +1189,18 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     // Read once the old output has stopped (dropped first, below).
     let overrides = old.engine.overrides();
     drop(old);
+    #[cfg(feature = "test-hooks")]
+    if let Some((reached, release)) = lock(&REBUILD_GATE).take() {
+        let _ = reached.send(());
+        let _ = release.recv_timeout(Duration::from_secs(30));
+    }
     let mut new = Host::create(project_rate(doc))?;
+    // Without the host lock (a cold CoreMIDI server is slow; M7: live
+    // hosts only).
+    if new.is_live() {
+        let fault = connect_midi_sources();
+        note_midi_fault(&mut new, fault);
+    }
     new.attach(owner, plugins);
     new.ensure_input(wants_audio_input(doc, seq))?;
     // Automated values held while stopped survive the rebuild (Plan 4d
@@ -1097,7 +1222,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     new.seq = seq;
     let mut slot = lock(&HOST);
     let spare = if slot.is_none() {
-        *slot = Some(new);
+        install(&mut slot, new);
         None
     } else {
         Some(new)
@@ -1156,6 +1281,9 @@ pub struct HostPlay {
     owner: u64,
     epoch: u64,
     pending: PendingPlay,
+    /// The host is live: `finish_play` connects the MIDI sources, without
+    /// the host lock (M7, Task 12 review).
+    connect_midi: bool,
 }
 
 /// Plays `seq` of `doc` for session `owner`, up to the disk wait (spec
@@ -1219,7 +1347,7 @@ pub fn play(
         break slot;
     };
     if slot.is_none() {
-        *slot = Some(Host::create(project)?);
+        install(&mut slot, Host::create(project)?);
     }
     let host = slot.as_mut().ok_or_else(|| VizError::Internal {
         message: "engine host missing".into(),
@@ -1232,6 +1360,9 @@ pub fn play(
         p.sync(doc);
     }
     host.faults.clear();
+    // Still unavailable: said again (Task 12 review M2).
+    let midi_fault = lock(&MIDI_UNAVAILABLE).clone();
+    note_midi_fault(host, midi_fault);
     if host.owner != owner {
         // Another session's recording ends below: its hold goes with it.
         host.record_hold = false;
@@ -1263,6 +1394,7 @@ pub fn play(
         owner,
         epoch: host.epoch,
         pending,
+        connect_midi: host.is_live(),
     })
 }
 
@@ -1272,6 +1404,9 @@ pub fn play(
 /// the meantime (they win; a rebuilt engine resumes on its own).
 pub fn finish_play(p: HostPlay) -> Result<(), VizError> {
     p.pending.wait();
+    if p.connect_midi {
+        connect_and_report();
+    }
     let mut slot = lock(&HOST);
     match slot.as_mut() {
         Some(h) if h.owner == p.owner && h.epoch == p.epoch => {

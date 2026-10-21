@@ -1306,3 +1306,26 @@ fn save_as_claims_before_it_writes() {
     assert!(!q.exists());
     a.close().unwrap();
 }
+
+/// Task 12 review M3 (pre-flight M7): an offline host never connects the
+/// machine's CoreMIDI sources, at Play or at a Record with an armed MIDI
+/// lane. The counter counts every connect attempt, whatever the build
+/// (the hook below proves it moves), so the gate pinned is the host's
+/// own live check, not the test build's compiled-out listener.
+#[test]
+fn an_offline_host_never_connects_midi_sources() {
+    use vizdaw_ffi::host::{debug_connect_midi_sources, midi_source_connects};
+    let g = serial(None);
+    let d = doc(2, true, false);
+    let s = untitled(&g, d.doc);
+    let before = midi_source_connects();
+    s.play(d.seq.0).unwrap();
+    s.stop().unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("recording", || s.record_state().unwrap().recording);
+    s.stop().unwrap();
+    assert_eq!(midi_source_connects(), before, "an offline host connected");
+    debug_connect_midi_sources();
+    assert_eq!(midi_source_connects(), before + 1);
+    s.close().unwrap();
+}

@@ -12,7 +12,7 @@
 mod common;
 
 use core_engine::offline::FakeInput;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{drain_offline_log, force_offline, reset_host, set_fake_input};
 use vizdaw_ffi::{
@@ -25,6 +25,7 @@ fn serial(input: Option<FakeInput>) -> MutexGuard<'static, ()> {
     let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     force_offline();
     set_fake_input(input);
+    vizdaw_ffi::host::set_midi_connect_failure(None);
     reset_host();
     g
 }
@@ -466,6 +467,119 @@ fn lane_edits_reach_the_engines_inputs_at_load() {
         (m.len(), m[0].thru),
         (1, false),
         "armed, monitor Off: records, no thru"
+    );
+    s.close().unwrap();
+}
+
+/// Arms "Chords" of `s` on source "Keystation", channel 1.
+fn arm_on_keystation(s: &Session) -> u64 {
+    let seq = song(s);
+    let chords = lane(s, seq, "Chords").id;
+    edit(
+        s,
+        LaneEdit::SetInput {
+            seq,
+            lane: chords,
+            input: Some(LaneInputRow::Midi {
+                port: Some("Keystation".into()),
+                channel: Some(0),
+            }),
+        },
+    )
+    .unwrap();
+    arm(s, seq, chords);
+    seq
+}
+
+/// Sends a note from "Keystation" until the offline log shows it.
+fn source_note_arrives() -> bool {
+    use vizdaw_ffi::host::debug_midi_from_source;
+    drain_offline_log();
+    let until = Instant::now() + Duration::from_secs(2);
+    debug_midi_from_source("Keystation", 0, &[0x90, 74, 90]);
+    while Instant::now() < until {
+        if drain_offline_log()
+            .iter()
+            .any(|(_, b)| b == &vec![0x90, 74, 90])
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+/// Task 12 review M1: a Play that installs a host while a device rebuild
+/// is making its own (which then loses and is dropped) leaves the
+/// sources' MIDI going to the installed engine, not the dropped one. The
+/// rebuild is held after dropping the old host, before making its own,
+/// so the race happens every time.
+#[test]
+fn a_play_racing_a_rebuild_leaves_source_midi_on_the_installed_engine() {
+    use core_engine::backend::BackendEvent;
+    use vizdaw_ffi::host::{hold_next_rebuild, hosts_created, simulate_event};
+    let _g = serial(Some(FakeInput::Signals));
+    let a = Session::new_demo().unwrap();
+    let b = Session::new_demo().unwrap();
+    let seq_a = song(&a);
+    let seq_b = arm_on_keystation(&b);
+    take_engine(&a, seq_a);
+    let gate = hold_next_rebuild();
+    simulate_event(BackendEvent::DefaultDeviceChanged);
+    let a2 = Arc::clone(&a);
+    // A's state poll handles the event: the old host goes and the
+    // rebuild waits before making A's new one.
+    let poll = std::thread::spawn(move || {
+        let _ = a2.transport();
+    });
+    assert!(gate.wait_reached(common::wait_limit()), "no rebuild");
+    let before = hosts_created();
+    // Meanwhile B plays into the empty slot: its host is installed.
+    take_engine(&b, seq_b);
+    assert_eq!(hosts_created(), before + 1);
+    gate.release();
+    poll.join().unwrap();
+    // The rebuild made its host after B's, found the slot taken and
+    // dropped it; B's engine hears the source.
+    assert_eq!(hosts_created(), before + 2);
+    assert!(
+        source_note_arrives(),
+        "source MIDI went to a dropped engine"
+    );
+    a.close().unwrap();
+    b.close().unwrap();
+}
+
+/// Task 12 review M2: a MIDI input that cannot open is reported as a
+/// transport fault (and again after a Play clears the faults), not
+/// silently missing; a later connect that works clears it.
+#[test]
+fn a_midi_input_that_cannot_open_is_a_fault() {
+    use vizdaw_ffi::host::{debug_connect_midi_sources, set_midi_connect_failure};
+    let _g = serial(Some(FakeInput::Signals));
+    let s = Session::new_demo().unwrap();
+    let seq = arm_on_keystation(&s);
+    take_engine(&s, seq);
+    set_midi_connect_failure(Some("MIDIClientCreate failed (-304)".into()));
+    debug_connect_midi_sources();
+    let want = "MIDI input is unavailable: MIDIClientCreate failed (-304)";
+    let faults = s.transport().unwrap().faults;
+    assert!(faults.iter().any(|f| f == want), "{faults:?}");
+    // A Play clears the faults; the input is still unavailable.
+    take_engine(&s, seq);
+    let faults = s.transport().unwrap().faults;
+    assert_eq!(
+        faults.iter().filter(|f| *f == want).count(),
+        1,
+        "{faults:?}"
+    );
+    set_midi_connect_failure(None);
+    debug_connect_midi_sources();
+    take_engine(&s, seq);
+    let faults = s.transport().unwrap().faults;
+    assert!(
+        !faults.iter().any(|f| f.starts_with("MIDI input")),
+        "{faults:?}"
     );
     s.close().unwrap();
 }
