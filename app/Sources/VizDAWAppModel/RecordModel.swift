@@ -91,7 +91,14 @@ public final class RecordModel {
     /// recording).
     public func refresh() {
         guard let m = document else { return }
-        if let s = try? m.session.recordState(), s != state { state = s }
+        do {
+            let s = try m.session.recordState()
+            if s != state { state = s }
+        } catch VizError.Busy {
+            return
+        } catch {
+            m.editor.status = AlertItem(error, title: "").message
+        }
     }
 
     /// Offers the recordings the project holds that nothing names (spec
@@ -99,11 +106,21 @@ public final class RecordModel {
     /// `record.recover`).
     func offerRecoveryIfNeeded(channelOn: Bool = MediaModel.channelIsOn()) {
         guard !channelOn, let m = document else { return }
+        offerHeld = false
         recoveryOffer = (try? m.session.recoveredFiles()) ?? []
     }
 
     /// Whether the window shows the recovery alert.
-    public func showsRecoveryAlert(channelOn: Bool) -> Bool { !channelOn && !recoveryOffer.isEmpty }
+    public func showsRecoveryAlert(channelOn: Bool) -> Bool {
+        !channelOn && !recoveryOffer.isEmpty && !offerHeld
+    }
+
+    /// The offer stays after a busy or failed answer; the alert waits for
+    /// the next poll (`reofferIfHeld`).
+    private var offerHeld = false
+
+    /// Shows a held offer again (the poll calls this).
+    func reofferIfHeld() { offerHeld = false }
 
     /// The alert's text: how many recordings, their names and (pre-flight
     /// M9) where they came from. Only a file whose size was never written
@@ -131,11 +148,20 @@ public final class RecordModel {
     /// or move to the Trash (`false`); `nil` ("Later") leaves them to be
     /// offered at the next open.
     public func answerRecovery(import answer: Bool?) {
-        recoveryOffer = []
-        guard let m = document, let answer else { return }
+        // The alert's dismissal calls this with nil after a button already
+        // answered; a held offer (busy or failed) must survive that.
+        guard let m = document, let answer else {
+            if !offerHeld { recoveryOffer = [] }
+            return
+        }
         do {
             m.apply(try m.session.recoverRecordings(import: answer))
+            recoveryOffer = []
+        } catch VizError.Busy {
+            // The core is busy: keep the offer and ask again at the next poll.
+            offerHeld = true
         } catch {
+            offerHeld = true
             m.alert = AlertItem(error, title: "Recovery Failed")
         }
     }

@@ -474,6 +474,7 @@ public final class DocumentModel {
             // A recording ends by Stop, at the end, or by itself (a full
             // disk, a lost device): the poll notices.
             if transport.playing || record.isRecording { record.refresh() }
+            record.reofferIfHeld()
         } catch VizError.Busy {
             return
         } catch {

@@ -388,7 +388,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     func keepPass() throws { passPresses.append(true) }
     func discardPass() throws { passPresses.append(false) }
-    func recordState() throws -> RecordStateRow { recordRow }
+    var recordStateError: VizError?
+    func recordState() throws -> RecordStateRow {
+        if let e = recordStateError { throw e }
+        return recordRow
+    }
 
     var recovered: [RecoveredFileRow] = []
     var recoverAnswers: [Bool] = []
@@ -396,7 +400,14 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func recoveredRecordings() throws -> [String] { recovered.map(\.path) }
     func recoveredFiles() throws -> [RecoveredFileRow] { recovered }
 
+    /// Thrown (once, then cleared) by `recoverRecordings`.
+    var recoverError: VizError?
+
     func recoverRecordings(import: Bool) throws -> DocSnapshot {
+        if let e = recoverError {
+            recoverError = nil
+            throw e
+        }
         recoverAnswers.append(`import`)
         recovered = []
         return commandResult()

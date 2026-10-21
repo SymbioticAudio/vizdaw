@@ -176,4 +176,42 @@ import VizDAWCore
         #expect(fail == .of(.busy, "Take.vizdaw is already open in another window."))
         #expect(fronted.isEmpty && s.alert == nil && opened == 0)
     }
+
+    // Review M3: a failed or busy recovery keeps the offer.
+    @Test func aBusyOrFailedRecoveryKeepsTheOfferAndReoffersIt() throws {
+        let f = demoFake()
+        f.recovered = [Self.row("Media/Recorded/a.caf", known: false)]
+        let (_, _, m, _) = try demo(f)
+        f.recoverError = .Busy(message: "busy")
+        m.record.answerRecovery(import: true)
+        #expect(!m.record.showsRecoveryAlert(channelOn: false) && !m.record.recoveryOffer.isEmpty)
+        #expect(m.alert == nil)
+        // The alert's own dismissal (nil) must not drop the held offer.
+        m.record.answerRecovery(import: nil)
+        #expect(!m.record.recoveryOffer.isEmpty)
+        m.poll()
+        #expect(m.record.showsRecoveryAlert(channelOn: false))
+        m.record.answerRecovery(import: true)
+        #expect(f.recoverAnswers == [true] && m.record.recoveryOffer.isEmpty)
+        // A real failure keeps the offer and shows the error.
+        f.recovered = [Self.row("Media/Recorded/b.caf", known: false)]
+        m.record.offerRecoveryIfNeeded(channelOn: false)
+        f.recoverError = .Io(message: "disk")
+        m.record.answerRecovery(import: false)
+        #expect(m.alert?.title == "Recovery Failed" && !m.record.recoveryOffer.isEmpty)
+        m.poll()
+        #expect(m.record.showsRecoveryAlert(channelOn: false))
+    }
+
+    // Review M2: a failing recordState is shown, not swallowed.
+    @Test func aFailingRecordStateIsSurfaced() throws {
+        let (_, _, m, f) = try demo()
+        f.recordStateError = .Engine(message: "no state")
+        m.record.refresh()
+        #expect(m.editor.status == "no state")
+        f.recordStateError = .Busy(message: "busy")
+        m.editor.status = nil
+        m.record.refresh()
+        #expect(m.editor.status == nil)
+    }
 }
