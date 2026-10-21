@@ -340,6 +340,20 @@ import VizDAWCore
         #expect(s.alert?.title == "Alone")
     }
 
+    /// 5c final review M3: the store's own open failures queue behind a
+    /// showing alert too (the launch's "Recordings Moved to the Trash"
+    /// is never overwritten).
+    @Test func openFailuresQueueBehindTheOneShowing() {
+        let s = store()
+        s.postAlert(AlertItem(title: "Recordings Moved to the Trash", message: "1 recording"))
+        _ = s.open(path: "/Users/me/Music")
+        _ = s.open(path: "/Users/me/missing.vizdaw")
+        #expect(s.takeAlert()?.title == "Recordings Moved to the Trash")
+        #expect(s.takeAlert()?.message.contains("not a .vizdaw project") == true)
+        #expect(s.takeAlert()?.title == "Open Failed")
+        #expect(s.takeAlert() == nil)
+    }
+
     @Test func transportKeysAreOffWhileAnyTextIsEdited() throws {
         let m = try DocumentModel(session: demoFake())
         #expect(m.transportKeysEnabled)

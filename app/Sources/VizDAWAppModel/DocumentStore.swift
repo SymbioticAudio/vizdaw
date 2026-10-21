@@ -200,9 +200,9 @@ public final class DocumentStore {
     /// Opens a `.vizdaw` package; other paths are refused with an alert.
     public func open(path: String) -> UUID? {
         guard (path as NSString).pathExtension == "vizdaw" else {
-            alert = AlertItem(
+            postAlert(AlertItem(
                 title: "Open Failed",
-                message: "\((path as NSString).lastPathComponent) is not a .vizdaw project.")
+                message: "\((path as NSString).lastPathComponent) is not a .vizdaw project."))
             return nil
         }
         // A project that is already open brings its window to the front
@@ -320,7 +320,7 @@ public final class DocumentStore {
             documents[id] = model
             return id
         } catch {
-            alert = AlertItem(error, title: title)
+            postAlert(AlertItem(error, title: title))
             return nil
         }
     }
