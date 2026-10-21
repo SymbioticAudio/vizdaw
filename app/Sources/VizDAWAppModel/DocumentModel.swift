@@ -61,6 +61,15 @@ public final class DocumentModel {
     /// (plan 5b): views drawing `Pending` or `Coarse` waveforms redraw.
     public internal(set) var overviewVersion = 0
     @ObservationIgnored private var mediaModel: MediaModel?
+    @ObservationIgnored private var recordModel: RecordModel?
+
+    /// Recording (plan 5c), made once.
+    public var record: RecordModel {
+        if let m = recordModel { return m }
+        let m = RecordModel(document: self)
+        recordModel = m
+        return m
+    }
 
     /// The media pool (plan 5b), made once.
     public var media: MediaModel {
@@ -267,6 +276,8 @@ public final class DocumentModel {
         // relink sheet (plan 5b Ruling 14; the app never shows it while
         // the control channel is on).
         media.offerRelinkIfNeeded()
+        // Recordings a crash left are offered too (plan 5c Task 13).
+        record.offerRecoveryIfNeeded()
     }
 
     /// The transport shown until the first successful read.
@@ -460,6 +471,9 @@ public final class DocumentModel {
             updatePlayKey()
             if transport.rateMismatch != (projectInfo?.rateMismatch ?? false) { refreshProjectInfo() }
             if !transport.faults.contains("stream-underrun") { diskWarningDismissed = false }
+            // A recording ends by Stop, at the end, or by itself (a full
+            // disk, a lost device): the poll notices.
+            if transport.playing || record.isRecording { record.refresh() }
         } catch VizError.Busy {
             return
         } catch {

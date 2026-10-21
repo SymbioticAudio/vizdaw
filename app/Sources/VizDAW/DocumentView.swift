@@ -33,6 +33,18 @@ struct DocumentView: View {
             RelinkSheet(media: model.media)
         }
         .alert(
+            "Recovered Recordings",
+            isPresented: Binding(
+                get: { model.record.showsRecoveryAlert(channelOn: ControlChannel.active) },
+                set: { if !$0 { model.record.answerRecovery(import: nil) } })
+        ) {
+            Button("Import into New Lanes") { model.record.answerRecovery(import: true) }
+            Button("Move to Trash", role: .destructive) { model.record.answerRecovery(import: false) }
+            Button("Later", role: .cancel) { model.record.answerRecovery(import: nil) }
+        } message: {
+            Text(model.record.recoveryMessage)
+        }
+        .alert(
             model.alert?.title ?? "",
             // With the control channel on no sheet opens (control spec §7):
             // the channel reports the alert and it stays on the document.

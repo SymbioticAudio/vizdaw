@@ -82,6 +82,7 @@ public final class DocumentStore {
         )
         s.makeDemoAudio = { try Session.newDemoAudio() }
         s.makeProject = { try Session.newProject(format: $0) }
+        s.recoverUntitled = { try recoverUntitledRecordings() }
         s.defaults = MemoryDefaults.appStore()
         s.listPreferences = ListPreferences(defaults: MemoryDefaults.appStore())
         return s
@@ -204,11 +205,47 @@ public final class DocumentStore {
                 message: "\((path as NSString).lastPathComponent) is not a .vizdaw project.")
             return nil
         }
+        // A project that is already open brings its window to the front
+        // (the core would refuse with "already open in another window").
+        if let existing = documentID(forPath: path) {
+            activate?(existing)
+            return nil
+        }
         guard let recovery else {
             return add("Open Failed") { try self.openPath(path) }
         }
         guard let options = recovery.options(for: path) else { return nil }
         return add("Open Failed") { try recovery.openWith(path, options) }
+    }
+
+    /// Brings a document's window to the front (set by the app).
+    public var activate: ((UUID) -> Void)?
+
+    /// The open document saved at `path` (same file, ignoring case and
+    /// symbolic links), if any.
+    public func documentID(forPath path: String) -> UUID? {
+        let want = Self.canonical(path)
+        return documents.first { (try? $0.value.session.path()).flatMap { $0 }.map(Self.canonical) == want }?.key
+    }
+
+    private static func canonical(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+    }
+
+    /// The launch-time check for recordings lost with untitled projects
+    /// (set by `live()`); returns the line to show.
+    public var recoverUntitled: () throws -> String? = { nil }
+    private var launchRecoveryDone = false
+
+    /// Runs `recoverUntitled` once per launch, before any document opens;
+    /// its line is logged and queued as an alert (plan 5c Task 10 review
+    /// M1: never dropped).
+    public func runLaunchRecovery() {
+        guard !launchRecoveryDone else { return }
+        launchRecoveryDone = true
+        guard let line = (try? recoverUntitled()) ?? nil else { return }
+        FileHandle.standardError.write(Data("VizDAW: \(line)\n".utf8))
+        postAlert(AlertItem(title: "Recordings Moved to the Trash", message: line))
     }
 
     /// Queues a document for the next window to appear.

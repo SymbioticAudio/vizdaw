@@ -22,9 +22,9 @@ extension DrumCommands: MenuCommands {}
 /// the control channel's `command.run`. None opens a dialog.
 @MainActor
 public enum TransportCommands {
-    /// Recording, scrubbing and loop passes are sub-project 5's; their
-    /// commands exist so keys can be bound now (editors spec §1).
-    public static let notYet = "Recording and scrubbing arrive with sub-project 5."
+    /// Scrubbing comes later; its command exists so a key can be bound now
+    /// (editors spec §1). Recording is plan 5c's (`RecordModel`).
+    public static let notYet = "Scrubbing is not available yet."
     static let noSequence = "Select a sequence first."
 
     public static let ids: Set<String> = Set(
@@ -52,7 +52,9 @@ public enum TransportCommands {
     public static func enabled(_ id: String, _ m: DocumentModel) -> Bool {
         if typesText(id) && !m.transportKeysEnabled { return false }
         return switch id {
-        case "transport.record", "transport.scrub", "record.keep_pass", "record.discard_pass": false
+        case "transport.scrub": false
+        case "transport.record": m.selectedSeq != nil || m.record.isRecording
+        case "record.keep_pass", "record.discard_pass": m.record.isLoopRecording
         case "transport.stop": m.isPlaying
         case "transport.overdub", "transport.punch", "editors.snap": true
         case "transport.play_from_edit_in": m.selectedSeq != nil && m.editor.selection.timeRange != nil
@@ -86,8 +88,12 @@ public enum TransportCommands {
     public static func run(_ id: String, on: Bool? = nil, _ m: DocumentModel) -> KeyOutcome {
         if typesText(id) && !m.transportKeysEnabled { return .unavailable(textFieldHasKeyboard) }
         switch id {
-        case "transport.record", "transport.scrub", "record.keep_pass", "record.discard_pass":
+        case "transport.scrub":
             return .unavailable(notYet)
+        case "transport.record":
+            return m.record.toggle()
+        case "record.keep_pass", "record.discard_pass":
+            return m.record.press(keep: id == "record.keep_pass")
         case "transport.overdub":
             m.editor.updateLayout { $0.transport.overdub = on ?? !$0.transport.overdub }
             return .done

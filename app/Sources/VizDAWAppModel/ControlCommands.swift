@@ -461,6 +461,11 @@ public enum ControlOpen {
     public static func open(
         path: String, answers: RecoveryAnswersRow, store: DocumentStore, command: String? = nil
     ) -> ControlOutcome {
+        // An open project is never opened twice, and no window is fronted.
+        if store.documentID(forPath: path) != nil {
+            let name = (path as NSString).lastPathComponent
+            return .failed(.of(.busy, "\(name) is already open in another window."))
+        }
         // The autosave question is settled before anything opens: opening to
         // find out would load plugins and consume the crash marker.
         if let r = store.recovery, answers.restoreAutosave == nil, let info = try? r.check(path),

@@ -29,6 +29,14 @@ struct VizDAWApp: App {
 
     init() {
         appStore.keyBindings = keyBindings
+        appStore.activate = { id in
+            let w = ControlWindows.windows().first {
+                let t = ControlWindows.tagOf($0)
+                return t.kind == .document && t.doc == id
+            }
+            w?.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+        }
         appStore.willClose = {
             PluginWindows.closeDocument($0)
             EditorWindows.closeDocument($0)
@@ -161,11 +169,7 @@ enum AppSetup {
     /// `--smoke` runs, which must leave the user's files alone.
     static func recoverUntitled() {
         guard !LaunchArguments.smokeRun else { return }
-        guard let line = (try? recoverUntitledRecordings()) ?? nil else { return }
-        // Also in the log; queued behind any alert already showing (Task
-        // 10 review M1).
-        FileHandle.standardError.write(Data("VizDAW: \(line)\n".utf8))
-        appStore.postAlert(AlertItem(title: "Recordings Moved to the Trash", message: line))
+        appStore.runLaunchRecovery()
     }
 
     /// After launch: the scan and the catalog's alerts.
