@@ -52,7 +52,7 @@ public final class RecordModel {
     public func toggle() -> KeyOutcome {
         guard let m = document else { return .unavailable("No document is open.") }
         // A pass can end by itself with no poll since (Task 15).
-        refresh()
+        refresh(quiet: true)
         if isRecording {
             do {
                 try m.session.stop()
@@ -90,8 +90,9 @@ public final class RecordModel {
     }
 
     /// Reads what the core is doing (the poll calls this while playing or
-    /// recording).
-    public func refresh() {
+    /// recording). `quiet`: a failure keeps the last report and leaves the
+    /// status line alone (a command's pre-read, Task 15).
+    public func refresh(quiet: Bool = false) {
         guard let m = document else { return }
         do {
             let s = try m.session.recordState()
@@ -99,7 +100,7 @@ public final class RecordModel {
         } catch VizError.Busy {
             return
         } catch {
-            m.editor.status = AlertItem(error, title: "").message
+            if !quiet { m.editor.status = AlertItem(error, title: "").message }
         }
     }
 

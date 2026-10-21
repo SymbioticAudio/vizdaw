@@ -1104,26 +1104,32 @@ and record with Transport > Record (R).
 131. Loopback calibration: wire output 1 to input 1, put a region with
      a sharp click on one lane and record input 1 on another with its
      monitor Off. Zoom into the recorded region: its click starts within
-     2 samples of the original's. If it does not, the interface
-     misreports its latency: `set_record_latency_trim` (Settings ›
-     Recording in plan 5d) moves it; record again to check. Repeat with
-     a separate input device (step 132) wired the same way: if its
-     recording lands late by about the aggregate device's own input
-     safety offset, the input latency should include that offset too;
-     note the offset by how many samples it lands off (this settles the
-     open question from plan 5c Task 11).
-132. Separate input device: choose another device for input
-     (`set_audio_input_device`, Settings › Audio in plan 5d), e.g. the
-     built-in microphone while playing through the interface: recording
-     works, stays in time with playback on the output, playback stays on
-     the interface, and Audio MIDI Setup shows no extra device (the
+     2 samples of the original's.
+     **Blocked until 5d (Settings › Audio):** the 5c build has no way to
+     set the latency trim or choose a separate input device, so these
+     wait:
+     - The trim correction: if the click is off, the interface
+       misreports its latency; `set_record_latency_trim` (Settings ›
+       Recording) moves it; record again to check.
+     - The aggregate loopback: repeat with a separate input device (step
+       132) wired the same way. If its recording lands late by about the
+       aggregate device's own input safety offset, the input latency
+       should include that offset too; note how many samples it lands
+       off (the open question from plan 5c Task 11).
+132. Separate input device. **Blocked until 5d (Settings › Audio):** the
+     5c build has no way to choose the input device
+     (`set_audio_input_device` has no caller yet), so this whole step
+     waits. Choose another device for input, e.g. the built-in
+     microphone while playing through the interface: recording works,
+     stays in time with playback on the output, playback stays on the
+     interface, and Audio MIDI Setup shows no extra device (the
      aggregate is private). Close the document or quit: no "VizDAW
      Input" aggregate is left behind. Rate: set the input device to
      44.1 kHz in Audio MIDI Setup with a 48 kHz project, then arm: the
-     input device switches to 48 kHz before the aggregate is built. With
-     a device locked to another rate, the transport faults say "audio
-     input could not open: … did not change to the project's 48000 Hz",
-     and playback goes on without input.
+     input device's nominal rate is set to 48 kHz before the aggregate
+     is built. With a device locked to another rate, the transport
+     faults say "audio input could not open: … did not change to the
+     project's 48000 Hz", and playback goes on without input.
 133. MIDI keyboard: set a lane's input to MIDI from your keyboard
      (`"kind": "midi", "port": "<its name>"`), arm it: what you play
      sounds on the lane's instrument at once (thru), stopped or

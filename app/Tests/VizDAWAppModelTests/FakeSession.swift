@@ -394,9 +394,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func discardPass() throws { passPresses.append(false) }
     var recordStateError: VizError?
     var recordStateCalls = 0
+    /// Thrown once, then cleared, by `recordState`.
+    var recordStateErrorOnce: VizError?
     func recordState() throws -> RecordStateRow {
         recordStateCalls += 1
         if let e = recordStateError { throw e }
+        if let e = recordStateErrorOnce {
+            recordStateErrorOnce = nil
+            throw e
+        }
         return recordRow
     }
 

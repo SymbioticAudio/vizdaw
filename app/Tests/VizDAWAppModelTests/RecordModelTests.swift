@@ -360,6 +360,31 @@ import VizDAWCore
         #expect(f.recordCalls.count == 2 && m.record.isRecording)
     }
 
+    // Task 15 review Minor 2: Record alone (no record.set before it) reads
+    // the core first, so a stale "recording" starts a new pass.
+    @Test func recordAfterAPassEndedByItselfStartsANewOne() throws {
+        let (s, id, m, f) = try demo()
+        #expect(run("transport.record", [], m, s, id) == nil)
+        #expect(m.record.isRecording)
+        f.recordRow.recording = false
+        f.state.playing = false
+        #expect(run("transport.record", [], m, s, id) == nil)
+        #expect(f.recordCalls.count == 2 && m.record.isRecording && f.state.playing)
+    }
+
+    // Task 15 review Minor 5: the commands' pre-reads leave the status
+    // line alone when the core's record state fails.
+    @Test func theCommandsPreReadsFailQuietly() throws {
+        let (s, id, m, f) = try demo()
+        f.recordStateError = .Engine(message: "no state")
+        #expect(run("record.set", [("loop", .flag(value: true))], m, s, id) == nil)
+        #expect(m.editor.status == nil && m.looping)
+        f.recordStateError = nil
+        f.recordStateErrorOnce = .Engine(message: "no state")
+        #expect(run("transport.record", [], m, s, id) == nil)
+        #expect(m.editor.status == nil && f.recordCalls.count == 1 && m.record.isRecording)
+    }
+
     // Review M3: the core's refusal of the payload is invalid_params.
     @Test func aPayloadTheCoreRefusesIsInvalidParams() throws {
         let (s, id, m, f) = try demo()
