@@ -150,6 +150,11 @@ pub struct RecordTap {
     stopped: bool,
     /// The block offset it stopped at, in the block that stopped.
     stop_at: Option<u32>,
+    /// The run of the last resume after a stop: a message stamped before
+    /// it arrived while the transport stood still (Task 6 review carry
+    /// 4), where the frozen run already played the timeline before the
+    /// stop, and is dropped.
+    resumed_at: Option<u64>,
     /// The `(run, frame)` of the last mark pushed: a wrap repeating it adds
     /// nothing (a roll exactly at the loop end is no wrap too).
     last_mark: Option<(u64, u64)>,
@@ -188,6 +193,7 @@ pub fn tap(req: &RecordRequest, latency: u64) -> (RecordTap, RecordHandles) {
             remark: false,
             stopped: false,
             stop_at: None,
+            resumed_at: None,
             last_mark: None,
         },
         RecordHandles {
@@ -249,6 +255,7 @@ impl RecordTap {
         } else if self.remark || self.stopped {
             if self.stopped {
                 self.status.delay.store(delay, Ordering::Release);
+                self.resumed_at = Some(self.run);
             }
             self.mark(self.run, frame, false);
         }
@@ -290,7 +297,8 @@ impl RecordTap {
     }
 
     /// Records an armed lane's message heard at block offset `offset`
-    /// (negative: before the block). // RT
+    /// (negative: before the block), unless it was heard before the last
+    /// resume after a stop. // RT
     pub fn midi(&mut self, lane: LaneId, offset: i64, msg: Midi1Msg) {
         if !self.rolling {
             return;
@@ -305,6 +313,12 @@ impl RecordTap {
         let run = i64::try_from(self.run)
             .unwrap_or(i64::MAX)
             .saturating_add(offset);
+        if self
+            .resumed_at
+            .is_some_and(|r| run < i64::try_from(r).unwrap_or(i64::MAX))
+        {
+            return;
+        }
         if self.midi.push(RecordedMidi { lane, run, msg }).is_err() {
             self.status.lost_midi.fetch_add(1, Ordering::Relaxed);
         }

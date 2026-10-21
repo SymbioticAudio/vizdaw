@@ -391,3 +391,52 @@ fn a_resume_refreshes_the_input_delay() {
     t.begin_block(356, 9);
     assert_eq!(h.status.delay(), Some(9));
 }
+
+/// Task 6 review carry 4 (Task 10): a message that arrived while the
+/// transport stood still but is taken by the resume block has a negative
+/// offset, a run before the resume mark, where the frozen run already
+/// played the timeline before the stop. It is dropped; one at or after
+/// the resume mark is kept, and before the stop nothing changes.
+#[test]
+fn midi_from_before_a_resume_is_dropped() {
+    use core_engine::midi1::Midi1Msg;
+    use core_model::ids::LaneId;
+    let (mut t, mut h) = core_engine::record::tap(&request(vec![0], 4800), 0);
+    let ch = [0.0f32; 256];
+    let input: [&[f32]; 1] = [&ch];
+    let lane = LaneId(1);
+    let msg = |p: u8| Midi1Msg::three(0x90, p, 100);
+    t.begin_block(1000, 0);
+    // Late in the first block: before it, still kept (pre-roll style).
+    t.midi(lane, -20, msg(60));
+    t.midi(lane, 10, msg(61));
+    t.end_block(&input, 256, true);
+    t.stop(100, 1356);
+    t.midi(lane, 50, msg(62));
+    t.end_block(&input, 256, true);
+    // Resumed at run 356.
+    t.begin_block(1356, 0);
+    t.midi(lane, -30, msg(63));
+    t.midi(lane, 0, msg(64));
+    t.midi(lane, 5, msg(65));
+    t.end_block(&input, 256, true);
+    // A later block's late message reaching back before the resume.
+    t.begin_block(1612, 0);
+    t.midi(lane, -300, msg(66));
+    t.midi(lane, -10, msg(67));
+    let mut got = Vec::new();
+    while let Ok(m) = h.midi.pop() {
+        got.push((m.run, m.msg.bytes[1]));
+    }
+    assert_eq!(
+        got,
+        vec![
+            (-20, 60),
+            (10, 61),
+            (306, 62),
+            (356, 64),
+            (361, 65),
+            (602, 67)
+        ]
+    );
+}

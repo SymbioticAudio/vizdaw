@@ -724,3 +724,43 @@ proptest::proptest! {
         }
     }
 }
+
+/// Task 6 review M3 (carried to Task 10): the engine records a message
+/// taken in the block whose sequence end falls at offset 0 (its live MIDI
+/// runs before the block's `Step::End`), stamped at or after the stop
+/// mark's run, where the run froze. Nothing plays after the stop: what
+/// was heard at or after the song end is dropped, so nothing lands there;
+/// with graph latency the output heard then was still the song's last
+/// frames, and what was played against them stays.
+#[test]
+fn midi_stamped_at_or_after_the_song_end_is_dropped() {
+    let d = doc(None);
+    for latency in [0u64, 64] {
+        let mut c = Case::new(&d, 2 * BEAT);
+        // Stopped at the song end (beat 4) at run 2 beats; the run froze.
+        c.marks = vec![mark(0, 2 * BEAT, false), mark(2 * BEAT, 4 * BEAT, false)];
+        c.end_run = 2 * BEAT;
+        c.latency = latency;
+        c.midi_lanes = vec![d.keys];
+        let end = (2 * BEAT) as i64;
+        c.midi = vec![
+            // Played at beat 3 as heard (output run + latency).
+            midi(d.keys, BEAT as i64 + latency as i64, on(60, 100)),
+            midi(d.keys, BEAT as i64 + latency as i64 + 100, off(60)),
+            // Taken by the end block: offset 0, 10 and 100.
+            midi(d.keys, end, on(61, 100)),
+            midi(d.keys, end + 10, Midi1Msg::three(0xB0, 64, 127)),
+            midi(d.keys, end + 100, on(62, 100)),
+        ];
+        let p = c.run().unwrap();
+        let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
+        let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
+        assert!(
+            ticks.iter().all(|t| *t < 4 * Q),
+            "latency {latency}: {ticks:?}"
+        );
+        let want = if latency == 0 { 1 } else { 3 };
+        assert_eq!(ticks.len(), want, "latency {latency}: {ticks:?}");
+        assert_eq!(ticks[0], 3 * Q);
+    }
+}
