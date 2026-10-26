@@ -216,7 +216,8 @@ fn remove_destination(
     let rep = require_replacement(dest, replacement, exists, users)?;
     // A lane recording the synth's return follows an external replacement
     // and is unlinked otherwise; the link alone is no use (plan 5c-2
-    // Ruling 3).
+    // Ruling 3). Only the link moves: the latency belongs to each synth,
+    // so the lane is aligned by the replacement's own return latency.
     let rep_return = rep.filter(|r| d.instruments().get(r).is_some_and(|x| x.kind.is_external()));
     for (s, l) in all_lanes(d) {
         let lane = d.lane_mut(s, l)?;
@@ -328,6 +329,19 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                 .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?;
             x.kind = kind;
             x.default_patch = *default_patch;
+            // No longer external: nothing returns its audio, and it has no
+            // return latency (spec §4.5, §4.5a; same undo step).
+            if !x.kind.is_external() {
+                x.return_latency_ms = 0.0;
+                for (s, l) in all_lanes(d) {
+                    if let Some(LaneInput::Audio { return_of, .. }) =
+                        d.lane_mut(s, l)?.input.as_mut()
+                        && *return_of == Some(*dest)
+                    {
+                        *return_of = None;
+                    }
+                }
+            }
             match (was, is) {
                 (true, false) => strips::remove_dest_strips(d, *dest, r),
                 (false, true) => strips::add_instrument_strip(d, *dest, &old.name, r),

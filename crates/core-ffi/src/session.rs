@@ -2535,7 +2535,7 @@ impl Session {
             if let crate::edit::EditCommand::Settings { edit } = &cmd {
                 crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
             }
-            let c = crate::edit::to_command(&cmd)?;
+            let c = crate::edit::to_command_in(&cmd, lock(&self.inner).doc())?;
             self.execute_with(c, &filter)
         })
     }
@@ -2570,7 +2570,7 @@ impl Session {
                     }
                     _ => {}
                 }
-                core.push(crate::edit::to_command(cmd)?);
+                core.push(crate::edit::to_command_in(cmd, lock(&self.inner).doc())?);
             }
             {
                 let mut inner = lock(&self.inner);
@@ -2626,7 +2626,7 @@ impl Session {
         filter: Option<crate::edit::ViewFilterRow>,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let c = crate::edit::to_command(&cmd)?;
+            let c = crate::edit::to_command_in(&cmd, lock(&self.inner).doc())?;
             {
                 let mut inner = lock(&self.inner);
                 let label = match (&inner.edit_label, inner.history.in_transaction()) {

@@ -341,3 +341,137 @@ fn removing_the_synth_relinks_or_unlinks_its_return_lane() {
     );
     assert_eq!(gone.lane(SeqId(0), rec).unwrap().monitor, MonitorMode::Auto);
 }
+
+fn link_of(doc: &Document, lane: LaneId) -> Option<DestId> {
+    doc.lane(SeqId(0), lane)
+        .unwrap()
+        .input
+        .as_ref()
+        .and_then(LaneInput::return_of)
+}
+
+fn edit_kind(dest: DestId, kind: DestKind) -> Command {
+    Command::Routing(RoutingCmd::EditDestination {
+        dest,
+        kind,
+        default_patch: None,
+    })
+}
+
+#[test]
+fn making_a_synth_non_external_clears_its_links_and_latency_in_one_step() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    let rec = with_return_lane(&mut doc, d.juno);
+    run(&mut doc, set_latency(d.juno, 12.5));
+    let f = ViewFilter::default();
+    for new_kind in [DestKind::plugin("au:pad"), endpoint("builtin:synth")] {
+        let mut h = History::new(doc.clone());
+        h.execute(&edit_kind(d.juno, new_kind), &f).unwrap();
+        assert_eq!(h.undo_label(), Some("Edit Destination"));
+        assert_eq!(link_of(h.doc(), rec), None);
+        assert_eq!(latency(h.doc(), d.juno), 0.0);
+        // The lane keeps its channels.
+        assert!(
+            h.doc()
+                .lane(SeqId(0), rec)
+                .unwrap()
+                .input
+                .as_ref()
+                .unwrap()
+                .is_audio()
+        );
+        h.undo().unwrap();
+        assert_eq!(link_of(h.doc(), rec), Some(d.juno));
+        assert_eq!(latency(h.doc(), d.juno), 12.5);
+        h.redo().unwrap();
+        assert_eq!(link_of(h.doc(), rec), None);
+        assert_eq!(latency(h.doc(), d.juno), 0.0);
+    }
+    // External to external keeps both.
+    let kept = apply(&doc, &edit_kind(d.juno, endpoint("Juno II")))
+        .unwrap()
+        .doc;
+    assert_eq!(link_of(&kept, rec), Some(d.juno));
+    assert_eq!(latency(&kept, d.juno), 12.5);
+}
+
+#[test]
+fn a_file_linking_or_delaying_a_non_external_destination_is_refused() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    with_return_lane(&mut doc, d.juno);
+    let base: Value = serde_json::from_str(&to_json(&doc).unwrap()).unwrap();
+    let corrupt = |v: &Value, needle: &str| match from_json(&serde_json::to_string(v).unwrap()) {
+        Err(ModelError::Corrupt { problems }) => assert!(
+            problems.iter().any(|p| p.contains(needle)),
+            "{needle}: {problems:?}"
+        ),
+        other => panic!("{needle}: {other:?}"),
+    };
+    let idx = |name: &str| {
+        base["document"]["instruments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|x| x["name"] == name)
+            .unwrap()
+    };
+    // The link names a plugin, then the built-in synth.
+    for target in [d.pad, d.synth] {
+        let mut v = base.clone();
+        v["document"]["sequences"][0]["lanes"][1]["input"]["audio"]["return_of"] = json!(target.0);
+        corrupt(&v, "return_of");
+    }
+    // A latency on a plugin, then on the built-in synth.
+    for name in ["Pad", "Synth"] {
+        let mut v = base.clone();
+        v["document"]["instruments"][idx(name)]["return_latency_ms"] = json!(5.0);
+        corrupt(&v, "return_latency_ms");
+    }
+}
+
+#[test]
+fn input_and_removal_edits_undo_and_redo_the_link() {
+    let d = doc();
+    let f = ViewFilter::default();
+    let mut h = History::new(d.doc.clone());
+    let input = set_input(LaneId(0), Some(returning(InputChannels::Mono(2), d.juno)));
+    h.execute(&input, &f).unwrap();
+    assert_eq!(link_of(h.doc(), LaneId(0)), Some(d.juno));
+    h.undo().unwrap();
+    assert_eq!(h.doc().lane(SeqId(0), LaneId(0)).unwrap().input, None);
+    h.redo().unwrap();
+    assert_eq!(link_of(h.doc(), LaneId(0)), Some(d.juno));
+    let remove = Command::Routing(RoutingCmd::RemoveDestination {
+        dest: d.juno,
+        replacement: Some(d.moog),
+    });
+    h.execute(&remove, &f).unwrap();
+    assert_eq!(link_of(h.doc(), LaneId(0)), Some(d.moog));
+    h.undo().unwrap();
+    assert_eq!(link_of(h.doc(), LaneId(0)), Some(d.juno));
+    h.redo().unwrap();
+    assert_eq!(link_of(h.doc(), LaneId(0)), Some(d.moog));
+}
+
+#[test]
+fn a_relinked_lane_takes_the_new_synths_latency_not_the_old() {
+    // The link moves with the lane; the latency belongs to the synth.
+    let d = doc();
+    let mut doc = d.doc.clone();
+    let rec = with_return_lane(&mut doc, d.juno);
+    run(&mut doc, set_latency(d.juno, 12.5));
+    run(&mut doc, set_latency(d.moog, 3.0));
+    let moved = apply(
+        &doc,
+        &Command::Routing(RoutingCmd::RemoveDestination {
+            dest: d.juno,
+            replacement: Some(d.moog),
+        }),
+    )
+    .unwrap()
+    .doc;
+    assert_eq!(link_of(&moved, rec), Some(d.moog));
+    assert_eq!(latency(&moved, d.moog), 3.0);
+}

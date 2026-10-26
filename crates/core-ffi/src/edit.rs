@@ -727,6 +727,32 @@ fn index(i: u32) -> usize {
     usize::try_from(i).unwrap_or(usize::MAX)
 }
 
+/// The core command for an editor command against `doc`: a lane input row
+/// without a return keeps the lane's current `return_of` (the rows carry
+/// none until plan 5c-2 Task 8), so an FFI `SetInput` that changes the
+/// channels does not drop the link.
+pub fn to_command_in(
+    c: &EditCommand,
+    doc: &core_model::document::Document,
+) -> Result<Command, VizError> {
+    use core_model::lane::LaneInput;
+    let mut cmd = to_command(c)?;
+    if let Command::Lane(LaneCmd::SetInput {
+        seq,
+        lane,
+        input: Some(LaneInput::Audio { return_of, .. }),
+    }) = &mut cmd
+        && return_of.is_none()
+    {
+        *return_of = doc
+            .lane(*seq, *lane)
+            .ok()
+            .and_then(|l| l.input.as_ref())
+            .and_then(LaneInput::return_of);
+    }
+    Ok(cmd)
+}
+
 /// The core command for an editor command.
 pub fn to_command(c: &EditCommand) -> Result<Command, VizError> {
     Ok(match c {
@@ -1192,5 +1218,113 @@ fn audio_cmd(e: &AudioEdit) -> AudioCmd {
         AudioEdit::RemoveFades { events } => AudioCmd::RemoveFades {
             events: ids(events),
         },
+    }
+}
+
+#[cfg(test)]
+mod return_link_tests {
+    use super::*;
+    use core_model::command::{LaneCmd, RoutingCmd, SequenceCmd, apply};
+    use core_model::document::{DestKind, Document};
+    use core_model::lane::{InputChannels, LaneInput};
+
+    #[test]
+    fn a_row_without_a_return_keeps_the_lanes_link() {
+        let run = |d: &Document, c: Command| apply(d, &c).unwrap().doc;
+        let mut d = run(
+            &Document::new(),
+            Command::Sequence(SequenceCmd::New { name: "S".into() }),
+        );
+        d = run(
+            &d,
+            Command::Routing(RoutingCmd::AddDestination {
+                name: "Juno".into(),
+                kind: DestKind::MidiEndpoint {
+                    endpoint_ref: "Juno".into(),
+                    group: 0,
+                    channel: 0,
+                },
+                default_patch: None,
+            }),
+        );
+        let juno = *d.instruments().keys().next().unwrap();
+        d = run(
+            &d,
+            Command::Lane(LaneCmd::SetInput {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                input: Some(LaneInput::Audio {
+                    channels: InputChannels::Mono(0),
+                    return_of: Some(juno),
+                }),
+            }),
+        );
+        let row = |input| EditCommand::Lane {
+            edit: LaneEdit::SetInput {
+                seq: 0,
+                lane: 0,
+                input,
+            },
+        };
+        let link = |d: &Document| d.lane(SeqId(0), LaneId(0)).unwrap().input.clone();
+        // New channels, no link in the row: the link stays.
+        let c = to_command_in(
+            &row(Some(LaneInputRow::Audio {
+                first: 3,
+                stereo: true,
+            })),
+            &d,
+        )
+        .unwrap();
+        assert_eq!(
+            link(&apply(&d, &c).unwrap().doc),
+            Some(LaneInput::Audio {
+                channels: InputChannels::Stereo(3),
+                return_of: Some(juno),
+            })
+        );
+        // A MIDI input or none replaces the input outright.
+        for input in [
+            None,
+            Some(LaneInputRow::Midi {
+                port: None,
+                channel: None,
+            }),
+        ] {
+            let c = to_command_in(&row(input), &d).unwrap();
+            let next = apply(&d, &c).unwrap().doc;
+            assert_eq!(
+                next.lane(SeqId(0), LaneId(0))
+                    .unwrap()
+                    .input
+                    .as_ref()
+                    .and_then(LaneInput::return_of),
+                None
+            );
+        }
+        // A lane with a plain audio input stays plain.
+        let plain = run(
+            &d,
+            Command::Lane(LaneCmd::SetInput {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                input: None,
+            }),
+        );
+        let c = to_command_in(
+            &row(Some(LaneInputRow::Audio {
+                first: 1,
+                stereo: false,
+            })),
+            &plain,
+        )
+        .unwrap();
+        assert_eq!(
+            link(&apply(&plain, &c).unwrap().doc),
+            Some(LaneInput::Audio {
+                channels: InputChannels::Mono(1),
+                return_of: None,
+            })
+        );
     }
 }

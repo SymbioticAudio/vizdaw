@@ -274,6 +274,15 @@ pub fn validate(doc: &Document) -> Vec<String> {
             ),
             &d.id.to_string(),
         );
+        // Only an external destination has a return latency.
+        push(
+            need(
+                ms == 0.0 || d.kind.is_external(),
+                "return_latency_ms on a destination that is not external",
+                ms,
+            ),
+            &d.id.to_string(),
+        );
     }
     for o in doc.outputs().values() {
         if o.id.0 >= c.output {
@@ -350,10 +359,14 @@ pub fn validate(doc: &Document) -> Vec<String> {
                 push(i.check(), &lctx);
             }
             // Plan 5c-2 Ruling 3: a synth's return names a destination.
-            if let Some(dest) = l.input.as_ref().and_then(LaneInput::return_of)
-                && !doc.instruments().contains_key(&dest)
-            {
-                push(Err(ModelError::UnknownId(AnyId::Dest(dest))), &lctx);
+            if let Some(dest) = l.input.as_ref().and_then(LaneInput::return_of) {
+                match doc.instruments().get(&dest) {
+                    None => push(Err(ModelError::UnknownId(AnyId::Dest(dest))), &lctx),
+                    Some(x) => push(
+                        need(x.kind.is_external(), "return_of (not external)", dest),
+                        &lctx,
+                    ),
+                }
             }
             if l.take(l.active_take).is_none() {
                 push(
