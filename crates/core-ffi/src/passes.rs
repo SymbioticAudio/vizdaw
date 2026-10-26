@@ -266,9 +266,9 @@ fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
         });
     }
     // Into heard runs, each by its own latency (final review I1).
-    let lats: Vec<i64> = m.iter().map(lat).collect();
-    for i in 0..out.len() {
-        let l = lats.get(i).copied().unwrap_or(0);
+    // `m` and `out` have one entry each, in step.
+    let mut prev_lat = 0;
+    for (i, l) in m.iter().map(lat).enumerate() {
         let (done, rest) = out.split_at_mut(i);
         let Some(p) = rest.first_mut() else {
             break;
@@ -277,27 +277,25 @@ fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
         p.run += l;
         p.end += l;
         p.catch += l;
-        let Some(ql) = i.checked_sub(1).and_then(|j| lats.get(j)).copied() else {
+        let ql = std::mem::replace(&mut prev_lat, l);
+        let Some(q) = done.last() else {
             continue;
         };
-        // The latency shrank: the newer piece is heard over the tail of
-        // every earlier piece reaching past its start, not only the one
-        // just before (plan 5c-2 Ruling 13); each is cut there.
-        let mut fell = false;
-        for q in done.iter_mut() {
-            if q.end > p.from {
-                q.end = p.from.max(q.from);
-                fell = true;
-            }
-        }
+        // Whether the piece just before is heard over: only it decides
+        // between a fall and a rise (an older piece already cut to nothing
+        // stays "over" every later one and must not hide a rise).
+        let fell = q.end > p.from;
         let rise = l - ql;
-        if !fell
-            && rise > 0
-            && let Some(q) = done.last()
-        {
+        if !fell && rise > 0 {
             // It grew: what is played in the gap it opened lands at this
             // piece's start (a cut before it stays a cut).
             p.catch = (p.from - rise).max(q.end);
+        }
+        // The latency shrank: the newer piece is heard over the tail of
+        // every earlier piece reaching past its start, not only the one
+        // just before (plan 5c-2 Ruling 13); each is cut there.
+        for q in done.iter_mut().filter(|q| q.end > p.from) {
+            q.end = p.from.max(q.from);
         }
     }
     out

@@ -934,3 +934,56 @@ fn a_return_latency_longer_than_the_take_places_nothing() {
     c.audio[0].return_frames = 5 * BEAT as i64;
     assert_eq!(c.run(), None);
 }
+
+/// Task 1 review I1/M2: a fall that cuts an older piece to zero length
+/// (its heard start lies past the newer piece's) must not stop a later rise
+/// from opening its gap: the stale piece is not the one just before.
+#[test]
+fn a_rise_after_a_fall_that_cut_a_piece_to_nothing_still_opens_its_gap() {
+    let d = doc(None);
+    let mut c = audio_case(&d, 0, 8 * BEAT);
+    c.marks = vec![
+        latent(0, 0, 10_000),
+        // Heard from 26 000, which the next mark (heard at 15 000) cuts to
+        // nothing: it ends where it starts, past the last mark's start.
+        latent(14_000, 14_000, 12_000),
+        latent(15_000, 15_000, 0),
+        latent(20_000, 20_000, 3000),
+    ];
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![
+        // In the gap the last rise opened: lands where that piece starts
+        // as the one before it ended (frame 20 000).
+        midi(d.keys, 21_000, on(60, 100)),
+        midi(d.keys, 21_500, off(60)),
+    ];
+    let p = c.run().unwrap();
+    let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
+    let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
+    let t = 20_000 * Q / BEAT as i64;
+    assert_eq!(ticks, vec![t]);
+}
+
+/// Task 1 review M2: a rise right after a fall keeps its gap.
+#[test]
+fn a_rise_after_a_fall_lands_gap_messages_at_its_start() {
+    let d = doc(None);
+    let mut c = audio_case(&d, 0, 8 * BEAT);
+    let b = BEAT as i64;
+    c.marks = vec![
+        latent(0, 0, 4800),
+        latent(2 * BEAT, 2 * BEAT, 0),
+        latent(4 * BEAT, 4 * BEAT, 2400),
+    ];
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![
+        midi(d.keys, 4 * b + 1000, on(60, 100)),
+        midi(d.keys, 4 * b + 1100, off(60)),
+    ];
+    let p = c.run().unwrap();
+    let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
+    let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
+    assert_eq!(ticks, vec![4 * Q]);
+    let got = active_frames(&p, d.mic, &d);
+    assert_no_overlap(&got);
+}
