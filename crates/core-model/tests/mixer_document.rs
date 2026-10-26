@@ -15,6 +15,7 @@ fn ep(id: u64, r: &str, ch: u8) -> Destination {
             channel: ch,
         },
         default_patch: None,
+        return_latency_ms: 0.0,
     }
 }
 
@@ -56,6 +57,7 @@ fn from_parts_without_a_mixer_derives_one() {
                 name: "Pad".into(),
                 kind: DestKind::plugin("au:pad"),
                 default_patch: None,
+                return_latency_ms: 0.0,
             },
             ep(1, "builtin:synth", 0),
             ep(2, "builtin:synth", 9),

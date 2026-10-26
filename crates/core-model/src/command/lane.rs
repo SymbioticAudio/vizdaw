@@ -277,6 +277,11 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
         LaneCmd::SetInput { seq, lane, input } => {
             if let Some(i) = input {
                 i.check()?;
+                // A synth's return names an external destination (plan
+                // 5c-2 Ruling 3).
+                if let Some(dest) = i.return_of() {
+                    super::routing::check_external(d, dest)?;
+                }
             }
             d.lane_mut(*seq, *lane)?.input = input.clone();
         }

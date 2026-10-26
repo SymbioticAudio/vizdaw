@@ -128,6 +128,7 @@ fn doc(bars: i64, arm_keys: bool, arm_mic: bool) -> Doc {
         lane: mic,
         input: Some(LaneInput::Audio {
             channels: InputChannels::Mono(0),
+            return_of: None,
         }),
     }))
     .unwrap();
@@ -655,6 +656,7 @@ fn bad_requests_are_refused_and_recording_holds_the_transport() {
             lane: d.mic,
             input: Some(LaneInput::Audio {
                 channels: InputChannels::Stereo(2),
+                return_of: None,
             }),
         }),
     )

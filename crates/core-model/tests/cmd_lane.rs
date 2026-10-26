@@ -19,6 +19,7 @@ fn base() -> Document {
             name: "Piano".into(),
             kind: DestKind::plugin("p"),
             default_patch: None,
+            return_latency_ms: 0.0,
         }],
         outputs: vec![],
         media: vec![],

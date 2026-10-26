@@ -105,6 +105,7 @@ fn sample() -> Document {
                 channel: 9,
             },
             default_patch: None,
+            return_latency_ms: 0.0,
         }],
         outputs: vec![OutputPath {
             id: OutputPathId(0),

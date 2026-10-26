@@ -4120,7 +4120,7 @@ impl Session {
         let mut midi_lanes = Vec::new();
         for l in s.lanes.iter().filter(|l| l.arm) {
             match &l.input {
-                Some(LaneInput::Audio { channels }) => {
+                Some(LaneInput::Audio { channels, .. }) => {
                     audio.push((l.id, l.name.clone(), *channels))
                 }
                 Some(LaneInput::Midi { .. }) => midi_lanes.push(l.id),

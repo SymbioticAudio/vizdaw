@@ -496,6 +496,8 @@ impl From<&LaneInputRow> for core_model::lane::LaneInput {
                 } else {
                     InputChannels::Mono(*first)
                 },
+                // Task 8 of plan 5c-2 carries it over the FFI.
+                return_of: None,
             },
             LaneInputRow::Midi { port, channel } => LaneInput::Midi {
                 port: port.clone(),
@@ -509,7 +511,7 @@ impl From<&core_model::lane::LaneInput> for LaneInputRow {
     fn from(i: &core_model::lane::LaneInput) -> Self {
         use core_model::lane::{InputChannels, LaneInput};
         match i {
-            LaneInput::Audio { channels } => LaneInputRow::Audio {
+            LaneInput::Audio { channels, .. } => LaneInputRow::Audio {
                 first: channels.first(),
                 stereo: matches!(channels, InputChannels::Stereo(_)),
             },

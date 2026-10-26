@@ -3,9 +3,10 @@
 //! given.
 
 use super::{Report, strips};
-use crate::document::{DestKind, Destination, Document, OutputPath, Patch};
+use crate::document::{DestKind, Destination, Document, MAX_RETURN_LATENCY_MS, OutputPath, Patch};
 use crate::error::{ModelError, Result};
 use crate::ids::{AnyId, DestId, LaneId, OutputPathId, SeqId};
+use crate::lane::LaneInput;
 use crate::mixer::StripKind;
 use crate::rules::check_group_channel;
 
@@ -72,6 +73,13 @@ pub enum RoutingCmd {
         /// Replacement (required when in use).
         replacement: Option<OutputPathId>,
     },
+    /// Set an external destination's return latency (spec §4.5a).
+    SetReturnLatency {
+        /// Target (an external MIDI destination).
+        dest: DestId,
+        /// Milliseconds, 0–[`MAX_RETURN_LATENCY_MS`].
+        ms: f32,
+    },
 }
 
 impl RoutingCmd {
@@ -86,6 +94,7 @@ impl RoutingCmd {
             RoutingCmd::RenameOutput { .. } => "Rename Output",
             RoutingCmd::EditOutput { .. } => "Edit Output",
             RoutingCmd::RemoveOutput { .. } => "Remove Output",
+            RoutingCmd::SetReturnLatency { .. } => "Set Return Latency",
         }
     }
 }
@@ -112,6 +121,23 @@ fn check_dest(kind: &DestKind, patch: &Option<Patch>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Refuses `dest` unless it is an external MIDI destination (plan 5c-2
+/// Ruling 2).
+pub(crate) fn check_external(d: &Document, dest: DestId) -> Result<()> {
+    let x = d
+        .instruments()
+        .get(&dest)
+        .ok_or(ModelError::UnknownId(AnyId::Dest(dest)))?;
+    if x.kind.is_external() {
+        Ok(())
+    } else {
+        Err(ModelError::invalid(format!(
+            "{} is not an external MIDI destination",
+            x.name
+        )))
+    }
 }
 
 fn all_lanes(d: &Document) -> Vec<(SeqId, LaneId)> {
@@ -188,10 +214,19 @@ fn remove_destination(
     users.extend(events.iter().map(|e| AnyId::Event(*e)));
     let exists = replacement.is_some_and(|x| d.instruments().contains_key(&x));
     let rep = require_replacement(dest, replacement, exists, users)?;
+    // A lane recording the synth's return follows an external replacement
+    // and is unlinked otherwise; the link alone is no use (plan 5c-2
+    // Ruling 3).
+    let rep_return = rep.filter(|r| d.instruments().get(r).is_some_and(|x| x.kind.is_external()));
     for (s, l) in all_lanes(d) {
         let lane = d.lane_mut(s, l)?;
         if lane.midi_dest == Some(dest) {
             lane.midi_dest = rep;
+        }
+        if let Some(LaneInput::Audio { return_of, .. }) = lane.input.as_mut()
+            && *return_of == Some(dest)
+        {
+            *return_of = rep_return;
         }
         if let Some(layout) = lane.drum.as_mut() {
             for row in layout.rows.iter_mut() {
@@ -235,6 +270,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                     name: name.clone(),
                     kind,
                     default_patch: *default_patch,
+                    return_latency_ms: 0.0,
                 },
             );
             if plugin {
@@ -343,6 +379,16 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             d.outputs_mut().remove(output);
             r.removed.push(AnyId::Output(*output));
             strips::remove_kind(d, StripKind::AudioPath(*output), r);
+        }
+        RoutingCmd::SetReturnLatency { dest, ms } => {
+            check_external(d, *dest)?;
+            if !ms.is_finite() || !(0.0..=MAX_RETURN_LATENCY_MS).contains(ms) {
+                return Err(ModelError::range("return_latency_ms", ms));
+            }
+            d.instruments_mut()
+                .get_mut(dest)
+                .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?
+                .return_latency_ms = *ms;
         }
     }
     Ok(())

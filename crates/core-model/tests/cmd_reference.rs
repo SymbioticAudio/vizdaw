@@ -73,6 +73,7 @@ fn base() -> Document {
             slot: PluginSlot::new(PluginInstanceId(i), PluginRef::from_legacy("p")),
         },
         default_patch: None,
+        return_latency_ms: 0.0,
     };
     let mut d = Document::from_parts(DocumentRepr {
         settings: Settings::default(),

@@ -42,6 +42,7 @@ fn input_and_monitor_are_undoable_lane_edits() {
     assert_eq!(lane(h.doc()).monitor, MonitorMode::Auto);
     let audio = LaneInput::Audio {
         channels: InputChannels::Stereo(2),
+        return_of: None,
     };
     h.execute(&set_input(Some(audio.clone())), &f).unwrap();
     assert_eq!(h.undo_label(), Some("Set Lane Input"));
@@ -78,12 +79,15 @@ fn hostile_inputs_are_refused_and_change_nothing() {
     for bad in [
         LaneInput::Audio {
             channels: InputChannels::Mono(MAX_INPUT_CHANNEL + 1),
+            return_of: None,
         },
         LaneInput::Audio {
             channels: InputChannels::Stereo(MAX_INPUT_CHANNEL),
+            return_of: None,
         },
         LaneInput::Audio {
             channels: InputChannels::Stereo(u16::MAX),
+            return_of: None,
         },
         LaneInput::Midi {
             port: Some(String::new()),
@@ -121,6 +125,7 @@ fn hostile_inputs_are_refused_and_change_nothing() {
     // The highest pair and channel are fine.
     let ok = LaneInput::Audio {
         channels: InputChannels::Stereo(MAX_INPUT_CHANNEL - 1),
+        return_of: None,
     };
     assert!(apply(&d, &set_input(Some(ok))).is_ok());
 }
@@ -196,7 +201,13 @@ fn the_range_error_names_the_channel_out_of_range() {
         (InputChannels::Stereo(MAX_INPUT_CHANNEL), "256"),
         (InputChannels::Stereo(u16::MAX), "65536"),
     ] {
-        match apply(&d, &set_input(Some(LaneInput::Audio { channels }))) {
+        match apply(
+            &d,
+            &set_input(Some(LaneInput::Audio {
+                channels,
+                return_of: None,
+            })),
+        ) {
             Err(ModelError::OutOfRange { field, value }) => {
                 assert_eq!(field, "input.channels");
                 assert_eq!(value, named, "{channels:?}");

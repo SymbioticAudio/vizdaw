@@ -431,7 +431,7 @@ pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
                 thru: l.monitor != MonitorMode::Off,
                 armed: l.arm,
             }),
-            Some(LaneInput::Audio { channels }) if l.monitor != MonitorMode::Off => {
+            Some(LaneInput::Audio { channels, .. }) if l.monitor != MonitorMode::Off => {
                 if let Some(path) = l.audio_out.or(first_out) {
                     spec.monitor.push(MonitorRoute {
                         path,

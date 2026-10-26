@@ -41,6 +41,7 @@ fn project(dir: &Path) -> (std::sync::Arc<Session>, std::path::PathBuf, u64) {
         lane: mic,
         input: Some(LaneInput::Audio {
             channels: InputChannels::Mono(0),
+            return_of: None,
         }),
     }))
     .unwrap();

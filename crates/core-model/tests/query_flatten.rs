@@ -58,6 +58,7 @@ fn base() -> Document {
                 name: "Plug".into(),
                 kind: DestKind::plugin("p"),
                 default_patch: None,
+                return_latency_ms: 0.0,
             },
             Destination {
                 id: DestId(1),
@@ -68,6 +69,7 @@ fn base() -> Document {
                     channel: 5,
                 },
                 default_patch: None,
+                return_latency_ms: 0.0,
             },
         ],
         outputs: vec![],

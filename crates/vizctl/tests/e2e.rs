@@ -919,6 +919,7 @@ fn records_audio_loop_takes_and_midi() {
             lane: mic,
             input: Some(LaneInput::Audio {
                 channels: InputChannels::Mono(0),
+                return_of: None,
             }),
         },
         LaneCmd::SetMonitor {

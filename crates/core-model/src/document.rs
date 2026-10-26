@@ -56,6 +56,20 @@ pub struct Destination {
     pub kind: DestKind,
     /// Patch sent when the destination is first used.
     pub default_patch: Option<Patch>,
+    /// An external MIDI destination's return latency (spec §4.5a): from a
+    /// note leaving to its sound at the synth's audio output (the MIDI
+    /// interface plus the synth's response), in ms,
+    /// 0–[`MAX_RETURN_LATENCY_MS`]. Absent in files when 0 (plan 5c-2
+    /// Ruling 1).
+    #[serde(default, skip_serializing_if = "is_zero_ms")]
+    pub return_latency_ms: f32,
+}
+
+/// The largest return latency a destination may have (spec §4.5a).
+pub const MAX_RETURN_LATENCY_MS: f32 = 500.0;
+
+fn is_zero_ms(v: &f32) -> bool {
+    *v == 0.0
 }
 
 /// Destination kinds.
@@ -87,6 +101,12 @@ impl DestKind {
         DestKind::PluginInstrument {
             slot: PluginSlot::new(PluginInstanceId(0), PluginRef::from_legacy(name)),
         }
+    }
+
+    /// True for an external MIDI destination (spec §4.5a): a MIDI endpoint
+    /// that is not the built-in synth (plan 5c-2 Ruling 2).
+    pub fn is_external(&self) -> bool {
+        matches!(self, DestKind::MidiEndpoint { .. }) && !self.is_builtin_synth()
     }
 
     /// True for MIDI endpoints that play on the built-in synth.

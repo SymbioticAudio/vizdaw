@@ -141,6 +141,12 @@ pub enum LaneInput {
     Audio {
         /// Which channels.
         channels: InputChannels,
+        /// The external MIDI destination whose audio return this lane
+        /// records (spec §4.5, §6.7: Track Synth): its recordings land
+        /// earlier by that destination's return latency. Absent in files
+        /// when none (plan 5c-2 Ruling 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_of: Option<DestId>,
     },
     /// MIDI from a port.
     Midi {
@@ -157,7 +163,7 @@ impl LaneInput {
     /// and the MIDI channel (0–15).
     pub fn check(&self) -> crate::error::Result<()> {
         match self {
-            LaneInput::Audio { channels } => {
+            LaneInput::Audio { channels, .. } => {
                 if channels.last().is_none_or(|c| c > MAX_INPUT_CHANNEL) {
                     // The channel out of range: the last one, or the one
                     // past `u16::MAX` (final review T2).
@@ -184,6 +190,14 @@ impl LaneInput {
     /// True for an audio input.
     pub fn is_audio(&self) -> bool {
         matches!(self, LaneInput::Audio { .. })
+    }
+
+    /// The destination whose return an audio input records, if any.
+    pub fn return_of(&self) -> Option<DestId> {
+        match self {
+            LaneInput::Audio { return_of, .. } => *return_of,
+            LaneInput::Midi { .. } => None,
+        }
     }
 }
 

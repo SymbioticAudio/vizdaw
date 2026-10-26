@@ -345,6 +345,7 @@ fn audio_input_is_wanted_only_for_armed_or_monitored_audio_lanes() {
             lane,
             input: Some(LaneInput::Audio {
                 channels: InputChannels::Mono(0),
+                return_of: None,
             }),
         },
     );

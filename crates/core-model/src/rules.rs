@@ -2,10 +2,11 @@
 //! value ranges. Commands call the `check_*` functions; loading calls
 //! [`validate`], which reports every problem instead of stopping at the first.
 
-use crate::document::{DestKind, Document};
+use crate::document::{DestKind, Document, MAX_RETURN_LATENCY_MS};
 use crate::error::{ModelError, Result};
 use crate::event::{EventBody, EventSpec, LoopCount};
 use crate::ids::{AnyId, EventId, SeqId};
+use crate::lane::LaneInput;
 use crate::time::Tick;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -264,6 +265,15 @@ pub fn validate(doc: &Document) -> Vec<String> {
             let ok = patch.program <= 127 && patch.bank.is_none_or(|(m, l)| m <= 127 && l <= 127);
             push(need(ok, "default_patch", patch.program), &d.id.to_string());
         }
+        let ms = d.return_latency_ms;
+        push(
+            need(
+                ms.is_finite() && (0.0..=MAX_RETURN_LATENCY_MS).contains(&ms),
+                "return_latency_ms",
+                ms,
+            ),
+            &d.id.to_string(),
+        );
     }
     for o in doc.outputs().values() {
         if o.id.0 >= c.output {
@@ -338,6 +348,12 @@ pub fn validate(doc: &Document) -> Vec<String> {
             }
             if let Some(i) = &l.input {
                 push(i.check(), &lctx);
+            }
+            // Plan 5c-2 Ruling 3: a synth's return names a destination.
+            if let Some(dest) = l.input.as_ref().and_then(LaneInput::return_of)
+                && !doc.instruments().contains_key(&dest)
+            {
+                push(Err(ModelError::UnknownId(AnyId::Dest(dest))), &lctx);
             }
             if l.take(l.active_take).is_none() {
                 push(
