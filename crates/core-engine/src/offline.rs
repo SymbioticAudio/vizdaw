@@ -477,19 +477,20 @@ impl SynthQueue {
         }
     }
 
-    /// Queues `v` (frame << 2 | kind). // RT
-    fn push(&self, v: u64) {
+    /// Queues `v` (frame << 2 | kind); false (and counted) when full. // RT
+    fn push(&self, v: u64) -> bool {
         let h = self.head.load(Ordering::Relaxed);
         let t = self.tail.load(Ordering::Acquire);
         let n = self.slots.len().max(1);
         if h.wrapping_sub(t) >= n {
             self.dropped.fetch_add(1, Ordering::Relaxed);
-            return;
+            return false;
         }
         if let Some(s) = self.slots.get(h % n) {
             s.store(v, Ordering::Relaxed);
         }
         self.head.store(h.wrapping_add(1), Ordering::Release);
+        true
     }
 
     /// The oldest queued event. // RT
@@ -569,16 +570,25 @@ impl MidiOut for FakeSynthOut {
             return false;
         }
         let frame = (host_time_ns as f64 * self.log.sample_rate / 1e9).round() as u64;
-        let kind = match msg {
-            [s, _, v, ..] if s & 0xF0 == 0x90 && *v > 0 => Some(EV_ON),
-            [s, ..] if s & 0xF0 == 0x80 || s & 0xF0 == 0x90 => Some(EV_OFF),
-            [s, c, ..] if s & 0xF0 == 0xB0 && (*c == 120 || *c == 123) => Some(EV_ALL_OFF),
-            _ => None,
-        };
-        if let Some(k) = kind {
-            self.queue.push((frame.min(u64::MAX >> 2) << 2) | k);
+        match note_kind(msg) {
+            // A full queue refuses, so the engine counts a dropped message
+            // too.
+            Some(k) => self.queue.push((frame.min(u64::MAX >> 2) << 2) | k),
+            None => true,
         }
-        true
+    }
+}
+
+/// What a message does to the fake synth.
+fn note_kind(msg: &[u8]) -> Option<u64> {
+    if msg.len() < 3 {
+        return None;
+    }
+    match msg {
+        [s, _, v, ..] if s & 0xF0 == 0x90 && *v > 0 => Some(EV_ON),
+        [s, ..] if s & 0xF0 == 0x80 || s & 0xF0 == 0x90 => Some(EV_OFF),
+        [s, c, ..] if s & 0xF0 == 0xB0 && (*c == 120 || *c == 123) => Some(EV_ALL_OFF),
+        _ => None,
     }
 }
 
@@ -594,19 +604,64 @@ struct SynthVoice {
     click_from: Option<u64>,
     /// Where the tone started (its phase).
     tone_from: u64,
+    /// Events taken from the queue, not yet due; they may be in any order.
+    /// Allocated once with the voice.
+    pending: Vec<u64>,
+    /// Frames the engine's negative MIDI offset puts a note's audible
+    /// frame before the block that sends it.
+    extra: u64,
 }
 
 impl SynthVoice {
+    fn new(queue: Arc<SynthQueue>, delay: u64) -> SynthVoice {
+        SynthVoice {
+            queue,
+            delay,
+            held: 0,
+            click_from: None,
+            tone_from: 0,
+            pending: Vec::with_capacity(FAKE_SYNTH_EVENTS),
+            extra: 0,
+        }
+    }
+
+    /// Grows the delay to cover a block of `frames`: a note is sent during
+    /// the block that carries it and heard no earlier than `extra` frames
+    /// before that block, so it can sound on time only if the synth waits
+    /// at least a block plus that. // RT
+    fn cover(&mut self, frames: u32) {
+        self.delay = self.delay.max(u64::from(frames) + self.extra);
+    }
+
+    /// The pending event due by frame `at` with the earliest time (the
+    /// first queued among equals), and its index. // RT
+    fn next_due(&self, at: u64) -> Option<(usize, u64)> {
+        let mut best: Option<(usize, u64)> = None;
+        for (i, ev) in self.pending.iter().enumerate() {
+            let when = (ev >> 2).saturating_add(self.delay);
+            if when <= at && best.is_none_or(|(_, b)| when < (b >> 2).saturating_add(self.delay)) {
+                best = Some((i, *ev));
+            }
+        }
+        best
+    }
+
     /// Renders channel 3 for absolute frames `abs..abs + out.len()`. // RT
     fn render(&mut self, out: &mut [f32], abs: u64, rate: f64) {
         let click = (FAKE_CLICK_SECONDS * rate).round().max(1.0) as u64;
+        while let Some(ev) = self.queue.peek() {
+            self.queue.pop();
+            if self.pending.len() < self.pending.capacity() {
+                self.pending.push(ev);
+            } else {
+                self.queue.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         for (k, x) in out.iter_mut().enumerate() {
             let at = abs + k as u64;
-            while let Some(ev) = self.queue.peek() {
+            // Due events act in time order, whatever order they arrived in.
+            while let Some((i, ev)) = self.next_due(at) {
                 let when = (ev >> 2).saturating_add(self.delay);
-                if when > at {
-                    break;
-                }
                 match ev & 3 {
                     EV_ON => {
                         if self.held == 0 {
@@ -618,7 +673,7 @@ impl SynthVoice {
                     EV_OFF => self.held = self.held.saturating_sub(1),
                     _ => self.held = 0,
                 }
-                self.queue.pop();
+                self.pending.remove(i);
             }
             let mut v = 0.0f32;
             if self.click_from.is_some_and(|c| at >= c && at - c < click) {
@@ -713,19 +768,15 @@ impl OfflineBackend {
     /// signals input (plan 5c-2 Ruling 7): call after
     /// [`OfflineBackend::with_input`]; with no fake input or the loopback
     /// nothing changes. Its delay is at least one block, as the loopback's
-    /// is: a note is sent during the block it plays in.
+    /// is (a note is sent during the block it plays in), and grows to the
+    /// largest block rendered plus the engine's negative MIDI offset, so
+    /// that a note never sounds before its audible frame plus the delay.
     pub fn with_synth(mut self, synth: &FakeSynth) -> OfflineBackend {
         let rate = self.sample_rate;
         let block = u64::from(self.block);
         if let Some(f) = self.fake.as_mut().filter(|f| f.kind == FakeInput::Signals) {
             let delay = ((synth.delay_ms * rate / 1000.0).round().max(0.0) as u64).max(block);
-            f.synth = Some(SynthVoice {
-                queue: Arc::clone(&synth.queue),
-                delay,
-                held: 0,
-                click_from: None,
-                tone_from: 0,
-            });
+            f.synth = Some(SynthVoice::new(Arc::clone(&synth.queue), delay));
         }
         self
     }
@@ -790,6 +841,9 @@ impl OfflineBackend {
         let abs = self.frames;
         let rate = self.sample_rate;
         if let Some(f) = self.fake.as_mut() {
+            if let Some(s) = f.synth.as_mut() {
+                s.cover(frames);
+            }
             fill_fake(f, abs, n, rate);
         }
         let (Some(l), Some(rt)) = (self.left.get_mut(..n), self.right.get_mut(..n)) else {
@@ -887,6 +941,11 @@ impl AudioBackend for OfflineBackend {
 
     fn start(&mut self, renderer: Renderer) -> Result<(), BackendError> {
         self.reserve(self.block.max(renderer.config().max_frames));
+        let cfg = renderer.config();
+        let early = (-cfg.midi_offset_ns).max(0) as f64 * cfg.sample_rate / 1e9;
+        if let Some(s) = self.fake.as_mut().and_then(|f| f.synth.as_mut()) {
+            s.extra = early.round() as u64;
+        }
         self.renderer = Some(renderer);
         Ok(())
     }
@@ -939,5 +998,93 @@ fn fill_fake(f: &mut Fake, abs: u64, n: usize, rate: f64) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod synth_tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+
+    fn ns(frame: u64) -> u64 {
+        (frame as f64 * 1e9 / RATE).round() as u64
+    }
+
+    fn out(queue: &Arc<SynthQueue>) -> FakeSynthOut {
+        let (tx, rx) = RingBuffer::new(FAKE_SYNTH_EVENTS + 8);
+        // Keep the log's consumer alive so the log accepts every send.
+        std::mem::forget(rx);
+        FakeSynthOut {
+            log: RecordingMidiOut {
+                tx,
+                target: TargetIdx(0),
+                sample_rate: RATE,
+                accept: true,
+            },
+            queue: Arc::clone(queue),
+        }
+    }
+
+    fn render(v: &mut SynthVoice, frames: usize) -> Vec<f32> {
+        let mut o = vec![0.0; frames];
+        v.render(&mut o, 0, RATE);
+        o
+    }
+
+    #[test]
+    fn short_messages_are_not_notes() {
+        assert_eq!(note_kind(&[0x90, 60]), None);
+        assert_eq!(note_kind(&[0x80, 60]), None);
+        assert_eq!(note_kind(&[0xB0, 123]), None);
+        assert_eq!(note_kind(&[0x90, 60, 0]), Some(EV_OFF));
+        assert_eq!(note_kind(&[0x90, 60, 9]), Some(EV_ON));
+        assert_eq!(note_kind(&[0x80, 60, 0]), Some(EV_OFF));
+        assert_eq!(note_kind(&[0xB0, 123, 0]), Some(EV_ALL_OFF));
+        assert_eq!(note_kind(&[0xB3, 120, 0]), Some(EV_ALL_OFF));
+    }
+
+    #[test]
+    fn all_notes_off_ends_the_tone() {
+        let q = Arc::new(SynthQueue::new());
+        let mut o = out(&q);
+        assert!(o.send(ns(10), &[0x90, 60, 100]));
+        assert!(o.send(ns(10), &[0x90, 64, 100]));
+        assert!(o.send(ns(1000), &[0xB0, 123, 0]));
+        let mut v = SynthVoice::new(q, 0);
+        let ch = render(&mut v, 2000);
+        assert!(ch[500..1000].iter().any(|x| x.abs() > 0.01));
+        assert!(ch[1000..].iter().all(|x| *x == 0.0));
+    }
+
+    #[test]
+    fn a_late_timestamped_event_does_not_block_the_queue() {
+        // The note-on is audible at 1000, but an all-notes-off audible at
+        // 10 was queued behind it: it must still act at 10, not wait for
+        // the note-on.
+        let q = Arc::new(SynthQueue::new());
+        let mut o = out(&q);
+        assert!(o.send(ns(1000), &[0x90, 60, 100]));
+        assert!(o.send(ns(10), &[0xB0, 123, 0]));
+        let mut v = SynthVoice::new(q, 0);
+        let ch = render(&mut v, 3000);
+        assert!(ch[..1000].iter().all(|x| *x == 0.0));
+        assert!(ch[1000] >= FAKE_CLICK_LEVEL - 1e-6);
+        assert!(
+            ch[1500..].iter().any(|x| x.abs() > 0.01),
+            "the note still sounds"
+        );
+    }
+
+    #[test]
+    fn a_full_queue_refuses_and_counts() {
+        let q = Arc::new(SynthQueue::new());
+        let mut o = out(&q);
+        for k in 0..FAKE_SYNTH_EVENTS {
+            assert!(o.send(ns(k as u64), &[0x90, 60, 100]), "event {k}");
+        }
+        assert_eq!(q.dropped.load(Ordering::Relaxed), 0);
+        assert!(!o.send(ns(9999), &[0x90, 60, 100]), "refused when full");
+        assert_eq!(q.dropped.load(Ordering::Relaxed), 1);
     }
 }
