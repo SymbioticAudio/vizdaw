@@ -18,7 +18,16 @@
 //! `L` grew, the heard runs between the pieces played the new graph's
 //! empty delay: no audio is placed from them, and a message played then
 //! lands where the next piece starts. Where `L` shrank, the newer piece is
-//! heard over the older one's tail, which it cuts.
+//! heard over the tail of every earlier piece that reaches past its start
+//! (the one just before, and one before that when a resync landed less
+//! than the fall earlier: 5c final review carry, plan 5c-2 Ruling 13),
+//! and cuts each there.
+//!
+//! **Synth returns (plan 5c-2 Ruling 4).** A lane recording an external
+//! synth's return (spec §6.7) captured the synth's answer `R` frames (its
+//! return latency) after the note that made it was heard: its file frames
+//! are placed with `D + R` ([`AudioTake::return_frames`]), so its regions
+//! land earlier by `R`. MIDI does not move.
 //!
 //! **Passes.** The roll and every wrap start a pass. A pass's window is the
 //! timeline it played, inside the record range. Discarded passes are
@@ -137,6 +146,11 @@ pub struct AudioTake {
     pub lane: LaneId,
     /// The file (package-relative path, format, frames, hash, name, pass).
     pub media: RecordedMedia,
+    /// Frames this lane's input arrived after what it records was heard,
+    /// besides the device's delay: an external synth's return latency for
+    /// a `return_of` lane (spec §6.7), else 0. Its regions move earlier by
+    /// that much.
+    pub return_frames: i64,
 }
 
 /// Everything a finished recording captured.
@@ -252,26 +266,39 @@ fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
         });
     }
     // Into heard runs, each by its own latency (final review I1).
-    let mut prev: Option<(&mut Piece, i64)> = None;
-    for (p, x) in out.iter_mut().zip(&m) {
-        let l = lat(x);
+    let lats: Vec<i64> = m.iter().map(lat).collect();
+    for i in 0..out.len() {
+        let l = lats.get(i).copied().unwrap_or(0);
+        let (done, rest) = out.split_at_mut(i);
+        let Some(p) = rest.first_mut() else {
+            break;
+        };
         p.from += l;
         p.run += l;
         p.end += l;
         p.catch += l;
-        if let Some((q, ql)) = prev {
-            let rise = l - ql;
+        let Some(ql) = i.checked_sub(1).and_then(|j| lats.get(j)).copied() else {
+            continue;
+        };
+        // The latency shrank: the newer piece is heard over the tail of
+        // every earlier piece reaching past its start, not only the one
+        // just before (plan 5c-2 Ruling 13); each is cut there.
+        let mut fell = false;
+        for q in done.iter_mut() {
             if q.end > p.from {
-                // The latency shrank: the newer piece is heard over the
-                // older one's tail.
                 q.end = p.from.max(q.from);
-            } else if rise > 0 {
-                // It grew: what is played in the gap it opened lands at
-                // this piece's start (a cut before it stays a cut).
-                p.catch = (p.from - rise).max(q.end);
+                fell = true;
             }
         }
-        prev = Some((p, l));
+        let rise = l - ql;
+        if !fell
+            && rise > 0
+            && let Some(q) = done.last()
+        {
+            // It grew: what is played in the gap it opened lands at this
+            // piece's start (a cut before it stays a cut).
+            p.catch = (p.from - rise).max(q.end);
+        }
     }
     out
 }
@@ -560,7 +587,15 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
     };
     // Audio makes a take of every pass when looped (spec §6.4).
     for a in c.audio {
-        let mut regions = audio_regions(a.media.length_frames, &pieces, &c.range, d, &tempo);
+        // A synth's return lands earlier by its return latency (plan 5c-2
+        // Ruling 4).
+        let mut regions = audio_regions(
+            a.media.length_frames,
+            &pieces,
+            &c.range,
+            d.saturating_add(a.return_frames),
+            &tempo,
+        );
         let takes = if c.looped {
             as_takes(&|p| regions.get(&p).is_some_and(|r| !r.is_empty()))
         } else {

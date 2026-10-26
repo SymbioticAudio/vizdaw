@@ -725,6 +725,8 @@ pub fn build(f: &Finished, doc: &Document) -> Result<Option<RecordPass>, String>
         let (_, stem) = MediaItem::file_parts(&a.path);
         audio.push(AudioTake {
             lane: a.lane,
+            // Task 8 of plan 5c-2 gives a `return_of` lane its shift.
+            return_frames: 0,
             media: RecordedMedia {
                 path: a.path.clone(),
                 sample_rate: f.format.sample_rate,

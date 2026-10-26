@@ -148,6 +148,7 @@ fn audio_case(d: &Doc, start: u64, frames: u64) -> Case<'_> {
     c.audio = vec![AudioTake {
         lane: d.mic,
         media: file(frames),
+        return_frames: 0,
     }];
     c
 }
@@ -415,6 +416,7 @@ fn nothing_armed_or_recorded_is_no_pass() {
     c.audio = vec![AudioTake {
         lane: d.mic,
         media: file(1000),
+        return_frames: 0,
     }];
     assert_eq!(c.run(), None, "no marks: the transport never rolled");
 }
@@ -848,4 +850,87 @@ fn a_latency_fall_places_what_follows_with_the_new_latency() {
     let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
     let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
     assert_eq!(ticks, vec![Q, 2 * Q + 1200 * Q / BEAT as i64, 4 * Q]);
+}
+
+/// 5c final review carry (plan 5c-2 Ruling 13): a schedule-only resync
+/// landed less than the latency fall before it, so two older pieces are
+/// heard past the new piece's start. Both are cut there: MIDI played after
+/// the fall lands with the new latency, and no file frame is placed twice.
+#[test]
+fn a_latency_fall_cuts_every_piece_it_is_heard_over() {
+    let d = doc(None);
+    let mut c = audio_case(&d, 0, 8 * BEAT);
+    let b = BEAT as i64;
+    c.marks = vec![
+        latent(0, 0, 4800),
+        // An edit recompiled the schedule; 1000 frames later the latent
+        // plugin went.
+        latent(2 * BEAT, 2 * BEAT, 4800),
+        latent(2 * BEAT + 1000, 2 * BEAT + 1000, 0),
+    ];
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![
+        midi(d.keys, b + 4800, on(60, 100)),
+        midi(d.keys, b + 4900, off(60)),
+        // Heard over both older tails: the new graph's.
+        midi(d.keys, 2 * b + 2000, on(61, 100)),
+        midi(d.keys, 2 * b + 2100, off(61)),
+    ];
+    let p = c.run().unwrap();
+    assert_eq!(
+        active_regions(&p, d.mic),
+        vec![
+            (0, 4800, 2 * BEAT - 3800),
+            (2 * Q + 640, 2 * BEAT + 1000, 6 * BEAT - 1000),
+        ]
+    );
+    let got = active_frames(&p, d.mic, &d);
+    assert_no_overlap(&got);
+    for w in got.windows(2) {
+        assert!(
+            w[0].1 + w[0].2 <= w[1].1,
+            "file frames placed twice: {got:?}"
+        );
+    }
+    let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
+    let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
+    assert_eq!(ticks, vec![Q, 2 * Q + 1280]);
+}
+
+/// Spec §6.7 (plan 5c-2 Ruling 4): a lane recording a synth's return
+/// lands earlier by the synth's return latency, on top of the device
+/// delay and the graph latency; MIDI recorded in the same pass does not
+/// move.
+#[test]
+fn a_return_lane_lands_earlier_by_its_return_latency() {
+    let d = doc(None);
+    let mut c = audio_case(&d, 2 * BEAT, 4 * BEAT);
+    c.latency = 512;
+    c.input_delay = 300;
+    c.audio[0].return_frames = 1200;
+    c.midi_lanes = vec![d.keys];
+    c.midi = vec![
+        midi(d.keys, 512 + 2400, on(60, 100)),
+        midi(d.keys, 512 + 4800, off(60)),
+    ];
+    let p = c.run().unwrap();
+    // File frame 812 + 1200 holds the synth's answer to what was heard at
+    // the record start.
+    assert_eq!(
+        active_regions(&p, d.mic),
+        vec![(2 * Q, 2012, 4 * BEAT - 2012)]
+    );
+    let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
+    let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
+    assert_eq!(ticks, vec![2 * Q + 2400 * Q / BEAT as i64]);
+}
+
+/// Plan 5c-2 Ruling 4: a return latency longer than the take means
+/// nothing of the file was heard in time; no region reaches outside it.
+#[test]
+fn a_return_latency_longer_than_the_take_places_nothing() {
+    let d = doc(None);
+    let mut c = audio_case(&d, 2 * BEAT, 4 * BEAT);
+    c.audio[0].return_frames = 5 * BEAT as i64;
+    assert_eq!(c.run(), None);
 }
