@@ -475,3 +475,172 @@ fn a_relinked_lane_takes_the_new_synths_latency_not_the_old() {
     assert_eq!(link_of(&moved, rec), Some(d.moog));
     assert_eq!(latency(&moved, d.moog), 3.0);
 }
+
+fn track(lane: LaneId, channels: InputChannels, arm_midi: bool) -> Command {
+    Command::Lane(LaneCmd::TrackSynth {
+        seq: SeqId(0),
+        lane,
+        channels,
+        arm_midi,
+    })
+}
+
+/// Spec §6.7, §12.3: Track Synth sets up and arms in one undo step: a lane
+/// "<synth> audio" just below records the chosen channels as the synth's
+/// return, on the first output path (made when there is none), armed and
+/// monitoring Auto; the MIDI lane is disarmed so its part plays (plan
+/// 5c-2 Ruling 5).
+#[test]
+fn track_synth_sets_up_and_arms_in_one_undo_step() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    run(
+        &mut doc,
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Below".into(),
+            index: None,
+        }),
+    );
+    run(
+        &mut doc,
+        Command::Lane(LaneCmd::SetFlags {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        }),
+    );
+    let mut h = History::new(doc.clone());
+    let f = ViewFilter::default();
+    let r = h
+        .execute(&track(LaneId(0), InputChannels::Mono(2), false), &f)
+        .unwrap();
+    assert_eq!(h.undo_label(), Some("Track Synth"));
+    let s = h.doc().sequence(SeqId(0)).unwrap();
+    let names: Vec<&str> = s.lanes.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["Part", "Juno audio", "Below"]);
+    let rec = &s.lanes[1];
+    assert!(r.created.contains(&AnyId::Lane(rec.id)));
+    assert_eq!(rec.input, Some(returning(InputChannels::Mono(2), d.juno)));
+    assert!(rec.arm);
+    assert_eq!(rec.monitor, MonitorMode::Auto);
+    let out = rec.audio_out.unwrap();
+    assert_eq!(h.doc().outputs().get(&out).unwrap().name, "Audio 1");
+    assert!(r.created.contains(&AnyId::Output(out)));
+    assert!(!s.lanes[0].arm, "the MIDI lane plays, unarmed");
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &doc, "one step undoes all of it");
+}
+
+#[test]
+fn track_synth_reuses_the_return_lane_and_can_arm_the_midi_lane() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    run(&mut doc, track(LaneId(0), InputChannels::Mono(2), false));
+    let lanes = doc.sequence(SeqId(0)).unwrap().lanes.len();
+    let out = doc.sequence(SeqId(0)).unwrap().lanes[1].audio_out;
+    // Again, stereo, with the MIDI lane armed: the same lane is set up.
+    run(&mut doc, track(LaneId(0), InputChannels::Stereo(4), true));
+    let s = doc.sequence(SeqId(0)).unwrap();
+    assert_eq!(s.lanes.len(), lanes);
+    assert_eq!(
+        s.lanes[1].input,
+        Some(returning(InputChannels::Stereo(4), d.juno))
+    );
+    assert_eq!(s.lanes[1].audio_out, out, "its output is kept");
+    assert_eq!(doc.outputs().len(), 1);
+    assert!(s.lanes[0].arm && s.lanes[1].arm);
+    // A lane that records the synth's return elsewhere in the sequence is
+    // the one reused, wherever it is.
+    let mut doc = d.doc.clone();
+    let rec = with_return_lane(&mut doc, d.juno);
+    run(
+        &mut doc,
+        Command::Lane(LaneCmd::Reorder {
+            seq: SeqId(0),
+            lane: rec,
+            to: 0,
+        }),
+    );
+    run(&mut doc, track(LaneId(0), InputChannels::Mono(5), false));
+    let s = doc.sequence(SeqId(0)).unwrap();
+    assert_eq!(s.lanes.len(), 2);
+    assert_eq!(
+        doc.lane(SeqId(0), rec).unwrap().input,
+        Some(returning(InputChannels::Mono(5), d.juno))
+    );
+}
+
+/// `Sequence::return_lane` is Track Synth's reuse rule: the lane recording
+/// the destination's return, other than `except`.
+#[test]
+fn return_lane_finds_the_lane_recording_a_destinations_return() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    let rec = with_return_lane(&mut doc, d.juno);
+    let s = doc.sequence(SeqId(0)).unwrap();
+    assert_eq!(s.return_lane(d.juno, None), Some(rec));
+    assert_eq!(s.return_lane(d.juno, Some(rec)), None);
+    assert_eq!(s.return_lane(d.juno, Some(LaneId(0))), Some(rec));
+    assert_eq!(s.return_lane(d.moog, None), None);
+}
+
+/// Plan 5c-2 Ruling 5: Track Synth refuses a lane that plays no external
+/// synth (none, a plugin, the built-in synth), an unknown lane or
+/// sequence, and channels past the last; nothing changes.
+#[test]
+fn track_synth_refuses_what_it_cannot_set_up() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    for (name, dest) in [
+        ("Pad lane", Some(d.pad)),
+        ("Synth lane", Some(d.synth)),
+        ("Bare", None),
+    ] {
+        let r = run(
+            &mut doc,
+            Command::Lane(LaneCmd::Add {
+                seq: SeqId(0),
+                name: name.into(),
+                index: None,
+            }),
+        );
+        let lane = r
+            .created
+            .iter()
+            .find_map(|id| match id {
+                AnyId::Lane(l) => Some(*l),
+                _ => None,
+            })
+            .unwrap();
+        run(
+            &mut doc,
+            Command::Lane(LaneCmd::SetDest {
+                seq: SeqId(0),
+                lane,
+                dest,
+            }),
+        );
+        assert!(
+            apply(&doc, &track(lane, InputChannels::Mono(0), false)).is_err(),
+            "{name}"
+        );
+    }
+    assert!(apply(&doc, &track(LaneId(99), InputChannels::Mono(0), false)).is_err());
+    assert!(
+        apply(
+            &doc,
+            &Command::Lane(LaneCmd::TrackSynth {
+                seq: SeqId(9),
+                lane: LaneId(0),
+                channels: InputChannels::Mono(0),
+                arm_midi: false,
+            })
+        )
+        .is_err()
+    );
+    assert!(apply(&doc, &track(LaneId(0), InputChannels::Mono(256), false)).is_err());
+    assert!(apply(&doc, &track(LaneId(0), InputChannels::Stereo(255), false)).is_err());
+}
