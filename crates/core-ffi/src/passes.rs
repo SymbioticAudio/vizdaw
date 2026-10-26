@@ -301,9 +301,13 @@ fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
     out
 }
 
-/// The piece a message heard at run `u` was played in.
+/// The piece a message heard at run `u` was played in. A piece a later one
+/// cut to nothing (`end <= from`) played nothing and takes no message, so
+/// a live piece covering `u` gets it.
 fn piece_of(pieces: &[Piece], u: i64) -> Option<&Piece> {
-    pieces.iter().find(|p| u >= p.catch && u < p.end)
+    pieces
+        .iter()
+        .find(|p| p.end > p.from && u >= p.catch && u < p.end)
 }
 
 /// Where in piece `p` a message heard at run `u` lands.

@@ -956,12 +956,17 @@ fn a_rise_after_a_fall_that_cut_a_piece_to_nothing_still_opens_its_gap() {
         // as the one before it ended (frame 20 000).
         midi(d.keys, 21_000, on(60, 100)),
         midi(d.keys, 21_500, off(60)),
+        // Heard inside the cut piece's stale [24 000, 26 000) too, but the
+        // last piece is the one that plays it: frame 20 000 + 2 000.
+        midi(d.keys, 25_000, on(62, 100)),
+        midi(d.keys, 25_100, off(62)),
     ];
     let p = c.run().unwrap();
     let k = p.lanes.iter().find(|x| x.lane == d.keys).unwrap();
     let ticks: Vec<i64> = k.active.events.iter().map(|e| e.tick.0).collect();
     let t = 20_000 * Q / BEAT as i64;
-    assert_eq!(ticks, vec![t]);
+    let t2 = 22_000 * Q / BEAT as i64;
+    assert_eq!(ticks, vec![t, t2]);
 }
 
 /// Task 1 review M2: a rise right after a fall keeps its gap.
