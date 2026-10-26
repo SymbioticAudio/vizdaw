@@ -530,8 +530,141 @@ fn track_synth_sets_up_and_arms_in_one_undo_step() {
     assert_eq!(h.doc().outputs().get(&out).unwrap().name, "Audio 1");
     assert!(r.created.contains(&AnyId::Output(out)));
     assert!(!s.lanes[0].arm, "the MIDI lane plays, unarmed");
+    let done = h.doc().clone();
     h.undo().unwrap();
     assert_eq!(h.doc(), &doc, "one step undoes all of it");
+    h.redo().unwrap();
+    assert_eq!(h.doc(), &done, "and one step redoes all of it");
+    assert_eq!(h.undo_label(), Some("Track Synth"));
+}
+
+/// Undo and redo of the reuse path: no lane is added; the input and the
+/// arm states come back.
+#[test]
+fn track_synth_on_a_reused_lane_undoes_and_redoes() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    let rec = with_return_lane(&mut doc, d.juno);
+    run(
+        &mut doc,
+        Command::Lane(LaneCmd::SetFlags {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        }),
+    );
+    let mut h = History::new(doc.clone());
+    let f = ViewFilter::default();
+    let r = h
+        .execute(&track(LaneId(0), InputChannels::Stereo(4), false), &f)
+        .unwrap();
+    assert!(!r.created.iter().any(|id| matches!(id, AnyId::Lane(_))));
+    let done = h.doc().clone();
+    let l = done.lane(SeqId(0), rec).unwrap();
+    assert!(l.arm);
+    assert_eq!(l.input, Some(returning(InputChannels::Stereo(4), d.juno)));
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &doc);
+    let l = h.doc().lane(SeqId(0), rec).unwrap();
+    assert!(!l.arm);
+    assert_eq!(l.input, Some(returning(InputChannels::Mono(2), d.juno)));
+    assert!(h.doc().lane(SeqId(0), LaneId(0)).unwrap().arm);
+    h.redo().unwrap();
+    assert_eq!(h.doc(), &done);
+}
+
+/// A lane returning another synth is never reused; of several lanes
+/// returning the same synth the first by order is, and the rest are left
+/// alone.
+#[test]
+fn track_synth_reuse_skips_other_synths_and_takes_the_first_candidate() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    let moog_rec = with_return_lane(&mut doc, d.moog);
+    let juno_a = with_return_lane(&mut doc, d.juno);
+    let juno_b = with_return_lane(&mut doc, d.juno);
+    let s = doc.sequence(SeqId(0)).unwrap();
+    assert_eq!(s.return_lane(d.juno, None), Some(juno_a), "first in order");
+    assert_eq!(s.return_lane(d.juno, Some(juno_a)), Some(juno_b));
+    assert_eq!(s.return_lane(d.moog, None), Some(moog_rec));
+    run(&mut doc, track(LaneId(0), InputChannels::Mono(7), false));
+    let s = doc.sequence(SeqId(0)).unwrap();
+    assert_eq!(s.lanes.len(), 4, "no lane added");
+    let mono7 = Some(returning(InputChannels::Mono(7), d.juno));
+    assert_eq!(doc.lane(SeqId(0), juno_a).unwrap().input, mono7);
+    assert!(doc.lane(SeqId(0), juno_a).unwrap().arm);
+    for other in [juno_b, moog_rec] {
+        let l = doc.lane(SeqId(0), other).unwrap();
+        assert_eq!(
+            l.input.as_ref().map(|i| i.return_of().is_some()),
+            Some(true)
+        );
+        assert_ne!(l.input, mono7);
+        assert!(!l.arm, "left alone");
+    }
+    // With only another synth's return lane, a new lane is added.
+    let mut doc = d.doc.clone();
+    let moog_rec = with_return_lane(&mut doc, d.moog);
+    run(&mut doc, track(LaneId(0), InputChannels::Mono(7), false));
+    let s = doc.sequence(SeqId(0)).unwrap();
+    assert_eq!(s.lanes.len(), 3);
+    assert_eq!(
+        doc.lane(SeqId(0), moog_rec).unwrap().input,
+        Some(returning(InputChannels::Mono(2), d.moog))
+    );
+}
+
+/// A refused Track Synth leaves the document and the undo history as they
+/// were.
+#[test]
+fn a_refused_track_synth_changes_nothing() {
+    let d = doc();
+    let mut doc = d.doc.clone();
+    let r = run(
+        &mut doc,
+        Command::Lane(LaneCmd::Add {
+            seq: SeqId(0),
+            name: "Pad lane".into(),
+            index: None,
+        }),
+    );
+    let pad_lane = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Lane(l) => Some(*l),
+            _ => None,
+        })
+        .unwrap();
+    run(
+        &mut doc,
+        Command::Lane(LaneCmd::SetDest {
+            seq: SeqId(0),
+            lane: pad_lane,
+            dest: Some(d.pad),
+        }),
+    );
+    let mut h = History::new(doc.clone());
+    let f = ViewFilter::default();
+    let bad = [
+        track(pad_lane, InputChannels::Mono(0), false),
+        track(LaneId(99), InputChannels::Mono(0), false),
+        track(LaneId(0), InputChannels::Mono(256), true),
+        track(LaneId(0), InputChannels::Stereo(255), true),
+        Command::Lane(LaneCmd::TrackSynth {
+            seq: SeqId(9),
+            lane: LaneId(0),
+            channels: InputChannels::Mono(0),
+            arm_midi: false,
+        }),
+    ];
+    for c in &bad {
+        assert!(h.execute(c, &f).is_err());
+        assert_eq!(h.doc(), &doc);
+        assert_eq!(h.undo_depth(), 0);
+    }
 }
 
 #[test]
