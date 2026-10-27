@@ -184,7 +184,7 @@ public enum ControlCommands {
     /// Every registry ID `run` handles (a test checks it is all of them).
     public static var handled: Set<String> {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
-            .union(fieldKeys.keys).union(RegionCommands.ids)
+            .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids)
     }
 
@@ -354,6 +354,9 @@ public enum ControlCommands {
                 guard let input = ControlLanes.input(args) else {
                     return .failed(.of(.invalidParams, "lane.set_input: `kind` is none, audio or midi"))
                 }
+                if case .audio(_, _, let returnOf?) = input.value, !SynthCommands.isExternal(returnOf, m) {
+                    return SynthCommands.notExternal(id, returnOf)
+                }
                 edit = .setInput(seq: seq, lane: lane, input: input.value)
             } else {
                 guard let mode = ControlLanes.monitor(args.text("mode")) else {
@@ -380,6 +383,8 @@ public enum ControlCommands {
             } catch {
                 return .failed(.thrown(error, "MIDI Injection Failed"))
             }
+        case _ where SynthCommands.ids.contains(id):
+            return SynthCommands.run(id, args: args, doc: docID, m)
         case RegionCommands.normalize:
             guard let text = args.text("peak_db") else { return .failed(.dialog("Normalize", "peak_db")) }
             guard let peak = RegionCommands.parsePeak(text) else {
@@ -719,7 +724,7 @@ public enum ControlLanes {
     public static func input(_ args: [ControlArg]) -> Input? {
         // Params that belong to another kind are mistakes, not extras.
         let names = Set(args.map(\.name))
-        let audioOnly: Set<String> = ["channel", "stereo"]
+        let audioOnly: Set<String> = ["channel", "stereo", "return_of"]
         let midiOnly: Set<String> = ["port", "midi_channel"]
         switch args.text("kind") {
         case "none" where !names.isDisjoint(with: audioOnly.union(midiOnly)): return nil
@@ -733,7 +738,14 @@ public enum ControlLanes {
         case "audio":
             let channel = args.int("channel") ?? 1
             guard (1...256).contains(channel) else { return nil }
-            return Input(value: .audio(first: UInt16(channel - 1), stereo: args.flag("stereo") ?? false, returnOf: nil))
+            // Without `return_of` the lane is plain audio: a link to a
+            // synth's return is dropped (plan 5c-2 Task 8).
+            let returnOf = args.int("return_of")
+            if let returnOf, returnOf < 0 { return nil }
+            return Input(
+                value: .audio(
+                    first: UInt16(channel - 1), stereo: args.flag("stereo") ?? false,
+                    returnOf: returnOf.map { UInt64($0) }))
         case "midi":
             let ch = args.int("midi_channel")
             if let ch, !(1...16).contains(ch) { return nil }

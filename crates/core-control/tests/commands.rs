@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        124,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject"
+        127,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1045,6 +1045,159 @@ fn record_and_lane_commands_check_their_params() {
     ] {
         assert!(!spec(id).menu_item && spec(id).document, "{id}");
     }
+}
+
+/// Plan 5c-2 Task 10: the synth-tracking commands, and `lane.set_input`'s
+/// `return_of`, take their parameters by type and range; hostile values
+/// never reach the app.
+#[test]
+fn synth_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("lane.track_synth", json!({ "seq": 1, "lane": 2 })),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 3, "stereo": true, "arm_midi": true, "mute_after": false }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 256 }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": "12.5" }),
+        ),
+        ("destination.measure_return", json!({ "dest": 4 })),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 3, "return_of": 4 }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("lane.track_synth", json!({ "lane": 2 })),
+        ("lane.track_synth", json!({ "seq": 1 })),
+        ("lane.track_synth", json!({})),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 0 }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 257 }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 1.5 }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "stereo": "yes" }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "arm_midi": 1 }),
+        ),
+        ("lane.track_synth", json!({ "seq": 1, "lane": -2 })),
+        ("lane.track_synth", json!({ "seq": "1", "lane": 2 })),
+        ("lane.track_synth", json!({ "seq": 1, "lane": u64::MAX })),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channels": 3 }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "junk": "x".repeat(100_000) }),
+        ),
+        ("destination.set_return_latency", json!({ "dest": 4 })),
+        ("destination.set_return_latency", json!({ "ms": "12" })),
+        // The milliseconds are text: a JSON number (negative, above 500
+        // or fractional) is the wrong type; the text's range is the
+        // app's check.
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": 12.5 }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": -1 }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": 501 }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": null }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": ["12"] }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": "x".repeat(100_000) }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": -4, "ms": "12" }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": "Juno", "ms": "12" }),
+        ),
+        ("destination.measure_return", json!({})),
+        ("destination.measure_return", json!({ "dest": "Juno" })),
+        ("destination.measure_return", json!({ "dest": -1 })),
+        ("destination.measure_return", json!({ "dest": 4.5 })),
+        (
+            "destination.measure_return",
+            json!({ "dest": 4, "wait": true }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "return_of": -1 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "return_of": "Juno" }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "return_of": 1.5 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "return_of": u64::MAX }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let spec = |id: &str| registry::find(id).unwrap();
+    for id in [
+        "lane.track_synth",
+        "destination.set_return_latency",
+        "destination.measure_return",
+    ] {
+        assert!(!spec(id).menu_item && spec(id).document, "{id}");
+        assert!(spec(id).dialogs.is_empty(), "{id} opens no dialog");
+    }
+    // Without `return_of`, `lane.set_input` unlinks (plan 5c-2 Task 8):
+    // its help says so.
+    let return_of = spec("lane.set_input")
+        .params
+        .iter()
+        .find(|p| p.name == "return_of")
+        .unwrap();
+    assert!(return_of.help.contains("unlink"), "{}", return_of.help);
 }
 
 #[test]

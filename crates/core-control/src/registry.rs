@@ -415,7 +415,63 @@ const SET_INPUT_PARAMS: &[ParamSpec] = &[
         required: false,
         help: "MIDI: the channel 1–16 (absent: every channel).",
     },
+    ParamSpec {
+        name: "return_of",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Audio: the external MIDI destination whose return the lane records (Track Synth); absent: plain audio, which unlinks a lane that recorded a synth's return.",
+    },
 ];
+
+/// `lane.track_synth` (plan 5c-2 Ruling 11).
+const TRACK_SYNTH_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The MIDI lane's sequence."),
+    id_param("lane", "The MIDI lane playing the external synth."),
+    ParamSpec {
+        name: "channel",
+        kind: ParamKind::Int { min: 1, max: 256 },
+        required: false,
+        help: "The input channel the synth's output is wired to, from 1 (default 1).",
+    },
+    ParamSpec {
+        name: "stereo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "The channel and the next as a pair.",
+    },
+    ParamSpec {
+        name: "arm_midi",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Also arm the MIDI lane to record the performance (default: disarm it, so its part plays and is never replaced).",
+    },
+    ParamSpec {
+        name: "mute_after",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Mute the MIDI lane after the next recording, in the same undo step.",
+    },
+];
+
+/// `destination.set_return_latency` (plan 5c-2 Ruling 11).
+const RETURN_LATENCY_PARAMS: &[ParamSpec] = &[
+    id_param("dest", "The external MIDI destination."),
+    ParamSpec {
+        name: "ms",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Its return latency in milliseconds, 0 to 500, as text (\"12.5\").",
+    },
+];
+
+/// `destination.measure_return` (plan 5c-2 Ruling 11).
+const MEASURE_RETURN_PARAMS: &[ParamSpec] = &[id_param(
+    "dest",
+    "The external MIDI destination to measure (a lane must record its return: Track Synth). Blocks for about 3 s (at most 10 s) with the transport stopped.",
+)];
 
 const SET_MONITOR_PARAMS: &[ParamSpec] = &[
     id_param("seq", "The lane's sequence."),
@@ -923,6 +979,30 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         params: INJECT_PARAMS,
         ..key_only(cmd("midi.inject", "MIDI", "Inject MIDI", None, true))
+    },
+    CommandSpec {
+        params: TRACK_SYNTH_PARAMS,
+        ..key_only(cmd("lane.track_synth", "Lane", "Track Synth", None, true))
+    },
+    CommandSpec {
+        params: RETURN_LATENCY_PARAMS,
+        ..key_only(cmd(
+            "destination.set_return_latency",
+            "Destination",
+            "Set Return Latency",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: MEASURE_RETURN_PARAMS,
+        ..key_only(cmd(
+            "destination.measure_return",
+            "Destination",
+            "Measure Return Latency",
+            None,
+            true,
+        ))
     },
     locator("locator.go_0", "Go to Locator 0", "0"),
     locator("locator.go_1", "Go to Locator 1", "1"),

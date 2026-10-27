@@ -525,6 +525,30 @@ fn record_and_input_results_as_json() {
     assert_eq!(i["input_latency"], json!(512));
 }
 
+/// Plan 5c-2 Task 10: `destination.measure_return` answers with the
+/// milliseconds it set and the onsets it found.
+#[test]
+fn a_measurement_answers_with_its_milliseconds() {
+    let v = result_json(&ControlResult::Measured {
+        doc: "D".into(),
+        dest: 4,
+        return_latency_ms: 12.5,
+        onsets: 5,
+    });
+    assert_eq!(
+        v,
+        json!({"doc": "D", "dest": 4, "return_latency_ms": 12.5, "onsets": 5})
+    );
+    // An f32 shows as the thousandths it means, not its rounding.
+    let v = result_json(&ControlResult::Measured {
+        doc: "D".into(),
+        dest: 4,
+        return_latency_ms: 24.9,
+        onsets: 3,
+    });
+    assert_eq!(v["return_latency_ms"], json!(24.9));
+}
+
 /// Plan 5c Task 14: document lanes show their takes, input and monitor
 /// (channels counted from 1), and the transport carries the record faults.
 #[test]
@@ -534,10 +558,15 @@ fn lanes_show_takes_input_and_monitor() {
     let snapshot = session.snapshot().unwrap();
     let seq = snapshot.sequences[0].id;
     let one = session.lanes(seq).unwrap().remove(0);
-    let mut lanes = vec![one.clone(), one.clone(), one];
+    let mut lanes = vec![one.clone(), one.clone(), one.clone(), one];
     lanes[0].input = Some(LaneInputRow::Audio {
         first: 2,
         stereo: true,
+        return_of: Some(7),
+    });
+    lanes[3].input = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: false,
         return_of: None,
     });
     lanes[0].monitor = MonitorModeRow::Input;
@@ -557,7 +586,12 @@ fn lanes_show_takes_input_and_monitor() {
     let l = v["lanes"].as_array().unwrap();
     assert_eq!(
         l[0]["input"],
-        json!({"kind": "audio", "channel": 3, "stereo": true})
+        json!({"kind": "audio", "channel": 3, "stereo": true, "return_of": 7})
+    );
+    // Plan 5c-2 Task 10: plain audio links no synth.
+    assert_eq!(
+        l[3]["input"],
+        json!({"kind": "audio", "channel": 1, "stereo": false, "return_of": null})
     );
     assert_eq!(l[0]["monitor"], json!("input"));
     assert_eq!(

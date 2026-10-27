@@ -540,6 +540,17 @@ pub enum ControlResult {
         /// What the input offers.
         info: crate::live::InputInfoRow,
     },
+    /// `destination.measure_return` (plan 5c-2).
+    Measured {
+        /// Document ID.
+        doc: String,
+        /// The destination measured.
+        dest: u64,
+        /// The return latency set, in ms.
+        return_latency_ms: f32,
+        /// Notes whose onset was found.
+        onsets: u32,
+    },
     /// `command.run`.
     Ran {
         /// Registry ID.
@@ -985,9 +996,14 @@ fn tree_json(nodes: &[UiNodeRow]) -> Vec<Value> {
 /// A lane's input as the channel spells it (`channel`s from 1).
 fn lane_input_json(i: &crate::edit::LaneInputRow) -> Value {
     match i {
-        crate::edit::LaneInputRow::Audio { first, stereo, .. } => {
-            json!({"kind": "audio", "channel": u32::from(*first) + 1, "stereo": stereo})
-        }
+        crate::edit::LaneInputRow::Audio {
+            first,
+            stereo,
+            return_of,
+        } => json!({
+            "kind": "audio", "channel": u32::from(*first) + 1, "stereo": stereo,
+            "return_of": return_of,
+        }),
         crate::edit::LaneInputRow::Midi { port, channel } => json!({
             "kind": "midi", "port": port, "midi_channel": channel.map(|c| u32::from(c) + 1),
         }),
@@ -1067,6 +1083,17 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "path": f.path, "frames": f.frames, "size_known": f.size_known,
                 "readable": f.readable,
             })).collect::<Vec<_>>(),
+        }),
+        ControlResult::Measured {
+            doc,
+            dest,
+            return_latency_ms,
+            onsets,
+        } => json!({
+            "doc": doc, "dest": dest,
+            // Thousandths: an f32 printed as f64 would show its rounding.
+            "return_latency_ms": (f64::from(*return_latency_ms) * 1000.0).round() / 1000.0,
+            "onsets": onsets,
         }),
         ControlResult::InputState { doc, info } => json!({
             "doc": doc, "device": info.device, "channels": info.channels,
