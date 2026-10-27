@@ -2169,3 +2169,85 @@ fn the_take_draws_while_it_grows_and_its_overview_peaks_at_the_sine() {
     assert!((p - 0.2512).abs() < 0.01, "{p}");
     s.close().unwrap();
 }
+
+/// Task 10 review I1: the growing take is drawn where Stop places it. File
+/// frame k lands at S(k - D - L) (+R on a synth return), so with a device
+/// delay (here a negative trim) the live anchor is the file frame at the
+/// pass's start tick, and it is the committed region's source offset.
+#[test]
+fn the_live_anchor_is_where_stop_places_the_take() {
+    let g = serial(Some(FakeInput::Signals));
+    vizdaw_ffi::set_record_latency_trim(-4800);
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.locate(4 * Q).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("the roll", || {
+        let st = s.record_state().unwrap();
+        st.pass_start_tick.is_some() && st.frames >= 48_000
+    });
+    let st = s.record_state().unwrap();
+    assert_eq!(st.lanes[0].return_frames, 0);
+    s.stop().unwrap();
+    vizdaw_ffi::set_record_latency_trim(0);
+    let r = regions(&s, d.seq.0, d.mic.0);
+    assert_eq!(r.len(), 1);
+    assert!(
+        st.pass_start_file_frame >= 4800,
+        "{}",
+        st.pass_start_file_frame
+    );
+    assert_eq!(
+        (st.pass_start_tick, st.pass_start_file_frame),
+        (Some(r[0].tick), r[0].source_offset)
+    );
+    s.close().unwrap();
+}
+
+/// Task 10 review M6: after a loop wrap the anchor moves to the wrap.
+#[test]
+fn the_live_anchor_follows_a_loop_wrap() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(1, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(
+        d.seq.0,
+        RecordSpecRow {
+            looped: true,
+            ..spec()
+        },
+    )
+    .unwrap();
+    wait_until("pass 2", || s.record_state().unwrap().pass >= 2);
+    let st = s.record_state().unwrap();
+    assert_eq!(st.pass_start_tick, Some(0));
+    assert!(
+        st.pass_start_file_frame >= 90_000,
+        "{}",
+        st.pass_start_file_frame
+    );
+    s.stop().unwrap();
+    s.close().unwrap();
+}
+
+/// Task 10 review M1: hostile frames do not overflow or panic.
+#[test]
+fn a_hostile_waveform_range_is_answered_not_overflowed() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    for (a, b) in [(1, u64::MAX), (u64::MAX - 1, u64::MAX), (0, u64::MAX)] {
+        let w = s.recording_waveform(d.mic.0, a, b, 8).unwrap();
+        assert_eq!(w.columns, 8);
+    }
+    let w = s.recording_waveform(d.mic.0, 0, u64::MAX, 8).unwrap();
+    assert!(w.max.iter().all(|x| x.is_finite()));
+    let ahead = s
+        .recording_waveform(d.mic.0, 10_000_000, 10_000_100, 4)
+        .unwrap();
+    assert!(ahead.min.iter().all(|x| *x == 0.0));
+    s.stop().unwrap();
+    s.close().unwrap();
+}

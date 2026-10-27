@@ -139,6 +139,12 @@ pub struct RecordLaneRow {
     /// Ruling 21).
     #[uniffi(default)]
     pub peak: f32,
+    /// How much earlier its take lands: a synth return lane's return
+    /// latency, in frames (0 otherwise). A view draws this lane's growing
+    /// take at file frame `pass_start_file_frame + return_frames` for the
+    /// pass's start tick (Task 10 review I1).
+    #[uniffi(default)]
+    pub return_frames: i64,
 }
 
 /// What a recording is doing (`state.get record`).
@@ -184,8 +190,11 @@ pub struct RecordStateRow {
     /// `pass_start_file_frame`, where a view draws the growing take.
     #[uniffi(default)]
     pub pass_start_tick: Option<i64>,
-    /// The file frame recorded at `pass_start_tick` (one file holds every
-    /// loop pass).
+    /// The file frame heard at `pass_start_tick`: where Stop will place
+    /// it, run frame + graph latency + the input delay less the trim (one
+    /// file holds every loop pass); a synth return lane adds its
+    /// `return_frames`. Resyncs after a Locate are not followed (Task 10
+    /// review M3): the anchor is the last wrap, else the roll.
     #[uniffi(default)]
     pub pass_start_file_frame: u64,
     /// Where the record range starts, a tick of the sequence: regions
@@ -674,6 +683,7 @@ impl Recording {
                     .and_then(|w| w.clipped.get(k).copied())
                     .unwrap_or(0),
                 peak: self.peaks(k).map_or(0.0, |p| lock(&p).peak()),
+                return_frames: a.return_frames,
             })
             .collect();
         lanes.extend(self.midi_lanes.iter().map(|l| RecordLaneRow {
@@ -682,6 +692,7 @@ impl Recording {
             path: None,
             clipped: 0,
             peak: 0.0,
+            return_frames: 0,
         }));
         // The pass recording now: from the last wrap, else the roll.
         let pass = self
@@ -707,7 +718,17 @@ impl Recording {
             recovered: Vec::new(),
             recovered_files: Vec::new(),
             pass_start_tick: pass.map(|m| self.tempo.frame_to_tick(m.frame).0),
-            pass_start_file_frame: pass.map_or(0, |m| m.run),
+            // File frame k is placed at S(k - D - L) at Stop (passes.rs), so
+            // the file frame at the pass's start tick is run + L + D (a
+            // lane adds its `return_frames`); never before the file.
+            pass_start_file_frame: pass.map_or(0, |m| {
+                let d = self.status.delay().unwrap_or(0) - latency_trim();
+                let at = i64::try_from(m.run)
+                    .unwrap_or(i64::MAX)
+                    .saturating_add(i64::try_from(m.latency).unwrap_or(0))
+                    .saturating_add(d);
+                u64::try_from(at).unwrap_or(0)
+            }),
             range_start_tick: self.tempo.frame_to_tick(self.range.start).0,
         }
     }
@@ -739,10 +760,18 @@ impl Recording {
         if n == 0 {
             return Some(out);
         }
-        let w = (to.saturating_sub(from)) as f64 / n as f64;
+        // Columns past what was written are silent, so the span is capped
+        // at it (hostile frames neither overflow nor spread the columns).
+        let to = to.min(p.frames());
+        if from >= to {
+            return Some(out);
+        }
+        let w = (to - from) as f64 / n as f64;
         for c in 0..n {
-            let a = from + (c as f64 * w).floor() as u64;
-            let b = (from + ((c + 1) as f64 * w).ceil() as u64).min(to);
+            let a = from.saturating_add((c as f64 * w).floor() as u64);
+            let b = from
+                .saturating_add(((c + 1) as f64 * w).ceil() as u64)
+                .min(to);
             for ch in 0..p.channels() {
                 if let Some((lo, hi)) = p.range(ch, a, b) {
                     let i = ch * n + c;

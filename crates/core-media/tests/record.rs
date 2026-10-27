@@ -294,3 +294,49 @@ fn the_writer_keeps_live_peaks_as_it_writes() {
     w.close();
     assert_eq!(writer.finish(Duration::from_secs(30)).error, None);
 }
+
+/// Task 10 review I2: a long take answers a wide range from the coarse
+/// level, and still agrees with a brute-force fold.
+#[test]
+fn live_peaks_answer_wide_ranges_from_the_coarse_level() {
+    use core_media::record::{LIVE_COARSE_PEAKS, LIVE_PEAK_FRAMES, LivePeaks};
+    let coarse = LIVE_COARSE_PEAKS * LIVE_PEAK_FRAMES;
+    let total = 40 * coarse + 5000; // a partial coarse peak at the end
+    let v =
+        |c: usize, f: u64| ((f.wrapping_mul(2654435761) >> (7 + c)) % 2001) as f32 / 1000.0 - 1.0;
+    let mut p = LivePeaks::new(2);
+    let mut f = 0u64;
+    while f < total {
+        let n = 700.min(total - f);
+        let block: Vec<f32> = (0..n).flat_map(|i| [v(0, f + i), v(1, f + i)]).collect();
+        p.feed(&block);
+        f += n;
+    }
+    assert_eq!(p.frames(), total);
+    let brute = |c: usize, a: u64, b: u64| {
+        (a..b.min(total))
+            .map(|i| v(c, i))
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), x| {
+                (l.min(x), h.max(x))
+            })
+    };
+    for c in 0..2 {
+        // Aligned to coarse peaks: exact.
+        assert_eq!(
+            p.range(c, 3 * coarse, 20 * coarse),
+            Some(brute(c, 3 * coarse, 20 * coarse))
+        );
+        // The whole take, partial last peak included.
+        assert_eq!(p.range(c, 0, total), Some(brute(c, 0, total)));
+        // Unaligned and wide: covers the span, within its coarse hull.
+        let (a, b) = (3 * coarse + 100, 30 * coarse + 77);
+        let (lo, hi) = p.range(c, a, b).unwrap();
+        let (blo, bhi) = brute(c, a, b);
+        let (hlo, hhi) = brute(c, 3 * coarse, 31 * coarse);
+        assert!(lo <= blo && hi >= bhi && lo >= hlo && hi <= hhi);
+        // Narrow: the fine level, whole 256-frame peaks.
+        let (a, b) = (1000, 1000 + 3 * LIVE_PEAK_FRAMES);
+        assert_eq!(p.range(c, a, b), Some(brute(c, 768, 1792)));
+    }
+    assert_eq!(p.range(0, total, total + 10), None);
+}

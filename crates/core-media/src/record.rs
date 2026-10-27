@@ -208,6 +208,11 @@ impl RingReader {
 /// Frames per peak of [`LivePeaks`] (the overviews' finest level).
 pub const LIVE_PEAK_FRAMES: u64 = 256;
 
+/// Fine peaks per coarse peak of [`LivePeaks`]: a coarse peak spans
+/// 64 x 256 = 16384 frames, so a wide `range` reads few of them.
+pub const LIVE_COARSE_PEAKS: u64 = 64;
+const COARSE_FRAMES: u64 = LIVE_PEAK_FRAMES * LIVE_COARSE_PEAKS;
+
 /// A lane's peaks so far, per [`LIVE_PEAK_FRAMES`] frames and channel,
 /// kept by the writer as it writes (sub-project 5 spec §6.2: "the region
 /// draws as it grows"; plan 5d-1 Ruling 21). In memory only: the
@@ -221,6 +226,13 @@ pub struct LivePeaks {
     cur: Vec<f32>,
     /// Frames in `cur`.
     cur_frames: u64,
+    /// Finished coarse peaks (same layout), each [`LIVE_COARSE_PEAKS`]
+    /// fine ones: a wide `range` reads these.
+    coarse: Vec<f32>,
+    /// The coarse peak being filled (finished fine peaks only).
+    coarse_cur: Vec<f32>,
+    /// Fine peaks in `coarse_cur`.
+    coarse_cur_n: u64,
     /// The largest absolute sample taken (kept by `feed`; `peak` is O(1)).
     max_abs: f32,
 }
@@ -234,6 +246,9 @@ impl LivePeaks {
             done: Vec::new(),
             cur: Self::empty(channels),
             cur_frames: 0,
+            coarse: Vec::new(),
+            coarse_cur: Self::empty(channels),
+            coarse_cur_n: 0,
             max_abs: 0.0,
         }
     }
@@ -242,6 +257,17 @@ impl LivePeaks {
         (0..channels)
             .flat_map(|_| [f32::INFINITY, f32::NEG_INFINITY])
             .collect()
+    }
+
+    /// Back to "no samples": min +inf, max -inf, in place.
+    fn reset(p: &mut [f32]) {
+        for (i, x) in p.iter_mut().enumerate() {
+            *x = if i % 2 == 0 {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+        }
     }
 
     /// Takes interleaved frames (non-finite samples count as 0).
@@ -260,9 +286,21 @@ impl LivePeaks {
             }
             self.cur_frames += 1;
             if self.cur_frames == LIVE_PEAK_FRAMES {
-                let full = std::mem::replace(&mut self.cur, Self::empty(ch));
-                self.done.extend(full);
+                // In place: the only growth is the Vecs' amortised O(1).
+                self.done.extend_from_slice(&self.cur);
+                for (i, x) in self.cur.iter().enumerate() {
+                    if let Some(m) = self.coarse_cur.get_mut(i) {
+                        *m = if i % 2 == 0 { m.min(*x) } else { m.max(*x) };
+                    }
+                }
+                Self::reset(&mut self.cur);
                 self.cur_frames = 0;
+                self.coarse_cur_n += 1;
+                if self.coarse_cur_n == LIVE_COARSE_PEAKS {
+                    self.coarse.extend_from_slice(&self.coarse_cur);
+                    Self::reset(&mut self.coarse_cur);
+                    self.coarse_cur_n = 0;
+                }
             }
         }
     }
@@ -280,27 +318,45 @@ impl LivePeaks {
 
     /// The lowest and highest sample of `channel` over frames `[from,
     /// to)`, from the whole peaks that overlap it; `None` outside what was
-    /// taken.
+    /// taken. A span of four coarse peaks or more reads the coarse level
+    /// (as `Overview::range` picks its level), so a call costs about the
+    /// columns it serves, not the take's length; the result then covers
+    /// the whole coarse peaks that overlap the span.
     pub fn range(&self, channel: usize, from: u64, to: u64) -> Option<(f32, f32)> {
         let to = to.min(self.frames());
         if from >= to || channel >= self.channels {
             return None;
         }
         let ch = self.channels;
-        let (b0, b1) = (from / LIVE_PEAK_FRAMES, to.div_ceil(LIVE_PEAK_FRAMES));
-        let finished = (self.done.len() / (ch * 2)) as u64;
+        let coarse = to - from >= 4 * COARSE_FRAMES;
+        let (unit, level, fin) = if coarse {
+            (COARSE_FRAMES, &self.coarse, &self.coarse_cur)
+        } else {
+            (LIVE_PEAK_FRAMES, &self.done, &self.cur)
+        };
+        let (b0, b1) = (from / unit, to.div_ceil(unit));
+        let finished = (level.len() / (ch * 2)) as u64;
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        let mut take = |p: &[f32]| {
+            if let (Some(a), Some(z)) = (p.get(channel * 2), p.get(channel * 2 + 1)) {
+                lo = lo.min(*a);
+                hi = hi.max(*z);
+            }
+        };
         for b in b0..b1 {
-            let peak = if b < finished {
-                self.done
-                    .get(b as usize * ch * 2..(b as usize + 1) * ch * 2)
+            if b < finished {
+                let i = usize::try_from(b)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(ch * 2);
+                if let Some(p) = level.get(i..i.saturating_add(ch * 2)) {
+                    take(p);
+                }
             } else {
-                Some(self.cur.as_slice())
-            };
-            if let Some(p) = peak {
-                if let (Some(a), Some(z)) = (p.get(channel * 2), p.get(channel * 2 + 1)) {
-                    lo = lo.min(*a);
-                    hi = hi.max(*z);
+                // The peak being filled; at the coarse level it also
+                // holds the fine peak being filled.
+                take(fin);
+                if coarse {
+                    take(&self.cur);
                 }
             }
         }

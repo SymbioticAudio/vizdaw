@@ -492,6 +492,7 @@ fn record_and_input_results_as_json() {
                 path: Some("Media/Recorded/Mic.caf".into()),
                 clipped: 4,
                 peak: 0.25,
+                return_frames: 0,
             }],
             frames: 96_000,
             overflows: 0,
