@@ -614,6 +614,28 @@ pub fn debug_hold_microphone_prompt(held: bool) {
     PROMPT_HELD.store(held, Ordering::SeqCst);
 }
 
+/// How long the fake prompt waits for its answer (ms; test hook, final
+/// review m1). Ten minutes unless a test shortens it.
+#[cfg(feature = "test-hooks")]
+static PROMPT_LIMIT_MS: AtomicU64 = AtomicU64::new(600_000);
+
+/// Sets how long the fake microphone prompt waits for its answer before
+/// it counts as unanswered (`None`: ten minutes; test hook, final review
+/// m1), as the live prompt's 120 s.
+#[cfg(feature = "test-hooks")]
+pub fn debug_microphone_prompt_limit(limit: Option<Duration>) {
+    let ms = limit.map_or(600_000, |d| {
+        u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+    });
+    PROMPT_LIMIT_MS.store(ms, Ordering::SeqCst);
+}
+
+/// The fault an input change reports when the microphone prompt was left
+/// up past its wait (final review m1; Ruling 14: only a grant opens the
+/// input). The next arm or input edit asks again (Ruling 15).
+pub const PROMPT_UNANSWERED: &str =
+    "audio input could not open: waiting for microphone permission; arm the lane again";
+
 /// Offline input opens that fail before one works (test hook, Ruling 15).
 #[cfg(feature = "test-hooks")]
 static FAIL_OPENS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -1223,6 +1245,9 @@ enum Opened {
     Broken(String),
     /// macOS (or the fake user) refused the microphone.
     Denied,
+    /// The microphone prompt was left unanswered past its wait: the input
+    /// stays closed (final review m1).
+    Unanswered,
     /// The fake input changed.
     #[cfg(feature = "test-hooks")]
     Fake,
@@ -1259,6 +1284,11 @@ fn open_input(opener: Opener, want: bool, flags: &JobFlags) -> Option<Opened> {
             if want && access == MicAccess::Denied {
                 return Some(Opened::Denied);
             }
+            // Only a grant opens the input (Ruling 14; final review m1): a
+            // prompt left up past the wait is not one.
+            if want && access == MicAccess::Undetermined {
+                return Some(Opened::Unanswered);
+            }
             let backend = backend.upgrade()?;
             let mut b = lock(&backend);
             Some(match reopen_backend(&mut b, &cfg) {
@@ -1274,15 +1304,21 @@ fn open_input(opener: Opener, want: bool, flags: &JobFlags) -> Option<Opened> {
                 if flags.cancelled() {
                     return None;
                 }
-                // The fake user has not answered yet (bounded, should a
-                // test never release it).
-                let until = Instant::now() + Duration::from_secs(600);
+                // The fake user has not answered yet (bounded, as the
+                // live prompt's wait is).
+                let limit = Duration::from_millis(PROMPT_LIMIT_MS.load(Ordering::SeqCst));
+                let until = Instant::now() + limit;
                 while PROMPT_HELD.load(Ordering::SeqCst) && Instant::now() < until {
                     std::thread::sleep(Duration::from_millis(2));
                 }
             }
             if !flags.past_prompt() {
                 return None;
+            }
+            // Still unanswered after the wait: not a grant (final review
+            // m1).
+            if want && prompt.is_some() && PROMPT_HELD.load(Ordering::SeqCst) {
+                return Some(Opened::Unanswered);
             }
             // The device's slowness, cut short when the host goes.
             let until = Instant::now() + delay;
@@ -1805,6 +1841,15 @@ impl Host {
                 // The fake user said no: macOS reads denied from now on.
                 #[cfg(feature = "test-hooks")]
                 FAKE_MIC_DENIED.store(true, Ordering::Relaxed);
+                self.input_open = false;
+            }
+            Opened::Unanswered => {
+                // Asked again at the next arm or input edit (Ruling 15).
+                let f = PROMPT_UNANSWERED.to_string();
+                if !self.faults.contains(&f) {
+                    self.faults.push(f.clone());
+                }
+                self.input_failed = Some(f);
                 self.input_open = false;
             }
             #[cfg(feature = "test-hooks")]
@@ -2603,6 +2648,9 @@ pub fn claim_idle(
         host.record_hold = false;
         host.pending_input = None;
         host.faults.clear();
+        // The old holder's failed open is not this arm's: the claim tries
+        // the device again (Ruling 15; final review m2).
+        host.input_failed = None;
         let midi_fault = lock(&MIDI_UNAVAILABLE).clone();
         note_midi_fault(host, midi_fault);
     }

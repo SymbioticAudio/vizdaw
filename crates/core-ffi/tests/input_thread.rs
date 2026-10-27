@@ -16,8 +16,9 @@ use platform_macos::permission::DENIED_MESSAGE;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{
-    debug_fail_input_opens, debug_hold_microphone_prompt, debug_input_open_delay, force_offline,
-    reset_host, set_fake_input, set_fake_microphone_denied, set_fake_microphone_prompt,
+    debug_fail_input_opens, debug_hold_microphone_prompt, debug_input_open_delay,
+    debug_microphone_prompt_limit, force_offline, reset_host, set_fake_input,
+    set_fake_microphone_denied, set_fake_microphone_prompt,
 };
 use vizdaw_ffi::{EditCommand, LaneEdit, LaneInputRow, LaneRow, RecordSpecRow, Session, VizError};
 
@@ -30,6 +31,7 @@ fn serial() -> MutexGuard<'static, ()> {
     debug_input_open_delay(None);
     set_fake_microphone_prompt(None);
     debug_hold_microphone_prompt(false);
+    debug_microphone_prompt_limit(None);
     set_fake_microphone_denied(false);
     debug_fail_input_opens(0);
     reset_host();
@@ -128,32 +130,27 @@ fn an_input_change_runs_off_the_calling_thread() {
     let seq = song(&s);
     let lp = audio_lane(&s, seq);
     take_engine(&s, seq);
-    let delay = Duration::from_millis(600);
-    debug_input_open_delay(Some(delay));
-    let t = Instant::now();
+    // The open cannot finish until the test lets it (final review m4: no
+    // wall-clock margin): the fake prompt is held. An arm that waited for
+    // the open would come back only when the prompt gave up, closed.
+    set_fake_microphone_prompt(Some(true));
+    debug_hold_microphone_prompt(true);
+    debug_microphone_prompt_limit(Some(common::wait_limit()));
     arm(&s, seq, lp, true);
-    // Pre-flight M14: the arm came back before the open could have
-    // finished, and the input is still opening (no fixed time bound).
-    let opening = s.input_info().unwrap().opening;
-    let elapsed = t.elapsed();
-    assert!(
-        opening && elapsed < delay,
-        "opening {opening} after {elapsed:?}"
-    );
+    // Pre-flight M14: the arm came back before the open finished, and the
+    // input is still opening.
+    assert!(s.input_info().unwrap().opening, "the arm waited");
     assert_eq!(s.debug_input_open(), Some(false));
     let _ = s.transport().unwrap();
     let _ = s.levels().unwrap();
     let _ = s.input_levels().unwrap();
     // The transport and the meters answered meanwhile.
-    let opening = s.input_info().unwrap().opening;
-    let elapsed = t.elapsed();
-    assert!(
-        opening && elapsed < delay,
-        "opening {opening} after {elapsed:?}"
-    );
+    assert!(s.input_info().unwrap().opening, "a call waited");
+    debug_hold_microphone_prompt(false);
     wait_until("the input to open", || !s.input_info().unwrap().opening);
     assert_eq!(s.debug_input_open(), Some(true));
     // Disarming while it opens: the input ends closed.
+    debug_input_open_delay(Some(Duration::from_millis(100)));
     arm(&s, seq, lp, false);
     arm(&s, seq, lp, true);
     arm(&s, seq, lp, false);
@@ -172,9 +169,16 @@ fn record_waits_for_an_input_that_is_opening() {
     let seq = song(&s);
     let lp = audio_lane(&s, seq);
     take_engine(&s, seq);
-    debug_input_open_delay(Some(Duration::from_millis(500)));
+    // Final review m4: opening is pinned by a held prompt, not by a time
+    // margin; once it is answered the device still takes a second, well
+    // inside Record's 3 s wait.
+    set_fake_microphone_prompt(Some(true));
+    debug_hold_microphone_prompt(true);
+    debug_microphone_prompt_limit(Some(common::wait_limit()));
+    debug_input_open_delay(Some(Duration::from_secs(1)));
     arm(&s, seq, lp, true);
     assert!(s.input_info().unwrap().opening);
+    debug_hold_microphone_prompt(false);
     s.record(seq, spec()).unwrap();
     assert!(s.record_state().unwrap().recording);
     assert!(!s.input_info().unwrap().opening, "Record waited for it");
@@ -182,7 +186,10 @@ fn record_waits_for_an_input_that_is_opening() {
     // Longer than the wait: Busy, nothing records.
     arm(&s, seq, lp, false);
     wait_until("closed", || s.debug_input_open() == Some(false));
-    debug_input_open_delay(Some(vizdaw_ffi::host::INPUT_WAIT + Duration::from_secs(2)));
+    // An open that cannot finish meanwhile (the prompt is held).
+    debug_input_open_delay(None);
+    set_fake_microphone_prompt(Some(true));
+    debug_hold_microphone_prompt(true);
     arm(&s, seq, lp, true);
     let r = s.record(seq, spec());
     assert!(
@@ -190,7 +197,7 @@ fn record_waits_for_an_input_that_is_opening() {
         "{r:?}"
     );
     assert!(!s.record_state().unwrap().recording);
-    debug_input_open_delay(None);
+    debug_hold_microphone_prompt(false);
     wait_until("the input to open", || s.debug_input_open() == Some(true));
     s.close().unwrap();
 }
@@ -337,10 +344,15 @@ fn only_the_holders_applied_edit_retries_a_failed_open() {
         },
     );
     assert!(refused.is_err(), "{refused:?}");
-    // Another window's arm.
+    // Another window's arm that does not take the engine (it plays;
+    // final review m2: one that claims an idle engine does retry).
+    s.play(seq).unwrap();
+    wait_until("playing", || s.transport().unwrap().playing);
     let oseq = song(&other);
     let olp = audio_lane(&other, oseq);
     arm(&other, oseq, olp, true);
+    s.stop().unwrap();
+    wait_until("stopped", || !s.transport().unwrap().playing);
     // Play does not try again: nothing cleared the failure.
     take_engine(&s, seq);
     assert!(
@@ -353,6 +365,65 @@ fn only_the_holders_applied_edit_retries_a_failed_open() {
         s.transport().unwrap().faults
     );
     assert_eq!(s.debug_input_open(), Some(false), "retried");
+    other.close().unwrap();
+    s.close().unwrap();
+}
+
+/// Final review m1 (Ruling 14: only a grant opens the input): a first
+/// microphone prompt left unanswered past its wait leaves the input
+/// closed with a fault saying why, and the next arm asks again.
+#[test]
+fn an_unanswered_prompt_does_not_open_the_input() {
+    let _g = serial();
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = audio_lane(&s, seq);
+    take_engine(&s, seq);
+    set_fake_microphone_prompt(Some(true));
+    debug_hold_microphone_prompt(true);
+    debug_microphone_prompt_limit(Some(Duration::from_millis(50)));
+    arm(&s, seq, lp, true);
+    wait_until("the prompt's wait to end", || {
+        !s.input_info().unwrap().opening
+    });
+    debug_hold_microphone_prompt(false);
+    assert_eq!(s.debug_input_open(), Some(false), "opened unanswered");
+    let faults = s.transport().unwrap().faults;
+    assert!(
+        faults
+            .iter()
+            .any(|f| f == vizdaw_ffi::host::PROMPT_UNANSWERED),
+        "{faults:?}"
+    );
+    assert!(vizdaw_ffi::host::PROMPT_UNANSWERED.starts_with("audio input could not open"));
+    // Arming again asks again; this time the fake user allows.
+    set_fake_microphone_prompt(Some(true));
+    arm(&s, seq, lp, false);
+    arm(&s, seq, lp, true);
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
+    s.close().unwrap();
+}
+
+/// Final review m2 (Ruling 15): an arm in another window that claims the
+/// idle engine tries the device again, rather than inheriting the failure
+/// the old holder's open left.
+#[test]
+fn an_arm_that_claims_the_engine_retries_a_failed_open() {
+    let _g = serial();
+    let s = Session::new_demo_audio().unwrap();
+    let other = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = audio_lane(&s, seq);
+    take_engine(&s, seq);
+    debug_fail_input_opens(1);
+    arm(&s, seq, lp, true);
+    assert_eq!(s.debug_input_open(), Some(false));
+    let oseq = song(&other);
+    let olp = audio_lane(&other, oseq);
+    arm(&other, oseq, olp, true);
+    wait_until("the claimed input to open", || {
+        other.debug_input_open() == Some(true)
+    });
     other.close().unwrap();
     s.close().unwrap();
 }
