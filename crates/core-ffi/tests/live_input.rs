@@ -587,3 +587,44 @@ fn a_midi_input_that_cannot_open_is_a_fault() {
     );
     s.close().unwrap();
 }
+
+/// Plan 5d-1 Ruling 27: a session's input levels are the open input's
+/// channels, once a lane wants the input; none before.
+#[test]
+fn input_levels_follow_the_open_input() {
+    let _g = serial(Some(FakeInput::Signals));
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = lane(&s, seq, "Loop").id;
+    assert!(s.input_levels().unwrap().is_empty(), "no engine");
+    edit(
+        &s,
+        LaneEdit::SetInput {
+            seq,
+            lane: lp,
+            input: Some(LaneInputRow::Audio {
+                first: 0,
+                stereo: false,
+                return_of: None,
+            }),
+        },
+    )
+    .unwrap();
+    take_engine(&s, seq);
+    assert!(
+        s.input_levels().unwrap().is_empty(),
+        "no lane wants the input"
+    );
+    arm(&s, seq, lp);
+    let until = Instant::now() + common::wait_limit();
+    loop {
+        let l = s.input_levels().unwrap();
+        if l.len() == 3 && l[0] > 0.2 {
+            assert!(l[0] < 0.26 && l[2] == 0.0, "{l:?}");
+            break;
+        }
+        assert!(Instant::now() < until, "never metered: {l:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    s.close().unwrap();
+}

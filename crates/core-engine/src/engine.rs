@@ -1161,6 +1161,12 @@ impl Engine {
         self.shared.take_load()
     }
 
+    /// The peak of each of the first `channels` device input channels
+    /// since the last call, read and cleared (plan 5d-1 Ruling 27).
+    pub fn input_peaks(&self, channels: usize) -> Vec<f32> {
+        self.shared.take_input_peaks(channels)
+    }
+
     /// Instances bypassed for faults since the last call (read and
     /// cleared).
     pub fn plugin_faults(&self) -> Vec<PluginInstanceId> {

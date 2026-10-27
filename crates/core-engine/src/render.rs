@@ -178,6 +178,9 @@ pub struct Shared {
     prepared: AtomicU32,
     meters: Box<[MeterCell]>,
     board: Box<[AtomicU64]>,
+    /// Per device input channel, the peak since the last read (`f32` bits;
+    /// plan 5d-1 Ruling 27).
+    input_peaks: Box<[AtomicU32]>,
 }
 
 impl Default for Shared {
@@ -202,6 +205,9 @@ impl Default for Shared {
             prepared: AtomicU32::new(0),
             meters: (0..MAX_NODES).map(|_| MeterCell::default()).collect(),
             board: (0..MAX_INSERTS).map(|_| AtomicU64::new(0)).collect(),
+            input_peaks: (0..crate::backend::MAX_INPUT_CHANNELS)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
         }
     }
 }
@@ -270,6 +276,26 @@ impl Shared {
     /// The meter of graph node `i`. // RT
     pub fn meter(&self, i: usize) -> Option<&MeterCell> {
         self.meters.get(i)
+    }
+
+    /// Raises input channel `c`'s held peak to `peak` (non-negative floats
+    /// order like their bits). // RT
+    pub fn hold_input(&self, c: usize, peak: f32) {
+        if let Some(cell) = self.input_peaks.get(c) {
+            if peak.is_finite() && peak > 0.0 {
+                cell.fetch_max(peak.to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The first `channels` input channels' peaks since the last read,
+    /// cleared.
+    pub fn take_input_peaks(&self, channels: usize) -> Vec<f32> {
+        self.input_peaks
+            .iter()
+            .take(channels)
+            .map(|c| f32::from_bits(c.swap(0, Ordering::Relaxed)))
+            .collect()
     }
 
     /// Records that `instance` was bypassed for faults. The board is an
@@ -751,6 +777,14 @@ impl Renderer {
         let n = frames as usize;
         for ch in out.iter_mut() {
             ch.fill(0.0);
+        }
+        // The input meters see every block, rendered or not.
+        for (c, ch) in input.channels.iter().enumerate() {
+            let peak = ch
+                .iter()
+                .take(n)
+                .fold(0f32, |m, x| if x.is_finite() { m.max(x.abs()) } else { m });
+            self.shared.hold_input(c, peak);
         }
         if !self.exec.try_finish(deadline) {
             // Nodes of a missed block are still running: touch nothing they

@@ -2195,6 +2195,19 @@ pub fn input_info(owner: u64) -> Option<(String, InputInfo)> {
         .map(|h| (h.device.clone(), h.inputs.clone()))
 }
 
+/// `owner`'s device input channel peaks since the last read (plan 5d-1
+/// Ruling 27): empty unless it holds the engine with its input open.
+pub fn input_levels(owner: u64) -> Vec<f32> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner && h.input_open)
+        .map(|h| {
+            h.engine
+                .input_peaks(usize::try_from(h.inputs.channels).unwrap_or(0))
+        })
+        .unwrap_or_default()
+}
+
 /// Whether `owner`'s host has (or, offline, would have) its input open
 /// (test hook, Task 11 review I1).
 #[cfg(feature = "test-hooks")]

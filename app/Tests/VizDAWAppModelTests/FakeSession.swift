@@ -371,6 +371,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     func inputInfo() throws -> InputInfoRow { inputRow }
 
+    var inputLevelsRow: [Float] = []
+
+    func inputLevels() throws -> [Float] { inputLevelsRow }
+
     // MARK: Recording (plan 5c Task 9)
 
     var recordCalls: [(seq: UInt64, spec: RecordSpecRow)] = []

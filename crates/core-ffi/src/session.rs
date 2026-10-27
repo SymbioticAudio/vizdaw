@@ -4683,6 +4683,13 @@ impl Session {
 /// Live input (plan 5c Task 8; spec §6.1, §6.6, §12.1).
 #[uniffi::export]
 impl Session {
+    /// Each device input channel's peak since the last call, linear (plan
+    /// 5d-1 Ruling 27; spec §12.1 `state.get input` meters): empty unless
+    /// this document holds the engine with its input open.
+    pub fn input_levels(&self) -> Result<Vec<f32>, VizError> {
+        ffi_guard(|| Ok(host::input_levels(self.id)))
+    }
+
     /// What the audio input offers while this document holds the engine
     /// (nothing before its first Play or Record).
     pub fn input_info(&self) -> Result<crate::live::InputInfoRow, VizError> {

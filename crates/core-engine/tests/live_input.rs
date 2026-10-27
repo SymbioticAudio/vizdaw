@@ -891,3 +891,22 @@ fn silencing_follows_the_lead_and_spares_other_lanes() {
         }
     }
 }
+
+/// Plan 5d-1 Ruling 27 (spec §12.1 meters): every input channel's peak
+/// is held whether or not a lane hears it, and a read clears it.
+#[test]
+fn input_channels_are_metered_whether_heard_or_not() {
+    use core_engine::offline::FAKE_SINE_AMPLITUDE;
+    let d = doc();
+    let (engine, mut b, _log) = start(&d, InputSpec::default(), FakeInput::Signals);
+    b.run_frames(2048);
+    let p = engine.input_peaks(3);
+    assert_eq!(p.len(), 3);
+    assert!((p[0] - FAKE_SINE_AMPLITUDE).abs() < 0.01, "{p:?}");
+    assert_eq!(p[1], 1.0, "the impulse at frame 0");
+    assert_eq!(p[2], 0.0);
+    b.run_frames(2048);
+    let q = engine.input_peaks(3);
+    assert!(q[0] > 0.2 && q[1] == 0.0, "{q:?}");
+    assert_eq!(engine.input_peaks(3), vec![0.0; 3], "read and cleared");
+}
