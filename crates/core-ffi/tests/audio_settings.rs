@@ -17,7 +17,9 @@ use vizdaw_ffi::audio::{
     set_software_monitoring, set_stream_settings,
 };
 use vizdaw_ffi::host::{
+    debug_hold_microphone_prompt, debug_input_job, debug_input_open_delay,
     debug_refuse_buffer_sizes, force_offline, hosts_created, reset_host, set_fake_input,
+    set_fake_microphone_prompt,
 };
 use vizdaw_ffi::{
     EditCommand, LaneEdit, LaneInputRow, LaneRow, MonitorModeRow, RecordSpecRow, Session, VizError,
@@ -30,6 +32,9 @@ fn serial(input: Option<FakeInput>) -> MutexGuard<'static, ()> {
     force_offline();
     set_fake_input(input);
     reset_audio_settings();
+    debug_input_open_delay(None);
+    set_fake_microphone_prompt(None);
+    debug_hold_microphone_prompt(false);
     reset_host();
     g
 }
@@ -228,6 +233,66 @@ fn the_buffer_size_is_refused_while_recording() {
     s.stop().unwrap();
     set_io_buffer_frames(512).unwrap();
     assert_eq!(audio_settings().buffer_frames, 512);
+    s.close().unwrap();
+}
+
+/// Task 7 parked m1 (Ruling 13): a buffer-size change waits for an input
+/// that is opening (up to `INPUT_WAIT`), then reopens; one that is still
+/// opening after that is `Busy` and changes nothing.
+#[test]
+fn the_buffer_size_waits_for_an_opening_input() {
+    let _g = serial(Some(FakeInput::Signals));
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = lane(&s, seq, "Loop").id;
+    edit(
+        &s,
+        LaneEdit::SetInput {
+            seq,
+            lane: lp,
+            input: Some(LaneInputRow::Audio {
+                first: 0,
+                stereo: false,
+                return_of: None,
+            }),
+        },
+    )
+    .unwrap();
+    take_engine(&s, seq);
+    let arm = |on: bool| {
+        edit(
+            &s,
+            LaneEdit::SetFlags {
+                seq,
+                lane: lp,
+                mute: None,
+                solo: None,
+                arm: Some(on),
+            },
+        )
+        .unwrap()
+    };
+    // Still opening past the wait (the prompt is held): Busy.
+    set_fake_microphone_prompt(Some(true));
+    debug_hold_microphone_prompt(true);
+    arm(true);
+    assert!(debug_input_job(), "opening");
+    let r = set_io_buffer_frames(256);
+    assert!(
+        matches!(&r, Err(VizError::Busy { message }) if message.contains("still opening")),
+        "{r:?}"
+    );
+    assert_eq!(audio_settings().buffer_frames, 128, "unchanged");
+    debug_hold_microphone_prompt(false);
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
+    // Opening within the wait: the change waits for it, then applies.
+    debug_input_open_delay(Some(Duration::from_millis(500)));
+    arm(false);
+    assert!(debug_input_job(), "closing");
+    set_io_buffer_frames(256).unwrap();
+    assert!(!debug_input_job(), "it waited for the input thread");
+    assert_eq!(audio_settings().buffer_frames, 256);
+    assert_eq!(s.debug_input_open(), Some(false));
     s.close().unwrap();
 }
 

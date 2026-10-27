@@ -2026,12 +2026,25 @@ fn a_failed_save_at_stop_is_reported_and_keeps_the_take() {
     // The package refuses writes (inside this test's own folder).
     let project = pkg.join("project.json");
     let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+    /// Gives the package its modes back however the test ends (Task 9
+    /// parked m1), so the temp folder can always be removed.
+    struct Restore(std::path::PathBuf, std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let set = |p: &Path, m: u32| {
+                let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+            };
+            set(&self.0, 0o755);
+            set(&self.1, 0o644);
+        }
+    }
+    let restore = Restore(pkg.clone(), project.clone());
     mode(&project, 0o444).unwrap();
     mode(&pkg, 0o555).unwrap();
     s.stop().unwrap();
     let problems = s.idle().unwrap().problems;
-    mode(&pkg, 0o755).unwrap();
-    mode(&project, 0o644).unwrap();
+    drop(restore);
     assert!(
         problems
             .iter()
@@ -2044,6 +2057,74 @@ fn a_failed_save_at_stop_is_reported_and_keeps_the_take() {
     assert!(pkg.join(&rel).is_file(), "the take is kept");
     let saved = core_model::file::load(&pkg).unwrap();
     assert!(saved.media().is_empty(), "the failed save wrote nothing");
+    s.close().unwrap();
+}
+
+/// Task 9 parked m3: a save at Stop the busy registry put off is made by
+/// a close that comes before the next idle, so the take the user was told
+/// is saved is on disk (whatever the close prompt answered).
+#[test]
+fn a_put_off_save_at_stop_is_made_by_close() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.save().unwrap();
+    vizdaw_ffi::plugins::with(0, |_| s.stop().unwrap()).unwrap();
+    assert!(s.saves_after_pass().unwrap(), "still owed");
+    s.close().unwrap();
+    assert_eq!(
+        core_model::file::load(&pkg).unwrap().media().len(),
+        1,
+        "the take was saved"
+    );
+}
+
+/// Task 10 parked: a stereo take's waveform rows are channel-major
+/// (`channel * columns + column`). The fake input's channel 1 is the
+/// −12 dBFS sine, channel 2 an impulse every half second: two half-second
+/// columns give the sine's level twice, then the impulse's twice.
+#[test]
+fn a_stereo_takes_waveform_is_channel_major() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::SetInput {
+                seq: d.seq.0,
+                lane: d.mic.0,
+                input: Some(vizdaw_ffi::LaneInputRow::Audio {
+                    first: 0,
+                    stereo: true,
+                    return_of: None,
+                }),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("a second of audio", || frames(&s) >= 48_000);
+    let w = s.recording_waveform(d.mic.0, 0, 48_000, 2).unwrap();
+    assert_eq!((w.channels, w.columns), (2, 2));
+    assert_eq!((w.max.len(), w.min.len()), (4, 4));
+    let near = |x: f32, y: f32, tol: f32| (x - y).abs() < tol;
+    assert!(
+        near(w.max[0], 0.2512, 0.02) && near(w.max[1], 0.2512, 0.02),
+        "channel 1 first: {:?}",
+        w.max
+    );
+    assert!(
+        near(w.max[2], 1.0, 1e-3) && near(w.max[3], 1.0, 1e-3),
+        "then channel 2: {:?}",
+        w.max
+    );
+    assert!(near(w.min[0], -0.2512, 0.02) && near(w.min[1], -0.2512, 0.02));
+    s.stop().unwrap();
     s.close().unwrap();
 }
 

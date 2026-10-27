@@ -1209,6 +1209,8 @@ impl JobFlags {
 struct InputJob {
     flags: Arc<JobFlags>,
     thread: Option<JoinHandle<()>>,
+    /// Open or closed, as the thread will leave the input.
+    want: bool,
 }
 
 /// What an input thread does without the host lock.
@@ -1685,6 +1687,14 @@ impl Host {
         }
     }
 
+    /// Open or closed, as the input was last asked to end: the change
+    /// waiting, else the input thread's, else as it is (Task 7 parked r1).
+    fn asked_input(&self) -> bool {
+        self.pending_input
+            .or(self.job.as_ref().map(|j| j.want))
+            .unwrap_or(self.input_open)
+    }
+
     /// Ends the hold a record tap put on the input and applies what was
     /// asked meanwhile.
     fn end_record_hold(&mut self) {
@@ -1786,6 +1796,7 @@ impl Host {
                 self.job = Some(InputJob {
                     flags,
                     thread: Some(t),
+                    want,
                 })
             }
             Err(e) => {
@@ -2629,7 +2640,9 @@ pub fn reload(
 /// monitored lanes are heard and thru plays before the first Play.
 /// Nothing when `owner` holds the engine with `seq` loaded already, or
 /// when the engine is busy (never taken then). True when it claimed (Task
-/// 8 review m2): the caller moves its position to the engine.
+/// 8 review m2): the caller moves its position to the engine. `Busy`
+/// with [`INPUT_OPENING`] when another session's input thread is at work:
+/// the caller tries again later (Task 8 parked n2).
 pub fn claim_idle(
     owner: u64,
     doc: &Document,
@@ -2646,6 +2659,11 @@ pub fn claim_idle(
     }
     let (mut slot, _) = match claim_host(owner, doc, plugins, Idle::Untouched) {
         Ok(s) => s,
+        // Another window's idle engine opening its input: the caller owes
+        // the claim (Task 8 parked n2).
+        Err(VizError::Busy { message }) if message == INPUT_OPENING => {
+            return Err(VizError::Busy { message });
+        }
         Err(VizError::Busy { .. }) => return Ok(false),
         Err(e) => return Err(e),
     };
@@ -2795,8 +2813,9 @@ pub(crate) fn set_buffer_frames(frames: u32) -> Result<(), VizError> {
         }
         Reopened::Lost(e) => {
             crate::audio::swap_io_buffer(old);
-            h.faults.push(format!("The audio device stopped: {e}"));
-            // No device under it: the next claim builds a new host.
+            // No device under it: the next claim builds a new host. The
+            // error goes back to the caller; a fault pushed here would go
+            // with the retired host (Task 6 parked n3).
             let mut gone = slot.take();
             *lock(&MIDI_TO) = None;
             drop(slot);
@@ -3023,14 +3042,16 @@ pub fn start_measure(
     plugins: Option<&mut PluginHost>,
 ) -> Result<Arc<MeasureStatus>, VizError> {
     crate::synth::external_dest(doc, dest)?;
-    let generation = {
+    let (generation, holder, asked) = {
         let (mut slot, _) = claim_host(owner, doc, plugins, Idle::Stopped)?;
         let host = slot.as_mut().ok_or_else(|| VizError::Internal {
             message: "engine host missing".into(),
         })?;
         host.faults.clear();
+        // What the holder asked of the input before Measure's own ask.
+        let asked = host.asked_input();
         host.ensure_input(true);
-        host.generation
+        (host.generation, host.owner, asked)
     };
     // The input opens on its own thread, without the host lock (plan 5d-1
     // Ruling 13); then nothing may have taken the engine meanwhile.
@@ -3064,6 +3085,11 @@ pub fn start_measure(
             host.ensure_input(wants_audio_input(doc, seq));
         } else if host.owner == 0 {
             host.ensure_input(false);
+        } else if host.owner == holder {
+            // Another window holds the idle engine: its input goes back
+            // to what it asked before Measure's ask (Task 7 parked r1),
+            // not left open for nobody.
+            host.ensure_input(asked);
         }
         return Err(e);
     }
@@ -3259,6 +3285,9 @@ pub fn debug_inputs(owner: u64) -> Option<InputSpec> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    use super::*;
+    use platform_macos::permission::{DENIED_MESSAGE, MicAccess};
+
     /// Review I2: a refused buffer size is tried again with the device's
     /// own; a refusal without a size asked for is not retried.
     #[test]
@@ -3284,9 +3313,6 @@ mod tests {
         });
         assert_eq!((r, tries), (Err(()), 1));
     }
-
-    use super::*;
-    use platform_macos::permission::{DENIED_MESSAGE, MicAccess};
 
     /// Pre-flight M8: CoreMIDI's thread never waits for the engine's MIDI
     /// input. With its lock held elsewhere a source's message is dropped

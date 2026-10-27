@@ -52,6 +52,8 @@ fn serial(delay_ms: Option<f64>, input: Option<FakeInput>) -> Serial {
     vizdaw_ffi::host::debug_hold_measure(false);
     vizdaw_ffi::host::debug_measure_end_delay(Duration::ZERO);
     vizdaw_ffi::host::debug_input_open_delay(None);
+    vizdaw_ffi::host::set_fake_microphone_prompt(None);
+    vizdaw_ffi::host::debug_hold_microphone_prompt(false);
     reset_host();
     Serial {
         _g: g,
@@ -1219,6 +1221,47 @@ fn an_arm_never_takes_the_engine_during_measures_input_wait() {
     assert_eq!(m.unwrap().onsets, 5);
     other.close().unwrap();
     s.close().unwrap();
+}
+
+/// Task 7 parked r1: a Measure refused because its input is still
+/// opening, on an idle engine another window holds, leaves that window's
+/// input as it asked (here closed: nothing of it is armed), not open for
+/// nobody.
+#[test]
+fn a_measure_refused_while_opening_leaves_the_holders_input_alone() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let holder = untitled(&g, d.doc.clone());
+    arm(&holder, d.seq, d.rec, false);
+    holder.play(d.seq.0).unwrap();
+    wait_until("playing", || holder.transport().unwrap().playing);
+    holder.stop().unwrap();
+    wait_until("stopped", || !holder.transport().unwrap().playing);
+    wait_until("the holder's input to settle", || {
+        !vizdaw_ffi::host::debug_input_job()
+    });
+    assert_eq!(holder.debug_input_open(), Some(false));
+    let s = untitled(&g, d.doc.clone());
+    // An open that cannot finish within Measure's wait.
+    vizdaw_ffi::host::set_fake_microphone_prompt(Some(true));
+    vizdaw_ffi::host::debug_hold_microphone_prompt(true);
+    let r = s.measure_return(d.synth.0);
+    vizdaw_ffi::host::debug_hold_microphone_prompt(false);
+    vizdaw_ffi::host::set_fake_microphone_prompt(None);
+    assert!(
+        matches!(&r, Err(VizError::Busy { message }) if message.contains("still opening")),
+        "{r:?}"
+    );
+    wait_until("the input to settle", || {
+        !vizdaw_ffi::host::debug_input_job()
+    });
+    assert_eq!(
+        holder.debug_input_open(),
+        Some(false),
+        "left open for nobody"
+    );
+    s.close().unwrap();
+    holder.close().unwrap();
 }
 
 /// Plan 5d-1 Ruling 25 ("New MIDI Destination…", 5c-2 carry): the ports

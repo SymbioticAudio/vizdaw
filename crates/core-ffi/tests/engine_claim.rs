@@ -29,6 +29,8 @@ fn serial() -> MutexGuard<'static, ()> {
     set_fake_input(Some(FakeInput::Signals));
     debug_pretend_live_midi(false);
     vizdaw_ffi::host::set_midi_connect_failure(None);
+    vizdaw_ffi::host::set_fake_microphone_prompt(None);
+    vizdaw_ffi::host::debug_hold_microphone_prompt(false);
     reset_host();
     g
 }
@@ -222,6 +224,37 @@ fn closing_a_window_lets_its_claimed_input_go() {
             && debug_host_inputs().is_none_or(|i| i.monitor.is_empty() && i.midi.is_empty())
     });
     assert_eq!(holder(), None);
+}
+
+/// Task 8 parked n2: an arm while another window's idle engine is still
+/// opening its input is not dropped: the claim is owed, and this window's
+/// `idle` takes the engine once that open has finished.
+#[test]
+fn an_arm_during_another_windows_open_claims_once_it_ends() {
+    let _g = serial();
+    let a = Session::new_demo_audio().unwrap();
+    let b = Session::new_demo_audio().unwrap();
+    let (sa, sb) = (song(&a), song(&b));
+    let la = inputs(&a, sa, true);
+    vizdaw_ffi::host::set_fake_microphone_prompt(Some(true));
+    vizdaw_ffi::host::debug_hold_microphone_prompt(true);
+    arm(&a, sa, la, true);
+    let owner = holder();
+    assert!(vizdaw_ffi::host::debug_input_job(), "a's input is opening");
+    let lb = inputs(&b, sb, true);
+    arm(&b, sb, lb, true);
+    assert_eq!(holder(), owner, "an engine opening its input is not taken");
+    b.idle().unwrap();
+    assert_eq!(holder(), owner, "still opening");
+    vizdaw_ffi::host::debug_hold_microphone_prompt(false);
+    vizdaw_ffi::host::set_fake_microphone_prompt(None);
+    wait_until("b's owed claim", || {
+        b.idle().unwrap();
+        b.debug_input_open() == Some(true)
+    });
+    assert_ne!(holder(), owner, "b took the idle engine");
+    a.close().unwrap();
+    b.close().unwrap();
 }
 
 /// Final review I1: closing a window while its transport plays lets its

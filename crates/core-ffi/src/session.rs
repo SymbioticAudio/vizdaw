@@ -54,6 +54,10 @@ struct Inner {
     /// A reload could not run (the plugin registry was busy, or Play's
     /// load failed): `idle` runs it once it can.
     reload_owed: bool,
+    /// An arm's engine claim found another window's idle engine opening
+    /// its input: `idle` tries the claim again for this sequence until it
+    /// is taken or refused for another reason (Task 8 parked n2).
+    claim_owed: Option<SeqId>,
     /// Plugin gestures waiting for an open edit to end.
     held: Vec<core_host::Gesture>,
     /// Slots whose plugin window is open (saved with the project, spec §9).
@@ -179,6 +183,7 @@ impl Inner {
             cursor_seq: None,
             reload_fault: None,
             reload_owed: false,
+            claim_owed: None,
             held: Vec::new(),
             windows: std::collections::BTreeSet::new(),
             news: News::default(),
@@ -1017,17 +1022,26 @@ impl Session {
     /// sources off this thread. Never claims while this session records; a failure
     /// is a fault, never the edit's.
     fn claim_for_input(&self, seq: SeqId) {
+        if self.claim(seq) {
+            host::listen_to_midi_sources_soon();
+        }
+    }
+
+    /// [`Session::claim_for_input`]'s claim; whether `seq` wants live
+    /// input (the MIDI sources then reconnect). A claim refused only
+    /// because another window's idle engine is opening its input is owed:
+    /// `idle` tries it again (Task 8 parked n2).
+    fn claim(&self, seq: SeqId) -> bool {
         let mut inner = lock(&self.inner);
+        inner.claim_owed = None;
         if inner.closed || !host::wants_live(inner.doc(), seq) {
-            return;
+            return false;
         }
         // During a pass nothing is claimed, but the sources reconnect all
         // the same (Ruling 17 as amended; final review m5). Arm and input
         // edits were refused before this point (Ruling 18).
         if inner.recording.is_some() || inner.finishing {
-            drop(inner);
-            host::listen_to_midi_sources_soon();
-            return;
+            return true;
         }
         let at = match (inner.cursor, inner.cursor_seq) {
             (Some(t), None) => t,
@@ -1046,10 +1060,12 @@ impl Session {
                 inner.cursor_seq = Some(seq);
             }
             Ok(false) => {}
+            Err(VizError::Busy { message }) if message == host::INPUT_OPENING => {
+                inner.claim_owed = Some(seq);
+            }
             Err(e) => inner.reload_fault = Some(format!("the engine could not be claimed: {e}")),
         }
-        drop(inner);
-        host::listen_to_midi_sources_soon();
+        true
     }
 
     /// `Busy` when one of `cmds` changes which lanes record (an arm or an
@@ -1582,6 +1598,12 @@ impl Session {
             plugins::tick_closing();
             self.unload_disabled();
             self.service_recording()?;
+            // An arm's claim another window's opening input put off (Task
+            // 8 parked n2); the sources were reconnected at the arm.
+            let owed = lock(&self.inner).claim_owed;
+            if let Some(seq) = owed {
+                self.claim(seq);
+            }
             let mut inner = lock(&self.inner);
             self.apply_pending_pass(&mut inner);
             // A save at Stop the busy registry put off (Task 9 review M4).
@@ -2062,8 +2084,8 @@ impl Session {
     /// undo step "Add Destination". `Model` for an empty or over-long name
     /// or port (1–255 characters, no control characters), a port
     /// [`crate::host::midi_destination_ports`] does not list (matched as
-    /// given, untrimmed) or a reserved reference, or a channel above 15. The same name, port and channel again make another
-    /// destination.
+    /// given, untrimmed) or a reserved reference, or a channel above 15.
+    /// The same name, port and channel again make another destination.
     pub fn add_midi_destination(
         &self,
         name: String,
@@ -2439,6 +2461,10 @@ impl Session {
                     break inner;
                 }
             };
+            // A save at Stop the busy registry put off is made now: no
+            // `idle` follows a close, and the take was promised saved
+            // (Task 9 parked m3; a failure is printed below).
+            self.save_after_pass_now(&mut inner);
             for line in inner.news.problems.iter().skip(before) {
                 eprintln!("VizDAW: {line}");
             }
