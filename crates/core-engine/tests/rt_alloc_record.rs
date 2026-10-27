@@ -2,7 +2,8 @@
 //! §3, §12.3 "`rt-check` covers … the input ring"): the counting
 //! allocator is armed only around `OfflineBackend::block`, while a record
 //! tap captures fake input through loop wraps, a full ring, tap swaps, an
-//! xrun, a stop and the tap's removal.
+//! xrun, a stop and the tap's removal; then a return-latency measurement
+//! runs, is replaced and is removed mid-note.
 
 use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
@@ -156,5 +157,30 @@ fn recording_never_allocates() {
         0,
         "allocations on xrun and stop"
     );
+    // A return-latency measurement (plan 5c-2 Task 5) with the transport
+    // stopped: installed, its five notes sent and watched for, then
+    // removed mid-note on a second run (its note-off sent, the tap
+    // retired).
+    engine.stop().unwrap();
+    let m = engine
+        .start_measure(&doc, synth, vec![0, 1])
+        .unwrap()
+        .unwrap();
+    for i in 0..400u32 {
+        armed_block(&mut b, 1 + (i * 37) % 1024);
+        if i % 100 == 0 {
+            log.drain();
+        }
+    }
+    assert!(m.done(), "the measurement ran to its end");
+    let m = engine.start_measure(&doc, synth, vec![2]).unwrap().unwrap();
+    for _ in 0..12 {
+        armed_block(&mut b, 512);
+    }
+    assert!(m.sent(0).is_some());
+    engine.stop_measure().unwrap();
+    armed_block(&mut b, 512);
+    assert!(m.closed());
+    assert_eq!(rt_check::count() - before, 0, "allocations while measuring");
     drop(b.stop().unwrap());
 }

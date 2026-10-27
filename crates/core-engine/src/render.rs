@@ -5,6 +5,7 @@ use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::regions::InputCopy;
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
 use crate::input::{InputRoutes, MIDI_IN_PER_BLOCK, MidiIn, on_channel};
+use crate::measure::MeasureTap;
 use crate::midi1::Midi1Msg;
 use crate::notes::ActiveNotes;
 use crate::pool::PoolShared;
@@ -408,6 +409,10 @@ pub enum EngineCmd {
     /// Replace the live input routes (spec §6.6); notes sounding through
     /// thru end first.
     SetInputs(Box<InputRoutes>),
+    /// Install a return-latency measurement (spec §6.7), or remove the one
+    /// installed (its sounding note ends; it goes back through the retire
+    /// ring).
+    Measure(Option<Box<MeasureTap>>),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -423,6 +428,8 @@ pub enum Retired {
     Tap(Box<RecordTap>),
     /// Replaced input routes.
     Inputs(Box<InputRoutes>),
+    /// A removed measurement.
+    Measure(Box<MeasureTap>),
 }
 
 /// Capacity of the command ring.
@@ -494,6 +501,8 @@ pub struct Renderer {
     thru: Box<ActiveNotes>,
     /// This block's input, for monitoring.
     input_copy: Box<InputCopy>,
+    /// A return-latency measurement (spec §6.7), while one is installed.
+    measure: Option<Box<MeasureTap>>,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -622,6 +631,7 @@ impl Renderer {
             inputs: None,
             thru: Box::default(),
             input_copy: Box::new(InputCopy::new(0, 0)),
+            measure: None,
         };
         r.prepare(cfg.max_frames);
         r
@@ -674,10 +684,15 @@ impl Renderer {
         crate::rt_check::disarm();
     }
 
-    /// The tap's end of a block (see [`RecordTap::end_block`]). // RT
+    /// The tap's end of a block (see [`RecordTap::end_block`]), and the
+    /// measurement's (it watches every block's input, played or not:
+    /// [`MeasureTap::capture`]). // RT
     fn end_tap(&mut self, input: &InputBlock<'_>, frames: u32, advanced: bool) {
         if let Some(t) = self.tap.as_deref_mut() {
             t.end_block(input.channels, frames, advanced);
+        }
+        if let Some(m) = self.measure.as_deref_mut() {
+            m.capture(input.channels, frames, input.delay_frames);
         }
     }
 
@@ -745,6 +760,7 @@ impl Renderer {
             }
         }
         self.live_midi();
+        self.measure_sends();
         let monitored = self.copy_monitored(input, frames);
         // No run is in flight (`try_finish` succeeded above): the streamer
         // may count a new epoch (5a Ruling 9) and plan around the playhead
@@ -1048,6 +1064,7 @@ impl Renderer {
                 Ok(EngineCmd::RemoveSink(_)) => self.retire.slots() == 0,
                 Ok(EngineCmd::Record(_)) => self.tap.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::SetInputs(_)) => self.inputs.is_some() && self.retire.slots() == 0,
+                Ok(EngineCmd::Measure(_)) => self.measure.is_some() && self.retire.slots() == 0,
                 Ok(_) => false,
                 Err(_) => break,
             };
@@ -1244,6 +1261,28 @@ impl Renderer {
                     }
                 }
             }
+            EngineCmd::Measure(new) => {
+                if let Some(mut old) = std::mem::replace(&mut self.measure, new) {
+                    // Its note must not hang.
+                    let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+                    let mut o = Out {
+                        sinks: &mut self.sinks,
+                        shared: &self.shared,
+                        block_ns: self.block_ns,
+                        ns_per_frame: 0.0,
+                        late_ns,
+                        base: 0,
+                    };
+                    let target = old.target();
+                    old.release(|m| o.send(target, 0, m.as_slice()));
+                    old.close();
+                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Measure(old))
+                    {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+            }
             EngineCmd::AddSink(idx, sink) => {
                 if let Some(slot) = self.sinks.get_mut(usize::from(idx.0)) {
                     if let Some(old) = slot.replace(sink) {
@@ -1384,6 +1423,27 @@ impl Renderer {
                 });
             }
         }
+    }
+
+    /// Sends what a measurement has due (spec §6.7) at block offset 0,
+    /// heard the graph latency and the MIDI offset after the block's first
+    /// frame. // RT
+    fn measure_sends(&mut self) {
+        let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+        let late = (late_ns.max(0) as f64 * self.cfg.sample_rate / 1e9).round() as u64;
+        let Some(m) = self.measure.as_deref_mut() else {
+            return;
+        };
+        let mut o = Out {
+            sinks: &mut self.sinks,
+            shared: &self.shared,
+            block_ns: self.block_ns,
+            ns_per_frame: 0.0,
+            late_ns,
+            base: 0,
+        };
+        let target = m.target();
+        m.sends(late, |msg| o.send(target, 0, msg.as_slice()));
     }
 
     /// [`LATE_SECONDS`] in frames.

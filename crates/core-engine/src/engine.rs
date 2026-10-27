@@ -228,6 +228,9 @@ pub struct Engine {
     /// The routes last sent to the renderer: a load sends them only when
     /// they change, so a load still retires just a schedule and a graph.
     inputs_sent: crate::input::InputRoutes,
+    /// The destinations whose return a lane records (spec §6.7): interned
+    /// at every load, so a measurement can play them (plan 5c-2 Ruling 10).
+    return_dests: Vec<DestId>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -364,6 +367,7 @@ impl Engine {
             input_spec: crate::input::InputSpec::default(),
             midi_tx,
             inputs_sent: crate::input::InputRoutes::default(),
+            return_dests: Vec::new(),
         };
         Ok((engine, renderer))
     }
@@ -532,6 +536,20 @@ impl Engine {
                     dest_channel,
                     chain: crate::input::InputChain,
                 });
+            }
+            // The synths lanes record the return of (spec §6.7): interned
+            // like thru's, so Measure can play one the sequence never plays
+            // (plan 5c-2 Ruling 10). One that cannot play is left out;
+            // Measure says why.
+            for id in &self.return_dests {
+                let Some(d) = doc.instruments().get(id) else {
+                    continue;
+                };
+                if let Ok(kinds) = kinds_for(&d.kind, opts.route, &opts.ports) {
+                    for k in &kinds {
+                        let _ = resolve(k);
+                    }
+                }
             }
         }
         let (mut schedule, mut report) = match compiled {
@@ -1176,6 +1194,58 @@ impl Engine {
     /// `midi.inject`).
     pub fn midi_sender(&self) -> crate::input::MidiSender {
         self.midi_tx.clone()
+    }
+
+    /// The destinations whose return the loaded sequence's lanes record
+    /// (spec §6.7); the next [`Engine::load`] interns their targets.
+    pub fn set_return_dests(&mut self, dests: Vec<DestId>) {
+        self.return_dests = dests;
+    }
+
+    /// Starts measuring `dest`'s return latency (spec §6.7) on device
+    /// input channels `inputs` (its return lane's): from the next block
+    /// the renderer plays the notes to the synth and watches the input,
+    /// whether or not the transport plays. Replaces a measurement already
+    /// installed. `Ok(Err(why))` when `dest` cannot play here: it is not
+    /// in `doc`, no MIDI destination has its name, or no load interned it
+    /// (no lane of the loaded sequence records its return).
+    pub fn start_measure(
+        &mut self,
+        doc: &Document,
+        dest: DestId,
+        inputs: Vec<u16>,
+    ) -> Result<Result<Arc<crate::measure::MeasureStatus>, String>, EngineError> {
+        let Some(d) = doc.instruments().get(&dest) else {
+            return Ok(Err(format!("destination {dest} is not in the project")));
+        };
+        let channel = match &d.kind {
+            DestKind::MidiEndpoint { channel, .. } => channel & 0x0F,
+            DestKind::PluginInstrument { .. } => 0,
+        };
+        let kinds = match kinds_for(&d.kind, self.cfg.route, &self.factory.ports()) {
+            Ok(k) => k,
+            Err(e) => return Ok(Err(e)),
+        };
+        let Some(target) = kinds.iter().find_map(|k| self.targets.find(k)) else {
+            return Ok(Err(format!(
+                "{} is not loaded: no lane of the loaded sequence records its return",
+                d.name
+            )));
+        };
+        let req = crate::measure::MeasureRequest {
+            target,
+            channel,
+            inputs,
+        };
+        let (tap, status) = crate::measure::tap(&req, self.cfg.sample_rate);
+        self.push(EngineCmd::Measure(Some(Box::new(tap))))?;
+        Ok(Ok(status))
+    }
+
+    /// Removes the measurement: the block that applies this sends its
+    /// sounding note's off, and its status reads closed.
+    pub fn stop_measure(&mut self) -> Result<(), EngineError> {
+        self.push(EngineCmd::Measure(None))
     }
 }
 
