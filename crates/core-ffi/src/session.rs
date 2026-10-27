@@ -808,7 +808,13 @@ impl Session {
         if let Some(next) = next {
             self.capture_removed(&next)?;
         }
+        before_execute();
         let mut inner = lock(&self.inner);
+        // Under the lock the command applies under (Ruling 18, Task 9
+        // review M5).
+        if crate::edit::retries_input_cmd(&cmd) {
+            records_busy(&inner)?;
+        }
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
         // An arm or input change that went through lets a failed input
@@ -1044,17 +1050,15 @@ impl Session {
     /// `Busy` when one of `cmds` changes which lanes record (an arm or an
     /// input) while this session records, finishes a pass or waits to
     /// apply one (plan 5d-1 Ruling 18, 5c carry M6); monitor changes pass.
+    /// This early check refuses before any validation or gesture rewind;
+    /// [`records_busy`] repeats it under the lock the command applies
+    /// under, so a pass another thread starts meanwhile is seen (Task 9
+    /// review M5).
     fn check_records(&self, cmds: &[crate::edit::EditCommand]) -> Result<(), VizError> {
         if !cmds.iter().any(crate::edit::retries_input) {
             return Ok(());
         }
-        let inner = lock(&self.inner);
-        if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
-            return Err(VizError::Busy {
-                message: RECORDING_LANES.into(),
-            });
-        }
-        Ok(())
+        records_busy(&lock(&self.inner))
     }
 
     /// Why Measure or Track Synth cannot start or take its step now:
@@ -1575,6 +1579,8 @@ impl Session {
             self.service_recording()?;
             let mut inner = lock(&self.inner);
             self.apply_pending_pass(&mut inner);
+            // A save at Stop the busy registry put off (Task 9 review M4).
+            self.save_after_pass_now(&mut inner);
             // A setting a load publishes changed (plan 5d-1 Ruling 12).
             let epoch = crate::audio::epoch();
             if inner.settings_seen != epoch {
@@ -2648,6 +2654,31 @@ fn edit_all_hook(_label: &str, _step: usize) {}
 
 #[cfg(feature = "test-hooks")]
 thread_local! {
+    /// What runs on this thread inside an edit's command, between its
+    /// checks and the locked apply (test hook, Task 9 review M5).
+    static BEFORE_EXECUTE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` the next time an edit on this thread is about to apply its
+/// command under the session lock; `None` clears it (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn set_before_execute_hook(f: Option<Box<dyn FnOnce()>>) {
+    BEFORE_EXECUTE.with(|h| *h.borrow_mut() = f);
+}
+
+#[cfg(feature = "test-hooks")]
+fn before_execute() {
+    if let Some(f) = BEFORE_EXECUTE.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn before_execute() {}
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
     /// What runs on this thread right before `close` tidies its package
     /// (test hook, final review M1).
     static BEFORE_CLOSE_TIDY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -2876,7 +2907,7 @@ impl Session {
             let (seq_id, lane_id, next, effect, live) = {
                 let inner = lock(&self.inner);
                 if inner.edit_label.is_some() {
-                    return Err(crate::events::bad("finish the open edit first"));
+                    return Err(edit_open_busy());
                 }
                 let doc = inner.doc();
                 let seq_id = seq_id(doc, seq)?;
@@ -3088,7 +3119,7 @@ impl Session {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
             if inner.history.in_transaction() {
-                return Err(crate::events::bad("finish the open edit first"));
+                return Err(edit_open_busy());
             }
             inner.history.begin("New Sequence from Template")?;
             match crate::templates::build(&mut inner.history, &name, &template) {
@@ -3817,6 +3848,17 @@ fn edit_open_busy() -> VizError {
 /// Why an arm or input change waits for Stop (plan 5d-1 Ruling 18).
 pub const RECORDING_LANES: &str = "Stop recording to change which lanes record.";
 
+/// `Busy` [`RECORDING_LANES`] while `inner` records, finishes a pass or
+/// waits to apply one.
+fn records_busy(inner: &Inner) -> Result<(), VizError> {
+    if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+        return Err(VizError::Busy {
+            message: RECORDING_LANES.into(),
+        });
+    }
+    Ok(())
+}
+
 /// "Busy" for Normalize.
 fn still_building(name: &str) -> VizError {
     VizError::Busy {
@@ -3851,7 +3893,7 @@ impl Session {
             let (root, mut measure) = {
                 let mut inner = lock(&self.inner);
                 if inner.edit_label.is_some() {
-                    return Err(crate::events::bad("finish the open edit first"));
+                    return Err(edit_open_busy());
                 }
                 inner.refresh_media(self.id, false);
                 let root = inner.root(self.id);
@@ -3935,7 +3977,7 @@ impl Session {
             let cmd = Command::Audio(core_model::command::AudioCmd::Normalize { regions, peak_db });
             let mut inner = lock(&self.inner);
             if inner.edit_label.is_some() {
-                return Err(crate::events::bad("finish the open edit first"));
+                return Err(edit_open_busy());
             }
             inner.refresh_media(self.id, false);
             let doc = inner.doc().clone();
@@ -4666,16 +4708,35 @@ impl Session {
         inner.news.media_changed = true;
         inner.reload_host(self.id);
         self.mark(inner);
-        // Saved while recording: the take is saved now (Ruling 19).
-        if std::mem::take(&mut inner.save_after_pass) {
-            if let Some(path) = inner.path.clone() {
-                if let Err(e) = self.save_to(inner, &path) {
-                    inner
-                        .news
-                        .problems
-                        .push(format!("The take could not be saved: {e}"));
-                }
+        self.save_after_pass_now(inner);
+    }
+
+    /// Saved while recording: the take is saved once its pass has landed
+    /// (Ruling 19). A plugin registry that is busy (a nested run loop)
+    /// keeps the mark for the next `idle` (Task 9 review M4); any other
+    /// failure is said and the mark goes (the document stays unsaved).
+    fn save_after_pass_now(&self, inner: &mut Inner) {
+        if !inner.save_after_pass
+            || inner.recording.is_some()
+            || inner.finishing
+            || inner.pending_pass.is_some()
+        {
+            return;
+        }
+        let Some(path) = inner.path.clone() else {
+            inner.save_after_pass = false;
+            return;
+        };
+        match self.save_to(inner, &path) {
+            Err(VizError::Busy { .. }) if plugins::is_busy() => {}
+            Err(e) => {
+                inner.save_after_pass = false;
+                inner
+                    .news
+                    .problems
+                    .push(format!("The take could not be saved: {e}."));
             }
+            Ok(()) => inner.save_after_pass = false,
         }
     }
 
@@ -5380,7 +5441,7 @@ impl Session {
     /// is open.
     fn pool_edit(&self, cmd: Command) -> Result<DocSnapshot, VizError> {
         if lock(&self.inner).edit_label.is_some() {
-            return Err(crate::events::bad("finish the open edit first"));
+            return Err(edit_open_busy());
         }
         self.execute(cmd)
     }
@@ -5424,7 +5485,7 @@ impl Session {
             self.media_item(media)?;
             let mut inner = lock(&self.inner);
             if inner.edit_label.is_some() {
-                return Err(crate::events::bad("finish the open edit first"));
+                return Err(edit_open_busy());
             }
             let users = core_model::command::media::regions_using(inner.doc(), id);
             let filter = ViewFilter::default();

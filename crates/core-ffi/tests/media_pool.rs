@@ -203,10 +203,19 @@ fn pool_rows_rename_remove_and_compact() {
     s.undo().unwrap();
     assert_eq!(s.media().unwrap().len(), 1);
     assert_eq!(s.lane_events(seq, lane).unwrap().events.len(), 1);
-    // Not while an edit is open.
+    // Not while an edit is open: Busy, it waits (plan 5d-1 Ruling 20,
+    // Task 9 review M1).
     s.begin_edit("Drag".into()).unwrap();
-    assert!(matches!(s.compact_media(), Err(VizError::Model { .. })));
+    let busy = |r: Result<vizdaw_ffi::DocSnapshot, VizError>| matches!(&r, Err(VizError::Busy { message }) if message == "Finish the open edit first.");
+    assert!(busy(s.compact_media()));
+    assert!(busy(s.rename_media(u.id, "Kit".into())));
+    assert!(busy(s.remove_media(u.id)));
+    assert!(busy(s.new_sequence_from_template(
+        "T".into(),
+        vizdaw_ffi::templates::SequenceTemplate::Empty
+    )));
     s.end_edit().unwrap();
+    assert_eq!(s.media().unwrap().len(), 1, "nothing changed");
     s.close().unwrap();
 }
 

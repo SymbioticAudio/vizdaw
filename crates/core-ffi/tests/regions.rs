@@ -209,7 +209,11 @@ fn normalize_refuses_bad_targets_offline_media_and_open_edits() {
     model(s.normalize_regions(vec![a_note(&s, seq)], -1.0));
     model(s.normalize_regions(vec![999_999], -1.0));
     s.begin_edit("Drag".into()).unwrap();
-    assert!(model(s.normalize_regions(vec![ev], -1.0)).contains("open edit"));
+    // Busy since plan 5d-1 Ruling 20 (Task 9 review M1).
+    assert!(matches!(
+        s.normalize_regions(vec![ev], -1.0),
+        Err(VizError::Busy { message }) if message == "Finish the open edit first."
+    ));
     s.end_edit().unwrap();
     // Offline media cannot be measured.
     let pkg = dir.path().join("P.vizdaw");

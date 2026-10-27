@@ -453,6 +453,12 @@ final class FakeControlHost: ControlHost {
         #expect(fake.normalizations.last?.peakDb == -1)
         fake.normalizeError = .Busy(message: "still being built")
         #expect(failure(run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])))?.code == .busy)
+        // An edit a mixer fader holds open (plan 5d-1 Ruling 20; Task 9
+        // review M1): `busy`, so a script retries.
+        fake.normalizeError = .Busy(message: "Finish the open edit first.")
+        let open = failure(run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])))
+        #expect(open?.code == .busy && open?.message == "Finish the open edit first.")
+        fake.normalizeError = nil
         guard case .done = run(RegionCommands.fadeIn, []) else {
             Issue.record("fade")
             return

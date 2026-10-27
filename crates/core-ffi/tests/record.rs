@@ -700,16 +700,20 @@ fn a_refused_microphone_is_why_record_refuses() {
 }
 
 /// Task 11 review I1: an edit during a pass that no longer wants audio
-/// input (the only audio lane disarmed) neither closes nor restarts the
-/// input under the pass; since plan 5d-1 Ruling 18 it is refused (`Busy`)
-/// and applies when made again after the pass ends.
+/// input neither closes nor restarts the input under the pass, and the
+/// change applies once the pass ends, with no further edit. Since plan
+/// 5d-1 Ruling 18 a disarm is refused (`Busy`); removing the recording
+/// lane (still allowed, pre-flight I3) is the edit that drops the want.
 #[test]
 fn input_stays_open_until_the_pass_ends() {
     use vizdaw_ffi::edit::{EditCommand, LaneEdit};
     let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, true);
     let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
     s.record(d.seq.0, spec()).unwrap();
+    let rel = s.record_state().unwrap().lanes[0].path.clone().unwrap();
     assert_eq!(s.debug_input_open(), Some(true));
     let changes = s.debug_input_changes().unwrap();
     wait_until("half a second of audio", || frames(&s) >= 24_000);
@@ -722,26 +726,32 @@ fn input_stays_open_until_the_pass_ends() {
             arm: Some(false),
         },
     };
-    assert!(matches!(
-        s.edit(disarm.clone(), None),
-        Err(VizError::Busy { .. })
-    ));
+    assert!(matches!(s.edit(disarm, None), Err(VizError::Busy { .. })));
+    // The only lane wanting audio input goes.
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::Remove {
+                seq: d.seq.0,
+                lane: d.mic.0,
+            },
+        },
+        None,
+    )
+    .unwrap();
     assert_eq!(s.debug_input_open(), Some(true), "closed under the pass");
     assert_eq!(s.debug_input_changes(), Some(changes), "restarted mid-pass");
     wait_until("a second of audio", || frames(&s) >= 48_000);
     assert!(s.record_state().unwrap().recording);
     s.stop().unwrap();
     assert!(!s.record_state().unwrap().recording);
-    s.edit(disarm, None).unwrap();
     assert_eq!(
         s.debug_input_open(),
         Some(false),
-        "the change applies after"
+        "the change applies after, with no further edit"
     );
-    // The take is whole: the fake sine runs to its last frame.
-    let media = s.media().unwrap();
-    assert_eq!(media.len(), 1);
-    let (_, data) = read(&s.media_file(media[0].id).unwrap());
+    // The take (kept, its lane gone) is whole: the fake sine runs to its
+    // last frame.
+    let (_, data) = read(&pkg.join(&rel).display().to_string());
     assert!(data.len() >= 48_000);
     let tail = &data[data.len() - 4_800..];
     let peak = tail.iter().fold(0.0f32, |a, x| a.max(x.abs()));
@@ -1914,4 +1924,178 @@ fn a_refused_save_while_recording_marks_nothing() {
     assert!(s.snapshot().unwrap().dirty, "nothing saved the take");
     s.close().unwrap();
     assert!(!s.saves_after_pass().unwrap());
+}
+
+/// Fix round 1 M2: mute and solo still apply during a pass (Ruling 18
+/// refuses only what changes which lanes record).
+#[test]
+fn mute_and_solo_apply_while_recording() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::SetFlags {
+                seq: d.seq.0,
+                lane: d.keys.0,
+                mute: Some(true),
+                solo: Some(true),
+                arm: None,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    s.set_lane_mute(d.seq.0, d.mic.0, true).unwrap();
+    let lanes = s.lanes(d.seq.0).unwrap();
+    let keys = lanes.iter().find(|l| l.id == d.keys.0).unwrap();
+    let mic = lanes.iter().find(|l| l.id == d.mic.0).unwrap();
+    assert!(keys.mute && keys.solo && !keys.arm);
+    assert!(mic.mute && mic.arm);
+    assert!(s.record_state().unwrap().recording);
+    wait_until("more audio", || frames(&s) >= 9600);
+    s.stop().unwrap();
+    assert_eq!(regions(&s, d.seq.0, d.mic.0).len(), 1);
+    s.close().unwrap();
+}
+
+/// Fix round 1 M3: hostile commands while an edit is open are Busy with
+/// the exact message (the guard comes first), change nothing and never
+/// panic.
+#[test]
+fn hostile_edits_during_an_open_edit_are_busy() {
+    let g = serial(None);
+    let d = doc(8, false, false);
+    let s = untitled(&g, d.doc.clone());
+    s.begin_edit("Drag".into()).unwrap();
+    let before = s.snapshot().unwrap();
+    let lanes = s.lanes(d.seq.0).unwrap();
+    let busy = |r: Result<vizdaw_ffi::DocSnapshot, VizError>| matches!(&r, Err(VizError::Busy { message }) if message == "Finish the open edit first.");
+    let tempo = vizdaw_ffi::EditCommand::Sequence {
+        edit: vizdaw_ffi::SequenceEdit::SetTempo {
+            seq: u64::MAX,
+            tempo: vec![],
+        },
+    };
+    let input = vizdaw_ffi::EditCommand::Lane {
+        edit: vizdaw_ffi::LaneEdit::SetInput {
+            seq: u64::MAX,
+            lane: u64::MAX,
+            input: None,
+        },
+    };
+    let cmds = [
+        arm_edit(d.seq, LaneId(u64::MAX), true),
+        arm_edit(SeqId(0), LaneId(0), false),
+        vizdaw_ffi::EditCommand::ModifyAgain,
+        tempo,
+        input,
+    ];
+    for c in &cmds {
+        assert!(busy(s.edit(c.clone(), None)), "{c:?}");
+        assert!(busy(s.edit_all("X".into(), vec![c.clone()], None)), "{c:?}");
+    }
+    assert!(busy(s.edit_all("Empty".into(), vec![], None)));
+    assert!(busy(s.edit_all("All".into(), cmds.to_vec(), None)));
+    assert!(busy(s.edit_all(String::new(), cmds.to_vec(), None)));
+    let after = s.snapshot().unwrap();
+    assert_eq!(after.version, before.version, "nothing changed");
+    assert_eq!(s.lanes(d.seq.0).unwrap(), lanes);
+    let snap = s.end_edit().unwrap();
+    assert_eq!(snap.undo_label, None);
+    s.close().unwrap();
+}
+
+/// Fix round 1 I2 (Ruling 19): a save at Stop that fails is reported,
+/// the mark goes, the document stays dirty and the take is kept.
+#[test]
+fn a_failed_save_at_stop_is_reported_and_keeps_the_take() {
+    use std::os::unix::fs::PermissionsExt;
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    let rel = s.record_state().unwrap().lanes[0].path.clone().unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.save().unwrap();
+    assert!(s.saves_after_pass().unwrap());
+    // The package refuses writes (inside this test's own folder).
+    let project = pkg.join("project.json");
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+    mode(&project, 0o444).unwrap();
+    mode(&pkg, 0o555).unwrap();
+    s.stop().unwrap();
+    let problems = s.idle().unwrap().problems;
+    mode(&pkg, 0o755).unwrap();
+    mode(&project, 0o644).unwrap();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("The take could not be saved")),
+        "{problems:?}"
+    );
+    assert!(!s.saves_after_pass().unwrap(), "the mark goes");
+    assert!(s.snapshot().unwrap().dirty, "still unsaved");
+    assert_eq!(s.media().unwrap().len(), 1);
+    assert!(pkg.join(&rel).is_file(), "the take is kept");
+    let saved = core_model::file::load(&pkg).unwrap();
+    assert!(saved.media().is_empty(), "the failed save wrote nothing");
+    s.close().unwrap();
+}
+
+/// Fix round 1 M4: a save at Stop that finds the plugin registry busy
+/// (a nested run loop) keeps the mark and saves at the next idle.
+#[test]
+fn a_save_at_stop_while_the_registry_is_busy_waits_for_idle() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.save().unwrap();
+    vizdaw_ffi::plugins::with(0, |_| s.stop().unwrap()).unwrap();
+    assert!(s.saves_after_pass().unwrap(), "still owed");
+    assert!(core_model::file::load(&pkg).unwrap().media().is_empty());
+    let problems = s.idle().unwrap().problems;
+    assert!(
+        !problems.iter().any(|p| p.contains("could not be saved")),
+        "{problems:?}"
+    );
+    assert!(!s.saves_after_pass().unwrap());
+    assert_eq!(core_model::file::load(&pkg).unwrap().media().len(), 1);
+    assert!(!s.snapshot().unwrap().dirty);
+    s.close().unwrap();
+}
+
+/// Fix round 1 M5 (Ruling 18): a recording that starts between the check
+/// and the command (another thread) still refuses the arm: both are
+/// under one lock.
+#[test]
+fn a_recording_that_starts_mid_edit_refuses_the_arm() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let other = s.clone();
+    vizdaw_ffi::session::set_before_execute_hook(Some(Box::new(move || {
+        other.record(d.seq.0, spec()).unwrap();
+    })));
+    let r = s.edit(arm_edit(d.seq, d.keys, true), None);
+    vizdaw_ffi::session::set_before_execute_hook(None);
+    assert!(s.record_state().unwrap().recording);
+    assert!(
+        matches!(&r, Err(VizError::Busy { message })
+            if message == vizdaw_ffi::session::RECORDING_LANES),
+        "{r:?}"
+    );
+    let lanes = s.lanes(d.seq.0).unwrap();
+    assert!(!lanes.iter().find(|l| l.id == d.keys.0).unwrap().arm);
+    wait_until("audio", || frames(&s) >= 4800);
+    s.stop().unwrap();
+    s.close().unwrap();
 }
