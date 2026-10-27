@@ -75,6 +75,14 @@ import VizDAWCore
                     [("name", .text(value: " Juno ")), ("port", .text(value: "Juno MIDI")), ("channel", .int(value: 3))],
                     s, id)) == nil)
         #expect(f.addedDestinations.last?.name == "Juno" && f.addedDestinations.last?.channel == 2)
+        // The port goes to the core as given: a CoreMIDI name may have edge
+        // spaces, and the core matches it untrimmed (final wave, Task 11).
+        #expect(
+            failure(
+                run(
+                    "destination.add_midi", [("name", .text(value: "J")), ("port", .text(value: " Juno MIDI "))],
+                    s, id)) == nil)
+        #expect(f.addedDestinations.last?.port == " Juno MIDI ")
         #expect(
             failure(run("destination.add_midi", [("name", .text(value: "A")), ("port", .text(value: "P"))], s, id)) == nil)
         #expect(f.addedDestinations.last?.channel == 0, "channel 1 by default")
@@ -82,6 +90,7 @@ import VizDAWCore
         for bad: [(String, ControlValue)] in [
             [("port", .text(value: "P"))], [("name", .text(value: "A"))],
             [("name", .text(value: " ")), ("port", .text(value: "P"))],
+            [("name", .text(value: "A")), ("port", .text(value: "  "))],
             [("name", .text(value: "A")), ("port", .text(value: "P")), ("channel", .int(value: 0))],
             [("name", .text(value: "A")), ("port", .text(value: "P")), ("channel", .int(value: 17))],
             [("name", .text(value: String(repeating: "x", count: 256))), ("port", .text(value: "P"))],

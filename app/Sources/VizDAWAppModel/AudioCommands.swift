@@ -91,9 +91,12 @@ public enum AudioCommands {
     /// `destination.add_midi`: a destination for a MIDI port, one undo step.
     public static func runAddMidi(_ args: [ControlArg], doc: UUID, _ m: DocumentModel) -> ControlOutcome {
         let name = args.text("name")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let port = args.text("port")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // The port goes as given: the core matches CoreMIDI names untrimmed
+        // (a name may have edge spaces); blank is still refused.
+        let port = args.text("port") ?? ""
+        let blankPort = port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let channel = args.int("channel") ?? 1
-        guard !name.isEmpty, !port.isEmpty, fitsCore(name), fitsCore(port), (1...16).contains(channel) else {
+        guard !name.isEmpty, !blankPort, fitsCore(name), fitsCore(port), (1...16).contains(channel) else {
             return .failed(
                 .of(
                     .invalidParams,
