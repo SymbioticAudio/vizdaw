@@ -30,7 +30,10 @@ static DEFAULT_MONITOR: AtomicU8 = AtomicU8::new(0);
 /// Bumped by every change a load publishes (Ruling 12).
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// The audio settings (Settings › Audio and › Recording).
+/// The audio settings (Settings › Audio and › Recording). New stream
+/// sizes (`cache_mb`, `read_ahead_seconds`) apply to the next engine: a
+/// holder that keeps monitoring (armed lanes, thru) keeps its old sizes
+/// until then, while this reports the new ones.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct AudioSettingsRow {
     /// Inputs are played back through their strips (spec §6.6).
@@ -66,7 +69,7 @@ pub fn audio_settings() -> AudioSettingsRow {
 #[uniffi::export]
 pub fn set_software_monitoring(on: bool) {
     if SOFTWARE_MONITORING.swap(on, Ordering::Relaxed) != on {
-        EPOCH.fetch_add(1, Ordering::Relaxed);
+        EPOCH.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -158,13 +161,14 @@ pub fn default_monitor() -> MonitorMode {
 
 /// Changes so far that a load publishes (Ruling 12).
 pub fn epoch() -> u64 {
-    EPOCH.load(Ordering::Relaxed)
+    EPOCH.load(Ordering::Acquire)
 }
 
 /// Every setting back to its default (test hook: a test binary's tests
 /// share the process).
 #[cfg(feature = "test-hooks")]
 pub fn reset_audio_settings() {
+    crate::host::debug_refuse_buffer_sizes(&[]);
     set_software_monitoring(true);
     IO_BUFFER.store(DEFAULT_BUFFER_FRAMES, Ordering::Relaxed);
     CACHE.store(CACHE_MB.2, Ordering::Relaxed);

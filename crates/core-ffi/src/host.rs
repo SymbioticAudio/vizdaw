@@ -652,6 +652,17 @@ pub fn force_offline() {
     FORCE_OFFLINE.store(true, Ordering::Relaxed);
 }
 
+/// Buffer sizes the offline device refuses to reopen at (test hook).
+#[cfg(feature = "test-hooks")]
+static REFUSED_BUFFERS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Makes the offline device refuse a reopen at any of `sizes` (test hook;
+/// empty: none).
+#[cfg(feature = "test-hooks")]
+pub fn debug_refuse_buffer_sizes(sizes: &[u32]) {
+    *lock(&REFUSED_BUFFERS) = sizes.to_vec();
+}
+
 /// Drops the host (test hook): the next Play creates a new one.
 #[cfg(feature = "test-hooks")]
 pub fn reset_host() {
@@ -1068,7 +1079,7 @@ impl Host {
         use std::sync::Arc;
         let mut backend = CoreAudioBackend::new();
         // Output only: `ensure_input` opens input once a lane needs it.
-        let info = backend.open(&live_audio_config(project, false))?;
+        let info = open_or_default(live_audio_config(project, false), |c| backend.open(c))?;
         let (engine, renderer) = Engine::with_platform(
             live_config(info.sample_rate),
             Box::new(MacSinks::new()),
@@ -1225,13 +1236,15 @@ impl Host {
                     return Ok(());
                 }
                 let mut r = b.stop()?;
-                let info = match b.open(&live_audio_config(self.project_rate, want)) {
+                let info = match open_or_default(live_audio_config(self.project_rate, want), |c| {
+                    b.open(c)
+                }) {
                     Ok(i) => i,
                     Err(e) if want => {
                         let f = format!("{}: {e}", crate::record::INPUT_FAILED_PREFIX);
                         self.faults.push(f.clone());
                         self.input_failed = Some(f);
-                        b.open(&live_audio_config(self.project_rate, false))?
+                        open_or_default(live_audio_config(self.project_rate, false), |c| b.open(c))?
                     }
                     Err(e) => return Err(e.into()),
                 };
@@ -1329,24 +1342,66 @@ impl Host {
     }
 
     /// Reopens a live device as it is (input open or not) with the I/O
-    /// buffer size now asked for (plan 5d-1 Ruling 9). Offline outputs
-    /// keep their blocks.
-    fn reopen(&mut self) -> Result<(), VizError> {
+    /// buffer size now asked for (plan 5d-1 Ruling 9; review I1). If the
+    /// device refuses it, it is reopened at `old` and the refusal comes
+    /// back as [`Reopened::Kept`]; if that fails too, [`Reopened::Lost`].
+    /// Offline outputs keep their blocks.
+    fn reopen(&mut self, old: u32) -> Reopened {
         match &mut self.output {
-            Output::Offline(_) => Ok(()),
+            Output::Offline(_) => {
+                #[cfg(feature = "test-hooks")]
+                {
+                    let refused = lock(&REFUSED_BUFFERS).clone();
+                    let new = crate::audio::io_buffer_frames();
+                    if refused.contains(&new) {
+                        let e = VizError::Engine {
+                            message: format!("the device refused a buffer of {new} frames"),
+                        };
+                        return if refused.contains(&old) {
+                            Reopened::Lost(e)
+                        } else {
+                            Reopened::Kept(e)
+                        };
+                    }
+                }
+                let _ = old;
+                Reopened::Done
+            }
             #[cfg(target_os = "macos")]
             Output::Hal(b) => {
-                let mut r = b.stop()?;
-                let info = b.open(&live_audio_config(self.project_rate, self.input_open))?;
+                let Ok(mut r) = b.stop() else {
+                    return Reopened::Lost(VizError::Engine {
+                        message: "the audio device would not stop".into(),
+                    });
+                };
+                let cfg = live_audio_config(self.project_rate, self.input_open);
+                // The size asked for is not softened: a refusal is an
+                // error, and the old size comes back.
+                let (info, refused) = match b.open(&cfg) {
+                    Ok(i) => (i, None),
+                    Err(e) => {
+                        let mut back = cfg;
+                        back.buffer_frames = Some(old);
+                        match open_or_default(back, |c| b.open(c)) {
+                            Ok(i) => (i, Some(VizError::from(e))),
+                            Err(e) => return Reopened::Lost(e.into()),
+                        }
+                    }
+                };
                 if info.buffer_frames > r.config().max_frames {
                     r.prepare(info.buffer_frames);
                 }
-                b.start(r)?;
+                if let Err(e) = b.start(r) {
+                    return Reopened::Lost(e.into());
+                }
                 self.engine
                     .set_rt_env(rt_env(b, info.buffer_frames, info.sample_rate));
                 self.input_open = info.input_channels > 0;
                 self.inputs = InputInfo::of(&info);
-                Ok(())
+                match refused {
+                    None => Reopened::Done,
+                    Some(e) => Reopened::Kept(e),
+                }
             }
         }
     }
@@ -1371,6 +1426,33 @@ impl Host {
                 Ok(())
             }
         }
+    }
+}
+
+/// How a buffer-size reopen ended (review I1).
+enum Reopened {
+    /// The device runs at the new size.
+    Done,
+    /// The device refused it and runs at the old size again.
+    Kept(VizError),
+    /// Neither size could be opened: the device is not running.
+    Lost(VizError),
+}
+
+/// Opens with `cfg`; if the device refuses the buffer size asked for,
+/// once more with the device's own (review I2: a refused size must not
+/// stop the device opening at all).
+#[cfg(target_os = "macos")]
+fn open_or_default<T, E>(
+    cfg: core_engine::backend::AudioConfig,
+    mut open: impl FnMut(&core_engine::backend::AudioConfig) -> Result<T, E>,
+) -> Result<T, E> {
+    match open(&cfg) {
+        Err(_) if cfg.buffer_frames.is_some() => open(&core_engine::backend::AudioConfig {
+            buffer_frames: None,
+            ..cfg
+        }),
+        r => r,
     }
 }
 
@@ -1951,24 +2033,11 @@ pub fn reset_if_owner(owner: u64, project: f64) {
     retire(old);
 }
 
-/// Whether a session records: its tap holds the engine (plan 5d-1 Ruling
-/// 9 refuses a buffer change then).
-pub fn any_recording() -> bool {
-    lock(&HOST).as_ref().is_some_and(|h| h.record_hold)
-}
-
-/// Reopens a live device with the I/O buffer size now asked for (plan
-/// 5d-1 Ruling 9); nothing for an offline host or none.
-pub fn reopen_device() -> Result<(), VizError> {
-    match lock(&HOST).as_mut() {
-        Some(h) => h.reopen(),
-        None => Ok(()),
-    }
-}
-
 /// Sets the I/O buffer size and reopens the device with it, all under one
 /// lock (pre-flight M4): `Busy` while a recording holds the engine or a
-/// measurement runs; the old size comes back if the reopen fails.
+/// measurement runs. If the device refuses the size, it is reopened at the
+/// old one (review I1); if that fails too, the host is retired. Either
+/// way the setting is the size the device has, and the error comes back.
 pub(crate) fn set_buffer_frames(frames: u32) -> Result<(), VizError> {
     let mut slot = lock(&HOST);
     if let Some(h) = slot.as_ref() {
@@ -1987,13 +2056,30 @@ pub(crate) fn set_buffer_frames(frames: u32) -> Result<(), VizError> {
     if old == frames {
         return Ok(());
     }
-    if let Some(h) = slot.as_mut() {
-        if let Err(e) = h.reopen() {
+    let Some(h) = slot.as_mut() else {
+        return Ok(());
+    };
+    match h.reopen(old) {
+        Reopened::Done => Ok(()),
+        Reopened::Kept(e) => {
+            // The device runs at the old size; so does the setting.
             crate::audio::swap_io_buffer(old);
-            return Err(e);
+            Err(e)
+        }
+        Reopened::Lost(e) => {
+            crate::audio::swap_io_buffer(old);
+            h.faults.push(format!("The audio device stopped: {e}"));
+            // No device under it: the next claim builds a new host.
+            let mut gone = slot.take();
+            *lock(&MIDI_TO) = None;
+            drop(slot);
+            if let Some(h) = gone.as_mut() {
+                let _ = h.engine.stop();
+            }
+            retire(gone);
+            Err(e)
         }
     }
-    Ok(())
 }
 
 /// Drops the engine when nobody plays, records, measures or monitors, so
@@ -2387,6 +2473,32 @@ pub fn debug_inputs(owner: u64) -> Option<InputSpec> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    /// Review I2: a refused buffer size is tried again with the device's
+    /// own; a refusal without a size asked for is not retried.
+    #[test]
+    fn a_refused_buffer_size_falls_back_to_the_devices_own() {
+        let cfg = live_audio_config(48_000.0, false);
+        assert!(cfg.buffer_frames.is_some());
+        let mut asked = Vec::new();
+        let r: Result<u32, ()> = open_or_default(cfg.clone(), |c| {
+            asked.push(c.buffer_frames);
+            if c.buffer_frames.is_some() {
+                Err(())
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(r, Ok(7));
+        assert_eq!(asked, vec![cfg.buffer_frames, None]);
+        let mut tries = 0;
+        let none = core_engine::backend::AudioConfig::default();
+        let r: Result<u32, ()> = open_or_default(none, |_| {
+            tries += 1;
+            Err(())
+        });
+        assert_eq!((r, tries), (Err(()), 1));
+    }
+
     use super::*;
     use platform_macos::permission::{DENIED_MESSAGE, MicAccess};
 

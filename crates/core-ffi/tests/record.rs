@@ -1616,3 +1616,29 @@ fn stop_during_a_count_in_records_nothing() {
     }
     s.close().unwrap();
 }
+
+/// Review m5: with Software Monitoring off an armed lane still records.
+#[test]
+fn recording_goes_on_with_software_monitoring_off() {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            vizdaw_ffi::audio::set_software_monitoring(true);
+        }
+    }
+    let g = serial(Some(FakeInput::Signals));
+    let _r = Restore;
+    vizdaw_ffi::audio::set_software_monitoring(false);
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("a second of audio", || frames(&s) >= 48_000);
+    s.stop().unwrap();
+    let media = s.media().unwrap();
+    assert_eq!(media.len(), 1);
+    assert_eq!(regions(&s, d.seq.0, d.mic.0).len(), 1);
+    let (_, data) = read(&s.media_file(media[0].id).unwrap());
+    let peak = data.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+    assert!((peak - 0.2512).abs() < 0.01, "{peak}");
+    s.close().unwrap();
+}

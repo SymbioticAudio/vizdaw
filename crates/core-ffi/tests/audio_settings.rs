@@ -16,7 +16,9 @@ use vizdaw_ffi::audio::{
     audio_settings, reset_audio_settings, set_default_monitor_mode, set_io_buffer_frames,
     set_software_monitoring, set_stream_settings,
 };
-use vizdaw_ffi::host::{force_offline, hosts_created, reset_host, set_fake_input};
+use vizdaw_ffi::host::{
+    debug_refuse_buffer_sizes, force_offline, hosts_created, reset_host, set_fake_input,
+};
 use vizdaw_ffi::{
     EditCommand, LaneEdit, LaneInputRow, LaneRow, MonitorModeRow, RecordSpecRow, Session, VizError,
 };
@@ -140,6 +142,23 @@ fn software_monitoring_off_drops_monitoring_at_once_but_keeps_thru() {
     assert_eq!(inputs.midi.len(), 1, "thru stays");
     assert!(inputs.midi[0].thru);
     assert_eq!(s.debug_input_open(), Some(false), "nothing needs input");
+    // An armed audio lane still records: the input stays open, with no
+    // monitor route (review m5).
+    let lp = lane(&s, seq, "Loop").id;
+    edit(
+        &s,
+        LaneEdit::SetFlags {
+            seq,
+            lane: lp,
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        },
+    )
+    .unwrap();
+    s.idle().unwrap();
+    assert_eq!(s.debug_input_open(), Some(true), "armed keeps the input");
+    assert!(s.debug_engine_inputs().unwrap().monitor.is_empty());
     set_software_monitoring(true);
     s.idle().unwrap();
     wait_until("the monitor routes to come back", || {
@@ -357,5 +376,43 @@ fn stream_settings_leave_a_monitoring_engine_alone() {
     });
     let a = audio_settings();
     assert_eq!((a.cache_mb, a.read_ahead_seconds), (256, 4));
+    s.close().unwrap();
+}
+
+/// Review I1: a device that refuses the new buffer size keeps running at
+/// the old one; the setting says so and the call returns the error.
+#[test]
+fn a_refused_buffer_size_keeps_the_old_one_running() {
+    let _g = serial(Some(FakeInput::Signals));
+    let s = Session::new_demo().unwrap();
+    let seq = song(&s);
+    take_engine(&s, seq);
+    debug_refuse_buffer_sizes(&[512]);
+    let r = set_io_buffer_frames(512);
+    debug_refuse_buffer_sizes(&[]);
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(audio_settings().buffer_frames, 128, "the size it has");
+    assert!(vizdaw_ffi::host::holder().is_some(), "the host stays");
+    take_engine(&s, seq);
+    s.close().unwrap();
+}
+
+/// Review I1: when the old size cannot be reopened either, the host is
+/// retired so the next Play builds a fresh one.
+#[test]
+fn a_lost_device_retires_the_host() {
+    let _g = serial(Some(FakeInput::Signals));
+    let s = Session::new_demo().unwrap();
+    let seq = song(&s);
+    take_engine(&s, seq);
+    let made = hosts_created();
+    debug_refuse_buffer_sizes(&[512, 128]);
+    let r = set_io_buffer_frames(512);
+    debug_refuse_buffer_sizes(&[]);
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(audio_settings().buffer_frames, 128);
+    assert_eq!(vizdaw_ffi::host::holder(), None, "the host went");
+    take_engine(&s, seq);
+    assert_eq!(hosts_created(), made + 1, "the next Play made one");
     s.close().unwrap();
 }
