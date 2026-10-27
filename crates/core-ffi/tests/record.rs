@@ -2170,6 +2170,23 @@ fn the_take_draws_while_it_grows_and_its_overview_peaks_at_the_sine() {
     s.close().unwrap();
 }
 
+/// Puts the global latency trim back to 0 when dropped, even if the test
+/// fails first (it would leak into the next test).
+struct Trim;
+
+impl Trim {
+    fn set(frames: i32) -> Trim {
+        vizdaw_ffi::set_record_latency_trim(frames);
+        Trim
+    }
+}
+
+impl Drop for Trim {
+    fn drop(&mut self) {
+        vizdaw_ffi::set_record_latency_trim(0);
+    }
+}
+
 /// Task 10 review I1: the growing take is drawn where Stop places it. File
 /// frame k lands at S(k - D - L) (+R on a synth return), so with a device
 /// delay (here a negative trim) the live anchor is the file frame at the
@@ -2177,7 +2194,7 @@ fn the_take_draws_while_it_grows_and_its_overview_peaks_at_the_sine() {
 #[test]
 fn the_live_anchor_is_where_stop_places_the_take() {
     let g = serial(Some(FakeInput::Signals));
-    vizdaw_ffi::set_record_latency_trim(-4800);
+    let _trim = Trim::set(-4800);
     let d = doc(8, false, true);
     let s = untitled(&g, d.doc.clone());
     s.locate(4 * Q).unwrap();
@@ -2199,7 +2216,7 @@ fn the_live_anchor_is_where_stop_places_the_take() {
     );
     assert_eq!(
         (st.pass_start_tick, st.pass_start_file_frame),
-        (Some(r[0].tick), r[0].source_offset)
+        (Some(r[0].tick), r[0].source_offset as i64)
     );
     s.close().unwrap();
 }
@@ -2248,6 +2265,52 @@ fn a_hostile_waveform_range_is_answered_not_overflowed() {
         .recording_waveform(d.mic.0, 10_000_000, 10_000_100, 4)
         .unwrap();
     assert!(ahead.min.iter().all(|x| *x == 0.0));
+    s.stop().unwrap();
+    s.close().unwrap();
+}
+
+/// Task 10 re-review I1: a positive trim larger than the device delay plus
+/// the latency on a roll pass puts file frame 0 *after* the pass's start:
+/// the anchor goes negative and the region starts later, with no offset.
+#[test]
+fn a_positive_trim_puts_the_live_take_later_like_stop_does() {
+    let g = serial(Some(FakeInput::Signals));
+    let _trim = Trim::set(24_000);
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.locate(4 * Q).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("the roll", || {
+        let st = s.record_state().unwrap();
+        st.pass_start_tick.is_some() && st.frames >= 72_000
+    });
+    let st = s.record_state().unwrap();
+    s.stop().unwrap();
+    let r = regions(&s, d.seq.0, d.mic.0);
+    assert_eq!(r.len(), 1);
+    let at = st.pass_start_file_frame;
+    assert!(at < 0, "{at}");
+    // File frame 0 is heard -at frames after the start tick.
+    assert_eq!(r[0].source_offset, 0);
+    let later = r[0].tick - st.pass_start_tick.unwrap();
+    let want = -at * Q / BEAT;
+    assert!((later - want).abs() <= 2, "{later} vs {want}");
+    s.close().unwrap();
+}
+
+/// Task 10 re-review N1: a request reaching past what is written keeps its
+/// column width: the columns beyond the end are silent, not stretched.
+#[test]
+fn a_request_past_the_written_end_leaves_silent_columns() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 48_000);
+    let w = s.recording_waveform(d.mic.0, 0, 100_000_000, 4).unwrap();
+    assert!(w.max[0] > 0.1, "{:?}", w.max);
+    assert!(w.max[1..].iter().all(|x| *x == 0.0), "{:?}", w.max);
+    assert!(w.min[1..].iter().all(|x| *x == 0.0), "{:?}", w.min);
     s.stop().unwrap();
     s.close().unwrap();
 }

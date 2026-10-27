@@ -193,10 +193,13 @@ pub struct RecordStateRow {
     /// The file frame heard at `pass_start_tick`: where Stop will place
     /// it, run frame + graph latency + the input delay less the trim (one
     /// file holds every loop pass); a synth return lane adds its
-    /// `return_frames`. Resyncs after a Locate are not followed (Task 10
+    /// `return_frames`. Signed and unclamped: below zero the file starts
+    /// that many frames after the pass's tick, as Stop places it, so a
+    /// view maps file frame f to the tick at `f - anchor - return_frames`
+    /// frames from `pass_start_tick`. Resyncs after a Locate are not followed (Task 10
     /// review M3): the anchor is the last wrap, else the roll.
     #[uniffi(default)]
-    pub pass_start_file_frame: u64,
+    pub pass_start_file_frame: i64,
     /// Where the record range starts, a tick of the sequence: regions
     /// cover only the range, so a view draws nothing before it.
     #[uniffi(default)]
@@ -720,14 +723,14 @@ impl Recording {
             pass_start_tick: pass.map(|m| self.tempo.frame_to_tick(m.frame).0),
             // File frame k is placed at S(k - D - L) at Stop (passes.rs), so
             // the file frame at the pass's start tick is run + L + D (a
-            // lane adds its `return_frames`); never before the file.
-            pass_start_file_frame: pass.map_or(0, |m| {
+            // lane adds its `return_frames`), negative when the file
+            // starts later than the pass (a trim past the delay).
+            pass_start_file_frame: pass.map_or(0i64, |m| {
                 let d = self.status.delay().unwrap_or(0) - latency_trim();
-                let at = i64::try_from(m.run)
+                i64::try_from(m.run)
                     .unwrap_or(i64::MAX)
                     .saturating_add(i64::try_from(m.latency).unwrap_or(0))
-                    .saturating_add(d);
-                u64::try_from(at).unwrap_or(0)
+                    .saturating_add(d)
             }),
             range_start_tick: self.tempo.frame_to_tick(self.range.start).0,
         }
@@ -760,15 +763,15 @@ impl Recording {
         if n == 0 {
             return Some(out);
         }
-        // Columns past what was written are silent, so the span is capped
-        // at it (hostile frames neither overflow nor spread the columns).
-        let to = to.min(p.frames());
-        if from >= to {
-            return Some(out);
-        }
-        let w = (to - from) as f64 / n as f64;
+        // The columns divide the requested span; those past what was
+        // written stay silent (saturating, for hostile frames).
+        let written = p.frames();
+        let w = to.saturating_sub(from) as f64 / n as f64;
         for c in 0..n {
             let a = from.saturating_add((c as f64 * w).floor() as u64);
+            if a >= written {
+                break;
+            }
             let b = from
                 .saturating_add(((c + 1) as f64 * w).ceil() as u64)
                 .min(to);

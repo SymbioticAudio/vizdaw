@@ -295,13 +295,14 @@ fn the_writer_keeps_live_peaks_as_it_writes() {
     assert_eq!(writer.finish(Duration::from_secs(30)).error, None);
 }
 
-/// Task 10 review I2: a long take answers a wide range from the coarse
-/// level, and still agrees with a brute-force fold.
+/// Task 10 re-review I2: a long take answers a wide range from the
+/// 4096- and 65 536-frame levels, and agrees with a brute-force fold, on
+/// both sides of each level's threshold.
 #[test]
-fn live_peaks_answer_wide_ranges_from_the_coarse_level() {
-    use core_media::record::{LIVE_COARSE_PEAKS, LIVE_PEAK_FRAMES, LivePeaks};
-    let coarse = LIVE_COARSE_PEAKS * LIVE_PEAK_FRAMES;
-    let total = 40 * coarse + 5000; // a partial coarse peak at the end
+fn live_peaks_answer_wide_ranges_from_the_coarse_levels() {
+    use core_media::record::{LIVE_LEVEL_FRAMES, LivePeaks};
+    let [l0, l1, l2] = LIVE_LEVEL_FRAMES;
+    let total = 40 * l2 + 5000; // partial peaks at every level
     let v =
         |c: usize, f: u64| ((f.wrapping_mul(2654435761) >> (7 + c)) % 2001) as f32 / 1000.0 - 1.0;
     let mut p = LivePeaks::new(2);
@@ -321,22 +322,30 @@ fn live_peaks_answer_wide_ranges_from_the_coarse_level() {
             })
     };
     for c in 0..2 {
-        // Aligned to coarse peaks: exact.
-        assert_eq!(
-            p.range(c, 3 * coarse, 20 * coarse),
-            Some(brute(c, 3 * coarse, 20 * coarse))
-        );
-        // The whole take, partial last peak included.
+        // Aligned to the biggest peaks: exact.
+        assert_eq!(p.range(c, 3 * l2, 20 * l2), Some(brute(c, 3 * l2, 20 * l2)));
+        // The whole take, the partial peaks included.
         assert_eq!(p.range(c, 0, total), Some(brute(c, 0, total)));
-        // Unaligned and wide: covers the span, within its coarse hull.
-        let (a, b) = (3 * coarse + 100, 30 * coarse + 77);
-        let (lo, hi) = p.range(c, a, b).unwrap();
-        let (blo, bhi) = brute(c, a, b);
-        let (hlo, hhi) = brute(c, 3 * coarse, 31 * coarse);
-        assert!(lo <= blo && hi >= bhi && lo >= hlo && hi <= hhi);
+        // Spans on both sides of each threshold (4 x 4096, 4 x 65 536),
+        // unaligned: they cover the span, within the hull of the whole
+        // peaks of the level that answers.
+        for (span, unit) in [
+            (4 * l1 - 1, l0),
+            (4 * l1, l1),
+            (4 * l2 - 1, l1),
+            (4 * l2, l2),
+            (4 * l2 + 3, l2),
+        ] {
+            let a = 3 * l2 + 100;
+            let b = a + span;
+            let (lo, hi) = p.range(c, a, b).unwrap();
+            let (blo, bhi) = brute(c, a, b);
+            let (hlo, hhi) = brute(c, a / unit * unit, b.div_ceil(unit) * unit);
+            assert!(lo <= blo && hi >= bhi, "span {span}");
+            assert!(lo >= hlo && hi <= hhi, "span {span}");
+        }
         // Narrow: the fine level, whole 256-frame peaks.
-        let (a, b) = (1000, 1000 + 3 * LIVE_PEAK_FRAMES);
-        assert_eq!(p.range(c, a, b), Some(brute(c, 768, 1792)));
+        assert_eq!(p.range(c, 1000, 1000 + 3 * l0), Some(brute(c, 768, 1792)));
     }
     assert_eq!(p.range(0, total, total + 10), None);
 }
