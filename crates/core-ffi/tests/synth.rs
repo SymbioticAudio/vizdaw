@@ -1220,3 +1220,206 @@ fn an_arm_never_takes_the_engine_during_measures_input_wait() {
     other.close().unwrap();
     s.close().unwrap();
 }
+
+/// Plan 5d-1 Ruling 25 ("New MIDI Destination…", 5c-2 carry): the ports
+/// a new destination may play (offline: the fake synth's), and the
+/// destination as one undo step.
+#[test]
+fn a_new_midi_destination_names_a_port_in_one_step() {
+    let g = serial(Some(DELAY_MS), None);
+    assert_eq!(
+        vizdaw_ffi::host::midi_destination_ports(),
+        vec![FAKE_SYNTH_PORT.to_string()]
+    );
+    let s = untitled(&g, Builder::new().finish());
+    let before = s.destinations().unwrap().len();
+    let snap = s
+        .add_midi_destination("Synth A".into(), FAKE_SYNTH_PORT.into(), 2)
+        .unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Add Destination"));
+    let d = s
+        .destinations()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.name == "Synth A")
+        .unwrap();
+    assert!(d.external && d.plugin.is_none());
+    s.undo().unwrap();
+    assert_eq!(s.destinations().unwrap().len(), before);
+    s.close().unwrap();
+    set_fake_synth(None);
+    assert!(vizdaw_ffi::host::midi_destination_ports().is_empty());
+}
+
+/// Review Focus 4: hostile names, ports and channels are `Model` and add
+/// nothing. A port must be one `midi_destination_ports` lists: an unknown
+/// one, or a reserved reference (the built-in synth, the virtual output),
+/// is refused.
+#[test]
+fn hostile_midi_destinations_are_refused() {
+    let g = serial(Some(DELAY_MS), None);
+    let s = untitled(&g, Builder::new().finish());
+    let long = "x".repeat(256);
+    for (name, port, channel) in [
+        ("", FAKE_SYNTH_PORT, 0u8),
+        ("   ", FAKE_SYNTH_PORT, 0),
+        (long.as_str(), FAKE_SYNTH_PORT, 0),
+        ("a\nb", FAKE_SYNTH_PORT, 0),
+        ("Synth", "", 0),
+        ("Synth", long.as_str(), 0),
+        ("Synth", "Port\u{7}", 0),
+        ("Synth", "No Such Port", 0),
+        ("Synth", "builtin:synth", 0),
+        ("Synth", "virtual:out", 0),
+        ("Synth", FAKE_SYNTH_PORT, 16),
+        ("Synth", FAKE_SYNTH_PORT, 255),
+    ] {
+        assert!(
+            matches!(
+                s.add_midi_destination(name.into(), port.into(), channel),
+                Err(VizError::Model { .. })
+            ),
+            "{name:?} {port:?} {channel}"
+        );
+    }
+    assert!(s.destinations().unwrap().is_empty());
+    assert!(s.snapshot().unwrap().undo_label.is_none());
+    // The channel's refusal names both numberings (preflight M10).
+    match s.add_midi_destination("Synth".into(), FAKE_SYNTH_PORT.into(), 16) {
+        Err(VizError::Model { message }) => assert!(
+            message.contains("the MIDI channel is 0 to 15 (MIDI channels 1 to 16)"),
+            "{message}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    // With the fake synth off, its port is unknown too.
+    set_fake_synth(None);
+    assert!(matches!(
+        s.add_midi_destination("Synth".into(), FAKE_SYNTH_PORT.into(), 0),
+        Err(VizError::Model { .. })
+    ));
+    assert!(s.destinations().unwrap().is_empty());
+    s.close().unwrap();
+}
+
+/// Plan 5d-1 Ruling 25, Review Focus 4: the same name, port and channel
+/// twice make two destinations, one undo step each; they share the port's
+/// one target, which stays while either names the port (Ruling 23,
+/// preflight M16).
+#[test]
+fn duplicate_midi_destinations_share_one_target() {
+    let g = serial(Some(DELAY_MS), None);
+    let mut b = Builder::new();
+    let (seq, rec) = b.sequence("S", "Rec", None).unwrap();
+    let s = untitled(&g, b.finish());
+    for _ in 0..2 {
+        let snap = s
+            .add_midi_destination("Synth".into(), FAKE_SYNTH_PORT.into(), 0)
+            .unwrap();
+        assert_eq!(snap.undo_label.as_deref(), Some("Add Destination"));
+    }
+    let ids: Vec<u64> = s.destinations().unwrap().iter().map(|d| d.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    set_input(
+        &s,
+        seq,
+        rec.0,
+        Some(LaneInputRow::Audio {
+            first: 2,
+            stereo: false,
+            return_of: Some(ids[0]),
+        }),
+    );
+    s.play(seq.0).unwrap();
+    assert_eq!(
+        midi_destination_targets(),
+        vec![FAKE_SYNTH_PORT.to_string()]
+    );
+    s.stop().unwrap();
+    // The lane's return goes, then one of the two: the other still names
+    // the port.
+    s.undo().unwrap();
+    s.undo().unwrap();
+    assert_eq!(s.destinations().unwrap().len(), 1);
+    assert_eq!(
+        midi_destination_targets(),
+        vec![FAKE_SYNTH_PORT.to_string()]
+    );
+    s.undo().unwrap();
+    assert!(s.destinations().unwrap().is_empty());
+    assert!(midi_destination_targets().is_empty());
+    s.close().unwrap();
+}
+
+/// Plan 5d-1 Ruling 23 (5c-2 final review finding 6): a MIDI-destination
+/// target is released at the load after no destination names its port.
+#[test]
+fn unused_midi_destination_targets_are_released() {
+    let g = serial(Some(DELAY_MS), None);
+    let mut b = Builder::new();
+    let (seq, rec) = b.sequence("S", "Rec", None).unwrap();
+    let s = untitled(&g, b.finish());
+    let snap = s
+        .add_midi_destination("Synth".into(), FAKE_SYNTH_PORT.into(), 0)
+        .unwrap();
+    let dest = s
+        .destinations()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.name == "Synth")
+        .unwrap()
+        .id;
+    assert_eq!(snap.undo_label.as_deref(), Some("Add Destination"));
+    // A lane records its return: every load interns its target.
+    set_input(
+        &s,
+        seq,
+        rec.0,
+        Some(LaneInputRow::Audio {
+            first: 2,
+            stereo: false,
+            return_of: Some(dest),
+        }),
+    );
+    s.play(seq.0).unwrap();
+    assert_eq!(
+        midi_destination_targets(),
+        vec![FAKE_SYNTH_PORT.to_string()]
+    );
+    s.stop().unwrap();
+    s.undo().unwrap();
+    s.undo().unwrap();
+    assert!(s.destinations().unwrap().is_empty());
+    assert!(
+        midi_destination_targets().is_empty(),
+        "nothing names the port: {:?}",
+        midi_destination_targets()
+    );
+    s.close().unwrap();
+}
+
+/// Plan 5d-1 Ruling 22 (5c-2 final review finding 12): a measurement
+/// waits for the input to open and applies its step. Since Task 7 the
+/// input change after a measurement runs on the input thread, so its
+/// failure is asynchronous (a host fault) and never takes the measurement
+/// with it (preflight M8: this pins the wait and the step, not a failure).
+#[test]
+fn a_measurement_waits_for_the_input_to_open_and_applies_its_step() {
+    let g = serial(Some(DELAY_MS), None);
+    vizdaw_ffi::host::debug_input_open_delay(Some(Duration::from_millis(200)));
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let m = s.measure_return(d.synth.0);
+    vizdaw_ffi::host::debug_input_open_delay(None);
+    let m = m.unwrap();
+    assert_eq!(m.snapshot.undo_label.as_deref(), Some("Set Return Latency"));
+    assert!(
+        (m.return_latency_ms - DELAY_MS as f32).abs() <= 1.0,
+        "{m:?}"
+    );
+    // The return lane is armed: the input stays open, once settled.
+    wait_until("the input to settle", || !s.input_info().unwrap().opening);
+    assert_eq!(s.debug_input_open(), Some(true));
+    s.close().unwrap();
+}

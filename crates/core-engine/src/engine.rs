@@ -189,6 +189,9 @@ pub struct Engine {
     /// Targets were released and no load has published a schedule and a
     /// graph since: the published ones may still name them.
     release_unpublished: bool,
+    /// The target the installed measurement plays: never released (plan
+    /// 5d-1 Ruling 23).
+    measure_target: Option<TargetIdx>,
     /// Insert instances in the last published graph, by ID.
     live: BTreeMap<PluginInstanceId, Live>,
     /// Inserts made for a graph that could not be planned: kept for the
@@ -357,6 +360,7 @@ impl Engine {
             sinks: [SinkInfo::default(); MAX_TARGETS],
             restart: BTreeSet::new(),
             release_unpublished: false,
+            measure_target: None,
             live: BTreeMap::new(),
             spare: BTreeMap::new(),
             meter_slots: BTreeMap::new(),
@@ -461,7 +465,7 @@ impl Engine {
         if !self.release_unpublished {
             self.targets.recycle();
         }
-        self.release_stale_targets(doc, max)?;
+        self.release_stale_targets(doc, max, &opts.ports)?;
         let mut new_sinks: Vec<(TargetIdx, Sink)> = Vec::new();
         let targets = &mut self.targets;
         let factory = &mut self.factory;
@@ -650,8 +654,25 @@ impl Engine {
     /// Releases targets whose sink must go before this load: plugin
     /// instruments no longer in `doc` or marked for restart, and instrument
     /// sinks made for blocks smaller than `max` (a later
-    /// `Renderer::prepare` grew the block size; Plan Ruling 5).
-    fn release_stale_targets(&mut self, doc: &Document, max: u32) -> Result<(), EngineError> {
+    /// `Renderer::prepare` grew the block size; Plan Ruling 5), and MIDI
+    /// destinations whose port no destination of `doc` names (on `ports`,
+    /// the load's) unless the installed measurement plays them (plan 5d-1
+    /// Ruling 23).
+    fn release_stale_targets(
+        &mut self,
+        doc: &Document,
+        max: u32,
+        ports: &[MidiPortInfo],
+    ) -> Result<(), EngineError> {
+        // The MIDI destinations the document still names (plan 5d-1
+        // Ruling 23; 5c-2 final review finding 6).
+        let named: Vec<TargetKind> = doc
+            .instruments()
+            .values()
+            .filter_map(|d| kinds_for(&d.kind, self.cfg.route, ports).ok())
+            .flatten()
+            .collect();
+        let measured = self.measure_target;
         let stale: Vec<TargetIdx> = self
             .targets
             .iter()
@@ -667,7 +688,10 @@ impl Engine {
                             })
                     }
                     TargetKind::BuiltinSynth => small,
-                    TargetKind::MidiVirtualSource | TargetKind::MidiDestination(_) => false,
+                    TargetKind::MidiVirtualSource => false,
+                    TargetKind::MidiDestination(_) => {
+                        measured != Some(*i) && !named.contains(kind)
+                    }
                 }
             })
             .map(|(i, _)| i)
@@ -1281,12 +1305,14 @@ impl Engine {
         };
         let (tap, status) = crate::measure::tap(&req, self.cfg.sample_rate);
         self.push(EngineCmd::Measure(Some(Box::new(tap))))?;
+        self.measure_target = Some(target);
         Ok(Ok(status))
     }
 
     /// Removes the measurement: the block that applies this sends its
     /// sounding note's off, and its status reads closed.
     pub fn stop_measure(&mut self) -> Result<(), EngineError> {
+        self.measure_target = None;
         self.push(EngineCmd::Measure(None))
     }
 }

@@ -980,6 +980,42 @@ pub fn midi_destination_targets() -> Vec<String> {
     })
 }
 
+/// The fake input an offline host opens and the delay of the fake synth
+/// it plays, if any. Only the signals input plays the synth: with any
+/// other, its queue would fill and drop every note (Task 7 review I1).
+fn offline_choice() -> (Option<FakeInput>, Option<f64>) {
+    let (input, input_chosen) = fake_input_choice();
+    let (delay, synth_chosen) = fake_synth_choice();
+    let input = offline_input(input, input_chosen, delay.is_some(), synth_chosen);
+    let delay = delay.filter(|_| input == Some(FakeInput::Signals));
+    (input, delay)
+}
+
+/// The MIDI destinations a new destination may play (plan 5d-1 Ruling
+/// 25; "New MIDI Destination…"): the system's CoreMIDI destinations on a
+/// live host; offline, the fake synth's port when an offline host would
+/// have it, else none.
+#[uniffi::export]
+pub fn midi_destination_ports() -> Vec<String> {
+    if offline_mode() {
+        return match offline_choice() {
+            (_, Some(_)) => vec![core_engine::offline::FAKE_SYNTH_PORT.to_string()],
+            _ => Vec::new(),
+        };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform_macos::midi::list_destinations()
+            .into_iter()
+            .map(|p| p.name)
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
 /// How many engine loads the host made (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn loads() -> u64 {
@@ -1444,14 +1480,8 @@ impl Host {
     fn create_any(project: f64) -> Result<Host, VizError> {
         HOSTS_CREATED.fetch_add(1, Ordering::Relaxed);
         if offline_mode() {
-            let (input, input_chosen) = fake_input_choice();
-            let (delay, synth_chosen) = fake_synth_choice();
-            let input = offline_input(input, input_chosen, delay.is_some(), synth_chosen);
-            // Only the signals input plays the synth: with any other, its
-            // queue would fill and drop every note (Task 7 review I1).
-            let synth = delay
-                .filter(|_| input == Some(FakeInput::Signals))
-                .map(FakeSynth::new);
+            let (input, delay) = offline_choice();
+            let synth = delay.map(FakeSynth::new);
             let mut sinks = OfflineSinks::new(1 << 16);
             if let Some(s) = &synth {
                 sinks = sinks.with_fake_synth(s);
@@ -1578,7 +1608,19 @@ impl Host {
             }
             None => Ok(()),
         };
-        removed.and(input)
+        // A good measurement stands when the input change after it fails:
+        // the failure is the device's, kept as a fault (plan 5d-1 Ruling
+        // 22; 5c-2 final review finding 12). Since Task 7 the change runs
+        // on the input thread, so its failure is asynchronous and reaches
+        // the faults from there; this keeps any synchronous one the same
+        // way.
+        if let Err(e) = input {
+            let f = format!("audio input after the measurement: {e}");
+            if !self.faults.contains(&f) {
+                self.faults.push(f);
+            }
+        }
+        removed
     }
 
     /// Opens or closes a live output's input to match `want` (spec §6.1),

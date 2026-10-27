@@ -2052,6 +2052,51 @@ impl Session {
         })
     }
 
+    /// "New MIDI Destination…" (plan 5d-1 Ruling 25): a destination named
+    /// `name` playing CoreMIDI destination `port` on `channel` (0–15), one
+    /// undo step "Add Destination". `Model` for an empty or over-long name
+    /// or port (1–255 characters, no control characters), a port
+    /// [`crate::host::midi_destination_ports`] does not list, or a channel
+    /// above 15. The same name, port and channel again make another
+    /// destination.
+    pub fn add_midi_destination(
+        &self,
+        name: String,
+        port: String,
+        channel: u8,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let name = name.trim().to_string();
+            let port = port.trim().to_string();
+            for (what, v) in [("name", &name), ("port", &port)] {
+                if v.is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control) {
+                    return Err(crate::events::bad(&format!(
+                        "the destination's {what} is 1 to 255 characters"
+                    )));
+                }
+            }
+            if channel > 15 {
+                return Err(crate::events::bad(
+                    "the MIDI channel is 0 to 15 (MIDI channels 1 to 16)",
+                ));
+            }
+            if !crate::host::midi_destination_ports().contains(&port) {
+                return Err(crate::events::bad(&format!(
+                    "no MIDI destination named {port:?}"
+                )));
+            }
+            self.execute(Command::Routing(RoutingCmd::AddDestination {
+                name,
+                kind: DestKind::MidiEndpoint {
+                    endpoint_ref: port,
+                    group: 0,
+                    channel,
+                },
+                default_patch: None,
+            }))
+        })
+    }
+
     /// Makes destination `dest` play `plugin` (every lane using it now
     /// plays the plugin; one undo step). The same plugin keeps its
     /// instance and state (3a Plan Ruling 10).

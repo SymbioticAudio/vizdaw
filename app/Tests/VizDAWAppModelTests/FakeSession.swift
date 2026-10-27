@@ -137,6 +137,18 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     func savesAfterPass() throws -> Bool { savesAfterPassRow }
 
+    /// What `addMidiDestination` was asked (plan 5d-1 Ruling 25).
+    var addedDestinations: [(name: String, port: String, channel: UInt8)] = []
+
+    func addMidiDestination(name: String, port: String, channel: UInt8) throws -> DocSnapshot {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        addedDestinations.append((name, port, channel))
+        return snap
+    }
+
     func saveAs(path: String) throws {
         savedPath = path
         snap.dirty = false
