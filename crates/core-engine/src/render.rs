@@ -506,8 +506,9 @@ pub struct Renderer {
     /// Where the transport last rolled from (a Play while not playing, a
     /// Locate): led regions read nothing before it (plan 5d-1 Ruling 3).
     roll_floor: u64,
-    /// The loop wrapped since the transport rolled.
-    wrapped: bool,
+    /// The loop `[start, end)` the transport last wrapped since it rolled
+    /// (kept when the loop is edited: it is what was heard).
+    wrapped: Option<(u64, u64)>,
     /// Frames rendered since playing reached its end: led regions play
     /// out their last frames meanwhile.
     after_end: u64,
@@ -641,7 +642,7 @@ impl Renderer {
             input_copy: Box::new(InputCopy::new(0, 0)),
             measure: None,
             roll_floor: 0,
-            wrapped: false,
+            wrapped: None,
             after_end: 0,
         };
         r.prepare(cfg.max_frames);
@@ -845,7 +846,7 @@ impl Renderer {
                             t.wrap(offset, to);
                         }
                         // Led regions read the loop's end before its start.
-                        self.wrapped = true;
+                        self.wrapped = self.transport.active_loop().or(self.wrapped);
                         release_all(&mut self.notes, &mut o, offset);
                         if let Some(s) = self.schedule.as_deref() {
                             reset_controllers(s, &mut o, offset);
@@ -1145,9 +1146,9 @@ impl Renderer {
                         .transport
                         .end
                         .map(|e| new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)));
-                    self.roll_floor = new
-                        .tempo
-                        .tick_to_frame(old.tempo.frame_to_tick(self.roll_floor));
+                    let remap = |f: u64| new.tempo.tick_to_frame(old.tempo.frame_to_tick(f));
+                    self.roll_floor = remap(self.roll_floor);
+                    self.wrapped = self.wrapped.map(|(s, e)| (remap(s), remap(e)));
                     if let Err(rtrb::PushError::Full(old)) =
                         self.retire.push(Retired::Schedule(old))
                     {
@@ -1198,7 +1199,7 @@ impl Renderer {
                 self.transport.play(length);
                 if rolls {
                     self.roll_floor = self.transport.pos;
-                    self.wrapped = false;
+                    self.wrapped = None;
                     self.after_end = 0;
                 }
                 self.seek();
@@ -1221,7 +1222,7 @@ impl Renderer {
                 self.release_now(true);
                 self.transport.locate(frame);
                 self.roll_floor = frame;
-                self.wrapped = false;
+                self.wrapped = None;
                 self.after_end = 0;
                 // A jump while recording is a cut: the next block marks
                 // where the transport landed (review fix M1).
@@ -1233,11 +1234,8 @@ impl Renderer {
                 self.auto_last.fill(f64::NAN);
             }
             EngineCmd::SetLoop(range) => {
-                // Another loop: its seam is not the one led regions read
-                // across (every load sends the same range again).
-                if range != self.transport.loop_range {
-                    self.wrapped = false;
-                }
+                // The loop wrapped so far stays what led regions read
+                // across (m1): it is what was heard.
                 self.transport.loop_range = range;
             }
             EngineCmd::RemoveSink(idx) => {
@@ -1382,7 +1380,7 @@ impl Renderer {
         // end) counts: the run plays from the loop start.
         let lp = self.transport.active_loop();
         let due = lp.is_some_and(|(_, e)| self.transport.pos == e);
-        let wrapped = if self.wrapped || due { lp } else { None };
+        let wrapped = if due { lp } else { self.wrapped };
         let run = if s.audio.is_empty() {
             crate::graph::RegionRun::transport(frame, true)
         } else {
@@ -1400,7 +1398,7 @@ impl Renderer {
                 )
             }
         };
-        run.with_bounds(self.roll_floor, ceiling, wrapped)
+        run.with_bounds(self.roll_floor, ceiling, wrapped, self.since_start)
     }
 
     /// Copies the input channels monitor routes name; true when there is

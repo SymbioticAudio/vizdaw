@@ -88,7 +88,7 @@ fn rig_with(doc: &Document, seq: SeqId, leads: bool, voice_seconds: f64) -> Rig 
     };
     if voice_seconds < 2.0 {
         // The window ahead shrinks with the ring.
-        cfg.stream.ahead_seconds = voice_seconds / 2.0;
+        cfg.stream.ahead_seconds = voice_seconds;
         cfg.stream.seam_seconds = voice_seconds / 4.0;
         cfg.stream.ready_seconds = 0.01;
         cfg.stream.min_read_bytes = 4096;
@@ -173,6 +173,20 @@ fn regions_read_ahead_play_exactly_what_a_delay_would() {
             r.render(300)
         });
         assert_eq!(led, delayed, "play selection, latency {l}");
+        // Review I1: a roll just before the loop end, and exactly at it,
+        // plays nothing from before the roll after the first wrap.
+        for back in [100, 0] {
+            let [led, delayed] = both(l, |r| {
+                r.engine.set_loop_range(Some((2 * QF, 4 * QF))).unwrap();
+                r.engine.locate_frame(4 * QF - back).unwrap();
+                r.engine.play().unwrap();
+                r.render(60)
+            });
+            assert_eq!(
+                led, delayed,
+                "rolling {back} before the loop end, latency {l}"
+            );
+        }
     }
 }
 
@@ -202,19 +216,41 @@ fn a_located_lead_path_starts_silent_and_aligned() {
     }
 }
 
-/// Plan 5d-1 M3: a lead never exceeds half a streaming voice. Path 1 has
-/// no plugin and leads by 4800 frames over path 2, which carries a
-/// latency-4800 insert; on a 0.15 s voice (7200 frames) the streamer must
-/// hold the span between the two reads (the lead) plus its window ahead,
-/// so the lead is capped at 3600 and nothing underruns. The sound is
-/// still what a delay would have made.
+/// Plan 5d-1 M3 (review I2): a lead never exceeds half a streaming voice.
+/// Path A has no plugin and would lead by 4800 frames over path B (its own
+/// output path, with a latency-4800 insert). On a 0.1 s voice (4800
+/// frames) the streamer's window from the earliest read cannot reach the
+/// unled path with that lead, so the engine caps it at 2400: nothing
+/// underruns, and the sound is still what a delay would have made.
 #[test]
 fn a_lead_is_capped_by_half_a_streaming_voice() {
+    use core_model::command::{Command, LaneCmd, RoutingCmd};
+    use core_model::ids::AnyId;
     use core_model::mixer::StripKind;
     const L: u32 = 4800;
     let (d, seq) = doc(0);
     let mut b = Builder::from_doc(d);
     let lane = b.lane(seq, "Audio 2", None).unwrap();
+    let r = b
+        .run(Command::Routing(RoutingCmd::AddOutput {
+            name: "Audio B".into(),
+            reference: "audio:3-4".into(),
+        }))
+        .unwrap();
+    let second = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .unwrap();
+    b.run(Command::Lane(LaneCmd::SetOutput {
+        seq,
+        lane,
+        output: Some(second),
+    }))
+    .unwrap();
     b.region(
         seq,
         lane,
@@ -227,14 +263,13 @@ fn a_lead_is_capped_by_half_a_streaming_voice() {
         Fade::default(),
     )
     .unwrap();
-    let second = *b.doc().outputs().keys().next_back().unwrap();
     let strip = b.strip_of(StripKind::AudioPath(second)).unwrap();
     b.insert(strip, TestInserts::plugin(&format!("latency={L}")))
         .unwrap();
     let d = b.finish();
     let mut out = Vec::new();
     for leads in [true, false] {
-        let mut r = rig_with(&d, seq, leads, 0.15);
+        let mut r = rig_with(&d, seq, leads, 0.1);
         assert_eq!(r.engine.latency_frames(), u64::from(L));
         r.engine.play().unwrap();
         let got = r.render(460);
@@ -248,4 +283,23 @@ fn a_lead_is_capped_by_half_a_streaming_voice() {
     }
     assert_eq!(out[0], out[1]);
     assert!(out[0].0.iter().any(|x| *x != 0.0));
+}
+
+/// Review m1: editing the loop right after a wrap leaves the seam led
+/// regions read across what was heard, still bit-exact with a delay.
+#[test]
+fn editing_the_loop_after_a_wrap_keeps_the_heard_seam() {
+    let [led, delayed] = both(4800, |r| {
+        r.engine.set_loop_range(Some((2 * QF, 4 * QF))).unwrap();
+        r.engine.locate_frame(2 * QF).unwrap();
+        r.engine.play().unwrap();
+        // The loop wraps at 4·QF = 96 000 (block ~188); edit it just after.
+        let mut got = r.render(190);
+        r.engine.set_loop_range(Some((5 * QF, 6 * QF))).unwrap();
+        let more = r.render(100);
+        got.0.extend(more.0);
+        got.1.extend(more.1);
+        got
+    });
+    assert_eq!(led, delayed);
 }

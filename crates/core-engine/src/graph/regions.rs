@@ -103,6 +103,10 @@ pub struct RegionRun {
     /// The loop `[start, end)` once the transport wrapped it since it
     /// rolled: a read before its start comes from its end.
     pub wrapped: Option<(u64, u64)>,
+    /// Frames played since the transport rolled, at the run's first
+    /// frame: a node with lead `a` reads silence until `a` frames have
+    /// played, whatever the loop did (plan 5d-1 review I1).
+    pub played: u64,
 }
 
 // SAFETY: the pointees are `Sync` (`AudioSchedule`, `InputCopy` and the
@@ -126,6 +130,7 @@ impl RegionRun {
         floor: 0,
         ceiling: u64::MAX,
         wrapped: None,
+        played: 0,
     };
 
     /// A run reading `audio` through `reader` from schedule frame `frame`.
@@ -162,12 +167,20 @@ impl RegionRun {
     }
 
     /// The run with the roll's start `floor`, the end of playing `ceiling`
-    /// and the loop it wrapped (see the fields).
-    pub fn with_bounds(self, floor: u64, ceiling: u64, wrapped: Option<(u64, u64)>) -> RegionRun {
+    /// the loop it wrapped and the frames `played` since the roll (see the
+    /// fields).
+    pub fn with_bounds(
+        self,
+        floor: u64,
+        ceiling: u64,
+        wrapped: Option<(u64, u64)>,
+        played: u64,
+    ) -> RegionRun {
         RegionRun {
             floor,
             ceiling,
             wrapped: wrapped.filter(|(s, e)| e > s),
+            played,
             ..self
         }
     }
@@ -203,8 +216,13 @@ impl RegionRun {
     /// Where read frame `x` (`frame − lead`, signed) reads from, and for
     /// how many of the next `left` (≥ 1) frames that holds: `None` is
     /// silence. Never 0 frames. // RT
-    fn map(&self, x: i128, left: u64) -> (Option<u64>, u64) {
+    fn map(&self, x: i128, lead: u64, k: u32, left: u64) -> (Option<u64>, u64) {
         let left = i128::from(left.max(1));
+        // Nothing was played to read before `lead` frames have (I1).
+        let quiet = i128::from(lead) - i128::from(self.played) - i128::from(k);
+        if quiet > 0 {
+            return (None, left.min(quiet).max(1) as u64);
+        }
         if let Some((s, e)) = self.wrapped {
             let (s, e) = (i128::from(s), i128::from(e));
             if x < s {
@@ -229,7 +247,8 @@ impl RegionRun {
     /// The frame a node with lead `lead` reads at the run's first frame,
     /// or `None` when it reads silence there. // RT
     pub fn read_frame(&self, lead: u64) -> Option<u64> {
-        self.map(i128::from(self.frame) - i128::from(lead), 1).0
+        self.map(i128::from(self.frame) - i128::from(lead), lead, 0, 1)
+            .0
     }
 
     /// The earliest frame a node with lead `lead` will read from the run's
@@ -241,9 +260,10 @@ impl RegionRun {
             return None;
         }
         let x = i128::from(self.frame) - i128::from(lead);
-        match self.map(x, 1) {
+        match self.map(x, lead, 0, 1) {
             (Some(f), _) => Some(f),
             (None, _) if x < i128::from(self.floor) => Some(self.floor),
+            (None, _) if lead > self.played => Some(self.floor),
             (None, _) => None,
         }
     }
@@ -260,6 +280,9 @@ impl RegionRun {
         else {
             return;
         };
+        // The first `lead` frames after a roll have no read frame: Auto
+        // treats them as out of range, which is what is heard (nothing of
+        // the new position has reached the output yet).
         let in_range = m
             .rec
             .is_some_and(|(a, b)| read.is_some_and(|x| x >= a && x < b));
@@ -303,7 +326,7 @@ impl RegionRun {
         let mut off = 0u32;
         let mut x = i128::from(self.frame) - i128::from(lead);
         while off < frames {
-            let (src, n) = self.map(x, u64::from(frames - off));
+            let (src, n) = self.map(x, lead, off, u64::from(frames - off));
             let n = u32::try_from(n)
                 .unwrap_or(frames - off)
                 .clamp(1, frames - off);
