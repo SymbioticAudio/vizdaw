@@ -449,7 +449,8 @@ pub enum EngineCmd {
     /// Install the sink of a new target (a released index is reused only
     /// after its `RemoveSink` and every schedule and graph naming it).
     AddSink(TargetIdx, Sink),
-    /// Remove a released target's sink; it goes back through the retire
+    /// Remove a released target's sink, ending the notes still sounding
+    /// on it first (plan 5d-1 Ruling 23); it goes back through the retire
     /// ring (a plugin instrument is deactivated off the audio thread).
     RemoveSink(TargetIdx),
     /// Send a note on or off to a target now (editor audition). Tracked
@@ -1355,10 +1356,22 @@ impl Renderer {
                 self.transport.loop_range = range;
             }
             EngineCmd::RemoveSink(idx) => {
-                // Forget its sounding notes: nothing will play them now.
-                self.notes.release(idx, |_| {});
-                self.audition.release(idx, |_| {});
-                self.thru.release(idx, |_| {});
+                // End its sounding notes (played, auditioned, played thru)
+                // before the sink goes, as Stop does: an external synth
+                // would hold them forever (plan 5d-1 Ruling 23; Task 11
+                // review I1).
+                let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+                let mut o = Out {
+                    sinks: &mut self.sinks,
+                    shared: &self.shared,
+                    block_ns: self.block_ns,
+                    ns_per_frame: 0.0,
+                    late_ns,
+                    base: 0,
+                };
+                self.notes.release(idx, |m| o.send(idx, 0, m.as_slice()));
+                self.audition.release(idx, |m| o.send(idx, 0, m.as_slice()));
+                self.thru.release(idx, |m| o.send(idx, 0, m.as_slice()));
                 let taken = self
                     .sinks
                     .get_mut(usize::from(idx.0))

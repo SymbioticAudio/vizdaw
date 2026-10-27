@@ -2056,8 +2056,8 @@ impl Session {
     /// `name` playing CoreMIDI destination `port` on `channel` (0–15), one
     /// undo step "Add Destination". `Model` for an empty or over-long name
     /// or port (1–255 characters, no control characters), a port
-    /// [`crate::host::midi_destination_ports`] does not list, or a channel
-    /// above 15. The same name, port and channel again make another
+    /// [`crate::host::midi_destination_ports`] does not list (matched as
+    /// given, untrimmed) or a reserved reference, or a channel above 15. The same name, port and channel again make another
     /// destination.
     pub fn add_midi_destination(
         &self,
@@ -2067,9 +2067,11 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let name = name.trim().to_string();
-            let port = port.trim().to_string();
+            // The port is matched as given: a CoreMIDI name may have
+            // edge spaces (Task 11 review m5).
             for (what, v) in [("name", &name), ("port", &port)] {
-                if v.is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control) {
+                if v.trim().is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control)
+                {
                     return Err(crate::events::bad(&format!(
                         "the destination's {what} is 1 to 255 characters"
                     )));
@@ -2079,6 +2081,15 @@ impl Session {
                 return Err(crate::events::bad(
                     "the MIDI channel is 0 to 15 (MIDI channels 1 to 16)",
                 ));
+            }
+            // A device named like a reserved reference would play the
+            // built-in synth or the virtual output (Task 11 review m5).
+            if port == core_model::mixer::BUILTIN_SYNTH_REF
+                || port == core_engine::schedule::targets::VIRTUAL_OUT_REF
+            {
+                return Err(crate::events::bad(&format!(
+                    "{port:?} is reserved; choose a MIDI destination"
+                )));
             }
             if !crate::host::midi_destination_ports().contains(&port) {
                 return Err(crate::events::bad(&format!(

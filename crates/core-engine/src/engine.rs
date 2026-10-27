@@ -434,6 +434,12 @@ impl Engine {
         self.cfg
     }
 
+    /// The MIDI destinations this engine's sinks can play now: what a
+    /// load resolves a destination's port against.
+    pub fn ports(&self) -> Vec<MidiPortInfo> {
+        self.factory.ports()
+    }
+
     /// Targets created so far.
     pub fn targets(&self) -> &TargetTable {
         &self.targets

@@ -1271,6 +1271,9 @@ fn hostile_midi_destinations_are_refused() {
         ("Synth", "No Such Port", 0),
         ("Synth", "builtin:synth", 0),
         ("Synth", "virtual:out", 0),
+        ("Synth", "   ", 0),
+        // Matched as given: no listed port has edge spaces.
+        ("Synth", " Fake Synth ", 0),
         ("Synth", FAKE_SYNTH_PORT, 16),
         ("Synth", FAKE_SYNTH_PORT, 255),
     ] {
@@ -1292,7 +1295,8 @@ fn hostile_midi_destinations_are_refused() {
         ),
         other => panic!("{other:?}"),
     }
-    // With the fake synth off, its port is unknown too.
+    // With the fake synth off and no host running (nothing here played),
+    // its port is unknown too.
     set_fake_synth(None);
     assert!(matches!(
         s.add_midi_destination("Synth".into(), FAKE_SYNTH_PORT.into(), 0),
@@ -1422,4 +1426,28 @@ fn a_measurement_waits_for_the_input_to_open_and_applies_its_step() {
     wait_until("the input to settle", || !s.input_info().unwrap().opening);
     assert_eq!(s.debug_input_open(), Some(true));
     s.close().unwrap();
+}
+
+/// Task 11 review m3: with a host running, the ports are the ones its
+/// loads resolve against, whatever the fake-synth setting says now; with
+/// none, the setting's.
+#[test]
+fn the_ports_are_the_running_hosts() {
+    let g = serial(Some(DELAY_MS), None);
+    let mut b = Builder::new();
+    let (seq, _) = b.sequence("S", "L", None).unwrap();
+    let s = untitled(&g, b.finish());
+    s.play(seq.0).unwrap();
+    set_fake_synth(None);
+    assert_eq!(
+        vizdaw_ffi::host::midi_destination_ports(),
+        vec![FAKE_SYNTH_PORT.to_string()],
+        "the running host still plays the fake synth"
+    );
+    s.add_midi_destination("Synth".into(), FAKE_SYNTH_PORT.into(), 0)
+        .unwrap();
+    s.stop().unwrap();
+    s.close().unwrap();
+    reset_host();
+    assert!(vizdaw_ffi::host::midi_destination_ports().is_empty());
 }

@@ -992,11 +992,15 @@ fn offline_choice() -> (Option<FakeInput>, Option<f64>) {
 }
 
 /// The MIDI destinations a new destination may play (plan 5d-1 Ruling
-/// 25; "New MIDI Destination…"): the system's CoreMIDI destinations on a
-/// live host; offline, the fake synth's port when an offline host would
-/// have it, else none.
+/// 25; "New MIDI Destination…"): the running host's (what its loads
+/// resolve ports against) when there is one; else the system's CoreMIDI
+/// destinations, or offline the fake synth's port when an offline host
+/// would have it (Task 11 review m3).
 #[uniffi::export]
 pub fn midi_destination_ports() -> Vec<String> {
+    if let Some(ports) = lock(&HOST).as_ref().map(|h| h.engine.ports()) {
+        return ports.into_iter().map(|p| p.name).collect();
+    }
     if offline_mode() {
         return match offline_choice() {
             (_, Some(_)) => vec![core_engine::offline::FAKE_SYNTH_PORT.to_string()],
@@ -1601,24 +1605,14 @@ impl Host {
     fn end_measuring(&mut self, want: Option<bool>) -> Result<(), VizError> {
         self.measure = None;
         let removed = self.engine.stop_measure().map_err(VizError::from);
-        let input = match want.or(self.pending_input.take()) {
-            Some(want) => {
-                self.pending_input = None;
-                self.ensure_input(want)
-            }
-            None => Ok(()),
-        };
         // A good measurement stands when the input change after it fails:
         // the failure is the device's, kept as a fault (plan 5d-1 Ruling
         // 22; 5c-2 final review finding 12). Since Task 7 the change runs
         // on the input thread, so its failure is asynchronous and reaches
-        // the faults from there; this keeps any synchronous one the same
-        // way.
-        if let Err(e) = input {
-            let f = format!("audio input after the measurement: {e}");
-            if !self.faults.contains(&f) {
-                self.faults.push(f);
-            }
+        // the faults from there: `ensure_input` cannot fail the call.
+        if let Some(want) = want.or(self.pending_input.take()) {
+            self.pending_input = None;
+            self.ensure_input(want);
         }
         removed
     }
@@ -1628,41 +1622,41 @@ impl Host {
     /// (plan 5d-1 Ruling 13). Offline outputs keep their fake input.
     /// While a record tap, a measurement or the input thread is at work,
     /// the change waits for it ([`Host::end_record_hold`],
-    /// [`Host::end_measuring`], [`Host::finish_job`]).
-    fn ensure_input(&mut self, want: bool) -> Result<(), VizError> {
+    /// [`Host::end_measuring`], [`Host::finish_job`]). It never fails:
+    /// a device or permission failure is a fault (`input_failed`), from
+    /// the input thread when the change runs there (plan 5d-1 Ruling 22).
+    fn ensure_input(&mut self, want: bool) {
         if self.record_hold || self.measure.is_some() || self.job.is_some() {
             self.pending_input = Some(want);
-            return Ok(());
+            return;
         }
         let was = self.input_open;
-        let r = self.apply_input(want);
+        self.apply_input(want);
         if self.input_open != was {
             self.input_changes += 1;
         }
-        r
     }
 
     /// Ends the hold a record tap put on the input and applies what was
     /// asked meanwhile.
-    fn end_record_hold(&mut self) -> Result<(), VizError> {
+    fn end_record_hold(&mut self) {
         self.record_hold = false;
-        match self.pending_input.take() {
-            Some(want) => self.ensure_input(want),
-            None => Ok(()),
+        if let Some(want) = self.pending_input.take() {
+            self.ensure_input(want);
         }
     }
 
-    fn apply_input(&mut self, want: bool) -> Result<(), VizError> {
+    fn apply_input(&mut self, want: bool) {
         #[cfg(target_os = "macos")]
         if let Output::Hal(b) = &self.output {
             let backend = Arc::downgrade(b);
             let want = want && live_input_allowed(&mut self.faults);
             if self.blocked_by_failure(want) || want == self.input_open {
-                return Ok(());
+                return;
             }
             let cfg = live_audio_config(self.project_rate, want);
             self.start_job(Opener::Hal { backend, cfg }, want);
-            return Ok(());
+            return;
         }
         #[cfg(all(feature = "test-hooks", target_os = "macos"))]
         if want && FAKE_MIC_DENIED.load(Ordering::Relaxed) {
@@ -1672,7 +1666,7 @@ impl Host {
             );
         }
         if self.blocked_by_failure(want) {
-            return Ok(());
+            return;
         }
         #[cfg(feature = "test-hooks")]
         if want != self.input_open {
@@ -1683,7 +1677,7 @@ impl Host {
                 );
                 self.faults.push(f.clone());
                 self.input_failed = Some(f);
-                return Ok(());
+                return;
             }
             let delay = Duration::from_millis(INPUT_OPEN_DELAY_MS.load(Ordering::Relaxed));
             let prompt = if want {
@@ -1693,7 +1687,7 @@ impl Host {
             };
             if !delay.is_zero() || prompt.is_some() {
                 self.start_job(Opener::Fake { delay, prompt }, want);
-                return Ok(());
+                return;
             }
         }
         // The fake input stays; what would be open is tracked.
@@ -1701,7 +1695,6 @@ impl Host {
             self.engine.clear_input_peaks();
         }
         self.input_open = want;
-        Ok(())
     }
 
     /// Whether an input that failed to open stops this change (Ruling 15:
@@ -1817,7 +1810,7 @@ impl Host {
         // A broken device is not tried again: the next claim replaces the
         // host, which opens what the lanes want (Task 7 review m4).
         if let Some(w) = self.pending_input.take().filter(|_| !self.broken) {
-            let _ = self.ensure_input(w);
+            self.ensure_input(w);
         }
     }
 
@@ -2162,7 +2155,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
         note_midi_fault(&mut new, fault);
     }
     new.attach(owner, plugins);
-    new.ensure_input(wants_audio_input(doc, seq))?;
+    new.ensure_input(wants_audio_input(doc, seq));
     // Automated values held while stopped survive the rebuild (Plan 4d
     // Ruling 13, final review Minor 1).
     if let Some(o) = overrides {
@@ -2387,7 +2380,7 @@ pub fn play(
         host.record_hold = false;
         host.pending_input = None;
     }
-    host.ensure_input(wants_audio_input(doc, seq))?;
+    host.ensure_input(wants_audio_input(doc, seq));
     if host.owner != owner || host.seq != seq || start.is_some() {
         host.engine.stop()?;
         if host.owner != owner {
@@ -2556,7 +2549,7 @@ pub fn reload(
                 return Ok(());
             }
             // An edit armed or disarmed a lane: input follows (spec §6.1).
-            h.ensure_input(wants_audio_input(doc, seq))?;
+            h.ensure_input(wants_audio_input(doc, seq));
             h.load(owner, doc, seq, looped)
         }
         _ => Ok(()),
@@ -2612,7 +2605,7 @@ pub fn claim_idle(
     host.want_play = false;
     host.until = None;
     host.epoch = next_epoch();
-    host.ensure_input(wants_audio_input(doc, seq))?;
+    host.ensure_input(wants_audio_input(doc, seq));
     Ok(true)
 }
 
@@ -2931,8 +2924,8 @@ pub fn stop_recording(owner: u64) -> Result<(), VizError> {
             let removed = h.engine.stop_recording().map_err(VizError::from);
             // The tap is out (or the session gave up on it): input follows
             // the lanes again.
-            let held = h.end_record_hold();
-            stopped.and(removed).and(held)
+            h.end_record_hold();
+            stopped.and(removed)
         }
         _ => Ok(()),
     }
@@ -2964,7 +2957,7 @@ pub fn start_measure(
             message: "engine host missing".into(),
         })?;
         host.faults.clear();
-        host.ensure_input(true)?;
+        host.ensure_input(true);
         host.generation
     };
     // The input opens on its own thread, without the host lock (plan 5d-1
@@ -2996,9 +2989,9 @@ pub fn start_measure(
         // does; another holder's own change stands. It waits for the
         // thread when one is at work.
         if host.owner == owner {
-            let _ = host.ensure_input(wants_audio_input(doc, seq));
+            host.ensure_input(wants_audio_input(doc, seq));
         } else if host.owner == 0 {
-            let _ = host.ensure_input(false);
+            host.ensure_input(false);
         }
         return Err(e);
     }
@@ -3010,7 +3003,7 @@ pub fn start_measure(
         Err(e) => {
             // Whatever failed, the input follows the lanes again (Task 9
             // review M6).
-            let _ = host.ensure_input(wants_audio_input(doc, seq));
+            host.ensure_input(wants_audio_input(doc, seq));
             Err(e)
         }
     }
