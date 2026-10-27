@@ -519,6 +519,8 @@ fn record_and_input_results_as_json() {
             names: vec!["Fake In 1".into()],
             input_latency_frames: 512,
             output_latency_frames: 512,
+            buffer_frames: 512,
+            round_trip_frames: 2048,
         },
     });
     assert_eq!(i["channels"], json!(3));

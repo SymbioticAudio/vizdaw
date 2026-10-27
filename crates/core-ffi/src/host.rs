@@ -417,13 +417,14 @@ pub fn set_audio_input_device(name: Option<String>) {
     *lock(&INPUT_DEVICE) = name.filter(|n| !n.is_empty());
 }
 
-/// Whether the lanes of `seq` need audio input: an armed or
-/// Input-monitored lane with an audio input (spec §6.1: input opens only
-/// while one is).
+/// Whether the lanes of `seq` need audio input: an armed lane with an
+/// audio input, or one monitored Input while Software Monitoring is on
+/// (spec §6.1: input opens only while one is; plan 5d-1 Ruling 8).
 pub fn wants_audio_input(doc: &Document, seq: SeqId) -> bool {
+    let software = crate::audio::software_monitoring();
     doc.sequence(seq).is_ok_and(|s| {
         s.lanes.iter().any(|l| {
-            (l.arm || l.monitor == MonitorMode::Input)
+            (l.arm || (software && l.monitor == MonitorMode::Input))
                 && l.input.as_ref().is_some_and(LaneInput::is_audio)
         })
     })
@@ -486,6 +487,8 @@ pub struct InputInfo {
     pub input_latency_frames: u32,
     /// Output latency in frames.
     pub output_latency_frames: u32,
+    /// The device's I/O buffer, frames (0 before a device opened).
+    pub buffer_frames: u32,
 }
 
 impl InputInfo {
@@ -496,15 +499,26 @@ impl InputInfo {
             names: info.input_channel_names.clone(),
             input_latency_frames: info.input_latency_frames,
             output_latency_frames: info.output_latency_frames,
+            buffer_frames: info.buffer_frames,
         }
+    }
+
+    /// The round trip a monitored input takes (plan 5d-1 Ruling 9): both
+    /// latencies and a buffer each way.
+    pub fn round_trip_frames(&self) -> u32 {
+        self.input_latency_frames
+            .saturating_add(self.output_latency_frames)
+            .saturating_add(self.buffer_frames.saturating_mul(2))
     }
 }
 
 /// What the lanes of `seq` listen to (spec §6.6): armed or Input-monitored
 /// lanes with an input. MIDI lanes play thru unless their monitor is Off;
 /// audio lanes are heard through their output path (the document's first
-/// when they have none) unless it is Off.
+/// when they have none) unless it is Off or Software Monitoring is off
+/// (plan 5d-1 Ruling 8).
 pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
+    let software = crate::audio::software_monitoring();
     let mut spec = InputSpec::default();
     let Ok(s) = doc.sequence(seq) else {
         return spec;
@@ -523,7 +537,9 @@ pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
                 thru: l.monitor != MonitorMode::Off,
                 armed: l.arm,
             }),
-            Some(LaneInput::Audio { channels, .. }) if l.monitor != MonitorMode::Off => {
+            Some(LaneInput::Audio { channels, .. })
+                if software && l.monitor != MonitorMode::Off =>
+            {
                 if let Some(path) = l.audio_out.or(first_out) {
                     spec.monitor.push(MonitorRoute {
                         lane: l.id,
@@ -1027,7 +1043,9 @@ impl Host {
             }
             let log = sinks.log();
             let rate = offline_rate(project);
-            let (engine, renderer) = Engine::new(EngineConfig::new(rate), Box::new(sinks))?;
+            let mut cfg = EngineConfig::new(rate);
+            cfg.stream = crate::audio::stream_config();
+            let (engine, renderer) = Engine::new(cfg, Box::new(sinks))?;
             let (driver, inputs) = OfflineDriver::start(renderer, rate, input, synth.as_ref())?;
             let mut h = Host::new(
                 engine,
@@ -1120,6 +1138,13 @@ impl Host {
     fn busy(&mut self) -> bool {
         self.collect_faults();
         self.record_hold || self.want_play || self.engine.state() == PlayState::Playing
+    }
+
+    /// The engine monitors or plays thru: it has audio input open or
+    /// routes for monitored audio or MIDI sources.
+    fn wants_live(&self) -> bool {
+        let i = self.engine.inputs();
+        self.input_open || !i.monitor.is_empty() || !i.midi.is_empty()
     }
 
     /// Ends the installed measurement (its sounding note ends) and makes
@@ -1303,6 +1328,29 @@ impl Host {
         events
     }
 
+    /// Reopens a live device as it is (input open or not) with the I/O
+    /// buffer size now asked for (plan 5d-1 Ruling 9). Offline outputs
+    /// keep their blocks.
+    fn reopen(&mut self) -> Result<(), VizError> {
+        match &mut self.output {
+            Output::Offline(_) => Ok(()),
+            #[cfg(target_os = "macos")]
+            Output::Hal(b) => {
+                let mut r = b.stop()?;
+                let info = b.open(&live_audio_config(self.project_rate, self.input_open))?;
+                if info.buffer_frames > r.config().max_frames {
+                    r.prepare(info.buffer_frames);
+                }
+                b.start(r)?;
+                self.engine
+                    .set_rt_env(rt_env(b, info.buffer_frames, info.sample_rate));
+                self.input_open = info.input_channels > 0;
+                self.inputs = InputInfo::of(&info);
+                Ok(())
+            }
+        }
+    }
+
     /// Restarts the device, preparing a larger buffer if needed (as the
     /// CLI does).
     fn restart_output(&mut self, frames: u32) -> Result<(), VizError> {
@@ -1332,6 +1380,7 @@ impl Host {
 fn live_audio_config(project: f64, input: bool) -> core_engine::backend::AudioConfig {
     core_engine::backend::AudioConfig {
         sample_rate: Some(project),
+        buffer_frames: Some(crate::audio::io_buffer_frames()),
         input_enabled: input,
         input_device: lock(&INPUT_DEVICE).clone(),
         ..core_engine::backend::AudioConfig::default()
@@ -1349,6 +1398,7 @@ pub fn live_config(sample_rate: f64) -> EngineConfig {
     let mut cfg = EngineConfig::new(sample_rate);
     cfg.workers = platform_macos::rt::default_workers();
     cfg.deadline = Some(DEADLINE);
+    cfg.stream = crate::audio::stream_config();
     cfg
 }
 
@@ -1901,6 +1951,74 @@ pub fn reset_if_owner(owner: u64, project: f64) {
     retire(old);
 }
 
+/// Whether a session records: its tap holds the engine (plan 5d-1 Ruling
+/// 9 refuses a buffer change then).
+pub fn any_recording() -> bool {
+    lock(&HOST).as_ref().is_some_and(|h| h.record_hold)
+}
+
+/// Reopens a live device with the I/O buffer size now asked for (plan
+/// 5d-1 Ruling 9); nothing for an offline host or none.
+pub fn reopen_device() -> Result<(), VizError> {
+    match lock(&HOST).as_mut() {
+        Some(h) => h.reopen(),
+        None => Ok(()),
+    }
+}
+
+/// Sets the I/O buffer size and reopens the device with it, all under one
+/// lock (pre-flight M4): `Busy` while a recording holds the engine or a
+/// measurement runs; the old size comes back if the reopen fails.
+pub(crate) fn set_buffer_frames(frames: u32) -> Result<(), VizError> {
+    let mut slot = lock(&HOST);
+    if let Some(h) = slot.as_ref() {
+        if h.record_hold {
+            return Err(VizError::Busy {
+                message: "Stop recording to change the I/O buffer size.".into(),
+            });
+        }
+        if h.measure.is_some() {
+            return Err(VizError::Busy {
+                message: "Wait for the measurement to finish.".into(),
+            });
+        }
+    }
+    let old = crate::audio::swap_io_buffer(frames);
+    if old == frames {
+        return Ok(());
+    }
+    if let Some(h) = slot.as_mut() {
+        if let Err(e) = h.reopen() {
+            crate::audio::swap_io_buffer(old);
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Drops the engine when nobody plays, records, measures or monitors, so
+/// the next one is made with the stream settings now asked for (plan 5d-1
+/// Ruling 10); a busy engine is left alone, and so is one whose sequence
+/// wants live input (pre-flight I2: dropping it would silence armed lanes
+/// and thru until the next arm or Play).
+pub fn drop_if_idle() {
+    let mut slot = lock(&HOST);
+    if !slot
+        .as_mut()
+        .is_some_and(|h| h.measure.is_none() && !h.busy() && !h.wants_live())
+    {
+        return;
+    }
+    let mut old = slot.take();
+    // No engine: nothing hears the sources until the next host.
+    *lock(&MIDI_TO) = None;
+    drop(slot);
+    if let Some(h) = old.as_mut() {
+        let _ = h.engine.stop();
+    }
+    retire(old);
+}
+
 /// Releases the engine if `owner` holds it (a session is closing).
 pub fn release(owner: u64) {
     let mut slot = lock(&HOST);
@@ -2397,7 +2515,10 @@ mod tests {
                 names: vec!["In 1".into(), "In 2".into()],
                 input_latency_frames: 40,
                 output_latency_frames: 60,
+                buffer_frames: 256,
             }
         );
+        // Plan 5d-1 Ruling 9: both latencies and a buffer each way.
+        assert_eq!(InputInfo::of(&info).round_trip_frames(), 40 + 60 + 2 * 256);
     }
 }

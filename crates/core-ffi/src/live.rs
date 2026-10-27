@@ -24,6 +24,14 @@ pub struct InputInfoRow {
     pub input_latency_frames: u32,
     /// Output latency in frames.
     pub output_latency_frames: u32,
+    /// The device's I/O buffer in frames (plan 5d-1 Ruling 9; 0 before
+    /// the first Play).
+    #[uniffi(default)]
+    pub buffer_frames: u32,
+    /// What a monitored input takes from input to output: both latencies
+    /// and a buffer each way.
+    #[uniffi(default)]
+    pub round_trip_frames: u32,
 }
 
 /// The channel messages in `bytes`, one after another (running status,

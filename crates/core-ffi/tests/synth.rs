@@ -46,6 +46,8 @@ fn serial(delay_ms: Option<f64>, input: Option<FakeInput>) -> Serial {
     set_fake_input(input);
     set_fake_synth(delay_ms);
     vizdaw_ffi::record::set_free_bytes(None);
+    // A test that set a trim must not shift the next (5c-2 final review).
+    vizdaw_ffi::set_record_latency_trim(0);
     // A test that failed holding a measurement must not hang the next.
     vizdaw_ffi::host::debug_hold_measure(false);
     vizdaw_ffi::host::debug_measure_end_delay(Duration::ZERO);
@@ -1099,5 +1101,49 @@ fn a_finished_measurement_survives_its_own_removal() {
     let m = s.measure_return(d.synth.0);
     vizdaw_ffi::host::debug_measure_end_delay(Duration::ZERO);
     assert_eq!(m.unwrap().onsets, 5);
+    s.close().unwrap();
+}
+
+/// 5c-2 final review carry (plan 5d-1 Task 6): the latency trim set for
+/// the whole app reaches the engine: a measurement made with a trim of 96
+/// frames (2 ms) reads 2 ms more. `serial` puts the trim back to 0.
+#[test]
+fn the_latency_trim_reaches_the_engine() {
+    let g = serial(Some(DELAY_MS), None);
+    vizdaw_ffi::set_record_latency_trim(96);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let m = s.measure_return(d.synth.0);
+    vizdaw_ffi::set_record_latency_trim(0);
+    let m = m.unwrap();
+    assert!(
+        (m.return_latency_ms - (DELAY_MS as f32 + 2.0)).abs() <= 0.25,
+        "{m:?}"
+    );
+    s.close().unwrap();
+}
+
+/// Pre-flight M4: the I/O buffer size waits for a measurement too, with
+/// its own words, and keeps the old size.
+#[test]
+fn the_buffer_size_waits_for_a_measurement() {
+    let g = serial(Some(DELAY_MS), None);
+    vizdaw_ffi::audio::reset_audio_settings();
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_hold_measure(true);
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    let r = vizdaw_ffi::audio::set_io_buffer_frames(256);
+    let kept = vizdaw_ffi::audio::audio_settings().buffer_frames;
+    vizdaw_ffi::host::debug_hold_measure(false);
+    t.join().unwrap().unwrap();
+    assert!(
+        matches!(&r, Err(VizError::Busy { message }) if message == "Wait for the measurement to finish."),
+        "{r:?}"
+    );
+    assert_eq!(kept, 128, "unchanged");
     s.close().unwrap();
 }

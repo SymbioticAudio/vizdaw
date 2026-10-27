@@ -147,7 +147,10 @@ pub fn return_lane(doc: &Document, dest: DestId) -> Option<(SeqId, LaneId, Strin
 
 /// Frames a lane recording `dest`'s return moves earlier (spec §6.7; plan
 /// 5c-2 Ruling 4): the destination's return latency at `rate`, while it
-/// is an external MIDI destination; else 0.
+/// is an external MIDI destination; else 0. External MIDI also leaves the
+/// engine `midi_offset_ns` after its frame is heard, so a non-zero offset
+/// would belong in this shift too; the app has no MIDI output offset (its
+/// engines all use 0; plan 5d-1 Ruling 24, 5c-2 final review finding 11).
 pub fn return_frames(doc: &Document, dest: Option<DestId>, rate: f64) -> i64 {
     dest.and_then(|d| doc.instruments().get(&d))
         .filter(|d| d.kind.is_external())

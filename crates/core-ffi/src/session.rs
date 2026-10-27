@@ -123,6 +123,9 @@ struct Inner {
     /// Ruling 6): by (sequence, return lane), the MIDI lane the next pass
     /// that places audio there mutes. Runtime only.
     synth_mutes: std::collections::BTreeMap<(SeqId, LaneId), LaneId>,
+    /// The audio settings epoch this session's engine last loaded under
+    /// (plan 5d-1 Ruling 12).
+    settings_seen: u64,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -195,6 +198,7 @@ impl Inner {
             record_faults: Vec::new(),
             recovered: Vec::new(),
             synth_mutes: Default::default(),
+            settings_seen: crate::audio::epoch(),
         }
     }
 
@@ -748,6 +752,43 @@ impl Session {
     fn modify_again_with(&self, filter: &ViewFilter) -> Result<DocSnapshot, VizError> {
         let mut inner = lock(&self.inner);
         inner.history.modify_again(filter)?;
+        inner.version += 1;
+        inner.reload_host(self.id);
+        self.mark(&mut inner);
+        inner.snapshot()
+    }
+
+    /// Add Lane `cmd` and the new lane's monitor `monitor`, one undo step
+    /// "Add Lane" (plan 5d-1 Ruling 11).
+    fn add_lane_monitored(
+        &self,
+        cmd: Command,
+        seq: SeqId,
+        monitor: core_model::lane::MonitorMode,
+        filter: &ViewFilter,
+    ) -> Result<DocSnapshot, VizError> {
+        let mut inner = lock(&self.inner);
+        let h = &mut inner.history;
+        h.begin("Add Lane")?;
+        let made = h.execute(&cmd, filter).and_then(|r| {
+            let lane = r
+                .created
+                .iter()
+                .find_map(|id| match id {
+                    core_model::ids::AnyId::Lane(l) => Some(*l),
+                    _ => None,
+                })
+                .ok_or_else(|| core_model::error::ModelError::invalid("no lane was added"))?;
+            h.execute(
+                &Command::Lane(LaneCmd::SetMonitor { seq, lane, monitor }),
+                filter,
+            )
+        });
+        if let Err(e) = made {
+            let _ = h.abort();
+            return Err(e.into());
+        }
+        h.commit()?;
         inner.version += 1;
         inner.reload_host(self.id);
         self.mark(&mut inner);
@@ -1451,6 +1492,12 @@ impl Session {
             self.service_recording()?;
             let mut inner = lock(&self.inner);
             self.apply_pending_pass(&mut inner);
+            // A setting a load publishes changed (plan 5d-1 Ruling 12).
+            let epoch = crate::audio::epoch();
+            if inner.settings_seen != epoch {
+                inner.settings_seen = epoch;
+                inner.reload_owed |= host::holder() == Some(self.id);
+            }
             if inner.reload_owed {
                 inner.reload_host(self.id);
             }
@@ -2565,6 +2612,18 @@ impl Session {
                 crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
             }
             let c = crate::edit::to_command(&cmd)?;
+            // Add Lane gives the lane the default monitor mode (plan 5d-1
+            // Ruling 11).
+            let monitor = crate::audio::default_monitor();
+            if let (
+                crate::edit::EditCommand::Lane {
+                    edit: crate::edit::LaneEdit::Add { seq, .. },
+                },
+                false,
+            ) = (&cmd, monitor == core_model::lane::MonitorMode::Auto)
+            {
+                return self.add_lane_monitored(c, SeqId(*seq), monitor, &filter);
+            }
             self.execute_with(c, &filter)
         })
     }
@@ -4709,9 +4768,11 @@ impl Session {
                 Some((device, i)) => crate::live::InputInfoRow {
                     device,
                     channels: i.channels,
+                    round_trip_frames: i.round_trip_frames(),
                     names: i.names,
                     input_latency_frames: i.input_latency_frames,
                     output_latency_frames: i.output_latency_frames,
+                    buffer_frames: i.buffer_frames,
                 },
                 None => crate::live::InputInfoRow {
                     device: String::new(),
@@ -4719,6 +4780,8 @@ impl Session {
                     names: Vec::new(),
                     input_latency_frames: 0,
                     output_latency_frames: 0,
+                    buffer_frames: 0,
+                    round_trip_frames: 0,
                 },
             })
         })
