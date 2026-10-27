@@ -47,6 +47,12 @@ pub struct Counting {
     /// Frames rendered since it started.
     elapsed: u64,
     rolled: bool,
+    /// The first click not started yet: a latency change moves only these
+    /// (Task 5 parked N1).
+    next: u32,
+    /// The click started last and where it started, so its tail plays on
+    /// where it began whatever the latency does next.
+    last: Option<(u32, u64)>,
 }
 
 impl Counting {
@@ -69,10 +75,14 @@ impl Counting {
             pad: None,
             elapsed: 0,
             rolled: false,
+            next: 0,
+            last: None,
         }
     }
 
-    /// Follows the graph latency as it changes during the count-in. // RT
+    /// Follows the graph latency as it changes during the count-in: the
+    /// clicks not started yet move; one already sounding plays on (Task 5
+    /// parked N1). // RT
     pub fn set_latency(&mut self, latency: u64) {
         self.delay = latency;
     }
@@ -117,45 +127,59 @@ impl Counting {
     }
 
     /// Adds this block's clicks to channels 0–1 of `out` and advances.
-    /// // RT
+    /// A click that has started keeps its start; one not started yet is
+    /// placed by the current latency, and never before this block (a fall
+    /// in latency makes it late rather than dropping it; Task 5 parked
+    /// N1). // RT
     pub fn render(&mut self, out: &mut [&mut [f32]], frames: u32) {
         let from = self.elapsed;
         let to = from.saturating_add(u64::from(frames));
-        let len = self.click_len();
-        for k in 0..self.c.beats {
-            let at = self.click_at(k);
-            if at >= to || at.saturating_add(len) <= from {
-                continue;
+        if let Some((k, at)) = self.last {
+            self.click(out, k, at, from, to);
+        }
+        while self.next < self.c.beats {
+            let k = self.next;
+            let at = self.click_at(k).max(from);
+            if at >= to {
+                break;
             }
-            let (hz, level) = if k % self.c.per_bar == 0 {
-                (ACCENT_HZ, ACCENT_LEVEL)
-            } else {
-                (BEAT_HZ, BEAT_LEVEL)
-            };
-            let a = at.max(from);
-            let b = at.saturating_add(len).min(to);
-            for f in a..b {
-                let t = (f - at) as f64 / self.rate;
-                let v = (f64::from(level)
-                    * (std::f64::consts::TAU * hz * t).sin()
-                    * (-t / DECAY_SECONDS).exp()) as f32;
-                let i = (f - from) as usize;
-                for ch in out.iter_mut().take(2) {
-                    if let Some(x) = ch.get_mut(i) {
-                        *x += v;
-                    }
+            self.click(out, k, at, from, to);
+            self.last = Some((k, at));
+            self.next = k.saturating_add(1);
+        }
+        self.elapsed = to;
+    }
+
+    /// Adds the part of click `k` (starting at `at`) inside `[from, to)`.
+    /// // RT
+    fn click(&self, out: &mut [&mut [f32]], k: u32, at: u64, from: u64, to: u64) {
+        let (hz, level) = if k % self.c.per_bar == 0 {
+            (ACCENT_HZ, ACCENT_LEVEL)
+        } else {
+            (BEAT_HZ, BEAT_LEVEL)
+        };
+        let a = at.max(from);
+        let b = at.saturating_add(self.click_len()).min(to);
+        for f in a..b {
+            let t = (f - at) as f64 / self.rate;
+            let v = (f64::from(level)
+                * (std::f64::consts::TAU * hz * t).sin()
+                * (-t / DECAY_SECONDS).exp()) as f32;
+            let i = (f - from) as usize;
+            for ch in out.iter_mut().take(2) {
+                if let Some(x) = ch.get_mut(i) {
+                    *x += v;
                 }
             }
         }
-        self.elapsed = to;
     }
 
     /// Whether it rolled and every click has sounded.
     pub fn done(&self) -> bool {
         self.rolled
-            && self.elapsed
-                >= self
-                    .click_at(self.c.beats.saturating_sub(1))
-                    .saturating_add(self.click_len())
+            && self.next >= self.c.beats
+            && self
+                .last
+                .is_none_or(|(_, at)| self.elapsed >= at.saturating_add(self.click_len()))
     }
 }

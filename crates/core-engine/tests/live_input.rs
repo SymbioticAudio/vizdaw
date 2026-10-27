@@ -180,6 +180,61 @@ fn rerouting_ends_notes_thru_started() {
     assert!(log.drain().is_empty());
 }
 
+/// Plan 5d-1 Ruling 23 (Task 11 parked): a MIDI-destination target
+/// released while a note played thru sounds on it ends that note, once,
+/// on the port that played it.
+#[test]
+fn a_released_targets_thru_note_ends_once() {
+    let port_doc = |port: &str| {
+        let mut b = Builder::new();
+        let synth = b.dest("Synth", port, 2).unwrap();
+        let (seq, keys) = b.sequence("Bar", "Keys", Some(synth)).unwrap();
+        (b.finish(), seq, keys, synth)
+    };
+    let (on0, seq, keys, synth) = port_doc("Port 0");
+    let (on1, _, _, _) = port_doc("Port 1");
+    let info = |name: &str| core_engine::backend::MidiPortInfo {
+        name: name.into(),
+        unique_id: None,
+    };
+    let sinks = OfflineSinks::new(10_000).with_ports(vec![info("Port 0"), info("Port 1")]);
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(EngineConfig::new(SR), Box::new(sinks)).unwrap();
+    let spec = InputSpec {
+        midi: vec![MidiInputSpec {
+            lane: keys,
+            port: Some(port_key("Keys")),
+            channel: Some(0),
+            dest: Some(synth),
+            thru: true,
+            armed: true,
+        }],
+        monitor: vec![],
+    };
+    engine.set_inputs(spec.clone());
+    engine.load(&on0, seq).unwrap();
+    let mut b = OfflineBackend::new(SR, 256).with_input(FakeInput::Signals);
+    b.start(renderer).unwrap();
+    send(&engine, "Keys", 0, note(true, 64));
+    b.run_frames(512);
+    let on = log.drain();
+    let old = on
+        .iter()
+        .find(|r| r.bytes() == [0x92, 64, 100])
+        .map(|r| r.target)
+        .expect("thru played on port 0");
+    // The destination moves to port 1: port 0's target is released.
+    engine.set_inputs(spec);
+    engine.load(&on1, seq).unwrap();
+    b.run_frames(512);
+    let offs: Vec<_> = log
+        .drain()
+        .into_iter()
+        .filter(|r| r.target == old && r.bytes() == [0x82, 64, 0])
+        .collect();
+    assert_eq!(offs.len(), 1, "{offs:?}");
+}
+
 #[test]
 fn armed_lanes_record_at_the_run_heard_when_the_message_arrived() {
     let d = doc();

@@ -285,6 +285,13 @@ struct Shared {
     /// A second frame the real-time side will read next (`u64::MAX`:
     /// none): where a led read jumps back to after a loop seam the
     /// transport no longer has, planned alongside `position`.
+    ///
+    /// Stored and loaded `Relaxed`, like `position`, and not read as a
+    /// pair with it (5d-1 Task 2 parked P3): a disk pass may plan one
+    /// block's playhead with the next block's seam. Both are planning
+    /// hints only; voice reads stay guarded by the epoch rule and `hi`,
+    /// so the worst case is one pass planned around a stale seam, which
+    /// costs at most one counted miss and never a torn read.
     seam: AtomicU64,
     /// The loop the real-time side wraps at (`loop_end` 0: none); set
     /// with `loop_end` cleared first and stored last.

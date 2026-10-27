@@ -146,3 +146,65 @@ fn a_plain_play_during_a_count_in_takes_over() {
     // a second roll there would show as a position that is not continuous.
     assert_eq!(engine.transport_frames(), 185 * u64::from(BLOCK));
 }
+
+/// Distinct clicks in `left`: runs of sound after at least 100 silent
+/// frames.
+fn bursts(left: &[f32]) -> usize {
+    let mut n = 0;
+    let mut quiet = usize::MAX;
+    for x in left {
+        if *x != 0.0 {
+            if quiet >= 100 {
+                n += 1;
+            }
+            quiet = 0;
+        } else {
+            quiet = quiet.saturating_add(1);
+        }
+    }
+    n
+}
+
+/// Renders `c` in 512-frame blocks for `frames` frames; at frame `at` the
+/// latency becomes `latency`.
+fn counted(
+    mut c: core_engine::count_in::Counting,
+    frames: usize,
+    at: usize,
+    latency: u64,
+) -> Vec<f32> {
+    let mut left = vec![0.0f32; frames];
+    let mut right = vec![0.0f32; frames];
+    let mut f = 0;
+    while f < frames {
+        if f >= at && f < at + 512 {
+            c.set_latency(latency);
+        }
+        let n = 512.min(frames - f);
+        let _ = c.rolls(n as u32);
+        let (l, r) = (&mut left[f..f + n], &mut right[f..f + n]);
+        let mut out: [&mut [f32]; 2] = [l, r];
+        c.render(&mut out, n as u32);
+        f += n;
+    }
+    left
+}
+
+/// Task 5 parked N1: a latency change during the count-in moves only the
+/// clicks that have not started. A rise does not play a started click
+/// again; a fall makes a due click late, never drops it.
+#[test]
+fn a_latency_change_mid_count_in_neither_repeats_nor_skips_a_click() {
+    use core_engine::count_in::Counting;
+    let c = CountIn {
+        beats: 4,
+        per_bar: 4,
+        beat_frames: 4800.0,
+    };
+    // Rises by 1000 frames while click 2 sounds (it starts at 4800).
+    let up = counted(Counting::new(c, None, 48_000.0, 0), 30_000, 4900, 1000);
+    assert_eq!(bursts(&up), 4, "a rise repeats no click");
+    // Falls by 2000 frames just before click 3 (due at 2000 + 9600).
+    let down = counted(Counting::new(c, None, 48_000.0, 2000), 30_000, 11_100, 0);
+    assert_eq!(bursts(&down), 4, "a fall skips no click");
+}
