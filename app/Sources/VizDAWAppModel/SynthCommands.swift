@@ -9,9 +9,12 @@ import VizDAWCore
 /// are plan 5d's; they call the same session methods (Measure off the
 /// main thread: it takes about three seconds).
 ///
-/// Errors: a parameter of the wrong shape, and a `dest` that names no
-/// external MIDI destination, are `invalid_params` and never reach the
-/// core; the core's `Busy` (recording or playing, another measurement, an
+/// Errors: a parameter of the wrong shape, and a `dest` (or
+/// `lane.set_input`'s `return_of`) that names no external MIDI
+/// destination, are `invalid_params` and never reach the core. Only
+/// destination ids are checked here: an unknown `seq` or `lane`, or a
+/// lane that plays no external synth, is the core's refusal, `failed`
+/// (Task 10 review M3); the core's `Busy` (recording or playing, another measurement, an
 /// open edit, an edit opened while Measure ran with the value it measured)
 /// is `busy` with its message unchanged; any other refusal (no lane
 /// records the return, no signal, the measurement timed out or stopped)
@@ -42,9 +45,21 @@ public enum SynthCommands {
         ((try? m.session.destinations()) ?? []).filter(\.external)
     }
 
-    /// Whether `dest` names one of `m`'s external MIDI destinations.
-    static func isExternal(_ dest: UInt64, _ m: DocumentModel) -> Bool {
-        externalDestinations(m).contains { $0.id == dest }
+    /// Whether `dest` names one of `m`'s external MIDI destinations; nil
+    /// when the list cannot be read (the core, which checks again, then
+    /// decides: Task 10 review M2).
+    static func isExternal(_ dest: UInt64, _ m: DocumentModel) -> Bool? {
+        guard let all = try? m.session.destinations() else { return nil }
+        return all.contains { $0.external && $0.id == dest }
+    }
+
+    /// The time, from its start, a call of `id` may block for, in ms:
+    /// Measure 10 s at most (the core's `MEASURE_WAIT`) plus a margin; nil
+    /// for the others. The channel extends the call's timeout to it before
+    /// running it, so a call queued behind others is not cut off (Task 10
+    /// review M6).
+    public static func extraTimeMs(_ id: String) -> UInt64? {
+        id == measureReturn ? 15_000 : nil
     }
 
     static func id(_ args: [ControlArg], _ name: String) -> UInt64? {
@@ -82,7 +97,7 @@ public enum SynthCommands {
                         .invalidParams,
                         "destination.set_return_latency: `dest` names a destination and `ms` is 0 to 500 (\"12.5\")"))
             }
-            guard isExternal(dest, m) else { return notExternal(id, dest) }
+            if isExternal(dest, m) == false { return notExternal(id, dest) }
             do {
                 m.apply(try m.session.setReturnLatency(dest: dest, ms: ms))
             } catch {
@@ -92,7 +107,7 @@ public enum SynthCommands {
             guard let dest = Self.id(args, "dest") else {
                 return .failed(.of(.invalidParams, "destination.measure_return: `dest` names a destination"))
             }
-            guard isExternal(dest, m) else { return notExternal(id, dest) }
+            if isExternal(dest, m) == false { return notExternal(id, dest) }
             // Blocks the main thread for about 2.7 s, 10 s at most (plan
             // 5c-2 Ruling 9 accepts it for the control channel; 5d's sheet
             // calls it off the main thread).

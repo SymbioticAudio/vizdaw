@@ -4515,7 +4515,8 @@ impl Session {
     /// 5c-2 Ruling 5). With `mute_after`, the next pass that records that
     /// return also mutes the MIDI lane, in its own "Record" step (Ruling
     /// 6). `Model` when the lane plays no external synth or the channels
-    /// are out of range; `Busy` while recording (Ruling 14).
+    /// are out of range; `Busy` while recording (Ruling 14) and while an
+    /// edit is open.
     pub fn track_synth(
         &self,
         seq: u64,
@@ -4531,13 +4532,10 @@ impl Session {
             // runs wholly before or after. Track Synth removes no plugin,
             // so nothing is captured first.
             let mut inner = lock(&self.inner);
-            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
-                return Err(recording_busy());
-            }
-            // An open edit's restart would drop it (review M1).
-            if inner.edit_label.is_some() || inner.history.in_transaction() {
-                return Err(crate::events::bad("finish the open edit first"));
-            }
+            // Not while recording, nor with an edit open: its restart
+            // would drop the step (Task 8 review M1). Both are `Busy`, as
+            // for Measure (Task 10 review I1).
+            Self::check_measurable(&inner)?;
             let id = seq_id(inner.doc(), seq)?;
             let channels = if stereo {
                 core_model::lane::InputChannels::Stereo(first)

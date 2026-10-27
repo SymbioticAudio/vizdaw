@@ -1153,6 +1153,18 @@ fn synth_commands_check_their_params() {
             "destination.set_return_latency",
             json!({ "dest": "Juno", "ms": "12" }),
         ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": "12", "wait": true }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": "12", "junk": "x".repeat(100_000) }),
+        ),
+        (
+            "destination.measure_return",
+            json!({ "dest": 4, "junk": "x".repeat(100_000) }),
+        ),
         ("destination.measure_return", json!({})),
         ("destination.measure_return", json!({ "dest": "Juno" })),
         ("destination.measure_return", json!({ "dest": -1 })),

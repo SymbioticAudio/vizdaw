@@ -176,6 +176,12 @@ enum ControlChannel {
         if staleWindow(call.request) { return answer(server, token, noWindow) }
         switch call.request {
         case .runCommand(let id, let args, let window):
+            // A call that blocks (Measure) gets the time it blocks for from
+            // now, past the app timeout it may have spent queued (Task 10
+            // review M6).
+            if let extra = SynthCommands.extraTimeMs(id) {
+                _ = try? server.extendTimeout(token: token, timeoutMs: extra)
+            }
             answer(server, token, ControlCommands.run(
                 id, args: args, doc: ControlWindows.document(window), store: appStore, host: AppControlHost.shared))
         case .state(let target, let window):

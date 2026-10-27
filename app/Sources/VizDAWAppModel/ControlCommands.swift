@@ -354,7 +354,7 @@ public enum ControlCommands {
                 guard let input = ControlLanes.input(args) else {
                     return .failed(.of(.invalidParams, "lane.set_input: `kind` is none, audio or midi"))
                 }
-                if case .audio(_, _, let returnOf?) = input.value, !SynthCommands.isExternal(returnOf, m) {
+                if case .audio(_, _, let returnOf?) = input.value, SynthCommands.isExternal(returnOf, m) == false {
                     return SynthCommands.notExternal(id, returnOf)
                 }
                 edit = .setInput(seq: seq, lane: lane, input: input.value)

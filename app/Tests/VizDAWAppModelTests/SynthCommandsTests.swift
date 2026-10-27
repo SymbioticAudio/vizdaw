@@ -237,6 +237,59 @@ import VizDAWCore
         #expect(f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: .audio(first: 2, stereo: false, returnOf: nil))))
     }
 
+    /// Task 10 review I1: an open edit the editor does not see as a
+    /// gesture (a mixer fader drag) reaches the core, whose refusal is
+    /// `busy`, as Measure's is.
+    @Test func trackSynthWithAFaderDragOpenIsBusy() throws {
+        let (s, id, m, f) = try demo()
+        let mixer = try MixerModel(document: m)
+        mixer.dragStarted("Set Fader")
+        #expect(m.editor.gesture == nil)
+        let busy = "Finish the open edit first."
+        for (command, args) in [
+            ("lane.track_synth", [("seq", ControlValue.int(value: 3)), ("lane", .int(value: 31))]),
+            ("destination.measure_return", [("dest", .int(value: 7))]),
+        ] {
+            f.synthError = .Busy(message: busy)
+            let e = failure(run(command, args, m, s, id))
+            #expect(e?.code == .busy && e?.message == busy, "\(command)")
+        }
+        mixer.dragEnded()
+        #expect(f.trackSynthCalls.isEmpty && f.measures.isEmpty)
+    }
+
+    /// Task 10 review M2: a destination list that cannot be read is no
+    /// verdict on the id; the core, which checks it again, decides.
+    @Test func anUnreadableDestinationListLeavesTheCheckToTheCore() throws {
+        let (s, id, m, f) = try demo()
+        f.destinationsError = .Internal(message: "no list")
+        #expect(failure(run("destination.measure_return", [("dest", .int(value: 7))], m, s, id)) == nil)
+        #expect(f.measures == [7])
+        #expect(
+            failure(
+                run("destination.set_return_latency", [("dest", .int(value: 7)), ("ms", .text(value: "3"))], m, s, id))
+                == nil)
+        #expect(f.returnLatencies.last?.dest == 7)
+        let lane: [(String, ControlValue)] = [("seq", .int(value: 3)), ("lane", .int(value: 31))]
+        #expect(
+            failure(
+                run("lane.set_input", lane + [("kind", .text(value: "audio")), ("return_of", .int(value: 7))], m, s, id))
+                == nil)
+        #expect(f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: .audio(first: 0, stereo: false, returnOf: 7))))
+        // The core's own refusal is then the answer.
+        f.synthError = .Model(message: "Piano is not an external MIDI destination")
+        #expect(failure(run("destination.measure_return", [("dest", .int(value: 1))], m, s, id))?.code == .failed)
+    }
+
+    /// Task 10 review M6: Measure's call is given the time it blocks for
+    /// (10 s at most) on top of the app timeout, so one queued behind
+    /// other calls is not cut off; other commands get none.
+    @Test func measureAsksForTheTimeItBlocks() {
+        #expect((SynthCommands.extraTimeMs("destination.measure_return") ?? 0) >= 10_000)
+        #expect(SynthCommands.extraTimeMs("lane.track_synth") == nil)
+        #expect(SynthCommands.extraTimeMs("destination.set_return_latency") == nil)
+    }
+
     @Test func externalDestinationsAreTheOnesTrackSynthOffers() throws {
         let (_, _, m, _) = try demo()
         #expect(SynthCommands.externalDestinations(m).map(\.id) == [7])

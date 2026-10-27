@@ -630,7 +630,8 @@ fn an_undone_track_synth_mutes_nothing_after_recording() {
 
 /// Task 8 review M1: with an edit open (a drag), Track Synth is refused
 /// and changes nothing; the next gesture's restart would otherwise drop
-/// it after it had answered Ok.
+/// it after it had answered Ok. Task 10 review I1: the refusal is `Busy`,
+/// as Measure's is (a state that passes, not bad input).
 #[test]
 fn track_synth_waits_for_the_open_edit() {
     let g = serial(Some(DELAY_MS), None);
@@ -641,7 +642,10 @@ fn track_synth_waits_for_the_open_edit() {
     let e = s
         .track_synth(d.seq.0, d.part.0, 2, false, false, true)
         .unwrap_err();
-    assert!(e.to_string().contains("open edit"), "{e}");
+    assert!(
+        matches!(&e, VizError::Busy { message } if message.contains("open edit")),
+        "{e:?}"
+    );
     assert_eq!(s.snapshot().unwrap().version, v, "nothing changed");
     s.end_edit().unwrap();
     assert_eq!(s.lanes(d.seq.0).unwrap().len(), 2, "no lane added");
