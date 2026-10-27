@@ -777,10 +777,16 @@ fn a_failed_stop_releases_the_input() {
         )
         .unwrap();
     };
+    // Not held back: each change reaches the input (on its own thread,
+    // plan 5d-1 Ruling 13).
     arm(false);
-    assert_eq!(s.debug_input_open(), Some(false), "disarm held back");
+    wait_until("the disarm to close the input", || {
+        s.debug_input_open() == Some(false)
+    });
     arm(true);
-    assert_eq!(s.debug_input_open(), Some(true), "arm held back");
+    wait_until("the arm to open the input", || {
+        s.debug_input_open() == Some(true)
+    });
     s.close().unwrap();
 }
 

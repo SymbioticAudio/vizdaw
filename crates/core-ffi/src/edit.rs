@@ -466,6 +466,17 @@ pub enum LaneEdit {
     },
 }
 
+/// Whether `cmd` changes a lane's arm or input: the input that failed to
+/// open is tried again (plan 5d-1 Ruling 15).
+pub fn retries_input(cmd: &EditCommand) -> bool {
+    matches!(
+        cmd,
+        EditCommand::Lane {
+            edit: LaneEdit::SetInput { .. } | LaneEdit::SetFlags { arm: Some(_), .. }
+        }
+    )
+}
+
 /// What a lane records (mirrors `core_model::lane::LaneInput`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum LaneInputRow {

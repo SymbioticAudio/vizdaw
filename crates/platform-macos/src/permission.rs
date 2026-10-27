@@ -47,6 +47,41 @@ pub fn microphone() -> MicAccess {
     access_of(status)
 }
 
+/// Asks macOS for microphone access when it was never asked (plan 5d-1
+/// Ruling 14), and waits up to `limit` for the user's answer to the
+/// system prompt; the access then. Returns at once when the access is
+/// already known. Blocks for as long as the user takes: never call it on
+/// the main thread (the host's input thread does). Tests never call it.
+pub fn request_microphone(limit: std::time::Duration) -> MicAccess {
+    let now = microphone();
+    if now != MicAccess::Undetermined {
+        return now;
+    }
+    let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
+        return now;
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    let tx = std::sync::Mutex::new(Some(tx));
+    let block = block2::RcBlock::new(move |granted: objc2::runtime::Bool| {
+        let sender = tx.lock().ok().and_then(|mut t| t.take());
+        if let Some(sender) = sender {
+            let _ = sender.send(granted.as_bool());
+        }
+    });
+    // SAFETY: `requestAccessForMediaType:completionHandler:` is a class
+    // method taking an `AVMediaType` (the framework's own NSString
+    // constant) and a block it calls once with a BOOL, on any queue; the
+    // block owns its sender and is retained by the framework until then.
+    let _: () = unsafe {
+        msg_send![cls, requestAccessForMediaType: AVMediaTypeAudio, completionHandler: &*block]
+    };
+    match rx.recv_timeout(limit) {
+        Ok(true) => MicAccess::Granted,
+        Ok(false) => MicAccess::Denied,
+        Err(_) => microphone(),
+    }
+}
+
 /// The message arming an audio lane shows when input is refused (spec
 /// §6.1).
 pub const DENIED_MESSAGE: &str = "VizDAW may not use audio input. Allow it in System Settings › Privacy & Security › Microphone, then arm the lane again.";

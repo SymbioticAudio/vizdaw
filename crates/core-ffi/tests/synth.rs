@@ -908,7 +908,9 @@ fn a_measurement_never_outlives_its_sequence() {
         None,
     )
     .unwrap();
-    assert_eq!(vizdaw_ffi::host::debug_host_input_open(), Some(false));
+    wait_until("the input to close", || {
+        vizdaw_ffi::host::debug_host_input_open() == Some(false)
+    });
     vizdaw_ffi::host::debug_hold_measure(false);
     let r = t.join().unwrap();
     assert!(matches!(r, Err(VizError::Engine { .. })), "{r:?}");
@@ -958,7 +960,7 @@ fn measuring_holds_the_input_open() {
     let m = t.join().unwrap();
     assert_eq!(held, Some(true), "the edit closed the input mid-measure");
     assert_eq!(m.unwrap().onsets, 5);
-    assert_eq!(s.debug_input_open(), Some(false));
+    wait_until("the input to close", || s.debug_input_open() == Some(false));
     s.close().unwrap();
 }
 
@@ -1005,6 +1007,7 @@ fn flip_arm_mid_measure(armed: bool) -> (Option<bool>, u64) {
     vizdaw_ffi::host::debug_hold_measure(false);
     let m = t.join().unwrap();
     assert_eq!(m.unwrap().onsets, 5);
+    wait_until("the input to settle", || !s.input_info().unwrap().opening);
     let out = (
         s.debug_input_open(),
         s.debug_input_changes().unwrap() - before,
@@ -1079,7 +1082,9 @@ fn closing_a_window_ends_its_measurement() {
     assert!(!vizdaw_ffi::host::measuring());
     // No one holds the engine: the input Measure opened is closed again
     // (re-review minor).
-    assert_eq!(vizdaw_ffi::host::debug_host_input_open(), Some(false));
+    wait_until("the input to close", || {
+        vizdaw_ffi::host::debug_host_input_open() == Some(false)
+    });
     vizdaw_ffi::host::debug_hold_measure(false);
     let r = t.join().unwrap();
     assert!(matches!(r, Err(VizError::Engine { .. })), "{r:?}");

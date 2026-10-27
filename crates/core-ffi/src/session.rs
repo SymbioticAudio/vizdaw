@@ -2612,6 +2612,9 @@ impl Session {
                 crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
             }
             let c = crate::edit::to_command(&cmd)?;
+            if crate::edit::retries_input(&cmd) {
+                host::clear_input_failure();
+            }
             // Add Lane gives the lane the default monitor mode (plan 5d-1
             // Ruling 11).
             let monitor = crate::audio::default_monitor();
@@ -2657,6 +2660,9 @@ impl Session {
                         crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
                     }
                     _ => {}
+                }
+                if crate::edit::retries_input(cmd) {
+                    host::clear_input_failure();
                 }
                 core.push(crate::edit::to_command(cmd)?);
             }
@@ -4318,6 +4324,13 @@ impl Session {
             let _ = host::stop_recording(self.id);
             Err(e)
         };
+        // The input opens on its own thread (plan 5d-1 Ruling 13): a pass
+        // that records audio waits for it, a bounded while.
+        if !audio.is_empty() && !host::wait_input(host::INPUT_WAIT) {
+            return fail(VizError::Busy {
+                message: host::INPUT_OPENING.into(),
+            });
+        }
         // A device at another rate than the project's would record at the
         // wrong speed and place MIDI wrongly (5a Ruling 20: no resampling).
         if let Some((true, rate)) = host::device(self.id) {
@@ -4773,6 +4786,7 @@ impl Session {
                     input_latency_frames: i.input_latency_frames,
                     output_latency_frames: i.output_latency_frames,
                     buffer_frames: i.buffer_frames,
+                    opening: host::input_opening(self.id),
                 },
                 None => crate::live::InputInfoRow {
                     device: String::new(),
@@ -4782,6 +4796,7 @@ impl Session {
                     output_latency_frames: 0,
                     buffer_frames: 0,
                     round_trip_frames: 0,
+                    opening: false,
                 },
             })
         })

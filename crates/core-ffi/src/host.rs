@@ -411,10 +411,43 @@ pub fn hold_next_rebuild() -> RebuildGate {
 static INPUT_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Chooses the audio input device by name (`None`: "Same as output").
-/// Takes effect when the next host opens its input.
+/// Takes effect when the next host opens its input; a device that failed
+/// to open is tried again then (plan 5d-1 Ruling 15).
 #[uniffi::export]
 pub fn set_audio_input_device(name: Option<String>) {
     *lock(&INPUT_DEVICE) = name.filter(|n| !n.is_empty());
+    clear_input_failure();
+}
+
+/// Lets the next input open try the device again after it failed (plan
+/// 5d-1 Ruling 15: the input picker and the arm button).
+pub fn clear_input_failure() {
+    if let Some(h) = lock(&HOST).as_mut() {
+        h.input_failed = None;
+    }
+}
+
+/// Whether `owner`'s host is opening or closing its input on the input
+/// thread (plan 5d-1 Ruling 13).
+pub fn input_opening(owner: u64) -> bool {
+    lock(&HOST)
+        .as_ref()
+        .is_some_and(|h| h.owner == owner && h.job.is_some())
+}
+
+/// Waits up to `limit`, with no lock held between looks, until no input
+/// thread is at work; false when one still is.
+pub fn wait_input(limit: Duration) -> bool {
+    let until = Instant::now() + limit;
+    loop {
+        if !lock(&HOST).as_ref().is_some_and(|h| h.job.is_some()) {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 /// Whether the lanes of `seq` need audio input: an armed lane with an
@@ -474,6 +507,84 @@ static FAKE_MIC_DENIED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "test-hooks")]
 pub fn set_fake_microphone_denied(denied: bool) {
     FAKE_MIC_DENIED.store(denied, Ordering::Relaxed);
+}
+
+/// How long Record and Measure wait for an input that is opening (plan
+/// 5d-1 Ruling 13).
+pub const INPUT_WAIT: Duration = Duration::from_secs(3);
+
+/// Why Record or Measure did not wait longer.
+pub const INPUT_OPENING: &str = "The audio input is still opening; try again in a moment.";
+
+/// How long the input thread waits for the answer to the first
+/// microphone prompt (Ruling 14).
+#[cfg(all(target_os = "macos", not(feature = "test-hooks")))]
+const PROMPT_WAIT: Duration = Duration::from_secs(120);
+
+/// Hands out [`Host::generation`] values.
+static GENERATIONS: AtomicU64 = AtomicU64::new(1);
+
+/// Offline hosts open their fake input on the input thread, this long
+/// (ms; 0: at once) — test hook, plan 5d-1 Ruling 13.
+#[cfg(feature = "test-hooks")]
+static INPUT_OPEN_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Makes offline hosts open (or close) their fake input on the input
+/// thread after `delay` (`None`: at once, as before; test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_input_open_delay(delay: Option<Duration>) {
+    let ms = delay.map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    INPUT_OPEN_DELAY_MS.store(ms, Ordering::Relaxed);
+}
+
+/// The answer the fake user gives the next (first) microphone prompt
+/// (`None`: no prompt; test hook, Ruling 14).
+#[cfg(feature = "test-hooks")]
+static FAKE_PROMPT: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Makes the next offline input open ask the fake user, who answers
+/// `answer` (true: allow; false: deny, after which macOS reads denied).
+/// `None`: no prompt (test hook, Ruling 14).
+#[cfg(feature = "test-hooks")]
+pub fn set_fake_microphone_prompt(answer: Option<bool>) {
+    *lock(&FAKE_PROMPT) = answer;
+}
+
+/// The fake user has not answered the prompt yet (test hook, pre-flight
+/// I1).
+#[cfg(feature = "test-hooks")]
+static PROMPT_HELD: AtomicBool = AtomicBool::new(false);
+
+/// While `held`, the fake microphone prompt waits for its answer (as a
+/// user who has not clicked yet); false answers it (test hook,
+/// pre-flight I1).
+#[cfg(feature = "test-hooks")]
+pub fn debug_hold_microphone_prompt(held: bool) {
+    PROMPT_HELD.store(held, Ordering::SeqCst);
+}
+
+/// Offline input opens that fail before one works (test hook, Ruling 15).
+#[cfg(feature = "test-hooks")]
+static FAIL_OPENS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Makes the next `n` offline input opens fail as a busy device would
+/// (test hook, Ruling 15).
+#[cfg(feature = "test-hooks")]
+pub fn debug_fail_input_opens(n: u32) {
+    FAIL_OPENS.store(n, Ordering::Relaxed);
+}
+
+/// Whether an offline input open fails now (one fewer to fail).
+#[cfg(feature = "test-hooks")]
+fn take_fake_failure() -> bool {
+    let mut n = FAIL_OPENS.load(Ordering::Relaxed);
+    while n > 0 {
+        match FAIL_OPENS.compare_exchange(n, n - 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(v) => n = v,
+        }
+    }
+    false
 }
 
 /// What a host's audio input offers (spec §6.1, §12.1 `state.get input`).
@@ -938,8 +1049,211 @@ impl Drop for OfflineDriver {
 enum Output {
     /// Held for its `Drop`, which stops the render thread.
     Offline(#[allow(dead_code)] OfflineDriver),
+    /// The device, shared with the input thread while it reopens it
+    /// without the host lock (plan 5d-1 Ruling 13).
     #[cfg(target_os = "macos")]
-    Hal(platform_macos::hal::CoreAudioBackend),
+    Hal(Arc<Mutex<platform_macos::hal::CoreAudioBackend>>),
+}
+
+/// What a host and its input thread share (plan 5d-1 Ruling 13;
+/// pre-flight I1).
+#[derive(Default)]
+struct JobFlags {
+    /// Set when the host goes: the thread then touches nothing of it and
+    /// hands nothing back.
+    cancel: AtomicBool,
+    /// The thread is past the microphone prompt: a host that goes waits
+    /// for it (it may be reopening the device); before that it does not
+    /// (the user may take minutes to answer).
+    asked: AtomicBool,
+}
+
+impl JobFlags {
+    /// Marks the thread past the prompt; whether it may go on. With
+    /// [`Drop for Host`](Host)'s store of `cancel` before its load of
+    /// `asked` (both `SeqCst`), either the thread sees the cancel or the
+    /// host sees `asked` and waits for it.
+    fn past_prompt(&self) -> bool {
+        self.asked.store(true, Ordering::SeqCst);
+        !self.cancel.load(Ordering::SeqCst)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+/// The thread changing a host's input (plan 5d-1 Ruling 13).
+struct InputJob {
+    flags: Arc<JobFlags>,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// What an input thread does without the host lock.
+enum Opener {
+    /// Reopens a live device with `cfg`, asking for the microphone first
+    /// when macOS never asked (Ruling 14). The device is held weakly: a
+    /// host that goes while the prompt is open takes its device with it.
+    #[cfg(target_os = "macos")]
+    Hal {
+        backend: std::sync::Weak<Mutex<platform_macos::hal::CoreAudioBackend>>,
+        cfg: core_engine::backend::AudioConfig,
+    },
+    /// The offline device under the test hooks: waits `delay`, the fake
+    /// user answering `prompt` to the first microphone prompt.
+    #[cfg(feature = "test-hooks")]
+    Fake {
+        delay: Duration,
+        prompt: Option<bool>,
+    },
+}
+
+/// What an input thread found.
+enum Opened {
+    /// The device reopened: what it offers, the workers' environment, and
+    /// why its input failed to open (it then reopened without input).
+    #[cfg(target_os = "macos")]
+    Device {
+        info: core_engine::backend::StreamInfo,
+        env: core_engine::pool::RtEnv,
+        failed: Option<String>,
+    },
+    /// The device could not reopen at all.
+    #[cfg(target_os = "macos")]
+    Broken(String),
+    /// macOS (or the fake user) refused the microphone.
+    Denied,
+    /// The fake input changed.
+    #[cfg(feature = "test-hooks")]
+    Fake,
+}
+
+/// Does `opener`'s work for an input that should end `want` (open or
+/// closed). Runs on the input thread, with no lock but the device's.
+/// `None` when the host went meanwhile (pre-flight I1: checked right
+/// after the prompt, before the device is touched).
+fn open_input(opener: Opener, want: bool, flags: &JobFlags) -> Option<Opened> {
+    match opener {
+        #[cfg(target_os = "macos")]
+        Opener::Hal { backend, cfg } => {
+            use platform_macos::permission::{MicAccess, microphone};
+            // The first open asks, here, off the caller's thread; a denial
+            // is known before anything records (Ruling 14). Test builds
+            // never ask (they never open a live device either).
+            #[cfg(not(feature = "test-hooks"))]
+            if want && microphone() == MicAccess::Undetermined {
+                let _ = platform_macos::permission::request_microphone(PROMPT_WAIT);
+            }
+            if !flags.past_prompt() {
+                return None;
+            }
+            if want && microphone() == MicAccess::Denied {
+                return Some(Opened::Denied);
+            }
+            let backend = backend.upgrade()?;
+            let mut b = lock(&backend);
+            Some(match reopen_backend(&mut b, &cfg) {
+                Ok((info, env, failed)) => Opened::Device { info, env, failed },
+                Err(e) => Opened::Broken(e.to_string()),
+            })
+        }
+        #[cfg(feature = "test-hooks")]
+        Opener::Fake { delay, prompt } => {
+            if prompt.is_some() {
+                // The fake user has not answered yet (bounded, should a
+                // test never release it).
+                let until = Instant::now() + Duration::from_secs(600);
+                while PROMPT_HELD.load(Ordering::SeqCst) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            if !flags.past_prompt() {
+                return None;
+            }
+            // The device's slowness, cut short when the host goes.
+            let until = Instant::now() + delay;
+            loop {
+                if flags.cancelled() {
+                    return None;
+                }
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                std::thread::sleep(left.min(Duration::from_millis(5)));
+            }
+            Some(if want && prompt == Some(false) {
+                Opened::Denied
+            } else {
+                Opened::Fake
+            })
+        }
+    }
+}
+
+/// Stops `b`, reopens it with `cfg` (without input when the input fails
+/// to open: its reason is returned; each open falls back to the device's
+/// own buffer size when it refuses the one asked for, Task 6 review I2)
+/// and restarts it with the same renderer; what it offers and the
+/// workers' environment.
+#[cfg(target_os = "macos")]
+fn reopen_backend(
+    b: &mut platform_macos::hal::CoreAudioBackend,
+    cfg: &core_engine::backend::AudioConfig,
+) -> Result<
+    (
+        core_engine::backend::StreamInfo,
+        core_engine::pool::RtEnv,
+        Option<String>,
+    ),
+    VizError,
+> {
+    let mut r = b.stop()?;
+    let (info, failed) = match open_or_default(cfg.clone(), |c| b.open(c)) {
+        Ok(i) => (i, None),
+        Err(e) if cfg.input_enabled => {
+            let f = format!("{}: {e}", crate::record::INPUT_FAILED_PREFIX);
+            let out = core_engine::backend::AudioConfig {
+                input_enabled: false,
+                ..cfg.clone()
+            };
+            (open_or_default(out, |c| b.open(c))?, Some(f))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if info.buffer_frames > r.config().max_frames {
+        r.prepare(info.buffer_frames);
+    }
+    b.start(r)?;
+    let env = rt_env(b, info.buffer_frames, info.sample_rate);
+    Ok((info, env, failed))
+}
+
+/// Gives what an input thread found back to host `generation`, under
+/// the host lock (tried, never waited for: a host being dropped may hold
+/// it while it joins this thread, after setting `cancel`). A host not in
+/// the slot yet (a rebuild's, before it is installed) is waited for; one
+/// that never gets there is dropped, which cancels.
+fn hand_back(generation: u64, flags: &JobFlags, want: bool, done: Opened) {
+    loop {
+        if flags.cancelled() {
+            return;
+        }
+        let mut slot = match HOST.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+        };
+        if let Some(h) = slot.as_mut().filter(|h| h.generation == generation) {
+            h.finish_job(want, done);
+            return;
+        }
+        drop(slot);
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 /// The engine and its output.
@@ -1012,6 +1326,31 @@ struct Host {
     /// ends, and the input stays as it is (pre-flight M1). Its status
     /// tells whose it is (Task 9 review).
     measure: Option<Arc<MeasureStatus>>,
+    /// This host among all hosts made: an input thread hands back only to
+    /// the host that started it.
+    generation: u64,
+    /// The input changing on its own thread (plan 5d-1 Ruling 13): input
+    /// changes asked meanwhile wait for it in `pending_input`.
+    job: Option<InputJob>,
+    /// The input thread could not reopen the device (pre-flight M7): the
+    /// next claim replaces this host.
+    broken: bool,
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        // The input thread hands nothing back to a host that is going. Past
+        // the prompt it may be reopening the device: it finishes before the
+        // output goes. At the prompt it is not waited for (pre-flight I1).
+        if let Some(mut j) = self.job.take() {
+            j.flags.cancel.store(true, Ordering::SeqCst);
+            if j.flags.asked.load(Ordering::SeqCst) {
+                if let Some(t) = j.thread.take() {
+                    let _ = t.join();
+                }
+            }
+        }
+    }
 }
 
 impl Host {
@@ -1089,7 +1428,7 @@ impl Host {
         backend.start(renderer)?;
         let mut h = Host::new(
             engine,
-            Output::Hal(backend),
+            Output::Hal(Arc::new(Mutex::new(backend))),
             &info.device_name,
             info.sample_rate,
             None,
@@ -1141,6 +1480,9 @@ impl Host {
             pending_input: None,
             input_failed: None,
             measure: None,
+            generation: GENERATIONS.fetch_add(1, Ordering::Relaxed),
+            job: None,
+            broken: false,
         }
     }
 
@@ -1176,12 +1518,13 @@ impl Host {
     }
 
     /// Opens or closes a live output's input to match `want` (spec §6.1),
-    /// restarting the device with the same renderer. Offline outputs keep
-    /// their fake input.
-    /// While a record tap or a measurement is in, the change waits for it
-    /// to go ([`Host::end_record_hold`], [`Host::end_measuring`]).
+    /// restarting the device with the same renderer on the input thread
+    /// (plan 5d-1 Ruling 13). Offline outputs keep their fake input.
+    /// While a record tap, a measurement or the input thread is at work,
+    /// the change waits for it ([`Host::end_record_hold`],
+    /// [`Host::end_measuring`], [`Host::finish_job`]).
     fn ensure_input(&mut self, want: bool) -> Result<(), VizError> {
-        if self.record_hold || self.measure.is_some() {
+        if self.record_hold || self.measure.is_some() || self.job.is_some() {
             self.pending_input = Some(want);
             return Ok(());
         }
@@ -1204,62 +1547,162 @@ impl Host {
     }
 
     fn apply_input(&mut self, want: bool) -> Result<(), VizError> {
-        match &mut self.output {
-            Output::Offline(_) => {
-                #[cfg(all(feature = "test-hooks", target_os = "macos"))]
-                if want && FAKE_MIC_DENIED.load(Ordering::Relaxed) {
-                    admit_input(
-                        platform_macos::permission::MicAccess::Denied,
-                        &mut self.faults,
-                    );
-                }
-                // The fake input stays; what would be open is tracked.
-                if want != self.input_open {
-                    self.engine.clear_input_peaks();
-                }
-                self.input_open = want;
-                Ok(())
+        #[cfg(target_os = "macos")]
+        if let Output::Hal(b) = &self.output {
+            let backend = Arc::downgrade(b);
+            let want = want && live_input_allowed(&mut self.faults);
+            if self.blocked_by_failure(want) || want == self.input_open {
+                return Ok(());
             }
+            let cfg = live_audio_config(self.project_rate, want);
+            self.start_job(Opener::Hal { backend, cfg }, want);
+            return Ok(());
+        }
+        #[cfg(all(feature = "test-hooks", target_os = "macos"))]
+        if want && FAKE_MIC_DENIED.load(Ordering::Relaxed) {
+            admit_input(
+                platform_macos::permission::MicAccess::Denied,
+                &mut self.faults,
+            );
+        }
+        if self.blocked_by_failure(want) {
+            return Ok(());
+        }
+        #[cfg(feature = "test-hooks")]
+        if want != self.input_open {
+            if want && take_fake_failure() {
+                let f = format!(
+                    "{}: the fake device is busy",
+                    crate::record::INPUT_FAILED_PREFIX
+                );
+                self.faults.push(f.clone());
+                self.input_failed = Some(f);
+                return Ok(());
+            }
+            let delay = Duration::from_millis(INPUT_OPEN_DELAY_MS.load(Ordering::Relaxed));
+            let prompt = if want {
+                lock(&FAKE_PROMPT).take()
+            } else {
+                None
+            };
+            if !delay.is_zero() || prompt.is_some() {
+                self.start_job(Opener::Fake { delay, prompt }, want);
+                return Ok(());
+            }
+        }
+        // The fake input stays; what would be open is tracked.
+        if want != self.input_open {
+            self.engine.clear_input_peaks();
+        }
+        self.input_open = want;
+        Ok(())
+    }
+
+    /// Whether an input that failed to open stops this change (Ruling 15:
+    /// it is not tried again until the input or the arm of a lane changes,
+    /// or another input device is chosen): it is reported again after Play
+    /// cleared the faults. Closing always clears the failure.
+    fn blocked_by_failure(&mut self, want: bool) -> bool {
+        if !want {
+            self.input_failed = None;
+            return false;
+        }
+        match &self.input_failed {
+            Some(f) => {
+                if !self.faults.contains(f) {
+                    self.faults.push(f.clone());
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Starts the input thread on `opener` for an input that should end
+    /// `want` (Ruling 13).
+    #[cfg_attr(
+        not(any(target_os = "macos", feature = "test-hooks")),
+        allow(dead_code)
+    )]
+    fn start_job(&mut self, opener: Opener, want: bool) {
+        let flags = Arc::new(JobFlags::default());
+        let (generation, theirs) = (self.generation, Arc::clone(&flags));
+        let spawned = std::thread::Builder::new()
+            .name("vizdaw-input".into())
+            .spawn(move || {
+                if let Some(done) = open_input(opener, want, &theirs) {
+                    hand_back(generation, &theirs, want, done);
+                }
+            });
+        match spawned {
+            Ok(t) => {
+                self.job = Some(InputJob {
+                    flags,
+                    thread: Some(t),
+                })
+            }
+            Err(e) => {
+                let f = format!(
+                    "{}: no input thread ({e})",
+                    crate::record::INPUT_FAILED_PREFIX
+                );
+                self.faults.push(f);
+            }
+        }
+    }
+
+    /// Takes what the input thread found (under the host lock), then
+    /// applies what was asked meanwhile.
+    fn finish_job(&mut self, want: bool, done: Opened) {
+        self.job = None;
+        let was = self.input_open;
+        match done {
             #[cfg(target_os = "macos")]
-            Output::Hal(b) => {
-                let want = want && live_input_allowed(&mut self.faults);
-                if !want {
-                    self.input_failed = None;
-                } else if let Some(f) = &self.input_failed {
-                    // Reported again after Play cleared the faults.
-                    if !self.faults.contains(f) {
-                        self.faults.push(f.clone());
-                    }
-                    return Ok(());
-                }
-                if want == self.input_open {
-                    return Ok(());
-                }
-                let mut r = b.stop()?;
-                let info = match open_or_default(live_audio_config(self.project_rate, want), |c| {
-                    b.open(c)
-                }) {
-                    Ok(i) => i,
-                    Err(e) if want => {
-                        let f = format!("{}: {e}", crate::record::INPUT_FAILED_PREFIX);
-                        self.faults.push(f.clone());
-                        self.input_failed = Some(f);
-                        open_or_default(live_audio_config(self.project_rate, false), |c| b.open(c))?
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                if info.buffer_frames > r.config().max_frames {
-                    r.prepare(info.buffer_frames);
-                }
-                b.start(r)?;
-                self.engine
-                    .set_rt_env(rt_env(b, info.buffer_frames, info.sample_rate));
+            Opened::Device { info, env, failed } => {
+                self.engine.set_rt_env(env);
                 self.input_open = info.input_channels > 0;
                 self.inputs = InputInfo::of(&info);
                 // No peak held under the old config outlives it.
                 self.engine.clear_input_peaks();
-                Ok(())
+                if let Some(f) = failed {
+                    if !self.faults.contains(&f) {
+                        self.faults.push(f.clone());
+                    }
+                    self.input_failed = Some(f);
+                }
             }
+            #[cfg(target_os = "macos")]
+            Opened::Broken(why) => {
+                let f = format!("the audio device could not reopen: {why}");
+                if !self.faults.contains(&f) {
+                    self.faults.push(f);
+                }
+                // No device under it: the next claim replaces this host
+                // (pre-flight M7).
+                self.broken = true;
+            }
+            Opened::Denied => {
+                #[cfg(target_os = "macos")]
+                admit_input(
+                    platform_macos::permission::MicAccess::Denied,
+                    &mut self.faults,
+                );
+                // The fake user said no: macOS reads denied from now on.
+                #[cfg(feature = "test-hooks")]
+                FAKE_MIC_DENIED.store(true, Ordering::Relaxed);
+                self.input_open = false;
+            }
+            #[cfg(feature = "test-hooks")]
+            Opened::Fake => self.input_open = want,
+        }
+        let _ = want;
+        if self.input_open != was {
+            self.input_changes += 1;
+            // No peak held under the old config outlives it.
+            self.engine.clear_input_peaks();
+        }
+        if let Some(w) = self.pending_input.take() {
+            let _ = self.ensure_input(w);
         }
     }
 
@@ -1335,8 +1778,16 @@ impl Host {
         let mut events = std::mem::take(&mut self.injected);
         match &mut self.output {
             Output::Offline(_) => {}
+            // Not while the input thread reopens it: the next poll reads
+            // them (plan 5d-1 Ruling 13).
             #[cfg(target_os = "macos")]
-            Output::Hal(b) => events.extend(b.take_events()),
+            Output::Hal(b) => match b.try_lock() {
+                Ok(mut b) => events.extend(b.take_events()),
+                Err(std::sync::TryLockError::Poisoned(p)) => {
+                    events.extend(p.into_inner().take_events())
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            },
         }
         events
     }
@@ -1369,6 +1820,10 @@ impl Host {
             }
             #[cfg(target_os = "macos")]
             Output::Hal(b) => {
+                // `set_buffer_frames` waited for the input thread: the
+                // device is free.
+                let mut b = lock(b);
+                let b = &mut *b;
                 let Ok(mut r) = b.stop() else {
                     return Reopened::Lost(VizError::Engine {
                         message: "the audio device would not stop".into(),
@@ -1414,15 +1869,19 @@ impl Host {
                 let _ = frames;
                 Ok(())
             }
+            // The input thread's reopen takes the new size anyway.
+            #[cfg(target_os = "macos")]
+            Output::Hal(_) if self.job.is_some() => Ok(()),
             #[cfg(target_os = "macos")]
             Output::Hal(b) => {
+                let mut b = lock(b);
                 let mut r = b.stop()?;
                 if frames > r.config().max_frames {
                     r.prepare(frames);
                 }
                 b.start(r)?;
                 // The workers follow the new block period.
-                self.engine.set_rt_env(rt_env(b, frames, self.sample_rate));
+                self.engine.set_rt_env(rt_env(&b, frames, self.sample_rate));
                 Ok(())
             }
         }
@@ -1725,8 +2184,11 @@ fn claim_host(
         // another project rate: a fresh engine (for plugins: so none of its
         // instances is taken for this document's same-numbered slots; for
         // rates: so the device is asked for this project's, Ruling 20).
+        // Or its device could not reopen (pre-flight M7).
         if slot.as_ref().is_some_and(|h| {
-            (h.factory_owner != owner && h.plugins_in_engine) || !same_rate(h.project_rate, project)
+            (h.factory_owner != owner && h.plugins_in_engine)
+                || !same_rate(h.project_rate, project)
+                || h.broken
         }) {
             let mut old = slot.take();
             if let Some(h) = old.as_mut() {
@@ -2039,7 +2501,21 @@ pub fn reset_if_owner(owner: u64, project: f64) {
 /// old one (review I1); if that fails too, the host is retired. Either
 /// way the setting is the size the device has, and the error comes back.
 pub(crate) fn set_buffer_frames(frames: u32) -> Result<(), VizError> {
-    let mut slot = lock(&HOST);
+    // The input thread reopens the device too: its change ends first,
+    // waited for without the lock (plan 5d-1 Ruling 13); then the checks
+    // and the reopen run under one lock with nothing else at the device.
+    let mut slot = loop {
+        let slot = lock(&HOST);
+        if !slot.as_ref().is_some_and(|h| h.job.is_some()) {
+            break slot;
+        }
+        drop(slot);
+        if !wait_input(INPUT_WAIT) {
+            return Err(VizError::Busy {
+                message: INPUT_OPENING.into(),
+            });
+        }
+    };
     if let Some(h) = slot.as_ref() {
         if h.record_hold {
             return Err(VizError::Busy {
@@ -2091,7 +2567,7 @@ pub fn drop_if_idle() {
     let mut slot = lock(&HOST);
     if !slot
         .as_mut()
-        .is_some_and(|h| h.measure.is_none() && !h.busy() && !h.wants_live())
+        .is_some_and(|h| h.measure.is_none() && h.job.is_none() && !h.busy() && !h.wants_live())
     {
         return;
     }
@@ -2282,12 +2758,40 @@ pub fn start_measure(
     plugins: Option<&mut PluginHost>,
 ) -> Result<Arc<MeasureStatus>, VizError> {
     crate::synth::external_dest(doc, dest)?;
-    let (mut slot, _) = claim_host(owner, doc, plugins, true)?;
-    let host = slot.as_mut().ok_or_else(|| VizError::Internal {
-        message: "engine host missing".into(),
-    })?;
-    host.faults.clear();
-    host.ensure_input(true)?;
+    let generation = {
+        let (mut slot, _) = claim_host(owner, doc, plugins, true)?;
+        let host = slot.as_mut().ok_or_else(|| VizError::Internal {
+            message: "engine host missing".into(),
+        })?;
+        host.faults.clear();
+        host.ensure_input(true)?;
+        host.generation
+    };
+    // The input opens on its own thread, without the host lock (plan 5d-1
+    // Ruling 13); then nothing may have taken the engine meanwhile.
+    let opened = wait_input(INPUT_WAIT);
+    let mut slot = lock(&HOST);
+    let host = slot
+        .as_mut()
+        .filter(|h| h.generation == generation)
+        .ok_or_else(|| VizError::Busy {
+            message: "The audio engine changed; measure again.".into(),
+        })?;
+    if host.measure.is_some() {
+        return Err(measuring_busy());
+    }
+    if host.busy() {
+        return Err(VizError::Busy {
+            message: STOP_FIRST.into(),
+        });
+    }
+    if !opened {
+        // The input follows the lanes once the thread is done.
+        let _ = host.ensure_input(wants_audio_input(doc, seq));
+        return Err(VizError::Busy {
+            message: INPUT_OPENING.into(),
+        });
+    }
     match install_measure(host, owner, doc, seq, dest, lane, channels) {
         Ok(status) => {
             host.measure = Some(Arc::clone(&status));

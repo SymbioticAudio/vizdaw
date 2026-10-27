@@ -521,6 +521,7 @@ fn record_and_input_results_as_json() {
             output_latency_frames: 512,
             buffer_frames: 512,
             round_trip_frames: 2048,
+            opening: false,
         },
     });
     assert_eq!(i["channels"], json!(3));

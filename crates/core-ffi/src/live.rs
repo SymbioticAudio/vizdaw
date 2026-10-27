@@ -32,6 +32,10 @@ pub struct InputInfoRow {
     /// and a buffer each way.
     #[uniffi(default)]
     pub round_trip_frames: u32,
+    /// The input is opening or closing on its own thread (plan 5d-1
+    /// Ruling 13).
+    #[uniffi(default)]
+    pub opening: bool,
 }
 
 /// The channel messages in `bytes`, one after another (running status,

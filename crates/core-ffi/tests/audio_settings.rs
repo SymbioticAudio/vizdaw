@@ -131,7 +131,8 @@ fn software_monitoring_off_drops_monitoring_at_once_but_keeps_thru() {
     take_engine(&s, seq);
     let inputs = s.debug_engine_inputs().unwrap();
     assert_eq!((inputs.monitor.len(), inputs.midi.len()), (1, 1));
-    assert_eq!(s.debug_input_open(), Some(true));
+    // The input opens on its own thread (plan 5d-1 Ruling 13).
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
     set_software_monitoring(false);
     assert!(!audio_settings().software_monitoring);
     s.idle().unwrap();
@@ -141,7 +142,9 @@ fn software_monitoring_off_drops_monitoring_at_once_but_keeps_thru() {
     let inputs = s.debug_engine_inputs().unwrap();
     assert_eq!(inputs.midi.len(), 1, "thru stays");
     assert!(inputs.midi[0].thru);
-    assert_eq!(s.debug_input_open(), Some(false), "nothing needs input");
+    wait_until("the input to close: nothing needs it", || {
+        s.debug_input_open() == Some(false)
+    });
     // An armed audio lane still records: the input stays open, with no
     // monitor route (review m5).
     let lp = lane(&s, seq, "Loop").id;
@@ -157,7 +160,9 @@ fn software_monitoring_off_drops_monitoring_at_once_but_keeps_thru() {
     )
     .unwrap();
     s.idle().unwrap();
-    assert_eq!(s.debug_input_open(), Some(true), "armed keeps the input");
+    wait_until("the armed lane to keep the input", || {
+        s.debug_input_open() == Some(true)
+    });
     assert!(s.debug_engine_inputs().unwrap().monitor.is_empty());
     set_software_monitoring(true);
     s.idle().unwrap();
