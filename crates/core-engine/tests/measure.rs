@@ -8,6 +8,7 @@
 use core_engine::backend::{AudioBackend, MidiPortInfo};
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::Builder;
+use core_engine::graph::TestInserts;
 use core_engine::measure::{MeasureStatus, PINGS};
 use core_engine::offline::{FAKE_SYNTH_PORT, FakeInput, FakeSynth, OfflineBackend, OfflineSinks};
 use core_engine::schedule::TargetKind;
@@ -18,9 +19,27 @@ use std::sync::Arc;
 /// against a fake synth 25 ms late; returns the status and the synth's
 /// delay in frames.
 fn measure(port: &str, inputs: Vec<u16>) -> (Arc<MeasureStatus>, i64) {
+    measure_with(port, inputs, 0, 0)
+}
+
+/// Like [`measure`], with the engine's MIDI offset `offset_ns` and a graph
+/// latency of `latency` frames (a latent insert on an aux bus); the delay
+/// returned is the synth's after the run (it grows to cover a negative
+/// offset).
+fn measure_with(
+    port: &str,
+    inputs: Vec<u16>,
+    offset_ns: i64,
+    latency: u64,
+) -> (Arc<MeasureStatus>, i64) {
     let mut b = Builder::new();
     let dest = b.dest(port, port, 0).unwrap();
     let (seq, _) = b.sequence("S", "Part", Some(dest)).unwrap();
+    if latency > 0 {
+        let bus = b.bus("Latent").unwrap();
+        b.insert(bus, TestInserts::plugin(&format!("latency={latency}")))
+            .unwrap();
+    }
     let doc = b.finish();
     let synth = FakeSynth::new(25.0);
     // "Other" is a MIDI destination nothing answers.
@@ -30,13 +49,16 @@ fn measure(port: &str, inputs: Vec<u16>) -> (Arc<MeasureStatus>, i64) {
             unique_id: None,
         }])
         .with_fake_synth(&synth);
-    let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    let mut cfg = EngineConfig::new(48_000.0);
+    cfg.midi_offset_ns = offset_ns;
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks)).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
     engine.set_return_dests(vec![dest]);
     engine.load(&doc, seq).unwrap();
+    assert_eq!(engine.latency_frames(), latency);
     let mut backend = OfflineBackend::new(48_000.0, 512)
         .with_input(FakeInput::Signals)
         .with_synth(&synth);
-    let delay = backend.synth_delay().unwrap() as i64;
     backend.start(renderer).unwrap();
     let status = engine.start_measure(&doc, dest, inputs).unwrap().unwrap();
     // The lead, five notes 500 ms apart and the last window: under 3 s.
@@ -49,6 +71,7 @@ fn measure(port: &str, inputs: Vec<u16>) -> (Arc<MeasureStatus>, i64) {
     engine.stop_measure().unwrap();
     backend.block(512);
     assert!(status.closed(), "removed, it reads closed");
+    let delay = backend.synth_delay().unwrap() as i64;
     drop(backend.stop().unwrap());
     (status, delay)
 }
@@ -86,10 +109,43 @@ fn an_input_that_never_falls_quiet_finds_no_onset() {
     let (s, _) = measure(FAKE_SYNTH_PORT, vec![0]);
     assert!(s.done());
     assert!((0..PINGS).all(|i| s.onset(i).is_none()));
-    // A pair: either channel's onset counts.
+    // A pair: either channel's onset counts. Fake input 2's impulses fall
+    // at 0, 24 000, 48 000 … and every note's window opens after its
+    // impulse, so each onset is the synth's on channel 3.
     let (s, delay) = measure(FAKE_SYNTH_PORT, vec![1, 2]);
-    assert!((0..PINGS).all(|i| s.onset(i).is_some()));
-    let _ = delay;
+    for i in 0..PINGS {
+        assert_eq!(s.onset(i), Some(s.sent(i).unwrap() + delay), "note {i}");
+    }
+}
+
+/// Fix round 1: a negative MIDI offset sends each note early, so it is
+/// heard before the block that sends it; `sent` is that earlier run, and
+/// the onset still follows it by exactly the synth's delay.
+#[test]
+fn a_negative_midi_offset_is_part_of_when_a_note_was_heard() {
+    let (s, delay) = measure_with(FAKE_SYNTH_PORT, vec![2], -50_000_000, 0);
+    assert!(s.done());
+    // 50 ms early: 2400 frames before the block the note went out in.
+    let sent0 = s.sent(0).unwrap();
+    assert!((4800 - 2400..4800 - 2400 + 512).contains(&sent0), "{sent0}");
+    for i in 0..PINGS {
+        assert_eq!(s.onset(i), Some(s.sent(i).unwrap() + delay), "note {i}");
+    }
+}
+
+/// Fix round 1: with a graph latency, a note is heard that much after the
+/// block that sends it (MIDI waits for the delayed audio): `sent` is
+/// later by the latency, and the onset follows it by the synth's delay.
+#[test]
+fn the_graph_latency_is_part_of_when_a_note_was_heard() {
+    const L: i64 = 480;
+    let (s, delay) = measure_with(FAKE_SYNTH_PORT, vec![2], 0, L as u64);
+    assert!(s.done());
+    let sent0 = s.sent(0).unwrap();
+    assert!((4800 + L..4800 + L + 512).contains(&sent0), "{sent0}");
+    for i in 0..PINGS {
+        assert_eq!(s.onset(i), Some(s.sent(i).unwrap() + delay), "note {i}");
+    }
 }
 
 /// Plan 5c-2 Ruling 10: the return destinations are interned at load, so
@@ -168,4 +224,50 @@ fn removing_a_measurement_mid_note_sends_its_note_off() {
         sent.iter().any(|m| m.get(..2) == Some(&[0x90, 60][..])),
         "{sent:x?}"
     );
+}
+
+/// Fix round 1, I1: an onset is credited only to the latest note whose
+/// window has begun, never to an older one. A synth answering 3 ms late
+/// (under the shortfall of a 23 552-frame gap at 512-frame blocks) leaves
+/// note 2 unanswered: note 3's answer, inside note 2's 500 ms window too,
+/// must not be taken for note 2's.
+#[test]
+fn an_onset_is_credited_only_to_the_latest_note_whose_window_began() {
+    use core_engine::measure::{MeasureRequest, tap};
+    use core_engine::schedule::TargetIdx;
+    const BLOCK: u32 = 512;
+    const ANSWER: i64 = 144; // 3 ms at 48 kHz
+    let req = MeasureRequest {
+        target: TargetIdx(0),
+        channel: 0,
+        inputs: vec![0],
+    };
+    let (mut t, s) = tap(&req, 48_000.0);
+    let mut clicks: Vec<i64> = Vec::new();
+    let mut buf = vec![0.0f32; BLOCK as usize];
+    let mut run = 0i64;
+    let mut ons = 0usize;
+    while !s.done() && run < 3 * 48_000 {
+        t.sends(0, |m| {
+            if m.as_slice().first().is_some_and(|b| b & 0xF0 == 0x90) {
+                if ons != 2 {
+                    clicks.push(run + ANSWER);
+                }
+                ons += 1;
+            }
+        });
+        for (j, x) in buf.iter_mut().enumerate() {
+            let k = run + j as i64;
+            let on = clicks.iter().any(|c| k >= *c && k - c < 240);
+            *x = if on { 0.5 } else { 0.0 };
+        }
+        t.capture(&[&buf], BLOCK, 0);
+        run += i64::from(BLOCK);
+    }
+    assert!(s.done());
+    assert_eq!(ons, PINGS);
+    for i in 0..PINGS {
+        let want = (i != 2).then(|| s.sent(i).unwrap() + ANSWER);
+        assert_eq!(s.onset(i), want, "note {i}");
+    }
 }

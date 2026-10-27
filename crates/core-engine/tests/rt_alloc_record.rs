@@ -3,14 +3,16 @@
 //! allocator is armed only around `OfflineBackend::block`, while a record
 //! tap captures fake input through loop wraps, a full ring, tap swaps, an
 //! xrun, a stop and the tap's removal; then a return-latency measurement
-//! runs, is replaced and is removed mid-note.
+//! runs, is replaced and is removed mid-note, and one finds the fake
+//! synth's onsets.
 
 use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
 use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, MonitorRoute, port_key};
+use core_engine::measure::PINGS;
 use core_engine::midi1::Midi1Msg;
-use core_engine::offline::{FakeInput, OfflineBackend, OfflineSinks};
+use core_engine::offline::{FAKE_SYNTH_PORT, FakeInput, FakeSynth, OfflineBackend, OfflineSinks};
 use core_engine::record::RecordRequest;
 use core_engine::rt_check::{self, CountingAlloc};
 use core_model::command::{Command, LaneCmd, RoutingCmd};
@@ -183,4 +185,35 @@ fn recording_never_allocates() {
     assert!(m.closed());
     assert_eq!(rt_check::count() - before, 0, "allocations while measuring");
     drop(b.stop().unwrap());
+    // The built-in synth's test tone peaks at -40 dBFS, never above it, so
+    // it gives no onset: the fake synth answers instead, so the onset
+    // branch runs while armed (fix round 1).
+    let mut fb = Builder::new();
+    let fake = fb.dest(FAKE_SYNTH_PORT, FAKE_SYNTH_PORT, 0).unwrap();
+    let (fseq, _) = fb.sequence("S", "Part", Some(fake)).unwrap();
+    let fdoc = fb.finish();
+    let fsynth = FakeSynth::new(25.0);
+    let (mut fe, fr) = Engine::new(
+        EngineConfig::new(48_000.0),
+        Box::new(OfflineSinks::new(1 << 16).with_fake_synth(&fsynth)),
+    )
+    .unwrap();
+    fe.set_return_dests(vec![fake]);
+    fe.load(&fdoc, fseq).unwrap();
+    let mut fbk = OfflineBackend::new(48_000.0, 512)
+        .with_input(FakeInput::Signals)
+        .with_synth(&fsynth);
+    fbk.start(fr).unwrap();
+    let m = fe.start_measure(&fdoc, fake, vec![2]).unwrap().unwrap();
+    let before = rt_check::count();
+    for _ in 0..300 {
+        armed_block(&mut fbk, 512);
+    }
+    assert!(m.done());
+    assert!(
+        (0..PINGS).all(|i| m.onset(i).is_some()),
+        "every note answered"
+    );
+    assert_eq!(rt_check::count() - before, 0, "allocations finding onsets");
+    drop(fbk.stop().unwrap());
 }

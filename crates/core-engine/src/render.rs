@@ -1430,7 +1430,9 @@ impl Renderer {
     /// frame. // RT
     fn measure_sends(&mut self) {
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
-        let late = (late_ns.max(0) as f64 * self.cfg.sample_rate / 1e9).round() as u64;
+        // Signed: a negative MIDI offset makes a note heard before the
+        // block's first frame (fix round 1).
+        let late = (late_ns as f64 * self.cfg.sample_rate / 1e9).round() as i64;
         let Some(m) = self.measure.as_deref_mut() else {
             return;
         };

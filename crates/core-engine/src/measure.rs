@@ -180,8 +180,9 @@ impl MeasureTap {
     /// At a block's start: sends what is due (the note-off of the note
     /// sounding, then the next note), each at block offset 0; `late` is
     /// how long after the block's first frame its MIDI is heard (the graph
-    /// latency plus the MIDI offset), in frames. // RT
-    pub fn sends(&mut self, late: u64, mut send: impl FnMut(Midi1Msg)) {
+    /// latency plus the MIDI offset, negative when the offset sends MIDI
+    /// early), in frames. // RT
+    pub fn sends(&mut self, late: i64, mut send: impl FnMut(Midi1Msg)) {
         if let Some(at) = self.off_at
             && self.run >= at
         {
@@ -198,7 +199,9 @@ impl MeasureTap {
             return;
         }
         send(self.on);
-        let heard = i64::try_from(self.run.saturating_add(late)).unwrap_or(i64::MAX);
+        let heard = i64::try_from(self.run)
+            .unwrap_or(i64::MAX)
+            .saturating_add(late);
         if let (Some(s), Some(st)) = (
             self.sent.get_mut(self.next),
             self.status.sent.get(self.next),
@@ -240,20 +243,25 @@ impl MeasureTap {
             }
             if self.quiet >= self.quiet_need {
                 let k = run.saturating_add(j as i64);
-                for ((s, f), st) in self
+                // Only the latest note whose window has begun may take it
+                // (fix round 1, I1): a later note's answer inside an
+                // unanswered note's window is not that note's onset.
+                let latest = self
                     .sent
                     .iter()
                     .zip(self.found.iter_mut())
                     .zip(self.status.onsets.iter())
+                    .rev()
+                    .find_map(|((s, f), st)| {
+                        let from = s.as_ref()?.saturating_add(d);
+                        (k >= from).then_some((from, f, st))
+                    });
+                if let Some((from, f, st)) = latest
+                    && !*f
+                    && k < from.saturating_add(window)
                 {
-                    let Some(u) = *s else {
-                        continue;
-                    };
-                    let from = u.saturating_add(d);
-                    if !*f && k >= from && k < from.saturating_add(window) {
-                        *f = true;
-                        st.store(k, Ordering::Release);
-                    }
+                    *f = true;
+                    st.store(k, Ordering::Release);
                 }
             }
             self.quiet = 0;

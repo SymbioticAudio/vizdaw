@@ -1208,7 +1208,10 @@ impl Engine {
     /// whether or not the transport plays. Replaces a measurement already
     /// installed. `Ok(Err(why))` when `dest` cannot play here: it is not
     /// in `doc`, no MIDI destination has its name, or no load interned it
-    /// (no lane of the loaded sequence records its return).
+    /// (no lane of the loaded sequence records its return). It does not
+    /// refuse a destination that is not external (the built-in synth, a
+    /// plugin instrument) or input channels the device lacks: the caller
+    /// checks those (plan 5c-2 Ruling 2; Task 9).
     pub fn start_measure(
         &mut self,
         doc: &Document,
