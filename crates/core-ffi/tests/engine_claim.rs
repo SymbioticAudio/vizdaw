@@ -224,6 +224,42 @@ fn closing_a_window_lets_its_claimed_input_go() {
     assert_eq!(holder(), None);
 }
 
+/// Final review I1: closing a window while its transport plays lets its
+/// input go too. The engine's Stop lands only at its next block, so the
+/// close must not wait on it: with a lane monitored Input (heard always)
+/// or armed Auto (heard once stopped), nothing stays open or monitored for
+/// a window that is gone.
+#[test]
+fn closing_a_playing_window_lets_its_input_go() {
+    for monitor in [MonitorModeRow::Input, MonitorModeRow::Auto] {
+        let _g = serial();
+        let s = Session::new_demo_audio().unwrap();
+        let seq = song(&s);
+        let lp = inputs(&s, seq, true);
+        edit(
+            &s,
+            LaneEdit::SetMonitor {
+                seq,
+                lane: lp,
+                monitor,
+            },
+        )
+        .unwrap();
+        if monitor == MonitorModeRow::Auto {
+            arm(&s, seq, lp, true);
+        }
+        s.play(seq).unwrap();
+        wait_until("the transport to play", || s.transport().unwrap().playing);
+        wait_until("the input to open", || s.debug_input_open() == Some(true));
+        s.close().unwrap();
+        wait_until("the input to close", || {
+            debug_host_input_open() != Some(true)
+                && debug_host_inputs().is_none_or(|i| i.monitor.is_empty() && i.midi.is_empty())
+        });
+        assert_eq!(holder(), None, "{monitor:?}");
+    }
+}
+
 /// Ruling 17 as amended (M15; Task 8 review m4): an arm reconnects the
 /// MIDI sources even when the engine is busy and not taken.
 #[test]

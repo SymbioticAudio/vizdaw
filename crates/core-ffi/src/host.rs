@@ -2791,8 +2791,12 @@ pub fn release(owner: u64) {
             // Nothing listens for a window that is gone (Task 8 review
             // I1): an engine it left monitoring, playing thru or opening
             // its input goes now, as `drop_if_idle` drops it (a job still
-            // at work is cancelled by the drop).
-            if !h.busy() && (h.wants_live() || h.job.is_some()) {
+            // at work is cancelled by the drop). Whether it was playing
+            // does not matter (final review I1): the Stop above lands only
+            // at the renderer's next block, so `busy()` would still see it
+            // playing and leave the input open and monitored for nobody.
+            // `retire` drains the note-offs the Stop sends.
+            if !h.record_hold && (h.wants_live() || h.job.is_some()) {
                 let old = slot.take();
                 *lock(&MIDI_TO) = None;
                 drop(slot);
