@@ -48,6 +48,7 @@ pub mod session;
 pub mod snapshot;
 pub mod step;
 pub mod strip;
+pub mod synth;
 pub mod templates;
 
 pub use blocks::{BlockKind, BlockRow, BlockRule};

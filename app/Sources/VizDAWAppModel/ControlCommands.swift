@@ -733,7 +733,7 @@ public enum ControlLanes {
         case "audio":
             let channel = args.int("channel") ?? 1
             guard (1...256).contains(channel) else { return nil }
-            return Input(value: .audio(first: UInt16(channel - 1), stereo: args.flag("stereo") ?? false))
+            return Input(value: .audio(first: UInt16(channel - 1), stereo: args.flag("stereo") ?? false, returnOf: nil))
         case "midi":
             let ch = args.int("midi_channel")
             if let ch, !(1...16).contains(ch) { return nil }

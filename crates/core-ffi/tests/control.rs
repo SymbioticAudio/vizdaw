@@ -538,6 +538,7 @@ fn lanes_show_takes_input_and_monitor() {
     lanes[0].input = Some(LaneInputRow::Audio {
         first: 2,
         stereo: true,
+        return_of: None,
     });
     lanes[0].monitor = MonitorModeRow::Input;
     lanes[1].input = Some(LaneInputRow::Midi {

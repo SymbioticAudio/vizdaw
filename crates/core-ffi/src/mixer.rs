@@ -86,7 +86,7 @@ pub struct StripRow {
 }
 
 /// A destination of the instrument list (lanes play through these).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct DestRow {
     /// Destination ID.
     pub id: u64,
@@ -94,6 +94,13 @@ pub struct DestRow {
     pub name: String,
     /// The plugin instrument it plays, if it is one.
     pub plugin: Option<crate::snapshot::PluginRefRow>,
+    /// An external MIDI destination: Track Synth and Measure work with it
+    /// (spec §6.7; plan 5c-2 Ruling 2).
+    #[uniffi(default)]
+    pub external: bool,
+    /// Its return latency in ms (spec §4.5a).
+    #[uniffi(default)]
+    pub return_latency_ms: f32,
 }
 
 /// A bus, for output and send menus.

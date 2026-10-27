@@ -119,6 +119,10 @@ struct Inner {
     /// Recordings a crash left (and kept takes), offered and not yet
     /// answered (plan 5c Task 10): the Trash leaves them until they are.
     recovered: Vec<crate::record::RecoveredFileRow>,
+    /// Track Synth's "Mute the MIDI lane after recording" (plan 5c-2
+    /// Ruling 6): by (sequence, return lane), the MIDI lane the next pass
+    /// that places audio there mutes. Runtime only.
+    synth_mutes: std::collections::BTreeMap<(SeqId, LaneId), LaneId>,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -190,6 +194,7 @@ impl Inner {
             finishing_files: Vec::new(),
             record_faults: Vec::new(),
             recovered: Vec::new(),
+            synth_mutes: Default::default(),
         }
     }
 
@@ -1886,6 +1891,8 @@ impl Session {
                         DestKind::PluginInstrument { slot } => Some((&slot.plugin).into()),
                         DestKind::MidiEndpoint { .. } => None,
                     },
+                    external: d.kind.is_external(),
+                    return_latency_ms: d.return_latency_ms,
                 })
                 .collect())
         })
@@ -2535,7 +2542,7 @@ impl Session {
             if let crate::edit::EditCommand::Settings { edit } = &cmd {
                 crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
             }
-            let c = crate::edit::to_command_in(&cmd, lock(&self.inner).doc())?;
+            let c = crate::edit::to_command(&cmd)?;
             self.execute_with(c, &filter)
         })
     }
@@ -2570,7 +2577,7 @@ impl Session {
                     }
                     _ => {}
                 }
-                core.push(crate::edit::to_command_in(cmd, lock(&self.inner).doc())?);
+                core.push(crate::edit::to_command(cmd)?);
             }
             {
                 let mut inner = lock(&self.inner);
@@ -2626,7 +2633,7 @@ impl Session {
         filter: Option<crate::edit::ViewFilterRow>,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let c = crate::edit::to_command_in(&cmd, lock(&self.inner).doc())?;
+            let c = crate::edit::to_command(&cmd)?;
             {
                 let mut inner = lock(&self.inner);
                 let label = match (&inner.edit_label, inner.history.in_transaction()) {
@@ -4112,17 +4119,23 @@ impl Session {
         let doc = inner.doc().clone();
         let id = seq_id(&doc, seq)?;
         let s = doc.sequence(id)?;
+        // An undone Track Synth leaves no "mute after" behind (Task 8
+        // ruling M10).
+        crate::synth::keep_live_mutes(&doc, &mut inner.synth_mutes);
+        // Each armed audio lane with the synth whose return it records.
         let mut audio: Vec<(
             core_model::ids::LaneId,
             String,
             core_model::lane::InputChannels,
+            Option<DestId>,
         )> = Vec::new();
         let mut midi_lanes = Vec::new();
         for l in s.lanes.iter().filter(|l| l.arm) {
             match &l.input {
-                Some(LaneInput::Audio { channels, .. }) => {
-                    audio.push((l.id, l.name.clone(), *channels))
-                }
+                Some(LaneInput::Audio {
+                    channels,
+                    return_of,
+                }) => audio.push((l.id, l.name.clone(), *channels, *return_of)),
                 Some(LaneInput::Midi { .. }) => midi_lanes.push(l.id),
                 None => {}
             }
@@ -4225,14 +4238,14 @@ impl Session {
         }
         let inputs = host::input_info(self.id).map_or(0, |(_, i)| i.channels);
         let faults = host::faults(self.id);
-        for (_, name, ch) in &audio {
+        for (_, name, ch, _) in &audio {
             if let Some(why) = crate::record::channel_refusal(name, *ch, inputs, &faults) {
                 return fail(crate::events::bad(&why));
             }
         }
         let mut device: Vec<u16> = audio
             .iter()
-            .flat_map(|(_, _, ch)| {
+            .flat_map(|(_, _, ch, _)| {
                 let a = ch.first();
                 [a, ch.last().unwrap_or(a)]
             })
@@ -4256,7 +4269,7 @@ impl Session {
         let now = std::time::SystemTime::now();
         let mut lanes = Vec::new();
         let mut writer_lanes = Vec::new();
-        for (lane, name, ch) in &audio {
+        for (lane, name, ch, ret) in &audio {
             let rel = crate::record::recorded_path(&root, name, now, &reserved);
             reserved.insert(rel.clone());
             let index = |c: u16| device.iter().position(|d| *d == c).unwrap_or(0);
@@ -4273,6 +4286,9 @@ impl Session {
                 name: name.clone(),
                 path: rel,
                 channels: ch.count(),
+                // Read now: an edit during the pass applies from the next
+                // one (plan 5c-2 Ruling 4).
+                return_frames: crate::synth::return_frames(&doc, *ret, rate),
             });
         }
         let writer = (!lanes.is_empty()).then_some(WriterConfig {
@@ -4403,14 +4419,37 @@ impl Session {
             .as_ref()
             .map_or("Record", core_model::command::RecordPass::name);
         if let Some(p) = pass {
-            if let Err(e) = inner
+            // Track Synth's "Mute the MIDI lane after recording" (spec
+            // §6.7): inside the group, so the mute is part of "Record"
+            // (plan 5c-2 Ruling 6).
+            let mutes = crate::synth::mutes_after(&p, &inner.synth_mutes);
+            match inner
                 .history
                 .execute(&Command::Record(p), &ViewFilter::default())
             {
-                inner.news.problems.push(format!(
-                    "The recording could not be added ({e}). Its files are kept."
-                ));
-                inner.keep_recordings.extend(files);
+                Err(e) => {
+                    inner.news.problems.push(format!(
+                        "The recording could not be added ({e}). Its files are kept."
+                    ));
+                    inner.keep_recordings.extend(files);
+                }
+                Ok(_) => {
+                    for (key, seq, lane) in mutes {
+                        inner.synth_mutes.remove(&key);
+                        let mute = Command::Lane(LaneCmd::SetFlags {
+                            seq,
+                            lane,
+                            mute: Some(true),
+                            solo: None,
+                            arm: None,
+                        });
+                        if let Err(e) = inner.history.execute(&mute, &ViewFilter::default()) {
+                            inner.news.problems.push(format!(
+                                "The MIDI lane could not be muted after recording ({e})."
+                            ));
+                        }
+                    }
+                }
             }
         }
         let _ = inner.history.end_group(label);
@@ -4443,6 +4482,77 @@ impl Session {
             Some(crate::record::Ending::Ended) => self.finish_recording(None),
             Some(crate::record::Ending::Because(why)) => self.finish_recording(Some(why)),
         }
+    }
+}
+
+/// Tracking a hardware synth (plan 5c-2; spec §6.7).
+#[uniffi::export]
+impl Session {
+    /// Track Synth… on MIDI lane `lane` of `seq` (spec §6.7), as one undo
+    /// step "Track Synth": the lane recording its external synth's return
+    /// (reused, else "<synth> audio" just below) records device input
+    /// `first` (and the next with `stereo`), has an output path and is
+    /// armed; the MIDI lane is armed with `arm_midi`, else disarmed (plan
+    /// 5c-2 Ruling 5). With `mute_after`, the next pass that records that
+    /// return also mutes the MIDI lane, in its own "Record" step (Ruling
+    /// 6). `Model` when the lane plays no external synth or the channels
+    /// are out of range; `Busy` while recording (Ruling 14).
+    pub fn track_synth(
+        &self,
+        seq: u64,
+        lane: u64,
+        first: u16,
+        stereo: bool,
+        arm_midi: bool,
+        mute_after: bool,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let id = {
+                let inner = lock(&self.inner);
+                if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                    return Err(recording_busy());
+                }
+                seq_id(inner.doc(), seq)?
+            };
+            let channels = if stereo {
+                core_model::lane::InputChannels::Stereo(first)
+            } else {
+                core_model::lane::InputChannels::Mono(first)
+            };
+            let snapshot = self.execute(Command::Lane(LaneCmd::TrackSynth {
+                seq: id,
+                lane: LaneId(lane),
+                channels,
+                arm_midi,
+            }))?;
+            let mut inner = lock(&self.inner);
+            let doc = inner.doc();
+            let audio = doc
+                .lane(id, LaneId(lane))
+                .ok()
+                .and_then(|l| l.midi_dest)
+                .and_then(|d| doc.sequence(id).ok()?.return_lane(d, Some(LaneId(lane))));
+            if let Some(audio) = audio {
+                if mute_after {
+                    inner.synth_mutes.insert((id, audio), LaneId(lane));
+                } else {
+                    inner.synth_mutes.remove(&(id, audio));
+                }
+            }
+            Ok(snapshot)
+        })
+    }
+
+    /// Sets external destination `dest`'s return latency to `ms` (spec
+    /// §4.5a: 0–500), one undo step "Set Return Latency". `Model` for
+    /// another destination or a value out of range.
+    pub fn set_return_latency(&self, dest: u64, ms: f32) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Routing(RoutingCmd::SetReturnLatency {
+                dest: DestId(dest),
+                ms,
+            }))
+        })
     }
 }
 

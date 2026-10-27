@@ -673,6 +673,33 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         auditions.append((dest, pitch, on))
         return auditionSent
     }
+
+    // MARK: Synth tracking (plan 5c-2)
+
+    var trackSynthCalls: [(seq: UInt64, lane: UInt64, first: UInt16, stereo: Bool, armMidi: Bool, muteAfter: Bool)] = []
+    var returnLatencies: [(dest: UInt64, ms: Float)] = []
+    /// Thrown (once, then cleared) by the synth-tracking calls.
+    var synthError: VizError?
+
+    func trackSynth(
+        seq: UInt64, lane: UInt64, first: UInt16, stereo: Bool, armMidi: Bool, muteAfter: Bool
+    ) throws -> DocSnapshot {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        trackSynthCalls.append((seq, lane, first, stereo, armMidi, muteAfter))
+        return commandResult()
+    }
+
+    func setReturnLatency(dest: UInt64, ms: Float) throws -> DocSnapshot {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        returnLatencies.append((dest, ms))
+        return commandResult()
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {

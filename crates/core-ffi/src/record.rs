@@ -203,6 +203,10 @@ pub struct AudioLane {
     pub path: String,
     /// Channels in the file (1 or 2).
     pub channels: u16,
+    /// How much earlier its take lands: the return latency of the synth
+    /// it records, in frames (spec §6.7; plan 5c-2 Ruling 4), read at
+    /// Record.
+    pub return_frames: i64,
 }
 
 /// Why a recording must end now (spec §6.2, §12.2).
@@ -725,8 +729,7 @@ pub fn build(f: &Finished, doc: &Document) -> Result<Option<RecordPass>, String>
         let (_, stem) = MediaItem::file_parts(&a.path);
         audio.push(AudioTake {
             lane: a.lane,
-            // Task 8 of plan 5c-2 gives a `return_of` lane its shift.
-            return_frames: 0,
+            return_frames: a.return_frames,
             media: RecordedMedia {
                 path: a.path.clone(),
                 sample_rate: f.format.sample_rate,
@@ -1144,6 +1147,7 @@ mod tests {
             name: name.into(),
             path: format!("{RECORDED_DIR}/{name}.caf"),
             channels: 1,
+            return_frames: 0,
         };
         let f = Finished {
             seq,

@@ -985,7 +985,7 @@ fn tree_json(nodes: &[UiNodeRow]) -> Vec<Value> {
 /// A lane's input as the channel spells it (`channel`s from 1).
 fn lane_input_json(i: &crate::edit::LaneInputRow) -> Value {
     match i {
-        crate::edit::LaneInputRow::Audio { first, stereo } => {
+        crate::edit::LaneInputRow::Audio { first, stereo, .. } => {
             json!({"kind": "audio", "channel": u32::from(*first) + 1, "stereo": stereo})
         }
         crate::edit::LaneInputRow::Midi { port, channel } => json!({

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{
     force_offline, midi_destination_targets, reset_host, set_fake_input, set_fake_synth,
 };
-use vizdaw_ffi::{EventRow, RecordSpecRow, Session};
+use vizdaw_ffi::{EditCommand, EventRow, LaneEdit, LaneInputRow, RecordSpecRow, Session};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -297,7 +297,7 @@ fn with_the_loopback_input_there_is_no_fake_synth_port_to_fill() {
     );
     assert!(
         t.report.iter().any(|l| l.contains(FAKE_SYNTH_PORT)),
-        "the Fake Synth port is listed: {:?}",
+        "the lane playing Fake Synth is reported unroutable (the port is absent): {:?}",
         t.report
     );
     assert!(midi_destination_targets().is_empty());
@@ -335,5 +335,290 @@ fn a_load_interns_the_return_synth_the_sequence_never_plays() {
         vec![FAKE_SYNTH_PORT.to_string()]
     );
     s.stop().unwrap();
+    s.close().unwrap();
+}
+
+/// Spec §12.3: one pass with an armed `return_of` lane — the clicks land
+/// on the MIDI note starts within ±1 ms, with `return_latency_ms` set to
+/// the fake delay.
+#[test]
+fn a_return_lane_lands_on_the_notes_that_played_it() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    s.set_return_latency(d.synth.0, DELAY_MS as f32).unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Return Latency")
+    );
+    let dest = s
+        .destinations()
+        .unwrap()
+        .into_iter()
+        .find(|x| x.id == d.synth.0)
+        .unwrap();
+    assert!(dest.external);
+    assert_eq!(dest.return_latency_ms, DELAY_MS as f32);
+    record_to_the_third_note(&s, d.seq);
+    let got = clicks(&s, d.seq.0, d.rec.0);
+    assert_eq!(got.len(), 3, "{got:?}");
+    for (at, note) in got.iter().zip([BEAT, 2 * BEAT, 3 * BEAT]) {
+        assert!(
+            (at - note).abs() <= MS,
+            "a click landed at {at}, its note at {note}"
+        );
+    }
+    // The region starts where recording did, its file offset taking the
+    // synth's latency.
+    let r = regions(&s, d.seq.0, d.rec.0);
+    assert_eq!((r[0].tick, r[0].source_offset), (0, 25 * MS as u64));
+    s.close().unwrap();
+}
+
+/// Spec §6.7, §12.3: Track Synth sets up and arms in one undo step; run
+/// again it reuses the lane; it refuses what it cannot set up and
+/// changes nothing then.
+#[test]
+fn track_synth_sets_up_and_arms_in_one_undo_step() {
+    let g = serial(Some(DELAY_MS), None);
+    let mut b = Builder::new();
+    let synth = b.dest(FAKE_SYNTH_PORT, FAKE_SYNTH_PORT, 0).unwrap();
+    let piano = b.dest("Piano", "builtin:synth", 0).unwrap();
+    let (seq, part) = b.sequence("S", "Part", Some(synth)).unwrap();
+    let keys = b.lane(seq, "Keys", Some(piano)).unwrap();
+    let s = untitled(&g, b.finish());
+    s.track_synth(seq.0, part.0, 2, false, false, false)
+        .unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Track Synth")
+    );
+    let lanes = s.lanes(seq.0).unwrap();
+    let names: Vec<&str> = lanes.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["Part", "Fake Synth audio", "Keys"]);
+    assert_eq!(
+        lanes[1].input,
+        Some(LaneInputRow::Audio {
+            first: 2,
+            stereo: false,
+            return_of: Some(synth.0),
+        })
+    );
+    assert!(lanes[1].arm && !lanes[0].arm);
+    assert!(lanes[1].audio_out.is_some());
+    s.track_synth(seq.0, part.0, 4, true, true, false).unwrap();
+    let lanes = s.lanes(seq.0).unwrap();
+    assert_eq!(lanes.len(), 3, "the same lane, set up again");
+    assert_eq!(
+        lanes[1].input,
+        Some(LaneInputRow::Audio {
+            first: 4,
+            stereo: true,
+            return_of: Some(synth.0),
+        })
+    );
+    assert!(lanes[0].arm);
+    s.undo().unwrap();
+    s.undo().unwrap();
+    assert_eq!(s.lanes(seq.0).unwrap().len(), 2);
+    let v = s.snapshot().unwrap().version;
+    for (lane, first) in [(keys.0, 0u16), (part.0, 300), (999, 0)] {
+        assert!(
+            s.track_synth(seq.0, lane, first, false, false, false)
+                .is_err(),
+            "lane {lane}, channel {first}"
+        );
+    }
+    assert!(s.track_synth(999, part.0, 0, false, false, false).is_err());
+    assert_eq!(s.snapshot().unwrap().version, v, "nothing changed");
+    s.close().unwrap();
+}
+
+/// Spec §6.7, §12.3: with the MIDI lane armed too, a loop pass makes MIDI
+/// and audio takes together; "Mute the MIDI lane after recording" mutes
+/// it in the same "Record" step (plan 5c-2 Ruling 6).
+#[test]
+fn a_loop_pass_makes_midi_and_audio_takes_together_and_mutes_after() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 1);
+    let s = untitled(&g, d.doc.clone());
+    s.set_return_latency(d.synth.0, DELAY_MS as f32).unwrap();
+    s.track_synth(d.seq.0, d.part.0, 2, false, true, true)
+        .unwrap();
+    let mut spec = spec();
+    spec.looped = true;
+    s.record(d.seq.0, spec).unwrap();
+    // One bar is 96 000 frames: a note in pass 1, then a beat and a half
+    // into pass 2.
+    wait_until("a little of pass 1", || frames(&s) >= 12_000);
+    assert!(s.inject_midi("Keys".into(), vec![0x90, 70, 100]).unwrap());
+    wait_until("an eighth on", || frames(&s) >= 24_000);
+    assert!(s.inject_midi("Keys".into(), vec![0x80, 70, 0]).unwrap());
+    wait_until("pass 2", || {
+        let r = s.record_state().unwrap();
+        r.pass >= 2 && frames(&s) >= 96_000 + 36_000
+    });
+    s.stop().unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Record"));
+    let lane = |id: LaneId| {
+        s.lanes(d.seq.0)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.id == id.0)
+            .unwrap()
+    };
+    let (part, rec) = (lane(d.part), lane(d.rec));
+    assert_eq!(part.take_count, rec.take_count, "matching takes");
+    assert_eq!(rec.take_count, 3, "one take per pass, besides the first");
+    assert!(part.mute, "muted after recording");
+    s.undo().unwrap();
+    let (part, rec) = (lane(d.part), lane(d.rec));
+    assert!(!part.mute, "the mute is part of the Record step");
+    assert_eq!((part.take_count, rec.take_count), (1, 1));
+    s.close().unwrap();
+}
+
+/// Plan 5c-2 Ruling 2 over the FFI: return latencies outside 0–500 ms,
+/// not finite, or for a destination that is not an external synth are
+/// refused and change nothing.
+#[test]
+fn hostile_return_latencies_are_refused() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let mut b = Builder::from_doc(d.doc.clone());
+    let piano = b.dest("Piano", "builtin:synth", 0).unwrap();
+    let s = untitled(&g, b.finish());
+    let v = s.snapshot().unwrap().version;
+    for (dest, ms) in [
+        (d.synth.0, -1.0f32),
+        (d.synth.0, 500.5),
+        (d.synth.0, f32::NAN),
+        (d.synth.0, f32::INFINITY),
+        (piano.0, 10.0),
+        (999, 10.0),
+    ] {
+        assert!(s.set_return_latency(dest, ms).is_err(), "{dest} {ms}");
+    }
+    assert_eq!(s.snapshot().unwrap().version, v);
+    let dests = s.destinations().unwrap();
+    assert!(dests.iter().all(|x| x.return_latency_ms == 0.0));
+    assert!(dests.iter().any(|x| x.id == piano.0 && !x.external));
+    s.close().unwrap();
+}
+
+fn lane_named(s: &Session, seq: SeqId, name: &str) -> vizdaw_ffi::LaneRow {
+    s.lanes(seq.0)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == name)
+        .unwrap()
+}
+
+fn set_input(s: &Session, seq: SeqId, lane: u64, input: Option<LaneInputRow>) {
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetInput {
+                seq: seq.0,
+                lane,
+                input,
+            },
+        },
+        None,
+    )
+    .unwrap();
+}
+
+/// Task 2 carry (plan 5c-2 Task 8): a row's `return_of` is the lane's
+/// link, so a `SetInput` without one leaves plain audio, unlinked.
+#[test]
+fn a_set_input_without_a_return_unlinks_the_lane() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let input = |s: &Session| lane_named(s, d.seq, "Rec").input;
+    assert_eq!(
+        input(&s),
+        Some(LaneInputRow::Audio {
+            first: 2,
+            stereo: false,
+            return_of: Some(d.synth.0),
+        })
+    );
+    let plain = LaneInputRow::Audio {
+        first: 3,
+        stereo: true,
+        return_of: None,
+    };
+    set_input(&s, d.seq, d.rec.0, Some(plain.clone()));
+    assert_eq!(input(&s), Some(plain), "unlinked");
+    let linked = LaneInputRow::Audio {
+        first: 3,
+        stereo: true,
+        return_of: Some(d.synth.0),
+    };
+    set_input(&s, d.seq, d.rec.0, Some(linked.clone()));
+    assert_eq!(input(&s), Some(linked), "linked again");
+    s.close().unwrap();
+}
+
+/// Task 8 ruling M10: "Mute the MIDI lane after recording" does not
+/// outlive an undo of the Track Synth that asked for it, even when a
+/// plain lane later takes the undone return lane's ID and records.
+#[test]
+fn an_undone_track_synth_mutes_nothing_after_recording() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(false, 2);
+    let s = untitled(&g, d.doc.clone());
+    s.track_synth(d.seq.0, d.part.0, 2, false, false, true)
+        .unwrap();
+    let undone = lane_named(&s, d.seq, "Fake Synth audio").id;
+    s.undo().unwrap();
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::Add {
+                seq: d.seq.0,
+                name: "Again".into(),
+                index: None,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let again = lane_named(&s, d.seq, "Again").id;
+    assert_eq!(again, undone, "the undone lane's ID comes back");
+    set_input(
+        &s,
+        d.seq,
+        again,
+        Some(LaneInputRow::Audio {
+            first: 2,
+            stereo: false,
+            return_of: None,
+        }),
+    );
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetFlags {
+                seq: d.seq.0,
+                lane: again,
+                mute: None,
+                solo: None,
+                arm: Some(true),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    record_to_the_third_note(&s, d.seq);
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Record"));
+    assert_eq!(
+        regions(&s, d.seq.0, again).len(),
+        1,
+        "the pass placed audio there"
+    );
+    assert!(
+        !lane_named(&s, d.seq, "Part").mute,
+        "the MIDI lane is not muted"
+    );
     s.close().unwrap();
 }

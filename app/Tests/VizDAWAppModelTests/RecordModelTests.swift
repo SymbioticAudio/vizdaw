@@ -267,7 +267,8 @@ import VizDAWCore
                     ("seq", .int(value: 3)), ("lane", .int(value: 31)), ("kind", .text(value: "audio")),
                     ("channel", .int(value: 3)), ("stereo", .flag(value: true)),
                 ], m, s, id) == nil)
-        #expect(f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: .audio(first: 2, stereo: true))))
+        #expect(
+            f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: .audio(first: 2, stereo: true, returnOf: nil))))
         _ = run(
             "lane.set_input",
             [

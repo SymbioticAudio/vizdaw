@@ -123,10 +123,12 @@ fn inputs_and_monitor_modes_are_lane_edits() {
         LaneInputRow::Audio {
             first: 300,
             stereo: false,
+            return_of: None,
         },
         LaneInputRow::Audio {
             first: 255,
             stereo: true,
+            return_of: None,
         },
         LaneInputRow::Midi {
             port: None,
@@ -290,6 +292,7 @@ fn a_monitored_input_is_heard_through_its_path() {
             input: Some(LaneInputRow::Audio {
                 first: 0,
                 stereo: false,
+                return_of: None,
             }),
         },
     )
