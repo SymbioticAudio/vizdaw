@@ -1308,6 +1308,11 @@ fn arms_meters_counts_in_and_draws_the_take() {
         i["levels"][0].as_f64().is_some_and(|l| l > 0.2)
     });
     assert_eq!(input["channels"], 3, "{input}");
+    assert_eq!(
+        input["levels"].as_array().map(Vec::len),
+        Some(3),
+        "a level per device channel: {input}"
+    );
     assert_eq!(input["opening"], false, "{input}");
     let t = app.call("state.get", json!({"target": "transport", "window": w}));
     assert_eq!(t["playing"], false, "nothing played: {t}");
@@ -1349,6 +1354,7 @@ fn arms_meters_counts_in_and_draws_the_take() {
     );
     let t = wait_for_state(&mut app, &w, "transport", |t| t["counting_in"] == true);
     assert_eq!(t["playing"], false, "{t}");
+    assert_eq!(t["tick"], json!(0), "the timeline stands at the start: {t}");
     let r = app.call("state.get", json!({"target": "record", "window": w}));
     assert_eq!(
         (r["recording"].clone(), r["frames"].clone()),

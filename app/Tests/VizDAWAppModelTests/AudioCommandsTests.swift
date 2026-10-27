@@ -51,7 +51,9 @@ import VizDAWCore
             [("buffer_frames", .int(value: 2048))], [("buffer_frames", .int(value: -128))],
             [("latency_trim", .int(value: 192_001))], [("latency_trim", .int(value: .min))],
             [("input_device", .text(value: String(repeating: "x", count: 300)))],
-            [("input_device", .text(value: "a\nb"))],
+            [("input_device", .text(value: "a\nb"))], [("input_device", .text(value: "a\tb"))],
+            // 200 graphemes, 400 scalars: over the core's 255.
+            [("input_device", .text(value: String(repeating: "e\u{301}", count: 200)))],
             // Wrong types and unknown keys alone change nothing.
             [("buffer_frames", .text(value: "128"))], [("software_monitoring", .int(value: 1))],
             [("junk", .text(value: "x"))],
@@ -83,6 +85,9 @@ import VizDAWCore
             [("name", .text(value: "A")), ("port", .text(value: "P")), ("channel", .int(value: 0))],
             [("name", .text(value: "A")), ("port", .text(value: "P")), ("channel", .int(value: 17))],
             [("name", .text(value: String(repeating: "x", count: 256))), ("port", .text(value: "P"))],
+            [("name", .text(value: "A\tB")), ("port", .text(value: "P"))],
+            [("name", .text(value: "A")), ("port", .text(value: "P\u{7}"))],
+            [("name", .text(value: String(repeating: "e\u{301}", count: 200))), ("port", .text(value: "P"))],
         ] {
             #expect(failure(run("destination.add_midi", bad, s, id))?.code == .invalidParams, "\(bad)")
         }

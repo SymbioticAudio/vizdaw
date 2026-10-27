@@ -995,10 +995,18 @@ fn offline_choice() -> (Option<FakeInput>, Option<f64>) {
 /// 25; "New MIDI Destination…"): the running host's (what its loads
 /// resolve ports against) when there is one; else the system's CoreMIDI
 /// destinations, or offline the fake synth's port when an offline host
-/// would have it (Task 11 review m3). Infallible: a panic in CoreMIDI's
-/// listing answers no ports rather than crossing the FFI (pre-flight M5).
+/// would have it (Task 11 review m3). Infallible: the whole body runs
+/// inside `catch_unwind`, so a panic in either CoreMIDI listing (a live
+/// host's ports are one too) answers no ports rather than crossing the
+/// FFI (pre-flight M5; Task 12 review I1). [`lock`] recovers a poisoned
+/// `HOST`, so later callers are unaffected.
 #[uniffi::export]
 pub fn midi_destination_ports() -> Vec<String> {
+    std::panic::catch_unwind(destination_ports).unwrap_or_default()
+}
+
+/// [`midi_destination_ports`]' body, which may panic.
+fn destination_ports() -> Vec<String> {
     if let Some(ports) = lock(&HOST).as_ref().map(|h| h.engine.ports()) {
         return ports.into_iter().map(|p| p.name).collect();
     }
@@ -1010,13 +1018,10 @@ pub fn midi_destination_ports() -> Vec<String> {
     }
     #[cfg(target_os = "macos")]
     {
-        std::panic::catch_unwind(|| {
-            platform_macos::midi::list_destinations()
-                .into_iter()
-                .map(|p| p.name)
-                .collect()
-        })
-        .unwrap_or_default()
+        platform_macos::midi::list_destinations()
+            .into_iter()
+            .map(|p| p.name)
+            .collect()
     }
     #[cfg(not(target_os = "macos"))]
     {

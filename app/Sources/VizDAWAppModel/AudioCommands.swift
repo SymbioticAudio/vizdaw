@@ -41,6 +41,15 @@ public enum AudioCommands {
     /// The latency trim's range in frames (5c `MAX_TRIM`).
     public static let maxTrim: Int64 = 192_000
 
+    /// A name the core takes as it is (Task 12 review m1): at most 255
+    /// Unicode scalars and no control characters (category Cc), as the
+    /// core's `chars()` and `char::is_control` count them, so a bad name
+    /// is `invalid_params` here, not the core's `failed`.
+    static func fitsCore(_ t: String) -> Bool {
+        t.unicodeScalars.count <= 255
+            && !t.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
+    }
+
     /// `audio.set`'s arguments as a change; nil for a value out of range
     /// or no value at all.
     public static func change(_ args: [ControlArg]) -> AudioChange? {
@@ -52,7 +61,7 @@ public enum AudioCommands {
         }
         if let name = args.text("input_device") {
             let t = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard t.count <= 255, !t.contains(where: { $0.isNewline }) else { return nil }
+            guard fitsCore(t) else { return nil }
             c.inputDevice = .some(t.isEmpty ? nil : t)
         }
         if let n = args.int("latency_trim") {
@@ -84,7 +93,7 @@ public enum AudioCommands {
         let name = args.text("name")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let port = args.text("port")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let channel = args.int("channel") ?? 1
-        guard !name.isEmpty, !port.isEmpty, name.count <= 255, port.count <= 255, (1...16).contains(channel) else {
+        guard !name.isEmpty, !port.isEmpty, fitsCore(name), fitsCore(port), (1...16).contains(channel) else {
             return .failed(
                 .of(
                     .invalidParams,
