@@ -1392,6 +1392,7 @@ impl Session {
                     host_time_ns: h.host_time_ns,
                     ticks_per_second: crate::clock::ticks_per_second(doc, Some(h.seq), h.tick),
                     rate_mismatch: h.rate_mismatch,
+                    counting_in: h.counting_in,
                 },
                 None => {
                     let tick = inner.cursor.unwrap_or(Tick::ZERO);
@@ -1416,6 +1417,7 @@ impl Session {
                         host_time_ns,
                         ticks_per_second: crate::clock::ticks_per_second(doc, seq, tick),
                         rate_mismatch: false,
+                        counting_in: false,
                     }
                 }
             })
@@ -3814,8 +3816,8 @@ impl Session {
     /// under `Media/Recorded/`, armed MIDI lanes record what they hear, and
     /// at Stop everything recorded becomes one undo step "Record". `Model`
     /// when no armed lane has an input, an audio lane names a channel the
-    /// input does not have, the spec is out of range, or count-in is asked
-    /// for (plan 5d plays it); `Busy` while recording or finishing a pass,
+    /// input does not have, or the spec is out of range; `Busy` while
+    /// recording or finishing a pass,
     /// while an edit is open, while a project format change has not been
     /// applied (review I-1), or when the disk is almost full. While it
     /// records (plan 5c Ruling 17) Play, Locate, Set Loop, another Record,
@@ -4124,11 +4126,6 @@ impl Session {
                 "count-in is 0–4 bars and pre-roll 0–8 bars",
             ));
         }
-        if spec.count_in_bars > 0 {
-            return Err(crate::events::bad(
-                "count-in arrives with the record controls (plan 5d); record with a count-in of 0",
-            ));
-        }
         if let Some(p) = &spec.punch {
             core_model::rules::check_ticks("punch", p.start)?;
             core_model::rules::check_ticks("punch", p.end)?;
@@ -4197,6 +4194,19 @@ impl Session {
                 .max(origin.0),
         );
         let frame = |t: i64| tempo.tick_to_frame(Tick(t));
+        // Count-in (plan 5d-1 Ruling 7): one click per beat of the meter at
+        // the roll point, at its tempo, before the transport rolls.
+        let count_in = (spec.count_in_bars > 0).then(|| {
+            let meter = s.meter.entry_at(play_from).meter;
+            let per_bar = u32::from(meter.num.max(1));
+            let beat = frame(play_from.0.saturating_add(meter.beat_ticks()))
+                .saturating_sub(frame(play_from.0));
+            core_engine::count_in::CountIn {
+                beats: per_bar * u32::from(spec.count_in_bars),
+                per_bar,
+                beat_frames: beat as f64,
+            }
+        });
         let punch = spec.punch.as_ref().map(|p| (frame(p.start), frame(p.end)));
         let looped = spec.looped.then(|| {
             let end = core_model::query::seq_length(&doc, id).unwrap_or(Tick::ZERO);
@@ -4237,13 +4247,14 @@ impl Session {
             host::play(self.id, &doc, id, Some(play_from), None, spec.looped, p)
         })
         .and_then(|r| r);
-        let pending = match played {
+        let mut pending = match played {
             Ok(p) => p,
             Err(e) => {
                 inner.reload_owed = true;
                 return Err(e);
             }
         };
+        pending.count_in(count_in);
         let fail = |e: VizError| {
             let _ = host::stop_recording(self.id);
             Err(e)

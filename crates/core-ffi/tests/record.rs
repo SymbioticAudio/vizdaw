@@ -608,10 +608,6 @@ fn bad_requests_are_refused_and_recording_holds_the_transport() {
     let s = untitled(&g, d.doc.clone());
     for bad in [
         RecordSpecRow {
-            count_in_bars: 1,
-            ..spec()
-        },
-        RecordSpecRow {
             count_in_bars: 5,
             ..spec()
         },
@@ -1541,5 +1537,68 @@ fn an_offline_host_never_connects_midi_sources() {
     assert_eq!(midi_source_connects(), before, "an offline host connected");
     debug_connect_midi_sources();
     assert_eq!(midi_source_connects(), before + 1);
+    s.close().unwrap();
+}
+
+/// Plan 5d-1 Ruling 7 (spec §6.4): a count-in plays before the transport
+/// rolls, the timeline standing still: nothing is captured while it
+/// counts, and the take starts where the recording was asked to.
+#[test]
+fn a_count_in_plays_before_the_pass_and_does_not_move_the_take() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.locate(4 * Q).unwrap();
+    s.record(
+        d.seq.0,
+        RecordSpecRow {
+            count_in_bars: 1,
+            ..spec()
+        },
+    )
+    .unwrap();
+    // One 4/4 bar at 120 BPM: two seconds of clicks.
+    wait_until("the count-in", || s.transport().unwrap().counting_in);
+    assert_eq!(frames(&s), 0, "nothing is captured while it counts");
+    assert!(!s.transport().unwrap().playing);
+    assert!(s.record_state().unwrap().recording);
+    wait_until("the roll", || {
+        !s.transport().unwrap().counting_in && frames(&s) > 0
+    });
+    wait_until("a second of audio", || frames(&s) >= 48_000);
+    s.stop().unwrap();
+    let r = regions(&s, d.seq.0, d.mic.0);
+    assert_eq!(r.len(), 1);
+    assert_eq!((r[0].tick, r[0].source_offset), (4 * Q, 0));
+    s.close().unwrap();
+}
+
+/// Plan 5d-1 M12: Stop during the count-in cancels the pass: nothing was
+/// captured, so no region lands, recording ends, and the transport never
+/// rolls.
+#[test]
+fn stop_during_a_count_in_records_nothing() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(
+        d.seq.0,
+        RecordSpecRow {
+            count_in_bars: 1,
+            ..spec()
+        },
+    )
+    .unwrap();
+    wait_until("the count-in", || s.transport().unwrap().counting_in);
+    s.stop().unwrap();
+    assert!(!s.record_state().unwrap().recording);
+    assert!(!s.transport().unwrap().counting_in);
+    assert!(!s.transport().unwrap().playing);
+    assert_eq!(frames(&s), 0);
+    assert!(
+        regions(&s, d.seq.0, d.mic.0).is_empty(),
+        "nothing was captured"
+    );
+    // Any file the pass opened is left where it is: closing does not fail.
     s.close().unwrap();
 }

@@ -1525,6 +1525,8 @@ pub struct HostState {
     /// The device runs at another rate than the project: regions are
     /// muted (Ruling 20).
     pub rate_mismatch: bool,
+    /// Record's count-in is playing (plan 5d-1 Ruling 7).
+    pub counting_in: bool,
 }
 
 /// A Play [`play`] prepared; [`finish_play`] waits for the disk and
@@ -1682,6 +1684,14 @@ pub fn play(
         pending,
         connect_midi: host.is_live(),
     })
+}
+
+impl HostPlay {
+    /// Plays count-in `c` before the transport rolls (Record's, plan 5d-1
+    /// Ruling 7).
+    pub fn count_in(&mut self, c: Option<core_engine::count_in::CountIn>) {
+        self.pending.set_count_in(c);
+    }
 }
 
 /// Waits for the disk (up to `LOCATE_WAIT`, without any lock: the UI's
@@ -1859,6 +1869,7 @@ pub fn state(
         faults: h.faults.clone(),
         report: h.report.clone(),
         rate_mismatch: h.rate_mismatch,
+        counting_in: h.engine.counting_in(),
     }))
 }
 

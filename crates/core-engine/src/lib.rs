@@ -18,6 +18,7 @@
 )]
 
 pub mod backend;
+pub mod count_in;
 pub mod engine;
 pub mod error;
 #[cfg(feature = "fixtures")]

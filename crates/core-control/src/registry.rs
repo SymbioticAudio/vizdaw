@@ -359,7 +359,7 @@ const RECORD_SET_PARAMS: &[ParamSpec] = &[
         name: "count_in",
         kind: ParamKind::Int { min: 0, max: 4 },
         required: false,
-        help: "Bars of count-in (Record refuses more than 0 until plan 5d plays it).",
+        help: "Bars of count-in: clicks before the transport rolls.",
     },
     ParamSpec {
         name: "pre_roll",

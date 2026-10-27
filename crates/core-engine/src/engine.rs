@@ -101,6 +101,8 @@ pub struct PendingPlay {
     /// Where to wait for the disk (`None`: no wait).
     wait: Option<(StreamWaiter, u64)>,
     until: Option<Tick>,
+    /// The count-in to play before rolling (plan 5d-1 Ruling 7).
+    count_in: Option<crate::count_in::CountIn>,
 }
 
 impl PendingPlay {
@@ -115,6 +117,11 @@ impl PendingPlay {
     /// True when [`PendingPlay::wait`] may wait at all.
     pub fn waits(&self) -> bool {
         self.wait.is_some()
+    }
+
+    /// Plays `c` before rolling (Record's count-in, plan 5d-1 Ruling 7).
+    pub fn set_count_in(&mut self, c: Option<crate::count_in::CountIn>) {
+        self.count_in = c;
     }
 }
 
@@ -986,6 +993,7 @@ impl Engine {
         PendingPlay {
             wait: at.map(|a| (self.streamer.waiter(), a)),
             until,
+            count_in: None,
         }
     }
 
@@ -994,7 +1002,10 @@ impl Engine {
         let until = p
             .until
             .map(|t| self.tempo.as_ref().map_or(0, |m| m.tick_to_frame(t)));
-        self.push(EngineCmd::Play { until })?;
+        self.push(EngineCmd::Play {
+            until,
+            count_in: p.count_in,
+        })?;
         self.commanded_playing = true;
         self.moved_since_play = false;
         Ok(())
@@ -1088,6 +1099,12 @@ impl Engine {
     /// Transport state.
     pub fn state(&self) -> PlayState {
         self.shared.state()
+    }
+
+    /// Whether a count-in plays before the transport rolls (plan 5d-1
+    /// Ruling 7).
+    pub fn counting_in(&self) -> bool {
+        self.shared.counting_in()
     }
 
     /// Reads and clears the fault bits.

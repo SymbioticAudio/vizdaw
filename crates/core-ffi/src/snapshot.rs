@@ -135,6 +135,10 @@ pub struct TransportState {
     /// first Play (F19).
     #[uniffi(default = false)]
     pub rate_mismatch: bool,
+    /// Record's count-in is playing: the transport rolls when it ends
+    /// (plan 5d-1 Ruling 7).
+    #[uniffi(default = false)]
+    pub counting_in: bool,
 }
 
 fn count(n: usize) -> u32 {

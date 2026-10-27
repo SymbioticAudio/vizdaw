@@ -115,7 +115,7 @@ pub struct RecordSpecRow {
     pub punch: Option<crate::selection::TickRange>,
     /// Loop recording over the transport loop (bar 1 to the end).
     pub looped: bool,
-    /// Bars of count-in, 0–4 (refused above 0 until plan 5d plays them).
+    /// Bars of count-in, 0–4 (plan 5d-1 Ruling 7: clicks before the roll).
     pub count_in_bars: u8,
     /// Bars of pre-roll, 0–8.
     pub pre_roll_bars: u8,

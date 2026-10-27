@@ -1,6 +1,7 @@
 //! The real-time renderer and the state it publishes.
 
 use crate::backend::{BlockInfo, BlockTime, InputBlock, MidiOut, StereoBuf};
+use crate::count_in::{CountIn, Counting};
 use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::regions::InputCopy;
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
@@ -159,6 +160,8 @@ pub struct DspLoad {
 pub struct Shared {
     /// Regions play silence (the device refused the project rate, 5a).
     regions_muted: AtomicBool,
+    /// A count-in is playing (plan 5d-1 Ruling 7).
+    counting: AtomicBool,
     position: AtomicU64,
     transport_pos: AtomicU64,
     state: AtomicU8,
@@ -196,6 +199,7 @@ impl Default for Shared {
     fn default() -> Shared {
         Shared {
             regions_muted: AtomicBool::new(false),
+            counting: AtomicBool::new(false),
             position: AtomicU64::new(0),
             transport_pos: AtomicU64::new(0),
             state: AtomicU8::new(0),
@@ -257,6 +261,11 @@ impl Shared {
     /// Transport state.
     pub fn state(&self) -> PlayState {
         PlayState::from_u8(self.state.load(Ordering::Relaxed))
+    }
+
+    /// Whether a count-in plays before the transport rolls.
+    pub fn counting_in(&self) -> bool {
+        self.counting.load(Ordering::Relaxed)
     }
 
     /// True once after playback reached the end and the tail finished.
@@ -422,10 +431,14 @@ pub enum EngineCmd {
     /// with the same shape, its node state.
     SetGraph(Box<Graph>),
     /// Start playing; `until` (a schedule frame) stops it there instead
-    /// of at the end, ignoring the loop (Play Selection, plan 4f).
+    /// of at the end, ignoring the loop (Play Selection, plan 4f). With
+    /// `count_in`, a count-in plays first and the transport rolls when it
+    /// ends (plan 5d-1 Ruling 7).
     Play {
         /// The frame playing stops at.
         until: Option<u64>,
+        /// The count-in to play before rolling.
+        count_in: Option<CountIn>,
     },
     /// Stop (note-offs are sent).
     Stop,
@@ -558,6 +571,9 @@ pub struct Renderer {
     /// Frames rendered since playing reached its end: led regions play
     /// out their last frames meanwhile.
     after_end: u64,
+    /// The count-in playing before the transport rolls, and its last
+    /// clicks after (Ruling 7).
+    counting: Option<Counting>,
 }
 
 /// What a wrap now, after `last` frames played since the roll or the
@@ -709,6 +725,7 @@ impl Renderer {
             wrapped: None,
             seg_mark: 0,
             after_end: 0,
+            counting: None,
         };
         r.prepare(cfg.max_frames);
         r
@@ -830,6 +847,14 @@ impl Renderer {
         }
         self.block_ns = time.host_time_ns;
         self.drain_commands();
+        // A count-in that ends at this block's start rolls the transport.
+        let roll = self
+            .counting
+            .as_mut()
+            .and_then(|c| c.rolls(frames).then(|| c.until()));
+        if let Some(until) = roll {
+            self.roll(until);
+        }
         let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
         if let Some(t) = self.tap.as_deref_mut() {
             match (self.transport.state, self.transport.play_pos(length)) {
@@ -966,6 +991,13 @@ impl Renderer {
             // as for a busy block, the sinks are told they passed once the
             // stragglers are done.
             self.pending_skip = self.pending_skip.saturating_add(u64::from(frames - offset));
+        }
+        if let Some(c) = self.counting.as_mut() {
+            c.render(out, frames);
+            clamp_master(out, 0, frames, &self.shared);
+            if c.done() {
+                self.counting = None;
+            }
         }
         self.end_tap(input, frames, !missed);
         self.publish();
@@ -1272,23 +1304,15 @@ impl Renderer {
                 // New inserts need their automated values.
                 self.auto_last.fill(f64::NAN);
             }
-            EngineCmd::Play { until } => {
-                let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
-                self.transport.end = until;
-                let rolls = self.transport.state != PlayState::Playing;
-                if rolls {
-                    self.since_start = 0;
+            EngineCmd::Play { until, count_in } => {
+                match count_in {
+                    // Counted in: the transport rolls when it ends.
+                    Some(c) if self.transport.state != PlayState::Playing => {
+                        self.counting =
+                            Some(Counting::new(c, until, self.cfg.sample_rate, self.latency));
+                    }
+                    _ => self.roll(until),
                 }
-                self.transport.play(length);
-                if rolls {
-                    self.roll_floor = self.transport.pos;
-                    self.wrapped = None;
-                    self.seg_mark = 0;
-                    self.after_end = 0;
-                }
-                self.seek();
-                self.forget_unautomated();
-                self.auto_last.fill(f64::NAN);
             }
             EngineCmd::Stop => {
                 // The stop is marked where playback stopped, before any
@@ -1301,6 +1325,8 @@ impl Renderer {
                 }
                 self.release_now(true);
                 self.transport.stop();
+                // A count-in still playing never rolls.
+                self.counting = None;
             }
             EngineCmd::Locate(frame) => {
                 self.release_now(true);
@@ -1642,8 +1668,32 @@ impl Renderer {
         }
     }
 
+    /// Starts playing (a Play, or the end of its count-in). // RT
+    fn roll(&mut self, until: Option<u64>) {
+        let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
+        self.transport.end = until;
+        let rolls = self.transport.state != PlayState::Playing;
+        if rolls {
+            self.since_start = 0;
+        }
+        self.transport.play(length);
+        if rolls {
+            self.roll_floor = self.transport.pos;
+            self.wrapped = None;
+            self.seg_mark = 0;
+            self.after_end = 0;
+        }
+        self.seek();
+        self.forget_unautomated();
+        self.auto_last.fill(f64::NAN);
+    }
+
     fn publish(&mut self) {
         let s = &self.shared;
+        s.counting.store(
+            self.counting.is_some_and(|c| !c.rolled()),
+            Ordering::Relaxed,
+        );
         s.position.store(
             self.transport.pos.saturating_sub(self.latency),
             Ordering::Relaxed,

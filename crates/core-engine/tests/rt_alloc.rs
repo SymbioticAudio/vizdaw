@@ -445,4 +445,27 @@ fn render_path_never_allocates() {
     );
     let f = engine.faults();
     assert!(!f.contains(Faults::STREAM_UNDERRUN), "{:?}", f.names());
+
+    // A count-in (plan 5d-1 Task 5): its clicks and the roll it starts,
+    // in blocks of every size.
+    engine.stop().unwrap();
+    let counted = rt_check::count();
+    let mut p = engine.begin_play(None);
+    p.set_count_in(Some(core_engine::count_in::CountIn {
+        beats: 2,
+        per_bar: 2,
+        beat_frames: 4800.0,
+    }));
+    p.wait();
+    engine.finish_play(p).unwrap();
+    for i in 0..60u32 {
+        engine.streamer().service();
+        armed_block(&mut b, 1 + (i * 37) % 1024);
+    }
+    assert_eq!(
+        rt_check::count() - counted,
+        0,
+        "allocations while counting in"
+    );
+    assert_eq!(engine.state(), PlayState::Playing, "the count-in rolled");
 }
