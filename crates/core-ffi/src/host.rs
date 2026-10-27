@@ -79,9 +79,21 @@ static FAKE_INPUT: Mutex<Option<Option<FakeInput>>> = Mutex::new(None);
 /// an offline host opens no audio hardware, so no microphone permission
 /// is asked (plan 5c Global Constraints).
 pub fn fake_input() -> Option<FakeInput> {
-    if let Some(v) = *lock(&FAKE_INPUT) {
-        return v;
+    fake_input_choice().0
+}
+
+/// The fake input and whether the test hook chose it, from one read of
+/// the hook.
+fn fake_input_choice() -> (Option<FakeInput>, bool) {
+    let hook = *lock(&FAKE_INPUT);
+    match hook {
+        Some(v) => (v, true),
+        None => (env_fake_input(), false),
     }
+}
+
+/// The fake input the environment asks for.
+fn env_fake_input() -> Option<FakeInput> {
     if let Some(n) = std::env::var("VIZDAW_AUDIO_LOOPBACK")
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
@@ -107,8 +119,10 @@ static FAKE_SYNTH: Mutex<Option<Option<f64>>> = Mutex::new(None);
 /// The fake synth of offline hosts created from now on (spec §12.1;
 /// plan 5c-2 Ruling 7): `VIZDAW_FAKE_SYNTH=<delay ms>` (0–500; anything
 /// else is ignored) adds the MIDI destination "Fake Synth", which answers
-/// every note on fake input channel 3 that long after it is heard. Tests
-/// choose with `set_fake_synth`. Live hosts never have it.
+/// every note on fake input channel 3 that long after it is heard. Only
+/// with the signals input: with the loopback or no input the host has no
+/// "Fake Synth" (nothing would play it). Tests choose with
+/// `set_fake_synth`. Live hosts never have it.
 ///
 /// The delay the synth really answers with is the backend's: a delay
 /// below one block is allowed but answered one block late (a note is sent
@@ -117,9 +131,21 @@ static FAKE_SYNTH: Mutex<Option<Option<f64>>> = Mutex::new(None);
 /// a note never sounds early. Read `OfflineBackend::synth_delay` after a
 /// run, not this value, for the delay a measurement should find.
 pub fn fake_synth() -> Option<f64> {
-    if let Some(v) = *lock(&FAKE_SYNTH) {
-        return v;
+    fake_synth_choice().0
+}
+
+/// The fake synth's delay and whether the test hook chose it, from one
+/// read of the hook.
+fn fake_synth_choice() -> (Option<f64>, bool) {
+    let hook = *lock(&FAKE_SYNTH);
+    match hook {
+        Some(v) => (v, true),
+        None => (env_fake_synth(), false),
     }
+}
+
+/// The fake synth delay the environment asks for.
+fn env_fake_synth() -> Option<f64> {
     let max = f64::from(core_model::document::MAX_RETURN_LATENCY_MS);
     std::env::var("VIZDAW_FAKE_SYNTH")
         .ok()
@@ -683,6 +709,24 @@ pub fn closing_hosts_waiting() -> usize {
     plugins::closing_hosts()
 }
 
+/// The names of the MIDI destinations the live engine has interned as
+/// targets (test hook; empty without a host).
+#[cfg(feature = "test-hooks")]
+pub fn midi_destination_targets() -> Vec<String> {
+    lock(&HOST).as_ref().map_or_else(Vec::new, |h| {
+        h.engine
+            .targets()
+            .iter()
+            .filter_map(|(_, k)| match k {
+                core_engine::schedule::targets::TargetKind::MidiDestination(p) => {
+                    Some(p.name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    })
+}
+
 /// How many engine loads the host made (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn loads() -> u64 {
@@ -900,14 +944,18 @@ impl Host {
     fn create_any(project: f64) -> Result<Host, VizError> {
         HOSTS_CREATED.fetch_add(1, Ordering::Relaxed);
         if offline_mode() {
-            let synth = fake_synth().map(FakeSynth::new);
+            let (input, input_chosen) = fake_input_choice();
+            let (delay, synth_chosen) = fake_synth_choice();
+            let input = offline_input(input, input_chosen, delay.is_some(), synth_chosen);
+            // Only the signals input plays the synth: with any other, its
+            // queue would fill and drop every note (Task 7 review I1).
+            let synth = delay
+                .filter(|_| input == Some(FakeInput::Signals))
+                .map(FakeSynth::new);
             let mut sinks = OfflineSinks::new(1 << 16);
             if let Some(s) = &synth {
                 sinks = sinks.with_fake_synth(s);
             }
-            let input_chosen = lock(&FAKE_INPUT).is_some();
-            let synth_chosen = lock(&FAKE_SYNTH).is_some();
-            let input = offline_input(fake_input(), input_chosen, synth.is_some(), synth_chosen);
             let log = sinks.log();
             let rate = offline_rate(project);
             let (engine, renderer) = Engine::new(EngineConfig::new(rate), Box::new(sinks))?;
@@ -1988,10 +2036,61 @@ mod tests {
         assert_eq!(offline_input(None, false, true, true), sig);
         // An environment synth and a test's explicit "no input".
         assert_eq!(offline_input(None, true, true, false), None);
-        // A chosen input always stands; no synth brings nothing.
-        assert_eq!(offline_input(lb, true, true, true), lb);
-        assert_eq!(offline_input(lb, false, true, false), lb);
-        assert_eq!(offline_input(None, false, false, false), None);
+        // A chosen input always stands, whoever chose it.
+        for (ic, sc) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(offline_input(lb, ic, true, sc), lb);
+            assert_eq!(offline_input(lb, ic, false, sc), lb);
+            assert_eq!(offline_input(sig, ic, true, sc), sig);
+            assert_eq!(offline_input(sig, ic, false, sc), sig);
+            // No synth brings nothing.
+            assert_eq!(offline_input(None, ic, false, sc), None);
+        }
+    }
+
+    /// Task 7 review M4 (pre-flight M2): `return_dests` leaves out a link
+    /// to a destination that is missing or not external, though
+    /// validation never lets one through.
+    #[test]
+    fn return_dests_keeps_only_external_destinations() {
+        use core_engine::fixtures::Builder;
+        use core_model::command::{Command, LaneCmd};
+        use core_model::lane::InputChannels;
+        let mut b = Builder::new();
+        let synth = b.dest("Synth", "Synth", 0).unwrap();
+        let (seq, _) = b.sequence("S", "Part", None).unwrap();
+        let lane = b.lane(seq, "Rec", None).unwrap();
+        b.run(Command::Lane(LaneCmd::SetInput {
+            seq,
+            lane,
+            input: Some(LaneInput::Audio {
+                channels: InputChannels::Mono(0),
+                return_of: Some(synth),
+            }),
+        }))
+        .unwrap();
+        let doc = b.finish();
+        assert_eq!(return_dests(&doc, seq), vec![synth]);
+        // Unvalidated edits of the serialized document.
+        let edit = |f: &dyn Fn(&mut serde_json::Value)| -> Document {
+            let mut v = serde_json::to_value(&doc).unwrap();
+            f(&mut v);
+            serde_json::from_value(v).unwrap()
+        };
+        let builtin = edit(&|v| {
+            v["instruments"][0]["kind"]["midi_endpoint"]["endpoint_ref"] =
+                core_model::mixer::BUILTIN_SYNTH_REF.into();
+        });
+        assert!(
+            !builtin.instruments()[&synth].kind.is_external(),
+            "{:?}",
+            builtin.instruments()[&synth].kind
+        );
+        assert!(return_dests(&builtin, seq).is_empty());
+        let missing = edit(&|v| {
+            v["instruments"] = serde_json::json!([]);
+        });
+        assert!(missing.instruments().is_empty());
+        assert!(return_dests(&missing, seq).is_empty());
     }
 
     /// Task 8 note: a stream's input (and its latencies) reach the host's

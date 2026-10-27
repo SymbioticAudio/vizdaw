@@ -22,7 +22,9 @@ use core_model::time::Tick;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use vizdaw_ffi::host::{force_offline, reset_host, set_fake_input, set_fake_synth};
+use vizdaw_ffi::host::{
+    force_offline, midi_destination_targets, reset_host, set_fake_input, set_fake_synth,
+};
 use vizdaw_ffi::{EventRow, RecordSpecRow, Session};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -252,4 +254,86 @@ fn the_return_lanes_synths_are_named_at_load() {
     assert_eq!(vizdaw_ffi::host::return_dests(&d.doc, d.seq), vec![d.synth]);
     let plain = doc(false, 2);
     assert!(vizdaw_ffi::host::return_dests(&plain.doc, plain.seq).is_empty());
+}
+
+/// Task 7 review I1: with the loopback input nothing plays the fake
+/// synth, so the host has no "Fake Synth" port (a lane playing it is
+/// unroutable) and notes sent its way never fill a queue nothing drains:
+/// thousands of them raise no `midi-dropped` fault.
+#[test]
+fn with_the_loopback_input_there_is_no_fake_synth_port_to_fill() {
+    let g = serial(Some(DELAY_MS), Some(FakeInput::Loopback(1000)));
+    let d = doc(false, 8);
+    let mut b = Builder::from_doc(d.doc.clone());
+    b.run(Command::Lane(LaneCmd::SetMonitor {
+        seq: d.seq,
+        lane: d.part,
+        monitor: MonitorMode::Input,
+    }))
+    .unwrap();
+    let s = untitled(&g, b.finish());
+    s.play(d.seq.0).unwrap();
+    wait_until("the transport", || s.transport().unwrap().playing);
+    // 4200 notes (8400 events, over the synth's 4096), 50 at a time.
+    for _ in 0..84 {
+        let mut bytes = Vec::new();
+        for _ in 0..50 {
+            bytes.extend_from_slice(&[0x90, 60, 100, 0x80, 60, 0]);
+        }
+        wait_until("room in the MIDI input queue", || {
+            s.inject_midi("Keys".into(), bytes.clone()).is_ok()
+        });
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let from = s.transport().unwrap().tick;
+    wait_until("the last notes to play", || {
+        s.transport().unwrap().tick >= from + Q / 4
+    });
+    let t = s.transport().unwrap();
+    assert!(
+        !t.faults.iter().any(|f| f == "midi-dropped"),
+        "{:?}",
+        t.faults
+    );
+    assert!(
+        t.report.iter().any(|l| l.contains(FAKE_SYNTH_PORT)),
+        "the Fake Synth port is listed: {:?}",
+        t.report
+    );
+    assert!(midi_destination_targets().is_empty());
+    s.stop().unwrap();
+    s.close().unwrap();
+}
+
+/// Task 7 review M3: every load hands the engine the return lanes'
+/// synths, so it interns one the sequence never plays (Measure plays it;
+/// plan 5c-2 Ruling 10), once however many lanes return it.
+#[test]
+fn a_load_interns_the_return_synth_the_sequence_never_plays() {
+    let g = serial(Some(DELAY_MS), None);
+    let mut b = Builder::new();
+    let synth = b.dest(FAKE_SYNTH_PORT, FAKE_SYNTH_PORT, 0).unwrap();
+    let (seq, _part) = b.sequence("S", "Part", None).unwrap();
+    for name in ["Rec", "Rec 2"] {
+        let lane = b.lane(seq, name, None).unwrap();
+        b.run(Command::Lane(LaneCmd::SetInput {
+            seq,
+            lane,
+            input: Some(LaneInput::Audio {
+                channels: InputChannels::Mono(2),
+                return_of: Some(synth),
+            }),
+        }))
+        .unwrap();
+    }
+    let doc = b.finish();
+    assert_eq!(vizdaw_ffi::host::return_dests(&doc, seq), vec![synth]);
+    let s = untitled(&g, doc);
+    s.play(seq.0).unwrap();
+    assert_eq!(
+        midi_destination_targets(),
+        vec![FAKE_SYNTH_PORT.to_string()]
+    );
+    s.stop().unwrap();
+    s.close().unwrap();
 }
