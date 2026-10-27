@@ -364,9 +364,31 @@ fn connect_and_report() {
 /// machine's real MIDI sources (pre-flight M7).
 pub fn listen_to_midi_sources() {
     let live = lock(&HOST).as_ref().is_some_and(Host::is_live);
+    #[cfg(feature = "test-hooks")]
+    let live = live || PRETEND_LIVE_MIDI.load(Ordering::Relaxed);
     if live {
         connect_and_report();
     }
+}
+
+/// [`listen_to_midi_sources`] on a thread of its own: an arm never waits
+/// for a cold CoreMIDI server (plan 5d-1 Ruling 17).
+pub fn listen_to_midi_sources_soon() {
+    let _ = std::thread::Builder::new()
+        .name("vizdaw-midi-connect".into())
+        .spawn(listen_to_midi_sources);
+}
+
+/// Offline hosts connect the MIDI sources as live ones do (test hook:
+/// counts connects; test builds connect nothing real).
+#[cfg(feature = "test-hooks")]
+static PRETEND_LIVE_MIDI: AtomicBool = AtomicBool::new(false);
+
+/// Makes [`listen_to_midi_sources`] connect for offline hosts too (test
+/// hook, plan 5d-1 Ruling 17).
+#[cfg(feature = "test-hooks")]
+pub fn debug_pretend_live_midi(on: bool) {
+    PRETEND_LIVE_MIDI.store(on, Ordering::Relaxed);
 }
 
 /// Holds the next rebuild between dropping the old host and making its
@@ -456,6 +478,20 @@ pub fn wait_input(limit: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// Whether the lanes of `seq` want the engine while it stands still (plan
+/// 5d-1 Ruling 16): an input to open, a monitored input or MIDI thru. The
+/// same test as [`Host::wants_live`], asked of the document instead of the
+/// engine's installed spec.
+pub fn wants_live(doc: &Document, seq: SeqId) -> bool {
+    wants_audio_input(doc, seq) || spec_wants_live(&input_spec(doc, seq))
+}
+
+/// Whether input spec `spec` listens to anything: a monitored audio input,
+/// or a MIDI lane (every one [`input_spec`] lists is armed or plays thru).
+fn spec_wants_live(spec: &InputSpec) -> bool {
+    !spec.monitor.is_empty() || !spec.midi.is_empty()
 }
 
 /// Whether the lanes of `seq` need audio input: an armed lane with an
@@ -1518,8 +1554,7 @@ impl Host {
     /// The engine monitors or plays thru: it has audio input open or
     /// routes for monitored audio or MIDI sources.
     fn wants_live(&self) -> bool {
-        let i = self.engine.inputs();
-        self.input_open || !i.monitor.is_empty() || !i.midi.is_empty()
+        self.input_open || spec_wants_live(self.engine.inputs())
     }
 
     /// Ends the installed measurement (its sounding note ends) and makes
@@ -2455,6 +2490,53 @@ pub fn reload(
         }
         _ => Ok(()),
     }
+}
+
+/// Claims the engine for session `owner`'s sequence `seq` of `doc` while
+/// it stands idle (plan 5d-1 Ruling 16, 5c carry I2): no session plays,
+/// records or measures. It loads `seq` stopped at `at` and opens the input
+/// its lanes want, so armed and monitored lanes are heard and thru plays
+/// before the first Play. Nothing when `owner` holds the engine with `seq`
+/// loaded already, or when the engine is busy (never taken then). True
+/// when it claimed a live host: the caller connects the MIDI sources
+/// without the lock ([`listen_to_midi_sources_soon`]).
+pub fn claim_idle(
+    owner: u64,
+    doc: &Document,
+    seq: SeqId,
+    at: Tick,
+    looped: bool,
+    plugins: Option<&mut PluginHost>,
+) -> Result<bool, VizError> {
+    if lock(&HOST)
+        .as_ref()
+        .is_some_and(|h| h.owner == owner && h.seq == seq)
+    {
+        return Ok(false);
+    }
+    let (mut slot, _) = match claim_host(owner, doc, plugins, true) {
+        Ok(s) => s,
+        Err(VizError::Busy { .. }) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let host = slot.as_mut().ok_or_else(|| VizError::Internal {
+        message: "engine host missing".into(),
+    })?;
+    if host.owner != owner {
+        // Another session's held position and plugins go with its claim.
+        host.record_hold = false;
+        host.pending_input = None;
+    }
+    host.engine.stop()?;
+    host.load(owner, doc, seq, looped)?;
+    host.engine.locate_tick(at)?;
+    host.owner = owner;
+    host.seq = seq;
+    host.want_play = false;
+    host.until = None;
+    host.epoch = next_epoch();
+    host.ensure_input(wants_audio_input(doc, seq))?;
+    Ok(host.is_live())
 }
 
 /// `owner`'s view of the transport, or `None` when it does not hold the

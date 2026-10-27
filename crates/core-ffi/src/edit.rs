@@ -466,6 +466,22 @@ pub enum LaneEdit {
     },
 }
 
+/// The sequence whose engine claim `cmd` asks for (plan 5d-1 Ruling 16):
+/// an edit of a lane's arm, monitor or input.
+pub fn claims_engine(cmd: &EditCommand) -> Option<u64> {
+    match cmd {
+        EditCommand::Lane {
+            edit:
+                LaneEdit::SetInput { seq, .. }
+                | LaneEdit::SetMonitor { seq, .. }
+                | LaneEdit::SetFlags {
+                    seq, arm: Some(_), ..
+                },
+        } => Some(*seq),
+        _ => None,
+    }
+}
+
 /// Whether `cmd` changes a lane's arm or input: the input that failed to
 /// open is tried again (plan 5d-1 Ruling 15).
 pub fn retries_input(cmd: &EditCommand) -> bool {

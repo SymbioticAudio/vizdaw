@@ -992,6 +992,43 @@ impl Session {
         host::finish_play(pending)
     }
 
+    /// After an edit of a lane's arm, monitor or input in `seq` (plan 5d-1
+    /// Rulings 16–17): claims an idle engine for `seq` when its lanes want
+    /// it, so they are heard before the first Play, and reconnects the MIDI
+    /// sources off this thread. Never while this session records; a failure
+    /// is a fault, never the edit's.
+    fn claim_for_input(&self, seq: SeqId) {
+        let mut inner = lock(&self.inner);
+        if inner.recording.is_some() || inner.finishing {
+            return;
+        }
+        if !host::wants_live(inner.doc(), seq) {
+            return;
+        }
+        let at = match (inner.cursor, inner.cursor_seq) {
+            (Some(t), None) => t,
+            (Some(t), Some(s)) if s == seq => t,
+            _ => Tick::ZERO,
+        };
+        let looped = inner.looped;
+        inner.mark(self.id, true);
+        let r = plugins::with(self.id, |p| {
+            host::claim_idle(self.id, inner.doc(), seq, at, looped, p)
+        })
+        .and_then(|r| r);
+        match r {
+            Ok(_) => {
+                if host::holder() == Some(self.id) {
+                    inner.cursor = None;
+                    inner.cursor_seq = Some(seq);
+                }
+            }
+            Err(e) => inner.reload_fault = Some(format!("the engine could not be claimed: {e}")),
+        }
+        drop(inner);
+        host::listen_to_midi_sources_soon();
+    }
+
     /// Why Measure or Track Synth cannot start or take its step now:
     /// `Busy` while this session records or has an edit open. Playback
     /// alone is not checked here: Track Synth stays allowed while playing,
@@ -2630,7 +2667,11 @@ impl Session {
             {
                 return self.add_lane_monitored(c, SeqId(*seq), monitor, &filter);
             }
-            self.execute_with(c, &filter)
+            let snapshot = self.execute_with(c, &filter)?;
+            if let Some(seq) = crate::edit::claims_engine(&cmd) {
+                self.claim_for_input(SeqId(seq));
+            }
+            Ok(snapshot)
         })
     }
 
@@ -2705,7 +2746,12 @@ impl Session {
             inner.version += 1;
             self.commit_held(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
-            inner.snapshot()
+            let snapshot = inner.snapshot()?;
+            drop(inner);
+            if let Some(seq) = cmds.iter().find_map(crate::edit::claims_engine) {
+                self.claim_for_input(SeqId(seq));
+            }
+            Ok(snapshot)
         })
     }
 
@@ -4650,7 +4696,11 @@ impl Session {
                     inner.synth_mutes.remove(&(id, audio));
                 }
             }
-            inner.snapshot()
+            let snapshot = inner.snapshot()?;
+            drop(inner);
+            // Track Synth arms the return lane (plan 5d-1 Ruling 16).
+            self.claim_for_input(id);
+            Ok(snapshot)
         })
     }
 
