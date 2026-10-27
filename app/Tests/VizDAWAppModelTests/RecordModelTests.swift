@@ -291,6 +291,15 @@ import VizDAWCore
                 "lane.set_input",
                 [("seq", .int(value: 3)), ("lane", .int(value: 31)), ("kind", .text(value: "audio"))], m, s, id)?
                 .message.contains("input.channels") == true)
+        // The core's Busy (an open edit, plan 5d-1 Ruling 20; recording,
+        // Ruling 18) is `busy`, not `failed` (5c-2 carry finding 13).
+        for message in ["Finish the open edit first.", "Stop recording to change which lanes record."] {
+            f.editError = .Busy(message: message)
+            let r = run(
+                "lane.set_input",
+                [("seq", .int(value: 3)), ("lane", .int(value: 31)), ("kind", .text(value: "none"))], m, s, id)
+            #expect(r?.code == .busy && r?.message == message)
+        }
     }
 
     @Test func midiInjectSendsHexBytes() throws {

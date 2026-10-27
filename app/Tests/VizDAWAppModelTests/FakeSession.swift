@@ -132,6 +132,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         snap.dirty = false
     }
 
+    /// A Save came while recording (plan 5d-1 Ruling 19).
+    var savesAfterPassRow = false
+
+    func savesAfterPass() throws -> Bool { savesAfterPassRow }
+
     func saveAs(path: String) throws {
         savedPath = path
         snap.dirty = false

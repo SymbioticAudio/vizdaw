@@ -701,7 +701,8 @@ fn a_refused_microphone_is_why_record_refuses() {
 
 /// Task 11 review I1: an edit during a pass that no longer wants audio
 /// input (the only audio lane disarmed) neither closes nor restarts the
-/// input under the pass; the change applies once the pass ends.
+/// input under the pass; since plan 5d-1 Ruling 18 it is refused (`Busy`)
+/// and applies when made again after the pass ends.
 #[test]
 fn input_stays_open_until_the_pass_ends() {
     use vizdaw_ffi::edit::{EditCommand, LaneEdit};
@@ -712,25 +713,26 @@ fn input_stays_open_until_the_pass_ends() {
     assert_eq!(s.debug_input_open(), Some(true));
     let changes = s.debug_input_changes().unwrap();
     wait_until("half a second of audio", || frames(&s) >= 24_000);
-    s.edit(
-        EditCommand::Lane {
-            edit: LaneEdit::SetFlags {
-                seq: d.seq.0,
-                lane: d.mic.0,
-                mute: None,
-                solo: None,
-                arm: Some(false),
-            },
+    let disarm = EditCommand::Lane {
+        edit: LaneEdit::SetFlags {
+            seq: d.seq.0,
+            lane: d.mic.0,
+            mute: None,
+            solo: None,
+            arm: Some(false),
         },
-        None,
-    )
-    .unwrap();
+    };
+    assert!(matches!(
+        s.edit(disarm.clone(), None),
+        Err(VizError::Busy { .. })
+    ));
     assert_eq!(s.debug_input_open(), Some(true), "closed under the pass");
     assert_eq!(s.debug_input_changes(), Some(changes), "restarted mid-pass");
     wait_until("a second of audio", || frames(&s) >= 48_000);
     assert!(s.record_state().unwrap().recording);
     s.stop().unwrap();
     assert!(!s.record_state().unwrap().recording);
+    s.edit(disarm, None).unwrap();
     assert_eq!(
         s.debug_input_open(),
         Some(false),
@@ -1683,4 +1685,233 @@ fn an_arm_never_takes_a_recording_engine() {
     s.stop().unwrap();
     other.close().unwrap();
     s.close().unwrap();
+}
+
+fn arm_edit(seq: SeqId, lane: LaneId, on: bool) -> vizdaw_ffi::EditCommand {
+    vizdaw_ffi::EditCommand::Lane {
+        edit: vizdaw_ffi::LaneEdit::SetFlags {
+            seq: seq.0,
+            lane: lane.0,
+            mute: None,
+            solo: None,
+            arm: Some(on),
+        },
+    }
+}
+
+/// Plan 5d-1 Ruling 18 (5c carry M6; Review Focus 5): while a pass
+/// records, arming, disarming, Move Record Arm and input changes are
+/// Busy and change nothing; monitor changes apply; the take is whole.
+#[test]
+fn arming_changes_are_refused_while_recording() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    let busy = |r: Result<vizdaw_ffi::DocSnapshot, VizError>| matches!(&r, Err(VizError::Busy { message }) if message.contains("Stop recording"));
+    assert!(busy(s.edit(arm_edit(d.seq, d.mic, false), None)));
+    assert!(busy(s.edit(arm_edit(d.seq, d.keys, true), None)));
+    assert!(busy(s.move_record_arm(d.seq.0, false)));
+    assert!(busy(s.edit_all(
+        "Arm".into(),
+        vec![arm_edit(d.seq, d.keys, true), arm_edit(d.seq, d.src, true)],
+        None
+    )));
+    assert!(busy(s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::SetInput {
+                seq: d.seq.0,
+                lane: d.mic.0,
+                input: None,
+            },
+        },
+        None
+    )));
+    // Monitoring changes only what is heard.
+    s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::SetMonitor {
+                seq: d.seq.0,
+                lane: d.mic.0,
+                monitor: vizdaw_ffi::MonitorModeRow::Input,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let lanes = s.lanes(d.seq.0).unwrap();
+    assert!(lanes.iter().find(|l| l.id == d.mic.0).unwrap().arm);
+    assert!(!lanes.iter().find(|l| l.id == d.keys.0).unwrap().arm);
+    wait_until("more audio", || frames(&s) >= 48_000);
+    s.stop().unwrap();
+    assert_eq!(regions(&s, d.seq.0, d.mic.0).len(), 1);
+    // After Stop, arming works again.
+    s.edit(arm_edit(d.seq, d.keys, true), None).unwrap();
+    s.close().unwrap();
+}
+
+/// Plan 5d-1 Ruling 19 (5c carry M5; Review Focus 5): a Save while
+/// recording saves the project now and again when the pass lands, so the
+/// take is in the saved project after Stop.
+#[test]
+fn a_save_while_recording_saves_the_take_after_stop() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    assert!(!s.saves_after_pass().unwrap());
+    s.save().unwrap();
+    assert!(s.saves_after_pass().unwrap(), "the take is saved at Stop");
+    let saved = core_model::file::load(&pkg).unwrap();
+    assert!(
+        saved.media().is_empty(),
+        "the take is not in the project yet"
+    );
+    s.stop().unwrap();
+    assert!(!s.saves_after_pass().unwrap());
+    let saved = core_model::file::load(&pkg).unwrap();
+    assert_eq!(saved.media().len(), 1, "saved with the take");
+    assert!(!s.snapshot().unwrap().dirty);
+    s.close().unwrap();
+}
+
+/// Plan 5d-1 Ruling 20 (5c-2 carry finding 13): an edit while a drag or
+/// fader holds an edit open is Busy, for one command and for several.
+#[test]
+fn an_edit_during_an_open_edit_is_busy() {
+    let g = serial(None);
+    let d = doc(8, false, false);
+    let s = untitled(&g, d.doc.clone());
+    s.begin_edit("Drag".into()).unwrap();
+    let busy = |r: Result<vizdaw_ffi::DocSnapshot, VizError>| matches!(&r, Err(VizError::Busy { message }) if message == "Finish the open edit first.");
+    assert!(busy(s.edit(arm_edit(d.seq, d.keys, true), None)));
+    assert!(busy(s.edit_all(
+        "Arm".into(),
+        vec![arm_edit(d.seq, d.keys, true), arm_edit(d.seq, d.mic, true)],
+        None
+    )));
+    s.end_edit().unwrap();
+    s.edit(arm_edit(d.seq, d.keys, true), None).unwrap();
+    s.close().unwrap();
+}
+
+/// Hostile input for Ruling 18: an arm or input change naming no lane,
+/// no sequence, or arriving through a gesture is still Busy while
+/// recording, changes nothing, and the take is whole.
+#[test]
+fn hostile_arming_while_recording_is_busy_and_changes_nothing() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    let before = s.lanes(d.seq.0).unwrap();
+    let lanes_busy = |r: Result<vizdaw_ffi::DocSnapshot, VizError>| {
+        matches!(&r, Err(VizError::Busy { message })
+            if message == vizdaw_ffi::session::RECORDING_LANES)
+    };
+    assert!(lanes_busy(
+        s.edit(arm_edit(d.seq, LaneId(u64::MAX), true), None)
+    ));
+    assert!(lanes_busy(
+        s.edit(arm_edit(SeqId(u64::MAX), d.keys, true), None)
+    ));
+    assert!(lanes_busy(s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::SetInput {
+                seq: u64::MAX,
+                lane: 0,
+                input: None,
+            },
+        },
+        None
+    )));
+    // One arm among other commands refuses them all.
+    let rename = vizdaw_ffi::EditCommand::Lane {
+        edit: vizdaw_ffi::LaneEdit::Rename {
+            seq: d.seq.0,
+            lane: d.keys.0,
+            name: "Renamed".into(),
+        },
+    };
+    assert!(lanes_busy(s.edit_all(
+        "Mixed".into(),
+        vec![rename.clone(), arm_edit(d.seq, d.keys, true)],
+        None
+    )));
+    // A gesture is no way around it, and the open gesture survives.
+    s.begin_edit("Drag".into()).unwrap();
+    s.edit_gesture(rename.clone(), None).unwrap();
+    assert!(lanes_busy(
+        s.edit_gesture(arm_edit(d.seq, d.keys, true), None)
+    ));
+    let during = s.lanes(d.seq.0).unwrap();
+    assert_eq!(
+        during.iter().find(|l| l.id == d.keys.0).unwrap().name,
+        "Renamed",
+        "the refused gesture step left the earlier one"
+    );
+    s.abort_edit().unwrap();
+    assert_eq!(s.lanes(d.seq.0).unwrap(), before, "nothing changed");
+    // An unarmed, non-recording edit still applies.
+    s.edit(rename, None).unwrap();
+    wait_until("more audio", || frames(&s) >= 48_000);
+    s.stop().unwrap();
+    assert_eq!(regions(&s, d.seq.0, d.mic.0).len(), 1);
+    s.close().unwrap();
+}
+
+/// Hostile input for Ruling 18: while a stopped pass waits behind an open
+/// edit (not yet in the document), arming is still Busy, by gesture too.
+#[test]
+fn arming_while_a_pass_waits_behind_an_open_edit_is_busy() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    // Waiting behind an open edit.
+    s.begin_edit("Drag".into()).unwrap();
+    s.stop().unwrap();
+    assert!(matches!(
+        s.edit(arm_edit(d.seq, d.keys, true), None),
+        Err(VizError::Busy { .. })
+    ));
+    assert!(matches!(
+        s.edit_gesture(arm_edit(d.seq, d.keys, true), None),
+        Err(VizError::Busy { message }) if message == vizdaw_ffi::session::RECORDING_LANES
+    ));
+    s.end_edit().unwrap();
+    assert_eq!(regions(&s, d.seq.0, d.mic.0).len(), 1, "the pass landed");
+    s.edit(arm_edit(d.seq, d.keys, true), None).unwrap();
+    s.close().unwrap();
+}
+
+/// Hostile input for Ruling 19: an untitled Save while recording is the
+/// usual `Io` and marks nothing; Save As stays Busy and marks nothing;
+/// `saves_after_pass` answers on a closed session.
+#[test]
+fn a_refused_save_while_recording_marks_nothing() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    assert!(matches!(s.save(), Err(VizError::Io { .. })));
+    assert!(!s.saves_after_pass().unwrap());
+    let pkg = g.dir.path().join("P.vizdaw");
+    assert!(matches!(
+        s.save_as(pkg.display().to_string()),
+        Err(VizError::Busy { .. })
+    ));
+    assert!(!s.saves_after_pass().unwrap());
+    assert!(!pkg.exists(), "Save As wrote nothing");
+    s.stop().unwrap();
+    assert!(s.snapshot().unwrap().dirty, "nothing saved the take");
+    s.close().unwrap();
+    assert!(!s.saves_after_pass().unwrap());
 }

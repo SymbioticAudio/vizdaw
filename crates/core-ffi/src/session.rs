@@ -126,6 +126,9 @@ struct Inner {
     /// The audio settings epoch this session's engine last loaded under
     /// (plan 5d-1 Ruling 12).
     settings_seen: u64,
+    /// A Save came while recording: the pass is saved when it lands (plan
+    /// 5d-1 Ruling 19).
+    save_after_pass: bool,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -199,6 +202,7 @@ impl Inner {
             recovered: Vec::new(),
             synth_mutes: Default::default(),
             settings_seen: crate::audio::epoch(),
+            save_after_pass: false,
         }
     }
 
@@ -1037,6 +1041,22 @@ impl Session {
         host::listen_to_midi_sources_soon();
     }
 
+    /// `Busy` when one of `cmds` changes which lanes record (an arm or an
+    /// input) while this session records, finishes a pass or waits to
+    /// apply one (plan 5d-1 Ruling 18, 5c carry M6); monitor changes pass.
+    fn check_records(&self, cmds: &[crate::edit::EditCommand]) -> Result<(), VizError> {
+        if !cmds.iter().any(crate::edit::retries_input) {
+            return Ok(());
+        }
+        let inner = lock(&self.inner);
+        if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+            return Err(VizError::Busy {
+                message: RECORDING_LANES.into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Why Measure or Track Synth cannot start or take its step now:
     /// `Busy` while this session records or has an edit open. Playback
     /// alone is not checked here: Track Synth stays allowed while playing,
@@ -1176,8 +1196,20 @@ impl Session {
             let path = inner.path.clone().ok_or_else(|| VizError::Io {
                 message: "the document has no file yet; use Save As".into(),
             })?;
-            self.save_to(&mut inner, &path)
+            self.save_to(&mut inner, &path)?;
+            // The take lands at Stop: it is saved then too (plan 5d-1
+            // Ruling 19, 5c carry M5). Only a Save that worked asks.
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                inner.save_after_pass = true;
+            }
+            Ok(())
         })
+    }
+
+    /// Whether a Save made while recording saves again once the pass
+    /// lands (plan 5d-1 Ruling 19; the app says so).
+    pub fn saves_after_pass(&self) -> Result<bool, VizError> {
+        ffi_guard(|| Ok(lock(&self.inner).save_after_pass))
     }
 
     /// Saves to `path` (`.vizdaw` appended if missing) and makes it the
@@ -2643,9 +2675,11 @@ fn before_close_tidy() {}
 #[uniffi::export]
 impl Session {
     /// Applies an editor command as one undo step. `filter` hides kinds and
-    /// lanes from commands that act on the selection. `Model` error while an
+    /// lanes from commands that act on the selection. `Busy` while an
     /// edit `begin_edit` opened is in progress (a drag, a fader): joining it
-    /// would merge the command into that undo step, or lose it on abort.
+    /// would merge the command into that undo step, or lose it on abort
+    /// (plan 5d-1 Ruling 20). `Busy` [`RECORDING_LANES`] for an arm or
+    /// input change while recording (Ruling 18).
     pub fn edit(
         &self,
         cmd: crate::edit::EditCommand,
@@ -2653,8 +2687,9 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             if lock(&self.inner).edit_label.is_some() {
-                return Err(crate::events::bad("finish the open edit first"));
+                return Err(edit_open_busy());
             }
+            self.check_records(std::slice::from_ref(&cmd))?;
             let filter = crate::edit::view_filter(filter.as_ref());
             if matches!(cmd, crate::edit::EditCommand::ModifyAgain) {
                 return self.modify_again_with(&filter);
@@ -2697,8 +2732,9 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             if lock(&self.inner).edit_label.is_some() {
-                return Err(crate::events::bad("finish the open edit first"));
+                return Err(edit_open_busy());
             }
+            self.check_records(&cmds)?;
             let filter = crate::edit::view_filter(filter.as_ref());
             let mut core = Vec::with_capacity(cmds.len());
             for cmd in &cmds {
@@ -2774,6 +2810,9 @@ impl Session {
         filter: Option<crate::edit::ViewFilterRow>,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
+            // Before the rewind: a refused step keeps the gesture's last
+            // one (plan 5d-1 Ruling 18).
+            self.check_records(std::slice::from_ref(&cmd))?;
             let c = crate::edit::to_command(&cmd)?;
             {
                 let mut inner = lock(&self.inner);
@@ -3767,6 +3806,17 @@ fn recording_busy() -> VizError {
     }
 }
 
+/// Why an edit waits for the edit a drag or a fader opened (plan 5d-1
+/// Ruling 20: `Busy`, as Track Synth and Measure answer).
+fn edit_open_busy() -> VizError {
+    VizError::Busy {
+        message: "Finish the open edit first.".into(),
+    }
+}
+
+/// Why an arm or input change waits for Stop (plan 5d-1 Ruling 18).
+pub const RECORDING_LANES: &str = "Stop recording to change which lanes record.";
+
 /// "Busy" for Normalize.
 fn still_building(name: &str) -> VizError {
     VizError::Busy {
@@ -4616,6 +4666,17 @@ impl Session {
         inner.news.media_changed = true;
         inner.reload_host(self.id);
         self.mark(inner);
+        // Saved while recording: the take is saved now (Ruling 19).
+        if std::mem::take(&mut inner.save_after_pass) {
+            if let Some(path) = inner.path.clone() {
+                if let Err(e) = self.save_to(inner, &path) {
+                    inner
+                        .news
+                        .problems
+                        .push(format!("The take could not be saved: {e}"));
+                }
+            }
+        }
     }
 
     /// `idle`'s recording step: ends the recording when the input went
