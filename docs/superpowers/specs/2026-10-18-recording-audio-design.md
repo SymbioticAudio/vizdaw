@@ -309,8 +309,14 @@ At Stop (or at the auto-stop in §6.2):
 - On open, `Media/Recorded/` files that no media item references and whose `info` chunk says `vizdaw-recording` are offered in the existing recovery sheet ("Recovered recordings: import into a new lane / move to Trash").
 
 ### 6.6 Monitoring and MIDI thru
-- **Audio monitoring.** An armed or `Input`-monitored lane's input feeds its AudioPath strip through the `RegionSource` node's input mix (the node exists for every AudioPath strip that has segments or a monitored input), with no extra latency beyond the device's round trip. When an input is monitored, the strip's inserts process it like playback.
-- **The modes:**
+The model follows Logic Pro: software monitoring through the strip, a per-lane Input Monitoring button, and an I/O buffer size that sets the latency (Ruling 33).
+
+- **Software Monitoring** (Settings › Audio, default on). When off, VizDAW never plays an input back: the user listens through the interface's direct monitoring. Recording and MIDI thru are unaffected.
+- **Audio monitoring.** With Software Monitoring on, an armed or `Input`-monitored lane's input feeds its AudioPath strip through the `RegionSource` node's input mix (the node exists for every AudioPath strip that has segments or a monitored input). When an input is monitored, the strip's inserts process it like playback.
+- **Latency of a monitored input.** It is the device round trip at the current I/O buffer size plus the latency of the plugins on the input's own path, and nothing more. Delay compensation for playback works by reading regions ahead, which a live input cannot do. So a monitored input is never delayed to wait for the rest of the mix; the latent paths are compensated by playing the regions early. The recorded audio is still placed by §6.3's latency compensation.
+- **I/O Buffer Size** (Settings › Audio): 32, 64, 128, 256, 512 or 1024 frames, default 128, with a readout of the resulting round-trip latency in ms. A change reopens the device and is refused while recording.
+- **Deferred:** Logic's Low Latency Mode (bypass plugins over a latency limit on a monitored path while recording) is in the feature backlog.
+- **The modes** (the lane's Input Monitoring button):
   - **Auto**: the input is heard when the lane is armed and either the transport is stopped, or it is recording and the play position is inside the record range. Outside the range, playback is heard. This is auto-input.
   - **Input**: always the input.
   - **Off**: never.
@@ -394,6 +400,8 @@ This is an explicit use case: printing an external synth into the project as aud
 - **Mixer (`MixerView`).** AudioPath strips show the same input picker and monitor button above the inserts.
 - **Settings › Audio:**
   - input device ("Same as output" or a device);
+  - Software Monitoring (§6.6);
+  - I/O Buffer Size, with the resulting round-trip latency readout (§6.6);
   - latency readout and trim;
   - RAM cache budget;
   - the streaming setting "Disk read-ahead" (2–8 s, default 3 s; ring size follows).
@@ -712,7 +720,7 @@ Plans run one after another by subagent-driven development under the standing au
 | **5b — Regions in the editors** | Overviews (build, cache, FFI); waveforms in the arrangement and region strip; fade and gain handles and region menu commands (Normalize); drag-in import; media pool window; offline/relink dialog; media retention (Trash on save/close). |
 | **5c — Recording engine** | HAL input (duplex and private aggregate), mic permission; input ring + `RecordWriter`; latency compensation; `LaneInput`/`MonitorMode`; MIDI timeline recording and thru through the lane's input-effect chain hook (empty until 5g); `RecordSpec` modes, punch, loop passes, keep/discard, takes; history groups and `RecordPass`; crash recovery of recordings; fake input and loopback; return latency on destinations, `return_of` alignment and Measure; fake synth; record and synth-tracking e2e. |
 | **5c-2 — Synth tracking** | `return_of` and return latency on destinations (§4.5, §4.5a); alignment shift and Measure, including stopped-transport capture (§6.7); fake synth; `lane.track_synth` and the destination commands (§12.1); synth tests and the synth-tracking e2e (§12.3). Split from 5c by plan 5c Ruling 1; runs after 5c and before 5d. |
-| **5d — Record UI** | Record button and popover, count-in and pre-roll, lane header input picker, monitor button and meter, mixer input controls, Settings › Audio/Recording, record-time readout and disk warnings; Track Synth sheet and lane menu; the recording region's waveform growing while the file is written (§6.2, deferred from 5c by plan 5c Ruling 23). Needs 5c-2 (`lane.track_synth`). |
+| **5d — Record UI** | Record button and popover, count-in and pre-roll, lane header input picker, monitor button and meter, mixer input controls, Settings › Audio/Recording (including Software Monitoring and I/O Buffer Size, §6.6), record-time readout and disk warnings; a monitored input is not delayed by playback delay compensation (§6.6, Ruling 33); Track Synth sheet and lane menu; the recording region's waveform growing while the file is written (§6.2, deferred from 5c by plan 5c Ruling 23). Needs 5c-2 (`lane.track_synth`). |
 | **5e — Automation recording** | Gesture channel (mixer, AU and CLAP plugin windows); `AutomationMode` per strip and UI; Write/Touch/Latch/Trim engine with capture, thinning, lane placement, live preview; `automation.*` commands; golden tests. |
 | **5f — Surfaces, bounce, external editor** | `core-surface` (MIDI learn, MCU + XT, HUI) and Settings › Surfaces; learn UI; bounce/export (offline render, stems, formats, dither, add to project); external sample editor; `surface.*`, `bounce`, `region.open_external`. |
 | **5g — MIDI input effects and MPE** | `InputFx` model and commands; real-time chain in the renderer (arpeggiator, transpose, velocity, chord, input quantize) feeding thru and the recorder; FX button and popover; `lane.set_input_fx`; golden tests and e2e. Until this plan lands, the chain is empty and thru/record pass input unchanged. **MPE** (added by the owner, 2026-10-20): MPE input — a per-input MPE setting (lower/upper zone, member-channel range, per-note pitch-bend range; also set from the MPE Configuration Message) turns channel-per-note MIDI 1.0 from an MPE controller into per-note events (note, per-note pitch bend, pressure, CC74 timbre as per-note controllers) before thru and recording; MPE output — a per-destination MPE setting rotates notes across member channels so per-note expression survives the MIDI 1.0 down-conversion to external synths and MIDI 1.0 plugins (instead of being dropped and counted); MPE settings in the lane/destination UI and control channel; golden and round-trip tests (MPE in → per-note events → MPE out). |
@@ -751,3 +759,4 @@ Plans run one after another by subagent-driven development under the standing au
 30. **16-bit media and bounces get TPDF dither. 24-bit is rounded without dither.** Integer formats clip at full scale and count the clipped samples.
 31. **Synth return latency is per destination, in milliseconds**, so it is rate-independent. Measure uses 5 pings, onsets above −40 dBFS and the median, minus the HAL's reported round trip.
 32. **The external editor's WAV is written in the project format**, and its return is converted back into it.
+33. *(Owner decision, 2026-10-26.)* **Monitoring works like Logic Pro.** A Software Monitoring switch, a per-lane Input Monitoring button (Auto / Input / Off), and an I/O Buffer Size setting that sets the latency. Playback delay compensation reads regions ahead, so a monitored input is never delayed beyond the round trip and its own plugins. Low Latency Mode is deferred to the feature backlog.
