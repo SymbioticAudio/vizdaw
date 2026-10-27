@@ -66,6 +66,20 @@ fn arm(s: &Session, seq: u64, lane: u64) {
     .unwrap();
 }
 
+fn disarm(s: &Session, seq: u64, lane: u64) {
+    edit(
+        s,
+        LaneEdit::SetFlags {
+            seq,
+            lane,
+            mute: None,
+            solo: None,
+            arm: Some(false),
+        },
+    )
+    .unwrap();
+}
+
 /// Plays and stops, so the session holds the engine.
 fn take_engine(s: &Session, seq: u64) {
     s.play(seq).unwrap();
@@ -624,6 +638,47 @@ fn input_levels_follow_the_open_input() {
             break;
         }
         assert!(Instant::now() < until, "never metered: {l:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    s.close().unwrap();
+}
+
+/// Review M-c: levels are empty once the input is released, and a read
+/// clears what it returned.
+#[test]
+fn input_levels_clear_on_read_and_end_with_the_input() {
+    let _g = serial(Some(FakeInput::Signals));
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = lane(&s, seq, "Loop").id;
+    edit(
+        &s,
+        LaneEdit::SetInput {
+            seq,
+            lane: lp,
+            input: Some(LaneInputRow::Audio {
+                first: 0,
+                stereo: false,
+                return_of: None,
+            }),
+        },
+    )
+    .unwrap();
+    take_engine(&s, seq);
+    arm(&s, seq, lp);
+    let until = Instant::now() + common::wait_limit();
+    while !s.input_levels().unwrap().iter().any(|p| *p > 0.2) {
+        assert!(Instant::now() < until, "never metered");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Reads are destructive: the peak the next read sees was held after
+    // the previous one, so it is the sine's, never the frame-0 impulse.
+    let a = s.input_levels().unwrap();
+    assert!(a.len() == 3 && a[1] < 1.0, "{a:?}");
+    disarm(&s, seq, lp);
+    let until = Instant::now() + common::wait_limit();
+    while !s.input_levels().unwrap().is_empty() {
+        assert!(Instant::now() < until, "levels outlived the input");
         std::thread::sleep(Duration::from_millis(20));
     }
     s.close().unwrap();

@@ -1178,6 +1178,9 @@ impl Host {
                     );
                 }
                 // The fake input stays; what would be open is tracked.
+                if want != self.input_open {
+                    self.engine.clear_input_peaks();
+                }
                 self.input_open = want;
                 Ok(())
             }
@@ -1215,6 +1218,8 @@ impl Host {
                     .set_rt_env(rt_env(b, info.buffer_frames, info.sample_rate));
                 self.input_open = info.input_channels > 0;
                 self.inputs = InputInfo::of(&info);
+                // No peak held under the old config outlives it.
+                self.engine.clear_input_peaks();
                 Ok(())
             }
         }

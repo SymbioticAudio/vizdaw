@@ -910,3 +910,29 @@ fn input_channels_are_metered_whether_heard_or_not() {
     assert!(q[0] > 0.2 && q[1] == 0.0, "{q:?}");
     assert_eq!(engine.input_peaks(3), vec![0.0; 3], "read and cleared");
 }
+
+/// Review M-a: clearing the held peaks (done when the input config
+/// changes) leaves nothing stale for the first read after it.
+#[test]
+fn clearing_input_peaks_leaves_no_stale_peak() {
+    let d = doc();
+    let (engine, mut b, _log) = start(&d, InputSpec::default(), FakeInput::Signals);
+    b.run_frames(2048);
+    engine.clear_input_peaks();
+    assert_eq!(engine.input_peaks(64), vec![0.0; 64]);
+}
+
+/// Review M-b: a non-finite sample is a clip, not silence.
+#[test]
+fn a_non_finite_input_sample_meters_as_a_clip() {
+    use core_engine::render::block_peak;
+    assert_eq!(block_peak(&[0.1, f32::NAN, 0.2], 3), 1.0);
+    assert_eq!(block_peak(&[0.1, f32::INFINITY], 2), 1.0);
+    assert_eq!(block_peak(&[0.1, f32::NEG_INFINITY], 2), 1.0);
+    assert_eq!(
+        block_peak(&[0.1, -0.4, f32::NAN], 2),
+        0.4,
+        "beyond n unseen"
+    );
+    assert_eq!(block_peak(&[0.3, -0.7], 2), 0.7);
+}

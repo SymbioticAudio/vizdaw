@@ -1161,6 +1161,12 @@ impl Engine {
         self.shared.take_load()
     }
 
+    /// Clears every held input peak: call when the input opens, closes or
+    /// changes its channel count, so no stale peak outlives the config.
+    pub fn clear_input_peaks(&self) {
+        self.shared.clear_input_peaks();
+    }
+
     /// The peak of each of the first `channels` device input channels
     /// since the last call, read and cleared (plan 5d-1 Ruling 27).
     pub fn input_peaks(&self, channels: usize) -> Vec<f32> {

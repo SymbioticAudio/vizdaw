@@ -183,6 +183,15 @@ pub struct Shared {
     input_peaks: Box<[AtomicU32]>,
 }
 
+/// The peak of the first `n` samples of `ch`; a non-finite sample counts
+/// as a clip (1.0). // RT
+pub fn block_peak(ch: &[f32], n: usize) -> f32 {
+    ch.iter().take(n).fold(
+        0f32,
+        |m, x| if x.is_finite() { m.max(x.abs()) } else { 1.0 },
+    )
+}
+
 impl Default for Shared {
     fn default() -> Shared {
         Shared {
@@ -285,6 +294,14 @@ impl Shared {
             if peak.is_finite() && peak > 0.0 {
                 cell.fetch_max(peak.to_bits(), Ordering::Relaxed);
             }
+        }
+    }
+
+    /// Clears every held input peak (control side, when the input config
+    /// changes).
+    pub fn clear_input_peaks(&self) {
+        for c in self.input_peaks.iter() {
+            c.store(0, Ordering::Relaxed);
         }
     }
 
@@ -780,11 +797,7 @@ impl Renderer {
         }
         // The input meters see every block, rendered or not.
         for (c, ch) in input.channels.iter().enumerate() {
-            let peak = ch
-                .iter()
-                .take(n)
-                .fold(0f32, |m, x| if x.is_finite() { m.max(x.abs()) } else { m });
-            self.shared.hold_input(c, peak);
+            self.shared.hold_input(c, block_peak(ch, n));
         }
         if !self.exec.try_finish(deadline) {
             // Nodes of a missed block are still running: touch nothing they
