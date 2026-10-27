@@ -62,9 +62,9 @@ pub struct Plan {
     pub sidechain_delays: Vec<Vec<u32>>,
     /// Total latency `L` (master's `t_out`).
     pub latency: u64,
-    /// Per node, how many frames ahead of the renderer's frame it plays:
-    /// a `Regions` node's lead (plan 5d-1 Ruling 2), 0 for every other
-    /// node.
+    /// Per node, its lead: a `Regions` node reads its regions at the
+    /// renderer's frame − lead (ahead of what is heard; plan 5d-1
+    /// Ruling 2). 0 for every other node.
     pub leads: Vec<u64>,
 }
 
@@ -87,10 +87,10 @@ pub fn plan(spec: &GraphSpec, max_delay: u64) -> Result<Plan, PlanError> {
     plan_with(spec, max_delay, true)
 }
 
-/// [`plan`], with `leads` false planning every `Regions` node with no
+/// [`plan`], with `with_leads` false planning every `Regions` node with no
 /// lead: its compensation is a delay line after it, as before plan 5d-1
 /// (tests compare the two).
-pub fn plan_with(spec: &GraphSpec, max_delay: u64, leads: bool) -> Result<Plan, PlanError> {
+pub fn plan_with(spec: &GraphSpec, max_delay: u64, with_leads: bool) -> Result<Plan, PlanError> {
     let n = spec.nodes.len();
     let inserts: usize = spec
         .nodes
@@ -149,7 +149,7 @@ pub fn plan_with(spec: &GraphSpec, max_delay: u64, leads: bool) -> Result<Plan, 
     }
     let none = vec![0u64; n];
     let base = forward(spec, &order, &none, max_delay)?;
-    if !leads
+    if !with_leads
         || !spec
             .nodes
             .iter()
@@ -157,11 +157,15 @@ pub fn plan_with(spec: &GraphSpec, max_delay: u64, leads: bool) -> Result<Plan, 
     {
         return Ok(base);
     }
-    let lead = region_leads(spec, &order, &succ, base.latency, max_delay / 2);
-    if lead.iter().all(|l| *l == 0) {
+    let leads = region_leads(spec, &order, &succ, base.latency, max_delay / 2);
+    if leads.iter().all(|l| *l == 0) {
         return Ok(base);
     }
-    let led = forward(spec, &order, &lead, max_delay)?;
+    // A lead can push an edge delay past `max_delay` (a sidechain-fed
+    // insert or a dead-end branch behind a led path): then nothing leads.
+    let Ok(led) = forward(spec, &order, &leads, max_delay) else {
+        return Ok(base);
+    };
     // A lead never raises `L` along a signal path; it can only through a
     // sidechain fed by a led path (Ruling 2). Then nothing leads.
     if led.latency != base.latency {
@@ -285,7 +289,7 @@ fn region_leads(
             let Some(NodeSpec::Strip(s)) = spec.nodes.get(k) else {
                 continue;
             };
-            if k == i || !s.inputs.iter().any(|x| x.from == i) {
+            if !s.inputs.iter().any(|x| x.from == i) {
                 continue;
             }
             let Some(below) = down.get(k).copied().flatten() else {

@@ -358,3 +358,91 @@ fn a_lead_that_would_raise_the_latency_through_a_sidechain_is_dropped() {
     assert_eq!(p.latency, 1000);
     assert_eq!(p, plan_with(&g, MAX, false).unwrap());
 }
+
+/// A lead can push an edge delay past the maximum; the graph then plans
+/// without leads instead of being refused.
+#[test]
+fn a_lead_that_overflows_the_delay_cap_falls_back_to_no_leads() {
+    let mut duck = ins(0);
+    duck.sidechain = Some(input(1));
+    // Led, the ducked strip would be ready at 1000 + 1500 and node 3's
+    // edge would need a 2500-frame delay.
+    let g = GraphSpec {
+        nodes: vec![
+            regions(),
+            strip(&[0], vec![]),
+            strip(&[], vec![duck, ins(1500)]),
+            strip(&[], vec![]),
+            strip(&[1, 2, 3], vec![]),
+        ],
+        master: 4,
+    };
+    let p = plan(&g, 2000).unwrap();
+    assert_eq!(p.leads, vec![0; 5]);
+    assert_eq!(p.latency, 1500);
+    assert_eq!(p, plan_with(&g, 2000, false).unwrap());
+}
+
+/// Each `Regions` node leads by its own path's slack.
+#[test]
+fn two_regions_nodes_with_different_slack_get_their_own_leads() {
+    let g = GraphSpec {
+        nodes: vec![
+            regions(),
+            strip(&[0], vec![ins(300)]),
+            regions(),
+            strip(&[2], vec![]),
+            strip(&[], vec![ins(1000)]),
+            strip(&[1, 3, 4], vec![]),
+        ],
+        master: 5,
+    };
+    let p = plan(&g, MAX).unwrap();
+    assert_eq!(p.leads, vec![700, 0, 1000, 0, 0, 0]);
+    assert_eq!(p.input_delays[5], vec![0, 0, 0]);
+    assert_eq!(p.latency, 1000);
+}
+
+/// A led `Regions` input and a latent `Instrument` input to one strip:
+/// the instrument is delayed up to the lead.
+#[test]
+fn a_strip_mixing_a_led_regions_and_a_latent_instrument_delays_the_instrument() {
+    let g = GraphSpec {
+        nodes: vec![
+            regions(),
+            NodeSpec::Instrument {
+                target: core_engine::schedule::TargetIdx(0),
+                latency: 300,
+                outputs: 1,
+            },
+            strip(&[0, 1], vec![]),
+            strip(&[], vec![ins(1000)]),
+            strip(&[2, 3], vec![]),
+        ],
+        master: 4,
+    };
+    let p = plan(&g, MAX).unwrap();
+    assert_eq!(p.leads, vec![1000, 0, 0, 0, 0]);
+    assert_eq!(p.input_delays[2], vec![0, 700]);
+    assert_eq!(p.input_delays[4], vec![0, 0]);
+    assert_eq!(p.latency, 1000);
+}
+
+/// The master's own inserts are on every path: they add to `L` but not to
+/// what a node lacks.
+#[test]
+fn the_masters_own_inserts_do_not_lengthen_the_lead() {
+    let g = GraphSpec {
+        nodes: vec![
+            regions(),
+            strip(&[0], vec![]),
+            strip(&[], vec![ins(1000)]),
+            strip(&[1, 2], vec![ins(400)]),
+        ],
+        master: 3,
+    };
+    let p = plan(&g, MAX).unwrap();
+    assert_eq!(p.leads, vec![1000, 0, 0, 0]);
+    assert_eq!(p.input_delays[3], vec![0, 0]);
+    assert_eq!(p.latency, 1400);
+}
