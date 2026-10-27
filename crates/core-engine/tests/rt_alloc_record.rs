@@ -109,7 +109,8 @@ fn recording_never_allocates() {
     let before = rt_check::count();
     let mut buf = Vec::with_capacity(1 << 20);
     // The graph latencies the marks carried (read between blocks).
-    let mut latencies = std::collections::BTreeSet::new();
+    // in order, consecutive repeats folded.
+    let mut latencies: Vec<u64> = Vec::new();
     for i in 0..3_000u32 {
         armed_block(&mut b, 1 + (i * 37) % 1024);
         // Drained (unarmed) except between blocks 1000 and 1500: the ring
@@ -117,7 +118,9 @@ fn recording_never_allocates() {
         if !(1000..1500).contains(&i) {
             while h.ring.pop(&mut buf).is_some() {}
             while let Ok(m) = h.marks.pop() {
-                latencies.insert(m.latency);
+                if latencies.last() != Some(&m.latency) {
+                    latencies.push(m.latency);
+                }
             }
         }
         if i % 100 == 0 {
@@ -164,8 +167,8 @@ fn recording_never_allocates() {
     }
     assert!(h.status.run() > 0);
     assert!(
-        latencies.contains(&0) && latencies.contains(&480),
-        "the marks carried the latency change: {latencies:?}"
+        latencies.starts_with(&[0, 480, 0]),
+        "the marks carried the latency change and its reversal: {latencies:?}"
     );
     assert_eq!(rt_check::count() - before, 0, "allocations while recording");
     // An xrun while recording, then the tap goes.
@@ -221,11 +224,9 @@ fn recording_never_allocates() {
         .unwrap();
     let sdoc = sb.finish();
     let fsynth = FakeSynth::new(25.0);
-    let (mut se, sr) = Engine::new(
-        EngineConfig::new(48_000.0),
-        Box::new(OfflineSinks::new(1 << 16).with_fake_synth(&fsynth)),
-    )
-    .unwrap();
+    let ssinks = OfflineSinks::new(1 << 16).with_fake_synth(&fsynth);
+    let slog = ssinks.log();
+    let (mut se, sr) = Engine::new(EngineConfig::new(48_000.0), Box::new(ssinks)).unwrap();
     se.set_return_dests(vec![fake]);
     se.load(&sdoc, fseq).unwrap();
     let mut sbk = OfflineBackend::new(48_000.0, 512)
@@ -253,12 +254,25 @@ fn recording_never_allocates() {
     for _ in 0..15 {
         armed_block(&mut sbk, 512);
     }
+    assert!(
+        again.sent(0).is_some(),
+        "a note was sounding at the removal"
+    );
     se.stop_measure().unwrap();
     armed_block(&mut sbk, 512);
     assert!(status.closed() && again.closed());
     for _ in 0..100 {
         armed_block(&mut sbk, 512);
     }
+    // The part's second note (pitch 64; the pings are pitch 60) reached
+    // the fake synth.
+    assert!(
+        slog.drain()
+            .iter()
+            .any(|r| r.bytes().first().is_some_and(|s| s & 0xF0 == 0x90)
+                && r.bytes().get(1) == Some(&64)),
+        "the part's notes reached the fake synth"
+    );
     assert_eq!(
         rt_check::count() - before,
         0,
