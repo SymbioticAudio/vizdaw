@@ -945,9 +945,11 @@ impl Session {
         host::finish_play(pending)
     }
 
-    /// Why Measure cannot start or set its step now: `Busy` while this
-    /// session records or has an edit open.
-    fn check_measurable(inner: &Inner) -> Result<(), VizError> {
+    /// Why Measure or Track Synth cannot start or take its step now:
+    /// `Busy` while this session records or has an edit open. Playback
+    /// alone is not checked here: Track Synth stays allowed while playing,
+    /// and Measure checks the transport itself.
+    fn check_idle(inner: &Inner) -> Result<(), VizError> {
         if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
             return Err(recording_busy());
         }
@@ -4535,7 +4537,7 @@ impl Session {
             // Not while recording, nor with an edit open: its restart
             // would drop the step (Task 8 review M1). Both are `Busy`, as
             // for Measure (Task 10 review I1).
-            Self::check_measurable(&inner)?;
+            Self::check_idle(&inner)?;
             let id = seq_id(inner.doc(), seq)?;
             let channels = if stereo {
                 core_model::lane::InputChannels::Stereo(first)
@@ -4592,7 +4594,7 @@ impl Session {
             // the engine loads the document the checks saw.
             let (seq, status) = {
                 let mut inner = lock(&self.inner);
-                Self::check_measurable(&inner)?;
+                Self::check_idle(&inner)?;
                 let d = crate::synth::external_dest(inner.doc(), dest)?;
                 let Some((seq, _, name, channels)) = crate::synth::return_lane(inner.doc(), dest)
                 else {
@@ -4641,7 +4643,7 @@ impl Session {
             }
             let m = crate::synth::measured_status(&status, crate::record::latency_trim())
                 .map_err(|e| crate::events::bad(&e))?;
-            if let Err(e) = Self::check_measurable(&inner) {
+            if let Err(e) = Self::check_idle(&inner) {
                 let message = match e {
                     VizError::Busy { message } => message,
                     other => return Err(other),

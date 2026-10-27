@@ -1185,3 +1185,62 @@ and record with Transport > Record (R).
      - The rate-mismatch flag is not refreshed when the device reopens
        for input: if the rate changes on that reopen, the mismatch
        warning may be stale.
+
+### Synth tracking (plan 5c-2)
+
+The Track Synth sheet, the lane menu item and the destination editor's
+Measure button are plan 5d's; until then these steps run through the
+channel. **Blocked until 5d for real hardware:** this build has no menu
+that makes a MIDI destination for a hardware synth (5d adds "New MIDI
+Destination…"); until then an external destination exists only in a
+project the tests made or in a hand-edited file. The IDs below come from
+`$V state document` (lanes) and the project's instrument list.
+
+140. Track Synth: on a MIDI lane playing the synth's destination, `$V run
+     lane.track_synth '{"seq": 1, "lane": 1, "channel": 3}'`: a lane
+     "<synth> audio" appears just below, records input 3, is armed, and
+     `$V state document` shows its input's `return_of`; the MIDI lane is
+     disarmed (so a Replace pass never clears its part); one undo step
+     "Track Synth". Again with `"stereo": true`: the same lane now
+     records inputs 3–4. With `"arm_midi": true` the MIDI lane is armed
+     too; with `"mute_after": true` the next recording also mutes the MIDI
+     lane, inside its "Record" step. It works while playing, but with an
+     edit open it is `busy`. Setting the audio lane's input again with
+     `lane.set_input` and no `return_of` unlinks it from the synth.
+141. Measure: with the synth's output wired to input 3 and the transport
+     stopped, `$V run destination.measure_return '{"dest": <id>}'` plays
+     five middle Cs half a second apart (you hear them through the lane's
+     strip) and answers `return_latency_ms` (a few milliseconds for most
+     hardware) and `onsets` 5; one undo step "Set Return Latency". Pull the
+     cable and measure again: "No signal on the synth's return input", and
+     nothing changes. While playing, or with an edit open, it is `busy`.
+     Each onset counts only for the latest note played, and a note's
+     onset needs 5 ms of quiet before it: a pad whose release rings into
+     the next note fails rather than reading 0 ms; type its latency
+     instead (`$V run destination.set_return_latency '{"dest": <id>,
+     "ms": "6.5"}'`).
+142. Track: Record (`transport.record`) to the end: the part plays the
+     synth and the audio lane records it in one pass, one "Undo Record".
+     Zoom in on a note's attack in the recorded region and on the MIDI
+     note above it: they start within a millisecond. By ear: mute the MIDI
+     lane and play: the printed synth sits in time with the rest. A loop
+     pass with the MIDI lane armed makes matching MIDI and audio takes.
+     The e2e test `tracks_the_fake_synth` runs 140–142 against the offline
+     device's fake synth (`VIZDAW_AUDIO=offline VIZDAW_FAKE_SYNTH=25`),
+     which opens no hardware and asks for no permission. The fake synth's
+     delay is not exactly the one asked for: a delay below one block is
+     answered one block late, and the delay grows to cover the largest
+     block rendered, with the engine's negative MIDI offset (when there
+     is one) raising its floor; tests read `synth_delay()` after a run
+     for the delay a measurement should find.
+143. Owner checks (by ear, by eye or on hardware; not run by the tests):
+     - On real hardware, Measure against a synth whose latency you know
+       reads close to it.
+     - The 5 ms quiet rule: a synth whose release never falls quiet (a
+       drone, a long reverb tail) cannot be measured; type its latency
+       instead (`destination.set_return_latency`).
+     - Through the control channel, Measure blocks the app for about
+       2.7 s (10 s at most): menus and meters stall meanwhile. The 5d
+       sheet calls it off the main thread.
+     - "New MIDI Destination…" arrives in 5d; until then an external
+       destination can be made only by the tests or a hand-edited file.

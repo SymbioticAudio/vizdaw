@@ -1060,3 +1060,146 @@ fn records_audio_loop_takes_and_midi() {
     assert_eq!(lane_named(&mut app, &w, "Keys")["events"], 1);
     app.quit();
 }
+
+/// README steps 140–142 through the channel (plan 5c-2; spec §12.3 "track
+/// the fake synth"): Track Synth sets up the return lane in one undo step,
+/// Measure finds the fake synth's 25 ms with the transport stopped, and
+/// one Record pass lands the synth's clicks on the MIDI notes that played
+/// them, within a millisecond. The offline device, its fake input and the
+/// fake synth: no hardware, no permission prompt.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn tracks_the_fake_synth() {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, RoutingCmd, SequenceCmd};
+    use core_model::event::EventBody;
+    use core_model::sequence::SeqLength;
+    use core_model::time::Tick;
+    // The fake synth brings the signals input by itself.
+    let mut app = App::start_with(&[("VIZDAW_FAKE_SYNTH", "25")]);
+    // Two bars at 120 BPM: "Part" plays "Fake Synth" at beats 1, 2 and 3.
+    let mut b = Builder::new();
+    let synth = b.dest("Fake Synth", "Fake Synth", 0).unwrap();
+    let (seq, part) = b.sequence("Track", "Part", Some(synth)).unwrap();
+    b.notes(
+        seq,
+        part,
+        &[
+            (Q, 60, 0x8000, Q / 2),
+            (2 * Q, 62, 0x8000, Q / 2),
+            (3 * Q, 64, 0x8000, Q / 2),
+        ],
+    )
+    .unwrap();
+    // Armed, so Track Synth disarming it is seen (pre-flight M13).
+    b.run(Command::Lane(LaneCmd::SetFlags {
+        seq,
+        lane: part,
+        mute: None,
+        solo: None,
+        arm: Some(true),
+    }))
+    .unwrap();
+    b.run(Command::Routing(RoutingCmd::AddOutput {
+        name: "Audio 1".into(),
+        reference: "audio:1-2".into(),
+    }))
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(8 * Q)),
+    }))
+    .unwrap();
+    let path = app.launched.home.join("Synth.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    assert_eq!(lane_named(&mut app, &w, "Part")["arm"], true);
+
+    // Step 140: Track Synth on input 3.
+    let r = app.call(
+        "command.run",
+        json!({"id": "lane.track_synth", "params": {"seq": seq.0, "lane": part.0, "channel": 3}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Track Synth", "{r}");
+    let rec = lane_named(&mut app, &w, "Fake Synth audio");
+    assert_eq!(rec["arm"], true, "{rec}");
+    assert_eq!(
+        rec["input"],
+        json!({"kind": "audio", "channel": 3, "stereo": false, "return_of": synth.0})
+    );
+    assert_eq!(lane_named(&mut app, &w, "Part")["arm"], false);
+
+    // Step 141: Measure.
+    let m = app.call(
+        "command.run",
+        json!({"id": "destination.measure_return", "params": {"dest": synth.0}, "window": w}),
+    );
+    let ms = m["return_latency_ms"].as_f64().unwrap();
+    assert!((ms - 25.0).abs() <= 1.0, "{m}");
+    assert_eq!(m["onsets"], 5, "{m}");
+    // A destination the document lacks is not external: refused before
+    // the core sees it.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "destination.measure_return", "params": {"dest": 999_999}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
+
+    // Step 142: one pass to the end of the sequence.
+    app.call(
+        "command.run",
+        json!({"id": "record.set", "params": {"replace": true, "loop": false, "pre_roll": 0}, "window": w}),
+    );
+    app.call(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    wait_for_record(&mut app, &w, |r| r["recording"] == true);
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    app.call("command.run", json!({"id": "file.save", "window": w}));
+
+    // Where each click landed against the note that played it: a sample
+    // above 0.3 after at least 5 ms at or below it (the tone stays under
+    // 0.1), on the timeline at 24 000 frames a beat.
+    let doc = core_model::file::load(&path).unwrap();
+    let s = doc.sequence(seq).unwrap();
+    let lane = s
+        .lanes
+        .iter()
+        .find(|l| l.name == "Fake Synth audio")
+        .unwrap();
+    let (tick, media, offset) = lane
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .find_map(|e| match e.body {
+            EventBody::AudioRegion {
+                media,
+                source_offset,
+                ..
+            } => Some((e.tick.0, media, source_offset)),
+            _ => None,
+        })
+        .expect("a recorded region");
+    let item = doc.media().get(&media).unwrap();
+    let reader = core_media::caf::CafReader::open(&path.join(&item.path)).unwrap();
+    let info = reader.info().clone();
+    assert_eq!(info.channels, 1);
+    let mut data = vec![0.0f32; info.frames as usize];
+    reader.read(0, &mut data, &mut Vec::new()).unwrap();
+    let clicks: Vec<i64> = core_engine::fixtures::clicks(&data, offset as usize, 0.3, 240)
+        .into_iter()
+        .map(|k| tick * 24_000 / Q + k as i64)
+        .collect();
+    assert_eq!(clicks.len(), 3, "{clicks:?}");
+    for (at, note) in clicks.iter().zip([24_000i64, 48_000, 72_000]) {
+        assert!(
+            (at - note).abs() <= 48,
+            "a click landed at frame {at}, its note at {note}"
+        );
+    }
+    app.quit();
+}
