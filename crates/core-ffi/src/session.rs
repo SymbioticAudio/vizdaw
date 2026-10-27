@@ -1014,14 +1014,19 @@ impl Session {
     /// After an edit of a lane's arm, monitor or input in `seq` (plan 5d-1
     /// Rulings 16–17): claims an idle engine for `seq` when its lanes want
     /// it, so they are heard before the first Play, and reconnects the MIDI
-    /// sources off this thread. Never while this session records; a failure
+    /// sources off this thread. Never claims while this session records; a failure
     /// is a fault, never the edit's.
     fn claim_for_input(&self, seq: SeqId) {
         let mut inner = lock(&self.inner);
-        if inner.closed || inner.recording.is_some() || inner.finishing {
+        if inner.closed || !host::wants_live(inner.doc(), seq) {
             return;
         }
-        if !host::wants_live(inner.doc(), seq) {
+        // During a pass nothing is claimed, but the sources reconnect all
+        // the same (Ruling 17 as amended; final review m5). Arm and input
+        // edits were refused before this point (Ruling 18).
+        if inner.recording.is_some() || inner.finishing {
+            drop(inner);
+            host::listen_to_midi_sources_soon();
             return;
         }
         let at = match (inner.cursor, inner.cursor_seq) {

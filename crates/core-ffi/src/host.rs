@@ -1374,6 +1374,9 @@ fn reopen_backend(
     if info.buffer_frames > r.config().max_frames {
         r.prepare(info.buffer_frames);
     }
+    // No peak held under the old config outlives it, and none of the new
+    // one is wiped (Task 4 parked item): cleared while stopped.
+    r.clear_input_peaks();
     b.start(r)?;
     let env = rt_env(b, info.buffer_frames, info.sample_rate);
     Ok((info, env, failed))
@@ -1807,14 +1810,16 @@ impl Host {
     fn finish_job(&mut self, want: bool, done: Opened) {
         self.job = None;
         let was = self.input_open;
+        // A reopened device's peaks were cleared between its stop and
+        // start (Task 4 parked item); clearing now would wipe fresh ones.
+        let mut cleared = false;
         match done {
             #[cfg(target_os = "macos")]
             Opened::Device { info, env, failed } => {
                 self.engine.set_rt_env(env);
                 self.input_open = info.input_channels > 0;
                 self.inputs = InputInfo::of(&info);
-                // No peak held under the old config outlives it.
-                self.engine.clear_input_peaks();
+                cleared = true;
                 if let Some(f) = failed {
                     if !self.faults.contains(&f) {
                         self.faults.push(f.clone());
@@ -1859,7 +1864,9 @@ impl Host {
         if self.input_open != was {
             self.input_changes += 1;
             // No peak held under the old config outlives it.
-            self.engine.clear_input_peaks();
+            if !cleared {
+                self.engine.clear_input_peaks();
+            }
         }
         // A broken device is not tried again: the next claim replaces the
         // host, which opens what the lanes want (Task 7 review m4).
@@ -2008,6 +2015,10 @@ impl Host {
                 if info.buffer_frames > r.config().max_frames {
                     r.prepare(info.buffer_frames);
                 }
+                // The channel count may change with the reopen: no peak
+                // outlives the config (final review m3), cleared while
+                // stopped.
+                r.clear_input_peaks();
                 if let Err(e) = b.start(r) {
                     return Reopened::Lost(e.into());
                 }

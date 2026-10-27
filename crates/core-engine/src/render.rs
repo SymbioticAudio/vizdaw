@@ -757,6 +757,16 @@ impl Renderer {
         self.shared.raise(f);
     }
 
+    /// Clears every held input peak ([`Engine::clear_input_peaks`]): a
+    /// host reopening the device calls it while the renderer is stopped,
+    /// so no peak of the old config survives and none of the new one is
+    /// lost (plan 5d-1 final review m3).
+    ///
+    /// [`Engine::clear_input_peaks`]: crate::engine::Engine::clear_input_peaks
+    pub fn clear_input_peaks(&self) {
+        self.shared.clear_input_peaks();
+    }
+
     /// Renders one block of `frames` frames into planar `out` channels.
     /// Channels 0–1 get master, the rest zeros. // RT
     pub fn process(&mut self, out: &mut [&mut [f32]], frames: u32, time: BlockTime) {

@@ -922,6 +922,21 @@ fn clearing_input_peaks_leaves_no_stale_peak() {
     assert_eq!(engine.input_peaks(64), vec![0.0; 64]);
 }
 
+/// Final review m3 / Task 4 parked item: a device reopen clears the held
+/// peaks while the renderer is stopped, between the device's stop and
+/// start, so no peak of the old config survives and no fresh one is
+/// wiped.
+#[test]
+fn a_stopped_renderer_clears_the_held_input_peaks() {
+    let d = doc();
+    let (engine, mut b, _log) = start(&d, InputSpec::default(), FakeInput::Signals);
+    b.run_frames(2048);
+    let r = b.stop().unwrap();
+    r.clear_input_peaks();
+    assert_eq!(engine.input_peaks(64), vec![0.0; 64]);
+    b.start(r).unwrap();
+}
+
 /// Review M-b: a non-finite sample is a clip, not silence.
 #[test]
 fn a_non_finite_input_sample_meters_as_a_clip() {

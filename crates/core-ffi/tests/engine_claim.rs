@@ -260,6 +260,53 @@ fn closing_a_playing_window_lets_its_input_go() {
     }
 }
 
+/// Final review m5 (Ruling 17 as amended): a monitor change during a
+/// pass still reconnects the MIDI sources, though nothing is claimed.
+#[test]
+fn a_monitor_change_while_recording_listens_to_new_sources() {
+    let _g = serial();
+    debug_pretend_live_midi(true);
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = inputs(&s, seq, true);
+    arm(&s, seq, lp, true);
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
+    s.record(
+        seq,
+        vizdaw_ffi::RecordSpecRow {
+            replace: true,
+            punch: None,
+            looped: false,
+            count_in_bars: 0,
+            pre_roll_bars: 0,
+            passes_as_takes: true,
+        },
+    )
+    .unwrap();
+    assert!(s.record_state().unwrap().recording);
+    // Let the connects the arm and Record started settle.
+    let mut seen = midi_source_connects();
+    wait_until("the connects to settle", || {
+        std::thread::sleep(Duration::from_millis(100));
+        let now = midi_source_connects();
+        std::mem::replace(&mut seen, now) == now
+    });
+    let before = midi_source_connects();
+    edit(
+        &s,
+        LaneEdit::SetMonitor {
+            seq,
+            lane: lp,
+            monitor: MonitorModeRow::Input,
+        },
+    )
+    .unwrap();
+    wait_until("a connect", || midi_source_connects() > before);
+    debug_pretend_live_midi(false);
+    s.stop().unwrap();
+    s.close().unwrap();
+}
+
 /// Ruling 17 as amended (M15; Task 8 review m4): an arm reconnects the
 /// MIDI sources even when the engine is busy and not taken.
 #[test]

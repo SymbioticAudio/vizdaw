@@ -504,14 +504,13 @@ pub fn claims_engine_step(
 }
 
 /// Whether `cmd` changes a lane's arm or input: the input that failed to
-/// open is tried again (plan 5d-1 Ruling 15).
+/// open is tried again (plan 5d-1 Ruling 15). Derived from
+/// [`retries_input_cmd`], so the two never disagree (final review m7).
 pub fn retries_input(cmd: &EditCommand) -> bool {
-    matches!(
-        cmd,
-        EditCommand::Lane {
-            edit: LaneEdit::SetInput { .. } | LaneEdit::SetFlags { arm: Some(_), .. }
-        }
-    )
+    match cmd {
+        EditCommand::Lane { edit } => retries_input_cmd(&Command::Lane(lane_cmd(edit))),
+        _ => false,
+    }
 }
 
 /// [`retries_input`] for the model's command, once converted: a lane's
