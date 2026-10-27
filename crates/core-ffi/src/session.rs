@@ -807,6 +807,12 @@ impl Session {
         let mut inner = lock(&self.inner);
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
+        // An arm or input change that went through lets a failed input
+        // open be tried again, in the engine this session holds (plan
+        // 5d-1 Ruling 15; Task 7 review m6), before the reload applies it.
+        if crate::edit::retries_input_cmd(&cmd) {
+            host::clear_input_failure_of(self.id);
+        }
         inner.reload_host(self.id);
         self.mark(&mut inner);
         inner.snapshot()
@@ -2612,9 +2618,6 @@ impl Session {
                 crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
             }
             let c = crate::edit::to_command(&cmd)?;
-            if crate::edit::retries_input(&cmd) {
-                host::clear_input_failure();
-            }
             // Add Lane gives the lane the default monitor mode (plan 5d-1
             // Ruling 11).
             let monitor = crate::audio::default_monitor();
@@ -2660,9 +2663,6 @@ impl Session {
                         crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
                     }
                     _ => {}
-                }
-                if crate::edit::retries_input(cmd) {
-                    host::clear_input_failure();
                 }
                 core.push(crate::edit::to_command(cmd)?);
             }

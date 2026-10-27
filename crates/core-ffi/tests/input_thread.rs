@@ -310,3 +310,49 @@ fn a_host_goes_without_waiting_for_a_prompt_that_is_open() {
     });
     s.close().unwrap();
 }
+
+/// Task 7 review m6: only an edit that went through, in the session that
+/// holds the engine, lets a failed input open be tried again; a refused
+/// arm or another window's arm does not (each try restarts the device).
+#[test]
+fn only_the_holders_applied_edit_retries_a_failed_open() {
+    let _g = serial();
+    let s = Session::new_demo_audio().unwrap();
+    let other = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = audio_lane(&s, seq);
+    take_engine(&s, seq);
+    debug_fail_input_opens(1);
+    arm(&s, seq, lp, true);
+    assert_eq!(s.debug_input_open(), Some(false));
+    // A refused arm (no such lane).
+    let refused = edit(
+        &s,
+        LaneEdit::SetFlags {
+            seq,
+            lane: 999_999,
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        },
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    // Another window's arm.
+    let oseq = song(&other);
+    let olp = audio_lane(&other, oseq);
+    arm(&other, oseq, olp, true);
+    // Play does not try again: nothing cleared the failure.
+    take_engine(&s, seq);
+    assert!(
+        s.transport()
+            .unwrap()
+            .faults
+            .iter()
+            .any(|f| f.starts_with("audio input could not open")),
+        "{:?}",
+        s.transport().unwrap().faults
+    );
+    assert_eq!(s.debug_input_open(), Some(false), "retried");
+    other.close().unwrap();
+    s.close().unwrap();
+}

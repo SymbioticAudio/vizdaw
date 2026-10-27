@@ -477,6 +477,16 @@ pub fn retries_input(cmd: &EditCommand) -> bool {
     )
 }
 
+/// [`retries_input`] for the model's command, once converted: a lane's
+/// arm or input changes.
+pub fn retries_input_cmd(cmd: &core_model::command::Command) -> bool {
+    use core_model::command::{Command, lane::LaneCmd};
+    matches!(
+        cmd,
+        Command::Lane(LaneCmd::SetInput { .. } | LaneCmd::SetFlags { arm: Some(_), .. })
+    )
+}
+
 /// What a lane records (mirrors `core_model::lane::LaneInput`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum LaneInputRow {

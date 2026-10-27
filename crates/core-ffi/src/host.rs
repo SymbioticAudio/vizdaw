@@ -427,6 +427,14 @@ pub fn clear_input_failure() {
     }
 }
 
+/// [`clear_input_failure`] when `owner` holds the engine (an edit of its
+/// lanes; Task 7 review m6: another window's edit leaves it).
+pub fn clear_input_failure_of(owner: u64) {
+    if let Some(h) = lock(&HOST).as_mut().filter(|h| h.owner == owner) {
+        h.input_failed = None;
+    }
+}
+
 /// Whether `owner`'s host is opening or closing its input on the input
 /// thread (plan 5d-1 Ruling 13).
 pub fn input_opening(owner: u64) -> bool {
@@ -1140,14 +1148,23 @@ fn open_input(opener: Opener, want: bool, flags: &JobFlags) -> Option<Opened> {
             // The first open asks, here, off the caller's thread; a denial
             // is known before anything records (Ruling 14). Test builds
             // never ask (they never open a live device either).
+            // A host that went before the prompt is never asked for
+            // (Task 7 review m5); the prompt's answer is the access.
             #[cfg(not(feature = "test-hooks"))]
-            if want && microphone() == MicAccess::Undetermined {
-                let _ = platform_macos::permission::request_microphone(PROMPT_WAIT);
-            }
+            let access = if want && microphone() == MicAccess::Undetermined {
+                if flags.cancelled() {
+                    return None;
+                }
+                platform_macos::permission::request_microphone(PROMPT_WAIT)
+            } else {
+                microphone()
+            };
+            #[cfg(feature = "test-hooks")]
+            let access = microphone();
             if !flags.past_prompt() {
                 return None;
             }
-            if want && microphone() == MicAccess::Denied {
+            if want && access == MicAccess::Denied {
                 return Some(Opened::Denied);
             }
             let backend = backend.upgrade()?;
@@ -1160,6 +1177,11 @@ fn open_input(opener: Opener, want: bool, flags: &JobFlags) -> Option<Opened> {
         #[cfg(feature = "test-hooks")]
         Opener::Fake { delay, prompt } => {
             if prompt.is_some() {
+                // As the live prompt: not asked for a host that went
+                // (Task 7 review m5).
+                if flags.cancelled() {
+                    return None;
+                }
                 // The fake user has not answered yet (bounded, should a
                 // test never release it).
                 let until = Instant::now() + Duration::from_secs(600);
@@ -1642,11 +1664,18 @@ impl Host {
                 })
             }
             Err(e) => {
+                // Said once and not tried again until something changes,
+                // as a failed open (Task 7 review m9).
                 let f = format!(
                     "{}: no input thread ({e})",
                     crate::record::INPUT_FAILED_PREFIX
                 );
-                self.faults.push(f);
+                if !self.faults.contains(&f) {
+                    self.faults.push(f.clone());
+                }
+                if want {
+                    self.input_failed = Some(f);
+                }
             }
         }
     }
@@ -1701,7 +1730,9 @@ impl Host {
             // No peak held under the old config outlives it.
             self.engine.clear_input_peaks();
         }
-        if let Some(w) = self.pending_input.take() {
+        // A broken device is not tried again: the next claim replaces the
+        // host, which opens what the lanes want (Task 7 review m4).
+        if let Some(w) = self.pending_input.take().filter(|_| !self.broken) {
             let _ = self.ensure_input(w);
         }
     }
@@ -2777,20 +2808,30 @@ pub fn start_measure(
         .ok_or_else(|| VizError::Busy {
             message: "The audio engine changed; measure again.".into(),
         })?;
-    if host.measure.is_some() {
-        return Err(measuring_busy());
-    }
-    if host.busy() {
-        return Err(VizError::Busy {
+    let refusal = if host.measure.is_some() {
+        Some(measuring_busy())
+    } else if host.busy() {
+        Some(VizError::Busy {
             message: STOP_FIRST.into(),
-        });
-    }
-    if !opened {
-        // The input follows the lanes once the thread is done.
-        let _ = host.ensure_input(wants_audio_input(doc, seq));
-        return Err(VizError::Busy {
+        })
+    } else if !opened {
+        Some(VizError::Busy {
             message: INPUT_OPENING.into(),
-        });
+        })
+    } else {
+        None
+    };
+    if let Some(e) = refusal {
+        // The input Measure opened follows the lanes again (Task 7 review
+        // m3): this session's when it holds the engine, closed when nobody
+        // does; another holder's own change stands. It waits for the
+        // thread when one is at work.
+        if host.owner == owner {
+            let _ = host.ensure_input(wants_audio_input(doc, seq));
+        } else if host.owner == 0 {
+            let _ = host.ensure_input(false);
+        }
+        return Err(e);
     }
     match install_measure(host, owner, doc, seq, dest, lane, channels) {
         Ok(status) => {
