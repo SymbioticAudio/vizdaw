@@ -4641,8 +4641,7 @@ impl Session {
                         .into(),
                 });
             }
-            let m = crate::synth::measured_status(&status, crate::record::latency_trim())
-                .map_err(|e| crate::events::bad(&e))?;
+            let m = crate::synth::measured_status(&status).map_err(|e| crate::events::bad(&e))?;
             if let Err(e) = Self::check_idle(&inner) {
                 let message = match e {
                     VizError::Busy { message } => message,

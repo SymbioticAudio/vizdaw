@@ -2111,7 +2111,7 @@ fn install_measure(
         inputs.push(r);
     }
     host.engine
-        .start_measure(doc, dest, inputs)?
+        .start_measure(doc, dest, inputs, crate::record::latency_trim())?
         .map_err(|why| crate::events::bad(&format!("the synth cannot be played: {why}")))
 }
 

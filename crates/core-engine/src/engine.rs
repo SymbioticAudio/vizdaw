@@ -1211,12 +1211,15 @@ impl Engine {
     /// (no lane of the loaded sequence records its return). It does not
     /// refuse a destination that is not external (the built-in synth, a
     /// plugin instrument) or input channels the device lacks: the caller
-    /// checks those (plan 5c-2 Ruling 2; Task 9).
+    /// checks those (plan 5c-2 Ruling 2; Task 9). `trim` is the recording
+    /// latency trim in frames: each note's window starts its heard run
+    /// plus the input delay less `trim` later (Ruling 8; final review I1).
     pub fn start_measure(
         &mut self,
         doc: &Document,
         dest: DestId,
         inputs: Vec<u16>,
+        trim: i64,
     ) -> Result<Result<Arc<crate::measure::MeasureStatus>, String>, EngineError> {
         let Some(d) = doc.instruments().get(&dest) else {
             return Ok(Err(format!("destination {dest} is not in the project")));
@@ -1239,6 +1242,7 @@ impl Engine {
             target,
             channel,
             inputs,
+            trim,
         };
         let (tap, status) = crate::measure::tap(&req, self.cfg.sample_rate);
         self.push(EngineCmd::Measure(Some(Box::new(tap))))?;

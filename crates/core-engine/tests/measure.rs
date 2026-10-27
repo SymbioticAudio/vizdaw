@@ -60,7 +60,10 @@ fn measure_with(
         .with_input(FakeInput::Signals)
         .with_synth(&synth);
     backend.start(renderer).unwrap();
-    let status = engine.start_measure(&doc, dest, inputs).unwrap().unwrap();
+    let status = engine
+        .start_measure(&doc, dest, inputs, 0)
+        .unwrap()
+        .unwrap();
     // The lead, five notes 500 ms apart and the last window: under 3 s.
     for _ in 0..(3 * 48_000 / 512) {
         if status.done() {
@@ -163,16 +166,26 @@ fn only_a_destination_the_load_interned_can_be_measured() {
     )
     .unwrap();
     engine.load(&doc, seq).unwrap();
-    assert!(engine.start_measure(&doc, dest, vec![2]).unwrap().is_err());
     assert!(
         engine
-            .start_measure(&doc, DestId(99), vec![2])
+            .start_measure(&doc, dest, vec![2], 0)
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        engine
+            .start_measure(&doc, DestId(99), vec![2], 0)
             .unwrap()
             .is_err()
     );
     engine.set_return_dests(vec![dest]);
     engine.load(&doc, seq).unwrap();
-    assert!(engine.start_measure(&doc, dest, vec![2]).unwrap().is_ok());
+    assert!(
+        engine
+            .start_measure(&doc, dest, vec![2], 0)
+            .unwrap()
+            .is_ok()
+    );
 }
 
 /// Pre-flight M8: a measurement removed while its note sounds ends the
@@ -200,7 +213,10 @@ fn removing_a_measurement_mid_note_sends_its_note_off() {
         .with_input(FakeInput::Signals)
         .with_synth(&synth);
     backend.start(renderer).unwrap();
-    let status = engine.start_measure(&doc, dest, vec![2]).unwrap().unwrap();
+    let status = engine
+        .start_measure(&doc, dest, vec![2], 0)
+        .unwrap()
+        .unwrap();
     // The first note goes out at block 10 (run 5120) and would end 100 ms
     // later, at block 20: blocks 0..15 leave it sounding.
     for _ in 0..15 {
@@ -241,6 +257,7 @@ fn an_onset_is_credited_only_to_the_latest_note_whose_window_began() {
         target: TargetIdx(0),
         channel: 0,
         inputs: vec![0],
+        trim: 0,
     };
     let (mut t, s) = tap(&req, 48_000.0);
     let mut clicks: Vec<i64> = Vec::new();
@@ -269,5 +286,71 @@ fn an_onset_is_credited_only_to_the_latest_note_whose_window_began() {
     for i in 0..PINGS {
         let want = (i != 2).then(|| s.sent(i).unwrap() + ANSWER);
         assert_eq!(s.onset(i), want, "note {i}");
+    }
+}
+
+/// Drives a bare measurement whose device reports a round trip of
+/// `delay` frames while its input really arrives `true_delay` after the
+/// output, against a synth answering `answer` frames after each note is
+/// heard, with the recording latency trim `trim`; returns the status.
+fn measure_round_trip(delay: i64, true_delay: i64, trim: i64, answer: i64) -> Arc<MeasureStatus> {
+    use core_engine::measure::{MeasureRequest, tap};
+    use core_engine::schedule::TargetIdx;
+    const BLOCK: u32 = 512;
+    let req = MeasureRequest {
+        target: TargetIdx(0),
+        channel: 0,
+        inputs: vec![0],
+        trim,
+    };
+    let (mut t, s) = tap(&req, 48_000.0);
+    let mut clicks: Vec<i64> = Vec::new();
+    let mut buf = vec![0.0f32; BLOCK as usize];
+    let mut run = 0i64;
+    while !s.done() && run < 4 * 48_000 {
+        t.sends(0, |m| {
+            if m.as_slice().first().is_some_and(|b| b & 0xF0 == 0x90) {
+                clicks.push(run + answer + true_delay);
+            }
+        });
+        for (j, x) in buf.iter_mut().enumerate() {
+            let k = run + j as i64;
+            let on = clicks.iter().any(|c| k >= *c && k - c < 240);
+            *x = if on { 0.5 } else { 0.0 };
+        }
+        t.capture(&[&buf], BLOCK, delay);
+        run += i64::from(BLOCK);
+    }
+    assert!(s.done());
+    assert_eq!(s.trim(), trim);
+    s
+}
+
+/// Final review I1 (plan 5c-2 Ruling 8): each note's window starts at its
+/// heard run plus the round trip as recording uses it, `delay − trim`. A
+/// device reporting 1000 frames whose true round trip is 760 (a +240
+/// trim) and a 3 ms synth: every note finds its own onset 3 ms after it,
+/// none is credited to the note before it (which read about 504 ms).
+#[test]
+fn the_latency_trim_starts_each_notes_window() {
+    const ANSWER: i64 = 144; // 3 ms at 48 kHz
+    let s = measure_round_trip(1000, 760, 240, ANSWER);
+    for i in 0..PINGS {
+        let want = s.sent(i).unwrap() + 760 + ANSWER;
+        assert_eq!(s.onset(i), Some(want), "note {i}");
+        // What the control side reads: onset − heard − (delay − trim).
+        assert_eq!(want - s.sent(i).unwrap() - (1000 - 240), ANSWER);
+    }
+}
+
+/// Final review I1 (b): with the over-report left uncorrected (no trim),
+/// each answer comes after a later note was heard but before that note's
+/// window: it is ambiguous and credited to no note, so the measurement
+/// finds nothing (a clean "no signal"), never about 500 ms.
+#[test]
+fn an_onset_before_its_notes_window_is_credited_to_no_note() {
+    let s = measure_round_trip(1000, 760, 0, 144);
+    for i in 0..PINGS {
+        assert_eq!(s.onset(i), None, "note {i}");
     }
 }

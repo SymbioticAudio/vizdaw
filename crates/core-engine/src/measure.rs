@@ -43,6 +43,7 @@ pub struct MeasureStatus {
     sent: [AtomicI64; PINGS],
     onsets: [AtomicI64; PINGS],
     delay: AtomicI64,
+    trim: i64,
     done: AtomicBool,
     closed: AtomicBool,
 }
@@ -75,6 +76,11 @@ impl MeasureStatus {
         read(&self.delay)
     }
 
+    /// The recording latency trim the windows were placed with.
+    pub fn trim(&self) -> i64 {
+        self.trim
+    }
+
     /// Every note was sent and its window has passed.
     pub fn done(&self) -> bool {
         self.done.load(Ordering::Acquire)
@@ -96,6 +102,10 @@ pub struct MeasureRequest {
     /// The return's device input channels (one, or a pair; more are
     /// ignored).
     pub inputs: Vec<u16>,
+    /// The recording latency trim in frames (spec §6.3): each note's
+    /// window starts its heard run plus `delay − trim` later, the round
+    /// trip as recording uses it (plan 5c-2 Ruling 8).
+    pub trim: i64,
 }
 
 /// The real-time side of a measurement, owned by the renderer.
@@ -139,6 +149,7 @@ pub fn tap(req: &MeasureRequest, sample_rate: f64) -> (MeasureTap, Arc<MeasureSt
         sent: std::array::from_fn(|_| AtomicI64::new(NONE)),
         onsets: std::array::from_fn(|_| AtomicI64::new(NONE)),
         delay: AtomicI64::new(NONE),
+        trim: req.trim,
         done: AtomicBool::new(false),
         closed: AtomicBool::new(false),
     });
@@ -215,9 +226,10 @@ impl MeasureTap {
 
     /// At a block's end: watches its input (device channel `c` is
     /// `input[c]`) for onsets and advances the run; `delay` is the device's
-    /// input delay for the block. // RT
+    /// input delay for the block (its reported round trip, before the
+    /// trim). // RT
     pub fn capture(&mut self, input: &[&[f32]], frames: u32, delay: i64) {
-        let d = match self.delay {
+        let reported = match self.delay {
             Some(d) => d,
             None => {
                 self.delay = Some(delay);
@@ -225,6 +237,8 @@ impl MeasureTap {
                 delay
             }
         };
+        // The round trip as recording uses it (final review I1).
+        let d = reported.saturating_sub(self.status.trim);
         let window = self.status.window;
         let run = i64::try_from(self.run).unwrap_or(i64::MAX);
         for j in 0..frames as usize {
@@ -245,7 +259,11 @@ impl MeasureTap {
                 let k = run.saturating_add(j as i64);
                 // Only the latest note whose window has begun may take it
                 // (fix round 1, I1): a later note's answer inside an
-                // unanswered note's window is not that note's onset.
+                // unanswered note's window is not that note's onset. An
+                // onset after a later note was heard but before that
+                // note's window began is ambiguous (final review I1): no
+                // note takes it.
+                let mut ambiguous = false;
                 let latest = self
                     .sent
                     .iter()
@@ -253,10 +271,16 @@ impl MeasureTap {
                     .zip(self.status.onsets.iter())
                     .rev()
                     .find_map(|((s, f), st)| {
-                        let from = s.as_ref()?.saturating_add(d);
-                        (k >= from).then_some((from, f, st))
+                        let heard = (*s)?;
+                        let from = heard.saturating_add(d);
+                        if k >= from {
+                            return Some((from, f, st));
+                        }
+                        ambiguous |= k >= heard;
+                        None
                     });
-                if let Some((from, f, st)) = latest
+                if !ambiguous
+                    && let Some((from, f, st)) = latest
                     && !*f
                     && k < from.saturating_add(window)
                 {

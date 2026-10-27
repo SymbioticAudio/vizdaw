@@ -194,7 +194,7 @@ fn recording_never_allocates() {
     // retired).
     engine.stop().unwrap();
     let m = engine
-        .start_measure(&doc, synth, vec![0, 1])
+        .start_measure(&doc, synth, vec![0, 1], 0)
         .unwrap()
         .unwrap();
     for i in 0..400u32 {
@@ -204,7 +204,10 @@ fn recording_never_allocates() {
         }
     }
     assert!(m.done(), "the measurement ran to its end");
-    let m = engine.start_measure(&doc, synth, vec![2]).unwrap().unwrap();
+    let m = engine
+        .start_measure(&doc, synth, vec![2], 0)
+        .unwrap()
+        .unwrap();
     for _ in 0..12 {
         armed_block(&mut b, 512);
     }
@@ -234,7 +237,7 @@ fn recording_never_allocates() {
         .with_synth(&fsynth);
     sbk.start(sr).unwrap();
     sbk.reserve(4096);
-    let status = se.start_measure(&sdoc, fake, vec![2]).unwrap().unwrap();
+    let status = se.start_measure(&sdoc, fake, vec![2], 0).unwrap().unwrap();
     let before = rt_check::count();
     for _ in 0..400 {
         armed_block(&mut sbk, 512);
@@ -248,7 +251,7 @@ fn recording_never_allocates() {
         "the synth answered every note"
     );
     se.play().unwrap();
-    let again = se.start_measure(&sdoc, fake, vec![2]).unwrap().unwrap();
+    let again = se.start_measure(&sdoc, fake, vec![2], 0).unwrap().unwrap();
     // Its first note goes out after the 100 ms lead and sounds 100 ms:
     // removed 15 blocks in, the note is sounding.
     for _ in 0..15 {

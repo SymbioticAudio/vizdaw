@@ -97,15 +97,16 @@ pub fn measured(
 }
 
 /// [`measured`] of a finished measurement, with the recording latency
-/// trim `trim` (the device's round trip as recording counts it).
-pub fn measured_status(s: &MeasureStatus, trim: i64) -> Result<Measured, String> {
+/// trim its windows were placed with (the device's round trip as
+/// recording counts it; final review I1).
+pub fn measured_status(s: &MeasureStatus) -> Result<Measured, String> {
     let sent: Vec<Option<i64>> = (0..PINGS).map(|i| s.sent(i)).collect();
     let onsets: Vec<Option<i64>> = (0..PINGS).map(|i| s.onset(i)).collect();
     measured(
         &sent,
         &onsets,
         s.delay().unwrap_or(0),
-        trim,
+        s.trim(),
         s.sample_rate(),
     )
 }
