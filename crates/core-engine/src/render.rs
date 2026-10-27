@@ -508,10 +508,31 @@ pub struct Renderer {
     roll_floor: u64,
     /// The loop `[start, end)` the transport last wrapped since it rolled
     /// (kept when the loop is edited: it is what was heard).
-    wrapped: Option<(u64, u64)>,
+    wrapped: Option<crate::graph::Wrapped>,
+    /// Frames played (`since_start`) when the transport last rolled or
+    /// wrapped.
+    seg_mark: u64,
     /// Frames rendered since playing reached its end: led regions play
     /// out their last frames meanwhile.
     after_end: u64,
+}
+
+/// What a wrap now, after `last` frames played since the roll or the
+/// last wrap, makes of the remembered wraps: the active loop (else
+/// the one remembered) with the stretches counted on. // RT
+fn wrapped_at(
+    transport: &Transport,
+    prev: Option<crate::graph::Wrapped>,
+    last: u64,
+) -> Option<crate::graph::Wrapped> {
+    let (start, end) = transport.active_loop().or(prev.map(|w| (w.start, w.end)))?;
+    Some(crate::graph::Wrapped {
+        start,
+        end,
+        last,
+        first: prev.map_or(last, |w| w.first),
+        wraps: prev.map_or(0, |w| w.wraps) + 1,
+    })
 }
 
 impl std::fmt::Debug for Renderer {
@@ -643,6 +664,7 @@ impl Renderer {
             measure: None,
             roll_floor: 0,
             wrapped: None,
+            seg_mark: 0,
             after_end: 0,
         };
         r.prepare(cfg.max_frames);
@@ -781,8 +803,11 @@ impl Renderer {
         // Led regions read up to the largest lead behind the transport:
         // the streamer plans from the earliest frame read (Ruling 3).
         let lead = self.graph.as_deref().map_or(0, Graph::max_lead);
-        let head = self.audio_run(length).head(lead);
-        self.reader.begin_block(head.unwrap_or(self.transport.pos));
+        let first = self.audio_run(length);
+        self.reader.begin_block_seam(
+            first.head(lead).unwrap_or(self.transport.pos),
+            first.seam(lead),
+        );
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let ns_per_frame = 1e9 / self.cfg.sample_rate.max(1.0);
         let mut missed = false;
@@ -803,6 +828,7 @@ impl Renderer {
             }
             let run = self.next_run(length, frames - offset);
             let end = offset + run;
+            let run_start = offset;
             // A run that starts at or past the end of playing plays out
             // the led regions' last frames (Ruling 3).
             let past_end = self.transport.play_pos(length).is_none()
@@ -846,7 +872,13 @@ impl Renderer {
                             t.wrap(offset, to);
                         }
                         // Led regions read the loop's end before its start.
-                        self.wrapped = self.transport.active_loop().or(self.wrapped);
+                        let now = self.since_start + u64::from(offset - run_start);
+                        self.wrapped = wrapped_at(
+                            &self.transport,
+                            self.wrapped,
+                            now.saturating_sub(self.seg_mark),
+                        );
+                        self.seg_mark = now;
                         release_all(&mut self.notes, &mut o, offset);
                         if let Some(s) = self.schedule.as_deref() {
                             reset_controllers(s, &mut o, offset);
@@ -1148,7 +1180,11 @@ impl Renderer {
                         .map(|e| new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)));
                     let remap = |f: u64| new.tempo.tick_to_frame(old.tempo.frame_to_tick(f));
                     self.roll_floor = remap(self.roll_floor);
-                    self.wrapped = self.wrapped.map(|(s, e)| (remap(s), remap(e)));
+                    self.wrapped = self.wrapped.map(|w| crate::graph::Wrapped {
+                        start: remap(w.start),
+                        end: remap(w.end),
+                        ..w
+                    });
                     if let Err(rtrb::PushError::Full(old)) =
                         self.retire.push(Retired::Schedule(old))
                     {
@@ -1200,6 +1236,7 @@ impl Renderer {
                 if rolls {
                     self.roll_floor = self.transport.pos;
                     self.wrapped = None;
+                    self.seg_mark = 0;
                     self.after_end = 0;
                 }
                 self.seek();
@@ -1223,6 +1260,7 @@ impl Renderer {
                 self.transport.locate(frame);
                 self.roll_floor = frame;
                 self.wrapped = None;
+                self.seg_mark = 0;
                 self.after_end = 0;
                 // A jump while recording is a cut: the next block marks
                 // where the transport landed (review fix M1).
@@ -1380,7 +1418,15 @@ impl Renderer {
         // end) counts: the run plays from the loop start.
         let lp = self.transport.active_loop();
         let due = lp.is_some_and(|(_, e)| self.transport.pos == e);
-        let wrapped = if due { lp } else { self.wrapped };
+        let wrapped = if due {
+            wrapped_at(
+                &self.transport,
+                self.wrapped,
+                self.since_start.saturating_sub(self.seg_mark),
+            )
+        } else {
+            self.wrapped
+        };
         let run = if s.audio.is_empty() {
             crate::graph::RegionRun::transport(frame, true)
         } else {

@@ -293,8 +293,9 @@ fn editing_the_loop_after_a_wrap_keeps_the_heard_seam() {
         r.engine.set_loop_range(Some((2 * QF, 4 * QF))).unwrap();
         r.engine.locate_frame(2 * QF).unwrap();
         r.engine.play().unwrap();
-        // The loop wraps at 4·QF = 96 000 (block ~188); edit it just after.
-        let mut got = r.render(190);
+        // The loop wraps at 4·QF = 96 000, played from 2·QF: block ~94
+        // (the second wrap is block ~188); edit it just after the first.
+        let mut got = r.render(96);
         r.engine.set_loop_range(Some((5 * QF, 6 * QF))).unwrap();
         let more = r.render(100);
         got.0.extend(more.0);
@@ -302,4 +303,53 @@ fn editing_the_loop_after_a_wrap_keeps_the_heard_seam() {
         got
     });
     assert_eq!(led, delayed);
+}
+
+/// Review N1: turning the loop off within one lead after a wrap leaves the
+/// led path's streamer planning the seam it is about to cross: no
+/// underrun, and the sound a delay would have made.
+#[test]
+fn turning_the_loop_off_just_after_a_wrap_does_not_starve_the_lead() {
+    let [led, delayed] = both(4800, |r| {
+        r.engine.set_loop_range(Some((2 * QF, 3 * QF))).unwrap();
+        r.engine.locate_frame(2 * QF).unwrap();
+        r.engine.play().unwrap();
+        let mut got = r.render(48);
+        r.engine.set_loop_range(None).unwrap();
+        let more = r.render(60);
+        got.0.extend(more.0);
+        got.1.extend(more.1);
+        got
+    });
+    assert_eq!(led, delayed);
+}
+
+/// Review N2: a loop shorter than the lead. Rolled into from before it,
+/// and shrunk to 1000 frames just before its wrap, the heard timeline
+/// before the wrap is the linear run, not the loop repeated.
+#[test]
+fn loops_shorter_than_the_lead_read_the_heard_timeline() {
+    let [led, delayed] = both(4800, |r| {
+        r.engine
+            .set_loop_range(Some((2 * QF, 2 * QF + 2000)))
+            .unwrap();
+        r.engine.locate_frame(QF).unwrap();
+        r.engine.play().unwrap();
+        r.render(60)
+    });
+    assert_eq!(led, delayed, "rolled into a 2000-frame loop");
+    let [led, delayed] = both(4800, |r| {
+        r.engine.set_loop_range(Some((QF, 5 * QF))).unwrap();
+        r.engine.locate_frame(QF).unwrap();
+        r.engine.play().unwrap();
+        let mut got = r.render(185);
+        r.engine
+            .set_loop_range(Some((5 * QF - 1000, 5 * QF)))
+            .unwrap();
+        let more = r.render(60);
+        got.0.extend(more.0);
+        got.1.extend(more.1);
+        got
+    });
+    assert_eq!(led, delayed, "shrunk to 1000 frames before the wrap");
 }

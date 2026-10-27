@@ -102,11 +102,30 @@ pub struct RegionRun {
     pub ceiling: u64,
     /// The loop `[start, end)` once the transport wrapped it since it
     /// rolled: a read before its start comes from its end.
-    pub wrapped: Option<(u64, u64)>,
+    pub wrapped: Option<Wrapped>,
     /// Frames played since the transport rolled, at the run's first
     /// frame: a node with lead `a` reads silence until `a` frames have
     /// played, whatever the loop did (plan 5d-1 review I1).
     pub played: u64,
+}
+
+/// A loop `[start, end)` the transport wrapped since it rolled, with the
+/// stretches the heard timeline ran before the wrap (review N2): going
+/// back from the wrap the transport played `last` frames up to `end`,
+/// before that `wraps - 2` full passes of the loop, before that `first`
+/// frames up to `end` (the stretch from the roll to the first wrap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wrapped {
+    /// Loop start.
+    pub start: u64,
+    /// Loop end.
+    pub end: u64,
+    /// Frames played just before the last wrap.
+    pub last: u64,
+    /// Frames played before the first wrap.
+    pub first: u64,
+    /// Wraps since the roll.
+    pub wraps: u64,
 }
 
 // SAFETY: the pointees are `Sync` (`AudioSchedule`, `InputCopy` and the
@@ -173,13 +192,13 @@ impl RegionRun {
         self,
         floor: u64,
         ceiling: u64,
-        wrapped: Option<(u64, u64)>,
+        wrapped: Option<Wrapped>,
         played: u64,
     ) -> RegionRun {
         RegionRun {
             floor,
             ceiling,
-            wrapped: wrapped.filter(|(s, e)| e > s),
+            wrapped: wrapped.filter(|w| w.end > w.start),
             played,
             ..self
         }
@@ -223,12 +242,27 @@ impl RegionRun {
         if quiet > 0 {
             return (None, left.min(quiet).max(1) as u64);
         }
-        if let Some((s, e)) = self.wrapped {
+        if let Some(w) = self.wrapped {
+            let (s, e) = (w.start, w.end);
             let (s, e) = (i128::from(s), i128::from(e));
             if x < s {
                 // The previous pass of the loop: its end.
-                let y = s + (x - s).rem_euclid(e - s);
-                let n = left.min(e - y).min(s - x).max(1);
+                // Within the stretch just before the wrap the heard
+                // frames are the ones before the loop end; further back
+                // the loop repeats (N2).
+                let d = s - x;
+                let l = e - s;
+                let last = i128::from(w.last);
+                let d1 = d - last;
+                let mid = i128::from(w.wraps.saturating_sub(2)) * l;
+                let y = if d <= last {
+                    e - d
+                } else if d1 <= mid {
+                    e - ((d1 - 1) % l + 1)
+                } else {
+                    e - (d1 - mid)
+                };
+                let n = left.min(e - y).min(d).max(1);
                 return (u64::try_from(y).ok(), n as u64);
             }
         } else {
@@ -266,6 +300,16 @@ impl RegionRun {
             (None, _) if lead > self.played => Some(self.floor),
             (None, _) => None,
         }
+    }
+
+    /// The frame the earliest read (lead `lead`) jumps to after the
+    /// remembered loop's seam, while it still reads before it: the
+    /// streamer plans it alongside the head, so a loop turned off or
+    /// edited meanwhile does not starve it. // RT
+    pub fn seam(&self, lead: u64) -> Option<u64> {
+        let s = self.wrapped?.start;
+        let x = i128::from(self.frame) - i128::from(lead);
+        (self.playing && x < i128::from(s)).then_some(s)
     }
 
     /// Adds the heard monitor routes of `path` to `out`, deciding Auto at

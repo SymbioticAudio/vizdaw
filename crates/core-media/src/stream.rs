@@ -282,6 +282,10 @@ struct Shared {
     slots: Box<[AtomicPtr<Voice>]>,
     epoch: AtomicU64,
     position: AtomicU64,
+    /// A second frame the real-time side will read next (`u64::MAX`:
+    /// none): where a led read jumps back to after a loop seam the
+    /// transport no longer has, planned alongside `position`.
+    seam: AtomicU64,
     /// The loop the real-time side wraps at (`loop_end` 0: none); set
     /// with `loop_end` cleared first and stored last.
     loop_start: AtomicU64,
@@ -362,7 +366,16 @@ impl StreamReader {
     /// the loop start (the transport wraps first), so that is published;
     /// past the loop end the transport plays on unwrapped. // RT
     pub fn begin_block(&self, position: u64) {
+        self.begin_block_seam(position, None);
+    }
+
+    /// [`StreamReader::begin_block`], also telling the disk side the frame
+    /// `seam` the reads jump to next (a led node crossing a loop seam
+    /// after the loop was turned off or edited), planned alongside the
+    /// playhead. // RT
+    pub fn begin_block_seam(&self, position: u64, seam: Option<u64>) {
         let s = &self.shared;
+        s.seam.store(seam.unwrap_or(u64::MAX), Ordering::Relaxed);
         let e1 = s.loop_end.load(Ordering::Acquire);
         let ls = s.loop_start.load(Ordering::Acquire);
         let e2 = s.loop_end.load(Ordering::Acquire);
@@ -504,6 +517,7 @@ impl Streamer {
                 .collect(),
             epoch: AtomicU64::new(0),
             position: AtomicU64::new(0),
+            seam: AtomicU64::new(u64::MAX),
             loop_start: AtomicU64::new(0),
             loop_end: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
@@ -1028,7 +1042,7 @@ fn pass(s: &Shared, d: &mut Disk) {
     let rate = s.rate;
     let ahead = (s.cfg.ahead_seconds * rate) as u64;
     let seam = (s.cfg.seam_seconds * rate) as u64;
-    let (media, needs, lp, pos, hint, reset) = {
+    let (media, needs, lp, pos, hint, seam_at, reset) = {
         let mut c = lock(&s.control);
         let lp = c.loop_range;
         // The published playhead: what the real-time side reads now.
@@ -1041,8 +1055,18 @@ fn pass(s: &Shared, d: &mut Disk) {
             c.hint = None;
         }
         let hint = c.hint.map(|h| wrapped(h.frame, lp));
+        let seam_at = s.seam.load(Ordering::Relaxed);
+        let seam_at = (seam_at != u64::MAX).then(|| wrapped(seam_at, lp));
         let reset = std::mem::take(&mut c.reset);
-        (c.media.clone(), Arc::clone(&c.needs), lp, pos, hint, reset)
+        (
+            c.media.clone(),
+            Arc::clone(&c.needs),
+            lp,
+            pos,
+            hint,
+            seam_at,
+            reset,
+        )
     };
     for m in reset {
         start_over(s, d, m);
@@ -1060,6 +1084,9 @@ fn pass(s: &Shared, d: &mut Disk) {
     d.readers.retain(|m, _| media.contains_key(m));
     let mut win = windows(pos, lp, ahead, seam);
     if let Some(h) = hint {
+        win.extend(windows(h, lp, ahead, seam));
+    }
+    if let Some(h) = seam_at {
         win.extend(windows(h, lp, ahead, seam));
     }
     // Stream slots used this pass, with the file frame to fill up to.
@@ -1154,7 +1181,7 @@ fn pass(s: &Shared, d: &mut Disk) {
         // The floor is the lowest frame of this voice the real-time side
         // may read: under the published playhead, or under the hint
         // should the locate land first (never past the playhead).
-        let floor = [Some(pos), hint]
+        let floor = [Some(pos), hint, seam_at]
             .into_iter()
             .flatten()
             .filter(|&p| p >= n.start && p < n.end())

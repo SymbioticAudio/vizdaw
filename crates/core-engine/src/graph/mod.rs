@@ -24,7 +24,7 @@ pub use node::{
     TestNode,
 };
 pub use pdc::{MAX_INSERTS, MAX_NODES, Plan, PlanError, plan, plan_capped, plan_with};
-pub use regions::RegionRun;
+pub use regions::{RegionRun, Wrapped};
 pub use spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};
 
 /// What compiling the mixer graph did (`CompileReport::graph`, Plan
