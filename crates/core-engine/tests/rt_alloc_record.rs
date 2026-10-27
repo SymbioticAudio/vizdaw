@@ -1,14 +1,16 @@
 //! Recording never allocates on the render path (plan 5c Task 5; spec
 //! §3, §12.3 "`rt-check` covers … the input ring"): the counting
 //! allocator is armed only around `OfflineBackend::block`, while a record
-//! tap captures fake input through loop wraps, a full ring, tap swaps, an
-//! xrun, a stop and the tap's removal; then a return-latency measurement
-//! runs, is replaced and is removed mid-note, and one finds the fake
-//! synth's onsets.
+//! tap captures fake input through loop wraps, a full ring, tap swaps, a
+//! graph whose latency really changes and changes back (plan 5c-2 Task 6),
+//! an xrun, a stop and the tap's removal; then a return-latency
+//! measurement runs with the transport stopped, is replaced and is removed
+//! mid-note, and the fake synth answers the part (plan 5c-2).
 
 use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
+use core_engine::graph::TestInserts;
 use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, MonitorRoute, port_key};
 use core_engine::measure::PINGS;
 use core_engine::midi1::Midi1Msg;
@@ -18,6 +20,7 @@ use core_engine::rt_check::{self, CountingAlloc};
 use core_model::command::{Command, LaneCmd, RoutingCmd};
 use core_model::ids::AnyId;
 use core_model::lane::MonitorMode;
+use core_model::mixer::StripKind;
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -58,9 +61,18 @@ fn recording_never_allocates() {
     }))
     .unwrap();
     let doc = bld.finish();
+    // The same document with a latent insert on the master: loaded
+    // mid-recording and back, the graph latency really changes (5c final
+    // review judgement 1).
+    let mut lb = Builder::from_doc(doc.clone());
+    let master = lb.strip_of(StripKind::Master).unwrap();
+    lb.insert(master, TestInserts::plugin("latency=480"))
+        .unwrap();
+    let latent = lb.finish();
     let sinks = OfflineSinks::new(1 << 20).with_tone();
     let log = sinks.log();
     let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
     // A MIDI lane with thru and recording, and a monitored input.
     let inputs = InputSpec {
         midi: vec![MidiInputSpec {
@@ -96,13 +108,17 @@ fn recording_never_allocates() {
     engine.play().unwrap();
     let before = rt_check::count();
     let mut buf = Vec::with_capacity(1 << 20);
+    // The graph latencies the marks carried (read between blocks).
+    let mut latencies = std::collections::BTreeSet::new();
     for i in 0..3_000u32 {
         armed_block(&mut b, 1 + (i * 37) % 1024);
         // Drained (unarmed) except between blocks 1000 and 1500: the ring
         // fills and blocks are lost.
         if !(1000..1500).contains(&i) {
             while h.ring.pop(&mut buf).is_some() {}
-            while h.marks.pop().is_ok() {}
+            while let Ok(m) = h.marks.pop() {
+                latencies.insert(m.latency);
+            }
         }
         if i % 100 == 0 {
             log.drain();
@@ -117,9 +133,15 @@ fn recording_never_allocates() {
                 msg,
             });
         }
+        if i == 1200 {
+            // A latent plugin comes in while recording: the graph swap
+            // changes the latency and the tap marks it (final review I1).
+            engine.load(&latent, seq).unwrap();
+        }
         if i == 1500 {
-            // Routes change (a reload): thru notes end, the old routes
-            // retire.
+            // Routes change (a reload, of the document without the latent
+            // insert: the latency falls back): thru notes end, the old
+            // routes retire.
             let mut changed = inputs.clone();
             changed.monitor[0].mode = MonitorMode::Off;
             engine.set_inputs(changed);
@@ -141,6 +163,10 @@ fn recording_never_allocates() {
         }
     }
     assert!(h.status.run() > 0);
+    assert!(
+        latencies.contains(&0) && latencies.contains(&480),
+        "the marks carried the latency change: {latencies:?}"
+    );
     assert_eq!(rt_check::count() - before, 0, "allocations while recording");
     // An xrun while recording, then the tap goes.
     armed_block(&mut b, 8192);
@@ -185,35 +211,58 @@ fn recording_never_allocates() {
     assert!(m.closed());
     assert_eq!(rt_check::count() - before, 0, "allocations while measuring");
     drop(b.stop().unwrap());
-    // The built-in synth's test tone peaks at -40 dBFS, never above it, so
-    // it gives no onset: the fake synth answers instead, so the onset
-    // branch runs while armed (fix round 1).
-    let mut fb = Builder::new();
-    let fake = fb.dest(FAKE_SYNTH_PORT, FAKE_SYNTH_PORT, 0).unwrap();
-    let (fseq, _) = fb.sequence("S", "Part", Some(fake)).unwrap();
-    let fdoc = fb.finish();
+    // Plan 5c-2: a measurement pings the fake synth with the transport
+    // stopped and watches its answer; it is replaced, then removed with a
+    // note sounding, while the part plays through the synth.
+    let mut sb = Builder::new();
+    let fake = sb.dest(FAKE_SYNTH_PORT, FAKE_SYNTH_PORT, 0).unwrap();
+    let (fseq, flane) = sb.sequence("Synth", "Part", Some(fake)).unwrap();
+    sb.notes(fseq, flane, &[(0, 60, 0x8000, Q), (2 * Q, 64, 0x8000, Q)])
+        .unwrap();
+    let sdoc = sb.finish();
     let fsynth = FakeSynth::new(25.0);
-    let (mut fe, fr) = Engine::new(
+    let (mut se, sr) = Engine::new(
         EngineConfig::new(48_000.0),
         Box::new(OfflineSinks::new(1 << 16).with_fake_synth(&fsynth)),
     )
     .unwrap();
-    fe.set_return_dests(vec![fake]);
-    fe.load(&fdoc, fseq).unwrap();
-    let mut fbk = OfflineBackend::new(48_000.0, 512)
+    se.set_return_dests(vec![fake]);
+    se.load(&sdoc, fseq).unwrap();
+    let mut sbk = OfflineBackend::new(48_000.0, 512)
         .with_input(FakeInput::Signals)
         .with_synth(&fsynth);
-    fbk.start(fr).unwrap();
-    let m = fe.start_measure(&fdoc, fake, vec![2]).unwrap().unwrap();
+    sbk.start(sr).unwrap();
+    sbk.reserve(4096);
+    let status = se.start_measure(&sdoc, fake, vec![2]).unwrap().unwrap();
     let before = rt_check::count();
-    for _ in 0..300 {
-        armed_block(&mut fbk, 512);
+    for _ in 0..400 {
+        armed_block(&mut sbk, 512);
+        if status.done() {
+            break;
+        }
     }
-    assert!(m.done());
+    assert!(status.done(), "the measurement finished");
     assert!(
-        (0..PINGS).all(|i| m.onset(i).is_some()),
-        "every note answered"
+        (0..PINGS).all(|i| status.onset(i).is_some()),
+        "the synth answered every note"
     );
-    assert_eq!(rt_check::count() - before, 0, "allocations finding onsets");
-    drop(fbk.stop().unwrap());
+    se.play().unwrap();
+    let again = se.start_measure(&sdoc, fake, vec![2]).unwrap().unwrap();
+    // Its first note goes out after the 100 ms lead and sounds 100 ms:
+    // removed 15 blocks in, the note is sounding.
+    for _ in 0..15 {
+        armed_block(&mut sbk, 512);
+    }
+    se.stop_measure().unwrap();
+    armed_block(&mut sbk, 512);
+    assert!(status.closed() && again.closed());
+    for _ in 0..100 {
+        armed_block(&mut sbk, 512);
+    }
+    assert_eq!(
+        rt_check::count() - before,
+        0,
+        "allocations while measuring and while the fake synth plays"
+    );
+    drop(sbk.stop().unwrap());
 }
