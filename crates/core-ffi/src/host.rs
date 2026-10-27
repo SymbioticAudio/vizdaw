@@ -10,7 +10,7 @@ use core_engine::backend::{AudioBackend, BackendEvent};
 use core_engine::engine::{Engine, EngineConfig, PendingPlay};
 use core_engine::graph::NoInserts;
 use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, MidiSender, MonitorRoute, port_key};
-use core_engine::offline::{EventLog, FakeInput, OfflineBackend, OfflineSinks};
+use core_engine::offline::{EventLog, FakeInput, FakeSynth, OfflineBackend, OfflineSinks};
 use core_engine::record::{RecordHandles, RecordRequest};
 use core_engine::render::Renderer;
 use core_engine::schedule::CompileReport;
@@ -98,6 +98,58 @@ pub fn fake_input() -> Option<FakeInput> {
 #[cfg(feature = "test-hooks")]
 pub fn set_fake_input(input: Option<FakeInput>) {
     *lock(&FAKE_INPUT) = Some(input);
+}
+
+/// The fake synth offline hosts get: `Some(choice)` set by the
+/// `set_fake_synth` test hook, `None` read from the environment.
+static FAKE_SYNTH: Mutex<Option<Option<f64>>> = Mutex::new(None);
+
+/// The fake synth of offline hosts created from now on (spec §12.1;
+/// plan 5c-2 Ruling 7): `VIZDAW_FAKE_SYNTH=<delay ms>` (0–500; anything
+/// else is ignored) adds the MIDI destination "Fake Synth", which answers
+/// every note on fake input channel 3 that long after it is heard. Tests
+/// choose with `set_fake_synth`. Live hosts never have it.
+///
+/// The delay the synth really answers with is the backend's: a delay
+/// below one block is allowed but answered one block late (a note is sent
+/// during the block it plays in), and it grows to cover the largest block
+/// rendered, plus the engine's negative MIDI offset when there is one, so
+/// a note never sounds early. Read `OfflineBackend::synth_delay` after a
+/// run, not this value, for the delay a measurement should find.
+pub fn fake_synth() -> Option<f64> {
+    if let Some(v) = *lock(&FAKE_SYNTH) {
+        return v;
+    }
+    let max = f64::from(core_model::document::MAX_RETURN_LATENCY_MS);
+    std::env::var("VIZDAW_FAKE_SYNTH")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|ms| ms.is_finite() && (0.0..=max).contains(ms))
+}
+
+/// Makes offline hosts created from now on have the fake synth answering
+/// `delay_ms` late, or none (test hook; it wins over the environment).
+#[cfg(feature = "test-hooks")]
+pub fn set_fake_synth(delay_ms: Option<f64>) {
+    *lock(&FAKE_SYNTH) = Some(delay_ms);
+}
+
+/// The fake input of a new offline host. The fake synth answers on the
+/// signals input's channel 3, so it brings that input when none was
+/// chosen (plan 5c-2 Ruling 7), unless the synth came from the
+/// environment and the test hook chose the input: a `VIZDAW_FAKE_SYNTH`
+/// left in a shell never overrides a test's explicit choice (pre-flight
+/// M14).
+fn offline_input(
+    input: Option<FakeInput>,
+    input_chosen: bool,
+    synth: bool,
+    synth_chosen: bool,
+) -> Option<FakeInput> {
+    match input {
+        None if synth && (synth_chosen || !input_chosen) => Some(FakeInput::Signals),
+        i => i,
+    }
 }
 
 /// Where the CoreMIDI sources' messages go: the installed host's engine
@@ -448,6 +500,32 @@ pub fn input_spec(doc: &Document, seq: SeqId) -> InputSpec {
     spec
 }
 
+/// The external synths whose return the lanes of `seq` record (spec
+/// §6.7), each once: the engine interns them at every load, so Measure
+/// can play them (plan 5c-2 Ruling 10). A link to a destination that is
+/// missing or not external is left out (the model clears such links;
+/// this is defence in depth).
+pub fn return_dests(doc: &Document, seq: SeqId) -> Vec<DestId> {
+    let mut out: Vec<DestId> = Vec::new();
+    if let Ok(s) = doc.sequence(seq) {
+        for d in s
+            .lanes
+            .iter()
+            .filter_map(|l| l.input.as_ref().and_then(LaneInput::return_of))
+            .filter(|d| {
+                doc.instruments()
+                    .get(d)
+                    .is_some_and(|x| x.kind.is_external())
+            })
+        {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
 fn next_epoch() -> u64 {
     EPOCHS.fetch_add(1, Ordering::Relaxed)
 }
@@ -673,10 +751,14 @@ impl OfflineDriver {
         renderer: Renderer,
         rate: f64,
         input: Option<FakeInput>,
+        synth: Option<&FakeSynth>,
     ) -> Result<(OfflineDriver, InputInfo), VizError> {
         let mut backend = OfflineBackend::new(rate, OFFLINE_BLOCK);
         if let Some(k) = input {
             backend = backend.with_input(k);
+        }
+        if let Some(s) = synth {
+            backend = backend.with_synth(s);
         }
         let info = backend.open(&core_engine::backend::AudioConfig::default())?;
         let inputs = InputInfo::of(&info);
@@ -818,11 +900,18 @@ impl Host {
     fn create_any(project: f64) -> Result<Host, VizError> {
         HOSTS_CREATED.fetch_add(1, Ordering::Relaxed);
         if offline_mode() {
-            let sinks = OfflineSinks::new(1 << 16);
+            let synth = fake_synth().map(FakeSynth::new);
+            let mut sinks = OfflineSinks::new(1 << 16);
+            if let Some(s) = &synth {
+                sinks = sinks.with_fake_synth(s);
+            }
+            let input_chosen = lock(&FAKE_INPUT).is_some();
+            let synth_chosen = lock(&FAKE_SYNTH).is_some();
+            let input = offline_input(fake_input(), input_chosen, synth.is_some(), synth_chosen);
             let log = sinks.log();
             let rate = offline_rate(project);
             let (engine, renderer) = Engine::new(EngineConfig::new(rate), Box::new(sinks))?;
-            let (driver, inputs) = OfflineDriver::start(renderer, rate, fake_input())?;
+            let (driver, inputs) = OfflineDriver::start(renderer, rate, input, synth.as_ref())?;
             let mut h = Host::new(
                 engine,
                 Output::Offline(driver),
@@ -1035,6 +1124,7 @@ impl Host {
         self.plugins_in_engine |= has_slots(doc);
         self.engine.set_media(media_of(owner));
         self.engine.set_inputs(input_spec(doc, seq));
+        self.engine.set_return_dests(return_dests(doc, seq));
         let report = self.engine.load(doc, seq)?;
         self.report = report_lines(&report);
         self.engine.set_loop(looped)?;
@@ -1883,6 +1973,25 @@ mod tests {
         assert!(!admit_input(MicAccess::Denied, &mut faults));
         assert!(!admit_input(MicAccess::Denied, &mut faults));
         assert_eq!(faults, ["xrun", DENIED_MESSAGE]);
+    }
+
+    /// Plan 5c-2 Ruling 7 and pre-flight M14: the synth brings the
+    /// signals input when no input was chosen, but an environment synth
+    /// never overrides a test's explicit input choice.
+    #[test]
+    fn the_fake_synth_brings_the_signals_input_unless_a_test_chose_one() {
+        let sig = Some(FakeInput::Signals);
+        let lb = Some(FakeInput::Loopback(64));
+        // Both from the environment, or the synth chosen by a test.
+        assert_eq!(offline_input(None, false, true, false), sig);
+        assert_eq!(offline_input(None, true, true, true), sig);
+        assert_eq!(offline_input(None, false, true, true), sig);
+        // An environment synth and a test's explicit "no input".
+        assert_eq!(offline_input(None, true, true, false), None);
+        // A chosen input always stands; no synth brings nothing.
+        assert_eq!(offline_input(lb, true, true, true), lb);
+        assert_eq!(offline_input(lb, false, true, false), lb);
+        assert_eq!(offline_input(None, false, false, false), None);
     }
 
     /// Task 8 note: a stream's input (and its latencies) reach the host's

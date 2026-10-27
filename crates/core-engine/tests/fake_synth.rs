@@ -162,3 +162,22 @@ fn overlapping_notes_sound_until_the_last_is_off() {
         "silent once both are off"
     );
 }
+
+/// `fixtures::clicks` (plan 5c-2 Task 7, reused by Task 11): a sample
+/// above the level after at least `quiet` samples at or below it starts a
+/// click; positions are counted from `from`, and a loud start without the
+/// quiet run before it is no click.
+#[test]
+fn clicks_finds_loud_onsets_after_a_quiet_run() {
+    let mut x = vec![0.0f32; 100];
+    x[0] = 0.9; // no quiet run before it
+    x[30] = 0.5; // 29 quiet samples before it (from 1)
+    x[31] = -0.5; // the same click
+    x[50] = 0.05; // the tone: below the level
+    x[60] = -0.4; // 28 quiet samples before it
+    x[65] = 0.4; // only 4
+    assert_eq!(core_engine::fixtures::clicks(&x, 0, 0.3, 20), vec![30, 60]);
+    assert_eq!(core_engine::fixtures::clicks(&x, 10, 0.3, 20), vec![20, 50]);
+    assert_eq!(core_engine::fixtures::clicks(&x, 0, 0.3, 29), vec![30]);
+    assert!(core_engine::fixtures::clicks(&x, 200, 0.3, 1).is_empty());
+}

@@ -545,3 +545,24 @@ pub fn demo_audio_document() -> Result<Document> {
     }
     Ok(b.finish())
 }
+
+/// Click onsets in `samples` from index `from` (plan 5c-2; the fake
+/// synth's clicks): each sample louder than `level` after at least `quiet`
+/// samples at or below it, as an offset from `from`. A loud sample with
+/// fewer quiet ones before it (counted from `from`) continues a click or
+/// is no click.
+pub fn clicks(samples: &[f32], from: usize, level: f32, quiet: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut run = 0usize;
+    for (k, x) in samples.iter().enumerate().skip(from) {
+        if x.abs() > level {
+            if run >= quiet {
+                out.push(k - from);
+            }
+            run = 0;
+        } else {
+            run += 1;
+        }
+    }
+    out
+}
