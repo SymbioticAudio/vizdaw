@@ -290,6 +290,19 @@ import VizDAWCore
         #expect(SynthCommands.extraTimeMs("destination.set_return_latency") == nil)
     }
 
+    /// Final review finding 3: Measure runs only when its call's timeout
+    /// was extended (its client still waits); a call answered `timeout`
+    /// while queued is skipped. Other calls run without extending.
+    @Test func measureRunsOnlyWhileItsClientWaits() {
+        var asked: [UInt64] = []
+        #expect(SynthCommands.shouldRun("destination.measure_return") { asked.append($0); return true })
+        #expect(asked == [15_000])
+        #expect(!SynthCommands.shouldRun("destination.measure_return") { _ in false })
+        asked = []
+        #expect(SynthCommands.shouldRun("lane.track_synth") { asked.append($0); return false })
+        #expect(asked.isEmpty)
+    }
+
     @Test func externalDestinationsAreTheOnesTrackSynthOffers() throws {
         let (_, _, m, _) = try demo()
         #expect(SynthCommands.externalDestinations(m).map(\.id) == [7])

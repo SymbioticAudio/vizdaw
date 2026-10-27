@@ -178,10 +178,11 @@ enum ControlChannel {
         case .runCommand(let id, let args, let window):
             // A call that blocks (Measure) gets the time it blocks for from
             // now, past the app timeout it may have spent queued (Task 10
-            // review M6).
-            if let extra = SynthCommands.extraTimeMs(id) {
-                _ = try? server.extendTimeout(token: token, timeoutMs: extra)
-            }
+            // review M6); one whose client was already answered `timeout`
+            // is skipped (final review finding 3).
+            guard SynthCommands.shouldRun(id, extend: {
+                (try? server.extendTimeout(token: token, timeoutMs: $0)) == true
+            }) else { return }
             answer(server, token, ControlCommands.run(
                 id, args: args, doc: ControlWindows.document(window), store: appStore, host: AppControlHost.shared))
         case .state(let target, let window):

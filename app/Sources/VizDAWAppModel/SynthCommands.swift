@@ -62,6 +62,17 @@ public enum SynthCommands {
         id == measureReturn ? 15_000 : nil
     }
 
+    /// Whether the channel runs a call of `id` now. A call that blocks
+    /// (Measure) runs only when `extend` gave it `extraTimeMs(_:)` (true:
+    /// its client still waits); one whose client was already answered
+    /// `timeout` while it was queued is skipped, so it never measures and
+    /// adds a step nobody asked for (final review finding 3). Other calls
+    /// always run.
+    public static func shouldRun(_ id: String, extend: (UInt64) -> Bool) -> Bool {
+        guard let extra = extraTimeMs(id) else { return true }
+        return extend(extra)
+    }
+
     static func id(_ args: [ControlArg], _ name: String) -> UInt64? {
         args.int(name).flatMap { UInt64(exactly: $0) }
     }
