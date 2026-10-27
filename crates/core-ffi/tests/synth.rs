@@ -887,6 +887,8 @@ fn a_measurement_never_outlives_its_sequence() {
     let other = untitled(&g, d.doc.clone());
     let s2 = Arc::clone(&s);
     let dest = d.synth.0;
+    // Held, so the delete always lands mid-measure (review M5).
+    vizdaw_ffi::host::debug_hold_measure(true);
     let t = std::thread::spawn(move || s2.measure_return(dest));
     wait_until("the measurement to start", vizdaw_ffi::host::measuring);
     s.edit(
@@ -899,8 +901,9 @@ fn a_measurement_never_outlives_its_sequence() {
         None,
     )
     .unwrap();
+    vizdaw_ffi::host::debug_hold_measure(false);
     let r = t.join().unwrap();
-    assert!(r.is_err(), "{r:?}");
+    assert!(matches!(r, Err(VizError::Engine { .. })), "{r:?}");
     assert!(!vizdaw_ffi::host::measuring());
     other.play(d.seq.0).unwrap();
     other.stop().unwrap();
@@ -949,4 +952,128 @@ fn measuring_holds_the_input_open() {
     assert_eq!(m.unwrap().onsets, 5);
     assert_eq!(s.debug_input_open(), Some(false));
     s.close().unwrap();
+}
+
+/// Arms (or disarms) lane `lane` of `seq`.
+fn arm(s: &Session, seq: SeqId, lane: LaneId, on: bool) {
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetFlags {
+                seq: seq.0,
+                lane: lane.0,
+                mute: None,
+                solo: None,
+                arm: Some(on),
+            },
+        },
+        None,
+    )
+    .unwrap();
+}
+
+/// Measures with `rec` armed `armed`, flipping its arm mid-measure;
+/// returns the input's state after the measurement and how many times it
+/// changed from the measurement's start to then.
+fn flip_arm_mid_measure(armed: bool) -> (Option<bool>, u64) {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let mut b = Builder::from_doc(d.doc.clone());
+    b.run(Command::Lane(LaneCmd::SetFlags {
+        seq: d.seq,
+        lane: d.rec,
+        mute: None,
+        solo: None,
+        arm: Some(armed),
+    }))
+    .unwrap();
+    let s = untitled(&g, b.finish());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_hold_measure(true);
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    let before = s.debug_input_changes().unwrap();
+    arm(&s, d.seq, d.rec, !armed);
+    vizdaw_ffi::host::debug_hold_measure(false);
+    let m = t.join().unwrap();
+    assert_eq!(m.unwrap().onsets, 5);
+    let out = (
+        s.debug_input_open(),
+        s.debug_input_changes().unwrap() - before,
+    );
+    s.close().unwrap();
+    out
+}
+
+/// Review I2: a lane armed mid-measure keeps the input open once the
+/// measurement ends, without a single input change.
+#[test]
+fn a_lane_armed_mid_measure_keeps_the_input_open() {
+    assert_eq!(flip_arm_mid_measure(false), (Some(true), 0));
+}
+
+/// Review I2: a lane disarmed mid-measure closes the input once the
+/// measurement ends, in one input change.
+#[test]
+fn a_lane_disarmed_mid_measure_closes_the_input_once() {
+    assert_eq!(flip_arm_mid_measure(true), (Some(false), 1));
+}
+
+/// Review I1: an edit opened while Measure waits does not absorb its
+/// step: Measure is refused, naming what it measured, and the edit's
+/// undo step holds only the edit.
+#[test]
+fn an_edit_opened_mid_measure_refuses_the_measured_step() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_hold_measure(true);
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    s.begin_edit("Drag".into()).unwrap();
+    s.set_lane_mute(d.seq.0, d.part.0, true).unwrap();
+    vizdaw_ffi::host::debug_hold_measure(false);
+    let r = t.join().unwrap();
+    match r {
+        Err(VizError::Busy { message }) => assert!(
+            message.contains("open edit") && message.contains("(measured 25.0 ms)"),
+            "{message}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(!vizdaw_ffi::host::measuring());
+    let snap = s.end_edit().unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Drag"));
+    assert_eq!(return_latency(&s, d.synth), 0.0);
+    s.undo().unwrap();
+    assert!(!lane_named(&s, d.seq, "Part").mute);
+    assert_eq!(return_latency(&s, d.synth), 0.0);
+    assert_eq!(s.snapshot().unwrap().undo_label, None);
+    s.close().unwrap();
+}
+
+/// Review M4 (pre-flight I1): a window closed mid-measure ends its
+/// measurement; every other session can play again.
+#[test]
+fn closing_a_window_ends_its_measurement() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let other = untitled(&g, d.doc.clone());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_hold_measure(true);
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    s.close().unwrap();
+    assert!(!vizdaw_ffi::host::measuring());
+    vizdaw_ffi::host::debug_hold_measure(false);
+    let r = t.join().unwrap();
+    assert!(matches!(r, Err(VizError::Engine { .. })), "{r:?}");
+    assert!(!vizdaw_ffi::host::measuring());
+    other.play(d.seq.0).unwrap();
+    other.stop().unwrap();
+    other.close().unwrap();
 }

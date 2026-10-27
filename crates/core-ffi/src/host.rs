@@ -719,6 +719,7 @@ pub fn inject_stop_recording_fault(on: bool) {
 
 /// Holds a measurement past its end (test hook, pre-flight M5): while
 /// held, `Session::measure_return` keeps waiting and does not end it.
+#[cfg(feature = "test-hooks")]
 static HOLD_MEASURE: AtomicBool = AtomicBool::new(false);
 
 /// Holds (`true`) or releases every measurement's end (test hook,
@@ -730,8 +731,15 @@ pub fn debug_hold_measure(on: bool) {
 }
 
 /// Whether a test holds measurements past their end.
+#[cfg(feature = "test-hooks")]
 pub(crate) fn measure_held() -> bool {
     HOLD_MEASURE.load(Ordering::Relaxed)
+}
+
+/// Never without the test hooks.
+#[cfg(not(feature = "test-hooks"))]
+pub(crate) const fn measure_held() -> bool {
+    false
 }
 
 /// Closed sessions' plugin hosts still waiting for processors (test hook).
@@ -947,10 +955,11 @@ struct Host {
     /// try restarts the device) until no lane wants input any more.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     input_failed: Option<String>,
-    /// A return-latency measurement is installed (plan 5c-2 Ruling 9):
-    /// Play, Record and another Measure are `Busy` until it ends, and the
-    /// input stays as it is (pre-flight M1).
-    measuring: bool,
+    /// The return-latency measurement installed, if any (plan 5c-2
+    /// Ruling 9): Play, Record and another Measure are `Busy` until it
+    /// ends, and the input stays as it is (pre-flight M1). Its status
+    /// tells whose it is (Task 9 review).
+    measure: Option<Arc<MeasureStatus>>,
 }
 
 impl Host {
@@ -1077,7 +1086,7 @@ impl Host {
             record_hold: false,
             pending_input: None,
             input_failed: None,
-            measuring: false,
+            measure: None,
         }
     }
 
@@ -1088,13 +1097,18 @@ impl Host {
         self.record_hold || self.want_play || self.engine.state() == PlayState::Playing
     }
 
-    /// Ends the installed measurement (its sounding note ends) and applies
-    /// the input change asked meanwhile (pre-flight I1, M1).
-    fn end_measuring(&mut self) -> Result<(), VizError> {
-        self.measuring = false;
+    /// Ends the installed measurement (its sounding note ends) and makes
+    /// one input change (pre-flight I1, M1; Task 9 review I2): to `want`
+    /// when given (what the current document asks), else to what was
+    /// asked while it ran.
+    fn end_measuring(&mut self, want: Option<bool>) -> Result<(), VizError> {
+        self.measure = None;
         let removed = self.engine.stop_measure().map_err(VizError::from);
-        let input = match self.pending_input.take() {
-            Some(want) => self.ensure_input(want),
+        let input = match want.or(self.pending_input.take()) {
+            Some(want) => {
+                self.pending_input = None;
+                self.ensure_input(want)
+            }
             None => Ok(()),
         };
         removed.and(input)
@@ -1106,7 +1120,7 @@ impl Host {
     /// While a record tap or a measurement is in, the change waits for it
     /// to go ([`Host::end_record_hold`], [`Host::end_measuring`]).
     fn ensure_input(&mut self, want: bool) -> Result<(), VizError> {
-        if self.record_hold || self.measuring {
+        if self.record_hold || self.measure.is_some() {
             self.pending_input = Some(want);
             return Ok(());
         }
@@ -1514,7 +1528,7 @@ fn claim_host(
     let mut slot = loop {
         let mut slot = lock(&HOST);
         if let Some(h) = slot.as_mut() {
-            if h.measuring {
+            if h.measure.is_some() {
                 return Err(measuring_busy());
             }
             if idle_only && h.busy() {
@@ -1747,8 +1761,8 @@ pub fn reload(
             if doc.sequence(seq).is_err() {
                 let stopped = h.engine.stop().map_err(VizError::from);
                 // A measurement of it ends with it (pre-flight I1).
-                let ended = if h.measuring {
-                    h.end_measuring()
+                let ended = if h.measure.is_some() {
+                    h.end_measuring(None)
                 } else {
                     Ok(())
                 };
@@ -1851,8 +1865,8 @@ pub fn release(owner: u64) {
         if h.owner == owner {
             let _ = h.engine.stop();
             // Its measurement ends with it (pre-flight I1).
-            if h.measuring {
-                let _ = h.end_measuring();
+            if h.measure.is_some() {
+                let _ = h.end_measuring(None);
             }
             h.want_play = false;
             h.epoch = next_epoch();
@@ -1949,7 +1963,7 @@ pub fn start_recording(owner: u64, req: &RecordRequest) -> Result<RecordHandles,
     let mut slot = lock(&HOST);
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
-            if h.measuring {
+            if h.measure.is_some() {
                 return Err(measuring_busy());
             }
             let handles = h.engine.start_recording(req)?;
@@ -2025,13 +2039,34 @@ pub fn start_measure(
     })?;
     host.faults.clear();
     host.ensure_input(true)?;
-    let back = |h: &mut Host| {
-        let _ = h.ensure_input(wants_audio_input(doc, seq));
-    };
+    match install_measure(host, owner, doc, seq, dest, lane, channels) {
+        Ok(status) => {
+            host.measure = Some(Arc::clone(&status));
+            Ok(status)
+        }
+        Err(e) => {
+            // Whatever failed, the input follows the lanes again (Task 9
+            // review M6).
+            let _ = host.ensure_input(wants_audio_input(doc, seq));
+            Err(e)
+        }
+    }
+}
+
+/// [`start_measure`] once the input is open: refuses a channel it lacks,
+/// loads `seq` stopped and installs the measurement.
+fn install_measure(
+    host: &mut Host,
+    owner: u64,
+    doc: &Document,
+    seq: SeqId,
+    dest: DestId,
+    lane: &str,
+    channels: core_model::lane::InputChannels,
+) -> Result<Arc<MeasureStatus>, VizError> {
     if let Some(why) =
         crate::record::channel_refusal(lane, channels, host.inputs.channels, &host.faults)
     {
-        back(host);
         return Err(crate::events::bad(&why));
     }
     host.engine.stop()?;
@@ -2047,43 +2082,39 @@ pub fn start_measure(
     if let Some(r) = channels.last().filter(|r| *r != first) {
         inputs.push(r);
     }
-    match host.engine.start_measure(doc, dest, inputs)? {
-        Ok(status) => {
-            host.measuring = true;
-            Ok(status)
-        }
-        Err(why) => {
-            back(host);
-            Err(crate::events::bad(&format!(
-                "the synth cannot be played: {why}"
-            )))
-        }
-    }
+    host.engine
+        .start_measure(doc, dest, inputs)?
+        .map_err(|why| crate::events::bad(&format!("the synth cannot be played: {why}")))
 }
 
-/// Ends the installed measurement, whoever holds the engine now (it is
-/// removed and its sounding note ends; pre-flight I1); when `owner` still
-/// holds it, the input follows the lanes of `seq` again (the change asked
-/// meanwhile applies otherwise; pre-flight M1).
-pub fn end_measure(owner: u64, doc: &Document, seq: SeqId) -> Result<(), VizError> {
+/// Ends the measurement `status` [`start_measure`] returned, whoever
+/// holds the engine now (it is removed and its sounding note ends;
+/// pre-flight I1). The input then changes once (Task 9 review I2): when
+/// `owner` still holds the engine, to what the lanes of `seq` in `doc`
+/// (the session's current document) want; else to what was asked while
+/// it ran. False when it was no longer installed: a deleted sequence, a
+/// closed window or a new device ended it first (nothing is changed then,
+/// so a later measurement is never ended by an earlier one's caller).
+pub fn end_measure(
+    owner: u64,
+    doc: &Document,
+    seq: SeqId,
+    status: &Arc<MeasureStatus>,
+) -> Result<bool, VizError> {
     let mut slot = lock(&HOST);
     match slot.as_mut() {
-        Some(h) if h.measuring => {
-            let ended = h.end_measuring();
-            let input = if h.owner == owner {
-                h.ensure_input(wants_audio_input(doc, seq))
-            } else {
-                Ok(())
-            };
-            ended.and(input)
+        Some(h) if h.measure.as_ref().is_some_and(|m| Arc::ptr_eq(m, status)) => {
+            let want = (h.owner == owner).then(|| wants_audio_input(doc, seq));
+            h.end_measuring(want)?;
+            Ok(true)
         }
-        _ => Ok(()),
+        _ => Ok(false),
     }
 }
 
 /// Whether a return-latency measurement runs (in any session).
 pub fn measuring() -> bool {
-    lock(&HOST).as_ref().is_some_and(|h| h.measuring)
+    lock(&HOST).as_ref().is_some_and(|h| h.measure.is_some())
 }
 
 /// Whether `owner`'s renderer has its transport stopped (the end of a

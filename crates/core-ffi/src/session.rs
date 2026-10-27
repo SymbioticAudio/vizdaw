@@ -945,6 +945,20 @@ impl Session {
         host::finish_play(pending)
     }
 
+    /// Why Measure cannot start or set its step now: `Busy` while this
+    /// session records or has an edit open.
+    fn check_measurable(inner: &Inner) -> Result<(), VizError> {
+        if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+            return Err(recording_busy());
+        }
+        if inner.edit_label.is_some() || inner.history.in_transaction() {
+            return Err(VizError::Busy {
+                message: "Finish the open edit first.".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Runs a transport call; an `Internal` error drops the engine host so
     /// the next Play starts clean.
     fn transport_call<T>(&self, f: impl FnOnce() -> Result<T, VizError>) -> Result<T, VizError> {
@@ -2228,6 +2242,10 @@ impl Session {
                 eprintln!("VizDAW: {line}");
             }
             inner.closed = true;
+            // The engine is let go now, not at the drop: a measurement
+            // running on another thread ends with the window (Task 9
+            // review M4).
+            host::release(self.id);
             let root = inner.root(self.id);
             let keep = inner.kept();
             for w in inner.jobs.shutdown() {
@@ -4564,39 +4582,33 @@ impl Session {
     /// for a channel the input lacks, and with "No signal on the synth's
     /// return input" when fewer than 3 onsets were found (nothing changes
     /// then); `Busy` while this session records or edits, while any
-    /// session plays or records, and while another measurement runs;
-    /// `Engine` when the measurement stopped before it finished (the
-    /// device went away, or its sequence was deleted).
+    /// session plays or records, and while another measurement runs, and
+    /// when an edit was opened while it ran (the message names the value
+    /// measured, which is not set); `Engine` when the measurement stopped
+    /// before it finished (the device went away, its sequence was
+    /// deleted or its window closed).
     pub fn measure_return(&self, dest: u64) -> Result<crate::synth::MeasureRow, VizError> {
         self.transport_call(|| {
             let dest = DestId(dest);
-            let (doc, seq, name, channels) = {
-                let inner = lock(&self.inner);
-                if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
-                    return Err(recording_busy());
-                }
-                if inner.edit_label.is_some() || inner.history.in_transaction() {
-                    return Err(VizError::Busy {
-                        message: "Finish the open edit first.".into(),
-                    });
-                }
-                let doc = inner.doc().clone();
-                let d = crate::synth::external_dest(&doc, dest)?;
-                let Some((seq, _, name, channels)) = crate::synth::return_lane(&doc, dest) else {
+            // One lock from the checks to the start (Task 9 review M3):
+            // the engine loads the document the checks saw.
+            let (seq, status) = {
+                let mut inner = lock(&self.inner);
+                Self::check_measurable(&inner)?;
+                let d = crate::synth::external_dest(inner.doc(), dest)?;
+                let Some((seq, _, name, channels)) = crate::synth::return_lane(inner.doc(), dest)
+                else {
                     return Err(crate::events::bad(&format!(
                         "no lane records the return of {}: set one up with Track Synth first",
                         d.name
                     )));
                 };
-                (doc, seq, name, channels)
-            };
-            let status = {
-                let mut inner = lock(&self.inner);
                 inner.mark(self.id, true);
-                plugins::with(self.id, |p| {
-                    host::start_measure(self.id, &doc, seq, dest, &name, channels, p)
+                let status = plugins::with(self.id, |p| {
+                    host::start_measure(self.id, inner.doc(), seq, dest, &name, channels, p)
                 })
-                .and_then(|r| r)?
+                .and_then(|r| r)?;
+                (seq, status)
             };
             // The notes take about 2.6 s; nothing here holds a lock. A
             // test may hold the measurement past its end (pre-flight M5).
@@ -4606,26 +4618,42 @@ impl Session {
             {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            let done = status.done();
-            let ended = host::end_measure(self.id, &doc, seq);
-            if !done {
+            // One lock from the end to the step (Task 9 review I1, as
+            // Track Synth): an edit opened meanwhile never absorbs it, and
+            // the input follows the current document (review I2).
+            let mut inner = lock(&self.inner);
+            let ours = host::end_measure(self.id, inner.doc(), seq, &status)?;
+            if !ours || status.closed() {
                 return Err(VizError::Engine {
-                    message: if status.closed() {
-                        "the measurement stopped before it finished: the audio device went \
-                         away or its sequence was deleted"
-                            .into()
-                    } else {
-                        "the measurement did not finish in time".into()
-                    },
+                    message: "the measurement stopped before it finished: the audio device \
+                              went away, its sequence was deleted or its window closed"
+                        .into(),
                 });
             }
-            ended?;
+            if !status.done() {
+                return Err(VizError::Engine {
+                    message: "the measurement did not finish in time".into(),
+                });
+            }
             let m = crate::synth::measured_status(&status, crate::record::latency_trim())
                 .map_err(|e| crate::events::bad(&e))?;
-            let snapshot = self.execute(Command::Routing(RoutingCmd::SetReturnLatency {
-                dest,
-                ms: m.ms,
-            }))?;
+            if let Err(e) = Self::check_measurable(&inner) {
+                let message = match e {
+                    VizError::Busy { message } => message,
+                    other => return Err(other),
+                };
+                let message = message.trim_end_matches('.');
+                return Err(VizError::Busy {
+                    message: format!("{message} (measured {:.1} ms).", m.ms),
+                });
+            }
+            // Setting a latency removes no plugin: nothing is captured.
+            let cmd = Command::Routing(RoutingCmd::SetReturnLatency { dest, ms: m.ms });
+            inner.history.execute(&cmd, &ViewFilter::default())?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            let snapshot = inner.snapshot()?;
             Ok(crate::synth::MeasureRow {
                 return_latency_ms: m.ms,
                 onsets: m.onsets,
