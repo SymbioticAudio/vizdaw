@@ -72,6 +72,11 @@ impl Counting {
         }
     }
 
+    /// Follows the graph latency as it changes during the count-in. // RT
+    pub fn set_latency(&mut self, latency: u64) {
+        self.delay = latency;
+    }
+
     /// The Play's `until`.
     pub fn until(&self) -> Option<u64> {
         self.until

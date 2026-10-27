@@ -129,3 +129,20 @@ fn stop_cancels_a_count_in() {
         "no click after the stop"
     );
 }
+
+#[test]
+fn a_plain_play_during_a_count_in_takes_over() {
+    let (mut engine, mut out) = rig(0);
+    count_in(&mut engine, BAR);
+    let (_, states) = render(&engine, &mut out, 10);
+    assert!(states.iter().all(|(p, c)| !p && *c));
+    let p = engine.begin_play(None);
+    engine.finish_play(p).unwrap();
+    let (left, states) = render(&engine, &mut out, 185);
+    assert!(states[0].0 && !states[0].1, "rolls now, no longer counting");
+    assert!(states.iter().all(|(p, c)| *p && !c), "never counts again");
+    assert!(clicks(&left, 0, 0.01, 185).is_empty(), "the clicks stopped");
+    // The count-in's end would have been at total block 188, rel. block 178:
+    // a second roll there would show as a position that is not continuous.
+    assert_eq!(engine.transport_frames(), 185 * u64::from(BLOCK));
+}

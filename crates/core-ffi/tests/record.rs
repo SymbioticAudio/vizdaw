@@ -1580,7 +1580,10 @@ fn a_count_in_plays_before_the_pass_and_does_not_move_the_take() {
 fn stop_during_a_count_in_records_nothing() {
     let g = serial(Some(FakeInput::Signals));
     let d = doc(8, false, true);
+    // Saved, so the package (and its Media/Recorded) has a known path.
+    let package = g.dir.path().join("Count.vizdaw");
     let s = untitled(&g, d.doc.clone());
+    s.save_as(package.display().to_string()).unwrap();
     s.record(
         d.seq.0,
         RecordSpecRow {
@@ -1590,6 +1593,14 @@ fn stop_during_a_count_in_records_nothing() {
     )
     .unwrap();
     wait_until("the count-in", || s.transport().unwrap().counting_in);
+    let recorded = package.join("Media/Recorded");
+    let files = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default()
+    };
+    let opened = files(&recorded);
+    assert!(!opened.is_empty(), "the pass opened its take file");
     s.stop().unwrap();
     assert!(!s.record_state().unwrap().recording);
     assert!(!s.transport().unwrap().counting_in);
@@ -1599,6 +1610,9 @@ fn stop_during_a_count_in_records_nothing() {
         regions(&s, d.seq.0, d.mic.0).is_empty(),
         "nothing was captured"
     );
-    // Any file the pass opened is left where it is: closing does not fail.
+    // The (empty) take file is left in place, never unlinked.
+    for f in &opened {
+        assert!(f.is_file(), "{f:?} was removed");
+    }
     s.close().unwrap();
 }

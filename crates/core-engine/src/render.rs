@@ -993,6 +993,7 @@ impl Renderer {
             self.pending_skip = self.pending_skip.saturating_add(u64::from(frames - offset));
         }
         if let Some(c) = self.counting.as_mut() {
+            c.set_latency(self.latency);
             c.render(out, frames);
             clamp_master(out, 0, frames, &self.shared);
             if c.done() {
@@ -1311,7 +1312,11 @@ impl Renderer {
                         self.counting =
                             Some(Counting::new(c, until, self.cfg.sample_rate, self.latency));
                     }
-                    _ => self.roll(until),
+                    // A plain Play during a count-in takes over: the clicks stop.
+                    _ => {
+                        self.counting = None;
+                        self.roll(until);
+                    }
                 }
             }
             EngineCmd::Stop => {
