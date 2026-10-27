@@ -6,7 +6,7 @@ use crate::error::{BackendError, EngineError};
 use crate::graph::mixer::mixer_spec;
 use crate::graph::{
     EffectNode, Graph, GraphReport, InsertFactory, InsertInit, InstrumentFeed, NoInserts, NodeSpec,
-    PlanError, plan,
+    PlanError, plan_with,
 };
 use crate::midi1::{Midi1Msg, note_on_velocity, release_velocity};
 use crate::pool::{Pool, RtEnv, RtPlatform, StdPlatform};
@@ -800,7 +800,9 @@ impl Engine {
             error: None,
         };
         let max_delay = (2.0 * sr).round().max(0.0) as u64;
-        let p = match plan(&mg.spec, max_delay) {
+        // No leads until the renderer reads regions ahead (plan 5d-1
+        // Task 2).
+        let p = match plan_with(&mg.spec, max_delay, false) {
             Ok(p) => p,
             Err(e) => {
                 self.shared.raise(match e {

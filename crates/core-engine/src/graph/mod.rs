@@ -23,7 +23,7 @@ pub use node::{
     EffectNode, InsertFactory, NoInserts, ProcessStatus, TestInserts, TestInstrument, TestMode,
     TestNode,
 };
-pub use pdc::{MAX_INSERTS, MAX_NODES, Plan, PlanError, plan};
+pub use pdc::{MAX_INSERTS, MAX_NODES, Plan, PlanError, plan, plan_with};
 pub use regions::RegionRun;
 pub use spec::{GraphSpec, InputSpec, InsertSpec, NodeSpec, StripSpec, Tap};
 
