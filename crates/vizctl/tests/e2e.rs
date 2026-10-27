@@ -1211,3 +1211,177 @@ fn tracks_the_fake_synth() {
     }
     app.quit();
 }
+
+/// Polls `state.get target` until `ok` holds.
+fn wait_for_state(
+    app: &mut App,
+    window: &Value,
+    target: &str,
+    ok: impl Fn(&Value) -> bool,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let r = app.call("state.get", json!({"target": target, "window": window}));
+        if ok(&r) {
+            return r;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{target} state within {WAIT_MS} ms: {r}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Plan 5d-1 through the channel (README 5d-2 steps): arming before any
+/// Play claims the engine and meters the fake input; `audio.set` changes
+/// the buffer size asked for and refuses one that is not offered; a
+/// count-in plays before the roll with the timeline standing still; the
+/// take's peak grows while it records, and its overview peaks at the fake
+/// sine's −12 dBFS after Stop (5c final review M8). The offline device:
+/// no hardware, no permission prompt, nothing saved.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn arms_meters_counts_in_and_draws_the_take() {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, RoutingCmd, SequenceCmd};
+    use core_model::ids::AnyId;
+    use core_model::lane::{InputChannels, LaneInput, MonitorMode};
+    use core_model::sequence::SeqLength;
+    use core_model::time::Tick;
+    let mut app = App::start_with(&[("VIZDAW_AUDIO_INPUT", "fake")]);
+    // Eight bars at 120 BPM; lane "Mic" records fake input 1, heard never.
+    let mut b = Builder::new();
+    let (seq, mic) = b.sequence("Take", "Mic", None).unwrap();
+    let r = b
+        .run(Command::Routing(RoutingCmd::AddOutput {
+            name: "Audio 1".into(),
+            reference: "audio:1-2".into(),
+        }))
+        .unwrap();
+    let out = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .unwrap();
+    for c in [
+        LaneCmd::SetOutput {
+            seq,
+            lane: mic,
+            output: Some(out),
+        },
+        LaneCmd::SetInput {
+            seq,
+            lane: mic,
+            input: Some(LaneInput::Audio {
+                channels: InputChannels::Mono(0),
+                return_of: None,
+            }),
+        },
+        LaneCmd::SetMonitor {
+            seq,
+            lane: mic,
+            monitor: MonitorMode::Off,
+        },
+    ] {
+        b.run(Command::Lane(c)).unwrap();
+    }
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(32 * Q)),
+    }))
+    .unwrap();
+    let path = app.launched.home.join("Arm.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+
+    // Armed before any Play: the engine is claimed and the input metered.
+    app.call(
+        "command.run",
+        json!({"id": "transport.arm_previous", "window": w}),
+    );
+    let input = wait_for_state(&mut app, &w, "input", |i| {
+        i["levels"][0].as_f64().is_some_and(|l| l > 0.2)
+    });
+    assert_eq!(input["channels"], 3, "{input}");
+    assert_eq!(input["opening"], false, "{input}");
+    let t = app.call("state.get", json!({"target": "transport", "window": w}));
+    assert_eq!(t["playing"], false, "nothing played: {t}");
+
+    // The buffer size: one of six, as asked (the offline device keeps its
+    // 512-frame blocks).
+    app.call(
+        "command.run",
+        json!({"id": "audio.set", "params": {"buffer_frames": 256}, "window": w}),
+    );
+    let input = app.call("state.get", json!({"target": "input", "window": w}));
+    assert_eq!(
+        (
+            input["buffer_frames"].clone(),
+            input["device_buffer_frames"].clone()
+        ),
+        (json!(256), json!(512)),
+        "{input}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "audio.set", "params": {"buffer_frames": 100}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "audio.set", "params": {"junk": 1}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
+
+    // One bar of count-in: the timeline stands still, nothing records.
+    app.call(
+        "command.run",
+        json!({"id": "record.set", "params": {"count_in": 1, "loop": false, "replace": true}, "window": w}),
+    );
+    app.call(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    let t = wait_for_state(&mut app, &w, "transport", |t| t["counting_in"] == true);
+    assert_eq!(t["playing"], false, "{t}");
+    let r = app.call("state.get", json!({"target": "record", "window": w}));
+    assert_eq!(
+        (r["recording"].clone(), r["frames"].clone()),
+        (json!(true), json!(0)),
+        "{r}"
+    );
+    // Then it rolls; the take's peak grows to the sine's.
+    let r = wait_for_record(&mut app, &w, |r| {
+        r["frames"].as_u64() >= Some(48_000) && r["lanes"][0]["peak"].as_f64() > Some(0.2)
+    });
+    assert!(
+        (r["lanes"][0]["peak"].as_f64().unwrap() - 0.251).abs() < 0.01,
+        "{r}"
+    );
+    assert_eq!(r["pass_start_tick"], json!(0), "{r}");
+    // The buffer size stays while recording: busy, and nothing changes.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "audio.set", "params": {"buffer_frames": 512}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Busy, "{e}");
+    let input = app.call("state.get", json!({"target": "input", "window": w}));
+    assert_eq!(input["buffer_frames"], json!(256), "{input}");
+    app.call(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    let m = wait_for_state(&mut app, &w, "media", |m| !m["items"][0]["peak"].is_null());
+    assert!(
+        (m["items"][0]["peak"].as_f64().unwrap() - 0.251).abs() < 0.01,
+        "{m}"
+    );
+    app.quit();
+}

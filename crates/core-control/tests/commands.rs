@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        127,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return"
+        129,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1222,5 +1222,67 @@ fn state_get_record_and_input() {
             Command::StateGet { target: t, .. } => assert_eq!(t, target),
             other => panic!("{other:?}"),
         }
+    }
+}
+
+/// Plan 5d-1 Task 12 (Rulings 25–26): `audio.set` and
+/// `destination.add_midi` take their values by type and range; the app
+/// checks the buffer size's six values and the text.
+#[test]
+fn audio_and_destination_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("audio.set", json!({ "software_monitoring": false })),
+        (
+            "audio.set",
+            json!({ "buffer_frames": 256, "input_device": "", "latency_trim": -48 }),
+        ),
+        ("audio.set", json!({ "buffer_frames": 32 })),
+        ("audio.set", json!({ "latency_trim": 192_000 })),
+        (
+            "destination.add_midi",
+            json!({ "name": "Juno", "port": "Juno MIDI" }),
+        ),
+        (
+            "destination.add_midi",
+            json!({ "name": "Juno", "port": "Juno MIDI", "channel": 16 }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("audio.set", json!({ "buffer_frames": 31 })),
+        ("audio.set", json!({ "buffer_frames": 1025 })),
+        ("audio.set", json!({ "buffer_frames": "128" })),
+        ("audio.set", json!({ "buffer_frames": 128.5 })),
+        ("audio.set", json!({ "software_monitoring": "off" })),
+        ("audio.set", json!({ "latency_trim": 192_001 })),
+        ("audio.set", json!({ "latency_trim": -192_001 })),
+        ("audio.set", json!({ "input_device": 3 })),
+        ("audio.set", json!({ "junk": "x".repeat(100_000) })),
+        ("destination.add_midi", json!({ "name": "Juno" })),
+        ("destination.add_midi", json!({ "port": "Juno MIDI" })),
+        (
+            "destination.add_midi",
+            json!({ "name": "Juno", "port": "P", "channel": 0 }),
+        ),
+        (
+            "destination.add_midi",
+            json!({ "name": "Juno", "port": "P", "channel": 17 }),
+        ),
+        ("destination.add_midi", json!({ "name": 4, "port": "P" })),
+        (
+            "destination.add_midi",
+            json!({ "name": "x".repeat(100_000), "port": "P" }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
     }
 }

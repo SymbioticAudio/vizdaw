@@ -11,7 +11,7 @@ use core_engine::midi1::Midi1Msg;
 pub const MAX_INJECT_BYTES: usize = 1024;
 
 /// What the audio input offers (`state.get input`).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct InputInfoRow {
     /// The device ("Offline" for the offline backend; "" before the first
     /// Play).
@@ -36,6 +36,10 @@ pub struct InputInfoRow {
     /// Ruling 13).
     #[uniffi(default)]
     pub opening: bool,
+    /// The device's rate (0 before the first Play), for the round trip in
+    /// milliseconds.
+    #[uniffi(default)]
+    pub sample_rate: f64,
 }
 
 /// The channel messages in `bytes`, one after another (running status,

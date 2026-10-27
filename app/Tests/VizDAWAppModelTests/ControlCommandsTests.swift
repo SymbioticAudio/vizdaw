@@ -19,6 +19,13 @@ final class FakeControlHost: ControlHost {
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { calls.append("tear \(kind.rawValue)") }
     func closeDocument(_ doc: UUID) { calls.append("close") }
     func showMediaPool(_ doc: UUID) { calls.append("media pool") }
+    /// What `audio.set` applied (plan 5d-1 Task 12), and its refusal.
+    var audio: [AudioChange] = []
+    var audioError: VizError?
+    func applyAudio(_ change: AudioChange) throws {
+        if let e = audioError { throw e }
+        audio.append(change)
+    }
 }
 
 @MainActor

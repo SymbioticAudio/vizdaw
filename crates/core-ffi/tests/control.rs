@@ -396,6 +396,7 @@ fn media_and_project_results_as_json() {
     assert_eq!(v["items"][0]["offline_reason"], "format");
     assert_eq!(v["items"][0]["offline"], true);
     assert_eq!(v["items"][0]["used_percent"], json!(40.0));
+    assert_eq!(v["items"][0]["peak"], json!(0.25));
     let changed = result_json(&ControlResult::Media {
         doc: "D".into(),
         items: vec![MediaRow {
@@ -414,6 +415,7 @@ fn media_and_project_results_as_json() {
         }],
     });
     assert_eq!(changed["items"][0]["offline_reason"], "changed");
+    assert_eq!(changed["items"][0]["peak"], Value::Null);
     let p = result_json(&ControlResult::Project {
         doc: "D".into(),
         info: ProjectInfoRow {
@@ -470,42 +472,43 @@ fn an_extended_call_outlives_the_app_timeout() {
 #[test]
 fn record_and_input_results_as_json() {
     use vizdaw_ffi::{InputInfoRow, RecordLaneRow, RecordSpecRow, RecordStateRow, TickRange};
+    let state = RecordStateRow {
+        recording: true,
+        seq: Some(3),
+        spec: Some(RecordSpecRow {
+            replace: false,
+            punch: Some(TickRange { start: 0, end: 10 }),
+            looped: true,
+            count_in_bars: 0,
+            pre_roll_bars: 1,
+            passes_as_takes: true,
+        }),
+        pass: 2,
+        kept: 1,
+        discarded: 0,
+        lanes: vec![RecordLaneRow {
+            lane: 7,
+            audio: true,
+            path: Some("Media/Recorded/Mic.caf".into()),
+            clipped: 4,
+            peak: 0.25,
+            return_frames: 0,
+        }],
+        frames: 96_000,
+        overflows: 0,
+        gap_frames: 0,
+        free_bytes: Some(1 << 30),
+        underruns: 5,
+        late_starts: 6,
+        recovered: vec!["Media/Recorded/old.caf".into()],
+        recovered_files: vec![],
+        pass_start_tick: Some(7680),
+        pass_start_file_frame: 48_000,
+        range_start_tick: 0,
+    };
     let v = result_json(&ControlResult::Record {
         doc: "D".into(),
-        state: RecordStateRow {
-            recording: true,
-            seq: Some(3),
-            spec: Some(RecordSpecRow {
-                replace: false,
-                punch: Some(TickRange { start: 0, end: 10 }),
-                looped: true,
-                count_in_bars: 0,
-                pre_roll_bars: 1,
-                passes_as_takes: true,
-            }),
-            pass: 2,
-            kept: 1,
-            discarded: 0,
-            lanes: vec![RecordLaneRow {
-                lane: 7,
-                audio: true,
-                path: Some("Media/Recorded/Mic.caf".into()),
-                clipped: 4,
-                peak: 0.25,
-                return_frames: 0,
-            }],
-            frames: 96_000,
-            overflows: 0,
-            gap_frames: 0,
-            free_bytes: Some(1 << 30),
-            underruns: 5,
-            late_starts: 6,
-            recovered: vec!["Media/Recorded/old.caf".into()],
-            recovered_files: vec![],
-            pass_start_tick: Some(7680),
-            pass_start_file_frame: 48_000,
-            range_start_tick: 0,
-        },
+        state: state.clone(),
     });
     assert_eq!(v["recording"], json!(true));
     assert_eq!(v["spec"]["loop"], json!(true));
@@ -529,10 +532,40 @@ fn record_and_input_results_as_json() {
             buffer_frames: 512,
             round_trip_frames: 2048,
             opening: false,
+            sample_rate: 48_000.0,
         },
+        levels: vec![0.25, 1.0, 0.0],
     });
     assert_eq!(i["channels"], json!(3));
     assert_eq!(i["input_latency"], json!(512));
+    // Plan 5d-1 Ruling 26: the settings, the round trip and the meters.
+    assert_eq!(i["device_buffer_frames"], json!(512));
+    assert_eq!(i["round_trip_frames"], json!(2048));
+    assert_eq!(i["round_trip_ms"], json!(42.67));
+    assert_eq!(i["levels"], json!([0.25, 1.0, 0.0]));
+    assert_eq!(i["opening"], json!(false));
+    assert!(i["software_monitoring"].is_boolean() && i["buffer_frames"].is_u64());
+    assert!(i["latency_trim"].is_i64(), "{i}");
+    assert_eq!(v["lanes"][0]["peak"], json!(0.25));
+    assert_eq!(v["lanes"][0]["return_frames"], json!(0));
+    assert_eq!(v["pass_start_tick"], json!(7680));
+    assert_eq!(v["pass_start_file_frame"], json!(48_000));
+    assert_eq!(v["range_start_tick"], json!(0));
+    // Task 10: the anchor is signed (a file that starts after the pass's
+    // tick), and a synth return lane's take lands `return_frames` earlier.
+    let mut early = state.clone();
+    early.pass_start_file_frame = -256;
+    early.pass_start_tick = None;
+    if let Some(l) = early.lanes.first_mut() {
+        l.return_frames = 1200;
+    }
+    let e = result_json(&ControlResult::Record {
+        doc: "D".into(),
+        state: early,
+    });
+    assert_eq!(e["pass_start_file_frame"], json!(-256));
+    assert_eq!(e["pass_start_tick"], Value::Null);
+    assert_eq!(e["lanes"][0]["return_frames"], json!(1200));
 }
 
 /// Plan 5c-2 Task 10: `destination.measure_return` answers with the
@@ -611,4 +644,38 @@ fn lanes_show_takes_input_and_monitor() {
     assert_eq!(l[2]["input"], Value::Null);
     assert_eq!(l[2]["monitor"], json!("auto"));
     assert!(l[2]["takes"].is_number() && l[2]["active_take"].is_string());
+}
+
+/// Plan 5d-1 Task 12 (Ruling 26): `state.get transport` says whether a
+/// count-in is playing.
+#[test]
+fn the_transport_says_when_it_counts_in() {
+    let state = vizdaw_ffi::TransportState {
+        playing: false,
+        seq: Some(1),
+        tick: 0,
+        position_bbu: "1.1.000".into(),
+        seconds: 0.0,
+        sample_rate: 48_000.0,
+        device: "Offline".into(),
+        faults: vec![],
+        report: vec![],
+        host_time_ns: 0,
+        ticks_per_second: 960.0,
+        rate_mismatch: false,
+        counting_in: true,
+    };
+    let t = result_json(&ControlResult::Transport {
+        doc: "D".into(),
+        state: state.clone(),
+    });
+    assert_eq!(t["counting_in"], json!(true), "{t}");
+    let t = result_json(&ControlResult::Transport {
+        doc: "D".into(),
+        state: vizdaw_ffi::TransportState {
+            counting_in: false,
+            ..state
+        },
+    });
+    assert_eq!(t["counting_in"], json!(false), "{t}");
 }

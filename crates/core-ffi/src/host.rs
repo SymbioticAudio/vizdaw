@@ -995,7 +995,8 @@ fn offline_choice() -> (Option<FakeInput>, Option<f64>) {
 /// 25; "New MIDI Destination…"): the running host's (what its loads
 /// resolve ports against) when there is one; else the system's CoreMIDI
 /// destinations, or offline the fake synth's port when an offline host
-/// would have it (Task 11 review m3).
+/// would have it (Task 11 review m3). Infallible: a panic in CoreMIDI's
+/// listing answers no ports rather than crossing the FFI (pre-flight M5).
 #[uniffi::export]
 pub fn midi_destination_ports() -> Vec<String> {
     if let Some(ports) = lock(&HOST).as_ref().map(|h| h.engine.ports()) {
@@ -1009,10 +1010,13 @@ pub fn midi_destination_ports() -> Vec<String> {
     }
     #[cfg(target_os = "macos")]
     {
-        platform_macos::midi::list_destinations()
-            .into_iter()
-            .map(|p| p.name)
-            .collect()
+        std::panic::catch_unwind(|| {
+            platform_macos::midi::list_destinations()
+                .into_iter()
+                .map(|p| p.name)
+                .collect()
+        })
+        .unwrap_or_default()
     }
     #[cfg(not(target_os = "macos"))]
     {

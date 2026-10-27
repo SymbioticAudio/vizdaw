@@ -467,6 +467,59 @@ const RETURN_LATENCY_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `audio.set` (plan 5d-1 Ruling 26): the app's audio settings.
+const AUDIO_SET_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "software_monitoring",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Play monitored inputs back through their strips (off: direct monitoring on the interface).",
+    },
+    ParamSpec {
+        name: "buffer_frames",
+        kind: ParamKind::Int { min: 32, max: 1024 },
+        required: false,
+        help: "The I/O buffer size: 32, 64, 128, 256, 512 or 1024 frames (refused while recording).",
+    },
+    ParamSpec {
+        name: "input_device",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The audio input device by name (\"\": the output device's own input).",
+    },
+    ParamSpec {
+        name: "latency_trim",
+        kind: ParamKind::Int {
+            min: -192_000,
+            max: 192_000,
+        },
+        required: false,
+        help: "Frames added to where recorded audio lands, for a device that misreports its latency.",
+    },
+];
+
+/// `destination.add_midi` (plan 5d-1 Ruling 26): New MIDI Destination.
+const ADD_MIDI_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The destination's name.",
+    },
+    ParamSpec {
+        name: "port",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI destination it plays (its CoreMIDI name).",
+    },
+    ParamSpec {
+        name: "channel",
+        kind: ParamKind::Int { min: 1, max: 16 },
+        required: false,
+        help: "The MIDI channel, 1 to 16 (default 1).",
+    },
+];
+
 /// `destination.measure_return` (plan 5c-2 Ruling 11).
 const MEASURE_RETURN_PARAMS: &[ParamSpec] = &[id_param(
     "dest",
@@ -1003,6 +1056,20 @@ pub const COMMANDS: &[CommandSpec] = &[
             None,
             true,
         ))
+    },
+    CommandSpec {
+        params: ADD_MIDI_PARAMS,
+        ..key_only(cmd(
+            "destination.add_midi",
+            "Destination",
+            "New MIDI Destination",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: AUDIO_SET_PARAMS,
+        ..key_only(cmd("audio.set", "Audio", "Audio Settings", None, false))
     },
     locator("locator.go_0", "Go to Locator 0", "0"),
     locator("locator.go_1", "Go to Locator 1", "1"),

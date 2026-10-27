@@ -143,6 +143,9 @@ public protocol ControlHost: AnyObject {
     /// Gives a transport field of document `doc`'s window the keyboard
     /// (plan 4f Ruling 16); false when the window shows none.
     func focus(_ field: TransportField, _ doc: UUID) -> Bool
+    /// Applies `audio.set`'s change to the app's audio settings (plan
+    /// 5d-1 Ruling 26); the core's refusal is thrown.
+    func applyAudio(_ change: AudioChange) throws
 }
 
 /// Runs registered menu commands (control spec §6) on a document model
@@ -185,7 +188,7 @@ public enum ControlCommands {
     public static var handled: Set<String> {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
-            .union(TransportCommands.ids).union(StepCommands.ids)
+            .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -222,6 +225,8 @@ public enum ControlCommands {
         case "keys.reset":
             host.keys.resetAll()
             return .done(ran(id, nil))
+        case AudioCommands.set:
+            return AudioCommands.runSet(args, host: host)
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }
@@ -385,6 +390,8 @@ public enum ControlCommands {
             }
         case _ where SynthCommands.ids.contains(id):
             return SynthCommands.run(id, args: args, doc: docID, m)
+        case AudioCommands.addMidi:
+            return AudioCommands.runAddMidi(args, doc: docID, m)
         case RegionCommands.normalize:
             guard let text = args.text("peak_db") else { return .failed(.dialog("Normalize", "peak_db")) }
             guard let peak = RegionCommands.parsePeak(text) else {
@@ -655,7 +662,7 @@ public enum ControlStates {
             return .record(doc: doc, state: s)
         case .input:
             guard let info = try? m.session.inputInfo() else { return nil }
-            return .inputState(doc: doc, info: info)
+            return .inputState(doc: doc, info: info, levels: (try? m.session.inputLevels()) ?? [])
         case .windows:
             return nil
         }

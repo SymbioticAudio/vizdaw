@@ -499,6 +499,15 @@ final class AppControlHost: ControlHost {
     var nudge: NudgeSettings { editingPreferences.nudge }
     var keys: KeyBindings { keyBindings }
 
+    /// `audio.set` (plan 5d-1 Ruling 26). Plan 5d-2 routes this through
+    /// the app's audio preferences, which also keep it.
+    func applyAudio(_ change: AudioChange) throws {
+        if let b = change.bufferFrames { try setIoBufferFrames(frames: b) }
+        if let on = change.softwareMonitoring { setSoftwareMonitoring(on: on) }
+        if let d = change.inputDevice { setAudioInputDevice(name: d) }
+        if let t = change.latencyTrim { setRecordLatencyTrim(frames: t) }
+    }
+
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {
         guard let w = ControlWindows.window(of: doc),
             let v = TransportFieldsView.find(in: w.contentView?.superview ?? w.contentView)

@@ -5059,6 +5059,7 @@ impl Session {
                     output_latency_frames: i.output_latency_frames,
                     buffer_frames: i.buffer_frames,
                     opening: host::input_opening(self.id),
+                    sample_rate: host::device(self.id).map_or(0.0, |(_, r)| r),
                 },
                 None => crate::live::InputInfoRow {
                     device: String::new(),
@@ -5069,6 +5070,7 @@ impl Session {
                     buffer_frames: 0,
                     round_trip_frames: 0,
                     opening: false,
+                    sample_rate: 0.0,
                 },
             })
         })

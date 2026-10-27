@@ -533,12 +533,14 @@ pub enum ControlResult {
         /// What recording is doing.
         state: crate::record::RecordStateRow,
     },
-    /// `state.get input` (plan 5c).
+    /// `state.get input` (plan 5c; plan 5d-1 Ruling 26).
     InputState {
         /// Document ID.
         doc: String,
         /// What the input offers.
         info: crate::live::InputInfoRow,
+        /// Each input channel's peak since the last read.
+        levels: Vec<f32>,
     },
     /// `destination.measure_return` (plan 5c-2).
     Measured {
@@ -1023,7 +1025,7 @@ fn transport_json(doc: &str, t: &TransportState) -> Value {
         "doc": doc, "playing": t.playing, "seq": t.seq, "tick": t.tick,
         "position": t.position_bbu, "seconds": t.seconds, "sample_rate": t.sample_rate,
         "device": t.device, "faults": t.faults, "report": t.report,
-        "rate_mismatch": t.rate_mismatch,
+        "rate_mismatch": t.rate_mismatch, "counting_in": t.counting_in,
     })
 }
 
@@ -1062,6 +1064,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                 }),
                 "uses": m.uses,
                 "used_percent": m.used_percent,
+                "peak": m.peak.map(|p| (f64::from(p) * 1000.0).round() / 1000.0),
             })).collect::<Vec<_>>(),
         }),
         ControlResult::Record { doc, state: r } => json!({
@@ -1075,7 +1078,12 @@ pub fn result_json(r: &ControlResult) -> Value {
             "pass": r.pass, "kept": r.kept, "discarded": r.discarded,
             "lanes": r.lanes.iter().map(|l| json!({
                 "lane": l.lane, "audio": l.audio, "path": l.path, "clipped": l.clipped,
+                "peak": (f64::from(l.peak) * 1000.0).round() / 1000.0,
+                "return_frames": l.return_frames,
             })).collect::<Vec<_>>(),
+            "pass_start_tick": r.pass_start_tick,
+            "pass_start_file_frame": r.pass_start_file_frame,
+            "range_start_tick": r.range_start_tick,
             "frames": r.frames, "overflows": r.overflows, "gap_frames": r.gap_frames,
             "underruns": r.underruns, "late_starts": r.late_starts,
             "free_bytes": r.free_bytes, "recovered": r.recovered,
@@ -1095,11 +1103,28 @@ pub fn result_json(r: &ControlResult) -> Value {
             "return_latency_ms": (f64::from(*return_latency_ms) * 1000.0).round() / 1000.0,
             "onsets": onsets,
         }),
-        ControlResult::InputState { doc, info } => json!({
-            "doc": doc, "device": info.device, "channels": info.channels,
-            "names": info.names, "input_latency": info.input_latency_frames,
-            "output_latency": info.output_latency_frames,
-        }),
+        ControlResult::InputState { doc, info, levels } => {
+            let a = crate::audio::audio_settings();
+            let ms = if info.sample_rate > 0.0 {
+                (f64::from(info.round_trip_frames) * 1000.0 / info.sample_rate * 100.0).round()
+                    / 100.0
+            } else {
+                0.0
+            };
+            json!({
+                "doc": doc, "device": info.device, "channels": info.channels,
+                "names": info.names, "input_latency": info.input_latency_frames,
+                "output_latency": info.output_latency_frames,
+                "software_monitoring": a.software_monitoring,
+                "buffer_frames": a.buffer_frames,
+                "device_buffer_frames": info.buffer_frames,
+                "round_trip_frames": info.round_trip_frames,
+                "round_trip_ms": ms,
+                "opening": info.opening,
+                "levels": levels.iter().map(|l| (f64::from(*l) * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+                "latency_trim": a.latency_trim,
+            })
+        }
         ControlResult::Project { doc, info } => json!({
             "doc": doc,
             "rate": info.format.sample_rate,

@@ -490,10 +490,12 @@ import VizDAWCore
         }
         #expect(st.frames == 4800)
         f.inputRow.channels = 3
-        guard case .inputState(_, let info)? = ControlStates.state(.input, id, m) else {
+        f.inputLevelsRow = [0.25, 1, 0]
+        guard case .inputState(_, let info, let levels)? = ControlStates.state(.input, id, m) else {
             Issue.record("input")
             return
         }
         #expect(info.channels == 3)
+        #expect(levels == [0.25, 1, 0], "plan 5d-1 Task 12: the meters ride along")
     }
 }
