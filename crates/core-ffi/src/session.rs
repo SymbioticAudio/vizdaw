@@ -4623,7 +4623,11 @@ impl Session {
             // the input follows the current document (review I2).
             let mut inner = lock(&self.inner);
             let ours = host::end_measure(self.id, inner.doc(), seq, &status)?;
-            if !ours || status.closed() {
+            host::after_measure_end();
+            // Still ours means nothing else removed it; `closed()` is not
+            // read here, as our own removal sets it (Task 9 re-review). A
+            // renderer gone with its device leaves it unfinished below.
+            if !ours {
                 return Err(VizError::Engine {
                     message: "the measurement stopped before it finished: the audio device \
                               went away, its sequence was deleted or its window closed"
@@ -4632,7 +4636,9 @@ impl Session {
             }
             if !status.done() {
                 return Err(VizError::Engine {
-                    message: "the measurement did not finish in time".into(),
+                    message: "the measurement did not finish: it timed out, or the audio device \
+                              stopped"
+                        .into(),
                 });
             }
             let m = crate::synth::measured_status(&status, crate::record::latency_trim())

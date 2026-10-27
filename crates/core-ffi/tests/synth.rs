@@ -48,6 +48,7 @@ fn serial(delay_ms: Option<f64>, input: Option<FakeInput>) -> Serial {
     vizdaw_ffi::record::set_free_bytes(None);
     // A test that failed holding a measurement must not hang the next.
     vizdaw_ffi::host::debug_hold_measure(false);
+    vizdaw_ffi::host::debug_measure_end_delay(Duration::ZERO);
     reset_host();
     Serial {
         _g: g,
@@ -901,6 +902,7 @@ fn a_measurement_never_outlives_its_sequence() {
         None,
     )
     .unwrap();
+    assert_eq!(vizdaw_ffi::host::debug_host_input_open(), Some(false));
     vizdaw_ffi::host::debug_hold_measure(false);
     let r = t.join().unwrap();
     assert!(matches!(r, Err(VizError::Engine { .. })), "{r:?}");
@@ -1069,6 +1071,9 @@ fn closing_a_window_ends_its_measurement() {
     wait_until("the measurement to start", vizdaw_ffi::host::measuring);
     s.close().unwrap();
     assert!(!vizdaw_ffi::host::measuring());
+    // No one holds the engine: the input Measure opened is closed again
+    // (re-review minor).
+    assert_eq!(vizdaw_ffi::host::debug_host_input_open(), Some(false));
     vizdaw_ffi::host::debug_hold_measure(false);
     let r = t.join().unwrap();
     assert!(matches!(r, Err(VizError::Engine { .. })), "{r:?}");
@@ -1076,4 +1081,19 @@ fn closing_a_window_ends_its_measurement() {
     other.play(d.seq.0).unwrap();
     other.stop().unwrap();
     other.close().unwrap();
+}
+
+/// Re-review Important: a measurement that finished is not taken for one
+/// stopped early because its own removal landed before the result was
+/// read (a delay hook stands for a descheduled thread).
+#[test]
+fn a_finished_measurement_survives_its_own_removal() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    vizdaw_ffi::host::debug_measure_end_delay(Duration::from_millis(200));
+    let m = s.measure_return(d.synth.0);
+    vizdaw_ffi::host::debug_measure_end_delay(Duration::ZERO);
+    assert_eq!(m.unwrap().onsets, 5);
+    s.close().unwrap();
 }

@@ -742,6 +742,30 @@ pub(crate) const fn measure_held() -> bool {
     false
 }
 
+/// Milliseconds Measure waits after ending its measurement, before it
+/// reads the result (test hook, Task 9 re-review: a descheduled thread).
+#[cfg(feature = "test-hooks")]
+static MEASURE_END_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Makes every Measure wait `d` after ending its measurement, before it
+/// reads the result (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_measure_end_delay(d: Duration) {
+    let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+    MEASURE_END_DELAY_MS.store(ms, Ordering::Relaxed);
+}
+
+/// The wait [`debug_measure_end_delay`] asked for.
+pub(crate) fn after_measure_end() {
+    #[cfg(feature = "test-hooks")]
+    {
+        let ms = MEASURE_END_DELAY_MS.load(Ordering::Relaxed);
+        if ms > 0 {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
+}
+
 /// Closed sessions' plugin hosts still waiting for processors (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn closing_hosts_waiting() -> usize {
@@ -1760,9 +1784,11 @@ pub fn reload(
             // The loaded sequence may have been deleted by the edit.
             if doc.sequence(seq).is_err() {
                 let stopped = h.engine.stop().map_err(VizError::from);
-                // A measurement of it ends with it (pre-flight I1).
+                // A measurement of it ends with it (pre-flight I1), and
+                // the input it opened closes: no session holds the engine
+                // now, so no lane wants it (Task 9 re-review).
                 let ended = if h.measure.is_some() {
-                    h.end_measuring(None)
+                    h.end_measuring(Some(false))
                 } else {
                     Ok(())
                 };
@@ -1864,9 +1890,11 @@ pub fn release(owner: u64) {
     if let Some(h) = slot.as_mut() {
         if h.owner == owner {
             let _ = h.engine.stop();
-            // Its measurement ends with it (pre-flight I1).
+            // Its measurement ends with it (pre-flight I1), and the input
+            // it opened closes: no session holds the engine now (Task 9
+            // re-review).
             if h.measure.is_some() {
-                let _ = h.end_measuring(None);
+                let _ = h.end_measuring(Some(false));
             }
             h.want_play = false;
             h.epoch = next_epoch();
@@ -2174,6 +2202,13 @@ pub fn debug_input_open(owner: u64) -> Option<bool> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.input_open)
+}
+
+/// Whether the host has (or, offline, would have) its input open,
+/// whoever holds it (test hook, Task 9 re-review).
+#[cfg(feature = "test-hooks")]
+pub fn debug_host_input_open() -> Option<bool> {
+    lock(&HOST).as_ref().map(|h| h.input_open)
 }
 
 /// How many times `owner`'s host opened or closed its input (test hook).
