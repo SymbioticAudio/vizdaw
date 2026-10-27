@@ -1214,6 +1214,8 @@ project the tests made or in a hand-edited file. The IDs below come from
      hardware) and `onsets` 5; one undo step "Set Return Latency". Pull the
      cable and measure again: "No signal on the synth's return input", and
      nothing changes. While playing, or with an edit open, it is `busy`.
+     Don't play the keyboard or audition notes while it measures: MIDI
+     thru reaches the synth and its notes add onsets that skew the value.
      Each onset counts only for the latest note played, and a note's
      onset needs 5 ms of quiet before it: a pad whose release rings into
      the next note fails rather than reading 0 ms; type its latency
@@ -1242,5 +1244,3 @@ project the tests made or in a hand-edited file. The IDs below come from
      - Through the control channel, Measure blocks the app for about
        2.7 s (10 s at most): menus and meters stall meanwhile. The 5d
        sheet calls it off the main thread.
-     - "New MIDI Destination…" arrives in 5d; until then an external
-       destination can be made only by the tests or a hand-edited file.

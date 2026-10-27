@@ -1135,8 +1135,14 @@ fn tracks_the_fake_synth() {
         "command.run",
         json!({"id": "destination.measure_return", "params": {"dest": synth.0}, "window": w}),
     );
+    // The fake synth answers `max(25 ms, block + offset)` late (README
+    // 142): 25 ms holds because the offline device renders 512-frame
+    // blocks (core-ffi `OFFLINE_BLOCK`, 10.7 ms, under the 1200 frames of
+    // 25 ms) and the app's MIDI offset is 0. The offline measurement is
+    // exact (1200 frames), so ±0.25 ms leaves the alignment check below
+    // to catch its own error (final review findings 7 and 8).
     let ms = m["return_latency_ms"].as_f64().unwrap();
-    assert!((ms - 25.0).abs() <= 1.0, "{m}");
+    assert!((ms - 25.0).abs() <= 0.25, "{m}");
     assert_eq!(m["onsets"], 5, "{m}");
     // A destination the document lacks is not external: refused before
     // the core sees it.
@@ -1188,6 +1194,8 @@ fn tracks_the_fake_synth() {
     let reader = core_media::caf::CafReader::open(&path.join(&item.path)).unwrap();
     let info = reader.info().clone();
     assert_eq!(info.channels, 1);
+    // The frames below assume 48 kHz (and 120 BPM: 24 000 frames a beat).
+    assert_eq!(info.sample_rate, 48_000);
     let mut data = vec![0.0f32; info.frames as usize];
     reader.read(0, &mut data, &mut Vec::new()).unwrap();
     let clicks: Vec<i64> = core_engine::fixtures::clicks(&data, offset as usize, 0.3, 240)
