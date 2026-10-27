@@ -622,3 +622,73 @@ fn an_undone_track_synth_mutes_nothing_after_recording() {
     );
     s.close().unwrap();
 }
+
+/// Task 8 review M1: with an edit open (a drag), Track Synth is refused
+/// and changes nothing; the next gesture's restart would otherwise drop
+/// it after it had answered Ok.
+#[test]
+fn track_synth_waits_for_the_open_edit() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(false, 2);
+    let s = untitled(&g, d.doc.clone());
+    s.begin_edit("Drag".into()).unwrap();
+    let v = s.snapshot().unwrap().version;
+    let e = s
+        .track_synth(d.seq.0, d.part.0, 2, false, false, true)
+        .unwrap_err();
+    assert!(e.to_string().contains("open edit"), "{e}");
+    assert_eq!(s.snapshot().unwrap().version, v, "nothing changed");
+    s.end_edit().unwrap();
+    assert_eq!(s.lanes(d.seq.0).unwrap().len(), 2, "no lane added");
+    assert_ne!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Track Synth")
+    );
+    s.close().unwrap();
+}
+
+/// Task 8 review M3, plan 5c-2 Ruling 14: Track Synth is `Busy` while a
+/// recording runs and changes nothing.
+#[test]
+fn track_synth_is_busy_while_recording() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    s.record(d.seq.0, spec()).unwrap();
+    let before = s.lanes(d.seq.0).unwrap();
+    let e = s
+        .track_synth(d.seq.0, d.part.0, 4, true, true, true)
+        .unwrap_err();
+    assert!(matches!(e, vizdaw_ffi::VizError::Busy { .. }), "{e:?}");
+    assert_eq!(s.lanes(d.seq.0).unwrap(), before, "nothing changed");
+    s.stop().unwrap();
+    assert!(!lane_named(&s, d.seq, "Part").mute, "no mute was asked for");
+    s.close().unwrap();
+}
+
+/// Task 8 review M3: a redone Track Synth keeps its "mute after": the
+/// next recording mutes the MIDI lane.
+#[test]
+fn a_redone_track_synth_mutes_after_recording() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(false, 2);
+    let s = untitled(&g, d.doc.clone());
+    s.track_synth(d.seq.0, d.part.0, 2, false, false, true)
+        .unwrap();
+    s.undo().unwrap();
+    s.redo().unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Track Synth")
+    );
+    let ret = lane_named(&s, d.seq, "Fake Synth audio").id;
+    record_to_the_third_note(&s, d.seq);
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Record"));
+    assert_eq!(
+        regions(&s, d.seq.0, ret).len(),
+        1,
+        "the pass placed audio there"
+    );
+    assert!(lane_named(&s, d.seq, "Part").mute, "the MIDI lane is muted");
+    s.close().unwrap();
+}

@@ -4286,8 +4286,9 @@ impl Session {
                 name: name.clone(),
                 path: rel,
                 channels: ch.count(),
-                // Read now: an edit during the pass applies from the next
-                // one (plan 5c-2 Ruling 4).
+                // Read once, at Record start (plan 5c-2 Ruling 4): a change
+                // during the recording, even between loop passes, applies
+                // from the next recording.
                 return_frames: crate::synth::return_frames(&doc, *ret, rate),
             });
         }
@@ -4507,25 +4508,34 @@ impl Session {
         mute_after: bool,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
-            let id = {
-                let inner = lock(&self.inner);
-                if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
-                    return Err(recording_busy());
-                }
-                seq_id(inner.doc(), seq)?
-            };
+            // One lock from the checks to the bookkeeping, as Record start
+            // holds it (Task 8 review M2): a Record from another thread
+            // runs wholly before or after. Track Synth removes no plugin,
+            // so nothing is captured first.
+            let mut inner = lock(&self.inner);
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                return Err(recording_busy());
+            }
+            // An open edit's restart would drop it (review M1).
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(crate::events::bad("finish the open edit first"));
+            }
+            let id = seq_id(inner.doc(), seq)?;
             let channels = if stereo {
                 core_model::lane::InputChannels::Stereo(first)
             } else {
                 core_model::lane::InputChannels::Mono(first)
             };
-            let snapshot = self.execute(Command::Lane(LaneCmd::TrackSynth {
+            let cmd = Command::Lane(LaneCmd::TrackSynth {
                 seq: id,
                 lane: LaneId(lane),
                 channels,
                 arm_midi,
-            }))?;
-            let mut inner = lock(&self.inner);
+            });
+            inner.history.execute(&cmd, &ViewFilter::default())?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
             let doc = inner.doc();
             let audio = doc
                 .lane(id, LaneId(lane))
@@ -4539,7 +4549,7 @@ impl Session {
                     inner.synth_mutes.remove(&(id, audio));
                 }
             }
-            Ok(snapshot)
+            inner.snapshot()
         })
     }
 
