@@ -2099,3 +2099,73 @@ fn a_recording_that_starts_mid_edit_refuses_the_arm() {
     s.stop().unwrap();
     s.close().unwrap();
 }
+
+/// Plan 5d-1 Ruling 21 (spec §6.2: the region draws as it grows; 5c carry
+/// M8): while it records, the take's waveform is there to draw, placed at
+/// the pass's start; after Stop the media's overview peaks at the fake
+/// sine's level (−12 dBFS, 0.2512).
+#[test]
+fn the_take_draws_while_it_grows_and_its_overview_peaks_at_the_sine() {
+    use vizdaw_ffi::OverviewStateRow;
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    s.locate(4 * Q).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("a second of audio", || frames(&s) >= 48_000);
+    let st = s.record_state().unwrap();
+    assert_eq!(
+        (
+            st.pass_start_tick,
+            st.pass_start_file_frame,
+            st.range_start_tick
+        ),
+        (Some(4 * Q), 0, 4 * Q)
+    );
+    assert!(
+        (st.lanes[0].peak - 0.2512).abs() < 0.01,
+        "{}",
+        st.lanes[0].peak
+    );
+    let w = s.recording_waveform(d.mic.0, 0, 48_000, 100).unwrap();
+    assert_eq!(
+        (w.state, w.channels, w.columns),
+        (OverviewStateRow::Ready, 1, 100)
+    );
+    assert!(
+        w.max.iter().all(|x| (x - 0.2512).abs() < 0.02),
+        "{:?}",
+        w.max
+    );
+    assert!(
+        w.min.iter().all(|x| (x + 0.2512).abs() < 0.02),
+        "{:?}",
+        w.min
+    );
+    // Not yet written: silent columns.
+    let ahead = s
+        .recording_waveform(d.mic.0, 10_000_000, 10_000_100, 4)
+        .unwrap();
+    assert!(ahead.max.iter().all(|x| *x == 0.0));
+    let model =
+        |r: Result<vizdaw_ffi::OverviewRows, VizError>| matches!(r, Err(VizError::Model { .. }));
+    assert!(
+        model(s.recording_waveform(d.keys.0, 0, 10, 10)),
+        "not recording audio"
+    );
+    assert!(model(s.recording_waveform(d.mic.0, 10, 10, 10)), "empty");
+    assert!(model(s.recording_waveform(d.mic.0, 0, 10, 0)), "no columns");
+    assert!(
+        model(s.recording_waveform(d.mic.0, 0, 10, u32::MAX)),
+        "too many"
+    );
+    s.stop().unwrap();
+    assert!(
+        model(s.recording_waveform(d.mic.0, 0, 10, 10)),
+        "nothing records"
+    );
+    wait_until("the overview", || s.media().unwrap()[0].peak.is_some());
+    let p = s.media().unwrap()[0].peak.unwrap();
+    assert!((p - 0.2512).abs() < 0.01, "{p}");
+    s.close().unwrap();
+}

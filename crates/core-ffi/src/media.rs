@@ -67,6 +67,10 @@ pub struct MediaRow {
     /// How much of its audio regions play, 0–100 (plan 5b Ruling 13).
     #[uniffi(default = 0.0)]
     pub used_percent: f32,
+    /// The largest absolute sample, from its overview (`None` until the
+    /// overview is built; plan 5d-1 Ruling 21).
+    #[uniffi(default)]
+    pub peak: Option<f32>,
 }
 
 /// One region using a media item (the pool's "select regions" and the
@@ -264,6 +268,7 @@ pub fn rows(doc: &Document, offline: &BTreeMap<MediaId, OfflineReasonRow>) -> Ve
                 offline: offline.get(&m.id).copied(),
                 uses: uses.get(&m.id).copied().unwrap_or(0),
                 used_percent: used_percent(spans.get(&m.id), m.length_frames),
+                peak: None,
             }
         })
         .collect()

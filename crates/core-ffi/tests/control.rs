@@ -390,6 +390,7 @@ fn media_and_project_results_as_json() {
             offline: Some(OfflineReasonRow::Format),
             uses: 3,
             used_percent: 40.0,
+            peak: Some(0.25),
         }],
     });
     assert_eq!(v["items"][0]["offline_reason"], "format");
@@ -409,6 +410,7 @@ fn media_and_project_results_as_json() {
             offline: Some(OfflineReasonRow::Changed),
             uses: 0,
             used_percent: 0.0,
+            peak: None,
         }],
     });
     assert_eq!(changed["items"][0]["offline_reason"], "changed");
@@ -489,6 +491,7 @@ fn record_and_input_results_as_json() {
                 audio: true,
                 path: Some("Media/Recorded/Mic.caf".into()),
                 clipped: 4,
+                peak: 0.25,
             }],
             frames: 96_000,
             overflows: 0,
@@ -498,6 +501,9 @@ fn record_and_input_results_as_json() {
             late_starts: 6,
             recovered: vec!["Media/Recorded/old.caf".into()],
             recovered_files: vec![],
+            pass_start_tick: Some(7680),
+            pass_start_file_frame: 48_000,
+            range_start_tick: 0,
         },
     });
     assert_eq!(v["recording"], json!(true));

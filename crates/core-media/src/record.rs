@@ -205,6 +205,114 @@ impl RingReader {
     }
 }
 
+/// Frames per peak of [`LivePeaks`] (the overviews' finest level).
+pub const LIVE_PEAK_FRAMES: u64 = 256;
+
+/// A lane's peaks so far, per [`LIVE_PEAK_FRAMES`] frames and channel,
+/// kept by the writer as it writes (sub-project 5 spec §6.2: "the region
+/// draws as it grows"; plan 5d-1 Ruling 21). In memory only: the
+/// overview proper is built once the take is placed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LivePeaks {
+    channels: usize,
+    /// Finished peaks: per peak, per channel, min then max.
+    done: Vec<f32>,
+    /// The peak being filled (same layout, one peak).
+    cur: Vec<f32>,
+    /// Frames in `cur`.
+    cur_frames: u64,
+    /// The largest absolute sample taken (kept by `feed`; `peak` is O(1)).
+    max_abs: f32,
+}
+
+impl LivePeaks {
+    /// No frames yet, `channels` (1 or 2) channels.
+    pub fn new(channels: usize) -> LivePeaks {
+        let channels = channels.clamp(1, 2);
+        LivePeaks {
+            channels,
+            done: Vec::new(),
+            cur: Self::empty(channels),
+            cur_frames: 0,
+            max_abs: 0.0,
+        }
+    }
+
+    fn empty(channels: usize) -> Vec<f32> {
+        (0..channels)
+            .flat_map(|_| [f32::INFINITY, f32::NEG_INFINITY])
+            .collect()
+    }
+
+    /// Takes interleaved frames (non-finite samples count as 0).
+    pub fn feed(&mut self, interleaved: &[f32]) {
+        let ch = self.channels;
+        for frame in interleaved.chunks_exact(ch) {
+            for (c, v) in frame.iter().enumerate() {
+                let v = if v.is_finite() { *v } else { 0.0 };
+                self.max_abs = self.max_abs.max(v.abs());
+                if let Some(x) = self.cur.get_mut(c * 2) {
+                    *x = x.min(v);
+                }
+                if let Some(x) = self.cur.get_mut(c * 2 + 1) {
+                    *x = x.max(v);
+                }
+            }
+            self.cur_frames += 1;
+            if self.cur_frames == LIVE_PEAK_FRAMES {
+                let full = std::mem::replace(&mut self.cur, Self::empty(ch));
+                self.done.extend(full);
+                self.cur_frames = 0;
+            }
+        }
+    }
+
+    /// Channels.
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Frames taken so far.
+    pub fn frames(&self) -> u64 {
+        let peaks = (self.done.len() / (self.channels * 2)) as u64;
+        peaks * LIVE_PEAK_FRAMES + self.cur_frames
+    }
+
+    /// The lowest and highest sample of `channel` over frames `[from,
+    /// to)`, from the whole peaks that overlap it; `None` outside what was
+    /// taken.
+    pub fn range(&self, channel: usize, from: u64, to: u64) -> Option<(f32, f32)> {
+        let to = to.min(self.frames());
+        if from >= to || channel >= self.channels {
+            return None;
+        }
+        let ch = self.channels;
+        let (b0, b1) = (from / LIVE_PEAK_FRAMES, to.div_ceil(LIVE_PEAK_FRAMES));
+        let finished = (self.done.len() / (ch * 2)) as u64;
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for b in b0..b1 {
+            let peak = if b < finished {
+                self.done
+                    .get(b as usize * ch * 2..(b as usize + 1) * ch * 2)
+            } else {
+                Some(self.cur.as_slice())
+            };
+            if let Some(p) = peak {
+                if let (Some(a), Some(z)) = (p.get(channel * 2), p.get(channel * 2 + 1)) {
+                    lo = lo.min(*a);
+                    hi = hi.max(*z);
+                }
+            }
+        }
+        (lo <= hi).then_some((lo, hi))
+    }
+
+    /// The largest absolute sample so far.
+    pub fn peak(&self) -> f32 {
+        self.max_abs
+    }
+}
+
 /// One armed audio lane's file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterLane {
@@ -282,6 +390,8 @@ struct Shared {
     gaps: AtomicU64,
     clipped: Box<[AtomicU64]>,
     error: Mutex<Option<String>>,
+    /// Each lane's live peaks (plan 5d-1 Ruling 21).
+    peaks: Box<[Arc<Mutex<LivePeaks>>]>,
 }
 
 /// The writer thread (spec §6.2).
@@ -307,6 +417,7 @@ struct Lane {
     writer: CafWriter,
     path: PathBuf,
     channels: Vec<usize>,
+    peaks: Arc<Mutex<LivePeaks>>,
 }
 
 impl RecordWriter {
@@ -345,6 +456,7 @@ impl RecordWriter {
                         writer,
                         path: l.path.clone(),
                         channels: l.channels.clone(),
+                        peaks: Arc::new(Mutex::new(LivePeaks::new(n))),
                     });
                 }
                 Err(e) => {
@@ -359,6 +471,7 @@ impl RecordWriter {
             gaps: AtomicU64::new(0),
             clipped: (0..lanes.len()).map(|_| AtomicU64::new(0)).collect(),
             error: Mutex::new(None),
+            peaks: lanes.iter().map(|l| Arc::clone(&l.peaks)).collect(),
         });
         let paths: Vec<PathBuf> = lanes.iter().map(|l| l.path.clone()).collect();
         let s = Arc::clone(&shared);
@@ -391,6 +504,11 @@ impl RecordWriter {
                 .collect(),
             error: guard(&self.shared.error).clone(),
         }
+    }
+
+    /// Lane `lane`'s peaks so far (in [`WriterConfig::lanes`] order).
+    pub fn peaks(&self, lane: usize) -> Option<Arc<Mutex<LivePeaks>>> {
+        self.shared.peaks.get(lane).map(Arc::clone)
     }
 
     /// Finishes: drains the ring until it is closed (or for `wait` at
@@ -436,6 +554,7 @@ fn pad(lanes: &mut [Lane], frames: u64, scratch: &mut Vec<f32>) -> Result<(), Me
             scratch.clear();
             scratch.resize(n * l.channels.len(), 0.0);
             l.writer.write(scratch)?;
+            guard(&l.peaks).feed(scratch);
         }
         left -= n as u64;
     }
@@ -459,6 +578,7 @@ fn write_block(
             }
         }
         l.writer.write(scratch)?;
+        guard(&l.peaks).feed(scratch);
     }
     Ok(())
 }
@@ -658,6 +778,7 @@ mod tests {
                 writer,
                 path,
                 channels: vec![usize::from(n == "b.caf")],
+                peaks: Arc::new(Mutex::new(LivePeaks::new(1))),
             });
         }
         assert!(w.push(0, 100, |_, _| 0.25));
@@ -669,6 +790,7 @@ mod tests {
             gaps: AtomicU64::new(0),
             clipped: (0..2).map(|_| AtomicU64::new(0)).collect(),
             error: Mutex::new(None),
+            peaks: lanes.iter().map(|l| Arc::clone(&l.peaks)).collect(),
         };
         let res = run(r, lanes, &shared);
         assert!(res.error.is_some());

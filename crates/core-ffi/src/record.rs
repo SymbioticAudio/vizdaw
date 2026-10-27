@@ -5,11 +5,12 @@
 //! here takes the session lock.
 
 use crate::error::VizError;
+use crate::guard::lock;
 use crate::passes::{AudioTake, Captured, PassFate, RecordRange, decide, plan};
 use core_engine::record::{
     Mark, MarkReader, MidiReader, RecordHandles, RecordStatus, RecordedMidi,
 };
-use core_media::record::{RING_SECONDS, RecordWriter, WriterConfig, WriterResult};
+use core_media::record::{LivePeaks, RING_SECONDS, RecordWriter, WriterConfig, WriterResult};
 use core_model::command::{RecordPass, RecordedMedia};
 use core_model::document::{Document, MediaItem, MediaOrigin};
 use core_model::format::AudioFormat;
@@ -124,7 +125,7 @@ pub struct RecordSpecRow {
 }
 
 /// One armed lane while recording.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct RecordLaneRow {
     /// The lane.
     pub lane: u64,
@@ -134,10 +135,14 @@ pub struct RecordLaneRow {
     pub path: Option<String>,
     /// Samples clipped so far (integer depths).
     pub clipped: u64,
+    /// The largest absolute sample written so far (audio; plan 5d-1
+    /// Ruling 21).
+    #[uniffi(default)]
+    pub peak: f32,
 }
 
 /// What a recording is doing (`state.get record`).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct RecordStateRow {
     /// A pass is recording.
     pub recording: bool,
@@ -174,6 +179,19 @@ pub struct RecordStateRow {
     /// The same files with what each holds (pre-flight M9).
     #[uniffi(default)]
     pub recovered_files: Vec<RecoveredFileRow>,
+    /// Where the pass recording now started, as a tick of the sequence
+    /// (plan 5d-1 Ruling 21; `None` before the roll): with
+    /// `pass_start_file_frame`, where a view draws the growing take.
+    #[uniffi(default)]
+    pub pass_start_tick: Option<i64>,
+    /// The file frame recorded at `pass_start_tick` (one file holds every
+    /// loop pass).
+    #[uniffi(default)]
+    pub pass_start_file_frame: u64,
+    /// Where the record range starts, a tick of the sequence: regions
+    /// cover only the range, so a view draws nothing before it.
+    #[uniffi(default)]
+    pub range_start_tick: i64,
 }
 
 /// A recording offered for recovery (plan 5c Task 10; pre-flight M9).
@@ -246,6 +264,8 @@ pub struct Recording {
     pub format: AudioFormat,
     /// The pass number media get.
     pub pass_number: u32,
+    /// The sequence's tempo, in schedule frames.
+    tempo: core_engine::schedule::TempoTable,
     marks: Vec<Mark>,
     midi: Vec<RecordedMidi>,
     fates: Vec<PassFate>,
@@ -459,7 +479,7 @@ pub fn channel_refusal(
 
 /// What a recording records (everything [`Recording::start`] needs
 /// besides the tap).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     /// The session recording.
     pub owner: u64,
@@ -479,6 +499,8 @@ pub struct Plan {
     pub format: AudioFormat,
     /// The pass number media get.
     pub pass_number: u32,
+    /// The sequence's tempo, in schedule frames (for the rows' ticks).
+    pub tempo: core_engine::schedule::TempoTable,
 }
 
 impl Recording {
@@ -516,6 +538,7 @@ impl Recording {
             root: plan.root,
             format: plan.format,
             pass_number: plan.pass_number,
+            tempo: plan.tempo,
             marks: Vec::new(),
             midi: Vec::new(),
             fates: Vec::new(),
@@ -650,6 +673,7 @@ impl Recording {
                     .as_ref()
                     .and_then(|w| w.clipped.get(k).copied())
                     .unwrap_or(0),
+                peak: self.peaks(k).map_or(0.0, |p| lock(&p).peak()),
             })
             .collect();
         lanes.extend(self.midi_lanes.iter().map(|l| RecordLaneRow {
@@ -657,7 +681,15 @@ impl Recording {
             audio: false,
             path: None,
             clipped: 0,
+            peak: 0.0,
         }));
+        // The pass recording now: from the last wrap, else the roll.
+        let pass = self
+            .marks
+            .iter()
+            .rev()
+            .find(|m| m.wrap)
+            .or_else(|| self.marks.first());
         RecordStateRow {
             recording: true,
             seq: Some(self.seq.0),
@@ -674,7 +706,56 @@ impl Recording {
             late_starts: stream.1,
             recovered: Vec::new(),
             recovered_files: Vec::new(),
+            pass_start_tick: pass.map(|m| self.tempo.frame_to_tick(m.frame).0),
+            pass_start_file_frame: pass.map_or(0, |m| m.run),
+            range_start_tick: self.tempo.frame_to_tick(self.range.start).0,
         }
+    }
+
+    /// Audio lane `k`'s live peaks (plan 5d-1 Ruling 21).
+    fn peaks(&self, k: usize) -> Option<Arc<std::sync::Mutex<LivePeaks>>> {
+        self.writer.as_ref().and_then(|w| w.peaks(k))
+    }
+
+    /// `columns` columns of lane `lane`'s take so far over file frames
+    /// `[from, to)` (plan 5d-1 Ruling 21): what was written, `Ready`;
+    /// `None` when the lane records no audio here.
+    pub fn waveform(
+        &self,
+        lane: LaneId,
+        from: u64,
+        to: u64,
+        columns: u32,
+    ) -> Option<crate::overviews::OverviewRows> {
+        use crate::overviews::{OverviewRows, OverviewStateRow};
+        let k = self.audio.iter().position(|a| a.lane == lane)?;
+        let peaks = self.peaks(k)?;
+        // Build the columns under the lock, from `range`: no clone of the
+        // take so far, and the writer is held only for this loop.
+        let p = lock(&*peaks);
+        let channels = u16::try_from(p.channels()).unwrap_or(1);
+        let mut out = OverviewRows::silent(OverviewStateRow::Ready, channels, columns);
+        let n = out.columns as usize;
+        if n == 0 {
+            return Some(out);
+        }
+        let w = (to.saturating_sub(from)) as f64 / n as f64;
+        for c in 0..n {
+            let a = from + (c as f64 * w).floor() as u64;
+            let b = (from + ((c + 1) as f64 * w).ceil() as u64).min(to);
+            for ch in 0..p.channels() {
+                if let Some((lo, hi)) = p.range(ch, a, b) {
+                    let i = ch * n + c;
+                    if let Some(v) = out.min.get_mut(i) {
+                        *v = lo;
+                    }
+                    if let Some(v) = out.max.get_mut(i) {
+                        *v = hi;
+                    }
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Ends it (the engine was told to stop and drop the tap): waits up

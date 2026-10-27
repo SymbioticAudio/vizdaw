@@ -658,6 +658,14 @@ pub fn columns(
     out
 }
 
+/// The largest absolute sample an overview holds (every channel, the
+/// whole file).
+pub fn peak_of(ov: &Overview) -> f32 {
+    (0..ov.channels)
+        .filter_map(|k| ov.range(k, 0, ov.frames))
+        .fold(0f32, |m, (lo, hi)| m.max(lo.abs()).max(hi.abs()))
+}
+
 /// The fade gain at region frame `r` of a region of `length` frames (the
 /// engine's `Segment::gain_at`, without the region gain).
 pub fn fade_gain(r: u64, length: u64, fade_in: Fade, fade_out: Fade) -> f32 {

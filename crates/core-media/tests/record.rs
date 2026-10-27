@@ -235,3 +235,62 @@ fn free_space_is_known_for_a_real_folder() {
     assert!(free_bytes(dir.path()).is_some_and(|b| b > 0));
     assert_eq!(free_bytes(Path::new("/no/such/folder/anywhere")), None);
 }
+
+/// Plan 5d-1 Ruling 21 (spec §6.2: the region draws as it grows): while it
+/// writes, the writer keeps each lane's min and max per 256 frames, gaps
+/// included as silence, so a view can draw the take before it is placed.
+#[test]
+fn the_writer_keeps_live_peaks_as_it_writes() {
+    use core_media::record::{LIVE_PEAK_FRAMES, LivePeaks};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut w, r) = input_ring(3, 48_000);
+    let writer = RecordWriter::start(
+        r,
+        WriterConfig {
+            rate: 48_000,
+            depth: BitDepth::Float32,
+            lanes: lanes(dir.path()),
+        },
+    )
+    .unwrap();
+    for (run, n) in [(0u64, 256u32), (256, 256), (1024, 512)] {
+        assert!(w.push(run, n, |c, f| value(c, run + f as u64)));
+    }
+    let mono = writer.peaks(0).unwrap();
+    let stereo = writer.peaks(1).unwrap();
+    let until = Instant::now() + Duration::from_secs(30);
+    while mono.lock().unwrap().frames() < 1536 {
+        assert!(Instant::now() < until, "never written");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let p = mono.lock().unwrap().clone();
+    assert_eq!((p.channels(), p.frames()), (1, 1536));
+    // Frames 0..256 of ring channel 2.
+    let want = (0..256u64).map(|f| value(2, f));
+    let (lo, hi) = want.fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), x| {
+        (a.min(x), b.max(x))
+    });
+    assert_eq!(p.range(0, 0, LIVE_PEAK_FRAMES), Some((lo, hi)));
+    // The lost frames 512..1024 are silence.
+    assert_eq!(p.range(0, 512, 1024), Some((0.0, 0.0)));
+    assert_eq!(p.range(0, 1536, 2000), None, "not written yet");
+    assert_eq!(p.range(1, 0, 256), None, "one channel");
+    let s = stereo.lock().unwrap().clone();
+    assert_eq!(s.channels(), 2);
+    // peak() is the brute-force fold over range (the running max_abs).
+    for q in [&p, &s] {
+        let brute = (0..q.channels())
+            .filter_map(|c| q.range(c, 0, q.frames()))
+            .fold(0f32, |m, (lo, hi)| m.max(lo.abs()).max(hi.abs()));
+        assert_eq!(q.peak(), brute);
+    }
+    assert!((s.peak() - 0.5).abs() < 0.01, "{}", s.peak());
+    // A peak being filled counts too.
+    let mut q = LivePeaks::new(1);
+    q.feed(&[0.25, -0.5, 0.125]);
+    assert_eq!((q.frames(), q.range(0, 0, 3)), (3, Some((-0.5, 0.25))));
+    assert_eq!(q.peak(), 0.5);
+    w.set_end(2048);
+    w.close();
+    assert_eq!(writer.finish(Duration::from_secs(30)).error, None);
+}

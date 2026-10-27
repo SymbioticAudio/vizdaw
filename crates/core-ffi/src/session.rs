@@ -4049,6 +4049,38 @@ impl Session {
         ffi_guard(|| self.press_pass(false))
     }
 
+    /// `columns` columns of the take lane `lane` is recording, over file
+    /// frames `[from_file_frame, to_file_frame)` (plan 5d-1 Ruling 21;
+    /// spec §6.2: the region draws as it grows); place them with
+    /// `RecordStateRow.pass_start_tick` and `pass_start_file_frame`.
+    /// `Model` when nothing records here, the lane records no audio, or
+    /// the arguments are out of range.
+    pub fn recording_waveform(
+        &self,
+        lane: u64,
+        from_file_frame: u64,
+        to_file_frame: u64,
+        columns: u32,
+    ) -> Result<crate::overviews::OverviewRows, VizError> {
+        ffi_guard(|| {
+            crate::overviews::check_columns(columns)?;
+            if from_file_frame >= to_file_frame {
+                return Err(crate::events::bad(
+                    "from_file_frame must be before to_file_frame",
+                ));
+            }
+            let inner = lock(&self.inner);
+            let r = inner
+                .recording
+                .as_ref()
+                .ok_or_else(|| crate::events::bad("nothing is recording"))?;
+            r.waveform(LaneId(lane), from_file_frame, to_file_frame, columns)
+                .ok_or_else(|| {
+                    crate::events::bad(&format!("lane {lane} records no audio in this pass"))
+                })
+        })
+    }
+
     /// What recording is doing (`state.get record`).
     pub fn record_state(&self) -> Result<crate::record::RecordStateRow, VizError> {
         ffi_guard(|| {
@@ -4074,6 +4106,9 @@ impl Session {
                     late_starts: 0,
                     recovered: Vec::new(),
                     recovered_files: Vec::new(),
+                    pass_start_tick: None,
+                    pass_start_file_frame: 0,
+                    range_start_tick: 0,
                 },
             })
             .map(|mut row| {
@@ -4556,6 +4591,7 @@ impl Session {
             root,
             format,
             pass_number: crate::record::next_pass(&doc),
+            tempo: tempo.clone(),
         };
         let recording = match Recording::start(plan, handles, writer) {
             Ok(r) => r,
@@ -5181,7 +5217,15 @@ impl Session {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
             inner.refresh_media(self.id, false);
-            Ok(crate::media::rows(inner.doc(), &inner.offline))
+            let mut rows = crate::media::rows(inner.doc(), &inner.offline);
+            // The overview's peak, once it is built (plan 5d-1 Ruling 21).
+            for r in &mut rows {
+                r.peak = inner
+                    .overviews
+                    .get(core_model::ids::MediaId(r.id))
+                    .map(|ov| crate::overviews::peak_of(&ov));
+            }
+            Ok(rows)
         })
     }
 

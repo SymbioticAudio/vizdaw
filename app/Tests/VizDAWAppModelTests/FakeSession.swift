@@ -405,6 +405,20 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var recordStateCalls = 0
     /// Thrown once, then cleared, by `recordState`.
     var recordStateErrorOnce: VizError?
+    /// What `recordingWaveform` answers (plan 5d-1 Ruling 21); nil: silent.
+    var recordingRows: OverviewRows?
+    var recordingWaveformCalls: [(lane: UInt64, from: UInt64, to: UInt64, columns: UInt32)] = []
+
+    func recordingWaveform(lane: UInt64, fromFileFrame: UInt64, toFileFrame: UInt64, columns: UInt32) throws
+        -> OverviewRows
+    {
+        recordingWaveformCalls.append((lane, fromFileFrame, toFileFrame, columns))
+        return recordingRows
+            ?? OverviewRows(
+                state: .ready, channels: 1, columns: columns, min: Array(repeating: 0, count: Int(columns)),
+                max: Array(repeating: 0, count: Int(columns)))
+    }
+
     func recordState() throws -> RecordStateRow {
         recordStateCalls += 1
         if let e = recordStateError { throw e }
