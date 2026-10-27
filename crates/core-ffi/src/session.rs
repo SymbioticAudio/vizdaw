@@ -4553,6 +4553,87 @@ impl Session {
         })
     }
 
+    /// Measure (spec §6.7; plan 5c-2 Rulings 8–9): with the transport
+    /// stopped, plays five notes to external destination `dest` and
+    /// listens on the input of the lane recording its return; sets its
+    /// return latency to what it found, one undo step "Set Return
+    /// Latency". Blocks for about 2.7 s (the session stays usable: its
+    /// lock is released while it waits); call it off the main thread.
+    /// `Model` for a destination that is not an external synth (the
+    /// built-in synth included) or that no lane records the return of,
+    /// for a channel the input lacks, and with "No signal on the synth's
+    /// return input" when fewer than 3 onsets were found (nothing changes
+    /// then); `Busy` while this session records or edits, while any
+    /// session plays or records, and while another measurement runs;
+    /// `Engine` when the measurement stopped before it finished (the
+    /// device went away, or its sequence was deleted).
+    pub fn measure_return(&self, dest: u64) -> Result<crate::synth::MeasureRow, VizError> {
+        self.transport_call(|| {
+            let dest = DestId(dest);
+            let (doc, seq, name, channels) = {
+                let inner = lock(&self.inner);
+                if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                    return Err(recording_busy());
+                }
+                if inner.edit_label.is_some() || inner.history.in_transaction() {
+                    return Err(VizError::Busy {
+                        message: "Finish the open edit first.".into(),
+                    });
+                }
+                let doc = inner.doc().clone();
+                let d = crate::synth::external_dest(&doc, dest)?;
+                let Some((seq, _, name, channels)) = crate::synth::return_lane(&doc, dest) else {
+                    return Err(crate::events::bad(&format!(
+                        "no lane records the return of {}: set one up with Track Synth first",
+                        d.name
+                    )));
+                };
+                (doc, seq, name, channels)
+            };
+            let status = {
+                let mut inner = lock(&self.inner);
+                inner.mark(self.id, true);
+                plugins::with(self.id, |p| {
+                    host::start_measure(self.id, &doc, seq, dest, &name, channels, p)
+                })
+                .and_then(|r| r)?
+            };
+            // The notes take about 2.6 s; nothing here holds a lock. A
+            // test may hold the measurement past its end (pre-flight M5).
+            let until = Instant::now() + crate::synth::measure_wait();
+            while (!status.done() && !status.closed() && Instant::now() < until)
+                || host::measure_held()
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let done = status.done();
+            let ended = host::end_measure(self.id, &doc, seq);
+            if !done {
+                return Err(VizError::Engine {
+                    message: if status.closed() {
+                        "the measurement stopped before it finished: the audio device went \
+                         away or its sequence was deleted"
+                            .into()
+                    } else {
+                        "the measurement did not finish in time".into()
+                    },
+                });
+            }
+            ended?;
+            let m = crate::synth::measured_status(&status, crate::record::latency_trim())
+                .map_err(|e| crate::events::bad(&e))?;
+            let snapshot = self.execute(Command::Routing(RoutingCmd::SetReturnLatency {
+                dest,
+                ms: m.ms,
+            }))?;
+            Ok(crate::synth::MeasureRow {
+                return_latency_ms: m.ms,
+                onsets: m.onsets,
+                snapshot,
+            })
+        })
+    }
+
     /// Sets external destination `dest`'s return latency to `ms` (spec
     /// §4.5a: 0–500), one undo step "Set Return Latency". `Model` for
     /// another destination or a value out of range.

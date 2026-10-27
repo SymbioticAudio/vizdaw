@@ -10,6 +10,7 @@ use core_engine::backend::{AudioBackend, BackendEvent};
 use core_engine::engine::{Engine, EngineConfig, PendingPlay};
 use core_engine::graph::NoInserts;
 use core_engine::input::{InputSpec, MidiIn, MidiInputSpec, MidiSender, MonitorRoute, port_key};
+use core_engine::measure::MeasureStatus;
 use core_engine::offline::{EventLog, FakeInput, FakeSynth, OfflineBackend, OfflineSinks};
 use core_engine::record::{RecordHandles, RecordRequest};
 use core_engine::render::Renderer;
@@ -57,6 +58,19 @@ fn project_rate(doc: &Document) -> f64 {
 pub const OFFLINE_BLOCK: u32 = 512;
 /// Device label of the offline backend.
 pub const OFFLINE_DEVICE: &str = "Offline";
+
+/// Why Play, Record and Measure wait while a measurement runs (plan 5c-2
+/// Ruling 9).
+pub const MEASURING: &str = "A synth's return latency is being measured; try again in a moment.";
+
+/// Why Measure waits for the transport (plan 5c-2 Ruling 9).
+pub const STOP_FIRST: &str = "Stop the transport first: Measure runs with it stopped.";
+
+fn measuring_busy() -> VizError {
+    VizError::Busy {
+        message: MEASURING.into(),
+    }
+}
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
 static FORCE_OFFLINE: AtomicBool = AtomicBool::new(false);
@@ -703,6 +717,23 @@ pub fn inject_stop_recording_fault(on: bool) {
     STOP_RECORDING_FAULT.store(on, Ordering::Relaxed);
 }
 
+/// Holds a measurement past its end (test hook, pre-flight M5): while
+/// held, `Session::measure_return` keeps waiting and does not end it.
+static HOLD_MEASURE: AtomicBool = AtomicBool::new(false);
+
+/// Holds (`true`) or releases every measurement's end (test hook,
+/// pre-flight M5): Play, Record and Measure calls can then be made while
+/// one is certainly installed.
+#[cfg(feature = "test-hooks")]
+pub fn debug_hold_measure(on: bool) {
+    HOLD_MEASURE.store(on, Ordering::Relaxed);
+}
+
+/// Whether a test holds measurements past their end.
+pub(crate) fn measure_held() -> bool {
+    HOLD_MEASURE.load(Ordering::Relaxed)
+}
+
 /// Closed sessions' plugin hosts still waiting for processors (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn closing_hosts_waiting() -> usize {
@@ -916,6 +947,10 @@ struct Host {
     /// try restarts the device) until no lane wants input any more.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     input_failed: Option<String>,
+    /// A return-latency measurement is installed (plan 5c-2 Ruling 9):
+    /// Play, Record and another Measure are `Busy` until it ends, and the
+    /// input stays as it is (pre-flight M1).
+    measuring: bool,
 }
 
 impl Host {
@@ -1042,16 +1077,36 @@ impl Host {
             record_hold: false,
             pending_input: None,
             input_failed: None,
+            measuring: false,
         }
+    }
+
+    /// The transport plays (or was asked to), or a recording holds the
+    /// engine. A song that ended by itself is seen first (pre-flight M3).
+    fn busy(&mut self) -> bool {
+        self.collect_faults();
+        self.record_hold || self.want_play || self.engine.state() == PlayState::Playing
+    }
+
+    /// Ends the installed measurement (its sounding note ends) and applies
+    /// the input change asked meanwhile (pre-flight I1, M1).
+    fn end_measuring(&mut self) -> Result<(), VizError> {
+        self.measuring = false;
+        let removed = self.engine.stop_measure().map_err(VizError::from);
+        let input = match self.pending_input.take() {
+            Some(want) => self.ensure_input(want),
+            None => Ok(()),
+        };
+        removed.and(input)
     }
 
     /// Opens or closes a live output's input to match `want` (spec §6.1),
     /// restarting the device with the same renderer. Offline outputs keep
     /// their fake input.
-    /// While a record tap is in, the change waits for it to go
-    /// ([`Host::end_record_hold`]).
+    /// While a record tap or a measurement is in, the change waits for it
+    /// to go ([`Host::end_record_hold`], [`Host::end_measuring`]).
     fn ensure_input(&mut self, want: bool) -> Result<(), VizError> {
-        if self.record_hold {
+        if self.record_hold || self.measuring {
             self.pending_input = Some(want);
             return Ok(());
         }
@@ -1441,23 +1496,33 @@ pub struct HostPlay {
     connect_midi: bool,
 }
 
-/// Plays `seq` of `doc` for session `owner`, up to the disk wait (spec
-/// §5.5): the caller drops every lock and calls [`finish_play`]. A
-/// different owner, sequence or an explicit `start` reloads (stopping
-/// whoever played); otherwise the engine resumes where it stopped.
-/// `until` stops it there (the loop ignored; plan 4f Ruling 9).
-pub fn play(
+/// Takes the engine host for `owner` as Play does (and Measure, plan 5c-2
+/// Ruling 9): device events nobody polled are handled; a host holding
+/// another session's plugins, or opened for another project rate, is
+/// replaced; one is made when there is none; `owner`'s plugin host
+/// becomes the insert factory and is synced. `Busy` while a measurement
+/// runs, and with `idle_only` also while the transport plays or a
+/// recording holds the engine, before anything is replaced. Returns the
+/// locked slot (holding the host) and whether instances were restarted.
+fn claim_host(
     owner: u64,
     doc: &Document,
-    seq: SeqId,
-    start: Option<Tick>,
-    until: Option<Tick>,
-    looped: bool,
     mut plugins: Option<&mut PluginHost>,
-) -> Result<HostPlay, VizError> {
+    idle_only: bool,
+) -> Result<(std::sync::MutexGuard<'static, Option<Host>>, bool), VizError> {
     let project = project_rate(doc);
     let mut slot = loop {
         let mut slot = lock(&HOST);
+        if let Some(h) = slot.as_mut() {
+            if h.measuring {
+                return Err(measuring_busy());
+            }
+            if idle_only && h.busy() {
+                return Err(VizError::Busy {
+                    message: STOP_FIRST.into(),
+                });
+            }
+        }
         // Device events nobody polled (the host had no owner, or another
         // one): a rebuild-class event drops the host so a fresh one opens
         // below.
@@ -1514,6 +1579,28 @@ pub fn play(
         crate::recovery::before_sync();
         p.sync(doc);
     }
+    Ok((slot, restarted))
+}
+
+/// Plays `seq` of `doc` for session `owner`, up to the disk wait (spec
+/// §5.5): the caller drops every lock and calls [`finish_play`]. A
+/// different owner, sequence or an explicit `start` reloads (stopping
+/// whoever played); otherwise the engine resumes where it stopped.
+/// `until` stops it there (the loop ignored; plan 4f Ruling 9). `Busy`
+/// while a measurement runs (plan 5c-2 Ruling 9).
+pub fn play(
+    owner: u64,
+    doc: &Document,
+    seq: SeqId,
+    start: Option<Tick>,
+    until: Option<Tick>,
+    looped: bool,
+    plugins: Option<&mut PluginHost>,
+) -> Result<HostPlay, VizError> {
+    let (mut slot, restarted) = claim_host(owner, doc, plugins, false)?;
+    let host = slot.as_mut().ok_or_else(|| VizError::Internal {
+        message: "engine host missing".into(),
+    })?;
     host.faults.clear();
     // Still unavailable: said again (Task 12 review M2).
     let midi_fault = lock(&MIDI_UNAVAILABLE).clone();
@@ -1658,11 +1745,17 @@ pub fn reload(
             let seq = h.seq;
             // The loaded sequence may have been deleted by the edit.
             if doc.sequence(seq).is_err() {
-                h.engine.stop()?;
+                let stopped = h.engine.stop().map_err(VizError::from);
+                // A measurement of it ends with it (pre-flight I1).
+                let ended = if h.measuring {
+                    h.end_measuring()
+                } else {
+                    Ok(())
+                };
                 h.epoch = next_epoch();
                 h.want_play = false;
                 h.owner = 0;
-                return Ok(());
+                return stopped.and(ended);
             }
             if h.factory_owner == owner {
                 // Instances unloaded since (a plugin turned off): dropped
@@ -1757,6 +1850,10 @@ pub fn release(owner: u64) {
     if let Some(h) = slot.as_mut() {
         if h.owner == owner {
             let _ = h.engine.stop();
+            // Its measurement ends with it (pre-flight I1).
+            if h.measuring {
+                let _ = h.end_measuring();
+            }
             h.want_play = false;
             h.epoch = next_epoch();
             h.owner = 0;
@@ -1852,6 +1949,9 @@ pub fn start_recording(owner: u64, req: &RecordRequest) -> Result<RecordHandles,
     let mut slot = lock(&HOST);
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
+            if h.measuring {
+                return Err(measuring_busy());
+            }
             let handles = h.engine.start_recording(req)?;
             h.record_hold = true;
             Ok(handles)
@@ -1897,6 +1997,93 @@ pub fn stop_recording(owner: u64) -> Result<(), VizError> {
         }
         _ => Ok(()),
     }
+}
+
+/// Starts measuring `dest`'s return latency for session `owner` (spec
+/// §6.7; plan 5c-2 Ruling 9): claims the engine as Play would (`Busy`
+/// while any session plays or records, or a measurement runs), loads
+/// `seq` (whose lane `lane` records `dest`'s return on `channels`) with
+/// the transport stopped, opens the input and installs the measurement.
+/// `Model` for a destination that is not an external MIDI synth (the
+/// engine leaves that check to its caller, Task 5) and for a channel the
+/// input lacks, refused as Record refuses it (with the denied or
+/// failed-open reason when there is one). The caller waits without any
+/// lock, then calls [`end_measure`].
+pub fn start_measure(
+    owner: u64,
+    doc: &Document,
+    seq: SeqId,
+    dest: DestId,
+    lane: &str,
+    channels: core_model::lane::InputChannels,
+    plugins: Option<&mut PluginHost>,
+) -> Result<Arc<MeasureStatus>, VizError> {
+    crate::synth::external_dest(doc, dest)?;
+    let (mut slot, _) = claim_host(owner, doc, plugins, true)?;
+    let host = slot.as_mut().ok_or_else(|| VizError::Internal {
+        message: "engine host missing".into(),
+    })?;
+    host.faults.clear();
+    host.ensure_input(true)?;
+    let back = |h: &mut Host| {
+        let _ = h.ensure_input(wants_audio_input(doc, seq));
+    };
+    if let Some(why) =
+        crate::record::channel_refusal(lane, channels, host.inputs.channels, &host.faults)
+    {
+        back(host);
+        return Err(crate::events::bad(&why));
+    }
+    host.engine.stop()?;
+    let looped = host.looped;
+    host.load(owner, doc, seq, looped)?;
+    host.owner = owner;
+    host.seq = seq;
+    host.want_play = false;
+    host.until = None;
+    host.epoch = next_epoch();
+    let first = channels.first();
+    let mut inputs = vec![first];
+    if let Some(r) = channels.last().filter(|r| *r != first) {
+        inputs.push(r);
+    }
+    match host.engine.start_measure(doc, dest, inputs)? {
+        Ok(status) => {
+            host.measuring = true;
+            Ok(status)
+        }
+        Err(why) => {
+            back(host);
+            Err(crate::events::bad(&format!(
+                "the synth cannot be played: {why}"
+            )))
+        }
+    }
+}
+
+/// Ends the installed measurement, whoever holds the engine now (it is
+/// removed and its sounding note ends; pre-flight I1); when `owner` still
+/// holds it, the input follows the lanes of `seq` again (the change asked
+/// meanwhile applies otherwise; pre-flight M1).
+pub fn end_measure(owner: u64, doc: &Document, seq: SeqId) -> Result<(), VizError> {
+    let mut slot = lock(&HOST);
+    match slot.as_mut() {
+        Some(h) if h.measuring => {
+            let ended = h.end_measuring();
+            let input = if h.owner == owner {
+                h.ensure_input(wants_audio_input(doc, seq))
+            } else {
+                Ok(())
+            };
+            ended.and(input)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether a return-latency measurement runs (in any session).
+pub fn measuring() -> bool {
+    lock(&HOST).as_ref().is_some_and(|h| h.measuring)
 }
 
 /// Whether `owner`'s renderer has its transport stopped (the end of a

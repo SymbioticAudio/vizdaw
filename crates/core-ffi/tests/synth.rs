@@ -25,7 +25,9 @@ use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{
     force_offline, midi_destination_targets, reset_host, set_fake_input, set_fake_synth,
 };
-use vizdaw_ffi::{EditCommand, EventRow, LaneEdit, LaneInputRow, RecordSpecRow, Session};
+use vizdaw_ffi::{
+    EditCommand, EventRow, LaneEdit, LaneInputRow, RecordSpecRow, SequenceEdit, Session, VizError,
+};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -44,6 +46,8 @@ fn serial(delay_ms: Option<f64>, input: Option<FakeInput>) -> Serial {
     set_fake_input(input);
     set_fake_synth(delay_ms);
     vizdaw_ffi::record::set_free_bytes(None);
+    // A test that failed holding a measurement must not hang the next.
+    vizdaw_ffi::host::debug_hold_measure(false);
     reset_host();
     Serial {
         _g: g,
@@ -690,5 +694,259 @@ fn a_redone_track_synth_mutes_after_recording() {
         "the pass placed audio there"
     );
     assert!(lane_named(&s, d.seq, "Part").mute, "the MIDI lane is muted");
+    s.close().unwrap();
+}
+
+fn return_latency(s: &Session, dest: DestId) -> f32 {
+    s.destinations()
+        .unwrap()
+        .into_iter()
+        .find(|x| x.id == dest.0)
+        .unwrap()
+        .return_latency_ms
+}
+
+/// Points lane `rec`'s return at `synth` on device input `first`.
+fn listen(s: &Session, d: &Doc, first: u16) {
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetInput {
+                seq: d.seq.0,
+                lane: d.rec.0,
+                input: Some(LaneInputRow::Audio {
+                    first,
+                    stereo: false,
+                    return_of: Some(d.synth.0),
+                }),
+            },
+        },
+        None,
+    )
+    .unwrap();
+}
+
+/// Spec §6.7, §12.3: Measure finds the fake delay within ±1 ms with the
+/// transport stopped, and sets it as one undo step.
+#[test]
+fn measure_finds_the_fake_delay_and_sets_it() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let m = s.measure_return(d.synth.0).unwrap();
+    assert!(
+        (m.return_latency_ms - DELAY_MS as f32).abs() <= 1.0,
+        "{m:?}"
+    );
+    assert_eq!(m.onsets, 5);
+    assert_eq!(m.snapshot.undo_label.as_deref(), Some("Set Return Latency"));
+    assert_eq!(return_latency(&s, d.synth), m.return_latency_ms);
+    assert!(
+        !s.transport().unwrap().playing,
+        "the transport stayed stopped"
+    );
+    assert!(!vizdaw_ffi::host::measuring());
+    s.undo().unwrap();
+    assert_eq!(return_latency(&s, d.synth), 0.0);
+    // Measured, then recorded: the clicks land on their notes.
+    s.redo().unwrap();
+    record_to_the_third_note(&s, d.seq);
+    for (at, note) in clicks(&s, d.seq.0, d.rec.0)
+        .iter()
+        .zip([BEAT, 2 * BEAT, 3 * BEAT])
+    {
+        assert!(
+            (at - note).abs() <= MS,
+            "a click at {at}, its note at {note}"
+        );
+    }
+    s.close().unwrap();
+}
+
+/// Spec §6.7, Review Focus 1: a return input with no clean onset (here
+/// fake input 1, a sine that never falls quiet) fails "No signal on the
+/// synth's return input" and changes nothing; nothing is left installed.
+#[test]
+fn measure_fails_cleanly_without_a_clean_onset() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    listen(&s, &d, 0);
+    let v = s.snapshot().unwrap().version;
+    match s.measure_return(d.synth.0) {
+        Err(VizError::Model { message }) => assert!(
+            message.contains("No signal on the synth's return input"),
+            "{message}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.snapshot().unwrap().version, v);
+    assert_eq!(return_latency(&s, d.synth), 0.0);
+    assert!(!vizdaw_ffi::host::measuring());
+    s.play(d.seq.0).unwrap();
+    s.stop().unwrap();
+    s.close().unwrap();
+}
+
+/// Plan 5c-2 Rulings 2 and 9 (and Task 5: the engine leaves these checks
+/// to its caller): Measure refuses a destination that is not an external
+/// synth (the built-in synth included), one no lane records the return
+/// of, an unknown one, a return channel the input lacks, and anything
+/// while the transport plays or records; afterwards it still works.
+#[test]
+fn measure_refuses_what_it_cannot_measure() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let mut b = Builder::from_doc(d.doc.clone());
+    let piano = b.dest("Piano", "builtin:synth", 0).unwrap();
+    let juno = b.dest("Juno", "Juno", 0).unwrap();
+    let s = untitled(&g, b.finish());
+    let model = |r: Result<vizdaw_ffi::synth::MeasureRow, VizError>, needle: &str| match r {
+        Err(VizError::Model { message }) => {
+            assert!(message.contains(needle), "{needle}: {message}")
+        }
+        other => panic!("{needle}: {other:?}"),
+    };
+    model(
+        s.measure_return(piano.0),
+        "not an external MIDI destination",
+    );
+    model(
+        s.measure_return(juno.0),
+        "no lane records the return of Juno",
+    );
+    model(s.measure_return(999), "unknown id dest999");
+    assert!(!vizdaw_ffi::host::measuring());
+    listen(&s, &d, 8);
+    model(
+        s.measure_return(d.synth.0),
+        "the audio input has 3 channel(s)",
+    );
+    assert!(!vizdaw_ffi::host::measuring());
+    listen(&s, &d, 2);
+    s.play(d.seq.0).unwrap();
+    assert!(matches!(
+        s.measure_return(d.synth.0),
+        Err(VizError::Busy { .. })
+    ));
+    s.stop().unwrap();
+    wait_until("the transport to stop", || !s.transport().unwrap().playing);
+    s.record(d.seq.0, spec()).unwrap();
+    assert!(matches!(
+        s.measure_return(d.synth.0),
+        Err(VizError::Busy { .. })
+    ));
+    s.stop().unwrap();
+    wait_until("the transport to stop", || !s.transport().unwrap().playing);
+    assert!(s.measure_return(d.synth.0).is_ok());
+    s.close().unwrap();
+}
+
+/// Plan 5c-2 Ruling 9: while a measurement runs, Play, Record and another
+/// window's Measure are Busy; the measurement then finishes. The
+/// measurement is held past its end (pre-flight M5) so the calls cannot
+/// miss its window.
+#[test]
+fn play_and_record_wait_for_a_measurement() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let other = untitled(&g, d.doc.clone());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_hold_measure(true);
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    let busy = (
+        s.play(d.seq.0),
+        s.record(d.seq.0, spec()),
+        other.measure_return(dest),
+        other.play(d.seq.0),
+    );
+    vizdaw_ffi::host::debug_hold_measure(false);
+    let m = t.join().unwrap().unwrap();
+    assert!(matches!(busy.0, Err(VizError::Busy { .. })), "{:?}", busy.0);
+    assert!(matches!(busy.1, Err(VizError::Busy { .. })), "{:?}", busy.1);
+    assert!(matches!(busy.2, Err(VizError::Busy { .. })), "{:?}", busy.2);
+    assert!(matches!(busy.3, Err(VizError::Busy { .. })), "{:?}", busy.3);
+    assert_eq!(m.onsets, 5);
+    assert!(!vizdaw_ffi::host::measuring());
+    other.close().unwrap();
+    s.close().unwrap();
+}
+
+/// Pre-flight I1: a measurement never outlives its sequence. Deleting
+/// the measured sequence mid-measure ends the measurement (it fails),
+/// and every session can play again.
+#[test]
+fn a_measurement_never_outlives_its_sequence() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let mut b = Builder::from_doc(d.doc.clone());
+    b.sequence("T", "Lane", None).unwrap();
+    let s = untitled(&g, b.finish());
+    let other = untitled(&g, d.doc.clone());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    s.edit(
+        EditCommand::Sequence {
+            edit: SequenceEdit::Delete {
+                seq: d.seq.0,
+                delete_references: false,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let r = t.join().unwrap();
+    assert!(r.is_err(), "{r:?}");
+    assert!(!vizdaw_ffi::host::measuring());
+    other.play(d.seq.0).unwrap();
+    other.stop().unwrap();
+    other.close().unwrap();
+    s.close().unwrap();
+}
+
+/// Pre-flight M1: measuring holds the input open. With the return lane
+/// disarmed (so no lane wants input), an edit mid-measure does not close
+/// it; it closes once the measurement ends.
+#[test]
+fn measuring_holds_the_input_open() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let mut b = Builder::from_doc(d.doc.clone());
+    b.run(Command::Lane(LaneCmd::SetFlags {
+        seq: d.seq,
+        lane: d.rec,
+        mute: None,
+        solo: None,
+        arm: Some(false),
+    }))
+    .unwrap();
+    let s = untitled(&g, b.finish());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_hold_measure(true);
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    assert_eq!(s.debug_input_open(), Some(true));
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::Rename {
+                seq: d.seq.0,
+                lane: d.part.0,
+                name: "Synth Part".into(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let held = s.debug_input_open();
+    vizdaw_ffi::host::debug_hold_measure(false);
+    let m = t.join().unwrap();
+    assert_eq!(held, Some(true), "the edit closed the input mid-measure");
+    assert_eq!(m.unwrap().onsets, 5);
+    assert_eq!(s.debug_input_open(), Some(false));
     s.close().unwrap();
 }

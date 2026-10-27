@@ -111,6 +111,7 @@ pub use step::{
 pub use strip::{
     LineOpRow, LinePointRow, LineRow, LineShapeRow, LineTargetRow, PeriodRow, SeriesRow,
 };
+pub use synth::MeasureRow;
 pub use templates::SequenceTemplate;
 
 /// The app is quitting: stops and drops the engine host so no plugin

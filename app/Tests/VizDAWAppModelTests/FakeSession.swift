@@ -700,6 +700,19 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         returnLatencies.append((dest, ms))
         return commandResult()
     }
+
+    var measures: [UInt64] = []
+    /// What `measureReturn` finds.
+    var measured: Float = 25
+
+    func measureReturn(dest: UInt64) throws -> MeasureRow {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        measures.append(dest)
+        return MeasureRow(returnLatencyMs: measured, onsets: 5, snapshot: commandResult())
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {
