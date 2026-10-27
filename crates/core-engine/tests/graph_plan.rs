@@ -1,6 +1,6 @@
 use core_engine::graph::{
     GraphSpec, InputSpec, InsertSpec, MAX_NODES, NodeSpec, PlanError, StripSpec, Tap, plan,
-    plan_with,
+    plan_capped, plan_with,
 };
 use core_engine::schedule::TargetIdx;
 use core_model::ids::PluginInstanceId;
@@ -445,4 +445,27 @@ fn the_masters_own_inserts_do_not_lengthen_the_lead() {
     assert_eq!(p.leads, vec![1000, 0, 0, 0]);
     assert_eq!(p.input_delays[3], vec![0, 0]);
     assert_eq!(p.latency, 1400);
+}
+
+/// Plan 5d-1 M3: the engine caps leads at half a streaming voice; the
+/// rest of the compensation is a delay after the path.
+#[test]
+fn a_lead_cap_leaves_the_rest_to_a_delay() {
+    let g = GraphSpec {
+        nodes: vec![
+            regions(),
+            strip(&[0], vec![]),
+            strip(&[], vec![ins(1000)]),
+            strip(&[1, 2], vec![]),
+        ],
+        master: 3,
+    };
+    let p = plan_capped(&g, MAX, true, 400).unwrap();
+    assert_eq!(p.latency, 1000);
+    assert_eq!(p.leads, vec![400, 0, 0, 0]);
+    assert_eq!(p.input_delays[3], vec![600, 0]);
+    assert_eq!(
+        plan_capped(&g, MAX, true, u64::MAX).unwrap(),
+        plan(&g, MAX).unwrap()
+    );
 }

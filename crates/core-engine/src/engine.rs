@@ -6,7 +6,7 @@ use crate::error::{BackendError, EngineError};
 use crate::graph::mixer::mixer_spec;
 use crate::graph::{
     EffectNode, Graph, GraphReport, InsertFactory, InsertInit, InstrumentFeed, NoInserts, NodeSpec,
-    PlanError, plan_with,
+    PlanError, plan_capped,
 };
 use crate::midi1::{Midi1Msg, note_on_velocity, release_velocity};
 use crate::pool::{Pool, RtEnv, RtPlatform, StdPlatform};
@@ -68,6 +68,9 @@ pub struct EngineConfig {
     pub disk: DiskMode,
     /// Streaming sizes (spec §5.5).
     pub stream: StreamConfig,
+    /// `Regions` nodes read ahead instead of being delayed (plan 5d-1
+    /// Ruling 2); tests turn it off to compare.
+    pub region_leads: bool,
 }
 
 /// How long Play waits for the disk at most (spec §5.5).
@@ -86,6 +89,7 @@ impl EngineConfig {
             deadline: None,
             disk: DiskMode::Thread,
             stream: StreamConfig::default(),
+            region_leads: true,
         }
     }
 }
@@ -800,9 +804,9 @@ impl Engine {
             error: None,
         };
         let max_delay = (2.0 * sr).round().max(0.0) as u64;
-        // No leads until the renderer reads regions ahead (plan 5d-1
-        // Task 2).
-        let p = match plan_with(&mg.spec, max_delay, false) {
+        // A lead is also at most half a streaming voice (plan 5d-1 M3).
+        let voice_frames = (self.cfg.stream.voice_seconds * sr).ceil().max(1.0) as u64;
+        let p = match plan_capped(&mg.spec, max_delay, self.cfg.region_leads, voice_frames / 2) {
             Ok(p) => p,
             Err(e) => {
                 self.shared.raise(match e {

@@ -385,6 +385,11 @@ fn render_path_never_allocates() {
         )
         .unwrap();
     }
+    // A latent bus (plan 5d-1 Task 2): the audio path's regions read 4800
+    // frames ahead of the renderer, across the loop seam and the locates.
+    let bus = bld.bus("Latent").unwrap();
+    bld.insert(bus, TestInserts::plugin("latency=4800"))
+        .unwrap();
     let audio_doc = bld.finish();
     let mut cfg = EngineConfig::new(48_000.0);
     cfg.disk = core_media::stream::DiskMode::Manual;
@@ -393,11 +398,13 @@ fn render_path_never_allocates() {
         ..Default::default()
     };
     let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(64))).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
     engine.set_media(vec![core_media::stream::MediaFile {
         id: m,
         path: path.clone(),
     }]);
     let report = engine.load(&audio_doc, seq).unwrap();
+    assert_eq!(engine.latency_frames(), 4800);
     assert!(
         report.audio_segments >= 3 && report.audio_offline == 0,
         "{report:?}"

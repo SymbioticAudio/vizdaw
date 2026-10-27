@@ -91,6 +91,18 @@ pub fn plan(spec: &GraphSpec, max_delay: u64) -> Result<Plan, PlanError> {
 /// lead: its compensation is a delay line after it, as before plan 5d-1
 /// (tests compare the two).
 pub fn plan_with(spec: &GraphSpec, max_delay: u64, with_leads: bool) -> Result<Plan, PlanError> {
+    plan_capped(spec, max_delay, with_leads, u64::MAX)
+}
+
+/// [`plan_with`], with every lead also at most `lead_cap` frames: the
+/// engine passes half a streaming voice's frames, so a read ahead of the
+/// renderer stays inside what the streamer's ring holds (plan 5d-1 M3).
+pub fn plan_capped(
+    spec: &GraphSpec,
+    max_delay: u64,
+    with_leads: bool,
+    lead_cap: u64,
+) -> Result<Plan, PlanError> {
     let n = spec.nodes.len();
     let inserts: usize = spec
         .nodes
@@ -157,7 +169,13 @@ pub fn plan_with(spec: &GraphSpec, max_delay: u64, with_leads: bool) -> Result<P
     {
         return Ok(base);
     }
-    let leads = region_leads(spec, &order, &succ, base.latency, max_delay / 2);
+    let leads = region_leads(
+        spec,
+        &order,
+        &succ,
+        base.latency,
+        (max_delay / 2).min(lead_cap),
+    );
     if leads.iter().all(|l| *l == 0) {
         return Ok(base);
     }

@@ -409,7 +409,9 @@ fn after_a_stop_only_messages_heard_before_it_are_recorded() {
 }
 
 /// Fix round 1, M2: Auto monitoring switches when the punch points are
-/// heard (the playhead minus the graph latency `L`), not `L` frames early.
+/// heard, not `L` frames early. Since plan 5d-1 (Rulings 2 and 4) the
+/// audio path reads its regions `L` ahead, so the punch points are tested
+/// at that read frame and the input is heard with no compensation delay.
 #[test]
 fn auto_monitoring_switches_at_the_audible_punch_points() {
     use core_engine::graph::TestInserts;
@@ -450,17 +452,71 @@ fn auto_monitoring_switches_at_the_audible_punch_points() {
         .unwrap();
     engine.play().unwrap();
     let peaks: Vec<f32> = (0..60).map(|_| b.block(256)).collect();
-    // Block k renders playhead 37 600 + 256·k and is heard L later. The
-    // punch-in is heard from playhead 42 400 (block 19), whose input is
-    // heard from output frame 4864 + L = 7264 (block 28); the punch-out
-    // from playhead 47 400 (block 39: output block 48).
+    // Block k renders playhead 37 600 + 256·k; the audio path reads
+    // 35 200 + 256·k, which is what is heard then. The punch-in is read
+    // from block 19 (40 064) and the punch-out from block 39 (45 184), and
+    // the input is heard in those same blocks: nothing delays it.
     for (k, p) in peaks.iter().enumerate() {
         match k {
-            11..=27 | 49.. => assert!(*p < 0.001, "block {k}: {p} ({peaks:?})"),
-            29..=47 => assert!(*p > 0.05, "block {k}: {p} ({peaks:?})"),
-            _ => {}
+            0..=18 | 39.. => assert!(*p < 0.001, "block {k}: {p} ({peaks:?})"),
+            _ => assert!(*p > 0.05, "block {k}: {p} ({peaks:?})"),
         }
     }
+}
+
+/// Plan 5d-1 Ruling 2 (spec §6.6; 5c carry PDC M4): a monitored input is
+/// delayed only by the plugins on its own path, however latent the rest
+/// of the mix is; without leads it waited for the slowest path.
+#[test]
+fn a_monitored_input_is_heard_through_its_own_path_only() {
+    use core_engine::graph::TestInserts;
+    use core_model::mixer::StripKind;
+    const L: u32 = 2400;
+    let d = doc();
+    let impulses = |own: u32, leads: bool| -> Vec<usize> {
+        let mut bb = Builder::from_doc(d.doc.clone());
+        let synth = bb.strip_of(StripKind::BuiltinSynth).unwrap();
+        bb.insert(synth, TestInserts::plugin(&format!("latency={L}")))
+            .unwrap();
+        if own > 0 {
+            let path = bb.strip_of(StripKind::AudioPath(d.path)).unwrap();
+            bb.insert(path, TestInserts::plugin(&format!("latency={own}")))
+                .unwrap();
+        }
+        let latent = bb.finish();
+        let mut cfg = EngineConfig::new(SR);
+        cfg.region_leads = leads;
+        let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(10_000))).unwrap();
+        engine.set_insert_factory(Box::new(TestInserts::new()));
+        // Fake input channel 2: an impulse every 0.5 s from frame 0.
+        engine.set_inputs(InputSpec {
+            midi: vec![],
+            monitor: vec![MonitorRoute {
+                path: d.path,
+                left: 1,
+                right: 1,
+                mode: MonitorMode::Input,
+                armed: false,
+            }],
+        });
+        engine.load(&latent, d.seq).unwrap();
+        assert_eq!(engine.latency_frames(), u64::from(L));
+        let mut b = OfflineBackend::new(SR, 256).with_input(FakeInput::Signals);
+        b.start(renderer).unwrap();
+        let mut left = Vec::new();
+        for _ in 0..120 {
+            b.block(256);
+            left.extend_from_slice(b.output(256).0);
+        }
+        left.iter()
+            .enumerate()
+            .filter(|(_, x)| x.abs() > 0.5)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    assert_eq!(impulses(0, true), vec![0, 24_000]);
+    assert_eq!(impulses(300, true), vec![300, 24_300]);
+    assert_eq!(impulses(0, false), vec![2400, 26_400]);
 }
 
 /// Fix round 1, M1: a thru destination that cannot play is reported in

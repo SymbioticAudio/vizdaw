@@ -106,7 +106,9 @@ impl Transport {
         }
     }
 
-    fn active_loop(&self) -> Option<(u64, u64)> {
+    /// The loop playing obeys: the loop range when it is not empty and no
+    /// Play Selection end is set. // RT
+    pub fn active_loop(&self) -> Option<(u64, u64)> {
         if self.end.is_some() {
             return None;
         }

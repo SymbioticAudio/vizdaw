@@ -231,6 +231,11 @@ impl RecordTap {
         self.status.closed.store(true, Ordering::Release);
     }
 
+    /// The record range, `(0, u64::MAX)` when it has none. // RT
+    pub fn range_or_all(&self) -> (u64, u64) {
+        self.range.unwrap_or((0, u64::MAX))
+    }
+
     /// Whether `frame` lies in the record range. // RT
     pub fn in_range(&self, frame: u64) -> bool {
         self.range.is_none_or(|(a, b)| frame >= a && frame < b)

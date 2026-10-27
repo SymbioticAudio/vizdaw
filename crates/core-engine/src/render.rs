@@ -503,6 +503,14 @@ pub struct Renderer {
     input_copy: Box<InputCopy>,
     /// A return-latency measurement (spec §6.7), while one is installed.
     measure: Option<Box<MeasureTap>>,
+    /// Where the transport last rolled from (a Play while not playing, a
+    /// Locate): led regions read nothing before it (plan 5d-1 Ruling 3).
+    roll_floor: u64,
+    /// The loop wrapped since the transport rolled.
+    wrapped: bool,
+    /// Frames rendered since playing reached its end: led regions play
+    /// out their last frames meanwhile.
+    after_end: u64,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -632,6 +640,9 @@ impl Renderer {
             thru: Box::default(),
             input_copy: Box::new(InputCopy::new(0, 0)),
             measure: None,
+            roll_floor: 0,
+            wrapped: false,
+            after_end: 0,
         };
         r.prepare(cfg.max_frames);
         r
@@ -766,7 +777,11 @@ impl Renderer {
         // may count a new epoch (5a Ruling 9) and plan around the playhead
         // as this block's commands left it (a Locate's new position, never
         // the stale one: commands are applied only here).
-        self.reader.begin_block(self.transport.pos);
+        // Led regions read up to the largest lead behind the transport:
+        // the streamer plans from the earliest frame read (Ruling 3).
+        let lead = self.graph.as_deref().map_or(0, Graph::max_lead);
+        let head = self.audio_run(length).head(lead);
+        self.reader.begin_block(head.unwrap_or(self.transport.pos));
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let ns_per_frame = 1e9 / self.cfg.sample_rate.max(1.0);
         let mut missed = false;
@@ -787,6 +802,10 @@ impl Renderer {
             }
             let run = self.next_run(length, frames - offset);
             let end = offset + run;
+            // A run that starts at or past the end of playing plays out
+            // the led regions' last frames (Ruling 3).
+            let past_end = self.transport.play_pos(length).is_none()
+                && matches!(self.transport.state, PlayState::Playing | PlayState::Tail);
             self.automate(length, run);
             let info = self.block_info();
             let regions = self.region_run(length, monitored, offset);
@@ -825,6 +844,8 @@ impl Renderer {
                         if let Some(t) = self.tap.as_deref_mut() {
                             t.wrap(offset, to);
                         }
+                        // Led regions read the loop's end before its start.
+                        self.wrapped = true;
                         release_all(&mut self.notes, &mut o, offset);
                         if let Some(s) = self.schedule.as_deref() {
                             reset_controllers(s, &mut o, offset);
@@ -847,6 +868,9 @@ impl Renderer {
             let lost = self.render_graph(out, offset, run, info, regions, deadline);
             if regions.playing {
                 self.since_start = self.since_start.saturating_add(u64::from(run));
+            }
+            if past_end {
+                self.after_end = self.after_end.saturating_add(u64::from(run));
             }
             offset = end;
             if lost {
@@ -1121,6 +1145,9 @@ impl Renderer {
                         .transport
                         .end
                         .map(|e| new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)));
+                    self.roll_floor = new
+                        .tempo
+                        .tick_to_frame(old.tempo.frame_to_tick(self.roll_floor));
                     if let Err(rtrb::PushError::Full(old)) =
                         self.retire.push(Retired::Schedule(old))
                     {
@@ -1164,10 +1191,16 @@ impl Renderer {
             EngineCmd::Play { until } => {
                 let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
                 self.transport.end = until;
-                if self.transport.state != PlayState::Playing {
+                let rolls = self.transport.state != PlayState::Playing;
+                if rolls {
                     self.since_start = 0;
                 }
                 self.transport.play(length);
+                if rolls {
+                    self.roll_floor = self.transport.pos;
+                    self.wrapped = false;
+                    self.after_end = 0;
+                }
                 self.seek();
                 self.forget_unautomated();
                 self.auto_last.fill(f64::NAN);
@@ -1187,6 +1220,9 @@ impl Renderer {
             EngineCmd::Locate(frame) => {
                 self.release_now(true);
                 self.transport.locate(frame);
+                self.roll_floor = frame;
+                self.wrapped = false;
+                self.after_end = 0;
                 // A jump while recording is a cut: the next block marks
                 // where the transport landed (review fix M1).
                 if let Some(t) = self.tap.as_deref_mut() {
@@ -1196,7 +1232,14 @@ impl Renderer {
                 self.seek();
                 self.auto_last.fill(f64::NAN);
             }
-            EngineCmd::SetLoop(range) => self.transport.loop_range = range,
+            EngineCmd::SetLoop(range) => {
+                // Another loop: its seam is not the one led regions read
+                // across (every load sends the same range again).
+                if range != self.transport.loop_range {
+                    self.wrapped = false;
+                }
+                self.transport.loop_range = range;
+            }
             EngineCmd::RemoveSink(idx) => {
                 // Forget its sounding notes: nothing will play them now.
                 self.notes.release(idx, |_| {});
@@ -1295,9 +1338,11 @@ impl Renderer {
     }
 
     /// The `Regions` nodes' context for the run starting now: the
-    /// schedule's audio from the playhead, late within `LATE_SECONDS` of
-    /// playing after a Play or Locate, muted when the device refused the
-    /// rate. // RT
+    /// schedule's audio from the playhead (led nodes read behind it, plan
+    /// 5d-1 Ruling 3), late within `LATE_SECONDS` of playing after a Play
+    /// or Locate, muted when the device refused the rate, and the
+    /// monitored input with the record range while a recording rolls
+    /// (each node decides Auto at its read frame, Ruling 4). // RT
     fn region_run(&self, length: u64, monitored: bool, offset: u32) -> crate::graph::RegionRun {
         let base = self.audio_run(length);
         if !monitored {
@@ -1307,50 +1352,55 @@ impl Renderer {
             return base;
         };
         let playing = self.transport.state == PlayState::Playing;
-        let pos = self.transport.play_pos(length);
-        // The record range is where the punch points are heard: the frame
-        // rendered now is heard `L` (the graph latency) later, so the
-        // frame heard now is `p − L` (fix round 1, M2).
-        let in_range = match (self.tap.as_deref(), pos) {
-            (Some(t), Some(p)) => t.rolling() && t.in_range(p.saturating_sub(self.latency)),
-            _ => false,
-        };
-        let mut heard = 0u64;
-        for (k, r) in routes.monitor.iter().enumerate().take(64) {
-            if r.heard(playing, in_range) {
-                heard |= 1u64 << k;
-            }
-        }
+        let rec = self
+            .tap
+            .as_deref()
+            .filter(|t| t.rolling())
+            .map(RecordTap::range_or_all);
         // SAFETY: the routes (boxed) and the input copy (boxed) change only
         // in `drain_commands`, `copy_monitored` or `prepare`, after
         // `try_finish` succeeded, so they outlive every run given this.
-        unsafe { base.with_monitor(&self.input_copy, &routes.monitor, heard, offset) }
+        unsafe { base.with_monitor(&self.input_copy, &routes.monitor, offset, playing, rec) }
     }
 
-    /// The schedule's audio from the playhead (none while stopped). // RT
+    /// The schedule's audio from the playhead, or past the end while
+    /// playing plays out (none while stopped). // RT
     fn audio_run(&self, length: u64) -> crate::graph::RegionRun {
         let Some(s) = self.schedule.as_deref() else {
             return crate::graph::RegionRun::NONE;
         };
-        if s.audio.is_empty() {
-            return crate::graph::RegionRun::NONE;
-        }
-        let Some(pos) = self.transport.play_pos(length) else {
-            return crate::graph::RegionRun::NONE;
+        let (frame, ceiling) = match self.transport.play_pos(length) {
+            Some(p) => (p, u64::MAX),
+            // At or past the end: led nodes read on to it (Ruling 3).
+            None if matches!(self.transport.state, PlayState::Playing | PlayState::Tail) => (
+                self.transport.pos.saturating_add(self.after_end),
+                self.transport.pos,
+            ),
+            None => return crate::graph::RegionRun::NONE,
         };
-        // SAFETY: the schedule (boxed) and the reader (boxed) change only
-        // in `drain_commands` or `Drop`, after `try_finish` succeeded, so
-        // they outlive every run given this value.
-        unsafe {
-            crate::graph::RegionRun::new(
-                &s.audio,
-                &self.reader,
-                pos,
-                true,
-                self.since_start < self.late_frames(),
-                self.shared.regions_muted(),
-            )
-        }
+        // A wrap due at this run's start (the transport sits at the loop
+        // end) counts: the run plays from the loop start.
+        let lp = self.transport.active_loop();
+        let due = lp.is_some_and(|(_, e)| self.transport.pos == e);
+        let wrapped = if self.wrapped || due { lp } else { None };
+        let run = if s.audio.is_empty() {
+            crate::graph::RegionRun::transport(frame, true)
+        } else {
+            // SAFETY: the schedule (boxed) and the reader (boxed) change
+            // only in `drain_commands` or `Drop`, after `try_finish`
+            // succeeded, so they outlive every run given this value.
+            unsafe {
+                crate::graph::RegionRun::new(
+                    &s.audio,
+                    &self.reader,
+                    frame,
+                    true,
+                    self.since_start < self.late_frames(),
+                    self.shared.regions_muted(),
+                )
+            }
+        };
+        run.with_bounds(self.roll_floor, ceiling, wrapped)
     }
 
     /// Copies the input channels monitor routes name; true when there is

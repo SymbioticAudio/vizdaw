@@ -142,6 +142,8 @@ enum NodeDef {
     },
     Regions {
         path: OutputPathId,
+        /// Frames it reads ahead of what is heard (`Plan.leads`).
+        lead: u64,
     },
     Strip {
         inputs: Range<usize>,
@@ -244,6 +246,9 @@ pub struct Graph {
     sources: Box<[usize]>,
     master: usize,
     latency: u64,
+    /// The largest `Regions` lead (the streamer's read head trails the
+    /// renderer by it).
+    max_lead: u64,
     shape: u64,
     max_frames: u32,
     instruments: u64,
@@ -369,7 +374,10 @@ impl Graph {
                     nodes.push(UnsafeCell::new(NodeState::instrument(max_frames, *outputs)));
                 }
                 NodeSpec::Regions { path } => {
-                    defs.push(NodeDef::Regions { path: *path });
+                    defs.push(NodeDef::Regions {
+                        path: *path,
+                        lead: plan.leads.get(i).copied().unwrap_or(0),
+                    });
                     nodes.push(UnsafeCell::new(NodeState::regions(max_frames)));
                 }
                 NodeSpec::Strip(s) => {
@@ -477,6 +485,7 @@ impl Graph {
             sources: sources.into_boxed_slice(),
             master: spec.master,
             latency: plan.latency,
+            max_lead: plan.leads.iter().copied().max().unwrap_or(0),
             shape: spec.shape(),
             max_frames,
             instruments,
@@ -491,6 +500,11 @@ impl Graph {
     /// Total latency `L` in frames.
     pub fn latency(&self) -> u64 {
         self.latency
+    }
+
+    /// The largest lead of its `Regions` nodes (plan 5d-1 Ruling 3).
+    pub fn max_lead(&self) -> u64 {
+        self.max_lead
     }
 
     /// The structure hash of the spec it was built from.
@@ -860,10 +874,10 @@ unsafe fn render_node(
                 }
             }
         }
-        NodeDef::Regions { path } => {
+        NodeDef::Regions { path, lead } => {
             let NodeState { outs, scratch, .. } = st;
             if let Some(out) = outs.first_mut() {
-                regions.render(*path, frames, out, scratch);
+                regions.render(*path, *lead, frames, out, scratch);
             }
         }
         NodeDef::Strip {
