@@ -465,6 +465,13 @@ pub fn input_opening(owner: u64) -> bool {
         .is_some_and(|h| h.owner == owner && h.job.is_some())
 }
 
+/// Whether the input thread is at work, whoever holds the engine (test
+/// hook, Task 8 review m1).
+#[cfg(feature = "test-hooks")]
+pub fn debug_input_job() -> bool {
+    lock(&HOST).as_ref().is_some_and(|h| h.job.is_some())
+}
+
 /// Waits up to `limit`, with no lock held between looks, until no input
 /// thread is at work; false when one still is.
 pub fn wait_input(limit: Duration) -> bool {
@@ -2199,20 +2206,34 @@ pub struct HostPlay {
     connect_midi: bool,
 }
 
+/// What a [`claim_host`] waits for before it takes the engine.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Idle {
+    /// Nothing but a measurement (Play).
+    Any,
+    /// A stopped transport and no recording too (Measure).
+    Stopped,
+    /// And no other session's input thread at work (an arm's claim, plan
+    /// 5d-1 Ruling 16).
+    Untouched,
+}
+
 /// Takes the engine host for `owner` as Play does (and Measure, plan 5c-2
 /// Ruling 9): device events nobody polled are handled; a host holding
 /// another session's plugins, or opened for another project rate, is
 /// replaced; one is made when there is none; `owner`'s plugin host
 /// becomes the insert factory and is synced. `Busy` while a measurement
-/// runs, and with `idle_only` also while the transport plays or a
-/// recording holds the engine, before anything is replaced. Returns the
-/// locked slot (holding the host) and whether instances were restarted.
+/// runs, and, as `idle` says, also while the transport plays or a
+/// recording holds the engine, or another session's input thread is at
+/// work, before anything is replaced. Returns the locked slot (holding the
+/// host) and whether instances were restarted.
 fn claim_host(
     owner: u64,
     doc: &Document,
     mut plugins: Option<&mut PluginHost>,
-    idle_only: bool,
+    idle: Idle,
 ) -> Result<(std::sync::MutexGuard<'static, Option<Host>>, bool), VizError> {
+    let idle_only = idle != Idle::Any;
     let project = project_rate(doc);
     let mut slot = loop {
         let mut slot = lock(&HOST);
@@ -2223,6 +2244,14 @@ fn claim_host(
             if idle_only && h.busy() {
                 return Err(VizError::Busy {
                     message: STOP_FIRST.into(),
+                });
+            }
+            // Measure waits for its input with no measurement installed
+            // yet: an arm in another window must not take that engine
+            // (Task 8 review m1).
+            if idle == Idle::Untouched && h.owner != owner && h.job.is_some() {
+                return Err(VizError::Busy {
+                    message: INPUT_OPENING.into(),
                 });
             }
         }
@@ -2303,7 +2332,7 @@ pub fn play(
     looped: bool,
     plugins: Option<&mut PluginHost>,
 ) -> Result<HostPlay, VizError> {
-    let (mut slot, restarted) = claim_host(owner, doc, plugins, false)?;
+    let (mut slot, restarted) = claim_host(owner, doc, plugins, Idle::Any)?;
     let host = slot.as_mut().ok_or_else(|| VizError::Internal {
         message: "engine host missing".into(),
     })?;
@@ -2494,12 +2523,13 @@ pub fn reload(
 
 /// Claims the engine for session `owner`'s sequence `seq` of `doc` while
 /// it stands idle (plan 5d-1 Ruling 16, 5c carry I2): no session plays,
-/// records or measures. It loads `seq` stopped at `at` and opens the input
-/// its lanes want, so armed and monitored lanes are heard and thru plays
-/// before the first Play. Nothing when `owner` holds the engine with `seq`
-/// loaded already, or when the engine is busy (never taken then). True
-/// when it claimed a live host: the caller connects the MIDI sources
-/// without the lock ([`listen_to_midi_sources_soon`]).
+/// records or measures, and no other session's input thread is at work
+/// (Measure's input wait among them, Task 8 review m1). It loads `seq`
+/// stopped at `at` and opens the input its lanes want, so armed and
+/// monitored lanes are heard and thru plays before the first Play.
+/// Nothing when `owner` holds the engine with `seq` loaded already, or
+/// when the engine is busy (never taken then). True when it claimed (Task
+/// 8 review m2): the caller moves its position to the engine.
 pub fn claim_idle(
     owner: u64,
     doc: &Document,
@@ -2514,7 +2544,7 @@ pub fn claim_idle(
     {
         return Ok(false);
     }
-    let (mut slot, _) = match claim_host(owner, doc, plugins, true) {
+    let (mut slot, _) = match claim_host(owner, doc, plugins, Idle::Untouched) {
         Ok(s) => s,
         Err(VizError::Busy { .. }) => return Ok(false),
         Err(e) => return Err(e),
@@ -2523,9 +2553,14 @@ pub fn claim_idle(
         message: "engine host missing".into(),
     })?;
     if host.owner != owner {
-        // Another session's held position and plugins go with its claim.
+        // Another session's held position and plugins go with its claim,
+        // and so do its faults; a MIDI input still unavailable is said
+        // again, as Play does (Task 8 review m3).
         host.record_hold = false;
         host.pending_input = None;
+        host.faults.clear();
+        let midi_fault = lock(&MIDI_UNAVAILABLE).clone();
+        note_midi_fault(host, midi_fault);
     }
     host.engine.stop()?;
     host.load(owner, doc, seq, looped)?;
@@ -2536,7 +2571,7 @@ pub fn claim_idle(
     host.until = None;
     host.epoch = next_epoch();
     host.ensure_input(wants_audio_input(doc, seq))?;
-    Ok(host.is_live())
+    Ok(true)
 }
 
 /// `owner`'s view of the transport, or `None` when it does not hold the
@@ -2709,6 +2744,16 @@ pub fn release(owner: u64) {
             h.want_play = false;
             h.epoch = next_epoch();
             h.owner = 0;
+            // Nothing listens for a window that is gone (Task 8 review
+            // I1): an engine it left monitoring, playing thru or opening
+            // its input goes now, as `drop_if_idle` drops it (a job still
+            // at work is cancelled by the drop).
+            if !h.busy() && (h.wants_live() || h.job.is_some()) {
+                let old = slot.take();
+                *lock(&MIDI_TO) = None;
+                drop(slot);
+                retire(old);
+            }
         }
     }
 }
@@ -2872,7 +2917,7 @@ pub fn start_measure(
 ) -> Result<Arc<MeasureStatus>, VizError> {
     crate::synth::external_dest(doc, dest)?;
     let generation = {
-        let (mut slot, _) = claim_host(owner, doc, plugins, true)?;
+        let (mut slot, _) = claim_host(owner, doc, plugins, Idle::Stopped)?;
         let host = slot.as_mut().ok_or_else(|| VizError::Internal {
             message: "engine host missing".into(),
         })?;
@@ -3087,6 +3132,13 @@ pub fn midi_sender(owner: u64) -> Option<MidiSender> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.midi_sender())
+}
+
+/// The input routes the engine was last given, whoever holds it (test
+/// hook, Task 8 review I1).
+#[cfg(feature = "test-hooks")]
+pub fn debug_host_inputs() -> Option<InputSpec> {
+    lock(&HOST).as_ref().map(|h| h.engine.inputs().clone())
 }
 
 /// The input routes `owner`'s engine was last given (test hook).

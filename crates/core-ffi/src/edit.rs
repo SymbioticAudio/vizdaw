@@ -482,6 +482,27 @@ pub fn claims_engine(cmd: &EditCommand) -> Option<u64> {
     }
 }
 
+/// [`claims_engine`] for an undo or redo, which keeps documents rather
+/// than commands (Task 8 review m6): the first sequence in which a lane
+/// both documents have changed its arm, monitor or input, or in which an
+/// armed lane appeared (Track Synth's return lane).
+pub fn claims_engine_step(
+    before: &core_model::document::Document,
+    after: &core_model::document::Document,
+) -> Option<core_model::ids::SeqId> {
+    after.sequences().iter().find_map(|(id, s)| {
+        let old = before.sequence(*id).ok();
+        let changed =
+            s.lanes.iter().any(
+                |l| match old.and_then(|o| o.lanes.iter().find(|x| x.id == l.id)) {
+                    Some(x) => x.arm != l.arm || x.monitor != l.monitor || x.input != l.input,
+                    None => l.arm,
+                },
+            );
+        changed.then_some(*id)
+    })
+}
+
 /// Whether `cmd` changes a lane's arm or input: the input that failed to
 /// open is tried again (plan 5d-1 Ruling 15).
 pub fn retries_input(cmd: &EditCommand) -> bool {

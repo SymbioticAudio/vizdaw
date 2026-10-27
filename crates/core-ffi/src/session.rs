@@ -938,6 +938,7 @@ impl Session {
             self.capture_removed(&next)?;
         }
         let mut inner = lock(&self.inner);
+        let before = inner.doc().clone();
         if undo {
             inner.history.undo()?;
         } else {
@@ -946,7 +947,15 @@ impl Session {
         inner.version += 1;
         inner.reload_host(self.id);
         self.mark(&mut inner);
-        inner.snapshot()
+        let snapshot = inner.snapshot()?;
+        // An undone or redone arm, monitor or input edit claims as the
+        // edit did (Task 8 review m6).
+        let claim = crate::edit::claims_engine_step(&before, inner.doc());
+        drop(inner);
+        if let Some(seq) = claim {
+            self.claim_for_input(seq);
+        }
+        Ok(snapshot)
     }
 
     /// Plays `seq` from `start`, else from where this session's position
@@ -999,7 +1008,7 @@ impl Session {
     /// is a fault, never the edit's.
     fn claim_for_input(&self, seq: SeqId) {
         let mut inner = lock(&self.inner);
-        if inner.recording.is_some() || inner.finishing {
+        if inner.closed || inner.recording.is_some() || inner.finishing {
             return;
         }
         if !host::wants_live(inner.doc(), seq) {
@@ -1017,12 +1026,11 @@ impl Session {
         })
         .and_then(|r| r);
         match r {
-            Ok(_) => {
-                if host::holder() == Some(self.id) {
-                    inner.cursor = None;
-                    inner.cursor_seq = Some(seq);
-                }
+            Ok(true) => {
+                inner.cursor = None;
+                inner.cursor_seq = Some(seq);
             }
+            Ok(false) => {}
             Err(e) => inner.reload_fault = Some(format!("the engine could not be claimed: {e}")),
         }
         drop(inner);

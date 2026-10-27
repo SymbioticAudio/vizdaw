@@ -1,8 +1,12 @@
 //! Arming claims an idle engine (plan 5d-1 Rulings 16–17; 5c carries I2
 //! and T12 M5): with the transport stopped and no Play yet, an armed or
 //! monitored lane is heard and MIDI thru plays; a playing, recording or
-//! measuring engine is never taken; a MIDI lane's arm reconnects the MIDI
-//! sources. Offline only: no device is opened and no microphone asked.
+//! measuring engine is never taken, nor one whose input another window's
+//! Measure waits on (the recording and measuring cases are in record.rs
+//! and synth.rs); an arm, monitor or input edit, and its undo or redo,
+//! reconnects the MIDI sources, claimed or not; a closed window's input
+//! goes with it. Offline only: no device is opened and no microphone
+//! asked.
 
 #![recursion_limit = "256"]
 
@@ -12,8 +16,8 @@ use core_engine::offline::FakeInput;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{
-    debug_pretend_live_midi, drain_offline_log, force_offline, holder, midi_source_connects,
-    reset_host, set_fake_input,
+    debug_host_input_open, debug_host_inputs, debug_pretend_live_midi, drain_offline_log,
+    drop_if_idle, force_offline, holder, midi_source_connects, reset_host, set_fake_input,
 };
 use vizdaw_ffi::{EditCommand, LaneEdit, LaneInputRow, LaneRow, MonitorModeRow, Session, VizError};
 
@@ -131,7 +135,10 @@ fn arming_claims_an_idle_engine_and_hears_the_input() {
     let seq = song(&s);
     let chords = inputs(&s, seq, false);
     arm(&s, seq, chords, true);
-    std::thread::sleep(Duration::from_millis(50));
+    // The claim loaded the thru route (Task 8 review m4: no settle sleep).
+    wait_until("the thru route", || {
+        s.debug_engine_inputs().is_some_and(|i| !i.midi.is_empty())
+    });
     drain_offline_log();
     assert!(s.inject_midi("Keys".into(), vec![0x90, 70, 99]).unwrap());
     let mut log = Vec::new();
@@ -195,5 +202,70 @@ fn arming_a_midi_lane_listens_to_new_sources() {
     arm(&s, seq, chords, true);
     wait_until("another connect", || midi_source_connects() > once);
     debug_pretend_live_midi(false);
+    s.close().unwrap();
+}
+
+/// Task 8 review I1: closing the window whose arm claimed the engine lets
+/// its input go: nothing stays open or monitored for a window that is
+/// gone.
+#[test]
+fn closing_a_window_lets_its_claimed_input_go() {
+    let _g = serial();
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = inputs(&s, seq, true);
+    arm(&s, seq, lp, true);
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
+    s.close().unwrap();
+    wait_until("the input to close", || {
+        debug_host_input_open() != Some(true)
+            && debug_host_inputs().is_none_or(|i| i.monitor.is_empty() && i.midi.is_empty())
+    });
+    assert_eq!(holder(), None);
+}
+
+/// Ruling 17 as amended (M15; Task 8 review m4): an arm reconnects the
+/// MIDI sources even when the engine is busy and not taken.
+#[test]
+fn arming_on_a_busy_engine_still_listens_to_new_sources() {
+    let _g = serial();
+    debug_pretend_live_midi(true);
+    let a = Session::new_demo().unwrap();
+    let b = Session::new_demo().unwrap();
+    let (sa, sb) = (song(&a), song(&b));
+    a.play(sa).unwrap();
+    wait_until("a plays", || a.transport().unwrap().playing);
+    let owner = holder();
+    let chords = inputs(&b, sb, false);
+    let before = midi_source_connects();
+    arm(&b, sb, chords, true);
+    wait_until("a connect", || midi_source_connects() > before);
+    assert_eq!(holder(), owner, "a playing engine is not taken");
+    debug_pretend_live_midi(false);
+    a.close().unwrap();
+    b.close().unwrap();
+}
+
+/// Task 8 review m6: an undo or redo that arms claims as the arm did. The
+/// host the undo left wanting nothing goes; the redo is heard before any
+/// Play.
+#[test]
+fn a_redone_arm_is_heard_before_play() {
+    let _g = serial();
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    let lp = inputs(&s, seq, true);
+    arm(&s, seq, lp, true);
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
+    s.undo().unwrap();
+    wait_until("the input to close", || s.debug_input_open() != Some(true));
+    drop_if_idle();
+    assert_eq!(holder(), None, "an engine wanting nothing goes");
+    s.redo().unwrap();
+    wait_until("the redone arm's input", || {
+        s.debug_input_open() == Some(true)
+    });
+    assert_eq!(s.debug_engine_inputs().unwrap().monitor.len(), 1);
+    assert!(!s.transport().unwrap().playing, "nothing played");
     s.close().unwrap();
 }

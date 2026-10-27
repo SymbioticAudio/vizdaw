@@ -1648,3 +1648,39 @@ fn recording_goes_on_with_software_monitoring_off() {
     assert!((peak - 0.2512).abs() < 0.01, "{peak}");
     s.close().unwrap();
 }
+
+/// Plan 5d-1 Ruling 16 (Task 8 review m4): an arm in another window never
+/// takes a recording engine.
+#[test]
+fn an_arm_never_takes_a_recording_engine() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let other = untitled(&g, doc(8, false, false).doc);
+    s.record(d.seq.0, spec()).unwrap();
+    let owner = vizdaw_ffi::host::holder();
+    other
+        .edit(
+            vizdaw_ffi::EditCommand::Lane {
+                edit: vizdaw_ffi::LaneEdit::SetFlags {
+                    seq: d.seq.0,
+                    lane: d.keys.0,
+                    mute: None,
+                    solo: None,
+                    arm: Some(true),
+                },
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        vizdaw_ffi::host::holder(),
+        owner,
+        "a recording engine is not taken"
+    );
+    assert!(s.record_state().unwrap().recording);
+    assert!(other.debug_engine_inputs().is_none());
+    s.stop().unwrap();
+    other.close().unwrap();
+    s.close().unwrap();
+}

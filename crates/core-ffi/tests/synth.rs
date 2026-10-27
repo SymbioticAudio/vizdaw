@@ -51,6 +51,7 @@ fn serial(delay_ms: Option<f64>, input: Option<FakeInput>) -> Serial {
     // A test that failed holding a measurement must not hang the next.
     vizdaw_ffi::host::debug_hold_measure(false);
     vizdaw_ffi::host::debug_measure_end_delay(Duration::ZERO);
+    vizdaw_ffi::host::debug_input_open_delay(None);
     reset_host();
     Serial {
         _g: g,
@@ -1150,5 +1151,72 @@ fn the_buffer_size_waits_for_a_measurement() {
         "{r:?}"
     );
     assert_eq!(kept, 128, "unchanged");
+    s.close().unwrap();
+}
+
+/// Arms one MIDI lane, `lane`, in `s` (an edit that claims an idle engine,
+/// plan 5d-1 Ruling 16).
+fn arm_lane(s: &Session, seq: SeqId, lane: LaneId) {
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetFlags {
+                seq: seq.0,
+                lane: lane.0,
+                mute: None,
+                solo: None,
+                arm: Some(true),
+            },
+        },
+        None,
+    )
+    .unwrap();
+}
+
+/// Plan 5d-1 Ruling 16 (Task 8 review m4): an arm in another window never
+/// takes a measuring engine.
+#[test]
+fn an_arm_never_takes_a_measuring_engine() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let other = untitled(&g, d.doc.clone());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_hold_measure(true);
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    let owner = vizdaw_ffi::host::holder();
+    arm_lane(&other, d.seq, d.part);
+    let kept = (vizdaw_ffi::host::holder(), vizdaw_ffi::host::measuring());
+    vizdaw_ffi::host::debug_hold_measure(false);
+    let m = t.join().unwrap().unwrap();
+    assert_eq!(kept, (owner, true), "a measuring engine is not taken");
+    assert_eq!(m.onsets, 5);
+    other.close().unwrap();
+    s.close().unwrap();
+}
+
+/// Task 8 review m1: while Measure waits for its input to open (no
+/// measurement installed yet), an arm in another window does not take the
+/// engine, so the measurement hears its input.
+#[test]
+fn an_arm_never_takes_the_engine_during_measures_input_wait() {
+    let g = serial(Some(DELAY_MS), None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let other = untitled(&g, d.doc.clone());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_input_open_delay(Some(Duration::from_millis(500)));
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the input to be opening", vizdaw_ffi::host::debug_input_job);
+    let owner = vizdaw_ffi::host::holder();
+    arm_lane(&other, d.seq, d.part);
+    let kept = vizdaw_ffi::host::holder();
+    let m = t.join().unwrap();
+    vizdaw_ffi::host::debug_input_open_delay(None);
+    assert_eq!(kept, owner, "the engine Measure waits on is not taken");
+    assert_eq!(m.unwrap().onsets, 5);
+    other.close().unwrap();
     s.close().unwrap();
 }
