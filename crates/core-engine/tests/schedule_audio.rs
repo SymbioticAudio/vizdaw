@@ -175,6 +175,22 @@ fn references_place_their_regions_in_the_parent_tempo() {
         segs(&s.audio, 0),
         vec![(4 * QF, QF, 0, 0), (8 * QF, QF, 0, 0)]
     );
+    // Plan 5d-1 Ruling 6: they belong to the song's lane holding the
+    // reference, the lane that records in the song.
+    assert!(
+        s.audio
+            .segments(OutputPathId(0))
+            .iter()
+            .all(|g| g.top_lane == sl)
+    );
+    // A region directly on a lane belongs to that lane.
+    let (c, _) = run(b.doc(), child, &[]);
+    assert!(
+        c.audio
+            .segments(OutputPathId(0))
+            .iter()
+            .all(|g| g.top_lane == cl)
+    );
 }
 
 #[test]
@@ -333,6 +349,7 @@ fn segment_gain_combines_fades() {
         fade_in: fade(10, FadeShape::Linear),
         fade_out: fade(10, FadeShape::Linear),
         online: true,
+        top_lane: LaneId(0),
     };
     // In at 0.5, out (5 frames left of 10) at 0.5: 0.5 × 0.5 × 0.5.
     assert!((g.gain_at(5) - 0.125).abs() < 1e-6);

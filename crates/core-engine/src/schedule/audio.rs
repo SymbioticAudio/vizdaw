@@ -41,6 +41,10 @@ pub struct Segment {
     pub fade_out: Fade,
     /// The media is readable (else silence, nothing counted).
     pub online: bool,
+    /// The lane of the playing sequence that holds the region, directly
+    /// or through references: while that lane records with its input
+    /// heard, the segment is silent (plan 5d-1 Ruling 6).
+    pub top_lane: LaneId,
 }
 
 impl Segment {
@@ -247,6 +251,7 @@ pub(crate) fn build(
                 fade_in,
                 fade_out,
                 online: !offline.contains(&media),
+                top_lane: r.path.first().map_or(last.lane, |p| p.lane),
             },
         });
     }

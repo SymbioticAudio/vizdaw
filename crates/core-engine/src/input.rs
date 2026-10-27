@@ -151,6 +151,9 @@ pub struct MidiInputSpec {
 /// One audio lane's monitoring (spec §6.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorRoute {
+    /// The lane: while it records with its input heard, its own regions
+    /// are silent (plan 5d-1 Ruling 6).
+    pub lane: LaneId,
     /// The output path whose strip hears it.
     pub path: OutputPathId,
     /// The device channel heard left.

@@ -17,7 +17,11 @@ use core_engine::midi1::Midi1Msg;
 use core_engine::offline::{FAKE_SYNTH_PORT, FakeInput, FakeSynth, OfflineBackend, OfflineSinks};
 use core_engine::record::RecordRequest;
 use core_engine::rt_check::{self, CountingAlloc};
+use core_media::caf::{CafWriter, WriteMode};
+use core_media::stream::{DiskMode, MediaFile};
 use core_model::command::{Command, LaneCmd, RoutingCmd};
+use core_model::event::Fade;
+use core_model::format::BitDepth;
 use core_model::ids::AnyId;
 use core_model::lane::MonitorMode;
 use core_model::mixer::StripKind;
@@ -60,6 +64,37 @@ fn recording_never_allocates() {
         output: Some(path),
     }))
     .unwrap();
+    // An audio lane "Mic" plays a region on the same output; a latent bus
+    // (not the master) makes the audio path lead, and the monitor route
+    // names "Mic": its region falls silent in the record range (plan 5d-1).
+    let mic = bld.lane(seq, "Mic", None).unwrap();
+    bld.run(Command::Lane(LaneCmd::SetOutput {
+        seq,
+        lane: mic,
+        output: Some(path),
+    }))
+    .unwrap();
+    let media = bld.media("Media/a.caf", 120_000, 2).unwrap();
+    bld.region(
+        seq,
+        mic,
+        0,
+        media,
+        0,
+        120_000,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+    let latent_bus = bld.bus("Latent").unwrap();
+    bld.insert(latent_bus, TestInserts::plugin("latency=64"))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.caf");
+    let mut w = CafWriter::create(&file, 48_000, 2, BitDepth::Float32, WriteMode::Normal).unwrap();
+    w.write(&vec![0.25f32; 2 * 120_000]).unwrap();
+    w.finish().unwrap();
     let doc = bld.finish();
     // The same document with a latent insert on the master: loaded
     // mid-recording and back, the graph latency really changes (5c final
@@ -71,7 +106,13 @@ fn recording_never_allocates() {
     let latent = lb.finish();
     let sinks = OfflineSinks::new(1 << 20).with_tone();
     let log = sinks.log();
-    let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    let mut cfg = EngineConfig::new(48_000.0);
+    cfg.disk = DiskMode::Manual;
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(sinks)).unwrap();
+    engine.set_media(vec![MediaFile {
+        id: media,
+        path: file,
+    }]);
     engine.set_insert_factory(Box::new(TestInserts::new()));
     // A MIDI lane with thru and recording, and a monitored input.
     let inputs = InputSpec {
@@ -84,6 +125,7 @@ fn recording_never_allocates() {
             armed: true,
         }],
         monitor: vec![MonitorRoute {
+            lane: mic,
             path,
             left: 0,
             right: 1,
@@ -112,6 +154,7 @@ fn recording_never_allocates() {
     // in order, consecutive repeats folded.
     let mut latencies: Vec<u64> = Vec::new();
     for i in 0..3_000u32 {
+        engine.streamer().service();
         armed_block(&mut b, 1 + (i * 37) % 1024);
         // Drained (unarmed) except between blocks 1000 and 1500: the ring
         // fills and blocks are lost.
@@ -167,7 +210,8 @@ fn recording_never_allocates() {
     }
     assert!(h.status.run() > 0);
     assert!(
-        latencies.starts_with(&[0, 480, 0]),
+        // The latent bus's 64 frames are the baseline.
+        latencies.starts_with(&[64, 544, 64]),
         "the marks carried the latency change and its reversal: {latencies:?}"
     );
     assert_eq!(rt_check::count() - before, 0, "allocations while recording");

@@ -345,6 +345,53 @@ impl RegionRun {
         }
     }
 
+    /// The routes whose lane's own regions are silent now (bit `k`: route
+    /// `k`; Ruling 6): armed, heard and recording inside the record range
+    /// at read frame `read`, whatever path they feed (the lane's regions
+    /// may play to other paths through references). // RT
+    fn silenced_mask(&self, read: Option<u64>) -> u64 {
+        let Some(m) = self.monitor else {
+            return 0;
+        };
+        // SAFETY: `with_monitor`'s contract keeps the routes alive.
+        let Some(routes) = (unsafe { m.routes.as_ref() }) else {
+            return 0;
+        };
+        let in_range = m
+            .rec
+            .is_some_and(|(a, b)| read.is_some_and(|x| x >= a && x < b));
+        if !in_range {
+            return 0;
+        }
+        let mut mask = 0u64;
+        for (k, r) in routes.iter().enumerate().take(64) {
+            if r.armed && r.heard(m.playing, in_range) {
+                mask |= 1u64 << k;
+            }
+        }
+        mask
+    }
+
+    /// Whether `lane`'s regions are silent in this run: a route in `mask`
+    /// is that lane's. // RT
+    fn silenced(&self, mask: u64, lane: core_model::ids::LaneId) -> bool {
+        if mask == 0 {
+            return false;
+        }
+        let Some(m) = self.monitor else {
+            return false;
+        };
+        // SAFETY: `with_monitor`'s contract keeps the routes alive.
+        let Some(routes) = (unsafe { m.routes.as_ref() }) else {
+            return false;
+        };
+        routes
+            .iter()
+            .enumerate()
+            .take(64)
+            .any(|(k, r)| mask & (1u64 << k) != 0 && r.lane == lane)
+    }
+
     /// Renders path `path`, whose node leads by `lead`, for `frames`
     /// frames into `out` (cleared first), using `scratch` (at least
     /// `frames` long). // RT
@@ -357,7 +404,9 @@ impl RegionRun {
         scratch: &mut StereoBuf,
     ) {
         out.clear(frames);
-        self.add_monitor(path, self.read_frame(lead), frames, out);
+        let read = self.read_frame(lead);
+        self.add_monitor(path, read, frames, out);
+        let mask = self.silenced_mask(read);
         if !self.playing || self.muted {
             return;
         }
@@ -375,7 +424,10 @@ impl RegionRun {
                 .unwrap_or(frames - off)
                 .clamp(1, frames - off);
             if let Some(from) = src {
-                render_piece(audio, reader, self.late, path, from, off, n, out, scratch);
+                let skip = |lane| self.silenced(mask, lane);
+                render_piece(
+                    audio, reader, self.late, path, from, off, n, &skip, out, scratch,
+                );
             }
             off += n;
             x += i128::from(n);
@@ -384,7 +436,7 @@ impl RegionRun {
 }
 
 /// Adds path `path`'s segments over schedule frames `[from, from + n)` to
-/// frames `[off, off + n)` of `out`. // RT
+/// frames `[off, off + n)` of `out`, but none whose lane `skip` names. // RT
 #[allow(clippy::too_many_arguments)]
 fn render_piece(
     audio: &AudioSchedule,
@@ -394,12 +446,13 @@ fn render_piece(
     from: u64,
     off: u32,
     n: u32,
+    skip: &dyn Fn(core_model::ids::LaneId) -> bool,
     out: &mut StereoBuf,
     scratch: &mut StereoBuf,
 ) {
     let to = from.saturating_add(u64::from(n));
     for seg in audio.overlapping(path, from, to) {
-        if !seg.online {
+        if !seg.online || skip(seg.top_lane) {
             continue;
         }
         let a = from.max(seg.start);

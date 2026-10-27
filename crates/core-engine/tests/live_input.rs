@@ -24,6 +24,7 @@ struct Doc {
     doc: Document,
     seq: SeqId,
     keys: LaneId,
+    mic: LaneId,
     synth: DestId,
     path: OutputPathId,
 }
@@ -61,6 +62,7 @@ fn doc() -> Doc {
         doc: b.finish(),
         seq,
         keys,
+        mic: audio,
         synth,
         path,
     }
@@ -247,6 +249,7 @@ fn peak(b: &mut OfflineBackend, blocks: usize) -> f32 {
 fn input_is_heard_through_its_path_by_the_monitor_mode() {
     let d = doc();
     let route = |mode, armed| MonitorRoute {
+        lane: d.mic,
         path: d.path,
         left: 0,
         right: 0,
@@ -429,6 +432,7 @@ fn auto_monitoring_switches_at_the_audible_punch_points() {
     engine.set_inputs(InputSpec {
         midi: vec![],
         monitor: vec![MonitorRoute {
+            lane: d.mic,
             path: d.path,
             left: 0,
             right: 0,
@@ -492,6 +496,7 @@ fn a_monitored_input_is_heard_through_its_own_path_only() {
         engine.set_inputs(InputSpec {
             midi: vec![],
             monitor: vec![MonitorRoute {
+                lane: d.mic,
                 path: d.path,
                 left: 1,
                 right: 1,
@@ -608,4 +613,204 @@ fn thru_past_the_target_limit_is_reported() {
     let r = engine.load(&doc, seq).unwrap();
     assert_eq!(r.thru_unroutable.len(), 1, "{r:?}");
     assert_eq!(r.thru_unroutable[0].0, keys);
+}
+
+/// Writes 5 s of 0.25 stereo to `a.caf` in `dir`.
+fn tone_file(dir: &std::path::Path) -> std::path::PathBuf {
+    use core_media::caf::{CafWriter, WriteMode};
+    let file = dir.join("a.caf");
+    let mut w = CafWriter::create(
+        &file,
+        48_000,
+        2,
+        core_model::format::BitDepth::Float32,
+        WriteMode::Normal,
+    )
+    .unwrap();
+    w.write(&vec![0.25f32; 2 * 240_000]).unwrap();
+    w.finish().unwrap();
+    file
+}
+
+/// Per 256-frame block, whether anything loud is heard, with `route`
+/// (if any) monitored and `range` recorded on fake input channel 3 (silent:
+/// only regions can sound).
+fn loud_blocks(
+    doc: &Document,
+    seq: SeqId,
+    media: (core_model::ids::MediaId, &std::path::Path),
+    route: Option<MonitorRoute>,
+    range: Option<(u64, u64)>,
+) -> Vec<bool> {
+    use core_media::stream::{DiskMode, MediaFile};
+    let mut cfg = EngineConfig::new(SR);
+    cfg.disk = DiskMode::Manual;
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(10_000))).unwrap();
+    engine.set_media(vec![MediaFile {
+        id: media.0,
+        path: media.1.to_path_buf(),
+    }]);
+    engine.set_inputs(InputSpec {
+        midi: vec![],
+        monitor: route.into_iter().collect(),
+    });
+    engine.load(doc, seq).unwrap();
+    let mut out = OfflineBackend::new(SR, 256).with_input(FakeInput::Signals);
+    out.start(renderer).unwrap();
+    let _tap = range.map(|r| {
+        engine
+            .start_recording(&RecordRequest {
+                channels: vec![2],
+                range: Some(r),
+                ring_frames: 48_000,
+            })
+            .unwrap()
+    });
+    engine.play().unwrap();
+    (0..220)
+        .map(|_| {
+            engine.streamer().service();
+            out.block(256) > 0.1
+        })
+        .collect()
+}
+
+/// Plan 5d-1 Ruling 6 (5c carry M10): while a pass records, an armed lane
+/// whose input is heard plays none of its own regions inside the record
+/// range; outside it, unarmed, or with no recording, they play.
+#[test]
+fn the_recording_lanes_own_regions_are_silent_while_its_input_is_heard() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = tone_file(dir.path());
+    // Lane "Mic" plays a 5 s region of 0.25 on "Audio 1"; nothing else.
+    let mut b = Builder::new();
+    let (seq, mic) = b.sequence("Song", "Mic", None).unwrap();
+    let m = b.media("Media/a.caf", 240_000, 2).unwrap();
+    b.region(
+        seq,
+        mic,
+        0,
+        m,
+        0,
+        240_000,
+        0.0,
+        core_model::event::Fade::default(),
+        core_model::event::Fade::default(),
+    )
+    .unwrap();
+    let doc = b.finish();
+    let path = doc.lane(seq, mic).unwrap().audio_out.unwrap();
+    let route = |mode, armed| MonitorRoute {
+        lane: mic,
+        path,
+        left: 2,
+        right: 2,
+        mode,
+        armed,
+    };
+    let blocks = |r: Option<MonitorRoute>, range| loud_blocks(&doc, seq, (m, &file), r, range);
+    // Block k reads frames from 256·k: the range [24 000, 48 000) is read
+    // from block 94 (24 064) to block 187 (47 872).
+    let silent_in_range: Vec<bool> = (0..220).map(|k| !(94..=187).contains(&k)).collect();
+    let range = Some((24_000, 48_000));
+    assert_eq!(
+        blocks(Some(route(MonitorMode::Auto, true)), range),
+        silent_in_range,
+        "auto, armed, recording"
+    );
+    assert_eq!(
+        blocks(Some(route(MonitorMode::Input, true)), range),
+        silent_in_range,
+        "input, armed, recording"
+    );
+    for (r, rec, why) in [
+        (route(MonitorMode::Auto, true), None, "not recording"),
+        (route(MonitorMode::Input, false), range, "unarmed"),
+        (route(MonitorMode::Off, true), range, "monitor off"),
+    ] {
+        assert!(blocks(Some(r), rec).iter().all(|x| *x), "{why}");
+    }
+}
+
+/// Ruling 6 / pre-flight M1: the decision is per route, whatever path the
+/// route feeds: a lane whose reference plays a child's region to a second
+/// output is silenced there too, while its input is heard on the first.
+#[test]
+fn a_recording_lane_is_silent_on_other_outputs_through_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = tone_file(dir.path());
+    let mut b = Builder::new();
+    let (child, cl) = b.sequence("Loop", "Audio", None).unwrap();
+    let m = b.media("Media/a.caf", 240_000, 2).unwrap();
+    let add_output = |b: &mut Builder, name: &str, reference: &str| {
+        let r = b
+            .run(Command::Routing(RoutingCmd::AddOutput {
+                name: name.into(),
+                reference: reference.into(),
+            }))
+            .unwrap();
+        r.created
+            .iter()
+            .find_map(|id| match id {
+                AnyId::Output(o) => Some(*o),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let first = add_output(&mut b, "Audio 1", "audio:1-2");
+    let second = add_output(&mut b, "Audio 2", "audio:3-4");
+    b.run(Command::Lane(LaneCmd::SetOutput {
+        seq: child,
+        lane: cl,
+        output: Some(second),
+    }))
+    .unwrap();
+    b.region(
+        child,
+        cl,
+        0,
+        m,
+        0,
+        240_000,
+        0.0,
+        core_model::event::Fade::default(),
+        core_model::event::Fade::default(),
+    )
+    .unwrap();
+    let (song, mic) = b.sequence("Song", "Mic", None).unwrap();
+    b.run(Command::Lane(LaneCmd::SetOutput {
+        seq: song,
+        lane: mic,
+        output: Some(first),
+    }))
+    .unwrap();
+    b.reference(song, mic, 0, child, 1, 0).unwrap();
+    let doc = b.finish();
+    let route = |mode| MonitorRoute {
+        lane: mic,
+        path: first,
+        left: 2,
+        right: 2,
+        mode,
+        armed: true,
+    };
+    let range = Some((24_000, 48_000));
+    let silent_in_range: Vec<bool> = (0..220).map(|k| !(94..=187).contains(&k)).collect();
+    assert_eq!(
+        loud_blocks(
+            &doc,
+            song,
+            (m, &file),
+            Some(route(MonitorMode::Auto)),
+            range
+        ),
+        silent_in_range,
+        "the referenced region on the second output is silent in range"
+    );
+    assert!(
+        loud_blocks(&doc, song, (m, &file), Some(route(MonitorMode::Off)), range)
+            .iter()
+            .all(|x| *x),
+        "off: it plays"
+    );
 }
