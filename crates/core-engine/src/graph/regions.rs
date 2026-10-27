@@ -313,8 +313,8 @@ impl RegionRun {
     }
 
     /// Adds the heard monitor routes of `path` to `out`, deciding Auto at
-    /// read frame `read` (Ruling 4). // RT
-    fn add_monitor(&self, path: OutputPathId, read: Option<u64>, frames: u32, out: &mut StereoBuf) {
+    /// the read frame (`in_range`) (Ruling 4). // RT
+    fn add_monitor(&self, path: OutputPathId, in_range: bool, frames: u32, out: &mut StereoBuf) {
         let Some(m) = self.monitor else {
             return;
         };
@@ -324,12 +324,6 @@ impl RegionRun {
         else {
             return;
         };
-        // The first `lead` frames after a roll have no read frame: Auto
-        // treats them as out of range, which is what is heard (nothing of
-        // the new position has reached the output yet).
-        let in_range = m
-            .rec
-            .is_some_and(|(a, b)| read.is_some_and(|x| x >= a && x < b));
         let n = frames as usize;
         let at = m.offset as usize;
         for r in routes.iter().take(64) {
@@ -345,11 +339,23 @@ impl RegionRun {
         }
     }
 
+    /// Whether read frame `read` lies in the record range. The first
+    /// `lead` frames after a roll have no read frame: they count as out of
+    /// range, which is what is heard (nothing of the new position has
+    /// reached the output yet). Input and region silence share this one
+    /// decision. // RT
+    fn in_record_range(&self, read: Option<u64>) -> bool {
+        self.monitor.is_some_and(|m| {
+            m.rec
+                .is_some_and(|(a, b)| read.is_some_and(|x| x >= a && x < b))
+        })
+    }
+
     /// The routes whose lane's own regions are silent now (bit `k`: route
     /// `k`; Ruling 6): armed, heard and recording inside the record range
-    /// at read frame `read`, whatever path they feed (the lane's regions
+    /// at the read frame (`in_range`), whatever path they feed (the lane's regions
     /// may play to other paths through references). // RT
-    fn silenced_mask(&self, read: Option<u64>) -> u64 {
+    fn silenced_mask(&self, in_range: bool) -> u64 {
         let Some(m) = self.monitor else {
             return 0;
         };
@@ -357,9 +363,6 @@ impl RegionRun {
         let Some(routes) = (unsafe { m.routes.as_ref() }) else {
             return 0;
         };
-        let in_range = m
-            .rec
-            .is_some_and(|(a, b)| read.is_some_and(|x| x >= a && x < b));
         if !in_range {
             return 0;
         }
@@ -405,8 +408,9 @@ impl RegionRun {
     ) {
         out.clear(frames);
         let read = self.read_frame(lead);
-        self.add_monitor(path, read, frames, out);
-        let mask = self.silenced_mask(read);
+        let in_range = self.in_record_range(read);
+        self.add_monitor(path, in_range, frames, out);
+        let mask = self.silenced_mask(in_range);
         if !self.playing || self.muted {
             return;
         }

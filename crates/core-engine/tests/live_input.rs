@@ -814,3 +814,80 @@ fn a_recording_lane_is_silent_on_other_outputs_through_references() {
         "off: it plays"
     );
 }
+
+/// Fix round (review m2, m3): silencing follows the lead. With a latent
+/// insert elsewhere the recording lane's Regions node reads `L` ahead, and
+/// its regions fall silent exactly where the heard record range is read
+/// (block start `256·k − L` inside it), no earlier and no later; a region
+/// on another lane of the same path keeps playing throughout.
+#[test]
+fn silencing_follows_the_lead_and_spares_other_lanes() {
+    use core_engine::graph::TestInserts;
+    use core_media::stream::{DiskMode, MediaFile};
+    const L: u64 = 2400;
+    let dir = tempfile::tempdir().unwrap();
+    let file = tone_file(dir.path());
+    let mut b = Builder::new();
+    let (seq, mic) = b.sequence("Song", "Mic", None).unwrap();
+    let gtr = b.lane(seq, "Gtr", None).unwrap();
+    let m = b.media("Media/a.caf", 240_000, 2).unwrap();
+    let fade = core_model::event::Fade::default;
+    for lane in [mic, gtr] {
+        b.region(seq, lane, 0, m, 0, 240_000, 0.0, fade(), fade())
+            .unwrap();
+    }
+    let path = b.doc().lane(seq, mic).unwrap().audio_out.unwrap();
+    b.run(Command::Lane(LaneCmd::SetOutput {
+        seq,
+        lane: gtr,
+        output: Some(path),
+    }))
+    .unwrap();
+    let strip = b.bus("Latent").unwrap();
+    b.insert(strip, TestInserts::plugin(&format!("latency={L}")))
+        .unwrap();
+    let doc = b.finish();
+    let mut cfg = EngineConfig::new(SR);
+    cfg.disk = DiskMode::Manual;
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(10_000))).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.set_media(vec![MediaFile { id: m, path: file }]);
+    engine.set_inputs(InputSpec {
+        midi: vec![],
+        monitor: vec![MonitorRoute {
+            lane: mic,
+            path,
+            left: 2,
+            right: 2,
+            mode: MonitorMode::Auto,
+            armed: true,
+        }],
+    });
+    engine.load(&doc, seq).unwrap();
+    assert_eq!(engine.latency_frames(), L);
+    let mut out = OfflineBackend::new(SR, 256).with_input(FakeInput::Signals);
+    out.start(renderer).unwrap();
+    let _tap = engine
+        .start_recording(&RecordRequest {
+            channels: vec![2],
+            range: Some((24_000, 48_000)),
+            ring_frames: 48_000,
+        })
+        .unwrap();
+    engine.play().unwrap();
+    for k in 0..220u64 {
+        engine.streamer().service();
+        let peak = out.block(256);
+        if k * 256 < L + 256 {
+            continue; // the lead has not played yet
+        }
+        let read = k * 256 - L;
+        if (24_000..48_000).contains(&read) {
+            // Only "Gtr" sounds (0.25 at the centre pan law, 0.177).
+            assert!((0.15..0.2).contains(&peak), "block {k}: {peak}");
+        } else {
+            // "Mic" and "Gtr" together (0.354).
+            assert!(peak > 0.3, "block {k}: {peak}");
+        }
+    }
+}
