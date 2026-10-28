@@ -16,7 +16,10 @@ struct AudioSettingsView: View {
                     "Input device",
                     selection: Binding(get: { prefs.settings.inputDevice }, set: { prefs.setInputDevice($0) })
                 ) {
-                    ForEach(prefs.inputDeviceChoices(), id: \.title) { c in Text(c.title).tag(c.name) }
+                    // By position: two devices may share a name (final review m3).
+                    ForEach(Array(prefs.inputDeviceChoices().enumerated()), id: \.offset) { _, c in
+                        Text(c.title).tag(c.name)
+                    }
                 }
                 Text("A new device takes effect at once; while recording or measuring, once that stops.")
                     .font(.caption)
@@ -67,7 +70,7 @@ struct AudioSettingsView: View {
                         get: { prefs.settings.cacheMb },
                         set: { prefs.setStream(cacheMb: $0, readAheadSeconds: prefs.settings.readAheadSeconds) })
                 ) {
-                    ForEach(AudioPreferences.cacheChoices, id: \.self) {
+                    ForEach(AudioPreferences.choices(AudioPreferences.cacheChoices, keeping: prefs.settings.cacheMb), id: \.self) {
                         Text($0 >= 1024 ? "\($0 / 1024) GB" : "\($0) MB").tag($0)
                     }
                 }
@@ -114,7 +117,9 @@ struct RecordingSettingsView: View {
                         get: { store.defaultFormat.sampleRate },
                         set: { store.defaultFormat = ProjectFormatRow(sampleRate: $0, depth: store.defaultFormat.depth) })
                 ) {
-                    ForEach(projectRates(), id: \.self) { Text(ProjectBanners.khz(Double($0))).tag($0) }
+                    ForEach(AudioPreferences.choices(projectRates(), keeping: store.defaultFormat.sampleRate), id: \.self) {
+                        Text(ProjectBanners.khz(Double($0))).tag($0)
+                    }
                 }
                 Picker(
                     "Bit depth",

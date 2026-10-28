@@ -80,13 +80,15 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
                 case .mute: toggle("M", on: lane.mute, color: .systemYellow, in: r)
                 case .solo: toggle("S", on: lane.solo, color: .systemGreen, in: r)
                 case .arm: toggle("R", on: lane.arm, color: .systemRed, in: r)
+                // One line, truncated (Task 5 review M4): the input keeps
+                // its channel at the end ("▾ ⇠ Ju…o · In 3").
                 case .destination:
                     NSString(string: "▾ " + (lane.destination ?? "No Destination")).draw(
-                        in: r, withAttributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor])
+                        in: r, withAttributes: Self.oneLine(small, .byTruncatingTail))
                 case .input:
                     let badge = inputs.badge(lane).map { $0 + " · " } ?? ""
                     NSString(string: "▾ " + badge + LaneInputs.title(lane.input)).draw(
-                        in: r, withAttributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor])
+                        in: r, withAttributes: Self.oneLine(small, .byTruncatingMiddle))
                 }
             }
             if laneHeight >= 46, inputs.showsMeter(lane) { meter(lane.id, rowTop: top, inputs: inputs) }
@@ -105,6 +107,13 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
 
     /// The thin input meter and its clip mark (spec §6.9); the track is
     /// yellow while the input is still opening (pre-flight I5).
+    /// Secondary text on one line, cut by `mode`.
+    static func oneLine(_ font: NSFont, _ mode: NSLineBreakMode) -> [NSAttributedString.Key: Any] {
+        let p = NSMutableParagraphStyle()
+        p.lineBreakMode = mode
+        return [.font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: p]
+    }
+
     private func meter(_ lane: UInt64, rowTop top: CGFloat, inputs: LaneInputs) {
         let r = LaneHeaderLayout.meterRect(rowTop: top)
         (inputs.opening ? NSColor.systemYellow.withAlphaComponent(0.5) : NSColor.quaternaryLabelColor).setFill()
@@ -326,7 +335,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
             let r = NSRect(x: 0, y: rowTop(i), width: bounds.width, height: laneHeight)
             let opening = inputs.opening && inputs.showsMeter(lane)
             let item = CanvasAccessibilityItem(
-                label: ArrangementA11y.header(lane) + (opening ? ", input opening" : ""), frame: r, selected: false,
+                label: ArrangementA11y.header(lane, returnOf: inputs.returnName(lane)) + (opening ? ", input opening" : ""),
+                frame: r, selected: false,
                 press: { [weak self] in self?.flags(seq, lane.id, mute: !lane.mute) })
             return (item: item, frame: r)
         }

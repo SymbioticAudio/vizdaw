@@ -54,6 +54,9 @@ import VizDAWCore
         r.showsPopover = false
         #expect(r.punchText(.punchOut) == m.fieldText(.punchOut))
         #expect(m.editor.status?.contains("is not a position") == true)
+        // Only the punch fields keep drafts (Task 2 review M5).
+        r.setPunchText(.position, "9")
+        #expect(r.punchText(.position) == m.fieldText(.position))
     }
 
     /// 5d-2 final review I3: In typed, Tab, Out typed, then the popover

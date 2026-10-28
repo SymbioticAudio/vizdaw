@@ -214,6 +214,22 @@ import VizDAWCore
         #expect(m.inputs.level(30) == 0)
     }
 
+    /// Task 4 review M1: a transport read that fails (`Busy` while a
+    /// plugin editor opens, or an error) does not freeze the meters.
+    @Test func metersPollWhileTheTransportReadFails() throws {
+        let (m, f) = try doc([audioLane(30, .audio(first: 0, stereo: false, returnOf: nil), arm: true)])
+        for e in [VizError.Busy(message: "plugin host is busy"), .Internal(message: "boom")] {
+            f.transportError = e
+            f.inputLevelsRow = [0.6]
+            m.poll()
+            #expect(m.inputs.level(30) == 0.6)
+            f.inputLevelsRow = [0]
+            m.poll()
+            #expect(m.inputs.level(30) == 0.6 * MixerMath.meterDecay)
+        }
+        f.transportError = nil
+    }
+
     /// Pre-flight I5 (5d-1 carry #9): while the input opens (the microphone
     /// prompt may be up) the status line says so.
     @Test func anOpeningInputSaysSo() throws {

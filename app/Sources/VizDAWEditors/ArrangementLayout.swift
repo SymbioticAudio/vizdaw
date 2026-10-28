@@ -163,12 +163,14 @@ public enum ArrangementA11y {
         }
     }
 
-    public static func header(_ lane: LaneRow) -> String {
+    /// `returnOf`: the synth whose return the lane records (its badge).
+    public static func header(_ lane: LaneRow, returnOf: String? = nil) -> String {
         var parts = [lane.name, lane.destination ?? "no destination"]
         if lane.mute { parts.append("muted") }
         if lane.solo { parts.append("soloed") }
         if lane.arm { parts.append("armed") }
         if lane.input != nil { parts.append("input " + LaneInputs.title(lane.input)) }
+        if let r = returnOf { parts.append("recording the return of " + r) }
         switch lane.monitor {
         case .auto: break
         case .input: parts.append("monitoring input")

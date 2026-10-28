@@ -10,6 +10,12 @@ extension AudioPreferences {
     /// The RAM cache sizes offered, MiB (64–8192; spec §5.5: 512).
     public static let cacheChoices: [UInt32] = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
+    /// `list`, with `current` added in order when it is not on it.
+    /// (Task 7 review Minor 1: a picker never shows an empty selection.)
+    public static func choices(_ list: [UInt32], keeping current: UInt32) -> [UInt32] {
+        list.contains(current) ? list : (list + [current]).sorted()
+    }
+
     /// The input device picker: "Same as output" (nil), every device, and
     /// the chosen one when it is not connected.
     public func inputDeviceChoices() -> [(title: String, name: String?)] {

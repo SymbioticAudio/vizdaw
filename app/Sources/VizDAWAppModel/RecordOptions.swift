@@ -32,7 +32,11 @@ extension RecordModel {
         punchDrafts[f] ?? document?.fieldText(f) ?? ""
     }
 
-    public func setPunchText(_ f: TransportField, _ text: String) { punchDrafts[f] = text }
+    /// Keeps a draft for the punch fields only (Task 2 review M5).
+    public func setPunchText(_ f: TransportField, _ text: String) {
+        guard f == .punchIn || f == .punchOut else { return }
+        punchDrafts[f] = text
+    }
 
     /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
     /// the status line and keeps the old value).

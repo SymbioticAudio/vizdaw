@@ -59,6 +59,10 @@ import VizDAWCore
         #expect(ArrangementA11y.header(l).hasSuffix("monitoring off"))
         l.monitor = .auto
         #expect(ArrangementA11y.header(l) == "Vocal, no destination, armed, input In 1+2")
+        // A return lane says whose return it records (Task 5 review M3).
+        #expect(
+            ArrangementA11y.header(l, returnOf: "Moog")
+                == "Vocal, no destination, armed, input In 1+2, recording the return of Moog")
     }
 
     /// Pre-flight I5: the header says so while the input opens.

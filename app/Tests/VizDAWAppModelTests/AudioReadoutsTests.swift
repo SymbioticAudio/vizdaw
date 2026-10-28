@@ -26,6 +26,17 @@ import VizDAWCore
         #expect(AudioPreferences.roundTripText(closed, bufferFrames: 1024).hasPrefix("About 42.7 ms"))
     }
 
+    /// Task 7 review Minor 1: a stored value off the list (an old pref, or
+    /// `audio.set` over the channel) is offered too, so the picker never
+    /// shows an empty selection.
+    @Test func aPickerKeepsAnOffListValue() {
+        #expect(AudioPreferences.choices(AudioPreferences.cacheChoices, keeping: 512) == AudioPreferences.cacheChoices)
+        #expect(
+            AudioPreferences.choices(AudioPreferences.cacheChoices, keeping: 300)
+                == [64, 128, 256, 300, 512, 1024, 2048, 4096, 8192])
+        #expect(AudioPreferences.choices([44_100, 48_000], keeping: 22_050) == [22_050, 44_100, 48_000])
+    }
+
     @Test func theDevicePickerKeepsADisconnectedChoice() {
         AudioPreferences.inputDevices = { ["Studio In", "Mic"] }
         defer { AudioPreferences.inputDevices = { audioInputDevices() } }

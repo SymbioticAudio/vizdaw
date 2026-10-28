@@ -144,8 +144,14 @@ public final class LaneInputs {
     /// The link badge of a lane that records a synth's return (spec §6.9):
     /// "⇠ ‹synth›"; nil for other lanes.
     public func badge(_ lane: LaneRow) -> String? {
+        returnName(lane).map { "⇠ " + $0 }
+    }
+
+    /// The synth whose return `lane` records (VoiceOver reads it with the
+    /// header; Task 5 review M3); nil for other lanes.
+    public func returnName(_ lane: LaneRow) -> String? {
         guard case .audio(_, _, let r?) = lane.input else { return nil }
-        return "⇠ " + (destName(r) ?? "Synth")
+        return destName(r) ?? "Synth"
     }
 
     private func destName(_ id: UInt64) -> String? {

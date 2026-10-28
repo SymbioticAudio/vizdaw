@@ -486,6 +486,9 @@ public final class DocumentModel {
     /// `Busy` (an AU v3 editor opening in a nested run loop) keeps the last
     /// transport, silently; the next poll tries again.
     public func poll() {
+        // The meters do not wait for a good transport read (Task 4 review
+        // M1): they read the input, not the transport.
+        defer { inputs.pollMeters() }
         do {
             transport = try session.transport()
             clock.update(transport, pollInterval: pollSeconds)
@@ -496,7 +499,6 @@ public final class DocumentModel {
             // disk, a lost device): the poll notices.
             if transport.playing || record.isRecording { record.refresh() }
             record.reofferIfHeld()
-            inputs.pollMeters()
         } catch VizError.Busy {
             return
         } catch {

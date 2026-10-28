@@ -20,7 +20,10 @@ struct TrackSynthSheet: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Form {
-                    Stepper("Return input: \(channelText(d))", value: draft(\.channel), in: 1...max(channels, 1))
+                    // With Stereo, the last channel has no partner (final review m5).
+                    Stepper(
+                        "Return input: \(channelText(d))", value: draft(\.channel),
+                        in: 1...max(d.stereo ? channels - 1 : channels, 1))
                     Toggle("Stereo (two channels)", isOn: draft(\.stereo))
                     Toggle("Also record the MIDI lane", isOn: draft(\.armMidi))
                     Toggle("Mute the MIDI lane after recording", isOn: draft(\.muteAfter))
