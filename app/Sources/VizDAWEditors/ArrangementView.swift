@@ -50,6 +50,7 @@ public final class ArrangementView: EditorCanvas {
         }
         refresh()
         observe()
+        observeRecording()
     }
 
     public required init?(coder: NSCoder) { nil }
@@ -87,6 +88,19 @@ public final class ArrangementView: EditorCanvas {
             Task { @MainActor in
                 self?.refresh()
                 self?.observe()
+            }
+        }
+    }
+
+    /// A recording's reports (about 30 a second) only redraw: the growing
+    /// take moves, nothing else does (plan 5d-2 Task 9).
+    private func observeRecording() {
+        withObservationTracking {
+            _ = document.record.state
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.content.needsDisplay = true
+                self?.observeRecording()
             }
         }
     }
@@ -139,6 +153,45 @@ public final class ArrangementView: EditorCanvas {
             NSColor.separatorColor.setFill()
             CGRect(x: dirty.minX, y: geometry.rowTop(i + 1) - 0.5, width: dirty.width, height: 1).fill()
             for b in blocks { draw(b, row: i, key: key, dirty: dirty) }
+        }
+        drawGrowingTakes(dirty)
+    }
+
+    /// The takes being recorded (spec §6.2): red regions that grow with
+    /// their files, drawn from the writer's live peaks. Only the visible
+    /// slice's peaks are asked for, at most the core's 8192 columns, so a
+    /// long take zoomed in keeps its waveform (pre-flight M3).
+    private func drawGrowingTakes(_ dirty: CGRect) {
+        for t in document.record.growingTakes() {
+            guard let row = lanes.firstIndex(where: { $0.lane == t.lane }) else { continue }
+            let x0 = axis.x(t.startTick)
+            let inset = ArrangementGeometry.blockInset + 1
+            let rect = CGRect(
+                x: x0, y: geometry.rowTop(row) + inset,
+                width: max(axis.x(t.endTick) - x0, ArrangementGeometry.minBlockWidth),
+                height: max(geometry.laneHeight - 2 * inset, 1))
+            let vis = rect.intersection(dirty).intersection(content.bounds)
+            guard !vis.isNull, vis.width > 0 else { continue }
+            let shape = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+            NSColor.systemRed.withAlphaComponent(0.18).setFill()
+            shape.fill()
+            NSColor.systemRed.setStroke()
+            shape.stroke()
+            let span = Double(t.toFrame - t.fromFrame)
+            let f0 = t.fromFrame + UInt64(span * Double((vis.minX - rect.minX) / rect.width))
+            let f1 = t.fromFrame + UInt64(span * Double((vis.maxX - rect.minX) / rect.width))
+            guard f1 > f0 else { continue }
+            let columns = UInt32(clamping: min(Int(vis.width.rounded(.up)), 8192))
+            guard columns > 0,
+                let rows = try? document.session.recordingWaveform(
+                    lane: t.lane, fromFileFrame: f0, toFileFrame: f1, columns: columns)
+            else { continue }
+            let wave = CGRect(x: vis.minX, y: rect.minY + 2, width: vis.width, height: max(rect.height - 4, 1))
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: vis).addClip()
+            NSColor.systemRed.withAlphaComponent(0.7).setFill()
+            for b in WaveformGeometry.bars(rows, in: wave) { b.fill() }
+            NSGraphicsContext.restoreGraphicsState()
         }
     }
 
