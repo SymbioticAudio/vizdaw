@@ -29,6 +29,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSMicrophoneUsageDescription</key><string>VizDAW records audio from your audio interface or microphone into armed lanes.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

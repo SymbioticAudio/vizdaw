@@ -254,20 +254,24 @@ fn the_marker_names_a_plugin_before_the_sync_that_loads_it() {
     );
 }
 
+/// One session per package (Task 9 review I-2, which replaced "two
+/// sessions on one project share the marker"): a second open is refused
+/// and leaves the first one's marker alone.
 #[test]
-fn two_sessions_on_one_project_share_the_marker() {
+fn a_second_session_on_one_project_is_refused_and_keeps_the_marker() {
     let (_g, support) = serial();
     let (_d, path, _id) = project();
     let a = Session::open(path.clone()).unwrap();
-    let b = Session::open(path.clone()).unwrap();
-    // Neither has ticked: both are still loading.
-    a.close().unwrap();
+    assert!(matches!(
+        Session::open(path.clone()),
+        Err(vizdaw_ffi::VizError::Busy { .. })
+    ));
     let m = markers(support.path());
-    assert_eq!(m.len(), 1, "the other window still has it open");
+    assert_eq!(m.len(), 1, "the first window still has it open");
     let text = std::fs::read_to_string(&m[0]).unwrap();
     assert!(text.contains("vizdaw.test.gain"), "still named: {text}");
     assert!(!recovery_check(path.clone()).unwrap().crashed);
-    b.close().unwrap();
+    a.close().unwrap();
     assert!(markers(support.path()).is_empty());
 }
 
@@ -284,8 +288,12 @@ fn a_closed_session_never_brings_its_marker_back() {
     }
     let synth = s.mixer().unwrap().strips[0].id;
     s.add_insert(synth, None, gain()).unwrap();
-    s.save_as(d.path().join("other.vizdaw").to_string_lossy().into_owned())
-        .unwrap();
+    // A closed window cannot Save As (Task 9 re-review m-3: it would
+    // claim a package for a closed window); no marker comes back.
+    let other = d.path().join("other.vizdaw");
+    assert!(s.save_as(other.to_string_lossy().into_owned()).is_err());
+    assert!(!other.exists());
+    s.save().unwrap();
     assert!(markers(support.path()).is_empty());
     assert!(!recovery_check(path).unwrap().crashed);
 }

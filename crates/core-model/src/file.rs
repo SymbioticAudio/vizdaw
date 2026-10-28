@@ -1,6 +1,6 @@
 //! The `.vizdaw` package: `project.json`, `Media/` and `Autosave/`.
 //!
-//! `project.json` is `{ "format": "vizdaw-project", "version": 2,
+//! `project.json` is `{ "format": "vizdaw-project", "version": 3,
 //! "document": { … } }`. Loading migrates older versions step by step,
 //! refuses newer ones, rejects unknown fields and runs every integrity
 //! check. Saving writes a temporary file, syncs it, renames it over the old
@@ -8,13 +8,17 @@
 
 use crate::document::Document;
 use crate::error::{ModelError, Result};
+use crate::format::AudioFormat;
 use crate::history::Timestamp;
 use crate::ids::PluginInstanceId;
 use crate::mixer::{PluginRef, PluginSlot};
 use crate::rules::validate;
 use crate::state::{STATE_DIR, blob_file_name, parse_blob_file_name, try_states_in_json};
+use crate::tempo::TempoMap;
+use crate::time::Tick;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,7 +27,7 @@ use std::sync::Arc;
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
 /// The version this build writes.
-pub const VERSION: u64 = 2;
+pub const VERSION: u64 = 3;
 /// The oldest version this build can migrate from.
 pub const FIRST_VERSION: u64 = 1;
 /// The project file name inside a package.
@@ -33,7 +37,131 @@ pub const PROJECT_FILE: &str = "project.json";
 pub type Migration = fn(Value) -> Result<Value>;
 
 /// Migrations indexed by `from - FIRST_VERSION`.
-pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2];
+pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2, migrate_v2_to_v3];
+
+/// The project rate a migrated project gets (5a Ruling 2): the most
+/// common media rate (the first item's on a tie), or 48 kHz when there is
+/// no media or that rate is not an allowed project rate.
+fn majority_rate(rates: &[u64]) -> u64 {
+    let mut best: Option<(u64, usize)> = None;
+    for r in rates {
+        let n = rates.iter().filter(|x| *x == r).count();
+        if best.is_none_or(|(_, m)| n > m) {
+            best = Some((*r, n));
+        }
+    }
+    best.map(|(r, _)| r)
+        .filter(|r| u32::try_from(*r).is_ok_and(|r| AudioFormat::RATES.contains(&r)))
+        .unwrap_or(u64::from(AudioFormat::DEFAULT.sample_rate))
+}
+
+/// A fade of `ticks` from `start` under `tempo`, in frames at `rate`.
+fn fade_frames(tempo: &TempoMap, start: i64, ticks: i64, rate: f64) -> u64 {
+    let s = tempo.tick_to_seconds(Tick(start));
+    let e = tempo.tick_to_seconds(Tick(start.saturating_add(ticks.max(0))));
+    // Float-to-int `as` saturates (and maps NaN to 0).
+    ((e - s) * rate).round().max(0.0) as u64
+}
+
+/// Version 2 → 3 (sub-project 5 spec §4.1–§4.3, 5a Ruling 2): settings
+/// gain `format` (int24 at the majority media rate), media items gain
+/// `name` and `origin`, and region fades turn from ticks into frames at
+/// the tempo in force at the region's start, clamped to the region.
+pub fn migrate_v2_to_v3(mut v: Value) -> Result<Value> {
+    let doc = v
+        .get_mut("document")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing document"))?;
+    let mut rates: Vec<u64> = Vec::new();
+    let mut media_rate: BTreeMap<u64, f64> = BTreeMap::new();
+    if let Some(Value::Array(items)) = doc.get_mut("media") {
+        for m in items.iter_mut() {
+            let obj = m
+                .as_object_mut()
+                .ok_or_else(|| corrupt("media item is not an object"))?;
+            let path = obj
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let (file, stem) = crate::document::MediaItem::file_parts(&path);
+            obj.insert("name".into(), Value::from(stem));
+            obj.insert(
+                "origin".into(),
+                json!({ "imported": { "original_name": file } }),
+            );
+            let rate = obj.get("sample_rate").and_then(Value::as_u64).unwrap_or(0);
+            if let Some(id) = obj.get("id").and_then(Value::as_u64) {
+                media_rate.insert(id, rate as f64);
+            }
+            rates.push(rate);
+        }
+    }
+    let rate = majority_rate(&rates);
+    doc.get_mut("settings")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing settings"))?
+        .insert(
+            "format".into(),
+            json!({ "sample_rate": rate, "depth": "int24" }),
+        );
+    if let Some(Value::Array(seqs)) = doc.get_mut("sequences") {
+        for s in seqs.iter_mut() {
+            let tempo: TempoMap = match s.get("tempo") {
+                Some(t) => serde_json::from_value(t.clone()).map_err(corrupt)?,
+                None => TempoMap::default(),
+            };
+            let Some(Value::Array(lanes)) = s.get_mut("lanes") else {
+                continue;
+            };
+            for lane in lanes.iter_mut() {
+                let Some(Value::Array(takes)) = lane.get_mut("takes") else {
+                    continue;
+                };
+                for take in takes.iter_mut() {
+                    let Some(Value::Array(events)) = take.get_mut("events") else {
+                        continue;
+                    };
+                    for ev in events.iter_mut() {
+                        migrate_region_fades(ev, &tempo, &media_rate);
+                    }
+                }
+            }
+        }
+    }
+    Ok(v)
+}
+
+/// One event of [`migrate_v2_to_v3`]: an audio region's fades to frames.
+fn migrate_region_fades(ev: &mut Value, tempo: &TempoMap, media_rate: &BTreeMap<u64, f64>) {
+    let tick = ev.get("tick").and_then(Value::as_i64).unwrap_or(0);
+    let Some(body) = ev.get_mut("body").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if body.get("type").and_then(Value::as_str) != Some("audio_region") {
+        return;
+    }
+    let rate = body
+        .get("media")
+        .and_then(Value::as_u64)
+        .and_then(|m| media_rate.get(&m).copied())
+        .unwrap_or(f64::from(AudioFormat::DEFAULT.sample_rate));
+    let length = body.get("length").and_then(Value::as_u64).unwrap_or(0);
+    let ticks = |name: &str, body: &serde_json::Map<String, Value>| {
+        body.get(name)
+            .and_then(|f| f.get("length"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+    };
+    let fi = fade_frames(tempo, tick, ticks("fade_in", body), rate).min(length);
+    let fo = fade_frames(tempo, tick, ticks("fade_out", body), rate).min(length - fi);
+    for (name, frames) in [("fade_in", fi), ("fade_out", fo)] {
+        if let Some(f) = body.get_mut(name).and_then(Value::as_object_mut) {
+            f.remove("length");
+            f.insert("length_frames".into(), Value::from(frames));
+        }
+    }
+}
 
 /// Version 1 → 2: each plugin instrument's `plugin_ref` string becomes a
 /// `slot` holding `PluginRef::from_legacy(string)` with instance IDs 0, 1, …

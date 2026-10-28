@@ -1,7 +1,7 @@
 # VizDAW
 
-A MIDI-first, open-source digital audio workstation for macOS, inspired by
-Opcode Studio Vision.
+VizDAW (pronounced "Vista") is a MIDI-first, open-source digital audio
+workstation for macOS, inspired by Opcode Studio Vision.
 
 **Status:** design phase — see [the design spec](docs/superpowers/specs/2026-10-15-vizdaw-design.md).
 

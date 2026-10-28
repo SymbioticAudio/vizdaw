@@ -1,5 +1,7 @@
 use core_model::ModelError;
-use core_model::command::{AudioCmd, Command, EventCmd, LaneCmd, RoutingCmd, SequenceCmd, apply};
+use core_model::command::{
+    AudioCmd, Command, EventCmd, LaneCmd, MediaCmd, RoutingCmd, SequenceCmd, apply,
+};
 use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec, Fade, FadeShape};
 use core_model::ids::{AnyId, DestId, EventId, LaneId, MediaId, OutputPathId, SeqId};
@@ -13,6 +15,10 @@ fn run(d: &Document, c: Command) -> core_model::Result<Document> {
 
 fn routing(c: RoutingCmd) -> Command {
     Command::Routing(c)
+}
+
+fn media(c: MediaCmd) -> Command {
+    Command::Media(c)
 }
 
 fn audio(c: AudioCmd) -> Command {
@@ -57,22 +63,23 @@ fn base() -> Document {
             name: "Aux".into(),
             reference: "bus:1".into(),
         },
-        RoutingCmd::AddMedia {
-            path: "Media/a.wav".into(),
-            sample_rate: 48_000,
-            channels: 2,
-            length_frames: 96_000,
-            content_hash: None,
-        },
-        RoutingCmd::AddMedia {
-            path: "Media/b.wav".into(),
-            sample_rate: 48_000,
-            channels: 2,
-            length_frames: 96_000,
-            content_hash: None,
-        },
     ] {
         d = run(&d, routing(c)).unwrap();
+    }
+    for path in ["Media/a.wav", "Media/b.wav"] {
+        d = run(
+            &d,
+            media(MediaCmd::Add {
+                path: path.into(),
+                sample_rate: 48_000,
+                channels: 2,
+                length_frames: 96_000,
+                content_hash: None,
+                name: None,
+                origin: None,
+            }),
+        )
+        .unwrap();
     }
     d
 }
@@ -89,11 +96,11 @@ fn with_region(d: &Document) -> Document {
             length: 96_000,
             gain_db: 0.0,
             fade_in: Fade {
-                length: Tick(10),
+                length_frames: 10,
                 shape: FadeShape::Linear,
             },
             fade_out: Fade {
-                length: Tick(20),
+                length_frames: 20,
                 shape: FadeShape::SCurve,
             },
         }),
@@ -135,12 +142,14 @@ fn add_items_allocate_ids_and_validate() {
     assert!(
         run(
             &d,
-            routing(RoutingCmd::AddMedia {
+            media(MediaCmd::Add {
                 path: "x".into(),
                 sample_rate: 0,
                 channels: 1,
                 length_frames: 1,
-                content_hash: None
+                content_hash: None,
+                name: None,
+                origin: None,
             })
         )
         .is_err()
@@ -314,7 +323,7 @@ fn removing_outputs_and_media_in_use() {
     assert_eq!(
         run(
             &d,
-            routing(RoutingCmd::RemoveMedia {
+            media(MediaCmd::Remove {
                 media: MediaId(0),
                 replacement: None
             })
@@ -325,7 +334,7 @@ fn removing_outputs_and_media_in_use() {
     );
     let d = run(
         &d,
-        routing(RoutingCmd::RemoveMedia {
+        media(MediaCmd::Remove {
             media: MediaId(0),
             replacement: Some(MediaId(1)),
         }),
@@ -419,8 +428,8 @@ fn split_divides_frames_and_fades() {
     assert_eq!((t0, o0, l0), (Tick(PPQ), 0, 24_000));
     assert_eq!((t1, o1, l1), (Tick(2 * PPQ), 24_000, 72_000));
     assert_eq!(
-        (fi0.length, fo0, fi1, fo1.length),
-        (Tick(10), Fade::default(), Fade::default(), Tick(20))
+        (fi0.length_frames, fo0, fi1, fo1.length_frames),
+        (10, Fade::default(), Fade::default(), 20)
     );
     assert!(
         run(
@@ -469,7 +478,7 @@ fn gain_and_fades() {
         .is_err()
     );
     let f = Fade {
-        length: Tick(99),
+        length_frames: 99,
         shape: FadeShape::Exponential,
     };
     let d = run(
@@ -487,8 +496,9 @@ fn gain_and_fades() {
             &d,
             audio(AudioCmd::SetFades {
                 event: EventId(0),
+                // Together longer than the 96 000-frame region.
                 fade_in: Fade {
-                    length: Tick(-1),
+                    length_frames: 95_950,
                     shape: FadeShape::Linear
                 },
                 fade_out: f
@@ -498,7 +508,7 @@ fn gain_and_fades() {
     );
 }
 
-/// A 4-beat region at beat 1 with a 1.5-beat fade in and a 2-beat fade out.
+/// A 4-beat region at beat 1 with a 36 000-frame (1.5-beat) fade in and a 48 000-frame (2-beat) fade out.
 fn with_long_fades(d: &Document) -> Document {
     run(
         d,
@@ -511,11 +521,11 @@ fn with_long_fades(d: &Document) -> Document {
             length: 96_000,
             gain_db: 0.0,
             fade_in: Fade {
-                length: Tick(3 * PPQ / 2),
+                length_frames: 36_000,
                 shape: FadeShape::Linear,
             },
             fade_out: Fade {
-                length: Tick(2 * PPQ),
+                length_frames: 48_000,
                 shape: FadeShape::Linear,
             },
         }),
@@ -537,8 +547,8 @@ fn split_and_trim_clamp_fades_to_the_part_length() {
     .unwrap();
     let (_, _, _, fi0, _) = region(&s, 0);
     let (_, _, _, _, fo1) = region(&s, 1);
-    assert_eq!(fi0.length, Tick(PPQ));
-    assert_eq!(fo1.length, Tick(2 * PPQ));
+    assert_eq!(fi0.length_frames, 24_000);
+    assert_eq!(fo1.length_frames, 48_000);
     // Trim three beats off the end: one beat left, both fades clamp to it.
     let t = run(
         &d,
@@ -551,7 +561,8 @@ fn split_and_trim_clamp_fades_to_the_part_length() {
     .unwrap();
     let (_, _, len, fi, fo) = region(&t, 0);
     assert_eq!(len, 24_000);
-    assert_eq!((fi.length, fo.length), (Tick(PPQ), Tick(PPQ)));
+    // The fade in takes the whole region; the fade out gets what is left.
+    assert_eq!((fi.length_frames, fo.length_frames), (24_000, 0));
 }
 
 #[test]
@@ -570,12 +581,14 @@ fn media_paths_must_be_relative_and_normalized() {
     ] {
         let r = run(
             &Document::new(),
-            routing(RoutingCmd::AddMedia {
+            media(MediaCmd::Add {
                 path: bad.into(),
                 sample_rate: 48_000,
                 channels: 2,
                 length_frames: 1,
                 content_hash: None,
+                name: None,
+                origin: None,
             }),
         );
         assert!(
@@ -585,12 +598,14 @@ fn media_paths_must_be_relative_and_normalized() {
     }
     let d = run(
         &Document::new(),
-        routing(RoutingCmd::AddMedia {
+        media(MediaCmd::Add {
             path: "Media/sub/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 1,
             content_hash: None,
+            name: None,
+            origin: None,
         }),
     )
     .unwrap();
@@ -602,12 +617,14 @@ fn validate_rejects_bad_media_paths_from_files() {
     use core_model::file::{from_json, to_json};
     let d = run(
         &Document::new(),
-        routing(RoutingCmd::AddMedia {
+        media(MediaCmd::Add {
             path: "Media/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 1,
             content_hash: None,
+            name: None,
+            origin: None,
         }),
     )
     .unwrap();
@@ -615,4 +632,35 @@ fn validate_rejects_bad_media_paths_from_files() {
         .unwrap()
         .replace("Media/a.wav", "../../etc/passwd");
     assert!(from_json(&text).is_err());
+}
+
+#[test]
+fn fades_may_not_exceed_the_region() {
+    let d = base();
+    let insert = |fi: u64, fo: u64| {
+        run(
+            &d,
+            audio(AudioCmd::Insert {
+                seq: SeqId(0),
+                lane: LaneId(0),
+                tick: Tick(0),
+                media: MediaId(0),
+                source_offset: 0,
+                length: 1000,
+                gain_db: 0.0,
+                fade_in: Fade {
+                    length_frames: fi,
+                    shape: FadeShape::Linear,
+                },
+                fade_out: Fade {
+                    length_frames: fo,
+                    shape: FadeShape::Linear,
+                },
+            }),
+        )
+    };
+    assert!(insert(600, 400).is_ok());
+    assert!(insert(1000, 0).is_ok());
+    assert!(insert(601, 400).is_err());
+    assert!(insert(u64::MAX, 1).is_err());
 }

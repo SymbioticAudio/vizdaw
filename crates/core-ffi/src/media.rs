@@ -1,0 +1,377 @@
+//! Media in a session (sub-project 5 spec §4.3, §5.1; plan 5a Rulings 14,
+//! 19, 22): where the files live, which are offline and why, the rows the
+//! app shows, and copying files into a package on save.
+
+use crate::error::VizError;
+use core_media::caf::{CafReader, hash_file};
+use core_media::import::{CafImporter, MediaImporter};
+use core_media::stream::MediaFile;
+use core_model::document::{Document, MediaOrigin};
+use core_model::event::EventBody;
+use core_model::ids::MediaId;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Why a media item cannot play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum OfflineReasonRow {
+    /// The file is not there.
+    Missing,
+    /// The file is not a readable VizDAW CAF.
+    Unreadable,
+    /// The file is in another rate or depth than the project.
+    Format,
+    /// The file's length differs from the item's.
+    Length,
+    /// The file no longer holds the audio the project recorded for the
+    /// item: its content hash differs (spec §4.3; plan 5b Ruling 2).
+    Changed,
+}
+
+/// Where a media item came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MediaOriginRow {
+    /// Imported from a file.
+    Imported,
+    /// Recorded.
+    Recorded,
+    /// A bounce.
+    Bounced,
+    /// Returned by the external editor.
+    ExternalEdit,
+}
+
+/// One media-pool item.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct MediaRow {
+    /// Media ID.
+    pub id: u64,
+    /// Display name.
+    pub name: String,
+    /// Package-relative path.
+    pub path: String,
+    /// Channels.
+    pub channels: u16,
+    /// Length in frames.
+    pub frames: u64,
+    /// Sample rate.
+    pub sample_rate: u32,
+    /// Origin.
+    pub origin: MediaOriginRow,
+    /// The imported file's name.
+    pub original_name: Option<String>,
+    /// Why it is offline (`None`: online).
+    pub offline: Option<OfflineReasonRow>,
+    /// Regions using it (any take).
+    pub uses: u32,
+    /// How much of its audio regions play, 0–100 (plan 5b Ruling 13).
+    #[uniffi(default = 0.0)]
+    pub used_percent: f32,
+    /// The largest absolute sample, from its overview (`None` until the
+    /// overview is built; plan 5d-1 Ruling 21).
+    #[uniffi(default)]
+    pub peak: Option<f32>,
+}
+
+/// One region using a media item (the pool's "select regions" and the
+/// delete confirmation; plan 5b Ruling 13).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MediaUseRow {
+    /// Sequence.
+    pub seq: u64,
+    /// Lane.
+    pub lane: u64,
+    /// The region.
+    pub event: u64,
+    /// Its start tick.
+    pub tick: i64,
+    /// The sequence's name.
+    pub sequence: String,
+    /// The lane's name.
+    pub lane_name: String,
+}
+
+/// The regions using `media`, in sequence, lane and time order.
+pub fn users(doc: &Document, media: MediaId) -> Vec<MediaUseRow> {
+    let mut out: Vec<MediaUseRow> = doc
+        .all_events()
+        .filter(|(_, e)| matches!(e.body, EventBody::AudioRegion { media: m, .. } if m == media))
+        .map(|(loc, e)| {
+            let seq = doc.sequence(loc.seq).ok();
+            MediaUseRow {
+                seq: loc.seq.0,
+                lane: loc.lane.0,
+                event: e.id.0,
+                tick: e.tick.0,
+                sequence: seq.map(|s| s.name.clone()).unwrap_or_default(),
+                lane_name: doc
+                    .lane(loc.seq, loc.lane)
+                    .map(|l| l.name.clone())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    out.sort_by_key(|u| (u.seq, u.lane, u.tick, u.event));
+    out
+}
+
+/// The share of `len` frames the spans cover, 0–100.
+fn used_percent(spans: Option<&Vec<(u64, u64)>>, len: u64) -> f32 {
+    let Some(spans) = spans else { return 0.0 };
+    if len == 0 {
+        return 0.0;
+    }
+    let mut v = spans.clone();
+    v.sort_unstable();
+    let (mut total, mut end) = (0u64, 0u64);
+    for (a, b) in v {
+        let (a, b) = (a.min(len), b.min(len));
+        if b <= end {
+            continue;
+        }
+        total += b - a.max(end);
+        end = b;
+    }
+    (total as f64 / len as f64 * 100.0) as f32
+}
+
+/// The folder under [`scratch_parent`] holding untitled sessions'
+/// packages, `<pid>-<session>.vizdaw` each.
+pub const UNTITLED_DIR: &str = "VizDAW-untitled";
+
+/// The scratch folder's test override ([`set_scratch_dir`]).
+static SCRATCH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Where untitled sessions' packages go (plan 5c Task 10, pre-flight I5):
+/// the test override, else in test builds (`test-hooks`) a per-process
+/// temporary folder, so tests never touch the real `$TMPDIR`'s
+/// `VizDAW-untitled`; else `$VIZDAW_SCRATCH_DIR` when absolute (`vizctl
+/// launch`, the Swift tests), else `$TMPDIR`.
+pub fn scratch_parent() -> PathBuf {
+    if let Some(p) = crate::guard::lock(&SCRATCH).clone() {
+        return p;
+    }
+    #[cfg(feature = "test-hooks")]
+    {
+        std::env::temp_dir().join(format!("vizdaw-test-scratch-{}", std::process::id()))
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        std::env::var_os("VIZDAW_SCRATCH_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(std::env::temp_dir)
+    }
+}
+
+/// Makes `dir` the scratch folder, `None`: back to the default (test
+/// hook; process-wide, so a test that sets it runs alone in its binary).
+#[cfg(feature = "test-hooks")]
+pub fn set_scratch_dir(dir: Option<PathBuf>) {
+    *crate::guard::lock(&SCRATCH) = dir;
+}
+
+/// Where an untitled session keeps its media (Ruling 14).
+pub fn scratch_root(session: u64) -> PathBuf {
+    scratch_parent()
+        .join(UNTITLED_DIR)
+        .join(format!("{}-{session}.vizdaw", std::process::id()))
+}
+
+/// The offline items of `doc` under `root`, with why (Ruling 22; the
+/// content hash is not re-checked here, Ruling 4).
+pub fn check(doc: &Document, root: &Path) -> BTreeMap<MediaId, OfflineReasonRow> {
+    let f = doc.settings().format;
+    let mut out = BTreeMap::new();
+    for m in doc.media().values() {
+        let p = root.join(&m.path);
+        let reason = if !p.is_file() {
+            Some(OfflineReasonRow::Missing)
+        } else {
+            match CafReader::open(&p) {
+                Err(_) => Some(OfflineReasonRow::Unreadable),
+                Ok(r) => {
+                    let i = r.info();
+                    if i.sample_rate != f.sample_rate || i.depth != f.depth {
+                        Some(OfflineReasonRow::Format)
+                    } else if i.frames != m.length_frames || i.channels != m.channels {
+                        Some(OfflineReasonRow::Length)
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(r) = reason {
+            out.insert(m.id, r);
+        }
+    }
+    out
+}
+
+/// The online items as the engine's media table.
+pub fn files(
+    doc: &Document,
+    root: &Path,
+    offline: &BTreeMap<MediaId, OfflineReasonRow>,
+) -> Vec<MediaFile> {
+    doc.media()
+        .values()
+        .filter(|m| !offline.contains_key(&m.id))
+        .map(|m| MediaFile {
+            id: m.id,
+            path: root.join(&m.path),
+        })
+        .collect()
+}
+
+/// The media pool as rows.
+pub fn rows(doc: &Document, offline: &BTreeMap<MediaId, OfflineReasonRow>) -> Vec<MediaRow> {
+    let mut uses: BTreeMap<MediaId, u32> = BTreeMap::new();
+    let mut spans: BTreeMap<MediaId, Vec<(u64, u64)>> = BTreeMap::new();
+    for (_, e) in doc.all_events() {
+        if let EventBody::AudioRegion {
+            media,
+            source_offset,
+            length,
+            ..
+        } = e.body
+        {
+            *uses.entry(media).or_default() += 1;
+            spans
+                .entry(media)
+                .or_default()
+                .push((source_offset, source_offset.saturating_add(length)));
+        }
+    }
+    doc.media()
+        .values()
+        .map(|m| {
+            let (origin, original_name) = match &m.origin {
+                MediaOrigin::Imported { original_name } => (
+                    MediaOriginRow::Imported,
+                    Some(original_name.clone()).filter(|n| !n.is_empty()),
+                ),
+                MediaOrigin::Recorded { .. } => (MediaOriginRow::Recorded, None),
+                MediaOrigin::Bounced => (MediaOriginRow::Bounced, None),
+                MediaOrigin::ExternalEdit { .. } => (MediaOriginRow::ExternalEdit, None),
+            };
+            MediaRow {
+                id: m.id.0,
+                name: m.name.clone(),
+                path: m.path.clone(),
+                channels: m.channels,
+                frames: m.length_frames,
+                sample_rate: m.sample_rate,
+                origin,
+                original_name,
+                offline: offline.get(&m.id).copied(),
+                uses: uses.get(&m.id).copied().unwrap_or(0),
+                used_percent: used_percent(spans.get(&m.id), m.length_frames),
+                peak: None,
+            }
+        })
+        .collect()
+}
+
+/// Copies the media files `media` names (package-relative path → content
+/// hash when known; the history's `referenced_media_anywhere`, so undo and
+/// redo states keep their files, final review I3) from `from` into `to`
+/// (Ruling 14) unless `to` already holds the same audio. A same-named file
+/// with other audio (Save As replacing an older package, review I1) is
+/// replaced atomically: copied to a temp file beside it, then renamed over
+/// it. Files of `to` not named are left alone. Missing sources are skipped
+/// (they stay offline).
+pub fn copy_media(
+    media: &BTreeMap<String, Option<String>>,
+    from: &Path,
+    to: &Path,
+) -> Result<(), VizError> {
+    if from == to {
+        return Ok(());
+    }
+    for (path, hash) in media {
+        let (src, dst) = (from.join(path), to.join(path));
+        if !src.is_file() {
+            continue;
+        }
+        if dst.exists() && same_audio(&src, &dst, hash.as_deref()) {
+            continue;
+        }
+        let Some(dir) = dst.parent() else {
+            return Err(VizError::Io {
+                message: format!("no folder for {}", dst.display()),
+            });
+        };
+        std::fs::create_dir_all(dir).map_err(io)?;
+        let name = dst
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = dir.join(format!(".{name}.{}{TMP_SUFFIX}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        // A hard link when both are on one volume; else a copy.
+        let placed = std::fs::hard_link(&src, &tmp)
+            .or_else(|_| std::fs::copy(&src, &tmp).map(|_| ()))
+            .and_then(|()| std::fs::rename(&tmp, &dst));
+        if let Err(e) = placed {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io(e));
+        }
+    }
+    Ok(())
+}
+
+/// The end of the temp files `copy_media` writes (`.<name>.<pid>` before
+/// it) beside their destination.
+const TMP_SUFFIX: &str = ".vizdaw-tmp";
+
+/// Removes leftover `copy_media` temp files (`Media/.*.vizdaw-tmp`) from
+/// the package at `root`: a Save As that was interrupted (Task 10 m10).
+pub fn sweep_temp(root: &Path) {
+    let Ok(dir) = std::fs::read_dir(root.join("Media")) else {
+        return;
+    };
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.ends_with(TMP_SUFFIX) && e.path().is_file() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// True when `dst` holds the audio of `src`: by the item's content hash
+/// when known, else by hashing both. An unreadable file never matches.
+fn same_audio(src: &Path, dst: &Path, hash: Option<&str>) -> bool {
+    let Ok(have) = hash_file(dst) else {
+        return false;
+    };
+    match hash {
+        Some(h) => have == h,
+        None => hash_file(src).is_ok_and(|want| want == have),
+    }
+}
+
+fn io(e: std::io::Error) -> VizError {
+    VizError::Io {
+        message: e.to_string(),
+    }
+}
+
+/// The platform importer: ExtAudioFile on macOS, CAF only elsewhere.
+pub fn importer() -> Box<dyn MediaImporter> {
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(platform_macos::media::ExtAudioImporter)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Box::new(CafImporter)
+    }
+}
+
+/// The CAF importer, for depth-only conversions on any platform.
+pub fn caf_importer() -> Box<dyn MediaImporter> {
+    Box::new(CafImporter)
+}

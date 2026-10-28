@@ -1,5 +1,5 @@
 use core_model::document::{
-    DestKind, Destination, Document, DocumentRepr, MediaItem, OutputPath, Settings,
+    DestKind, Destination, Document, DocumentRepr, MediaItem, MediaOrigin, OutputPath, Settings,
 };
 use core_model::event::{
     EventBody, EventKind, EventSpec, Fade, FadeShape, LoopCount, NoteAttribute, PerNoteCtl,
@@ -61,7 +61,7 @@ fn bodies() -> Vec<EventBody> {
             gain_db: -6.0,
             fade_in: Fade::default(),
             fade_out: Fade {
-                length: Tick(100),
+                length_frames: 100,
                 shape: FadeShape::EqualPower,
             },
         },
@@ -105,6 +105,7 @@ fn sample() -> Document {
                 channel: 9,
             },
             default_patch: None,
+            return_latency_ms: 0.0,
         }],
         outputs: vec![OutputPath {
             id: OutputPathId(0),
@@ -118,6 +119,8 @@ fn sample() -> Document {
             channels: 2,
             length_frames: 48_000,
             content_hash: None,
+            name: "a".into(),
+            origin: MediaOrigin::default(),
         }],
         sequences: vec![top, sub],
         mixer: None,

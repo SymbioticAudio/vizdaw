@@ -2,12 +2,12 @@
 //! `fixtures`). Shared by engine tests, `vizdaw-play` and the app (2c).
 
 use core_model::command::{
-    Command, DrumCmd, EventCmd, LaneCmd, MixerCmd, ReferenceCmd, Report, RoutingCmd, SequenceCmd,
-    apply,
+    AudioCmd, Command, DrumCmd, EventCmd, LaneCmd, MediaCmd, MixerCmd, ReferenceCmd, Report,
+    RoutingCmd, SequenceCmd, apply,
 };
 use core_model::document::{DestKind, Document, Patch};
 use core_model::event::{EventBody, EventSpec, Fade, LoopCount};
-use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, StripId};
+use core_model::ids::{AnyId, DestId, EventId, LaneId, MediaId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{PluginRef, PluginSlot, StripKind};
 use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::{PPQ, Tick};
@@ -238,6 +238,55 @@ impl Builder {
             .ok_or_else(|| ModelError::invalid("no event created"))
     }
 
+    /// Adds a media item `path` of `frames` frames at 48 kHz.
+    pub fn media(&mut self, path: &str, frames: u64, channels: u16) -> Result<MediaId> {
+        let r = self.run(Command::Media(MediaCmd::Add {
+            path: path.into(),
+            sample_rate: 48_000,
+            channels,
+            length_frames: frames,
+            content_hash: None,
+            name: None,
+            origin: None,
+        }))?;
+        created(&r, |id| match id {
+            AnyId::Media(m) => Some(*m),
+            _ => None,
+        })
+    }
+
+    /// Inserts an audio region (the lane gets an output path if it has
+    /// none, 5a Ruling 6).
+    #[allow(clippy::too_many_arguments)]
+    pub fn region(
+        &mut self,
+        seq: SeqId,
+        lane: LaneId,
+        tick: i64,
+        media: MediaId,
+        offset: u64,
+        length: u64,
+        gain_db: f32,
+        fade_in: Fade,
+        fade_out: Fade,
+    ) -> Result<EventId> {
+        let r = self.run(Command::Audio(AudioCmd::Insert {
+            seq,
+            lane,
+            tick: Tick(tick),
+            media,
+            source_offset: offset,
+            length,
+            gain_db,
+            fade_in,
+            fade_out,
+        }))?;
+        created(&r, |id| match id {
+            AnyId::Event(e) => Some(*e),
+            _ => None,
+        })
+    }
+
     /// Inserts a reference to `target`.
     pub fn reference(
         &mut self,
@@ -448,12 +497,14 @@ pub fn demo_audio_document() -> Result<Document> {
             _ => None,
         })
         .ok_or_else(|| ModelError::invalid("no output created"))?;
-    let r = b.run(Command::Routing(RoutingCmd::AddMedia {
+    let r = b.run(Command::Media(MediaCmd::Add {
         path: "Media/loop.wav".into(),
         sample_rate: 48_000,
         channels: 2,
         length_frames: 384_000,
         content_hash: None,
+        name: None,
+        origin: None,
     }))?;
     let media = r
         .created
@@ -493,4 +544,25 @@ pub fn demo_audio_document() -> Result<Document> {
         )?;
     }
     Ok(b.finish())
+}
+
+/// Click onsets in `samples` from index `from` (plan 5c-2; the fake
+/// synth's clicks): each sample louder than `level` after at least `quiet`
+/// samples at or below it, as an offset from `from`. A loud sample with
+/// fewer quiet ones before it (counted from `from`) continues a click or
+/// is no click.
+pub fn clicks(samples: &[f32], from: usize, level: f32, quiet: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut run = 0usize;
+    for (k, x) in samples.iter().enumerate().skip(from) {
+        if x.abs() > level {
+            if run >= quiet {
+                out.push(k - from);
+            }
+            run = 0;
+        } else {
+            run += 1;
+        }
+    }
+    out
 }

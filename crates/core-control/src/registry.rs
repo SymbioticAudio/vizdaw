@@ -20,6 +20,15 @@ pub enum ParamKind {
     Flag,
     /// One of these strings.
     Choice(&'static [&'static str]),
+    /// An integer in `min..=max`.
+    Int {
+        /// Smallest.
+        min: i64,
+        /// Largest.
+        max: i64,
+    },
+    /// An absolute path with any extension.
+    File,
 }
 
 /// One parameter of a command.
@@ -103,6 +112,8 @@ pub enum ArgValue {
     Text(String),
     /// A flag.
     Flag(bool),
+    /// An integer.
+    Int(i64),
 }
 
 const fn cmd(
@@ -218,9 +229,335 @@ const ON: &[ParamSpec] = &[ParamSpec {
     help: "Set on or off; absent toggles.",
 }];
 
+/// The project rates and depths as the channel spells them (5a Ruling 16).
+const RATES: &[&str] = &["44100", "48000", "88200", "96000", "176400", "192000"];
+const DEPTHS: &[&str] = &["16", "24", "32f"];
+
+const FORMAT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "rate",
+        kind: ParamKind::Choice(RATES),
+        required: false,
+        help: "Sample rate in Hz.",
+    },
+    ParamSpec {
+        name: "depth",
+        kind: ParamKind::Choice(DEPTHS),
+        required: false,
+        help: "Bit depth: 16, 24 or 32f (float).",
+    },
+];
+
+const IMPORT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The audio file to import (answers the Open dialog).",
+    },
+    ParamSpec {
+        name: "seq",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Sequence to place a region in (without it, the file only enters the media pool).",
+    },
+    ParamSpec {
+        name: "lane",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Lane for a mono or stereo file; without it, new lanes.",
+    },
+    ParamSpec {
+        name: "tick",
+        kind: ParamKind::Int {
+            min: -(1 << 40),
+            max: 1 << 40,
+        },
+        required: false,
+        help: "Where the region starts (negative imports at 0).",
+    },
+];
+
+/// A media item by ID (plan 5b).
+const MEDIA_ID: ParamSpec = ParamSpec {
+    name: "media",
+    kind: ParamKind::Int {
+        min: 0,
+        max: i64::MAX / 2,
+    },
+    required: false,
+    help: "The media item (see state.get media).",
+};
+
+const RELINK_PARAMS: &[ParamSpec] = &[
+    MEDIA_ID,
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The file to relink the item to (answers the Relink dialog).",
+    },
+];
+
+const RENAME_PARAMS: &[ParamSpec] = &[
+    MEDIA_ID,
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The item's new name (answers the Rename Media dialog).",
+    },
+];
+
+const NORMALIZE_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "peak_db",
+    kind: ParamKind::Text,
+    required: false,
+    help: "The peak level in dBFS, -96 to 0, as text (\"-0.3\"); answers the Normalize dialog.",
+}];
+
+/// An ID parameter (a sequence, a lane), required.
+const fn id_param(name: &'static str, help: &'static str) -> ParamSpec {
+    ParamSpec {
+        name,
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: true,
+        help,
+    }
+}
+
+/// `record.set` (plan 5c Ruling 18): every option of the next Record.
+const RECORD_SET_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace what the record range holds (true) or overdub it (false); sets transport.overdub.",
+    },
+    ParamSpec {
+        name: "punch",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Record only between the punch fields (sets transport.punch).",
+    },
+    ParamSpec {
+        name: "loop",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Loop recording over the transport loop (sets transport.loop).",
+    },
+    ParamSpec {
+        name: "count_in",
+        kind: ParamKind::Int { min: 0, max: 4 },
+        required: false,
+        help: "Bars of count-in: clicks before the transport rolls.",
+    },
+    ParamSpec {
+        name: "pre_roll",
+        kind: ParamKind::Int { min: 0, max: 8 },
+        required: false,
+        help: "Bars of pre-roll.",
+    },
+    ParamSpec {
+        name: "passes_as_takes",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Kept loop passes become takes.",
+    },
+];
+
+const RECOVER_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "action",
+    kind: ParamKind::Choice(&["import", "trash"]),
+    required: true,
+    help: "Import the recordings a crash left onto new lanes, or move them to the Trash.",
+}];
+
+const SET_INPUT_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The lane's sequence."),
+    id_param("lane", "The lane."),
+    ParamSpec {
+        name: "kind",
+        kind: ParamKind::Choice(&["none", "audio", "midi"]),
+        required: true,
+        help: "What the lane records: nothing, audio or MIDI.",
+    },
+    ParamSpec {
+        name: "channel",
+        kind: ParamKind::Int { min: 1, max: 256 },
+        required: false,
+        help: "Audio: the input channel, from 1 (default 1).",
+    },
+    ParamSpec {
+        name: "stereo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Audio: the channel and the next as a pair.",
+    },
+    ParamSpec {
+        name: "port",
+        kind: ParamKind::Text,
+        required: false,
+        help: "MIDI: the source's name (absent: every source).",
+    },
+    ParamSpec {
+        name: "midi_channel",
+        kind: ParamKind::Int { min: 1, max: 16 },
+        required: false,
+        help: "MIDI: the channel 1–16 (absent: every channel).",
+    },
+    ParamSpec {
+        name: "return_of",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "Audio: the external MIDI destination whose return the lane records (Track Synth); absent: plain audio, which unlinks a lane that recorded a synth's return.",
+    },
+];
+
+/// `lane.track_synth` (plan 5c-2 Ruling 11).
+const TRACK_SYNTH_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The MIDI lane's sequence."),
+    id_param("lane", "The MIDI lane playing the external synth."),
+    ParamSpec {
+        name: "channel",
+        kind: ParamKind::Int { min: 1, max: 256 },
+        required: false,
+        help: "The input channel the synth's output is wired to, from 1 (default 1).",
+    },
+    ParamSpec {
+        name: "stereo",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "The channel and the next as a pair.",
+    },
+    ParamSpec {
+        name: "arm_midi",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Also arm the MIDI lane to record the performance (default: disarm it, so its part plays and is never replaced).",
+    },
+    ParamSpec {
+        name: "mute_after",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Mute the MIDI lane after the next recording, in the same undo step.",
+    },
+];
+
+/// `destination.set_return_latency` (plan 5c-2 Ruling 11).
+const RETURN_LATENCY_PARAMS: &[ParamSpec] = &[
+    id_param("dest", "The external MIDI destination."),
+    ParamSpec {
+        name: "ms",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Its return latency in milliseconds, 0 to 500, as text (\"12.5\").",
+    },
+];
+
+/// `audio.set` (plan 5d-1 Ruling 26): the app's audio settings.
+const AUDIO_SET_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "software_monitoring",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Play monitored inputs back through their strips (off: direct monitoring on the interface).",
+    },
+    ParamSpec {
+        name: "buffer_frames",
+        kind: ParamKind::Int { min: 32, max: 1024 },
+        required: false,
+        help: "The I/O buffer size: 32, 64, 128, 256, 512 or 1024 frames (refused while recording).",
+    },
+    ParamSpec {
+        name: "input_device",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The audio input device by name (\"\": the output device's own input).",
+    },
+    ParamSpec {
+        name: "latency_trim",
+        kind: ParamKind::Int {
+            min: -192_000,
+            max: 192_000,
+        },
+        required: false,
+        help: "Frames added to where recorded audio lands, for a device that misreports its latency.",
+    },
+];
+
+/// `destination.add_midi` (plan 5d-1 Ruling 26): New MIDI Destination.
+const ADD_MIDI_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The destination's name.",
+    },
+    ParamSpec {
+        name: "port",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI destination it plays (its CoreMIDI name).",
+    },
+    ParamSpec {
+        name: "channel",
+        kind: ParamKind::Int { min: 1, max: 16 },
+        required: false,
+        help: "The MIDI channel, 1 to 16 (default 1).",
+    },
+];
+
+/// `destination.measure_return` (plan 5c-2 Ruling 11).
+const MEASURE_RETURN_PARAMS: &[ParamSpec] = &[id_param(
+    "dest",
+    "The external MIDI destination to measure (a lane must record its return: Track Synth). Blocks for about 3 s (at most 10 s) with the transport stopped.",
+)];
+
+const SET_MONITOR_PARAMS: &[ParamSpec] = &[
+    id_param("seq", "The lane's sequence."),
+    id_param("lane", "The lane."),
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(&["auto", "input", "off"]),
+        required: true,
+        help: "When the lane's input is heard: auto (armed, stopped or recording in range), input (always) or off.",
+    },
+];
+
+const INJECT_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "port",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI source the bytes come from, as lanes name it.",
+    },
+    ParamSpec {
+        name: "bytes",
+        kind: ParamKind::Text,
+        required: true,
+        help: "Channel messages as hex bytes, e.g. \"90 3c 64 80 3c 00\".",
+    },
+];
+
 /// Every menu command, in menu order.
 pub const COMMANDS: &[CommandSpec] = &[
-    cmd("file.new", "File", "New", Some("⌘N"), false),
+    CommandSpec {
+        params: FORMAT_PARAMS,
+        ..cmd("file.new", "File", "New", Some("⌘N"), false)
+    },
     CommandSpec {
         params: OPEN_PARAMS,
         dialogs: OPEN_DIALOGS,
@@ -240,6 +577,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         false,
     ),
+    CommandSpec {
+        params: IMPORT_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Open",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("media.import", "File", "Import Audio…", Some("⇧⌘I"), true)
+    },
     cmd("file.close", "File", "Close", Some("⌘W"), true),
     CommandSpec {
         params: SAVE_PATH,
@@ -261,6 +608,53 @@ pub const COMMANDS: &[CommandSpec] = &[
         }],
         ..cmd("file.save_as", "File", "Save As…", Some("⇧⌘S"), true)
     },
+    CommandSpec {
+        params: FORMAT_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Project Settings",
+            when: "always",
+            always: true,
+            answered_by: &["rate", "depth"],
+        }],
+        ..cmd(
+            "file.project_settings",
+            "File",
+            "Project Settings…",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        menu_item: false,
+        ..cmd(
+            "media.convert",
+            "File",
+            "Convert Media to Project Format",
+            None,
+            true,
+        )
+    },
+    CommandSpec {
+        params: RELINK_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Relink",
+            when: "always",
+            always: true,
+            answered_by: &["path"],
+        }],
+        ..cmd("media.relink", "File", "Relink Media…", None, true)
+    },
+    key_only(cmd("media.compact", "Media", "Compact Media", None, true)),
+    CommandSpec {
+        params: RENAME_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Rename Media",
+            when: "always",
+            always: true,
+            answered_by: &["name"],
+        }],
+        ..key_only(cmd("media.rename", "Media", "Rename Media…", None, true))
+    },
     cmd("edit.undo", "Edit", "Undo", Some("⌘Z"), true),
     cmd("edit.redo", "Edit", "Redo", Some("⇧⌘Z"), true),
     cmd("window.mixer", "Window", "Mixer", Some("⌥⌘M"), true),
@@ -271,6 +665,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌥⌘P"),
         false,
     ),
+    cmd("window.media_pool", "Window", "Media Pool", None, true),
     cmd(
         "editors.piano_roll",
         "Editors",
@@ -439,6 +834,31 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: ON,
         ..cmd("drum.timeline", "Drum", "Timeline View", None, true)
     },
+    CommandSpec {
+        params: NORMALIZE_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Normalize",
+            when: "always",
+            always: true,
+            answered_by: &["peak_db"],
+        }],
+        ..cmd("region.normalize", "Region", "Normalize…", None, true)
+    },
+    cmd(
+        "region.fade_in_to_cursor",
+        "Region",
+        "Fade In to Cursor",
+        None,
+        true,
+    ),
+    cmd(
+        "region.fade_out_from_cursor",
+        "Region",
+        "Fade Out from Cursor",
+        None,
+        true,
+    ),
+    cmd("region.remove_fades", "Region", "Remove Fades", None, true),
     cmd(
         "transport.play_stop",
         "Transport",
@@ -581,6 +1001,76 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         true,
     )),
+    CommandSpec {
+        params: RECORD_SET_PARAMS,
+        ..key_only(cmd("record.set", "Record", "Record Options", None, true))
+    },
+    CommandSpec {
+        params: RECOVER_PARAMS,
+        ..key_only(cmd(
+            "record.recover",
+            "Record",
+            "Recover Recordings",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: SET_INPUT_PARAMS,
+        ..key_only(cmd("lane.set_input", "Lane", "Set Lane Input", None, true))
+    },
+    CommandSpec {
+        params: SET_MONITOR_PARAMS,
+        ..key_only(cmd(
+            "lane.set_monitor",
+            "Lane",
+            "Set Lane Monitor",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: INJECT_PARAMS,
+        ..key_only(cmd("midi.inject", "MIDI", "Inject MIDI", None, true))
+    },
+    CommandSpec {
+        params: TRACK_SYNTH_PARAMS,
+        ..key_only(cmd("lane.track_synth", "Lane", "Track Synth", None, true))
+    },
+    CommandSpec {
+        params: RETURN_LATENCY_PARAMS,
+        ..key_only(cmd(
+            "destination.set_return_latency",
+            "Destination",
+            "Set Return Latency",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: MEASURE_RETURN_PARAMS,
+        ..key_only(cmd(
+            "destination.measure_return",
+            "Destination",
+            "Measure Return Latency",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: ADD_MIDI_PARAMS,
+        ..key_only(cmd(
+            "destination.add_midi",
+            "Destination",
+            "New MIDI Destination",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: AUDIO_SET_PARAMS,
+        ..key_only(cmd("audio.set", "Audio", "Audio Settings", None, false))
+    },
     locator("locator.go_0", "Go to Locator 0", "0"),
     locator("locator.go_1", "Go to Locator 1", "1"),
     locator("locator.go_2", "Go to Locator 2", "2"),
@@ -674,6 +1164,10 @@ pub fn validate_args(
                 .opt_path(s.name, ext)?
                 .map(|path| ArgValue::Text(path.to_string_lossy().into_owned())),
             ParamKind::Flag => p.opt_bool(s.name)?.map(ArgValue::Flag),
+            ParamKind::Int { min, max } => p.opt_int(s.name, min, max)?.map(ArgValue::Int),
+            ParamKind::File => p
+                .opt_file(s.name)?
+                .map(|path| ArgValue::Text(path.to_string_lossy().into_owned())),
             ParamKind::Choice(values) => match p.opt_str(s.name, MAX_PATH)? {
                 None => None,
                 Some(v) if values.contains(&v.as_str()) => Some(ArgValue::Text(v)),
@@ -757,6 +1251,8 @@ fn kind_json(k: ParamKind) -> Value {
         ParamKind::Path(ext) => json!({"type": "path", "extension": ext}),
         ParamKind::Flag => json!({"type": "bool"}),
         ParamKind::Choice(values) => json!({"type": "choice", "values": values}),
+        ParamKind::Int { min, max } => json!({"type": "int", "min": min, "max": max}),
+        ParamKind::File => json!({"type": "path"}),
     }
 }
 

@@ -23,6 +23,8 @@ fn save_as_then_open_round_trips() {
     assert!(!before.dirty);
     assert_eq!(before.title, "demo");
 
+    // One session per package (Task 9 review I-2): the first lets go.
+    s.close().unwrap();
     let reopened = Session::open(saved.to_string_lossy().into_owned()).unwrap();
     assert_eq!(
         without_version(reopened.snapshot().unwrap()),

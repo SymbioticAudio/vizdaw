@@ -31,6 +31,19 @@ public struct ArrangementGeometry: Equatable, Sendable {
 
     /// The lanes plus one spare row (the "Add Lane" row of the headers).
     public func contentHeight(rows: Int) -> CGFloat { CGFloat(rows + 1) * laneHeight }
+
+    /// An audio region's rectangle in row `row`: its own span, a point
+    /// inside the block band.
+    public func regionRect(_ r: EventRow, row: Int, axis: TimeAxis) -> CGRect {
+        let len = max(r.duration, 0)
+        let end = r.tick > Int64.max - len ? Int64.max : r.tick + len
+        let x0 = axis.x(r.tick)
+        let x1 = axis.x(end)
+        let inset = Self.blockInset + 1
+        return CGRect(
+            x: x0, y: rowTop(row) + inset, width: max(x1 - x0, Self.minBlockWidth),
+            height: max(laneHeight - 2 * inset, 1))
+    }
 }
 
 public struct BlockHit: Equatable, Sendable {
@@ -48,6 +61,8 @@ public struct BlockHit: Equatable, Sendable {
 public enum ArrangementHit: Equatable, Sendable {
     case block(BlockHit)
     case empty(lane: LaneKey?, tick: Int64)
+    /// A region's fade or gain handle (plan 5b).
+    case handle(RegionHandleHit)
 }
 
 public enum ArrangementHitTest {
@@ -148,18 +163,27 @@ public enum ArrangementA11y {
         }
     }
 
-    public static func header(_ lane: LaneRow) -> String {
+    /// `returnOf`: the synth whose return the lane records (its badge).
+    public static func header(_ lane: LaneRow, returnOf: String? = nil) -> String {
         var parts = [lane.name, lane.destination ?? "no destination"]
         if lane.mute { parts.append("muted") }
         if lane.solo { parts.append("soloed") }
         if lane.arm { parts.append("armed") }
+        if lane.input != nil { parts.append("input " + LaneInputs.title(lane.input)) }
+        if let r = returnOf { parts.append("recording the return of " + r) }
+        switch lane.monitor {
+        case .auto: break
+        case .input: parts.append("monitoring input")
+        case .off: parts.append("monitoring off")
+        }
         return parts.joined(separator: ", ")
     }
 }
 
-/// The clickable parts of a lane header (Plan Ruling 24).
+/// The clickable parts of a lane header (Plan Ruling 24; the monitor
+/// button and the input picker, plan 5d-2 Task 5).
 public enum HeaderControl: Equatable, Sendable {
-    case name, mute, solo, arm, destination
+    case name, monitor, mute, solo, arm, destination, input
 }
 
 public enum LaneHeaderLayout {
@@ -167,12 +191,25 @@ public enum LaneHeaderLayout {
 
     public static func controls(rowTop y: CGFloat) -> [(HeaderControl, CGRect)] {
         [
-            (.name, CGRect(x: 8, y: y + 4, width: 122, height: 18)),
+            (.name, CGRect(x: 8, y: y + 4, width: 101, height: 18)),
+            (.monitor, CGRect(x: 113, y: y + 4, width: 18, height: 18)),
             (.mute, CGRect(x: 134, y: y + 4, width: 18, height: 18)),
             (.solo, CGRect(x: 155, y: y + 4, width: 18, height: 18)),
             (.arm, CGRect(x: 176, y: y + 4, width: 18, height: 18)),
-            (.destination, CGRect(x: 8, y: y + 25, width: 186, height: 17)),
+            (.destination, CGRect(x: 8, y: y + 24, width: 92, height: 17)),
+            (.input, CGRect(x: 104, y: y + 24, width: 90, height: 17)),
         ]
+    }
+
+    /// The input meter, under the controls (shown while the lane is armed
+    /// or monitors its input).
+    public static func meterRect(rowTop y: CGFloat) -> CGRect {
+        CGRect(x: 8, y: y + 43, width: 178, height: 3)
+    }
+
+    /// The clip mark at the meter's end.
+    public static func clipRect(rowTop y: CGFloat) -> CGRect {
+        CGRect(x: 189, y: y + 43, width: 5, height: 3)
     }
 
     public static func control(at p: CGPoint, rowTop: CGFloat) -> HeaderControl? {

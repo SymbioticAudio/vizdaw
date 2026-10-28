@@ -17,13 +17,14 @@ use objc2_core_midi::{
     MIDIEventList, MIDIEventPacket, MIDIGetDestination, MIDIGetNumberOfDestinations,
     MIDIGetNumberOfSources, MIDIGetSource, MIDIInputPortCreateWithProtocol,
     MIDIObjectGetIntegerProperty, MIDIObjectGetStringProperty, MIDIObjectRef, MIDIOutputPortCreate,
-    MIDIPortConnectSource, MIDIPortDispose, MIDIPortRef, MIDIProtocolID, MIDIReceivedEventList,
-    MIDISendEventList, MIDISourceCreateWithProtocol, kMIDIPropertyName, kMIDIPropertyUniqueID,
+    MIDIPortConnectSource, MIDIPortDisconnectSource, MIDIPortDispose, MIDIPortRef, MIDIProtocolID,
+    MIDIReceivedEventList, MIDISendEventList, MIDISourceCreateWithProtocol, kMIDIPropertyName,
+    kMIDIPropertyUniqueID,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -331,6 +332,29 @@ pub fn list_destinations() -> Vec<MidiPortInfo> {
         .collect()
 }
 
+/// Sources visible to the system, except this process's own virtual
+/// sources (no client needed): what a MIDI lane's input picker offers
+/// (plan 5d-2 Task 1).
+pub fn list_sources() -> Vec<String> {
+    // SAFETY: a pure query.
+    let n = unsafe { MIDIGetNumberOfSources() };
+    let own = OWN_SOURCES.lock().map(|o| o.clone()).unwrap_or_default();
+    (0..n)
+        .filter_map(|i| {
+            // SAFETY: `i` is below the count just read.
+            let src = unsafe { MIDIGetSource(i) };
+            if src == 0 {
+                return None;
+            }
+            // SAFETY: the property keys are static CFStrings.
+            let (name_key, id_key) = unsafe { (kMIDIPropertyName, kMIDIPropertyUniqueID) };
+            let name = cfstring_property(src, name_key)?;
+            let mine = is_own_source(src, int_property(src, id_key), Some(name.as_str()), &own);
+            (!mine && !name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
 /// One CoreMIDI client plus the sender thread for every output it opened.
 pub struct MidiSystem {
     client: MIDIClientRef,
@@ -523,7 +547,67 @@ fn ump_words(t: u32) -> usize {
 /// `list` points at an event list CoreMIDI handed us. Packets are variable
 /// length (`wordCount` words, not the declared 64), so no packet or list is
 /// ever read as a whole struct.
-fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec<u8>) {
+/// The longest SysEx (F0 to F7) the record listener reassembles: 64 KiB.
+/// Longer ones are dropped and counted (Task 12 review M4); recording
+/// keeps channel messages only, so nothing it needs is lost.
+pub const MAX_SOURCE_SYSEX: usize = 64 * 1024;
+
+/// SysEx being reassembled across packets and callbacks.
+struct Sysex {
+    buf: Vec<u8>,
+    /// The longest message kept, F0 and F7 included.
+    cap: usize,
+    /// The message in progress overflowed: its remaining packets are
+    /// skipped until it ends or a new one starts.
+    discarding: bool,
+    /// Messages dropped for overflowing, since the owner last took them.
+    dropped: u64,
+}
+
+impl Sysex {
+    /// No bound (monitors and the note listener).
+    fn unbounded() -> Sysex {
+        Sysex {
+            buf: Vec::new(),
+            cap: usize::MAX,
+            discarding: false,
+            dropped: 0,
+        }
+    }
+
+    /// At most `cap` bytes, all allocated now: reassembly never
+    /// allocates on CoreMIDI's thread.
+    fn bounded(cap: usize) -> Sysex {
+        Sysex {
+            buf: Vec::with_capacity(cap),
+            cap,
+            discarding: false,
+            dropped: 0,
+        }
+    }
+}
+
+fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Sysex) {
+    decode_each(list, sysex, &mut |host_time, host_ns, bytes| {
+        out.push(Received {
+            host_time,
+            host_ns,
+            bytes: bytes.to_vec(),
+        })
+    });
+}
+
+/// Decodes the type-2 and type-3 UMPs of an event list, handing each
+/// message (host ticks, host nanoseconds, bytes) to `each` without
+/// allocating: channel messages are built on the stack and SysEx in
+/// `sysex`, whose capacity is kept across calls. A SysEx longer than
+/// `sysex.cap` is dropped and counted in `sysex.dropped`; decoding picks
+/// up again at the next message.
+fn decode_each(
+    list: NonNull<MIDIEventList>,
+    sysex: &mut Sysex,
+    each: &mut impl FnMut(u64, u64, &[u8]),
+) {
     let list = list.as_ptr();
     // SAFETY: `list` is a valid event list for the call; the header fields
     // are read through raw field pointers without forming a reference.
@@ -556,11 +640,7 @@ fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec
                 0x2 => {
                     let b = [(w0 >> 16) as u8, (w0 >> 8) as u8 & 0x7F, w0 as u8 & 0x7F];
                     let len = channel_len(b[0]);
-                    out.push(Received {
-                        host_time: time_stamp,
-                        host_ns,
-                        bytes: b.get(..len).unwrap_or(&b).to_vec(),
-                    });
+                    each(time_stamp, host_ns, b.get(..len).unwrap_or(&b));
                     i += 1;
                 }
                 0x3 => {
@@ -575,18 +655,33 @@ fn decode(list: NonNull<MIDIEventList>, out: &mut Vec<Received>, sysex: &mut Vec
                         (w1 >> 8) as u8,
                         w1 as u8,
                     ];
-                    if u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_START) == status {
-                        sysex.clear();
-                        sysex.push(0xF0);
+                    let starts =
+                        u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_START) == status;
+                    let ends =
+                        u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_END) == status;
+                    if starts {
+                        // A new message resyncs after an overflowed one.
+                        sysex.discarding = false;
+                        sysex.buf.clear();
+                        sysex.buf.push(0xF0);
                     }
-                    sysex.extend_from_slice(bytes.get(..count.min(6)).unwrap_or(&[]));
-                    if u32::from(SYSEX_COMPLETE) == status || u32::from(SYSEX_END) == status {
-                        sysex.push(0xF7);
-                        out.push(Received {
-                            host_time: time_stamp,
-                            host_ns,
-                            bytes: std::mem::take(sysex),
-                        });
+                    if sysex.discarding {
+                        sysex.discarding = !ends;
+                    } else {
+                        let part = bytes.get(..count.min(6)).unwrap_or(&[]);
+                        // The F7 still to come counts toward the bound.
+                        if sysex.buf.len() + part.len() + 1 > sysex.cap {
+                            sysex.buf.clear();
+                            sysex.dropped = sysex.dropped.saturating_add(1);
+                            sysex.discarding = !ends;
+                        } else {
+                            sysex.buf.extend_from_slice(part);
+                            if ends {
+                                sysex.buf.push(0xF7);
+                                each(time_stamp, host_ns, &sysex.buf);
+                                sysex.buf.clear();
+                            }
+                        }
                     }
                     i += 2;
                 }
@@ -610,7 +705,7 @@ impl MidiMonitor {
         let source = system.source(name).ok_or(BackendError::NoDevice)?;
         let received = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received);
-        let pending = Mutex::new(Vec::new());
+        let pending = Mutex::new(Sysex::unbounded());
         let block = RcBlock::new(move |list: NonNull<MIDIEventList>, _src: *mut c_void| {
             if let (Ok(mut out), Ok(mut sx)) = (sink.lock(), pending.lock()) {
                 decode(list, &mut out, &mut sx);
@@ -711,7 +806,7 @@ impl NoteListener {
         })?;
         // Scratch buffers reused across callbacks (CoreMIDI calls the block
         // from one thread at a time, so the lock is never contended).
-        let scratch = Mutex::new((Vec::<Received>::new(), Vec::<u8>::new()));
+        let scratch = Mutex::new((Vec::<Received>::new(), Sysex::unbounded()));
         let block = RcBlock::new(move |list: NonNull<MIDIEventList>, _src: *mut c_void| {
             if let Ok(mut s) = scratch.try_lock() {
                 let (out, sx) = &mut *s;
@@ -807,6 +902,224 @@ impl Drop for NoteListener {
     }
 }
 
+/// What a [`SourceListener`] hands each received MIDI 1.0 message to (on
+/// CoreMIDI's thread): the source's key (`core_engine::input::port_key`
+/// of its name), its host time in nanoseconds and its bytes. It must not
+/// block.
+pub type SourceSink = Box<dyn Fn(u32, u64, &[u8]) + Send + Sync>;
+
+/// A source as a reconnect sees it: its endpoint and its name.
+type SourceEntry = (MIDIEndpointRef, String);
+
+/// What a reconnect changes, given the sources connected and the ones
+/// present now: the indices into `connected` to disconnect (gone, or
+/// renamed so their key changed) and into `present` to connect (new, or
+/// renamed). A source present under the same name stays connected as it
+/// is, so it is never connected twice (pre-flight M7).
+fn plan_reconnect(connected: &[SourceEntry], present: &[SourceEntry]) -> (Vec<usize>, Vec<usize>) {
+    let gone = connected
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !present.contains(c))
+        .map(|(i, _)| i)
+        .collect();
+    let new = present
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !connected.contains(p))
+        .map(|(i, _)| i)
+        .collect();
+    (gone, new)
+}
+
+/// Listens to the MIDI sources for recording, telling them apart and
+/// keeping each message's timestamp (plan 5c Task 12: lane inputs name a
+/// source; spec §6.3: MIDI lands where it was heard). Like
+/// [`NoteListener`] it has its own client and skips this process's own
+/// virtual sources. It keeps that one client and input port for its
+/// whole life (Apple: one client per process); sources added later are
+/// connected by [`SourceListener::reconnect`] (pre-flight M7).
+pub struct SourceListener {
+    client: MIDIClientRef,
+    port: MIDIPortRef,
+    /// Tests: listen only to this process's own virtual sources, never to
+    /// a real device.
+    own_only: bool,
+    connected: Vec<SourceEntry>,
+    names: Vec<String>,
+    /// Messages the callback dropped: SysEx over [`MAX_SOURCE_SYSEX`].
+    dropped: Arc<AtomicU64>,
+    _block: RcBlock<dyn Fn(NonNull<MIDIEventList>, *mut c_void)>,
+}
+
+// SAFETY: as for `NoteListener`: plain CoreMIDI object references, a block
+// only CoreMIDI calls (its captures are `Send + Sync`), dropped after the
+// port is disposed.
+unsafe impl Send for SourceListener {}
+
+impl SourceListener {
+    /// Creates client `name` and connects it to every source present now
+    /// except this process's own virtual sources.
+    pub fn connect_all(name: &str, sink: SourceSink) -> Result<SourceListener, BackendError> {
+        SourceListener::connect(name, sink, false)
+    }
+
+    /// Like [`SourceListener::connect_all`] but listening only to this
+    /// process's own virtual sources (tests only: a test plays into the
+    /// listener without connecting any real device).
+    #[doc(hidden)]
+    pub fn connect_own_only(name: &str, sink: SourceSink) -> Result<SourceListener, BackendError> {
+        SourceListener::connect(name, sink, true)
+    }
+
+    fn connect(
+        name: &str,
+        sink: SourceSink,
+        own_only: bool,
+    ) -> Result<SourceListener, BackendError> {
+        let mut client: MIDIClientRef = 0;
+        let cf = CFString::from_str(name);
+        // SAFETY: `client` is a valid out-pointer; no notification callback.
+        os("MIDIClientCreate", unsafe {
+            MIDIClientCreate(&cf, None, ptr::null_mut(), NonNull::from(&mut client))
+        })?;
+        // SysEx scratch reused across callbacks, bounded and allocated
+        // here (Task 12 review M4). CoreMIDI calls the block from one
+        // thread at a time, so the lock is never contended; were it ever,
+        // the list is skipped (and counted) rather than waited for.
+        // Channel messages reach the sink without any allocation.
+        let scratch = Mutex::new(Sysex::bounded(MAX_SOURCE_SYSEX));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
+        let block = RcBlock::new(move |list: NonNull<MIDIEventList>, src: *mut c_void| {
+            // The connection's refCon is the source's key.
+            let key = src as usize as u32;
+            if let Ok(mut sx) = scratch.try_lock() {
+                decode_each(list, &mut sx, &mut |_, host_ns, bytes| {
+                    sink(key, host_ns, bytes)
+                });
+                if sx.dropped > 0 {
+                    counted.fetch_add(std::mem::take(&mut sx.dropped), Ordering::Relaxed);
+                }
+            } else {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let mut port: MIDIPortRef = 0;
+        let pcf = CFString::from_str("VizDAW Record In");
+        // SAFETY: valid client, out-pointer and block; CoreMIDI copies the
+        // block, and ours lives as long as the port anyway.
+        let made = os("MIDIInputPortCreateWithProtocol", unsafe {
+            MIDIInputPortCreateWithProtocol(
+                client,
+                &pcf,
+                MIDIProtocolID::Protocol_1_0,
+                NonNull::from(&mut port),
+                (&*block as *const block2::DynBlock<_>).cast_mut(),
+            )
+        });
+        if let Err(e) = made {
+            // SAFETY: the client was created above and is not used again.
+            unsafe {
+                MIDIClientDispose(client);
+            }
+            return Err(e);
+        }
+        let mut l = SourceListener {
+            client,
+            port,
+            own_only,
+            connected: Vec::new(),
+            names: Vec::new(),
+            dropped,
+            _block: block,
+        };
+        l.reconnect();
+        Ok(l)
+    }
+
+    /// The sources this listener should hear now: every present source but
+    /// this process's own (or, `own_only`, only those).
+    fn present(&self) -> Vec<SourceEntry> {
+        // SAFETY: a pure query.
+        let n = unsafe { MIDIGetNumberOfSources() };
+        let own = OWN_SOURCES.lock().map(|o| o.clone()).unwrap_or_default();
+        let mut present = Vec::new();
+        for i in 0..n {
+            // SAFETY: `i` is below the count just read.
+            let src = unsafe { MIDIGetSource(i) };
+            if src == 0 {
+                continue;
+            }
+            // SAFETY: the property keys are static CFStrings.
+            let (name_key, id_key) = unsafe { (kMIDIPropertyName, kMIDIPropertyUniqueID) };
+            let id = int_property(src, id_key);
+            let sname = cfstring_property(src, name_key).unwrap_or_default();
+            if is_own_source(src, id, Some(sname.as_str()), &own) != self.own_only {
+                continue;
+            }
+            present.push((src, sname));
+        }
+        present
+    }
+
+    /// Connects the sources that appeared since the last connect (and
+    /// forgets the ones gone) on the same client and port; the ones still
+    /// present stay connected untouched. Returns how many it connected.
+    pub fn reconnect(&mut self) -> usize {
+        let present = self.present();
+        let (gone, new) = plan_reconnect(&self.connected, &present);
+        for &i in gone.iter().rev() {
+            let (src, _) = self.connected.remove(i);
+            // SAFETY: the port is ours; a source that went away fails
+            // harmlessly (its connection went with it).
+            unsafe {
+                MIDIPortDisconnectSource(self.port, src);
+            }
+        }
+        let mut added = 0;
+        for i in new {
+            let Some((src, sname)) = present.get(i).cloned() else {
+                continue;
+            };
+            let key = core_engine::input::port_key(&sname);
+            // SAFETY: both objects are live; the port belongs to our client;
+            // the refCon is a plain integer CoreMIDI hands back unread.
+            let ok = os("MIDIPortConnectSource", unsafe {
+                MIDIPortConnectSource(self.port, src, key as usize as *mut c_void)
+            });
+            if ok.is_ok() {
+                self.connected.push((src, sname));
+                added += 1;
+            }
+        }
+        self.names = self.connected.iter().map(|(_, n)| n.clone()).collect();
+        added
+    }
+
+    /// The names of the sources it listens to.
+    pub fn sources(&self) -> &[String] {
+        &self.names
+    }
+
+    /// How many received messages it dropped (SysEx longer than
+    /// [`MAX_SOURCE_SYSEX`]).
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for SourceListener {
+    fn drop(&mut self) {
+        // SAFETY: the port and client belong to this listener and are not
+        // used again.
+        unsafe {
+            MIDIPortDispose(self.port);
+            MIDIClientDispose(self.client);
+        }
+    }
+}
+
 /// Nanoseconds to host-clock ticks (the timestamps CoreMIDI carries).
 pub fn ns_to_host(ns: u64) -> u64 {
     // SAFETY: pure conversion.
@@ -855,7 +1168,7 @@ mod tests {
         let start = unsafe { guard.sub(bytes) }.cast::<u32>();
         unsafe { ptr::copy_nonoverlapping(words.as_ptr(), start, words.len()) };
         let mut out = Vec::new();
-        let mut sysex = Vec::new();
+        let mut sysex = Sysex::unbounded();
         let list = NonNull::new(start.cast::<MIDIEventList>()).unwrap();
         decode(list, &mut out, &mut sysex);
         // SAFETY: the mapping is ours and nothing points into it any more.
@@ -936,6 +1249,105 @@ mod tests {
         assert!(!is_own_source(9, Some(43), Some("VizDAW Out"), &own));
         assert!(!is_own_source(9, None, Some("Keyboard"), &own));
         assert!(!is_own_source(9, Some(42), None, &[]));
+    }
+
+    /// An event list as CoreMIDI lays it out: protocol, packet count,
+    /// then each packet's timestamp (0), word count and words.
+    fn event_list(packets: &[Vec<u32>]) -> Vec<u32> {
+        let mut l = vec![1, packets.len() as u32];
+        for p in packets {
+            l.extend([0, 0, p.len() as u32]);
+            l.extend(p);
+        }
+        l
+    }
+
+    /// One SysEx7 UMP (status, up to 6 bytes).
+    fn sysex7(status: u8, bytes: &[u8]) -> [u32; 2] {
+        let mut b = [0u8; 6];
+        b[..bytes.len()].copy_from_slice(bytes);
+        let w0 = 0x3000_0000
+            | u32::from(status) << 20
+            | (bytes.len() as u32) << 16
+            | u32::from(b[0]) << 8
+            | u32::from(b[1]);
+        let w1 = u32::from_be_bytes([b[2], b[3], b[4], b[5]]);
+        [w0, w1]
+    }
+
+    /// A SysEx of `len` data bytes as packets of at most 64 words.
+    fn sysex_packets(len: usize) -> Vec<Vec<u32>> {
+        let data = vec![0x11u8; len];
+        let chunks: Vec<&[u8]> = data.chunks(6).collect();
+        let mut words = Vec::new();
+        for (i, c) in chunks.iter().enumerate() {
+            let status = match (i, chunks.len()) {
+                (_, 1) => SYSEX_COMPLETE,
+                (0, _) => SYSEX_START,
+                (i, n) if i + 1 == n => SYSEX_END,
+                _ => SYSEX_CONTINUE,
+            };
+            words.extend(sysex7(status, c));
+        }
+        words.chunks(64).map(<[u32]>::to_vec).collect()
+    }
+
+    fn decode_source(packets: &[Vec<u32>], sx: &mut Sysex) -> Vec<Vec<u8>> {
+        let mut list = event_list(packets);
+        let mut got = Vec::new();
+        let p = NonNull::new(list.as_mut_ptr().cast::<MIDIEventList>()).unwrap();
+        decode_each(p, sx, &mut |_, _, b| got.push(b.to_vec()));
+        got
+    }
+
+    /// Task 12 review M4: the source path's SysEx buffer is bounded. A
+    /// SysEx longer than the bound is dropped and counted, and decoding
+    /// resyncs at the next message: a note after it and a SysEx after
+    /// that arrive. The buffer never grows past its preallocated bound;
+    /// one exactly at the bound is still delivered.
+    #[test]
+    fn an_oversized_sysex_is_dropped_and_counted_and_the_next_messages_arrive() {
+        let mut sx = Sysex::bounded(MAX_SOURCE_SYSEX);
+        let cap = sx.buf.capacity();
+        assert!(cap >= MAX_SOURCE_SYSEX);
+        let mut packets = sysex_packets(MAX_SOURCE_SYSEX + 4096);
+        packets.push(vec![0x2090_3C40]);
+        packets.extend(sysex_packets(3));
+        let got = decode_source(&packets, &mut sx);
+        assert_eq!(got.len(), 2, "only the note and the small SysEx");
+        assert_eq!(got[0], [0x90, 0x3C, 0x40]);
+        assert_eq!(got[1], [0xF0, 0x11, 0x11, 0x11, 0xF7]);
+        assert_eq!(sx.dropped, 1);
+        assert_eq!(sx.buf.capacity(), cap, "the buffer grew");
+        // An oversized one cut short by a new SysEx: the new one arrives.
+        let mut cut = sysex_packets(MAX_SOURCE_SYSEX + 600);
+        cut.pop();
+        cut.extend(sysex_packets(9));
+        let got = decode_source(&cut, &mut sx);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].len(), 11);
+        assert_eq!(sx.dropped, 2);
+        // F0 + data + F7 exactly at the bound is kept.
+        let got = decode_source(&sysex_packets(MAX_SOURCE_SYSEX - 2), &mut sx);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].len(), MAX_SOURCE_SYSEX);
+        assert_eq!(sx.dropped, 2);
+        assert_eq!(sx.buf.capacity(), cap);
+    }
+
+    /// Pre-flight M7: a reconnect connects only what is new (or renamed:
+    /// its key changed) and drops only what is gone; a source present
+    /// under the same name is left alone, never connected twice.
+    #[test]
+    fn a_reconnect_touches_only_new_gone_or_renamed_sources() {
+        let e = |r: MIDIEndpointRef, n: &str| (r, n.to_string());
+        let connected = [e(1, "A"), e(2, "B"), e(3, "C")];
+        let present = [e(1, "A"), e(3, "C renamed"), e(4, "D")];
+        let (gone, new) = plan_reconnect(&connected, &present);
+        assert_eq!(gone, [1, 2]);
+        assert_eq!(new, [1, 2]);
+        assert_eq!(plan_reconnect(&present, &present), (vec![], vec![]));
+        assert_eq!(plan_reconnect(&[], &present).1, [0, 1, 2]);
     }
 
     #[test]

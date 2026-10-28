@@ -54,6 +54,10 @@ struct Inner {
     /// A reload could not run (the plugin registry was busy, or Play's
     /// load failed): `idle` runs it once it can.
     reload_owed: bool,
+    /// An arm's engine claim found another window's idle engine opening
+    /// its input: `idle` tries the claim again for this sequence until it
+    /// is taken or refused for another reason (Task 8 parked n2).
+    claim_owed: Option<SeqId>,
     /// Plugin gestures waiting for an open edit to end.
     held: Vec<core_host::Gesture>,
     /// Slots whose plugin window is open (saved with the project, spec §9).
@@ -82,6 +86,53 @@ struct Inner {
     /// The editors' layout, opaque JSON from the app, saved in `ui.json`
     /// (plan 4a Ruling 12).
     editor_layout: Option<serde_json::Value>,
+    /// Offline media and why (Ruling 22; runtime only, never saved).
+    offline: std::collections::BTreeMap<core_model::ids::MediaId, crate::media::OfflineReasonRow>,
+    /// The document whose media and format `offline` was computed for, and
+    /// the root it was checked under.
+    media_seen: Option<(Document, std::path::PathBuf)>,
+    /// Imports and conversions (Ruling 15).
+    jobs: crate::jobs::Jobs,
+    /// Waveform overviews and their worker (plan 5b Ruling 3).
+    overviews: crate::overviews::Overviews,
+    /// Items whose file failed the content-hash check, with the path and
+    /// hash it was checked for (plan 5b Ruling 2; runtime only).
+    changed: std::collections::BTreeMap<core_model::ids::MediaId, (String, Option<String>)>,
+    /// The folder standing for the Trash (test hook; `None`: the
+    /// environment's or the platform's).
+    trash_dir: Option<PathBuf>,
+    /// The recording in progress (plan 5c Task 9).
+    recording: Option<crate::record::Recording>,
+    /// A recording is being finished (its files are closing without the
+    /// lock): no new one may start.
+    finishing: bool,
+    /// A finished recording's pass (or `None` when nothing landed), with
+    /// its files, waiting for an open edit to end.
+    pending_pass: Option<(Option<core_model::command::RecordPass>, Vec<String>)>,
+    /// Recorded files no document references that the Trash must not take
+    /// (a pass that could not be applied, a take whose lane went or whose
+    /// file the writer could not close; pre-flight I3): crash recovery
+    /// offers them at the next open.
+    keep_recordings: std::collections::BTreeSet<String>,
+    /// The files of the pass being finished without the session lock
+    /// (pre-flight I1): a save meanwhile must leave them.
+    finishing_files: Vec<String>,
+    /// Transport fault names the last recording raised (`record-overflow`,
+    /// `input-lost`; pre-flight M11), until the next one starts.
+    record_faults: Vec<String>,
+    /// Recordings a crash left (and kept takes), offered and not yet
+    /// answered (plan 5c Task 10): the Trash leaves them until they are.
+    recovered: Vec<crate::record::RecoveredFileRow>,
+    /// Track Synth's "Mute the MIDI lane after recording" (plan 5c-2
+    /// Ruling 6): by (sequence, return lane), the MIDI lane the next pass
+    /// that places audio there mutes. Runtime only.
+    synth_mutes: std::collections::BTreeMap<(SeqId, LaneId), LaneId>,
+    /// The audio settings epoch this session's engine last loaded under
+    /// (plan 5d-1 Ruling 12).
+    settings_seen: u64,
+    /// A Save came while recording: the pass is saved when it lands (plan
+    /// 5d-1 Ruling 19).
+    save_after_pass: bool,
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -107,6 +158,9 @@ fn marker_names(id: u64, doc: &Document, ahead: bool) -> Option<Vec<PluginRef>> 
 #[derive(Debug, Default)]
 struct News {
     doc_changed: bool,
+    /// A job was applied outside `idle` (when an edit closed): the next
+    /// `idle` reports `media_changed`.
+    media_changed: bool,
     slots_changed: bool,
     params_changed: std::collections::BTreeSet<u64>,
     problems: Vec<String>,
@@ -129,6 +183,7 @@ impl Inner {
             cursor_seq: None,
             reload_fault: None,
             reload_owed: false,
+            claim_owed: None,
             held: Vec::new(),
             windows: std::collections::BTreeSet::new(),
             news: News::default(),
@@ -137,7 +192,179 @@ impl Inner {
             autosave_soon: false,
             plugin_dirty: false,
             closed: false,
+            offline: Default::default(),
+            media_seen: None,
+            jobs: Default::default(),
+            overviews: Default::default(),
+            changed: Default::default(),
+            trash_dir: None,
+            recording: None,
+            finishing: false,
+            pending_pass: None,
+            keep_recordings: Default::default(),
+            finishing_files: Vec::new(),
+            record_faults: Vec::new(),
+            recovered: Vec::new(),
+            synth_mutes: Default::default(),
+            settings_seen: crate::audio::epoch(),
+            save_after_pass: false,
         }
+    }
+
+    /// Recorded files the Trash must leave: those being written or
+    /// finished, those of a pass waiting to apply, those kept after a
+    /// failed pass, and those offered for recovery (plan 5c Ruling 15,
+    /// Task 10; pre-flight I1, I3).
+    fn recorded_keep(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.keep_recordings.iter().cloned().collect();
+        out.extend(self.recovered.iter().map(|r| r.path.clone()));
+        out.extend(self.finishing_files.iter().cloned());
+        if let Some(r) = &self.recording {
+            out.extend(r.files());
+        }
+        if let Some((_, files)) = &self.pending_pass {
+            out.extend(files.iter().cloned());
+        }
+        out
+    }
+
+    /// The retention rule on `package` (plan 5b Ruling 11). Skipped while
+    /// a job is not applied yet (its files are in no document), unless
+    /// `jobs_done` (the jobs were shut down and their files removed).
+    /// Failures become problems for the next `idle`; at `close` no `idle`
+    /// follows, so `close` also writes them to stderr (preflight M5).
+    fn tidy(&mut self, package: &Path, jobs_done: bool) {
+        if !jobs_done && self.jobs.busy() {
+            return;
+        }
+        let dir = crate::retention::trash_dir(self.trash_dir.as_deref());
+        let mut refs = self.history.referenced_media_anywhere();
+        for p in self.recorded_keep() {
+            refs.entry(p).or_insert(None);
+        }
+        let out = crate::retention::run(&refs, package, &|p| {
+            crate::retention::trash(dir.as_deref(), p)
+        });
+        self.news.problems.extend(out.problems);
+    }
+
+    /// Writes `package`'s keep file from the kept takes (plan 5c Task 10);
+    /// a failure is a problem for the next `idle`.
+    fn write_kept(&mut self, package: &Path) {
+        if let Err(e) = crate::record::write_kept(package, &self.keep_recordings) {
+            self.news
+                .problems
+                .push(format!("The list of kept recordings was not saved ({e})."));
+        }
+    }
+
+    /// Every package-relative path a history state references: no job
+    /// may give a new file one of these names, even when the file is
+    /// missing (plan 5b Ruling 12; final review r2). Their users
+    /// (`import_reserved`, `relink`) compare them without case, as macOS
+    /// volumes resolve names (preflight I2).
+    fn reserved_names(&self) -> std::collections::BTreeSet<String> {
+        self.named_media().into_keys().collect()
+    }
+
+    /// [`Inner::reserved_names`] with the content hash each path names (a
+    /// relink uses a file already in `Media/` in place only when no state
+    /// names its path for other audio; preflight M7).
+    fn named_media(&self) -> std::collections::BTreeMap<String, Option<String>> {
+        self.history.referenced_media_anywhere()
+    }
+
+    /// [`Inner::reserved_names`] in lower case: the files a job's cleanup
+    /// never removes (Task 6 review m1), compared as macOS volumes
+    /// resolve names.
+    fn kept(&self) -> std::collections::BTreeSet<String> {
+        self.named_media()
+            .into_keys()
+            .map(|p| p.to_lowercase())
+            .collect()
+    }
+
+    /// `Busy` while a Format, Convert or Relink job has not been applied:
+    /// each captures the project format and the items' files when it
+    /// starts, so another such job may not start meanwhile (5a Task 11
+    /// review Minor 4; preflight M3). An import does not block them.
+    fn media_jobs_idle(&self) -> Result<(), VizError> {
+        use crate::jobs::JobKindRow;
+        if self
+            .jobs
+            .pending(&[JobKindRow::Format, JobKindRow::Convert, JobKindRow::Relink])
+        {
+            return Err(VizError::Busy {
+                message: "Wait for the media job to finish.".into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The media root: the package, or the untitled scratch package.
+    fn root(&self, id: u64) -> std::path::PathBuf {
+        self.path
+            .clone()
+            .unwrap_or_else(|| crate::media::scratch_root(id))
+    }
+
+    /// Recomputes the offline set when the media pool, the format or the
+    /// root changed (or `force`), and hands the online media to the
+    /// engine host and to the overview worker (which re-verifies every
+    /// item when `force`). True when the offline set changed.
+    fn refresh_media(&mut self, id: u64, force: bool) -> bool {
+        self.refresh_media_with(id, force, force)
+    }
+
+    /// [`Inner::refresh_media`]; `reverify` makes the overview worker
+    /// check every item again (a recheck), not only new ones.
+    fn refresh_media_with(&mut self, id: u64, force: bool, reverify: bool) -> bool {
+        let root = self.root(id);
+        let doc = self.history.doc();
+        let same = !force
+            && self.media_seen.as_ref().is_some_and(|(d, r)| {
+                *r == root
+                    && d.settings().format == doc.settings().format
+                    && (d.media().ptr_eq(doc.media()) || d.media() == doc.media())
+            });
+        if same {
+            return false;
+        }
+        let mut offline = crate::media::check(doc, &root);
+        // A file that failed the hash check stays offline while the item
+        // still names that file and hash (plan 5b Ruling 2).
+        for (m, (path, hash)) in &self.changed {
+            if let Some(item) = doc.media().get(m) {
+                if item.path == *path && item.content_hash == *hash {
+                    offline
+                        .entry(*m)
+                        .or_insert(crate::media::OfflineReasonRow::Changed);
+                }
+            }
+        }
+        let changed = offline != self.offline;
+        host::set_media(id, crate::media::files(doc, &root, &offline));
+        // Overviews of online items, and of changed ones so a returning
+        // original is noticed.
+        let wants = doc
+            .media()
+            .values()
+            .filter(|m| match offline.get(&m.id) {
+                None | Some(crate::media::OfflineReasonRow::Changed) => true,
+                Some(_) => false,
+            })
+            .map(|m| crate::overviews::Want {
+                media: m.id,
+                path: m.path.clone(),
+                file: root.join(&m.path),
+                hash: m.content_hash.clone(),
+                package: root.clone(),
+            })
+            .collect();
+        self.overviews.ensure(wants, reverify);
+        self.offline = offline;
+        self.media_seen = Some((doc.clone(), root));
+        changed
     }
 
     /// The sequence a position set without the engine belongs to: the one
@@ -158,6 +385,11 @@ impl Inner {
     /// recompiles. A failure (or panic, which also resets the host) never
     /// fails the edit: it becomes a sticky fault.
     fn reload_host(&mut self, id: u64) {
+        // A format change (or its undo) moved the project rate: the host
+        // this session plays through goes, so the next Play asks the
+        // device for the new rate (Ruling 20).
+        host::reset_if_owner(id, f64::from(self.doc().settings().format.sample_rate));
+        self.refresh_media(id, false);
         // The marker names any plugin the sync starts loading first.
         self.mark(id, true);
         let (doc, looped) = (self.history.doc(), self.looped);
@@ -291,6 +523,9 @@ impl Session {
         plugins_off: bool,
     ) -> Result<Arc<Session>, VizError> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        // One session per package (review I-2); released by the guard
+        // until the session exists.
+        let claim = path.as_deref().map(|p| claim_package(p, id)).transpose()?;
         let key = path.as_deref().map(recovery::key);
         // An earlier crash's marker survives a failed open (retrying
         // still offers safe mode).
@@ -343,6 +578,10 @@ impl Session {
             id,
             inner: Mutex::new(Inner::new(doc, path)),
         });
+        // The session releases it from now on (close, drop, Save As).
+        if let Some(c) = claim {
+            c.keep();
+        }
         {
             let mut inner = lock(&s.inner);
             inner.marked = marked;
@@ -355,6 +594,7 @@ impl Session {
             // A sync that could not run is retried by `idle`.
             inner.reload_owed = synced.is_err();
             inner.mark(id, false);
+            inner.refresh_media(id, true);
         }
         Ok(s)
     }
@@ -415,8 +655,20 @@ impl Session {
     fn save_to(&self, inner: &mut Inner, path: &Path) -> Result<(), VizError> {
         let captured = self.capture_all(inner)?;
         let _g = lock(&SAVE_LOCK);
+        let mut refs = inner.history.referenced_media_anywhere();
+        // Recordings kept for the recovery offer go with the project
+        // (pre-flight I3): Save As removes an untitled scratch package.
+        for p in inner.recorded_keep() {
+            refs.entry(p).or_insert(None);
+        }
+        crate::media::copy_media(&refs, &inner.root(self.id), path)?;
+        crate::overviews::copy_cache(&refs, &inner.root(self.id), path);
         file::save(inner.doc(), path)?;
         write_windows(path, &inner.windows, inner.editor_layout.as_ref());
+        inner.write_kept(path);
+        // Reads `project.json` and the autosaves under the save lock
+        // (preflight M4: whole-document reads, not media-file reads).
+        inner.tidy(path, false);
         inner.clean = inner.doc().clone();
         // A plugin whose state could not be captured is still unsaved.
         if captured {
@@ -515,6 +767,43 @@ impl Session {
         inner.snapshot()
     }
 
+    /// Add Lane `cmd` and the new lane's monitor `monitor`, one undo step
+    /// "Add Lane" (plan 5d-1 Ruling 11).
+    fn add_lane_monitored(
+        &self,
+        cmd: Command,
+        seq: SeqId,
+        monitor: core_model::lane::MonitorMode,
+        filter: &ViewFilter,
+    ) -> Result<DocSnapshot, VizError> {
+        let mut inner = lock(&self.inner);
+        let h = &mut inner.history;
+        h.begin("Add Lane")?;
+        let made = h.execute(&cmd, filter).and_then(|r| {
+            let lane = r
+                .created
+                .iter()
+                .find_map(|id| match id {
+                    core_model::ids::AnyId::Lane(l) => Some(*l),
+                    _ => None,
+                })
+                .ok_or_else(|| core_model::error::ModelError::invalid("no lane was added"))?;
+            h.execute(
+                &Command::Lane(LaneCmd::SetMonitor { seq, lane, monitor }),
+                filter,
+            )
+        });
+        if let Err(e) = made {
+            let _ = h.abort();
+            return Err(e.into());
+        }
+        h.commit()?;
+        inner.version += 1;
+        inner.reload_host(self.id);
+        self.mark(&mut inner);
+        inner.snapshot()
+    }
+
     /// [`Session::execute`] with a view filter (editor commands that act
     /// on the selection).
     fn execute_with(&self, cmd: Command, filter: &ViewFilter) -> Result<DocSnapshot, VizError> {
@@ -524,9 +813,21 @@ impl Session {
         if let Some(next) = next {
             self.capture_removed(&next)?;
         }
+        before_execute();
         let mut inner = lock(&self.inner);
+        // Under the lock the command applies under (Ruling 18, Task 9
+        // review M5).
+        if crate::edit::retries_input_cmd(&cmd) {
+            records_busy(&inner)?;
+        }
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
+        // An arm or input change that went through lets a failed input
+        // open be tried again, in the engine this session holds (plan
+        // 5d-1 Ruling 15; Task 7 review m6), before the reload applies it.
+        if crate::edit::retries_input_cmd(&cmd) {
+            host::clear_input_failure_of(self.id);
+        }
         inner.reload_host(self.id);
         self.mark(&mut inner);
         inner.snapshot()
@@ -652,6 +953,7 @@ impl Session {
             self.capture_removed(&next)?;
         }
         let mut inner = lock(&self.inner);
+        let before = inner.doc().clone();
         if undo {
             inner.history.undo()?;
         } else {
@@ -660,7 +962,15 @@ impl Session {
         inner.version += 1;
         inner.reload_host(self.id);
         self.mark(&mut inner);
-        inner.snapshot()
+        let snapshot = inner.snapshot()?;
+        // An undone or redone arm, monitor or input edit claims as the
+        // edit did (Task 8 review m6).
+        let claim = crate::edit::claims_engine_step(&before, inner.doc());
+        drop(inner);
+        if let Some(seq) = claim {
+            self.claim_for_input(seq);
+        }
+        Ok(snapshot)
     }
 
     /// Plays `seq` from `start`, else from where this session's position
@@ -673,6 +983,9 @@ impl Session {
         until: Option<Tick>,
     ) -> Result<(), VizError> {
         let mut inner = lock(&self.inner);
+        if inner.recording.is_some() || inner.finishing {
+            return Err(recording_busy());
+        }
         let id = seq_id(inner.doc(), seq)?;
         let start = start.or(match (inner.cursor, inner.cursor_seq) {
             (Some(t), None) => Some(t),
@@ -685,15 +998,103 @@ impl Session {
             host::play(self.id, inner.doc(), id, start, until, looped, p)
         })
         .and_then(|r| r);
-        if let Err(e) = played {
-            // Retried by `idle` (the engine may hold stale plugins).
-            inner.reload_owed = true;
-            return Err(e);
-        }
+        let pending = match played {
+            Ok(p) => p,
+            Err(e) => {
+                // Retried by `idle` (the engine may hold stale plugins).
+                inner.reload_owed = true;
+                return Err(e);
+            }
+        };
         inner.reload_owed = false;
         inner.reload_fault = None;
         inner.cursor = None;
         inner.cursor_seq = Some(id);
+        // The disk wait (up to 250 ms) holds no lock: this session's
+        // transport poll and every other session go on meanwhile.
+        drop(inner);
+        host::finish_play(pending)
+    }
+
+    /// After an edit of a lane's arm, monitor or input in `seq` (plan 5d-1
+    /// Rulings 16–17): claims an idle engine for `seq` when its lanes want
+    /// it, so they are heard before the first Play, and reconnects the MIDI
+    /// sources off this thread. Never claims while this session records; a failure
+    /// is a fault, never the edit's.
+    fn claim_for_input(&self, seq: SeqId) {
+        if self.claim(seq) {
+            host::listen_to_midi_sources_soon();
+        }
+    }
+
+    /// [`Session::claim_for_input`]'s claim; whether `seq` wants live
+    /// input (the MIDI sources then reconnect). A claim refused only
+    /// because another window's idle engine is opening its input is owed:
+    /// `idle` tries it again (Task 8 parked n2).
+    fn claim(&self, seq: SeqId) -> bool {
+        let mut inner = lock(&self.inner);
+        inner.claim_owed = None;
+        if inner.closed || !host::wants_live(inner.doc(), seq) {
+            return false;
+        }
+        // During a pass nothing is claimed, but the sources reconnect all
+        // the same (Ruling 17 as amended; final review m5). Arm and input
+        // edits were refused before this point (Ruling 18).
+        if inner.recording.is_some() || inner.finishing {
+            return true;
+        }
+        let at = match (inner.cursor, inner.cursor_seq) {
+            (Some(t), None) => t,
+            (Some(t), Some(s)) if s == seq => t,
+            _ => Tick::ZERO,
+        };
+        let looped = inner.looped;
+        inner.mark(self.id, true);
+        let r = plugins::with(self.id, |p| {
+            host::claim_idle(self.id, inner.doc(), seq, at, looped, p)
+        })
+        .and_then(|r| r);
+        match r {
+            Ok(true) => {
+                inner.cursor = None;
+                inner.cursor_seq = Some(seq);
+            }
+            Ok(false) => {}
+            Err(VizError::Busy { message }) if message == host::INPUT_OPENING => {
+                inner.claim_owed = Some(seq);
+            }
+            Err(e) => inner.reload_fault = Some(format!("the engine could not be claimed: {e}")),
+        }
+        true
+    }
+
+    /// `Busy` when one of `cmds` changes which lanes record (an arm or an
+    /// input) while this session records, finishes a pass or waits to
+    /// apply one (plan 5d-1 Ruling 18, 5c carry M6); monitor changes pass.
+    /// This early check refuses before any validation or gesture rewind;
+    /// [`records_busy`] repeats it under the lock the command applies
+    /// under, so a pass another thread starts meanwhile is seen (Task 9
+    /// review M5).
+    fn check_records(&self, cmds: &[crate::edit::EditCommand]) -> Result<(), VizError> {
+        if !cmds.iter().any(crate::edit::retries_input) {
+            return Ok(());
+        }
+        records_busy(&lock(&self.inner))
+    }
+
+    /// Why Measure or Track Synth cannot start or take its step now:
+    /// `Busy` while this session records or has an edit open. Playback
+    /// alone is not checked here: Track Synth stays allowed while playing,
+    /// and Measure checks the transport itself.
+    fn check_idle(inner: &Inner) -> Result<(), VizError> {
+        if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+            return Err(recording_busy());
+        }
+        if inner.edit_label.is_some() || inner.history.in_transaction() {
+            return Err(VizError::Busy {
+                message: "Finish the open edit first.".into(),
+            });
+        }
         Ok(())
     }
 
@@ -735,6 +1136,27 @@ impl Session {
         })
     }
 
+    /// An untitled, empty project in `format` (the New Project sheet;
+    /// spec §4.1).
+    #[uniffi::constructor]
+    pub fn new_project(format: crate::format::ProjectFormatRow) -> Result<Arc<Session>, VizError> {
+        ffi_guard(|| {
+            let f = core_model::format::AudioFormat::from(format);
+            let mut doc = Document::new();
+            if f != doc.settings().format {
+                doc = core_model::command::apply(
+                    &doc,
+                    &Command::Settings(core_model::command::SettingsCmd::SetFormat {
+                        format: f,
+                        swaps: Vec::new(),
+                    }),
+                )?
+                .doc;
+            }
+            Session::with(doc, None, false)
+        })
+    }
+
     /// Opens the `.vizdaw` package at `path`.
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<Session>, VizError> {
@@ -769,11 +1191,21 @@ impl Session {
                     (doc.clone(), doc)
                 }
             };
+            let s = Session::with(doc, Some(p.clone()), options.plugins_off)?;
+            // Only once the package is this session's (final review M1,
+            // M2): a refused open leaves another session's imports alone,
+            // and nothing is read while a close is still writing it.
+            crate::media::sweep_temp(&p);
             let windows = read_windows(&p);
             let layout = read_layout(&p);
-            let s = Session::with(doc, Some(p), options.plugins_off)?;
             {
                 let mut inner = lock(&s.inner);
+                // Plan 5c Task 10: kept takes, and what a crash left.
+                let (kept, unread) = crate::record::kept_at_open(&p, inner.doc());
+                let recovered = crate::record::offered(&p, inner.doc(), &kept);
+                inner.keep_recordings = kept;
+                inner.recovered = recovered;
+                inner.news.problems.extend(unread);
                 inner.windows = windows;
                 inner.editor_layout = layout;
                 inner.clean = clean;
@@ -789,16 +1221,52 @@ impl Session {
             let path = inner.path.clone().ok_or_else(|| VizError::Io {
                 message: "the document has no file yet; use Save As".into(),
             })?;
-            self.save_to(&mut inner, &path)
+            self.save_to(&mut inner, &path)?;
+            // The take lands at Stop: it is saved then too (plan 5d-1
+            // Ruling 19, 5c carry M5). Only a Save that worked asks.
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                inner.save_after_pass = true;
+            }
+            Ok(())
         })
+    }
+
+    /// Whether a Save made while recording saves again once the pass
+    /// lands (plan 5d-1 Ruling 19; the app says so).
+    pub fn saves_after_pass(&self) -> Result<bool, VizError> {
+        ffi_guard(|| Ok(lock(&self.inner).save_after_pass))
     }
 
     /// Saves to `path` (`.vizdaw` appended if missing) and makes it the
     /// current path.
+    /// `Busy` while an import or conversion has not been applied: its
+    /// files are under the current media root, which Save As moves away
+    /// from (plan 5a Ruling 15).
     pub fn save_as(&self, path: String) -> Result<(), VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
+            // Recordings are written under the current root, and a pass
+            // waiting for an edit to end names paths under it (pre-flight
+            // I1).
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                return Err(recording_busy());
+            }
+            // A job that just finished applies first, under the old root.
+            self.apply_jobs(&mut inner);
+            if inner.jobs.busy() {
+                return Err(VizError::Busy {
+                    message: "Wait for the import or conversion to finish, then save.".into(),
+                });
+            }
+            // A closed window holds no package (re-review m-3).
+            if inner.closed {
+                return Err(crate::events::bad("this project was closed"));
+            }
             let p = with_extension(&path);
+            // Another window's package (review I-2): its retention would
+            // not know this session's files. Claimed before anything is
+            // written (re-review m-2); a failed save releases it.
+            let claim = claim_package(&p, self.id)?;
             self.save_to(&mut inner, &p)?;
             if inner.path.as_deref() != Some(p.as_path()) {
                 // The marker follows the project to its new place (not
@@ -817,9 +1285,23 @@ impl Session {
                     }
                     inner.key = Some(key);
                 }
+                // The old package goes, unless it is the same one spelled
+                // another way.
+                if let Some(old) = inner.path.clone() {
+                    if package_key(&old) != claim.key {
+                        release_package(&old, self.id);
+                    }
+                }
                 inner.path = Some(p);
+                // The overview worker moves to the new package first, so it
+                // writes nothing more into the scratch package (review m3).
+                inner.refresh_media(self.id, true);
+                // The scratch package of an untitled session is done with.
+                let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
+                inner.reload_host(self.id);
                 self.mark(&mut inner);
             }
+            claim.keep();
             Ok(())
         })
     }
@@ -975,6 +1457,12 @@ impl Session {
     /// Stops; the position is kept.
     pub fn stop(&self) -> Result<(), VizError> {
         self.transport_call(|| {
+            // Stop while recording finishes the pass (spec §6.5), then
+            // stops as any Stop does (pre-flight M4: a rebuild running
+            // meanwhile must not resume playing).
+            if lock(&self.inner).recording.is_some() {
+                self.finish_recording(None)?;
+            }
             // Behind a rebuild this session's poll is running (its drain
             // has taken the host out of the slot): the Stop must not be
             // lost to an empty slot.
@@ -987,6 +1475,9 @@ impl Session {
     pub fn locate(&self, tick: i64) -> Result<(), VizError> {
         self.transport_call(|| {
             let mut inner = lock(&self.inner);
+            if inner.recording.is_some() {
+                return Err(recording_busy());
+            }
             if !host::locate(self.id, Tick(tick))? {
                 inner.cursor = Some(Tick(tick));
                 inner.cursor_seq = inner.selected_seq();
@@ -999,6 +1490,9 @@ impl Session {
     pub fn set_loop(&self, on: bool) -> Result<(), VizError> {
         self.transport_call(|| {
             let mut inner = lock(&self.inner);
+            if inner.recording.is_some() {
+                return Err(recording_busy());
+            }
             inner.looped = on;
             host::set_loop(self.id, on)
         })
@@ -1038,11 +1532,16 @@ impl Session {
                     device: h.device,
                     faults: {
                         h.faults.extend(inner.reload_fault.clone());
+                        for f in &inner.record_faults {
+                            add_fault(&mut h.faults, f);
+                        }
                         h.faults
                     },
                     report: h.report,
                     host_time_ns: h.host_time_ns,
                     ticks_per_second: crate::clock::ticks_per_second(doc, Some(h.seq), h.tick),
+                    rate_mismatch: h.rate_mismatch,
+                    counting_in: h.counting_in,
                 },
                 None => {
                     let tick = inner.cursor.unwrap_or(Tick::ZERO);
@@ -1057,10 +1556,17 @@ impl Session {
                         seconds: seq.map_or(0.0, |s| seconds(doc, s, tick)),
                         sample_rate: 0.0,
                         device: String::new(),
-                        faults: inner.reload_fault.iter().cloned().collect(),
+                        faults: inner
+                            .reload_fault
+                            .iter()
+                            .chain(&inner.record_faults)
+                            .cloned()
+                            .collect(),
                         report: Vec::new(),
                         host_time_ns,
                         ticks_per_second: crate::clock::ticks_per_second(doc, seq, tick),
+                        rate_mismatch: false,
+                        counting_in: false,
                     }
                 }
             })
@@ -1081,6 +1587,8 @@ impl Session {
                 slots_changed: false,
                 params_changed: Vec::new(),
                 problems: Vec::new(),
+                media_changed: false,
+                overviews_changed: false,
             };
             // A nested run loop inside a plugin call: skip this tick (before
             // taking the session lock, which that call may hold).
@@ -1089,11 +1597,93 @@ impl Session {
             }
             plugins::tick_closing();
             self.unload_disabled();
+            self.service_recording()?;
+            // An arm's claim another window's opening input put off (Task
+            // 8 parked n2); the sources were reconnected at the arm.
+            let owed = lock(&self.inner).claim_owed;
+            if let Some(seq) = owed {
+                self.claim(seq);
+            }
             let mut inner = lock(&self.inner);
+            self.apply_pending_pass(&mut inner);
+            // A save at Stop the busy registry put off (Task 9 review M4).
+            self.save_after_pass_now(&mut inner);
+            // A setting a load publishes changed (plan 5d-1 Ruling 12).
+            let epoch = crate::audio::epoch();
+            if inner.settings_seen != epoch {
+                inner.settings_seen = epoch;
+                inner.reload_owed |= host::holder() == Some(self.id);
+            }
             if inner.reload_owed {
                 inner.reload_host(self.id);
             }
             let changed = self.pump(&mut inner);
+            // Jobs applied when an edit closed (outside `idle`) count too.
+            let owed = std::mem::take(&mut inner.news.media_changed);
+            let jobs_changed = self.apply_jobs(&mut inner);
+            let mut stream_failed = false;
+            for (m, why) in host::take_stream_errors(self.id) {
+                inner
+                    .offline
+                    .insert(m, crate::media::OfflineReasonRow::Unreadable);
+                inner
+                    .news
+                    .problems
+                    .push(format!("media {m} went offline: {why}"));
+                stream_failed = true;
+            }
+            if stream_failed {
+                // The failed items leave the engine's table (also after a
+                // job reloaded it above), so a recheck that finds them
+                // back lists them again and the streamer reopens them
+                // (final review I2).
+                let root = inner.root(self.id);
+                let files = crate::media::files(inner.doc(), &root, &inner.offline);
+                host::set_media(self.id, files);
+                inner.reload_host(self.id);
+            }
+            // What the overview worker found (plan 5b Ruling 2).
+            let found = inner.overviews.take_news();
+            let mut hash_news = false;
+            // In the order found: the latest finding for an item wins
+            // (review m1).
+            for f in found.found {
+                match f {
+                    crate::overviews::Finding::Mismatch {
+                        media: m,
+                        path,
+                        hash,
+                    } => {
+                        if inner.changed.get(&m) == Some(&(path.clone(), hash.clone())) {
+                            continue;
+                        }
+                        let name = inner
+                            .doc()
+                            .media()
+                            .get(&m)
+                            .map_or_else(|| m.to_string(), |x| x.name.clone());
+                        inner.news.problems.push(format!(
+                            "{name}: the file no longer holds the audio this project expects; it stays silent until it is relinked or restored"
+                        ));
+                        inner.changed.insert(m, (path, hash));
+                        hash_news = true;
+                    }
+                    crate::overviews::Finding::Verified { media: m, path } => {
+                        if inner.changed.get(&m).is_some_and(|(p, _)| *p == path) {
+                            inner.changed.remove(&m);
+                            hash_news = true;
+                        }
+                    }
+                }
+            }
+            if hash_news {
+                // Not a re-verification: a still-changed file is not read
+                // again in a loop.
+                inner.refresh_media_with(self.id, true, false);
+                inner.reload_host(self.id);
+            }
+            let media_changed = jobs_changed || owed || stream_failed || hash_news;
+            let changed = changed || jobs_changed;
             let n = std::mem::take(&mut inner.news);
             Ok(IdleUpdate {
                 snapshot: if changed || n.doc_changed {
@@ -1104,6 +1694,8 @@ impl Session {
                 slots_changed: n.slots_changed,
                 params_changed: n.params_changed.into_iter().collect(),
                 problems: n.problems,
+                media_changed,
+                overviews_changed: found.changed,
             })
         })
     }
@@ -1240,6 +1832,7 @@ impl Session {
             }
             inner.edit_label = None;
             self.commit_held(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
         })
     }
@@ -1479,8 +2072,66 @@ impl Session {
                         DestKind::PluginInstrument { slot } => Some((&slot.plugin).into()),
                         DestKind::MidiEndpoint { .. } => None,
                     },
+                    external: d.kind.is_external(),
+                    return_latency_ms: d.return_latency_ms,
                 })
                 .collect())
+        })
+    }
+
+    /// "New MIDI Destination…" (plan 5d-1 Ruling 25): a destination named
+    /// `name` playing CoreMIDI destination `port` on `channel` (0–15), one
+    /// undo step "Add Destination". `Model` for an empty or over-long name
+    /// or port (1–255 characters, no control characters), a port
+    /// [`crate::host::midi_destination_ports`] does not list (matched as
+    /// given, untrimmed) or a reserved reference, or a channel above 15.
+    /// The same name, port and channel again make another destination.
+    pub fn add_midi_destination(
+        &self,
+        name: String,
+        port: String,
+        channel: u8,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let name = name.trim().to_string();
+            // The port is matched as given: a CoreMIDI name may have
+            // edge spaces (Task 11 review m5).
+            for (what, v) in [("name", &name), ("port", &port)] {
+                if v.trim().is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control)
+                {
+                    return Err(crate::events::bad(&format!(
+                        "the destination's {what} is 1 to 255 characters"
+                    )));
+                }
+            }
+            if channel > 15 {
+                return Err(crate::events::bad(
+                    "the MIDI channel is 0 to 15 (MIDI channels 1 to 16)",
+                ));
+            }
+            // A device named like a reserved reference would play the
+            // built-in synth or the virtual output (Task 11 review m5).
+            if port == core_model::mixer::BUILTIN_SYNTH_REF
+                || port == core_engine::schedule::targets::VIRTUAL_OUT_REF
+            {
+                return Err(crate::events::bad(&format!(
+                    "{port:?} is reserved; choose a MIDI destination"
+                )));
+            }
+            if !crate::host::midi_destination_ports().contains(&port) {
+                return Err(crate::events::bad(&format!(
+                    "no MIDI destination named {port:?}"
+                )));
+            }
+            self.execute(Command::Routing(RoutingCmd::AddDestination {
+                name,
+                kind: DestKind::MidiEndpoint {
+                    endpoint_ref: port,
+                    group: 0,
+                    channel,
+                },
+                default_patch: None,
+            }))
         })
     }
 
@@ -1727,6 +2378,15 @@ impl Session {
         })
     }
 
+    /// Holds this session's job threads before they start (`true`), or
+    /// lets them go (test hook).
+    pub fn debug_hold_jobs(&self, on: bool) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).jobs.set_held(on);
+            Ok(())
+        })
+    }
+
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
@@ -1781,11 +2441,109 @@ impl Session {
     /// marker goes. Safe to call more than once.
     pub fn close(&self) -> Result<(), VizError> {
         ffi_guard(|| {
-            let mut inner = lock(&self.inner);
+            // What finishing a pass here says: no `idle` follows a close
+            // (review minor c).
+            let before = lock(&self.inner).news.problems.len();
+            let mut inner = loop {
+                // A pass another thread is finishing lands first
+                // (pre-flight I1): its files are in no document yet.
+                self.wait_finished()?;
+                // A recording ends cleanly first: its files are finished,
+                // its pass applied (what is not saved then goes to the
+                // Trash).
+                if lock(&self.inner).recording.is_some() {
+                    self.finish_recording(None)?;
+                }
+                // Another thread may have started finishing meanwhile
+                // (review minor a): checked again under the lock kept.
+                let inner = lock(&self.inner);
+                if !inner.finishing && inner.recording.is_none() {
+                    break inner;
+                }
+            };
+            // A save at Stop the busy registry put off is made now: no
+            // `idle` follows a close, and the take was promised saved
+            // (Task 9 parked m3; a failure is printed below).
+            self.save_after_pass_now(&mut inner);
+            for line in inner.news.problems.iter().skip(before) {
+                eprintln!("VizDAW: {line}");
+            }
             inner.closed = true;
+            // The engine is let go now, not at the drop: a measurement
+            // running on another thread ends with the window (Task 9
+            // review M4).
+            host::release(self.id);
+            let root = inner.root(self.id);
+            let keep = inner.kept();
+            for w in inner.jobs.shutdown() {
+                discard(&root, w, &keep);
+            }
+            inner.overviews.shutdown();
+            if let Some(p) = inner.path.clone() {
+                // The jobs were shut down and their files removed above,
+                // and the overview worker has stopped. Under the save
+                // lock, as after a save (an autosave may be writing).
+                let _g = lock(&SAVE_LOCK);
+                let before = inner.news.problems.len();
+                // Takes kept since the last save stay kept (plan 5c Task
+                // 10), saved or not.
+                inner.write_kept(&p);
+                before_close_tidy();
+                inner.tidy(&p, true);
+                // No `idle` follows a close: the problems would be lost
+                // (preflight M5).
+                for line in inner.news.problems.iter().skip(before) {
+                    eprintln!("VizDAW: {line}");
+                }
+            }
+            host::forget_media(self.id);
+            if inner.path.is_none() {
+                let scratch = crate::media::scratch_root(self.id);
+                // Recordings are never unlinked: an untitled project's go
+                // to the Trash before its scratch package is removed
+                // (plan 5c Ruling 15).
+                let dir = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                let mut left = 0usize;
+                let recorded = scratch.join(crate::record::RECORDED_DIR);
+                match std::fs::read_dir(&recorded) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    // Unreadable: recordings may be in it (review minor b).
+                    Err(e) => {
+                        eprintln!("VizDAW: {}: not read ({e})", recorded.display());
+                        left += 1;
+                    }
+                    Ok(rd) => {
+                        for e in rd.flatten() {
+                            if e.path().is_file() {
+                                if let Err(why) = crate::retention::trash(dir.as_deref(), &e.path())
+                                {
+                                    eprintln!(
+                                        "VizDAW: {}: not moved to the Trash ({why})",
+                                        e.path().display()
+                                    );
+                                    left += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if left == 0 {
+                    let _ = std::fs::remove_dir_all(scratch);
+                } else {
+                    // Never unlinked (pre-flight I2): the package stays.
+                    eprintln!(
+                        "VizDAW: {left} recording(s) were left in {}",
+                        scratch.display()
+                    );
+                }
+            }
             if let Some(k) = inner.key.clone() {
                 recovery::closed(&k, self.id);
             }
+            // Last (final review M1): an open of this package meanwhile
+            // would read a keep file being rewritten and offer files the
+            // tidy is moving to the Trash.
+            release_packages(self.id);
             Ok(())
         })
     }
@@ -1807,6 +2565,7 @@ pub fn simulate_crash(s: Arc<Session>) {
     if let Some(p) = lock(&s.inner).path.clone() {
         recovery::forget_open(&p);
     }
+    release_packages(s.id);
     std::mem::forget(s);
 }
 
@@ -1879,26 +2638,99 @@ impl Session {
     }
 }
 
-/// The `edit_all` that panics (test hook): its label and the 0-based
-/// command it panics before.
+/// Test hooks that are not part of the app's interface.
 #[cfg(feature = "test-hooks")]
-static EDIT_ALL_PANIC: Mutex<Option<(String, usize)>> = Mutex::new(None);
+impl Session {
+    /// The engine host's media table for this session: `(media, absolute
+    /// path)` of every file reloads play (test hook, preflight M2).
+    pub fn debug_engine_media(&self) -> Vec<(u64, String)> {
+        host::debug_media(self.id)
+    }
 
-/// Makes the next `edit_all` (or step entry edit) named `label` panic
-/// before command `step` (0-based); `None` clears it (test hook, Plan 4d
-/// Ruling 1).
+    /// The input routes the engine was last given for this session (test
+    /// hook, plan 5c Task 8).
+    pub fn debug_engine_inputs(&self) -> Option<core_engine::input::InputSpec> {
+        host::debug_inputs(self.id)
+    }
+
+    /// Whether the engine host has its audio input open for this session
+    /// (test hook, Task 11 review I1).
+    pub fn debug_input_open(&self) -> Option<bool> {
+        host::debug_input_open(self.id)
+    }
+
+    /// How many times the engine host opened or closed its input (test
+    /// hook).
+    pub fn debug_input_changes(&self) -> Option<u64> {
+        host::debug_input_changes(self.id)
+    }
+
+    /// True when every job thread has ended, applied or not (test hook).
+    pub fn debug_jobs_settled(&self) -> bool {
+        lock(&self.inner).jobs.settled()
+    }
+
+    /// True when the overview worker has nothing to do (test hook).
+    pub fn debug_overviews_idle(&self) -> bool {
+        lock(&self.inner).overviews.idle()
+    }
+
+    /// Holds the overview worker (`true`) or lets it go (test hook).
+    pub fn debug_hold_overviews(&self, on: bool) {
+        lock(&self.inner).overviews.set_held(on);
+    }
+
+    /// Forgets every loaded overview (test hook).
+    pub fn debug_forget_overviews(&self) {
+        lock(&self.inner).overviews.forget_all();
+    }
+
+    /// Holds (`true`) or releases the finishing of every recording pass
+    /// (test hook, pre-flight I1; see [`crate::record::set_hold_finish`]).
+    pub fn debug_hold_finish(&self, on: bool) {
+        crate::record::set_hold_finish(on);
+    }
+
+    /// The folder this session's retention moves files into instead of
+    /// the Trash (test hook; `None`: back to the default).
+    pub fn debug_set_trash_dir(&self, dir: Option<String>) {
+        lock(&self.inner).trash_dir = dir.map(PathBuf::from);
+    }
+
+    /// Makes the overview worker's next task panic (test hook, preflight
+    /// M10).
+    pub fn debug_panic_overviews(&self) {
+        lock(&self.inner).overviews.panic_next();
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    /// The `edit_all` that panics (test hook): its label and the 0-based
+    /// command it panics before. Per thread (final review m8): tests run
+    /// in parallel threads and each calls `edit_all`/`step_entry` on its
+    /// own, so one test's injection never reaches another's call.
+    static EDIT_ALL_PANIC: std::cell::RefCell<Option<(String, usize)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Makes the next `edit_all` (or step entry edit) named `label` called on
+/// this thread panic before command `step` (0-based); `None` clears it
+/// (test hook, Plan 4d Ruling 1).
 #[cfg(feature = "test-hooks")]
 pub fn inject_edit_all_panic(label: Option<&str>, step: usize) {
-    *lock(&EDIT_ALL_PANIC) = label.map(|l| (l.to_string(), step));
+    EDIT_ALL_PANIC.with(|p| *p.borrow_mut() = label.map(|l| (l.to_string(), step)));
 }
 
 /// Panics when `edit_all` `label` reaches the injected `step`.
 #[cfg(feature = "test-hooks")]
 #[allow(clippy::panic)]
 fn edit_all_hook(label: &str, step: usize) {
-    let hit = lock(&EDIT_ALL_PANIC)
-        .as_ref()
-        .is_some_and(|(l, s)| l == label && *s == step);
+    let hit = EDIT_ALL_PANIC.with(|p| {
+        p.borrow()
+            .as_ref()
+            .is_some_and(|(l, s)| l == label && *s == step)
+    });
     if hit {
         panic!("injected edit_all panic");
     }
@@ -1907,13 +2739,65 @@ fn edit_all_hook(label: &str, step: usize) {
 #[cfg(not(feature = "test-hooks"))]
 fn edit_all_hook(_label: &str, _step: usize) {}
 
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    /// What runs on this thread inside an edit's command, between its
+    /// checks and the locked apply (test hook, Task 9 review M5).
+    static BEFORE_EXECUTE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` the next time an edit on this thread is about to apply its
+/// command under the session lock; `None` clears it (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn set_before_execute_hook(f: Option<Box<dyn FnOnce()>>) {
+    BEFORE_EXECUTE.with(|h| *h.borrow_mut() = f);
+}
+
+#[cfg(feature = "test-hooks")]
+fn before_execute() {
+    if let Some(f) = BEFORE_EXECUTE.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn before_execute() {}
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    /// What runs on this thread right before `close` tidies its package
+    /// (test hook, final review M1).
+    static BEFORE_CLOSE_TIDY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` the next time `close` on this thread is about to tidy its
+/// package; `None` clears it (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn set_before_close_tidy_hook(f: Option<Box<dyn FnOnce()>>) {
+    BEFORE_CLOSE_TIDY.with(|h| *h.borrow_mut() = f);
+}
+
+#[cfg(feature = "test-hooks")]
+fn before_close_tidy() {
+    if let Some(f) = BEFORE_CLOSE_TIDY.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn before_close_tidy() {}
+
 /// Editor edits (spec §3.2, §3.8).
 #[uniffi::export]
 impl Session {
     /// Applies an editor command as one undo step. `filter` hides kinds and
-    /// lanes from commands that act on the selection. `Model` error while an
+    /// lanes from commands that act on the selection. `Busy` while an
     /// edit `begin_edit` opened is in progress (a drag, a fader): joining it
-    /// would merge the command into that undo step, or lose it on abort.
+    /// would merge the command into that undo step, or lose it on abort
+    /// (plan 5d-1 Ruling 20). `Busy` [`RECORDING_LANES`] for an arm or
+    /// input change while recording (Ruling 18).
     pub fn edit(
         &self,
         cmd: crate::edit::EditCommand,
@@ -1921,8 +2805,9 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             if lock(&self.inner).edit_label.is_some() {
-                return Err(crate::events::bad("finish the open edit first"));
+                return Err(edit_open_busy());
             }
+            self.check_records(std::slice::from_ref(&cmd))?;
             let filter = crate::edit::view_filter(filter.as_ref());
             if matches!(cmd, crate::edit::EditCommand::ModifyAgain) {
                 return self.modify_again_with(&filter);
@@ -1931,7 +2816,23 @@ impl Session {
                 crate::modify::check_settings_edit(lock(&self.inner).doc(), edit)?;
             }
             let c = crate::edit::to_command(&cmd)?;
-            self.execute_with(c, &filter)
+            // Add Lane gives the lane the default monitor mode (plan 5d-1
+            // Ruling 11).
+            let monitor = crate::audio::default_monitor();
+            if let (
+                crate::edit::EditCommand::Lane {
+                    edit: crate::edit::LaneEdit::Add { seq, .. },
+                },
+                false,
+            ) = (&cmd, monitor == core_model::lane::MonitorMode::Auto)
+            {
+                return self.add_lane_monitored(c, SeqId(*seq), monitor, &filter);
+            }
+            let snapshot = self.execute_with(c, &filter)?;
+            if let Some(seq) = crate::edit::claims_engine(&cmd) {
+                self.claim_for_input(SeqId(seq));
+            }
+            Ok(snapshot)
         })
     }
 
@@ -1949,8 +2850,9 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             if lock(&self.inner).edit_label.is_some() {
-                return Err(crate::events::bad("finish the open edit first"));
+                return Err(edit_open_busy());
             }
+            self.check_records(&cmds)?;
             let filter = crate::edit::view_filter(filter.as_ref());
             let mut core = Vec::with_capacity(cmds.len());
             for cmd in &cmds {
@@ -1997,6 +2899,7 @@ impl Session {
                 inner.version += 1;
                 inner.reload_host(self.id);
                 self.commit_held(&mut inner);
+                self.apply_jobs_after_edit(&mut inner);
                 return Err(e);
             }
             let mut inner = lock(&self.inner);
@@ -2004,7 +2907,13 @@ impl Session {
             inner.history.commit()?;
             inner.version += 1;
             self.commit_held(&mut inner);
-            inner.snapshot()
+            self.apply_jobs_after_edit(&mut inner);
+            let snapshot = inner.snapshot()?;
+            drop(inner);
+            if let Some(seq) = cmds.iter().find_map(crate::edit::claims_engine) {
+                self.claim_for_input(SeqId(seq));
+            }
+            Ok(snapshot)
         })
     }
 
@@ -2019,6 +2928,9 @@ impl Session {
         filter: Option<crate::edit::ViewFilterRow>,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
+            // Before the rewind: a refused step keeps the gesture's last
+            // one (plan 5d-1 Ruling 18).
+            self.check_records(std::slice::from_ref(&cmd))?;
             let c = crate::edit::to_command(&cmd)?;
             {
                 let mut inner = lock(&self.inner);
@@ -2053,6 +2965,7 @@ impl Session {
             }
             inner.edit_label = None;
             self.commit_held(&mut inner);
+            self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
         })
     }
@@ -2081,7 +2994,7 @@ impl Session {
             let (seq_id, lane_id, next, effect, live) = {
                 let inner = lock(&self.inner);
                 if inner.edit_label.is_some() {
-                    return Err(crate::events::bad("finish the open edit first"));
+                    return Err(edit_open_busy());
                 }
                 let doc = inner.doc();
                 let seq_id = seq_id(doc, seq)?;
@@ -2293,7 +3206,7 @@ impl Session {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
             if inner.history.in_transaction() {
-                return Err(crate::events::bad("finish the open edit first"));
+                return Err(edit_open_busy());
             }
             inner.history.begin("New Sequence from Template")?;
             match crate::templates::build(&mut inner.history, &name, &template) {
@@ -2334,11 +3247,2585 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(k) = lock(&self.inner).key.clone() {
+        let (key, recording) = {
+            let inner = lock(&self.inner);
+            (inner.key.clone(), inner.recording.is_some())
+        };
+        // Dropped while recording without `close`: the tap goes with the
+        // writer, whose files stay for the recovery offer.
+        if recording {
+            let _ = host::stop_recording(self.id);
+        }
+        release_packages(self.id);
+        if let Some(k) = key {
             recovery::closed(&k, self.id);
         }
         // The engine goes first when this session's plugin host feeds it;
         // queued if a plugin call is running (re-entrancy, plugins.rs).
         plugins::close_session(self.id);
+    }
+}
+
+/// Removes the file `rel` a job wrote under `root`, unless `keep` (lower
+/// case, [`Inner::kept`]) holds it: a history state references it, so it
+/// is no longer only the job's (Task 6 review m1).
+fn remove_unkept(root: &Path, rel: &str, keep: &std::collections::BTreeSet<String>) {
+    if !keep.contains(&rel.to_lowercase()) {
+        let _ = std::fs::remove_file(root.join(rel));
+    }
+}
+
+/// Removes the files of a job that was never applied (`root` is the
+/// session's media root), except those `keep` holds ([`remove_unkept`];
+/// job threads, which cannot see the history, pass an empty set).
+pub(crate) fn discard(
+    root: &Path,
+    w: crate::jobs::Work,
+    keep: &std::collections::BTreeSet<String>,
+) {
+    use crate::jobs::Work;
+    let files: Vec<String> = match w {
+        Work::Import { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .map(|i| i.path)
+            .collect(),
+        Work::Convert { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .map(|i| i.path)
+            .collect(),
+        // Only files the job wrote; a file it found in `Media/` stays.
+        Work::Relink { files } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .filter(|r| r.made)
+            .map(|r| r.file.path)
+            .collect(),
+        Work::Cancelled => Vec::new(),
+    };
+    for f in files {
+        remove_unkept(root, &f, keep);
+    }
+}
+
+impl Session {
+    /// Applies every finished job (one undo step each); true when the
+    /// document changed.
+    ///
+    /// Not while an edit (a drag, a fader move) is open (final review
+    /// I1): the job would join that edit's undo step, be refused ("a
+    /// transaction is already open"), or be rolled back by the next
+    /// pointer move. Finished jobs then stay pending (reported Running,
+    /// `busy()` stays true) and apply when the edit closes:
+    /// `end_edit`/`abort_edit` call [`Session::apply_jobs_after_edit`],
+    /// and `idle`/`job` apply them too.
+    fn apply_jobs(&self, inner: &mut Inner) -> bool {
+        use crate::jobs::{JobStateRow, Work, row};
+        if inner.history.in_transaction() {
+            return false;
+        }
+        let mut changed = false;
+        for (id, kind, work) in inner.jobs.finished() {
+            let root = inner.root(self.id);
+            let row = match work {
+                Work::Cancelled => row(id, kind, JobStateRow::Cancelled, None, vec![], vec![]),
+                Work::Import { files, target } => match apply_import(inner, &root, files, target) {
+                    Ok((created, problems)) => {
+                        changed |= !created.is_empty();
+                        row(id, kind, JobStateRow::Done, None, problems, created)
+                    }
+                    Err((e, problems)) => row(
+                        id,
+                        kind,
+                        JobStateRow::Failed,
+                        Some(e.to_string()),
+                        problems,
+                        vec![],
+                    ),
+                },
+                Work::Relink { files } => {
+                    let (done, problems) = apply_relink(inner, &root, files);
+                    changed |= !done.is_empty();
+                    row(id, kind, JobStateRow::Done, None, problems, done)
+                }
+                Work::Convert { format, files, .. } => {
+                    let was_format = format.is_some();
+                    match apply_convert(inner, &root, format, files) {
+                        Ok((converted, problems)) => {
+                            changed |= !converted.is_empty() || was_format;
+                            row(id, kind, JobStateRow::Done, None, problems, converted)
+                        }
+                        Err((e, problems)) => row(
+                            id,
+                            kind,
+                            JobStateRow::Failed,
+                            Some(e.to_string()),
+                            problems,
+                            vec![],
+                        ),
+                    }
+                }
+            };
+            inner.jobs.finish(id, row);
+        }
+        if changed {
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(inner);
+        }
+        changed
+    }
+
+    /// Applies the jobs that finished (while an edit was open, now that it
+    /// closed, or before a new job starts; Task 6 review m7); the next
+    /// `idle` reports the media and document change.
+    fn apply_jobs_after_edit(&self, inner: &mut Inner) {
+        if self.apply_jobs(inner) {
+            inner.news.media_changed = true;
+            inner.news.doc_changed = true;
+        }
+        self.apply_pending_pass(inner);
+    }
+}
+
+/// One import job's result per source file: `(file name, the items it
+/// became or why it failed)`.
+type ImportFiles = Vec<(String, Result<Vec<core_media::import::Imported>, String>)>;
+
+/// What an applied import made (media IDs, per-file problems), or why
+/// nothing was applied (with the per-file problems).
+type ImportApplied = Result<(Vec<u64>, Vec<String>), (VizError, Vec<String>)>;
+
+/// One finished import (Ruling 19): the media items and, with a target,
+/// their regions (into the given lane for a single mono/stereo file, else
+/// one new "Audio n" lane per item), as one undo step "Import Audio".
+/// On an error nothing is applied and the written files are removed.
+fn apply_import(
+    inner: &mut Inner,
+    root: &Path,
+    files: ImportFiles,
+    target: Option<crate::jobs::ImportTargetRow>,
+) -> ImportApplied {
+    use core_model::command::{AudioCmd, MediaCmd};
+    use core_model::document::MediaOrigin;
+    use core_model::event::Fade;
+    let mut problems = Vec::new();
+    let mut items = Vec::new();
+    for (name, r) in files {
+        match r {
+            Ok(v) => items.push(v),
+            Err(e) => problems.push(format!("{name}: {e}")),
+        }
+    }
+    let written: Vec<String> = items.iter().flatten().map(|i| i.path.clone()).collect();
+    let keep = inner.kept();
+    if items.is_empty() {
+        return Ok((Vec::new(), problems));
+    }
+    let single = items.len() == 1 && items.first().is_some_and(|v| v.len() == 1);
+    let filter = ViewFilter::default();
+    let h = &mut inner.history;
+    let fail = |e: VizError, problems: Vec<String>| {
+        for p in &written {
+            remove_unkept(root, p, &keep);
+        }
+        (e, problems)
+    };
+    if let Err(e) = h.begin("Import Audio") {
+        return Err(fail(e.into(), problems));
+    }
+    let run = (|| -> Result<Vec<u64>, VizError> {
+        let mut created = Vec::new();
+        for item in items.iter().flatten() {
+            let r = h.execute(
+                &Command::Media(MediaCmd::Add {
+                    path: item.path.clone(),
+                    sample_rate: item.sample_rate,
+                    channels: item.channels,
+                    length_frames: item.length_frames,
+                    content_hash: Some(item.content_hash.clone()),
+                    name: Some(item.name.clone()),
+                    origin: Some(MediaOrigin::Imported {
+                        original_name: item.original_name.clone(),
+                    }),
+                }),
+                &filter,
+            )?;
+            let media = r
+                .created
+                .iter()
+                .find_map(|id| match id {
+                    core_model::ids::AnyId::Media(m) => Some(*m),
+                    _ => None,
+                })
+                .ok_or_else(|| VizError::Internal {
+                    message: "no media created".into(),
+                })?;
+            created.push(media.0);
+            let Some(t) = target else { continue };
+            let seq = SeqId(t.seq);
+            let lane = match t.lane {
+                Some(l) if single => LaneId(l),
+                _ => {
+                    let n = h.doc().sequence(seq)?.lanes.len() + 1;
+                    let r = h.execute(
+                        &Command::Lane(LaneCmd::Add {
+                            seq,
+                            name: format!("Audio {n}"),
+                            index: None,
+                        }),
+                        &filter,
+                    )?;
+                    r.created
+                        .iter()
+                        .find_map(|id| match id {
+                            core_model::ids::AnyId::Lane(l) => Some(*l),
+                            _ => None,
+                        })
+                        .ok_or_else(|| VizError::Internal {
+                            message: "no lane created".into(),
+                        })?
+                }
+            };
+            h.execute(
+                &Command::Audio(AudioCmd::Insert {
+                    seq,
+                    lane,
+                    tick: Tick(t.tick.max(0)),
+                    media,
+                    source_offset: 0,
+                    length: item.length_frames,
+                    gain_db: 0.0,
+                    fade_in: Fade::default(),
+                    fade_out: Fade::default(),
+                }),
+                &filter,
+            )?;
+        }
+        Ok(created)
+    })();
+    match run {
+        Ok(created) => match h.commit() {
+            Ok(()) => Ok((created, problems)),
+            Err(e) => Err(fail(e.into(), problems)),
+        },
+        Err(e) => {
+            let _ = h.abort();
+            Err(fail(e, problems))
+        }
+    }
+}
+
+/// Applies a finished relink job: one undo step "Relink Media" per item
+/// (Ruling 9). A refused relink (the file is too short) removes the file
+/// the job made and becomes a problem. Returns the relinked items and
+/// the problems.
+fn apply_relink(
+    inner: &mut Inner,
+    root: &Path,
+    files: Vec<(
+        core_model::ids::MediaId,
+        Result<crate::jobs::RelinkFile, String>,
+    )>,
+) -> (Vec<u64>, Vec<String>) {
+    use core_model::command::MediaCmd;
+    let mut done = Vec::new();
+    let mut problems = Vec::new();
+    // Files this job wrote for relinks that were refused: removed only
+    // after the whole batch, and only if no state names them, since a
+    // search gives every item of one hash the same file (5b final review
+    // m2).
+    let mut refused: Vec<String> = Vec::new();
+    for (m, r) in files {
+        let f = match r {
+            Ok(f) => f,
+            Err(e) => {
+                problems.push(e);
+                continue;
+            }
+        };
+        let name = inner
+            .doc()
+            .media()
+            .get(&m)
+            .map_or_else(|| m.to_string(), |x| x.name.clone());
+        // Never the model's region-length refusal for a file without
+        // audio (Task 1 carry); `relink_file` refuses one already.
+        if f.file.length_frames == 0 {
+            if f.made {
+                refused.push(f.file.path.clone());
+            }
+            problems.push(format!("{name}: the file holds no audio"));
+            continue;
+        }
+        let cmd = Command::Media(MediaCmd::Relink {
+            media: m,
+            path: f.file.path.clone(),
+            content_hash: Some(f.file.content_hash.clone()),
+            length_frames: f.file.length_frames,
+            channels: f.file.channels,
+            sample_rate: f.file.sample_rate,
+        });
+        match inner.history.execute(&cmd, &ViewFilter::default()) {
+            Ok(_) => {
+                inner.changed.remove(&m);
+                done.push(m.0);
+            }
+            Err(e) => {
+                if f.made {
+                    refused.push(f.file.path.clone());
+                }
+                let why = match e {
+                    core_model::ModelError::OutOfRange {
+                        field: "relink.length_frames",
+                        ..
+                    } => "the file is shorter than the regions using this item".to_string(),
+                    other => other.to_string(),
+                };
+                problems.push(format!("{name}: {why}"));
+            }
+        }
+    }
+    let keep = inner.kept();
+    for p in refused {
+        remove_unkept(root, &p, &keep);
+    }
+    (done, problems)
+}
+
+/// `(media, absolute file, stem)` per item to convert.
+type ConvertList = Vec<(core_model::ids::MediaId, PathBuf, String)>;
+
+/// One conversion job's result per media item: the new file, or why it
+/// failed.
+type ConvertFiles = Vec<(
+    core_model::ids::MediaId,
+    Result<core_media::import::Imported, String>,
+)>;
+
+/// What an applied conversion converted (media IDs, per-item problems), or
+/// why nothing was applied (with the per-item problems).
+type ConvertApplied = ImportApplied;
+
+/// `(media, absolute file, stem)` of the items `pick` chooses.
+fn convert_list(
+    inner: &Inner,
+    id: u64,
+    pick: impl Fn(core_model::ids::MediaId) -> bool,
+) -> ConvertList {
+    let root = inner.root(id);
+    inner
+        .doc()
+        .media()
+        .values()
+        .filter(|m| pick(m.id))
+        .map(|m| {
+            let (_, stem) = core_model::document::MediaItem::file_parts(&m.path);
+            (m.id, root.join(&m.path), stem)
+        })
+        .collect()
+}
+
+/// The conversion job's body: each file through the platform importer
+/// into the project's `Media/` in `format`. Every result is a new file
+/// under the first free name after the item's stem; the old files are
+/// only read (media files are write-once: Save As hard-links them between
+/// packages), and stay for undo.
+fn convert_files(
+    root: &Path,
+    items: ConvertList,
+    format: core_model::format::AudioFormat,
+    reserved: &std::collections::BTreeSet<String>,
+    progress: &std::sync::atomic::AtomicU32,
+    cancel: &std::sync::atomic::AtomicBool,
+    kind: crate::jobs::JobKindRow,
+) -> crate::jobs::Work {
+    let importer = crate::media::importer();
+    let n = items.len().max(1) as f32;
+    let mut files: ConvertFiles = Vec::new();
+    for (k, (media, path, stem)) in items.into_iter().enumerate() {
+        let r = crate::relink::regular_file(&path).and_then(|()| {
+            core_media::import::import_reserved(
+                importer.as_ref(),
+                &path,
+                root,
+                format,
+                &stem,
+                reserved,
+                &mut |f| {
+                    progress.store(
+                        ((k as f32 + f) / n).to_bits(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                },
+                cancel,
+            )
+        });
+        match r {
+            Err(core_media::MediaError::Cancelled) => {
+                discard(
+                    root,
+                    crate::jobs::Work::Convert {
+                        kind,
+                        format: None,
+                        files,
+                    },
+                    &std::collections::BTreeSet::new(),
+                );
+                return crate::jobs::Work::Cancelled;
+            }
+            Ok(mut v) if v.len() == 1 => files.push((media, Ok(v.remove(0)))),
+            Ok(v) => {
+                discard(
+                    root,
+                    crate::jobs::Work::Import {
+                        files: vec![(stem.clone(), Ok(v))],
+                        target: None,
+                    },
+                    &std::collections::BTreeSet::new(),
+                );
+                files.push((media, Err(format!("{stem}: has more than two channels"))));
+            }
+            Err(e) => files.push((media, Err(format!("{stem}: {e}")))),
+        }
+    }
+    crate::jobs::Work::Convert {
+        kind,
+        format: (kind == crate::jobs::JobKindRow::Format).then_some(format),
+        files,
+    }
+}
+
+/// Applies a finished conversion. A format change applies only when every
+/// item converted (else nothing, the converted files are removed, and the
+/// failures are the message); a media conversion applies what converted
+/// and lists the rest as problems. Both swap the items to the new files
+/// and rescale their regions in one model step (`swap_media`); the old
+/// files are left as they are.
+fn apply_convert(
+    inner: &mut Inner,
+    root: &Path,
+    format: Option<core_model::format::AudioFormat>,
+    files: ConvertFiles,
+) -> ConvertApplied {
+    use core_model::command::{MediaCmd, MediaSwap, SettingsCmd};
+    let mut swaps = Vec::new();
+    let mut problems = Vec::new();
+    for (m, r) in &files {
+        match r {
+            Ok(i) => swaps.push(MediaSwap {
+                media: *m,
+                path: i.path.clone(),
+                length_frames: i.length_frames,
+                content_hash: Some(i.content_hash.clone()),
+            }),
+            Err(e) => problems.push(e.clone()),
+        }
+    }
+    // Only this job's new files: never referenced by any document yet.
+    let keep = inner.kept();
+    let remove = |files: &ConvertFiles| {
+        for (_, r) in files {
+            if let Ok(i) = r {
+                remove_unkept(root, &i.path, &keep);
+            }
+        }
+    };
+    let cmd = match format {
+        Some(f) => {
+            if !problems.is_empty() {
+                remove(&files);
+                return Err((
+                    VizError::Model {
+                        message: problems.join("; "),
+                    },
+                    problems,
+                ));
+            }
+            Command::Settings(SettingsCmd::SetFormat { format: f, swaps })
+        }
+        None => {
+            if swaps.is_empty() {
+                return Ok((Vec::new(), problems));
+            }
+            Command::Media(MediaCmd::Convert { swaps })
+        }
+    };
+    match inner.history.execute(&cmd, &ViewFilter::default()) {
+        Ok(_) => Ok((
+            files
+                .iter()
+                .filter(|(_, r)| r.is_ok())
+                .map(|(m, _)| m.0)
+                .collect(),
+            problems,
+        )),
+        Err(e) => {
+            remove(&files);
+            Err((e.into(), problems))
+        }
+    }
+}
+
+/// One region [`Session::normalize_regions`] measures, and what it was
+/// measured against.
+struct Measured {
+    id: core_model::ids::EventId,
+    media: core_model::ids::MediaId,
+    /// The item's path and hash when measured (preflight M4: checked
+    /// again before the command applies).
+    path: String,
+    hash: Option<String>,
+    name: String,
+    file: std::path::PathBuf,
+    /// The overview in memory, if it is this file's (preflight I1).
+    overview: Option<Arc<core_media::overview::Overview>>,
+    /// The frames the region plays.
+    from: u64,
+    to: u64,
+}
+
+/// A Normalize note as the user reads it: the model names a region by its
+/// event ID (`"ev12: gain limited …"`, `"ev4 is silent: …"`); the region's
+/// media name replaces the ID only when the ID matches whole, never as a
+/// prefix of a longer one (5b final review m1: `ev1` must not take
+/// `ev12`'s note).
+pub(crate) fn normalize_warning(w: &str, regions: &[(core_model::ids::EventId, &str)]) -> String {
+    for (id, name) in regions {
+        let id = id.to_string();
+        if let Some(rest) = w.strip_prefix(id.as_str()) {
+            if rest.starts_with(':') || rest.starts_with(' ') {
+                return format!("Normalize: a region of {name}{rest}");
+            }
+        }
+    }
+    format!("Normalize: {w}")
+}
+
+/// The packages open in this process, by [`package_key`], with the
+/// session holding each (review I-2: a second session on one package
+/// would move the first one's recordings to the Trash at its save).
+static PACKAGES: Mutex<std::collections::BTreeMap<String, u64>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// `path` as one package is named whatever the spelling: canonical (its
+/// folder's, for a package not made yet), in lower case as macOS volumes
+/// resolve names.
+fn package_key(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        match (std::fs::canonicalize(dir), path.file_name()) {
+            (Ok(d), Some(n)) => d.join(n),
+            _ => path.to_path_buf(),
+        }
+    });
+    canonical.to_string_lossy().to_lowercase()
+}
+
+/// "Already open" for `path`.
+fn already_open(path: &Path) -> VizError {
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    VizError::Busy {
+        message: format!("{name} is already open in another window."),
+    }
+}
+
+/// A claim on a package (re-review m-1): released when dropped unless
+/// [`PackageClaim::keep`] hands it to the session (which releases it at
+/// `close`, drop or a Save As elsewhere). A panic or an early return
+/// between claiming and the session existing therefore releases it.
+#[must_use = "dropping the claim releases the package"]
+struct PackageClaim {
+    key: String,
+    sid: u64,
+    /// This claim inserted the entry (a session re-claiming its own
+    /// package releases nothing on drop).
+    armed: bool,
+}
+
+impl PackageClaim {
+    /// The session holds the package from now on.
+    fn keep(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PackageClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut m = lock(&PACKAGES);
+            if m.get(&self.key) == Some(&self.sid) {
+                m.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Claims `path` for session `sid`, checked and inserted as one step under
+/// the registry lock (re-review m-2: two concurrent opens cannot both
+/// pass); the path is resolved before the lock is taken (m-3). `Busy`
+/// when another session holds it.
+fn claim_package(path: &Path, sid: u64) -> Result<PackageClaim, VizError> {
+    let key = package_key(path);
+    let mut m = lock(&PACKAGES);
+    match m.entry(key.clone()) {
+        std::collections::btree_map::Entry::Occupied(e) if *e.get() != sid => {
+            Err(already_open(path))
+        }
+        std::collections::btree_map::Entry::Occupied(_) => Ok(PackageClaim {
+            key,
+            sid,
+            armed: false,
+        }),
+        std::collections::btree_map::Entry::Vacant(e) => {
+            e.insert(sid);
+            Ok(PackageClaim {
+                key,
+                sid,
+                armed: true,
+            })
+        }
+    }
+}
+
+/// Session `sid` lets go of `path` (resolved before the lock).
+fn release_package(path: &Path, sid: u64) {
+    let key = package_key(path);
+    let mut m = lock(&PACKAGES);
+    if m.get(&key) == Some(&sid) {
+        m.remove(&key);
+    }
+}
+
+/// Session `sid` holds no package any more.
+fn release_packages(sid: u64) {
+    lock(&PACKAGES).retain(|_, s| *s != sid);
+}
+
+/// Adds fault name `f` to `faults` once.
+fn add_fault(faults: &mut Vec<String>, f: &str) {
+    if !faults.iter().any(|x| x == f) {
+        faults.push(f.to_string());
+    }
+}
+
+/// `Busy` while a recording runs or finishes.
+fn recording_busy() -> VizError {
+    VizError::Busy {
+        message: "Stop recording first.".into(),
+    }
+}
+
+/// Why an edit waits for the edit a drag or a fader opened (plan 5d-1
+/// Ruling 20: `Busy`, as Track Synth and Measure answer).
+fn edit_open_busy() -> VizError {
+    VizError::Busy {
+        message: "Finish the open edit first.".into(),
+    }
+}
+
+/// Why an arm or input change waits for Stop (plan 5d-1 Ruling 18).
+pub const RECORDING_LANES: &str = "Stop recording to change which lanes record.";
+
+/// `Busy` [`RECORDING_LANES`] while `inner` records, finishes a pass or
+/// waits to apply one.
+fn records_busy(inner: &Inner) -> Result<(), VizError> {
+    if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+        return Err(VizError::Busy {
+            message: RECORDING_LANES.into(),
+        });
+    }
+    Ok(())
+}
+
+/// "Busy" for Normalize.
+fn still_building(name: &str) -> VizError {
+    VizError::Busy {
+        message: format!("The waveform of {name} is still being built; try again in a moment."),
+    }
+}
+
+/// Region menu commands that need the overviews (plan 5b Task 5).
+#[uniffi::export]
+impl Session {
+    /// Normalize… (spec §4.4; plan 5b Ruling 5): sets each region among
+    /// `events` so its loudest sample reaches `peak_db` (−96…0 dBFS), as
+    /// one undo step "Normalize". Events that are not regions are ignored.
+    /// `Model` error for a bad target, no region, offline media or an open
+    /// edit; `Busy` while a region's overview is still being built, or when
+    /// an item's file changed while it was measured. No file is read under
+    /// the session lock (preflight M4).
+    pub fn normalize_regions(
+        &self,
+        events: Vec<u64>,
+        peak_db: f32,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            use core_media::overview::{Overview, Stamp, exact_peak};
+            use core_model::event::EventBody;
+            if !(peak_db.is_finite() && (-96.0..=0.0).contains(&peak_db)) {
+                return Err(crate::events::bad(
+                    "the peak must be a level from -96 to 0 dB",
+                ));
+            }
+            // Under the lock: what to measure and the overviews in memory.
+            let (root, mut measure) = {
+                let mut inner = lock(&self.inner);
+                if inner.edit_label.is_some() {
+                    return Err(edit_open_busy());
+                }
+                inner.refresh_media(self.id, false);
+                let root = inner.root(self.id);
+                let doc = inner.doc().clone();
+                let mut measure = Vec::new();
+                for e in &events {
+                    let id = core_model::ids::EventId(*e);
+                    let (ev, _) = doc.event(id)?;
+                    let EventBody::AudioRegion {
+                        media,
+                        source_offset,
+                        length,
+                        ..
+                    } = ev.body
+                    else {
+                        continue;
+                    };
+                    let m = doc
+                        .media()
+                        .get(&media)
+                        .ok_or_else(|| crate::events::bad(&format!("unknown media {media}")))?;
+                    if inner.offline.contains_key(&media) {
+                        return Err(crate::events::bad(&format!(
+                            "{} is offline: relink it first",
+                            m.name
+                        )));
+                    }
+                    // Only an overview of the audio the item names now.
+                    let overview = inner.overviews.get(media).filter(|o| {
+                        m.content_hash
+                            .as_deref()
+                            .is_none_or(|h| h == o.hash.as_str())
+                    });
+                    measure.push(Measured {
+                        id,
+                        media,
+                        path: m.path.clone(),
+                        hash: m.content_hash.clone(),
+                        name: m.name.clone(),
+                        file: root.join(&m.path),
+                        overview,
+                        from: source_offset,
+                        to: source_offset.saturating_add(length),
+                    });
+                }
+                (root, measure)
+            };
+            if measure.is_empty() {
+                return Err(crate::events::bad("select audio regions to normalize"));
+            }
+            // Without the lock: the cached overview file when it is this
+            // file's (so Normalize works right after an import), and the
+            // edge samples.
+            for x in &mut measure {
+                if x.overview.is_some() {
+                    continue;
+                }
+                x.overview = x.hash.as_deref().and_then(|h| {
+                    let o = Overview::read(&Overview::path(&root, h)?).ok()?;
+                    let st = Stamp::of(&x.file).ok()?;
+                    (o.hash == h && o.has_stamp(&st)).then(|| Arc::new(o))
+                });
+                if x.overview.is_none() {
+                    return Err(still_building(&x.name));
+                }
+            }
+            let io = |e: core_media::MediaError| VizError::Io {
+                message: e.to_string(),
+            };
+            let mut regions = Vec::with_capacity(measure.len());
+            for x in &measure {
+                let Some(ov) = &x.overview else {
+                    return Err(still_building(&x.name));
+                };
+                let r = core_media::caf::CafReader::open(&x.file).map_err(io)?;
+                let mut exact = |a: u64, b: u64| exact_peak(&r, a, b);
+                regions.push((x.id, ov.peak(x.from, x.to, &mut exact).map_err(io)?));
+            }
+            // Under the lock again: apply only if every item still names
+            // the file measured and every region the frames measured.
+            let cmd = Command::Audio(core_model::command::AudioCmd::Normalize { regions, peak_db });
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() {
+                return Err(edit_open_busy());
+            }
+            inner.refresh_media(self.id, false);
+            let doc = inner.doc().clone();
+            for x in &measure {
+                let same_region = matches!(
+                    doc.event(x.id).map(|(ev, _)| &ev.body),
+                    Ok(EventBody::AudioRegion { media, source_offset, length, .. })
+                        if *media == x.media
+                            && *source_offset == x.from
+                            && source_offset.saturating_add(*length) == x.to
+                );
+                let same_file = doc
+                    .media()
+                    .get(&x.media)
+                    .is_some_and(|m| m.path == x.path && m.content_hash == x.hash);
+                if !(same_region && same_file) || inner.offline.contains_key(&x.media) {
+                    return Err(VizError::Busy {
+                        message: "The audio changed while it was measured; try again.".into(),
+                    });
+                }
+            }
+            // Normalize removes no plugin: nothing to capture first.
+            let report = inner.history.execute(&cmd, &ViewFilter::default())?;
+            // The model's notes ("silent", "gain limited") name the event
+            // ID: the user reads the media name in the next `idle`'s
+            // problems (final review m3 / T5 m2).
+            let names: Vec<(core_model::ids::EventId, &str)> =
+                measure.iter().map(|x| (x.id, x.name.as_str())).collect();
+            for w in report.warnings {
+                let line = normalize_warning(&w, &names);
+                inner.news.problems.push(line);
+            }
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+}
+
+/// Recording (plan 5c Task 9; spec §6.2–§6.5).
+#[uniffi::export]
+impl Session {
+    /// Records into sequence `seq` from where its position is (spec §6.4):
+    /// the transport rolls (from `pre_roll_bars` bars earlier), each armed
+    /// lane with an audio input records its channels into its own file
+    /// under `Media/Recorded/`, armed MIDI lanes record what they hear, and
+    /// at Stop everything recorded becomes one undo step "Record". `Model`
+    /// when no armed lane has an input, an audio lane names a channel the
+    /// input does not have, or the spec is out of range; `Busy` while
+    /// recording or finishing a pass,
+    /// while an edit is open, while a project format change has not been
+    /// applied (review I-1), or when the disk is almost full. While it
+    /// records (plan 5c Ruling 17) Play, Locate, Set Loop, another Record,
+    /// Save As and a format change are `Busy`; Stop finishes the pass.
+    pub fn record(&self, seq: u64, spec: crate::record::RecordSpecRow) -> Result<(), VizError> {
+        self.transport_call(|| self.start_recording(seq, spec))
+    }
+
+    /// `record.keep_pass`: keeps every loop pass completed so far (they
+    /// survive a later discard). `Model` unless loop recording.
+    pub fn keep_pass(&self) -> Result<(), VizError> {
+        ffi_guard(|| self.press_pass(true))
+    }
+
+    /// `record.discard_pass`: drops every loop pass completed since the
+    /// last keep. `Model` unless loop recording.
+    pub fn discard_pass(&self) -> Result<(), VizError> {
+        ffi_guard(|| self.press_pass(false))
+    }
+
+    /// `columns` columns of the take lane `lane` is recording, over file
+    /// frames `[from_file_frame, to_file_frame)` (plan 5d-1 Ruling 21;
+    /// spec §6.2: the region draws as it grows); place them with
+    /// `RecordStateRow.pass_start_tick` and `pass_start_file_frame`.
+    /// `Model` when nothing records here, the lane records no audio, or
+    /// the arguments are out of range.
+    pub fn recording_waveform(
+        &self,
+        lane: u64,
+        from_file_frame: u64,
+        to_file_frame: u64,
+        columns: u32,
+    ) -> Result<crate::overviews::OverviewRows, VizError> {
+        ffi_guard(|| {
+            crate::overviews::check_columns(columns)?;
+            if from_file_frame >= to_file_frame {
+                return Err(crate::events::bad(
+                    "from_file_frame must be before to_file_frame",
+                ));
+            }
+            let inner = lock(&self.inner);
+            let r = inner
+                .recording
+                .as_ref()
+                .ok_or_else(|| crate::events::bad("nothing is recording"))?;
+            r.waveform(LaneId(lane), from_file_frame, to_file_frame, columns)
+                .ok_or_else(|| {
+                    crate::events::bad(&format!("lane {lane} records no audio in this pass"))
+                })
+        })
+    }
+
+    /// What recording is doing (`state.get record`).
+    pub fn record_state(&self) -> Result<crate::record::RecordStateRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            Ok(match inner.recording.as_mut() {
+                Some(r) => {
+                    r.drain();
+                    r.row()
+                }
+                None => crate::record::RecordStateRow {
+                    recording: false,
+                    seq: None,
+                    spec: None,
+                    pass: 0,
+                    kept: 0,
+                    discarded: 0,
+                    lanes: Vec::new(),
+                    frames: 0,
+                    overflows: 0,
+                    gap_frames: 0,
+                    free_bytes: crate::record::free_bytes(&inner.root(self.id)),
+                    underruns: 0,
+                    late_starts: 0,
+                    recovered: Vec::new(),
+                    recovered_files: Vec::new(),
+                    pass_start_tick: None,
+                    pass_start_file_frame: 0,
+                    range_start_tick: 0,
+                },
+            })
+            .map(|mut row| {
+                row.recovered = inner.recovered.iter().map(|r| r.path.clone()).collect();
+                row.recovered_files = inner.recovered.clone();
+                row
+            })
+        })
+    }
+
+    /// Recordings a crash left in this project, and takes kept for this
+    /// offer, offered at open (spec §6.5: "Recovered recordings: import
+    /// into a new lane / move to Trash"); empty once answered.
+    pub fn recovered_recordings(&self) -> Result<Vec<String>, VizError> {
+        ffi_guard(|| {
+            Ok(lock(&self.inner)
+                .recovered
+                .iter()
+                .map(|r| r.path.clone())
+                .collect())
+        })
+    }
+
+    /// [`Session::recovered_recordings`] with what each file holds: its
+    /// frames, whether its size was written (a finished take nothing
+    /// names) or not (a crash leftover), and whether it reads at all
+    /// (pre-flight M9).
+    pub fn recovered_files(&self) -> Result<Vec<crate::record::RecoveredFileRow>, VizError> {
+        ffi_guard(|| Ok(lock(&self.inner).recovered.clone()))
+    }
+
+    /// Answers the offer: `import` puts each readable offered file on a
+    /// new lane of the first top-level sequence at bar 1, as one undo step
+    /// "Recover Recordings" (an unreadable one stays kept and is
+    /// reported); otherwise each moves to the Trash (never unlinked; a file
+    /// the Trash refuses stays kept and is reported). `Model` when there
+    /// is nothing to recover; `Busy` while a recording runs, finishes or
+    /// waits to be applied, or while an edit is open.
+    pub fn recover_recordings(&self, import: bool) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if inner.recovered.is_empty() {
+                return Err(crate::events::bad("there are no recovered recordings"));
+            }
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                return Err(recording_busy());
+            }
+            if inner.history.in_transaction() || inner.history.in_group() {
+                return Err(VizError::Busy {
+                    message: "Finish the open edit first.".into(),
+                });
+            }
+            let root = inner.root(self.id);
+            let files: Vec<String> = std::mem::take(&mut inner.recovered)
+                .into_iter()
+                .map(|r| r.path)
+                .collect();
+            if !import {
+                let dir = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                for rel in files {
+                    match crate::retention::trash(dir.as_deref(), &root.join(&rel)) {
+                        Ok(()) => {
+                            inner.keep_recordings.remove(&rel);
+                        }
+                        Err(e) => {
+                            inner
+                                .news
+                                .problems
+                                .push(format!("{rel}: not moved to the Trash ({e})"));
+                            // Still in place: kept, offered at the next open.
+                            inner.keep_recordings.insert(rel);
+                        }
+                    }
+                }
+                if let Some(p) = inner.path.clone() {
+                    inner.write_kept(&p);
+                }
+                return inner.snapshot();
+            }
+            let (imported, problems) = match recover_into_lanes(&mut inner, &root, &files) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Offered again: nothing was applied.
+                    inner.recovered = files
+                        .iter()
+                        .map(|f| crate::record::recovered_row(&root, f))
+                        .collect();
+                    return Err(e);
+                }
+            };
+            inner.news.problems.extend(problems);
+            for rel in &files {
+                if imported.contains(rel) {
+                    inner.keep_recordings.remove(rel);
+                } else {
+                    // Unreadable: kept, offered at the next open.
+                    inner.keep_recordings.insert(rel.clone());
+                }
+            }
+            if imported.is_empty() {
+                return inner.snapshot();
+            }
+            inner.version += 1;
+            inner.news.doc_changed = true;
+            inner.news.media_changed = true;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+}
+
+/// [`Session::recover_recordings`]'s import: one transaction "Recover
+/// Recordings" adding each readable file as a recorded media item and a
+/// region at bar 1 on its own new lane (named after the file) in the
+/// first top-level sequence. Returns the files imported and a problem for
+/// each one that could not be read.
+fn recover_into_lanes(
+    inner: &mut Inner,
+    root: &Path,
+    files: &[String],
+) -> Result<(Vec<String>, Vec<String>), VizError> {
+    use core_model::command::{AudioCmd, MediaCmd};
+    use core_model::document::{MediaItem, MediaOrigin};
+    use core_model::event::Fade;
+    use core_model::ids::AnyId;
+    let seq = seq_rows(inner.doc())?
+        .iter()
+        .find(|r| r.top_level)
+        .map(|r| SeqId(r.id))
+        .ok_or_else(|| crate::events::bad("the project has no sequence to recover into"))?;
+    let pass = crate::record::next_pass(inner.doc());
+    let mut problems = Vec::new();
+    let mut found = Vec::new();
+    for rel in files {
+        let path = root.join(rel);
+        let info = core_media::caf::CafReader::open(&path).map(|r| r.info().clone());
+        match (info, core_media::caf::hash_file(&path)) {
+            (Ok(i), Ok(h)) if i.frames > 0 => found.push((rel.clone(), i, h)),
+            (Ok(_), Ok(_)) => problems.push(format!("{rel}: it holds no audio; it is kept")),
+            (Err(e), _) | (_, Err(e)) => problems.push(format!("{rel}: {e}; it is kept")),
+        }
+    }
+    if found.is_empty() {
+        return Ok((Vec::new(), problems));
+    }
+    let filter = ViewFilter::default();
+    let h = &mut inner.history;
+    h.begin("Recover Recordings")?;
+    let run = (|| -> Result<(), VizError> {
+        for (rel, info, hash) in &found {
+            let (_, stem) = MediaItem::file_parts(rel);
+            let r = h.execute(
+                &Command::Media(MediaCmd::Add {
+                    path: rel.clone(),
+                    sample_rate: info.sample_rate,
+                    channels: info.channels,
+                    length_frames: info.frames,
+                    content_hash: Some(hash.clone()),
+                    name: Some(stem.clone()),
+                    origin: Some(MediaOrigin::Recorded { pass }),
+                }),
+                &filter,
+            )?;
+            let media = r
+                .created
+                .iter()
+                .find_map(|id| match id {
+                    AnyId::Media(m) => Some(*m),
+                    _ => None,
+                })
+                .ok_or_else(|| VizError::Internal {
+                    message: "no media created".into(),
+                })?;
+            let r = h.execute(
+                &Command::Lane(LaneCmd::Add {
+                    seq,
+                    name: stem,
+                    index: None,
+                }),
+                &filter,
+            )?;
+            let lane = r
+                .created
+                .iter()
+                .find_map(|id| match id {
+                    AnyId::Lane(l) => Some(*l),
+                    _ => None,
+                })
+                .ok_or_else(|| VizError::Internal {
+                    message: "no lane created".into(),
+                })?;
+            h.execute(
+                &Command::Audio(AudioCmd::Insert {
+                    seq,
+                    lane,
+                    tick: Tick::ZERO,
+                    media,
+                    source_offset: 0,
+                    length: info.frames,
+                    gain_db: 0.0,
+                    fade_in: Fade::default(),
+                    fade_out: Fade::default(),
+                }),
+                &filter,
+            )?;
+        }
+        Ok(())
+    })();
+    match run {
+        Ok(()) => {
+            h.commit()?;
+            Ok((found.into_iter().map(|(r, _, _)| r).collect(), problems))
+        }
+        Err(e) => {
+            let _ = h.abort();
+            Err(e)
+        }
+    }
+}
+
+impl Session {
+    fn press_pass(&self, keep: bool) -> Result<(), VizError> {
+        let mut inner = lock(&self.inner);
+        match inner.recording.as_mut() {
+            Some(r) => r.press(keep),
+            None => Err(crate::events::bad("nothing is recording")),
+        }
+    }
+
+    /// [`Session::record`].
+    fn start_recording(
+        &self,
+        seq: u64,
+        spec: crate::record::RecordSpecRow,
+    ) -> Result<(), VizError> {
+        use crate::record::{AudioLane, LOW_DISK_STOP, LOW_DISK_WARN, Plan, Recording};
+        use core_engine::record::RecordRequest;
+        use core_media::record::{WriterConfig, WriterLane};
+        use core_model::lane::LaneInput;
+        let mut inner = lock(&self.inner);
+        if inner.recording.is_some() || inner.finishing {
+            return Err(VizError::Busy {
+                message: "A recording is already running.".into(),
+            });
+        }
+        if inner.history.in_transaction() || inner.history.in_group() {
+            return Err(VizError::Busy {
+                message: "Finish the open edit first.".into(),
+            });
+        }
+        // Review I-1: the take would be planned at the old rate and land
+        // in a project at the new one.
+        if inner.jobs.pending(&[crate::jobs::JobKindRow::Format]) {
+            return Err(VizError::Busy {
+                message: "Wait for the project format change to finish, then record.".into(),
+            });
+        }
+        if spec.count_in_bars > 4 || spec.pre_roll_bars > 8 {
+            return Err(crate::events::bad(
+                "count-in is 0–4 bars and pre-roll 0–8 bars",
+            ));
+        }
+        if let Some(p) = &spec.punch {
+            core_model::rules::check_ticks("punch", p.start)?;
+            core_model::rules::check_ticks("punch", p.end)?;
+            if p.start >= p.end {
+                return Err(crate::events::bad("the punch range is empty"));
+            }
+        }
+        let doc = inner.doc().clone();
+        let id = seq_id(&doc, seq)?;
+        let s = doc.sequence(id)?;
+        // An undone Track Synth leaves no "mute after" behind (Task 8
+        // ruling M10).
+        crate::synth::keep_live_mutes(&doc, &mut inner.synth_mutes);
+        // Each armed audio lane with the synth whose return it records.
+        let mut audio: Vec<(
+            core_model::ids::LaneId,
+            String,
+            core_model::lane::InputChannels,
+            Option<DestId>,
+        )> = Vec::new();
+        let mut midi_lanes = Vec::new();
+        for l in s.lanes.iter().filter(|l| l.arm) {
+            match &l.input {
+                Some(LaneInput::Audio {
+                    channels,
+                    return_of,
+                }) => audio.push((l.id, l.name.clone(), *channels, *return_of)),
+                Some(LaneInput::Midi { .. }) => midi_lanes.push(l.id),
+                None => {}
+            }
+        }
+        if audio.is_empty() && midi_lanes.is_empty() {
+            return Err(crate::events::bad("arm a lane that has an input to record"));
+        }
+        let root = inner.root(self.id);
+        if !audio.is_empty() {
+            match crate::record::free_bytes(&root) {
+                Some(f) if f < LOW_DISK_STOP => {
+                    return Err(VizError::Busy {
+                        message: "The disk is almost full: free some space to record.".into(),
+                    });
+                }
+                Some(f) if f < LOW_DISK_WARN => inner
+                    .news
+                    .problems
+                    .push("Recording: less than 1 GB of disk space is left.".into()),
+                _ => {}
+            }
+        }
+        // Where it starts: the position as heard, then the pre-roll.
+        let format = doc.settings().format;
+        let rate = f64::from(format.sample_rate);
+        let origin = Tick(-s.start_offset.0);
+        let tempo = core_engine::schedule::TempoTable::build(&s.tempo, origin, rate);
+        let at = match host::position(self.id) {
+            Some((sq, t)) if sq == id => t,
+            _ => match (inner.cursor, inner.cursor_seq) {
+                (Some(t), None) => t,
+                (Some(t), Some(sq)) if sq == id => t,
+                _ => Tick::ZERO,
+            },
+        };
+        let bar = s.meter.entry_at(at).meter.bar_ticks();
+        let play_from = Tick(
+            at.0.saturating_sub(bar.saturating_mul(i64::from(spec.pre_roll_bars)))
+                .max(origin.0),
+        );
+        let frame = |t: i64| tempo.tick_to_frame(Tick(t));
+        // Count-in (plan 5d-1 Ruling 7): one click per beat of the meter at
+        // the roll point, at its tempo, before the transport rolls.
+        let count_in = (spec.count_in_bars > 0).then(|| {
+            let meter = s.meter.entry_at(play_from).meter;
+            let per_bar = u32::from(meter.num.max(1));
+            let beat = frame(play_from.0.saturating_add(meter.beat_ticks()))
+                .saturating_sub(frame(play_from.0));
+            core_engine::count_in::CountIn {
+                beats: per_bar * u32::from(spec.count_in_bars),
+                per_bar,
+                beat_frames: beat as f64,
+            }
+        });
+        let punch = spec.punch.as_ref().map(|p| (frame(p.start), frame(p.end)));
+        let looped = spec.looped.then(|| {
+            let end = core_model::query::seq_length(&doc, id).unwrap_or(Tick::ZERO);
+            (frame(0), frame(end.0))
+        });
+        let range = match (looped, punch) {
+            (Some((a, b)), Some((pa, pb))) => crate::passes::RecordRange {
+                start: a.max(pa),
+                end: Some(b.min(pb)),
+            },
+            (Some((a, b)), None) => crate::passes::RecordRange {
+                start: a,
+                end: Some(b),
+            },
+            (None, Some((pa, pb))) => crate::passes::RecordRange {
+                start: pa,
+                end: Some(pb),
+            },
+            (None, None) => crate::passes::RecordRange {
+                start: frame(at.0),
+                end: None,
+            },
+        };
+        if range.end.is_some_and(|e| e <= range.start) {
+            return Err(crate::events::bad(
+                "the record range is empty (an empty loop, or a punch outside it)",
+            ));
+        }
+        // MIDI sources plugged in since the engine started are heard too
+        // (a live host only: pre-flight M7).
+        if !midi_lanes.is_empty() {
+            host::listen_to_midi_sources();
+        }
+        // The engine plays (this loads the sequence and locates); the tap
+        // goes in before the Play, so the roll is the first block captured.
+        inner.mark(self.id, true);
+        let played = plugins::with(self.id, |p| {
+            host::play(self.id, &doc, id, Some(play_from), None, spec.looped, p)
+        })
+        .and_then(|r| r);
+        let mut pending = match played {
+            Ok(p) => p,
+            Err(e) => {
+                inner.reload_owed = true;
+                return Err(e);
+            }
+        };
+        pending.count_in(count_in);
+        let fail = |e: VizError| {
+            let _ = host::stop_recording(self.id);
+            Err(e)
+        };
+        // The input opens on its own thread (plan 5d-1 Ruling 13): a pass
+        // that records audio waits for it, a bounded while.
+        if !audio.is_empty() && !host::wait_input(host::INPUT_WAIT) {
+            return fail(VizError::Busy {
+                message: host::INPUT_OPENING.into(),
+            });
+        }
+        // A device at another rate than the project's would record at the
+        // wrong speed and place MIDI wrongly (5a Ruling 20: no resampling).
+        if let Some((true, rate)) = host::device(self.id) {
+            return fail(crate::events::bad(&format!(
+                "the device runs at {rate} Hz, not the project's {} Hz: change one of them to record",
+                format.sample_rate
+            )));
+        }
+        let inputs = host::input_info(self.id).map_or(0, |(_, i)| i.channels);
+        let faults = host::faults(self.id);
+        for (_, name, ch, _) in &audio {
+            if let Some(why) = crate::record::channel_refusal(name, *ch, inputs, &faults) {
+                return fail(crate::events::bad(&why));
+            }
+        }
+        let mut device: Vec<u16> = audio
+            .iter()
+            .flat_map(|(_, _, ch, _)| {
+                let a = ch.first();
+                [a, ch.last().unwrap_or(a)]
+            })
+            .collect();
+        device.sort_unstable();
+        device.dedup();
+        let req = RecordRequest {
+            channels: if audio.is_empty() {
+                Vec::new()
+            } else {
+                device.clone()
+            },
+            range: Some((range.start, range.end.unwrap_or(u64::MAX))),
+            ring_frames: crate::record::ring_frames(rate),
+        };
+        let handles = match host::start_recording(self.id, &req) {
+            Ok(h) => h,
+            Err(e) => return fail(e),
+        };
+        let mut reserved = inner.reserved_names();
+        let now = std::time::SystemTime::now();
+        let mut lanes = Vec::new();
+        let mut writer_lanes = Vec::new();
+        for (lane, name, ch, ret) in &audio {
+            let rel = crate::record::recorded_path(&root, name, now, &reserved);
+            reserved.insert(rel.clone());
+            let index = |c: u16| device.iter().position(|d| *d == c).unwrap_or(0);
+            let mut chans = vec![index(ch.first())];
+            if let Some(r) = ch.last().filter(|r| *r != ch.first()) {
+                chans.push(index(r));
+            }
+            writer_lanes.push(WriterLane {
+                path: root.join(&rel),
+                channels: chans,
+            });
+            lanes.push(AudioLane {
+                lane: *lane,
+                name: name.clone(),
+                path: rel,
+                channels: ch.count(),
+                // Read once, at Record start (plan 5c-2 Ruling 4): a change
+                // during the recording, even between loop passes, applies
+                // from the next recording.
+                return_frames: crate::synth::return_frames(&doc, *ret, rate),
+            });
+        }
+        let writer = (!lanes.is_empty()).then_some(WriterConfig {
+            rate: format.sample_rate,
+            depth: format.depth,
+            lanes: writer_lanes,
+        });
+        let plan = Plan {
+            owner: self.id,
+            seq: id,
+            spec: spec.clone(),
+            range,
+            audio: lanes,
+            midi_lanes,
+            root,
+            format,
+            pass_number: crate::record::next_pass(&doc),
+            tempo: tempo.clone(),
+        };
+        let recording = match Recording::start(plan, handles, writer) {
+            Ok(r) => r,
+            Err(e) => {
+                return fail(VizError::Io {
+                    message: format!("the recording could not start: {e}"),
+                });
+            }
+        };
+        if let Err(e) = inner.history.begin_group() {
+            return fail(e.into());
+        }
+        inner.recording = Some(recording);
+        inner.record_faults.clear();
+        inner.looped = spec.looped;
+        inner.reload_owed = false;
+        inner.reload_fault = None;
+        inner.cursor = None;
+        inner.cursor_seq = Some(id);
+        drop(inner);
+        // A Play that cannot be sent ends the recording it started
+        // (pre-flight M4): nothing would ever roll or end it.
+        if let Err(e) = host::finish_play(pending) {
+            let _ = self.finish_recording(None);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Waits while another thread finishes a pass (up to
+    /// [`crate::record::FINISH_WAIT`] and some), `Busy` after.
+    fn wait_finished(&self) -> Result<(), VizError> {
+        let until = Instant::now() + crate::record::FINISH_WAIT * 4;
+        while lock(&self.inner).finishing {
+            if Instant::now() >= until {
+                return Err(recording_busy());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    /// Ends the recording in progress (spec §6.5): the engine stops and
+    /// drops its tap, the files are finished without the session lock,
+    /// then the pass is applied as the last step of the recording's group,
+    /// which closes as one undo step. `reason` is told to the user.
+    fn finish_recording(&self, reason: Option<String>) -> Result<(), VizError> {
+        let rec = {
+            let mut inner = lock(&self.inner);
+            let Some(r) = inner.recording.take() else {
+                return Ok(());
+            };
+            inner.finishing = true;
+            // In the keep set while the lock is down (pre-flight I1).
+            inner.finishing_files = r.files();
+            let _ = host::stop_recording(self.id);
+            r
+        };
+        let done = rec.finish(crate::record::FINISH_WAIT);
+        let mut inner = lock(&self.inner);
+        inner.finishing = false;
+        if let Some(why) = reason {
+            inner
+                .news
+                .problems
+                .push(format!("Recording stopped: {why}."));
+        }
+        // Input lost on the way (pre-flight I4, M11).
+        if let Some(line) = crate::record::gaps_problem(&done) {
+            inner.news.problems.push(line);
+            if done.written.as_ref().is_some_and(|w| w.gap_frames > 0)
+                || done.status.lost_blocks() > 0
+            {
+                add_fault(&mut inner.record_faults, crate::record::RECORD_OVERFLOW);
+            }
+        }
+        let files = done.files();
+        let doc = inner.doc().clone();
+        let pass = match crate::record::build(&done, &doc) {
+            Ok(p) => {
+                // Takes no region uses (pre-flight I3).
+                let left = crate::record::leftovers(&done, &doc, p.as_ref());
+                inner.news.problems.extend(left.problems);
+                inner.keep_recordings.extend(left.keep);
+                p
+            }
+            Err(e) => {
+                inner.news.problems.push(format!(
+                    "The recording could not be placed: {e}. Its files are kept."
+                ));
+                inner.keep_recordings.extend(files.iter().cloned());
+                None
+            }
+        };
+        inner.pending_pass = Some((pass, files));
+        inner.finishing_files.clear();
+        self.apply_pending_pass(&mut inner);
+        Ok(())
+    }
+
+    /// Applies a finished recording's pass and closes its group, unless
+    /// an edit is still open (then `end_edit` or the next `idle` does).
+    fn apply_pending_pass(&self, inner: &mut Inner) {
+        if inner.history.in_transaction() {
+            return;
+        }
+        let Some((pass, files)) = inner.pending_pass.take() else {
+            return;
+        };
+        let label = pass
+            .as_ref()
+            .map_or("Record", core_model::command::RecordPass::name);
+        if let Some(p) = pass {
+            // Track Synth's "Mute the MIDI lane after recording" (spec
+            // §6.7): inside the group, so the mute is part of "Record"
+            // (plan 5c-2 Ruling 6).
+            let mutes = crate::synth::mutes_after(&p, &inner.synth_mutes);
+            match inner
+                .history
+                .execute(&Command::Record(p), &ViewFilter::default())
+            {
+                Err(e) => {
+                    inner.news.problems.push(format!(
+                        "The recording could not be added ({e}). Its files are kept."
+                    ));
+                    inner.keep_recordings.extend(files);
+                }
+                Ok(_) => {
+                    for (key, seq, lane) in mutes {
+                        inner.synth_mutes.remove(&key);
+                        let mute = Command::Lane(LaneCmd::SetFlags {
+                            seq,
+                            lane,
+                            mute: Some(true),
+                            solo: None,
+                            arm: None,
+                        });
+                        if let Err(e) = inner.history.execute(&mute, &ViewFilter::default()) {
+                            inner.news.problems.push(format!(
+                                "The MIDI lane could not be muted after recording ({e})."
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let _ = inner.history.end_group(label);
+        inner.version += 1;
+        inner.news.doc_changed = true;
+        inner.news.media_changed = true;
+        inner.reload_host(self.id);
+        self.mark(inner);
+        self.save_after_pass_now(inner);
+    }
+
+    /// Saved while recording: the take is saved once its pass has landed
+    /// (Ruling 19). A plugin registry that is busy (a nested run loop)
+    /// keeps the mark for the next `idle` (Task 9 review M4); any other
+    /// failure is said and the mark goes (the document stays unsaved).
+    fn save_after_pass_now(&self, inner: &mut Inner) {
+        if !inner.save_after_pass
+            || inner.recording.is_some()
+            || inner.finishing
+            || inner.pending_pass.is_some()
+        {
+            return;
+        }
+        let Some(path) = inner.path.clone() else {
+            inner.save_after_pass = false;
+            return;
+        };
+        match self.save_to(inner, &path) {
+            Err(VizError::Busy { .. }) if plugins::is_busy() => {}
+            Err(e) => {
+                inner.save_after_pass = false;
+                inner
+                    .news
+                    .problems
+                    .push(format!("The take could not be saved: {e}."));
+            }
+            Ok(()) => inner.save_after_pass = false,
+        }
+    }
+
+    /// `idle`'s recording step: ends the recording when the input went
+    /// away, the disk failed or filled, or the transport stopped by itself.
+    fn service_recording(&self) -> Result<(), VizError> {
+        let ending = {
+            let mut inner = lock(&self.inner);
+            let stopped = host::transport_stopped(self.id).unwrap_or(false);
+            let (mut problems, mut faults) = (Vec::new(), Vec::new());
+            let e = inner
+                .recording
+                .as_mut()
+                .and_then(|r| r.check(stopped, &mut problems, &mut faults));
+            inner.news.problems.extend(problems);
+            for f in faults {
+                add_fault(&mut inner.record_faults, &f);
+            }
+            e
+        };
+        match ending {
+            None => Ok(()),
+            Some(crate::record::Ending::Ended) => self.finish_recording(None),
+            Some(crate::record::Ending::Because(why)) => self.finish_recording(Some(why)),
+        }
+    }
+}
+
+/// Tracking a hardware synth (plan 5c-2; spec §6.7).
+#[uniffi::export]
+impl Session {
+    /// Track Synth… on MIDI lane `lane` of `seq` (spec §6.7), as one undo
+    /// step "Track Synth": the lane recording its external synth's return
+    /// (reused, else "<synth> audio" just below) records device input
+    /// `first` (and the next with `stereo`), has an output path and is
+    /// armed; the MIDI lane is armed with `arm_midi`, else disarmed (plan
+    /// 5c-2 Ruling 5). With `mute_after`, the next pass that records that
+    /// return also mutes the MIDI lane, in its own "Record" step (Ruling
+    /// 6). `Model` when the lane plays no external synth or the channels
+    /// are out of range; `Busy` while recording (Ruling 14) and while an
+    /// edit is open.
+    pub fn track_synth(
+        &self,
+        seq: u64,
+        lane: u64,
+        first: u16,
+        stereo: bool,
+        arm_midi: bool,
+        mute_after: bool,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            // One lock from the checks to the bookkeeping, as Record start
+            // holds it (Task 8 review M2): a Record from another thread
+            // runs wholly before or after. Track Synth removes no plugin,
+            // so nothing is captured first.
+            let mut inner = lock(&self.inner);
+            // Not while recording, nor with an edit open: its restart
+            // would drop the step (Task 8 review M1). Both are `Busy`, as
+            // for Measure (Task 10 review I1).
+            Self::check_idle(&inner)?;
+            let id = seq_id(inner.doc(), seq)?;
+            let channels = if stereo {
+                core_model::lane::InputChannels::Stereo(first)
+            } else {
+                core_model::lane::InputChannels::Mono(first)
+            };
+            let cmd = Command::Lane(LaneCmd::TrackSynth {
+                seq: id,
+                lane: LaneId(lane),
+                channels,
+                arm_midi,
+            });
+            inner.history.execute(&cmd, &ViewFilter::default())?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            let doc = inner.doc();
+            let audio = doc
+                .lane(id, LaneId(lane))
+                .ok()
+                .and_then(|l| l.midi_dest)
+                .and_then(|d| doc.sequence(id).ok()?.return_lane(d, Some(LaneId(lane))));
+            if let Some(audio) = audio {
+                if mute_after {
+                    inner.synth_mutes.insert((id, audio), LaneId(lane));
+                } else {
+                    inner.synth_mutes.remove(&(id, audio));
+                }
+            }
+            let snapshot = inner.snapshot()?;
+            drop(inner);
+            // Track Synth arms the return lane (plan 5d-1 Ruling 16).
+            self.claim_for_input(id);
+            Ok(snapshot)
+        })
+    }
+
+    /// Measure (spec §6.7; plan 5c-2 Rulings 8–9): with the transport
+    /// stopped, plays five notes to external destination `dest` and
+    /// listens on the input of the lane recording its return; sets its
+    /// return latency to what it found, one undo step "Set Return
+    /// Latency". Blocks for about 2.7 s (the session stays usable: its
+    /// lock is released while it waits); call it off the main thread.
+    /// `Model` for a destination that is not an external synth (the
+    /// built-in synth included) or that no lane records the return of,
+    /// for a channel the input lacks, and with "No signal on the synth's
+    /// return input" when fewer than 3 onsets were found (nothing changes
+    /// then); `Busy` while this session records or edits, while any
+    /// session plays or records, and while another measurement runs, and
+    /// when an edit was opened while it ran (the message names the value
+    /// measured, which is not set); `Engine` when the measurement stopped
+    /// before it finished (the device went away, its sequence was
+    /// deleted or its window closed).
+    pub fn measure_return(&self, dest: u64) -> Result<crate::synth::MeasureRow, VizError> {
+        self.transport_call(|| {
+            let dest = DestId(dest);
+            // One lock from the checks to the start (Task 9 review M3):
+            // the engine loads the document the checks saw.
+            let (seq, status) = {
+                let mut inner = lock(&self.inner);
+                Self::check_idle(&inner)?;
+                let d = crate::synth::external_dest(inner.doc(), dest)?;
+                let Some((seq, _, name, channels)) = crate::synth::return_lane(inner.doc(), dest)
+                else {
+                    return Err(crate::events::bad(&format!(
+                        "no lane records the return of {}: set one up with Track Synth first",
+                        d.name
+                    )));
+                };
+                inner.mark(self.id, true);
+                let status = plugins::with(self.id, |p| {
+                    host::start_measure(self.id, inner.doc(), seq, dest, &name, channels, p)
+                })
+                .and_then(|r| r)?;
+                (seq, status)
+            };
+            // The notes take about 2.6 s; nothing here holds a lock. A
+            // test may hold the measurement past its end (pre-flight M5).
+            let until = Instant::now() + crate::synth::measure_wait();
+            while (!status.done() && !status.closed() && Instant::now() < until)
+                || host::measure_held()
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            // One lock from the end to the step (Task 9 review I1, as
+            // Track Synth): an edit opened meanwhile never absorbs it, and
+            // the input follows the current document (review I2).
+            let mut inner = lock(&self.inner);
+            let ours = host::end_measure(self.id, inner.doc(), seq, &status)?;
+            host::after_measure_end();
+            // Measured off the plugin thread (the app's task): the engine
+            // has no inserts for this document, so the timer's next step
+            // claims it with the plugin host (5d-2 Task 8 re-review-2 R1).
+            if host::factory_owner() != Some(self.id) && host::wants_live(inner.doc(), seq) {
+                inner.claim_owed = Some(seq);
+            }
+            // Still ours means nothing else removed it; `closed()` is not
+            // read here, as our own removal sets it (Task 9 re-review). A
+            // renderer gone with its device leaves it unfinished below.
+            if !ours {
+                return Err(VizError::Engine {
+                    message: "the measurement stopped before it finished: the audio device \
+                              went away, its sequence was deleted or its window closed"
+                        .into(),
+                });
+            }
+            if !status.done() {
+                return Err(VizError::Engine {
+                    message: "the measurement did not finish: it timed out, or the audio device \
+                              stopped"
+                        .into(),
+                });
+            }
+            let m = crate::synth::measured_status(&status).map_err(|e| crate::events::bad(&e))?;
+            if let Err(e) = Self::check_idle(&inner) {
+                let message = match e {
+                    VizError::Busy { message } => message,
+                    other => return Err(other),
+                };
+                let message = message.trim_end_matches('.');
+                return Err(VizError::Busy {
+                    message: format!("{message} (measured {:.1} ms).", m.ms),
+                });
+            }
+            // Setting a latency removes no plugin: nothing is captured.
+            let cmd = Command::Routing(RoutingCmd::SetReturnLatency { dest, ms: m.ms });
+            inner.history.execute(&cmd, &ViewFilter::default())?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            let snapshot = inner.snapshot()?;
+            Ok(crate::synth::MeasureRow {
+                return_latency_ms: m.ms,
+                onsets: m.onsets,
+                snapshot,
+            })
+        })
+    }
+
+    /// Sets external destination `dest`'s return latency to `ms` (spec
+    /// §4.5a: 0–500), one undo step "Set Return Latency". `Model` for
+    /// another destination or a value out of range.
+    pub fn set_return_latency(&self, dest: u64, ms: f32) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Routing(RoutingCmd::SetReturnLatency {
+                dest: DestId(dest),
+                ms,
+            }))
+        })
+    }
+}
+
+/// Live input (plan 5c Task 8; spec §6.1, §6.6, §12.1).
+#[uniffi::export]
+impl Session {
+    /// Each device input channel's peak since the last call, linear (plan
+    /// 5d-1 Ruling 27; spec §12.1 `state.get input` meters): empty unless
+    /// this document holds the engine with its input open.
+    pub fn input_levels(&self) -> Result<Vec<f32>, VizError> {
+        ffi_guard(|| Ok(host::input_levels(self.id)))
+    }
+
+    /// What the audio input offers while this document holds the engine
+    /// (nothing before its first Play or Record).
+    pub fn input_info(&self) -> Result<crate::live::InputInfoRow, VizError> {
+        ffi_guard(|| {
+            Ok(match host::input_info(self.id) {
+                Some((device, i)) => crate::live::InputInfoRow {
+                    device,
+                    channels: i.channels,
+                    round_trip_frames: i.round_trip_frames(),
+                    names: i.names,
+                    input_latency_frames: i.input_latency_frames,
+                    output_latency_frames: i.output_latency_frames,
+                    buffer_frames: i.buffer_frames,
+                    opening: host::input_opening(self.id),
+                    sample_rate: host::device(self.id).map_or(0.0, |(_, r)| r),
+                },
+                None => crate::live::InputInfoRow {
+                    device: String::new(),
+                    channels: 0,
+                    names: Vec::new(),
+                    input_latency_frames: 0,
+                    output_latency_frames: 0,
+                    buffer_frames: 0,
+                    round_trip_frames: 0,
+                    opening: false,
+                    sample_rate: 0.0,
+                },
+            })
+        })
+    }
+
+    /// Feeds `bytes` (channel messages, one after another) to the engine
+    /// as if source `port` sent them now (`midi.inject`): lanes listening
+    /// to that source play them thru and, armed and recording, record
+    /// them. False when this document does not hold the engine (nothing
+    /// is sent). `Model` for bytes that are not channel messages or a bad
+    /// port name; `Busy` when the input queue is full.
+    pub fn inject_midi(&self, port: String, bytes: Vec<u8>) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let msgs = crate::live::parse_injection(&port, &bytes)?;
+            let Some(tx) = host::midi_sender(self.id) else {
+                return Ok(false);
+            };
+            let key = core_engine::input::port_key(&port);
+            for msg in msgs {
+                let sent = tx.send(core_engine::input::MidiIn {
+                    port: key,
+                    host_ns: 0,
+                    msg,
+                });
+                if !sent {
+                    return Err(VizError::Busy {
+                        message: "the MIDI input queue is full".into(),
+                    });
+                }
+            }
+            Ok(true)
+        })
+    }
+}
+
+/// Waveform overviews (plan 5b Task 4).
+#[uniffi::export]
+impl Session {
+    /// `columns` columns of media item `media` over frames `[from_frame,
+    /// to_frame)` (cut to the file). Never waits for a file: what is not
+    /// loaded answers `Pending` (spec §10.1; plan 5b Ruling 3).
+    pub fn overview(
+        &self,
+        media: u64,
+        from_frame: u64,
+        to_frame: u64,
+        columns: u32,
+    ) -> Result<crate::overviews::OverviewRows, VizError> {
+        ffi_guard(|| {
+            use crate::overviews::{OverviewRows, OverviewStateRow};
+            crate::overviews::check_columns(columns)?;
+            if from_frame >= to_frame {
+                return Err(crate::events::bad("from_frame must be before to_frame"));
+            }
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let id = core_model::ids::MediaId(media);
+            let m = inner
+                .doc()
+                .media()
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| crate::events::bad(&format!("unknown media {media}")))?;
+            if inner.offline.contains_key(&id) {
+                return Ok(OverviewRows::silent(
+                    OverviewStateRow::Offline,
+                    m.channels,
+                    columns,
+                ));
+            }
+            // Past the end there is nothing to read or wait for (review I1).
+            if from_frame >= m.length_frames {
+                return Ok(OverviewRows::silent(
+                    OverviewStateRow::Ready,
+                    m.channels,
+                    columns,
+                ));
+            }
+            let to = to_frame.min(m.length_frames);
+            let n = columns as usize;
+            let w = (to - from_frame) as f64 / n as f64;
+            let spans: Vec<Option<(u64, u64)>> = (0..n)
+                .map(|c| {
+                    let a = from_frame + (c as f64 * w).floor() as u64;
+                    let b = (from_frame + ((c + 1) as f64 * w).ceil() as u64).min(to);
+                    (b > a).then_some((a, b))
+                })
+                .collect();
+            let file = inner.root(self.id).join(&m.path);
+            Ok(crate::overviews::columns(
+                &inner.overviews,
+                id,
+                &file,
+                m.channels,
+                &spans,
+                &|_| 1.0,
+            ))
+        })
+    }
+
+    /// `columns` columns of audio region `event` over ticks `[from_tick,
+    /// to_tick)` of its sequence, mapped through the tempo map, scaled by
+    /// the region's gain and shaped by its fades; columns outside the
+    /// region are silent (plan 5b Ruling 4).
+    pub fn region_waveform(
+        &self,
+        event: u64,
+        from_tick: i64,
+        to_tick: i64,
+        columns: u32,
+    ) -> Result<crate::overviews::OverviewRows, VizError> {
+        ffi_guard(|| {
+            use crate::overviews::{OverviewRows, OverviewStateRow};
+            use core_model::event::EventBody;
+            crate::overviews::check_columns(columns)?;
+            if from_tick >= to_tick {
+                return Err(crate::events::bad("from_tick must be before to_tick"));
+            }
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let doc = inner.doc().clone();
+            let (ev, loc) = doc.event(core_model::ids::EventId(event))?;
+            let EventBody::AudioRegion {
+                media,
+                source_offset,
+                length,
+                gain_db,
+                fade_in,
+                fade_out,
+            } = ev.body
+            else {
+                return Err(crate::events::bad(&format!(
+                    "{event} is not an audio region"
+                )));
+            };
+            let m = doc
+                .media()
+                .get(&media)
+                .ok_or_else(|| crate::events::bad(&format!("unknown media {media}")))?;
+            if inner.offline.contains_key(&media) {
+                return Ok(OverviewRows::silent(
+                    OverviewStateRow::Offline,
+                    m.channels,
+                    columns,
+                ));
+            }
+            let tempo = &doc.sequence(loc.seq)?.tempo;
+            let rate = f64::from(m.sample_rate.max(1));
+            let start = tempo.tick_to_seconds(ev.tick);
+            // Region frame at tick `t` (f64 ticks; `as` saturates).
+            let frame =
+                |t: f64| (tempo.tick_to_seconds(core_model::time::Tick(t as i64)) - start) * rate;
+            let n = columns as usize;
+            let (t0, t1) = (from_tick as f64, to_tick as f64);
+            let w = (t1 - t0) / n as f64;
+            let len = length as f64;
+            let spans: Vec<Option<(u64, u64)>> = (0..n)
+                .map(|c| {
+                    let (a, b) = (frame(t0 + c as f64 * w), frame(t0 + (c + 1) as f64 * w));
+                    // NaN before clamping: `max`/`min` would hide it.
+                    if a.is_nan() || b.is_nan() {
+                        return None;
+                    }
+                    let (a, b) = (a.max(0.0), b.min(len));
+                    if b <= a {
+                        return None;
+                    }
+                    let a = a.floor() as u64;
+                    let b = (b.ceil() as u64).clamp(a + 1, length.max(a + 1));
+                    Some((
+                        source_offset.saturating_add(a),
+                        source_offset.saturating_add(b),
+                    ))
+                })
+                .collect();
+            let lin = 10f32.powf(gain_db / 20.0);
+            let gain = |c: usize| -> f32 {
+                let Some(Some((a, b))) = spans.get(c) else {
+                    return 0.0;
+                };
+                let r = (a + b) / 2 - source_offset.min((a + b) / 2);
+                lin * crate::overviews::fade_gain(r, length, fade_in, fade_out)
+            };
+            let file = inner.root(self.id).join(&m.path);
+            Ok(crate::overviews::columns(
+                &inner.overviews,
+                media,
+                &file,
+                m.channels,
+                &spans,
+                &gain,
+            ))
+        })
+    }
+}
+
+/// Media and jobs (plan 5a Task 10).
+#[uniffi::export]
+impl Session {
+    /// The media pool, with offline items and use counts.
+    pub fn media(&self) -> Result<Vec<crate::media::MediaRow>, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let mut rows = crate::media::rows(inner.doc(), &inner.offline);
+            // The overview's peak, once it is built (plan 5d-1 Ruling 21).
+            for r in &mut rows {
+                r.peak = inner
+                    .overviews
+                    .get(core_model::ids::MediaId(r.id))
+                    .map(|ov| crate::overviews::peak_of(&ov));
+            }
+            Ok(rows)
+        })
+    }
+
+    /// Checks every media file again (the app became active, or the user
+    /// asked); true when the offline set changed.
+    pub fn recheck_media(&self) -> Result<bool, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let changed = inner.refresh_media(self.id, true);
+            if changed {
+                inner.reload_host(self.id);
+            }
+            Ok(changed)
+        })
+    }
+
+    /// Starts importing `paths` (converted into the project format; spec
+    /// §5.1) as a job; `target` places regions (Ruling 19). Returns the
+    /// job ID; `job` reports it and applies it when done.
+    pub fn import_audio(
+        &self,
+        paths: Vec<String>,
+        target: Option<crate::jobs::ImportTargetRow>,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if let Some(t) = target {
+                let doc = inner.doc();
+                doc.sequence(SeqId(t.seq))?;
+                if let Some(l) = t.lane {
+                    doc.lane(SeqId(t.seq), LaneId(l))?;
+                }
+            }
+            let root = inner.root(self.id);
+            let format = inner.doc().settings().format;
+            let reserved = inner.reserved_names();
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Import, move |progress, cancel| {
+                    let importer = crate::media::importer();
+                    let n = paths.len().max(1) as f32;
+                    let mut files: ImportFiles = Vec::new();
+                    for (k, p) in paths.iter().enumerate() {
+                        let path = std::path::PathBuf::from(p);
+                        let name = path
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| p.clone());
+                        let stem = path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let r = crate::relink::regular_file(&path).and_then(|()| {
+                            core_media::import::import_reserved(
+                                importer.as_ref(),
+                                &path,
+                                &root,
+                                format,
+                                &stem,
+                                &reserved,
+                                &mut |f| {
+                                    progress.store(
+                                        ((k as f32 + f) / n).to_bits(),
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    )
+                                },
+                                cancel,
+                            )
+                        });
+                        match r {
+                            Err(core_media::MediaError::Cancelled) => {
+                                // Remove what earlier files of this batch wrote.
+                                for (_, done) in &files {
+                                    if let Ok(items) = done {
+                                        for i in items {
+                                            let _ = std::fs::remove_file(root.join(&i.path));
+                                        }
+                                    }
+                                }
+                                return crate::jobs::Work::Cancelled;
+                            }
+                            r => files.push((name, r.map_err(|e| e.to_string()))),
+                        }
+                    }
+                    crate::jobs::Work::Import { files, target }
+                })
+        })
+    }
+
+    /// The project's format, its mismatched media and the device's rate
+    /// (known once this session has played: the host asks the device at
+    /// Play, Ruling 20 / F19).
+    pub fn project_info(&self) -> Result<crate::format::ProjectInfoRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let mismatched = inner
+                .offline
+                .values()
+                .filter(|r| {
+                    matches!(
+                        r,
+                        crate::media::OfflineReasonRow::Format
+                            | crate::media::OfflineReasonRow::Unreadable
+                    )
+                })
+                .count();
+            let (rate_mismatch, device_rate) = host::device(self.id).unwrap_or((false, 0.0));
+            Ok(crate::format::ProjectInfoRow {
+                format: inner.doc().settings().format.into(),
+                mismatched: u32::try_from(mismatched).unwrap_or(u32::MAX),
+                rate_mismatch,
+                device_rate,
+            })
+        })
+    }
+
+    /// Starts changing the project format: every media file is converted
+    /// into the new format, as new files (a job; spec §4.1, §5.1). Refused
+    /// at once for the same format or an invalid rate; the job fails,
+    /// changing nothing, when a file is missing, of another length or
+    /// cannot be converted. Applied as one undo step "Change Project
+    /// Format"; the engine host then reopens at the new rate.
+    pub fn set_project_format(
+        &self,
+        format: crate::format::ProjectFormatRow,
+    ) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let f = core_model::format::AudioFormat::from(format);
+            let mut inner = lock(&self.inner);
+            // A take is planned and filed at the project rate (review
+            // I-1): not while one records, finishes or waits to land.
+            if inner.recording.is_some() || inner.finishing || inner.pending_pass.is_some() {
+                return Err(recording_busy());
+            }
+            self.apply_jobs_after_edit(&mut inner);
+            inner.media_jobs_idle()?;
+            if !f.is_valid() {
+                return Err(VizError::Model {
+                    message: format!("{} Hz is not a project rate", f.sample_rate),
+                });
+            }
+            if f == inner.doc().settings().format {
+                return Err(VizError::Model {
+                    message: "the project is already in that format".into(),
+                });
+            }
+            inner.refresh_media(self.id, false);
+            let blocked: Vec<String> = inner
+                .doc()
+                .media()
+                .values()
+                .filter(|m| {
+                    matches!(
+                        inner.offline.get(&m.id),
+                        Some(
+                            crate::media::OfflineReasonRow::Missing
+                                | crate::media::OfflineReasonRow::Length
+                                | crate::media::OfflineReasonRow::Changed
+                        )
+                    )
+                })
+                .map(|m| m.name.clone())
+                .collect();
+            let items = convert_list(&inner, self.id, |_| true);
+            let root = inner.root(self.id);
+            let reserved = inner.reserved_names();
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Format, move |progress, cancel| {
+                    if !blocked.is_empty() {
+                        return crate::jobs::Work::Convert {
+                            kind: crate::jobs::JobKindRow::Format,
+                            format: Some(f),
+                            files: vec![(
+                                core_model::ids::MediaId(u64::MAX),
+                                Err(format!(
+                                    "missing or changed media must be relinked first: {}",
+                                    blocked.join(", ")
+                                )),
+                            )],
+                        };
+                    }
+                    convert_files(
+                        &root,
+                        items,
+                        f,
+                        &reserved,
+                        progress,
+                        cancel,
+                        crate::jobs::JobKindRow::Format,
+                    )
+                })
+        })
+    }
+
+    /// Starts converting the media that is not in the project format
+    /// (another rate or depth, or not a VizDAW CAF) into it, as new files
+    /// (the banner's "Convert"; a job, one undo step "Convert Media").
+    pub fn convert_media(&self) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.apply_jobs_after_edit(&mut inner);
+            inner.media_jobs_idle()?;
+            inner.refresh_media(self.id, false);
+            let offline = inner.offline.clone();
+            let items = convert_list(&inner, self.id, |m| {
+                matches!(
+                    offline.get(&m),
+                    Some(
+                        crate::media::OfflineReasonRow::Format
+                            | crate::media::OfflineReasonRow::Unreadable
+                    )
+                )
+            });
+            let f = inner.doc().settings().format;
+            let root = inner.root(self.id);
+            let reserved = inner.reserved_names();
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Convert, move |progress, cancel| {
+                    convert_files(
+                        &root,
+                        items,
+                        f,
+                        &reserved,
+                        progress,
+                        cancel,
+                        crate::jobs::JobKindRow::Convert,
+                    )
+                })
+        })
+    }
+
+    /// Job `id`, applying it first when it just finished.
+    pub fn job(&self, id: u64) -> Result<crate::jobs::JobRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            inner.jobs.row(id).ok_or_else(|| VizError::Model {
+                message: format!("unknown job {id}"),
+            })
+        })
+    }
+
+    /// Asks job `id` to stop (nothing it did is applied).
+    pub fn cancel_job(&self, id: u64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).jobs.cancel(id);
+            Ok(())
+        })
+    }
+}
+
+impl Session {
+    /// A media-pool edit as one undo step; refused while an edit (a drag)
+    /// is open.
+    fn pool_edit(&self, cmd: Command) -> Result<DocSnapshot, VizError> {
+        if lock(&self.inner).edit_label.is_some() {
+            return Err(edit_open_busy());
+        }
+        self.execute(cmd)
+    }
+
+    /// The item `media`, or a `Model` error.
+    fn media_item(&self, media: u64) -> Result<core_model::document::MediaItem, VizError> {
+        lock(&self.inner)
+            .doc()
+            .media()
+            .get(&core_model::ids::MediaId(media))
+            .cloned()
+            .ok_or_else(|| crate::events::bad(&format!("unknown media {media}")))
+    }
+}
+
+/// The media pool window (spec §10.3; plan 5b Task 6).
+#[uniffi::export]
+impl Session {
+    /// Renames media item `media` (display name only; trimmed, not empty):
+    /// one undo step "Rename Media".
+    pub fn rename_media(&self, media: u64, name: String) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return Err(crate::events::bad("a media name cannot be empty"));
+            }
+            self.media_item(media)?;
+            self.pool_edit(Command::Media(core_model::command::MediaCmd::Rename {
+                media: core_model::ids::MediaId(media),
+                name,
+            }))
+        })
+    }
+
+    /// Removes media item `media` and every region using it, as one undo
+    /// step "Remove Media" (the app asks first; Ruling 13).
+    pub fn remove_media(&self, media: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            use core_model::command::{EventCmd, MediaCmd};
+            let id = core_model::ids::MediaId(media);
+            self.media_item(media)?;
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() {
+                return Err(edit_open_busy());
+            }
+            let users = core_model::command::media::regions_using(inner.doc(), id);
+            let filter = ViewFilter::default();
+            inner.history.begin("Remove Media")?;
+            let run = (|| -> Result<(), VizError> {
+                if !users.is_empty() {
+                    inner
+                        .history
+                        .execute(&Command::Event(EventCmd::Delete { events: users }), &filter)?;
+                }
+                inner.history.execute(
+                    &Command::Media(MediaCmd::Remove {
+                        media: id,
+                        replacement: None,
+                    }),
+                    &filter,
+                )?;
+                Ok(())
+            })();
+            match run {
+                Ok(()) => inner.history.commit()?,
+                Err(e) => {
+                    inner.history.abort()?;
+                    return Err(e);
+                }
+            }
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+
+    /// Removes every item no region uses: one undo step "Compact Media".
+    /// The files go to the Trash by the retention rule once no undo or
+    /// redo state needs them (Ruling 11).
+    pub fn compact_media(&self) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.pool_edit(Command::Media(core_model::command::MediaCmd::Compact)))
+    }
+
+    /// The regions using media item `media`.
+    pub fn media_users(&self, media: u64) -> Result<Vec<crate::media::MediaUseRow>, VizError> {
+        ffi_guard(|| {
+            self.media_item(media)?;
+            Ok(crate::media::users(
+                lock(&self.inner).doc(),
+                core_model::ids::MediaId(media),
+            ))
+        })
+    }
+
+    /// The absolute path of media item `media`'s file (Reveal in Finder).
+    pub fn media_file(&self, media: u64) -> Result<String, VizError> {
+        ffi_guard(|| {
+            let m = self.media_item(media)?;
+            let root = lock(&self.inner).root(self.id);
+            Ok(root.join(&m.path).to_string_lossy().into_owned())
+        })
+    }
+
+    /// Relinks media item `media` to the file at `path` (absolute; spec
+    /// §10.3 "Locate…"): a job of kind `Relink` that imports (converts)
+    /// the file into `Media/` unless it already is a VizDAW CAF in the
+    /// project format there, then applies one undo step "Relink Media".
+    pub fn relink_media(&self, media: u64, path: String) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let item = self.media_item(media)?;
+            let src = PathBuf::from(&path);
+            if path.is_empty() || !src.is_absolute() {
+                return Err(crate::events::bad(
+                    "relink needs the absolute path of a file",
+                ));
+            }
+            // Never a FIFO, socket, device or folder: opening one could
+            // block the job for good (Task 6 review m2).
+            crate::relink::regular_file(&src).map_err(|e| crate::events::bad(&e.to_string()))?;
+            let mut inner = lock(&self.inner);
+            self.apply_jobs_after_edit(&mut inner);
+            inner.media_jobs_idle()?;
+            let root = inner.root(self.id);
+            let format = inner.doc().settings().format;
+            let named = inner.named_media();
+            let unapplied = inner.jobs.unapplied();
+            let id = core_model::ids::MediaId(media);
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
+                    let importer = crate::media::importer();
+                    let r = crate::relink::relink_file(
+                        importer.as_ref(),
+                        &root,
+                        &src,
+                        format,
+                        &named,
+                        &unapplied,
+                        &mut |f| progress.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed),
+                        cancel,
+                    );
+                    match r {
+                        Err(core_media::MediaError::Cancelled) => crate::jobs::Work::Cancelled,
+                        r => crate::jobs::Work::Relink {
+                            files: vec![(id, r.map_err(|e| format!("{}: {e}", item.name)))],
+                        },
+                    }
+                })
+        })
+    }
+
+    /// Searches `folder` (absolute) for every item offline as missing,
+    /// changed in length or changed in content (spec §10.3 "Search
+    /// folder…", Ruling 10): a job of kind `Relink`, one undo step per
+    /// item relinked, a problem per item not found.
+    pub fn search_media(&self, folder: String) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            use crate::media::OfflineReasonRow;
+            let dir = PathBuf::from(&folder);
+            if folder.is_empty() || !dir.is_absolute() {
+                return Err(crate::events::bad(
+                    "search needs the absolute path of a folder",
+                ));
+            }
+            let mut inner = lock(&self.inner);
+            self.apply_jobs_after_edit(&mut inner);
+            inner.media_jobs_idle()?;
+            inner.refresh_media(self.id, false);
+            let root = inner.root(self.id);
+            let lost: Vec<crate::relink::Lost> = inner
+                .doc()
+                .media()
+                .values()
+                .filter(|m| {
+                    matches!(
+                        inner.offline.get(&m.id),
+                        Some(
+                            OfflineReasonRow::Missing
+                                | OfflineReasonRow::Length
+                                | OfflineReasonRow::Changed
+                        )
+                    )
+                })
+                .map(|m| crate::relink::Lost {
+                    media: m.id,
+                    name: m.name.clone(),
+                    stem: core_model::document::MediaItem::file_parts(&m.path).1,
+                    hash: m.content_hash.clone(),
+                    seconds: m.length_frames as f64 / f64::from(m.sample_rate.max(1)),
+                    file: root.join(&m.path),
+                    changed: matches!(inner.offline.get(&m.id), Some(OfflineReasonRow::Changed)),
+                })
+                .collect();
+            if lost.is_empty() {
+                return Err(crate::events::bad("no media item is missing"));
+            }
+            let format = inner.doc().settings().format;
+            let named = inner.named_media();
+            let unapplied = inner.jobs.unapplied();
+            inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Relink, move |progress, cancel| {
+                    let importer = crate::media::importer();
+                    crate::relink::search(
+                        importer.as_ref(),
+                        &root,
+                        &dir,
+                        lost,
+                        format,
+                        &named,
+                        &unapplied,
+                        progress,
+                        cancel,
+                    )
+                })
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_warning;
+    use core_model::ids::EventId;
+
+    /// 5b final review m1: a note about `ev12` is never named after
+    /// `ev1`'s media, whichever comes first.
+    #[test]
+    fn a_normalize_note_names_the_region_its_id_matches_whole() {
+        let regions = [(EventId(1), "kick"), (EventId(12), "snare")];
+        assert_eq!(
+            normalize_warning("ev12: gain limited to +24.0 dB", &regions),
+            "Normalize: a region of snare: gain limited to +24.0 dB"
+        );
+        assert_eq!(
+            normalize_warning("ev1 is silent: not normalized", &regions),
+            "Normalize: a region of kick is silent: not normalized"
+        );
+        assert_eq!(
+            normalize_warning("ev123: gain limited to +24.0 dB", &regions),
+            "Normalize: ev123: gain limited to +24.0 dB"
+        );
+        assert_eq!(
+            normalize_warning("nothing to normalize", &regions),
+            "Normalize: nothing to normalize"
+        );
     }
 }

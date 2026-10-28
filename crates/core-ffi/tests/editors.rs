@@ -4,6 +4,8 @@
 //! real editor needs AppKit on the main thread: platform-macos's
 //! `au_editor` test and the manual checklist cover that.
 
+mod common;
+
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{force_offline, reset_host};
@@ -31,13 +33,14 @@ fn plugin(format: PluginFormatTag, id: &str) -> PluginRefRow {
 
 /// The demo with `p` on the built-in synth, running: (session, slot).
 fn with_insert(p: PluginRefRow) -> (Arc<Session>, u64) {
+    common::assert_exe_dir_small();
     let s = Session::new_demo().unwrap();
     let synth = s.mixer().unwrap().strips[0].id;
     s.add_insert(synth, None, p).unwrap();
     let id = s.plugin_slots().unwrap()[0].id;
     let t = Instant::now();
     while s.plugin_slots().unwrap()[0].status != SlotStatus::Live {
-        assert!(t.elapsed() < Duration::from_secs(10));
+        assert!(t.elapsed() < common::au_wait_limit());
         s.idle().unwrap();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -87,12 +90,16 @@ fn open_windows_are_saved_with_the_project() {
     let path = dir.path().join("w.vizdaw");
     s.save_as(path.to_string_lossy().into_owned()).unwrap();
     assert!(path.join("ui.json").exists());
+    // One session per package (Task 9 review I-2): the first lets go.
+    s.close().unwrap();
     let again = Session::open(path.to_string_lossy().into_owned()).unwrap();
     assert_eq!(again.open_windows().unwrap(), vec![id]);
     again.set_window_open(id, false).unwrap();
     again.save().unwrap();
+    again.close().unwrap();
     let third = Session::open(path.to_string_lossy().into_owned()).unwrap();
     assert!(third.open_windows().unwrap().is_empty());
+    third.close().unwrap();
     // A project without the file (older, or written elsewhere) opens none.
     std::fs::remove_file(path.join("ui.json")).unwrap();
     let fourth = Session::open(path.to_string_lossy().into_owned()).unwrap();

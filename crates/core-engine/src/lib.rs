@@ -18,15 +18,19 @@
 )]
 
 pub mod backend;
+pub mod count_in;
 pub mod engine;
 pub mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
 pub mod graph;
+pub mod input;
+pub mod measure;
 pub mod midi1;
 pub mod notes;
 pub mod offline;
 pub mod pool;
+pub mod record;
 pub mod render;
 pub mod rt_check;
 pub mod schedule;

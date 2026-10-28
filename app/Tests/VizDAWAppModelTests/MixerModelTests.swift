@@ -34,6 +34,32 @@ import VizDAWCore
         try MixerModel(document: DocumentModel(session: f))
     }
 
+    /// Plan 5d-2 Ruling 4: an AudioPath strip's input controls edit the
+    /// shown sequence's lane that plays through it, the armed one first.
+    @Test func anAudioPathStripsInputIsItsLanes() throws {
+        let f = mixerFake()
+        f.mixerSnap.strips.insert(stripRow(4, "Vocal", kind: .audioPath(path: 7)), at: 0)
+        var a = lane(30, "Vocal A")
+        a.audioOut = 7
+        var b = lane(31, "Vocal B")
+        b.audioOut = 7
+        f.laneTable[3] = [a, b]
+        let m = try model(f)
+        m.document.select(3)
+        let strip = try #require(m.strips.first)
+        #expect(m.inputLane(for: strip)?.id == 30, "the first, with none armed")
+        b.arm = true
+        f.laneTable[3] = [a, b]
+        f.snap.version += 1
+        m.document.refreshAfterJob()
+        #expect(m.inputLane(for: strip)?.id == 31, "the armed one")
+        #expect(m.inputLane(for: m.strips[1]) == nil, "an instrument strip has none")
+        f.laneTable[3] = [lane(30, "Keys")]
+        f.snap.version += 1
+        m.document.refreshAfterJob()
+        #expect(m.inputLane(for: strip) == nil, "no lane plays through it in this sequence")
+    }
+
     @Test func masterIsSeparateAndOutputsAreNamed() throws {
         let f = mixerFake()
         f.dests = [DestRow(id: 7, name: "Piano", plugin: nil)]

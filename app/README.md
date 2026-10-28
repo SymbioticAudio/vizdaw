@@ -931,3 +931,477 @@ preferences). Keys are the defaults unless a step changes them.
     "/tmp/x.vizkeys"}'` loads a bindings file and `$V key` follows it;
     `$V state editor` reads the snap division snake_case
     (`thirty_second`).
+
+### Audio playback (plan 5a)
+
+Use a throwaway home (`vizctl launch`) and a few audio files of your own:
+a WAV, an AIFF, an MP3 or AAC, and one at 44.1 kHz.
+
+109. New project: File > New opens a "New Project" dialog ("Every audio
+     file of the project is stored in this format.") with Sample rate and
+     Bit depth pop-ups, pre-filled with 48 kHz / 24-bit; choose 44.1 kHz
+     and 16-bit and press Create. The next File > New offers 44.1 kHz /
+     16-bit. File > Project Settings… shows "Format: 44.1 kHz, 16-bit.
+     The project has no audio files yet."
+110. Import Audio: open the demo, select a lane, put the playhead on bar
+     3 and choose File > Import Audio… (⇧⌘I) with one stereo WAV. A bar
+     shows "Importing audio…" with progress and a Cancel button, then the
+     region sits on that lane at bar 3. Undo removes it (one step,
+     "Import Audio"). Import two files at once: each gets a new lane
+     "Audio n". A text file renamed `.wav` in the batch is listed by a
+     bar (Dismiss clears it) and the others import; imported alone, it
+     raises an "Import Failed" alert.
+111. It plays: Play from bar 1. The region sounds through the output path
+     strip "Audio 1" (use the plain Create Demo Project) in the mixer; its fader, pan, mute and solo work; the
+     region's sound starts at its bar exactly (record the output or
+     listen against the click of a MIDI lane).
+112. Loops and locates: loop bars 3–4 over a long region: the loop wraps
+     with no gap or click beyond the region's own audio at the seam.
+     Click in the ruler in the middle of a region while playing: the
+     sound resumes from there at once. No "Disk too slow: some audio
+     played as silence." bar shows on a normal disk (if it does, Dismiss
+     clears it).
+113. Formats: use the project from step 109 (44.1 kHz / 16-bit, with a
+     file imported into it; the demo is not in that format). File >
+     Project Settings… says how many audio files the change converts
+     (one undo step); choose 48 kHz / 24-bit and press
+     Change: a "Converting media…" bar, then the regions sit where they
+     were and sound the same. Edit > Undo ("Change Project Format")
+     restores 44.1 kHz and the old files.
+114. Media in another format: in a saved project, replace a file in its
+     `Media/` folder (Finder > Show Package Contents) with a CAF at
+     another rate, then switch back to VizDAW: a bar says "1 media file
+     is not in the project format (…) and stay silent."; that region is
+     silent. "Convert 1 File": the bar goes and the region plays.
+     `$V state media` lists the item with `"offline": false` afterwards.
+115. Missing media: rename a media file in Finder and switch back: its
+     region is silent and `$V state media` shows `"offline_reason":
+     "missing"`; rename it back and switch again: it plays.
+116. Device rate: in Audio MIDI Setup set the output to 44.1 kHz, open a
+     48 kHz project and press Play: VizDAW switches the device to 48 kHz
+     (Audio MIDI Setup shows it). With a device that cannot run at 48 kHz
+     (or set the project to 192 kHz on a 48 kHz-only device), after the
+     first Play a bar says "The audio device runs at … ; this project is
+     …. Audio regions are muted." while MIDI still plays, and "Change
+     Project Rate to …" converts the project to the device's rate.
+     Afterwards set the device's rate in Audio MIDI Setup back to what it
+     was (the throwaway home does not protect this system setting).
+117. Save As during a job: in a saved project, import a long or large
+     audio file (a few hundred MB, or several files at once) so the
+     "Importing audio…" bar stays up for a while, and at once choose File
+     > Save As…: it is refused with "Wait for the import or conversion
+     to finish, then save." Once the bar ends, Save As works.
+
+### Regions in the editors (plan 5b)
+
+Use a throwaway home (`vizctl launch`), a few audio files of your own
+(one long, one stereo WAV), and the Finder.
+
+118. Waveforms: open the demo and Import Audio… a stereo WAV onto a lane.
+     Within a second its region in the arrangement shows the waveform of
+     both channels. Zoom in until single samples show (the waveform may
+     look blocky for a moment, then sharp) and out until the whole song
+     fits: it stays drawn, scrolling never stalls. Open the Piano Roll on
+     the sequence: the region strip draws the same waveform.
+119. Fades: with the arrow tool, drag the region's top-left corner square
+     to the right: the waveform ramps in and a line shows the fade; Edit
+     > Undo says "Undo Fade In". Drag the top-right square to the left
+     ("Fade Out"). Right-click inside a fade: "Fade In: Linear …
+     S-Curve" with the current shape checked; choose S-Curve and listen.
+     A region narrower than about 24 points shows no handles.
+120. Gain: drag the region's top edge up: a readout shows "+3.0 dB" and
+     the waveform grows; release: one step "Region Gain". With ⇧ the
+     steps are finer. ⌥-click the top edge: back to "0.0 dB".
+121. Region menu: select the region; Region > Normalize… offers -0.3;
+     enter -1: the loudest peak reaches -1 dBFS (the waveform touches
+     near the top), one step "Normalize". Put the playhead inside the
+     region: Region > Fade In to Cursor and Fade Out from Cursor set the
+     fades there; Remove Fades clears them. With nothing selected the
+     items are disabled; with the playhead outside the region the status
+     line says "the cursor is not inside a selected audio region".
+122. Drag-in: drag a WAV from the Finder onto a lane at bar 3: a bar
+     "Importing audio…", then a region at bar 3 (snapped to the grid).
+     Drop two files below the last lane: two new lanes "Audio n". Drop a
+     file on the Piano Roll's region strip: it lands on that region's
+     lane. A text file renamed `.wav` among them is listed in a Problems
+     bar.
+123. Media Pool: Window > Media Pool lists Name, Duration, Channels,
+     Origin, Uses, Used and Offline. Select Unused selects items no
+     region uses; Compact removes them (one undo step). Rename… renames
+     (the arrangement's VoiceOver label follows). Reveal in Finder shows
+     the file. Import… adds files to the pool only. Delete on an item
+     in use first lists its regions ("Song › Audio 3, bar 1"), then
+     removes the item and those regions as one step. Double-click a row
+     (or Select Regions): its sequence shows with its regions selected.
+124. Offline and Relink: save, close, move one media file out of the
+     package (Show Package Contents > Media), reopen: the "missing or
+     changed" sheet lists it as Missing and its region is hatched and
+     says "Offline". Locate… the moved file: the bar "Relinking media…",
+     then the region plays again (the file is copied into Media/ as
+     "<name> 2.caf"). Leave Offline closes the sheet; File > Relink
+     Media… reopens it while something is offline. Search Folder… on the
+     folder holding the moved file finds it even renamed. Replace a
+     media file with another of the same length and format (copy one in
+     under its name) and switch back to VizDAW: after a moment the item
+     is "Changed" and silent; put the original back: it plays.
+125. Retention: in a saved project, import a file, Undo, Save: the file
+     is still in Media/. Make any other edit and Save: the file is now
+     in the Finder's Trash (Put Back restores it). Compact an unused
+     item and Save: its file stays (Undo could bring it back) until
+     another edit and Save. Once, run `cargo test -p platform-macos --
+     --ignored a_file_goes_to_the_real_trash`: a
+     "vizdaw-trash-check-<pid>.txt" appears in the Trash (delete it).
+126. Overview cache: quit, delete the package's `Media/.overviews`
+     folder, reopen: waveforms come back within a second or two; a
+     garbage file put there in place of a `.vzov` is replaced the same
+     way.
+127. Channel: with a region selected, `$V run region.normalize
+     '{"peak_db": "-0.3"}'` answers with `"undo": "Normalize"`; `$V run
+     region.normalize` fails naming the "Normalize" dialog; `$V run
+     media.relink '{"media": 1, "path": "/abs/file.wav"}'` waits for the
+     job; `$V state media` shows `used_percent` and, for a changed file,
+     `"offline_reason": "changed"`; `$V run window.media_pool` opens the
+     pool and `$V state windows` lists it as `media_pool`.
+128. Look and access: switch macOS between Light and Dark appearance:
+     regions, waveforms, handles and the offline hatching follow the
+     system colours. With VoiceOver, regions read "Region <name> on
+     <lane>, bar n, gain …"; the Relink sheet's buttons read "Locate
+     <name>", "Search Folder…" and "Leave Offline".
+
+### Recording (plan 5c)
+
+These steps use real hardware, so they are by eye: an audio interface
+with a microphone or a line source, a MIDI keyboard, and a loopback
+cable (an output wired back to an input). Use a throwaway home
+(`vizctl launch`) for the channel steps. The lane headers' input
+pickers, monitor buttons and meters, the toolbar's Record button and
+Settings › Audio (steps 144–159) do what the channel commands below do;
+the channel steps stay as they are.
+
+129. Microphone permission: macOS keeps the permission per app bundle,
+     not per home, so a fresh home does not ask again. To re-test, run
+     `tccutil reset Microphone org.vizdaw.VizDAW` first. Set a lane's
+     input to audio channel 1 (`$V run lane.set_input '{"seq": 1,
+     "lane": 2, "kind": "audio", "channel": 1}'`), arm it and press
+     Play or Record: macOS asks for the microphone once ("VizDAW records
+     audio from your audio interface…"; arming alone does not ask, the
+     prompt comes once the document holds the engine). Deny it, then
+     press Record: the transport's faults say "VizDAW may not use audio
+     input. Allow it in System Settings › Privacy & Security ›
+     Microphone…", a second Record says the same, and the input stays
+     closed. Allow it in System Settings and arm again: input opens, and
+     `$V state input` shows the channels, their names and nonzero
+     latencies.
+130. Record and monitor: with the interface as output and input, arm
+     an audio lane (monitor Auto): stopped, you hear the input through
+     the lane's strip; play without recording: you hear playback only;
+     press R: you hear the input while recording, the transport rolls,
+     and Stop (or R again) leaves one region on the lane and one undo
+     step "Record". The media pool lists "<lane> <date> <time>"
+     (Recorded, the project's rate and depth). Set the monitor to Input
+     (`$V run lane.set_monitor '{"seq": 1, "lane": 2, "mode":
+     "input"}'`): always heard; Off: never.
+131. Loopback calibration: wire output 1 to input 1, put a region with
+     a sharp click on one lane and record input 1 on another with its
+     monitor Off. Zoom into the recorded region: its click starts within
+     2 samples of the original's.
+     - The trim correction: if the click is off, the interface
+       misreports its latency; Settings › Audio › Latency trim moves the
+       recording by that many frames; record again to check, then Reset
+       Trim.
+     - The aggregate loopback: repeat with a separate input device (step
+       132) wired the same way. If its recording lands late by about the
+       aggregate device's own input safety offset, the input latency
+       should include that offset too: note how many samples it lands
+       off and the device's safety offset (Audio MIDI Setup does not show
+       it; `$V state input` shows the latencies VizDAW used) and file it
+       (the open question from plan 5c Task 11).
+     - With Auto and a plugin with latency elsewhere in the mix, the
+       monitored input is silent for the first few milliseconds after the
+       roll (the compensation lead), exactly as the playback is: not a
+       dropout (plan 5d-1 carry #10).
+132. Separate input device: in Settings › Audio choose another device
+     for input, e.g. the built-in microphone while playing through the
+     interface (back to "Same as output" afterwards). A new device takes
+     effect at once, even with a lane armed; while recording or
+     measuring, once that stops, so the next recording uses it (5d-2
+     final review I1: choose the device mid-pass, stop, record again and
+     listen: the new take is from the new device). Recording works,
+     stays in time with playback on the output, playback stays on the
+     interface, and Audio MIDI Setup shows no extra device (the
+     aggregate is private). Close the document or quit: no "VizDAW
+     Input" aggregate is left behind. Rate: set the input device to
+     44.1 kHz in Audio MIDI Setup with a 48 kHz project, then arm: the
+     input device's nominal rate is set to 48 kHz before the aggregate
+     is built. With a device locked to another rate, the transport
+     faults say "audio input could not open: … did not change to the
+     project's 48000 Hz", and playback goes on without input.
+133. MIDI keyboard: set a lane's input to MIDI from your keyboard
+     (`"kind": "midi", "port": "<its name>"`), arm it: what you play
+     sounds on the lane's instrument at once (thru), stopped or
+     playing. Record a phrase: the notes land where you played them
+     against what you heard, not a buffer late. Overdub (transport >
+     Overdub) merges a second pass; Replace with Punch on clears only
+     the punch range. With an external MIDI synth mixed into the same
+     monitors as VizDAW's audio, its clicks and VizDAW's line up by ear.
+134. Loop passes: turn Loop on and record over a short sequence for
+     three passes; after the first pass run `$V run record.keep_pass`,
+     after the second `$V run record.discard_pass`, then Stop: the lane
+     has two new takes ("Take 2", "Take 3"), the last plays, and one
+     Undo removes both.
+135. Crash recovery: record a few seconds into a saved project, then
+     kill VizDAW (`kill -9`). Reopen the project: the document window
+     comes to the front with the "Recovered Recordings" alert on it,
+     offering the file; Import into New Lanes adds a lane with it at
+     bar 1 (one undo step "Recover Recordings"); repeat and choose Move
+     to Trash: the file is in the Finder's Trash; choose Later: it is
+     offered again next time and Save never trashes it. Repeat with a
+     media file also moved away, so the Relink sheet is due at open
+     too: the alert still shows once the sheet is dealt with (SwiftUI
+     shows no alert over a sheet on the same view); if it never shows,
+     file it.
+     Open the project again while it is open: its window comes to the
+     front and no second alert shows. No automated test covers the
+     alert or the fronting in a live window.
+136. Unplug mid-recording: record from a USB interface and pull its
+     cable: within a moment recording stops with "Recording stopped: the
+     audio device went away; what was recorded is kept." and the region
+     holds what was recorded. A full disk stops the same way ("the disk
+     is almost full"); below 1 GB a warning shows first.
+137. Channel: `$V state record` while recording shows `recording`, the
+     `pass`, `frames` and each lane's file; `$V state input` names the
+     device's input channels and latencies; `$V run midi.inject
+     '{"port": "Keys", "bytes": "90 3c 64"}'` plays into lanes listening
+     to "Keys"; malformed bytes are `invalid_params`. The e2e test
+     `records_audio_loop_takes_and_midi` runs steps 130, 134 and 137
+     against the offline device's fake input
+     (`VIZDAW_AUDIO=offline VIZDAW_AUDIO_INPUT=fake`), which opens no
+     hardware and asks for no permission.
+138. Input only while needed: with no lane armed or monitoring Input,
+     the menu bar's microphone indicator is off; arming an audio lane
+     (and pressing Play or Record) turns it on, disarming turns it off.
+139. Known hardware-only gaps (plan 5c Task 11; watch for them, file
+     them if seen):
+     - Arming an audio lane while playing restarts the device mid-play
+       to open input: expect a short glitch. That is by design (input
+       opens only when needed); anything worse is a bug.
+     - If reopening the device for input fails and even the output-only
+       reopen fails, playback stays broken until the audio host is
+       rebuilt (quit and relaunch VizDAW to recover).
+     - The rate-mismatch flag is not refreshed when the device reopens
+       for input: if the rate changes on that reopen, the mismatch
+       warning may be stale.
+
+### Synth tracking (plan 5c-2)
+
+These steps run through the channel; the lane menu's Track Synth… and
+New MIDI Destination… sheets do the same by hand (steps 155–156). Make
+the hardware synth's destination with New MIDI Destination… (or `$V run
+destination.add_midi '{"name": "Juno", "port": "<its MIDI port>"}'`).
+The IDs below come from `$V state document` (lanes) and the project's
+instrument list.
+
+140. Track Synth: on a MIDI lane playing the synth's destination, `$V run
+     lane.track_synth '{"seq": 1, "lane": 1, "channel": 3}'`: a lane
+     "<synth> audio" appears just below, records input 3, is armed, and
+     `$V state document` shows its input's `return_of`; the MIDI lane is
+     disarmed (so a Replace pass never clears its part); one undo step
+     "Track Synth". Again with `"stereo": true`: the same lane now
+     records inputs 3–4. With `"arm_midi": true` the MIDI lane is armed
+     too; with `"mute_after": true` the next recording also mutes the MIDI
+     lane, inside its "Record" step. It works while playing, but with an
+     edit open it is `busy`. Setting the audio lane's input again with
+     `lane.set_input` and no `return_of` unlinks it from the synth.
+141. Measure: with the synth's output wired to input 3 and the transport
+     stopped, `$V run destination.measure_return '{"dest": <id>}'` plays
+     five middle Cs half a second apart (you hear them through the lane's
+     strip) and answers `return_latency_ms` (a few milliseconds for most
+     hardware) and `onsets` 5; one undo step "Set Return Latency". Pull the
+     cable and measure again: "No signal on the synth's return input", and
+     nothing changes. While playing, or with an edit open, it is `busy`.
+     Don't play the keyboard or audition notes while it measures: MIDI
+     thru reaches the synth and its notes add onsets that skew the value.
+     Each onset counts only for the latest note played, and a note's
+     onset needs 5 ms of quiet before it: a pad whose release rings into
+     the next note fails rather than reading 0 ms; type its latency
+     instead (`$V run destination.set_return_latency '{"dest": <id>,
+     "ms": "6.5"}'`).
+     After a Measure, the lane's plugin inserts come back on their own
+     within a moment (the engine may restart once); the playhead does not
+     move.
+142. Track: Record (`transport.record`) to the end: the part plays the
+     synth and the audio lane records it in one pass, one "Undo Record".
+     Zoom in on a note's attack in the recorded region and on the MIDI
+     note above it: they start within a millisecond. By ear: mute the MIDI
+     lane and play: the printed synth sits in time with the rest. A loop
+     pass with the MIDI lane armed makes matching MIDI and audio takes.
+     The e2e test `tracks_the_fake_synth` runs 140–142 against the offline
+     device's fake synth (`VIZDAW_AUDIO=offline VIZDAW_FAKE_SYNTH=25`),
+     which opens no hardware and asks for no permission. The fake synth's
+     delay is not exactly the one asked for: a delay below one block is
+     answered one block late, and the delay grows to cover the largest
+     block rendered, with the engine's negative MIDI offset (when there
+     is one) raising its floor; tests read `synth_delay()` after a run
+     for the delay a measurement should find.
+143. Owner checks (by ear, by eye or on hardware; not run by the tests):
+     - On real hardware, Measure against a synth whose latency you know
+       reads close to it.
+     - The 5 ms quiet rule: a synth whose release never falls quiet (a
+       drone, a long reverb tail) cannot be measured; type its latency
+       instead (`destination.set_return_latency`).
+     - Measure runs off the main thread, from the sheet and from the
+       channel: menus and meters keep moving while it measures (plan 5d-2
+       Ruling 6).
+
+### Record UI and monitoring (plans 5d-1 and 5d-2)
+
+By eye, on real hardware where a step says so (an interface with a
+microphone or line input, a MIDI keyboard, a loopback cable). No test
+drives these views; their models are tested (`RecordOptionsTests`,
+`LaneInputsTests`, `AudioReadoutsTests`, `SynthSheetsTests`,
+`GrowingTakeTests`) and the e2e `arms_meters_counts_in_and_draws_the_take`
+checks the same behaviour through the channel. Steps that record
+(144, 145, 149, 153, 154) record over lanes: use a throwaway project or
+a copy, not one you care about.
+
+144. Record button and popover: the toolbar shows a Record button (a
+     circle) and a chevron after Loop. R and the button both record; the
+     button turns red while recording and stops on the next press. A
+     refusal (no lane armed with an input, step entry on) shows in the
+     status line. The chevron's popover holds Replace/Overdub, Punch with
+     its In and Out fields, Loop, Count-in (off to 4 bars), Pre-roll (off
+     to 8 bars) and Passes as takes. Type `3` in Punch In and press
+     Return: the punch starts at bar 3, as the transport bar's field
+     shows; typing R or Space in the field types it (no transport key
+     fires). With Overdub chosen and an audio lane armed, the popover says
+     "Audio overdub replaces what it overlaps: record into another lane or
+     take to layer." While recording the popover's controls are dimmed.
+145. Count-in: set Count-in to 1 bar and press Record: four clicks (the
+     first higher) play while the toolbar shows "Count-in" and the
+     playhead waits, then the transport rolls on the downbeat. 2 bars at
+     3/4 is six clicks. The click is never recorded. If the audio device
+     restarts during the count-in (another device chosen, a sample-rate
+     change), the rest of the count-in is skipped and recording starts at
+     once (known; backlog).
+146. Time left and loop counters: with one stereo audio lane armed, the
+     toolbar shows the recording time left (for 48 kHz / 24-bit stereo,
+     about one hour per 1 GB free beyond the last 100 MB); arming a second
+     stereo lane halves it; with only MIDI lanes armed it is gone. Loop
+     record: the toolbar counts "Pass 2", then "Pass 3 · 1 kept" after
+     Keep Pass.
+147. Lane header: each lane has a monitor button (A, I or –) left of M:
+     clicking cycles Auto → Input → Off, one undo step "Set Lane Monitor"
+     each. The second line splits into the destination and the input
+     picker: an audio lane's picker lists "No Input", each device channel
+     by its name ("In 1 (Mic)") and the pairs ("In 1+2"); a MIDI lane's
+     lists All MIDI Inputs and each keyboard, then Any Channel and
+     channels 1–16. On a new project, before any Play or arm, the audio
+     picker already lists every channel of the chosen input device by
+     name, and no microphone prompt appears (5d-2 final review I4); a
+     mono input lists In 1 alone. The lane's input is checked; choosing
+     another is one undo step "Set Lane Input". While a lane is armed or
+     monitors Input,
+     a thin meter runs under its controls; a full-scale peak (or a
+     clipped sample in a 16/24-bit recording) lights the red mark at its
+     end for two seconds. While the input is opening (the first arm may
+     show macOS's microphone prompt), the meter track is yellow and the
+     status line says so. A lane made by Track Synth shows
+     "⇠ <synth> · In 3", cut in the middle when it is long so the
+     channel stays visible.
+148. Mixer: each AudioPath strip shows the same input picker and monitor
+     button above its inserts, for the shown sequence's lane that plays
+     through it (the armed one if several). Changing either in the mixer
+     changes the lane header at once, and the reverse.
+149. Monitoring latency (plan 5d-1, Review Focus 1): put a plugin that
+     reports latency (a look-ahead limiter, a linear-phase EQ) on the
+     master strip; monitor a lane on Input and clap into the microphone:
+     you hear it with no more delay than with the plugin bypassed (the
+     round trip Settings › Audio shows). Play: the playback stays in time
+     with the click, through a loop wrap, at the end of the song and after
+     a locate, and nothing from before the play point is heard. Move the
+     plugin onto the monitored lane's own strip: now its latency adds to
+     what you hear, as it should. While recording, the lane's old take is
+     silent inside the record range when its input is heard (Auto or
+     Input), and plays outside it.
+150. Arm before Play (plan 5d-1 Ruling 16): open a project and, without
+     pressing Play, arm an audio lane on Auto: its input is heard at once
+     and its meter moves. Arm a MIDI lane: the keyboard plays thru at
+     once. Plug in a second keyboard, disarm and arm again: it plays too.
+     With another window playing, arming here changes nothing there
+     (that window keeps playing; this one is heard at its next Play).
+151. Settings › Audio: Input device lists "Same as output" and every
+     input device; a chosen device that is unplugged shows "(not
+     connected)". A new device takes effect at once, even with a lane
+     armed (the meter and monitoring move to it); while recording or
+     measuring, once that stops, so the next recording uses it (the
+     caption says so). Software Monitoring off: a
+     monitored input falls silent at once while the keyboard still plays
+     thru and Record still records. I/O Buffer Size: each size changes
+     the readout; once the input has opened it reads "Round trip … ms
+     (input … + output … + 2 × … frames)" (at 48 kHz and 128 frames,
+     5.3 ms plus the device's own latencies); a device that refuses a
+     size says the size it runs at. A device that refuses every buffer
+     size stops playback, with the error shown in red (5d-1 T6 n2).
+     Choose another size while recording: "Stop recording to change the
+     I/O buffer size." shows in red and nothing changes. The latency trim
+     steps in frames with its milliseconds; Reset Trim zeroes it. RAM
+     cache and Disk read-ahead apply from the next Play. Quit and
+     relaunch: every setting is kept (they are app preferences, never in
+     a project).
+152. Settings › Recording: the sample rate and bit depth are what File >
+     New offers first. Count-in, Pre-roll and Passes as takes are what
+     the next opened document's popover starts with (open documents keep
+     theirs). Monitoring for new lanes set to Input: "+ Add Lane" makes a
+     lane showing I, and one Undo removes the lane. The low-disk
+     thresholds read "Recording warns below 1 GB … and stops below 100
+     MB."
+153. Save while recording (plan 5d-1 Ruling 19): in a saved project,
+     press ⌘S while recording: the status line says "Saved. The take is
+     saved when recording stops."; Stop: close the window, no unsaved
+     changes are asked about, and reopening shows the take. VizDAW never
+     asks when a window closes: after ⌘S during a pass, closing the
+     window keeps the take that was announced (it is saved), even with no
+     Save after Stop. ⇧⌘S (Save As) while recording says "Stop recording
+     to use Save As: the take is being written into this project." and
+     opens no panel; so does ⌘S in an untitled project.
+154. The growing take: while recording, a red region grows on every
+     armed audio lane from the record range's start, drawing its
+     waveform as it goes; at Stop the finished region replaces it in the
+     same place (after a Locate during the pass it may shift). With Punch
+     on, it starts at Punch In and stops growing at Punch Out while the
+     transport plays on.
+155. Track Synth sheet (spec §6.7): right-click a MIDI lane that plays an
+     external MIDI destination: Track Synth… is enabled (dimmed on other
+     lanes). The sheet sets the return input (In 3, or In 3+4 with
+     Stereo), Also record the MIDI lane, and Mute the MIDI lane after
+     recording; Track Synth adds "<synth> audio" below as step 140 does
+     (one undo step) and the sheet stays open. Measure: a spinner shows,
+     the five notes play, and the window stays responsive (except that
+     the first Measure may pause it for up to 3 s while the input
+     opens): meters move, menus open, until "Return latency … ms (5 of 5
+     notes heard)." Done closes it. After a Measure, the lane's plugin
+     inserts come back on their own within a moment (the engine may
+     restart once); the playhead does not move.
+156. New MIDI Destination…: right-click a lane: the sheet's MIDI port
+     lists the system's MIDI destinations; Add makes the destination and
+     points the lane at it (two undo steps, "Add Destination" and "Set
+     Lane Destination"); the lane's destination now names it and Track
+     Synth… is enabled for it. With no MIDI destination connected, Add is
+     dimmed.
+157. Under the control channel (`vizctl launch`), choosing Track Synth…
+     or New MIDI Destination… from a lane menu opens no sheet: the status
+     line names `lane.track_synth` or `destination.add_midi`. `$V run
+     destination.measure_return '{"dest": <id>}'` answers after the
+     measurement while other calls (`$V state transport`) keep answering
+     meanwhile.
+158. VoiceOver: a lane header reads like "Vocal, no destination, armed,
+     input In 1+2, monitoring input"; the toolbar's buttons read "Record"
+     (or "Stop Recording") and "Record Options"; a mixer strip's monitor
+     button reads its mode.
+159. Microphone prompt left up (plan 5d-1 final review m1): on a Mac where
+     VizDAW has never asked (reset it with `tccutil reset Microphone
+     org.vizdaw.VizDAW`, as in step 129), arm an audio lane and leave
+     macOS's prompt unanswered for more than 2 minutes. The input does
+     NOT open (the meter stays yellow, then empty), and the fault popover
+     says "audio input could not open: waiting for microphone permission;
+     arm the lane again". Answer Allow, arm again: it opens.

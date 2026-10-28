@@ -2,8 +2,8 @@
 //! chosen block sizes, and records every event its sinks receive.
 
 use crate::backend::{
-    AudioBackend, AudioConfig, BackendEvent, BlockTime, InstrumentNode, MidiOut, MidiPortInfo,
-    StereoBuf, StreamInfo,
+    AudioBackend, AudioConfig, BackendEvent, BlockTime, InputBlock, InstrumentNode, MidiOut,
+    MidiPortInfo, StereoBuf, StreamInfo,
 };
 use crate::engine::SinkFactory;
 use crate::error::BackendError;
@@ -11,7 +11,7 @@ use crate::render::{Renderer, Sink};
 use crate::schedule::{TargetIdx, TargetKind};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Bytes kept per logged message (longer SysEx is truncated in the log).
@@ -292,6 +292,8 @@ pub struct OfflineSinks {
     /// midi-dropped fault).
     pub midi_accepts: bool,
     tone: bool,
+    /// The fake synth behind the port [`FAKE_SYNTH_PORT`] (plan 5c-2).
+    synth: Option<FakeSynth>,
 }
 
 impl OfflineSinks {
@@ -303,6 +305,7 @@ impl OfflineSinks {
             ports: Vec::new(),
             midi_accepts: true,
             tone: false,
+            synth: None,
         }
     }
 
@@ -316,6 +319,21 @@ impl OfflineSinks {
     /// Ruling 27).
     pub fn with_tone(mut self) -> OfflineSinks {
         self.tone = true;
+        self
+    }
+
+    /// Pretends the MIDI destination [`FAKE_SYNTH_PORT`] exists and is
+    /// `synth` (spec §12.1): what is sent to it is logged like any MIDI
+    /// output and also played by the synth on the fake input. Call after
+    /// [`OfflineSinks::with_ports`], which replaces the ports.
+    pub fn with_fake_synth(mut self, synth: &FakeSynth) -> OfflineSinks {
+        if !self.ports.iter().any(|p| p.name == FAKE_SYNTH_PORT) {
+            self.ports.push(MidiPortInfo {
+                name: FAKE_SYNTH_PORT.into(),
+                unique_id: None,
+            });
+        }
+        self.synth = Some(synth.clone());
         self
     }
 
@@ -341,6 +359,19 @@ impl SinkFactory for OfflineSinks {
             return Err(BackendError::NotSupported(format!("plugin instance {id}")));
         }
         let tx = self.log.add(target, self.capacity);
+        if let (TargetKind::MidiDestination(p), Some(synth)) = (kind, self.synth.as_ref())
+            && p.name == FAKE_SYNTH_PORT
+        {
+            return Ok(Sink::Midi(Box::new(FakeSynthOut {
+                log: RecordingMidiOut {
+                    tx,
+                    target,
+                    sample_rate,
+                    accept: self.midi_accepts,
+                },
+                queue: Arc::clone(&synth.queue),
+            })));
+        }
         Ok(match kind {
             TargetKind::BuiltinSynth => Sink::Instrument(Box::new(RecordingNode {
                 tx,
@@ -361,8 +392,320 @@ impl SinkFactory for OfflineSinks {
     }
 }
 
+/// A fake audio input (sub-project 5 spec §12.1): no device and no
+/// microphone permission, for tests and the e2e.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeInput {
+    /// Channel 1 carries a 440 Hz sine at −12 dBFS, channel 2 an impulse
+    /// every 0.5 s (from frame 0), channel 3 silence, or the fake synth
+    /// ([`OfflineBackend::with_synth`]).
+    Signals,
+    /// Channels 1 and 2 are the output's left and right this many frames
+    /// later (at least one block, plan 5c Ruling 8); channel 3 silence.
+    /// The device reports half the delay as output latency and the rest
+    /// as input latency, as a real loopback cable would show.
+    Loopback(u32),
+}
+
+/// Channels of the fake input.
+pub const FAKE_INPUT_CHANNELS: usize = 3;
+/// The fake sine's frequency.
+pub const FAKE_SINE_HZ: f64 = 440.0;
+/// The fake sine's amplitude: −12 dBFS.
+pub const FAKE_SINE_AMPLITUDE: f32 = 0.251_188_64;
+
+/// Sample `frame` of fake input channel `c` for [`FakeInput::Signals`].
+pub fn fake_signal(c: usize, frame: u64, sample_rate: f64) -> f32 {
+    match c {
+        0 => {
+            let t = frame as f64 / sample_rate.max(1.0);
+            (FAKE_SINE_AMPLITUDE as f64 * (std::f64::consts::TAU * FAKE_SINE_HZ * t).sin()) as f32
+        }
+        1 => {
+            let every = (sample_rate / 2.0).round().max(1.0) as u64;
+            if frame % every == 0 { 1.0 } else { 0.0 }
+        }
+        _ => 0.0,
+    }
+}
+
+/// The fake external MIDI destination's port name (spec §12.1).
+pub const FAKE_SYNTH_PORT: &str = "Fake Synth";
+/// The fake input channel the fake synth plays on (0-based: "channel 3").
+pub const FAKE_SYNTH_CHANNEL: usize = 2;
+/// The fake synth's click: 5 ms (spec §12.1).
+pub const FAKE_CLICK_SECONDS: f64 = 0.005;
+/// The click's level: -6 dBFS (plan 5c-2 Ruling 7).
+pub const FAKE_CLICK_LEVEL: f32 = 0.5;
+/// The tone a held note sounds (spec §12.1: 220 Hz).
+pub const FAKE_TONE_HZ: f64 = 220.0;
+/// The tone's amplitude: -20 dBFS.
+pub const FAKE_TONE_LEVEL: f32 = 0.1;
+/// Note events the fake synth holds until the fake input plays them.
+pub const FAKE_SYNTH_EVENTS: usize = 4096;
+
+/// Event kinds in the low two bits of a queued event (the frame is above
+/// them).
+const EV_OFF: u64 = 0;
+const EV_ON: u64 = 1;
+const EV_ALL_OFF: u64 = 2;
+
+/// The fake synth's note events: pushed by its MIDI sink and taken by the
+/// fake input, both on the render thread, one at a time (a sink replaced
+/// by a load takes over the same queue). Single producer, single
+/// consumer, over atomics; a full queue drops and counts.
+struct SynthQueue {
+    slots: Box<[AtomicU64]>,
+    head: AtomicUsize,
+    tail: AtomicUsize,
+    dropped: AtomicU64,
+}
+
+impl std::fmt::Debug for SynthQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SynthQueue")
+    }
+}
+
+impl SynthQueue {
+    fn new() -> SynthQueue {
+        SynthQueue {
+            slots: (0..FAKE_SYNTH_EVENTS).map(|_| AtomicU64::new(0)).collect(),
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// Queues `v` (frame << 2 | kind); false (and counted) when full. // RT
+    fn push(&self, v: u64) -> bool {
+        let h = self.head.load(Ordering::Relaxed);
+        let t = self.tail.load(Ordering::Acquire);
+        let n = self.slots.len().max(1);
+        if h.wrapping_sub(t) >= n {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if let Some(s) = self.slots.get(h % n) {
+            s.store(v, Ordering::Relaxed);
+        }
+        self.head.store(h.wrapping_add(1), Ordering::Release);
+        true
+    }
+
+    /// The oldest queued event. // RT
+    fn peek(&self) -> Option<u64> {
+        let t = self.tail.load(Ordering::Relaxed);
+        if t == self.head.load(Ordering::Acquire) {
+            return None;
+        }
+        let n = self.slots.len().max(1);
+        self.slots.get(t % n).map(|s| s.load(Ordering::Relaxed))
+    }
+
+    /// Drops the oldest queued event. // RT
+    fn pop(&self) {
+        let t = self.tail.load(Ordering::Relaxed);
+        self.tail.store(t.wrapping_add(1), Ordering::Release);
+    }
+}
+
+/// A fake external synth (spec §12.1 `VIZDAW_FAKE_SYNTH`; plan 5c-2
+/// Ruling 7): what is sent to the MIDI destination [`FAKE_SYNTH_PORT`]
+/// plays on fake input channel 3 `delay_ms` after its audible time:
+/// every note-on starts a 5 ms click, and a 220 Hz tone sounds while any
+/// note is held. Give the same synth to [`OfflineSinks::with_fake_synth`]
+/// and [`OfflineBackend::with_synth`].
+#[derive(Clone)]
+pub struct FakeSynth {
+    queue: Arc<SynthQueue>,
+    delay_ms: f64,
+}
+
+impl std::fmt::Debug for FakeSynth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeSynth")
+            .field("delay_ms", &self.delay_ms)
+            .finish()
+    }
+}
+
+impl FakeSynth {
+    /// A synth answering `delay_ms` late (not finite or negative: 0).
+    pub fn new(delay_ms: f64) -> FakeSynth {
+        FakeSynth {
+            queue: Arc::new(SynthQueue::new()),
+            delay_ms: if delay_ms.is_finite() {
+                delay_ms.max(0.0)
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// Its delay in milliseconds.
+    pub fn delay_ms(&self) -> f64 {
+        self.delay_ms
+    }
+
+    /// Note events dropped because the queue was full.
+    pub fn dropped(&self) -> u64 {
+        self.queue.dropped.load(Ordering::Relaxed)
+    }
+}
+
+/// The fake synth's MIDI destination: logs like [`RecordingMidiOut`] and
+/// queues note events at their audible frame for the fake input (the fake
+/// device's output latency is 0 with the signals input, so a host time is
+/// its frame).
+pub struct FakeSynthOut {
+    log: RecordingMidiOut,
+    queue: Arc<SynthQueue>,
+}
+
+impl MidiOut for FakeSynthOut {
+    /// // RT
+    fn send(&mut self, host_time_ns: u64, msg: &[u8]) -> bool {
+        if !self.log.send(host_time_ns, msg) {
+            return false;
+        }
+        let frame = (host_time_ns as f64 * self.log.sample_rate / 1e9).round() as u64;
+        match note_kind(msg) {
+            // A full queue refuses, so the engine counts a dropped message
+            // too.
+            Some(k) => self.queue.push((frame.min(u64::MAX >> 2) << 2) | k),
+            None => true,
+        }
+    }
+}
+
+/// What a message does to the fake synth.
+fn note_kind(msg: &[u8]) -> Option<u64> {
+    if msg.len() < 3 {
+        return None;
+    }
+    match msg {
+        [s, _, v, ..] if s & 0xF0 == 0x90 && *v > 0 => Some(EV_ON),
+        [s, ..] if s & 0xF0 == 0x80 || s & 0xF0 == 0x90 => Some(EV_OFF),
+        [s, c, ..] if s & 0xF0 == 0xB0 && (*c == 120 || *c == 123) => Some(EV_ALL_OFF),
+        _ => None,
+    }
+}
+
+/// The fake synth's voice in the fake input.
+#[derive(Debug)]
+struct SynthVoice {
+    queue: Arc<SynthQueue>,
+    /// Frames after a note's audible frame it sounds.
+    delay: u64,
+    /// Notes held.
+    held: u32,
+    /// Where the last click started.
+    click_from: Option<u64>,
+    /// Where the tone started (its phase).
+    tone_from: u64,
+    /// Events taken from the queue, not yet due; they may be in any order.
+    /// Allocated once with the voice.
+    pending: Vec<u64>,
+    /// Frames the engine's negative MIDI offset puts a note's audible
+    /// frame before the block that sends it.
+    extra: u64,
+}
+
+impl SynthVoice {
+    fn new(queue: Arc<SynthQueue>, delay: u64) -> SynthVoice {
+        SynthVoice {
+            queue,
+            delay,
+            held: 0,
+            click_from: None,
+            tone_from: 0,
+            pending: Vec::with_capacity(FAKE_SYNTH_EVENTS),
+            extra: 0,
+        }
+    }
+
+    /// Grows the delay to cover a block of `frames`: a note is sent during
+    /// the block that carries it and heard no earlier than `extra` frames
+    /// before that block, so it can sound on time only if the synth waits
+    /// at least a block plus that. // RT
+    fn cover(&mut self, frames: u32) {
+        self.delay = self.delay.max(u64::from(frames) + self.extra);
+    }
+
+    /// The pending event due by frame `at` with the earliest time (the
+    /// first queued among equals), and its index. // RT
+    fn next_due(&self, at: u64) -> Option<(usize, u64)> {
+        let mut best: Option<(usize, u64)> = None;
+        for (i, ev) in self.pending.iter().enumerate() {
+            let when = (ev >> 2).saturating_add(self.delay);
+            if when <= at && best.is_none_or(|(_, b)| when < (b >> 2).saturating_add(self.delay)) {
+                best = Some((i, *ev));
+            }
+        }
+        best
+    }
+
+    /// Renders channel 3 for absolute frames `abs..abs + out.len()`. // RT
+    fn render(&mut self, out: &mut [f32], abs: u64, rate: f64) {
+        let click = (FAKE_CLICK_SECONDS * rate).round().max(1.0) as u64;
+        while let Some(ev) = self.queue.peek() {
+            self.queue.pop();
+            if self.pending.len() < self.pending.capacity() {
+                self.pending.push(ev);
+            } else {
+                self.queue.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for (k, x) in out.iter_mut().enumerate() {
+            let at = abs + k as u64;
+            // Due events act in time order, whatever order they arrived in.
+            while let Some((i, ev)) = self.next_due(at) {
+                let when = (ev >> 2).saturating_add(self.delay);
+                match ev & 3 {
+                    EV_ON => {
+                        if self.held == 0 {
+                            self.tone_from = when;
+                        }
+                        self.held = self.held.saturating_add(1);
+                        self.click_from = Some(when);
+                    }
+                    EV_OFF => self.held = self.held.saturating_sub(1),
+                    _ => self.held = 0,
+                }
+                self.pending.remove(i);
+            }
+            let mut v = 0.0f32;
+            if self.click_from.is_some_and(|c| at >= c && at - c < click) {
+                v += FAKE_CLICK_LEVEL;
+            }
+            if self.held > 0 {
+                let t = at.saturating_sub(self.tone_from) as f64 / rate.max(1.0);
+                v += (f64::from(FAKE_TONE_LEVEL) * (std::f64::consts::TAU * FAKE_TONE_HZ * t).sin())
+                    as f32;
+            }
+            *x = v;
+        }
+    }
+}
+
+/// The fake input's buffers.
+#[derive(Debug)]
+struct Fake {
+    kind: FakeInput,
+    /// The loopback delay in frames (0 for signals).
+    delay: u32,
+    chans: [Vec<f32>; FAKE_INPUT_CHANNELS],
+    /// The output's left and right, by absolute frame modulo the length.
+    history: [Vec<f32>; 2],
+    /// The fake synth on channel 3 (plan 5c-2 Ruling 7).
+    synth: Option<SynthVoice>,
+}
+
 /// Drives a renderer without hardware. Block `n` starts at host time
-/// `frames_so_far × 1e9 / sample_rate` ns.
+/// `(frames_so_far + output latency) × 1e9 / sample_rate` ns: the time
+/// its first frame is heard (the fake device's output latency is 0
+/// unless it loops back).
 #[derive(Debug)]
 pub struct OfflineBackend {
     sample_rate: f64,
@@ -372,6 +715,7 @@ pub struct OfflineBackend {
     frames: u64,
     left: Vec<f32>,
     right: Vec<f32>,
+    fake: Option<Fake>,
 }
 
 impl OfflineBackend {
@@ -385,12 +729,75 @@ impl OfflineBackend {
             frames: 0,
             left: Vec::new(),
             right: Vec::new(),
+            fake: None,
+        }
+    }
+
+    /// The backend with a fake input (spec §12.1).
+    pub fn with_input(mut self, kind: FakeInput) -> OfflineBackend {
+        let delay = match kind {
+            FakeInput::Signals => 0,
+            FakeInput::Loopback(n) => n.max(self.block),
+        };
+        self.fake = Some(Fake {
+            kind,
+            delay,
+            chans: Default::default(),
+            history: Default::default(),
+            synth: None,
+        });
+        let n = self.left.len() as u32;
+        self.reserve(n.max(self.block));
+        self
+    }
+
+    /// `(output, input)` latency the fake device reports, in frames.
+    fn latencies(&self) -> (u32, u32) {
+        match &self.fake {
+            Some(f) => (f.delay / 2, f.delay - f.delay / 2),
+            None => (0, 0),
         }
     }
 
     /// Frames rendered so far.
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// Plays `synth` on fake input channel 3 (spec §12.1). Only with the
+    /// signals input (plan 5c-2 Ruling 7): call after
+    /// [`OfflineBackend::with_input`]; with no fake input or the loopback
+    /// nothing changes. Its delay is at least one block, as the loopback's
+    /// is (a note is sent during the block it plays in), and grows to the
+    /// largest block rendered plus the engine's negative MIDI offset, so
+    /// that a note never sounds before its audible frame plus the delay.
+    pub fn with_synth(mut self, synth: &FakeSynth) -> OfflineBackend {
+        let rate = self.sample_rate;
+        let block = u64::from(self.block);
+        if let Some(f) = self.fake.as_mut().filter(|f| f.kind == FakeInput::Signals) {
+            let delay = ((synth.delay_ms * rate / 1000.0).round().max(0.0) as u64).max(block);
+            f.synth = Some(SynthVoice::new(Arc::clone(&synth.queue), delay));
+        }
+        self
+    }
+
+    /// Frames the fake synth sounds after a note's audible frame, once
+    /// [`OfflineBackend::with_synth`] gave it one.
+    pub fn synth_delay(&self) -> Option<u64> {
+        self.fake
+            .as_ref()
+            .and_then(|f| f.synth.as_ref())
+            .map(|s| s.delay)
+    }
+
+    /// The last block's fake input channel `c`, `frames` long (for tests;
+    /// empty without a fake input).
+    pub fn input(&self, c: usize, frames: u32) -> &[f32] {
+        self.fake
+            .as_ref()
+            .and_then(|f| f.chans.get(c))
+            .and_then(|ch| ch.get(..frames as usize))
+            .unwrap_or(&[])
     }
 
     /// Prepares output buffers for blocks up to `max` frames (non-RT).
@@ -400,25 +807,76 @@ impl OfflineBackend {
             self.left.resize(n, 0.0);
             self.right.resize(n, 0.0);
         }
+        let n = self.left.len();
+        if let Some(f) = self.fake.as_mut() {
+            for c in f.chans.iter_mut() {
+                if c.len() < n {
+                    c.resize(n, 0.0);
+                }
+            }
+            let h = f.delay as usize + n;
+            for c in f.history.iter_mut() {
+                if c.len() < h {
+                    // Resizing loses the history: only before playing.
+                    *c = vec![0.0; h];
+                }
+            }
+        }
     }
 
     /// Renders one block of `frames` frames; returns the peak absolute
     /// sample. Call [`OfflineBackend::reserve`] first for blocks larger than
     /// any seen before.
     pub fn block(&mut self, frames: u32) -> f32 {
+        let (out_latency, _) = self.latencies();
         let Some(r) = self.renderer.as_mut() else {
             return 0.0;
         };
         let n = (frames as usize).min(self.left.len());
         let time = BlockTime {
-            host_time_ns: (self.frames as f64 * 1e9 / self.sample_rate).round() as u64,
+            host_time_ns: ((self.frames + u64::from(out_latency)) as f64 * 1e9 / self.sample_rate)
+                .round() as u64,
             sample_rate: self.sample_rate,
         };
+        let abs = self.frames;
+        let rate = self.sample_rate;
+        if let Some(f) = self.fake.as_mut() {
+            if let Some(s) = f.synth.as_mut() {
+                s.cover(frames);
+            }
+            fill_fake(f, abs, n, rate);
+        }
         let (Some(l), Some(rt)) = (self.left.get_mut(..n), self.right.get_mut(..n)) else {
             return 0.0;
         };
         let mut chans: [&mut [f32]; 2] = [l, rt];
-        r.process(&mut chans, frames, time);
+        match &self.fake {
+            Some(f) => {
+                let ins: [&[f32]; FAKE_INPUT_CHANNELS] = [
+                    f.chans[0].get(..n).unwrap_or(&[]),
+                    f.chans[1].get(..n).unwrap_or(&[]),
+                    f.chans[2].get(..n).unwrap_or(&[]),
+                ];
+                let input = InputBlock {
+                    channels: &ins,
+                    delay_frames: i64::from(f.delay),
+                };
+                r.process_input(&mut chans, frames, time, input);
+            }
+            None => r.process(&mut chans, frames, time),
+        }
+        if let Some(f) = self.fake.as_mut() {
+            if f.kind != FakeInput::Signals {
+                for (h, src) in f.history.iter_mut().zip([&*chans[0], &*chans[1]]) {
+                    let len = h.len().max(1);
+                    for (k, x) in src.iter().enumerate() {
+                        if let Some(d) = h.get_mut((abs as usize + k) % len) {
+                            *d = *x;
+                        }
+                    }
+                }
+            }
+        }
         self.frames += u64::from(frames);
         chans
             .iter()
@@ -463,16 +921,31 @@ impl OfflineBackend {
 
 impl AudioBackend for OfflineBackend {
     fn open(&mut self, _cfg: &AudioConfig) -> Result<StreamInfo, BackendError> {
+        let (output_latency_frames, input_latency_frames) = self.latencies();
+        let inputs = if self.fake.is_some() {
+            FAKE_INPUT_CHANNELS
+        } else {
+            0
+        };
         Ok(StreamInfo {
             device_name: "offline".into(),
             sample_rate: self.sample_rate,
             buffer_frames: self.block,
             channels: u32::try_from(self.channels).unwrap_or(2),
+            input_channels: inputs as u32,
+            input_channel_names: (1..=inputs).map(|k| format!("Fake In {k}")).collect(),
+            input_latency_frames,
+            output_latency_frames,
         })
     }
 
     fn start(&mut self, renderer: Renderer) -> Result<(), BackendError> {
         self.reserve(self.block.max(renderer.config().max_frames));
+        let cfg = renderer.config();
+        let early = (-cfg.midi_offset_ns).max(0) as f64 * cfg.sample_rate / 1e9;
+        if let Some(s) = self.fake.as_mut().and_then(|f| f.synth.as_mut()) {
+            s.extra = early.round() as u64;
+        }
         self.renderer = Some(renderer);
         Ok(())
     }
@@ -483,5 +956,135 @@ impl AudioBackend for OfflineBackend {
 
     fn take_events(&mut self) -> Vec<BackendEvent> {
         Vec::new()
+    }
+}
+
+/// Fills the fake input's channels for `n` frames from absolute frame
+/// `abs`. // RT
+fn fill_fake(f: &mut Fake, abs: u64, n: usize, rate: f64) {
+    let [c0, c1, c2] = &mut f.chans;
+    let (Some(c0), Some(c1), Some(c2)) = (c0.get_mut(..n), c1.get_mut(..n), c2.get_mut(..n)) else {
+        return;
+    };
+    c2.fill(0.0);
+    // The fake synth plays on channel 3 (plan 5c-2 Ruling 7).
+    if let Some(s) = f.synth.as_mut() {
+        s.render(c2, abs, rate);
+    }
+    match f.kind {
+        FakeInput::Signals => {
+            for k in 0..n {
+                let at = abs + k as u64;
+                if let (Some(a), Some(b)) = (c0.get_mut(k), c1.get_mut(k)) {
+                    *a = fake_signal(0, at, rate);
+                    *b = fake_signal(1, at, rate);
+                }
+            }
+        }
+        FakeInput::Loopback(_) => {
+            let delay = u64::from(f.delay);
+            for (c, h) in [c0, c1].into_iter().zip(f.history.iter()) {
+                let len = h.len().max(1) as u64;
+                for (k, x) in c.iter_mut().enumerate() {
+                    let at = abs + k as u64;
+                    // Frames the output has not played yet read 0 (a block
+                    // longer than the delay).
+                    *x = match at.checked_sub(delay) {
+                        Some(src) if src < abs => {
+                            h.get((src % len) as usize).copied().unwrap_or(0.0)
+                        }
+                        _ => 0.0,
+                    };
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod synth_tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+
+    fn ns(frame: u64) -> u64 {
+        (frame as f64 * 1e9 / RATE).round() as u64
+    }
+
+    fn out(queue: &Arc<SynthQueue>) -> FakeSynthOut {
+        let (tx, rx) = RingBuffer::new(FAKE_SYNTH_EVENTS + 8);
+        // Keep the log's consumer alive so the log accepts every send.
+        std::mem::forget(rx);
+        FakeSynthOut {
+            log: RecordingMidiOut {
+                tx,
+                target: TargetIdx(0),
+                sample_rate: RATE,
+                accept: true,
+            },
+            queue: Arc::clone(queue),
+        }
+    }
+
+    fn render(v: &mut SynthVoice, frames: usize) -> Vec<f32> {
+        let mut o = vec![0.0; frames];
+        v.render(&mut o, 0, RATE);
+        o
+    }
+
+    #[test]
+    fn short_messages_are_not_notes() {
+        assert_eq!(note_kind(&[0x90, 60]), None);
+        assert_eq!(note_kind(&[0x80, 60]), None);
+        assert_eq!(note_kind(&[0xB0, 123]), None);
+        assert_eq!(note_kind(&[0x90, 60, 0]), Some(EV_OFF));
+        assert_eq!(note_kind(&[0x90, 60, 9]), Some(EV_ON));
+        assert_eq!(note_kind(&[0x80, 60, 0]), Some(EV_OFF));
+        assert_eq!(note_kind(&[0xB0, 123, 0]), Some(EV_ALL_OFF));
+        assert_eq!(note_kind(&[0xB3, 120, 0]), Some(EV_ALL_OFF));
+    }
+
+    #[test]
+    fn all_notes_off_ends_the_tone() {
+        let q = Arc::new(SynthQueue::new());
+        let mut o = out(&q);
+        assert!(o.send(ns(10), &[0x90, 60, 100]));
+        assert!(o.send(ns(10), &[0x90, 64, 100]));
+        assert!(o.send(ns(1000), &[0xB0, 123, 0]));
+        let mut v = SynthVoice::new(q, 0);
+        let ch = render(&mut v, 2000);
+        assert!(ch[500..1000].iter().any(|x| x.abs() > 0.01));
+        assert!(ch[1000..].iter().all(|x| *x == 0.0));
+    }
+
+    #[test]
+    fn a_late_timestamped_event_does_not_block_the_queue() {
+        // The note-on is audible at 1000, but an all-notes-off audible at
+        // 10 was queued behind it: it must still act at 10, not wait for
+        // the note-on.
+        let q = Arc::new(SynthQueue::new());
+        let mut o = out(&q);
+        assert!(o.send(ns(1000), &[0x90, 60, 100]));
+        assert!(o.send(ns(10), &[0xB0, 123, 0]));
+        let mut v = SynthVoice::new(q, 0);
+        let ch = render(&mut v, 3000);
+        assert!(ch[..1000].iter().all(|x| *x == 0.0));
+        assert!(ch[1000] >= FAKE_CLICK_LEVEL - 1e-6);
+        assert!(
+            ch[1500..].iter().any(|x| x.abs() > 0.01),
+            "the note still sounds"
+        );
+    }
+
+    #[test]
+    fn a_full_queue_refuses_and_counts() {
+        let q = Arc::new(SynthQueue::new());
+        let mut o = out(&q);
+        for k in 0..FAKE_SYNTH_EVENTS {
+            assert!(o.send(ns(k as u64), &[0x90, 60, 100]), "event {k}");
+        }
+        assert_eq!(q.dropped.load(Ordering::Relaxed), 0);
+        assert!(!o.send(ns(9999), &[0x90, 60, 100]), "refused when full");
+        assert_eq!(q.dropped.load(Ordering::Relaxed), 1);
     }
 }

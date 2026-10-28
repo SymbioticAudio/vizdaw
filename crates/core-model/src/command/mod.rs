@@ -4,7 +4,9 @@ pub mod audio;
 pub mod drum;
 pub mod event;
 pub mod lane;
+pub mod media;
 pub mod mixer;
+pub mod record;
 pub mod reference;
 pub mod routing;
 mod select;
@@ -12,11 +14,13 @@ pub mod sequence;
 pub mod settings;
 mod strips;
 
-pub use audio::AudioCmd;
+pub use audio::{AudioCmd, FadeEdge};
 pub use drum::DrumCmd;
 pub use event::EventCmd;
 pub use lane::LaneCmd;
+pub use media::{MediaCmd, MediaSwap};
 pub use mixer::MixerCmd;
+pub use record::{LaneRecord, RecordPass, RecordedContent, RecordedMedia, RecordedRegion};
 pub use reference::ReferenceCmd;
 pub use routing::RoutingCmd;
 pub use sequence::SequenceCmd;
@@ -78,12 +82,16 @@ pub enum Command {
     Reference(ReferenceCmd),
     /// Audio-region edits.
     Audio(AudioCmd),
-    /// Destination, output and media edits.
+    /// Destination and output edits.
     Routing(RoutingCmd),
+    /// Media-pool edits.
+    Media(MediaCmd),
     /// Mixer edits.
     Mixer(MixerCmd),
     /// Document-settings edits.
     Settings(SettingsCmd),
+    /// A finished recording pass, applied whole (sub-project 5 spec §4.7).
+    Record(RecordPass),
     /// Select events by rule, then optionally modify them (or copies).
     SelectAndModify {
         /// Rule; `None` uses the current selection as is.
@@ -108,8 +116,10 @@ impl Command {
             Command::Reference(c) => c.name(),
             Command::Audio(c) => c.name(),
             Command::Routing(c) => c.name(),
+            Command::Media(c) => c.name(),
             Command::Mixer(c) => c.name(),
             Command::Settings(c) => c.name(),
+            Command::Record(p) => p.name(),
             Command::SelectAndModify { modify, .. } => {
                 modify.as_ref().map_or("Select", Modify::name)
             }
@@ -165,12 +175,20 @@ pub fn apply_in(doc: &Document, ctx: Context<'_>, cmd: &Command) -> Result<Appli
             routing::apply(&mut d, c, &mut report)?;
             None
         }
+        Command::Media(c) => {
+            media::apply(&mut d, c, &mut report)?;
+            None
+        }
         Command::Mixer(c) => {
             mixer::apply(&mut d, c, &mut report)?;
             None
         }
         Command::Settings(c) => {
             settings::apply(&mut d, c, &mut report)?;
+            None
+        }
+        Command::Record(p) => {
+            record::apply(&mut d, p, &mut report)?;
             None
         }
         Command::SelectAndModify {

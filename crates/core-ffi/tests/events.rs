@@ -2,7 +2,7 @@
 
 use core_engine::fixtures::{Builder, Q};
 use core_model::command::Command;
-use core_model::command::routing::RoutingCmd;
+use core_model::command::MediaCmd;
 use core_model::document::Document;
 use core_model::event::{
     EventBody, EventSpec, Fade, FadeShape, LoopCount, NoteAttribute, PerNoteCtl, PerNoteKind,
@@ -23,12 +23,14 @@ fn every_kind() -> (Document, SeqId, LaneId) {
     let piano = b.dest("Piano", "builtin:synth", 0).unwrap();
     let other = b.dest("Other", "builtin:synth", 3).unwrap();
     let r = b
-        .run(Command::Routing(RoutingCmd::AddMedia {
+        .run(Command::Media(MediaCmd::Add {
             path: "Media/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 96_000,
             content_hash: None,
+            name: None,
+            origin: None,
         }))
         .unwrap();
     let media = r
@@ -125,11 +127,11 @@ fn every_kind() -> (Document, SeqId, LaneId) {
                 length: 48_000,
                 gain_db: -3.5,
                 fade_in: Fade {
-                    length: Tick(Q / 4),
+                    length_frames: 12_000,
                     shape: FadeShape::EqualPower,
                 },
                 fade_out: Fade {
-                    length: Tick(Q / 8),
+                    length_frames: 6_000,
                     shape: FadeShape::SCurve,
                 },
             },
@@ -338,12 +340,14 @@ fn the_other_variants_round_trip_too() {
     let mut b = Builder::new();
     let piano = b.dest("Piano", "builtin:synth", 0).unwrap();
     let r = b
-        .run(Command::Routing(RoutingCmd::AddMedia {
+        .run(Command::Media(MediaCmd::Add {
             path: "Media/b.wav".into(),
             sample_rate: 48_000,
             channels: 1,
             length_frames: 96_000,
             content_hash: None,
+            name: None,
+            origin: None,
         }))
         .unwrap();
     let media = r
@@ -431,11 +435,11 @@ fn the_other_variants_round_trip_too() {
             length: 48_000,
             gain_db: 0.0,
             fade_in: Fade {
-                length: Tick(Q / 2),
+                length_frames: 24_000,
                 shape: FadeShape::Linear,
             },
             fade_out: Fade {
-                length: Tick(Q / 2),
+                length_frames: 24_000,
                 shape: FadeShape::Exponential,
             },
         },

@@ -52,7 +52,7 @@ impl Net {
     fn strip_mut(&mut self, i: usize) -> &mut StripSpec {
         match &mut self.spec.nodes[i] {
             NodeSpec::Strip(s) => s,
-            NodeSpec::Instrument { .. } => panic!("not a strip"),
+            NodeSpec::Instrument { .. } | NodeSpec::Regions { .. } => panic!("not a strip"),
         }
     }
 

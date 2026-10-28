@@ -240,9 +240,10 @@ fn refusals_leave_everything_as_it_was() {
         ));
     }
     s.begin_edit("Drag".into()).unwrap();
+    // Busy since plan 5d-1 Ruling 20 (Task 9 review M1).
     assert!(matches!(
         s.step_entry(song, lane, st.clone(), input.clone()),
-        Err(VizError::Model { .. })
+        Err(VizError::Busy { message }) if message == "Finish the open edit first."
     ));
     s.abort_edit().unwrap();
     // A step past the model's time limit is refused by the core.

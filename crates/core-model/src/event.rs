@@ -327,12 +327,14 @@ pub enum LoopCount {
     Fill,
 }
 
-/// A re-editable fade.
+/// A re-editable fade. Its length is in sample frames of the region's
+/// media, so a tempo change never changes it (sub-project 5 spec §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fade {
-    /// Fade length in ticks (>= 0).
-    pub length: Tick,
+    /// Fade length in frames; a region's fades together are at most its
+    /// length.
+    pub length_frames: u64,
     /// Curve shape.
     pub shape: FadeShape,
 }
@@ -340,7 +342,7 @@ pub struct Fade {
 impl Default for Fade {
     fn default() -> Self {
         Fade {
-            length: Tick::ZERO,
+            length_frames: 0,
             shape: FadeShape::Linear,
         }
     }

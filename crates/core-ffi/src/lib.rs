@@ -16,6 +16,7 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod audio;
 pub mod blocks;
 pub mod catalog;
 pub mod clock;
@@ -25,22 +26,33 @@ pub mod edit;
 pub mod editor;
 pub mod error;
 pub mod events;
+pub mod format;
 pub mod guard;
 pub mod host;
 pub mod input;
+pub mod jobs;
 pub mod keys;
+pub mod live;
+pub mod media;
 pub mod mixer;
 pub mod modify;
+pub mod overviews;
+pub mod passes;
 pub mod plugins;
+pub mod record;
 pub mod recovery;
+pub mod relink;
+pub mod retention;
 pub mod revs;
 pub mod selection;
 pub mod session;
 pub mod snapshot;
 pub mod step;
 pub mod strip;
+pub mod synth;
 pub mod templates;
 
+pub use audio::AudioSettingsRow;
 pub use blocks::{BlockKind, BlockRow, BlockRule};
 pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
@@ -60,8 +72,8 @@ pub use drum::{
     DrumViewRow, QuantizeChoiceRow,
 };
 pub use edit::{
-    AudioEdit, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneRef, QuantizeRow, ReferenceEdit,
-    SequenceEdit, ViewFilterRow,
+    AudioEdit, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneInputRow, LaneRef,
+    MonitorModeRow, QuantizeRow, ReferenceEdit, SequenceEdit, ViewFilterRow,
 };
 pub use editor::EditorSize;
 pub use error::VizError;
@@ -70,9 +82,13 @@ pub use events::{
     GroupChannel, LaneEvents, MarkerRow, MeterEntryRow, NoteAttributeRow, PerNoteKindRow,
     PerNotePoint, PerNoteValueRow, SequenceInfo, TempoPointRow, TextKindRow,
 };
+pub use format::{BitDepthRow, ProjectFormatRow, ProjectInfoRow, format_label, project_rates};
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
+pub use jobs::{ImportTargetRow, JobKindRow, JobRow, JobStateRow};
 pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
+pub use live::InputInfoRow;
+pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
 pub use mixer::{
     BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
 };
@@ -80,6 +96,8 @@ pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,
     NoteMapEntry, RuleRow, SelectModeRow, SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
 };
+pub use overviews::{OverviewRows, OverviewStateRow};
+pub use record::{RecordLaneRow, RecordSpecRow, RecordStateRow, set_record_latency_trim};
 pub use recovery::RecoveryInfo;
 pub use revs::LaneRev;
 pub use selection::{SelectionRow, TickRange};
@@ -95,6 +113,7 @@ pub use step::{
 pub use strip::{
     LineOpRow, LinePointRow, LineRow, LineShapeRow, LineTargetRow, PeriodRow, SeriesRow,
 };
+pub use synth::MeasureRow;
 pub use templates::SequenceTemplate;
 
 /// The app is quitting: stops and drops the engine host so no plugin

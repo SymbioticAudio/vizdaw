@@ -114,6 +114,9 @@ struct StripView: View {
             if let inst = strip.instrument {
                 SlotView(model: model, strip: strip, slot: inst, index: nil)
             }
+            if let lane = model.inputLane(for: strip) {
+                StripInputView(inputs: model.document.inputs, lane: lane)
+            }
             inserts
             sends
             output

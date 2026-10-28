@@ -238,6 +238,15 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         let m = try DocumentModel(session: f)
         let h = LaneHeaderView(document: m)
         var lane = m.lanes[1]
+        let titles = h.laneMenu(seq: 3, lane: lane).items.filter { !$0.isSeparatorItem }.map(\.title)
+        #expect(titles == ["Drum Lane", "Track Synth…", "New MIDI Destination…"])
+        #expect(!h.laneMenu(seq: 3, lane: lane).items[2].isEnabled, "Chords plays no external synth")
+        let saved = f.dests
+        f.dests = saved + [DestRow(id: 7, name: "Juno", plugin: nil, external: true)]
+        var juno = lane
+        juno.midiDest = 7
+        #expect(h.laneMenu(seq: 3, lane: juno).items[2].isEnabled, "Juno is an external synth")
+        f.dests = saved
         let item = try #require(h.laneMenu(seq: 3, lane: lane).items.first)
         #expect(item.title == "Drum Lane" && item.state == .off)
         _ = item.target?.perform(item.action)

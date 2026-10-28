@@ -29,13 +29,17 @@ enum ControlChannel {
         let step: @MainActor (_ expired: Bool) -> Bool
     }
 
+    /// How long a call that started a job waits for it.
+    private static var jobWait = ControlJobs.waitMs
+
     static var active: Bool { server != nil }
 
     /// Starts listening on `path`; a socket that cannot be made ends the
     /// app (exit status 2), so a launching agent sees why at once.
-    static func start(path: String) {
+    static func start(path: String, appTimeoutMs: UInt64 = 60_000, jobWaitMs: UInt64 = ControlJobs.waitMs) {
+        jobWait = jobWaitMs
         do {
-            server = try ControlServer.start(path: path, appTimeoutMs: 60_000)
+            server = try ControlServer.start(path: path, appTimeoutMs: appTimeoutMs)
         } catch {
             FileHandle.standardError.write(Data("vizdaw: \(AlertItem(error, title: "Control").message)\n".utf8))
             exit(2)
@@ -94,6 +98,69 @@ enum ControlChannel {
         case .done(let r): _ = try? server.reply(token: token, result: r)
         case .failed(let f): _ = try? server.fail(token: token, failure: f)
         case .opened(let command, let doc): whenShown(server, token, command: command, doc: doc)
+        case .job(let command, let doc, let job):
+            // The server's app timeout is for stalls; a job gets its own.
+            _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
+            whenJobEnds(server, token, command: command, doc: doc, job: job)
+        case .measure(let doc, let job):
+            whenMeasured(server, token, doc: doc, job: job)
+        }
+    }
+
+    /// Answers once Measure `job` ended: about 13 s at most (the core's 3 s
+    /// input wait, then its 10 s measure wait), so a 2 s margin within the
+    /// 15 s the call's timeout was extended to (`SynthCommands.extraTimeMs`).
+    static func whenMeasured(_ server: ControlServer, _ token: UInt64, doc: UUID, job: MeasureJob) {
+        later(token, seconds: 15) { expired in
+            guard let m = appStore.model(doc) else {
+                _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
+                return true
+            }
+            if let outcome = SynthCommands.answer(job, doc: doc, m) {
+                answer(server, token, outcome)
+                return true
+            }
+            if expired {
+                _ = try? server.fail(token: token, failure: .of(.timeout, "the measurement did not end in time"))
+            }
+            return expired
+        }
+    }
+
+    /// Answers once job `job` of `doc` ended (an import or conversion may
+    /// take minutes; `jobWait` at most).
+    static func whenJobEnds(_ server: ControlServer, _ token: UInt64, command: String, doc: UUID, job: UInt64) {
+        later(token, seconds: Double(jobWait) / 1000) { expired in
+            guard let m = appStore.model(doc) else {
+                _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
+                return true
+            }
+            guard let j = try? m.session.job(id: job) else {
+                _ = try? server.fail(token: token, failure: .of(.failed, "the job is unknown"))
+                return true
+            }
+            switch ControlJobs.answer(j) {
+            case .wait:
+                if expired {
+                    _ = try? server.fail(
+                        token: token, failure: .of(.timeout, ControlJobs.expiredMessage(j)))
+                }
+                return expired
+            case .ok(let status):
+                m.refreshAfterJob()
+                let window = ControlWindows.window(of: doc).map { Int64($0.windowNumber) }
+                _ = try? server.reply(
+                    token: token,
+                    result: .ran(
+                        command: command, doc: doc.uuidString, window: window, undoLabel: m.snapshot.undoLabel,
+                        status: status))
+                return true
+            case .failed(let message):
+                // A failed import may still have changed nothing; a refresh is harmless.
+                m.refreshAfterJob()
+                _ = try? server.fail(token: token, failure: .of(.failed, message))
+                return true
+            }
         }
     }
 
@@ -124,6 +191,11 @@ enum ControlChannel {
 
     static func execute(_ call: ControlCall, _ server: ControlServer) {
         let token = call.token
+        // Its client was already answered `timeout` while it was queued:
+        // running it now would change what nobody waits for (5c-2 final
+        // review finding 3, for every call; `SynthCommands.shouldRun` still
+        // extends Measure's timeout).
+        guard server.isWaiting(token: token) else { return }
         if controlHostBusy() {
             answer(server, token, .failed(.of(.busy, "a plugin call is running on the main thread; try again")))
             return
@@ -131,6 +203,13 @@ enum ControlChannel {
         if staleWindow(call.request) { return answer(server, token, noWindow) }
         switch call.request {
         case .runCommand(let id, let args, let window):
+            // A call that blocks (Measure) gets the time it blocks for from
+            // now, past the app timeout it may have spent queued (Task 10
+            // review M6); one whose client was already answered `timeout`
+            // is skipped (final review finding 3).
+            guard SynthCommands.shouldRun(id, extend: {
+                (try? server.extendTimeout(token: token, timeoutMs: $0)) == true
+            }) else { return }
             answer(server, token, ControlCommands.run(
                 id, args: args, doc: ControlWindows.document(window), store: appStore, host: AppControlHost.shared))
         case .state(let target, let window):
@@ -272,7 +351,7 @@ enum ControlChannel {
                 case .failed(let f):
                     _ = try? server.fail(token: token, failure: f)
                     return
-                case .done, .opened:
+                case .done, .opened, .job, .measure:
                     if case .opened(_, let doc) = outcome { ControlWindows.openDocument(doc) }
                     sent += 1
                     continue
@@ -433,6 +512,7 @@ final class AppControlHost: ControlHost {
 
     func showMixer(_ doc: UUID) { ControlWindows.openWindow?(id: "mixer", value: doc) }
     func showPluginManager() { ControlWindows.openWindow?(id: "plugins") }
+    func showMediaPool(_ doc: UUID) { ControlWindows.openWindow?(id: "media-pool", value: doc) }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { EditorWindows.tearOff(appStore, doc: doc, kind: kind) }
 
     func closeDocument(_ doc: UUID) {
@@ -445,6 +525,12 @@ final class AppControlHost: ControlHost {
 
     var nudge: NudgeSettings { editingPreferences.nudge }
     var keys: KeyBindings { keyBindings }
+
+    /// `audio.set` (plan 5d-1 Ruling 26): through the app's audio
+    /// preferences, which keep it (plan 5d-2 Ruling 2).
+    func applyAudio(_ change: AudioChange) throws {
+        try audioPreferences.set(change)
+    }
 
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {
         guard let w = ControlWindows.window(of: doc),

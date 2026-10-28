@@ -281,5 +281,58 @@ fn graph_render_path_never_allocates() {
     );
     drop(b.stop().unwrap());
     drop(engine);
+
+    // Phase 4 (5d-1 Task 11 parked): a MIDI-destination target released
+    // while its note sounds sends the note's off from `RemoveSink`, on the
+    // render thread, without allocating.
+    let port = |name: &str| core_engine::backend::MidiPortInfo {
+        name: name.into(),
+        unique_id: None,
+    };
+    let port_doc = |name: &str| {
+        let mut b = Builder::new();
+        let d = b.dest("Synth", name, 0).unwrap();
+        let (seq, lane) = b.sequence("S", "L", Some(d)).unwrap();
+        b.notes(seq, lane, &[(0, 60, 0x8000, 8 * core_engine::fixtures::Q)])
+            .unwrap();
+        (b.finish(), seq)
+    };
+    let (on0, seq) = port_doc("Port 0");
+    let (on1, _) = port_doc("Port 1");
+    let sinks = OfflineSinks::new(1 << 16).with_ports(vec![port("Port 0"), port("Port 1")]);
+    let log = sinks.log();
+    let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(sinks)).unwrap();
+    engine.load(&on0, seq).unwrap();
+    let mut b = OfflineBackend::new(48_000.0, 512);
+    b.start(renderer).unwrap();
+    engine.play().unwrap();
+    for _ in 0..4 {
+        armed_block(&mut b, 512);
+    }
+    let first = log.drain();
+    assert!(
+        first.iter().any(|r| r.bytes() == [0x90, 60, 64]),
+        "{first:?}"
+    );
+    let old = first.first().unwrap().target;
+    let before = rt_check::count();
+    // Nothing names port 0 now: its target is released.
+    engine.load(&on1, seq).unwrap();
+    for _ in 0..4 {
+        armed_block(&mut b, 512);
+    }
+    assert_eq!(
+        rt_check::count() - before,
+        0,
+        "allocations releasing a sounding target"
+    );
+    let offs = log.drain();
+    assert!(
+        offs.iter()
+            .any(|r| r.target == old && r.bytes() == [0x80, 60, 0]),
+        "{offs:?}"
+    );
+    drop(b.stop().unwrap());
+    drop(engine);
     rt_check::set_arm_workers(false);
 }

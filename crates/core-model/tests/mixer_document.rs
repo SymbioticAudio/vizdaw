@@ -15,6 +15,7 @@ fn ep(id: u64, r: &str, ch: u8) -> Destination {
             channel: ch,
         },
         default_patch: None,
+        return_latency_ms: 0.0,
     }
 }
 
@@ -56,6 +57,7 @@ fn from_parts_without_a_mixer_derives_one() {
                 name: "Pad".into(),
                 kind: DestKind::plugin("au:pad"),
                 default_patch: None,
+                return_latency_ms: 0.0,
             },
             ep(1, "builtin:synth", 0),
             ep(2, "builtin:synth", 9),
@@ -121,7 +123,7 @@ fn json_round_trip_keeps_the_mixer() {
     let d = Document::new();
     let text = to_json(&d).unwrap();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], 3);
     assert_eq!(v["document"]["mixer"]["master"], 0);
     assert_eq!(v["document"]["counters"]["strip"], 1);
     assert_eq!(from_json(&text).unwrap(), d);

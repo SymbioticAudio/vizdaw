@@ -2,10 +2,11 @@
 //! value ranges. Commands call the `check_*` functions; loading calls
 //! [`validate`], which reports every problem instead of stopping at the first.
 
-use crate::document::{DestKind, Document};
+use crate::document::{DestKind, Document, MAX_RETURN_LATENCY_MS};
 use crate::error::{ModelError, Result};
 use crate::event::{EventBody, EventSpec, LoopCount};
 use crate::ids::{AnyId, EventId, SeqId};
+use crate::lane::LaneInput;
 use crate::time::Tick;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -211,10 +212,8 @@ pub fn check_event_fields(doc: &Document, ev: &EventSpec) -> Result<()> {
                 "region.gain_db",
                 gain_db,
             )?;
-            need(fade_in.length.0 >= 0, "fade_in.length", fade_in.length.0)?;
-            need(fade_out.length.0 >= 0, "fade_out.length", fade_out.length.0)?;
-            check_ticks("fade_in.length", fade_in.length.0)?;
-            check_ticks("fade_out.length", fade_out.length.0)?;
+            let fades = fade_in.length_frames.saturating_add(fade_out.length_frames);
+            need(fades <= *length, "region.fades", fades)?;
         }
         EventBody::Automation { value, .. } => need(
             crate::automation::check_value(*value),
@@ -266,12 +265,35 @@ pub fn validate(doc: &Document) -> Vec<String> {
             let ok = patch.program <= 127 && patch.bank.is_none_or(|(m, l)| m <= 127 && l <= 127);
             push(need(ok, "default_patch", patch.program), &d.id.to_string());
         }
+        let ms = d.return_latency_ms;
+        push(
+            need(
+                ms.is_finite() && (0.0..=MAX_RETURN_LATENCY_MS).contains(&ms),
+                "return_latency_ms",
+                ms,
+            ),
+            &d.id.to_string(),
+        );
+        // Only an external destination has a return latency.
+        push(
+            need(
+                ms == 0.0 || d.kind.is_external(),
+                "return_latency_ms on a destination that is not external",
+                ms,
+            ),
+            &d.id.to_string(),
+        );
     }
     for o in doc.outputs().values() {
         if o.id.0 >= c.output {
             push(Err(ModelError::range("counters.output", o.id)), "output");
         }
     }
+    let f = doc.settings().format;
+    push(
+        need(f.is_valid(), "settings.format", f.sample_rate),
+        "settings",
+    );
     for m in doc.media().values() {
         if m.id.0 >= c.media {
             push(Err(ModelError::range("counters.media", m.id)), "media");
@@ -332,6 +354,19 @@ pub fn validate(doc: &Document) -> Vec<String> {
             }
             if let Some(q) = &l.play_quantize {
                 push(q.check(), &lctx);
+            }
+            if let Some(i) = &l.input {
+                push(i.check(), &lctx);
+            }
+            // Plan 5c-2 Ruling 3: a synth's return names a destination.
+            if let Some(dest) = l.input.as_ref().and_then(LaneInput::return_of) {
+                match doc.instruments().get(&dest) {
+                    None => push(Err(ModelError::UnknownId(AnyId::Dest(dest))), &lctx),
+                    Some(x) => push(
+                        need(x.kind.is_external(), "return_of (not external)", dest),
+                        &lctx,
+                    ),
+                }
             }
             if l.take(l.active_take).is_none() {
                 push(

@@ -8,7 +8,6 @@ use crate::error::{ModelError, Result};
 use crate::event::{Event, EventBody, EventSpec, Fade};
 use crate::ids::{AnyId, EventId, LaneId, MediaId, SeqId};
 use crate::rules::check_event_fields;
-use crate::tempo::TempoMap;
 use crate::time::Tick;
 
 /// Audio-region edits.
@@ -68,6 +67,40 @@ pub enum AudioCmd {
         /// Fade out.
         fade_out: Fade,
     },
+    /// Set each region's gain so its loudest sample reaches `peak_db`
+    /// (spec §4.4; non-destructive). Each region comes with the linear
+    /// peak of the frames it plays, measured from its overview (5b
+    /// Ruling 5). Events that are not regions are ignored.
+    Normalize {
+        /// `(region, peak)`: the peak as a linear amplitude (> 0).
+        regions: Vec<(EventId, f32)>,
+        /// The target, −96…0 dBFS.
+        peak_db: f32,
+    },
+    /// The fade in ends (`In`) or the fade out starts (`Out`) at `at`, in
+    /// every region `at` lies strictly inside (5b Ruling 6).
+    FadeTo {
+        /// The events (non-regions are ignored).
+        events: Vec<EventId>,
+        /// The cursor.
+        at: Tick,
+        /// Which fade.
+        edge: FadeEdge,
+    },
+    /// Removes both fades of every region.
+    RemoveFades {
+        /// The events (non-regions are ignored).
+        events: Vec<EventId>,
+    },
+}
+
+/// Which fade a [`AudioCmd::FadeTo`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeEdge {
+    /// The fade in.
+    In,
+    /// The fade out.
+    Out,
 }
 
 impl AudioCmd {
@@ -79,6 +112,15 @@ impl AudioCmd {
             AudioCmd::Split { .. } => "Split Region",
             AudioCmd::SetGain { .. } => "Set Region Gain",
             AudioCmd::SetFades { .. } => "Set Region Fades",
+            AudioCmd::Normalize { .. } => "Normalize",
+            AudioCmd::FadeTo {
+                edge: FadeEdge::In, ..
+            } => "Fade In to Cursor",
+            AudioCmd::FadeTo {
+                edge: FadeEdge::Out,
+                ..
+            } => "Fade Out from Cursor",
+            AudioCmd::RemoveFades { .. } => "Remove Fades",
         }
     }
 }
@@ -97,9 +139,9 @@ fn region(d: &Document, id: EventId) -> Result<(Event, SeqId, f64)> {
     Ok((ev.clone(), loc.seq, rate))
 }
 
-/// Shortens a region's fades so neither is longer than the region itself
-/// (measured in ticks under `tempo` from the region's start).
-fn clamp_fades(ev: &mut Event, tempo: &TempoMap, rate: f64) {
+/// Shortens a region's fades so together they fit it: the fade in first,
+/// then the fade out to what is left (5a Ruling 1).
+pub(crate) fn clamp_fades(ev: &mut Event) {
     if let EventBody::AudioRegion {
         length,
         fade_in,
@@ -107,10 +149,10 @@ fn clamp_fades(ev: &mut Event, tempo: &TempoMap, rate: f64) {
         ..
     } = &mut ev.body
     {
-        let start = tempo.tick_to_seconds(ev.tick);
-        let part = tempo.seconds_to_tick(start + *length as f64 / rate) - ev.tick;
-        fade_in.length = fade_in.length.min(part);
-        fade_out.length = fade_out.length.min(part);
+        fade_in.length_frames = fade_in.length_frames.min(*length);
+        fade_out.length_frames = fade_out
+            .length_frames
+            .min(length.saturating_sub(fade_in.length_frames));
     }
 }
 
@@ -133,6 +175,15 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
             fade_in,
             fade_out,
         } => {
+            // A region plays on its lane's output path: a lane without one
+            // takes the first, or a new "Audio 1" (5a Ruling 6).
+            if d.lane(*seq, *lane)?.audio_out.is_none() {
+                let out = match d.outputs().keys().next().copied() {
+                    Some(o) => o,
+                    None => super::routing::add_output(d, "Audio 1", "audio:1-2", r),
+                };
+                d.lane_mut(*seq, *lane)?.audio_out = Some(out);
+            }
             let spec = EventSpec::new(
                 *tick,
                 EventBody::AudioRegion {
@@ -169,7 +220,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 let secs = tempo.tick_to_seconds(ev.tick) + *front_frames as f64 / rate;
                 ev.tick = tempo.seconds_to_tick(secs);
             }
-            clamp_fades(&mut ev, &tempo, rate);
+            clamp_fades(&mut ev);
             store(d, ev)?;
         }
         AudioCmd::Split { event, at } => {
@@ -201,7 +252,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                 fade_in,
                 fade_out: Fade::default(),
             };
-            clamp_fades(&mut a, &tempo, rate);
+            clamp_fades(&mut a);
             store(d, a)?;
             let id = d.counters_mut().alloc_event();
             let mut b = Event {
@@ -219,7 +270,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                     fade_out,
                 },
             };
-            clamp_fades(&mut b, &tempo, rate);
+            clamp_fades(&mut b);
             check_event_fields(d, &b.spec())?;
             let loc = d.locate(*event)?;
             d.insert_event(loc.seq, loc.lane, Some(loc.take), b)?;
@@ -249,6 +300,109 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
             }
             store(d, ev)?;
         }
+        AudioCmd::Normalize { regions, peak_db } => {
+            if !(peak_db.is_finite() && (-96.0..=0.0).contains(peak_db)) {
+                return Err(ModelError::range("normalize.peak_db", peak_db));
+            }
+            let mut changed = 0usize;
+            for (id, peak) in regions {
+                if !is_region(d, *id)? {
+                    continue;
+                }
+                if !(peak.is_finite() && *peak > 0.0) {
+                    r.warnings.push(format!("{id} is silent: not normalized"));
+                    continue;
+                }
+                let want = f64::from(*peak_db) - 20.0 * f64::from(*peak).log10();
+                let g = want.clamp(-144.0, 24.0) as f32;
+                if (want - f64::from(g)).abs() > 0.05 {
+                    r.warnings.push(format!("{id}: gain limited to {g:+.1} dB"));
+                }
+                let (mut ev, _, _) = region(d, *id)?;
+                if let EventBody::AudioRegion { gain_db, .. } = &mut ev.body {
+                    *gain_db = g;
+                }
+                store(d, ev)?;
+                changed += 1;
+            }
+            if changed == 0 {
+                return Err(ModelError::invalid(
+                    "no selected audio region has sound to normalize",
+                ));
+            }
+        }
+        AudioCmd::FadeTo { events, at, edge } => {
+            let mut changed = 0usize;
+            for id in events {
+                if !is_region(d, *id)? {
+                    continue;
+                }
+                let (mut ev, seq, rate) = region(d, *id)?;
+                let tempo = d.sequence(seq)?.tempo.clone();
+                let secs = tempo.tick_to_seconds(*at) - tempo.tick_to_seconds(ev.tick);
+                let f = (secs * rate).round();
+                let EventBody::AudioRegion {
+                    length,
+                    fade_in,
+                    fade_out,
+                    ..
+                } = &mut ev.body
+                else {
+                    continue;
+                };
+                // Strictly inside: a fade of 0 or of the whole region is
+                // not "to the cursor".
+                if !(f >= 1.0 && f < *length as f64) {
+                    continue;
+                }
+                let f = f as u64;
+                match edge {
+                    FadeEdge::In => {
+                        fade_in.length_frames = f;
+                        fade_out.length_frames = fade_out.length_frames.min(*length - f);
+                    }
+                    FadeEdge::Out => {
+                        fade_out.length_frames = *length - f;
+                        fade_in.length_frames = fade_in.length_frames.min(f);
+                    }
+                }
+                store(d, ev)?;
+                changed += 1;
+            }
+            if changed == 0 {
+                return Err(ModelError::invalid(
+                    "the cursor is not inside a selected audio region",
+                ));
+            }
+        }
+        AudioCmd::RemoveFades { events } => {
+            let mut regions = 0usize;
+            for id in events {
+                if !is_region(d, *id)? {
+                    continue;
+                }
+                let (mut ev, _, _) = region(d, *id)?;
+                if let EventBody::AudioRegion {
+                    fade_in, fade_out, ..
+                } = &mut ev.body
+                {
+                    *fade_in = Fade::default();
+                    *fade_out = Fade::default();
+                }
+                store(d, ev)?;
+                regions += 1;
+            }
+            if regions == 0 {
+                return Err(ModelError::invalid(
+                    "select audio regions to remove their fades",
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+/// Whether event `id` is an audio region (an unknown ID is an error).
+fn is_region(d: &Document, id: EventId) -> Result<bool> {
+    Ok(matches!(d.event(id)?.0.body, EventBody::AudioRegion { .. }))
 }

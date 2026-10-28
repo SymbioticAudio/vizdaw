@@ -355,3 +355,104 @@ fn engine_errors() {
     }
     assert!(busy);
 }
+
+/// Destination "Synth" on `port`, played by one note 8 beats long at
+/// `at` (so every load interns its target).
+fn port_doc(port: &str, at: i64) -> (Document, SeqId) {
+    let mut b = Builder::new();
+    let d = b.dest("Synth", port, 0).unwrap();
+    let (seq, lane) = b.sequence("S", "L", Some(d)).unwrap();
+    b.notes(seq, lane, &[(at, 60, 0x8000, 8 * Q)]).unwrap();
+    (b.finish(), seq)
+}
+
+/// What port `port` was sent.
+fn sent_to(f: &PortFactory, port: usize) -> Vec<Vec<u8>> {
+    f.seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| *p == port)
+        .map(|(_, m)| m.clone())
+        .collect()
+}
+
+fn has_port(engine: &Engine, name: &str) -> bool {
+    engine
+        .targets()
+        .iter()
+        .any(|(_, k)| matches!(k, TargetKind::MidiDestination(p) if p.name == name))
+}
+
+/// Plan 5d-1 Ruling 23, Task 11 review I1: a MIDI-destination target
+/// released while a played note sounds on it gets that note's off; an
+/// external synth would hold it forever.
+#[test]
+fn a_released_midi_destination_target_ends_its_sounding_notes() {
+    let f = PortFactory::default();
+    let (mut engine, mut r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
+    let (doc, seq) = port_doc("Port 0", 0);
+    engine.load(&doc, seq).unwrap();
+    engine.play().unwrap();
+    let mut ns = 0;
+    blocks(&mut r, 5, 1000, &mut ns);
+    assert_eq!(sent_to(&f, 0), vec![vec![0x90, 60, 64]]);
+    // The destination moves to port 1: nothing names port 0 now.
+    let (moved, seq) = port_doc("Port 1", 0);
+    engine.load(&moved, seq).unwrap();
+    blocks(&mut r, 5, 1000, &mut ns);
+    assert!(!has_port(&engine, "Port 0"), "{:?}", engine.targets());
+    assert_eq!(
+        sent_to(&f, 0),
+        vec![vec![0x90, 60, 64], vec![0x80, 60, 0]],
+        "port 0's note ends when its target goes"
+    );
+}
+
+/// Task 11 review I1: an editor audition held on a released target ends
+/// too.
+#[test]
+fn a_released_midi_destination_target_ends_its_auditions() {
+    let f = PortFactory::default();
+    let (mut engine, mut r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
+    let (doc, seq) = port_doc("Port 0", 64 * Q);
+    engine.load(&doc, seq).unwrap();
+    let dest = *doc.instruments().keys().next().unwrap();
+    assert!(engine.audition(&doc, dest, 61, 0x8000, true).unwrap());
+    let mut ns = 0;
+    blocks(&mut r, 1, 64, &mut ns);
+    assert_eq!(sent_to(&f, 0), vec![vec![0x90, 61, 64]]);
+    let (moved, seq) = port_doc("Port 1", 64 * Q);
+    engine.load(&moved, seq).unwrap();
+    blocks(&mut r, 1, 64, &mut ns);
+    assert_eq!(sent_to(&f, 0), vec![vec![0x90, 61, 64], vec![0x80, 61, 0]]);
+}
+
+/// Plan 5d-1 Ruling 23, Task 11 review m1: the target the installed
+/// measurement plays stays through a load whose document no longer names
+/// its port, and goes at the first load after the measurement ends.
+#[test]
+fn a_measured_midi_destination_target_stays_until_the_measurement_ends() {
+    let f = PortFactory::default();
+    let (mut engine, mut r) =
+        Engine::new(EngineConfig::new(48_000.0), Box::new(f.clone())).unwrap();
+    let (doc, seq) = port_doc("Port 0", 64 * Q);
+    engine.load(&doc, seq).unwrap();
+    let dest = *doc.instruments().keys().next().unwrap();
+    engine
+        .start_measure(&doc, dest, vec![0], 0)
+        .unwrap()
+        .unwrap();
+    let mut ns = 0;
+    blocks(&mut r, 1, 64, &mut ns);
+    let (moved, seq) = port_doc("Port 1", 64 * Q);
+    engine.load(&moved, seq).unwrap();
+    assert!(has_port(&engine, "Port 0"), "{:?}", engine.targets());
+    engine.stop_measure().unwrap();
+    blocks(&mut r, 1, 64, &mut ns);
+    engine.load(&moved, seq).unwrap();
+    assert!(!has_port(&engine, "Port 0"), "{:?}", engine.targets());
+    assert!(has_port(&engine, "Port 1"));
+}

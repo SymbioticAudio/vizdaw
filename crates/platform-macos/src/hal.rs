@@ -1,30 +1,42 @@
-//! CoreAudio HAL output through an IOProc on the device's own real-time
-//! thread (no AUHAL).
+//! CoreAudio HAL output and input through an IOProc on the device's own
+//! real-time thread (no AUHAL). Input (sub-project 5 spec §6.1) comes from
+//! the output device's own IOProc (one duplex stream) or, from another
+//! device, through a private aggregate device with the output device as
+//! clock and drift correction on the input; it is opened only when asked.
 
 use core_engine::BackendError;
 use core_engine::backend::{
-    AudioBackend, AudioConfig, BackendEvent, BlockTime, MAX_FRAMES, StreamInfo,
+    AudioBackend, AudioConfig, BackendEvent, BlockTime, InputBlock, MAX_FRAMES, MAX_INPUT_CHANNELS,
+    StreamInfo,
 };
 use core_engine::pool::RtWorkgroup;
 use core_engine::render::{Faults, Renderer};
 use objc2_core_audio::{
     AudioConvertHostTimeToNanos, AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID,
     AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop, AudioGetCurrentHostTime,
+    AudioHardwareCreateAggregateDevice, AudioHardwareDestroyAggregateDevice,
     AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
-    AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyScope,
-    AudioObjectPropertySelector, AudioObjectRemovePropertyListener, AudioObjectSetPropertyData,
+    AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyElement,
+    AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
+    AudioObjectSetPropertyData, kAudioAggregateDeviceIsPrivateKey,
+    kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
+    kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceUIDKey,
     kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyDeviceIsAlive,
-    kAudioDevicePropertyIOThreadOSWorkgroup, kAudioDevicePropertyNominalSampleRate,
-    kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyStreams,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, kAudioStreamPropertyVirtualFormat,
+    kAudioDevicePropertyDeviceUID, kAudioDevicePropertyIOThreadOSWorkgroup,
+    kAudioDevicePropertyLatency, kAudioDevicePropertyNominalSampleRate,
+    kAudioDevicePropertySafetyOffset, kAudioDevicePropertyStreamConfiguration,
+    kAudioDevicePropertyStreams, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyElementName, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+    kAudioStreamPropertyLatency, kAudioStreamPropertyVirtualFormat,
+    kAudioSubDeviceDriftCompensationKey, kAudioSubDeviceUIDKey,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
     kAudioFormatFlagIsFloat, kAudioFormatLinearPCM,
 };
-use objc2_core_foundation::{CFRetained, CFString};
+use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
@@ -45,10 +57,18 @@ fn addr(
     selector: AudioObjectPropertySelector,
     scope: AudioObjectPropertyScope,
 ) -> AudioObjectPropertyAddress {
+    addr_at(selector, scope, kAudioObjectPropertyElementMain)
+}
+
+fn addr_at(
+    selector: AudioObjectPropertySelector,
+    scope: AudioObjectPropertyScope,
+    element: AudioObjectPropertyElement,
+) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress {
         mSelector: selector,
         mScope: scope,
-        mElement: kAudioObjectPropertyElementMain,
+        mElement: element,
     }
 }
 
@@ -147,7 +167,25 @@ fn get_ids(
 }
 
 fn name_of(obj: AudioObjectID) -> Option<String> {
-    let mut a = addr(kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal);
+    string_prop(
+        obj,
+        addr(kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal),
+    )
+}
+
+/// A device's persistent UID (what an aggregate device names it by).
+fn uid_of(obj: AudioObjectID) -> Option<String> {
+    string_prop(
+        obj,
+        addr(
+            kAudioDevicePropertyDeviceUID,
+            kAudioObjectPropertyScopeGlobal,
+        ),
+    )
+}
+
+/// A CFString property.
+fn string_prop(obj: AudioObjectID, mut a: AudioObjectPropertyAddress) -> Option<String> {
     let mut s: *const CFString = ptr::null();
     let mut size = size_of::<*const CFString>() as u32;
     // SAFETY: the name property is a +1 retained CFStringRef.
@@ -172,11 +210,12 @@ fn name_of(obj: AudioObjectID) -> Option<String> {
 
 /// Output channel counts of the device's output buffers, in order.
 fn output_layout(dev: AudioObjectID) -> Result<Vec<u32>, BackendError> {
-    let words = get_bytes(
-        dev,
-        kAudioDevicePropertyStreamConfiguration,
-        kAudioObjectPropertyScopeOutput,
-    )?;
+    layout(dev, kAudioObjectPropertyScopeOutput)
+}
+
+/// Channel counts of the device's buffers in `scope`, in order.
+fn layout(dev: AudioObjectID, scope: AudioObjectPropertyScope) -> Result<Vec<u32>, BackendError> {
+    let words = get_bytes(dev, kAudioDevicePropertyStreamConfiguration, scope)?;
     let list = words.as_ptr().cast::<AudioBufferList>();
     // SAFETY: the property is an AudioBufferList with `mNumberBuffers`
     // trailing buffers, stored in `words` (8-byte aligned).
@@ -189,11 +228,15 @@ fn output_layout(dev: AudioObjectID) -> Result<Vec<u32>, BackendError> {
 
 /// Every output stream must be 32-bit float linear PCM.
 fn check_formats(dev: AudioObjectID) -> Result<(), BackendError> {
-    for stream in get_ids(
-        dev,
-        kAudioDevicePropertyStreams,
-        kAudioObjectPropertyScopeOutput,
-    )? {
+    check_scope_formats(dev, kAudioObjectPropertyScopeOutput)
+}
+
+/// Every stream of `scope` must be 32-bit float linear PCM.
+fn check_scope_formats(
+    dev: AudioObjectID,
+    scope: AudioObjectPropertyScope,
+) -> Result<(), BackendError> {
+    for stream in get_ids(dev, kAudioDevicePropertyStreams, scope)? {
         let f: AudioStreamBasicDescription = get_asbd(stream)?;
         if f.mFormatID != kAudioFormatLinearPCM
             || f.mFormatFlags & kAudioFormatFlagIsFloat == 0
@@ -241,6 +284,274 @@ fn get_asbd(stream: AudioObjectID) -> Result<AudioStreamBasicDescription, Backen
     Ok(f)
 }
 
+/// The latency properties of devices and streams (the seam the latency
+/// arithmetic is tested through).
+trait LatencyProps {
+    /// A `u32` property of `obj` (`None`: unknown).
+    fn value(
+        &self,
+        obj: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope,
+    ) -> Option<u32>;
+    /// The streams of `dev` in `scope`, in order.
+    fn streams(&self, dev: AudioObjectID, scope: AudioObjectPropertyScope) -> Vec<AudioObjectID>;
+}
+
+/// The HAL's latency properties.
+struct HalProps;
+
+impl LatencyProps for HalProps {
+    fn value(
+        &self,
+        obj: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope,
+    ) -> Option<u32> {
+        get(obj, selector, scope).ok()
+    }
+
+    fn streams(&self, dev: AudioObjectID, scope: AudioObjectPropertyScope) -> Vec<AudioObjectID> {
+        get_ids(dev, kAudioDevicePropertyStreams, scope).unwrap_or_default()
+    }
+}
+
+/// The latency of `dev` in `scope`, in frames: device latency + safety
+/// offset + the first stream's latency (spec §6.1). Unknown parts count
+/// 0.
+fn latency(dev: AudioObjectID, scope: AudioObjectPropertyScope) -> u32 {
+    latency_with(&HalProps, dev, scope)
+}
+
+fn latency_with(p: &impl LatencyProps, dev: AudioObjectID, scope: AudioObjectPropertyScope) -> u32 {
+    let device = p
+        .value(dev, kAudioDevicePropertyLatency, scope)
+        .unwrap_or(0);
+    let safety = p
+        .value(dev, kAudioDevicePropertySafetyOffset, scope)
+        .unwrap_or(0);
+    let stream = p
+        .streams(dev, scope)
+        .first()
+        .and_then(|st| {
+            p.value(
+                *st,
+                kAudioStreamPropertyLatency,
+                kAudioObjectPropertyScopeGlobal,
+            )
+        })
+        .unwrap_or(0);
+    device.saturating_add(safety).saturating_add(stream)
+}
+
+/// The input latency of a stream opened on `device`, whose input comes
+/// from `input_device` inside an aggregate when there is one (Task 11
+/// review I2): the chosen input device's own latency, never the
+/// aggregate's first input stream (which belongs to the output device
+/// whenever that has inputs).
+fn input_latency_with(
+    p: &impl LatencyProps,
+    device: AudioObjectID,
+    input_device: Option<AudioObjectID>,
+) -> u32 {
+    latency_with(
+        p,
+        input_device.unwrap_or(device),
+        kAudioObjectPropertyScopeInput,
+    )
+}
+
+/// Whether a stream lost its device (`DeviceLost`): the device it runs on
+/// or a sub-device of its aggregate (the aggregate may outlive either).
+fn device_lost(
+    alive: impl Fn(AudioObjectID) -> bool,
+    device: AudioObjectID,
+    subs: [Option<AudioObjectID>; 2],
+) -> bool {
+    !alive(device) || subs.into_iter().flatten().any(|d| !alive(d))
+}
+
+/// Makes aggregate UIDs unique within the process too (one per open).
+static AGGREGATES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The UID of the next private aggregate (Task 11 review M4): the process
+/// and a count, so neither another VizDAW nor a destroy that failed makes
+/// a duplicate.
+fn next_aggregate_uid() -> String {
+    let n = AGGREGATES.fetch_add(1, Ordering::Relaxed);
+    format!("org.vizdaw.input.{}.{n}", std::process::id())
+}
+
+/// The names of `dev`'s first `n` input channels (the device's element
+/// names; "Input k" where it has none).
+fn input_names(dev: AudioObjectID, n: u32) -> Vec<String> {
+    (1..=n)
+        .map(|k| {
+            string_prop(
+                dev,
+                addr_at(
+                    kAudioObjectPropertyElementName,
+                    kAudioObjectPropertyScopeInput,
+                    k,
+                ),
+            )
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("Input {k}"))
+        })
+        .collect()
+}
+
+/// A device by name.
+fn find_device(name: &str) -> Result<AudioObjectID, BackendError> {
+    get_ids(
+        SYSTEM,
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+    )?
+    .into_iter()
+    .find(|d| name_of(*d).as_deref() == Some(name))
+    .ok_or(BackendError::NoDevice)
+}
+
+/// The description of a private aggregate device (spec §6.1) named
+/// `uid`: `output` first and as its clock, `input` drift-corrected.
+pub fn aggregate_description(
+    uid: &str,
+    output: &str,
+    input: &str,
+) -> CFRetained<CFDictionary<CFString, CFType>> {
+    let key = |k: &std::ffi::CStr| CFString::from_str(&k.to_string_lossy());
+    let sub = |device: &str, drift: bool| {
+        let keys = [
+            key(kAudioSubDeviceUIDKey),
+            key(kAudioSubDeviceDriftCompensationKey),
+        ];
+        let uid = CFString::from_str(device);
+        let drift = CFNumber::new_i32(i32::from(drift));
+        let values: [&CFType; 2] = [uid.as_ref(), drift.as_ref()];
+        let keys: [&CFString; 2] = [&keys[0], &keys[1]];
+        CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
+    };
+    let (out, inp) = (sub(output, false), sub(input, true));
+    let list = CFArray::<CFType>::from_objects(&[(*out).as_ref(), (*inp).as_ref()]);
+    let keys = [
+        key(kAudioAggregateDeviceUIDKey),
+        key(kAudioAggregateDeviceNameKey),
+        key(kAudioAggregateDeviceIsPrivateKey),
+        key(kAudioAggregateDeviceMainSubDeviceKey),
+        key(kAudioAggregateDeviceSubDeviceListKey),
+    ];
+    let (u, name, private, main) = (
+        CFString::from_str(uid),
+        CFString::from_str("VizDAW Input"),
+        CFNumber::new_i32(1),
+        CFString::from_str(output),
+    );
+    let values: [&CFType; 5] = [
+        u.as_ref(),
+        name.as_ref(),
+        private.as_ref(),
+        main.as_ref(),
+        (*list).as_ref(),
+    ];
+    let keys: Vec<&CFString> = keys.iter().map(|k| &**k).collect();
+    CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
+}
+
+/// Creates the private aggregate device of `output` and `input`.
+fn create_aggregate(
+    output: AudioObjectID,
+    input: AudioObjectID,
+) -> Result<AudioObjectID, BackendError> {
+    let (Some(out_uid), Some(in_uid)) = (uid_of(output), uid_of(input)) else {
+        return Err(BackendError::NoDevice);
+    };
+    let uid = next_aggregate_uid();
+    let desc = aggregate_description(&uid, &out_uid, &in_uid);
+    let mut id: AudioObjectID = 0;
+    // SAFETY: `desc` is a valid dictionary of CFString keys for the call
+    // and `id` a valid out-pointer.
+    os("AudioHardwareCreateAggregateDevice", unsafe {
+        AudioHardwareCreateAggregateDevice(desc.as_opaque(), NonNull::from(&mut id))
+    })?;
+    if id == 0 {
+        return Err(BackendError::NoDevice);
+    }
+    Ok(id)
+}
+
+/// When a block's first frame is heard: the output time CoreAudio gives
+/// plus the output latency (spec §6.3), so MIDI scheduled against it
+/// leaves at audible time.
+pub fn audible_ns(out_ns: u64, output_latency: u32, rate: f64) -> u64 {
+    let lat = (f64::from(output_latency) * 1e9 / rate.max(1.0)).round() as u64;
+    out_ns.saturating_add(lat)
+}
+
+/// How much earlier than the output buffer's first frame is heard the
+/// input buffer's first frame was captured (spec §6.3): their sample-time
+/// difference plus both latencies.
+pub fn input_delay(
+    out_sample: f64,
+    in_sample: f64,
+    output_latency: u32,
+    input_latency: u32,
+) -> i64 {
+    let gap = if out_sample.is_finite() && in_sample.is_finite() {
+        (out_sample - in_sample).round() as i64
+    } else {
+        0
+    };
+    gap.saturating_add(i64::from(output_latency))
+        .saturating_add(i64::from(input_latency))
+}
+
+/// Copies input channels `offset..offset + inputs.len()` (counted across
+/// every buffer of `list`) into the planar `inputs`, `frames` frames. A
+/// channel this cycle's list does not carry (fewer buffers, or no data)
+/// is silence, never the last cycle's input again. // RT
+///
+/// # Safety
+///
+/// As for [`buffers`].
+unsafe fn deinterleave(
+    list: NonNull<AudioBufferList>,
+    offset: usize,
+    inputs: &mut [Box<[f32]>],
+    frames: usize,
+) {
+    for dst in inputs.iter_mut() {
+        for d in dst.iter_mut().take(frames) {
+            *d = 0.0;
+        }
+    }
+    // SAFETY: forwarded from the caller.
+    let bufs = unsafe { buffers(list) };
+    let mut global = 0usize;
+    for b in bufs.iter() {
+        let nch = b.mNumberChannels.max(1) as usize;
+        if b.mData.is_null() {
+            global += nch;
+            continue;
+        }
+        let samples = b.mDataByteSize as usize / 4;
+        // SAFETY: `mData` holds `mDataByteSize` bytes of f32 samples.
+        let data = unsafe { std::slice::from_raw_parts(b.mData.cast::<f32>(), samples) };
+        for c in 0..nch {
+            let Some(dst) = (global + c)
+                .checked_sub(offset)
+                .and_then(|k| inputs.get_mut(k))
+            else {
+                continue;
+            };
+            for (f, d) in dst.iter_mut().take(frames).enumerate() {
+                *d = data.get(f * nch + c).copied().unwrap_or(0.0);
+            }
+        }
+        global += nch;
+    }
+}
+
 /// Names of every device with output channels.
 pub fn output_devices() -> Vec<String> {
     get_ids(
@@ -253,6 +564,42 @@ pub fn output_devices() -> Vec<String> {
     .filter(|d| output_layout(*d).is_ok_and(|l| l.iter().sum::<u32>() > 0))
     .filter_map(name_of)
     .collect()
+}
+
+/// Names of every device with input channels.
+pub fn input_devices() -> Vec<String> {
+    get_ids(
+        SYSTEM,
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|d| layout(*d, kAudioObjectPropertyScopeInput).is_ok_and(|l| l.iter().sum::<u32>() > 0))
+    .filter_map(name_of)
+    .collect()
+}
+
+/// The input channels of device `name` (`None`: the default output
+/// device's own input) and one name per channel, as an open would give
+/// them (at most `MAX_INPUT_CHANNELS`), read from its properties: the
+/// device is not opened and no I/O starts, so no microphone permission is
+/// asked (5d-2 final review I4). `None` for a device not connected.
+pub fn input_channels_of(name: Option<&str>) -> Option<(u32, Vec<String>)> {
+    let dev = match name {
+        None => get::<AudioObjectID>(
+            SYSTEM,
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioObjectPropertyScopeGlobal,
+        )
+        .ok()?,
+        Some(n) => find_device(n).ok()?,
+    };
+    let n = layout(dev, kAudioObjectPropertyScopeInput)
+        .map(|l| l.iter().sum::<u32>())
+        .unwrap_or(0)
+        .min(MAX_INPUT_CHANNELS as u32);
+    Some((n, input_names(dev, n)))
 }
 
 /// Flags set by property listeners (non-RT CoreAudio notification thread)
@@ -306,6 +653,13 @@ struct RtContext {
     left: Box<[f32]>,
     right: Box<[f32]>,
     poisoned: bool,
+    /// Planar input, one buffer per input channel (none: input closed).
+    inputs: Box<[Box<[f32]>]>,
+    /// The first device input channel this stream's input carries (an
+    /// aggregate puts the output device's inputs first).
+    input_offset: usize,
+    output_latency: u32,
+    input_latency: u32,
 }
 
 /// The `mNumberBuffers` buffers of `list`. // RT
@@ -351,7 +705,13 @@ unsafe fn silence(out: NonNull<AudioBufferList>) {
 /// # Safety
 ///
 /// As for [`buffers`].
-unsafe fn render(ctx: &mut RtContext, out: NonNull<AudioBufferList>, time: &AudioTimeStamp) {
+unsafe fn render(
+    ctx: &mut RtContext,
+    out: NonNull<AudioBufferList>,
+    time: &AudioTimeStamp,
+    input: NonNull<AudioBufferList>,
+    input_time: &AudioTimeStamp,
+) {
     // SAFETY: forwarded from the caller (CoreAudio hands the IOProc
     // `mNumberBuffers` trailing buffers, valid for the call).
     let bufs = unsafe { buffers(out) };
@@ -373,12 +733,37 @@ unsafe fn render(ctx: &mut RtContext, out: NonNull<AudioBufferList>, time: &Audi
         return;
     };
     let mut chans: [&mut [f32]; 2] = [l, r];
-    ctx.renderer.process(
+    let valid = AudioTimeStampFlags::SampleTimeValid;
+    let delay = if time.mFlags.contains(valid) && input_time.mFlags.contains(valid) {
+        input_delay(
+            time.mSampleTime,
+            input_time.mSampleTime,
+            ctx.output_latency,
+            ctx.input_latency,
+        )
+    } else {
+        i64::from(ctx.output_latency) + i64::from(ctx.input_latency)
+    };
+    if !ctx.inputs.is_empty() {
+        // SAFETY: CoreAudio's input list is valid for this call.
+        unsafe { deinterleave(input, ctx.input_offset, &mut ctx.inputs, len) };
+    }
+    let mut ins: [&[f32]; MAX_INPUT_CHANNELS] = [&[]; MAX_INPUT_CHANNELS];
+    for (slot, buf) in ins.iter_mut().zip(ctx.inputs.iter()) {
+        *slot = buf.get(..len).unwrap_or(&[]);
+    }
+    let n_in = ctx.inputs.len().min(MAX_INPUT_CHANNELS);
+    ctx.renderer.process_input(
         &mut chans,
         frames,
         BlockTime {
-            host_time_ns: host_ns,
+            // MIDI leaves at the time this block is heard (spec §6.3).
+            host_time_ns: audible_ns(host_ns, ctx.output_latency, sr),
             sample_rate: sr,
+        },
+        InputBlock {
+            channels: ins.get(..n_in).unwrap_or(&[]),
+            delay_frames: delay,
         },
     );
     let mut global = 0usize;
@@ -407,24 +792,33 @@ unsafe fn render(ctx: &mut RtContext, out: NonNull<AudioBufferList>, time: &Audi
 unsafe extern "C-unwind" fn io_proc(
     _device: AudioObjectID,
     _now: NonNull<AudioTimeStamp>,
-    _input: NonNull<AudioBufferList>,
-    _input_time: NonNull<AudioTimeStamp>,
+    input: NonNull<AudioBufferList>,
+    input_time: NonNull<AudioTimeStamp>,
     output: NonNull<AudioBufferList>,
     output_time: NonNull<AudioTimeStamp>,
     client: *mut c_void,
 ) -> i32 {
     // SAFETY: `client` is the `RtContext` boxed in `start`, owned by this
     // IOProc until `stop` has returned from `AudioDeviceStop`; the buffer
-    // list and timestamp are valid for this call. The buffer list stays a
-    // raw pointer (see `buffers`). // RT
-    let (ctx, time) = unsafe { (&mut *client.cast::<RtContext>(), output_time.as_ref()) };
+    // lists and timestamps are valid for this call. The buffer lists stay
+    // raw pointers (see `buffers`). // RT
+    let (ctx, time, in_time) = unsafe {
+        (
+            &mut *client.cast::<RtContext>(),
+            output_time.as_ref(),
+            input_time.as_ref(),
+        )
+    };
     if ctx.poisoned {
         // SAFETY: CoreAudio's output list is valid for this call.
         unsafe { silence(output) };
         return 0;
     }
-    // SAFETY: as above; `render` is the only user of the list meanwhile.
-    let ok = catch_unwind(AssertUnwindSafe(|| unsafe { render(ctx, output, time) })).is_ok();
+    // SAFETY: as above; `render` is the only user of the lists meanwhile.
+    let ok = catch_unwind(AssertUnwindSafe(|| unsafe {
+        render(ctx, output, time, input, in_time)
+    }))
+    .is_ok();
     if !ok {
         // Never unwind into CoreAudio: go silent for good and report.
         ctx.poisoned = true;
@@ -452,6 +846,17 @@ pub struct CoreAudioBackend {
     info: Option<StreamInfo>,
     running: Option<Running>,
     listening: Option<Listening>,
+    /// The private aggregate device made for a separate input device
+    /// (destroyed on close).
+    aggregate: Option<AudioObjectID>,
+    /// The input device inside it, also listened to (unplugging it ends a
+    /// recording).
+    input_device: Option<AudioObjectID>,
+    /// The first device input channel the stream carries.
+    input_offset: usize,
+    /// The output device (the aggregate's clock when there is one): what
+    /// following the system default compares.
+    output: Option<AudioObjectID>,
     /// Flags of removed listeners. CoreAudio may still be running a
     /// listener call on its notification thread while
     /// `AudioObjectRemovePropertyListener` returns, so the flags live as
@@ -493,6 +898,10 @@ impl CoreAudioBackend {
             info: None,
             running: None,
             listening: None,
+            aggregate: None,
+            input_device: None,
+            input_offset: 0,
+            output: None,
             retired: Vec::new(),
         }
     }
@@ -519,8 +928,32 @@ impl CoreAudioBackend {
         Some(Arc::new(wg))
     }
 
+    /// The devices inside the aggregate made for input (none without
+    /// one): the output and the input device, each listened to for loss.
+    fn sub_devices(&self) -> [Option<AudioObjectID>; 2] {
+        match self.aggregate {
+            Some(_) => [self.output, self.input_device],
+            None => [None, None],
+        }
+    }
+
     fn listen(&mut self, device: AudioObjectID, follow_default: bool) {
         let flags = Arc::into_raw(Arc::new(Flags::default()));
+        for sub in self.sub_devices().into_iter().flatten() {
+            let mut a = addr(
+                kAudioDevicePropertyDeviceIsAlive,
+                kAudioObjectPropertyScopeGlobal,
+            );
+            // SAFETY: as below; removed in `unlisten`.
+            unsafe {
+                AudioObjectAddPropertyListener(
+                    sub,
+                    NonNull::from(&mut a),
+                    Some(listener),
+                    flags.cast_mut().cast::<c_void>(),
+                );
+            }
+        }
         for (selector, system) in LISTENED {
             if system && !follow_default {
                 continue;
@@ -555,6 +988,21 @@ impl CoreAudioBackend {
         let Some(l) = self.listening.take() else {
             return;
         };
+        for sub in self.sub_devices().into_iter().flatten() {
+            let mut a = addr(
+                kAudioDevicePropertyDeviceIsAlive,
+                kAudioObjectPropertyScopeGlobal,
+            );
+            // SAFETY: removes exactly the listener added in `listen`.
+            unsafe {
+                AudioObjectRemovePropertyListener(
+                    sub,
+                    NonNull::from(&mut a),
+                    Some(listener),
+                    l.flags.cast_mut().cast::<c_void>(),
+                );
+            }
+        }
         for (selector, system) in LISTENED {
             if system && !l.follow_default {
                 continue;
@@ -577,10 +1025,22 @@ impl CoreAudioBackend {
         self.retired.push(unsafe { Arc::from_raw(l.flags) });
     }
 
-    /// Stops (if running) and forgets the device.
+    /// Stops (if running) and forgets the device; an aggregate device made
+    /// for input is destroyed.
     pub fn close(&mut self) -> Option<Renderer> {
         let r = self.stop().ok();
         self.unlisten();
+        if let Some(agg) = self.aggregate.take() {
+            // SAFETY: the aggregate was made by this backend and nothing
+            // runs on it any more.
+            let status = unsafe { AudioHardwareDestroyAggregateDevice(agg) };
+            if status != 0 {
+                eprintln!("warning: AudioHardwareDestroyAggregateDevice failed ({status})");
+            }
+        }
+        self.input_device = None;
+        self.input_offset = 0;
+        self.output = None;
         self.device = None;
         self.info = None;
         r
@@ -608,8 +1068,8 @@ impl AudioBackend for CoreAudioBackend {
         if device == 0 {
             return Err(BackendError::NoDevice);
         }
-        let layout = output_layout(device)?;
-        let channels: u32 = layout.iter().sum();
+        let outputs = output_layout(device)?;
+        let channels: u32 = outputs.iter().sum();
         if channels == 0 {
             return Err(BackendError::NoDevice);
         }
@@ -622,6 +1082,71 @@ impl AudioBackend for CoreAudioBackend {
                 n,
             )?;
         }
+        if let Some(want) = cfg.sample_rate {
+            let now: f64 = get(
+                device,
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+            )?;
+            if (now - want).abs() > 0.5 {
+                // The device may refuse or take a moment: ask, then wait up
+                // to 1 s for it to report the new rate (5a Ruling 20). A
+                // refused request is not waited for (Task 11 Minor 1): the
+                // rate read below reports the mismatch at once.
+                let asked = set(
+                    device,
+                    kAudioDevicePropertyNominalSampleRate,
+                    kAudioObjectPropertyScopeGlobal,
+                    want,
+                )
+                .is_ok();
+                settle_rate(asked, want, std::time::Duration::from_secs(1), || {
+                    get::<f64>(
+                        device,
+                        kAudioDevicePropertyNominalSampleRate,
+                        kAudioObjectPropertyScopeGlobal,
+                    )
+                })?;
+            }
+        }
+        // Input (spec §6.1), once the output runs at its rate: the output
+        // device's own, or another device's through a private aggregate
+        // (the output device first, as its clock), whose inputs list the
+        // output device's before the input device's.
+        let output = device;
+        let mut device = device;
+        let mut input_source = None;
+        if cfg.input_enabled {
+            match &cfg.input_device {
+                Some(name) if name_of(output).as_deref() != Some(name.as_str()) => {
+                    let input = find_device(name)?;
+                    // Pre-flight M15: the input device runs at the
+                    // output's rate (the project's, unless the output
+                    // refused it) before the aggregate joins them, or
+                    // input does not open.
+                    let rate: f64 = get(
+                        output,
+                        kAudioDevicePropertyNominalSampleRate,
+                        kAudioObjectPropertyScopeGlobal,
+                    )?;
+                    match_rate(
+                        &mut HalRate(input),
+                        name,
+                        rate,
+                        std::time::Duration::from_secs(1),
+                    )?;
+                    let agg = create_aggregate(output, input)?;
+                    self.input_offset = layout(output, kAudioObjectPropertyScopeInput)
+                        .map(|l| l.iter().sum::<u32>() as usize)
+                        .unwrap_or(0);
+                    self.aggregate = Some(agg);
+                    self.input_device = Some(input);
+                    input_source = Some(input);
+                    device = agg;
+                }
+                _ => input_source = Some(output),
+            }
+        }
         let sample_rate: f64 = get(
             device,
             kAudioDevicePropertyNominalSampleRate,
@@ -632,13 +1157,37 @@ impl AudioBackend for CoreAudioBackend {
             kAudioDevicePropertyBufferFrameSize,
             kAudioObjectPropertyScopeGlobal,
         )?;
+        let input_channels = match input_source {
+            Some(src) => {
+                let n = layout(src, kAudioObjectPropertyScopeInput)
+                    .map(|l| l.iter().sum::<u32>())
+                    .unwrap_or(0)
+                    .min(MAX_INPUT_CHANNELS as u32);
+                if n > 0 {
+                    check_scope_formats(device, kAudioObjectPropertyScopeInput)?;
+                }
+                n
+            }
+            None => 0,
+        };
         let info = StreamInfo {
-            device_name: name_of(device).unwrap_or_default(),
+            device_name: name_of(output).unwrap_or_default(),
             sample_rate,
             buffer_frames,
             channels,
+            input_channels,
+            input_channel_names: input_source
+                .map(|src| input_names(src, input_channels))
+                .unwrap_or_default(),
+            input_latency_frames: if input_channels > 0 {
+                input_latency_with(&HalProps, device, self.input_device)
+            } else {
+                0
+            },
+            output_latency_frames: latency(device, kAudioObjectPropertyScopeOutput),
         };
         self.device = Some(device);
+        self.output = Some(output);
         self.info = Some(info.clone());
         self.listen(device, cfg.device.is_none());
         Ok(info)
@@ -653,11 +1202,19 @@ impl AudioBackend for CoreAudioBackend {
             });
         }
         let max = renderer.config().max_frames.max(MAX_FRAMES) as usize;
+        let info = self.info.clone();
+        let inputs = info.as_ref().map_or(0, |i| i.input_channels as usize);
         let ctx = Box::into_raw(Box::new(RtContext {
             renderer,
             left: vec![0.0; max].into_boxed_slice(),
             right: vec![0.0; max].into_boxed_slice(),
             poisoned: false,
+            inputs: (0..inputs)
+                .map(|_| vec![0.0; max].into_boxed_slice())
+                .collect(),
+            input_offset: self.input_offset,
+            output_latency: info.as_ref().map_or(0, |i| i.output_latency_frames),
+            input_latency: info.as_ref().map_or(0, |i| i.input_latency_frames),
         }));
         let mut proc_id: AudioDeviceIOProcID = None;
         // SAFETY: `io_proc` matches the IOProc signature; `ctx` stays valid
@@ -715,13 +1272,18 @@ impl AudioBackend for CoreAudioBackend {
         // SAFETY: `flags` lives until `unlisten`.
         let flags = unsafe { &*l.flags };
         if flags.dead.swap(false, Ordering::Relaxed) {
-            let alive: u32 = get(
-                device,
-                kAudioDevicePropertyDeviceIsAlive,
-                kAudioObjectPropertyScopeGlobal,
-            )
-            .unwrap_or(0);
-            if alive == 0 {
+            // Either device inside an aggregate counts too: the aggregate
+            // may outlive it.
+            let alive = |d: AudioObjectID| {
+                get::<u32>(
+                    d,
+                    kAudioDevicePropertyDeviceIsAlive,
+                    kAudioObjectPropertyScopeGlobal,
+                )
+                .unwrap_or(0)
+                    != 0
+            };
+            if device_lost(alive, device, self.sub_devices()) {
                 ev.push(BackendEvent::DeviceLost);
             }
         }
@@ -732,7 +1294,7 @@ impl AudioBackend for CoreAudioBackend {
                 kAudioObjectPropertyScopeGlobal,
             )
             .unwrap_or(0);
-            if now != device {
+            if now != self.output.unwrap_or(device) {
                 ev.push(BackendEvent::DefaultDeviceChanged);
             }
         }
@@ -774,6 +1336,86 @@ impl Drop for CoreAudioBackend {
     }
 }
 
+/// A device's nominal rate, read and asked for (the seam the rate
+/// decision of [`match_rate`] is tested through).
+trait NominalRate {
+    /// The rate it runs at now.
+    fn rate(&mut self) -> Result<f64, BackendError>;
+    /// Asks it for `want`; false when it refused at once.
+    fn ask(&mut self, want: f64) -> bool;
+}
+
+/// A HAL device's nominal rate.
+struct HalRate(AudioObjectID);
+
+impl NominalRate for HalRate {
+    fn rate(&mut self) -> Result<f64, BackendError> {
+        get(
+            self.0,
+            kAudioDevicePropertyNominalSampleRate,
+            kAudioObjectPropertyScopeGlobal,
+        )
+    }
+
+    fn ask(&mut self, want: f64) -> bool {
+        set(
+            self.0,
+            kAudioDevicePropertyNominalSampleRate,
+            kAudioObjectPropertyScopeGlobal,
+            want,
+        )
+        .is_ok()
+    }
+}
+
+/// Brings input device `name` to `want` Hz (pre-flight M15): asked only
+/// when it runs at another rate, then waited for up to `timeout` (not at
+/// all when it refused); an error when it still runs at another rate.
+fn match_rate(
+    dev: &mut impl NominalRate,
+    name: &str,
+    want: f64,
+    timeout: std::time::Duration,
+) -> Result<(), BackendError> {
+    let same = |r: f64| (r - want).abs() <= 0.5;
+    if same(dev.rate()?) {
+        return Ok(());
+    }
+    let asked = dev.ask(want);
+    settle_rate(asked, want, timeout, || dev.rate())?;
+    let now = dev.rate()?;
+    if same(now) {
+        return Ok(());
+    }
+    Err(BackendError::Format {
+        detail: format!(
+            "the input device {name} runs at {now} Hz and did not change to the project's {want} Hz"
+        ),
+    })
+}
+
+/// After asking a device for rate `want`: when it accepted (`asked`),
+/// polls `read` every 20 ms, up to `timeout`, until it reports `want`;
+/// when it refused, returns at once (nothing will change).
+fn settle_rate<E>(
+    asked: bool,
+    want: f64,
+    timeout: std::time::Duration,
+    mut read: impl FnMut() -> Result<f64, E>,
+) -> Result<(), E> {
+    if !asked {
+        return Ok(());
+    }
+    let until = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < until {
+        if (read()? - want).abs() <= 0.5 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,5 +1446,325 @@ mod tests {
         unsafe { silence(p) };
         assert_eq!(a, [0.0; 8]);
         assert_eq!(b, [0.0; 8]);
+    }
+
+    /// Plan 5c Task 11 (spec §6.3): MIDI leaves at the time a block is
+    /// heard, the output latency after CoreAudio's output time.
+    #[test]
+    fn a_block_is_heard_one_output_latency_later() {
+        assert_eq!(audible_ns(1_000_000, 0, 48_000.0), 1_000_000);
+        assert_eq!(audible_ns(1_000_000, 480, 48_000.0), 11_000_000);
+        assert_eq!(audible_ns(u64::MAX - 1, 480, 48_000.0), u64::MAX);
+    }
+
+    /// Spec §6.3: the input buffer's first frame was captured the
+    /// sample-time difference plus both latencies before the output
+    /// buffer's first frame is heard.
+    #[test]
+    fn the_input_delay_adds_both_latencies_to_the_buffer_gap() {
+        assert_eq!(input_delay(1000.0, 744.0, 100, 50), 256 + 150);
+        assert_eq!(input_delay(500.0, 500.0, 0, 0), 0);
+        assert_eq!(input_delay(f64::NAN, 1.0, 10, 20), 30);
+    }
+
+    /// The input channels after `offset`, across every buffer, land in
+    /// the planar buffers.
+    #[test]
+    fn input_buffers_are_split_into_channels_from_the_offset() {
+        // Buffer 0: two interleaved channels; buffer 1: one channel.
+        let mut a = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut b = [10.0f32, 20.0, 30.0];
+        let list = TwoBuffers {
+            n: 2,
+            bufs: [
+                AudioBuffer {
+                    mNumberChannels: 2,
+                    mDataByteSize: 24,
+                    mData: a.as_mut_ptr().cast(),
+                },
+                AudioBuffer {
+                    mNumberChannels: 1,
+                    mDataByteSize: 12,
+                    mData: b.as_mut_ptr().cast(),
+                },
+            ],
+        };
+        let mut list = list;
+        let p = NonNull::from(&mut list).cast::<AudioBufferList>();
+        let mut inputs: Box<[Box<[f32]>]> =
+            (0..2).map(|_| vec![0.0; 3].into_boxed_slice()).collect();
+        // The aggregate's first input (buffer 0, channel 0) belongs to the
+        // output device: offset 1.
+        // SAFETY: `list` is a valid two-buffer list for the call.
+        unsafe { deinterleave(p, 1, &mut inputs, 3) };
+        assert_eq!(&*inputs[0], &[2.0, 4.0, 6.0]);
+        assert_eq!(&*inputs[1], &[10.0, 20.0, 30.0]);
+    }
+
+    /// The aggregate's description names both devices, is private and
+    /// clocked by the output.
+    #[test]
+    fn the_aggregate_is_private_and_clocked_by_the_output() {
+        let d = aggregate_description("org.vizdaw.input.1", "OUT-UID", "IN-UID");
+        assert_eq!(d.len(), 5);
+        let get = |k: &str| d.get(&CFString::from_str(k)).unwrap();
+        let private = get("private");
+        assert_eq!(
+            private.downcast_ref::<CFNumber>().unwrap().as_i64(),
+            Some(1)
+        );
+        let main = get("master");
+        assert_eq!(
+            main.downcast_ref::<CFString>().unwrap().to_string(),
+            "OUT-UID"
+        );
+        let subs = get("subdevices");
+        assert_eq!(subs.downcast_ref::<CFArray>().unwrap().len(), 2);
+    }
+
+    /// Task 11 Minor 1: a device that refused the rate is not polled (no
+    /// 1 s wait); one that accepted it is polled until it reports it.
+    #[test]
+    fn a_refused_rate_is_not_waited_for() {
+        let mut reads = 0;
+        let t0 = std::time::Instant::now();
+        let r = settle_rate(false, 48_000.0, std::time::Duration::from_secs(1), || {
+            reads += 1;
+            Ok::<f64, ()>(44_100.0)
+        });
+        assert_eq!((r, reads), (Ok(()), 0));
+        assert!(t0.elapsed() < std::time::Duration::from_millis(100));
+        let mut now = 44_100.0;
+        let r = settle_rate(true, 48_000.0, std::time::Duration::from_secs(1), || {
+            reads += 1;
+            let r = now;
+            now = 48_000.0;
+            Ok::<f64, ()>(r)
+        });
+        assert_eq!((r, reads), (Ok(()), 2));
+    }
+
+    /// A device standing in for the input device's nominal rate: `accept`
+    /// says whether a request is taken, `lag` how many reads it takes to
+    /// report the new rate.
+    struct FakeRate {
+        now: f64,
+        accept: bool,
+        lag: u32,
+        pending: Option<f64>,
+        asked: Vec<f64>,
+    }
+
+    impl FakeRate {
+        fn new(now: f64, accept: bool, lag: u32) -> FakeRate {
+            FakeRate {
+                now,
+                accept,
+                lag,
+                pending: None,
+                asked: Vec::new(),
+            }
+        }
+    }
+
+    impl NominalRate for FakeRate {
+        fn rate(&mut self) -> Result<f64, BackendError> {
+            if let Some(p) = self.pending {
+                if self.lag == 0 {
+                    self.now = p;
+                    self.pending = None;
+                } else {
+                    self.lag -= 1;
+                }
+            }
+            Ok(self.now)
+        }
+
+        fn ask(&mut self, want: f64) -> bool {
+            self.asked.push(want);
+            if self.accept {
+                self.pending = Some(want);
+            }
+            self.accept
+        }
+    }
+
+    /// Pre-flight M15: an input device already at the rate is not asked;
+    /// one at another rate is asked once and waited for; one that refuses
+    /// (or never changes) fails, naming both rates.
+    #[test]
+    fn the_input_device_is_brought_to_the_rate_or_refused() {
+        let t = std::time::Duration::from_millis(200);
+        let mut same = FakeRate::new(48_000.0, true, 0);
+        assert!(match_rate(&mut same, "Mic", 48_000.0, t).is_ok());
+        assert!(same.asked.is_empty(), "a device at the rate is not asked");
+
+        let mut slow = FakeRate::new(44_100.0, true, 2);
+        assert!(match_rate(&mut slow, "Mic", 48_000.0, t).is_ok());
+        assert_eq!(slow.asked, [48_000.0]);
+        assert_eq!(slow.now, 48_000.0);
+
+        let mut refuses = FakeRate::new(44_100.0, false, 0);
+        let t0 = std::time::Instant::now();
+        let e = match_rate(
+            &mut refuses,
+            "Mic",
+            48_000.0,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(500),
+            "a refusal is not waited for"
+        );
+        assert_eq!(refuses.asked, [48_000.0]);
+        assert!(
+            e.contains("Mic") && e.contains("44100") && e.contains("48000"),
+            "{e}"
+        );
+
+        // Accepted, but never reports the rate within the wait.
+        let mut stuck = FakeRate::new(44_100.0, true, u32::MAX);
+        assert!(match_rate(&mut stuck, "Mic", 48_000.0, t).is_err());
+    }
+
+    /// Latency properties standing in for a device tree: `(object,
+    /// selector, scope) -> value` and `(device, scope) -> streams`.
+    #[derive(Default)]
+    struct FakeProps {
+        values: Vec<(
+            AudioObjectID,
+            AudioObjectPropertySelector,
+            AudioObjectPropertyScope,
+            u32,
+        )>,
+        streams: Vec<(AudioObjectID, AudioObjectPropertyScope, Vec<AudioObjectID>)>,
+    }
+
+    impl LatencyProps for FakeProps {
+        fn value(
+            &self,
+            obj: AudioObjectID,
+            selector: AudioObjectPropertySelector,
+            scope: AudioObjectPropertyScope,
+        ) -> Option<u32> {
+            self.values
+                .iter()
+                .find(|v| v.0 == obj && v.1 == selector && v.2 == scope)
+                .map(|v| v.3)
+        }
+
+        fn streams(
+            &self,
+            dev: AudioObjectID,
+            scope: AudioObjectPropertyScope,
+        ) -> Vec<AudioObjectID> {
+            self.streams
+                .iter()
+                .find(|s| s.0 == dev && s.1 == scope)
+                .map(|s| s.2.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    /// Task 11 review I2: with a separate input device, the input latency
+    /// is that device's own, not the aggregate's first input stream (the
+    /// output device's, when it has inputs).
+    #[test]
+    fn the_input_latency_is_the_chosen_input_devices() {
+        let (agg, input) = (10, 20);
+        let (inp, glob) = (
+            kAudioObjectPropertyScopeInput,
+            kAudioObjectPropertyScopeGlobal,
+        );
+        let p = FakeProps {
+            values: vec![
+                // The aggregate: its first input stream is the output
+                // device's (latency 100).
+                (agg, kAudioDevicePropertyLatency, inp, 5),
+                (agg, kAudioDevicePropertySafetyOffset, inp, 3),
+                (101, kAudioStreamPropertyLatency, glob, 100),
+                (102, kAudioStreamPropertyLatency, glob, 7),
+                // The input device itself.
+                (input, kAudioDevicePropertyLatency, inp, 11),
+                (input, kAudioDevicePropertySafetyOffset, inp, 2),
+                (201, kAudioStreamPropertyLatency, glob, 7),
+            ],
+            streams: vec![(agg, inp, vec![101, 102]), (input, inp, vec![201])],
+        };
+        assert_eq!(input_latency_with(&p, agg, Some(input)), 11 + 2 + 7);
+        // Duplex (no aggregate): the device's own.
+        assert_eq!(input_latency_with(&p, agg, None), 5 + 3 + 100);
+        // Unknown parts count 0.
+        assert_eq!(input_latency_with(&FakeProps::default(), 1, Some(2)), 0);
+    }
+
+    /// Task 11 review M1: a channel this cycle's list does not carry is
+    /// silence, not the last cycle's input repeated.
+    #[test]
+    fn channels_missing_from_a_cycle_are_silent() {
+        let mut a = [1.0f32, 2.0, 3.0];
+        let list = TwoBuffers {
+            n: 2,
+            bufs: [
+                AudioBuffer {
+                    mNumberChannels: 1,
+                    mDataByteSize: 12,
+                    mData: a.as_mut_ptr().cast(),
+                },
+                // A buffer without data.
+                AudioBuffer {
+                    mNumberChannels: 1,
+                    mDataByteSize: 12,
+                    mData: ptr::null_mut(),
+                },
+            ],
+        };
+        let mut list = list;
+        let p = NonNull::from(&mut list).cast::<AudioBufferList>();
+        // Last cycle's input, in all three channels and past `frames`.
+        let mut inputs: Box<[Box<[f32]>]> =
+            (0..3).map(|_| vec![9.0; 4].into_boxed_slice()).collect();
+        // SAFETY: `list` is a valid two-buffer list for the call.
+        unsafe { deinterleave(p, 0, &mut inputs, 3) };
+        assert_eq!(&*inputs[0], &[1.0, 2.0, 3.0, 9.0]);
+        assert_eq!(&*inputs[1], &[0.0, 0.0, 0.0, 9.0], "no data");
+        assert_eq!(&*inputs[2], &[0.0, 0.0, 0.0, 9.0], "no buffer");
+        // A list with no buffers at all.
+        let mut empty = TwoBuffers {
+            n: 0,
+            bufs: list.bufs,
+        };
+        let p = NonNull::from(&mut empty).cast::<AudioBufferList>();
+        // SAFETY: as above (no buffers are read).
+        unsafe { deinterleave(p, 0, &mut inputs, 3) };
+        assert_eq!(&inputs[0][..3], &[0.0; 3]);
+    }
+
+    /// Task 11 review M4: every aggregate gets its own UID, naming the
+    /// process.
+    #[test]
+    fn aggregate_uids_are_unique() {
+        let (a, b) = (next_aggregate_uid(), next_aggregate_uid());
+        assert_ne!(a, b);
+        let pid = format!("org.vizdaw.input.{}.", std::process::id());
+        assert!(a.starts_with(&pid) && b.starts_with(&pid), "{a} {b}");
+    }
+
+    /// Task 11 review M5: the stream is lost when its device, or either
+    /// device inside its aggregate, is gone.
+    #[test]
+    fn losing_either_sub_device_loses_the_stream() {
+        let gone = |dead: &'static [AudioObjectID]| move |d| !dead.contains(&d);
+        let subs = [Some(1), Some(2)];
+        assert!(!device_lost(gone(&[]), 10, subs));
+        assert!(device_lost(gone(&[1]), 10, subs), "the output");
+        assert!(device_lost(gone(&[2]), 10, subs), "the input");
+        assert!(device_lost(gone(&[10]), 10, subs), "the aggregate");
+        assert!(
+            !device_lost(gone(&[1, 2]), 10, [None, None]),
+            "no aggregate"
+        );
     }
 }

@@ -98,6 +98,10 @@ pub struct LaneRow {
     pub midi_dest: Option<u64>,
     /// The lane's audio output path ID.
     pub audio_out: Option<u64>,
+    /// What the lane records (plan 5c).
+    pub input: Option<crate::edit::LaneInputRow>,
+    /// When its input is heard (plan 5c).
+    pub monitor: crate::edit::MonitorModeRow,
 }
 
 /// What the transport is doing.
@@ -126,6 +130,15 @@ pub struct TransportState {
     pub host_time_ns: u64,
     /// Tempo at `tick` in ticks per second.
     pub ticks_per_second: f64,
+    /// The device runs at another rate than the project: regions are
+    /// muted (5a Ruling 20). Known only once a host exists, i.e. after the
+    /// first Play (F19).
+    #[uniffi(default = false)]
+    pub rate_mismatch: bool,
+    /// Record's count-in is playing: the transport rolls when it ends
+    /// (plan 5d-1 Ruling 7).
+    #[uniffi(default = false)]
+    pub counting_in: bool,
 }
 
 fn count(n: usize) -> u32 {
@@ -198,6 +211,8 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                 arm: l.arm,
                 midi_dest: l.midi_dest.map(|d| d.0),
                 audio_out: l.audio_out.map(|o| o.0),
+                input: l.input.as_ref().map(Into::into),
+                monitor: l.monitor.into(),
             }
         })
         .collect())
@@ -348,8 +363,16 @@ pub struct IdleUpdate {
     /// Slots whose parameter list or values changed outside a gesture.
     pub params_changed: Vec<u64>,
     /// New problems: plugins that failed to load or refused their saved
-    /// state.
+    /// state; media that failed to read.
     pub problems: Vec<String>,
+    /// The media rows changed (a job finished, media went offline):
+    /// refetch `Session.media`.
+    #[uniffi(default = false)]
+    pub media_changed: bool,
+    /// Waveform overviews or sample windows became available: views
+    /// showing `Pending` or `Coarse` waveforms ask again (plan 5b).
+    #[uniffi(default = false)]
+    pub overviews_changed: bool,
 }
 
 /// One plugin parameter and its current value.

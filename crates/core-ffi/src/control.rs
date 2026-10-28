@@ -114,6 +114,14 @@ pub enum StateTargetRow {
     Selection,
     /// Windows and app alerts.
     Windows,
+    /// Media pool.
+    Media,
+    /// Project format and device rate.
+    Project,
+    /// Recording (plan 5c).
+    Record,
+    /// Audio input (plan 5c).
+    Input,
 }
 
 /// The after-crash answer.
@@ -148,6 +156,11 @@ pub enum ControlValue {
     Flag {
         /// The flag.
         value: bool,
+    },
+    /// An integer.
+    Int {
+        /// The integer.
+        value: i64,
     },
 }
 
@@ -432,6 +445,8 @@ pub enum WindowKindRow {
     Settings,
     /// Anything else (menus' windows are not listed).
     Other,
+    /// A media pool window (plan 5b).
+    MediaPool,
 }
 
 /// A VizDAW window.
@@ -497,6 +512,47 @@ pub struct UiNodeRow {
 /// What a call came to.
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ControlResult {
+    /// `state.get media`.
+    Media {
+        /// Document ID.
+        doc: String,
+        /// The pool.
+        items: Vec<crate::media::MediaRow>,
+    },
+    /// `state.get project`.
+    Project {
+        /// Document ID.
+        doc: String,
+        /// Format, mismatched media, device rate.
+        info: crate::format::ProjectInfoRow,
+    },
+    /// `state.get record` (plan 5c).
+    Record {
+        /// Document ID.
+        doc: String,
+        /// What recording is doing.
+        state: crate::record::RecordStateRow,
+    },
+    /// `state.get input` (plan 5c; plan 5d-1 Ruling 26).
+    InputState {
+        /// Document ID.
+        doc: String,
+        /// What the input offers.
+        info: crate::live::InputInfoRow,
+        /// Each input channel's peak since the last read.
+        levels: Vec<f32>,
+    },
+    /// `destination.measure_return` (plan 5c-2).
+    Measured {
+        /// Document ID.
+        doc: String,
+        /// The destination measured.
+        dest: u64,
+        /// The return latency set, in ms.
+        return_latency_ms: f32,
+        /// Notes whose onset was found.
+        onsets: u32,
+    },
     /// `command.run`.
     Ran {
         /// Registry ID.
@@ -761,6 +817,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                     value: match v {
                         ArgValue::Text(value) => ControlValue::Text { value },
                         ArgValue::Flag(value) => ControlValue::Flag { value },
+                        ArgValue::Int(value) => ControlValue::Int { value },
                     },
                 })
                 .collect(),
@@ -773,6 +830,10 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 StateTarget::Editor => StateTargetRow::Editor,
                 StateTarget::Selection => StateTargetRow::Selection,
                 StateTarget::Windows => StateTargetRow::Windows,
+                StateTarget::Media => StateTargetRow::Media,
+                StateTarget::Project => StateTargetRow::Project,
+                StateTarget::Record => StateTargetRow::Record,
+                StateTarget::Input => StateTargetRow::Input,
             },
             window: window_row(window),
         },
@@ -934,11 +995,37 @@ fn tree_json(nodes: &[UiNodeRow]) -> Vec<Value> {
     roots
 }
 
+/// A lane's input as the channel spells it (`channel`s from 1).
+fn lane_input_json(i: &crate::edit::LaneInputRow) -> Value {
+    match i {
+        crate::edit::LaneInputRow::Audio {
+            first,
+            stereo,
+            return_of,
+        } => json!({
+            "kind": "audio", "channel": u32::from(*first) + 1, "stereo": stereo,
+            "return_of": return_of,
+        }),
+        crate::edit::LaneInputRow::Midi { port, channel } => json!({
+            "kind": "midi", "port": port, "midi_channel": channel.map(|c| u32::from(c) + 1),
+        }),
+    }
+}
+
+fn monitor_name(m: crate::edit::MonitorModeRow) -> &'static str {
+    match m {
+        crate::edit::MonitorModeRow::Auto => "auto",
+        crate::edit::MonitorModeRow::Input => "input",
+        crate::edit::MonitorModeRow::Off => "off",
+    }
+}
+
 fn transport_json(doc: &str, t: &TransportState) -> Value {
     json!({
         "doc": doc, "playing": t.playing, "seq": t.seq, "tick": t.tick,
         "position": t.position_bbu, "seconds": t.seconds, "sample_rate": t.sample_rate,
         "device": t.device, "faults": t.faults, "report": t.report,
+        "rate_mismatch": t.rate_mismatch, "counting_in": t.counting_in,
     })
 }
 
@@ -955,6 +1042,102 @@ pub fn result_json(r: &ControlResult) -> Value {
             "command": command, "doc": doc, "window": window, "undo": undo_label, "status": status,
         }),
         ControlResult::Transport { doc, state } => transport_json(doc, state),
+        ControlResult::Media { doc, items } => json!({
+            "doc": doc,
+            "items": items.iter().map(|m| json!({
+                "id": m.id, "name": m.name, "path": m.path, "channels": m.channels,
+                "frames": m.frames, "rate": m.sample_rate,
+                "origin": match m.origin {
+                    crate::media::MediaOriginRow::Imported => "imported",
+                    crate::media::MediaOriginRow::Recorded => "recorded",
+                    crate::media::MediaOriginRow::Bounced => "bounced",
+                    crate::media::MediaOriginRow::ExternalEdit => "external_edit",
+                },
+                "original_name": m.original_name,
+                "offline": m.offline.is_some(),
+                "offline_reason": m.offline.map(|r| match r {
+                    crate::media::OfflineReasonRow::Missing => "missing",
+                    crate::media::OfflineReasonRow::Unreadable => "unreadable",
+                    crate::media::OfflineReasonRow::Format => "format",
+                    crate::media::OfflineReasonRow::Length => "length",
+                    crate::media::OfflineReasonRow::Changed => "changed",
+                }),
+                "uses": m.uses,
+                "used_percent": m.used_percent,
+                "peak": m.peak.map(|p| (f64::from(p) * 1000.0).round() / 1000.0),
+            })).collect::<Vec<_>>(),
+        }),
+        ControlResult::Record { doc, state: r } => json!({
+            "doc": doc, "recording": r.recording, "seq": r.seq,
+            "spec": r.spec.as_ref().map(|s| json!({
+                "replace": s.replace,
+                "punch": s.punch.as_ref().map(|p| json!({"start": p.start, "end": p.end})),
+                "loop": s.looped, "count_in": s.count_in_bars, "pre_roll": s.pre_roll_bars,
+                "passes_as_takes": s.passes_as_takes,
+            })),
+            "pass": r.pass, "kept": r.kept, "discarded": r.discarded,
+            "lanes": r.lanes.iter().map(|l| json!({
+                "lane": l.lane, "audio": l.audio, "path": l.path, "clipped": l.clipped,
+                "peak": (f64::from(l.peak) * 1000.0).round() / 1000.0,
+                "return_frames": l.return_frames,
+            })).collect::<Vec<_>>(),
+            "pass_start_tick": r.pass_start_tick,
+            "pass_start_file_frame": r.pass_start_file_frame,
+            "range_start_tick": r.range_start_tick,
+            "frames": r.frames, "overflows": r.overflows, "gap_frames": r.gap_frames,
+            "underruns": r.underruns, "late_starts": r.late_starts,
+            "free_bytes": r.free_bytes, "recovered": r.recovered,
+            "recovered_files": r.recovered_files.iter().map(|f| json!({
+                "path": f.path, "frames": f.frames, "size_known": f.size_known,
+                "readable": f.readable,
+            })).collect::<Vec<_>>(),
+        }),
+        ControlResult::Measured {
+            doc,
+            dest,
+            return_latency_ms,
+            onsets,
+        } => json!({
+            "doc": doc, "dest": dest,
+            // Thousandths: an f32 printed as f64 would show its rounding.
+            "return_latency_ms": (f64::from(*return_latency_ms) * 1000.0).round() / 1000.0,
+            "onsets": onsets,
+        }),
+        ControlResult::InputState { doc, info, levels } => {
+            let a = crate::audio::audio_settings();
+            let ms = if info.sample_rate > 0.0 {
+                (f64::from(info.round_trip_frames) * 1000.0 / info.sample_rate * 100.0).round()
+                    / 100.0
+            } else {
+                0.0
+            };
+            json!({
+                "doc": doc, "device": info.device, "channels": info.channels,
+                "names": info.names, "input_latency": info.input_latency_frames,
+                "output_latency": info.output_latency_frames,
+                "software_monitoring": a.software_monitoring,
+                "buffer_frames": a.buffer_frames,
+                "device_buffer_frames": info.buffer_frames,
+                "round_trip_frames": info.round_trip_frames,
+                "round_trip_ms": ms,
+                "opening": info.opening,
+                "levels": levels.iter().map(|l| (f64::from(*l) * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+                "latency_trim": a.latency_trim,
+            })
+        }
+        ControlResult::Project { doc, info } => json!({
+            "doc": doc,
+            "rate": info.format.sample_rate,
+            "depth": match info.format.depth {
+                crate::format::BitDepthRow::Int16 => "16",
+                crate::format::BitDepthRow::Int24 => "24",
+                crate::format::BitDepthRow::Float32 => "32f",
+            },
+            "label": crate::format::format_label(info.format),
+            "mismatched": info.mismatched,
+            "rate_mismatch": info.rate_mismatch,
+            "device_rate": info.device_rate,
+        }),
         ControlResult::Document {
             doc,
             path,
@@ -973,6 +1156,9 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "id": l.id, "name": l.name, "destination": l.destination,
                 "events": l.midi_event_count, "regions": l.region_count,
                 "references": l.reference_count, "mute": l.mute, "solo": l.solo, "arm": l.arm,
+                "takes": l.take_count, "active_take": l.active_take,
+                "input": l.input.as_ref().map(lane_input_json),
+                "monitor": monitor_name(l.monitor),
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
             "alert": alert.as_ref().map(alert_json),
@@ -1047,6 +1233,7 @@ fn window_kind(k: WindowKindRow) -> &'static str {
         WindowKindRow::PluginManager => "plugin_manager",
         WindowKindRow::Settings => "settings",
         WindowKindRow::Other => "other",
+        WindowKindRow::MediaPool => "media_pool",
     }
 }
 
@@ -1130,6 +1317,12 @@ impl ControlServer {
             .with_details(details);
             Ok(lock(&self.server).reply(token, Err(e)))
         })
+    }
+
+    /// Gives `token` `timeout_ms` from now to be answered instead of the
+    /// app timeout (a job that runs long); false when nobody waits.
+    pub fn extend_timeout(&self, token: u64, timeout_ms: u64) -> Result<bool, VizError> {
+        ffi_guard(|| Ok(lock(&self.server).extend(token, Duration::from_millis(timeout_ms))))
     }
 
     /// Whether a client still waits for `token`.

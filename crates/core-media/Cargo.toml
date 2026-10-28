@@ -1,0 +1,18 @@
+[package]
+name = "core-media"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
+core-model = { path = "../core-model" }
+thiserror = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"

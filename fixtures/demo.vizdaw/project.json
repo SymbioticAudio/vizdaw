@@ -1,11 +1,15 @@
 {
   "format": "vizdaw-project",
-  "version": 2,
+  "version": 3,
   "document": {
     "settings": {
       "history_depth": 200,
       "autosave_keep": 10,
-      "templates": {}
+      "templates": {},
+      "format": {
+        "sample_rate": 48000,
+        "depth": "int24"
+      }
     },
     "instruments": [
       {

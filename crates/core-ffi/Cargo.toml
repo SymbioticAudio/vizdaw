@@ -14,7 +14,9 @@ crate-type = ["staticlib", "cdylib", "lib"]
 # `debug_panic`, `Session::debug_panic_locked`, `force_offline`,
 # `reset_host`, `drain_offline_log`, `simulate_event`, `hosts_created`,
 # `inject_reload_fault`, `engine_active`, `engine_workers`,
-# `add_test_bundle` and `closing_hosts`, for tests only.
+# `add_test_bundle`, `closing_hosts`, `midi_destination_targets`,
+# `set_fake_input` and `set_fake_synth` (the fake input and synth
+# choices), for tests only.
 test-hooks = []
 
 [dependencies]
@@ -23,6 +25,7 @@ core-editor = { path = "../core-editor" }
 core-model = { path = "../core-model" }
 core-engine = { path = "../core-engine", features = ["fixtures"] }
 core-host = { path = "../core-host" }
+core-media = { path = "../core-media" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

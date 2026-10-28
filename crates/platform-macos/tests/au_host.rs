@@ -66,7 +66,7 @@ fn a_dry_au_delay_insert_passes_the_strip_unchanged() {
     let doc = b.finish();
     let mut h = host();
     h.sync(&doc);
-    let r = h.wait_ready(Duration::from_secs(10));
+    let r = h.wait_ready(au_wait());
     assert_eq!(r.loaded, vec![delay], "{:?}", r.failed);
     let (mut e, mut be) = engine(&h);
     let report = e.load(&doc, song).unwrap();
@@ -92,7 +92,7 @@ fn the_dls_unit_plays_as_a_plugin_instrument() {
     let doc = b.finish();
     let mut h = host();
     h.sync(&doc);
-    assert_eq!(h.wait_ready(Duration::from_secs(10)).loaded, vec![id]);
+    assert_eq!(h.wait_ready(au_wait()).loaded, vec![id]);
     let (mut e, mut be) = engine(&h);
     let report = e.load(&doc, seq).unwrap();
     assert!(report.unroutable.is_empty(), "{:?}", report.warnings);
@@ -120,13 +120,13 @@ fn au_state_is_captured_and_restored() {
     {
         let mut h = host();
         h.sync(hist.doc());
-        h.wait_ready(Duration::from_secs(10));
+        h.wait_ready(au_wait());
         h.capture(&mut hist, delay).unwrap();
     }
     assert!(hist.doc().plugin_slot(delay).unwrap().params.is_empty());
     let mut fresh = host();
     fresh.sync(hist.doc());
-    let r = fresh.wait_ready(Duration::from_secs(10));
+    let r = fresh.wait_ready(au_wait());
     assert!(r.rejected_state.is_empty(), "{:?}", r.rejected_state);
     let v = fresh
         .instance(delay)
@@ -138,4 +138,16 @@ fn au_state_is_captured_and_restored() {
         fresh.instance(delay).unwrap().info().plugin.format,
         PluginFormat::Au
     );
+}
+
+/// The deadline for Audio Units to load: `VIZDAW_TEST_WAIT_SECS`, else 60 s
+/// (final review test waits: the first AU open of a fresh test binary can
+/// wait on the system's code scan under load). A deadline, not a sleep.
+fn au_wait() -> Duration {
+    Duration::from_secs(
+        std::env::var("VIZDAW_TEST_WAIT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(60),
+    )
 }

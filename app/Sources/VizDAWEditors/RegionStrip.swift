@@ -24,6 +24,8 @@ public enum RegionHit: Equatable, Sendable {
     case mute(UInt64)
     case solo(UInt64)
     case region(RegionItem)
+    /// A region's fade or gain handle, with the region's rectangle (plan 5b).
+    case handle(RegionItem, RegionHandle, CGRect)
     case none
 }
 
@@ -67,6 +69,15 @@ public enum RegionStripLayout {
             height: rowHeight - 4)
     }
 
+    /// True when a region of `line` (at `index`) covers `title`, where the
+    /// line's title would be drawn: the title is then left out, never
+    /// drawn over the region (final review V1).
+    public static func titleCovered(_ title: CGRect, line: RegionLine, index: Int, time: TimeAxis, side: CGFloat)
+        -> Bool
+    {
+        line.items.contains { rect($0.row, line: index, time: time, side: side).intersects(title) }
+    }
+
     public static func muteRect(line: Int) -> CGRect { CGRect(x: 4, y: top(line) + 3, width: 18, height: 16) }
     public static func soloRect(line: Int) -> CGRect { CGRect(x: 24, y: top(line) + 3, width: 18, height: 16) }
 
@@ -85,6 +96,24 @@ public enum RegionStripLayout {
             return .region(item)
         }
         return .none
+    }
+
+    /// The lane of the region under `p`: where a drop there goes.
+    public static func dropLane(_ p: CGPoint, lines: [RegionLine], time: TimeAxis, side: CGFloat) -> LaneKey? {
+        if case .region(let item) = hit(p, lines: lines, time: time, side: side) { return item.lane }
+        return nil
+    }
+
+    /// A region handle under `p`, if any (checked before `hit`).
+    public static func handleHit(_ p: CGPoint, lines: [RegionLine], time: TimeAxis, side: CGFloat) -> RegionHit? {
+        guard p.x >= side, p.y.isFinite, p.y >= -2 else { return nil }
+        let i = max(Int((p.y / rowHeight).rounded(.down)), 0)
+        guard i < lines.count else { return nil }
+        for item in lines[i].items.reversed() {
+            let r = rect(item.row, line: i, time: time, side: side)
+            if let h = RegionHandles.hit(p, row: item.row, in: r) { return .handle(item, h, r) }
+        }
+        return nil
     }
 
     /// A region drag's full target: its start snapped (nil: no change).

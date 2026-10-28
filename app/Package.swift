@@ -28,6 +28,8 @@ let package = Package(
                 .linkedFramework("CoreMIDI"),
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("Foundation"),
+                // The microphone permission (plan 5c Task 11).
+                .linkedFramework("AVFoundation"),
             ]
         ),
         .target(

@@ -29,6 +29,14 @@ struct VizDAWApp: App {
 
     init() {
         appStore.keyBindings = keyBindings
+        appStore.activate = { id in
+            let w = ControlWindows.windows().first {
+                let t = ControlWindows.tagOf($0)
+                return t.kind == .document && t.doc == id
+            }
+            w?.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+        }
         appStore.willClose = {
             PluginWindows.closeDocument($0)
             EditorWindows.closeDocument($0)
@@ -45,6 +53,10 @@ struct VizDAWApp: App {
         // The catalog and support folder exist before any project can open
         // (launch arguments, Finder opens), so "Disable ‹plugin›" works.
         LaunchArguments.parseFlags(CommandLine.arguments)
+        // The audio settings reach the core before any document opens
+        // (plan 5d-2 Ruling 2; 5d-1 carry: before the first host opens).
+        audioPreferences.applyAll()
+        MediaModel.channelIsOn = { ControlChannel.active }
         // The control channel (control spec §8) starts before any document
         // opens, so launch-time dialogs already go to it instead of the screen.
         if let path = ControlLaunch.socketPath(
@@ -66,6 +78,10 @@ struct VizDAWApp: App {
             MixerWindow(id: $id, store: appStore)
         }
         .defaultSize(width: 760, height: 560)
+        WindowGroup("Media Pool", id: "media-pool", for: UUID.self) { $id in
+            MediaPoolWindow(id: $id, store: appStore)
+        }
+        .defaultSize(width: 760, height: 420)
         Window("Plugin Manager", id: "plugins") {
             PluginManagerView(model: pluginManager)
         }
@@ -75,6 +91,10 @@ struct VizDAWApp: App {
                     .tabItem { Label("Editing", systemImage: "pencil") }
                 KeysSettingsView(keys: keyBindings)
                     .tabItem { Label("Keys", systemImage: "keyboard") }
+                AudioSettingsView(prefs: audioPreferences, store: appStore)
+                    .tabItem { Label("Audio", systemImage: "hifispeaker") }
+                RecordingSettingsView(prefs: audioPreferences, store: appStore)
+                    .tabItem { Label("Recording", systemImage: "record.circle") }
             }
         }
     }
@@ -87,9 +107,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         StoreAlerts.watch(appStore)
+        AppSetup.recoverUntitled()
         KeyMonitor.start()
         AppSetup.startScan()
         PluginTicker.start(appStore)
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            for m in appStore.documents.values { m.recheckMedia() }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -142,6 +169,14 @@ enum AppSetup {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? setSupportDir(path: dir.path)
         appPlugins.start(config: AppPlugins.config(supportDir: dir, scanner: scanner), scan: false)
+    }
+
+    /// Recordings untitled projects lost in a crash go to the Trash, with
+    /// one alert naming them (plan 5c Task 10, pre-flight I5). Not in
+    /// `--smoke` runs, which must leave the user's files alone.
+    static func recoverUntitled() {
+        guard !LaunchArguments.smokeRun else { return }
+        appStore.runLaunchRecovery()
     }
 
     /// After launch: the scan and the catalog's alerts.

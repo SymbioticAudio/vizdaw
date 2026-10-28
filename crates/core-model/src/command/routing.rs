@@ -1,15 +1,16 @@
-//! Instrument-list, output-path and media-pool commands. Removing an item
-//! in use is refused unless a replacement is given.
+//! Instrument-list and output-path commands (media-pool commands are in
+//! `media`). Removing an item in use is refused unless a replacement is
+//! given.
 
 use super::{Report, strips};
-use crate::document::{DestKind, Destination, Document, MediaItem, OutputPath, Patch};
+use crate::document::{DestKind, Destination, Document, MAX_RETURN_LATENCY_MS, OutputPath, Patch};
 use crate::error::{ModelError, Result};
-use crate::event::EventBody;
-use crate::ids::{AnyId, DestId, LaneId, MediaId, OutputPathId, SeqId};
+use crate::ids::{AnyId, DestId, LaneId, OutputPathId, SeqId};
+use crate::lane::LaneInput;
 use crate::mixer::StripKind;
-use crate::rules::{check_event_fields, check_group_channel, check_media_path};
+use crate::rules::check_group_channel;
 
-/// Destination, output and media edits.
+/// Destination and output edits.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoutingCmd {
     /// Add an instrument-list entry.
@@ -72,25 +73,12 @@ pub enum RoutingCmd {
         /// Replacement (required when in use).
         replacement: Option<OutputPathId>,
     },
-    /// Add a media item.
-    AddMedia {
-        /// Package-relative path.
-        path: String,
-        /// Sample rate (> 0).
-        sample_rate: u32,
-        /// Channels (> 0).
-        channels: u16,
-        /// Length in frames.
-        length_frames: u64,
-        /// Optional content hash.
-        content_hash: Option<String>,
-    },
-    /// Remove a media item, re-pointing regions to `replacement`.
-    RemoveMedia {
-        /// Target.
-        media: MediaId,
-        /// Replacement (required when in use; must be long enough).
-        replacement: Option<MediaId>,
+    /// Set an external destination's return latency (spec §4.5a).
+    SetReturnLatency {
+        /// Target (an external MIDI destination).
+        dest: DestId,
+        /// Milliseconds, 0–[`MAX_RETURN_LATENCY_MS`].
+        ms: f32,
     },
 }
 
@@ -106,8 +94,7 @@ impl RoutingCmd {
             RoutingCmd::RenameOutput { .. } => "Rename Output",
             RoutingCmd::EditOutput { .. } => "Edit Output",
             RoutingCmd::RemoveOutput { .. } => "Remove Output",
-            RoutingCmd::AddMedia { .. } => "Add Media",
-            RoutingCmd::RemoveMedia { .. } => "Remove Media",
+            RoutingCmd::SetReturnLatency { .. } => "Set Return Latency",
         }
     }
 }
@@ -136,6 +123,23 @@ fn check_dest(kind: &DestKind, patch: &Option<Patch>) -> Result<()> {
     Ok(())
 }
 
+/// Refuses `dest` unless it is an external MIDI destination (plan 5c-2
+/// Ruling 2).
+pub(crate) fn check_external(d: &Document, dest: DestId) -> Result<()> {
+    let x = d
+        .instruments()
+        .get(&dest)
+        .ok_or(ModelError::UnknownId(AnyId::Dest(dest)))?;
+    if x.kind.is_external() {
+        Ok(())
+    } else {
+        Err(ModelError::invalid(format!(
+            "{} is not an external MIDI destination",
+            x.name
+        )))
+    }
+}
+
 fn all_lanes(d: &Document) -> Vec<(SeqId, LaneId)> {
     d.sequences()
         .values()
@@ -143,7 +147,7 @@ fn all_lanes(d: &Document) -> Vec<(SeqId, LaneId)> {
         .collect()
 }
 
-fn require_replacement<T: Copy + PartialEq>(
+pub(crate) fn require_replacement<T: Copy + PartialEq>(
     target: T,
     replacement: Option<T>,
     exists: bool,
@@ -155,6 +159,27 @@ fn require_replacement<T: Copy + PartialEq>(
         Some(_) if !exists => Err(ModelError::invalid("replacement does not exist")),
         other => Ok(other),
     }
+}
+
+/// Adds output path `name` (with its `AudioPath` strip) and returns its ID.
+pub(crate) fn add_output(
+    d: &mut Document,
+    name: &str,
+    reference: &str,
+    r: &mut Report,
+) -> OutputPathId {
+    let id = d.counters_mut().alloc_output();
+    d.outputs_mut().insert(
+        id,
+        OutputPath {
+            id,
+            name: name.to_string(),
+            reference: reference.to_string(),
+        },
+    );
+    r.created.push(AnyId::Output(id));
+    strips::add_audio_path_strip(d, id, name, r);
+    id
 }
 
 fn remove_destination(
@@ -189,10 +214,20 @@ fn remove_destination(
     users.extend(events.iter().map(|e| AnyId::Event(*e)));
     let exists = replacement.is_some_and(|x| d.instruments().contains_key(&x));
     let rep = require_replacement(dest, replacement, exists, users)?;
+    // A lane recording the synth's return follows an external replacement
+    // and is unlinked otherwise; the link alone is no use (plan 5c-2
+    // Ruling 3). Only the link moves: the latency belongs to each synth,
+    // so the lane is aligned by the replacement's own return latency.
+    let rep_return = rep.filter(|r| d.instruments().get(r).is_some_and(|x| x.kind.is_external()));
     for (s, l) in all_lanes(d) {
         let lane = d.lane_mut(s, l)?;
         if lane.midi_dest == Some(dest) {
             lane.midi_dest = rep;
+        }
+        if let Some(LaneInput::Audio { return_of, .. }) = lane.input.as_mut()
+            && *return_of == Some(dest)
+        {
+            *return_of = rep_return;
         }
         if let Some(layout) = lane.drum.as_mut() {
             for row in layout.rows.iter_mut() {
@@ -236,6 +271,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                     name: name.clone(),
                     kind,
                     default_patch: *default_patch,
+                    return_latency_ms: 0.0,
                 },
             );
             if plugin {
@@ -293,6 +329,19 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
                 .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?;
             x.kind = kind;
             x.default_patch = *default_patch;
+            // No longer external: nothing returns its audio, and it has no
+            // return latency (spec §4.5, §4.5a; same undo step).
+            if !x.kind.is_external() {
+                x.return_latency_ms = 0.0;
+                for (s, l) in all_lanes(d) {
+                    if let Some(LaneInput::Audio { return_of, .. }) =
+                        d.lane_mut(s, l)?.input.as_mut()
+                        && *return_of == Some(*dest)
+                    {
+                        *return_of = None;
+                    }
+                }
+            }
             match (was, is) {
                 (true, false) => strips::remove_dest_strips(d, *dest, r),
                 (false, true) => strips::add_instrument_strip(d, *dest, &old.name, r),
@@ -304,17 +353,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             remove_destination(d, *dest, *replacement, r)?
         }
         RoutingCmd::AddOutput { name, reference } => {
-            let id = d.counters_mut().alloc_output();
-            d.outputs_mut().insert(
-                id,
-                OutputPath {
-                    id,
-                    name: name.clone(),
-                    reference: reference.clone(),
-                },
-            );
-            r.created.push(AnyId::Output(id));
-            strips::add_audio_path_strip(d, id, name, r);
+            add_output(d, name, reference, r);
         }
         RoutingCmd::RenameOutput { output, name } => {
             d.outputs_mut()
@@ -355,55 +394,15 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             r.removed.push(AnyId::Output(*output));
             strips::remove_kind(d, StripKind::AudioPath(*output), r);
         }
-        RoutingCmd::AddMedia {
-            path,
-            sample_rate,
-            channels,
-            length_frames,
-            content_hash,
-        } => {
-            if *sample_rate == 0 || *channels == 0 {
-                return Err(ModelError::range("media.format", sample_rate));
+        RoutingCmd::SetReturnLatency { dest, ms } => {
+            check_external(d, *dest)?;
+            if !ms.is_finite() || !(0.0..=MAX_RETURN_LATENCY_MS).contains(ms) {
+                return Err(ModelError::range("return_latency_ms", ms));
             }
-            check_media_path(path)?;
-            let id = d.counters_mut().alloc_media();
-            d.media_mut().insert(
-                id,
-                MediaItem {
-                    id,
-                    path: path.clone(),
-                    sample_rate: *sample_rate,
-                    channels: *channels,
-                    length_frames: *length_frames,
-                    content_hash: content_hash.clone(),
-                },
-            );
-            r.created.push(AnyId::Media(id));
-        }
-        RoutingCmd::RemoveMedia { media, replacement } => {
-            if !d.media().contains_key(media) {
-                return Err(ModelError::UnknownId(AnyId::Media(*media)));
-            }
-            let regions: Vec<_> = d
-                .all_events()
-                .filter(|(_, e)| matches!(e.body, EventBody::AudioRegion { media: m, .. } if m == *media))
-                .map(|(_, e)| e.id)
-                .collect();
-            let users = regions.iter().map(|e| AnyId::Event(*e)).collect();
-            let exists = replacement.is_some_and(|x| d.media().contains_key(&x));
-            let rep = require_replacement(*media, *replacement, exists, users)?;
-            if let Some(rep) = rep {
-                for id in regions {
-                    let mut ev = d.event(id)?.0.clone();
-                    if let EventBody::AudioRegion { media: m, .. } = &mut ev.body {
-                        *m = rep;
-                    }
-                    check_event_fields(d, &ev.spec())?;
-                    d.replace_event(ev)?;
-                }
-            }
-            d.media_mut().remove(media);
-            r.removed.push(AnyId::Media(*media));
+            d.instruments_mut()
+                .get_mut(dest)
+                .ok_or(ModelError::UnknownId(AnyId::Dest(*dest)))?
+                .return_latency_ms = *ms;
         }
     }
     Ok(())

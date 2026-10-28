@@ -132,6 +132,24 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         snap.dirty = false
     }
 
+    /// A Save came while recording (plan 5d-1 Ruling 19).
+    var savesAfterPassRow = false
+
+    func savesAfterPass() throws -> Bool { savesAfterPassRow }
+
+    /// What `addMidiDestination` was asked (plan 5d-1 Ruling 25).
+    var addedDestinations: [(name: String, port: String, channel: UInt8)] = []
+
+    func addMidiDestination(name: String, port: String, channel: UInt8) throws -> DocSnapshot {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        addedDestinations.append((name, port, channel))
+        dests.append(DestRow(id: UInt64(100 + addedDestinations.count), name: name, plugin: nil, external: true))
+        return snap
+    }
+
     func saveAs(path: String) throws {
         savedPath = path
         snap.dirty = false
@@ -143,9 +161,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
-    func setLoop(on: Bool) throws {}
+    var loopError: VizError?
+    func setLoop(on: Bool) throws { if let e = loopError { throw e } }
     func snapshot() throws -> DocSnapshot { snap }
-    func stop() throws { state.playing = false }
+    func stop() throws {
+        state.playing = false
+        recordRow.recording = false
+    }
     func transport() throws -> TransportState {
         if let e = transportError { throw e }
         return state
@@ -338,6 +360,212 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func heldSlots() throws -> [UInt64] { held }
     func close() throws { closeCalls += 1 }
+    /// What `overview` and `regionWaveform` answer (nil: pending silence).
+    var waveformRows: OverviewRows?
+    /// `regionWaveform` calls: event, from, to, columns.
+    var waveformCalls: [(event: UInt64, from: Int64, to: Int64, columns: UInt32)] = []
+    func overview(media: UInt64, fromFrame: UInt64, toFrame: UInt64, columns: UInt32) throws -> OverviewRows {
+        waveformRows ?? OverviewRows(
+            state: .pending, channels: 1, columns: columns, min: Array(repeating: 0, count: Int(columns)),
+            max: Array(repeating: 0, count: Int(columns)))
+    }
+    func regionWaveform(event: UInt64, fromTick: Int64, toTick: Int64, columns: UInt32) throws -> OverviewRows {
+        waveformCalls.append((event, fromTick, toTick, columns))
+        return try overview(media: 0, fromFrame: 0, toFrame: 1, columns: columns)
+    }
+    // MARK: Live input (plan 5c Task 8)
+
+    var injected: [(port: String, bytes: Data)] = []
+    var inputRow = InputInfoRow(
+        device: "", channels: 0, names: [], inputLatencyFrames: 0, outputLatencyFrames: 0)
+
+    var injectError: VizError?
+
+    func injectMidi(port: String, bytes: Data) throws -> Bool {
+        if let e = injectError { throw e }
+        injected.append((port, bytes))
+        return true
+    }
+
+    func inputInfo() throws -> InputInfoRow { inputRow }
+
+    var inputLevelsRow: [Float] = []
+
+    /// Peaks are read and reset, as the core's are, when set (plan 5d-2 pre-flight I2).
+    var inputLevelsReset = false
+
+    func inputLevels() throws -> [Float] {
+        defer { if inputLevelsReset { inputLevelsRow = inputLevelsRow.map { _ in 0 } } }
+        return inputLevelsRow
+    }
+
+    // MARK: Recording (plan 5c Task 9)
+
+    var recordCalls: [(seq: UInt64, spec: RecordSpecRow)] = []
+    var recordError: VizError?
+    var passPresses: [Bool] = []
+    var recordRow = RecordStateRow(
+        recording: false, seq: nil, spec: nil, pass: 0, kept: 0, discarded: 0, lanes: [], frames: 0,
+        overflows: 0, gapFrames: 0, freeBytes: nil, recovered: [])
+
+    func record(seq: UInt64, spec: RecordSpecRow) throws {
+        if let e = recordError { throw e }
+        recordCalls.append((seq, spec))
+        recordRow.recording = true
+        recordRow.seq = seq
+        recordRow.spec = spec
+        state.playing = true
+        state.seq = seq
+    }
+
+    func keepPass() throws { passPresses.append(true) }
+    func discardPass() throws { passPresses.append(false) }
+    var recordStateError: VizError?
+    var recordStateCalls = 0
+    /// Thrown once, then cleared, by `recordState`.
+    var recordStateErrorOnce: VizError?
+    /// What `recordingWaveform` answers (plan 5d-1 Ruling 21); nil: silent.
+    var recordingRows: OverviewRows?
+    var recordingWaveformCalls: [(lane: UInt64, from: UInt64, to: UInt64, columns: UInt32)] = []
+
+    func recordingWaveform(lane: UInt64, fromFileFrame: UInt64, toFileFrame: UInt64, columns: UInt32) throws
+        -> OverviewRows
+    {
+        recordingWaveformCalls.append((lane, fromFileFrame, toFileFrame, columns))
+        return recordingRows
+            ?? OverviewRows(
+                state: .ready, channels: 1, columns: columns, min: Array(repeating: 0, count: Int(columns)),
+                max: Array(repeating: 0, count: Int(columns)))
+    }
+
+    func recordState() throws -> RecordStateRow {
+        recordStateCalls += 1
+        if let e = recordStateError { throw e }
+        if let e = recordStateErrorOnce {
+            recordStateErrorOnce = nil
+            throw e
+        }
+        return recordRow
+    }
+
+    var recovered: [RecoveredFileRow] = []
+    var recoverAnswers: [Bool] = []
+
+    func recoveredRecordings() throws -> [String] { recovered.map(\.path) }
+    func recoveredFiles() throws -> [RecoveredFileRow] { recovered }
+
+    /// Thrown (once, then cleared) by `recoverRecordings`.
+    var recoverError: VizError?
+
+    func recoverRecordings(import: Bool) throws -> DocSnapshot {
+        if let e = recoverError {
+            recoverError = nil
+            throw e
+        }
+        recoverAnswers.append(`import`)
+        recovered = []
+        return commandResult()
+    }
+
+    // MARK: Media pool (plan 5b Task 6)
+
+    var renamed: [(UInt64, String)] = []
+    var removedMedia: [UInt64] = []
+    var compactions = 0
+    var relinks: [(media: UInt64, path: String)] = []
+    var searches: [String] = []
+    /// What `mediaUsers` answers, per item.
+    var usersTable: [UInt64: [MediaUseRow]] = [:]
+    /// Thrown by the pool's edits.
+    var poolError: VizError?
+    func renameMedia(media: UInt64, name: String) throws -> DocSnapshot {
+        if let e = poolError { throw e }
+        renamed.append((media, name))
+        return commandResult()
+    }
+    func removeMedia(media: UInt64) throws -> DocSnapshot {
+        if let e = poolError { throw e }
+        removedMedia.append(media)
+        return commandResult()
+    }
+    func compactMedia() throws -> DocSnapshot {
+        if let e = poolError { throw e }
+        compactions += 1
+        return commandResult()
+    }
+    func mediaUsers(media: UInt64) throws -> [MediaUseRow] { usersTable[media] ?? [] }
+    func mediaFile(media: UInt64) throws -> String { "/tmp/pool/\(media).caf" }
+    func relinkMedia(media: UInt64, path: String) throws -> UInt64 {
+        relinks.append((media, path))
+        let id = UInt64(3000 + relinks.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .relink, progress: 1, state: jobStartState, message: nil, problems: [], created: [media])
+        return id
+    }
+    func searchMedia(folder: String) throws -> UInt64 {
+        searches.append(folder)
+        let id = UInt64(4000 + searches.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .relink, progress: 1, state: jobStartState, message: nil, problems: [], created: [])
+        return id
+    }
+
+    /// `normalizeRegions` calls; `normalizeError` is thrown instead.
+    var normalizations: [(events: [UInt64], peakDb: Float)] = []
+    var normalizeError: VizError?
+    func normalizeRegions(events: [UInt64], peakDb: Float) throws -> DocSnapshot {
+        if let e = normalizeError { throw e }
+        normalizations.append((events, peakDb))
+        return commandResult()
+    }
+    var mediaRows: [MediaRow] = []
+    var jobRows: [UInt64: JobRow] = [:]
+    var imports: [([String], ImportTargetRow?)] = []
+    var mediaError: VizError?
+    func media() throws -> [MediaRow] {
+        if let e = mediaError { throw e }
+        return mediaRows
+    }
+    func recheckMedia() throws -> Bool { false }
+    func importAudio(paths: [String], target: ImportTargetRow?) throws -> UInt64 {
+        imports.append((paths, target))
+        let id = UInt64(imports.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .import, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
+            message: nil, problems: [], created: [])
+        return id
+    }
+    var jobCalls = 0
+    var jobBusy = false
+    func job(id: UInt64) throws -> JobRow {
+        jobCalls += 1
+        if jobBusy { throw VizError.Busy(message: "busy") }
+        guard let j = jobRows[id] else { throw VizError.Model(message: "unknown job \(id)") }
+        return j
+    }
+    var cancelled: [UInt64] = []
+    var jobStartState: JobStateRow = .done
+    func cancelJob(id: UInt64) throws { cancelled.append(id) }
+    var info = ProjectInfoRow(
+        format: ProjectFormatRow(sampleRate: 48_000, depth: .int24), mismatched: 0, rateMismatch: false,
+        deviceRate: 0)
+    var formatChanges: [ProjectFormatRow] = []
+    var conversions = 0
+    func projectInfo() throws -> ProjectInfoRow { info }
+    func setProjectFormat(format: ProjectFormatRow) throws -> UInt64 {
+        formatChanges.append(format)
+        info.format = format
+        let id = UInt64(1000 + formatChanges.count)
+        jobRows[id] = JobRow(id: id, kind: .format, progress: 1, state: .done, message: nil, problems: [], created: [])
+        return id
+    }
+    func convertMedia() throws -> UInt64 {
+        conversions += 1
+        info.mismatched = 0
+        let id = UInt64(2000 + conversions)
+        jobRows[id] = JobRow(id: id, kind: .convert, progress: 1, state: .done, message: nil, problems: [], created: [])
+        return id
+    }
 
     // MARK: Editor reads (plan 4a)
 
@@ -487,6 +715,50 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         auditions.append((dest, pitch, on))
         return auditionSent
     }
+
+    // MARK: Synth tracking (plan 5c-2)
+
+    var trackSynthCalls: [(seq: UInt64, lane: UInt64, first: UInt16, stereo: Bool, armMidi: Bool, muteAfter: Bool)] = []
+    var returnLatencies: [(dest: UInt64, ms: Float)] = []
+    /// Thrown (once, then cleared) by the synth-tracking calls.
+    var synthError: VizError?
+
+    func trackSynth(
+        seq: UInt64, lane: UInt64, first: UInt16, stereo: Bool, armMidi: Bool, muteAfter: Bool
+    ) throws -> DocSnapshot {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        trackSynthCalls.append((seq, lane, first, stereo, armMidi, muteAfter))
+        return commandResult()
+    }
+
+    func setReturnLatency(dest: UInt64, ms: Float) throws -> DocSnapshot {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        returnLatencies.append((dest, ms))
+        return commandResult()
+    }
+
+    var measures: [UInt64] = []
+    /// What `measureReturn` finds.
+    var measured: Float = 25
+
+    /// Whether each Measure ran on the main thread (plan 5d-2: never).
+    var measuredOnMain: [Bool] = []
+
+    func measureReturn(dest: UInt64) throws -> MeasureRow {
+        measuredOnMain.append(Thread.isMainThread)
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        measures.append(dest)
+        return MeasureRow(returnLatencyMs: measured, onsets: 5, snapshot: commandResult())
+    }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {
@@ -499,7 +771,8 @@ func lane(_ id: UInt64, _ name: String, mute: Bool = false) -> LaneRow {
     LaneRow(
         id: id, name: name, destination: nil, midiEventCount: 0, regionCount: 0,
         referenceCount: 0, mute: mute, solo: false, looped: false, takeCount: 1,
-        activeTake: "Take 1", isDrum: false, arm: false, midiDest: nil, audioOut: nil)
+        activeTake: "Take 1", isDrum: false, arm: false, midiDest: nil, audioOut: nil, input: nil,
+        monitor: .auto)
 }
 
 /// Song (top-level) using Groove, which uses Beat.
@@ -563,6 +836,32 @@ func noteRow(_ id: UInt64, tick: Int64, pitch: UInt8 = 60, duration: Int64 = 15_
         media: nil, sourceOffset: 0, frames: 0, gainDb: 0,
         fadeIn: FadeRow(length: 0, shape: .linear), fadeOut: FadeRow(length: 0, shape: .linear),
         text: nil, textKind: nil, data: Data(), eightBit: false)
+}
+
+/// An audio region of media `media`: `frames` frames shown over
+/// `duration` ticks.
+func regionRow(
+    _ id: UInt64, tick: Int64, duration: Int64, frames: UInt64, media: UInt64 = 7, gainDb: Float = 0,
+    fadeIn: Int64 = 0, fadeOut: Int64 = 0
+) -> EventRow {
+    var r = noteRow(id, tick: tick, duration: duration)
+    r.kind = .audioRegion
+    r.media = media
+    r.frames = frames
+    r.gainDb = gainDb
+    r.fadeIn = FadeRow(length: fadeIn, shape: .linear)
+    r.fadeOut = FadeRow(length: fadeOut, shape: .linear)
+    return r
+}
+
+/// A media-pool row.
+func mediaRow(
+    _ id: UInt64, _ name: String, frames: UInt64 = 96_000, uses: UInt32 = 0, offline: OfflineReasonRow? = nil,
+    used: Float = 0
+) -> MediaRow {
+    MediaRow(
+        id: id, name: name, path: "Media/\(name).caf", channels: 2, frames: frames, sampleRate: 48_000,
+        origin: .imported, originalName: "\(name).wav", offline: offline, uses: uses, usedPercent: used)
 }
 
 /// An events block, or a reference block when `ref` is set.

@@ -10,7 +10,9 @@ use crate::events::{
     PerNoteValueRow, TempoPointRow, bad, fade_of, kind_of, loops, per_note_kind, spec,
 };
 use crate::snapshot::KeySlotRow;
-use core_model::command::{AudioCmd, Command, EventCmd, LaneCmd, ReferenceCmd, SequenceCmd};
+use core_model::command::{
+    AudioCmd, Command, EventCmd, FadeEdge, LaneCmd, ReferenceCmd, SequenceCmd,
+};
 use core_model::ids::{DestId, EventId, LaneId, MediaId, OutputPathId, SeqId, TakeId};
 use core_model::lane::QuantizeSpec;
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
@@ -444,6 +446,181 @@ pub enum LaneEdit {
         /// Take.
         take: u64,
     },
+    /// Set what the lane records (sub-project 5 spec §4.5).
+    SetInput {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// The input, or none.
+        input: Option<LaneInputRow>,
+    },
+    /// Set when the lane's input is heard (spec §6.6).
+    SetMonitor {
+        /// Sequence.
+        seq: u64,
+        /// Lane.
+        lane: u64,
+        /// The mode.
+        monitor: MonitorModeRow,
+    },
+}
+
+/// The sequence whose engine claim `cmd` asks for (plan 5d-1 Ruling 16):
+/// an edit of a lane's arm, monitor or input.
+pub fn claims_engine(cmd: &EditCommand) -> Option<u64> {
+    match cmd {
+        EditCommand::Lane {
+            edit:
+                LaneEdit::SetInput { seq, .. }
+                | LaneEdit::SetMonitor { seq, .. }
+                | LaneEdit::SetFlags {
+                    seq, arm: Some(_), ..
+                },
+        } => Some(*seq),
+        _ => None,
+    }
+}
+
+/// [`claims_engine`] for an undo or redo, which keeps documents rather
+/// than commands (Task 8 review m6): the first sequence in which a lane
+/// both documents have changed its arm, monitor or input, or in which an
+/// armed lane appeared (Track Synth's return lane).
+pub fn claims_engine_step(
+    before: &core_model::document::Document,
+    after: &core_model::document::Document,
+) -> Option<core_model::ids::SeqId> {
+    after.sequences().iter().find_map(|(id, s)| {
+        let old = before.sequence(*id).ok();
+        let changed =
+            s.lanes.iter().any(
+                |l| match old.and_then(|o| o.lanes.iter().find(|x| x.id == l.id)) {
+                    Some(x) => x.arm != l.arm || x.monitor != l.monitor || x.input != l.input,
+                    None => l.arm,
+                },
+            );
+        changed.then_some(*id)
+    })
+}
+
+/// Whether `cmd` changes a lane's arm or input: the input that failed to
+/// open is tried again (plan 5d-1 Ruling 15). Derived from
+/// [`retries_input_cmd`], so the two never disagree (final review m7).
+pub fn retries_input(cmd: &EditCommand) -> bool {
+    match cmd {
+        EditCommand::Lane { edit } => retries_input_cmd(&Command::Lane(lane_cmd(edit))),
+        _ => false,
+    }
+}
+
+/// [`retries_input`] for the model's command, once converted: a lane's
+/// arm or input changes.
+pub fn retries_input_cmd(cmd: &core_model::command::Command) -> bool {
+    use core_model::command::{Command, lane::LaneCmd};
+    matches!(
+        cmd,
+        Command::Lane(LaneCmd::SetInput { .. } | LaneCmd::SetFlags { arm: Some(_), .. })
+    )
+}
+
+/// What a lane records (mirrors `core_model::lane::LaneInput`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum LaneInputRow {
+    /// Device input channel `first` (0-based), and the next one too when
+    /// `stereo`.
+    Audio {
+        /// The first (left) channel.
+        first: u16,
+        /// A pair.
+        stereo: bool,
+        /// The external MIDI destination whose return the lane records
+        /// (spec §4.5, §6.7); none: an ordinary input.
+        return_of: Option<u64>,
+    },
+    /// MIDI.
+    Midi {
+        /// The source's name; none: every source.
+        port: Option<String>,
+        /// The channel 0–15; none: every channel.
+        channel: Option<u8>,
+    },
+}
+
+impl From<&LaneInputRow> for core_model::lane::LaneInput {
+    fn from(r: &LaneInputRow) -> Self {
+        use core_model::lane::{InputChannels, LaneInput};
+        match r {
+            LaneInputRow::Audio {
+                first,
+                stereo,
+                return_of,
+            } => LaneInput::Audio {
+                channels: if *stereo {
+                    InputChannels::Stereo(*first)
+                } else {
+                    InputChannels::Mono(*first)
+                },
+                return_of: return_of.map(core_model::ids::DestId),
+            },
+            LaneInputRow::Midi { port, channel } => LaneInput::Midi {
+                port: port.clone(),
+                channel: *channel,
+            },
+        }
+    }
+}
+
+impl From<&core_model::lane::LaneInput> for LaneInputRow {
+    fn from(i: &core_model::lane::LaneInput) -> Self {
+        use core_model::lane::{InputChannels, LaneInput};
+        match i {
+            LaneInput::Audio {
+                channels,
+                return_of,
+            } => LaneInputRow::Audio {
+                first: channels.first(),
+                stereo: matches!(channels, InputChannels::Stereo(_)),
+                return_of: return_of.map(|d| d.0),
+            },
+            LaneInput::Midi { port, channel } => LaneInputRow::Midi {
+                port: port.clone(),
+                channel: *channel,
+            },
+        }
+    }
+}
+
+/// When a lane's input is heard (mirrors `core_model::lane::MonitorMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MonitorModeRow {
+    /// Armed and stopped, or recording inside the record range.
+    Auto,
+    /// Always.
+    Input,
+    /// Never.
+    Off,
+}
+
+impl From<MonitorModeRow> for core_model::lane::MonitorMode {
+    fn from(m: MonitorModeRow) -> Self {
+        use core_model::lane::MonitorMode;
+        match m {
+            MonitorModeRow::Auto => MonitorMode::Auto,
+            MonitorModeRow::Input => MonitorMode::Input,
+            MonitorModeRow::Off => MonitorMode::Off,
+        }
+    }
+}
+
+impl From<core_model::lane::MonitorMode> for MonitorModeRow {
+    fn from(m: core_model::lane::MonitorMode) -> Self {
+        use core_model::lane::MonitorMode;
+        match m {
+            MonitorMode::Auto => MonitorModeRow::Auto,
+            MonitorMode::Input => MonitorModeRow::Input,
+            MonitorMode::Off => MonitorModeRow::Off,
+        }
+    }
 }
 
 /// Mirrors `core_model::command::SequenceCmd`.
@@ -586,6 +763,22 @@ pub enum AudioEdit {
         fade_in: FadeRow,
         /// Fade out.
         fade_out: FadeRow,
+    },
+    /// Fade In to Cursor (`fade_in`) or Fade Out from Cursor, on every
+    /// region `at` lies inside; other events are ignored (plan 5b
+    /// Ruling 6).
+    FadeTo {
+        /// The events.
+        events: Vec<u64>,
+        /// The cursor tick.
+        at: i64,
+        /// The fade in (else the fade out).
+        fade_in: bool,
+    },
+    /// Remove Fades from every region; other events are ignored.
+    RemoveFades {
+        /// The events.
+        events: Vec<u64>,
     },
 }
 
@@ -880,6 +1073,16 @@ fn lane_cmd(e: &LaneEdit) -> LaneCmd {
             lane: LaneId(*lane),
             take: TakeId(*take),
         },
+        LaneEdit::SetInput { seq, lane, input } => LaneCmd::SetInput {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            input: input.as_ref().map(Into::into),
+        },
+        LaneEdit::SetMonitor { seq, lane, monitor } => LaneCmd::SetMonitor {
+            seq: SeqId(*seq),
+            lane: LaneId(*lane),
+            monitor: (*monitor).into(),
+        },
     }
 }
 
@@ -1039,6 +1242,22 @@ fn audio_cmd(e: &AudioEdit) -> AudioCmd {
             event: EventId(*event),
             fade_in: fade_of(fade_in),
             fade_out: fade_of(fade_out),
+        },
+        AudioEdit::FadeTo {
+            events,
+            at,
+            fade_in,
+        } => AudioCmd::FadeTo {
+            events: ids(events),
+            at: Tick(*at),
+            edge: if *fade_in {
+                FadeEdge::In
+            } else {
+                FadeEdge::Out
+            },
+        },
+        AudioEdit::RemoveFades { events } => AudioCmd::RemoveFades {
+            events: ids(events),
         },
     }
 }

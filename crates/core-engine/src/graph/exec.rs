@@ -26,12 +26,14 @@ use crate::graph::delay::DelayLine;
 use crate::graph::dsp;
 use crate::graph::node::{EffectNode, ProcessStatus};
 use crate::graph::pdc::Plan;
+use crate::graph::regions::RegionRun;
 use crate::graph::spec::{GraphSpec, InsertSpec, NodeSpec, Tap};
 use crate::pool::{Pool, PoolShared, RtEnv, RtPlatform};
 use crate::render::{Shared, Sink};
-use crate::schedule::MAX_TARGETS;
 use crate::schedule::automation::{AutoDest, StripParam};
-use core_model::ids::{PluginInstanceId, StripId};
+use crate::schedule::{AudioSchedule, MAX_TARGETS};
+use core_media::stream::StreamReader;
+use core_model::ids::{OutputPathId, PluginInstanceId, StripId};
 use crossbeam_queue::ArrayQueue;
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
@@ -138,6 +140,11 @@ enum NodeDef {
     Instrument {
         target: usize,
     },
+    Regions {
+        path: OutputPathId,
+        /// Frames it reads ahead of what is heard (`Plan.leads`).
+        lead: u64,
+    },
     Strip {
         inputs: Range<usize>,
         inserts: Range<usize>,
@@ -169,6 +176,18 @@ impl NodeState {
             post: StereoBuf::new(0),
             outs: (0..outputs.max(1)).map(|_| StereoBuf::new(max)).collect(),
             scratch: StereoBuf::new(0),
+            sc: StereoBuf::new(0),
+            delays: Box::new([]),
+            sc_delays: Box::new([]),
+        }
+    }
+
+    fn regions(max: u32) -> NodeState {
+        NodeState {
+            pre: StereoBuf::new(0),
+            post: StereoBuf::new(0),
+            outs: Box::new([StereoBuf::new(max)]),
+            scratch: StereoBuf::new(max),
             sc: StereoBuf::new(0),
             delays: Box::new([]),
             sc_delays: Box::new([]),
@@ -227,6 +246,9 @@ pub struct Graph {
     sources: Box<[usize]>,
     master: usize,
     latency: u64,
+    /// The largest `Regions` lead (the streamer's read head trails the
+    /// renderer by it).
+    max_lead: u64,
     shape: u64,
     max_frames: u32,
     instruments: u64,
@@ -284,7 +306,7 @@ fn acyclic(succ: &[Vec<usize>], indegree: &[u32], sources: &[usize]) -> bool {
 fn tap_buf<'a>(g: &Graph, from: usize, src: &'a NodeState, tap: Tap) -> &'a StereoBuf {
     match (tap, g.defs.get(from)) {
         (Tap::Pre, Some(NodeDef::Strip { .. })) => &src.pre,
-        (_, Some(NodeDef::Instrument { .. })) => {
+        (_, Some(NodeDef::Instrument { .. } | NodeDef::Regions { .. })) => {
             let k = match tap {
                 Tap::Out(k) => usize::from(k),
                 Tap::Pre | Tap::Post => 0,
@@ -350,6 +372,13 @@ impl Graph {
                     };
                     defs.push(NodeDef::Instrument { target });
                     nodes.push(UnsafeCell::new(NodeState::instrument(max_frames, *outputs)));
+                }
+                NodeSpec::Regions { path } => {
+                    defs.push(NodeDef::Regions {
+                        path: *path,
+                        lead: plan.leads.get(i).copied().unwrap_or(0),
+                    });
+                    nodes.push(UnsafeCell::new(NodeState::regions(max_frames)));
                 }
                 NodeSpec::Strip(s) => {
                     let in_start = inputs.len();
@@ -456,6 +485,7 @@ impl Graph {
             sources: sources.into_boxed_slice(),
             master: spec.master,
             latency: plan.latency,
+            max_lead: plan.leads.iter().copied().max().unwrap_or(0),
             shape: spec.shape(),
             max_frames,
             instruments,
@@ -470,6 +500,11 @@ impl Graph {
     /// Total latency `L` in frames.
     pub fn latency(&self) -> u64 {
         self.latency
+    }
+
+    /// The largest lead of its `Regions` nodes (plan 5d-1 Ruling 3).
+    pub fn max_lead(&self) -> u64 {
+        self.max_lead
     }
 
     /// The structure hash of the spec it was built from.
@@ -806,6 +841,7 @@ unsafe fn render_node(
     shared: &Shared,
     frames: u32,
     info: &BlockInfo,
+    regions: &RegionRun,
     i: usize,
 ) {
     let (Some(def), Some(cell)) = (g.defs.get(i), g.nodes.get(i)) else {
@@ -836,6 +872,12 @@ unsafe fn render_node(
                         o.clear(frames);
                     }
                 }
+            }
+        }
+        NodeDef::Regions { path, lead } => {
+            let NodeState { outs, scratch, .. } = st;
+            if let Some(out) = outs.first_mut() {
+                regions.render(*path, *lead, frames, out, scratch);
             }
         }
         NodeDef::Strip {
@@ -929,6 +971,7 @@ pub(crate) struct Job {
     pool: Option<*const PoolShared>,
     frames: u32,
     info: BlockInfo,
+    regions: RegionRun,
 }
 
 // SAFETY: the pointees (`Graph`, `SinkTable`, `Shared`, `PoolShared`) are
@@ -949,6 +992,7 @@ impl Job {
             pool: None,
             frames: 0,
             info: BlockInfo::default(),
+            regions: RegionRun::NONE,
         }
     }
 
@@ -970,7 +1014,7 @@ impl Job {
         };
         // SAFETY: this thread popped `i` from this run's queue just above,
         // and `sinks` are this run's sinks (caller's contract).
-        unsafe { render_node(g, sinks, shared, self.frames, &self.info, i) };
+        unsafe { render_node(g, sinks, shared, self.frames, &self.info, &self.regions, i) };
         let mut ready = 0u32;
         for &s in g.succ.get(i).map(|v| &**v).unwrap_or(&[]) {
             if let Some(p) = g.pending.get(s) {
@@ -1087,6 +1131,7 @@ impl Exec {
     /// true. With a deadline, returns `Missed` once it passes with nodes
     /// still pending; `Done` may leave a worker still leaving the job, which
     /// the next `try_finish` waits for. // RT
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run(
         &mut self,
         g: &Graph,
@@ -1094,6 +1139,7 @@ impl Exec {
         shared: &Shared,
         frames: u32,
         info: BlockInfo,
+        regions: RegionRun,
         deadline: Option<Instant>,
     ) -> RunResult {
         // Never reset counters or the queue under a run still in flight.
@@ -1123,6 +1169,7 @@ impl Exec {
                 pool: pool.map(|p| p as *const PoolShared),
                 frames,
                 info,
+                regions,
             };
         }
         self.running = true;
@@ -1173,6 +1220,8 @@ pub struct Runner {
     shared: Arc<Shared>,
     pool: Option<Pool>,
     deadline: Option<Duration>,
+    /// Audio for `Regions` nodes, the reader and the next block's frame.
+    regions: Option<(Arc<AudioSchedule>, Box<StreamReader>, u64)>,
 }
 
 impl Runner {
@@ -1185,6 +1234,7 @@ impl Runner {
             shared: Arc::new(Shared::default()),
             pool: None,
             deadline: None,
+            regions: None,
         }
     }
 
@@ -1203,6 +1253,7 @@ impl Runner {
             shared,
             pool: Some(pool),
             deadline: None,
+            regions: None,
         })
     }
 
@@ -1235,6 +1286,13 @@ impl Runner {
         &mut self.graph
     }
 
+    /// Plays `audio` through `reader` from schedule frame `frame`; every
+    /// `block` advances the frame (graph tests of the Regions node).
+    pub fn set_regions(&mut self, audio: Arc<AudioSchedule>, reader: StreamReader, frame: u64) {
+        self.exec.wait_idle();
+        self.regions = Some((audio, Box::new(reader), frame));
+    }
+
     /// Hands the workers a new real-time environment.
     pub fn set_env(&self, env: RtEnv) {
         if let Some(p) = &self.pool {
@@ -1251,12 +1309,25 @@ impl Runner {
         if !self.exec.try_finish(deadline) {
             return false;
         }
+        let regions = match &mut self.regions {
+            Some((audio, reader, frame)) => {
+                reader.begin_block(*frame);
+                // SAFETY: `audio` and `reader` live in `self` (an `Arc` and
+                // a `Box`, so their addresses are stable) until the next
+                // `set_regions` or drop, both of which wait for the run.
+                let r = unsafe { RegionRun::new(audio, reader, *frame, true, false, false) };
+                *frame += u64::from(frames);
+                r
+            }
+            None => RegionRun::NONE,
+        };
         match self.exec.run(
             &self.graph,
             &self.sinks,
             &self.shared,
             frames,
             BlockInfo::default(),
+            regions,
             deadline,
         ) {
             RunResult::Done => {

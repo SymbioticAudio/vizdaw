@@ -198,19 +198,21 @@ fn a_meter_change_bumps_every_lane_of_that_sequence_only() {
 
 #[test]
 fn a_media_pool_change_bumps_only_lanes_holding_regions() {
-    use core_model::command::routing::RoutingCmd;
+    use core_model::command::MediaCmd;
     use core_model::event::{EventBody, Fade};
     use core_model::ids::AnyId;
     use vizdaw_ffi::revs::Revisions;
 
     let mut b = Builder::new();
     let r = b
-        .run(Command::Routing(RoutingCmd::AddMedia {
+        .run(Command::Media(MediaCmd::Add {
             path: "Media/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 96_000,
             content_hash: None,
+            name: None,
+            origin: None,
         }))
         .unwrap();
     let media = r
@@ -240,12 +242,14 @@ fn a_media_pool_change_bumps_only_lanes_holding_regions() {
     .unwrap();
     let mut revs = Revisions::new(b.doc());
     let (audio_rev, notes_rev) = (revs.rev(seq, audio).unwrap(), revs.rev(seq, notes).unwrap());
-    b.run(Command::Routing(RoutingCmd::AddMedia {
+    b.run(Command::Media(MediaCmd::Add {
         path: "Media/b.wav".into(),
         sample_rate: 44_100,
         channels: 1,
         length_frames: 10,
         content_hash: None,
+        name: None,
+        origin: None,
     }))
     .unwrap();
     revs.update(b.doc());

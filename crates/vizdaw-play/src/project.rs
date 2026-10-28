@@ -17,6 +17,19 @@ pub enum Choice {
     Ambiguous(Vec<String>),
 }
 
+/// The package's media for the engine's streamer (5a Ruling 24): each
+/// item's file under `package`. The engine opens them lazily; one that is
+/// not a readable CAF fails once and plays as silence.
+pub fn media_files(doc: &Document, package: &Path) -> Vec<core_media::stream::MediaFile> {
+    doc.media()
+        .values()
+        .map(|m| core_media::stream::MediaFile {
+            id: m.id,
+            path: package.join(&m.path),
+        })
+        .collect()
+}
+
 /// Loads `project.json` from a package.
 pub fn load(path: &Path) -> Result<Document, String> {
     core_model::file::load(path).map_err(|e| format!("cannot load {}: {e}", path.display()))

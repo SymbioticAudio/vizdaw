@@ -1,7 +1,7 @@
 //! Sequences: the main unit of work.
 
-use crate::ids::{LaneId, SeqId};
-use crate::lane::Lane;
+use crate::ids::{DestId, LaneId, SeqId};
+use crate::lane::{Lane, LaneInput};
 use crate::meter::MeterMap;
 use crate::tempo::TempoMap;
 use crate::time::Tick;
@@ -62,6 +62,20 @@ impl Sequence {
     /// Index of a lane by ID.
     pub fn lane_index(&self, id: LaneId) -> Option<usize> {
         self.lanes.iter().position(|l| l.id == id)
+    }
+
+    /// The lane recording `dest`'s return (an audio input with
+    /// `return_of == Some(dest)`), skipping `except`; the first by order.
+    /// This is Track Synth's reuse rule: it sets up the lane found here
+    /// rather than adding another.
+    pub fn return_lane(&self, dest: DestId, except: Option<LaneId>) -> Option<LaneId> {
+        self.lanes
+            .iter()
+            .find(|l| {
+                Some(l.id) != except
+                    && l.input.as_ref().and_then(LaneInput::return_of) == Some(dest)
+            })
+            .map(|l| l.id)
     }
 }
 

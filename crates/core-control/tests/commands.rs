@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        108,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry"
+        129,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -740,5 +740,549 @@ mod fuzz {
                 prop_assert_eq!(got, id);
             }
         }
+    }
+}
+
+#[test]
+fn file_new_takes_a_format() {
+    let Command::CommandRun { args, .. } = ok(
+        "command.run",
+        json!({ "id": "file.new", "params": { "rate": "44100", "depth": "16" } }),
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        args,
+        vec![
+            ("rate".to_string(), ArgValue::Text("44100".into())),
+            ("depth".to_string(), ArgValue::Text("16".into()))
+        ]
+    );
+    let (code, msg) = err(
+        "command.run",
+        json!({ "id": "file.new", "params": { "rate": "22050" } }),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+    assert!(msg.contains("rate"), "{msg}");
+}
+
+#[test]
+fn media_import_takes_any_absolute_file_and_a_place() {
+    let Command::CommandRun { args, .. } = ok(
+        "command.run",
+        json!({ "id": "media.import",
+                "params": { "path": "/tmp/a b.wav", "seq": 1, "lane": 2, "tick": 3840 } }),
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        args,
+        vec![
+            ("path".to_string(), ArgValue::Text("/tmp/a b.wav".into())),
+            ("seq".to_string(), ArgValue::Int(1)),
+            ("lane".to_string(), ArgValue::Int(2)),
+            ("tick".to_string(), ArgValue::Int(3840)),
+        ]
+    );
+    // The dialog is answered only by `path`.
+    let (code, _) = err("command.run", json!({ "id": "media.import" }));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    let (code, _) = err(
+        "command.run",
+        json!({ "id": "media.import", "params": { "path": "relative.wav" } }),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+    let (code, _) = err(
+        "command.run",
+        json!({ "id": "media.import", "params": { "path": "/a.wav", "seq": -1 } }),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+}
+
+#[test]
+fn project_settings_is_a_dialog_without_a_format() {
+    let (code, _) = err("command.run", json!({ "id": "file.project_settings" }));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(matches!(
+        ok(
+            "command.run",
+            json!({ "id": "file.project_settings", "params": { "depth": "32f" } })
+        ),
+        Command::CommandRun { .. }
+    ));
+    assert!(matches!(
+        ok("command.run", json!({ "id": "media.convert" })),
+        Command::CommandRun { .. }
+    ));
+}
+
+/// Plan 5b: the media pool's and the Region menu's commands take their
+/// dialogs' answers as parameters; hostile values are refused by type
+/// and range before they reach the app.
+#[test]
+fn media_and_region_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    // Dialogs without their answers.
+    for (id, dialog) in [
+        ("media.relink", "Relink"),
+        ("media.rename", "Rename Media"),
+        ("region.normalize", "Normalize"),
+    ] {
+        let (code, message) = err("command.run", run(id, json!({})));
+        assert_eq!(code, ErrorCode::DialogRequired, "{id}");
+        assert!(message.contains(dialog), "{id}: {message}");
+    }
+    // The good forms.
+    let Command::CommandRun { args, .. } = ok(
+        "command.run",
+        run(
+            "media.relink",
+            json!({ "media": 3, "path": "/tmp/x y.wav" }),
+        ),
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        args,
+        vec![
+            ("media".to_string(), ArgValue::Int(3)),
+            ("path".to_string(), ArgValue::Text("/tmp/x y.wav".into())),
+        ]
+    );
+    for (id, params) in [
+        ("media.rename", json!({ "media": 0, "name": "Kick" })),
+        ("region.normalize", json!({ "peak_db": "-0.3" })),
+        ("media.compact", json!({})),
+        ("window.media_pool", json!({})),
+        ("region.fade_in_to_cursor", json!({})),
+        ("region.fade_out_from_cursor", json!({})),
+        ("region.remove_fades", json!({})),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params)),
+                Command::CommandRun { .. }
+            ),
+            "{id}"
+        );
+    }
+    // Hostile values.
+    for (id, params) in [
+        ("media.relink", json!({ "media": -1, "path": "/a.wav" })),
+        (
+            "media.relink",
+            json!({ "media": i64::MAX, "path": "/a.wav" }),
+        ),
+        ("media.relink", json!({ "media": 1.5, "path": "/a.wav" })),
+        ("media.relink", json!({ "media": "3", "path": "/a.wav" })),
+        (
+            "media.relink",
+            json!({ "media": 3, "path": "relative.wav" }),
+        ),
+        ("media.relink", json!({ "media": 3, "path": "" })),
+        ("media.relink", json!({ "media": 3, "path": 7 })),
+        (
+            "media.rename",
+            json!({ "media": 3, "name": "x".repeat(100_000) }),
+        ),
+        ("media.rename", json!({ "media": 3, "name": ["x"] })),
+        ("region.normalize", json!({ "peak_db": -1 })),
+        ("region.normalize", json!({ "peak_db": null, "extra": 1 })),
+        ("media.compact", json!({ "media": 1 })),
+        ("region.remove_fades", json!({ "events": [1] })),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    // Where they appear.
+    let spec = |id: &str| registry::find(id).unwrap();
+    assert_eq!(
+        (spec("media.relink").menu, spec("media.relink").menu_item),
+        ("File", true)
+    );
+    assert_eq!(
+        (spec("media.rename").menu, spec("media.rename").menu_item),
+        ("Media", false)
+    );
+    assert_eq!(
+        (spec("media.compact").menu, spec("media.compact").menu_item),
+        ("Media", false)
+    );
+    assert_eq!(spec("window.media_pool").menu, "Window");
+    for id in [
+        "region.normalize",
+        "region.fade_in_to_cursor",
+        "region.fade_out_from_cursor",
+        "region.remove_fades",
+    ] {
+        assert_eq!(
+            (spec(id).menu, spec(id).menu_item, spec(id).document),
+            ("Region", true, true),
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn state_get_media_and_project() {
+    assert!(matches!(
+        ok("state.get", json!({ "target": "media" })),
+        Command::StateGet {
+            target: StateTarget::Media,
+            ..
+        }
+    ));
+    assert!(matches!(
+        ok("state.get", json!({ "target": "project" })),
+        Command::StateGet {
+            target: StateTarget::Project,
+            ..
+        }
+    ));
+}
+
+/// Plan 5c Task 14: the record and lane commands take their parameters
+/// by type and range; hostile values never reach the app.
+#[test]
+fn record_and_lane_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("record.set", json!({})),
+        (
+            "record.set",
+            json!({ "replace": false, "punch": true, "loop": true, "count_in": 0, "pre_roll": 8, "passes_as_takes": false }),
+        ),
+        ("record.recover", json!({ "action": "import" })),
+        ("record.recover", json!({ "action": "trash" })),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 3, "stereo": true }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "midi", "port": "Keys", "midi_channel": 16 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "none" }),
+        ),
+        (
+            "lane.set_monitor",
+            json!({ "seq": 1, "lane": 2, "mode": "input" }),
+        ),
+        (
+            "midi.inject",
+            json!({ "port": "Keys", "bytes": "90 3c 64" }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("record.set", json!({ "count_in": 5 })),
+        ("record.set", json!({ "pre_roll": -1 })),
+        ("record.set", json!({ "loop": "yes" })),
+        ("record.set", json!({ "takes": true })),
+        ("record.recover", json!({})),
+        ("record.recover", json!({ "action": "delete" })),
+        ("lane.set_input", json!({ "lane": 2, "kind": "audio" })),
+        ("lane.set_input", json!({ "seq": 1, "lane": 2 })),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "video" }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 0 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 257 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "midi", "midi_channel": 17 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": -1, "lane": 2, "kind": "none" }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "midi", "port": "x".repeat(100_000) }),
+        ),
+        ("lane.set_monitor", json!({ "seq": 1, "lane": 2 })),
+        (
+            "lane.set_monitor",
+            json!({ "seq": 1, "lane": 2, "mode": "loud" }),
+        ),
+        ("midi.inject", json!({ "port": "Keys" })),
+        ("midi.inject", json!({ "bytes": "90 3c 64" })),
+        (
+            "midi.inject",
+            json!({ "port": "Keys", "bytes": [0x90, 60, 100] }),
+        ),
+        (
+            "midi.inject",
+            json!({ "port": "Keys", "bytes": "9".repeat(100_000) }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let spec = |id: &str| registry::find(id).unwrap();
+    for id in [
+        "record.set",
+        "record.recover",
+        "lane.set_input",
+        "lane.set_monitor",
+        "midi.inject",
+    ] {
+        assert!(!spec(id).menu_item && spec(id).document, "{id}");
+    }
+}
+
+/// Plan 5c-2 Task 10: the synth-tracking commands, and `lane.set_input`'s
+/// `return_of`, take their parameters by type and range; hostile values
+/// never reach the app.
+#[test]
+fn synth_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("lane.track_synth", json!({ "seq": 1, "lane": 2 })),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 3, "stereo": true, "arm_midi": true, "mute_after": false }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 256 }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": "12.5" }),
+        ),
+        ("destination.measure_return", json!({ "dest": 4 })),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "channel": 3, "return_of": 4 }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("lane.track_synth", json!({ "lane": 2 })),
+        ("lane.track_synth", json!({ "seq": 1 })),
+        ("lane.track_synth", json!({})),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 0 }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 257 }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channel": 1.5 }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "stereo": "yes" }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "arm_midi": 1 }),
+        ),
+        ("lane.track_synth", json!({ "seq": 1, "lane": -2 })),
+        ("lane.track_synth", json!({ "seq": "1", "lane": 2 })),
+        ("lane.track_synth", json!({ "seq": 1, "lane": u64::MAX })),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "channels": 3 }),
+        ),
+        (
+            "lane.track_synth",
+            json!({ "seq": 1, "lane": 2, "junk": "x".repeat(100_000) }),
+        ),
+        ("destination.set_return_latency", json!({ "dest": 4 })),
+        ("destination.set_return_latency", json!({ "ms": "12" })),
+        // The milliseconds are text: a JSON number (negative, above 500
+        // or fractional) is the wrong type; the text's range is the
+        // app's check.
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": 12.5 }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": -1 }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": 501 }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": null }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": ["12"] }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": "x".repeat(100_000) }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": -4, "ms": "12" }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": "Juno", "ms": "12" }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": "12", "wait": true }),
+        ),
+        (
+            "destination.set_return_latency",
+            json!({ "dest": 4, "ms": "12", "junk": "x".repeat(100_000) }),
+        ),
+        (
+            "destination.measure_return",
+            json!({ "dest": 4, "junk": "x".repeat(100_000) }),
+        ),
+        ("destination.measure_return", json!({})),
+        ("destination.measure_return", json!({ "dest": "Juno" })),
+        ("destination.measure_return", json!({ "dest": -1 })),
+        ("destination.measure_return", json!({ "dest": 4.5 })),
+        (
+            "destination.measure_return",
+            json!({ "dest": 4, "wait": true }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "return_of": -1 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "return_of": "Juno" }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "return_of": 1.5 }),
+        ),
+        (
+            "lane.set_input",
+            json!({ "seq": 1, "lane": 2, "kind": "audio", "return_of": u64::MAX }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let spec = |id: &str| registry::find(id).unwrap();
+    for id in [
+        "lane.track_synth",
+        "destination.set_return_latency",
+        "destination.measure_return",
+    ] {
+        assert!(!spec(id).menu_item && spec(id).document, "{id}");
+        assert!(spec(id).dialogs.is_empty(), "{id} opens no dialog");
+    }
+    // Without `return_of`, `lane.set_input` unlinks (plan 5c-2 Task 8):
+    // its help says so.
+    let return_of = spec("lane.set_input")
+        .params
+        .iter()
+        .find(|p| p.name == "return_of")
+        .unwrap();
+    assert!(return_of.help.contains("unlink"), "{}", return_of.help);
+}
+
+#[test]
+fn state_get_record_and_input() {
+    for (name, target) in [
+        ("record", StateTarget::Record),
+        ("input", StateTarget::Input),
+    ] {
+        match ok("state.get", json!({ "target": name })) {
+            Command::StateGet { target: t, .. } => assert_eq!(t, target),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// Plan 5d-1 Task 12 (Rulings 25–26): `audio.set` and
+/// `destination.add_midi` take their values by type and range; the app
+/// checks the buffer size's six values and the text.
+#[test]
+fn audio_and_destination_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("audio.set", json!({ "software_monitoring": false })),
+        (
+            "audio.set",
+            json!({ "buffer_frames": 256, "input_device": "", "latency_trim": -48 }),
+        ),
+        ("audio.set", json!({ "buffer_frames": 32 })),
+        ("audio.set", json!({ "latency_trim": 192_000 })),
+        (
+            "destination.add_midi",
+            json!({ "name": "Juno", "port": "Juno MIDI" }),
+        ),
+        (
+            "destination.add_midi",
+            json!({ "name": "Juno", "port": "Juno MIDI", "channel": 16 }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("audio.set", json!({ "buffer_frames": 31 })),
+        ("audio.set", json!({ "buffer_frames": 1025 })),
+        ("audio.set", json!({ "buffer_frames": "128" })),
+        ("audio.set", json!({ "buffer_frames": 128.5 })),
+        ("audio.set", json!({ "software_monitoring": "off" })),
+        ("audio.set", json!({ "latency_trim": 192_001 })),
+        ("audio.set", json!({ "latency_trim": -192_001 })),
+        ("audio.set", json!({ "input_device": 3 })),
+        ("audio.set", json!({ "junk": "x".repeat(100_000) })),
+        ("destination.add_midi", json!({ "name": "Juno" })),
+        ("destination.add_midi", json!({ "port": "Juno MIDI" })),
+        (
+            "destination.add_midi",
+            json!({ "name": "Juno", "port": "P", "channel": 0 }),
+        ),
+        (
+            "destination.add_midi",
+            json!({ "name": "Juno", "port": "P", "channel": 17 }),
+        ),
+        ("destination.add_midi", json!({ "name": 4, "port": "P" })),
+        (
+            "destination.add_midi",
+            json!({ "name": "x".repeat(100_000), "port": "P" }),
+        ),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
     }
 }

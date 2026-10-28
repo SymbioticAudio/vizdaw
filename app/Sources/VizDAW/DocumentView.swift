@@ -12,7 +12,10 @@ struct DocumentView: View {
             SequenceSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         } detail: {
-            EditorSplit(model: model, docID: docID)
+            VStack(spacing: 0) {
+                ProjectBanners(model: model)
+                EditorSplit(model: model, docID: docID)
+            }
         }
         .navigationTitle(model.windowTitle)
         .toolbar { TransportToolbar(model: model) }
@@ -21,6 +24,37 @@ struct DocumentView: View {
                 get: { model.editor.referenceDraft }, set: { model.editor.referenceDraft = $0 })
         ) { _ in
             ReferenceSheet(editor: model.editor)
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { model.media.showsRelinkSheet(channelOn: ControlChannel.active) },
+                set: { if !$0 { model.media.leaveOffline() } })
+        ) {
+            RelinkSheet(media: model.media)
+        }
+        .sheet(
+            item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
+        ) { _ in
+            TrackSynthSheet(
+                sheets: model.synth, editor: model.editor, channels: model.inputs.knownChannels ?? 256)
+        }
+        .sheet(
+            item: Binding(
+                get: { model.synth.newDestination }, set: { if $0 == nil { model.synth.closeNewDestination() } })
+        ) { _ in
+            NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
+        }
+        .alert(
+            "Recovered Recordings",
+            isPresented: Binding(
+                get: { model.record.showsRecoveryAlert(channelOn: ControlChannel.active) },
+                set: { if !$0 { model.record.answerRecovery(import: nil) } })
+        ) {
+            Button("Import into New Lanes") { model.record.answerRecovery(import: true) }
+            Button("Move to Trash", role: .destructive) { model.record.answerRecovery(import: false) }
+            Button("Later", role: .cancel) { model.record.answerRecovery(import: nil) }
+        } message: {
+            Text(model.record.recoveryMessage)
         }
         .alert(
             model.alert?.title ?? "",
@@ -56,6 +90,7 @@ struct TransportToolbar: ToolbarContent {
             ) {
                 Label("Loop", systemImage: "repeat")
             }
+            RecordControls(model: model, record: model.record)
         }
         ToolbarItemGroup(placement: .principal) {
             Text(Formatting.position(model.transport))

@@ -256,6 +256,8 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
     private_dir(&ctl, uid)?;
     let support = home.join("support");
     private_dir(&support, uid)?;
+    let scratch = home.join("scratch");
+    private_dir(&scratch, uid)?;
     let socket = ctl.join("vizdaw.sock");
     if socket.as_os_str().len() > MAX_SOCKET_PATH {
         return Err(format!(
@@ -289,6 +291,9 @@ pub fn launch(o: &LaunchOptions) -> Result<Launched, String> {
         .arg("--no-scan")
         .env("HOME", &home)
         .env("VIZDAW_SUPPORT_DIR", &support)
+        // Untitled projects' scratch packages, and the lost recordings
+        // the app looks for at launch, stay in this home (plan 5c Task 10).
+        .env("VIZDAW_SCRATCH_DIR", &scratch)
         .env_remove("VIZDAW_CONTROL")
         .stdin(Stdio::null())
         .stdout(out)

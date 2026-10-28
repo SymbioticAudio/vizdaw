@@ -172,6 +172,16 @@ public final class MixerModel {
         strips.filter { $0.id != strip.id }
     }
 
+    /// The lane an AudioPath strip's input controls edit (plan 5d-2
+    /// Ruling 4): of the shown sequence's lanes that play through the
+    /// strip's path, the first armed one, else the first; nil for other
+    /// strips.
+    public func inputLane(for strip: StripRow) -> LaneRow? {
+        guard case .audioPath(let path) = strip.kind else { return nil }
+        let through = document.lanes.filter { $0.audioOut == path }
+        return through.first(where: \.arm) ?? through.first
+    }
+
     public func stripName(_ id: UInt64) -> String {
         snapshot.strips.first { $0.id == id }?.name ?? "Strip \(id)"
     }

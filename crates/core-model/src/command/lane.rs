@@ -4,7 +4,7 @@ use super::Report;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::ids::{AnyId, DestId, LaneId, OutputPathId, SeqId, TakeId};
-use crate::lane::{Lane, QuantizeSpec, Take};
+use crate::lane::{InputChannels, Lane, LaneInput, MonitorMode, QuantizeSpec, Take};
 use crate::rules::check_positive;
 use crate::time::Tick;
 
@@ -125,6 +125,43 @@ pub enum LaneCmd {
         /// Take (must exist in the lane).
         take: TakeId,
     },
+    /// Set what the lane records (sub-project 5 spec §4.5).
+    SetInput {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// The input (checked by [`LaneInput::check`]) or none.
+        input: Option<LaneInput>,
+    },
+    /// Set when the lane's input is heard (spec §6.6).
+    SetMonitor {
+        /// Sequence.
+        seq: SeqId,
+        /// Lane.
+        lane: LaneId,
+        /// The mode.
+        monitor: MonitorMode,
+    },
+    /// Track Synth (spec §6.7; plan 5c-2 Ruling 5): sets up the audio lane
+    /// recording the return of the external synth MIDI lane `lane` plays,
+    /// in one step. It reuses the sequence's lane already recording that
+    /// synth's return ([`Sequence::return_lane`]), else adds "<synth>
+    /// audio" just below `lane`; sets that lane's input to `channels` as
+    /// the synth's return, gives it an output path when it has none (the
+    /// first, else a new "Audio 1") and arms it. The MIDI lane is armed
+    /// when `arm_midi`, else disarmed, so a Replace pass never clears the
+    /// part that plays the synth.
+    TrackSynth {
+        /// Sequence.
+        seq: SeqId,
+        /// The MIDI lane playing the synth.
+        lane: LaneId,
+        /// The device input channels the synth's outputs are wired to.
+        channels: InputChannels,
+        /// Also arm the MIDI lane (to record the performance as well).
+        arm_midi: bool,
+    },
 }
 
 impl LaneCmd {
@@ -143,6 +180,9 @@ impl LaneCmd {
             LaneCmd::SetPlayShift { .. } => "Set Play Shift",
             LaneCmd::AddTake { .. } => "Add Take",
             LaneCmd::SetActiveTake { .. } => "Set Active Take",
+            LaneCmd::SetInput { .. } => "Set Lane Input",
+            LaneCmd::SetMonitor { .. } => "Set Lane Monitor",
+            LaneCmd::TrackSynth { .. } => "Track Synth",
         }
     }
 }
@@ -254,6 +294,80 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
             }
             l.active_take = *take;
         }
+        LaneCmd::SetInput { seq, lane, input } => {
+            if let Some(i) = input {
+                i.check()?;
+                // A synth's return names an external destination (plan
+                // 5c-2 Ruling 3).
+                if let Some(dest) = i.return_of() {
+                    super::routing::check_external(d, dest)?;
+                }
+            }
+            d.lane_mut(*seq, *lane)?.input = input.clone();
+        }
+        LaneCmd::SetMonitor { seq, lane, monitor } => {
+            d.lane_mut(*seq, *lane)?.monitor = *monitor;
+        }
+        LaneCmd::TrackSynth {
+            seq,
+            lane,
+            channels,
+            arm_midi,
+        } => track_synth(d, *seq, *lane, *channels, *arm_midi, r)?,
     }
+    Ok(())
+}
+
+/// [`LaneCmd::TrackSynth`].
+fn track_synth(
+    d: &mut Document,
+    seq: SeqId,
+    lane: LaneId,
+    channels: InputChannels,
+    arm_midi: bool,
+    r: &mut Report,
+) -> Result<()> {
+    let dest = d.lane(seq, lane)?.midi_dest.ok_or_else(|| {
+        ModelError::invalid("Track Synth needs a lane that plays an external MIDI destination")
+    })?;
+    super::routing::check_external(d, dest)?;
+    let input = LaneInput::Audio {
+        channels,
+        return_of: Some(dest),
+    };
+    input.check()?;
+    let name = d
+        .instruments()
+        .get(&dest)
+        .map(|x| format!("{} audio", x.name))
+        .unwrap_or_else(|| "Synth audio".into());
+    let s = d.sequence(seq)?;
+    let at = s
+        .lane_index(lane)
+        .ok_or(ModelError::UnknownId(AnyId::Lane(lane)))?;
+    let audio = match s.return_lane(dest, Some(lane)) {
+        Some(id) => id,
+        None => {
+            let c = d.counters_mut();
+            let (id, take) = (c.alloc_lane(), c.alloc_take());
+            let s = d.seq_mut(seq)?;
+            let below = at.saturating_add(1).min(s.lanes.len());
+            s.lanes.insert(below, Lane::new(id, take, name));
+            r.created.extend([AnyId::Lane(id), AnyId::Take(take)]);
+            id
+        }
+    };
+    if d.lane(seq, audio)?.audio_out.is_none() {
+        // Heard through its strip while tracking (spec §6.7 "Monitoring").
+        let out = match d.outputs().keys().next().copied() {
+            Some(o) => o,
+            None => super::routing::add_output(d, "Audio 1", "audio:1-2", r),
+        };
+        d.lane_mut(seq, audio)?.audio_out = Some(out);
+    }
+    let l = d.lane_mut(seq, audio)?;
+    l.input = Some(input);
+    l.arm = true;
+    d.lane_mut(seq, lane)?.arm = arm_midi;
     Ok(())
 }

@@ -463,6 +463,8 @@ fn a_project_saved_before_to_copy_existed_still_opens() {
         "the template's to_copy was in the file"
     );
     std::fs::write(&file, serde_json::to_string(&json).unwrap()).unwrap();
+    // One session per package (Task 9 review I-2): the first lets go.
+    s.close().unwrap();
     let reopened = Session::open(saved.to_string_lossy().into_owned()).unwrap();
     let templates = reopened.modify_templates().unwrap();
     assert_eq!(templates.len(), 1);
@@ -602,6 +604,8 @@ fn templates_with_every_new_variant_survive_save_and_reopen() {
     let second = dir.path().join("b.vizdaw");
     let s = Session::from_document(doc).unwrap();
     s.save_as(first.to_string_lossy().into_owned()).unwrap();
+    // One session per package (Task 9 review I-2): the first lets go.
+    s.close().unwrap();
     let reopened = Session::open(first.to_string_lossy().into_owned()).unwrap();
     reopened
         .save_as(second.to_string_lossy().into_owned())

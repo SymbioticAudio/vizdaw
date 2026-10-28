@@ -13,6 +13,7 @@ rt-check = ["core-engine/rt-check"]
 core-model = { path = "../core-model" }
 core-engine = { path = "../core-engine", features = ["fixtures"] }
 core-host = { path = "../core-host" }
+core-media = { path = "../core-media" }
 clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

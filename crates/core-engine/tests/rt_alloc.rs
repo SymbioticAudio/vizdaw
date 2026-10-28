@@ -345,4 +345,127 @@ fn render_path_never_allocates() {
         instruments.load(Ordering::Relaxed)
     );
     assert_eq!(rt_check::count() - before, 0, "allocations with automation");
+    drop(b.stop().unwrap());
+    drop(engine);
+
+    // Regions (5a): streamed from disk with a loop and locates; the disk
+    // is serviced outside the armed blocks. The output must carry the
+    // regions' audio, so this phase cannot pass on silence.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.caf");
+    {
+        let mut w = core_media::caf::CafWriter::create(
+            &path,
+            48_000,
+            2,
+            core_model::format::BitDepth::Float32,
+            core_media::caf::WriteMode::Normal,
+        )
+        .unwrap();
+        w.write(&vec![0.25f32; 2 * 480_000]).unwrap();
+        w.finish().unwrap();
+    }
+    let mut bld = Builder::new();
+    let (seq, lane) = bld.sequence("Song", "Audio", None).unwrap();
+    let m = bld.media("Media/a.caf", 480_000, 2).unwrap();
+    for beat in [0i64, 3, 9] {
+        bld.region(
+            seq,
+            lane,
+            beat * 15_360,
+            m,
+            beat as u64 * 1000,
+            100_000,
+            -3.0,
+            core_model::event::Fade {
+                length_frames: 500,
+                shape: core_model::event::FadeShape::SCurve,
+            },
+            core_model::event::Fade::default(),
+        )
+        .unwrap();
+    }
+    // A latent bus (plan 5d-1 Task 2): the audio path's regions read 4800
+    // frames ahead of the renderer, across the loop seam and the locates.
+    let bus = bld.bus("Latent").unwrap();
+    bld.insert(bus, TestInserts::plugin("latency=4800"))
+        .unwrap();
+    let audio_doc = bld.finish();
+    let mut cfg = EngineConfig::new(48_000.0);
+    cfg.disk = core_media::stream::DiskMode::Manual;
+    cfg.stream = core_media::stream::StreamConfig {
+        cache_file_bytes: 0,
+        ..Default::default()
+    };
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(64))).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.set_media(vec![core_media::stream::MediaFile {
+        id: m,
+        path: path.clone(),
+    }]);
+    let report = engine.load(&audio_doc, seq).unwrap();
+    assert_eq!(engine.latency_frames(), 4800);
+    assert!(
+        report.audio_segments >= 3 && report.audio_offline == 0,
+        "{report:?}"
+    );
+    let mut b = OfflineBackend::new(48_000.0, 512);
+    b.start(renderer).unwrap();
+    b.reserve(4096);
+    engine.set_loop_range(Some((10_000, 200_000))).unwrap();
+    engine.play().unwrap();
+    let (mut sounding, mut peak) = (0u32, 0f32);
+    for i in 0..2_000u32 {
+        if i % 500 == 250 {
+            engine.locate_frame(u64::from(i) * 97).unwrap();
+        }
+        engine.streamer().service();
+        let frames = 1 + (i * 37) % 1024;
+        armed_block(&mut b, frames);
+        let (l, r) = b.output(frames);
+        let p = l.iter().chain(r).fold(0f32, |m, x| m.max(x.abs()));
+        if p > 0.0 {
+            sounding += 1;
+        }
+        peak = peak.max(p);
+    }
+    assert_eq!(
+        rt_check::count() - before,
+        0,
+        "allocations while playing regions"
+    );
+    assert_eq!(engine.state(), PlayState::Playing);
+    assert!(
+        sounding > 1_000 && peak > 0.1,
+        "regions were not heard: {sounding} sounding block(s), peak {peak}"
+    );
+    assert!(
+        engine.streamer().counters().stream_voices > 0,
+        "nothing streamed"
+    );
+    let f = engine.faults();
+    assert!(!f.contains(Faults::STREAM_UNDERRUN), "{:?}", f.names());
+
+    // A count-in (plan 5d-1 Task 5): its clicks and the roll it starts,
+    // in blocks of every size.
+    engine.stop().unwrap();
+    let counted = rt_check::count();
+    let mut p = engine.begin_play(None);
+    p.set_count_in(Some(core_engine::count_in::CountIn {
+        beats: 2,
+        per_bar: 2,
+        beat_frames: 4800.0,
+    }));
+    p.wait();
+    engine.finish_play(p).unwrap();
+    for i in 0..60u32 {
+        engine.streamer().service();
+        armed_block(&mut b, 1 + (i * 37) % 1024);
+    }
+    assert_eq!(
+        rt_check::count() - counted,
+        0,
+        "allocations while counting in"
+    );
+    assert_eq!(engine.state(), PlayState::Playing, "the count-in rolled");
 }

@@ -130,12 +130,10 @@ import VizDAWCore
         #expect(!m.editor.layout.snap.enabled && !TransportCommands.isOn("editors.snap", m))
     }
 
-    @Test func recordingCommandsWaitForSubProjectFive() throws {
+    @Test func scrubbingWaits() throws {
         let (s, id, m, _) = try demo()
-        for cmd in ["transport.record", "transport.scrub", "record.keep_pass", "record.discard_pass"] {
-            #expect(failure(run(cmd, s, id)) == .of(.unavailable, TransportCommands.notYet), "\(cmd)")
-            #expect(!TransportCommands.enabled(cmd, m))
-        }
+        #expect(failure(run("transport.scrub", s, id)) == .of(.unavailable, TransportCommands.notYet))
+        #expect(!TransportCommands.enabled("transport.scrub", m))
     }
 
     @Test func recordArmMovesAndARefusalShows() throws {

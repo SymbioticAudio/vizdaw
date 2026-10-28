@@ -2,6 +2,7 @@ import AppKit
 import Observation
 import SwiftUI
 import VizDAWAppModel
+import VizDAWCore
 
 struct DocumentModelKey: FocusedValueKey {
     typealias Value = DocumentModel
@@ -42,39 +43,66 @@ struct AppCommands: Commands {
     private var tornWindow: UUID? { store.tornFocus?.window }
 
     var body: some Commands {
-        CommandGroup(replacing: .newItem) {
-            Button("New") { show(store.newEmpty()) }
+        // Older SDKs (CI's macos-15 Xcode) take at most 10 items per
+        // builder, so the standard groups go in one Group.
+        Group {
+            CommandGroup(replacing: .newItem) {
+                Button("New") {
+                    if let f = FormatPanel.run(
+                        title: "New Project", message: "Every audio file of the project is stored in this format.",
+                        initial: store.defaultFormat, ok: "Create")
+                    {
+                        store.defaultFormat = f
+                        show(store.newProject(f))
+                    }
+                }
                 .keyboardShortcut(KeyMenu.shortcut("file.new"))
-            Button("Open…") { if let path = Panels.chooseProject() { show(store.open(path: path)) } }
-                .keyboardShortcut(KeyMenu.shortcut("file.open"))
-            Button("Create Demo Project") { show(store.newDemo()) }
-            Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
-        }
-        CommandGroup(replacing: .saveItem) {
-            Button("Close") { NSApp.keyWindow?.performClose(nil) }
-                .keyboardShortcut(KeyMenu.shortcut("file.close"))
-            Button("Save") { save(as: false) }
-                .keyboardShortcut(KeyMenu.shortcut("file.save"))
+                Button("Open…") { if let path = Panels.chooseProject() { show(store.open(path: path)) } }
+                    .keyboardShortcut(KeyMenu.shortcut("file.open"))
+                Button("Import Audio…") {
+                    let paths = Panels.chooseAudio()
+                    doc?.importAudio(paths: paths)
+                }
+                .keyboardShortcut(KeyMenu.shortcut("media.import"))
                 .disabled(doc == nil)
-            Button("Save As…") { save(as: true) }
-                .keyboardShortcut(KeyMenu.shortcut("file.save_as"))
-                .disabled(doc == nil)
-        }
-        CommandGroup(replacing: .undoRedo) {
-            Button(doc?.undoTitle ?? "Undo") { doc?.undo() }
-                .keyboardShortcut(KeyMenu.shortcut("edit.undo"))
-                .disabled(!(doc?.canUndo ?? false) || doc?.editor.gesture != nil)
-            Button(doc?.redoTitle ?? "Redo") { doc?.redo() }
-                .keyboardShortcut(KeyMenu.shortcut("edit.redo"))
-                .disabled(!(doc?.canRedo ?? false) || doc?.editor.gesture != nil)
-        }
-        CommandGroup(before: .windowList) {
-            Button("Mixer") { if let docID { openWindow(id: "mixer", value: docID) } }
-                .keyboardShortcut(KeyMenu.shortcut("window.mixer"))
-                .disabled(docID == nil)
-            Button("Plugin Manager") { openWindow(id: "plugins") }
-                .keyboardShortcut(KeyMenu.shortcut("window.plugin_manager"))
-            Divider()
+                Button("Create Demo Project") { show(store.newDemo()) }
+                Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
+            }
+            CommandGroup(replacing: .saveItem) {
+                Button("Close") { NSApp.keyWindow?.performClose(nil) }
+                    .keyboardShortcut(KeyMenu.shortcut("file.close"))
+                Button("Save") { save(as: false) }
+                    .keyboardShortcut(KeyMenu.shortcut("file.save"))
+                    .disabled(doc == nil)
+                Button("Save As…") { save(as: true) }
+                    .keyboardShortcut(KeyMenu.shortcut("file.save_as"))
+                    .disabled(doc == nil)
+                Divider()
+                Button("Project Settings…") { projectSettings() }
+                    .disabled(doc == nil)
+                Button("Relink Media…") { doc?.media.relinkShown = true }
+                    .keyboardShortcut(KeyMenu.shortcut("media.relink"))
+                    .disabled(doc?.media.relinkable.isEmpty ?? true)
+            }
+            CommandGroup(replacing: .undoRedo) {
+                Button(doc?.undoTitle ?? "Undo") { doc?.undo() }
+                    .keyboardShortcut(KeyMenu.shortcut("edit.undo"))
+                    .disabled(!(doc?.canUndo ?? false) || doc?.editor.gesture != nil)
+                Button(doc?.redoTitle ?? "Redo") { doc?.redo() }
+                    .keyboardShortcut(KeyMenu.shortcut("edit.redo"))
+                    .disabled(!(doc?.canRedo ?? false) || doc?.editor.gesture != nil)
+            }
+            CommandGroup(before: .windowList) {
+                Button("Mixer") { if let docID { openWindow(id: "mixer", value: docID) } }
+                    .keyboardShortcut(KeyMenu.shortcut("window.mixer"))
+                    .disabled(docID == nil)
+                Button("Plugin Manager") { openWindow(id: "plugins") }
+                    .keyboardShortcut(KeyMenu.shortcut("window.plugin_manager"))
+                Button("Media Pool") { if let docID { openWindow(id: "media-pool", value: docID) } }
+                    .keyboardShortcut(KeyMenu.shortcut("window.media_pool"))
+                    .disabled(docID == nil)
+                Divider()
+            }
         }
         CommandMenu("Editors") {
             ForEach(DetailEditorKind.allCases, id: \.self) { kind in
@@ -146,6 +174,14 @@ struct AppCommands: Commands {
             Button("Back to Parent Sequence") { doc?.editor.back() }
                 .keyboardShortcut(KeyMenu.shortcut("sequence.back"))
                 .disabled(doc?.editor.navigation.isEmpty ?? true)
+        }
+        CommandMenu("Region") {
+            Button(keyBindings.row(RegionCommands.normalize)?.title ?? "Normalize…") { if let doc { normalize(doc) } }
+                .keyboardShortcut(KeyMenu.shortcut(RegionCommands.normalize))
+                .disabled(doc.map { !RegionCommands.enabled(RegionCommands.normalize, $0) } ?? true)
+            commandItem(RegionCommands.fadeIn, RegionCommands.self)
+            commandItem(RegionCommands.fadeOut, RegionCommands.self)
+            commandItem(RegionCommands.removeFades, RegionCommands.self)
         }
         CommandMenu("Drum") {
             drumToggle("Drum Lane", DrumCommands.markLane)
@@ -271,17 +307,51 @@ struct AppCommands: Commands {
             .disabled(doc == nil)
     }
 
+    /// Region › Normalize…: asks for the peak level, then normalizes the
+    /// selected regions (Ruling 18's default level).
+    private func normalize(_ doc: DocumentModel) {
+        guard
+            let text = TextPanel.run(
+                title: "Normalize",
+                message: "Set the gain of each selected region so its loudest sample reaches this peak level (dB).",
+                initial: String(RegionCommands.defaultPeakDb), ok: "Normalize", label: "Peak level in dB")
+        else { return }
+        guard let peak = RegionCommands.parsePeak(text) else {
+            doc.alert = AlertItem(title: "Normalize", message: "Enter a level from −96 to 0 dB, like -0.3.")
+            return
+        }
+        report(RegionCommands.normalize(peakDb: peak, doc), doc)
+    }
+
+    private func projectSettings() {
+        guard let m = doc, let info = m.projectInfo ?? (try? m.session.projectInfo()) else { return }
+        let media = (try? m.session.media()) ?? []
+        let files = media.count
+        let seconds = media.reduce(0.0) { $0 + Double($1.frames) / Double(max($1.sampleRate, 1)) }
+        let minutes = seconds >= 60 ? String(format: "%.0f min", seconds / 60) : String(format: "%.0f s", seconds)
+        let note =
+            files == 0
+            ? "The project has no audio files yet."
+            : "Changing the format converts \(files) audio file\(files == 1 ? "" : "s") (\(minutes) of audio) into new files (one undo step)."
+        guard
+            let f = FormatPanel.run(
+                title: "Project Settings", message: "Format: \(formatLabel(format: info.format)). \(note)",
+                initial: info.format, ok: "Change")
+        else { return }
+        if f != info.format { m.changeFormat(f) }
+    }
+
     private func show(_ id: UUID?) {
         if let id { openWindow(value: id) }
     }
 
     private func save(as forceAs: Bool) {
         guard let doc else { return }
-        if forceAs || doc.needsSaveAs {
+        if doc.wantsSavePanel(forceAs: forceAs) {
             if let path = Panels.chooseSaveLocation(title: doc.snapshot.title) {
                 doc.saveAs(path: path)
             }
-        } else {
+        } else if !(forceAs || doc.needsSaveAs) {
             doc.save()
         }
     }

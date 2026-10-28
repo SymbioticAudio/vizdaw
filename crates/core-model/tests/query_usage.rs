@@ -1,5 +1,7 @@
 use core_model::command::{Command, DrumCmd, EventCmd, LaneCmd, SequenceCmd, apply};
-use core_model::document::{DestKind, Destination, Document, DocumentRepr, MediaItem, Settings};
+use core_model::document::{
+    DestKind, Destination, Document, DocumentRepr, MediaItem, MediaOrigin, Settings,
+};
 use core_model::event::{EventBody, EventSpec, Fade, LoopCount};
 use core_model::ids::{Counters, DestId, EventId, LaneId, MediaId, SeqId};
 use core_model::query::{
@@ -39,12 +41,14 @@ fn base() -> Document {
                     channel: 9,
                 },
                 default_patch: None,
+                return_latency_ms: 0.0,
             },
             Destination {
                 id: DestId(1),
                 name: "Plug".into(),
                 kind: DestKind::plugin("p"),
                 default_patch: None,
+                return_latency_ms: 0.0,
             },
         ],
         outputs: vec![],
@@ -55,6 +59,8 @@ fn base() -> Document {
             channels: 2,
             length_frames: 48_000,
             content_hash: None,
+            name: "a".into(),
+            origin: MediaOrigin::default(),
         }],
         sequences: vec![],
         mixer: None,

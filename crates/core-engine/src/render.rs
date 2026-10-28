@@ -1,11 +1,16 @@
 //! The real-time renderer and the state it publishes.
 
-use crate::backend::{BlockInfo, BlockTime, MidiOut, StereoBuf};
+use crate::backend::{BlockInfo, BlockTime, InputBlock, MidiOut, StereoBuf};
+use crate::count_in::{CountIn, Counting};
 use crate::graph::exec::{Exec, RunResult, SinkTable};
+use crate::graph::regions::InputCopy;
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
+use crate::input::{InputRoutes, MIDI_IN_PER_BLOCK, MidiIn, on_channel};
+use crate::measure::MeasureTap;
 use crate::midi1::Midi1Msg;
 use crate::notes::ActiveNotes;
 use crate::pool::PoolShared;
+use crate::record::RecordTap;
 use crate::schedule::automation::StripParam;
 use crate::schedule::{AutoDest, MAX_AUTO_LANES, MAX_TARGETS, MIN_RUN, Schedule, TargetIdx};
 use crate::transport::{PlayState, Step, Transport};
@@ -49,6 +54,12 @@ impl Faults {
     /// A recompiled graph was invalid (cycle or bad index); the previous
     /// graph keeps playing.
     pub const GRAPH_INVALID: Faults = Faults(1024);
+    /// A region's frames were not streamed in time: they played as
+    /// silence (5a).
+    pub const STREAM_UNDERRUN: Faults = Faults(2048);
+    /// Right after Play or Locate (within [`LATE_SECONDS`]) a region was
+    /// not ready yet and started late (5a).
+    pub const LATE_START: Faults = Faults(4096);
 
     /// True when every bit of `other` is set.
     pub fn contains(self, other: Faults) -> bool {
@@ -74,6 +85,8 @@ impl Faults {
             (Faults::WORKGROUP_JOIN_FAILED, "workgroup-join-failed"),
             (Faults::THREAD_POLICY_FAILED, "thread-policy-failed"),
             (Faults::GRAPH_INVALID, "graph-invalid"),
+            (Faults::STREAM_UNDERRUN, "stream-underrun"),
+            (Faults::LATE_START, "late-start"),
         ]
         .into_iter()
         .filter(|(f, _)| self.contains(*f))
@@ -145,6 +158,10 @@ pub struct DspLoad {
 /// (atomics only).
 #[derive(Debug)]
 pub struct Shared {
+    /// Regions play silence (the device refused the project rate, 5a).
+    regions_muted: AtomicBool,
+    /// A count-in is playing (plan 5d-1 Ruling 7).
+    counting: AtomicBool,
     position: AtomicU64,
     transport_pos: AtomicU64,
     state: AtomicU8,
@@ -164,11 +181,25 @@ pub struct Shared {
     prepared: AtomicU32,
     meters: Box<[MeterCell]>,
     board: Box<[AtomicU64]>,
+    /// Per device input channel, the peak since the last read (`f32` bits;
+    /// plan 5d-1 Ruling 27).
+    input_peaks: Box<[AtomicU32]>,
+}
+
+/// The peak of the first `n` samples of `ch`; a non-finite sample counts
+/// as a clip (1.0). // RT
+pub fn block_peak(ch: &[f32], n: usize) -> f32 {
+    ch.iter().take(n).fold(
+        0f32,
+        |m, x| if x.is_finite() { m.max(x.abs()) } else { 1.0 },
+    )
 }
 
 impl Default for Shared {
     fn default() -> Shared {
         Shared {
+            regions_muted: AtomicBool::new(false),
+            counting: AtomicBool::new(false),
             position: AtomicU64::new(0),
             transport_pos: AtomicU64::new(0),
             state: AtomicU8::new(0),
@@ -187,11 +218,24 @@ impl Default for Shared {
             prepared: AtomicU32::new(0),
             meters: (0..MAX_NODES).map(|_| MeterCell::default()).collect(),
             board: (0..MAX_INSERTS).map(|_| AtomicU64::new(0)).collect(),
+            input_peaks: (0..crate::backend::MAX_INPUT_CHANNELS)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
         }
     }
 }
 
 impl Shared {
+    /// Mutes or unmutes every region (5a Ruling 20).
+    pub fn set_regions_muted(&self, on: bool) {
+        self.regions_muted.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether regions are muted. // RT
+    pub fn regions_muted(&self) -> bool {
+        self.regions_muted.load(Ordering::Relaxed)
+    }
+
     /// Sets fault bits. // RT
     pub fn raise(&self, f: Faults) {
         self.faults.fetch_or(f.0, Ordering::Relaxed);
@@ -217,6 +261,11 @@ impl Shared {
     /// Transport state.
     pub fn state(&self) -> PlayState {
         PlayState::from_u8(self.state.load(Ordering::Relaxed))
+    }
+
+    /// Whether a count-in plays before the transport rolls.
+    pub fn counting_in(&self) -> bool {
+        self.counting.load(Ordering::Relaxed)
     }
 
     /// True once after playback reached the end and the tail finished.
@@ -245,6 +294,34 @@ impl Shared {
     /// The meter of graph node `i`. // RT
     pub fn meter(&self, i: usize) -> Option<&MeterCell> {
         self.meters.get(i)
+    }
+
+    /// Raises input channel `c`'s held peak to `peak` (non-negative floats
+    /// order like their bits). // RT
+    pub fn hold_input(&self, c: usize, peak: f32) {
+        if let Some(cell) = self.input_peaks.get(c) {
+            if peak.is_finite() && peak > 0.0 {
+                cell.fetch_max(peak.to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Clears every held input peak (control side, when the input config
+    /// changes).
+    pub fn clear_input_peaks(&self) {
+        for c in self.input_peaks.iter() {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// The first `channels` input channels' peaks since the last read,
+    /// cleared.
+    pub fn take_input_peaks(&self, channels: usize) -> Vec<f32> {
+        self.input_peaks
+            .iter()
+            .take(channels)
+            .map(|c| f32::from_bits(c.swap(0, Ordering::Relaxed)))
+            .collect()
     }
 
     /// Records that `instance` was bypassed for faults. The board is an
@@ -354,10 +431,14 @@ pub enum EngineCmd {
     /// with the same shape, its node state.
     SetGraph(Box<Graph>),
     /// Start playing; `until` (a schedule frame) stops it there instead
-    /// of at the end, ignoring the loop (Play Selection, plan 4f).
+    /// of at the end, ignoring the loop (Play Selection, plan 4f). With
+    /// `count_in`, a count-in plays first and the transport rolls when it
+    /// ends (plan 5d-1 Ruling 7).
     Play {
         /// The frame playing stops at.
         until: Option<u64>,
+        /// The count-in to play before rolling.
+        count_in: Option<CountIn>,
     },
     /// Stop (note-offs are sent).
     Stop,
@@ -368,7 +449,8 @@ pub enum EngineCmd {
     /// Install the sink of a new target (a released index is reused only
     /// after its `RemoveSink` and every schedule and graph naming it).
     AddSink(TargetIdx, Sink),
-    /// Remove a released target's sink; it goes back through the retire
+    /// Remove a released target's sink, ending the notes still sounding
+    /// on it first (plan 5d-1 Ruling 23); it goes back through the retire
     /// ring (a plugin instrument is deactivated off the audio thread).
     RemoveSink(TargetIdx),
     /// Send a note on or off to a target now (editor audition). Tracked
@@ -377,6 +459,17 @@ pub enum EngineCmd {
     /// the end do not, so a note dragged in an editor keeps sounding until
     /// the editor ends it (4b Plan Ruling 1).
     Audition(TargetIdx, Midi1Msg),
+    /// Install a record tap, or remove the one installed (it goes back
+    /// through the retire ring; dropping it tells the control side the
+    /// recording's input ended). Spec §6.2.
+    Record(Option<Box<RecordTap>>),
+    /// Replace the live input routes (spec §6.6); notes sounding through
+    /// thru end first.
+    SetInputs(Box<InputRoutes>),
+    /// Install a return-latency measurement (spec §6.7), or remove the one
+    /// installed (its sounding note ends; it goes back through the retire
+    /// ring).
+    Measure(Option<Box<MeasureTap>>),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -388,10 +481,19 @@ pub enum Retired {
     Graph(Box<Graph>),
     /// A removed sink.
     Sink(Sink),
+    /// A removed record tap.
+    Tap(Box<RecordTap>),
+    /// Replaced input routes.
+    Inputs(Box<InputRoutes>),
+    /// A removed measurement.
+    Measure(Box<MeasureTap>),
 }
 
 /// Capacity of the command ring.
 pub const CMD_CAPACITY: usize = 256;
+/// How long after Play or Locate a miss counts as a late start (spec
+/// §5.5: the transport waits this long for the disk at most).
+pub const LATE_SECONDS: f64 = 0.25;
 /// Capacity of the retire ring: room for a schedule, a graph and a
 /// removed sink per target (3a Plan Ruling 30; 3b Plan Ruling 4).
 pub const RETIRE_CAPACITY: usize = 64;
@@ -417,6 +519,14 @@ pub struct Renderer {
     cmds: Consumer<EngineCmd>,
     retire: Producer<Retired>,
     shared: Arc<Shared>,
+    /// The streamer's real-time side (boxed: the executor's job points at
+    /// it while a run is in flight).
+    reader: Box<core_media::stream::StreamReader>,
+    /// Frames played since the last Play or Locate: misses while it is
+    /// under [`LATE_SECONDS`] count as late starts (5a Ruling 10). Counted
+    /// in frames played, not schedule frames, so a loop wrap back below
+    /// where playing started does not reopen the window (F16).
+    since_start: u64,
     schedule: Option<Box<Schedule>>,
     cursor: usize,
     transport: Transport,
@@ -437,6 +547,52 @@ pub struct Renderer {
     pending_skip: u64,
     /// Per automation lane, the plugin value last sent (NaN: none yet).
     auto_last: Box<[f64; MAX_AUTO_LANES]>,
+    /// The recording's tap (spec §6.2), while one is installed.
+    tap: Option<Box<RecordTap>>,
+    /// MIDI from sources (spec §6.6).
+    midi_in: Consumer<MidiIn>,
+    /// The live input routes.
+    inputs: Option<Box<InputRoutes>>,
+    /// Notes sounding through thru (boxed: the renderer moves between
+    /// threads by value).
+    thru: Box<ActiveNotes>,
+    /// This block's input, for monitoring.
+    input_copy: Box<InputCopy>,
+    /// A return-latency measurement (spec §6.7), while one is installed.
+    measure: Option<Box<MeasureTap>>,
+    /// Where the transport last rolled from (a Play while not playing, a
+    /// Locate): led regions read nothing before it (plan 5d-1 Ruling 3).
+    roll_floor: u64,
+    /// The loop `[start, end)` the transport last wrapped since it rolled
+    /// (kept when the loop is edited: it is what was heard).
+    wrapped: Option<crate::graph::Wrapped>,
+    /// Frames played (`since_start`) when the transport last rolled or
+    /// wrapped.
+    seg_mark: u64,
+    /// Frames rendered since playing reached its end: led regions play
+    /// out their last frames meanwhile.
+    after_end: u64,
+    /// The count-in playing before the transport rolls, and its last
+    /// clicks after (Ruling 7).
+    counting: Option<Counting>,
+}
+
+/// What a wrap now, after `last` frames played since the roll or the
+/// last wrap, makes of the remembered wraps: the active loop (else
+/// the one remembered) with the stretches counted on. // RT
+fn wrapped_at(
+    transport: &Transport,
+    prev: Option<crate::graph::Wrapped>,
+    last: u64,
+) -> Option<crate::graph::Wrapped> {
+    let (start, end) = transport.active_loop().or(prev.map(|w| (w.start, w.end)))?;
+    Some(crate::graph::Wrapped {
+        start,
+        end,
+        last,
+        first: prev.map_or(last, |w| w.first),
+        wraps: prev.map_or(0, |w| w.wraps) + 1,
+    })
 }
 
 impl std::fmt::Debug for Renderer {
@@ -536,12 +692,16 @@ impl Renderer {
         retire: Producer<Retired>,
         shared: Arc<Shared>,
         pool: Option<Arc<PoolShared>>,
+        reader: core_media::stream::StreamReader,
+        midi_in: Consumer<MidiIn>,
     ) -> Renderer {
         let mut r = Renderer {
             cfg,
             cmds,
             retire,
             shared,
+            reader: Box::new(reader),
+            since_start: 0,
             schedule: None,
             cursor: 0,
             transport: Transport::new(cfg.sample_rate.max(0.0).round() as u64),
@@ -556,6 +716,17 @@ impl Renderer {
             latency: 0,
             pending_skip: 0,
             auto_last: Box::new([f64::NAN; MAX_AUTO_LANES]),
+            tap: None,
+            midi_in,
+            inputs: None,
+            thru: Box::default(),
+            input_copy: Box::new(InputCopy::new(0, 0)),
+            measure: None,
+            roll_floor: 0,
+            wrapped: None,
+            seg_mark: 0,
+            after_end: 0,
+            counting: None,
         };
         r.prepare(cfg.max_frames);
         r
@@ -570,6 +741,7 @@ impl Renderer {
         self.bufs = (0..MAX_TARGETS)
             .map(|_| StereoBuf::new(max_frames))
             .collect();
+        *self.input_copy = InputCopy::new(crate::backend::MAX_INPUT_CHANNELS, max_frames);
         if let Some(g) = self.graph.as_mut() {
             g.prepare(max_frames);
         }
@@ -585,21 +757,61 @@ impl Renderer {
         self.shared.raise(f);
     }
 
+    /// Clears every held input peak ([`Engine::clear_input_peaks`]): a
+    /// host reopening the device calls it while the renderer is stopped,
+    /// so no peak of the old config survives and none of the new one is
+    /// lost (plan 5d-1 final review m3).
+    ///
+    /// [`Engine::clear_input_peaks`]: crate::engine::Engine::clear_input_peaks
+    pub fn clear_input_peaks(&self) {
+        self.shared.clear_input_peaks();
+    }
+
     /// Renders one block of `frames` frames into planar `out` channels.
     /// Channels 0–1 get master, the rest zeros. // RT
     pub fn process(&mut self, out: &mut [&mut [f32]], frames: u32, time: BlockTime) {
+        self.process_input(out, frames, time, InputBlock::NONE);
+    }
+
+    /// [`Renderer::process`] with this block's device input (spec §6.1):
+    /// a record tap takes it, and monitored lanes hear it. // RT
+    pub fn process_input(
+        &mut self,
+        out: &mut [&mut [f32]],
+        frames: u32,
+        time: BlockTime,
+        input: InputBlock<'_>,
+    ) {
         #[cfg(feature = "rt-check")]
         crate::rt_check::arm();
-        self.process_inner(out, frames, time);
+        self.process_inner(out, frames, time, &input);
         #[cfg(feature = "rt-check")]
         crate::rt_check::disarm();
+    }
+
+    /// The tap's end of a block (see [`RecordTap::end_block`]), and the
+    /// measurement's (it watches every block's input, played or not:
+    /// [`MeasureTap::capture`]). // RT
+    fn end_tap(&mut self, input: &InputBlock<'_>, frames: u32, advanced: bool) {
+        if let Some(t) = self.tap.as_deref_mut() {
+            t.end_block(input.channels, frames, advanced);
+        }
+        if let Some(m) = self.measure.as_deref_mut() {
+            m.capture(input.channels, frames, input.delay_frames);
+        }
     }
 
     fn latency_ns(&self) -> i64 {
         (self.latency as f64 * 1e9 / self.cfg.sample_rate.max(1.0)).round() as i64
     }
 
-    fn process_inner(&mut self, out: &mut [&mut [f32]], frames: u32, time: BlockTime) {
+    fn process_inner(
+        &mut self,
+        out: &mut [&mut [f32]],
+        frames: u32,
+        time: BlockTime,
+        input: &InputBlock<'_>,
+    ) {
         let started = Instant::now();
         let block_s = f64::from(frames) / self.cfg.sample_rate.max(1.0);
         let deadline = self
@@ -611,6 +823,10 @@ impl Renderer {
         for ch in out.iter_mut() {
             ch.fill(0.0);
         }
+        // The input meters see every block, rendered or not.
+        for (c, ch) in input.channels.iter().enumerate() {
+            self.shared.hold_input(c, block_peak(ch, n));
+        }
         if !self.exec.try_finish(deadline) {
             // Nodes of a missed block are still running: touch nothing they
             // use (Plan Ruling 18).
@@ -618,6 +834,8 @@ impl Renderer {
             self.pending_skip = self.pending_skip.saturating_add(u64::from(frames));
             // The block was lost to the graph: report it as full load.
             self.shared.set_load(1.0);
+            // Its input is still recorded; the transport did not move.
+            self.end_tap(input, frames, false);
             return;
         }
         // No run is in flight: the last run's ramps have arrived (Plan 4d
@@ -635,11 +853,44 @@ impl Renderer {
         if frames > self.cfg.max_frames || out.iter().any(|c| c.len() < n) {
             skip_sinks(&mut self.sinks, u64::from(frames), 0);
             self.shared.count_xrun();
+            self.end_tap(input, frames, false);
             return;
         }
         self.block_ns = time.host_time_ns;
         self.drain_commands();
+        // A count-in that ends at this block's start rolls the transport.
+        let roll = self
+            .counting
+            .as_mut()
+            .and_then(|c| c.rolls(frames).then(|| c.until()));
+        if let Some(until) = roll {
+            self.roll(until);
+        }
         let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
+        if let Some(t) = self.tap.as_deref_mut() {
+            match (self.transport.state, self.transport.play_pos(length)) {
+                (PlayState::Playing, Some(at)) => t.begin_block(at, input.delay_frames),
+                // At the end already: the block's `Step::End` stops the tap.
+                (PlayState::Playing, None) => {}
+                // Stopped or in the tail: the run ends here (pre-flight M2).
+                _ => t.stop(0, self.transport.pos),
+            }
+        }
+        self.live_midi();
+        self.measure_sends();
+        let monitored = self.copy_monitored(input, frames);
+        // No run is in flight (`try_finish` succeeded above): the streamer
+        // may count a new epoch (5a Ruling 9) and plan around the playhead
+        // as this block's commands left it (a Locate's new position, never
+        // the stale one: commands are applied only here).
+        // Led regions read up to the largest lead behind the transport:
+        // the streamer plans from the earliest frame read (Ruling 3).
+        let lead = self.graph.as_deref().map_or(0, Graph::max_lead);
+        let first = self.audio_run(length);
+        self.reader.begin_block_seam(
+            first.head(lead).unwrap_or(self.transport.pos),
+            first.seam(lead),
+        );
         let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
         let ns_per_frame = 1e9 / self.cfg.sample_rate.max(1.0);
         let mut missed = false;
@@ -660,8 +911,14 @@ impl Renderer {
             }
             let run = self.next_run(length, frames - offset);
             let end = offset + run;
+            let run_start = offset;
+            // A run that starts at or past the end of playing plays out
+            // the led regions' last frames (Ruling 3).
+            let past_end = self.transport.play_pos(length).is_none()
+                && matches!(self.transport.state, PlayState::Playing | PlayState::Tail);
             self.automate(length, run);
             let info = self.block_info();
+            let regions = self.region_run(length, monitored, offset);
             let mut o = Out {
                 sinks: &mut self.sinks,
                 shared: &self.shared,
@@ -694,6 +951,17 @@ impl Renderer {
                         }
                     }
                     Step::Wrap { offset, to } => {
+                        if let Some(t) = self.tap.as_deref_mut() {
+                            t.wrap(offset, to);
+                        }
+                        // Led regions read the loop's end before its start.
+                        let now = self.since_start + u64::from(offset - run_start);
+                        self.wrapped = wrapped_at(
+                            &self.transport,
+                            self.wrapped,
+                            now.saturating_sub(self.seg_mark),
+                        );
+                        self.seg_mark = now;
                         release_all(&mut self.notes, &mut o, offset);
                         if let Some(s) = self.schedule.as_deref() {
                             reset_controllers(s, &mut o, offset);
@@ -701,12 +969,25 @@ impl Renderer {
                         self.chase_pending = true;
                         self.cursor = self.schedule.as_ref().map_or(0, |s| s.cursor_at(to));
                     }
-                    Step::End { offset } => release_all(&mut self.notes, &mut o, offset),
+                    Step::End { offset } => {
+                        // The run ends where the sequence does (pre-flight
+                        // M2).
+                        if let Some(t) = self.tap.as_deref_mut() {
+                            t.stop(offset, self.transport.pos);
+                        }
+                        release_all(&mut self.notes, &mut o, offset);
+                    }
                     Step::Idle { .. } => {}
                 }
                 at += step.frames();
             }
-            let lost = self.render_graph(out, offset, run, info, deadline);
+            let lost = self.render_graph(out, offset, run, info, regions, deadline);
+            if regions.playing {
+                self.since_start = self.since_start.saturating_add(u64::from(run));
+            }
+            if past_end {
+                self.after_end = self.after_end.saturating_add(u64::from(run));
+            }
             offset = end;
             if lost {
                 missed = true;
@@ -722,6 +1003,15 @@ impl Renderer {
             // stragglers are done.
             self.pending_skip = self.pending_skip.saturating_add(u64::from(frames - offset));
         }
+        if let Some(c) = self.counting.as_mut() {
+            c.set_latency(self.latency);
+            c.render(out, frames);
+            clamp_master(out, 0, frames, &self.shared);
+            if c.done() {
+                self.counting = None;
+            }
+        }
+        self.end_tap(input, frames, !missed);
         self.publish();
         if block_s > 0.0 {
             let load = (started.elapsed().as_secs_f64() / block_s) as f32;
@@ -734,12 +1024,13 @@ impl Renderer {
     /// The next run's length (1 ..= `left`): the rest of the block, cut at
     /// the next automation point (never under `MIN_RUN` frames after the
     /// run's start) and at the loop end or the sequence end while a
-    /// schedule with automation plays (Plan 4d Ruling 10). // RT
+    /// schedule with automation or audio plays (Plan 4d Ruling 10, 5a
+    /// Ruling 12). // RT
     fn next_run(&self, length: u64, left: u32) -> u32 {
         let Some(s) = self.schedule.as_deref() else {
             return left;
         };
-        if s.automation.is_empty() {
+        if s.automation.is_empty() && s.audio.is_empty() {
             return left;
         }
         let Some(pos) = self.transport.play_pos(length) else {
@@ -868,6 +1159,7 @@ impl Renderer {
         offset: u32,
         frames: u32,
         info: BlockInfo,
+        regions: crate::graph::RegionRun,
         deadline: Option<Instant>,
     ) -> bool {
         let at = offset as usize;
@@ -884,10 +1176,15 @@ impl Renderer {
             return false;
         }
         self.shared.runs.fetch_add(1, Ordering::Relaxed);
-        match self
-            .exec
-            .run(g, &self.sinks, &self.shared, frames, info, deadline)
-        {
+        match self.exec.run(
+            g,
+            &self.sinks,
+            &self.shared,
+            frames,
+            info,
+            regions,
+            deadline,
+        ) {
             RunResult::Done => {
                 g.write_master(out, at, frames);
                 let covered = g.instruments();
@@ -913,6 +1210,9 @@ impl Renderer {
                 }
                 Ok(EngineCmd::SetGraph(_)) => self.graph.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::RemoveSink(_)) => self.retire.slots() == 0,
+                Ok(EngineCmd::Record(_)) => self.tap.is_some() && self.retire.slots() == 0,
+                Ok(EngineCmd::SetInputs(_)) => self.inputs.is_some() && self.retire.slots() == 0,
+                Ok(EngineCmd::Measure(_)) => self.measure.is_some() && self.retire.slots() == 0,
                 Ok(_) => false,
                 Err(_) => break,
             };
@@ -969,6 +1269,13 @@ impl Renderer {
                         .transport
                         .end
                         .map(|e| new.tempo.tick_to_frame(old.tempo.frame_to_tick(e)));
+                    let remap = |f: u64| new.tempo.tick_to_frame(old.tempo.frame_to_tick(f));
+                    self.roll_floor = remap(self.roll_floor);
+                    self.wrapped = self.wrapped.map(|w| crate::graph::Wrapped {
+                        start: remap(w.start),
+                        end: remap(w.end),
+                        ..w
+                    });
                     if let Err(rtrb::PushError::Full(old)) =
                         self.retire.push(Retired::Schedule(old))
                     {
@@ -979,6 +1286,9 @@ impl Renderer {
                 }
                 self.cursor = new.cursor_at(self.transport.pos);
                 self.schedule = Some(new);
+                if let Some(t) = self.tap.as_deref_mut() {
+                    t.resync();
+                }
                 self.auto_last.fill(f64::NAN);
                 if self.transport.state == PlayState::Playing {
                     self.forget_unautomated();
@@ -996,34 +1306,82 @@ impl Renderer {
                 // The compensated audio of the last notes arrives L frames
                 // late: the tail waits for it before `ended`.
                 self.transport.latency = self.latency;
+                // What a recording captures from here on is heard with the
+                // new latency (final review I1).
+                if let Some(t) = self.tap.as_deref_mut() {
+                    t.set_latency(self.latency);
+                }
                 self.graph = Some(new);
                 self.shared.graphs_applied.fetch_add(1, Ordering::Relaxed);
                 // New inserts need their automated values.
                 self.auto_last.fill(f64::NAN);
             }
-            EngineCmd::Play { until } => {
-                let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
-                self.transport.end = until;
-                self.transport.play(length);
-                self.seek();
-                self.forget_unautomated();
-                self.auto_last.fill(f64::NAN);
+            EngineCmd::Play { until, count_in } => {
+                match count_in {
+                    // Counted in: the transport rolls when it ends.
+                    Some(c) if self.transport.state != PlayState::Playing => {
+                        self.counting =
+                            Some(Counting::new(c, until, self.cfg.sample_rate, self.latency));
+                    }
+                    // A plain Play during a count-in takes over: the clicks stop.
+                    _ => {
+                        self.counting = None;
+                        self.roll(until);
+                    }
+                }
             }
             EngineCmd::Stop => {
+                // The stop is marked where playback stopped, before any
+                // later command of this block moves the transport (review
+                // fix M2).
+                if self.transport.state == PlayState::Playing {
+                    if let Some(t) = self.tap.as_deref_mut() {
+                        t.stop(0, self.transport.pos);
+                    }
+                }
                 self.release_now(true);
                 self.transport.stop();
+                // A count-in still playing never rolls.
+                self.counting = None;
             }
             EngineCmd::Locate(frame) => {
                 self.release_now(true);
                 self.transport.locate(frame);
+                self.roll_floor = frame;
+                self.wrapped = None;
+                self.seg_mark = 0;
+                self.after_end = 0;
+                // A jump while recording is a cut: the next block marks
+                // where the transport landed (review fix M1).
+                if let Some(t) = self.tap.as_deref_mut() {
+                    t.resync();
+                }
+                self.since_start = 0;
                 self.seek();
                 self.auto_last.fill(f64::NAN);
             }
-            EngineCmd::SetLoop(range) => self.transport.loop_range = range,
+            EngineCmd::SetLoop(range) => {
+                // The loop wrapped so far stays what led regions read
+                // across (m1): it is what was heard.
+                self.transport.loop_range = range;
+            }
             EngineCmd::RemoveSink(idx) => {
-                // Forget its sounding notes: nothing will play them now.
-                self.notes.release(idx, |_| {});
-                self.audition.release(idx, |_| {});
+                // End its sounding notes (played, auditioned, played thru)
+                // before the sink goes, as Stop does: an external synth
+                // would hold them forever (plan 5d-1 Ruling 23; Task 11
+                // review I1).
+                let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+                let mut o = Out {
+                    sinks: &mut self.sinks,
+                    shared: &self.shared,
+                    block_ns: self.block_ns,
+                    ns_per_frame: 0.0,
+                    late_ns,
+                    base: 0,
+                };
+                self.notes.release(idx, |m| o.send(idx, 0, m.as_slice()));
+                self.audition.release(idx, |m| o.send(idx, 0, m.as_slice()));
+                self.thru.release(idx, |m| o.send(idx, 0, m.as_slice()));
                 let taken = self
                     .sinks
                     .get_mut(usize::from(idx.0))
@@ -1048,6 +1406,63 @@ impl Renderer {
                 o.send(target, 0, msg.as_slice());
                 self.audition.observe(target, msg.as_slice());
             }
+            EngineCmd::Record(mut new) => {
+                // The latency the graph has now, whatever it was when the
+                // tap was made (final review I1).
+                if let Some(t) = new.as_deref_mut() {
+                    t.set_latency(self.latency);
+                }
+                if let Some(old) = std::mem::replace(&mut self.tap, new) {
+                    old.close();
+                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Tap(old)) {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+            }
+            EngineCmd::SetInputs(new) => {
+                // Notes thru started end: a lane disarmed or re-routed
+                // must not leave one hanging.
+                let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+                let mut o = Out {
+                    sinks: &mut self.sinks,
+                    shared: &self.shared,
+                    block_ns: self.block_ns,
+                    ns_per_frame: 0.0,
+                    late_ns,
+                    base: 0,
+                };
+                release_all(&mut self.thru, &mut o, 0);
+                if let Some(old) = self.inputs.replace(new) {
+                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Inputs(old))
+                    {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+            }
+            EngineCmd::Measure(new) => {
+                if let Some(mut old) = std::mem::replace(&mut self.measure, new) {
+                    // Its note must not hang.
+                    let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+                    let mut o = Out {
+                        sinks: &mut self.sinks,
+                        shared: &self.shared,
+                        block_ns: self.block_ns,
+                        ns_per_frame: 0.0,
+                        late_ns,
+                        base: 0,
+                    };
+                    let target = old.target();
+                    old.release(|m| o.send(target, 0, m.as_slice()));
+                    old.close();
+                    if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Measure(old))
+                    {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+            }
             EngineCmd::AddSink(idx, sink) => {
                 if let Some(slot) = self.sinks.get_mut(usize::from(idx.0)) {
                     if let Some(old) = slot.replace(sink) {
@@ -1057,6 +1472,180 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// The `Regions` nodes' context for the run starting now: the
+    /// schedule's audio from the playhead (led nodes read behind it, plan
+    /// 5d-1 Ruling 3), late within `LATE_SECONDS` of playing after a Play
+    /// or Locate, muted when the device refused the rate, and the
+    /// monitored input with the record range while a recording rolls
+    /// (each node decides Auto at its read frame, Ruling 4). // RT
+    fn region_run(&self, length: u64, monitored: bool, offset: u32) -> crate::graph::RegionRun {
+        let base = self.audio_run(length);
+        if !monitored {
+            return base;
+        }
+        let Some(routes) = self.inputs.as_deref() else {
+            return base;
+        };
+        let playing = self.transport.state == PlayState::Playing;
+        let rec = self
+            .tap
+            .as_deref()
+            .filter(|t| t.rolling())
+            .map(RecordTap::range_or_all);
+        // SAFETY: the routes (boxed) and the input copy (boxed) change only
+        // in `drain_commands`, `copy_monitored` or `prepare`, after
+        // `try_finish` succeeded, so they outlive every run given this.
+        unsafe { base.with_monitor(&self.input_copy, &routes.monitor, offset, playing, rec) }
+    }
+
+    /// The schedule's audio from the playhead, or past the end while
+    /// playing plays out (none while stopped). // RT
+    fn audio_run(&self, length: u64) -> crate::graph::RegionRun {
+        let Some(s) = self.schedule.as_deref() else {
+            return crate::graph::RegionRun::NONE;
+        };
+        let (frame, ceiling) = match self.transport.play_pos(length) {
+            Some(p) => (p, u64::MAX),
+            // At or past the end: led nodes read on to it (Ruling 3).
+            None if matches!(self.transport.state, PlayState::Playing | PlayState::Tail) => (
+                self.transport.pos.saturating_add(self.after_end),
+                self.transport.pos,
+            ),
+            None => return crate::graph::RegionRun::NONE,
+        };
+        // A wrap due at this run's start (the transport sits at the loop
+        // end) counts: the run plays from the loop start.
+        let lp = self.transport.active_loop();
+        let due = lp.is_some_and(|(_, e)| self.transport.pos == e);
+        let wrapped = if due {
+            wrapped_at(
+                &self.transport,
+                self.wrapped,
+                self.since_start.saturating_sub(self.seg_mark),
+            )
+        } else {
+            self.wrapped
+        };
+        let run = if s.audio.is_empty() {
+            crate::graph::RegionRun::transport(frame, true)
+        } else {
+            // SAFETY: the schedule (boxed) and the reader (boxed) change
+            // only in `drain_commands` or `Drop`, after `try_finish`
+            // succeeded, so they outlive every run given this value.
+            unsafe {
+                crate::graph::RegionRun::new(
+                    &s.audio,
+                    &self.reader,
+                    frame,
+                    true,
+                    self.since_start < self.late_frames(),
+                    self.shared.regions_muted(),
+                )
+            }
+        };
+        run.with_bounds(self.roll_floor, ceiling, wrapped, self.since_start)
+    }
+
+    /// Copies the input channels monitor routes name; true when there is
+    /// one. // RT
+    fn copy_monitored(&mut self, input: &InputBlock<'_>, frames: u32) -> bool {
+        let Some(routes) = self.inputs.as_deref() else {
+            return false;
+        };
+        if routes.monitor.is_empty() {
+            return false;
+        }
+        let r = &routes.monitor;
+        self.input_copy.fill(input.channels, frames, |c| {
+            r.iter()
+                .any(|m| usize::from(m.left) == c || usize::from(m.right) == c)
+        });
+        true
+    }
+
+    /// Takes the queued MIDI input: each message a lane listens to goes
+    /// through its input chain to thru (its destination, now) and, while a
+    /// tap rolls and the lane is armed, to the recorder, stamped at the
+    /// run frame heard when it arrived (spec §6.3, §6.6). // RT
+    fn live_midi(&mut self) {
+        let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+        let sr = self.cfg.sample_rate;
+        let block_ns = self.block_ns;
+        let mut o = Out {
+            sinks: &mut self.sinks,
+            shared: &self.shared,
+            block_ns,
+            ns_per_frame: 0.0,
+            late_ns,
+            base: 0,
+        };
+        let thru = &mut self.thru;
+        let mut tap = self.tap.as_deref_mut();
+        let mut routes = self.inputs.as_deref_mut();
+        for _ in 0..MIDI_IN_PER_BLOCK {
+            let Ok(ev) = self.midi_in.pop() else {
+                break;
+            };
+            let Some(routes) = routes.as_deref_mut() else {
+                continue;
+            };
+            let offset = if ev.host_ns == 0 {
+                0
+            } else {
+                let ns = i128::from(ev.host_ns) - i128::from(block_ns);
+                (ns as f64 * sr / 1e9).round() as i64
+            };
+            for r in routes.midi.iter_mut() {
+                if !r.matches(&ev) {
+                    continue;
+                }
+                let (spec, targets, ch) = (&r.spec, r.targets, r.dest_channel);
+                r.chain.process(ev.msg, &mut |m| {
+                    if spec.thru {
+                        let m = on_channel(m, ch);
+                        for t in targets.iter().flatten() {
+                            o.send(*t, 0, m.as_slice());
+                            thru.observe(*t, m.as_slice());
+                        }
+                    }
+                    if spec.armed {
+                        if let Some(t) = tap.as_deref_mut() {
+                            t.midi(spec.lane, offset, m);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Sends what a measurement has due (spec §6.7) at block offset 0,
+    /// heard the graph latency and the MIDI offset after the block's first
+    /// frame. // RT
+    fn measure_sends(&mut self) {
+        let late_ns = self.cfg.midi_offset_ns + self.latency_ns();
+        // Signed: a negative MIDI offset makes a note heard before the
+        // block's first frame (fix round 1).
+        let late = (late_ns as f64 * self.cfg.sample_rate / 1e9).round() as i64;
+        let Some(m) = self.measure.as_deref_mut() else {
+            return;
+        };
+        let mut o = Out {
+            sinks: &mut self.sinks,
+            shared: &self.shared,
+            block_ns: self.block_ns,
+            ns_per_frame: 0.0,
+            late_ns,
+            base: 0,
+        };
+        let target = m.target();
+        m.sends(late, |msg| o.send(target, 0, msg.as_slice()));
+    }
+
+    /// [`LATE_SECONDS`] in frames.
+    fn late_frames(&self) -> u64 {
+        (LATE_SECONDS * self.cfg.sample_rate.max(0.0)) as u64
     }
 
     /// The transport facts of the block about to render. // RT
@@ -1107,8 +1696,32 @@ impl Renderer {
         }
     }
 
+    /// Starts playing (a Play, or the end of its count-in). // RT
+    fn roll(&mut self, until: Option<u64>) {
+        let length = self.schedule.as_ref().map_or(0, |s| s.length_frames);
+        self.transport.end = until;
+        let rolls = self.transport.state != PlayState::Playing;
+        if rolls {
+            self.since_start = 0;
+        }
+        self.transport.play(length);
+        if rolls {
+            self.roll_floor = self.transport.pos;
+            self.wrapped = None;
+            self.seg_mark = 0;
+            self.after_end = 0;
+        }
+        self.seek();
+        self.forget_unautomated();
+        self.auto_last.fill(f64::NAN);
+    }
+
     fn publish(&mut self) {
         let s = &self.shared;
+        s.counting.store(
+            self.counting.is_some_and(|c| !c.rolled()),
+            Ordering::Relaxed,
+        );
         s.position.store(
             self.transport.pos.saturating_sub(self.latency),
             Ordering::Relaxed,

@@ -36,6 +36,39 @@ public final class DocumentStore {
     /// document's plugin windows and releases their editors).
     public var willClose: ((UUID) -> Void)?
 
+    /// Makes a project in a format (set by `live()`; tests set a fake).
+    public var makeProject: ((ProjectFormatRow) throws -> any SessionProtocol)?
+
+    /// The app's preferences (in memory in tests; `live()` sets the real
+    /// store, which is itself in memory under `VIZDAW_SUPPORT_DIR`).
+    public var defaults: UserDefaults = MemoryDefaults()
+
+    /// The "Default project format" preference (5a Ruling 18), e.g.
+    /// "48000/24"; 48 kHz / 24-bit when unset or damaged.
+    public var defaultFormat: ProjectFormatRow {
+        get {
+            // Observed through the counter: the preference itself is not.
+            _ = formatChanges
+            let s = defaults.string(forKey: "defaultProjectFormat") ?? ""
+            let p = s.split(separator: "/").map(String.init)
+            return ControlFormats.parse(rate: p.first, depth: p.count > 1 ? p[1] : nil)
+                ?? ProjectFormatRow(sampleRate: 48_000, depth: .int24)
+        }
+        set {
+            let d: String =
+                switch newValue.depth {
+                case .int16: "16"
+                case .int24: "24"
+                case .float32: "32f"
+                }
+            defaults.set("\(newValue.sampleRate)/\(d)", forKey: "defaultProjectFormat")
+            formatChanges += 1
+        }
+    }
+
+    /// Bumped when `defaultFormat` is set (Settings › Recording redraws).
+    public private(set) var formatChanges = 0
+
     private let makeEmpty: Make
     private let makeDemo: Make
     private let openPath: Open
@@ -54,6 +87,9 @@ public final class DocumentStore {
             open: { try Session.open(path: $0) }
         )
         s.makeDemoAudio = { try Session.newDemoAudio() }
+        s.makeProject = { try Session.newProject(format: $0) }
+        s.recoverUntitled = { try recoverUntitledRecordings() }
+        s.defaults = MemoryDefaults.appStore()
         s.listPreferences = ListPreferences(defaults: MemoryDefaults.appStore())
         return s
     }
@@ -146,6 +182,12 @@ public final class DocumentStore {
 
     public func newEmpty() -> UUID? { add("New Document Failed", makeEmpty) }
 
+    /// A new project in `format` (the New Project sheet, `file.new`).
+    public func newProject(_ format: ProjectFormatRow) -> UUID? {
+        guard let make = makeProject else { return newEmpty() }
+        return add("New Document Failed") { try make(format) }
+    }
+
     public func newDemo() -> UUID? { add("Demo Project Failed", makeDemo) }
 
     /// Makes the demo with an audio lane (Plan 4b Ruling 19); set by `live()`.
@@ -164,9 +206,15 @@ public final class DocumentStore {
     /// Opens a `.vizdaw` package; other paths are refused with an alert.
     public func open(path: String) -> UUID? {
         guard (path as NSString).pathExtension == "vizdaw" else {
-            alert = AlertItem(
+            postAlert(AlertItem(
                 title: "Open Failed",
-                message: "\((path as NSString).lastPathComponent) is not a .vizdaw project.")
+                message: "\((path as NSString).lastPathComponent) is not a .vizdaw project."))
+            return nil
+        }
+        // A project that is already open brings its window to the front
+        // (the core would refuse with "already open in another window").
+        if let existing = documentID(forPath: path) {
+            activate?(existing)
             return nil
         }
         guard let recovery else {
@@ -174,6 +222,36 @@ public final class DocumentStore {
         }
         guard let options = recovery.options(for: path) else { return nil }
         return add("Open Failed") { try recovery.openWith(path, options) }
+    }
+
+    /// Brings a document's window to the front (set by the app).
+    public var activate: ((UUID) -> Void)?
+
+    /// The open document saved at `path` (same file, ignoring case and
+    /// symbolic links), if any.
+    public func documentID(forPath path: String) -> UUID? {
+        let want = Self.canonical(path)
+        return documents.first { (try? $0.value.session.path()).flatMap { $0 }.map(Self.canonical) == want }?.key
+    }
+
+    private static func canonical(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+    }
+
+    /// The launch-time check for recordings lost with untitled projects
+    /// (set by `live()`); returns the line to show.
+    public var recoverUntitled: () throws -> String? = { nil }
+    private var launchRecoveryDone = false
+
+    /// Runs `recoverUntitled` once per launch, before any document opens;
+    /// its line is logged and queued as an alert (plan 5c Task 10 review
+    /// M1: never dropped).
+    public func runLaunchRecovery() {
+        guard !launchRecoveryDone else { return }
+        launchRecoveryDone = true
+        guard let line = (try? recoverUntitled()) ?? nil else { return }
+        FileHandle.standardError.write(Data("VizDAW: \(line)\n".utf8))
+        postAlert(AlertItem(title: "Recordings Moved to the Trash", message: line))
     }
 
     /// Queues a document for the next window to appear.
@@ -194,10 +272,25 @@ public final class DocumentStore {
         return takePending() ?? newEmpty()
     }
 
-    /// The store-level alert, cleared (the app shows it once).
+    /// Alerts posted while another was showing, oldest first.
+    private var queuedAlerts: [AlertItem] = []
+
+    /// Shows `item` now, or after the alerts already showing or waiting
+    /// (Task 10 review M1: never dropped).
+    public func postAlert(_ item: AlertItem) {
+        if alert == nil && queuedAlerts.isEmpty {
+            alert = item
+        } else {
+            queuedAlerts.append(item)
+        }
+    }
+
+    /// The store-level alert, cleared (the app shows it once); the next
+    /// posted one takes its place.
     public func takeAlert() -> AlertItem? {
-        defer { alert = nil }
-        return alert
+        let current = alert ?? (queuedAlerts.isEmpty ? nil : queuedAlerts.removeFirst())
+        alert = queuedAlerts.isEmpty ? nil : queuedAlerts.removeFirst()
+        return current
     }
 
     /// A window closed: its document goes (a clean close: the crash
@@ -233,7 +326,7 @@ public final class DocumentStore {
             documents[id] = model
             return id
         } catch {
-            alert = AlertItem(error, title: title)
+            postAlert(AlertItem(error, title: title))
             return nil
         }
     }

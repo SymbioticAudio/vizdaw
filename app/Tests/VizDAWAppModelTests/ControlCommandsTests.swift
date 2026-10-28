@@ -18,6 +18,14 @@ final class FakeControlHost: ControlHost {
     func showPluginManager() { calls.append("plugins") }
     func tearOff(_ doc: UUID, kind: DetailEditorKind) { calls.append("tear \(kind.rawValue)") }
     func closeDocument(_ doc: UUID) { calls.append("close") }
+    func showMediaPool(_ doc: UUID) { calls.append("media pool") }
+    /// What `audio.set` applied (plan 5d-1 Task 12), and its refusal.
+    var audio: [AudioChange] = []
+    var audioError: VizError?
+    func applyAudio(_ change: AudioChange) throws {
+        if let e = audioError { throw e }
+        audio.append(change)
+    }
 }
 
 @MainActor
@@ -285,5 +293,225 @@ final class FakeControlHost: ControlHost {
         #expect(ControlLaunch.socketPath(arguments: ["VizDAW"], environment: ["VIZDAW_CONTROL": ""]) == nil)
         #expect(ControlLaunch.socketPath(arguments: ["VizDAW", "--control"], environment: [:]) == nil)
         #expect(ControlLaunch.strip(["VizDAW", "--control", "/a/x.vizdaw", "--demo"]) == ["VizDAW", "--demo"])
+    }
+
+    // MARK: Plan 5a: formats, import, conversion, media and project state
+
+    /// A store with no document, and this suite's host (thin wrapper).
+    func makeStoreAndHost() -> (DocumentStore, FakeControlHost) {
+        (DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { demoFake() }, open: { _ in demoFake() }), host)
+    }
+
+    /// The demo document: store, host, ID, model and fake session (thin
+    /// wrapper over `demo()`).
+    func makeDocument() throws -> (DocumentStore, FakeControlHost, UUID, DocumentModel, FakeSession) {
+        let (s, id, m, f) = try demo()
+        return (s, host, id, m, f)
+    }
+
+    @Test func fileNewTakesRateAndDepth() throws {
+        let (store, host) = makeStoreAndHost()
+        var made: ProjectFormatRow?
+        store.makeProject = { f in made = f; return FakeSession([]) }
+        _ = ControlCommands.run(
+            "file.new", args: [ControlArg(name: "rate", value: .text(value: "96000"))], doc: nil,
+            store: store, host: host)
+        #expect(made == ProjectFormatRow(sampleRate: 96_000, depth: store.defaultFormat.depth))
+    }
+
+    @Test func formatsParseTheChannelsSpelling() {
+        #expect(ControlFormats.parse(rate: "44100", depth: "16") == ProjectFormatRow(sampleRate: 44_100, depth: .int16))
+        #expect(ControlFormats.parse(rate: nil, depth: "32f")?.depth == .float32)
+        #expect(ControlFormats.parse(rate: "nope", depth: nil) == nil)
+    }
+
+    @Test func mediaImportStartsAJobAndAnswersLater() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        let out = ControlCommands.run(
+            "media.import",
+            args: [
+                ControlArg(name: "path", value: .text(value: "/tmp/x.wav")),
+                ControlArg(name: "seq", value: .int(value: 4)),
+                ControlArg(name: "tick", value: .int(value: 960)),
+            ],
+            doc: (id, model), store: store, host: host)
+        guard case .job(let command, let doc, let job) = out else { Issue.record("\(out)"); return }
+        #expect(command == "media.import" && doc == id && job == 1)
+        #expect(fake.imports.first?.0 == ["/tmp/x.wav"])
+        #expect(fake.imports.first?.1 == ImportTargetRow(seq: 4, lane: nil, tick: 960))
+    }
+
+    @Test func projectSettingsChangesTheFormatAsAJob() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        let out = ControlCommands.run(
+            "file.project_settings", args: [ControlArg(name: "depth", value: .text(value: "16"))],
+            doc: (id, model), store: store, host: host)
+        guard case .job = out else { Issue.record("\(out)"); return }
+        #expect(fake.formatChanges == [ProjectFormatRow(sampleRate: 48_000, depth: .int16)])
+    }
+
+    @Test func stateGetMediaAndProject() throws {
+        let (_, _, id, model, fake) = try makeDocument()
+        fake.mediaRows = [
+            MediaRow(
+                id: 3, name: "kick", path: "Media/kick.caf", channels: 2, frames: 10, sampleRate: 48_000,
+                origin: .imported, originalName: "kick.wav", offline: .missing, uses: 1)
+        ]
+        guard case .media(_, let items)? = ControlStates.state(.media, id, model) else {
+            Issue.record("media")
+            return
+        }
+        #expect(items.map(\.id) == [3])
+        guard case .project(_, let info)? = ControlStates.state(.project, id, model) else {
+            Issue.record("project")
+            return
+        }
+        #expect(info.format.sampleRate == 48_000)
+    }
+
+    // MARK: Plan 5b: the media pool and the Region menu
+
+    func args(_ pairs: [(String, ControlValue)]) -> [ControlArg] {
+        pairs.map { ControlArg(name: $0.0, value: $0.1) }
+    }
+
+    @Test func relinkTakesTheItemAndTheFileAndStartsAJob() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        fake.mediaRows = [mediaRow(3, "kick", offline: .missing)]
+        model.refreshAfterJob()
+        let run = { (a: [ControlArg]) in
+            ControlCommands.run("media.relink", args: a, doc: (id, model), store: store, host: host)
+        }
+        #expect(failure(run([]))?.code == .dialogRequired)
+        #expect(failure(run(args([("path", .text(value: "/x/kick.wav"))])))?.code == .invalidParams)
+        #expect(
+            failure(run(args([("path", .text(value: "/x/kick.wav")), ("media", .int(value: 99))])))?.code
+                == .invalidParams)
+        // A negative id is refused, never a trap (Task 9 review M1).
+        #expect(
+            failure(run(args([("path", .text(value: "/x/kick.wav")), ("media", .int(value: -3))])))?.code
+                == .invalidParams)
+        let out = run(args([("path", .text(value: "/x/kick.wav")), ("media", .int(value: 3))]))
+        guard case .job(let command, _, _) = out else {
+            Issue.record("\(out)")
+            return
+        }
+        #expect(command == "media.relink")
+        #expect(fake.relinks.first?.media == 3 && fake.relinks.first?.path == "/x/kick.wav")
+    }
+
+    @Test func renameAndCompactRunWithoutDialogs() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        fake.mediaRows = [mediaRow(3, "kick")]
+        model.refreshAfterJob()
+        let run = { (cmd: String, a: [ControlArg]) in
+            ControlCommands.run(cmd, args: a, doc: (id, model), store: store, host: host)
+        }
+        #expect(failure(run("media.rename", args([("media", .int(value: 3))])))?.code == .dialogRequired)
+        #expect(
+            failure(run("media.rename", args([("media", .int(value: -3)), ("name", .text(value: "x"))])))?.code
+                == .invalidParams)
+        #expect(
+            failure(run("media.rename", args([("media", .int(value: 3)), ("name", .text(value: "   "))])))?.code
+                == .invalidParams)
+        #expect(
+            failure(run("media.rename", args([("media", .int(value: 7)), ("name", .text(value: "x"))])))?.code
+                == .invalidParams)
+        #expect(failure(run("media.rename", args([("name", .text(value: "x"))])))?.code == .invalidParams)
+        guard case .done = run("media.rename", args([("media", .int(value: 3)), ("name", .text(value: "Kick"))]))
+        else {
+            Issue.record("rename")
+            return
+        }
+        #expect(fake.renamed.map(\.1) == ["Kick"])
+        guard case .done = run("media.compact", []) else {
+            Issue.record("compact")
+            return
+        }
+        #expect(fake.compactions == 1)
+        fake.poolError = .Model(message: "nothing to compact")
+        #expect(failure(run("media.compact", []))?.message.contains("nothing to compact") == true)
+        guard case .done = run("window.media_pool", []) else {
+            Issue.record("window")
+            return
+        }
+        #expect(host.calls.contains("media pool"))
+    }
+
+    @Test func regionCommandsActOnTheSelectionAndCheckThePeak() throws {
+        let (store, host, id, model, fake) = try makeDocument()
+        let run = { (cmd: String, a: [ControlArg]) in
+            ControlCommands.run(cmd, args: a, doc: (id, model), store: store, host: host)
+        }
+        #expect(failure(run(RegionCommands.normalize, []))?.code == .dialogRequired)
+        for bad in ["nan", "inf", "1", "-97", "abc", "", "-1e999"] {
+            #expect(
+                failure(run(RegionCommands.normalize, args([("peak_db", .text(value: bad))])))?.code
+                    == .invalidParams, "\(bad)")
+        }
+        // No selection: unavailable, nothing sent.
+        #expect(failure(run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])))?.code == .unavailable)
+        #expect(failure(run(RegionCommands.removeFades, []))?.code == .unavailable)
+        model.editor.setSelection(SelectionRow(timeRange: nil, lanes: [], events: [5]))
+        guard case .done = run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])) else {
+            Issue.record("normalize")
+            return
+        }
+        #expect(fake.normalizations.last?.peakDb == -1)
+        fake.normalizeError = .Busy(message: "still being built")
+        #expect(failure(run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])))?.code == .busy)
+        // An edit a mixer fader holds open (plan 5d-1 Ruling 20; Task 9
+        // review M1): `busy`, so a script retries.
+        fake.normalizeError = .Busy(message: "Finish the open edit first.")
+        let open = failure(run(RegionCommands.normalize, args([("peak_db", .text(value: "-1"))])))
+        #expect(open?.code == .busy && open?.message == "Finish the open edit first.")
+        fake.normalizeError = nil
+        guard case .done = run(RegionCommands.fadeIn, []) else {
+            Issue.record("fade")
+            return
+        }
+        #expect(fake.edits.last == .audio(edit: .fadeTo(events: [5], at: 0, fadeIn: true)))
+    }
+
+    // MARK: Fix round 1: how a finished job is answered (I-2)
+
+    func job(
+        _ kind: JobKindRow, _ state: JobStateRow, created: [UInt64] = [], problems: [String] = [],
+        message: String? = nil
+    ) -> JobRow {
+        JobRow(id: 1, kind: kind, progress: 1, state: state, message: message, problems: problems, created: created)
+    }
+
+    @Test func aRunningJobWaits() {
+        #expect(ControlJobs.answer(job(.import, .running)) == .wait)
+    }
+
+    @Test func importingOnlyBadFilesFailsWithTheProblems() {
+        let j = job(.import, .done, problems: ["a.wav: not audio", "b.wav: unreadable"])
+        #expect(ControlJobs.answer(j) == .failed("a.wav: not audio; b.wav: unreadable"))
+    }
+
+    @Test func importingGoodAndBadFilesSucceedsWithWarnings() {
+        let j = job(.import, .done, created: [3], problems: ["b.wav: unreadable"])
+        #expect(ControlJobs.answer(j) == .ok(status: "warnings: b.wav: unreadable"))
+        #expect(ControlJobs.answer(job(.import, .done, created: [3])) == .ok(status: nil))
+    }
+
+    @Test func aFailedJobKeepsItsProblems() {
+        let j = job(.convert, .failed, problems: ["x: disk full"], message: "conversion failed")
+        #expect(ControlJobs.answer(j) == .failed("conversion failed; x: disk full"))
+        #expect(ControlJobs.answer(job(.convert, .cancelled)) == .failed("the job was cancelled"))
+    }
+
+    @Test func anExpiredWaitSaysTheJobStillRunsAndNamesIt() {
+        #expect(ControlJobs.expiredMessage(job(.import, .running)).contains("job 1"))
+        #expect(ControlJobs.expiredMessage(job(.import, .running)).contains("still running"))
+    }
+
+    @Test func aConvertWhereEveryFileFailsFailsAndAPartialOneWarns() {
+        let bad = job(.convert, .done, problems: ["a.caf: unreadable"])
+        #expect(ControlJobs.answer(bad) == .failed("a.caf: unreadable"))
+        let some = job(.convert, .done, created: [5], problems: ["a.caf: unreadable"])
+        #expect(ControlJobs.answer(some) == .ok(status: "warnings: a.caf: unreadable"))
     }
 }

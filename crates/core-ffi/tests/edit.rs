@@ -3,6 +3,7 @@
 
 use core_engine::fixtures::{Builder, Q};
 use core_model::command::Command;
+use core_model::command::MediaCmd;
 use core_model::command::lane::LaneCmd;
 use core_model::command::routing::RoutingCmd;
 use core_model::document::Document;
@@ -55,12 +56,14 @@ fn fixture() -> Fixture {
         _ => None,
     });
     let r = b
-        .run(Command::Routing(RoutingCmd::AddMedia {
+        .run(Command::Media(MediaCmd::Add {
             path: "Media/a.wav".into(),
             sample_rate: 48_000,
             channels: 2,
             length_frames: 480_000,
             content_hash: None,
+            name: None,
+            origin: None,
         }))
         .unwrap();
     let media = created(&r, |id| match id {
@@ -648,9 +651,10 @@ fn an_edit_during_an_open_edit_is_refused_and_changes_nothing() {
     s.begin_edit("Move Block".into()).unwrap();
     s.edit_gesture(move_note(&f, Q, None), None).unwrap();
     let during = state(&s);
+    // Busy since plan 5d-1 Ruling 20 (it waits for the open edit).
     assert!(matches!(
         s.edit(move_note(&f, 2 * Q, None), None),
-        Err(VizError::Model { .. })
+        Err(VizError::Busy { .. })
     ));
     assert_eq!(state(&s), during, "the refused edit changed nothing");
     let snap = s.end_edit().unwrap();

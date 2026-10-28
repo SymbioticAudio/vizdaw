@@ -222,6 +222,7 @@ public enum KeyDispatch {
         switch outcome {
         case .done: return .handled
         case .opened(_, let d): return .opened(d)
+        case .job, .measure: return .handled
         case .failed(let f):
             switch f.code {
             case .unavailable, .dialogRequired, .unknownId, .noDocument: return .pass

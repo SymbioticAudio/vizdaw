@@ -46,9 +46,58 @@ public final class DocumentModel {
     public private(set) var laneFetches = 0
     /// Plugins that failed to load or refused their state (newest last).
     public private(set) var pluginProblems: [String] = []
+    /// The project's format, mismatched media and device rate (5a).
+    public internal(set) var projectInfo: ProjectInfoRow?
+    /// Running imports and conversions, oldest first.
+    public internal(set) var jobs: [JobRow] = []
+    /// A finished job's per-file problems, until dismissed.
+    public internal(set) var jobProblems: [String] = []
+    /// The disk warning was dismissed for this playback.
+    var diskWarningDismissed = false
     /// Bumped when plugin slots change (loaded, failed, restarted): views
     /// that show slots refetch.
     public private(set) var slotsVersion = 0
+    /// Bumped when waveform overviews or sample windows became available
+    /// (plan 5b): views drawing `Pending` or `Coarse` waveforms redraw.
+    public internal(set) var overviewVersion = 0
+    @ObservationIgnored private var mediaModel: MediaModel?
+    @ObservationIgnored private var recordModel: RecordModel?
+    @ObservationIgnored private var inputsModel: LaneInputs?
+    @ObservationIgnored private var synthModel: SynthSheets?
+
+    /// The Track Synth and New MIDI Destination sheets (plan 5d-2), made
+    /// once.
+    public var synth: SynthSheets {
+        if let m = synthModel { return m }
+        let m = SynthSheets(document: self)
+        synthModel = m
+        return m
+    }
+
+    /// The lanes' input pickers, monitor buttons and meters (plan 5d-2),
+    /// made once.
+    public var inputs: LaneInputs {
+        if let m = inputsModel { return m }
+        let m = LaneInputs(document: self)
+        inputsModel = m
+        return m
+    }
+
+    /// Recording (plan 5c), made once.
+    public var record: RecordModel {
+        if let m = recordModel { return m }
+        let m = RecordModel(document: self)
+        recordModel = m
+        return m
+    }
+
+    /// The media pool (plan 5b), made once.
+    public var media: MediaModel {
+        if let m = mediaModel { return m }
+        let m = MediaModel(document: self)
+        mediaModel = m
+        return m
+    }
     /// Slots whose parameters changed outside a gesture (their windows
     /// refetch), cleared by whoever handles them.
     public var paramsChanged: Set<UInt64> = []
@@ -231,6 +280,7 @@ public final class DocumentModel {
         clock.update(transport, pollInterval: Self.pollSeconds(playing: transport.playing))
         updatePlayKey()
         apply(snap)
+        projectInfo = try? session.projectInfo()
         editor.applySnapshot = { [weak self] in self?.apply($0) }
         editor.selectSequence = { [weak self] in self?.select($0) }
         editor.currentSequence = { [weak self] in self?.selectedSeq }
@@ -242,6 +292,12 @@ public final class DocumentModel {
             self?.pruneStripCharts()
             self?.pruneDrumGrids()
         }
+        // A project that opens with missing or changed media offers the
+        // relink sheet (plan 5b Ruling 14; the app never shows it while
+        // the control channel is on).
+        media.offerRelinkIfNeeded()
+        // Recordings a crash left are offered too (plan 5c Task 13).
+        record.offerRecoveryIfNeeded()
     }
 
     /// The transport shown until the first successful read.
@@ -276,8 +332,9 @@ public final class DocumentModel {
     public var canPlay: Bool { selectedSeq != nil || isPlaying }
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
     public var pollInterval: Duration { .seconds(pollSeconds) }
-    /// `pollInterval` in seconds.
-    public var pollSeconds: Double { Self.pollSeconds(playing: isPlaying) }
+    /// `pollInterval` in seconds; input meters poll as fast as playback
+    /// (plan 5d-2 Task 4).
+    public var pollSeconds: Double { Self.pollSeconds(playing: isPlaying || inputs.metering) }
 
     /// The one place the poll period is defined.
     static func pollSeconds(playing: Bool) -> Double { playing ? 0.033 : 0.25 }
@@ -429,10 +486,19 @@ public final class DocumentModel {
     /// `Busy` (an AU v3 editor opening in a nested run loop) keeps the last
     /// transport, silently; the next poll tries again.
     public func poll() {
+        // The meters do not wait for a good transport read (Task 4 review
+        // M1): they read the input, not the transport.
+        defer { inputs.pollMeters() }
         do {
             transport = try session.transport()
             clock.update(transport, pollInterval: pollSeconds)
             updatePlayKey()
+            if transport.rateMismatch != (projectInfo?.rateMismatch ?? false) { refreshProjectInfo() }
+            if !transport.faults.contains("stream-underrun") { diskWarningDismissed = false }
+            // A recording ends by Stop, at the end, or by itself (a full
+            // disk, a lost device): the poll notices.
+            if transport.playing || record.isRecording { record.refresh() }
+            record.reofferIfHeld()
         } catch VizError.Busy {
             return
         } catch {
@@ -448,6 +514,13 @@ public final class DocumentModel {
         editor.tick()
         guard let u = try? session.idle() else { return }
         if let s = u.snapshot { apply(s) }
+        if u.mediaChanged {
+            mediaVersion += 1
+            refreshProjectInfo()
+            media.offerRelinkIfNeeded()
+        }
+        if u.overviewsChanged { overviewVersion += 1 }
+        if !jobs.isEmpty { pollJobs() }
         if u.slotsChanged { slotsVersion += 1 }
         if !u.paramsChanged.isEmpty { paramsChanged.formUnion(u.paramsChanged) }
         if !u.problems.isEmpty {
@@ -462,6 +535,21 @@ public final class DocumentModel {
     public func save() {
         editor.storeLayout()
         perform("Save Failed") { try $0.save() }
+        // Saved while recording: the take follows at Stop (plan 5d-1
+        // Ruling 19).
+        if alert == nil, (try? session.savesAfterPass()) == true { editor.status = RecordModel.savedDuringPass }
+    }
+
+    /// Whether File › Save (or Save As, `forceAs`) asks for a location.
+    /// While recording it never does: Save As waits for Stop (the status
+    /// line says so) and an untitled project's Save does too.
+    public func wantsSavePanel(forceAs: Bool) -> Bool {
+        guard forceAs || needsSaveAs else { return false }
+        if record.isRecording {
+            editor.status = RecordModel.saveAsWhileRecording
+            return false
+        }
+        return true
     }
 
     public func saveAs(path: String) {
@@ -501,6 +589,18 @@ public final class DocumentModel {
             alert = AlertItem(error, title: title)
         }
     }
+
+    /// After a job applied (an import or conversion): the document, its
+    /// lanes and the media rows are new.
+    public func refreshAfterJob() {
+        if let s = try? session.snapshot() { apply(s) }
+        mediaVersion += 1
+        refreshProjectInfo()
+    }
+
+    /// Bumped when the media pool or its offline state changed (views
+    /// showing media refetch).
+    public internal(set) var mediaVersion = 0
 
     /// Takes a new snapshot: keeps the selection if the sequence still
     /// exists (else the first top-level one), refetches lanes if needed.

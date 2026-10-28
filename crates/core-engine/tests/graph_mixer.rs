@@ -12,6 +12,7 @@ fn strip(spec: &core_engine::graph::GraphSpec, i: usize) -> &StripSpec {
     match &spec.nodes[i] {
         NodeSpec::Strip(s) => s,
         NodeSpec::Instrument { .. } => panic!("node {i} is an instrument"),
+        NodeSpec::Regions { .. } => panic!("node {i} is a regions node"),
     }
 }
 
