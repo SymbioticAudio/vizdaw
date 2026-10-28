@@ -662,7 +662,7 @@ public enum ControlStates {
             return .record(doc: doc, state: s)
         case .input:
             guard let info = try? m.session.inputInfo() else { return nil }
-            return .inputState(doc: doc, info: info, levels: (try? m.session.inputLevels()) ?? [])
+            return .inputState(doc: doc, info: info, levels: m.inputs.takeChannelLevels())
         case .windows:
             return nil
         }

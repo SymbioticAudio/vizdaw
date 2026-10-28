@@ -62,6 +62,16 @@ public final class DocumentModel {
     public internal(set) var overviewVersion = 0
     @ObservationIgnored private var mediaModel: MediaModel?
     @ObservationIgnored private var recordModel: RecordModel?
+    @ObservationIgnored private var inputsModel: LaneInputs?
+
+    /// The lanes' input pickers, monitor buttons and meters (plan 5d-2),
+    /// made once.
+    public var inputs: LaneInputs {
+        if let m = inputsModel { return m }
+        let m = LaneInputs(document: self)
+        inputsModel = m
+        return m
+    }
 
     /// Recording (plan 5c), made once.
     public var record: RecordModel {
@@ -312,8 +322,9 @@ public final class DocumentModel {
     public var canPlay: Bool { selectedSeq != nil || isPlaying }
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
     public var pollInterval: Duration { .seconds(pollSeconds) }
-    /// `pollInterval` in seconds.
-    public var pollSeconds: Double { Self.pollSeconds(playing: isPlaying) }
+    /// `pollInterval` in seconds; input meters poll as fast as playback
+    /// (plan 5d-2 Task 4).
+    public var pollSeconds: Double { Self.pollSeconds(playing: isPlaying || inputs.metering) }
 
     /// The one place the poll period is defined.
     static func pollSeconds(playing: Bool) -> Double { playing ? 0.033 : 0.25 }
@@ -475,6 +486,7 @@ public final class DocumentModel {
             // disk, a lost device): the poll notices.
             if transport.playing || record.isRecording { record.refresh() }
             record.reofferIfHeld()
+            inputs.pollMeters()
         } catch VizError.Busy {
             return
         } catch {

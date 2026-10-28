@@ -390,7 +390,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     var inputLevelsRow: [Float] = []
 
-    func inputLevels() throws -> [Float] { inputLevelsRow }
+    /// Peaks are read and reset, as the core's are, when set (plan 5d-2 pre-flight I2).
+    var inputLevelsReset = false
+
+    func inputLevels() throws -> [Float] {
+        defer { if inputLevelsReset { inputLevelsRow = inputLevelsRow.map { _ in 0 } } }
+        return inputLevelsRow
+    }
 
     // MARK: Recording (plan 5c Task 9)
 
