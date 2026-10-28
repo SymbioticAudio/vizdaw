@@ -105,6 +105,44 @@ import VizDAWCore
         #expect(sheets.measuring == nil && f.measures == [7])
     }
 
+    /// Task 8 review M3: Measure's result never shows in the New MIDI
+    /// Destination sheet.
+    @Test func eachSheetKeepsItsOwnMessage() async throws {
+        SynthSheets.ports = { ["Moog"] }
+        defer { SynthSheets.ports = { midiDestinationPorts() } }
+        let (m, f) = try demo()
+        let sheets = m.synth
+        sheets.measure(7)
+        sheets.beginNewDestination(seq: 3, lane: m.lanes[1], channelOn: false)
+        await settle(sheets)
+        #expect(sheets.message?.hasPrefix("Return latency") == true)
+        #expect(sheets.destinationMessage == nil)
+        f.synthError = .Model(message: "the port is gone")
+        sheets.commitNewDestination()
+        #expect(sheets.destinationMessage == "the port is gone" && sheets.newDestination != nil)
+        sheets.closeNewDestination()
+        #expect(sheets.destinationMessage == nil)
+    }
+
+    /// Task 8 review M4, M5: the name counts as the core counts it; an added
+    /// destination that cannot be found again is said.
+    @Test func newDestinationCountsAndReportsAsTheCoreDoes() throws {
+        SynthSheets.ports = { ["Moog"] }
+        defer { SynthSheets.ports = { midiDestinationPorts() } }
+        let (m, f) = try demo()
+        let sheets = m.synth
+        sheets.beginNewDestination(seq: 3, lane: m.lanes[1], channelOn: false)
+        // 40 characters, 280 Unicode scalars: the core refuses more than 255.
+        sheets.newDestination?.name = String(repeating: "\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}", count: 40)
+        #expect(!sheets.canAddDestination)
+        sheets.newDestination?.name = "Sub 37"
+        #expect(sheets.canAddDestination)
+        f.destinationsError = .Internal(message: "no list")
+        sheets.commitNewDestination()
+        #expect(f.addedDestinations.count == 1 && sheets.newDestination == nil)
+        #expect(m.editor.status == "Added Sub 37; choose it in the lane's destination menu.")
+    }
+
     @Test func newDestinationAddsItAndPointsTheLaneAtIt() throws {
         SynthSheets.ports = { ["Moog", "Juno"] }
         defer { SynthSheets.ports = { midiDestinationPorts() } }

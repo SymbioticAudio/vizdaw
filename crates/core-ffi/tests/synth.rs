@@ -17,6 +17,7 @@ use core_model::command::{Command, LaneCmd, RoutingCmd, SequenceCmd};
 use core_model::document::Document;
 use core_model::ids::{AnyId, DestId, LaneId, SeqId};
 use core_model::lane::{InputChannels, LaneInput, MonitorMode};
+use core_model::mixer::{PluginFormat, PluginRef, StripKind};
 use core_model::sequence::SeqLength;
 use core_model::time::Tick;
 use std::path::Path;
@@ -26,7 +27,8 @@ use vizdaw_ffi::host::{
     force_offline, midi_destination_targets, reset_host, set_fake_input, set_fake_synth,
 };
 use vizdaw_ffi::{
-    EditCommand, EventRow, LaneEdit, LaneInputRow, RecordSpecRow, SequenceEdit, Session, VizError,
+    EditCommand, EventRow, LaneEdit, LaneInputRow, RecordSpecRow, SequenceEdit, Session,
+    SlotStatus, VizError,
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -1493,4 +1495,88 @@ fn the_ports_are_the_running_hosts() {
     s.close().unwrap();
     reset_host();
     assert!(vizdaw_ffi::host::midi_destination_ports().is_empty());
+}
+
+/// Runs the plugin timer until `done` (10 s at most).
+fn idle_until(s: &Session, mut done: impl FnMut(&Session) -> bool) {
+    let start = Instant::now();
+    while !done(s) {
+        assert!(start.elapsed() < Duration::from_secs(10), "timed out");
+        s.idle().unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// The engine's report lines for plugin slots that are placeholders.
+fn placeholder_lines(s: &Session) -> Vec<String> {
+    s.transport()
+        .unwrap()
+        .report
+        .into_iter()
+        .filter(|l| l.contains("loading") || l.contains("Test Gain"))
+        .collect()
+}
+
+/// Plan 5d-2 Task 8 review I1: Measure run off the thread that holds the
+/// session's plugin host (the app's detached task) claims the engine with
+/// no plugin host. It must not make the empty factory this document's:
+/// after another window took the engine, the document's plugin plays
+/// again at its next Play.
+#[test]
+fn a_measure_off_the_plugin_thread_keeps_the_documents_plugins() {
+    let g = serial(Some(DELAY_MS), None);
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    let d = doc(true, 2);
+    let mut b = Builder::from_doc(d.doc.clone());
+    let master = b.strip_of(StripKind::Master).unwrap();
+    let slot = b
+        .insert(
+            master,
+            PluginRef {
+                format: PluginFormat::Clap,
+                id: "vizdaw.test.gain".into(),
+                name: "Test Gain".into(),
+                vendor: "VizDAW".into(),
+                version: "1.0.0".into(),
+            },
+        )
+        .unwrap();
+    let a = untitled(&g, b.finish());
+    let live = |s: &Session| {
+        s.plugin_slots()
+            .unwrap()
+            .iter()
+            .any(|r| r.id == slot.0 && r.status == SlotStatus::Live)
+    };
+    let plays_its_plugin =
+        |s: &Session| live(s) && placeholder_lines(s).is_empty() && s.transport().unwrap().playing;
+    a.play(d.seq.0).unwrap();
+    idle_until(&a, plays_its_plugin);
+    a.stop().unwrap();
+    let a_id = vizdaw_ffi::host::factory_owner().unwrap();
+    // Another window (no plugins) takes the engine and its factory.
+    let other = untitled(&g, d.doc.clone());
+    other.play(d.seq.0).unwrap();
+    other.stop().unwrap();
+    assert_ne!(vizdaw_ffi::host::factory_owner(), Some(a_id));
+    // A measures from a thread with no plugin host.
+    let a2 = Arc::clone(&a);
+    let dest = d.synth.0;
+    let m = std::thread::spawn(move || a2.measure_return(dest))
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.onsets, 5);
+    assert_ne!(
+        vizdaw_ffi::host::factory_owner(),
+        Some(a_id),
+        "a claim with no plugin host does not take the factory"
+    );
+    // A's next Play plays its plugin again.
+    a.play(d.seq.0).unwrap();
+    idle_until(&a, plays_its_plugin);
+    assert_eq!(vizdaw_ffi::host::factory_owner(), Some(a_id));
+    a.stop().unwrap();
+    other.close().unwrap();
+    a.close().unwrap();
 }

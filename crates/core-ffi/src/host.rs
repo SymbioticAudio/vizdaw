@@ -1984,10 +1984,21 @@ impl Host {
         let block = self.engine.block_frames();
         if self.factory_owner != owner {
             match plugins.as_deref() {
-                Some(p) => self.engine.set_insert_factory(Box::new(p.factory())),
-                None => self.engine.set_insert_factory(Box::new(NoInserts)),
+                Some(p) => {
+                    self.engine.set_insert_factory(Box::new(p.factory()));
+                    self.factory_owner = owner;
+                }
+                // No plugin host here (a call off the session's plugin
+                // thread, e.g. the app's Measure task; 5d-2 Task 8 review
+                // I1): another session's instances must not serve this
+                // document, so the engine gets none, and nobody owns the
+                // factory: `owner`'s next claim with its host installs it
+                // (on a fresh engine when this one loaded plugin slots).
+                None => {
+                    self.engine.set_insert_factory(Box::new(NoInserts));
+                    self.factory_owner = 0;
+                }
             }
-            self.factory_owner = owner;
         }
         if let Some(p) = plugins {
             // Instances unloaded since (a plugin turned off): the engine
@@ -2481,8 +2492,11 @@ fn claim_host(
         // instances is taken for this document's same-numbered slots; for
         // rates: so the device is asked for this project's, Ruling 20).
         // Or its device could not reopen (pre-flight M7).
+        // A claim with no plugin host keeps an engine nobody's factory
+        // feeds: a fresh one would get no plugins either.
+        let hostless = plugins.is_none();
         if slot.as_ref().is_some_and(|h| {
-            (h.factory_owner != owner && h.plugins_in_engine)
+            (h.factory_owner != owner && h.plugins_in_engine && !(hostless && h.factory_owner == 0))
                 || !same_rate(h.project_rate, project)
                 || h.broken
         }) {

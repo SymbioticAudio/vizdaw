@@ -97,7 +97,7 @@ struct NewMidiDestinationSheet: View {
                         "Channel \(d.channel)",
                         value: Binding(get: { d.channel }, set: { sheets.newDestination?.channel = $0 }), in: 1...16)
                 }
-                if let msg = sheets.message {
+                if let msg = sheets.destinationMessage {
                     Text(msg).font(.callout).foregroundStyle(.red)
                 }
                 HStack {

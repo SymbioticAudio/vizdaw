@@ -73,15 +73,20 @@ public enum SynthCommands {
         return extend(extra)
     }
 
-    /// The answer of a Measure that ended: its milliseconds, with the step
-    /// applied, or its failure (the core's `Busy` is `busy`); nil while it
-    /// runs.
+    /// Applies the snapshot of Measure's step. No stale snapshot (M5): an
+    /// edit made while Measure ran wins.
+    static func applyMeasured(_ row: MeasureRow, _ m: DocumentModel) {
+        if row.snapshot.version >= m.snapshot.version { m.apply(row.snapshot) } else { m.refreshAfterJob() }
+    }
+
+    /// The answer of a Measure that ended: its milliseconds (its step was
+    /// applied when it ended), or its failure (the core's `Busy` is
+    /// `busy`); nil while it runs.
     public static func answer(_ job: MeasureJob, doc: UUID, _ m: DocumentModel) -> ControlOutcome? {
         switch job.result {
         case nil: return nil
         case .success(let row):
-            // No stale snapshot (M5): an edit made while Measure ran wins.
-            if row.snapshot.version >= m.snapshot.version { m.apply(row.snapshot) } else { m.refreshAfterJob() }
+            // The step was applied when the job ended (`run`'s `onDone`).
             return .done(
                 .measured(doc: doc.uuidString, dest: job.dest, returnLatencyMs: row.returnLatencyMs, onsets: row.onsets))
         case .failure(let error):
@@ -137,7 +142,13 @@ public enum SynthCommands {
             if isExternal(dest, m) == false { return notExternal(id, dest) }
             // Off the main thread (plan 5d-2 Ruling 6): the channel answers
             // when the job ends, and its pump never blocks.
-            return .measure(doc: doc, job: MeasureJob(session: m.session, dest: dest))
+            let job = MeasureJob(session: m.session, dest: dest)
+            // The step reaches the model when the job ends, whether or not
+            // a client still waits for the answer (Task 8 review M1).
+            job.onDone = { [weak m] r in
+                if case .success(let row) = r, let m { applyMeasured(row, m) }
+            }
+            return .measure(doc: doc, job: job)
         default:
             return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }

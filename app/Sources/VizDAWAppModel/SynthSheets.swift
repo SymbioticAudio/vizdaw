@@ -54,6 +54,9 @@ public final class SynthSheets {
     public private(set) var measuring: MeasureJob?
     /// The last Measure's outcome, or why a sheet's action failed.
     public private(set) var message: String?
+    /// Why New MIDI Destination's Add failed (its own: Measure's result
+    /// never shows there; Task 8 review M3).
+    public private(set) var destinationMessage: String?
 
     /// The MIDI destinations New MIDI Destination offers (tests replace it).
     public static var ports: () -> [String] = { midiDestinationPorts() }
@@ -122,8 +125,7 @@ public final class SynthSheets {
         guard let m = document else { return }
         switch r {
         case .success(let row):
-            // No stale snapshot (M5): an edit made while Measure ran wins.
-            if row.snapshot.version >= m.snapshot.version { m.apply(row.snapshot) } else { m.refreshAfterJob() }
+            SynthCommands.applyMeasured(row, m)
             message = String(format: "Return latency %.1f ms (%u of 5 notes heard).", row.returnLatencyMs, row.onsets)
         case .failure(let e):
             message = AlertItem(e, title: "").message
@@ -144,16 +146,17 @@ public final class SynthSheets {
             return
         }
         let ports = Self.ports()
-        message = nil
+        destinationMessage = nil
         newDestination = MidiDestinationDraft(
             seq: seq, lane: lane.id, name: ports.first ?? "Synth", port: ports.first ?? "", ports: ports)
     }
 
-    /// Whether Add can run: a name and a port.
+    /// Whether Add can run: a name and a port. The name's length counts
+    /// Unicode scalars, as the core does (Task 8 review M4).
     public var canAddDestination: Bool {
         guard let d = newDestination else { return false }
         let name = d.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !name.isEmpty && name.count <= 255 && !d.port.isEmpty && (1...16).contains(d.channel)
+        return !name.isEmpty && name.unicodeScalars.count <= 255 && !d.port.isEmpty && (1...16).contains(d.channel)
     }
 
     /// Adds the destination ("Add Destination") and points the lane at it
@@ -162,20 +165,24 @@ public final class SynthSheets {
         guard let m = document, let d = newDestination, canAddDestination else { return }
         let name = d.name.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            let before = Set(((try? m.session.destinations()) ?? []).map(\.id))
+            let before = (try? m.session.destinations()).map { Set($0.map(\.id)) }
             m.apply(try m.session.addMidiDestination(name: name, port: d.port, channel: UInt8(d.channel - 1)))
-            let added = ((try? m.session.destinations()) ?? []).last { !before.contains($0.id) }
+            let after = try? m.session.destinations()
+            let added = before.flatMap { b in after?.last { !b.contains($0.id) } }
             if let added {
                 m.editor.edit(.lane(edit: .setDest(seq: d.seq, lane: d.lane, dest: added.id)))
+            } else {
+                // Added, but not found again (Task 8 review M5): said.
+                m.editor.status = "Added \(name); choose it in the lane's destination menu."
             }
             newDestination = nil
         } catch {
-            message = AlertItem(error, title: "").message
+            destinationMessage = AlertItem(error, title: "").message
         }
     }
 
     public func closeNewDestination() {
         newDestination = nil
-        message = nil
+        destinationMessage = nil
     }
 }

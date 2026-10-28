@@ -16,16 +16,35 @@ public final class MeasureJob {
 
     public var isDone: Bool { result != nil }
 
+    /// The task keeps the job until it ends, so `onDone` runs even when
+    /// nobody waits for the answer any more (Task 8 review M1).
     public init(session: any SessionProtocol, dest: UInt64) {
         self.dest = dest
-        Task.detached { [weak self] in
-            let r: Result<MeasureRow, any Error> = Result { try session.measureReturn(dest: dest) }
-            await self?.finish(r)
+        let hold = SessionHold(session)
+        Task.detached {
+            let r = hold.measure(dest)
+            await self.finish(r, hold)
         }
     }
 
-    private func finish(_ r: Result<MeasureRow, any Error>) {
+    private func finish(_ r: Result<MeasureRow, any Error>, _ hold: SessionHold) {
+        hold.session = nil
         result = r
         onDone?(r)
+    }
+}
+
+/// Holds the session for the detached call and lets it go on the main
+/// actor (Task 8 review M2): a document closed mid-Measure has its
+/// `Session` dropped on the thread that keeps its plugin host. Read off
+/// the main actor only by the call, and cleared on it only after.
+private final class SessionHold: @unchecked Sendable {
+    var session: (any SessionProtocol)?
+
+    init(_ session: any SessionProtocol) { self.session = session }
+
+    func measure(_ dest: UInt64) -> Result<MeasureRow, any Error> {
+        guard let s = session else { return .failure(VizError.Internal(message: "the session closed")) }
+        return Result { try s.measureReturn(dest: dest) }
     }
 }

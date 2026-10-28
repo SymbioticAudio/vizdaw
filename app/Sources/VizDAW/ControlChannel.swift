@@ -107,8 +107,9 @@ enum ControlChannel {
         }
     }
 
-    /// Answers once Measure `job` ended (10 s at most, plus a margin: the
-    /// call's timeout was extended by `SynthCommands.extraTimeMs`).
+    /// Answers once Measure `job` ended: about 13 s at most (the core's 3 s
+    /// input wait, then its 10 s measure wait), so a 2 s margin within the
+    /// 15 s the call's timeout was extended to (`SynthCommands.extraTimeMs`).
     static func whenMeasured(_ server: ControlServer, _ token: UInt64, doc: UUID, job: MeasureJob) {
         later(token, seconds: 15) { expired in
             guard let m = appStore.model(doc) else {

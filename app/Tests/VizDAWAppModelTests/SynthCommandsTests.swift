@@ -138,6 +138,21 @@ import VizDAWCore
                 .code == .failed)
     }
 
+    /// Task 8 review M1: the step is applied when Measure ends, even when
+    /// nobody is left to answer.
+    @Test func aMeasureNobodyWaitsForStillAppliesItsStep() async throws {
+        let (s, id, m, _) = try demo()
+        let version = m.snapshot.version
+        guard case .measure(_, let job) = run("destination.measure_return", [("dest", .int(value: 7))], m, s, id)
+        else {
+            Issue.record("Measure answers when its job ends")
+            return
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !job.isDone, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(5)) }
+        #expect(job.isDone && m.snapshot.version > version, "applied with no answer asked")
+    }
+
     @Test func measureAnswersWithTheMillisecondsAndAppliesTheStep() async throws {
         let (s, id, m, f) = try demo()
         f.measured = 24.9
