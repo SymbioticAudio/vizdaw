@@ -1295,14 +1295,19 @@ a copy, not one you care about.
      picker: an audio lane's picker lists "No Input", each device channel
      by its name ("In 1 (Mic)") and the pairs ("In 1+2"); a MIDI lane's
      lists All MIDI Inputs and each keyboard, then Any Channel and
-     channels 1–16. The lane's input is checked; choosing another is one
-     undo step "Set Lane Input". While a lane is armed or monitors Input,
+     channels 1–16. On a new project, before any Play or arm, the audio
+     picker already lists every channel of the chosen input device by
+     name, and no microphone prompt appears (5d-2 final review I4); a
+     mono input lists In 1 alone. The lane's input is checked; choosing
+     another is one undo step "Set Lane Input". While a lane is armed or
+     monitors Input,
      a thin meter runs under its controls; a full-scale peak (or a
      clipped sample in a 16/24-bit recording) lights the red mark at its
      end for two seconds. While the input is opening (the first arm may
      show macOS's microphone prompt), the meter track is yellow and the
      status line says so. A lane made by Track Synth shows
-     "⇠ <synth> · In 3".
+     "⇠ <synth> · In 3", cut in the middle when it is long so the
+     channel stays visible.
 148. Mixer: each AudioPath strip shows the same input picker and monitor
      button above its inserts, for the shown sequence's lane that plays
      through it (the armed one if several). Changing either in the mixer
