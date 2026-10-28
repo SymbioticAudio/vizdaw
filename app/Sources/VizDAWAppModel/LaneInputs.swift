@@ -184,7 +184,7 @@ public final class LaneInputs {
     /// Software Monitoring as the core has it (tests replace it).
     public static var softwareMonitoring: () -> Bool = { audioSettings().softwareMonitoring }
     /// Software Monitoring as the last meter poll read it.
-    public private(set) var monitoringOn = true
+    public private(set) var monitoringOn = LaneInputs.softwareMonitoring()
     /// The input is opening (or waiting on macOS's microphone prompt) while
     /// a lane shows a meter (plan 5d-2 pre-flight I5).
     public private(set) var opening = false

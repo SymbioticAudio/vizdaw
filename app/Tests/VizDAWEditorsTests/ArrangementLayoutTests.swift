@@ -122,7 +122,9 @@ private let b = LaneKey(3, 31)
         let controls = LaneHeaderLayout.controls(rowTop: 48)
         let mute = controls.first { $0.0 == .mute }!.1
         #expect(LaneHeaderLayout.control(at: CGPoint(x: mute.midX, y: mute.midY), rowTop: 48) == .mute)
-        #expect(LaneHeaderLayout.control(at: CGPoint(x: 100, y: 48 + 30), rowTop: 48) == .destination)
+        #expect(LaneHeaderLayout.control(at: CGPoint(x: 50, y: 48 + 30), rowTop: 48) == .destination)
+        #expect(LaneHeaderLayout.control(at: CGPoint(x: 150, y: 48 + 30), rowTop: 48) == .input)
+        #expect(LaneHeaderLayout.control(at: CGPoint(x: 120, y: 48 + 10), rowTop: 48) == .monitor)
         #expect(LaneHeaderLayout.control(at: CGPoint(x: 199, y: 48 + 46), rowTop: 48) == nil)
     }
 }

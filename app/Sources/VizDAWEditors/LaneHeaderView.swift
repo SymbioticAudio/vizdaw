@@ -4,7 +4,8 @@ import VizDAWAppModel
 import VizDAWCore
 
 /// Lane headers beside the arrangement (Plan Ruling 24): name (double-click
-/// renames), mute/solo/arm, destination menu, and an "Add Lane" row.
+/// renames), monitor/mute/solo/arm, destination and input menus, the input
+/// meter (plan 5d-2 Task 5), and an "Add Lane" row.
 @MainActor
 public final class LaneHeaderView: NSView, NSTextFieldDelegate {
     public let document: DocumentModel
@@ -39,6 +40,10 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         withObservationTracking {
             _ = document.lanes
             _ = editor.layout
+            _ = document.inputs.levels
+            _ = document.inputs.clipped
+            _ = document.inputs.monitoringOn
+            _ = document.inputs.opening
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.needsDisplay = true
@@ -56,6 +61,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         NSColor.windowBackgroundColor.setFill()
         dirty.fill()
         let small = NSFont.systemFont(ofSize: 11)
+        let inputs = document.inputs
         for (i, lane) in document.lanes.enumerated() {
             let top = rowTop(i)
             guard top + laneHeight >= dirty.minY, top <= dirty.maxY else { continue }
@@ -67,14 +73,23 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
                         withAttributes: [
                             .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.labelColor,
                         ])
+                case .monitor:
+                    toggle(
+                        LaneInputs.label(lane.monitor), on: lane.monitor != .off,
+                        color: lane.monitor == .input ? .systemOrange : .systemTeal, in: r)
                 case .mute: toggle("M", on: lane.mute, color: .systemYellow, in: r)
                 case .solo: toggle("S", on: lane.solo, color: .systemGreen, in: r)
                 case .arm: toggle("R", on: lane.arm, color: .systemRed, in: r)
                 case .destination:
                     NSString(string: "▾ " + (lane.destination ?? "No Destination")).draw(
                         in: r, withAttributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor])
+                case .input:
+                    let badge = inputs.badge(lane).map { $0 + " · " } ?? ""
+                    NSString(string: "▾ " + badge + LaneInputs.title(lane.input)).draw(
+                        in: r, withAttributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor])
                 }
             }
+            if laneHeight >= 46, inputs.showsMeter(lane) { meter(lane.id, rowTop: top, inputs: inputs) }
             NSColor.separatorColor.setFill()
             NSRect(x: 0, y: top + laneHeight - 0.5, width: bounds.width, height: 1).fill()
         }
@@ -86,6 +101,19 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         NSRect(x: 0, y: 0, width: bounds.width, height: EditorCanvas.rulerHeight).fill()
         NSColor.separatorColor.setFill()
         NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill()
+    }
+
+    /// The thin input meter and its clip mark (spec §6.9); the track is
+    /// yellow while the input is still opening (pre-flight I5).
+    private func meter(_ lane: UInt64, rowTop top: CGFloat, inputs: LaneInputs) {
+        let r = LaneHeaderLayout.meterRect(rowTop: top)
+        (inputs.opening ? NSColor.systemYellow.withAlphaComponent(0.5) : NSColor.quaternaryLabelColor).setFill()
+        r.fill()
+        let fill = CGFloat(MixerMath.meterFill(inputs.level(lane)))
+        NSColor.systemGreen.setFill()
+        CGRect(x: r.minX, y: r.minY, width: r.width * fill, height: r.height).fill()
+        (inputs.isClipped(lane) ? NSColor.systemRed : NSColor.quaternaryLabelColor).setFill()
+        LaneHeaderLayout.clipRect(rowTop: top).fill()
     }
 
     private func toggle(_ letter: String, on: Bool, color: NSColor, in r: CGRect) {
@@ -119,6 +147,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         }
         let lane = lanes[i]
         switch LaneHeaderLayout.control(at: p, rowTop: rowTop(i)) {
+        case .monitor: document.inputs.cycleMonitor(lane)
+        case .input: inputMenu(seq: seq, lane: lane).popUp(positioning: nil, at: p, in: self)
         case .mute: flags(seq, lane.id, mute: !lane.mute)
         case .solo: flags(seq, lane.id, solo: !lane.solo)
         case .arm: flags(seq, lane.id, arm: !lane.arm)
@@ -186,6 +216,29 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
                 self?.editor.edit(.lane(edit: .setDest(seq: seq, lane: lane.id, dest: d.id)))
             }
             menu.addItem(a.item(checked: lane.midiDest == d.id))
+        }
+        return menu
+    }
+
+    /// The input picker (spec §6.9): "No Input", the device's channels by
+    /// name for an audio lane, the MIDI sources and channels for a MIDI
+    /// lane; the lane's input is checked.
+    func inputMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
+        let inputs = document.inputs
+        inputs.refreshInfo()
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (i, group) in inputs.groups(for: lane).enumerated() {
+            if i > 0 { menu.addItem(.separator()) }
+            if !group.title.isEmpty {
+                let title = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
+                title.isEnabled = false
+                menu.addItem(title)
+            }
+            for choice in group.choices {
+                let a = MenuAction(title: choice.title) { inputs.choose(choice, lane: lane) }
+                menu.addItem(a.item(checked: choice.input == lane.input))
+            }
         }
         return menu
     }
@@ -258,10 +311,12 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
             a11yElements = []
             return []
         }
+        let inputs = document.inputs
         let items = document.lanes.enumerated().map { i, lane in
             let r = NSRect(x: 0, y: rowTop(i), width: bounds.width, height: laneHeight)
+            let opening = inputs.opening && inputs.showsMeter(lane)
             let item = CanvasAccessibilityItem(
-                label: ArrangementA11y.header(lane), frame: r, selected: false,
+                label: ArrangementA11y.header(lane) + (opening ? ", input opening" : ""), frame: r, selected: false,
                 press: { [weak self] in self?.flags(seq, lane.id, mute: !lane.mute) })
             return (item: item, frame: r)
         }
