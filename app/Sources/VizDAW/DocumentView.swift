@@ -36,8 +36,7 @@ struct DocumentView: View {
             item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
         ) { _ in
             TrackSynthSheet(
-                sheets: model.synth, editor: model.editor, channels: Int(model.inputs.info?.channels ?? 0) > 0
-                    ? Int(model.inputs.info?.channels ?? 0) : 256)
+                sheets: model.synth, editor: model.editor, channels: model.inputs.knownChannels ?? 256)
         }
         .sheet(
             item: Binding(

@@ -17,7 +17,7 @@ use vizdaw_ffi::audio::{
     set_software_monitoring, set_stream_settings,
 };
 use vizdaw_ffi::host::{
-    debug_hold_microphone_prompt, debug_input_job, debug_input_open_delay,
+    audio_input_channels, debug_hold_microphone_prompt, debug_input_job, debug_input_open_delay,
     debug_refuse_buffer_sizes, force_offline, hosts_created, reset_host, set_audio_input_device,
     set_fake_input, set_fake_microphone_prompt,
 };
@@ -496,6 +496,40 @@ fn offline_hosts_offer_no_devices_or_sources() {
     let _g = serial(None);
     assert!(vizdaw_ffi::host::audio_input_devices().is_empty());
     assert!(vizdaw_ffi::host::midi_source_ports().is_empty());
+}
+
+/// 5d-2 final review I4: the chosen input device's channels are known
+/// without the engine (no host is made, no device opened): offline, the
+/// fake input's for "Same as output"; nothing with no input, for a device
+/// offline hosts do not offer, or for a hostile name.
+#[test]
+fn the_input_devices_channels_are_known_without_the_engine() {
+    let _g = serial(None);
+    let made = hosts_created();
+    assert_eq!(audio_input_channels(), None, "no input device");
+    set_fake_input(Some(FakeInput::Signals));
+    let fake = audio_input_channels().expect("the fake input");
+    assert_eq!(fake.channels, 3);
+    assert_eq!(fake.names, ["Fake In 1", "Fake In 2", "Fake In 3"]);
+    set_audio_input_device(Some(String::new()));
+    assert_eq!(
+        audio_input_channels(),
+        Some(fake.clone()),
+        "empty is Same as output"
+    );
+    for hostile in [
+        "Nope".to_string(),
+        "\0".to_string(),
+        "\u{202e}In\u{0}".to_string(),
+        "x".repeat(1 << 20),
+    ] {
+        set_audio_input_device(Some(hostile));
+        assert_eq!(audio_input_channels(), None, "an unknown device");
+    }
+    set_audio_input_device(None);
+    assert_eq!(audio_input_channels(), Some(fake));
+    assert_eq!(hosts_created(), made, "no host made");
+    assert_eq!(vizdaw_ffi::host::holder(), None);
 }
 
 /// Plan 5d-2 pre-flight I4 (5d-1 carry #4): choosing another input device

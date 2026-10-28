@@ -10,6 +10,17 @@ use core_engine::midi1::Midi1Msg;
 /// The most bytes one injection may carry.
 pub const MAX_INJECT_BYTES: usize = 1024;
 
+/// The chosen input device's channels as the input picker offers them
+/// (5d-2 final review I4), read without the engine: no device is opened
+/// and no microphone asked.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct InputChannelsRow {
+    /// Input channels (0: the device has none).
+    pub channels: u32,
+    /// One name per channel ("Input k" when the device names none).
+    pub names: Vec<String>,
+}
+
 /// What the audio input offers (`state.get input`).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct InputInfoRow {

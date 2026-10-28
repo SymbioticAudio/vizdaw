@@ -13,6 +13,8 @@ import VizDAWCore
     func doc(_ lanes: [LaneRow]) throws -> (DocumentModel, FakeSession) {
         let f = demoFake()
         f.laneTable[3] = lanes
+        // No device read from the HAL in tests (final review I4).
+        LaneInputs.deviceChannels = { nil }
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
         let m = try #require(s.newDemo().flatMap(s.model))
         m.select(3)
@@ -50,6 +52,37 @@ import VizDAWCore
         #expect(f.edits.last == .lane(edit: .setInput(seq: 3, lane: 30, input: .audio(first: 0, stereo: true, returnOf: nil))))
         #expect(LaneInputs.title(pair.input) == "In 1+2")
         #expect(LaneInputs.title(nil) == "No Input")
+    }
+
+    /// 5d-2 final review I4: before the document holds the engine, the
+    /// picker lists the chosen device's own channels and names (read
+    /// without the engine); a mono input offers In 1 alone; with nothing
+    /// known, In 1, In 2 and In 1+2.
+    @Test func thePickerListsTheDevicesChannelsBeforeTheEngine() throws {
+        let l = audioLane(30, nil)
+        let (m, f) = try doc([l])
+        let inputs = m.inputs
+        LaneInputs.deviceChannels = { InputChannelsRow(channels: 4, names: ["Mic", "", "Synth L", "Synth R"]) }
+        defer { LaneInputs.deviceChannels = { nil } }
+        inputs.refreshInfo()
+        #expect(
+            titles(inputs.groups(for: l))["Audio"] == [
+                "In 1 (Mic)", "In 2", "In 3 (Synth L)", "In 4 (Synth R)", "In 1+2", "In 3+4",
+            ])
+        #expect(inputs.knownChannels == 4)
+        // Once the engine's input is open, it is what counts.
+        f.inputRow = InputInfoRow(
+            device: "Fake", channels: 1, names: ["Mono"], inputLatencyFrames: 0, outputLatencyFrames: 0)
+        inputs.refreshInfo()
+        #expect(titles(inputs.groups(for: l))["Audio"] == ["In 1 (Mono)"])
+        #expect(inputs.knownChannels == 1)
+        // Nothing known: the two-channel guess.
+        f.inputRow = InputInfoRow(
+            device: "", channels: 0, names: [], inputLatencyFrames: 0, outputLatencyFrames: 0)
+        LaneInputs.deviceChannels = { nil }
+        inputs.refreshInfo()
+        #expect(titles(inputs.groups(for: l))["Audio"] == ["In 1", "In 2", "In 1+2"])
+        #expect(inputs.knownChannels == nil)
     }
 
     @Test func aReturnLaneKeepsItsSynth() throws {
@@ -193,5 +226,12 @@ import VizDAWCore
         m.inputs.pollMeters()
         #expect(!m.inputs.opening)
         #expect(m.editor.status == nil)
+        // A refusal from the same click is not hidden by the note (final
+        // review m6).
+        m.editor.status = "Lane Audio 30 records input 3, but the audio input has 2 channel(s)"
+        f.inputRow.opening = true
+        m.inputs.pollMeters()
+        #expect(m.inputs.opening)
+        #expect(m.editor.status?.hasPrefix("Lane Audio 30") == true)
     }
 }

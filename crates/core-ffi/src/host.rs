@@ -1100,6 +1100,43 @@ fn audio_input_devices_body() -> Vec<String> {
     }
 }
 
+/// The chosen input device's channels and their names (5d-2 final review
+/// I4), for the input picker before any document holds the engine: read
+/// from the device's properties, so no device is opened, no host made and
+/// no microphone asked. Offline: the fake input for "Same as output", and
+/// nothing for a named device (offline hosts offer none). `None` when
+/// unknown: no input device, a chosen device not connected. Infallible: the
+/// body runs inside `catch_unwind`, so a panic in the HAL read answers
+/// `None` rather than crossing the FFI.
+#[uniffi::export]
+pub fn audio_input_channels() -> Option<crate::live::InputChannelsRow> {
+    std::panic::catch_unwind(audio_input_channels_body)
+        .ok()
+        .flatten()
+}
+
+/// [`audio_input_channels`]' body, which may panic.
+fn audio_input_channels_body() -> Option<crate::live::InputChannelsRow> {
+    let device = lock(&INPUT_DEVICE).clone();
+    let (channels, names) = if offline_mode() {
+        // As an offline host's input (`OfflineBackend`): the fake input's
+        // channels, named as it names them.
+        let _ = fake_input().filter(|_| device.is_none())?;
+        let n = core_engine::offline::FAKE_INPUT_CHANNELS as u32;
+        (n, (1..=n).map(|k| format!("Fake In {k}")).collect())
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            platform_macos::hal::input_channels_of(device.as_deref())?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return None;
+        }
+    };
+    Some(crate::live::InputChannelsRow { channels, names })
+}
+
 /// The MIDI sources a MIDI lane's input picker offers (plan 5d-2 Task 1):
 /// the system's sources but VizDAW's own on a live host; none offline.
 /// Infallible: the body runs inside `catch_unwind`, so a panic in the

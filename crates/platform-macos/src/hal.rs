@@ -580,6 +580,28 @@ pub fn input_devices() -> Vec<String> {
     .collect()
 }
 
+/// The input channels of device `name` (`None`: the default output
+/// device's own input) and one name per channel, as an open would give
+/// them (at most `MAX_INPUT_CHANNELS`), read from its properties: the
+/// device is not opened and no I/O starts, so no microphone permission is
+/// asked (5d-2 final review I4). `None` for a device not connected.
+pub fn input_channels_of(name: Option<&str>) -> Option<(u32, Vec<String>)> {
+    let dev = match name {
+        None => get::<AudioObjectID>(
+            SYSTEM,
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioObjectPropertyScopeGlobal,
+        )
+        .ok()?,
+        Some(n) => find_device(n).ok()?,
+    };
+    let n = layout(dev, kAudioObjectPropertyScopeInput)
+        .map(|l| l.iter().sum::<u32>())
+        .unwrap_or(0)
+        .min(MAX_INPUT_CHANNELS as u32);
+    Some((n, input_names(dev, n)))
+}
+
 /// Flags set by property listeners (non-RT CoreAudio notification thread)
 /// and read by `take_events`.
 #[derive(Debug, Default)]

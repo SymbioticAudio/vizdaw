@@ -43,6 +43,20 @@ public final class LaneInputs {
 
     /// The MIDI sources the picker offers (tests replace it).
     public static var midiPorts: () -> [String] = { midiSourcePorts() }
+    /// The chosen input device's channels read without the engine (tests
+    /// replace it; 5d-2 final review I4).
+    public static var deviceChannels: () -> InputChannelsRow? = { audioInputChannels() }
+    /// The chosen device's channels as last read without the engine.
+    public private(set) var device: InputChannelsRow?
+    /// The input channels the picker offers, by name: the engine's open
+    /// input, else the chosen device's (nil: unknown, nothing read yet).
+    var known: (count: Int, names: [String])? {
+        if let i = info, i.channels > 0 { return (Int(i.channels), i.names) }
+        if let d = device, d.channels > 0 { return (Int(d.channels), d.names) }
+        return nil
+    }
+    /// How many input channels the device has, when known.
+    public var knownChannels: Int? { known?.count }
     /// How long a clip mark stays lit (plan 5d-1 Ruling 27).
     public static let clipHold: Duration = .seconds(2)
 
@@ -50,10 +64,13 @@ public final class LaneInputs {
 
     // MARK: The picker
 
-    /// Reads the device's channels and names again (a picker opens).
+    /// Reads the device's channels and names again (a picker opens): the
+    /// engine's when this document holds it, else the chosen device's,
+    /// read without the engine (5d-2 final review I4).
     public func refreshInfo() {
         guard let m = document else { return }
         if let i = try? m.session.inputInfo() { info = i }
+        if (info?.channels ?? 0) == 0 { device = Self.deviceChannels() }
     }
 
     /// Whether the lane records audio (it plays to an audio path or has an
@@ -76,7 +93,9 @@ public final class LaneInputs {
         if kinds.audio {
             var returnOf: UInt64?
             if case .audio(_, _, let r) = lane.input { returnOf = r }
-            let n = max(Int(info?.channels ?? 0), 2)
+            // Exactly the device's channels when known (a mono input offers
+            // In 1 alone; final review I4), else two.
+            let n = known?.count ?? 2
             var choices: [InputChoice] = []
             for c in 0..<n {
                 choices.append(InputChoice(channelTitle(c), .audio(first: UInt16(c), stereo: false, returnOf: returnOf)))
@@ -104,7 +123,8 @@ public final class LaneInputs {
     }
 
     private func channelTitle(_ c: Int) -> String {
-        let name = info?.names.indices.contains(c) == true ? info?.names[c] ?? "" : ""
+        let names = known?.names ?? []
+        let name = names.indices.contains(c) ? names[c] : ""
         return name.isEmpty ? "In \(c + 1)" : "In \(c + 1) (\(name))"
     }
 
@@ -244,7 +264,9 @@ public final class LaneInputs {
         guard on != opening else { return }
         opening = on
         if on {
-            m.editor.status = Self.openingNote
+            // Never over another message, such as a refusal from the same
+            // click (5d-2 final review m6).
+            if m.editor.status == nil { m.editor.status = Self.openingNote }
         } else if m.editor.status == Self.openingNote {
             m.editor.status = nil
         }
