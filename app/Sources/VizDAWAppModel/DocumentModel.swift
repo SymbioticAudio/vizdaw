@@ -511,6 +511,21 @@ public final class DocumentModel {
     public func save() {
         editor.storeLayout()
         perform("Save Failed") { try $0.save() }
+        // Saved while recording: the take follows at Stop (plan 5d-1
+        // Ruling 19).
+        if alert == nil, (try? session.savesAfterPass()) == true { editor.status = RecordModel.savedDuringPass }
+    }
+
+    /// Whether File › Save (or Save As, `forceAs`) asks for a location.
+    /// While recording it never does: Save As waits for Stop (the status
+    /// line says so) and an untitled project's Save does too.
+    public func wantsSavePanel(forceAs: Bool) -> Bool {
+        guard forceAs || needsSaveAs else { return false }
+        if record.isRecording {
+            editor.status = RecordModel.saveAsWhileRecording
+            return false
+        }
+        return true
     }
 
     public func saveAs(path: String) {

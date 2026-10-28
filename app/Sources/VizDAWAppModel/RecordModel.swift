@@ -21,6 +21,16 @@ public final class RecordModel {
     public var preRollBars: UInt8 = 0
     /// Kept loop passes become takes.
     public var passesAsTakes = true
+    /// The toolbar's record popover is open; closing it drops the punch
+    /// drafts.
+    public var showsPopover = false {
+        didSet { if !showsPopover { punchDrafts = [:] } }
+    }
+    /// Text typed in the popover's punch fields, until Return.
+    var punchDrafts: [TransportField: String] = [:]
+    /// Free bytes on a project's volume (tests replace it; plan 5d-2 Task
+    /// 2).
+    public static var freeSpace: (String?) -> UInt64? = RecordModel.volumeFreeSpace
     /// What the core last reported.
     public private(set) var state: RecordStateRow?
     /// Recordings found in the project and not yet answered: crash

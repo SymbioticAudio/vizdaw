@@ -343,11 +343,11 @@ struct AppCommands: Commands {
 
     private func save(as forceAs: Bool) {
         guard let doc else { return }
-        if forceAs || doc.needsSaveAs {
+        if doc.wantsSavePanel(forceAs: forceAs) {
             if let path = Panels.chooseSaveLocation(title: doc.snapshot.title) {
                 doc.saveAs(path: path)
             }
-        } else {
+        } else if !(forceAs || doc.needsSaveAs) {
             doc.save()
         }
     }
