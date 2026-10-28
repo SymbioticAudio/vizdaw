@@ -18,8 +18,8 @@ use vizdaw_ffi::audio::{
 };
 use vizdaw_ffi::host::{
     debug_hold_microphone_prompt, debug_input_job, debug_input_open_delay,
-    debug_refuse_buffer_sizes, force_offline, hosts_created, reset_host, set_fake_input,
-    set_fake_microphone_prompt,
+    debug_refuse_buffer_sizes, force_offline, hosts_created, reset_host, set_audio_input_device,
+    set_fake_input, set_fake_microphone_prompt,
 };
 use vizdaw_ffi::{
     EditCommand, LaneEdit, LaneInputRow, LaneRow, MonitorModeRow, RecordSpecRow, Session, VizError,
@@ -484,5 +484,46 @@ fn a_lost_device_retires_the_host() {
     assert_eq!(vizdaw_ffi::host::holder(), None, "the host went");
     take_engine(&s, seq);
     assert_eq!(hosts_created(), made + 1, "the next Play made one");
+    s.close().unwrap();
+}
+
+/// Plan 5d-2 Task 1: an offline host offers no input device and no MIDI
+/// source (the pickers then show "Same as output" and "All MIDI Inputs").
+#[test]
+fn offline_hosts_offer_no_devices_or_sources() {
+    let _g = serial(None);
+    assert!(vizdaw_ffi::host::audio_input_devices().is_empty());
+    assert!(vizdaw_ffi::host::midi_source_ports().is_empty());
+}
+
+/// Plan 5d-2 pre-flight I4 (5d-1 carry #4): choosing another input device
+/// moves an input already open to it at once: closed, then reopened (two
+/// input changes offline); the same name again changes nothing.
+#[test]
+fn a_new_input_device_reopens_an_open_input() {
+    let _g = serial(Some(FakeInput::Signals));
+    set_audio_input_device(None);
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    monitored(&s, seq);
+    take_engine(&s, seq);
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
+    let n = s.debug_input_changes().unwrap();
+    set_audio_input_device(Some("Other In".into()));
+    assert_eq!(
+        s.debug_input_changes(),
+        Some(n + 2),
+        "closed, then reopened"
+    );
+    wait_until("the input to stay open", || {
+        s.debug_input_open() == Some(true)
+    });
+    set_audio_input_device(Some("Other In".into()));
+    assert_eq!(
+        s.debug_input_changes(),
+        Some(n + 2),
+        "the same device again"
+    );
+    set_audio_input_device(None);
     s.close().unwrap();
 }

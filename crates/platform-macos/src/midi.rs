@@ -332,6 +332,29 @@ pub fn list_destinations() -> Vec<MidiPortInfo> {
         .collect()
 }
 
+/// Sources visible to the system, except this process's own virtual
+/// sources (no client needed): what a MIDI lane's input picker offers
+/// (plan 5d-2 Task 1).
+pub fn list_sources() -> Vec<String> {
+    // SAFETY: a pure query.
+    let n = unsafe { MIDIGetNumberOfSources() };
+    let own = OWN_SOURCES.lock().map(|o| o.clone()).unwrap_or_default();
+    (0..n)
+        .filter_map(|i| {
+            // SAFETY: `i` is below the count just read.
+            let src = unsafe { MIDIGetSource(i) };
+            if src == 0 {
+                return None;
+            }
+            // SAFETY: the property keys are static CFStrings.
+            let (name_key, id_key) = unsafe { (kMIDIPropertyName, kMIDIPropertyUniqueID) };
+            let name = cfstring_property(src, name_key)?;
+            let mine = is_own_source(src, int_property(src, id_key), Some(name.as_str()), &own);
+            (!mine && !name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
 /// One CoreMIDI client plus the sender thread for every output it opened.
 pub struct MidiSystem {
     client: MIDIClientRef,

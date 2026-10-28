@@ -6,14 +6,16 @@ import VizDAWCore
 /// §6.5): what Record asks the core for, what the core reports while it
 /// records, and the crash-recovery offer. Replace, punch and loop come
 /// from the transport (overdub, the punch fields, Loop); count-in,
-/// pre-roll and passes-as-takes are kept here for plan 5d's record
-/// popover (and `record.set`).
+/// pre-roll and passes-as-takes are kept here for the record popover (and
+/// `record.set`), starting from Settings › Recording's defaults.
 @Observable
 @MainActor
 public final class RecordModel {
     @ObservationIgnored weak var document: DocumentModel?
-    /// Bars of count-in (0–4; the core refuses more than 0 until plan 5d
-    /// plays the click).
+    /// What a new document's options start as (Settings › Recording; plan
+    /// 5d-2 Ruling 3).
+    public static var defaults = RecordDefaults()
+    /// Bars of count-in (0–4).
     public var countInBars: UInt8 = 0
     /// Bars of pre-roll (0–8).
     public var preRollBars: UInt8 = 0
@@ -29,7 +31,13 @@ public final class RecordModel {
     /// Why Record is refused while step entry is on (spec §6.4).
     public static let stepEntryOn = "Step entry is on: turn it off to record."
 
-    init(document: DocumentModel) { self.document = document }
+    init(document: DocumentModel) {
+        self.document = document
+        let d = Self.defaults
+        countInBars = d.countInBars
+        preRollBars = d.preRollBars
+        passesAsTakes = d.passesAsTakes
+    }
 
     /// A pass is recording.
     public var isRecording: Bool { state?.recording ?? false }

@@ -499,13 +499,10 @@ final class AppControlHost: ControlHost {
     var nudge: NudgeSettings { editingPreferences.nudge }
     var keys: KeyBindings { keyBindings }
 
-    /// `audio.set` (plan 5d-1 Ruling 26). Plan 5d-2 routes this through
-    /// the app's audio preferences, which also keep it.
+    /// `audio.set` (plan 5d-1 Ruling 26): through the app's audio
+    /// preferences, which keep it (plan 5d-2 Ruling 2).
     func applyAudio(_ change: AudioChange) throws {
-        if let b = change.bufferFrames { try setIoBufferFrames(frames: b) }
-        if let on = change.softwareMonitoring { setSoftwareMonitoring(on: on) }
-        if let d = change.inputDevice { setAudioInputDevice(name: d) }
-        if let t = change.latencyTrim { setRecordLatencyTrim(frames: t) }
+        try audioPreferences.set(change)
     }
 
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {

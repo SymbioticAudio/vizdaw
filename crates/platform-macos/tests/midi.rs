@@ -193,3 +193,18 @@ fn a_source_listener_reconnects_new_sources_without_doubling_old_ones() {
     assert_eq!(g.iter().filter(|b| *b == &vec![0x95, 60, 1]).count(), 1);
     assert_eq!(g.iter().filter(|b| *b == &vec![0x96, 61, 2]).count(), 1);
 }
+
+/// Plan 5d-2 Task 1: the input picker's MIDI sources leave out this
+/// process's own virtual sources (they carry VizDAW's own output).
+#[test]
+fn sources_are_listed_without_this_processs_own() {
+    let mut sys = MidiSystem::new("VizDAW Sources Test").unwrap();
+    let _out = sys.open_virtual_source("VizDAW Sources Test Out").unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let names = platform_macos::midi::list_sources();
+    assert!(
+        !names.iter().any(|n| n == "VizDAW Sources Test Out"),
+        "{names:?}"
+    );
+    assert!(names.iter().all(|n| !n.is_empty()), "{names:?}");
+}

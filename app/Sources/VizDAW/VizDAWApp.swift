@@ -53,6 +53,9 @@ struct VizDAWApp: App {
         // The catalog and support folder exist before any project can open
         // (launch arguments, Finder opens), so "Disable ‹plugin›" works.
         LaunchArguments.parseFlags(CommandLine.arguments)
+        // The audio settings reach the core before any document opens
+        // (plan 5d-2 Ruling 2; 5d-1 carry: before the first host opens).
+        audioPreferences.applyAll()
         MediaModel.channelIsOn = { ControlChannel.active }
         // The control channel (control spec §8) starts before any document
         // opens, so launch-time dialogs already go to it instead of the screen.

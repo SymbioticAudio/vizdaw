@@ -433,12 +433,33 @@ pub fn hold_next_rebuild() -> RebuildGate {
 static INPUT_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Chooses the audio input device by name (`None`: "Same as output").
-/// Takes effect when the next host opens its input; a device that failed
-/// to open is tried again then (plan 5d-1 Ruling 15).
+/// Takes effect at once for an open input (it is reopened on the input
+/// thread); while recording or measuring, at the next open. A device that
+/// failed to open is tried again then (plan 5d-1 Ruling 15).
 #[uniffi::export]
 pub fn set_audio_input_device(name: Option<String>) {
-    *lock(&INPUT_DEVICE) = name.filter(|n| !n.is_empty());
+    let name = name.filter(|n| !n.is_empty());
+    // Lock order HOST → INPUT_DEVICE: `INPUT_DEVICE` is released before
+    // `HOST` is taken below.
+    let changed = {
+        let mut d = lock(&INPUT_DEVICE);
+        let changed = *d != name;
+        *d = name;
+        changed
+    };
     clear_input_failure();
+    if changed {
+        // An input already open (or opening) moves to the new device now:
+        // closed, then reopened by the input thread with the new config
+        // (`pending_input`), offline as two input changes. Under a record
+        // hold or a measurement it applies at the next open (pre-flight I4).
+        if let Some(h) = lock(&HOST).as_mut() {
+            if !h.record_hold && h.measure.is_none() && h.asked_input() {
+                h.ensure_input(false);
+                h.ensure_input(true);
+            }
+        }
+    }
 }
 
 /// Lets the next input open try the device again after it failed (plan
@@ -1044,6 +1065,56 @@ fn destination_ports() -> Vec<String> {
             .into_iter()
             .map(|p| p.name)
             .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+/// The audio input devices Settings › Audio offers (plan 5d-2 Task 1):
+/// every device with input channels on a live host; none offline.
+/// Infallible: the body runs inside `catch_unwind`, so a panic in the
+/// HAL listing answers no devices rather than crossing the FFI (5d-2
+/// pre-flight M1).
+#[uniffi::export]
+pub fn audio_input_devices() -> Vec<String> {
+    std::panic::catch_unwind(audio_input_devices_body).unwrap_or_default()
+}
+
+/// [`audio_input_devices`]' body, which may panic.
+fn audio_input_devices_body() -> Vec<String> {
+    if offline_mode() {
+        return Vec::new();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform_macos::hal::input_devices()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+/// The MIDI sources a MIDI lane's input picker offers (plan 5d-2 Task 1):
+/// the system's sources but VizDAW's own on a live host; none offline.
+/// Infallible: the body runs inside `catch_unwind`, so a panic in the
+/// CoreMIDI listing answers no sources rather than crossing the FFI (5d-2
+/// pre-flight M1).
+#[uniffi::export]
+pub fn midi_source_ports() -> Vec<String> {
+    std::panic::catch_unwind(midi_source_ports_body).unwrap_or_default()
+}
+
+/// [`midi_source_ports`]' body, which may panic.
+fn midi_source_ports_body() -> Vec<String> {
+    if offline_mode() {
+        return Vec::new();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform_macos::midi::list_sources()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -2874,6 +2945,10 @@ pub fn release(owner: u64) {
             // at the renderer's next block, so `busy()` would still see it
             // playing and leave the input open and monitored for nobody.
             // `retire` drains the note-offs the Stop sends.
+            // `close` finishes any pass before it releases, so `record_hold`
+            // is never set here today. It stays as a defence: a future path
+            // that left the hold set would otherwise close the input under a
+            // recording.
             if !h.record_hold && (h.wants_live() || h.job.is_some()) {
                 let old = slot.take();
                 *lock(&MIDI_TO) = None;
@@ -3049,6 +3124,9 @@ pub fn start_measure(
         })?;
         host.faults.clear();
         // What the holder asked of the input before Measure's own ask.
+        // Known race (5d-1 re-review, T7 r1): if the holder edits its input
+        // during the wait below and Measure is then refused, this restores
+        // the earlier ask until the holder's next reload or edit.
         let asked = host.asked_input();
         host.ensure_input(true);
         (host.generation, host.owner, asked)
