@@ -78,6 +78,7 @@ struct TransportToolbar: ToolbarContent {
             ) {
                 Label("Loop", systemImage: "repeat")
             }
+            RecordControls(model: model, record: model.record)
         }
         ToolbarItemGroup(placement: .principal) {
             Text(Formatting.position(model.transport))
