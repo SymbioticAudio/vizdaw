@@ -1075,7 +1075,7 @@ with a microphone or a line source, a MIDI keyboard, and a loopback
 cable (an output wired back to an input). Use a throwaway home
 (`vizctl launch`) for the channel steps. The lane headers' input
 pickers, monitor buttons and meters, the toolbar's Record button and
-Settings › Audio (steps 144–158) do what the channel commands below do;
+Settings › Audio (steps 144–159) do what the channel commands below do;
 the channel steps stay as they are.
 
 129. Microphone permission: macOS keeps the permission per app bundle,
@@ -1123,8 +1123,10 @@ the channel steps stay as they are.
 132. Separate input device: in Settings › Audio choose another device
      for input, e.g. the built-in microphone while playing through the
      interface (back to "Same as output" afterwards). A new device takes
-     effect at once, even with a lane armed; while recording, from the
-     next recording. Recording works,
+     effect at once, even with a lane armed; while recording or
+     measuring, once that stops, so the next recording uses it (5d-2
+     final review I1: choose the device mid-pass, stop, record again and
+     listen: the new take is from the new device). Recording works,
      stays in time with playback on the output, playback stays on the
      interface, and Audio MIDI Setup shows no extra device (the
      aggregate is private). Close the document or quit: no "VizDAW
@@ -1258,7 +1260,9 @@ microphone or line input, a MIDI keyboard, a loopback cable). No test
 drives these views; their models are tested (`RecordOptionsTests`,
 `LaneInputsTests`, `AudioReadoutsTests`, `SynthSheetsTests`,
 `GrowingTakeTests`) and the e2e `arms_meters_counts_in_and_draws_the_take`
-checks the same behaviour through the channel.
+checks the same behaviour through the channel. Steps that record
+(144, 145, 149, 153, 154) record over lanes: use a throwaway project or
+a copy, not one you care about.
 
 144. Record button and popover: the toolbar shows a Record button (a
      circle) and a chevron after Loop. R and the button both record; the
@@ -1323,8 +1327,9 @@ checks the same behaviour through the channel.
 151. Settings › Audio: Input device lists "Same as output" and every
      input device; a chosen device that is unplugged shows "(not
      connected)". A new device takes effect at once, even with a lane
-     armed (the meter and monitoring move to it); while recording, from
-     the next recording (the caption says so). Software Monitoring off: a
+     armed (the meter and monitoring move to it); while recording or
+     measuring, once that stops, so the next recording uses it (the
+     caption says so). Software Monitoring off: a
      monitored input falls silent at once while the keyboard still plays
      thru and Record still records. I/O Buffer Size: each size changes
      the readout; once the input has opened it reads "Round trip … ms
@@ -1366,9 +1371,9 @@ checks the same behaviour through the channel.
      Stereo), Also record the MIDI lane, and Mute the MIDI lane after
      recording; Track Synth adds "<synth> audio" below as step 140 does
      (one undo step) and the sheet stays open. Measure: a spinner shows,
-     the five notes play, and the window stays responsive (the first
-     Measure may pause the window for up to 3 s while the input opens;
-     then meters move, menus open) until "Return latency … ms (5 of 5
+     the five notes play, and the window stays responsive (except that
+     the first Measure may pause it for up to 3 s while the input
+     opens): meters move, menus open, until "Return latency … ms (5 of 5
      notes heard)." Done closes it. After a Measure, the lane's plugin
      inserts come back on their own within a moment (the engine may
      restart once); the playhead does not move.
@@ -1389,8 +1394,9 @@ checks the same behaviour through the channel.
      (or "Stop Recording") and "Record Options"; a mixer strip's monitor
      button reads its mode.
 159. Microphone prompt left up (plan 5d-1 final review m1): on a Mac where
-     VizDAW has never asked, arm an audio lane and leave macOS's prompt
-     unanswered for more than 2 minutes. The input does NOT open (the
-     meter stays yellow, then empty), and the fault popover says "audio
-     input could not open: waiting for microphone permission; arm the
-     lane again". Answer Allow, arm again: it opens.
+     VizDAW has never asked (reset it with `tccutil reset Microphone
+     org.vizdaw.VizDAW`, as in step 129), arm an audio lane and leave
+     macOS's prompt unanswered for more than 2 minutes. The input does
+     NOT open (the meter stays yellow, then empty), and the fault popover
+     says "audio input could not open: waiting for microphone permission;
+     arm the lane again". Answer Allow, arm again: it opens.

@@ -434,7 +434,8 @@ static INPUT_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Chooses the audio input device by name (`None`: "Same as output").
 /// Takes effect at once for an open input (it is reopened on the input
-/// thread); while recording or measuring, at the next open. A device that
+/// thread); while recording or measuring, when the pass or measurement
+/// ends (5d-2 final review I1). A device that
 /// failed to open is tried again then (plan 5d-1 Ruling 15).
 #[uniffi::export]
 pub fn set_audio_input_device(name: Option<String>) {
@@ -453,7 +454,8 @@ pub fn set_audio_input_device(name: Option<String>) {
         // it) moves to the new device now: closed, then reopened by the
         // input thread with the new config (`pending_input`), offline as
         // two input changes. Under a record
-        // hold or a measurement it applies at the next open (pre-flight I4).
+        // hold or a measurement it applies when that ends
+        // ([`Host::settle_input`]; 5d-2 final review I1).
         if let Some(h) = lock(&HOST).as_mut() {
             if !h.record_hold && h.measure.is_none() && h.asked_input() {
                 h.ensure_input(false);
@@ -1547,6 +1549,10 @@ struct Host {
     record_hold: bool,
     /// What the input should become once the hold ends.
     pending_input: Option<bool>,
+    /// The input device the open input (or the input thread's open) uses:
+    /// a different choice reopens it once nothing holds the input (5d-2
+    /// final review I1).
+    opened_device: Option<String>,
     /// Why a live output's input could not open: not tried again (each
     /// try restarts the device) until no lane wants input any more.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1702,6 +1708,7 @@ impl Host {
             input_changes: 0,
             record_hold: false,
             pending_input: None,
+            opened_device: None,
             input_failed: None,
             measure: None,
             generation: GENERATIONS.fetch_add(1, Ordering::Relaxed),
@@ -1735,11 +1742,28 @@ impl Host {
         // 22; 5c-2 final review finding 12). Since Task 7 the change runs
         // on the input thread, so its failure is asynchronous and reaches
         // the faults from there: `ensure_input` cannot fail the call.
-        if let Some(want) = want.or(self.pending_input.take()) {
-            self.pending_input = None;
-            self.ensure_input(want);
-        }
+        let want = want.or(self.pending_input.take());
+        self.pending_input = None;
+        self.settle_input(want);
         removed
+    }
+
+    /// Applies `want` (asked while a record hold or a measurement kept the
+    /// input as it was), and moves an input left open to a device chosen
+    /// meanwhile: closed, then reopened (5d-2 final review I1). An input
+    /// thread at work checks the device itself when it hands back
+    /// ([`Host::finish_job`]).
+    fn settle_input(&mut self, want: Option<bool>) {
+        let stale =
+            self.job.is_none() && self.input_open && self.opened_device != *lock(&INPUT_DEVICE);
+        match want {
+            Some(true) | None if stale => {
+                self.ensure_input(false);
+                self.ensure_input(true);
+            }
+            Some(w) => self.ensure_input(w),
+            None => {}
+        }
     }
 
     /// Opens or closes a live output's input to match `want` (spec §6.1),
@@ -1774,9 +1798,8 @@ impl Host {
     /// asked meanwhile.
     fn end_record_hold(&mut self) {
         self.record_hold = false;
-        if let Some(want) = self.pending_input.take() {
-            self.ensure_input(want);
-        }
+        let want = self.pending_input.take();
+        self.settle_input(want);
     }
 
     fn apply_input(&mut self, want: bool) {
@@ -1788,7 +1811,9 @@ impl Host {
                 return;
             }
             let cfg = live_audio_config(self.project_rate, want);
-            self.start_job(Opener::Hal { backend, cfg }, want);
+            // The job opens the device in `cfg`: one read (Task 1 rr-m1).
+            let device = cfg.input_device.clone();
+            self.start_job(Opener::Hal { backend, cfg }, want, device);
             return;
         }
         #[cfg(all(feature = "test-hooks", target_os = "macos"))]
@@ -1819,13 +1844,17 @@ impl Host {
                 None
             };
             if !delay.is_zero() || prompt.is_some() {
-                self.start_job(Opener::Fake { delay, prompt }, want);
+                let device = lock(&INPUT_DEVICE).clone();
+                self.start_job(Opener::Fake { delay, prompt }, want, device);
                 return;
             }
         }
         // The fake input stays; what would be open is tracked.
         if want != self.input_open {
             self.engine.clear_input_peaks();
+            if want {
+                self.opened_device = lock(&INPUT_DEVICE).clone();
+            }
         }
         self.input_open = want;
     }
@@ -1851,12 +1880,12 @@ impl Host {
     }
 
     /// Starts the input thread on `opener` for an input that should end
-    /// `want` (Ruling 13).
+    /// `want` (Ruling 13), opening `device`.
     #[cfg_attr(
         not(any(target_os = "macos", feature = "test-hooks")),
         allow(dead_code)
     )]
-    fn start_job(&mut self, opener: Opener, want: bool) {
+    fn start_job(&mut self, opener: Opener, want: bool, device: Option<String>) {
         let flags = Arc::new(JobFlags::default());
         let (generation, theirs) = (self.generation, Arc::clone(&flags));
         let spawned = std::thread::Builder::new()
@@ -1868,12 +1897,11 @@ impl Host {
             });
         match spawned {
             Ok(t) => {
-                // Under the host lock: HOST → INPUT_DEVICE is the order.
                 self.job = Some(InputJob {
                     flags,
                     thread: Some(t),
                     want,
-                    device: lock(&INPUT_DEVICE).clone(),
+                    device,
                 })
             }
             Err(e) => {
@@ -1949,6 +1977,9 @@ impl Host {
             Opened::Fake => self.input_open = want,
         }
         let _ = want;
+        if let Some(j) = job.as_ref().filter(|j| j.want && self.input_open) {
+            self.opened_device = j.device.clone();
+        }
         if self.input_open != was {
             self.input_changes += 1;
             // No peak held under the old config outlives it.
@@ -1958,7 +1989,8 @@ impl Host {
         }
         // A device chosen while this job opened the one before (5d-2 Task 1
         // review I1): closed, then reopened with the new one. Under a record
-        // hold or a measurement the pair is left pending, for the next open.
+        // hold or a measurement the pair waits for it to end
+        // ([`Host::settle_input`]).
         let stale =
             self.input_open && job.is_some_and(|j| j.want && j.device != *lock(&INPUT_DEVICE));
         // A broken device is not tried again: the next claim replaces the
@@ -2111,6 +2143,9 @@ impl Host {
                     });
                 };
                 let cfg = live_audio_config(self.project_rate, self.input_open);
+                if self.input_open {
+                    self.opened_device = cfg.input_device.clone();
+                }
                 // The size asked for is not softened: a refusal is an
                 // error, and the old size comes back.
                 let (info, refused) = match b.open(&cfg) {

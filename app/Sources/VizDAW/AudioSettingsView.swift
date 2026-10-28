@@ -18,7 +18,7 @@ struct AudioSettingsView: View {
                 ) {
                     ForEach(prefs.inputDeviceChoices(), id: \.title) { c in Text(c.title).tag(c.name) }
                 }
-                Text("A new device takes effect at once; while recording, from the next recording.")
+                Text("A new device takes effect at once; while recording or measuring, once that stops.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle(

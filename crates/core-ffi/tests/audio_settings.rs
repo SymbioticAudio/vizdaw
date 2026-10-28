@@ -530,6 +530,43 @@ fn a_new_input_device_reopens_an_open_input() {
     s.close().unwrap();
 }
 
+/// 5d-2 final review I1: a device chosen during a pass is not opened under
+/// it (the input stays as it is), but at Stop: the input is closed, then
+/// reopened on the new device (two input changes), so the next recording
+/// uses it, as Settings says.
+#[test]
+fn a_device_chosen_while_recording_reaches_the_input_at_stop() {
+    let _g = serial(Some(FakeInput::Signals));
+    set_audio_input_device(None);
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    monitored(&s, seq);
+    let lp = lane(&s, seq, "Loop").id;
+    edit(
+        &s,
+        LaneEdit::SetFlags {
+            seq,
+            lane: lp,
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        },
+    )
+    .unwrap();
+    take_engine(&s, seq);
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
+    s.record(seq, spec()).unwrap();
+    let n = s.debug_input_changes().unwrap();
+    set_audio_input_device(Some("Other In".into()));
+    assert_eq!(s.debug_input_changes(), Some(n), "not under the pass");
+    s.stop().unwrap();
+    wait_until("the input to reopen", || {
+        s.debug_input_changes() == Some(n + 2) && s.debug_input_open() == Some(true)
+    });
+    set_audio_input_device(None);
+    s.close().unwrap();
+}
+
 /// Plan 5d-2 Task 1 review I1: a device chosen while the input is still
 /// opening reaches it: the open lands on the device the job started with,
 /// then the input is closed and reopened (three input changes).
