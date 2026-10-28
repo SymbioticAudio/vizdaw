@@ -1517,16 +1517,8 @@ fn placeholder_lines(s: &Session) -> Vec<String> {
         .collect()
 }
 
-/// Plan 5d-2 Task 8 review I1: Measure run off the thread that holds the
-/// session's plugin host (the app's detached task) claims the engine with
-/// no plugin host. It must not make the empty factory this document's:
-/// after another window took the engine, the document's plugin plays
-/// again at its next Play.
-#[test]
-fn a_measure_off_the_plugin_thread_keeps_the_documents_plugins() {
-    let g = serial(Some(DELAY_MS), None);
-    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
-    let d = doc(true, 2);
+/// `d`'s document with a Test Gain insert on the master, and the insert.
+fn with_gain(d: &Doc) -> (Document, core_model::ids::PluginInstanceId) {
     let mut b = Builder::from_doc(d.doc.clone());
     let master = b.strip_of(StripKind::Master).unwrap();
     let slot = b
@@ -1541,7 +1533,21 @@ fn a_measure_off_the_plugin_thread_keeps_the_documents_plugins() {
             },
         )
         .unwrap();
-    let a = untitled(&g, b.finish());
+    (b.finish(), slot)
+}
+
+/// Plan 5d-2 Task 8 review I1: Measure run off the thread that holds the
+/// session's plugin host (the app's detached task) claims the engine with
+/// no plugin host. It must not make the empty factory this document's:
+/// after another window took the engine, the document's plugin plays
+/// again at its next Play.
+#[test]
+fn a_measure_off_the_plugin_thread_keeps_the_documents_plugins() {
+    let g = serial(Some(DELAY_MS), None);
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    let d = doc(true, 2);
+    let (with_gain, slot) = with_gain(&d);
+    let a = untitled(&g, with_gain);
     let live = |s: &Session| {
         s.plugin_slots()
             .unwrap()
@@ -1572,11 +1578,54 @@ fn a_measure_off_the_plugin_thread_keeps_the_documents_plugins() {
         Some(a_id),
         "a claim with no plugin host does not take the factory"
     );
-    // A's next Play plays its plugin again.
+    // An idle claim with the plugin host (an arm, as monitoring needs)
+    // brings the document's plugin back without a Play (re-review N1).
+    arm(&a, d.seq, d.rec, false);
+    arm(&a, d.seq, d.rec, true);
+    assert_eq!(
+        vizdaw_ffi::host::factory_owner(),
+        Some(a_id),
+        "the arm's claim installs A's factory"
+    );
+    idle_until(&a, |s| live(s) && placeholder_lines(s).is_empty());
+    assert!(!a.transport().unwrap().playing);
+    // A's next Play plays its plugin.
     a.play(d.seq.0).unwrap();
     idle_until(&a, plays_its_plugin);
     assert_eq!(vizdaw_ffi::host::factory_owner(), Some(a_id));
     a.stop().unwrap();
     other.close().unwrap();
+    a.close().unwrap();
+}
+
+/// Plan 5d-2 Task 8 re-review N2: a claim with no plugin host keeps an
+/// engine whose factory nobody owns, so Measures run off the plugin
+/// thread one after another do not reopen the device each time.
+#[test]
+fn measures_off_the_plugin_thread_keep_the_engine() {
+    let g = serial(Some(DELAY_MS), None);
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    let d = doc(true, 2);
+    let (with_gain, _) = with_gain(&d);
+    let a = untitled(&g, with_gain);
+    let measure = || {
+        let a2 = Arc::clone(&a);
+        let dest = d.synth.0;
+        let m = std::thread::spawn(move || a2.measure_return(dest))
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.onsets, 5);
+    };
+    measure();
+    assert_eq!(vizdaw_ffi::host::factory_owner(), None);
+    let created = vizdaw_ffi::host::hosts_created();
+    measure();
+    measure();
+    assert_eq!(
+        vizdaw_ffi::host::hosts_created(),
+        created,
+        "the same engine for each Measure"
+    );
     a.close().unwrap();
 }

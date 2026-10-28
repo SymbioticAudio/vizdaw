@@ -2755,9 +2755,13 @@ pub fn claim_idle(
     looped: bool,
     plugins: Option<&mut PluginHost>,
 ) -> Result<bool, VizError> {
+    // Held already, unless a claim with no plugin host (Measure off the
+    // plugin thread) left the engine without this session's factory: this
+    // one, with the host, installs it (5d-2 Task 8 re-review N1).
+    let hosted = plugins.is_some();
     if lock(&HOST)
         .as_ref()
-        .is_some_and(|h| h.owner == owner && h.seq == seq)
+        .is_some_and(|h| h.owner == owner && h.seq == seq && (h.factory_owner == owner || !hosted))
     {
         return Ok(false);
     }
