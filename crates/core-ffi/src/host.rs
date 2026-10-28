@@ -449,9 +449,10 @@ pub fn set_audio_input_device(name: Option<String>) {
     };
     clear_input_failure();
     if changed {
-        // An input already open (or opening) moves to the new device now:
-        // closed, then reopened by the input thread with the new config
-        // (`pending_input`), offline as two input changes. Under a record
+        // An input already open (or opening: [`Host::finish_job`] reopens
+        // it) moves to the new device now: closed, then reopened by the
+        // input thread with the new config (`pending_input`), offline as
+        // two input changes. Under a record
         // hold or a measurement it applies at the next open (pre-flight I4).
         if let Some(h) = lock(&HOST).as_mut() {
             if !h.record_hold && h.measure.is_none() && h.asked_input() {
@@ -1282,6 +1283,9 @@ struct InputJob {
     thread: Option<JoinHandle<()>>,
     /// Open or closed, as the thread will leave the input.
     want: bool,
+    /// The input device chosen when the job started (what an open opens;
+    /// 5d-2 Task 1 review I1).
+    device: Option<String>,
 }
 
 /// What an input thread does without the host lock.
@@ -1864,10 +1868,12 @@ impl Host {
             });
         match spawned {
             Ok(t) => {
+                // Under the host lock: HOST → INPUT_DEVICE is the order.
                 self.job = Some(InputJob {
                     flags,
                     thread: Some(t),
                     want,
+                    device: lock(&INPUT_DEVICE).clone(),
                 })
             }
             Err(e) => {
@@ -1890,7 +1896,7 @@ impl Host {
     /// Takes what the input thread found (under the host lock), then
     /// applies what was asked meanwhile.
     fn finish_job(&mut self, want: bool, done: Opened) {
-        self.job = None;
+        let job = self.job.take();
         let was = self.input_open;
         // A reopened device's peaks were cleared between its stop and
         // start (Task 4 parked item); clearing now would wipe fresh ones.
@@ -1950,10 +1956,23 @@ impl Host {
                 self.engine.clear_input_peaks();
             }
         }
+        // A device chosen while this job opened the one before (5d-2 Task 1
+        // review I1): closed, then reopened with the new one. Under a record
+        // hold or a measurement the pair is left pending, for the next open.
+        let stale =
+            self.input_open && job.is_some_and(|j| j.want && j.device != *lock(&INPUT_DEVICE));
         // A broken device is not tried again: the next claim replaces the
         // host, which opens what the lanes want (Task 7 review m4).
         if let Some(w) = self.pending_input.take().filter(|_| !self.broken) {
-            self.ensure_input(w);
+            if w && stale {
+                self.ensure_input(false);
+                self.ensure_input(true);
+            } else {
+                self.ensure_input(w);
+            }
+        } else if stale && !self.broken {
+            self.ensure_input(false);
+            self.ensure_input(true);
         }
     }
 

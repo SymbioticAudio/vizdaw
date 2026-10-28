@@ -36,6 +36,8 @@ fn serial(input: Option<FakeInput>) -> MutexGuard<'static, ()> {
     set_fake_microphone_prompt(None);
     debug_hold_microphone_prompt(false);
     reset_host();
+    // No test inherits another's input device (Task 1 review m1).
+    set_audio_input_device(None);
     g
 }
 
@@ -524,6 +526,34 @@ fn a_new_input_device_reopens_an_open_input() {
         Some(n + 2),
         "the same device again"
     );
+    set_audio_input_device(None);
+    s.close().unwrap();
+}
+
+/// Plan 5d-2 Task 1 review I1: a device chosen while the input is still
+/// opening reaches it: the open lands on the device the job started with,
+/// then the input is closed and reopened (three input changes).
+#[test]
+fn a_new_input_device_reaches_an_opening_input() {
+    let _g = serial(Some(FakeInput::Signals));
+    set_audio_input_device(None);
+    debug_input_open_delay(Some(Duration::from_millis(500)));
+    let s = Session::new_demo_audio().unwrap();
+    let seq = song(&s);
+    monitored(&s, seq);
+    take_engine(&s, seq);
+    assert!(debug_input_job(), "opening");
+    let n = s.debug_input_changes().unwrap();
+    set_audio_input_device(Some("Other In".into()));
+    wait_until("the reopen to finish", || {
+        !debug_input_job() && s.debug_input_open() == Some(true)
+    });
+    assert_eq!(
+        s.debug_input_changes(),
+        Some(n + 3),
+        "opened, closed, reopened"
+    );
+    debug_input_open_delay(None);
     set_audio_input_device(None);
     s.close().unwrap();
 }
