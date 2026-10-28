@@ -89,6 +89,24 @@ import VizDAWCore
             ])
     }
 
+    /// The core saturates the pass's file frame at `Int64.max` (5d-2 final
+    /// review I2): an anchor past the frame range draws no take, never traps.
+    @Test func aSaturatedFileFrameDrawsNothingAndNeverTraps() throws {
+        for punch in [nil, Int64(92_160)] {
+            let (m, f) = try recording(punchEnd: punch)
+            f.recordRow.passStartFileFrame = .max - 1
+            f.recordRow.lanes[0] = RecordLaneRow(
+                lane: 30, audio: true, path: "Media/Recorded/G.caf", clipped: 0, returnFrames: 4_800)
+            m.record.refresh()
+            #expect(m.record.growingTakes().isEmpty)
+            f.recordRow.passStartFileFrame = .min + 1
+            f.recordRow.lanes[0] = RecordLaneRow(
+                lane: 30, audio: true, path: "Media/Recorded/G.caf", clipped: 0, returnFrames: -4_800)
+            m.record.refresh()
+            #expect(m.record.growingTakes().isEmpty)
+        }
+    }
+
     @Test func theArrangementDrawsItFromTheLivePeaks() throws {
         let (m, f) = try recording()
         let v = ArrangementView(document: m)

@@ -33,20 +33,33 @@ extension RecordModel {
         guard let secs = try? m.session.secondsAt(seq: seq, ticks: ticks), secs.count == ticks.count else { return [] }
         let hz = Double(rate)
         let written = Int64(clamping: s.frames)
-        let startOff = Int64(((secs[1] - secs[0]) * hz).rounded())
-        let punchOff = secs.count == 3 ? Int64(((secs[2] - secs[0]) * hz).rounded()) : nil
+        // Checked throughout (5d-2 final review I2): the core saturates the
+        // pass's file frame at `Int64.max`, and a trap here is a crash
+        // mid-recording; a value out of range draws no take.
+        guard let startOff = Self.frames((secs[1] - secs[0]) * hz) else { return [] }
+        var punchOff: Int64?
+        if secs.count == 3 {
+            guard let p = Self.frames((secs[2] - secs[0]) * hz) else { return [] }
+            punchOff = p
+        }
         var out: [GrowingTake] = []
         for lane in s.lanes where lane.audio {
             // File frame `anchor` is heard at `passTick` (plan 5d-1 Task 10 review I1); signed.
-            let anchor = s.passStartFileFrame + lane.returnFrames
-            let wanted = anchor + max(0, startOff)
+            guard let anchor = Self.add(s.passStartFileFrame, lane.returnFrames),
+                let wanted = Self.add(anchor, max(0, startOff))
+            else { continue }
             let from = max(0, wanted)
             var to = written
-            if let p = punchOff { to = min(to, anchor + p) }
-            guard to > from else { continue }
+            if let p = punchOff {
+                guard let end = Self.add(anchor, p) else { continue }
+                to = min(to, end)
+            }
+            guard to > from, let fromOff = Self.sub(from, anchor), let toOff = Self.sub(to, anchor) else {
+                continue
+            }
             guard
                 let t = try? m.session.ticksAt(
-                    seq: seq, seconds: [secs[0] + Double(from - anchor) / hz, secs[0] + Double(to - anchor) / hz]),
+                    seq: seq, seconds: [secs[0] + Double(fromOff) / hz, secs[0] + Double(toOff) / hz]),
                 t.count == 2
             else { continue }
             let startTick = from == wanted ? start : t[0]
@@ -56,5 +69,20 @@ extension RecordModel {
                     lane: lane.lane, startTick: startTick, endTick: t[1], fromFrame: UInt64(from), toFrame: UInt64(to)))
         }
         return out
+    }
+
+    private static func add(_ a: Int64, _ b: Int64) -> Int64? {
+        let (r, o) = a.addingReportingOverflow(b)
+        return o ? nil : r
+    }
+
+    private static func sub(_ a: Int64, _ b: Int64) -> Int64? {
+        let (r, o) = a.subtractingReportingOverflow(b)
+        return o ? nil : r
+    }
+
+    /// `x` rounded to whole frames, or nil when it is not finite or out of range.
+    private static func frames(_ x: Double) -> Int64? {
+        Int64(exactly: x.rounded())
     }
 }
