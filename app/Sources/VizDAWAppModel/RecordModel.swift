@@ -21,12 +21,13 @@ public final class RecordModel {
     public var preRollBars: UInt8 = 0
     /// Kept loop passes become takes.
     public var passesAsTakes = true
-    /// The toolbar's record popover is open; closing it drops the punch
-    /// drafts.
+    /// The toolbar's record popover is open; closing it commits the punch
+    /// drafts (5d-2 final review I3).
     public var showsPopover = false {
-        didSet { if !showsPopover { punchDrafts = [:] } }
+        didSet { if !showsPopover { commitPunchDrafts() } }
     }
-    /// Text typed in the popover's punch fields, until Return.
+    /// Text typed in the popover's punch fields, until Return, the field
+    /// losing focus, the popover closing or Record.
     var punchDrafts: [TransportField: String] = [:]
     /// Free bytes on a project's volume (tests replace it; plan 5d-2 Task
     /// 2).
@@ -84,6 +85,9 @@ public final class RecordModel {
         guard let seq = m.selectedSeq else { return .unavailable(TransportCommands.noSequence) }
         guard !m.stepEntry.isOn else { return .refused(Self.stepEntryOn) }
         guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
+        // A punch time typed in the popover is what this pass punches at
+        // (5d-2 final review I3).
+        commitPunchDrafts()
         do {
             try m.session.record(seq: seq, spec: spec())
         } catch {

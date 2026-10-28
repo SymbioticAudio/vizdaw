@@ -53,6 +53,9 @@ struct RecordControls: View {
 struct RecordPopover: View {
     let model: DocumentModel
     @Bindable var record: RecordModel
+    /// The punch field being edited: leaving it commits its draft, as a
+    /// macOS text field does (5d-2 final review I3).
+    @FocusState private var focusedPunch: TransportField?
 
     var body: some View {
         Form {
@@ -85,6 +88,9 @@ struct RecordPopover: View {
         .disabled(record.isRecording)
         .frame(width: 340)
         // The punch fields take letters and digits, not transport keys.
+        .onChange(of: focusedPunch) { old, _ in
+            if let old { record.commitPunch(old) }
+        }
         .onAppear { model.editor.beginTextEditing("recordPopover") }
         .onDisappear { model.editor.endTextEditing("recordPopover") }
     }
@@ -92,6 +98,7 @@ struct RecordPopover: View {
     private func punchField(_ f: TransportField) -> some View {
         TextField(f.title, text: Binding(get: { record.punchText(f) }, set: { record.setPunchText(f, $0) }))
             .font(.body.monospacedDigit())
+            .focused($focusedPunch, equals: f)
             .onSubmit { record.commitPunch(f) }
     }
 

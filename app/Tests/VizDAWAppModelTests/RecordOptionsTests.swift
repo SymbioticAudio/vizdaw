@@ -47,11 +47,43 @@ import VizDAWCore
         r.commitPunch(.punchIn)
         #expect(m.editor.layout.transport.punchIn == 61_440)
         #expect(r.punchText(.punchIn) == m.fieldText(.punchIn))
-        // Closing the popover drops an uncommitted draft.
+        // Closing the popover commits a draft (final review I3); one that
+        // is not a position is refused, says why, and shows the value.
         r.showsPopover = true
         r.setPunchText(.punchOut, "x")
         r.showsPopover = false
         #expect(r.punchText(.punchOut) == m.fieldText(.punchOut))
+        #expect(m.editor.status?.contains("is not a position") == true)
+    }
+
+    /// 5d-2 final review I3: In typed, Tab, Out typed, then the popover
+    /// closes without Return: both are committed, never shown but stale.
+    @Test func closingThePopoverCommitsEveryPunchDraft() throws {
+        let (m, _) = try demo()
+        m.select(3)
+        let r = m.record
+        r.setPunch(true)
+        r.showsPopover = true
+        r.setPunchText(.punchIn, "3")
+        r.setPunchText(.punchOut, "6")
+        r.showsPopover = false
+        #expect(m.editor.layout.transport.punchIn == 122_880)
+        #expect(m.editor.layout.transport.punchOut == 307_200)
+        #expect(r.spec().punch == TickRange(start: 122_880, end: 307_200))
+    }
+
+    /// The toolbar's Record button records at the typed punch time, not
+    /// the old one (final review I3).
+    @Test func recordCommitsThePunchDraftsFirst() throws {
+        let (m, f) = try armed()
+        let r = m.record
+        r.setPunch(true)
+        r.showsPopover = true
+        r.setPunchText(.punchIn, "2")
+        r.pressRecord()
+        #expect(r.isRecording)
+        #expect(f.recordCalls.last?.1.punch?.start == 61_440)
+        #expect(r.punchText(.punchIn) == m.fieldText(.punchIn))
     }
 
     @Test func theTimeLeftCountsTheArmedAudioChannels() throws {

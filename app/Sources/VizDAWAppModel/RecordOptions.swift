@@ -34,11 +34,18 @@ extension RecordModel {
 
     public func setPunchText(_ f: TransportField, _ text: String) { punchDrafts[f] = text }
 
-    /// Return in a punch field: commits its draft (a refusal says why in
+    /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
     /// the status line and keeps the old value).
     public func commitPunch(_ f: TransportField) {
         guard let text = punchDrafts.removeValue(forKey: f) else { return }
-        document?.commitField(f, text)
+        _ = document?.commitField(f, text)
+    }
+
+    /// Commits every punch draft, In first (5d-2 final review I3: the
+    /// popover closing or Record pressed never leaves a typed time shown
+    /// but unused). A refusal says why in the status line.
+    public func commitPunchDrafts() {
+        for f in [TransportField.punchIn, .punchOut] { commitPunch(f) }
     }
 
     /// The count-in is playing (the timeline waits).
