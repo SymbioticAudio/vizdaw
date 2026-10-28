@@ -2193,7 +2193,14 @@ fn the_take_draws_while_it_grows_and_its_overview_peaks_at_the_sine() {
     let s = untitled(&g, d.doc.clone());
     s.locate(4 * Q).unwrap();
     s.record(d.seq.0, spec()).unwrap();
-    wait_until("a second of audio", || frames(&s) >= 48_000);
+    // The live peaks trail the captured frames by the writer's latest
+    // blocks, so wait for the peaks themselves to cover the first second
+    // (a slow CI runner showed the last column still silent).
+    wait_until("a second of peaks", || {
+        frames(&s) >= 48_000
+            && s.recording_waveform(d.mic.0, 0, 48_000, 100)
+                .is_ok_and(|w| w.max.last().is_some_and(|x| *x > 0.2))
+    });
     let st = s.record_state().unwrap();
     assert_eq!(
         (

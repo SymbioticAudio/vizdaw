@@ -1965,6 +1965,7 @@ impl Host {
         let was = self.input_open;
         // A reopened device's peaks were cleared between its stop and
         // start (Task 4 parked item); clearing now would wipe fresh ones.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut cleared = false;
         match done {
             #[cfg(target_os = "macos")]

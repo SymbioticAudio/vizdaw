@@ -7,6 +7,7 @@
 //! stand in for the device's slowness, the prompt and a busy interface:
 //! no device is opened and no microphone asked.
 
+#![cfg(target_os = "macos")]
 #![recursion_limit = "256"]
 
 mod common;

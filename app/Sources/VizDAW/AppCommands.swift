@@ -43,62 +43,66 @@ struct AppCommands: Commands {
     private var tornWindow: UUID? { store.tornFocus?.window }
 
     var body: some Commands {
-        CommandGroup(replacing: .newItem) {
-            Button("New") {
-                if let f = FormatPanel.run(
-                    title: "New Project", message: "Every audio file of the project is stored in this format.",
-                    initial: store.defaultFormat, ok: "Create")
-                {
-                    store.defaultFormat = f
-                    show(store.newProject(f))
+        // Older SDKs (CI's macos-15 Xcode) take at most 10 items per
+        // builder, so the standard groups go in one Group.
+        Group {
+            CommandGroup(replacing: .newItem) {
+                Button("New") {
+                    if let f = FormatPanel.run(
+                        title: "New Project", message: "Every audio file of the project is stored in this format.",
+                        initial: store.defaultFormat, ok: "Create")
+                    {
+                        store.defaultFormat = f
+                        show(store.newProject(f))
+                    }
                 }
+                .keyboardShortcut(KeyMenu.shortcut("file.new"))
+                Button("Open…") { if let path = Panels.chooseProject() { show(store.open(path: path)) } }
+                    .keyboardShortcut(KeyMenu.shortcut("file.open"))
+                Button("Import Audio…") {
+                    let paths = Panels.chooseAudio()
+                    doc?.importAudio(paths: paths)
+                }
+                .keyboardShortcut(KeyMenu.shortcut("media.import"))
+                .disabled(doc == nil)
+                Button("Create Demo Project") { show(store.newDemo()) }
+                Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
             }
-            .keyboardShortcut(KeyMenu.shortcut("file.new"))
-            Button("Open…") { if let path = Panels.chooseProject() { show(store.open(path: path)) } }
-                .keyboardShortcut(KeyMenu.shortcut("file.open"))
-            Button("Import Audio…") {
-                let paths = Panels.chooseAudio()
-                doc?.importAudio(paths: paths)
+            CommandGroup(replacing: .saveItem) {
+                Button("Close") { NSApp.keyWindow?.performClose(nil) }
+                    .keyboardShortcut(KeyMenu.shortcut("file.close"))
+                Button("Save") { save(as: false) }
+                    .keyboardShortcut(KeyMenu.shortcut("file.save"))
+                    .disabled(doc == nil)
+                Button("Save As…") { save(as: true) }
+                    .keyboardShortcut(KeyMenu.shortcut("file.save_as"))
+                    .disabled(doc == nil)
+                Divider()
+                Button("Project Settings…") { projectSettings() }
+                    .disabled(doc == nil)
+                Button("Relink Media…") { doc?.media.relinkShown = true }
+                    .keyboardShortcut(KeyMenu.shortcut("media.relink"))
+                    .disabled(doc?.media.relinkable.isEmpty ?? true)
             }
-            .keyboardShortcut(KeyMenu.shortcut("media.import"))
-            .disabled(doc == nil)
-            Button("Create Demo Project") { show(store.newDemo()) }
-            Button("Create Demo Project with Audio") { show(store.newDemoAudio()) }
-        }
-        CommandGroup(replacing: .saveItem) {
-            Button("Close") { NSApp.keyWindow?.performClose(nil) }
-                .keyboardShortcut(KeyMenu.shortcut("file.close"))
-            Button("Save") { save(as: false) }
-                .keyboardShortcut(KeyMenu.shortcut("file.save"))
-                .disabled(doc == nil)
-            Button("Save As…") { save(as: true) }
-                .keyboardShortcut(KeyMenu.shortcut("file.save_as"))
-                .disabled(doc == nil)
-            Divider()
-            Button("Project Settings…") { projectSettings() }
-                .disabled(doc == nil)
-            Button("Relink Media…") { doc?.media.relinkShown = true }
-                .keyboardShortcut(KeyMenu.shortcut("media.relink"))
-                .disabled(doc?.media.relinkable.isEmpty ?? true)
-        }
-        CommandGroup(replacing: .undoRedo) {
-            Button(doc?.undoTitle ?? "Undo") { doc?.undo() }
-                .keyboardShortcut(KeyMenu.shortcut("edit.undo"))
-                .disabled(!(doc?.canUndo ?? false) || doc?.editor.gesture != nil)
-            Button(doc?.redoTitle ?? "Redo") { doc?.redo() }
-                .keyboardShortcut(KeyMenu.shortcut("edit.redo"))
-                .disabled(!(doc?.canRedo ?? false) || doc?.editor.gesture != nil)
-        }
-        CommandGroup(before: .windowList) {
-            Button("Mixer") { if let docID { openWindow(id: "mixer", value: docID) } }
-                .keyboardShortcut(KeyMenu.shortcut("window.mixer"))
-                .disabled(docID == nil)
-            Button("Plugin Manager") { openWindow(id: "plugins") }
-                .keyboardShortcut(KeyMenu.shortcut("window.plugin_manager"))
-            Button("Media Pool") { if let docID { openWindow(id: "media-pool", value: docID) } }
-                .keyboardShortcut(KeyMenu.shortcut("window.media_pool"))
-                .disabled(docID == nil)
-            Divider()
+            CommandGroup(replacing: .undoRedo) {
+                Button(doc?.undoTitle ?? "Undo") { doc?.undo() }
+                    .keyboardShortcut(KeyMenu.shortcut("edit.undo"))
+                    .disabled(!(doc?.canUndo ?? false) || doc?.editor.gesture != nil)
+                Button(doc?.redoTitle ?? "Redo") { doc?.redo() }
+                    .keyboardShortcut(KeyMenu.shortcut("edit.redo"))
+                    .disabled(!(doc?.canRedo ?? false) || doc?.editor.gesture != nil)
+            }
+            CommandGroup(before: .windowList) {
+                Button("Mixer") { if let docID { openWindow(id: "mixer", value: docID) } }
+                    .keyboardShortcut(KeyMenu.shortcut("window.mixer"))
+                    .disabled(docID == nil)
+                Button("Plugin Manager") { openWindow(id: "plugins") }
+                    .keyboardShortcut(KeyMenu.shortcut("window.plugin_manager"))
+                Button("Media Pool") { if let docID { openWindow(id: "media-pool", value: docID) } }
+                    .keyboardShortcut(KeyMenu.shortcut("window.media_pool"))
+                    .disabled(docID == nil)
+                Divider()
+            }
         }
         CommandMenu("Editors") {
             ForEach(DetailEditorKind.allCases, id: \.self) { kind in
