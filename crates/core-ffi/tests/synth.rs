@@ -1579,7 +1579,11 @@ fn a_measure_off_the_plugin_thread_keeps_the_documents_plugins() {
         "a claim with no plugin host does not take the factory"
     );
     // An idle claim with the plugin host (an arm, as monitoring needs)
-    // brings the document's plugin back without a Play (re-review N1).
+    // brings the document's plugin back without a Play (re-review N1),
+    // where the playhead was (re-review-2 R2).
+    let at = 2 * Q;
+    a.locate(at).unwrap();
+    wait_until("the locate", || a.transport().unwrap().tick == at);
     arm(&a, d.seq, d.rec, false);
     arm(&a, d.seq, d.rec, true);
     assert_eq!(
@@ -1587,7 +1591,29 @@ fn a_measure_off_the_plugin_thread_keeps_the_documents_plugins() {
         Some(a_id),
         "the arm's claim installs A's factory"
     );
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        a.transport().unwrap().tick,
+        at,
+        "the heal keeps the playhead"
+    );
     idle_until(&a, |s| live(s) && placeholder_lines(s).is_empty());
+    assert!(!a.transport().unwrap().playing);
+    // Rec stays armed through another background Measure: the session's
+    // own timer makes the claim, with no edit and no Play (re-review-2 R1).
+    other.play(d.seq.0).unwrap();
+    other.stop().unwrap();
+    let a2 = Arc::clone(&a);
+    std::thread::spawn(move || a2.measure_return(dest))
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_ne!(vizdaw_ffi::host::factory_owner(), Some(a_id));
+    idle_until(&a, |s| {
+        vizdaw_ffi::host::factory_owner() == Some(a_id)
+            && live(s)
+            && placeholder_lines(s).is_empty()
+    });
     assert!(!a.transport().unwrap().playing);
     // A's next Play plays its plugin.
     a.play(d.seq.0).unwrap();

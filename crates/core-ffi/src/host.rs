@@ -2758,13 +2758,19 @@ pub fn claim_idle(
     // Held already, unless a claim with no plugin host (Measure off the
     // plugin thread) left the engine without this session's factory: this
     // one, with the host, installs it (5d-2 Task 8 re-review N1).
+    // The heal keeps the engine's playhead (the session's cursor is unset
+    // while it holds the engine; re-review-2 R2), across a retire too.
     let hosted = plugins.is_some();
-    if lock(&HOST)
-        .as_ref()
-        .is_some_and(|h| h.owner == owner && h.seq == seq && (h.factory_owner == owner || !hosted))
-    {
-        return Ok(false);
-    }
+    let held = match lock(&HOST).as_ref() {
+        Some(h) if h.owner == owner && h.seq == seq => {
+            if h.factory_owner == owner || !hosted {
+                return Ok(false);
+            }
+            Some(h.engine.position_tick())
+        }
+        _ => None,
+    };
+    let at = held.unwrap_or(at);
     let (mut slot, _) = match claim_host(owner, doc, plugins, Idle::Untouched) {
         Ok(s) => s,
         // Another window's idle engine opening its input: the caller owes

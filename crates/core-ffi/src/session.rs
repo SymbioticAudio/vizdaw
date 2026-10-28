@@ -5010,6 +5010,12 @@ impl Session {
             let mut inner = lock(&self.inner);
             let ours = host::end_measure(self.id, inner.doc(), seq, &status)?;
             host::after_measure_end();
+            // Measured off the plugin thread (the app's task): the engine
+            // has no inserts for this document, so the timer's next step
+            // claims it with the plugin host (5d-2 Task 8 re-review-2 R1).
+            if host::factory_owner() != Some(self.id) && host::wants_live(inner.doc(), seq) {
+                inner.claim_owed = Some(seq);
+            }
             // Still ours means nothing else removed it; `closed()` is not
             // read here, as our own removal sets it (Task 9 re-review). A
             // renderer gone with its device leaves it unfinished below.
