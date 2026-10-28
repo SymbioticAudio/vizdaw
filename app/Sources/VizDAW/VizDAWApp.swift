@@ -91,6 +91,10 @@ struct VizDAWApp: App {
                     .tabItem { Label("Editing", systemImage: "pencil") }
                 KeysSettingsView(keys: keyBindings)
                     .tabItem { Label("Keys", systemImage: "keyboard") }
+                AudioSettingsView(prefs: audioPreferences, store: appStore)
+                    .tabItem { Label("Audio", systemImage: "hifispeaker") }
+                RecordingSettingsView(prefs: audioPreferences, store: appStore)
+                    .tabItem { Label("Recording", systemImage: "record.circle") }
             }
         }
     }

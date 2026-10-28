@@ -89,6 +89,8 @@ public final class AudioPreferences {
     public private(set) var settings: AudioSettings
     /// Why the last change was refused (nil after one that took).
     public var problem: String?
+    /// The device's input as Settings › Audio last read it (Task 7).
+    public internal(set) var device: InputInfoRow?
 
     public init(defaults: UserDefaults, sink: any AudioSink) {
         self.defaults = defaults

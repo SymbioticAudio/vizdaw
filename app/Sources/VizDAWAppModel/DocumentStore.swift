@@ -47,6 +47,8 @@ public final class DocumentStore {
     /// "48000/24"; 48 kHz / 24-bit when unset or damaged.
     public var defaultFormat: ProjectFormatRow {
         get {
+            // Observed through the counter: the preference itself is not.
+            _ = formatChanges
             let s = defaults.string(forKey: "defaultProjectFormat") ?? ""
             let p = s.split(separator: "/").map(String.init)
             return ControlFormats.parse(rate: p.first, depth: p.count > 1 ? p[1] : nil)
@@ -60,8 +62,12 @@ public final class DocumentStore {
                 case .float32: "32f"
                 }
             defaults.set("\(newValue.sampleRate)/\(d)", forKey: "defaultProjectFormat")
+            formatChanges += 1
         }
     }
+
+    /// Bumped when `defaultFormat` is set (Settings › Recording redraws).
+    public private(set) var formatChanges = 0
 
     private let makeEmpty: Make
     private let makeDemo: Make
