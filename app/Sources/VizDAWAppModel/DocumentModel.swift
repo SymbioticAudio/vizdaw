@@ -63,6 +63,16 @@ public final class DocumentModel {
     @ObservationIgnored private var mediaModel: MediaModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
+    @ObservationIgnored private var synthModel: SynthSheets?
+
+    /// The Track Synth and New MIDI Destination sheets (plan 5d-2), made
+    /// once.
+    public var synth: SynthSheets {
+        if let m = synthModel { return m }
+        let m = SynthSheets(document: self)
+        synthModel = m
+        return m
+    }
 
     /// The lanes' input pickers, monitor buttons and meters (plan 5d-2),
     /// made once.

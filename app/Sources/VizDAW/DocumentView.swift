@@ -32,6 +32,19 @@ struct DocumentView: View {
         ) {
             RelinkSheet(media: model.media)
         }
+        .sheet(
+            item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
+        ) { _ in
+            TrackSynthSheet(
+                sheets: model.synth, editor: model.editor, channels: Int(model.inputs.info?.channels ?? 0) > 0
+                    ? Int(model.inputs.info?.channels ?? 0) : 256)
+        }
+        .sheet(
+            item: Binding(
+                get: { model.synth.newDestination }, set: { if $0 == nil { model.synth.closeNewDestination() } })
+        ) { _ in
+            NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
+        }
         .alert(
             "Recovered Recordings",
             isPresented: Binding(

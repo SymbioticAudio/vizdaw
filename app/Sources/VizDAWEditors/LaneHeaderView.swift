@@ -168,7 +168,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
     }
 
     /// Drum Lane: marks the lane a drum lane (rows for its notes) or a
-    /// normal lane again (Plan 4e Ruling 3).
+    /// normal lane again (Plan 4e Ruling 3). Track Synth… (spec §6.7) on a
+    /// lane that plays an external synth, and New MIDI Destination… (plan
+    /// 5d-2 Task 8).
     func laneMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -176,6 +178,14 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
             self?.editor.markDrumLane(seq: seq, lane: lane.id, on: !lane.isDrum)
         }
         menu.addItem(drum.item(checked: lane.isDrum))
+        menu.addItem(.separator())
+        let sheets = document.synth
+        let track = MenuAction(title: "Track Synth…") { sheets.beginTrackSynth(seq: seq, lane: lane) }
+        let trackItem = track.item(checked: false)
+        trackItem.isEnabled = sheets.synth(of: lane) != nil
+        menu.addItem(trackItem)
+        let add = MenuAction(title: "New MIDI Destination…") { sheets.beginNewDestination(seq: seq, lane: lane) }
+        menu.addItem(add.item(checked: false))
         return menu
     }
 

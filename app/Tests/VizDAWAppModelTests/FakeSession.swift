@@ -146,6 +146,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
             throw e
         }
         addedDestinations.append((name, port, channel))
+        dests.append(DestRow(id: UInt64(100 + addedDestinations.count), name: name, plugin: nil, external: true))
         return snap
     }
 
@@ -746,7 +747,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     /// What `measureReturn` finds.
     var measured: Float = 25
 
+    /// Whether each Measure ran on the main thread (plan 5d-2: never).
+    var measuredOnMain: [Bool] = []
+
     func measureReturn(dest: UInt64) throws -> MeasureRow {
+        measuredOnMain.append(Thread.isMainThread)
         if let e = synthError {
             synthError = nil
             throw e

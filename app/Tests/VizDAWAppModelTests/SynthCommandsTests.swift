@@ -36,6 +36,21 @@ import VizDAWCore
         return nil
     }
 
+    /// Measure answers once its job ends (plan 5d-2 Ruling 6), as the
+    /// channel answers it.
+    func settled(_ o: ControlOutcome, _ m: DocumentModel) async -> ControlOutcome {
+        guard case .measure(let doc, let job) = o else { return o }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !job.isDone, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(5)) }
+        return SynthCommands.answer(job, doc: doc, m) ?? .failed(.of(.timeout, "Measure did not end"))
+    }
+
+    func measured(_ args: [(String, ControlValue)], _ m: DocumentModel, _ s: DocumentStore, _ doc: UUID) async
+        -> ControlOutcome
+    {
+        await settled(run("destination.measure_return", args, m, s, doc), m)
+    }
+
     @Test func trackSynthAsksTheCoreWithChannelsFromOne() throws {
         let (s, id, m, f) = try demo()
         let o = run(
@@ -123,24 +138,28 @@ import VizDAWCore
                 .code == .failed)
     }
 
-    @Test func measureAnswersWithTheMillisecondsAndAppliesTheStep() throws {
+    @Test func measureAnswersWithTheMillisecondsAndAppliesTheStep() async throws {
         let (s, id, m, f) = try demo()
         f.measured = 24.9
         let version = m.snapshot.version
-        guard case .done(.measured(let doc, let dest, let ms, let onsets)) =
-            run("destination.measure_return", [("dest", .int(value: 7))], m, s, id)
-        else {
+        let started = run("destination.measure_return", [("dest", .int(value: 7))], m, s, id)
+        guard case .measure = started else {
+            Issue.record("Measure answers when its job ends")
+            return
+        }
+        guard case .done(.measured(let doc, let dest, let ms, let onsets)) = await settled(started, m) else {
             Issue.record("Measure did not answer with its milliseconds")
             return
         }
         #expect(doc == id.uuidString && dest == 7 && ms == 24.9 && onsets == 5)
         #expect(f.measures == [7])
         #expect(m.snapshot.version > version, "the step was applied")
+        #expect(f.measuredOnMain == [false], "off the main thread")
         f.synthError = .Model(message: "No signal on the synth's return input")
-        let e = failure(run("destination.measure_return", [("dest", .int(value: 7))], m, s, id))
+        let e = failure(await measured([("dest", .int(value: 7))], m, s, id))
         #expect(e?.code == .failed && e?.message.contains("No signal") == true)
         f.synthError = .Busy(message: "Stop the transport first: Measure runs with it stopped.")
-        #expect(failure(run("destination.measure_return", [("dest", .int(value: 7))], m, s, id))?.code == .busy)
+        #expect(failure(await measured([("dest", .int(value: 7))], m, s, id))?.code == .busy)
         #expect(failure(run("destination.measure_return", [], m, s, id))?.code == .invalidParams)
         #expect(f.measures == [7])
     }
@@ -148,16 +167,16 @@ import VizDAWCore
     /// Ruling 3 of the dispatch: each of Measure's refusals has its code;
     /// the core's Busy messages (the measured value included) pass
     /// through unchanged.
-    @Test func measureRefusalsHaveTheirCodes() throws {
+    @Test func measureRefusalsHaveTheirCodes() async throws {
         let (s, id, m, f) = try demo()
-        let measure = { failure(run("destination.measure_return", [("dest", .int(value: 7))], m, s, id)) }
+        func measure() async -> ControlFailure? { failure(await measured([("dest", .int(value: 7))], m, s, id)) }
         for busy in [
             "Finish the open edit first (measured 25.0 ms).", "Finish the open edit first.",
             "Another measurement is running.", "Stop the transport first: Measure runs with it stopped.",
             "Stop recording first.",
         ] {
             f.synthError = .Busy(message: busy)
-            let e = measure()
+            let e = await measure()
             #expect(e?.code == .busy && e?.message == busy, "\(busy)")
         }
         for (error, text) in [
@@ -178,7 +197,7 @@ import VizDAWCore
             (VizError.Model(message: "No signal on the synth's return input"), "No signal"),
         ] {
             f.synthError = error
-            let e = measure()
+            let e = await measure()
             #expect(e?.code == .failed && e?.message.contains(text) == true, "\(text)")
             #expect(e?.dialog == nil)
         }
@@ -194,7 +213,7 @@ import VizDAWCore
         #expect(f.measures.isEmpty)
         // A drag in progress refuses it.
         #expect(m.editor.beginGesture("Move", lanes: [], origin: .other))
-        #expect(measure()?.code == .unavailable)
+        #expect(await measure()?.code == .unavailable)
         #expect(f.measures.isEmpty)
     }
 
@@ -240,7 +259,7 @@ import VizDAWCore
     /// Task 10 review I1: an open edit the editor does not see as a
     /// gesture (a mixer fader drag) reaches the core, whose refusal is
     /// `busy`, as Measure's is.
-    @Test func trackSynthWithAFaderDragOpenIsBusy() throws {
+    @Test func trackSynthWithAFaderDragOpenIsBusy() async throws {
         let (s, id, m, f) = try demo()
         let mixer = try MixerModel(document: m)
         mixer.dragStarted("Set Fader")
@@ -251,7 +270,7 @@ import VizDAWCore
             ("destination.measure_return", [("dest", .int(value: 7))]),
         ] {
             f.synthError = .Busy(message: busy)
-            let e = failure(run(command, args, m, s, id))
+            let e = failure(await settled(run(command, args, m, s, id), m))
             #expect(e?.code == .busy && e?.message == busy, "\(command)")
         }
         mixer.dragEnded()
@@ -260,10 +279,10 @@ import VizDAWCore
 
     /// Task 10 review M2: a destination list that cannot be read is no
     /// verdict on the id; the core, which checks it again, decides.
-    @Test func anUnreadableDestinationListLeavesTheCheckToTheCore() throws {
+    @Test func anUnreadableDestinationListLeavesTheCheckToTheCore() async throws {
         let (s, id, m, f) = try demo()
         f.destinationsError = .Internal(message: "no list")
-        #expect(failure(run("destination.measure_return", [("dest", .int(value: 7))], m, s, id)) == nil)
+        #expect(failure(await measured([("dest", .int(value: 7))], m, s, id)) == nil)
         #expect(f.measures == [7])
         #expect(
             failure(
@@ -278,7 +297,7 @@ import VizDAWCore
         #expect(f.edits.last == .lane(edit: .setInput(seq: 3, lane: 31, input: .audio(first: 0, stereo: false, returnOf: 7))))
         // The core's own refusal is then the answer.
         f.synthError = .Model(message: "Piano is not an external MIDI destination")
-        #expect(failure(run("destination.measure_return", [("dest", .int(value: 1))], m, s, id))?.code == .failed)
+        #expect(failure(await measured([("dest", .int(value: 1))], m, s, id))?.code == .failed)
     }
 
     /// Task 10 review M6: Measure's call is given the time it blocks for

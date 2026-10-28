@@ -5,9 +5,9 @@ import VizDAWCore
 /// sub-project 5 spec §6.7, §12.1): `lane.track_synth` sets up the lane
 /// recording a synth's return, `destination.set_return_latency` types a
 /// synth's return latency and `destination.measure_return` measures it.
-/// The Track Synth sheet, the lane menu item and the destination editor
-/// are plan 5d's; they call the same session methods (Measure off the
-/// main thread: it takes about three seconds).
+/// The Track Synth sheet and the lane menu (plan 5d-2 Task 8) call the
+/// same session methods; Measure runs off the main thread for both (it
+/// takes about three seconds).
 ///
 /// Errors: a parameter of the wrong shape, and a `dest` (or
 /// `lane.set_input`'s `return_of`) that names no external MIDI
@@ -73,6 +73,22 @@ public enum SynthCommands {
         return extend(extra)
     }
 
+    /// The answer of a Measure that ended: its milliseconds, with the step
+    /// applied, or its failure (the core's `Busy` is `busy`); nil while it
+    /// runs.
+    public static func answer(_ job: MeasureJob, doc: UUID, _ m: DocumentModel) -> ControlOutcome? {
+        switch job.result {
+        case nil: return nil
+        case .success(let row):
+            // No stale snapshot (M5): an edit made while Measure ran wins.
+            if row.snapshot.version >= m.snapshot.version { m.apply(row.snapshot) } else { m.refreshAfterJob() }
+            return .done(
+                .measured(doc: doc.uuidString, dest: job.dest, returnLatencyMs: row.returnLatencyMs, onsets: row.onsets))
+        case .failure(let error):
+            return .failed(.thrown(error, "Measure Failed"))
+        }
+    }
+
     static func id(_ args: [ControlArg], _ name: String) -> UInt64? {
         args.int(name).flatMap { UInt64(exactly: $0) }
     }
@@ -119,17 +135,9 @@ public enum SynthCommands {
                 return .failed(.of(.invalidParams, "destination.measure_return: `dest` names a destination"))
             }
             if isExternal(dest, m) == false { return notExternal(id, dest) }
-            // Blocks the main thread for about 2.7 s, 10 s at most (plan
-            // 5c-2 Ruling 9 accepts it for the control channel; 5d's sheet
-            // calls it off the main thread).
-            do {
-                let r = try m.session.measureReturn(dest: dest)
-                m.apply(r.snapshot)
-                return .done(
-                    .measured(doc: doc.uuidString, dest: dest, returnLatencyMs: r.returnLatencyMs, onsets: r.onsets))
-            } catch {
-                return .failed(.thrown(error, "Measure Failed"))
-            }
+            // Off the main thread (plan 5d-2 Ruling 6): the channel answers
+            // when the job ends, and its pump never blocks.
+            return .measure(doc: doc, job: MeasureJob(session: m.session, dest: dest))
         default:
             return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }

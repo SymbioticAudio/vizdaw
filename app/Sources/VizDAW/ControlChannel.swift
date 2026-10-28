@@ -102,6 +102,27 @@ enum ControlChannel {
             // The server's app timeout is for stalls; a job gets its own.
             _ = try? server.extendTimeout(token: token, timeoutMs: jobWait + 5_000)
             whenJobEnds(server, token, command: command, doc: doc, job: job)
+        case .measure(let doc, let job):
+            whenMeasured(server, token, doc: doc, job: job)
+        }
+    }
+
+    /// Answers once Measure `job` ended (10 s at most, plus a margin: the
+    /// call's timeout was extended by `SynthCommands.extraTimeMs`).
+    static func whenMeasured(_ server: ControlServer, _ token: UInt64, doc: UUID, job: MeasureJob) {
+        later(token, seconds: 15) { expired in
+            guard let m = appStore.model(doc) else {
+                _ = try? server.fail(token: token, failure: .of(.noDocument, "the document closed"))
+                return true
+            }
+            if let outcome = SynthCommands.answer(job, doc: doc, m) {
+                answer(server, token, outcome)
+                return true
+            }
+            if expired {
+                _ = try? server.fail(token: token, failure: .of(.timeout, "the measurement did not end in time"))
+            }
+            return expired
         }
     }
 
@@ -169,6 +190,11 @@ enum ControlChannel {
 
     static func execute(_ call: ControlCall, _ server: ControlServer) {
         let token = call.token
+        // Its client was already answered `timeout` while it was queued:
+        // running it now would change what nobody waits for (5c-2 final
+        // review finding 3, for every call; `SynthCommands.shouldRun` still
+        // extends Measure's timeout).
+        guard server.isWaiting(token: token) else { return }
         if controlHostBusy() {
             answer(server, token, .failed(.of(.busy, "a plugin call is running on the main thread; try again")))
             return
@@ -324,7 +350,7 @@ enum ControlChannel {
                 case .failed(let f):
                     _ = try? server.fail(token: token, failure: f)
                     return
-                case .done, .opened, .job:
+                case .done, .opened, .job, .measure:
                     if case .opened(_, let doc) = outcome { ControlWindows.openDocument(doc) }
                     sent += 1
                     continue

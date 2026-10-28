@@ -12,6 +12,9 @@ public enum ControlOutcome {
     case opened(command: String?, doc: UUID)
     /// A job started (import, conversion): the app answers when it ends.
     case job(command: String, doc: UUID, job: UInt64)
+    /// A Measure started off the main thread (plan 5d-2 Ruling 6): the app
+    /// answers with `SynthCommands.answer` when it ends.
+    case measure(doc: UUID, job: MeasureJob)
 }
 
 /// How a job that ended is answered (fix round 1, I-2).
