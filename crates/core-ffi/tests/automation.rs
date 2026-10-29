@@ -285,8 +285,14 @@ fn write_and_latch_land_at_stop_and_write_becomes_latch() {
     assert_eq!(lane_named(&s, song, "Built-in Synth Pan"), None);
     // Latch: a pan touched and let go holds to Stop.
     s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    // The Play goes on from the Stop, past beat 1 already: wait for the
+    // roll itself, so the touch is not taken (and let go) before it.
+    let from = tick(&s);
     s.play(song).unwrap();
-    wait_until("beat 1", || tick(&s) > Q);
+    wait_until("a beat of the Latch pass", || {
+        s.idle().unwrap();
+        s.transport().unwrap().playing && tick(&s) > from + Q / 4
+    });
     let pan = Target::StripPan { strip: synth };
     s.gesture(pan, Phase::Touch { value: Some(0.2) }).unwrap();
     pace(&s);
