@@ -156,7 +156,11 @@ pub struct TargetWrite {
 /// What a segment's samples are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    /// Only its touch so far.
+    /// Only its touch so far. A touch with nothing after it is written
+    /// as an absolute value, also in Trim: a Trim grab on an automated
+    /// target is sent as `Offset(0.0)` (Ruling 11), so only an
+    /// unautomated Trim target, which writes absolute values, gets here
+    /// (review m4).
     Untyped,
     /// Values.
     Absolute,
@@ -177,6 +181,8 @@ struct Segment {
 }
 
 impl Segment {
+    // A segment always holds at least the sample it was opened with, so
+    // the defaults of `last` and `first_frame` are never used (review m7).
     fn last(&self) -> f64 {
         self.samples.last().map_or(0.0, |s| s.1)
     }
@@ -260,6 +266,18 @@ struct Placed {
     frame: i64,
     phase: GesturePhase,
     mode: WriteMode,
+}
+
+/// A phase's values as the live table plays them (review I1;
+/// `LiveTable::apply`): values clamped to 0–1 (NaN is 0), a non-finite
+/// offset 0.
+fn sanitised(phase: GesturePhase) -> GesturePhase {
+    match phase {
+        GesturePhase::Touch(v) => GesturePhase::Touch(unit(v)),
+        GesturePhase::Value(v) => GesturePhase::Value(unit(v)),
+        GesturePhase::Offset(d) if !d.is_finite() => GesturePhase::Offset(0.0),
+        other => other,
+    }
 }
 
 /// A target's segments, walking its placed stamps (sorted by piece, then
@@ -371,14 +389,19 @@ fn segments(
                 if let Some(mut seg) = open.take() {
                     seg.end_at(f);
                     let stretch_end = spans.get(s.piece).map_or(f, |x| x.stretch_end);
-                    let to = f.saturating_add(i64::from(n)).min(stretch_end).max(f);
-                    let v = if seg.kind == Kind::Offset {
-                        0.0
-                    } else {
-                        let frame = u64::try_from(to).unwrap_or(0);
-                        (c.existing)(target, frame).unwrap_or_else(|| (c.fixed)(target))
-                    };
-                    seg.push(to, v);
+                    // A glide of 0 frames is a step one frame after the
+                    // release (review I2): the engine holds the value up
+                    // to the release, so `(f, last)` must survive.
+                    let to = f.saturating_add(i64::from(n.max(1))).min(stretch_end);
+                    if to > f {
+                        let v = if seg.kind == Kind::Offset {
+                            0.0
+                        } else {
+                            let frame = u64::try_from(to).unwrap_or(0);
+                            unit((c.existing)(target, frame).unwrap_or_else(|| (c.fixed)(target)))
+                        };
+                        seg.push(to, v);
+                    }
                     out.push(seg);
                 }
             }
@@ -403,6 +426,10 @@ fn segments(
 /// Ruling 9: pass 0's Write segments of a held target merge into one per
 /// contiguous stretch of pass 0, from the stretch's start at the held
 /// value, each touch changing it from its first frame on.
+///
+/// Only held targets are merged: a Write strip's plugin parameter (no
+/// hold, written from its touch) keeps its own segment, which its Hold
+/// carries to the pass's end (review m2).
 fn merge_holds(segs: Vec<Segment>, hold: f64, spans: &[Span]) -> Vec<Segment> {
     let (mut writes, mut rest): (Vec<Segment>, Vec<Segment>) = segs
         .into_iter()
@@ -518,8 +545,25 @@ pub fn writes(c: &AutoCapture<'_>) -> Vec<TargetWrite> {
         let Some(mode) = WriteMode::of_tag(s.tag) else {
             continue;
         };
-        let Some(p) = piece_of(&all, s.run) else {
-            continue;
+        // Never before the pass's start (Task 6 review m2): a later
+        // piece's placement already starts at its own start.
+        let (p, frame) = match piece_of(&all, s.run) {
+            Some(p) => (p, place(p, s.run).max(place(p, p.from))),
+            // An end no piece covers (a latency rise's catch region a
+            // quick fall cut away; review m1) still ends its segment, at
+            // the end of the piece before: dropped, it would leave the
+            // segment running on as a Latch.
+            None if matches!(
+                s.phase,
+                GesturePhase::Release | GesturePhase::Glide(_) | GesturePhase::Hold
+            ) =>
+            {
+                match live.iter().rev().find(|q| q.end <= s.run) {
+                    Some(q) => (*q, place(q, q.end)),
+                    None => continue,
+                }
+            }
+            None => continue,
         };
         let Some(piece) = live.iter().position(|q| std::ptr::eq(*q, p)) else {
             continue;
@@ -533,9 +577,6 @@ pub fn writes(c: &AutoCapture<'_>) -> Vec<TargetWrite> {
         } else {
             mode
         };
-        // Never before the pass's start (Task 6 review m2): a later
-        // piece's placement already starts at its own start.
-        let frame = place(p, s.run).max(place(p, p.from));
         let target = s.dest.target();
         if !targets.contains(&target) {
             targets.push(target);
@@ -545,7 +586,7 @@ pub fn writes(c: &AutoCapture<'_>) -> Vec<TargetWrite> {
             Placed {
                 piece,
                 frame,
-                phase: s.phase,
+                phase: sanitised(s.phase),
                 mode,
             },
         ));
@@ -680,6 +721,10 @@ pub fn to_model(
 ) -> Vec<AutomationWrite> {
     let mut out = Vec::new();
     let chunk = MAX_WRITE_POINTS.saturating_sub(2).max(1);
+    // The writes made so far (target, range, every point with its edges):
+    // they apply before the later ones, so an edge inside one of them
+    // holds its value, not the value before the pass (review I3).
+    let mut prior: Vec<Prior> = Vec::new();
     for w in writes {
         let mut pts: Vec<(Tick, f64)> = Vec::with_capacity(w.points.len());
         for (f, v) in &w.points {
@@ -695,6 +740,21 @@ pub fn to_model(
         let start = Tick(first.0.0.saturating_sub(1));
         let end = Tick(last.0.0.saturating_add(1));
         let lane_name = name(w.target);
+        let edge = |t: Tick| -> f64 {
+            prior
+                .iter()
+                .rev()
+                .find(|(x, a, b, _)| *x == w.target && *a <= t && t <= *b)
+                .map_or_else(
+                    || outside(w.target, t),
+                    |(_, _, _, p)| lane_at(p, t, w.target.is_stepped()),
+                )
+        };
+        let (start_value, end_value) = (edge(start), edge(end));
+        let mut all = Vec::with_capacity(pts.len() + 2);
+        all.push((start, start_value));
+        all.extend_from_slice(&pts);
+        all.push((end, end_value));
         let chunks: Vec<&[(Tick, f64)]> = pts.chunks(chunk).collect();
         let count = chunks.len();
         for (i, c) in chunks.iter().enumerate() {
@@ -714,11 +774,11 @@ pub fn to_model(
             };
             let mut points = Vec::with_capacity(c.len() + 2);
             if i == 0 {
-                points.push((start, outside(w.target, start)));
+                points.push((start, start_value));
             }
             points.extend_from_slice(c);
             if is_last {
-                points.push((end, outside(w.target, end)));
+                points.push((end, end_value));
             }
             out.push(AutomationWrite {
                 seq,
@@ -729,6 +789,26 @@ pub fn to_model(
                 lane_name: lane_name.clone(),
             });
         }
+        prior.push((w.target, start, end, all));
     }
     out
+}
+
+/// An earlier write in `to_model`: its target, range and every point
+/// with its edges.
+type Prior = (AutomationTarget, Tick, Tick, Vec<(Tick, f64)>);
+
+/// The value of `points` (by tick) at `t` by Plan 4d's lane rule: the
+/// first value before the first point, the last after the last, linear
+/// between unless `stepped`.
+fn lane_at(points: &[(Tick, f64)], t: Tick, stepped: bool) -> f64 {
+    let n = points.partition_point(|p| p.0 <= t);
+    match (n.checked_sub(1).and_then(|i| points.get(i)), points.get(n)) {
+        (Some(a), Some(b)) if !stepped && b.0 > a.0 => {
+            a.1 + (b.1 - a.1) * (t.0 - a.0.0) as f64 / (b.0.0 - a.0.0) as f64
+        }
+        (Some(a), _) => a.1,
+        (None, Some(b)) => b.1,
+        (None, None) => 0.0,
+    }
 }

@@ -654,3 +654,173 @@ fn a_stamp_before_a_jumps_mark_stays_in_the_piece_before() {
     close(&w[0].points, &[(40_000, 0.7), (47_000, 0.8), (48_000, 0.8)]);
     close(&w[1].points, &[(10_000, 0.8), (12_000, 0.9), (58_000, 0.9)]);
 }
+
+/// Task 7 review I1: values are written as the engine plays them: a NaN
+/// or out-of-range value is clamped (`unit`), a non-finite offset is 0,
+/// and neither collapses the thinning; the model takes the write.
+#[test]
+fn hostile_values_are_written_as_the_engine_plays_them() {
+    let stamps = [
+        st(PAN, 1_000, GesturePhase::Touch(0.6), WriteMode::Latch),
+        st(PAN, 10_000, GesturePhase::Value(f64::NAN), WriteMode::Latch),
+        st(PAN, 20_000, GesturePhase::Value(0.1), WriteMode::Latch),
+        st(PAN, 30_000, GesturePhase::Value(0.9), WriteMode::Latch),
+        st(PAN, 40_000, GesturePhase::Value(1.2), WriteMode::Latch),
+        st(PAN, 50_000, GesturePhase::Hold, WriteMode::Latch),
+    ];
+    let w = run(&[roll(0, 0)], 96_000, &stamps, &[], &half, &no_points);
+    assert_eq!(w.len(), 1, "{w:?}");
+    close(
+        &w[0].points,
+        &[
+            (1_000, 0.6),
+            (10_000, 0.0),
+            (20_000, 0.1),
+            (30_000, 0.9),
+            (40_000, 1.0),
+            (96_000, 1.0),
+        ],
+    );
+    let doc = apply(
+        &Document::new(),
+        &Command::Sequence(SequenceCmd::New { name: "S".into() }),
+    )
+    .unwrap()
+    .doc;
+    let s = doc.sequence(SeqId(0)).unwrap();
+    let tempo = TempoTable::build(&s.tempo, Tick(-s.start_offset.0), 48_000.0);
+    let target = AutomationTarget::StripPan(doc.mixer().master());
+    let tw = TargetWrite {
+        target,
+        pass: 0,
+        points: w[0].points.clone(),
+    };
+    let model = to_model(&[tw], SeqId(0), &tempo, &|_, _| 0.5, &|_| "Pan".into());
+    assert!(
+        apply(
+            &doc,
+            &Command::Record(RecordPass {
+                automation: model,
+                ..RecordPass::default()
+            })
+        )
+        .is_ok()
+    );
+    // A non-finite Trim offset is 0.
+    let trim = [
+        st(FADER, 1_000, GesturePhase::Touch(0.5), WriteMode::Trim),
+        st(
+            FADER,
+            2_000,
+            GesturePhase::Offset(f64::INFINITY),
+            WriteMode::Trim,
+        ),
+        st(FADER, 3_000, GesturePhase::Release, WriteMode::Trim),
+    ];
+    let w = run(&[roll(0, 0)], 96_000, &trim, &[], &half, &no_points);
+    assert!(
+        w[0].points.iter().all(|p| (p.1 - 0.5).abs() < 1e-9),
+        "{w:?}"
+    );
+}
+
+/// Task 7 review I2: a return time of 0 holds the value up to the release
+/// and steps there, as the engine plays it; it is no ramp.
+#[test]
+fn a_glide_of_zero_holds_then_steps() {
+    let stamps = [
+        st(PAN, 1_000, GesturePhase::Touch(0.6), WriteMode::Touch),
+        st(PAN, 10_000, GesturePhase::Value(0.9), WriteMode::Touch),
+        st(PAN, 40_000, GesturePhase::Glide(0), WriteMode::Touch),
+    ];
+    let w = run(&[roll(0, 0)], 96_000, &stamps, &[], &half, &no_points);
+    close(
+        &w[0].points,
+        &[(1_000, 0.6), (10_000, 0.9), (40_000, 0.9), (40_001, 0.5)],
+    );
+}
+
+/// Task 7 review I3: a later write of a target that starts inside an
+/// earlier one of the same capture (a re-grab during a Touch glide, a
+/// jump back shorter than the segment) takes its start edge from the
+/// earlier write, not from the value before the pass: no notch.
+#[test]
+fn an_overlapping_write_takes_its_edge_from_the_earlier_one() {
+    let doc = apply(
+        &Document::new(),
+        &Command::Sequence(SequenceCmd::New { name: "S".into() }),
+    )
+    .unwrap()
+    .doc;
+    let s = doc.sequence(SeqId(0)).unwrap();
+    let tempo = TempoTable::build(&s.tempo, Tick(-s.start_offset.0), 48_000.0);
+    let stamps = [
+        st(PAN, 10_000, GesturePhase::Touch(0.9), WriteMode::Touch),
+        st(PAN, 20_000, GesturePhase::Glide(12_000), WriteMode::Touch),
+        st(PAN, 26_000, GesturePhase::Touch(0.7), WriteMode::Touch),
+        st(PAN, 26_500, GesturePhase::Value(0.75), WriteMode::Touch),
+        st(PAN, 30_000, GesturePhase::Release, WriteMode::Touch),
+    ];
+    let w = run(&[roll(0, 0)], 96_000, &stamps, &[], &half, &no_points);
+    assert_eq!(w.len(), 2, "{w:?}");
+    let model = to_model(&w, SeqId(0), &tempo, &|_, _| 0.1, &|_| "Pan".into());
+    assert_eq!(model.len(), 2);
+    let edge = model[1].points[0];
+    assert_eq!(edge.0, model[1].start);
+    // The glide 0.9 → 0.5 over 20 000–32 000 is at 0.7 at 26 000.
+    assert!((edge.1 - 0.7).abs() < 1e-3, "{model:?}");
+    // Its end edge (30 000) is inside the glide too: 0.9 − 0.4 × 10/12.
+    assert!(
+        (model[1].points.last().unwrap().1 - (0.9 - 0.4 * 10.0 / 12.0)).abs() < 1e-3,
+        "{model:?}"
+    );
+    // The first write's own edges are outside every earlier write.
+    assert_eq!(model[0].points.first().unwrap().1, 0.1);
+    assert_eq!(model[0].points.last().unwrap().1, 0.1);
+    // A jump back into the segment: the reopened write starts inside it.
+    let jump = Mark {
+        run: 48_000,
+        frame: 44_000,
+        wrap: false,
+        latency: 0,
+    };
+    let held = [
+        st(PAN, 40_000, GesturePhase::Touch(0.7), WriteMode::Latch),
+        st(PAN, 48_000, GesturePhase::Value(0.8), WriteMode::Latch),
+        st(PAN, 49_000, GesturePhase::Hold, WriteMode::Latch),
+    ];
+    let w = run(&[roll(0, 0), jump], 60_000, &held, &[], &half, &no_points);
+    assert_eq!(w.len(), 2, "{w:?}");
+    let model = to_model(&w, SeqId(0), &tempo, &|_, _| 0.1, &|_| "Pan".into());
+    assert!((model[1].points[0].1 - 0.7).abs() < 1e-9, "{model:?}");
+}
+
+/// Task 7 review m1: a release in runs no piece covers (a latency rise's
+/// catch region a quick fall cut away) still ends its segment, at the end
+/// of the piece before, instead of leaving it to run on as a Latch.
+#[test]
+fn a_release_no_piece_covers_still_ends_its_segment() {
+    let marks = [
+        roll(0, 0),
+        Mark {
+            run: 100,
+            frame: 100,
+            wrap: false,
+            latency: 1_000,
+        },
+        Mark {
+            run: 200,
+            frame: 200,
+            wrap: false,
+            latency: 0,
+        },
+    ];
+    let stamps = [
+        st(PAN, 20, GesturePhase::Touch(0.4), WriteMode::Touch),
+        st(PAN, 60, GesturePhase::Value(0.6), WriteMode::Touch),
+        st(PAN, 150, GesturePhase::Release, WriteMode::Touch),
+    ];
+    let w = run(&marks, 96_000, &stamps, &[], &half, &no_points);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].points.last().unwrap().0 <= 200, "{w:?}");
+}
