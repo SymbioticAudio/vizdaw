@@ -662,6 +662,153 @@ fn a_play_that_ends_at_once_does_not_keep_writing() {
     s.close().unwrap();
 }
 
+/// Owner ruling 2026-10-29 (re-review N1): a new automation lane made
+/// while another lane of the sequence is soloed is not soloed; it follows
+/// the solo (silent until it clears), and the status line says so.
+#[test]
+fn a_new_lane_under_a_solo_is_not_soloed_and_the_status_line_says_so() {
+    let _g = serial();
+    let (s, song) = demo();
+    let first = s.lanes(song).unwrap().first().unwrap().id;
+    s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::SetFlags {
+                seq: song,
+                lane: first,
+                mute: None,
+                solo: Some(true),
+                arm: None,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    s.play(song).unwrap();
+    wait_until("beat 1", || {
+        s.idle().unwrap();
+        tick(&s) > Q
+    });
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.3) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    s.stop().unwrap();
+    wait_until("the transport to stop", || !s.transport().unwrap().playing);
+    let problems = s.idle().unwrap().problems;
+    let lane = s
+        .lanes(song)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Built-in Synth Fader")
+        .expect("a new lane");
+    assert!(!lane.solo, "the new lane is not soloed");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("Built-in Synth Fader") && p.contains("solo")),
+        "{problems:?}"
+    );
+    s.close().unwrap();
+}
+
+/// Re-review N3: a Latch touch and release sent right after a resumed
+/// Play is written as well as heard. The renderer took the gestures in
+/// the block whose commands it had already drained before the Play and
+/// the new pass's gesture tap arrived, so they played before the tap that
+/// stamps them was in. Gestures no longer overtake commands sent before
+/// them (seen under a 4 ms load in each block, between the commands and
+/// the gestures: 6 of 6 wrote nothing before the fix).
+#[test]
+fn a_latch_touch_and_release_right_after_a_resumed_play_is_written() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: synth };
+    s.play(song).unwrap();
+    wait_until("2 beats", || {
+        s.idle().unwrap();
+        tick(&s) > 2 * Q
+    });
+    stop_and_land(&s);
+    s.play(song).unwrap();
+    s.gesture(t, Phase::Touch { value: Some(0.2) }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    let from = tick(&s);
+    wait_until("a beat", || {
+        s.idle().unwrap();
+        tick(&s) > from + Q
+    });
+    let heard = fader_override(synth);
+    assert!(
+        heard.is_some_and(|d| (d - fader_db(0.2)).abs() < 1e-6),
+        "{heard:?}"
+    );
+    stop_and_land(&s);
+    let lane = lane_named(&s, song, "Built-in Synth Fader").expect("the hold was written");
+    let p = points(&s, song, lane);
+    assert!(p.iter().any(|x| (x.1 - 0.2).abs() < 1e-9), "{p:?}");
+    s.close().unwrap();
+}
+
+/// Re-review N2: a song that ended by itself leaves the engine's ended
+/// flag up until a poll collects it. A Play pressed before any poll did
+/// must not collect that old flag as its own end (which landed the new
+/// pass before its roll, so the Play wrote nothing).
+#[test]
+fn a_play_after_the_song_ended_by_itself_writes() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    s.play_from(song, 0, Some(Q / 2)).unwrap();
+    // No idle and no transport poll: nothing collects the ended flag.
+    wait_until("the song to play", || {
+        vizdaw_ffi::host::debug_engine_stopped() == Some(false)
+    });
+    wait_until("the song to end by itself", || {
+        vizdaw_ffi::host::debug_engine_stopped() == Some(true)
+    });
+    std::thread::sleep(Duration::from_millis(20));
+    // Held: the idles below certainly run before the roll.
+    debug_hold_offline(true);
+    s.play_from(song, 0, None).unwrap();
+    for _ in 0..3 {
+        s.idle().unwrap();
+    }
+    let writing = s.automation_state().unwrap().writing;
+    debug_hold_offline(false);
+    assert!(
+        writing,
+        "the new Play's pass is still writing before its roll"
+    );
+    wait_until("beat 1", || {
+        s.idle().unwrap();
+        tick(&s) > Q
+    });
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.3) }).unwrap();
+    for v in [0.4, 0.5] {
+        pace(&s);
+        s.gesture(t, Phase::Value { value: v }).unwrap();
+    }
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    stop_and_land(&s);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation")
+    );
+    let lane = lane_named(&s, song, "Built-in Synth Fader").expect("the ride was written");
+    let p = points(&s, song, lane);
+    assert!(p.iter().any(|x| (x.1 - 0.5).abs() < 1e-9), "{p:?}");
+    s.close().unwrap();
+}
+
 /// Pre-flight C1, Ruling 24: the idles that run right after Play, before
 /// the renderer has rolled, do not end the pass; what is then written
 /// lands at Stop.
@@ -2189,5 +2336,628 @@ fn targets_parse_only_in_their_own_spelling() {
         &"9".repeat(100),
     ] {
         assert_eq!(parse(bad.to_string()), None, "{bad:?}");
+    }
+}
+
+// ---- Plan 5e-1 Task 12: automation recorded while looping lands at each
+// loop wrap (owner 2026-10-29; spec §7.4) ----
+
+/// Sequence "S" of `beats` beats (locked), looping: a long note on the
+/// built-in synth, bus "Bus" and lane "Auto" holding the bus fader at 0.2
+/// over the whole loop. Returns the session, the sequence, the bus and
+/// the lane.
+fn looping_bus(beats: i64) -> (Arc<Session>, u64, u64, u64) {
+    looping_bus_ticks(beats * Q)
+}
+
+/// [`looping_bus`], `len` ticks long.
+fn looping_bus_ticks(len: i64) -> (Arc<Session>, u64, u64, u64) {
+    use core_engine::fixtures::{Builder, Q as FQ};
+    use core_model::automation::AutomationTarget;
+    use core_model::command::{Command, SequenceCmd};
+    use core_model::event::EventBody;
+    use core_model::sequence::SeqLength;
+    let mut b = Builder::new();
+    let synth_dest = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(synth_dest)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0x8000, 64 * FQ)]).unwrap();
+    let bus = b.bus("Bus").unwrap();
+    let auto = b.lane(seq, "Auto", None).unwrap();
+    for tick in [0, len] {
+        b.event(
+            seq,
+            auto,
+            tick,
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(bus),
+                value: 0.2,
+            },
+        )
+        .unwrap();
+    }
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(core_model::time::Tick(len)),
+    }))
+    .unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    s.set_loop(true).unwrap();
+    (s, seq.0, bus.0, auto.0)
+}
+
+/// Idles (every 2 ms) until the transport wraps: its tick goes back.
+fn wait_wrap(s: &Session) -> Instant {
+    let mut last = tick(s);
+    let until = Instant::now() + common::wait_limit();
+    loop {
+        assert!(Instant::now() < until, "timed out waiting for a wrap");
+        s.idle().unwrap();
+        let t = tick(s);
+        if t < last {
+            return Instant::now();
+        }
+        last = t;
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Idles until the tick is in `[from, to)`.
+fn wait_tick_in(s: &Session, from: i64, to: i64) {
+    wait_until("the tick", || {
+        s.idle().unwrap();
+        let t = tick(s);
+        from <= t && t < to
+    });
+}
+
+fn has_value(p: &[(i64, f64)], v: f64) -> bool {
+    p.iter().any(|x| (x.1 - v).abs() < 1e-9)
+}
+
+/// Spec §7.4 (owner 2026-10-29): while looping, a cycle's writes land
+/// when the loop wraps, so the next cycle plays what was just written;
+/// every landing of the looped pass and the part Stop lands mid-cycle are
+/// one undo step "Write Automation", which one Undo takes back and Redo
+/// brings back.
+#[test]
+fn a_looped_pass_lands_at_each_wrap_as_one_undo_step() {
+    let _g = serial();
+    let (s, seq, bus, auto) = looping_bus(4);
+    s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.play(seq).unwrap();
+    // Cycle 0: Latch 0.4 from about beat 1 to the wrap.
+    wait_tick_in(&s, Q, 2 * Q);
+    s.gesture(t, Phase::Touch { value: Some(0.3) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.4 }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_wrap(&s);
+    wait_until("cycle 0 to land", || {
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.4)
+    });
+    assert!(s.transport().unwrap().playing, "landed while playing");
+    assert!(s.automation_state().unwrap().writing);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation")
+    );
+    // Cycle 1 plays it.
+    wait_tick_in(&s, 5 * Q / 2, 3 * Q);
+    let heard = fader_override(bus).expect("the lane drives the fader");
+    assert!(
+        (heard - fader_db(0.4)).abs() < 0.05,
+        "cycle 1 hears 0.4: {heard}"
+    );
+    // Cycle 1: Latch 0.7 from here to the wrap.
+    s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_wrap(&s);
+    wait_until("cycle 1 to land", || {
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.7)
+    });
+    assert!(s.transport().unwrap().playing);
+    // Cycle 2 plays both: 0.4 where only cycle 0 wrote, 0.7 after.
+    wait_tick_in(&s, 3 * Q / 2, 2 * Q);
+    let heard = fader_override(bus).unwrap();
+    assert!(
+        (heard - fader_db(0.4)).abs() < 0.05,
+        "cycle 2 at 1.5 beats: {heard}"
+    );
+    wait_tick_in(&s, 13 * Q / 4, 4 * Q);
+    let heard = fader_override(bus).unwrap();
+    assert!(
+        (heard - fader_db(0.7)).abs() < 0.05,
+        "cycle 2 at 3.25 beats: {heard}"
+    );
+    // Stop mid-cycle 3 after a ride: the partial cycle lands into the
+    // same step.
+    wait_wrap(&s);
+    wait_tick_in(&s, Q / 2, Q);
+    s.gesture(t, Phase::Touch { value: Some(0.9) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let at = tick(&s);
+    wait_until("a quarter beat on", || {
+        s.idle().unwrap();
+        tick(&s) > at + Q / 4
+    });
+    stop_and_land(&s);
+    let all = points(&s, seq, auto);
+    assert!(
+        has_value(&all, 0.4) && has_value(&all, 0.7) && has_value(&all, 0.9),
+        "{all:?}"
+    );
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation")
+    );
+    s.undo().unwrap();
+    assert_eq!(
+        points(&s, seq, auto),
+        vec![(0, 0.2), (4 * Q, 0.2)],
+        "one Undo takes back the whole looped pass"
+    );
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Automation Mode")
+    );
+    s.redo().unwrap();
+    assert_eq!(points(&s, seq, auto), all, "Redo brings it all back");
+    s.close().unwrap();
+}
+
+/// Task 12: wraps with nothing written land nothing and make no step.
+#[test]
+fn wraps_with_nothing_written_make_no_step() {
+    let _g = serial();
+    let (s, seq, bus, auto) = looping_bus(2);
+    s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
+    let version = s.snapshot().unwrap().version;
+    s.play(seq).unwrap();
+    for _ in 0..3 {
+        wait_wrap(&s);
+    }
+    wait_tick_in(&s, Q / 2, Q);
+    stop_and_land(&s);
+    assert_eq!(s.snapshot().unwrap().version, version, "nothing changed");
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Automation Mode")
+    );
+    assert_eq!(points(&s, seq, auto), vec![(0, 0.2), (2 * Q, 0.2)]);
+    s.close().unwrap();
+}
+
+/// Task 12: a loop shorter than the time between two idles (an eighth of
+/// a beat, 62.5 ms, with an idle only every 150 ms): every cycle that is
+/// over lands at the next idle, all into the one step.
+#[test]
+fn a_loop_shorter_than_a_landing_round_trip_lands_into_one_step() {
+    let _g = serial();
+    let (s, seq, bus, auto) = looping_bus_ticks(Q / 8);
+    s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.play(seq).unwrap();
+    wait_until("playing", || {
+        s.idle().unwrap();
+        s.transport().unwrap().playing
+    });
+    let slow = |n: usize| {
+        for _ in 0..n {
+            std::thread::sleep(Duration::from_millis(150));
+            s.idle().unwrap();
+        }
+    };
+    s.gesture(t, Phase::Touch { value: Some(0.3) }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    slow(3);
+    let p = points(&s, seq, auto);
+    assert!(has_value(&p, 0.3), "landed while playing: {p:?}");
+    assert!(s.transport().unwrap().playing);
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    slow(3);
+    let p = points(&s, seq, auto);
+    assert!(has_value(&p, 0.6), "{p:?}");
+    stop_and_land(&s);
+    assert!(
+        // The end edge is one tick past the loop's end.
+        points(&s, seq, auto).iter().all(|x| x.0 <= Q / 8 + 1),
+        "inside the loop: {:?}",
+        points(&s, seq, auto)
+    );
+    s.undo().unwrap();
+    assert_eq!(
+        points(&s, seq, auto).len(),
+        2,
+        "one step: {:?}",
+        points(&s, seq, auto)
+    );
+    s.close().unwrap();
+}
+
+/// Task 12, spec §7.3: a Write strip writes its cycle and lands at the
+/// wrap, and is in its After Write mode (Latch) from then on, while the
+/// loop plays on; untouched, it writes nothing more, and the one step
+/// takes the mode back too.
+#[test]
+fn a_write_strip_is_its_after_write_mode_from_the_first_wrap() {
+    let _g = serial();
+    let (s, seq, bus, auto) = looping_bus(2);
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.play(seq).unwrap();
+    wait_tick_in(&s, Q / 2, Q);
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_wrap(&s);
+    wait_until("cycle 0 to land", || {
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.6)
+    });
+    let mode = |s: &Session| {
+        s.automation_state()
+            .unwrap()
+            .modes
+            .into_iter()
+            .find(|m| m.strip == bus)
+            .map(|m| m.mode)
+    };
+    assert_eq!(
+        mode(&s),
+        Some(Mode::Latch),
+        "After Write from the first wrap"
+    );
+    assert!(s.transport().unwrap().playing);
+    let landed = points(&s, seq, auto);
+    wait_wrap(&s);
+    wait_wrap(&s);
+    stop_and_land(&s);
+    assert_eq!(points(&s, seq, auto), landed, "untouched: nothing more");
+    s.undo().unwrap();
+    assert_eq!(mode(&s), Some(Mode::Write), "one step takes the mode back");
+    assert_eq!(points(&s, seq, auto), vec![(0, 0.2), (2 * Q, 0.2)]);
+    s.close().unwrap();
+}
+
+/// Task 12: how soon after a wrap the landed automation is heard. A Latch
+/// ride made right after one wrap is written from the start of its cycle;
+/// after the next wrap the engine plays the old 0.2 until the landing
+/// reaches it, then the ride. The landing comes within the landing margin
+/// (20 ms) plus about one idle (here every millisecond): asserted within
+/// 120 ms, and the ride is heard an eighth of a beat (62.5 ms at 120 BPM)
+/// into the cycle.
+#[test]
+fn a_landed_cycle_is_heard_soon_after_the_wrap() {
+    let _g = serial();
+    let (s, seq, bus, auto) = looping_bus(4);
+    s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.play(seq).unwrap();
+    wait_wrap(&s);
+    // Right after the wrap: the ride starts near the cycle's start.
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    let touched = tick(&s);
+    assert!(touched < Q / 16, "touched at {touched}");
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let wrapped = wait_wrap(&s);
+    let until = Instant::now() + common::wait_limit();
+    while !has_value(&points(&s, seq, auto), 0.6) {
+        assert!(Instant::now() < until, "timed out waiting for the landing");
+        std::thread::sleep(Duration::from_millis(1));
+        s.idle().unwrap();
+    }
+    let landed = wrapped.elapsed();
+    let landed_at = tick(&s);
+    eprintln!("wrap -> landed {landed:?} (at tick {landed_at}; ride from {touched})");
+    assert!(
+        landed < Duration::from_millis(120),
+        "landed {landed:?} after the wrap"
+    );
+    wait_until("an eighth of a beat", || {
+        s.idle().unwrap();
+        tick(&s) >= Q / 8
+    });
+    let heard = fader_override(bus);
+    let at = tick(&s);
+    assert!(at < Q / 4, "still early in the cycle: {at}");
+    assert!(
+        heard.is_some_and(|d| (d - fader_db(0.6)).abs() < 0.05),
+        "the ride is heard at tick {at}: {heard:?}"
+    );
+    stop_and_land(&s);
+    s.close().unwrap();
+}
+
+/// Task 12, Ruling 21: a device rebuild during a looped pass lands what was
+/// written into the pass's step, and the pass that restarts on the
+/// rebuilt engine goes on landing into it: one Undo takes back all.
+#[test]
+fn a_rebuild_during_a_looped_pass_keeps_its_one_step() {
+    let _g = serial();
+    let (s, seq, bus, auto) = looping_bus(4);
+    s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.play(seq).unwrap();
+    wait_tick_in(&s, Q / 2, Q);
+    s.gesture(t, Phase::Touch { value: Some(0.4) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_wrap(&s);
+    wait_until("cycle 0 to land", || {
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.4)
+    });
+    wait_tick_in(&s, Q / 2, Q);
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    simulate_event(BackendEvent::SampleRateChanged(44_100.0));
+    wait_until("the rebuilt pass", || {
+        let _ = s.transport();
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.5)
+            && s.automation_state().unwrap().writing
+            && s.transport().unwrap().playing
+    });
+    wait_wrap(&s);
+    wait_tick_in(&s, Q / 2, Q);
+    s.gesture(t, Phase::Touch { value: Some(0.8) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_wrap(&s);
+    wait_until("the restarted pass's cycle to land", || {
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.8)
+    });
+    stop_and_land(&s);
+    s.undo().unwrap();
+    assert_eq!(
+        points(&s, seq, auto),
+        vec![(0, 0.2), (4 * Q, 0.2)],
+        "one step for the looped pass, the rebuild included"
+    );
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Automation Mode")
+    );
+    s.close().unwrap();
+}
+
+/// What [`record_loop`] answers: the Mic lane's take count, the undo
+/// label, Auto's points, the session, the sequence and Auto.
+type Recorded = (u32, Option<String>, Vec<(i64, f64)>, Arc<Session>, u64, u64);
+
+/// One bar (4 beats) looped, recording fake input on lane "Mic" with bus
+/// "Bus" in Latch over lane "Auto" (0.2): rides 0.4 in pass 1 and 0.7 in
+/// pass 2 when `ride`, and stops two beats into pass 3.
+fn record_loop(ride: bool) -> Recorded {
+    use core_engine::fixtures::{Builder, Q as FQ};
+    use core_model::automation::AutomationTarget;
+    use core_model::command::{Command, LaneCmd, RoutingCmd, SequenceCmd};
+    use core_model::event::EventBody;
+    use core_model::ids::AnyId;
+    use core_model::lane::{InputChannels, LaneInput, MonitorMode};
+    use core_model::sequence::SeqLength;
+    let mut b = Builder::new();
+    let synth_dest = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(synth_dest)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0x8000, 64 * FQ)]).unwrap();
+    let mic = b.lane(seq, "Mic", None).unwrap();
+    let r = b
+        .run(Command::Routing(RoutingCmd::AddOutput {
+            name: "Audio 1".into(),
+            reference: "audio:1-2".into(),
+        }))
+        .unwrap();
+    let out = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .unwrap();
+    for cmd in [
+        LaneCmd::SetOutput {
+            seq,
+            lane: mic,
+            output: Some(out),
+        },
+        LaneCmd::SetInput {
+            seq,
+            lane: mic,
+            input: Some(LaneInput::Audio {
+                channels: InputChannels::Mono(0),
+                return_of: None,
+            }),
+        },
+        LaneCmd::SetMonitor {
+            seq,
+            lane: mic,
+            monitor: MonitorMode::Off,
+        },
+        LaneCmd::SetFlags {
+            seq,
+            lane: mic,
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        },
+    ] {
+        b.run(Command::Lane(cmd)).unwrap();
+    }
+    let bus = b.bus("Bus").unwrap();
+    let auto = b.lane(seq, "Auto", None).unwrap();
+    for tick in [0, 4 * FQ] {
+        b.event(
+            seq,
+            auto,
+            tick,
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(bus),
+                value: 0.2,
+            },
+        )
+        .unwrap();
+    }
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(core_model::time::Tick(4 * FQ)),
+    }))
+    .unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    s.debug_set_trash_dir(Some(dir.path().join("Trash").display().to_string()));
+    std::mem::forget(dir);
+    s.set_automation_mode(vec![bus.0], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: bus.0 };
+    s.record(
+        seq.0,
+        vizdaw_ffi::RecordSpecRow {
+            replace: true,
+            punch: None,
+            looped: true,
+            count_in_bars: 0,
+            pre_roll_bars: 0,
+            passes_as_takes: true,
+        },
+    )
+    .unwrap();
+    let pass = |s: &Session| s.record_state().unwrap().pass;
+    wait_tick_in(&s, Q / 2, Q);
+    if ride {
+        s.gesture(t, Phase::Touch { value: Some(0.4) }).unwrap();
+        pace(&s);
+        s.gesture(t, Phase::Release).unwrap();
+    }
+    wait_until("pass 2", || {
+        s.idle().unwrap();
+        pass(&s) >= 2
+    });
+    if ride {
+        wait_until("pass 1's automation to land while recording", || {
+            s.idle().unwrap();
+            has_value(&points(&s, seq.0, auto.0), 0.4)
+        });
+        assert!(s.record_state().unwrap().recording, "still recording");
+        wait_tick_in(&s, 2 * Q, 3 * Q);
+        let heard = fader_override(bus.0).unwrap();
+        assert!(
+            (heard - fader_db(0.4)).abs() < 0.05,
+            "pass 2 hears 0.4: {heard}"
+        );
+        s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
+        pace(&s);
+        s.gesture(t, Phase::Release).unwrap();
+    }
+    wait_until("pass 3", || {
+        s.idle().unwrap();
+        pass(&s) >= 3
+    });
+    if ride {
+        wait_until("pass 2's automation to land", || {
+            s.idle().unwrap();
+            has_value(&points(&s, seq.0, auto.0), 0.7)
+        });
+    }
+    wait_until("two beats into pass 3", || {
+        s.idle().unwrap();
+        s.record_state().unwrap().frames >= 10 * 24_000
+    });
+    stop_and_land(&s);
+    let takes = s
+        .lanes(seq.0)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.id == mic.0)
+        .unwrap()
+        .take_count;
+    let label = s.snapshot().unwrap().undo_label;
+    let p = points(&s, seq.0, auto.0);
+    (takes, label, p, s, seq.0, auto.0)
+}
+
+/// Task 12, spec §7.4: recording audio and automation together while
+/// looping: each pass's automation lands at its wrap into the recording's
+/// group (heard in the next pass), the takes per pass are as without
+/// automation, and the whole is one "Record" step.
+#[test]
+fn a_looped_recording_lands_automation_at_each_wrap_into_its_record_step() {
+    let _g = serial();
+    vizdaw_ffi::host::set_fake_input(Some(core_engine::offline::FakeInput::Signals));
+    let (plain, plain_label, _, s, _, _) = record_loop(false);
+    s.close().unwrap();
+    let (takes, label, p, s, seq, auto) = record_loop(true);
+    vizdaw_ffi::host::set_fake_input(None);
+    assert_eq!(takes, plain, "the takes per pass are unchanged");
+    assert!(takes >= 3, "a take per pass: {takes}");
+    assert_eq!(plain_label.as_deref(), Some("Record"));
+    assert_eq!(label.as_deref(), Some("Record"));
+    assert!(has_value(&p, 0.4) && has_value(&p, 0.7), "{p:?}");
+    s.undo().unwrap();
+    assert_eq!(
+        points(&s, seq, auto),
+        vec![(0, 0.2), (4 * Q, 0.2)],
+        "one step"
+    );
+    s.close().unwrap();
+}
+
+/// Task 12: a Touch glide and a Trim glide back that the wrap cuts land as
+/// far as they went (the engine ends them at the wrap), and the next
+/// cycle starts on the automation as it was.
+#[test]
+fn glides_the_wrap_cuts_land_as_far_as_they_went() {
+    let _g = serial();
+    set_automation_settings(AutomationSettingsRow {
+        after_write: Mode::Latch,
+        return_ms: 2000,
+        thinning: ThinningRow::Medium,
+    })
+    .unwrap();
+    for (mode, ride) in [
+        (Mode::Touch, 0.8),
+        (Mode::Trim, fader_norm(fader_db(0.2) + 6.0)),
+    ] {
+        let (s, seq, bus, auto) = looping_bus(4);
+        s.set_automation_mode(vec![bus], mode).unwrap();
+        let t = Target::StripFader { strip: bus };
+        s.play(seq).unwrap();
+        wait_tick_in(&s, 3 * Q, 3 * Q + Q / 4);
+        s.gesture(t, Phase::Touch { value: None }).unwrap();
+        pace(&s);
+        s.gesture(t, Phase::Value { value: ride }).unwrap();
+        pace(&s);
+        pace(&s);
+        // A 2 s glide back from about 3.3 beats: the wrap at 4 beats cuts it.
+        s.gesture(t, Phase::Release).unwrap();
+        wait_wrap(&s);
+        wait_until("the cycle to land", || {
+            s.idle().unwrap();
+            points(&s, seq, auto).len() > 2
+        });
+        let p = points(&s, seq, auto);
+        let end = p.iter().rev().find(|x| x.0 <= 4 * Q).unwrap();
+        assert_eq!(end.0, 4 * Q, "{mode:?}: written to the wrap: {p:?}");
+        let (lo, hi, at) = (fader_db(0.2), fader_db(ride), fader_db(end.1));
+        assert!(
+            at > lo + 0.5 && at < hi - 0.5,
+            "{mode:?}: the glide ends part way back ({lo} < {at} < {hi} dB): {p:?}"
+        );
+        assert!(
+            p.iter().filter(|x| x.0 < 3 * Q).all(|x| *x == (0, 0.2)),
+            "{mode:?}: nothing written at the next cycle's start: {p:?}"
+        );
+        stop_and_land(&s);
+        s.close().unwrap();
     }
 }

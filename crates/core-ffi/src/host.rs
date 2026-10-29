@@ -2662,6 +2662,9 @@ pub fn play(
         message: "engine host missing".into(),
     })?;
     host.faults.clear();
+    // A song that ended by itself before any poll saw it must not end
+    // this Play (plan 5e-1 Task 12, re-review N2).
+    let _ = host.engine.take_ended();
     // Still unavailable: said again (Task 12 review M2).
     let midi_fault = lock(&MIDI_UNAVAILABLE).clone();
     note_midi_fault(host, midi_fault);
@@ -3595,6 +3598,16 @@ pub fn debug_automation_suspended() -> Option<bool> {
     lock(&HOST)
         .as_ref()
         .map(|h| h.engine.automation_suspended())
+}
+
+/// Whether the engine, whoever holds it, has stopped, read without
+/// collecting its ended flag as every poll does (test hook, plan 5e-1
+/// Task 12, re-review N2).
+#[cfg(feature = "test-hooks")]
+pub fn debug_engine_stopped() -> Option<bool> {
+    lock(&HOST)
+        .as_ref()
+        .map(|h| h.engine.state() == PlayState::Stopped)
 }
 
 /// The input routes the engine was last given, whoever holds it (test

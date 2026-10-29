@@ -174,10 +174,14 @@ fn latch_holds_to_the_end_of_its_pass() {
     );
 }
 
-/// Review Focus 2, Ruling 10: a target still touched at a wrap writes to
-/// the end of that pass and again from the next pass's start.
+/// Review Focus 2, Ruling 10 as amended by the owner (2026-10-29, plan
+/// 5e-1 Task 12): a wrap ends the writing of every target. A target still
+/// touched at a wrap writes to the end of that pass, and in the next pass
+/// again from its next move (Ruling 20): its value is not carried from the
+/// new pass's start, and a touch held still over the wrap and released
+/// writes nothing there.
 #[test]
-fn a_target_held_over_a_wrap_writes_both_passes() {
+fn a_target_held_over_a_wrap_writes_again_from_its_next_move() {
     let stamps = [
         st(PAN, 80_000, GesturePhase::Touch(0.6), WriteMode::Latch),
         st(PAN, 100_000, GesturePhase::Value(0.65), WriteMode::Latch),
@@ -193,7 +197,81 @@ fn a_target_held_over_a_wrap_writes_both_passes() {
     );
     assert_eq!(w.iter().map(|x| x.pass).collect::<Vec<_>>(), vec![0, 1]);
     close(&w[0].points, &[(80_000, 0.6), (96_000, 0.6)]);
-    close(&w[1].points, &[(0, 0.6), (4_000, 0.65), (54_000, 0.65)]);
+    close(&w[1].points, &[(4_000, 0.65), (54_000, 0.65)]);
+    // Held still over the wrap, then let go: nothing in the next pass.
+    let still = [
+        st(PAN, 80_000, GesturePhase::Touch(0.6), WriteMode::Touch),
+        st(PAN, 110_000, GesturePhase::Glide(12_000), WriteMode::Touch),
+    ];
+    let w = run(
+        &[roll(0, 0), wrap(96_000, 0)],
+        150_000,
+        &still,
+        &[],
+        &half,
+        &no_points,
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    close(&w[0].points, &[(80_000, 0.6), (96_000, 0.6)]);
+}
+
+/// Plan 5e-1 Task 12: a Touch glide the wrap cuts is written as far as it
+/// went, so the landed cycle plays what was heard up to the wrap (the
+/// engine ends the glide there): the ramp's last point is on the straight
+/// ramp at the wrap, not the existing value. Trim's offset glide likewise
+/// ends part way back to 0.
+#[test]
+fn a_glide_the_wrap_cuts_ends_where_it_was() {
+    let stamps = [
+        st(PAN, 80_000, GesturePhase::Touch(0.9), WriteMode::Touch),
+        st(PAN, 90_000, GesturePhase::Glide(12_000), WriteMode::Touch),
+    ];
+    let w = run(
+        &[roll(0, 0), wrap(96_000, 0)],
+        150_000,
+        &stamps,
+        &[],
+        &half,
+        &no_points,
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    // Half way (6 000 of 12 000 frames) from 0.9 back to 0.5.
+    close(&w[0].points, &[(80_000, 0.9), (90_000, 0.9), (96_000, 0.7)]);
+    // Without the wrap the whole glide is written.
+    let w = run(&[roll(0, 0)], 150_000, &stamps, &[], &half, &no_points);
+    close(
+        &w[0].points,
+        &[(80_000, 0.9), (90_000, 0.9), (102_000, 0.5)],
+    );
+}
+
+/// Plan 5e-1 Task 12: the passes of a capture that are over by an output
+/// run: a pass is over once the next one's first piece has been heard
+/// for the margin (a stamp heard before then may still be the pass's).
+#[test]
+fn passes_are_over_once_the_next_one_is_heard() {
+    use vizdaw_ffi::autowrite::passes_over;
+    let marks = [roll(0, 0), wrap(96_000, 0), wrap(192_000, 0)];
+    assert_eq!(passes_over(&marks[..1], 150_000, 960), 0, "no wrap");
+    assert_eq!(
+        passes_over(&marks[..2], 96_500, 960),
+        0,
+        "inside the margin"
+    );
+    assert_eq!(passes_over(&marks[..2], 96_960, 960), 1);
+    assert_eq!(passes_over(&marks, 200_000, 960), 2, "two wraps in one go");
+    // Behind latency the wrap is heard later.
+    let late = [
+        roll(0, 1_000),
+        Mark {
+            run: 96_000,
+            frame: 0,
+            wrap: true,
+            latency: 1_000,
+        },
+    ];
+    assert_eq!(passes_over(&late, 97_500, 960), 0);
+    assert_eq!(passes_over(&late, 97_960, 960), 1);
 }
 
 /// Write (Ruling 9): a held control writes from the roll at its value,
@@ -872,7 +950,8 @@ fn a_release_no_piece_covers_still_ends_its_segment() {
     assert_eq!(w.len(), 2, "{w:?}");
     close(&w[0].points, &[(20, 0.4), (60, 0.6), (100, 0.6)]);
     close(&w[1].points, &[(200, 0.6), (96_000, 0.6)]);
-    // The same over a wrap: held to the next pass's end.
+    // The same over a wrap: the wrap ends the writing (owner 2026-10-29,
+    // Task 12), and a hold with no move after it writes nothing there.
     let marks = [
         roll(0, 0),
         Mark {
@@ -896,10 +975,9 @@ fn a_release_no_piece_covers_still_ends_its_segment() {
     let w = run(&marks, 96_000, &latch, &[], &half, &no_points);
     assert_eq!(
         w.iter().map(|x| x.pass).collect::<Vec<_>>(),
-        vec![0, 1],
+        vec![0],
         "{w:?}"
     );
-    close(&w[1].points, &[(100, 0.6), (95_000, 0.6)]);
 }
 
 /// Re-review I2 and N1: a hold then a step on adjacent frames (a glide of

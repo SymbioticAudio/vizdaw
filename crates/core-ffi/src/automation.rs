@@ -422,7 +422,67 @@ pub(crate) struct Writing {
     /// The targets touched since the pass began: their holds are not
     /// sent again (re-review m4).
     pub moved: BTreeSet<AutomationTarget>,
+    /// Loop passes already landed at their wrap (plan 5e-1 Task 12): the
+    /// writer's passes before this one are in the document.
+    pub landed: usize,
+    /// The undo step this pass's landings go into (its history serial),
+    /// once one landed outside a recording (Task 12).
+    pub step: Option<u64>,
+    /// After Write went with an earlier landing (Task 12).
+    pub after_done: bool,
 }
+
+impl Writing {
+    /// The writer's writes of this pass up to `end_run`, of passes from
+    /// [`Writing::landed`] on and before `until` (all when `None`), read
+    /// against `doc` (which holds the landed passes), in the model's terms.
+    pub fn model_writes(
+        &self,
+        owner: u64,
+        doc: &Document,
+        end_run: u64,
+        until: Option<usize>,
+    ) -> Vec<core_model::command::AutomationWrite> {
+        let stamps: Vec<Stamped> = self.stamps.values().flatten().copied().collect();
+        let targets: BTreeSet<AutomationTarget> = self.stamps.keys().copied().collect();
+        let pd = PassDoc::read(owner, doc, self.seq, self.rate, targets.into_iter());
+        let made: Vec<_> = pd
+            .writes(
+                doc,
+                &self.marks,
+                end_run,
+                &stamps,
+                &self.holds,
+                self.thinning,
+                self.after_write,
+            )
+            .into_iter()
+            .filter(|x| x.pass >= self.landed && until.is_none_or(|u| x.pass < u))
+            .collect();
+        pd.to_model(doc, &made)
+    }
+}
+
+/// What a pass's landing carries (plan 5e-1 Task 12): its writes, the
+/// Write strips whose mode becomes the After Write mode, that mode, and
+/// the undo step its earlier landings went into.
+#[derive(Debug)]
+pub(crate) struct Landing {
+    /// The writes.
+    pub writes: Vec<core_model::command::AutomationWrite>,
+    /// The Write strips that still exist (none once After Write went).
+    pub strips: Vec<StripId>,
+    /// The After Write mode read at Play.
+    pub after: AutomationMode,
+    /// The pass's undo step so far, to land into while it is the present.
+    pub step: Option<u64>,
+}
+
+/// How long after a wrap is heard its pass lands (plan 5e-1 Task 12): a
+/// message the renderer stamps before its block (by its host time) can be
+/// heard up to about a block before it, so a pass is over this long after
+/// the next one began.
+pub(crate) const WRAP_MARGIN_MS: f64 = 20.0;
 
 /// Ruling 24 (pre-flight C1, M17): a pass ends when its tap closed, when
 /// another session took the engine (`transport_stopped` is `None`), or
@@ -1080,6 +1140,40 @@ impl PassDoc {
             |t: AutomationTarget| lane_name(doc, t, self.params.get(&t).map(|p| p.name.as_str()));
         crate::autowrite::to_model(writes, self.seq, &self.tempo, &outside, &name, &stepped)
     }
+}
+
+/// The status lines for the lanes `writes` made in `after` (from `before`)
+/// that another lane's solo silences: a new automation lane is not soloed
+/// (owner ruling 2026-10-29, re-review N1), so it is silent until the
+/// solo clears, and the user is told.
+pub(crate) fn silent_new_lanes(
+    before: &Document,
+    after: &Document,
+    writes: &[core_model::command::AutomationWrite],
+) -> Vec<String> {
+    let seqs: BTreeSet<SeqId> = writes.iter().map(|w| w.seq).collect();
+    let mut out = Vec::new();
+    for seq in seqs {
+        let Ok(a) = after.sequence(seq) else {
+            continue;
+        };
+        if !a.lanes.iter().any(|l| l.solo) {
+            continue;
+        }
+        let old: BTreeSet<core_model::ids::LaneId> = before
+            .sequence(seq)
+            .map(|b| b.lanes.iter().map(|l| l.id).collect())
+            .unwrap_or_default();
+        for l in a.lanes.iter().filter(|l| !l.solo && !old.contains(&l.id)) {
+            if writes.iter().any(|w| w.seq == seq && w.lane_name == l.name) {
+                out.push(format!(
+                    "The new automation lane \"{}\" is silent while another lane is soloed; it plays once the solo is cleared.",
+                    l.name
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// The undo label of a static gesture on `t` (Ruling 14).

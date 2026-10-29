@@ -295,8 +295,11 @@ fn segments(
     let mut open: Option<Segment> = None;
     let mut at = 0usize;
     // Crosses the piece boundaries up to `to`: a wrap or a jump ends the
-    // open segment at the earlier piece's end and, unless it was released,
-    // reopens it at the new piece's start with its last value.
+    // open segment at the earlier piece's end. A jump reopens it, unless it
+    // was released, at the new piece's start with its last value; a wrap
+    // ends the writing of every target (spec §7.3), so a target still
+    // touched writes again from its next move (owner 2026-10-29, plan
+    // 5e-1 Task 12; Ruling 20).
     let cross = |open: &mut Option<Segment>, out: &mut Vec<Segment>, from: usize, to: usize| {
         for j in from.saturating_add(1)..=to {
             let (Some(prev), Some(next)) = (spans.get(j - 1), spans.get(j)) else {
@@ -312,27 +315,18 @@ fn segments(
             let v = seg.last();
             let (held, kind, mode) = (seg.held, seg.kind, seg.mode);
             out.push(seg);
-            if held {
+            if held || next.wrap {
                 continue;
             }
-            // From the first wrap on, Write is the After Write mode
-            // (Ruling 9).
-            let mode = if next.wrap && mode == WriteMode::Write && next.pass > 0 {
-                c.after_write
-            } else {
-                Some(mode)
-            };
-            if let Some(mode) = mode {
-                *open = Some(Segment {
-                    pass: next.pass,
-                    piece: j,
-                    mode,
-                    kind,
-                    samples: vec![(next.start, v)],
-                    held: false,
-                    reopened: true,
-                });
-            }
+            *open = Some(Segment {
+                pass: next.pass,
+                piece: j,
+                mode,
+                kind,
+                samples: vec![(next.start, v)],
+                held: false,
+                reopened: true,
+            });
         }
     };
     let open_seg = |s: &Placed, kind: Kind, value: f64| Segment {
@@ -414,13 +408,23 @@ fn segments(
                     // A glide of 0 frames is a step one frame after the
                     // release (review I2): the engine holds the value up
                     // to the release, so `(f, last)` must survive.
-                    let to = f.saturating_add(i64::from(n.max(1))).min(stretch_end);
+                    let full = f.saturating_add(i64::from(n.max(1)));
+                    let to = full.min(stretch_end);
                     if to > f {
-                        let v = if seg.kind == Kind::Offset {
+                        let goal = if seg.kind == Kind::Offset {
                             0.0
                         } else {
                             let frame = u64::try_from(to).unwrap_or(0);
                             unit((c.existing)(target, frame).unwrap_or_else(|| (c.fixed)(target)))
+                        };
+                        // Cut by the stretch's end (a wrap ends it in the
+                        // engine too): written as far as it went, on the
+                        // straight ramp (plan 5e-1 Task 12).
+                        let v = if to < full {
+                            let from = seg.last();
+                            from + (goal - from) * (to - f) as f64 / (full - f) as f64
+                        } else {
+                            goal
                         };
                         seg.push(to, v);
                     }
@@ -878,4 +882,21 @@ fn lane_at(points: &[(Tick, f64)], t: Tick, stepped: bool) -> f64 {
         (None, Some(b)) => b.1,
         (None, None) => 0.0,
     }
+}
+
+/// How many passes of a capture with `marks` are over by output run `run`
+/// (plan 5e-1 Task 12: a looped pass lands each pass once it is over): a
+/// pass is over once the next pass's first piece has been heard for
+/// `margin` frames, so no stamp heard before that start (the gesture tap
+/// stamps a message up to the graph latency later than its block, or a
+/// little before it) can still arrive for it.
+pub fn passes_over(marks: &[Mark], run: u64, margin: u64) -> usize {
+    let run = i64::try_from(run).unwrap_or(i64::MAX);
+    let margin = i64::try_from(margin).unwrap_or(i64::MAX);
+    writing_pieces(marks, run)
+        .iter()
+        .filter(|p| p.pass > 0 && p.from.saturating_add(margin) <= run)
+        .map(|p| p.pass)
+        .max()
+        .unwrap_or(0)
 }

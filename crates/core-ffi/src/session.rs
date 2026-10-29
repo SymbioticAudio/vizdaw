@@ -169,11 +169,20 @@ struct Inner {
     /// A pass a device rebuild ended, to start again in this sequence once
     /// the rebuilt engine plays (controller ruling 3 on Task 8).
     restart_writing: Option<SeqId>,
-    /// One entry per pass, landed as one step each (review m2).
-    pending_automation: Vec<(Vec<AutomationWrite>, Vec<StripId>, AutomationMode)>,
+    /// One entry per pass, landed as one step each (review m2), or into
+    /// the step its loop passes landed in (plan 5e-1 Task 12).
+    pending_automation: Vec<crate::automation::Landing>,
     /// The Write strips (and the After Write mode) whose mode changes
     /// when a recording's pass with automation lands (Ruling 9).
     after_write_pending: Option<(Vec<StripId>, AutomationMode)>,
+    /// The undo step the last landing outside a recording made or went
+    /// into (Task 12: a looped pass a rebuild restarts keeps its step).
+    last_step: Option<u64>,
+    /// The step a pass a rebuild ended had, for the pass that restarts.
+    restart_step: Option<u64>,
+    /// Loop passes of the recording landed into its group (Task 12): its
+    /// step is "Write Automation" when it recorded nothing else.
+    landed_in_group: bool,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -271,6 +280,9 @@ impl Inner {
             pending_automation: Vec::new(),
             restart_writing: None,
             after_write_pending: None,
+            last_step: None,
+            restart_step: None,
+            landed_in_group: false,
         }
     }
 
@@ -447,8 +459,8 @@ impl Inner {
             targets.extend(w.ended.iter().copied());
             targets.extend(w.holds.iter().map(|(t, _)| *t));
         }
-        for (writes, _, _) in &self.pending_automation {
-            targets.extend(writes.iter().map(|w| w.target));
+        for p in &self.pending_automation {
+            targets.extend(p.writes.iter().map(|w| w.target));
         }
         if let Some((Some(pass), _)) = &self.pending_pass {
             targets.extend(pass.automation.iter().map(|w| w.target));
@@ -4870,6 +4882,7 @@ impl Session {
         if let Err(e) = inner.history.begin_group() {
             return fail(e.into());
         }
+        inner.landed_in_group = false;
         inner.recording = Some(recording);
         inner.record_faults.clear();
         inner.looped = spec.looped;
@@ -4974,9 +4987,15 @@ impl Session {
         let Some((pass, files)) = inner.pending_pass.take() else {
             return;
         };
-        let label = pass
-            .as_ref()
-            .map_or("Record", core_model::command::RecordPass::name);
+        // A recording that recorded nothing but whose loop passes landed
+        // automation into its group (Task 12) is "Write Automation".
+        let label = match &pass {
+            Some(p) => p.name(),
+            None if inner.landed_in_group => "Write Automation",
+            None => "Record",
+        };
+        inner.landed_in_group = false;
+        let before = inner.doc().clone();
         // The automation that landed, if any (plan 5e-1 Ruling 25).
         let mut landed: Vec<AutomationWrite> = Vec::new();
         if let Some(p) = pass {
@@ -5024,6 +5043,8 @@ impl Session {
         // 5e-1 Ruling 9).
         self.after_write_in_group(inner, !landed.is_empty());
         let _ = inner.history.end_group(label);
+        let silent = crate::automation::silent_new_lanes(&before, inner.doc(), &landed);
+        inner.news.problems.extend(silent);
         inner.version += 1;
         inner.news.doc_changed = true;
         inner.news.media_changed = true;
@@ -5387,15 +5408,21 @@ impl Session {
             let doc = inner.doc();
             let pd =
                 crate::automation::PassDoc::read(self.id, doc, w.seq, w.rate, std::iter::once(t));
-            let made = pd.writes(
-                doc,
-                &w.marks,
-                end_run,
-                &stamps,
-                &holds,
-                w.thinning,
-                w.after_write,
-            );
+            // The loop passes landed at their wraps are in the document
+            // already (Task 12).
+            let made: Vec<_> = pd
+                .writes(
+                    doc,
+                    &w.marks,
+                    end_run,
+                    &stamps,
+                    &holds,
+                    w.thinning,
+                    w.after_write,
+                )
+                .into_iter()
+                .filter(|x| x.pass >= w.landed)
+                .collect();
             let Some(last) = made.iter().map(|x| x.pass).max() else {
                 return Ok(Vec::new());
             };
@@ -6259,6 +6286,9 @@ impl Session {
             // Touches held over the pass's start count as moved: the holds
             // re-sent at the roll spare them (re-review 2 N4).
             moved: inner.touches.keys().copied().collect(),
+            landed: 0,
+            step: None,
+            after_done: false,
         });
         let tag = WriteMode::Write.tag();
         let ns = host_time(None);
@@ -6363,16 +6393,25 @@ impl Session {
                 match (holder, wants_play) {
                     (Holder::This, true) => {
                         // The old pass lands first (re-review N1).
+                        inner.last_step = None;
                         self.apply_pending_automation(&mut inner);
+                        let step = inner.last_step.take().or(inner.restart_step.take());
                         let at = self.resume_tick();
                         self.begin_writing(&mut inner, seq, at);
+                        self.keep_loop_step(&mut inner, step);
                     }
                     (Holder::Nobody, _) => {}
-                    _ => inner.restart_writing = None,
+                    _ => {
+                        inner.restart_writing = None;
+                        inner.restart_step = None;
+                    }
                 }
             }
             return;
         };
+        // The run before the stamps: every stamp of a block up to it is
+        // in the ring by then (Task 12's landing at a wrap).
+        let run = w.handles.status.run();
         drain_tap(w);
         let (closed, seq) = (w.handles.status.closed(), w.seq);
         // Re-review m4: the holds went out right after the Play's (or the
@@ -6403,27 +6442,102 @@ impl Session {
                 self.send_gesture(&mut inner, t, GesturePhase::Hold, tag, ns);
             }
         }
-        // A recording ends its own pass and takes the writes with it.
-        if inner.recording.is_some() || inner.finishing {
+        // A recording ends its own pass and takes the writes with it; its
+        // loop passes land into its group as they end (Task 12).
+        if inner.finishing {
+            return;
+        }
+        if inner.recording.is_some() {
+            if !closed {
+                self.land_wraps(&mut inner, run);
+            }
             return;
         }
         match crate::automation::pass_step(closed, rolled, stopped, wants_play, holder) {
-            PassStep::Go => {}
+            PassStep::Go => self.land_wraps(&mut inner, run),
             PassStep::Land => self.finish_writing(&mut inner),
             PassStep::Restart => {
                 // The rebuilt engine plays on (Ruling 21; controller
                 // ruling 3): what was written lands as Stop lands it (After
                 // Write included, so the new pass holds the strips' new
                 // modes), then writing goes on from where it resumed
-                // (re-review N1).
+                // (re-review N1). A looped pass keeps its one step (Task
+                // 12).
+                let old = inner.writing.as_ref().and_then(|w| w.step);
+                inner.last_step = None;
                 self.finish_writing(&mut inner);
                 self.apply_pending_automation(&mut inner);
+                let step = inner.last_step.take().or(old);
                 let at = self.resume_tick();
                 self.begin_writing(&mut inner, seq, at);
+                self.keep_loop_step(&mut inner, step);
             }
             PassStep::RestartLater => {
+                let old = inner.writing.as_ref().and_then(|w| w.step);
+                inner.last_step = None;
                 self.finish_writing(&mut inner);
                 inner.restart_writing = Some(seq);
+                inner.restart_step = old;
+            }
+        }
+    }
+
+    /// A looped pass a rebuild restarted goes on landing into the step its
+    /// part before the rebuild landed in (plan 5e-1 Task 12: one undo step
+    /// per looped pass).
+    fn keep_loop_step(&self, inner: &mut Inner, step: Option<u64>) {
+        let looped = inner.looped;
+        if let Some(w) = inner.writing.as_mut().filter(|_| looped) {
+            w.step = step;
+        }
+    }
+
+    /// Plan 5e-1 Task 12 (owner 2026-10-29; spec §7.4): while looping, the
+    /// loop passes that are over as of tap run `run` (the next pass heard
+    /// for [`crate::automation::WRAP_MARGIN_MS`]) land now, so the next
+    /// cycle plays what was just written: into the pass's one undo step,
+    /// or into the recording's group. Put off while an edit is open (the
+    /// next `idle` lands them). A pass that wrote nothing makes no step.
+    fn land_wraps(&self, inner: &mut Inner, run: u64) {
+        let Some(w) = inner.writing.as_ref() else {
+            return;
+        };
+        let margin = (crate::automation::WRAP_MARGIN_MS * w.rate / 1000.0).round() as u64;
+        let over = crate::autowrite::passes_over(&w.marks, run, margin);
+        if over <= w.landed {
+            return;
+        }
+        let recording = inner.recording.is_some();
+        if inner.history.in_transaction()
+            || inner.static_edit.is_some()
+            || inner.history.in_group() != recording
+        {
+            return;
+        }
+        let writes = w.model_writes(self.id, inner.doc(), run, Some(over));
+        let (step, after, after_done) = (w.step, w.after_write, w.after_done);
+        let strips: Vec<StripId> = if after_done {
+            Vec::new()
+        } else {
+            w.write_strips.iter().copied().collect()
+        };
+        if let Some(w) = inner.writing.as_mut() {
+            w.landed = over;
+        }
+        let landing = crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            step,
+        };
+        inner.last_step = None;
+        if self.land(inner, landing) {
+            let step = inner.last_step.take();
+            if let Some(w) = inner.writing.as_mut() {
+                w.after_done = true;
+                if !recording {
+                    w.step = step;
+                }
             }
         }
     }
@@ -6436,14 +6550,18 @@ impl Session {
             .unwrap_or(Tick::ZERO)
     }
 
-    /// Ends the pass and answers its writes, the Write strips that still
-    /// exist and the After Write mode (none without a pass).
-    fn take_writes(
-        &self,
-        inner: &mut Inner,
-    ) -> (Vec<AutomationWrite>, Vec<StripId>, AutomationMode) {
+    /// Ends the pass and answers its landing: the writes of the passes
+    /// not landed yet, the Write strips that still exist (none once After
+    /// Write went), the After Write mode and the pass's step (nothing
+    /// without a pass).
+    fn take_writes(&self, inner: &mut Inner) -> crate::automation::Landing {
         let Some(mut w) = inner.writing.take() else {
-            return (Vec::new(), Vec::new(), AutomationMode::Latch);
+            return crate::automation::Landing {
+                writes: Vec::new(),
+                strips: Vec::new(),
+                after: AutomationMode::Latch,
+                step: None,
+            };
         };
         if host::holder() == Some(self.id) {
             host::stop_gestures(self.id);
@@ -6472,23 +6590,11 @@ impl Session {
                 .problems
                 .push("Some automation moves were lost while writing.".into());
         }
-        let stamps: Vec<_> = w.stamps.values().flatten().copied().collect();
-        let doc = inner.doc();
-        let targets: std::collections::BTreeSet<AutomationTarget> =
-            w.stamps.keys().copied().collect();
-        let pd = crate::automation::PassDoc::read(self.id, doc, w.seq, w.rate, targets.into_iter());
-        let made = pd.writes(
-            doc,
-            &w.marks,
-            end_run,
-            &stamps,
-            &w.holds,
-            w.thinning,
-            w.after_write,
-        );
-        let writes = pd.to_model(doc, &made);
+        // The loop passes landed at their wraps are in the document
+        // (Task 12): only the rest lands now.
+        let writes = w.model_writes(self.id, inner.doc(), end_run, None);
         let writes = self.drop_gone(inner, writes);
-        let strips = if writes.is_empty() {
+        let strips = if writes.is_empty() || w.after_done {
             Vec::new()
         } else {
             let m = inner.doc().mixer();
@@ -6498,7 +6604,12 @@ impl Session {
                 .filter(|s| m.strip(*s).is_ok())
                 .collect()
         };
-        (writes, strips, w.after_write)
+        crate::automation::Landing {
+            writes,
+            strips,
+            after: w.after_write,
+            step: w.step,
+        }
     }
 
     /// Ruling 25: writes whose target or sequence went are dropped, one
@@ -6523,18 +6634,23 @@ impl Session {
     /// Ends the pass; its writes wait to land as "Write Automation"
     /// (Stop, the jumps of Ruling 23, a failed Play, close).
     fn finish_writing(&self, inner: &mut Inner) {
-        let (writes, strips, after) = self.take_writes(inner);
-        if writes.is_empty() {
+        let landing = self.take_writes(inner);
+        if landing.writes.is_empty() {
             return;
         }
-        inner.pending_automation.push((writes, strips, after));
+        inner.pending_automation.push(landing);
     }
 
     /// Ends the pass into a recording's pass (spec §7.4): its writes join
     /// `pass`, or make one when the recording recorded nothing (Ruling
     /// 25).
     fn writes_into_pass(&self, inner: &mut Inner, pass: Option<RecordPass>) -> Option<RecordPass> {
-        let (writes, strips, after) = self.take_writes(inner);
+        let crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            ..
+        } = self.take_writes(inner);
         if writes.is_empty() {
             return pass;
         }
@@ -6598,66 +6714,116 @@ impl Session {
     }
 
     /// Lands a finished pass's writes as one undo step "Write Automation"
-    /// (with After Write in the same step), once no edit is open.
+    /// (with After Write in the same step), or into the step its loop
+    /// passes landed in (Task 12), once no edit is open.
     fn apply_pending_automation(&self, inner: &mut Inner) {
         if inner.history.in_transaction() || inner.history.in_group() || inner.static_edit.is_some()
         {
             return;
         }
         // Oldest first, each pass its own step (Ruling 23, review m2).
-        for (writes, strips, after) in std::mem::take(&mut inner.pending_automation) {
-            self.land_writes(inner, writes, strips, after);
+        for landing in std::mem::take(&mut inner.pending_automation) {
+            self.land(inner, landing);
         }
     }
 
-    /// Lands one pass's writes as one undo step (see
-    /// [`Session::apply_pending_automation`]).
-    fn land_writes(
-        &self,
-        inner: &mut Inner,
-        writes: Vec<AutomationWrite>,
-        strips: Vec<StripId>,
-        after: AutomationMode,
-    ) {
+    /// Lands one pass's writes (see [`Session::apply_pending_automation`];
+    /// plan 5e-1 Task 12): inside a recording's group as part of its step;
+    /// else into `step` while that step is still the present (one Undo
+    /// takes back the whole looped pass), else as a new step "Write
+    /// Automation"; After Write for `strips` with it. True when it landed;
+    /// outside a recording `last_step` is then its step.
+    fn land(&self, inner: &mut Inner, landing: crate::automation::Landing) -> bool {
+        let crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            step,
+        } = landing;
         let writes = self.drop_gone(inner, writes);
         if writes.is_empty() {
-            return;
+            return false;
         }
         let m = inner.doc().mixer();
         let strips: Vec<StripId> = strips.into_iter().filter(|s| m.strip(*s).is_ok()).collect();
+        let before = inner.doc().clone();
         let pass = Command::Record(RecordPass {
             automation: writes.clone(),
             ..Default::default()
         });
+        let mode = (!strips.is_empty()).then(|| {
+            Command::Mixer(MixerCmd::SetAutomationMode {
+                strips,
+                mode: after,
+            })
+        });
         let f = ViewFilter::default();
-        let landed = if strips.is_empty() {
-            inner.history.execute(&pass, &f).map(|_| ())
-        } else if let Err(e) = inner.history.begin_group() {
-            Err(e)
-        } else {
-            let r = inner.history.execute(&pass, &f).map(|_| ());
-            if r.is_ok() {
-                let cmd = Command::Mixer(MixerCmd::SetAutomationMode {
-                    strips,
-                    mode: after,
-                });
-                if let Err(e) = inner.history.execute(&cmd, &f) {
+        let in_group = inner.history.in_group();
+        let amended = match step {
+            Some(serial) if !in_group => inner.history.amend(&pass, &f, serial),
+            _ => Ok(false),
+        };
+        let landed = match amended {
+            Err(e) => Err(e),
+            Ok(true) => {
+                if let Some(cmd) = &mode
+                    && let Some(serial) = step
+                    && let Err(e) = inner.history.amend(cmd, &f, serial)
+                {
                     inner
                         .news
                         .problems
                         .push(format!("The automation mode could not be set ({e})."));
                 }
+                Ok(())
             }
-            let _ = inner.history.end_group("Write Automation");
-            r
+            Ok(false) if in_group => {
+                let r = inner.history.execute(&pass, &f).map(|_| ());
+                if r.is_ok() {
+                    inner.landed_in_group = true;
+                    if let Some(cmd) = &mode
+                        && let Err(e) = inner.history.execute(cmd, &f)
+                    {
+                        inner
+                            .news
+                            .problems
+                            .push(format!("The automation mode could not be set ({e})."));
+                    }
+                }
+                r
+            }
+            Ok(false) => match &mode {
+                None => inner.history.execute(&pass, &f).map(|_| ()),
+                Some(cmd) => match inner.history.begin_group() {
+                    Err(e) => Err(e),
+                    Ok(()) => {
+                        let r = inner.history.execute(&pass, &f).map(|_| ());
+                        if r.is_ok()
+                            && let Err(e) = inner.history.execute(cmd, &f)
+                        {
+                            inner
+                                .news
+                                .problems
+                                .push(format!("The automation mode could not be set ({e})."));
+                        }
+                        let _ = inner.history.end_group("Write Automation");
+                        r
+                    }
+                },
+            },
         };
         if let Err(e) = landed {
             inner
                 .news
                 .problems
                 .push(format!("The automation could not be written ({e})."));
-            return;
+            return false;
         }
+        if !in_group {
+            inner.last_step = Some(inner.history.present_serial());
+        }
+        let silent = crate::automation::silent_new_lanes(&before, inner.doc(), &writes);
+        inner.news.problems.extend(silent);
         inner.version += 1;
         inner.news.doc_changed = true;
         inner.reload_host(self.id);
@@ -6665,6 +6831,7 @@ impl Session {
         self.sync_written_plugins(inner, &writes);
         self.resync_plugin_automation(inner, None);
         self.release_vanished(inner);
+        true
     }
 
     /// After a landing, each written plugin parameter is sent the landed
