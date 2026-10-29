@@ -5861,10 +5861,15 @@ impl Session {
             let all = crate::automation::existing_all(doc, seq);
             for s in &write_strips {
                 for t in held_controls(doc, *s) {
-                    let v = all
-                        .get(&t)
-                        .and_then(|p| crate::automation::value_at(p, tick, t.is_stepped()))
-                        .unwrap_or_else(|| crate::automation::fixed_value(doc, t, None));
+                    // A control the hand holds over the pass's start is held
+                    // at the hand's value (re-review 2 N4).
+                    let v = match inner.touches.get(&t) {
+                        Some(x) => x.value,
+                        None => all
+                            .get(&t)
+                            .and_then(|p| crate::automation::value_at(p, tick, t.is_stepped()))
+                            .unwrap_or_else(|| crate::automation::fixed_value(doc, t, None)),
+                    };
                     holds.push((t, v));
                 }
             }
@@ -5884,13 +5889,18 @@ impl Session {
             rate,
             ended: holds.iter().map(|h| h.0).collect(),
             holds_resent: false,
-            moved: Default::default(),
+            // Touches held over the pass's start count as moved: the holds
+            // re-sent at the roll spare them (re-review 2 N4).
+            moved: inner.touches.keys().copied().collect(),
         });
         let tag = WriteMode::Write.tag();
         let ns = host_time(None);
         for (t, v) in holds {
             self.send_gesture(inner, t, GesturePhase::Touch(v), tag, ns);
-            self.send_gesture(inner, t, GesturePhase::Hold, tag, ns);
+            // A touched control stays touched; its release holds it.
+            if !inner.touches.contains_key(&t) {
+                self.send_gesture(inner, t, GesturePhase::Hold, tag, ns);
+            }
         }
         // Touches held over Stop (Ruling 20 as amended, M2): a static
         // touch whose edit is open keeps its path; the rest write when

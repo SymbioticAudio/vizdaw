@@ -1759,3 +1759,70 @@ fn a_resent_hold_adds_no_point() {
     }
     s.close().unwrap();
 }
+
+/// Re-review 2 N4: a Write touch held over a pre-roll Locate into a pass
+/// that still holds its strip, and released before the first idle sees
+/// the roll, keeps its released value: the holds re-sent at the roll
+/// (m4) spare it.
+#[test]
+fn a_write_touch_held_over_the_pass_start_is_not_re_held() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    let t = Target::StripFader { strip: bus };
+    debug_hold_offline(true);
+    s.play(seq).unwrap();
+    s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
+    s.locate(16 * Q).unwrap();
+    s.idle().unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    debug_hold_offline(false);
+    wait_until("a beat on", || {
+        s.idle().unwrap();
+        tick(&s) > 17 * Q
+    });
+    stop_and_land(&s);
+    let p = points(&s, seq, lane);
+    let after: Vec<_> = p.iter().filter(|x| x.0 >= 16 * Q && x.0 < 17 * Q).collect();
+    assert!(
+        !after.is_empty() && after.iter().all(|x| (x.1 - 0.7).abs() < 1e-9),
+        "the released 0.7 stays: {p:?}"
+    );
+    s.close().unwrap();
+}
+
+/// Re-review 2 N4, moved after the roll: the same touch moves to 0.9 and
+/// is released once the transport rolled, before any idle sees the roll;
+/// the holds re-sent then do not take it back to its earlier value.
+#[test]
+fn a_write_touch_held_over_the_pass_start_and_moved_after_the_roll_keeps_its_value() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    let t = Target::StripFader { strip: bus };
+    debug_hold_offline(true);
+    s.play(seq).unwrap();
+    s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
+    s.locate(16 * Q).unwrap();
+    s.idle().unwrap();
+    debug_hold_offline(false);
+    wait_until("the roll", || tick(&s) > 16 * Q);
+    s.gesture(t, Phase::Value { value: 0.9 }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    wait_until("a beat on", || {
+        s.idle().unwrap();
+        tick(&s) > 17 * Q
+    });
+    stop_and_land(&s);
+    let p = points(&s, seq, lane);
+    // Held at 0.7 from the pass's start, then the move to 0.9 holds to
+    // the end: no re-sent hold takes it back.
+    let after: Vec<_> = p.iter().filter(|x| x.0 >= 16 * Q && x.0 < 17 * Q).collect();
+    let moved = after.iter().position(|x| (x.1 - 0.9).abs() < 1e-9);
+    assert!(
+        moved.is_some_and(|m| after[..m].iter().all(|x| (x.1 - 0.7).abs() < 1e-9)
+            && after[m..].iter().all(|x| (x.1 - 0.9).abs() < 1e-9)),
+        "0.7, then the released 0.9 stays: {p:?}"
+    );
+    s.close().unwrap();
+}
