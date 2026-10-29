@@ -1424,3 +1424,65 @@ a copy, not one you care about.
      NOT open (the meter stays yellow, then empty), and the fault popover
      says "audio input could not open: waiting for microphone permission;
      arm the lane again". Answer Allow, arm again: it opens.
+
+### Automation recording, the engine (plan 5e-1)
+
+Through the control channel (`vizctl launch … --env VIZDAW_AUDIO=offline`
+for steps 160–162; plan 5e-2 adds the mixer's mode popups, rings and
+Settings › Automation, steps 166 on). `$V` is `target/debug/vizctl`.
+The e2e `touch_writes_a_fader_over_the_channel` runs step 160.
+
+160. Touch: `$V state automation` lists each strip's mode (all `read`).
+     `$V run automation.set_mode '{"strips": "<synth>", "mode": "touch"}'`,
+     play, `$V run automation.gesture '{"target": "fader:<synth>", "phase":
+     "touch", "value": "0.4"}'`, a few `"phase": "value"` calls, then
+     `"release"`; the fader is heard at 0.4 at once and glides back over a
+     quarter of a second after the release. Stop: Edit > Undo reads "Undo
+     Write Automation"; a lane "Built-in Synth Fader" was added at the end
+     of Song; the Strip Chart on it shows the move and a ramp back. One
+     Undo removes the lane. A Locate (or Play) while writing lands what
+     was written so far as its own Write Automation step.
+161. Write and Latch: set the strip to `write` and play a few bars without
+     touching anything, Stop: lanes for its fader, pan and mute hold their
+     values from the play point to Stop, and `$V state automation` shows
+     the strip on `latch` (Settings › Automation's After Write, plan 5e-2);
+     one Undo puts both back. On `latch`, touch and release the pan: it
+     holds until Stop, and with Loop on it holds until the loop wraps.
+     Automation inside a referenced sequence is not replaced by a write.
+162. Off and suspend: set the strip to `off`: its automation is not
+     heard (the fader stays where the mixer has it). `$V run
+     automation.suspend`: it is heard again (every strip behaves as Read);
+     run it again to resume.
+163. Plugin windows (manual checklist "plugin-window automation"; a real
+     AU and a real CLAP plugin): put a plugin on the Built-in Synth strip,
+     set the strip to Touch, play, and move a knob in the plugin's own
+     window: the move is written into a lane named "Built-in Synth
+     <parameter>", and there is no "Change Plugin Parameter" step under
+     it. A plugin that reports no gesture start or end (some older AUs)
+     writes from its first value to half a second after its last. In
+     Read, a move in its window is one "Change Plugin Parameter" step, as
+     before. Moves in a plugin's window are placed when VizDAW reads them,
+     up to a sixtieth of a second late.
+164. Latency (5d-1 ruling C2): put a plugin with latency (a linear-phase
+     EQ or a look-ahead limiter) on a bus, so audio tracks are read ahead;
+     write a mute on an audio track at a bar line: it cuts exactly at the
+     bar as heard, with and without the plugin. Zoom in on a bounce
+     (plan 5f) to check to the sample.
+165. Hardware checks for automation recording (owner checklist, plan
+     5e-1): with a real control surface or the mouse, and a real AU and a
+     real CLAP plugin.
+     a. Write, Touch, Latch and Trim: for each mode, play and ride a
+        fader (surface or mouse). Write replaces from the play point;
+        Touch writes only while held and glides back on release; Latch
+        holds the last value until Stop; Trim moves the existing
+        automation by the offset you ride, relative, without a jump when
+        you grab. Stop each pass: one "Write Automation" step.
+     b. Plugin-window rides: in an AU's own window and in a CLAP's own
+        window, ride a parameter in Touch while playing; it is written to
+        a lane named for the strip and the parameter, with no "Change
+        Plugin Parameter" step.
+     c. Undo of a pass: after each pass, Edit > Undo removes the whole
+        pass in one step (lanes and points), Redo puts it back.
+     d. Save and reopen: save a project with a plugin parameter that has a
+        static value (set in Read) and a written lane; reopen it: the
+        static value is kept, and the lane plays back as written.
