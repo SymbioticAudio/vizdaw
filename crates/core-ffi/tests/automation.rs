@@ -1416,8 +1416,10 @@ fn write_holds_take_the_play_from_tick() {
 
 /// Review I-2 with check I-2: a Locate before the roll starts the pass
 /// again from the new position, and its Write holds take the values
-/// there, not where the held renderer last published. (After a rolled
-/// pass the landing's After Write leaves no Write strip to hold.)
+/// there, not where the held renderer last published. (A mid-pass Locate
+/// takes the same path: its landing's After Write is put off while an
+/// edit is open, and a strip switched to Write mid-pass is not in the
+/// pass's Write strips.)
 #[test]
 fn write_holds_after_a_locate_take_the_new_tick() {
     let _g = serial();
@@ -1634,5 +1636,126 @@ fn a_static_gesture_sends_a_snapshot() {
         snap.and_then(|x| x.undo_label).as_deref(),
         Some("Set Fader")
     );
+    s.close().unwrap();
+}
+
+/// Re-review N1 (controller ruling 3, Ruling 9): a device rebuild during a
+/// Write pass played from 16 Q lands the pass first (the strip becomes
+/// After Write, so the new pass holds nothing of it) and never writes the
+/// fader's bar-1 value after the rebuild.
+#[test]
+fn a_rebuild_during_a_write_pass_lands_before_the_new_pass() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    s.play_from(seq, 16 * Q, None).unwrap();
+    wait_until("20 Q", || tick(&s) > 20 * Q);
+    simulate_event(BackendEvent::SampleRateChanged(44_100.0));
+    wait_until("the first pass to land and a new one", || {
+        let _ = s.transport();
+        s.idle().unwrap();
+        s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
+            && s.automation_state().unwrap().writing
+    });
+    let modes = s.automation_state().unwrap().modes;
+    assert!(
+        modes
+            .iter()
+            .any(|m| m.strip == bus && m.mode == Mode::Latch),
+        "{modes:?}"
+    );
+    let at = tick(&s);
+    wait_until("a beat on", || tick(&s) > at + Q);
+    stop_and_land(&s);
+    let p = points(&s, seq, lane);
+    // The new pass held nothing of the strip (it was After Write by then):
+    // nothing is written past the first pass's end.
+    assert!(
+        // The first pass's last point and its end edge only.
+        p.iter().filter(|x| x.0 > 20 * Q && x.0 < 32 * Q).count() <= 2,
+        "no hold from the new pass: {p:?}"
+    );
+    assert!(
+        p.iter()
+            .filter(|x| x.0 > 20 * Q)
+            .all(|x| (x.1 - ramp_at(0)).abs() > 1e-3),
+        "no bar-1 hold after the rebuild: {p:?}"
+    );
+    s.close().unwrap();
+}
+
+/// Re-review N1: with the landing put off by an open edit, the strip is
+/// still Write when the new pass starts, and its holds take the value at
+/// the tick the rebuilt engine resumed from, not bar 1.
+#[test]
+fn a_rebuild_restart_holds_at_the_resume_tick() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    let master = s.mixer().unwrap().strips.last().unwrap().id;
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    s.play_from(seq, 16 * Q, None).unwrap();
+    wait_until("20 Q", || tick(&s) > 20 * Q);
+    // The master is Read: its held touch keeps the static edit open.
+    let m = Target::StripFader { strip: master };
+    s.gesture(m, Phase::Touch { value: Some(0.5) }).unwrap();
+    let reb = tick(&s);
+    simulate_event(BackendEvent::SampleRateChanged(44_100.0));
+    let mut restarted = false;
+    wait_until("a new pass after the rebuild", || {
+        let before = s.automation_state().unwrap().writing;
+        let _ = s.transport();
+        s.idle().unwrap();
+        restarted |= !before;
+        tick(&s) > 21 * Q && s.automation_state().unwrap().writing
+    });
+    let _ = restarted;
+    let at = tick(&s);
+    wait_until("a beat on", || tick(&s) > at + Q);
+    s.gesture(m, Phase::Release).unwrap();
+    stop_and_land(&s);
+    let p = points(&s, seq, lane);
+    let after: Vec<_> = p.iter().filter(|x| x.0 > 20 * Q).collect();
+    assert!(
+        after.iter().all(|x| (x.1 - ramp_at(0)).abs() > 1e-3),
+        "no bar-1 hold: {p:?}"
+    );
+    let want = ramp_at(reb);
+    assert!(
+        after.iter().any(|x| x.1 > want - 1e-3 && x.1 < want + 0.02),
+        "held at the resume tick (about {want}): {p:?}"
+    );
+    s.close().unwrap();
+}
+
+/// Re-review m4: the Write holds re-sent at the roll (so a Locate applied
+/// after them cannot end them) are stamped again at the held values and
+/// add no point: an untouched Write pass lands each held control as one
+/// flat stretch, its two ends inside the two edges.
+#[test]
+fn a_resent_hold_adds_no_point() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Write).unwrap();
+    s.play(song).unwrap();
+    // Idles run meanwhile: one of them sees the roll and re-sends.
+    wait_until("two beats", || {
+        s.idle().unwrap();
+        tick(&s) > 2 * Q
+    });
+    stop_and_land(&s);
+    for name in [
+        "Built-in Synth Fader",
+        "Built-in Synth Pan",
+        "Built-in Synth Mute",
+    ] {
+        let lane = lane_named(&s, song, name).unwrap();
+        let p = points(&s, song, lane);
+        assert_eq!(p.len(), 4, "{name}: {p:?}");
+        assert!(
+            p.windows(2).all(|w| (w[0].1 - w[1].1).abs() < 1e-9),
+            "{name}: {p:?}"
+        );
+    }
     s.close().unwrap();
 }

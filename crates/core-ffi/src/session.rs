@@ -5600,6 +5600,9 @@ impl Session {
                 }
             }
         }
+        if let Some(w) = inner.writing.as_mut() {
+            w.moved.insert(t);
+        }
         inner.touches.insert(
             t,
             Touching {
@@ -5880,6 +5883,8 @@ impl Session {
             dropped_at_start: host::gestures_dropped(self.id).unwrap_or(0),
             rate,
             ended: holds.iter().map(|h| h.0).collect(),
+            holds_resent: false,
+            moved: Default::default(),
         });
         let tag = WriteMode::Write.tag();
         let ns = host_time(None);
@@ -5949,7 +5954,9 @@ impl Session {
             if let Some(seq) = inner.restart_writing {
                 match (holder, wants_play) {
                     (Holder::This, true) => {
-                        let at = host::position(self.id).map_or(Tick::ZERO, |p| p.1);
+                        // The old pass lands first (re-review N1).
+                        self.apply_pending_automation(&mut inner);
+                        let at = self.resume_tick();
                         self.begin_writing(&mut inner, seq, at);
                     }
                     (Holder::Nobody, _) => {}
@@ -5960,6 +5967,34 @@ impl Session {
         };
         drain_tap(w);
         let (closed, rolled, seq) = (w.handles.status.closed(), w.handles.status.rolled(), w.seq);
+        // Re-review m4: the holds went out right after the Play's (or the
+        // Locate's) command; a command swap the renderer put off could
+        // apply that Locate, whose `end_holds` ends them, after them. The
+        // tap is installed by a command queued after the Locate, so once it
+        // rolled the Locate applied: the holds go again, at the same
+        // values (a flat stretch gains no point), sparing targets touched
+        // now or earlier in the pass.
+        let resend: Vec<(AutomationTarget, f64)> = if rolled && !w.holds_resent && !closed {
+            w.holds_resent = true;
+            // Not one a touch already moved this pass.
+            w.holds
+                .iter()
+                .filter(|(t, _)| !w.moved.contains(t))
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !resend.is_empty() {
+            let (tag, ns) = (WriteMode::Write.tag(), host_time(None));
+            for (t, v) in resend {
+                if inner.touches.contains_key(&t) {
+                    continue;
+                }
+                self.send_gesture(&mut inner, t, GesturePhase::Touch(v), tag, ns);
+                self.send_gesture(&mut inner, t, GesturePhase::Hold, tag, ns);
+            }
+        }
         // A recording ends its own pass and takes the writes with it.
         if inner.recording.is_some() || inner.finishing {
             return;
@@ -5969,9 +6004,13 @@ impl Session {
             PassStep::Land => self.finish_writing(&mut inner),
             PassStep::Restart => {
                 // The rebuilt engine plays on (Ruling 21; controller
-                // ruling 3): what was written lands, writing goes on.
+                // ruling 3): what was written lands as Stop lands it (After
+                // Write included, so the new pass holds the strips' new
+                // modes), then writing goes on from where it resumed
+                // (re-review N1).
                 self.finish_writing(&mut inner);
-                let at = host::position(self.id).map_or(Tick::ZERO, |p| p.1);
+                self.apply_pending_automation(&mut inner);
+                let at = self.resume_tick();
                 self.begin_writing(&mut inner, seq, at);
             }
             PassStep::RestartLater => {
@@ -5979,6 +6018,14 @@ impl Session {
                 inner.restart_writing = Some(seq);
             }
         }
+    }
+
+    /// Where a rebuilt engine resumed: the rebuild's tick (its renderer
+    /// may not have published a position yet), else the position.
+    fn resume_tick(&self) -> Tick {
+        host::resumed_at(self.id)
+            .or_else(|| host::position(self.id).map(|p| p.1))
+            .unwrap_or(Tick::ZERO)
     }
 
     /// Ends the pass and answers its writes, the Write strips that still

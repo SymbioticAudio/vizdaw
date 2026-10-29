@@ -1573,6 +1573,9 @@ struct Host {
     /// Where the asked Play stops (Play Selection, plan 4f): a rebuild
     /// resumes with it.
     until: Option<Tick>,
+    /// The tick a device rebuild resumed this host from (plan 5e-1
+    /// re-review N1: its renderer publishes no position until it runs).
+    resumed_at: Option<Tick>,
     /// Changed by every Play, Stop and release: a Play that waited for
     /// the disk without the lock goes on only if nothing came meanwhile
     /// ([`finish_play`]).
@@ -1754,6 +1757,7 @@ impl Host {
             looped: false,
             want_play: false,
             until: None,
+            resumed_at: None,
             epoch: next_epoch(),
             device: device.to_string(),
             sample_rate,
@@ -2441,6 +2445,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     }
     new.load(owner, doc, seq, looped)?;
     new.engine.locate_tick(at)?;
+    new.resumed_at = Some(at);
     if playing {
         match until {
             Some(t) => new.engine.play_until(t)?,
@@ -3423,6 +3428,15 @@ pub fn transport_stopped(owner: u64) -> Option<bool> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.state() == PlayState::Stopped)
+}
+
+/// The tick a device rebuild resumed `owner`'s host from, when it holds
+/// the engine and its host came from a rebuild.
+pub fn resumed_at(owner: u64) -> Option<Tick> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .and_then(|h| h.resumed_at)
 }
 
 /// Whether `owner`'s host means to play (its Play intent, ahead of the

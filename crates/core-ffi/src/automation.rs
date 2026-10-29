@@ -338,6 +338,11 @@ pub(crate) struct Writing {
     /// The targets sent a Glide or a Hold this pass (Write holds
     /// included): released at the pass's end, so none plays on past it.
     pub ended: BTreeSet<AutomationTarget>,
+    /// The holds were sent again once the tap rolled (re-review m4).
+    pub holds_resent: bool,
+    /// The targets touched since the pass began: their holds are not
+    /// sent again (re-review m4).
+    pub moved: BTreeSet<AutomationTarget>,
 }
 
 /// Ruling 24 (pre-flight C1, M17): a pass ends when its tap closed, when
