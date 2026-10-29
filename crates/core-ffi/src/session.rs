@@ -5716,24 +5716,7 @@ impl Session {
             w.ended.insert(t);
         }
         if touching.path == TouchPath::Static {
-            if let (Source::Ui, AutomationTarget::PluginParam(slot, param)) = (touching.source, t) {
-                if let Some(info) = crate::automation::param_info(self.id, t) {
-                    let plain = core_model::automation::param_plain(
-                        touching.value,
-                        info.min,
-                        info.max,
-                        info.stepped,
-                    );
-                    let cmd = Command::Mixer(MixerCmd::SetPluginParams {
-                        slot,
-                        params: vec![(param, plain)],
-                    });
-                    if inner.history.execute(&cmd, &ViewFilter::default()).is_ok() {
-                        inner.version += 1;
-                        inner.reload_host(self.id);
-                    }
-                }
-            }
+            self.keep_static_param(inner, t, touching);
             self.end_static_share(inner);
         }
         // A Touch or Trim plugin parameter no lane drives plays its static
@@ -5763,6 +5746,27 @@ impl Session {
                     });
                 }
             }
+        }
+    }
+
+    /// A static `Ui` touch of a plugin parameter keeps its value in the
+    /// document as it leaves the static edit.
+    fn keep_static_param(&self, inner: &mut Inner, t: AutomationTarget, touching: Touching) {
+        let (Source::Ui, AutomationTarget::PluginParam(slot, param)) = (touching.source, t) else {
+            return;
+        };
+        let Some(info) = crate::automation::param_info(self.id, t) else {
+            return;
+        };
+        let plain =
+            core_model::automation::param_plain(touching.value, info.min, info.max, info.stepped);
+        let cmd = Command::Mixer(MixerCmd::SetPluginParams {
+            slot,
+            params: vec![(param, plain)],
+        });
+        if inner.history.execute(&cmd, &ViewFilter::default()).is_ok() {
+            inner.version += 1;
+            inner.reload_host(self.id);
         }
     }
 
@@ -5902,14 +5906,24 @@ impl Session {
                 self.send_gesture(inner, t, GesturePhase::Hold, tag, ns);
             }
         }
-        // Touches held over Stop (Ruling 20 as amended, M2): a static
-        // touch whose edit is open keeps its path; the rest write when
-        // their strip writes now, else are heard only.
+        // Touches held over the pass's start (Ruling 20 as amended, M2):
+        // each writes when its strip writes now, else is heard only. A
+        // static touch (held over Play from while stopped) writes too when
+        // its strip writes now (re-review 3 n1, fix round 4): a fader held
+        // on a Write strip while Play is pressed writes its ride, and its
+        // release follows the strip's mode. It leaves the static edit (its
+        // share ends below); on a strip that does not write it keeps the
+        // static path.
         let held: Vec<(AutomationTarget, Touching)> =
             inner.touches.iter().map(|(t, x)| (*t, *x)).collect();
+        let mut left_static = 0usize;
         for (t, x) in held {
             if x.path == TouchPath::Static && inner.static_edit.is_some() {
-                continue;
+                if self.write_mode_of(inner, t).is_none() {
+                    continue;
+                }
+                self.keep_static_param(inner, t, x);
+                left_static += 1;
             }
             // A Trim offset stays an offset from its own grab (review I-1,
             // Ruling 11: the engine keeps `Offset` entries over a Stop or a
@@ -5938,6 +5952,12 @@ impl Session {
                     y.base = y.value;
                 }
             }
+        }
+        // The static touches that now write end their share of the static
+        // edit as their release would: the last closes it as its own step
+        // (what was set while stopped), and what waited for it lands.
+        for _ in 0..left_static {
+            self.end_static_share(inner);
         }
     }
 

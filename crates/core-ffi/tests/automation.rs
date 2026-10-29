@@ -1826,3 +1826,114 @@ fn a_write_touch_held_over_the_pass_start_and_moved_after_the_roll_keeps_its_val
     );
     s.close().unwrap();
 }
+
+/// Re-review 3 n1 (spec §7.3 Write; controller ruling, fix round 4): a
+/// fader held on a Write strip while Play is pressed becomes a writing
+/// touch for that pass. Every move after Play is written as it is heard,
+/// and its release holds the last value to Stop; the landed lane is what
+/// was heard.
+#[test]
+fn a_write_fader_held_over_play_writes_its_ride() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    let t = Target::StripFader { strip: bus };
+    // Held while stopped: the static path.
+    s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
+    pace(&s);
+    s.play(seq).unwrap();
+    wait_until("the roll", || {
+        s.idle().unwrap();
+        tick(&s) > Q / 4
+    });
+    for (v, until) in [(0.9, 2 * Q), (0.5, 4 * Q)] {
+        s.gesture(t, Phase::Value { value: v }).unwrap();
+        wait_until("the move heard", || {
+            s.idle().unwrap();
+            fader_override(bus).is_some_and(|d| (d - fader_db(v)).abs() < 1e-6)
+        });
+        wait_until("playing on", || {
+            s.idle().unwrap();
+            tick(&s) > until
+        });
+    }
+    s.gesture(t, Phase::Release).unwrap();
+    let released = tick(&s);
+    wait_until("a beat after the release", || {
+        s.idle().unwrap();
+        tick(&s) > released + Q
+    });
+    // Write keeps the held value to Stop.
+    let heard = fader_override(bus);
+    assert!(
+        heard.is_some_and(|d| (d - fader_db(0.5)).abs() < 1e-6),
+        "the released 0.5 is held: {heard:?}"
+    );
+    stop_and_land(&s);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation")
+    );
+    let p = points(&s, seq, lane);
+    // From the pass's start to its end edge (where the ramp resumes after
+    // the Stop): held at 0.7, then 0.9, then 0.5 to the end; nothing of
+    // the ramp, and the lane ends where it was heard.
+    let ride = |x: &&(i64, f64)| [0.7, 0.9, 0.5].iter().any(|v| (x.1 - v).abs() < 1e-9);
+    let pass: Vec<_> = p.iter().filter(|x| x.0 >= 0).take_while(ride).collect();
+    let at = |v: f64| pass.iter().position(|x| (x.1 - v).abs() < 1e-9);
+    assert!(
+        pass.first().is_some_and(|x| x.0 == 0)
+            && at(0.7) == Some(0)
+            && at(0.7) < at(0.9)
+            && at(0.9) < at(0.5),
+        "0.7 from the start, then 0.9, then 0.5: {p:?}"
+    );
+    assert!(
+        pass.last()
+            .is_some_and(|x| (x.1 - 0.5).abs() < 1e-9 && x.0 > released + Q / 2),
+        "0.5 held to the Stop: {p:?}"
+    );
+    s.close().unwrap();
+}
+
+/// Re-review 3 m1: a Write touch held over a pass's start stays touched
+/// in the engine (`Touch` only, no `Hold`), so a Stop's end of the holds
+/// leaves it: held over a pre-roll Locate, not released over Stop, it is
+/// still heard at the hand's value when the strip then plays in Read.
+#[test]
+fn a_write_touch_held_over_the_pass_start_is_heard_after_stop() {
+    let _g = serial();
+    let (s, seq, _, bus, _) = ramped_bus();
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    let t = Target::StripFader { strip: bus };
+    debug_hold_offline(true);
+    s.play(seq).unwrap();
+    s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
+    s.locate(16 * Q).unwrap();
+    s.idle().unwrap();
+    debug_hold_offline(false);
+    wait_until("a beat on", || {
+        s.idle().unwrap();
+        tick(&s) > 17 * Q
+    });
+    stop_and_land(&s);
+    s.set_automation_mode(vec![bus], Mode::Read).unwrap();
+    s.play(seq).unwrap();
+    wait_until("playing", || {
+        s.idle().unwrap();
+        tick(&s) > Q
+    });
+    wait_until("the fader heard", || {
+        s.idle().unwrap();
+        fader_override(bus).is_some()
+    });
+    pace(&s);
+    let heard = fader_override(bus);
+    assert!(
+        heard.is_some_and(|d| (d - fader_db(0.7)).abs() < 1e-6),
+        "the hand's 0.7 is heard: {heard:?}"
+    );
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
+    s.close().unwrap();
+}
