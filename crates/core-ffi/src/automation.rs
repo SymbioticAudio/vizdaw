@@ -348,6 +348,57 @@ pub(crate) fn writing_ended(closed: bool, rolled: bool, transport_stopped: Optio
     closed || transport_stopped.is_none() || (rolled && transport_stopped == Some(true))
 }
 
+/// Who holds the engine, as a session's pass sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Holder {
+    /// This session.
+    This,
+    /// Another session.
+    Other,
+    /// None: the slot is empty (a device rebuild between dropping the old
+    /// host and installing the new one, or no engine at all).
+    Nobody,
+}
+
+/// What `idle` does with a writing pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassStep {
+    /// It goes on.
+    Go,
+    /// It ends and lands.
+    Land,
+    /// It ends and lands, and a new pass starts now: the engine was
+    /// rebuilt under it and plays on (controller ruling 3 on Task 8).
+    Restart,
+    /// It ends and lands; a new pass starts once this session's rebuilt
+    /// engine plays (the slot is empty meanwhile).
+    RestartLater,
+}
+
+/// Ruling 24 with controller ruling 3: another session taking the engine
+/// lands the pass (M17); a tap that went with its engine lands it, and the
+/// pass starts again when this session's rebuilt engine plays on; an
+/// empty slot with the tap still open is a rebuild under way, so the pass
+/// waits for the tap to close; else [`writing_ended`]. `wants_play` is
+/// the host's intent to play (a rebuilt engine reads stopped until its
+/// Play applies).
+pub(crate) fn pass_step(
+    closed: bool,
+    rolled: bool,
+    transport_stopped: Option<bool>,
+    wants_play: bool,
+    holder: Holder,
+) -> PassStep {
+    match holder {
+        Holder::Other => PassStep::Land,
+        Holder::Nobody if closed => PassStep::RestartLater,
+        Holder::Nobody => PassStep::Go,
+        Holder::This if closed && wants_play => PassStep::Restart,
+        Holder::This if writing_ended(closed, rolled, transport_stopped) => PassStep::Land,
+        Holder::This => PassStep::Go,
+    }
+}
+
 /// Ends the queue refused (pre-flight I3, Ruling 10), per target.
 #[derive(Debug, Default)]
 pub(crate) struct UnsentEnds {
@@ -806,6 +857,33 @@ mod tests {
                 writing_ended(closed, rolled, stopped),
                 ended,
                 "{closed} {rolled} {stopped:?}"
+            );
+        }
+    }
+
+    /// Controller ruling 3 on Task 8: a pass under a device rebuild
+    /// waits for its tap to close, then starts again when the rebuilt
+    /// engine plays; another session's engine never restarts it.
+    #[test]
+    fn a_rebuild_restarts_the_pass_and_another_session_does_not() {
+        use Holder::{Nobody, Other, This};
+        for (closed, rolled, stopped, wants, holder, step) in [
+            (false, true, None, false, Nobody, PassStep::Go),
+            (true, true, None, false, Nobody, PassStep::RestartLater),
+            // The rebuilt engine's Play is still on its way.
+            (true, true, Some(true), true, This, PassStep::Restart),
+            (true, true, Some(false), true, This, PassStep::Restart),
+            (true, true, Some(true), false, This, PassStep::Land),
+            (false, true, Some(false), true, This, PassStep::Go),
+            (false, false, Some(true), true, This, PassStep::Go),
+            (false, true, Some(true), false, This, PassStep::Land),
+            (false, true, None, true, Other, PassStep::Land),
+            (true, true, None, true, Other, PassStep::Land),
+        ] {
+            assert_eq!(
+                pass_step(closed, rolled, stopped, wants, holder),
+                step,
+                "{closed} {rolled} {stopped:?} {wants} {holder:?}"
             );
         }
     }

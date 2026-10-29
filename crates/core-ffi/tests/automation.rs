@@ -1232,19 +1232,12 @@ fn a_device_rebuild_while_suspended_stays_suspended() {
     s.close().unwrap();
 }
 
-/// Task 5 (forwarded): in Read while stopped, a release returns the
-/// control to its automation's last value (the static value the gesture
-/// set is not what plays over the automation).
-///
-/// Ignored: it fails. The static path's `SetGain` reloads the engine, and
-/// the new graph adopts an override only where the static value did not
-/// change (Plan 4d Ruling 13), so the automation's last value (−12 dB) is
-/// dropped and the release returns to the new static value (−3 dB) until
-/// the next roll. Making it pass changes Plan 4d Ruling 13 in the engine
-/// (a controller ruling; Task 8 report).
+/// Controller ruling (1) on the Task 5 forward (Plan 4d Ruling 13 kept):
+/// in Read while stopped, a released gesture on an automated fader stays
+/// at the value the user left (the new static value); at the next Play the
+/// automation takes over.
 #[test]
-#[ignore = "Plan 4d Ruling 13 drops the held automation value at the static edit; needs a ruling"]
-fn a_read_release_while_stopped_returns_to_the_automation() {
+fn a_read_release_while_stopped_stays_until_play() {
     let _g = serial();
     let (s, seq, bus, _) = automated_bus(fader_norm(-12.0));
     let t = Target::StripFader { strip: bus };
@@ -1264,11 +1257,381 @@ fn a_read_release_while_stopped_returns_to_the_automation() {
         fader_override(bus).is_some_and(|d| (d + 3.0).abs() < 1e-6)
     });
     s.gesture(t, Phase::Release).unwrap();
-    wait_until("back to the automation", || {
-        fader_override(bus).is_some_and(|d| (d + 12.0).abs() < 1e-6)
-    });
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(200) {
+        s.idle().unwrap();
+        let d = fader_override(bus);
+        assert!(
+            d.is_none_or(|d| (d + 3.0).abs() < 1e-6),
+            "stays at the user's value while stopped: {d:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let gain = s
+        .mixer()
+        .unwrap()
+        .strips
+        .iter()
+        .find(|x| x.id == bus)
+        .unwrap()
+        .gain_db;
+    assert!((gain + 3.0).abs() < 1e-9, "{gain}");
     assert_eq!(
         s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader")
+    );
+    s.play(seq).unwrap();
+    wait_until("the automation at Play", || {
+        fader_override(bus).is_some_and(|d| (d + 12.0).abs() < 1e-6)
+    });
+    stop_and_land(&s);
+    s.close().unwrap();
+}
+
+/// Review I-1 (Ruling 11): a Trim touch held over a Locate stays an offset
+/// over the automation, from its own grab: no jump to the hand's absolute
+/// position.
+#[test]
+fn a_trim_touch_held_over_a_locate_stays_an_offset() {
+    let _g = serial();
+    let (s, seq, bus, _) = automated_bus(fader_norm(-12.0));
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Trim).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(
+        t,
+        Phase::Touch {
+            value: Some(fader_norm(0.0)),
+        },
+    )
+    .unwrap();
+    pace(&s);
+    s.gesture(
+        t,
+        Phase::Value {
+            value: fader_norm(3.0),
+        },
+    )
+    .unwrap();
+    wait_until("+3 dB on the automation", || {
+        fader_override(bus).is_some_and(|d| (d + 9.0).abs() < 1e-6)
+    });
+    s.locate(4 * Q).unwrap();
+    s.idle().unwrap();
+    assert!(s.automation_state().unwrap().writing);
+    wait_until("past the jump", || tick(&s) > 4 * Q + Q / 4);
+    pace(&s);
+    s.gesture(
+        t,
+        Phase::Value {
+            value: fader_norm(4.0),
+        },
+    )
+    .unwrap();
+    wait_until("+4 dB on the automation", || {
+        let d = fader_override(bus);
+        assert!(
+            d.is_none_or(|d| d < 0.0),
+            "no jump to the hand's +4 dB: {d:?}"
+        );
+        d.is_some_and(|d| (d + 8.0).abs() < 1e-6)
+    });
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
+    s.close().unwrap();
+}
+
+/// A session whose bus fader (lane "Auto" of "S") ramps from 0.2 at tick
+/// 0 to 0.8 at `32 Q`, and an empty sequence "Other" first:
+/// `(session, S, Other, bus, lane)`.
+fn ramped_bus() -> (Arc<Session>, u64, u64, u64, u64) {
+    use core_engine::fixtures::{Builder, Q as FQ};
+    use core_model::automation::AutomationTarget;
+    use core_model::event::EventBody;
+    let mut b = Builder::new();
+    let synth_dest = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (other, onotes) = b.sequence("Other", "Notes", Some(synth_dest)).unwrap();
+    b.notes(other, onotes, &[(0, 60, 0x8000, 64 * FQ)]).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(synth_dest)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0x8000, 64 * FQ)]).unwrap();
+    let bus = b.bus("Bus").unwrap();
+    let auto = b.lane(seq, "Auto", None).unwrap();
+    for (tick, v) in [(0, 0.2), (32 * FQ, 0.8)] {
+        b.event(
+            seq,
+            auto,
+            tick,
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(bus),
+                value: v,
+            },
+        )
+        .unwrap();
+    }
+    (
+        Session::from_document(b.finish()).unwrap(),
+        seq.0,
+        other.0,
+        bus.0,
+        auto.0,
+    )
+}
+
+/// The ramp's value at `tick`.
+fn ramp_at(tick: i64) -> f64 {
+    0.2 + 0.6 * tick as f64 / (32 * Q) as f64
+}
+
+/// The first point at or after `from` holds `v` (the held value written
+/// from the pass's start).
+fn held_from(p: &[(i64, f64)], from: i64, v: f64) {
+    let first = p.iter().find(|x| x.0 >= from);
+    assert!(
+        first.is_some_and(|x| (x.1 - v).abs() < 1e-3),
+        "held at {v} from {from}: {p:?}"
+    );
+}
+
+/// Review I-2 (Ruling 9): Play from a tick elsewhere holds a Write strip
+/// at its value there, not where the transport stood before.
+#[test]
+fn write_holds_take_the_play_from_tick() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    s.play(seq).unwrap();
+    wait_until("beat 2", || tick(&s) > 2 * Q);
+    stop_and_land(&s);
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    s.play_from(seq, 16 * Q, None).unwrap();
+    wait_until("a beat on", || tick(&s) > 17 * Q);
+    stop_and_land(&s);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation")
+    );
+    held_from(&points(&s, seq, lane), 16 * Q, ramp_at(16 * Q));
+    s.close().unwrap();
+}
+
+/// Review I-2 with check I-2: a Locate before the roll starts the pass
+/// again from the new position, and its Write holds take the values
+/// there, not where the held renderer last published. (After a rolled
+/// pass the landing's After Write leaves no Write strip to hold.)
+#[test]
+fn write_holds_after_a_locate_take_the_new_tick() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    debug_hold_offline(true);
+    s.play(seq).unwrap();
+    s.locate(16 * Q).unwrap();
+    s.idle().unwrap();
+    debug_hold_offline(false);
+    assert!(s.automation_state().unwrap().writing);
+    wait_until("a beat on", || tick(&s) > 17 * Q);
+    stop_and_land(&s);
+    held_from(&points(&s, seq, lane), 16 * Q, ramp_at(16 * Q));
+    s.close().unwrap();
+}
+
+/// Review I-2: the first Play of a sequence after another played holds
+/// Write strips at the new sequence's start, not at the old position.
+#[test]
+fn write_holds_after_switching_sequence_take_its_start() {
+    let _g = serial();
+    let (s, seq, other, bus, lane) = ramped_bus();
+    s.play(other).unwrap();
+    wait_until("eight beats", || tick(&s) > 8 * Q);
+    stop_and_land(&s);
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    s.play(seq).unwrap();
+    wait_until("a beat on", || {
+        s.transport().unwrap().seq == Some(seq) && tick(&s) > Q
+    });
+    stop_and_land(&s);
+    held_from(&points(&s, seq, lane), 0, ramp_at(0));
+    s.close().unwrap();
+}
+
+/// Review I-3: clicking an automated Read fader (a touch with no value)
+/// and letting go changes no static value and makes no undo step.
+#[test]
+fn a_click_on_an_automated_read_fader_changes_nothing() {
+    let _g = serial();
+    let (s, seq, bus, _) = automated_bus(fader_norm(-12.0));
+    let t = Target::StripFader { strip: bus };
+    let gain = |s: &Session| {
+        s.mixer()
+            .unwrap()
+            .strips
+            .iter()
+            .find(|x| x.id == bus)
+            .unwrap()
+            .gain_db
+    };
+    let before = gain(&s);
+    s.play(seq).unwrap();
+    wait_until("the automation", || {
+        fader_override(bus).is_some_and(|d| (d + 12.0).abs() < 1e-6)
+    });
+    s.gesture(t, Phase::Touch { value: None }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
+    s.gesture(t, Phase::Touch { value: None }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label, None, "no step");
+    assert_eq!(gain(&s), before, "no static change");
+    s.close().unwrap();
+}
+
+/// Controller ruling (3): a device rebuild mid-pass while the transport
+/// keeps playing lands the pass and starts a new one, so writing strips
+/// keep writing; each pass undoes on its own.
+#[test]
+fn a_device_rebuild_mid_pass_starts_a_new_pass() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: synth };
+    s.play(song).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: Some(0.45) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    simulate_event(BackendEvent::SampleRateChanged(44_100.0));
+    wait_until("the first pass to land", || {
+        let _ = s.transport();
+        s.idle().unwrap();
+        s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
+    });
+    wait_until("a new pass", || {
+        s.idle().unwrap();
+        s.automation_state().unwrap().writing && s.transport().unwrap().playing
+    });
+    let lane = lane_named(&s, song, "Built-in Synth Fader").unwrap();
+    let first = points(&s, song, lane);
+    let at = tick(&s);
+    wait_until("on", || tick(&s) > at + Q / 4);
+    s.gesture(t, Phase::Touch { value: Some(0.8) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    stop_and_land(&s);
+    assert!(
+        points(&s, song, lane)
+            .iter()
+            .any(|p| (p.1 - 0.8).abs() < 1e-9),
+        "the new pass wrote"
+    );
+    s.undo().unwrap();
+    assert_eq!(points(&s, song, lane), first, "one step per pass");
+    s.close().unwrap();
+}
+
+/// Controller ruling (3), the other half (M17): another session taking the
+/// engine lands the pass and starts none.
+#[test]
+fn another_session_taking_the_engine_starts_no_pass() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: synth };
+    s.play(song).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: Some(0.45) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    let (other, other_song) = demo();
+    other.play(other_song).unwrap();
+    let mut problems = Vec::new();
+    wait_until("the pass to land", || {
+        problems.extend(s.idle().unwrap().problems);
+        s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
+    });
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(12));
+        problems.extend(s.idle().unwrap().problems);
+        assert!(
+            !s.automation_state().unwrap().writing,
+            "no new pass in another session's engine"
+        );
+    }
+    // Not even tried: a pass in another session's engine cannot start.
+    assert!(
+        !problems.iter().any(|p| p.contains("not being written")),
+        "{problems:?}"
+    );
+    other.stop().unwrap();
+    other.close().unwrap();
+    s.close().unwrap();
+}
+
+/// Review m2 (Ruling 23): two passes that wait for the same open static
+/// edit land as two undo steps, not one.
+#[test]
+fn passes_waiting_for_an_open_edit_land_as_their_own_steps() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    let master = s.mixer().unwrap().strips.last().unwrap().id;
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: synth };
+    s.play(song).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    // The master is Read: its touch opens the static edit and keeps it.
+    let m = Target::StripFader { strip: master };
+    s.gesture(m, Phase::Touch { value: Some(0.5) }).unwrap();
+    for v in [0.4, 0.7] {
+        s.gesture(t, Phase::Touch { value: Some(v) }).unwrap();
+        pace(&s);
+        s.gesture(t, Phase::Release).unwrap();
+        pace(&s);
+        s.locate(Q).unwrap();
+        s.idle().unwrap();
+        wait_until("playing on", || tick(&s) > Q + Q / 4);
+    }
+    s.gesture(m, Phase::Release).unwrap();
+    stop_and_land(&s);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation")
+    );
+    s.undo().unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation"),
+        "two steps"
+    );
+    s.undo().unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader")
+    );
+    s.close().unwrap();
+}
+
+/// Review m3: a static gesture's step reaches the app through `idle`'s
+/// snapshot.
+#[test]
+fn a_static_gesture_sends_a_snapshot() {
+    let _g = serial();
+    let (s, _) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.idle().unwrap();
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.4 }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    let snap = s.idle().unwrap().snapshot;
+    assert_eq!(
+        snap.and_then(|x| x.undo_label).as_deref(),
         Some("Set Fader")
     );
     s.close().unwrap();

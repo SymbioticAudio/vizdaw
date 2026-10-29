@@ -2517,6 +2517,10 @@ pub struct HostPlay {
     /// The host is live: `finish_play` connects the MIDI sources, without
     /// the host lock (M7, Task 12 review).
     connect_midi: bool,
+    /// The tick this Play located to, when it located (plan 5e-1 review
+    /// I-2: the engine's published position shows the old one until the
+    /// renderer applies it).
+    located: Option<Tick>,
 }
 
 /// What a [`claim_host`] waits for before it takes the engine.
@@ -2662,7 +2666,9 @@ pub fn play(
         host.pending_input = None;
     }
     host.ensure_input(wants_audio_input(doc, seq));
+    let mut located = None;
     if host.owner != owner || host.seq != seq || start.is_some() {
+        located = Some(start.unwrap_or(Tick::ZERO));
         host.engine.stop()?;
         if host.owner != owner {
             // Another session's recording ends here: its tap must not
@@ -2688,6 +2694,7 @@ pub fn play(
         epoch: host.epoch,
         pending,
         connect_midi: host.is_live(),
+        located,
     })
 }
 
@@ -2696,6 +2703,12 @@ impl HostPlay {
     /// Ruling 7).
     pub fn count_in(&mut self, c: Option<core_engine::count_in::CountIn>) {
         self.pending.set_count_in(c);
+    }
+
+    /// The tick this Play located to; `None` when it resumes where the
+    /// transport stands.
+    pub fn located(&self) -> Option<Tick> {
+        self.located
     }
 }
 
@@ -3410,6 +3423,15 @@ pub fn transport_stopped(owner: u64) -> Option<bool> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.state() == PlayState::Stopped)
+}
+
+/// Whether `owner`'s host means to play (its Play intent, ahead of the
+/// renderer), when it holds the engine.
+pub fn wants_play(owner: u64) -> Option<bool> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.want_play)
 }
 
 /// The session holding the engine, if any.
