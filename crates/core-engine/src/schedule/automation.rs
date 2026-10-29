@@ -190,7 +190,9 @@ impl Automation {
         }
     }
 
-    /// The first point frame after `frame`. // RT
+    /// The first point frame after `frame`, over every lane. The renderer
+    /// no longer uses it (it cuts each lane at its own arrival, plan 5e-1
+    /// Ruling 5); kept for tests and diagnostics. // RT
     pub fn next_cut(&self, frame: u64) -> Option<u64> {
         let i = self.cuts.partition_point(|c| *c <= frame);
         self.cuts.get(i).copied()

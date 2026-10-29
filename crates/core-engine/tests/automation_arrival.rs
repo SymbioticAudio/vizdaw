@@ -277,3 +277,209 @@ fn each_point_cuts_once_on_a_latent_session() {
         "a latent session cuts at the same points"
     );
 }
+
+/// The `doc` shape with the path muted from beat 3.5 on (unmuted from 0).
+fn seam_doc(l: u32) -> (Document, SeqId) {
+    let mut b = Builder::new();
+    let (seq, lane) = b.sequence("Song", "Audio", None).unwrap();
+    let m = b.media("Media/a.caf", FILE_FRAMES, 2).unwrap();
+    b.region(
+        seq,
+        lane,
+        Q,
+        m,
+        0,
+        6 * QF,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+    let bus = b.bus("Latent").unwrap();
+    b.insert(bus, TestInserts::plugin(&format!("latency={l}")))
+        .unwrap();
+    let out = b.doc().lane(seq, lane).unwrap().audio_out.unwrap();
+    let path = b.strip_of(StripKind::AudioPath(out)).unwrap();
+    let mute = AutomationTarget::StripMute(path);
+    b.event(
+        seq,
+        lane,
+        0,
+        EventBody::Automation {
+            target: mute,
+            value: 0.0,
+        },
+    )
+    .unwrap();
+    b.event(
+        seq,
+        lane,
+        7 * Q / 2,
+        EventBody::Automation {
+            target: mute,
+            value: 1.0,
+        },
+    )
+    .unwrap();
+    (b.finish(), seq)
+}
+
+/// The left channel of `blocks` blocks from bar 1, looping `range`.
+fn render_looped(
+    doc: &Document,
+    seq: SeqId,
+    leads: bool,
+    range: (u64, u64),
+    blocks: usize,
+) -> Vec<f32> {
+    let dir = tempfile::tempdir().unwrap();
+    caf(&dir.path().join("a.caf"));
+    let mut cfg = EngineConfig::new(48_000.0);
+    cfg.disk = DiskMode::Manual;
+    cfg.stream = StreamConfig {
+        cache_file_bytes: 0,
+        ..StreamConfig::default()
+    };
+    cfg.region_leads = leads;
+    let (mut engine, renderer) = Engine::new(cfg, Box::new(OfflineSinks::new(64))).unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.set_media(vec![MediaFile {
+        id: MediaId(0),
+        path: dir.path().join("a.caf"),
+    }]);
+    engine.load(doc, seq).unwrap();
+    engine.set_loop_range(Some(range)).unwrap();
+    let mut out = OfflineBackend::new(48_000.0, BLOCK);
+    out.start(renderer).unwrap();
+    out.reserve(4096);
+    engine.play().unwrap();
+    let mut left = Vec::new();
+    for _ in 0..blocks {
+        engine.streamer().service();
+        out.block(BLOCK);
+        left.extend_from_slice(out.output(BLOCK).0);
+    }
+    left
+}
+
+/// Review I1 (Task 4 fix round 1): at a loop wrap, a strip behind latency
+/// reads its automation from the loop's start as soon as its audio does,
+/// not past the loop's end for the rest of the run: muted at the loop's
+/// end and unmuted at its start, the second pass is heard from its first
+/// frame, led or delayed.
+#[test]
+fn a_latent_strips_automation_follows_the_loop_seam() {
+    let l = 100u32;
+    let (d, seq) = seam_doc(l);
+    let (s, e) = (2 * QF, 4 * QF + 300);
+    for leads in [true, false] {
+        let left = render_looped(&d, seq, leads, (s, e), 220);
+        // The second pass's loop start is heard at renderer frame `e`
+        // plus the latency.
+        let at = (e + u64::from(l)) as usize;
+        assert_eq!(left[at - 1], 0.0, "the loop's end is muted: leads {leads}");
+        let lost = left[at..at + 4800].iter().filter(|x| **x == 0.0).count();
+        assert_eq!(
+            lost, 0,
+            "the second pass is heard from its start: leads {leads}"
+        );
+    }
+}
+
+/// Review M3 (Task 4 fix round 1): a point in the last `l` frames of the
+/// sequence still applies to a strip behind latency `l`, while its audio
+/// plays out past the end: muted 4000 frames before the region's (and
+/// the sequence's, bar 3) end, the path is silent from there as heard,
+/// led or delayed.
+#[test]
+fn a_point_near_the_end_applies_while_the_end_plays_out() {
+    let l = 4800u32;
+    let mut b = Builder::new();
+    let (seq, lane) = b.sequence("Song", "Audio", None).unwrap();
+    let m = b.media("Media/a.caf", FILE_FRAMES, 2).unwrap();
+    b.region(
+        seq,
+        lane,
+        Q,
+        m,
+        0,
+        7 * QF,
+        0.0,
+        Fade::default(),
+        Fade::default(),
+    )
+    .unwrap();
+    let bus = b.bus("Latent").unwrap();
+    b.insert(bus, TestInserts::plugin(&format!("latency={l}")))
+        .unwrap();
+    let out = b.doc().lane(seq, lane).unwrap().audio_out.unwrap();
+    let path = b.strip_of(StripKind::AudioPath(out)).unwrap();
+    let mute = AutomationTarget::StripMute(path);
+    // 2560 ticks are 4000 frames at 120 bpm.
+    b.event(
+        seq,
+        lane,
+        0,
+        EventBody::Automation {
+            target: mute,
+            value: 0.0,
+        },
+    )
+    .unwrap();
+    b.event(
+        seq,
+        lane,
+        8 * Q - 2560,
+        EventBody::Automation {
+            target: mute,
+            value: 1.0,
+        },
+    )
+    .unwrap();
+    let d = b.finish();
+    for leads in [true, false] {
+        let left = render(&d, seq, leads, 400);
+        let at = (8 * QF - 4000 + u64::from(l)) as usize;
+        assert!(left[at - 10] != 0.0, "heard up to the point: leads {leads}");
+        let heard = left[at..at + 3900].iter().filter(|x| **x != 0.0).count();
+        assert_eq!(heard, 0, "silent from the point as heard: leads {leads}");
+    }
+}
+
+/// Ruling 5 as refined by the controller (Task 4): mute, solo and send
+/// gains act on the fed edge, after its delay line, so their arrival is
+/// the fed node's input time; a strip without such an edge (master) or a
+/// graph without controls answers the strip's own arrival.
+#[test]
+fn edge_gains_arrive_at_the_fed_node() {
+    let mut b = Builder::new();
+    b.dest("Synth", "builtin:synth", 0).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let bus = b.bus("Bus").unwrap();
+    b.insert(bus, TestInserts::plugin("latency=150")).unwrap();
+    let master = b.doc().mixer().master();
+    let d = b.finish();
+    let mut latency = |_: &PluginSlot| 150;
+    let mg = mixer_spec(
+        &d,
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut latency,
+    );
+    let p = plan(&mg.spec, 96_000).unwrap();
+    let mut g = Graph::build(&mg.spec, &p, 512, |_, _| InsertInit::Placeholder);
+    assert_eq!(
+        g.feed_arrival(synth, None),
+        0,
+        "no controls: the strip's own"
+    );
+    g.set_controls(&mg.controls);
+    assert_eq!(g.strip_arrival(synth), 0, "its fader acts at its output");
+    assert_eq!(
+        g.feed_arrival(synth, None),
+        150,
+        "its mute acts after master's delay"
+    );
+    assert_eq!(g.feed_arrival(bus, None), 150);
+    assert_eq!(g.feed_arrival(master, None), 150, "master: its own arrival");
+    assert_eq!(g.arrivals(), &[0, 150]);
+}

@@ -1068,6 +1068,10 @@ unsafe fn render_node(
                 (*gain_l, *gain_r),
                 frames,
             );
+            // `audible` follows the mute read at the main edge's arrival
+            // (plan 5e-1 Ruling 5) while the meter measures at this
+            // strip's output: on a delayed strip it blanks up to that
+            // edge's delay late (visual only; Task 4 review M5).
             if *audible {
                 let (l, r) = dsp::peaks(&st.post, frames);
                 if let Some(m) = shared.meter(*meter) {

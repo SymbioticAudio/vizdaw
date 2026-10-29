@@ -1028,7 +1028,8 @@ impl Renderer {
     /// run's start) and at the loop end or the sequence end while a
     /// schedule with automation or audio plays (Plan 4d Ruling 10, 5a
     /// Ruling 12). Cut at each lane's next point at its own arrival
-    /// (pre-flight I13). // RT
+    /// (pre-flight I13), and where that lane's read jumps; past the end,
+    /// only the lanes still reading (`auto_pos`). // RT
     fn next_run(&self, length: u64, left: u32, regions: &crate::graph::RegionRun) -> u32 {
         let Some(s) = self.schedule.as_deref() else {
             return left;
@@ -1036,14 +1037,23 @@ impl Renderer {
         if s.automation.is_empty() && s.audio.is_empty() {
             return left;
         }
-        let Some(pos) = self.transport.play_pos(length) else {
+        let Some((pos, past)) = self.auto_pos(length, regions) else {
             return left;
         };
         let mut run = u64::from(left);
         let g = self.graph.as_deref();
         let auto = &s.automation;
         for lane in auto.lanes() {
-            let r = auto_frame(regions, pos, lane_arrival(g, lane));
+            let a = lane_arrival(g, lane);
+            if a > 0 {
+                // Where this lane's read jumps (its loop seam, the roll's
+                // floor, the end), so no run reads across it (Task 4
+                // review I1).
+                run = run.min(regions.read_span(a, run).1);
+            }
+            let Some(r) = lane_frame(regions, pos, a, past) else {
+                continue;
+            };
             let pts = auto.points(lane);
             let i = pts.partition_point(|p| p.frame <= r);
             if let Some(p) = pts.get(i) {
@@ -1066,6 +1076,9 @@ impl Renderer {
     /// 16)` frames, each only when it changed. Each lane is read at its
     /// strip's arrival (`auto_frame`, plan 5e-1 Ruling 5). // RT
     fn automate(&mut self, length: u64, run: u32, regions: &crate::graph::RegionRun) {
+        let Some((pos, past)) = self.auto_pos(length, regions) else {
+            return;
+        };
         let Some(s) = self.schedule.as_deref() else {
             return;
         };
@@ -1073,9 +1086,6 @@ impl Renderer {
         if auto.is_empty() {
             return;
         }
-        let Some(pos) = self.transport.play_pos(length) else {
-            return;
-        };
         // A mute or solo point inside the run (one shorter than `MIN_RUN`
         // stretched over it) switches at the run boundary nearest to it:
         // the run's start when at most half way in, else the next run's.
@@ -1086,7 +1096,10 @@ impl Renderer {
             for ramp in [false, true] {
                 let mut any = false;
                 for lane in auto.lanes() {
-                    let f0 = auto_frame(regions, pos, lane_arrival(Some(g), lane));
+                    let a = lane_arrival(Some(g), lane);
+                    let Some(f0) = lane_frame(regions, pos, a, past) else {
+                        continue;
+                    };
                     let mid = f0.saturating_add(u64::from(run / 2));
                     let end = f0.saturating_add(u64::from(run));
                     let v = match (ramp, lane.dest) {
@@ -1118,7 +1131,10 @@ impl Renderer {
             let AutoDest::Plugin(id, param) = lane.dest else {
                 continue;
             };
-            let f0 = auto_frame(regions, pos, lane_arrival(self.graph.as_deref(), lane));
+            let a = lane_arrival(self.graph.as_deref(), lane);
+            let Some(f0) = lane_frame(regions, pos, a, past) else {
+                continue;
+            };
             let Some(last) = self.auto_last.get_mut(k) else {
                 break;
             };
@@ -1150,6 +1166,18 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// Where automation reads in the run starting now: the transport's
+    /// play position, or (`true`) past the end while the end plays out,
+    /// the renderer's frame, where only lanes behind latency still read
+    /// (`lane_frame`; Task 4 review M3). `None` while not playing. // RT
+    fn auto_pos(&self, length: u64, regions: &crate::graph::RegionRun) -> Option<(u64, bool)> {
+        if let Some(p) = self.transport.play_pos(length) {
+            return Some((p, false));
+        }
+        let ending = matches!(self.transport.state, PlayState::Playing | PlayState::Tail);
+        (ending && regions.playing).then_some((regions.frame, true))
     }
 
     /// Drops the overrides of the controls the schedule no longer
@@ -1800,6 +1828,20 @@ fn auto_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64) -> u64 {
     }
     run.read_frame(arrival)
         .unwrap_or(pos.saturating_sub(arrival))
+}
+
+/// The frame a lane with arrival `arrival` reads at in the run starting
+/// at `pos`: `auto_frame`; past the end (`past`), only a lane behind
+/// latency reads, and only while its audio still plays (Task 4 review
+/// M3). // RT
+fn lane_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64, past: bool) -> Option<u64> {
+    if !past {
+        return Some(auto_frame(run, pos, arrival));
+    }
+    if arrival == 0 {
+        return None;
+    }
+    run.read_frame(arrival)
 }
 
 /// A lane's arrival (plan 5e-1 Ruling 5): a strip's fader and pan at its
