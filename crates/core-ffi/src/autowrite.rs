@@ -178,6 +178,8 @@ struct Segment {
     kind: Kind,
     samples: Vec<(i64, f64)>,
     held: bool,
+    /// Reopened at a wrap or a jump, with no stamp of its own yet.
+    reopened: bool,
 }
 
 impl Segment {
@@ -328,6 +330,7 @@ fn segments(
                     kind,
                     samples: vec![(next.start, v)],
                     held: false,
+                    reopened: true,
                 });
             }
         }
@@ -339,11 +342,19 @@ fn segments(
         kind,
         samples: vec![(s.frame, value)],
         held: false,
+        reopened: false,
     };
     for s in stamps {
         cross(&mut open, &mut out, at, s.piece);
         at = at.max(s.piece);
         let f = s.frame;
+        if let (
+            Some(seg),
+            GesturePhase::Touch(_) | GesturePhase::Value(_) | GesturePhase::Offset(_),
+        ) = (open.as_mut(), s.phase)
+        {
+            seg.reopened = false;
+        }
         match s.phase {
             GesturePhase::Touch(v) => match open.as_mut() {
                 Some(seg) => {
@@ -381,8 +392,13 @@ fn segments(
             }
             GesturePhase::Release => {
                 if let Some(mut seg) = open.take() {
-                    seg.end_at(f);
-                    out.push(seg);
+                    // Released where it reopened (an end stamp a gap moved
+                    // to the next piece's start): nothing to write there.
+                    let empty = seg.reopened && seg.samples.iter().all(|x| x.0 == f);
+                    if !empty {
+                        seg.end_at(f);
+                        out.push(seg);
+                    }
                 }
             }
             GesturePhase::Glide(n) => {
@@ -435,7 +451,7 @@ fn merge_holds(segs: Vec<Segment>, hold: f64, spans: &[Span]) -> Vec<Segment> {
         .into_iter()
         .partition(|s| s.pass == 0 && s.mode == WriteMode::Write && s.kind != Kind::Offset);
     writes.sort_by_key(|s| (s.piece, s.first_frame()));
-    let mut value = hold;
+    let mut value = unit(hold);
     let mut k = 0usize;
     while let Some(first) = spans.get(k) {
         if first.pass != 0 {
@@ -453,6 +469,7 @@ fn merge_holds(segs: Vec<Segment>, hold: f64, spans: &[Span]) -> Vec<Segment> {
             kind: Kind::Absolute,
             samples: vec![(first.start, value)],
             held: true,
+            reopened: false,
         };
         for seg in writes.iter().filter(|s| (k..m).contains(&s.piece)) {
             let so_far = merged.last();
@@ -558,9 +575,16 @@ pub fn writes(c: &AutoCapture<'_>) -> Vec<TargetWrite> {
                 GesturePhase::Release | GesturePhase::Glide(_) | GesturePhase::Hold
             ) =>
             {
-                match live.iter().rev().find(|q| q.end <= s.run) {
-                    Some(q) => (*q, place(q, q.end)),
-                    None => continue,
+                // At the start of the piece the gap precedes, so the
+                // segment crosses the break first and a Latch held there
+                // reopens (re-review N2); at the end of the piece before
+                // only when none follows.
+                match live.iter().find(|q| q.from > s.run) {
+                    Some(q) => (*q, place(q, q.from)),
+                    None => match live.iter().rev().find(|q| q.end <= s.run) {
+                        Some(q) => (*q, place(q, q.end)),
+                        None => continue,
+                    },
                 }
             }
             None => continue,
@@ -708,9 +732,13 @@ pub fn thin(samples: &[(u64, f64)], tolerance: f64, db: bool, stepped: bool) -> 
         .collect()
 }
 
-/// The model's writes (Ruling 13): ticks through `tempo` (equal ticks keep
+/// The model's writes (Ruling 13): ticks through `tempo` (a point
+/// rounding onto the tick before goes to the next tick when the next
+/// point leaves room, else, and for a `stepped` target, equal ticks keep
 /// the last value), the range one tick beyond the first and last, an edge
-/// point at each holding `outside(target, tick)`; a write longer than
+/// point at each holding `outside(target, tick)`, or the value of the
+/// latest earlier write in `writes` of the same target covering it (by
+/// the lane rule, stepped when `stepped`); a write longer than
 /// `MAX_WRITE_POINTS` is split into consecutive writes (Ruling 25).
 pub fn to_model(
     writes: &[TargetWrite],
@@ -718,6 +746,7 @@ pub fn to_model(
     tempo: &TempoTable,
     outside: &dyn Fn(AutomationTarget, Tick) -> f64,
     name: &dyn Fn(AutomationTarget) -> String,
+    stepped: &dyn Fn(AutomationTarget) -> bool,
 ) -> Vec<AutomationWrite> {
     let mut out = Vec::new();
     let chunk = MAX_WRITE_POINTS.saturating_sub(2).max(1);
@@ -726,12 +755,33 @@ pub fn to_model(
     // holds its value, not the value before the pass (review I3).
     let mut prior: Vec<Prior> = Vec::new();
     for w in writes {
+        let step = stepped(w.target);
+        let ticks: Vec<Tick> = w
+            .points
+            .iter()
+            .map(|(f, _)| tempo.frame_to_tick(*f))
+            .collect();
         let mut pts: Vec<(Tick, f64)> = Vec::with_capacity(w.points.len());
-        for (f, v) in &w.points {
-            let t = tempo.frame_to_tick(*f);
+        for (i, (t, (_, v))) in ticks.iter().zip(&w.points).enumerate() {
             match pts.last_mut() {
-                Some(l) if l.0 >= t => l.1 = *v,
-                _ => pts.push((t, *v)),
+                // A point rounding onto the tick before (adjacent frames
+                // share a tick about a third of the time at 120 BPM)
+                // goes to the next tick, so a hold then a step stays a
+                // step (re-review I2, N1). Only when the next point does
+                // not already own that tick or one before it; else, and
+                // for a stepped target (whose lane holds anyway), the
+                // later value wins on the tick. The write's end follows
+                // its last point, so a bump never passes it.
+                Some(l) if l.0 >= *t => {
+                    let next = Tick(l.0.0.saturating_add(1));
+                    let room = ticks.get(i + 1).is_none_or(|n| *n > next);
+                    if !step && l.1 != *v && room {
+                        pts.push((next, *v));
+                    } else {
+                        l.1 = *v;
+                    }
+                }
+                _ => pts.push((*t, *v)),
             }
         }
         let (Some(first), Some(last)) = (pts.first(), pts.last()) else {
@@ -745,10 +795,7 @@ pub fn to_model(
                 .iter()
                 .rev()
                 .find(|(x, a, b, _)| *x == w.target && *a <= t && t <= *b)
-                .map_or_else(
-                    || outside(w.target, t),
-                    |(_, _, _, p)| lane_at(p, t, w.target.is_stepped()),
-                )
+                .map_or_else(|| outside(w.target, t), |(_, _, _, p)| lane_at(p, t, step))
         };
         let (start_value, end_value) = (edge(start), edge(end));
         let mut all = Vec::with_capacity(pts.len() + 2);

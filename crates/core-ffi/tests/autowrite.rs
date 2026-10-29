@@ -485,6 +485,7 @@ fn edge_points_leave_the_values_outside_unchanged() {
         &tempo,
         &outside,
         &|_| "Master Fader".into(),
+        &|t| t.is_stepped(),
     );
     assert_eq!(model.len(), 1);
     let w = &model[0];
@@ -521,9 +522,14 @@ fn edge_points_leave_the_values_outside_unchanged() {
     }
     assert!((lane_value(&after, 3 * q) - 0.9).abs() < 1e-12);
     // No automation: the edges hold the static value.
-    let model = to_model(&[tw], SeqId(0), &tempo, &|_, _| 0.3, &|_| {
-        "Master Fader".into()
-    });
+    let model = to_model(
+        &[tw],
+        SeqId(0),
+        &tempo,
+        &|_, _| 0.3,
+        &|_| "Master Fader".into(),
+        &|t| t.is_stepped(),
+    );
     let p = &model[0].points;
     assert!(p.first().unwrap().1 == 0.3 && p.last().unwrap().1 == 0.3);
 }
@@ -551,7 +557,14 @@ fn a_write_longer_than_the_model_limit_is_split() {
         pass: 0,
         points: input.clone(),
     };
-    let model = to_model(&[tw], SeqId(0), &tempo, &|_, _| 0.3, &|_| "Pan".into());
+    let model = to_model(
+        &[tw],
+        SeqId(0),
+        &tempo,
+        &|_, _| 0.3,
+        &|_| "Pan".into(),
+        &|t| t.is_stepped(),
+    );
     assert!(model.len() >= 3, "{}", model.len());
     for w in &model {
         assert!(w.points.len() <= MAX_WRITE_POINTS, "{}", w.points.len());
@@ -695,7 +708,14 @@ fn hostile_values_are_written_as_the_engine_plays_them() {
         pass: 0,
         points: w[0].points.clone(),
     };
-    let model = to_model(&[tw], SeqId(0), &tempo, &|_, _| 0.5, &|_| "Pan".into());
+    let model = to_model(
+        &[tw],
+        SeqId(0),
+        &tempo,
+        &|_, _| 0.5,
+        &|_| "Pan".into(),
+        &|t| t.is_stepped(),
+    );
     assert!(
         apply(
             &doc,
@@ -705,6 +725,20 @@ fn hostile_values_are_written_as_the_engine_plays_them() {
             })
         )
         .is_ok()
+    );
+    // A held value is clamped too (re-review nit).
+    let w = run(
+        &[roll(0, 0)],
+        96_000,
+        &[],
+        &[(PAN, f64::NAN), (FADER, 1.5)],
+        &half,
+        &no_points,
+    );
+    assert!(
+        w.iter()
+            .all(|x| x.points.iter().all(|p| (0.0..=1.0).contains(&p.1))),
+        "{w:?}"
     );
     // A non-finite Trim offset is 0.
     let trim = [
@@ -763,7 +797,9 @@ fn an_overlapping_write_takes_its_edge_from_the_earlier_one() {
     ];
     let w = run(&[roll(0, 0)], 96_000, &stamps, &[], &half, &no_points);
     assert_eq!(w.len(), 2, "{w:?}");
-    let model = to_model(&w, SeqId(0), &tempo, &|_, _| 0.1, &|_| "Pan".into());
+    let model = to_model(&w, SeqId(0), &tempo, &|_, _| 0.1, &|_| "Pan".into(), &|t| {
+        t.is_stepped()
+    });
     assert_eq!(model.len(), 2);
     let edge = model[1].points[0];
     assert_eq!(edge.0, model[1].start);
@@ -791,7 +827,9 @@ fn an_overlapping_write_takes_its_edge_from_the_earlier_one() {
     ];
     let w = run(&[roll(0, 0), jump], 60_000, &held, &[], &half, &no_points);
     assert_eq!(w.len(), 2, "{w:?}");
-    let model = to_model(&w, SeqId(0), &tempo, &|_, _| 0.1, &|_| "Pan".into());
+    let model = to_model(&w, SeqId(0), &tempo, &|_, _| 0.1, &|_| "Pan".into(), &|t| {
+        t.is_stepped()
+    });
     assert!((model[1].points[0].1 - 0.7).abs() < 1e-9, "{model:?}");
 }
 
@@ -823,4 +861,199 @@ fn a_release_no_piece_covers_still_ends_its_segment() {
     let w = run(&marks, 96_000, &stamps, &[], &half, &no_points);
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].points.last().unwrap().0 <= 200, "{w:?}");
+    // Re-review N2: a Latch's Hold in the gap goes to the start of the
+    // piece after it, so the Latch reopens there and holds to the end.
+    let latch = [
+        st(PAN, 20, GesturePhase::Touch(0.4), WriteMode::Latch),
+        st(PAN, 60, GesturePhase::Value(0.6), WriteMode::Latch),
+        st(PAN, 150, GesturePhase::Hold, WriteMode::Latch),
+    ];
+    let w = run(&marks, 96_000, &latch, &[], &half, &no_points);
+    assert_eq!(w.len(), 2, "{w:?}");
+    close(&w[0].points, &[(20, 0.4), (60, 0.6), (100, 0.6)]);
+    close(&w[1].points, &[(200, 0.6), (96_000, 0.6)]);
+    // The same over a wrap: held to the next pass's end.
+    let marks = [
+        roll(0, 0),
+        Mark {
+            run: 1_000,
+            frame: 0,
+            wrap: true,
+            latency: 1_000,
+        },
+        Mark {
+            run: 1_100,
+            frame: 100,
+            wrap: false,
+            latency: 0,
+        },
+    ];
+    let latch = [
+        st(PAN, 500, GesturePhase::Touch(0.4), WriteMode::Latch),
+        st(PAN, 600, GesturePhase::Value(0.6), WriteMode::Latch),
+        st(PAN, 1_050, GesturePhase::Hold, WriteMode::Latch),
+    ];
+    let w = run(&marks, 96_000, &latch, &[], &half, &no_points);
+    assert_eq!(
+        w.iter().map(|x| x.pass).collect::<Vec<_>>(),
+        vec![0, 1],
+        "{w:?}"
+    );
+    close(&w[1].points, &[(100, 0.6), (95_000, 0.6)]);
+}
+
+/// Re-review I2 and N1: a hold then a step on adjacent frames (a glide of
+/// 0, Write's hold merge) survives the frames' rounding to ticks: a
+/// point rounding onto the tick before goes to the next tick, so the
+/// model holds and then steps instead of ramping.
+#[test]
+fn a_step_survives_the_tick_rounding() {
+    let doc = apply(
+        &Document::new(),
+        &Command::Sequence(SequenceCmd::New { name: "S".into() }),
+    )
+    .unwrap()
+    .doc;
+    let s = doc.sequence(SeqId(0)).unwrap();
+    let tempo = TempoTable::build(&s.tempo, Tick(-s.start_offset.0), 48_000.0);
+    let model_of = |w: &[TargetWrite]| {
+        let m = to_model(w, SeqId(0), &tempo, &|_, _| 0.5, &|_| "Pan".into(), &|t| {
+            t.is_stepped()
+        });
+        assert_eq!(m.len(), 1);
+        let p: Vec<(i64, f64)> = m[0].points.iter().map(|(t, v)| (t.0, *v)).collect();
+        assert!(p.windows(2).all(|x| x[0].0 < x[1].0), "ticks rise: {p:?}");
+        p
+    };
+    let mut collided = 0;
+    for g in 40_000..40_010u64 {
+        collided += usize::from(tempo.frame_to_tick(g) == tempo.frame_to_tick(g + 1));
+        let stamps = [
+            st(PAN, 1_000, GesturePhase::Touch(0.6), WriteMode::Touch),
+            st(PAN, 10_000, GesturePhase::Value(0.9), WriteMode::Touch),
+            st(PAN, g as i64, GesturePhase::Glide(0), WriteMode::Touch),
+        ];
+        let w = run(&[roll(0, 0)], 96_000, &stamps, &[], &half, &no_points);
+        let p = model_of(&w);
+        let held = tempo.frame_to_tick(g).0;
+        assert!((lane_value(&p, held) - 0.9).abs() < 1e-12, "g={g}: {p:?}");
+        assert!(
+            (lane_value(&p, tempo.frame_to_tick(30_000).0) - 0.9).abs() < 1e-12,
+            "g={g}: {p:?}"
+        );
+        assert!(
+            (lane_value(&p, held + 1) - 0.5).abs() < 1e-12,
+            "g={g}: {p:?}"
+        );
+    }
+    assert!(collided > 0, "some frame pair shares a tick");
+    for f in 48_000..48_010u64 {
+        let stamps = [
+            st(PAN, f as i64, GesturePhase::Touch(0.8), WriteMode::Write),
+            st(PAN, f as i64 + 5_000, GesturePhase::Hold, WriteMode::Write),
+        ];
+        let w = run(
+            &[roll(0, 0)],
+            96_000,
+            &stamps,
+            &[(PAN, 0.2)],
+            &half,
+            &no_points,
+        );
+        let p = model_of(&w);
+        let before = tempo.frame_to_tick(f - 1).0;
+        assert!((lane_value(&p, before) - 0.2).abs() < 1e-12, "f={f}: {p:?}");
+        assert!(
+            (lane_value(&p, tempo.frame_to_tick(30_000).0) - 0.2).abs() < 1e-12,
+            "f={f}: {p:?}"
+        );
+        assert!(
+            (lane_value(&p, before + 1) - 0.8).abs() < 1e-12,
+            "f={f}: {p:?}"
+        );
+    }
+    // No room for the bump (the next point already owns the next tick):
+    // the later value wins on its tick, as before.
+    let tw = TargetWrite {
+        target: PAN,
+        pass: 0,
+        points: vec![(0, 0.1), (1, 0.2), (2, 0.3), (3, 0.4)],
+    };
+    let ticks: Vec<i64> = (0..4).map(|f| tempo.frame_to_tick(f).0).collect();
+    assert_eq!(ticks, vec![0, 1, 1, 2]);
+    let p = model_of(&[tw]);
+    assert_eq!(p[1..p.len() - 1], [(0, 0.1), (1, 0.3), (2, 0.4)]);
+}
+
+/// Re-review N3: `to_model` takes the target's stepped flag (a plugin's
+/// stepped parameter too): an overlap edge takes the earlier write's
+/// step, not an interpolation, and a step on a shared tick is one point.
+#[test]
+fn to_model_steps_stepped_targets() {
+    let doc = apply(
+        &Document::new(),
+        &Command::Sequence(SequenceCmd::New { name: "S".into() }),
+    )
+    .unwrap()
+    .doc;
+    let s = doc.sequence(SeqId(0)).unwrap();
+    let tempo = TempoTable::build(&s.tempo, Tick(-s.start_offset.0), 48_000.0);
+    let a = TargetWrite {
+        target: PAN,
+        pass: 0,
+        points: vec![(0, 0.2), (48_000, 0.8)],
+    };
+    let b = TargetWrite {
+        target: PAN,
+        pass: 0,
+        points: vec![(24_000, 0.5), (30_000, 0.5)],
+    };
+    let both = [a, b];
+    let stepped = to_model(
+        &both,
+        SeqId(0),
+        &tempo,
+        &|_, _| 0.1,
+        &|_| "Pan".into(),
+        &|_| true,
+    );
+    assert_eq!(stepped[1].points.first().unwrap().1, 0.2, "{stepped:?}");
+    assert_eq!(stepped[1].points.last().unwrap().1, 0.2, "{stepped:?}");
+    let linear = to_model(
+        &both,
+        SeqId(0),
+        &tempo,
+        &|_, _| 0.1,
+        &|_| "Pan".into(),
+        &|_| false,
+    );
+    assert!(
+        (linear[1].points.first().unwrap().1 - 0.5).abs() < 1e-3,
+        "{linear:?}"
+    );
+    // A step on a shared tick: one point, the later value.
+    let g = (40_000..41_000u64)
+        .find(|g| tempo.frame_to_tick(*g) == tempo.frame_to_tick(g + 1))
+        .unwrap();
+    let tw = TargetWrite {
+        target: PAN,
+        pass: 0,
+        points: vec![(1_000, 0.0), (g, 0.0), (g + 1, 1.0)],
+    };
+    let m = to_model(
+        &[tw],
+        SeqId(0),
+        &tempo,
+        &|_, _| 0.0,
+        &|_| "Pan".into(),
+        &|_| true,
+    );
+    let inner = &m[0].points[1..m[0].points.len() - 1];
+    assert_eq!(
+        inner,
+        [
+            (tempo.frame_to_tick(1_000), 0.0),
+            (tempo.frame_to_tick(g), 1.0)
+        ]
+    );
 }
