@@ -61,6 +61,18 @@ import VizDAWCore
         #expect(code(run(AutomationCommands.gesture, [arg("target", "fader:1"), arg("phase", "touch")])) == .busy)
     }
 
+    /// 5e-1 Task 10 review M3: a mode change while an editor drag is open
+    /// is unavailable, and the core is not called.
+    @Test func setModeIsUnavailableDuringAnEditorDrag() throws {
+        let (id, m, f) = try doc()
+        #expect(m.editor.beginGesture("Move", lanes: [], origin: .other))
+        let calls = f.modeCalls.count
+        let o = AutomationCommands.run(
+            AutomationCommands.setMode, args: [arg("strips", "all"), arg("mode", "touch")], doc: id, m)
+        #expect(code(o) == .unavailable)
+        #expect(f.modeCalls.count == calls)
+    }
+
     @Test func suspendTogglesTheGlobalSwitch() throws {
         setAutomationSuspended(on: false)
         defer { setAutomationSuspended(on: false) }

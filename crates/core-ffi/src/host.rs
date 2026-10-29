@@ -3267,8 +3267,10 @@ pub fn stop_recording(owner: u64) -> Result<(), VizError> {
 /// `Model` for a destination that is not an external MIDI synth (the
 /// engine leaves that check to its caller, Task 5) and for a channel the
 /// input lacks, refused as Record refuses it (with the denied or
-/// failed-open reason when there is one). The caller waits without any
-/// lock, then calls [`end_measure`].
+/// failed-open reason when there is one). The channel check comes before
+/// the claim, so a missing channel is reported ahead of the claim's
+/// `Busy` ("Stop first"). The caller waits without any lock, then calls
+/// [`end_measure`].
 pub fn start_measure(
     owner: u64,
     doc: &Document,

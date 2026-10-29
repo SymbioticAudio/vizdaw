@@ -98,10 +98,13 @@ import VizDAWCore
         let r = m.record
         r.setPunch(true)
         r.showsPopover = true
+        let before = m.fieldText(.punchIn)
         r.setPunchText(.punchIn, "x")
         r.pressRecord()
         #expect(!r.isRecording && f.recordCalls.isEmpty)
         #expect(m.editor.status?.contains("is not a position") == true)
+        // 5e-1 Task 1 review m3: the old punch range is kept.
+        #expect(m.fieldText(.punchIn) == before && r.punchText(.punchIn) == before)
         r.setPunchText(.punchIn, "2")
         m.editor.clearStatus()
         r.pressRecord()

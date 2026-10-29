@@ -47,6 +47,9 @@ fn serial(delay_ms: Option<f64>, input: Option<FakeInput>) -> Serial {
     force_offline();
     set_fake_input(input);
     set_fake_synth(delay_ms);
+    // A test that failed with another device chosen does not leave it for
+    // the next (5e-1 Task 1 review m1).
+    vizdaw_ffi::host::set_audio_input_device(None);
     vizdaw_ffi::record::set_free_bytes(None);
     // A test that set a trim must not shift the next (5c-2 final review).
     vizdaw_ffi::set_record_latency_trim(0);
@@ -1723,6 +1726,7 @@ fn a_measure_refused_for_its_channel_leaves_another_windows_plugin_engine() {
     }))
     .unwrap();
     let other = untitled(&g, b.finish());
+    let inputs = a.debug_input_changes();
     let o2 = Arc::clone(&other);
     let dest = d.synth.0;
     let r = std::thread::spawn(move || o2.measure_return(dest))
@@ -1744,6 +1748,11 @@ fn a_measure_refused_for_its_channel_leaves_another_windows_plugin_engine() {
     );
     assert_eq!(vizdaw_ffi::host::holder(), Some(a_id));
     assert_eq!(vizdaw_ffi::host::hosts_created(), created, "no host made");
+    assert_eq!(
+        a.debug_input_changes(),
+        inputs,
+        "A's input (its monitoring) is left alone (Task 1 review m4)"
+    );
     other.close().unwrap();
     a.close().unwrap();
 }
