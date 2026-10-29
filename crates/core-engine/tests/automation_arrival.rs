@@ -540,3 +540,53 @@ fn flat_lanes_do_not_cut_runs_at_the_loop_seam() {
     assert!(plain >= 200, "{plain}");
     assert_eq!(runs(true), plain, "flat lanes add no runs at the seams");
 }
+
+/// Task 4 review (parked): a send's level is an edge gain on the send
+/// edge, so it arrives at the fed bus's input time, not at the strip's
+/// main edge or its own output. A 150-frame Latent bus routed into Fx
+/// sets Fx's input time to 150, and Fx's latency of 100 sets master's to
+/// 250: the synth's send to Fx arrives at 150, its main edge at 250, its
+/// fader at 0.
+#[test]
+fn a_send_level_arrives_at_its_send_edge() {
+    use core_model::command::MixerCmd;
+    use core_model::mixer::{AuxSend, Output};
+    let mut b = Builder::new();
+    b.dest("Synth", "builtin:synth", 0).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let latent = b.bus("Latent").unwrap();
+    b.insert(latent, TestInserts::plugin("latency=150"))
+        .unwrap();
+    let fx = b.bus("Fx").unwrap();
+    b.insert(fx, TestInserts::plugin("latency=100")).unwrap();
+    b.mixer(MixerCmd::SetOutput {
+        strip: latent,
+        output: Output::Bus(fx),
+    })
+    .unwrap();
+    b.mixer(MixerCmd::AddSend {
+        strip: synth,
+        send: AuxSend::new(fx),
+    })
+    .unwrap();
+    let d = b.finish();
+    let mut latency = |s: &PluginSlot| {
+        if s.plugin.id.contains("latency=100") {
+            100
+        } else {
+            150
+        }
+    };
+    let mg = mixer_spec(
+        &d,
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut latency,
+    );
+    let p = plan(&mg.spec, 96_000).unwrap();
+    let mut g = Graph::build(&mg.spec, &p, 512, |_, _| InsertInit::Placeholder);
+    g.set_controls(&mg.controls);
+    assert_eq!(g.strip_arrival(synth), 0, "its fader");
+    assert_eq!(g.feed_arrival(synth, None), 250, "its main edge");
+    assert_eq!(g.feed_arrival(synth, Some(0)), 150, "its send to Fx");
+    assert_eq!(g.feed_arrival(synth, Some(1)), 0, "no such send: its own");
+}
