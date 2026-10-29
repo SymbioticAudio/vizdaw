@@ -239,6 +239,8 @@ pub struct Engine {
     input_spec: crate::input::InputSpec,
     /// Feeds the renderer's MIDI input queue.
     midi_tx: crate::input::MidiSender,
+    /// Feeds the renderer's gesture queue (plan 5e-1 Ruling 6).
+    gesture_tx: crate::gesture::GestureSender,
     /// Automation is suspended (spec §7.5); read by the next load.
     automation_suspended: bool,
     /// The routes last sent to the renderer: a load sends them only when
@@ -327,6 +329,7 @@ impl Engine {
             None
         };
         let (midi_tx, midi_rx) = crate::input::midi_queue();
+        let (gesture_tx, gesture_rx) = crate::gesture::gesture_queue();
         let (streamer, reader) =
             Streamer::new(cfg.sample_rate, cfg.stream, cfg.disk).map_err(|e| {
                 EngineError::Thread {
@@ -347,6 +350,7 @@ impl Engine {
             pool.as_ref().map(Pool::handle),
             reader,
             midi_rx,
+            gesture_rx,
         );
         let engine = Engine {
             cfg,
@@ -383,6 +387,7 @@ impl Engine {
             stream_seen: (AtomicU64::new(0), AtomicU64::new(0)),
             input_spec: crate::input::InputSpec::default(),
             midi_tx,
+            gesture_tx,
             automation_suspended: false,
             inputs_sent: crate::input::InputRoutes::default(),
             return_dests: Vec::new(),
@@ -1269,6 +1274,20 @@ impl Engine {
     /// `midi.inject`).
     pub fn midi_sender(&self) -> crate::input::MidiSender {
         self.midi_tx.clone()
+    }
+
+    /// Feeds this engine's gesture queue (plan 5e-1 Ruling 6; control-side
+    /// threads only).
+    pub fn gesture_sender(&self) -> crate::gesture::GestureSender {
+        self.gesture_tx.clone()
+    }
+
+    /// Gestures dropped so far: the queue's (full) and the renderer's (a
+    /// touch with no free live entry).
+    pub fn gestures_dropped(&self) -> u64 {
+        self.gesture_tx
+            .dropped()
+            .saturating_add(self.shared.gestures_dropped())
     }
 
     /// The destinations whose return the loaded sequence's lanes record

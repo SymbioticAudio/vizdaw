@@ -668,6 +668,13 @@ impl Graph {
         }
     }
 
+    /// The mixer's value for a strip control or send, normalised as
+    /// automation is (`fader_norm(db)`, `pan_norm(pan)`, 1.0/0.0 for mute
+    /// and solo); `None` for plugins and unknown controls. // RT
+    pub fn static_value(&self, dest: AutoDest) -> Option<f64> {
+        self.controls.base_of(dest)
+    }
+
     /// Automation's normalised value for a strip control; it takes effect
     /// at the next `commit_controls`. // RT
     ///

@@ -23,6 +23,7 @@ pub mod engine;
 pub mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
+pub mod gesture;
 pub mod graph;
 pub mod input;
 pub mod measure;
