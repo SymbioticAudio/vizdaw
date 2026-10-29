@@ -5518,8 +5518,10 @@ impl Session {
         let rolled = w.handles.status.rolled();
         let plays = match host::transport_stopped(self.id) {
             Some(false) => true,
-            // Before the roll the transport still reads stopped.
-            Some(true) => !rolled,
+            // Before the roll the transport still reads stopped, while the
+            // Play is meant (a Play that ended at once is not; final
+            // review m4).
+            Some(true) => !rolled && host::wants_play(self.id) == Some(true),
             None => false,
         };
         if !plays {

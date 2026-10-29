@@ -463,9 +463,10 @@ pub(crate) enum PassStep {
 /// lands the pass (M17); a tap that went with its engine lands it, and the
 /// pass starts again when this session's rebuilt engine plays on; an
 /// empty slot with the tap still open is a rebuild under way, so the pass
-/// waits for the tap to close; else [`writing_ended`]. `wants_play` is
-/// the host's intent to play (a rebuilt engine reads stopped until its
-/// Play applies).
+/// waits for the tap to close; else [`writing_ended`], or, before the
+/// roll, a stopped transport with no intent to play (a Play that ended at
+/// once). `wants_play` is the host's intent to play (a rebuilt engine
+/// reads stopped until its Play applies).
 pub(crate) fn pass_step(
     closed: bool,
     rolled: bool,
@@ -479,6 +480,9 @@ pub(crate) fn pass_step(
         Holder::Nobody => PassStep::Go,
         Holder::This if closed && wants_play => PassStep::Restart,
         Holder::This if writing_ended(closed, rolled, transport_stopped) => PassStep::Land,
+        // A Play that ended at once (a range past the end) never rolls:
+        // with its intent gone the pass lands (final review m4).
+        Holder::This if !wants_play && transport_stopped == Some(true) => PassStep::Land,
         Holder::This => PassStep::Go,
     }
 }
@@ -1158,6 +1162,9 @@ mod tests {
             (true, true, Some(true), false, This, PassStep::Land),
             (false, true, Some(false), true, This, PassStep::Go),
             (false, false, Some(true), true, This, PassStep::Go),
+            // Final review m4: a Play that ended at once (its intent gone)
+            // never rolls; the pass lands instead of writing while stopped.
+            (false, false, Some(true), false, This, PassStep::Land),
             (false, true, Some(true), false, This, PassStep::Land),
             (false, true, None, true, Other, PassStep::Land),
             (true, true, None, true, Other, PassStep::Land),

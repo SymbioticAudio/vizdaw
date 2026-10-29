@@ -3440,12 +3440,13 @@ pub fn resumed_at(owner: u64) -> Option<Tick> {
 }
 
 /// Whether `owner`'s host means to play (its Play intent, ahead of the
-/// renderer), when it holds the engine.
+/// renderer), when it holds the engine. A song that ended by itself is
+/// seen first, as `busy` sees it (final review m4).
 pub fn wants_play(owner: u64) -> Option<bool> {
-    lock(&HOST)
-        .as_ref()
-        .filter(|h| h.owner == owner)
-        .map(|h| h.want_play)
+    lock(&HOST).as_mut().filter(|h| h.owner == owner).map(|h| {
+        h.collect_faults();
+        h.want_play
+    })
 }
 
 /// The session holding the engine, if any.

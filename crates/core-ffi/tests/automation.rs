@@ -600,6 +600,32 @@ fn a_device_rebuild_mid_pass_keeps_what_was_written() {
     s.close().unwrap();
 }
 
+/// Final review m4: a Play that ends at once (a range past the sequence's
+/// end) never rolls; its pass lands instead of sending touches down the
+/// write path while the transport stands still.
+#[test]
+fn a_play_that_ends_at_once_does_not_keep_writing() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Touch).unwrap();
+    s.play_from(song, 10_000 * Q, Some(10_001 * Q)).unwrap();
+    wait_until("the pass to end", || {
+        s.idle().unwrap();
+        !s.automation_state().unwrap().writing
+    });
+    assert!(!s.transport().unwrap().playing);
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader"),
+        "a touch while stopped is a static edit"
+    );
+    s.close().unwrap();
+}
+
 /// Pre-flight C1, Ruling 24: the idles that run right after Play, before
 /// the renderer has rolled, do not end the pass; what is then written
 /// lands at Stop.
