@@ -444,3 +444,58 @@ fn a_full_live_table_drops_and_counts() {
     r.blocks(1);
     assert!(near(r.fader_db(r.bus), -3.0), "a freed entry is reused");
 }
+
+/// Task 5 review I1: a Trim held over a Stop keeps playing its offset over
+/// the automation that was heard, not over the mixer's static value.
+#[test]
+fn a_trim_held_over_a_stop_keeps_its_level() {
+    let mut r = rig();
+    r.engine.play().unwrap();
+    r.blocks(2);
+    r.send(fader(r.synth), GesturePhase::Offset(4.0));
+    r.blocks(1);
+    assert!(near(r.fader_db(r.synth), -8.0), "{:?}", r.fader_db(r.synth));
+    r.engine.stop().unwrap();
+    r.blocks(2);
+    assert!(
+        near(r.fader_db(r.synth), -8.0),
+        "held over the Stop: {:?}",
+        r.fader_db(r.synth)
+    );
+}
+
+/// The peaks of the first and second halves of the last block.
+fn halves(r: &Rig) -> (f32, f32) {
+    let (l, _) = r.out.output(BLOCK);
+    let h = l.len() / 2;
+    let peak = |s: &[f32]| s.iter().fold(0f32, |m, x| m.max(x.abs()));
+    (peak(&l[..h]), peak(&l[h..]))
+}
+
+/// Task 5 review I2: riding a fader ramps each new value over a run, as
+/// automation does, instead of stepping at the run's start.
+#[test]
+fn riding_a_fader_ramps_each_value() {
+    let mut r = rig();
+    r.engine.play().unwrap();
+    r.blocks(8);
+    r.send(fader(r.synth), GesturePhase::Touch(fader_norm(-12.0)));
+    r.blocks(2);
+    let (a, b) = halves(&r);
+    assert!(
+        a > 0.0 && (a / b - 1.0).abs() < 0.05,
+        "a steady tone: {a} {b}"
+    );
+    for db in [-6.0, 0.0] {
+        r.send(fader(r.synth), GesturePhase::Value(fader_norm(db)));
+        r.blocks(1);
+        let (a, b) = halves(&r);
+        assert!(
+            a < 0.85 * b,
+            "the move to {db} dB ramps over the block: {a} {b}"
+        );
+    }
+    r.blocks(1);
+    let (a, b) = halves(&r);
+    assert!((a / b - 1.0).abs() < 0.05, "settled: {a} {b}");
+}

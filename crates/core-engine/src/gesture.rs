@@ -123,17 +123,34 @@ enum LiveState {
     GlidingOffset { from: f64, done: u32, frames: u32 },
 }
 
+/// Where a strip or send target's next run starts (Task 5 review I2):
+/// each live change ramps over one run, as automation does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Start {
+    /// From what is under it (a new entry: the value heard before).
+    Under,
+    /// From the value committed at the last run's end.
+    Was(f64),
+}
+
 /// One live target.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Live {
     dest: AutoDest,
     state: LiveState,
+    start: Start,
+    /// What was last heard under it while a lane read it (NaN: nothing
+    /// yet): offsets and glides play over it when its lane reads nothing
+    /// (stopped, past the end; Task 5 review I1).
+    base: f64,
 }
 
 /// A placeholder entry (past `len`, never read).
 const EMPTY: Live = Live {
     dest: AutoDest::Plugin(PluginInstanceId(0), ParamId(0)),
     state: LiveState::Touched(0.0),
+    start: Start::Under,
+    base: f64::NAN,
 };
 
 /// The renderer's touched targets (Ruling 6), sorted by dest. // RT
@@ -211,7 +228,12 @@ impl LiveTable {
         }
         self.entries.copy_within(at..self.len, at + 1);
         if let Some(e) = self.entries.get_mut(at) {
-            *e = Live { dest, state };
+            *e = Live {
+                dest,
+                state,
+                start: Start::Under,
+                base: f64::NAN,
+            };
         }
         self.len += 1;
         true
@@ -240,6 +262,26 @@ impl LiveTable {
         self.entries.copy_within(i + 1..self.len, i);
         self.len -= 1;
         self.ended(dest);
+    }
+
+    /// Keeps the entries `keep` says to (it may change them) and ends the
+    /// rest, in one pass (Task 5 review M1). // RT
+    fn retain(&mut self, mut keep: impl FnMut(&mut Live) -> bool) {
+        let mut w = 0;
+        for r in 0..self.len {
+            let Some(mut e) = self.entries.get(r).copied() else {
+                break;
+            };
+            if keep(&mut e) {
+                if let Some(slot) = self.entries.get_mut(w) {
+                    *slot = e;
+                }
+                w += 1;
+            } else {
+                self.ended(e.dest);
+            }
+        }
+        self.len = w;
     }
 
     /// Applies `phase` to `dest`; false when a touch found no free entry (dropped). // RT
@@ -306,8 +348,20 @@ impl LiveTable {
     }
 
     /// The value `dest` plays `at` frames into the run instead of `under` (its automation or static value); None when it is not live. // RT
+    ///
+    /// For a strip or send target, at 0 (the run's start commit) it is
+    /// the value committed at the last run's end ([`LiveTable::note`]), or
+    /// `under` for a new entry, so each change ramps over one run (Task 5
+    /// review I2).
     pub fn value(&self, dest: AutoDest, under: f64, at: u32) -> Option<f64> {
-        Some(match self.state(dest)? {
+        let e = self.find(dest).ok().and_then(|i| self.entries.get(i))?;
+        if at == 0 && !matches!(dest, AutoDest::Plugin(..)) {
+            return Some(match e.start {
+                Start::Under => under,
+                Start::Was(v) => v,
+            });
+        }
+        Some(match e.state {
             LiveState::Touched(v) | LiveState::Held(v) => v,
             LiveState::Offset(d) | LiveState::HeldOffset(d) => offset(dest, under, d),
             LiveState::Gliding { from, done, frames } => {
@@ -317,6 +371,47 @@ impl LiveTable {
                 offset(dest, under, from * left(done, frames, at))
             }
         })
+    }
+
+    /// Notes what `dest`'s run ended at: `end`, the value committed, and
+    /// (`under`) what its lane read under it. // RT
+    pub fn note(&mut self, dest: AutoDest, end: f64, under: Option<f64>) {
+        let Some(e) = self.find(dest).ok().and_then(|i| self.entries.get_mut(i)) else {
+            return;
+        };
+        e.start = Start::Was(end);
+        if let Some(u) = under {
+            e.base = u;
+        }
+    }
+
+    /// What was last heard under `dest` while its lane read it ([`LiveTable::note`]). // RT
+    pub fn base(&self, dest: AutoDest) -> Option<f64> {
+        let e = self.find(dest).ok().and_then(|i| self.entries.get(i))?;
+        e.base.is_finite().then_some(e.base)
+    }
+
+    /// Remembers `under` as what is heard under `dest` (its lane read
+    /// nothing yet: the control's current value). // RT
+    pub fn set_base(&mut self, dest: AutoDest, under: f64) {
+        if let Some(e) = self.find(dest).ok().and_then(|i| self.entries.get_mut(i)) {
+            e.base = under;
+        }
+    }
+
+    /// The destination of the `i`th live entry (by dest order). // RT
+    pub fn dest_at(&self, i: usize) -> Option<AutoDest> {
+        self.live().get(i).map(|l| l.dest)
+    }
+
+    /// How many targets are live. // RT
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// No target is live. // RT
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// Whether `dest` has an entry. // RT
@@ -334,47 +429,29 @@ impl LiveTable {
 
     /// Glides move on by `frames`; finished glides end. // RT
     pub fn advance(&mut self, frames: u32) {
-        let mut i = 0;
-        while i < self.len {
-            let Some(e) = self.entries.get_mut(i) else {
-                break;
-            };
-            let finished = match &mut e.state {
-                LiveState::Gliding {
-                    done, frames: n, ..
-                }
-                | LiveState::GlidingOffset {
-                    done, frames: n, ..
-                } => {
-                    *done = done.saturating_add(frames);
-                    *done >= *n
-                }
-                _ => false,
-            };
-            if finished {
-                self.remove(i);
-            } else {
-                i += 1;
+        self.retain(|e| match &mut e.state {
+            LiveState::Gliding {
+                done, frames: n, ..
             }
-        }
+            | LiveState::GlidingOffset {
+                done, frames: n, ..
+            } => {
+                *done = done.saturating_add(frames);
+                *done < *n
+            }
+            _ => true,
+        });
     }
 
     /// Held and gliding entries end (a Stop, a loop wrap, a Locate). // RT
     pub fn end_holds(&mut self) {
-        let mut i = 0;
-        while i < self.len {
-            let Some(e) = self.entries.get(i) else {
-                break;
-            };
-            if matches!(e.state, LiveState::Touched(_) | LiveState::Offset(_)) {
-                i += 1;
-            } else {
-                self.remove(i);
-            }
-        }
+        self.retain(|e| matches!(e.state, LiveState::Touched(_) | LiveState::Offset(_)));
     }
 
-    /// Whether an entry ended since the last call (its override must go). // RT
+    /// Whether an entry ended since the last call (its override must go).
+    /// The renderer drops it before its next run's commits, so a glide
+    /// that ends in `advance` lets go one run later, at about the value
+    /// under it (Task 5 review M5). // RT
     pub fn take_released(&mut self) -> bool {
         std::mem::take(&mut self.released)
     }

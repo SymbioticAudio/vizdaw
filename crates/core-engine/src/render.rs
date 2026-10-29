@@ -1148,7 +1148,19 @@ impl Renderer {
                             }
                             (true, _) => auto.value(lane, end, true),
                         };
-                        let v = live.value(lane.dest, v, into).unwrap_or(v);
+                        let under = v;
+                        let v = match live.value(lane.dest, v, into) {
+                            Some(lv) => {
+                                // The next run starts here; offsets and
+                                // glides play over this when the lane
+                                // reads nothing (Task 5 review I1, I2).
+                                if ramp {
+                                    live.note(lane.dest, lv, Some(under));
+                                }
+                                lv
+                            }
+                            None => v,
+                        };
                         match lane.dest {
                             AutoDest::Strip(id, p) => {
                                 g.automate_strip(id, p, v);
@@ -1162,7 +1174,7 @@ impl Renderer {
                         }
                     }
                 }
-                any |= apply_live(g, live, auto, regions, at, into);
+                any |= apply_live(g, live, auto, regions, at, into, ramp);
                 if any {
                     g.commit_controls(ramp);
                 }
@@ -1947,43 +1959,64 @@ fn lane_arrival(graph: Option<&Graph>, lane: &crate::schedule::AutoLane) -> u64 
 
 /// Sets, for the next commit, the value of every live strip and send
 /// target this run's lanes did not set (no lane drives it, its lane reads
-/// nothing past the end, or the transport is not playing: `at` is `None`),
-/// over its static value (plan 5e-1 Ruling 6); true when one was set. // RT
+/// nothing past the end, or the transport is not playing: `at` is `None`);
+/// true when one was set. Its value plays over the static value, or, for a
+/// target a lane drives, over what was last heard under it (Task 5 review
+/// I1). The ramped commit's value is noted as the next run's start (I2).
+/// // RT
 fn apply_live(
     g: &mut Graph,
-    live: &crate::gesture::LiveTable,
+    live: &mut crate::gesture::LiveTable,
     auto: Option<&crate::schedule::Automation>,
     regions: &crate::graph::RegionRun,
     at: Option<(u64, bool)>,
     into: u32,
+    ramp: bool,
 ) -> bool {
     let mut any = false;
-    for dest in live.dests() {
+    for i in 0..live.len() {
+        let Some(dest) = live.dest_at(i) else {
+            break;
+        };
         if matches!(dest, AutoDest::Plugin(..)) {
             continue;
         }
-        if let (Some((pos, past)), Some(auto)) = (at, auto) {
-            let lanes = auto.lanes();
-            let lane = lanes
+        let lane = auto.and_then(|a| {
+            let lanes = a.lanes();
+            lanes
                 .binary_search_by_key(&dest, |l| l.dest)
                 .ok()
-                .and_then(|i| lanes.get(i));
-            if lane
-                .is_some_and(|l| lane_frame(regions, pos, lane_arrival(Some(g), l), past).is_some())
-            {
+                .and_then(|i| lanes.get(i))
+        });
+        if let (Some((pos, past)), Some(l)) = (at, lane) {
+            if lane_frame(regions, pos, lane_arrival(Some(g), l), past).is_some() {
                 continue;
             }
         }
-        let Some(v) = g
-            .static_value(dest)
-            .and_then(|under| live.value(dest, under, into))
-        else {
+        let under = if lane.is_some() {
+            match live.base(dest) {
+                Some(b) => Some(b),
+                None => {
+                    let h = g.heard_value(dest);
+                    if let Some(h) = h {
+                        live.set_base(dest, h);
+                    }
+                    h
+                }
+            }
+        } else {
+            g.static_value(dest)
+        };
+        let Some(v) = under.and_then(|under| live.value(dest, under, into)) else {
             continue;
         };
         match dest {
             AutoDest::Strip(id, p) => g.automate_strip(id, p, v),
             AutoDest::Send(id, i) => g.automate_send(id, i, v),
             AutoDest::Plugin(..) => continue,
+        }
+        if ramp {
+            live.note(dest, v, None);
         }
         any = true;
     }

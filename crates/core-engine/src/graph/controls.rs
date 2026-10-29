@@ -369,6 +369,30 @@ impl Controls {
         }
     }
 
+    /// The value (normalised, as automation's) a strip control or a send
+    /// plays now: its override, else its static value; `None` for plugins
+    /// and unknown controls (Task 5 review I1). // RT
+    pub(crate) fn heard_of(&self, dest: AutoDest) -> Option<f64> {
+        let strip = match dest {
+            AutoDest::Strip(s, _) | AutoDest::Send(s, _) => s,
+            AutoDest::Plugin(..) => return None,
+        };
+        let s = self.find(strip).and_then(|i| self.strips.get(i))?;
+        let on = |b: bool| if b { 1.0 } else { 0.0 };
+        let (o, b) = (s.over, s.base);
+        match dest {
+            AutoDest::Strip(_, StripParam::Fader) => Some(fader_norm(o.db.unwrap_or(b.db))),
+            AutoDest::Strip(_, StripParam::Pan) => Some(pan_norm(o.pan.unwrap_or(b.pan))),
+            AutoDest::Strip(_, StripParam::Mute) => Some(on(o.mute.unwrap_or(b.mute))),
+            AutoDest::Strip(_, StripParam::Solo) => Some(on(o.solo.unwrap_or(b.solo))),
+            AutoDest::Send(_, index) => self.feeds.get(s.feeds.clone())?.iter().find_map(|f| {
+                let send = f.send.filter(|x| x.index == index)?;
+                Some(fader_norm(f.over_db.unwrap_or(send.level_db)))
+            }),
+            AutoDest::Plugin(..) => None,
+        }
+    }
+
     /// Automation's value (normalised) for `strip`'s `p`. // RT
     pub(crate) fn set_strip(&mut self, strip: StripId, p: StripParam, v: f64) {
         let Some(i) = self.find(strip) else {

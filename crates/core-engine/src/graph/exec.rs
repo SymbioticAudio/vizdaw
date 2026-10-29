@@ -675,6 +675,13 @@ impl Graph {
         self.controls.base_of(dest)
     }
 
+    /// The value a strip control or send plays now (its override, else
+    /// its static value), normalised as automation is; `None` for plugins
+    /// and unknown controls. // RT
+    pub fn heard_value(&self, dest: AutoDest) -> Option<f64> {
+        self.controls.heard_of(dest)
+    }
+
     /// Automation's normalised value for a strip control; it takes effect
     /// at the next `commit_controls`. // RT
     ///
