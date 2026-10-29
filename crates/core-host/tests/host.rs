@@ -1312,3 +1312,192 @@ fn only_turning_a_plugin_off_unloads_it_blocklisted_and_missing_ones_keep_runnin
     );
     drop(engine);
 }
+
+// ---------------------------------------------------------------------------
+// Task 9b: an automated parameter keeps its static value across a capture.
+
+/// The scripted plugin as an insert on the synth's strip, with a lane of
+/// `Song` automating `params` of it (plus hostile automation: a parameter
+/// it does not list, and a second slot's parameter whose slot is then
+/// removed), loaded, with the static values `statics` committed first.
+fn with_fake_automated(
+    params: &[ParamId],
+    statics: &[(ParamId, f64)],
+) -> (History, SeqId, PluginInstanceId, PluginHost, Arc<Script>) {
+    use core_model::automation::AutomationTarget;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::time::Tick;
+    let doc = demo_document().unwrap();
+    let song = find_sequence(&doc, "Song").unwrap();
+    let mut b = Builder::from_doc(doc);
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let id = b.insert(synth, fake_ref()).unwrap();
+    let gone = b.insert(synth, plugin("vizdaw.test.gain")).unwrap();
+    let lane = b.lane(song, "Auto", None).unwrap();
+    let mut targets: Vec<AutomationTarget> = params
+        .iter()
+        .map(|p| AutomationTarget::PluginParam(id, *p))
+        .collect();
+    targets.push(AutomationTarget::PluginParam(id, ParamId(999)));
+    targets.push(AutomationTarget::PluginParam(gone, OTHER));
+    let events = targets
+        .into_iter()
+        .map(|target| EventSpec::new(Tick(0), EventBody::Automation { target, value: 0.5 }))
+        .collect();
+    b.events(song, lane, events).unwrap();
+    b.mixer(MixerCmd::RemoveInsert { slot: gone }).unwrap();
+    let mut hist = History::new(b.finish());
+    if !statics.is_empty() {
+        run(
+            &mut hist,
+            MixerCmd::SetPluginParams {
+                slot: id,
+                params: statics.to_vec(),
+            },
+        );
+    }
+    let script = Arc::new(Script::default());
+    let mut h = host(4096);
+    h.add_format(Box::new(FakeFormat(script.clone())));
+    h.sync(hist.doc());
+    let r = h.wait_ready(WAIT);
+    assert_eq!(r.loaded, vec![id], "{:?}", r.failed);
+    (hist, song, id, h, script)
+}
+
+/// The plugin's saved state as `(param, value)` pairs.
+fn blob_values(hist: &History, id: PluginInstanceId) -> BTreeMap<u64, f64> {
+    let slot = hist.doc().plugin_slot(id).unwrap();
+    let bytes = hist.doc().state_blob(slot.state.unwrap()).unwrap();
+    String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(|kv| {
+            let (k, v) = kv.split_once('=').unwrap();
+            (k.parse().unwrap(), v.parse().unwrap())
+        })
+        .collect()
+}
+
+/// Spec §7, plan 5e-1 Ruling 15, Task 9b: a capture while an automated
+/// parameter is ridden keeps the parameter's static value in the overlay
+/// (its overlay value, else its value before the ride), does not snap the
+/// playing plugin back, and a new host plays the static value; a
+/// parameter that is not automated is captured as before (the plugin's
+/// own value, no overlay entry). Hostile automation adds nothing.
+#[test]
+fn a_capture_keeps_an_automated_parameters_static_value() {
+    for statics in [vec![], vec![(GAIN, 0.8)]] {
+        let static_gain = statics.first().map_or(1.0, |(_, v)| *v);
+        let (mut hist, song, id, mut host, script) = with_fake_automated(&[GAIN], &statics);
+        let (mut engine, mut be) = engine(&host, 4096);
+        engine.load(hist.doc(), song).unwrap();
+        tick(&mut host, &mut engine, &mut be, &hist, song);
+        // The ride (a written gesture: never committed) and a move of a
+        // parameter nobody automates.
+        script.emit(&[
+            ParamEvent::Begin(GAIN),
+            ParamEvent::Value(GAIN, 0.4),
+            ParamEvent::End(GAIN),
+            ParamEvent::Value(OTHER, 0.6),
+        ]);
+        tick(&mut host, &mut engine, &mut be, &hist, song);
+        assert_eq!(script.held(GAIN), 0.4);
+        host.capture(&mut hist, id).unwrap();
+        assert_eq!(gain_params(&hist, id), vec![(GAIN, static_gain)]);
+        let blob = blob_values(&hist, id);
+        assert_eq!(blob.get(&0), Some(&0.4), "the plugin's own state");
+        assert_eq!(blob.get(&1), Some(&0.6), "not automated: as before");
+        for _ in 0..3 {
+            tick(&mut host, &mut engine, &mut be, &hist, song);
+        }
+        peak(&mut be, 512);
+        assert_eq!(script.held(GAIN), 0.4, "not snapped back while it plays");
+        assert_eq!(script.held(OTHER), 0.6);
+        // A second capture keeps it too (the overlay entry is now there).
+        host.capture(&mut hist, id).unwrap();
+        assert_eq!(gain_params(&hist, id), vec![(GAIN, static_gain)]);
+        // The undo-free reset puts the plugin at the static value.
+        host.reset_param(id, GAIN);
+        tick(&mut host, &mut engine, &mut be, &hist, song);
+        peak(&mut be, 512);
+        assert_eq!(script.held(GAIN), static_gain);
+        drop(engine);
+        // A new host (a reopen): state, then the kept overlay.
+        let doc = hist.doc().clone();
+        let fresh_script = Arc::new(Script::default());
+        let mut fresh = self::host(4096);
+        fresh.add_format(Box::new(FakeFormat(fresh_script.clone())));
+        fresh.sync(&doc);
+        fresh.wait_ready(WAIT);
+        assert_eq!(fresh_script.held(GAIN), static_gain);
+        assert_eq!(fresh_script.held(OTHER), 0.6);
+    }
+}
+
+/// Task 9b: a parameter touched or written in an open pass (no lane yet,
+/// a mid-pass autosave) is kept like an automated one, through
+/// `capture_with` and `capture_all`; a parameter the plugin does not list
+/// is never kept.
+#[test]
+fn a_capture_keeps_the_parameters_a_pass_writes() {
+    let (mut hist, song, id, mut host, script) = with_fake_automated(&[], &[]);
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    script.emit(&[ParamEvent::Value(GAIN, 0.3), ParamEvent::Value(OTHER, 0.7)]);
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    let riding = std::collections::BTreeSet::from([OTHER, ParamId(999)]);
+    host.capture_with(&mut hist, id, &riding).unwrap();
+    assert_eq!(gain_params(&hist, id), vec![(OTHER, 0.0)]);
+    for _ in 0..3 {
+        tick(&mut host, &mut engine, &mut be, &hist, song);
+    }
+    peak(&mut be, 512);
+    assert_eq!(script.held(OTHER), 0.7, "not snapped back");
+    let all = std::collections::BTreeSet::from([(id, OTHER), (PluginInstanceId(4242), GAIN)]);
+    assert!(host.capture_all(&mut hist, &all).is_empty());
+    assert_eq!(gain_params(&hist, id), vec![(OTHER, 0.0)]);
+    // No longer written: captured as before.
+    assert!(host.capture_all(&mut hist, &Default::default()).is_empty());
+    assert!(gain_params(&hist, id).is_empty());
+    assert_eq!(blob_values(&hist, id).get(&1), Some(&0.7));
+    drop(engine);
+}
+
+/// Task 9b: a plugin whose state capture fails changes nothing: the
+/// document keeps its overlay and the host its values.
+#[test]
+fn a_failed_capture_of_an_automated_plugin_changes_nothing() {
+    use core_model::automation::AutomationTarget;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::time::Tick;
+    let doc = demo_document().unwrap();
+    let song = find_sequence(&doc, "Song").unwrap();
+    let mut b = Builder::from_doc(doc);
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let id = b.insert(synth, plugin("vizdaw.test.nan")).unwrap();
+    let lane = b.lane(song, "Auto", None).unwrap();
+    b.events(
+        song,
+        lane,
+        vec![EventSpec::new(
+            Tick(0),
+            EventBody::Automation {
+                target: AutomationTarget::PluginParam(id, ParamId(0)),
+                value: 0.5,
+            },
+        )],
+    )
+    .unwrap();
+    let mut hist = History::new(b.finish());
+    let mut host = host(4096);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    let before = hist.doc().clone();
+    assert!(host.capture(&mut hist, id).is_err());
+    let all = std::collections::BTreeSet::from([(id, ParamId(0))]);
+    assert_eq!(host.capture_all(&mut hist, &all).len(), 1);
+    assert_eq!(hist.doc(), &before);
+}

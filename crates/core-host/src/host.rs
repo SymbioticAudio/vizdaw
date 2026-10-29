@@ -1269,28 +1269,72 @@ impl PluginHost {
     /// §4: on save, autosave and before removal; no undo step). The app
     /// calls it before it commits a removal whose plugin state must be
     /// kept: the host cannot capture an instance after `sync` removed it.
+    /// An automated parameter keeps its static value in the overlay (see
+    /// [`PluginHost::capture_with`]).
     pub fn capture(
         &mut self,
         history: &mut History,
         id: PluginInstanceId,
     ) -> Result<StateBlobId, HostError> {
-        let Some(State::Live(live)) = self.slots.get_mut(&id).map(|s| &mut s.state) else {
+        self.capture_with(history, id, &BTreeSet::new())
+    }
+
+    /// [`PluginHost::capture`] that also keeps the parameters in `riding`
+    /// (touched or written in an open pass, whose lane does not exist
+    /// yet) like automated ones.
+    ///
+    /// Spec §7, plan 5e-1 Ruling 15 and Task 9b: for a parameter that is
+    /// automated (some lane of the document holds automation of it, in
+    /// any take, muted or not) or in `riding`, the overlay is the static
+    /// value and the source of truth. Such a parameter keeps its overlay
+    /// entry, else gets one holding its value from before the overlay (its
+    /// static value, not what a ride or automation sent since); what the
+    /// plugin holds now goes into the state blob only, which the overlay
+    /// overrides at load. The host then counts that entry as sent, so
+    /// the plugin is not snapped back to it while it plays. A parameter
+    /// the plugin does not list is never kept. Every other parameter is
+    /// folded into the state as before.
+    pub fn capture_with(
+        &mut self,
+        history: &mut History,
+        id: PluginInstanceId,
+        riding: &BTreeSet<ParamId>,
+    ) -> Result<StateBlobId, HostError> {
+        let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
+            return Err(HostError::NotFound(format!("instance {id} is not loaded")));
+        };
+        let State::Live(live) = state else {
             return Err(HostError::NotFound(format!("instance {id} is not loaded")));
         };
         let bytes = live.inst.save_state()?;
+        let doc = history.doc();
+        let overlay = doc.plugin_slot(id).map(|s| &s.params);
+        let mut automated = core_model::automation::automated_params(doc, id);
+        automated.extend(riding.iter().copied());
+        let keep: BTreeMap<ParamId, f64> = automated
+            .into_iter()
+            .filter_map(|p| {
+                let before = live.base.get(&p).copied()?;
+                let static_value = overlay.and_then(|o| o.get(&p)).copied();
+                Some((p, static_value.unwrap_or(before)))
+            })
+            .filter(|(_, v)| v.is_finite())
+            .collect();
         let blob = history
-            .capture_state(id, &bytes)
+            .capture_state_keeping(id, &bytes, &keep)
             .map_err(|e| HostError::StateRejected(e.to_string()))?;
         live.applied_state = Some(blob);
         // The overlay, and values the document had not caught up with, are
-        // now part of the state.
+        // now part of the state; a kept parameter's are not.
         let sent = std::mem::take(&mut live.sent);
-        live.base.extend(sent);
+        live.base
+            .extend(sent.into_iter().filter(|(p, _)| !keep.contains_key(p)));
         live.pending.clear();
-        if let Some(s) = self.slots.get_mut(&id) {
-            s.want.state = history.doc().state_blob(blob).map(|b| (blob, Arc::from(b)));
-            s.want.params.clear();
-        }
+        // The document's overlay; as sent, so `apply_want` leaves what the
+        // plugin plays alone.
+        live.sent.clone_from(&keep);
+        want.state = history.doc().state_blob(blob).map(|b| (blob, Arc::from(b)));
+        want.params = keep;
         Ok(blob)
     }
 
@@ -1379,14 +1423,26 @@ impl PluginHost {
         std::mem::take(&mut self.evicted).into_iter().collect()
     }
 
-    /// Captures every live instance with state (before saving).
-    pub fn capture_all(&mut self, history: &mut History) -> Vec<(PluginInstanceId, HostError)> {
+    /// Captures every live instance with state (before saving), through
+    /// [`PluginHost::capture_with`]: the parameters in `riding` (by slot)
+    /// are kept like automated ones.
+    pub fn capture_all(
+        &mut self,
+        history: &mut History,
+        riding: &BTreeSet<(PluginInstanceId, ParamId)>,
+    ) -> Vec<(PluginInstanceId, HostError)> {
         let ids: Vec<PluginInstanceId> = self.slots.keys().copied().collect();
         ids.into_iter()
-            .filter_map(|id| match self.capture(history, id) {
-                Ok(_) => None,
-                Err(HostError::NotFound(_)) => None,
-                Err(e) => Some((id, e)),
+            .filter_map(|id| {
+                let mine: BTreeSet<ParamId> = riding
+                    .range((id, ParamId(0))..=(id, ParamId(u64::MAX)))
+                    .map(|(_, p)| *p)
+                    .collect();
+                match self.capture_with(history, id, &mine) {
+                    Ok(_) => None,
+                    Err(HostError::NotFound(_)) => None,
+                    Err(e) => Some((id, e)),
+                }
             })
             .collect()
     }

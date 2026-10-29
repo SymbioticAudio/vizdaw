@@ -176,6 +176,27 @@ struct Inner {
     after_write_pending: Option<(Vec<StripId>, AutomationMode)>,
 }
 
+/// The parameters of `riding` that belong to slot `id`.
+fn slot_params(
+    riding: &std::collections::BTreeSet<(PluginInstanceId, ParamId)>,
+    id: PluginInstanceId,
+) -> std::collections::BTreeSet<ParamId> {
+    riding
+        .iter()
+        .filter(|(s, _)| *s == id)
+        .map(|(_, p)| *p)
+        .collect()
+}
+
+/// Slot `id`'s overlay in `doc` (what a capture into a copy of the
+/// history kept, plan 5e-1 Task 9b), to store with the same blob in the
+/// real history.
+fn kept_overlay(doc: &Document, id: PluginInstanceId) -> std::collections::BTreeMap<ParamId, f64> {
+    doc.plugin_slot(id)
+        .map(|s| s.params.iter().map(|(k, v)| (*k, *v)).collect())
+        .unwrap_or_default()
+}
+
 /// The plugins the crash marker names: those loading now, and with
 /// `ahead` also those the next sync is about to start loading. `None`
 /// while the registry is busy.
@@ -421,6 +442,38 @@ impl Inner {
         changed
     }
 
+    /// The plugin parameters touched or written in an open pass, or
+    /// written by a pass not landed yet (plan 5e-1 Task 9b): a capture
+    /// keeps their static values like an automated parameter's, since
+    /// their lane may not exist yet (a mid-pass autosave).
+    fn riding_params(&self) -> std::collections::BTreeSet<(PluginInstanceId, ParamId)> {
+        let mut targets: Vec<AutomationTarget> = self
+            .touches
+            .iter()
+            .filter(|(_, x)| matches!(x.path, crate::automation::Path::Write(..)))
+            .map(|(t, _)| *t)
+            .collect();
+        if let Some(w) = &self.writing {
+            targets.extend(w.stamps.keys().copied());
+            targets.extend(w.moved.iter().copied());
+            targets.extend(w.ended.iter().copied());
+            targets.extend(w.holds.iter().map(|(t, _)| *t));
+        }
+        for (writes, _, _) in &self.pending_automation {
+            targets.extend(writes.iter().map(|w| w.target));
+        }
+        if let Some((Some(pass), _)) = &self.pending_pass {
+            targets.extend(pass.automation.iter().map(|w| w.target));
+        }
+        targets
+            .into_iter()
+            .filter_map(|t| match t {
+                AutomationTarget::PluginParam(slot, p) => Some((slot, p)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The sequence a position set without the engine belongs to: the one
     /// last played, else the first top-level sequence.
     fn selected_seq(&self) -> Option<SeqId> {
@@ -662,9 +715,11 @@ impl Session {
     /// plugin call is on the stack: nothing is captured, and the caller
     /// must not write a half-captured file.
     fn capture_all(&self, inner: &mut Inner) -> Result<bool, VizError> {
+        let riding = inner.riding_params();
         let history = &mut inner.history;
         let failed = plugins::with(self.id, |p| {
-            p.map(|p| p.capture_all(history)).unwrap_or_default()
+            p.map(|p| p.capture_all(history, &riding))
+                .unwrap_or_default()
         })?;
         let all = failed.is_empty();
         for (id, e) in failed {
@@ -769,6 +824,7 @@ impl Session {
             // The title shows Edited.
             inner.news.doc_changed = true;
         }
+        self.sync_loaded_plugins(inner, &r.loaded);
         // A plugin window's moves are gestures too (spec §7.1); the
         // parameters they write as automation are not parameter steps
         // (plan 5e-1 Ruling 15, pre-flight M13).
@@ -912,7 +968,7 @@ impl Session {
     /// plugin call is on the stack: the removal is refused rather than
     /// losing the state.
     fn capture_removed(&self, next: &Document) -> Result<(), VizError> {
-        let (mut scratch, gone) = {
+        let (mut scratch, gone, riding) = {
             let inner = lock(&self.inner);
             let before = mixer::slot_ids(inner.doc());
             let after = mixer::slot_ids(next);
@@ -920,20 +976,28 @@ impl Session {
             if gone.is_empty() {
                 return Ok(());
             }
-            (inner.history.clone(), gone)
+            (inner.history.clone(), gone, inner.riding_params())
         };
         let captured = plugins::with(self.id, |p| {
             let Some(p) = p else { return Vec::new() };
             gone.into_iter()
                 // A placeholder has nothing to capture; its saved state
                 // stays in the document.
-                .filter_map(|id| p.capture(&mut scratch, id).ok().map(|blob| (id, blob)))
+                .filter_map(|id| {
+                    let mine = slot_params(&riding, id);
+                    p.capture_with(&mut scratch, id, &mine)
+                        .ok()
+                        .map(|blob| (id, blob))
+                })
                 .collect::<Vec<_>>()
         })?;
         let mut inner = lock(&self.inner);
         for (id, blob) in captured {
             if let Some(bytes) = scratch.doc().state_blob(blob) {
-                inner.history.capture_state(id, bytes)?;
+                // The overlay the capture kept (Task 9b), as in `scratch`.
+                inner
+                    .history
+                    .capture_state_keeping(id, bytes, &kept_overlay(scratch.doc(), id))?;
             }
         }
         Ok(())
@@ -976,7 +1040,7 @@ impl Session {
                     .ok_or_else(|| "captured state missing".to_string())?;
                 inner
                     .history
-                    .capture_state(id, bytes)
+                    .capture_state_keeping(id, bytes, &kept_overlay(scratch.doc(), id))
                     .map_err(|e| e.to_string())
             });
             // Reported like a save's capture failure; the document keeps
@@ -6034,6 +6098,34 @@ impl Session {
         }
         inner.plugin_auto = now;
         inner.plugin_auto_doc = doc;
+        self.sync_plugin_targets(inner, changed);
+    }
+
+    /// Plan 5e-1 Task 9b, item 4: a plugin that finished loading (at open,
+    /// or loaded again) got its state, then its overlay (the static
+    /// values); its automated parameters are put where their automation
+    /// plays at the position, once, through the same path as
+    /// [`Session::resync_plugin_automation`].
+    fn sync_loaded_plugins(&self, inner: &mut Inner, loaded: &[PluginInstanceId]) {
+        let targets: std::collections::BTreeSet<AutomationTarget> = loaded
+            .iter()
+            .flat_map(|id| {
+                core_model::automation::automated_params(inner.doc(), *id)
+                    .into_iter()
+                    .map(|p| AutomationTarget::PluginParam(*id, p))
+            })
+            .collect();
+        self.sync_plugin_targets(inner, targets);
+    }
+
+    /// Sends each plugin parameter in `targets` the value its automation
+    /// plays at the position (the playing sequence's, else the cursor's),
+    /// else its static value. A target touched now is left to the hand.
+    fn sync_plugin_targets(
+        &self,
+        inner: &mut Inner,
+        changed: std::collections::BTreeSet<AutomationTarget>,
+    ) {
         if changed.is_empty() {
             return;
         }

@@ -2,9 +2,11 @@
 //! spec §4d; Plan 4d Rulings 2–5). Values are `f64` in `0.0..=1.0`.
 
 use crate::document::{Document, SlotOwner};
+use crate::event::EventBody;
 use crate::ids::{DestId, PluginInstanceId, StripId};
 use crate::mixer::{GAIN_FLOOR_DB, GAIN_MAX_DB, ParamId, StripKind};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// A send's position in its strip's send list (Plan 4d Ruling 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -137,6 +139,31 @@ pub fn strip_of(doc: &Document, t: AutomationTarget) -> Option<StripId> {
         },
         AutomationTarget::VelocityScale(_) => None,
     }
+}
+
+/// The parameters of plugin slot `slot` that automation drives (plan
+/// 5e-1 Task 9b): every one some automation event of any take of any
+/// lane of any sequence targets, muted or not, whether or not it plays.
+pub fn automated_params(doc: &Document, slot: PluginInstanceId) -> BTreeSet<ParamId> {
+    let mut out = BTreeSet::new();
+    for seq in doc.sequences().values() {
+        for lane in &seq.lanes {
+            for take in &lane.takes {
+                for e in take.events.values() {
+                    if let EventBody::Automation {
+                        target: AutomationTarget::PluginParam(s, p),
+                        ..
+                    } = e.body
+                    {
+                        if s == slot {
+                            out.insert(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Whether an automation target's strip, send, plugin or destination

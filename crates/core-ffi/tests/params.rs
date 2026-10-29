@@ -406,3 +406,237 @@ fn undoing_a_plugin_parameter_write_puts_back_its_static_value() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Task 9b (spec §7, plan 5e-1 Ruling 15): an automated parameter's static
+// value survives every save and autosave. CLAP Test Gain only: Gain 0–2,
+// static 1.0; a ride is Wiggle 0.4 from the plugin's window, or an app
+// gesture to 0.3 (Gain 0.6).
+
+fn settle(s: &Session, ms: u64) {
+    let t0 = Instant::now();
+    idle_until(s, |_| t0.elapsed() > Duration::from_millis(ms));
+}
+
+fn gain_is(s: &Session, id: u64, v: f64) {
+    idle_until(s, |s| (param(s, id, GAIN).value - v).abs() < 1e-6);
+}
+
+/// Starts a ride of Gain while playing: from the plugin's own window, or
+/// from the app. Returns the value the ride sets.
+fn start_ride(s: &Session, id: u64, from_plugin: bool) -> f64 {
+    use vizdaw_ffi::AutomationTargetRow as Target;
+    use vizdaw_ffi::automation::GesturePhaseRow as Phase;
+    if from_plugin {
+        s.set_param(id, WIGGLE, 0.4).unwrap();
+        0.4
+    } else {
+        let t = Target::PluginParam {
+            slot: id,
+            param: GAIN,
+        };
+        s.gesture(t, Phase::Touch { value: Some(0.25) }).unwrap();
+        std::thread::sleep(Duration::from_millis(15));
+        s.gesture(t, Phase::Value { value: 0.3 }).unwrap();
+        s.gesture(t, Phase::Release).unwrap();
+        0.6
+    }
+}
+
+/// A Latch ride landed as "Write Automation", static Gain `static_v`
+/// (committed to the overlay first when given): (dir, session, slot,
+/// song, the written lane, the ride's value).
+fn latch_ride(
+    static_v: Option<f64>,
+    from_plugin: bool,
+) -> (tempfile::TempDir, Arc<Session>, u64, u64, u64, f64) {
+    use vizdaw_ffi::automation::AutomationModeRow;
+    let (d, s, id) = playing_gain();
+    let song = s.transport().unwrap().seq.unwrap();
+    if let Some(v) = static_v {
+        s.stop().unwrap();
+        // The stopped pass ends first.
+        settle(&s, 150);
+        s.commit_params(id, vec![ParamValue { id: GAIN, value: v }])
+            .unwrap();
+        gain_is(&s, id, v);
+        s.play(song).unwrap();
+        idle_until(&s, |s| {
+            s.transport().unwrap().report.is_empty() && s.transport().unwrap().playing
+        });
+        settle(&s, 50);
+    }
+    let synth = s.mixer().unwrap().strips[0].id;
+    s.set_automation_mode(vec![synth], AutomationModeRow::Latch)
+        .unwrap();
+    let ridden = start_ride(&s, id, from_plugin);
+    settle(&s, 400);
+    s.stop().unwrap();
+    idle_until(&s, |s| {
+        s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
+    });
+    gain_is(&s, id, ridden);
+    let lane = s
+        .lanes(song)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Built-in Synth Gain")
+        .expect("the written lane")
+        .id;
+    (d, s, id, song, lane, ridden)
+}
+
+fn remove_lane(s: &Session, seq: u64, lane: u64) {
+    s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::Remove { seq, lane },
+        },
+        None,
+    )
+    .unwrap();
+}
+
+/// Saves, closes and opens the project again, once its plugin runs.
+fn reopen(d: &tempfile::TempDir, s: Arc<Session>) -> Arc<Session> {
+    s.save().unwrap();
+    let path = d.path().join("p.vizdaw").to_string_lossy().into_owned();
+    drop(s);
+    let s = Session::open(path).unwrap();
+    idle_until(&s, |s| {
+        s.plugin_slots().unwrap()[0].status == SlotStatus::Live
+    });
+    s
+}
+
+/// Task 9b, the re-review's table: a Latch ride, landed, then a save (with
+/// or without a reopen), then the lane removed: the plugin goes back to
+/// the static value (1.0, or the 0.8 committed before the ride), never to
+/// the ride's value. Both sources, both with and without a reopen.
+#[test]
+fn a_save_keeps_an_automated_parameters_static_value() {
+    let _g = serial();
+    for from_plugin in [true, false] {
+        for static_v in [None, Some(0.8)] {
+            for reopened in [false, true] {
+                let case = format!("plugin {from_plugin}, static {static_v:?}, reopen {reopened}");
+                let (d, s, id, song, lane, ridden) = latch_ride(static_v, from_plugin);
+                let s = if reopened {
+                    reopen(&d, s)
+                } else {
+                    s.save().unwrap();
+                    // The plugin still plays the lane's value.
+                    settle(&s, 50);
+                    assert!(
+                        (param(&s, id, GAIN).value - ridden).abs() < 1e-6,
+                        "{case}: not snapped back"
+                    );
+                    s
+                };
+                remove_lane(&s, song, lane);
+                let want = static_v.unwrap_or(1.0);
+                let t0 = Instant::now();
+                while (param(&s, id, GAIN).value - want).abs() > 1e-6 {
+                    assert!(
+                        t0.elapsed() < Duration::from_secs(10),
+                        "{case}: Gain {} after removing the lane",
+                        param(&s, id, GAIN).value
+                    );
+                    s.idle().unwrap();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                // And it stays so across another save and reopen.
+                let s = reopen(&d, s);
+                settle(&s, 50);
+                assert!(
+                    (param(&s, id, GAIN).value - want).abs() < 1e-6,
+                    "{case}: Gain {} after the last reopen",
+                    param(&s, id, GAIN).value
+                );
+            }
+        }
+    }
+}
+
+/// Task 9b: a save (the path every autosave takes) while a pass is open
+/// and Gain is being ridden, before its lane exists: after Stop the lane
+/// plays the ride, Undo of the landing puts back the static value, and a
+/// save and reopen keep it. Both sources.
+#[test]
+fn a_save_in_the_middle_of_a_pass_keeps_the_static_value() {
+    use vizdaw_ffi::automation::AutomationModeRow;
+    let _g = serial();
+    for from_plugin in [true, false] {
+        let (d, s, id) = playing_gain();
+        let synth = s.mixer().unwrap().strips[0].id;
+        s.set_automation_mode(vec![synth], AutomationModeRow::Latch)
+            .unwrap();
+        let ridden = start_ride(&s, id, from_plugin);
+        settle(&s, 150);
+        s.save().unwrap();
+        settle(&s, 50);
+        assert!(
+            (param(&s, id, GAIN).value - ridden).abs() < 1e-6,
+            "plugin {from_plugin}: not snapped back by the save"
+        );
+        settle(&s, 200);
+        s.stop().unwrap();
+        idle_until(&s, |s| {
+            s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
+        });
+        gain_is(&s, id, ridden);
+        s.undo().unwrap();
+        gain_is(&s, id, 1.0);
+        let s = reopen(&d, s);
+        settle(&s, 50);
+        assert_eq!(param(&s, id, GAIN).value, 1.0, "plugin {from_plugin}");
+    }
+}
+
+/// Task 9b: a parameter nobody automates is saved as the plugin holds it
+/// (no change): a value sent to the plugin and never committed is in its
+/// saved state after a reopen.
+#[test]
+fn a_save_captures_a_parameter_nobody_automates_as_the_plugin_holds_it() {
+    let _g = serial();
+    let (d, s, id) = playing_gain();
+    s.set_param(id, GAIN, 0.7).unwrap();
+    gain_is(&s, id, 0.7);
+    let s = reopen(&d, s);
+    settle(&s, 50);
+    assert_eq!(param(&s, id, GAIN).value, 0.7);
+}
+
+/// Task 9b, item 4: a plugin that loads (at open, or again: here the
+/// undo of its removal, whose capture kept Gain's static value) gets its
+/// state, then its static value, and then the value its lane plays at
+/// the position, not the static value. (At open no engine runs yet, so
+/// that value reaches the plugin with its first block; here the engine
+/// runs while stopped.)
+#[test]
+fn a_loaded_plugin_plays_its_automation_at_the_position() {
+    let _g = serial();
+    let (_d, s, id, _song, _lane, ridden) = latch_ride(None, true);
+    s.remove_insert(id).unwrap();
+    settle(&s, 300);
+    assert!(s.plugin_slots().unwrap().is_empty());
+    s.undo().unwrap();
+    idle_until(&s, |s| {
+        s.plugin_slots()
+            .unwrap()
+            .first()
+            .is_some_and(|p| p.status == SlotStatus::Live)
+    });
+    gain_is(&s, id, ridden);
+    // The removal's capture kept the static value: removing the lane
+    // puts it back.
+    let song = s.transport().unwrap().seq.unwrap();
+    let lane = s
+        .lanes(song)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Built-in Synth Gain")
+        .expect("the written lane")
+        .id;
+    remove_lane(&s, song, lane);
+    gain_is(&s, id, 1.0);
+}

@@ -440,12 +440,24 @@ impl History {
     /// overlay in the present version, without an undo step (Plan Ruling
     /// 9). Refused inside an open transaction.
     pub fn capture_state(&mut self, slot: PluginInstanceId, bytes: &[u8]) -> Result<StateBlobId> {
+        self.capture_state_keeping(slot, bytes, &std::collections::BTreeMap::new())
+    }
+
+    /// Like [`History::capture_state`], but the slot's overlay becomes
+    /// `keep` (its automated parameters' static values; see
+    /// [`crate::state::capture_keeping`]).
+    pub fn capture_state_keeping(
+        &mut self,
+        slot: PluginInstanceId,
+        bytes: &[u8],
+        keep: &std::collections::BTreeMap<crate::mixer::ParamId, f64>,
+    ) -> Result<StateBlobId> {
         if self.txn.is_some() {
             return Err(ModelError::invalid(
                 "cannot capture plugin state inside a transaction",
             ));
         }
-        let (doc, id) = crate::state::capture(&self.present.doc, slot, bytes)?;
+        let (doc, id) = crate::state::capture_keeping(&self.present.doc, slot, bytes, keep)?;
         self.present.doc = doc;
         Ok(id)
     }
