@@ -122,6 +122,8 @@ pub enum StateTargetRow {
     Record,
     /// Audio input (plan 5c).
     Input,
+    /// Automation modes, touches and suspend (plan 5e-1).
+    Automation,
 }
 
 /// The after-crash answer.
@@ -542,6 +544,13 @@ pub enum ControlResult {
         /// Each input channel's peak since the last read.
         levels: Vec<f32>,
     },
+    /// `state.get automation` (plan 5e-1).
+    Automation {
+        /// Document ID.
+        doc: String,
+        /// Its strips' modes, the touched targets, suspend and writing.
+        state: crate::automation::AutomationStateRow,
+    },
     /// `destination.measure_return` (plan 5c-2).
     Measured {
         /// Document ID.
@@ -834,6 +843,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 StateTarget::Project => StateTargetRow::Project,
                 StateTarget::Record => StateTargetRow::Record,
                 StateTarget::Input => StateTargetRow::Input,
+                StateTarget::Automation => StateTargetRow::Automation,
             },
             window: window_row(window),
         },
@@ -1102,6 +1112,15 @@ pub fn result_json(r: &ControlResult) -> Value {
             // Thousandths: an f32 printed as f64 would show its rounding.
             "return_latency_ms": (f64::from(*return_latency_ms) * 1000.0).round() / 1000.0,
             "onsets": onsets,
+        }),
+        ControlResult::Automation { doc, state } => json!({
+            "doc": doc, "suspended": state.suspended, "writing": state.writing,
+            "modes": state.modes.iter().map(|m| json!({
+                "strip": m.strip, "mode": crate::automation::mode_text(m.mode),
+            })).collect::<Vec<_>>(),
+            "touched": state.touched.iter()
+                .map(|t| crate::automation::automation_target_text(*t))
+                .collect::<Vec<_>>(),
         }),
         ControlResult::InputState { doc, info, levels } => {
             let a = crate::audio::audio_settings();

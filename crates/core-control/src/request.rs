@@ -57,8 +57,14 @@ pub enum StateTarget {
     Project,
     /// What recording is doing (plan 5c).
     Record,
-    /// What the audio input offers (plan 5c).
+    /// What the audio input offers (plan 5c). Its `levels` are each
+    /// channel's peak since the last read (held, so a quiet read can show
+    /// a recent peak), as long as the channel count at the last poll (one
+    /// poll stale after a device change; 5d-2 T4 M3).
     Input,
+    /// Its strips' automation modes, the touched targets and suspend
+    /// (plan 5e-1).
+    Automation,
 }
 
 /// Where a click or drag lands.
@@ -235,9 +241,10 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 "project" => StateTarget::Project,
                 "record" => StateTarget::Record,
                 "input" => StateTarget::Input,
+                "automation" => StateTarget::Automation,
                 _ => {
                     return Err(p.error(
-                        "`target` must be transport, document, editor, selection, windows, media, project, record or input",
+                        "`target` must be transport, document, editor, selection, windows, media, project, record, input or automation",
                     ));
                 }
             };

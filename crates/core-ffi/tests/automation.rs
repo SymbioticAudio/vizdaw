@@ -2048,3 +2048,59 @@ fn a_trim_fader_held_at_no_value_over_play_rides_as_an_offset() {
     );
     assert_shape_kept(&landed, (heard[0] + heard[1]) / 2.0);
 }
+
+/// Ruling 17, Review Focus 5: targets are spelt one way; anything else
+/// is refused (signs, spaces, zero sends, overflow, velocity scale, long
+/// or non-ASCII text).
+#[test]
+fn targets_parse_only_in_their_own_spelling() {
+    use vizdaw_ffi::automation::{automation_target_text, parse_automation_target as parse};
+    for t in [
+        Target::StripFader { strip: 3 },
+        Target::StripPan { strip: 0 },
+        Target::StripMute { strip: 12 },
+        Target::StripSolo { strip: 4 },
+        Target::SendLevel { strip: 3, send: 0 },
+        Target::SendLevel {
+            strip: u64::MAX,
+            send: u16::MAX,
+        },
+        Target::PluginParam {
+            slot: 9,
+            param: 4_294_967_295,
+        },
+    ] {
+        let text = automation_target_text(t);
+        assert_eq!(parse(text.clone()), Some(t), "{text}");
+    }
+    assert_eq!(
+        automation_target_text(Target::SendLevel { strip: 3, send: 0 }),
+        "send:3:1"
+    );
+    assert_eq!(
+        automation_target_text(Target::VelocityScale { dest: 1 }),
+        ""
+    );
+    for bad in [
+        "",
+        "fader",
+        "fader:",
+        "fader:-1",
+        "fader:+1",
+        "fader: 3",
+        "fader:3 ",
+        "Fader:3",
+        "fader:3:1",
+        "send:3",
+        "send:3:0",
+        "send:3:65537",
+        "param:9",
+        "velocity:1",
+        "fader:99999999999999999999999",
+        "fader:３",
+        "pan:1\u{0}",
+        &"9".repeat(100),
+    ] {
+        assert_eq!(parse(bad.to_string()), None, "{bad:?}");
+    }
+}

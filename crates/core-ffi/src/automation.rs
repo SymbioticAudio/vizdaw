@@ -250,6 +250,86 @@ pub(crate) fn suspended() -> bool {
     SUSPENDED.load(Ordering::Relaxed)
 }
 
+/// A mode as the channel spells it (`automation.set_mode`'s Choice).
+pub fn mode_text(m: AutomationModeRow) -> &'static str {
+    match m {
+        AutomationModeRow::Off => "off",
+        AutomationModeRow::Read => "read",
+        AutomationModeRow::Touch => "touch",
+        AutomationModeRow::Latch => "latch",
+        AutomationModeRow::Write => "write",
+        AutomationModeRow::Trim => "trim",
+    }
+}
+
+/// The longest target text `parse_automation_target` reads.
+const MAX_TARGET_TEXT: usize = 64;
+
+/// `target` as the channel spells it (Ruling 17): `fader:<strip>`,
+/// `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n
+/// from 1), `param:<slot>:<param>`; empty for velocity scale, which has
+/// no spelling (it cannot be gestured).
+#[uniffi::export]
+pub fn automation_target_text(target: AutomationTargetRow) -> String {
+    std::panic::catch_unwind(|| match target {
+        AutomationTargetRow::StripFader { strip } => format!("fader:{strip}"),
+        AutomationTargetRow::StripPan { strip } => format!("pan:{strip}"),
+        AutomationTargetRow::StripMute { strip } => format!("mute:{strip}"),
+        AutomationTargetRow::StripSolo { strip } => format!("solo:{strip}"),
+        AutomationTargetRow::SendLevel { strip, send } => {
+            format!("send:{strip}:{}", u32::from(send).saturating_add(1))
+        }
+        AutomationTargetRow::PluginParam { slot, param } => format!("param:{slot}:{param}"),
+        AutomationTargetRow::VelocityScale { .. } => String::new(),
+    })
+    .unwrap_or_default()
+}
+
+/// A run of ASCII digits as a number: no sign, no spaces, nothing else;
+/// `None` when empty or it overflows.
+fn digits(t: &str) -> Option<u64> {
+    if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    t.parse().ok()
+}
+
+/// The target `text` spells (Ruling 17), the inverse of
+/// [`automation_target_text`]: at most 64 characters, ASCII digits only
+/// (no sign, no spaces), `send:` counting from 1; `None` for anything
+/// else, velocity scale included.
+#[uniffi::export]
+pub fn parse_automation_target(text: String) -> Option<AutomationTargetRow> {
+    std::panic::catch_unwind(|| {
+        if text.len() > MAX_TARGET_TEXT {
+            return None;
+        }
+        let mut parts = text.split(':');
+        let kind = parts.next()?;
+        let a = digits(parts.next()?)?;
+        let b = parts.next();
+        if parts.next().is_some() {
+            return None;
+        }
+        match (kind, b) {
+            ("fader", None) => Some(AutomationTargetRow::StripFader { strip: a }),
+            ("pan", None) => Some(AutomationTargetRow::StripPan { strip: a }),
+            ("mute", None) => Some(AutomationTargetRow::StripMute { strip: a }),
+            ("solo", None) => Some(AutomationTargetRow::StripSolo { strip: a }),
+            ("send", Some(n)) => {
+                let send = u16::try_from(digits(n)?.checked_sub(1)?).ok()?;
+                Some(AutomationTargetRow::SendLevel { strip: a, send })
+            }
+            ("param", Some(p)) => Some(AutomationTargetRow::PluginParam {
+                slot: a,
+                param: digits(p)?,
+            }),
+            _ => None,
+        }
+    })
+    .unwrap_or(None)
+}
+
 /// Puts the settings back to their defaults (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn reset_automation_settings() {

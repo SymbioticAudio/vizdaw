@@ -96,6 +96,25 @@ Undo and redo answer `busy` while a plugin call is on the main thread, and
 `modify.template` answers `unavailable` when there are no templates. Model
 edits and loads refuse tick positions or lengths beyond +-2^40.
 
+Automation (plan 5e-1): `automation.set_mode {"strips": "all" | "1,2",
+"mode": "touch"}`, `automation.gesture {"target": "fader:3", "phase":
+"touch" | "value" | "release", "value": "0.5"}` (targets `fader:`, `pan:`,
+`mute:`, `solo:` with a strip ID, `send:<strip>:<n>` with n from 1,
+`param:<slot>:<param>`; values are text, 0 to 1) and `automation.suspend`
+(absent `on` toggles; it is app-wide). A `touch` without `value` starts at
+the value heard now. A touch from the channel lasts until its release, a
+Stop's landing keeps it, closing the window ends it; a Locate or a Play
+while writing lands what was written so far.
+Each call is its own connection, so a touch outlives the call that made
+it: a client that lost track of its touches releases the ones `state.get
+automation` lists. A release takes no `value`, and a release of a target
+that is not touched (or no longer exists) does nothing and answers `ran`.
+`state.get automation` lists each strip's mode, the touched targets and
+whether automation is suspended or being written. `state.get input`'s
+`levels` are each channel's peak since the last read (held, so a quiet
+read can still show a recent peak) and its list is as long as the channel
+count at the last poll (one poll stale after a device change).
+
 `vizctl` drives it from a shell:
 
 ```bash
