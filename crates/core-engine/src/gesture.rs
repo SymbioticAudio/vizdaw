@@ -415,6 +415,25 @@ impl LiveTable {
         }
     }
 
+    /// The value `dest`'s last run ended at, when it is being released
+    /// (the value the hand left). // RT
+    pub fn left_at(&self, dest: AutoDest) -> Option<f64> {
+        let e = self.find(dest).ok().and_then(|i| self.entries.get(i))?;
+        match (e.state, e.start) {
+            (LiveState::Releasing, Start::Was(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Whether `dest`'s entry has played no run yet (it starts from what
+    /// is under it). // RT
+    pub fn is_new(&self, dest: AutoDest) -> bool {
+        self.find(dest)
+            .ok()
+            .and_then(|i| self.entries.get(i))
+            .is_some_and(|e| e.start == Start::Under)
+    }
+
     /// The destination of the `i`th live entry (by dest order). // RT
     pub fn dest_at(&self, i: usize) -> Option<AutoDest> {
         self.live().get(i).map(|l| l.dest)
@@ -466,9 +485,9 @@ impl LiveTable {
     }
 
     /// Whether an entry ended since the last call (its override must go).
-    /// The renderer drops it before its next run's commits, so a glide
-    /// that ends in `advance` lets go one run later, at about the value
-    /// under it (Task 5 review M5). // RT
+    /// The renderer drops it before its next run's commits; an entry that
+    /// ends in `advance` lets go in the same `automate`, by the end-of-run
+    /// release (Task 5 re-review N4). // RT
     pub fn take_released(&mut self) -> bool {
         std::mem::take(&mut self.released)
     }

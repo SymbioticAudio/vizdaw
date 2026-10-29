@@ -2127,9 +2127,13 @@ fn apply_live(
             }
         }
         let under = if lane.is_some() {
-            match live.base(dest) {
-                Some(b) => Some(b),
-                None => {
+            // Released while stopped: the control stays at the value the
+            // hand left (controller ruling 1 on the Task 5 forward; final
+            // review m3) until Play gives it to its lane again.
+            match (at, live.left_at(dest), live.base(dest)) {
+                (None, Some(v), _) => Some(v),
+                (_, _, Some(b)) => Some(b),
+                _ => {
                     let h = g.heard_value(dest);
                     if let Some(h) = h {
                         live.set_base(dest, h);
@@ -2138,10 +2142,23 @@ fn apply_live(
                 }
             }
         } else {
-            g.static_value(dest)
+            // What plays under it if a lane appears while it is live
+            // (final review m2): the static value, not its own output.
+            let s = g.static_value(dest);
+            if let Some(s) = s {
+                live.set_base(dest, s);
+            }
+            s
         };
         let Some(v) = under.and_then(|under| live.value(dest, under, into)) else {
             continue;
+        };
+        // A new entry starts from what is heard now (a hold just ended
+        // may still be heard; final review m2), not from what is under it.
+        let v = if !ramp && live.is_new(dest) {
+            g.heard_value(dest).unwrap_or(v)
+        } else {
+            v
         };
         match dest {
             AutoDest::Strip(id, p) => g.automate_strip(id, p, v),

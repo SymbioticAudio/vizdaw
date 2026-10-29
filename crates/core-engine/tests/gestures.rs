@@ -769,3 +769,122 @@ fn a_gesture_just_after_a_wrap_maps_to_the_pass_its_strip_rendered() {
         "the written automation is heard where the touch was"
     );
 }
+
+/// The built-in synth plays through its strip at a static 0 dB; with
+/// `lane`, its fader is automated at −12 dB from 0.
+fn plain_doc(lane: bool) -> (Document, SeqId, StripId, core_model::ids::DestId) {
+    let mut b = Builder::new();
+    let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0x8000, 64 * Q)]).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let auto = b.lane(seq, "Auto", None).unwrap();
+    if lane {
+        b.event(
+            seq,
+            auto,
+            0,
+            EventBody::Automation {
+                target: AutomationTarget::StripFader(synth),
+                value: fader_norm(-12.0),
+            },
+        )
+        .unwrap();
+    }
+    (b.finish(), seq, synth, d)
+}
+
+/// Final review m2 (Task 5 re-review N2): a Trim offset held while
+/// stopped on a fader no lane drives plays over the static value; when a
+/// lane appears under it (still stopped) it keeps playing over the static
+/// value, instead of over its own output (the offset counted twice).
+#[test]
+fn a_held_trim_keeps_its_level_when_a_lane_appears_while_stopped() {
+    let (doc, seq, synth, _) = plain_doc(false);
+    let mut r = rig_of(&doc, seq, synth, synth, PluginInstanceId(0));
+    r.blocks(2);
+    r.send(fader(synth), GesturePhase::Offset(4.0));
+    r.blocks(2);
+    assert!(near(r.fader_db(synth), 4.0), "{:?}", r.fader_db(synth));
+    let (with_lane, _, _, _) = plain_doc(true);
+    r.engine.load(&with_lane, seq).unwrap();
+    r.blocks(4);
+    assert!(
+        near(r.fader_db(synth), 4.0),
+        "the offset counts once: {:?}",
+        r.fader_db(synth)
+    );
+}
+
+/// Final review m2 (Task 5 re-review N2): a touch right after a Locate
+/// ended a hold, in the same block, starts from the held value still
+/// heard, not from the static value under it (no dip). A noise insert on
+/// a bus no lane drives sounds while stopped.
+#[test]
+fn a_touch_right_after_a_hold_ends_starts_from_what_is_heard() {
+    let mut b = Builder::new();
+    let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, _) = b.sequence("S", "Notes", Some(d)).unwrap();
+    let bus = b.bus("Bus").unwrap();
+    let insert = b.insert(bus, TestInserts::plugin("noise=7")).unwrap();
+    let doc = b.finish();
+    let mut r = rig_of(&doc, seq, bus, bus, insert);
+    r.blocks(4);
+    r.send(fader(bus), GesturePhase::Touch(fader_norm(-20.0)));
+    r.send(fader(bus), GesturePhase::Hold);
+    r.blocks(3);
+    let (a, b) = halves(&r);
+    assert!(a > 0.0 && a < 1.5 * b && b < 1.5 * a, "held: {a} {b}");
+    r.engine.locate_frame(0).unwrap();
+    r.send(fader(bus), GesturePhase::Touch(fader_norm(-20.0)));
+    r.blocks(1);
+    let (a, b) = halves(&r);
+    assert!(a < 1.5 * b, "no dip: {a} {b}");
+}
+
+/// Final review m3 (controller ruling 1 on the Task 5 forward): released
+/// while stopped, a fader its lane drives stays at the value the user
+/// left (the session makes it the static value) until Play, instead of
+/// returning to the automation value heard when it was touched.
+#[test]
+fn a_release_while_stopped_keeps_the_value_left() {
+    let mut r = rig();
+    r.engine.play().unwrap();
+    r.blocks(4);
+    r.engine.stop().unwrap();
+    r.blocks(2);
+    assert!(
+        near(r.fader_db(r.synth), -12.0),
+        "{:?}",
+        r.fader_db(r.synth)
+    );
+    r.send(fader(r.synth), GesturePhase::Touch(fader_norm(-3.0)));
+    r.blocks(1);
+    assert!(near(r.fader_db(r.synth), -3.0));
+    r.send(fader(r.synth), GesturePhase::Release);
+    r.blocks(3);
+    assert!(
+        near(r.fader_db(r.synth), -3.0),
+        "stays while stopped: {:?}",
+        r.fader_db(r.synth)
+    );
+    r.engine.play().unwrap();
+    r.blocks(2);
+    assert!(near(r.fader_db(r.synth), -12.0), "the automation at Play");
+}
+
+/// Task 5 re-review N3: a Trim offset taken while stopped, on a fader its
+/// lane drove before the Stop, plays over the automation value still
+/// heard (the lane reads nothing while stopped), not over the static
+/// value.
+#[test]
+fn a_trim_while_stopped_plays_over_the_heard_automation() {
+    let mut r = rig();
+    r.engine.play().unwrap();
+    r.blocks(4);
+    r.engine.stop().unwrap();
+    r.blocks(2);
+    r.send(fader(r.synth), GesturePhase::Offset(4.0));
+    r.blocks(4);
+    assert!(near(r.fader_db(r.synth), -8.0), "{:?}", r.fader_db(r.synth));
+}
