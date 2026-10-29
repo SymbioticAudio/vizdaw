@@ -2,6 +2,7 @@
 //! Routing rules live in [`crate::mixer_rules`]; edits in
 //! `crate::command::mixer`.
 
+use crate::automation::AutomationMode;
 use crate::document::{DestKind, Destination, OutputPath};
 use crate::error::{ModelError, Result};
 use crate::ids::{AnyId, Counters, DestId, OutputPathId, PluginInstanceId, StateBlobId, StripId};
@@ -207,6 +208,10 @@ pub struct Strip {
     pub sends: Vector<AuxSend>,
     /// Main output.
     pub output: Output,
+    /// Its automation mode (sub-project 5 spec §4.6); not written when
+    /// Read, so all-Read projects save as before (plan 5e-1 Ruling 2).
+    #[serde(default, skip_serializing_if = "AutomationMode::is_read")]
+    pub automation: AutomationMode,
 }
 
 impl Strip {
@@ -224,6 +229,7 @@ impl Strip {
             solo: false,
             sends: Vector::new(),
             output: Output::Master,
+            automation: AutomationMode::Read,
         }
     }
 }

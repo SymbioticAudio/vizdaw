@@ -8,7 +8,9 @@ use super::{ChaseIndex, Entry, MAX_TARGETS, Schedule, WireMsg};
 use crate::backend::MidiPortInfo;
 use crate::error::EngineError;
 use crate::midi1::{Class, Midi1Msg, When, translate};
-use core_model::automation::{AutomationTarget, velocity_scale_percent};
+use core_model::automation::{
+    AutomationMode, AutomationTarget, strip_of, target_exists, velocity_scale_percent,
+};
 use core_model::document::{DestKind, Document, SlotOwner};
 use core_model::event::EventBody;
 use core_model::ids::{DestId, MediaId, PluginInstanceId, SeqId};
@@ -29,6 +31,9 @@ pub struct CompileOptions {
     pub ports: Vec<MidiPortInfo>,
     /// Media that cannot be read: their regions play silence (5a).
     pub offline_media: BTreeSet<MediaId>,
+    /// Automation is suspended (spec §7.5): Off strips play theirs too
+    /// (plan 5e-1 Ruling 3).
+    pub suspend_automation: bool,
 }
 
 impl CompileOptions {
@@ -39,6 +44,7 @@ impl CompileOptions {
             route: BuiltinRoute::Builtin,
             ports: Vec::new(),
             offline_media: BTreeSet::new(),
+            suspend_automation: false,
         }
     }
 }
@@ -160,6 +166,14 @@ pub fn compile(
         };
         if !target_exists(doc, target) {
             report.automation_missing += 1;
+            continue;
+        }
+        // An Off strip plays its static values (spec §4.6), unless
+        // automation is suspended (every strip then behaves as Read).
+        let off = strip_of(doc, target)
+            .and_then(|s| doc.mixer().strip(s).ok())
+            .is_some_and(|s| s.automation == AutomationMode::Off);
+        if off && !opts.suspend_automation {
             continue;
         }
         match (AutoDest::of(target), target) {
@@ -377,23 +391,6 @@ pub fn compile(
     report.warnings = warnings(&report);
     report.compile_time = started.elapsed().saturating_sub(resolving);
     Ok((schedule, report))
-}
-
-/// Whether an automation target's strip, send, plugin or destination
-/// exists.
-fn target_exists(doc: &Document, t: AutomationTarget) -> bool {
-    let m = doc.mixer();
-    match t {
-        AutomationTarget::StripFader(s)
-        | AutomationTarget::StripPan(s)
-        | AutomationTarget::StripMute(s)
-        | AutomationTarget::StripSolo(s) => m.strip(s).is_ok(),
-        AutomationTarget::SendLevel(s, i) => {
-            m.strip(s).is_ok_and(|x| usize::from(i.0) < x.sends.len())
-        }
-        AutomationTarget::PluginParam(p, _) => doc.plugin_slot(p).is_some(),
-        AutomationTarget::VelocityScale(d) => doc.instruments().contains_key(&d),
-    }
 }
 
 /// A velocity-scale lane's value at `tick` (Plan 4d Ruling 8).

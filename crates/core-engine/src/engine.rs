@@ -239,6 +239,8 @@ pub struct Engine {
     input_spec: crate::input::InputSpec,
     /// Feeds the renderer's MIDI input queue.
     midi_tx: crate::input::MidiSender,
+    /// Automation is suspended (spec §7.5); read by the next load.
+    automation_suspended: bool,
     /// The routes last sent to the renderer: a load sends them only when
     /// they change, so a load still retires just a schedule and a graph.
     inputs_sent: crate::input::InputRoutes,
@@ -381,6 +383,7 @@ impl Engine {
             stream_seen: (AtomicU64::new(0), AtomicU64::new(0)),
             input_spec: crate::input::InputSpec::default(),
             midi_tx,
+            automation_suspended: false,
             inputs_sent: crate::input::InputRoutes::default(),
             return_dests: Vec::new(),
         };
@@ -445,6 +448,12 @@ impl Engine {
         &self.targets
     }
 
+    /// Whether automation is suspended (spec §7.5): the next
+    /// [`Engine::load`] compiles with it.
+    pub fn set_automation_suspended(&mut self, on: bool) {
+        self.automation_suspended = on;
+    }
+
     /// Compiles `seq` and the mixer graph and sends them (and sinks for new
     /// targets) to the renderer. Call again after every committed edit.
     pub fn load(&mut self, doc: &Document, seq: SeqId) -> Result<CompileReport, EngineError> {
@@ -464,6 +473,7 @@ impl Engine {
                 .filter(|m| !self.online.contains(m))
                 .copied()
                 .collect(),
+            suspend_automation: self.automation_suspended,
         };
         let (sr, max) = (self.cfg.sample_rate, self.block_frames());
         // Indices released by an earlier load are free only once a load

@@ -2,6 +2,7 @@
 //! document is unchanged (commands work on a copy).
 
 use super::Report;
+use crate::automation::AutomationMode;
 use crate::document::{DestKind, Document, SlotOwner};
 use crate::error::{ModelError, Result};
 use crate::ids::{AnyId, DestId, PluginInstanceId, StripId};
@@ -149,6 +150,13 @@ pub enum MixerCmd {
         /// Strip name.
         name: String,
     },
+    /// Set the automation mode of `strips` (spec §4.6), one undo step.
+    SetAutomationMode {
+        /// The strips (at least one).
+        strips: Vec<StripId>,
+        /// The mode.
+        mode: AutomationMode,
+    },
 }
 
 impl MixerCmd {
@@ -174,6 +182,7 @@ impl MixerCmd {
             MixerCmd::SetSidechain { .. } => "Set Sidechain",
             MixerCmd::SetPluginParams { .. } => "Change Plugin Parameter",
             MixerCmd::AddInstrumentOutput { .. } => "Add Instrument Output",
+            MixerCmd::SetAutomationMode { .. } => "Set Automation Mode",
         }
     }
 }
@@ -284,6 +293,22 @@ pub(crate) fn apply(d: &mut Document, cmd: &MixerCmd, r: &mut Report) -> Result<
             let s = d.slot_mut(*slot)?;
             for (p, v) in params {
                 s.params.insert(*p, *v);
+            }
+        }
+        MixerCmd::SetAutomationMode { strips, mode } => {
+            if strips.is_empty() {
+                return Err(ModelError::invalid(
+                    "set the automation mode of at least one strip",
+                ));
+            }
+            // A strip listed twice is set once, at its first occurrence
+            // (pre-flight M21); an unknown strip fails the whole command,
+            // which works on a copy.
+            for (i, s) in strips.iter().enumerate() {
+                if strips.iter().take(i).any(|x| x == s) {
+                    continue;
+                }
+                d.mixer_mut().strip_mut(*s)?.automation = *mode;
             }
         }
         MixerCmd::AddInstrumentOutput { dest, index, name } => {
