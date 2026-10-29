@@ -571,6 +571,9 @@ pub struct GestureTap {
     clock: RunClock,
     stamps: Producer<Stamped>,
     status: Arc<GestureStatus>,
+    /// The tap rolled this block: `rolled` is set once the block has
+    /// published its transport state ([`GestureTap::published`]).
+    roll_due: bool,
 }
 
 /// A tap and its control side, its marks carrying graph latency `latency`. Allocates; call off the RT thread.
@@ -589,6 +592,7 @@ pub fn gesture_tap(latency: u64) -> (GestureTap, GestureHandles) {
             clock: RunClock::new(mark_tx, latency),
             stamps: stamp_tx,
             status: Arc::clone(&status),
+            roll_due: false,
         },
         GestureHandles {
             marks: mark_rx,
@@ -618,6 +622,16 @@ impl GestureTap {
         let (begun, fit) = self.clock.begin_block(frame);
         self.count(fit);
         if begun == Begun::Rolled {
+            self.roll_due = true;
+        }
+    }
+
+    /// After the block published its transport state: a roll this block
+    /// sets the status's `rolled` now, so a control side that reads
+    /// `rolled` and then the state never sees the roll with the state
+    /// from before the Play. // RT
+    pub fn published(&mut self) {
+        if std::mem::take(&mut self.roll_due) {
             self.status.rolled.store(true, Ordering::Release);
         }
     }

@@ -603,10 +603,12 @@ impl Recording {
     /// by itself. Pushes a warning once below [`LOW_DISK_WARN`], and the
     /// transport fault names (pre-flight M11) of what happened to
     /// `faults`: `record-overflow` when input was lost, `input-lost`
-    /// when the input went away.
+    /// when the input went away. `transport_stopped` is asked only after
+    /// the run was read (Task 9b review m5: progress first, then the
+    /// state, so a state from before the roll never pairs with its run).
     pub fn check(
         &mut self,
-        transport_stopped: bool,
+        transport_stopped: impl FnOnce() -> bool,
         problems: &mut Vec<String>,
         faults: &mut Vec<String>,
     ) -> Option<Ending> {
@@ -649,7 +651,7 @@ impl Recording {
                 }
             }
         }
-        if transport_stopped && self.status.run() > 0 {
+        if self.status.run() > 0 && transport_stopped() {
             return Some(Ending::Ended);
         }
         None

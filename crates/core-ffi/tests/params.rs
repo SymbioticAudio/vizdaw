@@ -455,16 +455,10 @@ fn latch_ride(
     let song = s.transport().unwrap().seq.unwrap();
     if let Some(v) = static_v {
         s.stop().unwrap();
-        // The stopped pass ends first.
-        settle(&s, 150);
         s.commit_params(id, vec![ParamValue { id: GAIN, value: v }])
             .unwrap();
         gain_is(&s, id, v);
         s.play(song).unwrap();
-        idle_until(&s, |s| {
-            s.transport().unwrap().report.is_empty() && s.transport().unwrap().playing
-        });
-        settle(&s, 50);
     }
     let synth = s.mixer().unwrap().strips[0].id;
     s.set_automation_mode(vec![synth], AutomationModeRow::Latch)
@@ -639,4 +633,44 @@ fn a_loaded_plugin_plays_its_automation_at_the_position() {
         .id;
     remove_lane(&s, song, lane);
     gain_is(&s, id, 1.0);
+}
+
+/// A Stop and an immediate Play, with the idle loop running: the new
+/// pass writes the ride (the first block's roll must not read as the
+/// transport having stopped after it).
+#[test]
+fn a_ride_right_after_stop_and_play_is_written() {
+    use vizdaw_ffi::AutomationTargetRow as Target;
+    use vizdaw_ffi::automation::AutomationModeRow;
+    use vizdaw_ffi::automation::GesturePhaseRow as Phase;
+    let _g = serial();
+    let (_d, s, id) = playing_gain();
+    let song = s.transport().unwrap().seq.unwrap();
+    let synth = s.mixer().unwrap().strips[0].id;
+    s.set_automation_mode(vec![synth], AutomationModeRow::Latch)
+        .unwrap();
+    let t = Target::PluginParam {
+        slot: id,
+        param: GAIN,
+    };
+    for i in 0..30 {
+        s.stop().unwrap();
+        s.play(song).unwrap();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(60) {
+            s.idle().unwrap();
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        let v = 0.2 + 0.01 * f64::from(i % 20);
+        s.gesture(t, Phase::Touch { value: Some(v) }).unwrap();
+        s.gesture(t, Phase::Value { value: v + 0.05 }).unwrap();
+        s.gesture(t, Phase::Release).unwrap();
+        settle(&s, 30);
+        s.stop().unwrap();
+        assert_eq!(
+            s.snapshot().unwrap().undo_label.as_deref(),
+            Some("Write Automation"),
+            "pass {i}: the ride went the static path"
+        );
+    }
 }

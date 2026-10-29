@@ -176,18 +176,6 @@ struct Inner {
     after_write_pending: Option<(Vec<StripId>, AutomationMode)>,
 }
 
-/// The parameters of `riding` that belong to slot `id`.
-fn slot_params(
-    riding: &std::collections::BTreeSet<(PluginInstanceId, ParamId)>,
-    id: PluginInstanceId,
-) -> std::collections::BTreeSet<ParamId> {
-    riding
-        .iter()
-        .filter(|(s, _)| *s == id)
-        .map(|(_, p)| *p)
-        .collect()
-}
-
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
 /// history kept, plan 5e-1 Task 9b), to store with the same blob in the
 /// real history.
@@ -984,7 +972,7 @@ impl Session {
                 // A placeholder has nothing to capture; its saved state
                 // stays in the document.
                 .filter_map(|id| {
-                    let mine = slot_params(&riding, id);
+                    let mine = core_model::automation::slot_params(&riding, id);
                     p.capture_with(&mut scratch, id, &mine)
                         .ok()
                         .map(|blob| (id, blob))
@@ -1018,15 +1006,15 @@ impl Session {
         if due != Ok(true) {
             return false;
         }
-        let mut scratch = {
+        let (mut scratch, riding) = {
             let inner = lock(&self.inner);
             if inner.history.in_transaction() {
                 return false;
             }
-            inner.history.clone()
+            (inner.history.clone(), inner.riding_params())
         };
         let Ok(unloaded) = plugins::with(self.id, |p| {
-            p.map(|p| p.unload_unavailable(&mut scratch))
+            p.map(|p| p.unload_unavailable(&mut scratch, &riding))
                 .unwrap_or_default()
         }) else {
             return false;
@@ -5083,7 +5071,8 @@ impl Session {
     fn service_recording(&self) -> Result<(), VizError> {
         let ending = {
             let mut inner = lock(&self.inner);
-            let stopped = host::transport_stopped(self.id).unwrap_or(false);
+            let id = self.id;
+            let stopped = || host::transport_stopped(id).unwrap_or(false);
             let (mut problems, mut faults) = (Vec::new(), Vec::new());
             let e = inner
                 .recording
@@ -5524,10 +5513,13 @@ impl Session {
         if crate::automation::suspended() {
             return None;
         }
+        // The roll first, then the state (the renderer publishes the
+        // state before it sets `rolled`).
+        let rolled = w.handles.status.rolled();
         let plays = match host::transport_stopped(self.id) {
             Some(false) => true,
             // Before the roll the transport still reads stopped.
-            Some(true) => !w.handles.status.rolled(),
+            Some(true) => !rolled,
             None => false,
         };
         if !plays {
@@ -6107,13 +6099,15 @@ impl Session {
     /// plays at the position, once, through the same path as
     /// [`Session::resync_plugin_automation`].
     fn sync_loaded_plugins(&self, inner: &mut Inner, loaded: &[PluginInstanceId]) {
-        let targets: std::collections::BTreeSet<AutomationTarget> = loaded
-            .iter()
-            .flat_map(|id| {
-                core_model::automation::automated_params(inner.doc(), *id)
-                    .into_iter()
-                    .map(|p| AutomationTarget::PluginParam(*id, p))
-            })
+        if loaded.is_empty() {
+            return;
+        }
+        // One scan of the document for every loaded slot (review m4).
+        let all = core_model::automation::automated_targets(inner.doc());
+        let targets: std::collections::BTreeSet<AutomationTarget> = all
+            .into_iter()
+            .filter(|(slot, _)| loaded.contains(slot))
+            .map(|(slot, p)| AutomationTarget::PluginParam(slot, p))
             .collect();
         self.sync_plugin_targets(inner, targets);
     }
@@ -6345,6 +6339,11 @@ impl Session {
             Some(_) => Holder::Other,
             None => Holder::Nobody,
         };
+        // The roll is read before the state (see `write_mode_of`).
+        let rolled = inner
+            .writing
+            .as_ref()
+            .is_some_and(|w| w.handles.status.rolled());
         let stopped = host::transport_stopped(self.id);
         // The intent, not the renderer's state: a rebuilt engine's Play
         // reads stopped until it applies it.
@@ -6367,7 +6366,7 @@ impl Session {
             return;
         };
         drain_tap(w);
-        let (closed, rolled, seq) = (w.handles.status.closed(), w.handles.status.rolled(), w.seq);
+        let (closed, seq) = (w.handles.status.closed(), w.seq);
         // Re-review m4: the holds went out right after the Play's (or the
         // Locate's) command; a command swap the renderer put off could
         // apply that Locate, whose `end_holds` ends them, after them. The

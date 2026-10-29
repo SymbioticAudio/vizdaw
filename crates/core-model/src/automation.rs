@@ -145,6 +145,13 @@ pub fn strip_of(doc: &Document, t: AutomationTarget) -> Option<StripId> {
 /// 5e-1 Task 9b): every one some automation event of any take of any
 /// lane of any sequence targets, muted or not, whether or not it plays.
 pub fn automated_params(doc: &Document, slot: PluginInstanceId) -> BTreeSet<ParamId> {
+    slot_params(&automated_targets(doc), slot)
+}
+
+/// Every automated plugin parameter of the document, as `(slot,
+/// parameter)` (see [`automated_params`]): one scan of the events for
+/// all slots.
+pub fn automated_targets(doc: &Document) -> BTreeSet<(PluginInstanceId, ParamId)> {
     let mut out = BTreeSet::new();
     for seq in doc.sequences().values() {
         for lane in &seq.lanes {
@@ -155,15 +162,24 @@ pub fn automated_params(doc: &Document, slot: PluginInstanceId) -> BTreeSet<Para
                         ..
                     } = e.body
                     {
-                        if s == slot {
-                            out.insert(p);
-                        }
+                        out.insert((s, p));
                     }
                 }
             }
         }
     }
     out
+}
+
+/// The parameters of `targets` that belong to plugin slot `slot`.
+pub fn slot_params(
+    targets: &BTreeSet<(PluginInstanceId, ParamId)>,
+    slot: PluginInstanceId,
+) -> BTreeSet<ParamId> {
+    targets
+        .range((slot, ParamId(0))..=(slot, ParamId(u64::MAX)))
+        .map(|(_, p)| *p)
+        .collect()
 }
 
 /// Whether an automation target's strip, send, plugin or destination

@@ -1979,14 +1979,16 @@ fn trim_ride_over_play(touch: Option<f64>, to: f64) -> (Vec<f64>, Vec<(i64, f64)
     let released = tick(&s);
     stop_and_land(&s);
     // The ride's points, from the move to the release; the edge's second
-    // half (one tick after the release's point) is the lane again.
+    // half (one tick after the release's point) is the lane again. The
+    // renderer takes the release up to a block after the tick read here
+    // (Task 9b review m1), so the release point may be a little later.
     let p = points(&s, seq, lane);
     let landed = p
         .iter()
         .enumerate()
         .filter(|(i, x)| {
             x.0 >= moved - Q / 16
-                && x.0 <= released
+                && x.0 <= released + Q / 16
                 && !(*i > 0 && p[i - 1].0 == x.0 - 1 && p[i - 1].0 >= moved)
         })
         .map(|(_, &(k, v))| (k, fader_db(v) - fader_db(ramp_at(k))))

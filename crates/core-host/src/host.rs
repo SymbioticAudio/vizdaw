@@ -1300,6 +1300,19 @@ impl PluginHost {
         id: PluginInstanceId,
         riding: &BTreeSet<ParamId>,
     ) -> Result<StateBlobId, HostError> {
+        let mut automated = core_model::automation::automated_params(history.doc(), id);
+        automated.extend(riding.iter().copied());
+        self.capture_kept(history, id, &automated)
+    }
+
+    /// [`PluginHost::capture_with`] with the automated set given
+    /// (document automation and riding parameters together).
+    fn capture_kept(
+        &mut self,
+        history: &mut History,
+        id: PluginInstanceId,
+        automated: &BTreeSet<ParamId>,
+    ) -> Result<StateBlobId, HostError> {
         let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
             return Err(HostError::NotFound(format!("instance {id} is not loaded")));
         };
@@ -1307,12 +1320,10 @@ impl PluginHost {
             return Err(HostError::NotFound(format!("instance {id} is not loaded")));
         };
         let bytes = live.inst.save_state()?;
-        let doc = history.doc();
-        let overlay = doc.plugin_slot(id).map(|s| &s.params);
-        let mut automated = core_model::automation::automated_params(doc, id);
-        automated.extend(riding.iter().copied());
+        let overlay = history.doc().plugin_slot(id).map(|s| &s.params);
         let keep: BTreeMap<ParamId, f64> = automated
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|p| {
                 let before = live.base.get(&p).copied()?;
                 let static_value = overlay.and_then(|o| o.get(&p)).copied();
@@ -1369,7 +1380,9 @@ impl PluginHost {
     pub fn unload_unavailable(
         &mut self,
         history: &mut History,
+        riding: &BTreeSet<(PluginInstanceId, ParamId)>,
     ) -> Vec<(PluginInstanceId, Result<StateBlobId, HostError>)> {
+        let all = automated_and(history.doc(), riding);
         let due: Vec<PluginInstanceId> = self
             .slots
             .iter()
@@ -1394,7 +1407,8 @@ impl PluginHost {
                 .cloned()
                 .unwrap_or_default();
             if live {
-                out.push((id, self.capture(history, id)));
+                let mine = core_model::automation::slot_params(&all, id);
+                out.push((id, self.capture_kept(history, id, &mine)));
                 self.evicted.insert(id);
             }
             // `capture` updated what the slot wants (the captured state).
@@ -1432,13 +1446,12 @@ impl PluginHost {
         riding: &BTreeSet<(PluginInstanceId, ParamId)>,
     ) -> Vec<(PluginInstanceId, HostError)> {
         let ids: Vec<PluginInstanceId> = self.slots.keys().copied().collect();
+        // One scan of the document for every slot (Task 9b review m4).
+        let all = automated_and(history.doc(), riding);
         ids.into_iter()
             .filter_map(|id| {
-                let mine: BTreeSet<ParamId> = riding
-                    .range((id, ParamId(0))..=(id, ParamId(u64::MAX)))
-                    .map(|(_, p)| *p)
-                    .collect();
-                match self.capture_with(history, id, &mine) {
+                let mine = core_model::automation::slot_params(&all, id);
+                match self.capture_kept(history, id, &mine) {
                     Ok(_) => None,
                     Err(HostError::NotFound(_)) => None,
                     Err(e) => Some((id, e)),
@@ -1616,6 +1629,16 @@ fn apply_want(l: &mut Live, want: &Want) {
             l.sent.insert(*p, *v);
         }
     }
+}
+
+/// The document's automated plugin parameters plus `riding` (by slot).
+fn automated_and(
+    doc: &Document,
+    riding: &BTreeSet<(PluginInstanceId, ParamId)>,
+) -> BTreeSet<(PluginInstanceId, ParamId)> {
+    let mut all = core_model::automation::automated_targets(doc);
+    all.extend(riding.iter().copied());
+    all
 }
 
 fn current_values(inst: &mut dyn PluginInstance) -> BTreeMap<ParamId, f64> {

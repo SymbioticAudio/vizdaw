@@ -1141,7 +1141,7 @@ fn disabling_a_running_plugin_captures_and_unloads_it_and_enabling_restores_it()
     cat.set_enabled(PluginFormat::Clap, "vizdaw.test.synth4", false);
     cat.apply(&mut host);
     assert!(host.unloads_due(), "running instances of disabled plugins");
-    let unloaded = host.unload_unavailable(&mut hist);
+    let unloaded = host.unload_unavailable(&mut hist, &Default::default());
     let ids: Vec<PluginInstanceId> = unloaded.iter().map(|(id, _)| *id).collect();
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&gain) && ids.contains(&synth));
@@ -1241,7 +1241,11 @@ fn a_load_in_progress_of_a_disabled_plugin_is_abandoned() {
     assert!(!host.unloads_due(), "unavailable, not turned off");
     host.set_disabled(PluginFormat::Clap, "vizdaw.test.gain", true);
     assert!(host.unloads_due());
-    assert!(host.unload_unavailable(&mut hist).is_empty(), "nothing ran");
+    assert!(
+        host.unload_unavailable(&mut hist, &Default::default())
+            .is_empty(),
+        "nothing ran"
+    );
     host.wait_ready(WAIT);
     assert!(host.instance(gain).is_none());
     assert_eq!(
@@ -1300,7 +1304,11 @@ fn only_turning_a_plugin_off_unloads_it_blocklisted_and_missing_ones_keep_runnin
     cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", false);
     cat.apply(&mut host);
     assert!(host.unloads_due());
-    assert_eq!(host.unload_unavailable(&mut hist).len(), 1);
+    assert_eq!(
+        host.unload_unavailable(&mut hist, &Default::default())
+            .len(),
+        1
+    );
     assert!(host.instance(gain).is_none());
     // On again but still missing: it waits as a placeholder.
     cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", true);
@@ -1500,4 +1508,48 @@ fn a_failed_capture_of_an_automated_plugin_changes_nothing() {
     let all = std::collections::BTreeSet::from([(id, ParamId(0))]);
     assert_eq!(host.capture_all(&mut hist, &all).len(), 1);
     assert_eq!(hist.doc(), &before);
+}
+
+/// Task 9b review m2: a plugin turned off in the Plugin Manager while a
+/// pass rides one of its parameters (no lane yet) keeps that parameter's
+/// static value, not the ride, in the captured overlay.
+#[test]
+fn disabling_a_plugin_mid_ride_keeps_the_ridden_parameters_static_value() {
+    use core_host::catalog::{Catalog, CatalogEntry, ScanStatus, Source};
+    let (mut hist, song, gain) = with_gain();
+    let src = Source::clap_bundle(&test_plugins::bundle());
+    let mut cat = Catalog::new();
+    cat.record(
+        &src,
+        vec![CatalogEntry {
+            source: src.clone(),
+            plugin: plugin("vizdaw.test.gain"),
+            kind: Some(PluginKind::Effect),
+            info: None,
+            status: ScanStatus::Ok,
+        }],
+    );
+    let mut host = host(4096);
+    cat.apply(&mut host);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    host.set_param(gain, ParamId(0), 0.3);
+    for _ in 0..500 {
+        peak(&mut be, 256);
+        host.idle();
+        if host.instance(gain).unwrap().param_value(ParamId(0)) == Some(0.3) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", false);
+    cat.apply(&mut host);
+    let riding = std::collections::BTreeSet::from([(gain, ParamId(0))]);
+    let unloaded = host.unload_unavailable(&mut hist, &riding);
+    assert_eq!(unloaded.len(), 1);
+    assert!(unloaded[0].1.is_ok());
+    assert_eq!(gain_params(&hist, gain), vec![(ParamId(0), 1.0)]);
+    drop(engine);
 }

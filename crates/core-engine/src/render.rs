@@ -1068,6 +1068,9 @@ impl Renderer {
         }
         self.end_tap(input, frames, !missed);
         self.publish();
+        if let Some(t) = self.gestures.as_deref_mut() {
+            t.published();
+        }
         if block_s > 0.0 {
             let load = (started.elapsed().as_secs_f64() / block_s) as f32;
             // A missed deadline lost the block: at least full load.
