@@ -353,6 +353,39 @@ fn undoing_a_plugin_parameter_write_puts_back_its_static_value() {
             s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
         });
         idle_until(&s, |s| (param(s, id, GAIN).value - ridden).abs() < 1e-6);
+        // Re-review N1: what plays is what counts. A muted lane, or a new
+        // (empty) take made active, plays no automation: the plugin goes
+        // back to its static value; the undo plays the ride again.
+        let song = s.transport().unwrap().seq.unwrap();
+        let lane = s
+            .lanes(song)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.name == "Built-in Synth Gain")
+            .expect("the written lane")
+            .id;
+        s.set_lane_mute(song, lane, true).unwrap();
+        idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
+        s.undo().unwrap();
+        idle_until(&s, |s| (param(s, id, GAIN).value - ridden).abs() < 1e-6);
+        s.edit(
+            vizdaw_ffi::EditCommand::Lane {
+                edit: vizdaw_ffi::LaneEdit::AddTake {
+                    seq: song,
+                    lane,
+                    name: "Take 2".into(),
+                },
+            },
+            None,
+        )
+        .unwrap();
+        idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
+        s.undo().unwrap();
+        idle_until(&s, |s| (param(s, id, GAIN).value - ridden).abs() < 1e-6);
+        assert_eq!(
+            s.snapshot().unwrap().undo_label.as_deref(),
+            Some("Write Automation")
+        );
         s.undo().unwrap();
         idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
         s.redo().unwrap();

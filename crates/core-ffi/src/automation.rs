@@ -687,26 +687,41 @@ pub(crate) fn norm(plain: f64, min: f64, max: f64) -> f64 {
     }
 }
 
-/// Every plugin parameter's automation in `doc`, every take of every lane
-/// of every sequence, as `(sequence, tick, value bits)`: compared before
-/// and after a change to find the parameters whose automation it added,
-/// removed or changed (Task 9 review I-1).
+/// Every plugin parameter's automation as `doc` plays it (each
+/// sequence flattened: lane mute and solo, event mute, the active take and
+/// references honoured), as `(sequence, tick, value bits)`: compared
+/// before and after a change to find the parameters whose played
+/// automation it added, removed or changed (Task 9 review I-1, re-review
+/// N1). A document with no plugin-parameter automation event at all is
+/// not flattened (re-review N2).
 pub(crate) fn plugin_automation(
     doc: &Document,
 ) -> BTreeMap<AutomationTarget, Vec<(SeqId, Tick, u64)>> {
     let mut out: BTreeMap<AutomationTarget, Vec<(SeqId, Tick, u64)>> = BTreeMap::new();
-    for (id, seq) in doc.sequences() {
-        for lane in &seq.lanes {
-            for take in &lane.takes {
-                for e in take.events.values() {
-                    if let EventBody::Automation { target, value } = &e.body {
-                        if matches!(target, AutomationTarget::PluginParam(..)) {
-                            out.entry(*target)
-                                .or_default()
-                                .push((*id, e.tick, value.to_bits()));
+    let any = doc.sequences().values().any(|seq| {
+        seq.lanes.iter().any(|lane| {
+            lane.takes.iter().any(|take| {
+                take.events.values().any(|e| {
+                    matches!(
+                        e.body,
+                        EventBody::Automation {
+                            target: AutomationTarget::PluginParam(..),
+                            ..
                         }
-                    }
-                }
+                    )
+                })
+            })
+        })
+    });
+    if !any {
+        return out;
+    }
+    for id in doc.sequences().keys() {
+        for (target, points) in existing_all(doc, *id) {
+            if matches!(target, AutomationTarget::PluginParam(..)) {
+                out.entry(target)
+                    .or_default()
+                    .extend(points.into_iter().map(|(t, v)| (*id, t, v.to_bits())));
             }
         }
     }
