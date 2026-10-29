@@ -229,6 +229,10 @@ impl NodeState {
     }
 }
 
+/// A strip's fed edge: `(strip, None)` its main output, `(strip,
+/// Some(i))` its send `i`.
+type FeedKey = (StripId, Option<u16>);
+
 /// An immutable render graph with its runtime state.
 pub struct Graph {
     defs: Box<[NodeDef]>,
@@ -249,6 +253,21 @@ pub struct Graph {
     /// The largest `Regions` lead (the streamer's read head trails the
     /// renderer by it).
     max_lead: u64,
+    /// Per strip, the frame its controls act at behind the renderer: its
+    /// node's output time (plan 5e-1 Ruling 5), by strip.
+    strip_arrive: Box<[(StripId, u64)]>,
+    /// Per insert instance, its strip's input time plus the inserts
+    /// before it, by instance.
+    insert_arrive: Box<[(PluginInstanceId, u64)]>,
+    /// Every distinct arrival, sorted, 0 included.
+    arrivals: Box<[u64]>,
+    /// Per node, when its (aligned, delayed) inputs arrive (`Plan::t_in`).
+    t_in: Box<[u64]>,
+    /// Per fed edge of a strip (`(strip, None)` its main output, `(strip,
+    /// Some(i))` its send `i`), the input time of the node it feeds: an
+    /// edge's gain (mute, solo, a send's level) acts after that edge's
+    /// delay line, by key. Filled by `set_controls`.
+    feed_arrive: Box<[(FeedKey, u64)]>,
     shape: u64,
     max_frames: u32,
     instruments: u64,
@@ -470,6 +489,33 @@ impl Graph {
             sources.clear();
             instruments = 0;
         }
+        // Where each strip's controls and each insert's parameters act
+        // behind the renderer (plan 5e-1 Ruling 5).
+        let mut strip_arrive: Vec<(StripId, u64)> = Vec::new();
+        let mut insert_arrive: Vec<(PluginInstanceId, u64)> = Vec::new();
+        for (i, node) in spec.nodes.iter().enumerate() {
+            let NodeSpec::Strip(s) = node else {
+                continue;
+            };
+            if let Some(id) = s.strip {
+                strip_arrive.push((id, plan.t_out.get(i).copied().unwrap_or(0)));
+            }
+            let mut at = plan.t_in.get(i).copied().unwrap_or(0);
+            for ins in &s.inserts {
+                if let Some(id) = ins.instance {
+                    insert_arrive.push((id, at));
+                }
+                at = at.saturating_add(u64::from(ins.latency));
+            }
+        }
+        strip_arrive.sort_by_key(|x| x.0);
+        insert_arrive.sort_by_key(|x| x.0);
+        let mut arrivals: Vec<u64> = std::iter::once(0)
+            .chain(strip_arrive.iter().map(|x| x.1))
+            .chain(insert_arrive.iter().map(|x| x.1))
+            .collect();
+        arrivals.sort_unstable();
+        arrivals.dedup();
         insert_ids.sort_by_key(|x| x.0);
         Graph {
             defs: defs.into_boxed_slice(),
@@ -486,6 +532,11 @@ impl Graph {
             master: spec.master,
             latency: plan.latency,
             max_lead: plan.leads.iter().copied().max().unwrap_or(0),
+            strip_arrive: strip_arrive.into_boxed_slice(),
+            insert_arrive: insert_arrive.into_boxed_slice(),
+            arrivals: arrivals.into_boxed_slice(),
+            t_in: plan.t_in.clone().into_boxed_slice(),
+            feed_arrive: Box::default(),
             shape: spec.shape(),
             max_frames,
             instruments,
@@ -505,6 +556,49 @@ impl Graph {
     /// The largest lead of its `Regions` nodes (plan 5d-1 Ruling 3).
     pub fn max_lead(&self) -> u64 {
         self.max_lead
+    }
+
+    /// The frame `strip`'s controls act at behind the renderer: its node's
+    /// output time (plan 5e-1 Ruling 5); 0 when unknown. // RT
+    pub fn strip_arrival(&self, strip: StripId) -> u64 {
+        self.strip_arrive
+            .binary_search_by_key(&strip, |x| x.0)
+            .ok()
+            .and_then(|i| self.strip_arrive.get(i))
+            .map_or(0, |x| x.1)
+    }
+
+    /// The frame insert `id`'s parameters act at behind the renderer: its
+    /// strip's input time plus the latency of the inserts before it (plan
+    /// 5e-1 Ruling 5); 0 when unknown. // RT
+    pub fn insert_arrival(&self, id: PluginInstanceId) -> u64 {
+        self.insert_arrive
+            .binary_search_by_key(&id, |x| x.0)
+            .ok()
+            .and_then(|i| self.insert_arrive.get(i))
+            .map_or(0, |x| x.1)
+    }
+
+    /// The frame the gain of `strip`'s main output (`send` `None`: mute and
+    /// solo) or of its send `send` acts at behind the renderer: the input
+    /// time of the node that edge feeds, after its delay line; the strip's
+    /// own arrival when it has no such edge (master) or no controls are
+    /// installed. // RT
+    pub fn feed_arrival(&self, strip: StripId, send: Option<u16>) -> u64 {
+        match self
+            .feed_arrive
+            .binary_search_by_key(&(strip, send), |x| x.0)
+            .ok()
+            .and_then(|i| self.feed_arrive.get(i))
+        {
+            Some(x) => x.1,
+            None => self.strip_arrival(strip),
+        }
+    }
+
+    /// Every distinct arrival, sorted, 0 included (for diagnostics). // RT
+    pub fn arrivals(&self) -> &[u64] {
+        &self.arrivals
     }
 
     /// The structure hash of the spec it was built from.
@@ -536,6 +630,27 @@ impl Graph {
             .map(|(i, k)| (*k, i))
             .collect();
         self.controls = Controls::build(specs, |node, k| keys.get(&(node, k)).copied());
+        let mut feed: Vec<(FeedKey, u64)> = specs
+            .iter()
+            .flat_map(|c| {
+                c.feeds.iter().map(|f| {
+                    let at = self.t_in.get(f.to).copied().unwrap_or(0);
+                    ((c.strip, f.send.map(|x| x.index)), at)
+                })
+            })
+            .collect();
+        feed.sort_by_key(|x| x.0);
+        feed.dedup_by_key(|x| x.0);
+        let mut arrivals: Vec<u64> = self
+            .arrivals
+            .iter()
+            .copied()
+            .chain(feed.iter().map(|x| x.1))
+            .collect();
+        arrivals.sort_unstable();
+        arrivals.dedup();
+        self.arrivals = arrivals.into_boxed_slice();
+        self.feed_arrive = feed.into_boxed_slice();
     }
 
     /// The automation overrides of this graph's controls as of their last

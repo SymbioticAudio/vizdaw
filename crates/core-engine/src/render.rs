@@ -909,16 +909,18 @@ impl Renderer {
                     g.settle();
                 }
             }
-            let run = self.next_run(length, frames - offset);
+            // Built before the run's length: automation is read at each
+            // strip's arrival through it (plan 5e-1 Ruling 5).
+            let regions = self.region_run(length, monitored, offset);
+            let run = self.next_run(length, frames - offset, &regions);
             let end = offset + run;
             let run_start = offset;
             // A run that starts at or past the end of playing plays out
             // the led regions' last frames (Ruling 3).
             let past_end = self.transport.play_pos(length).is_none()
                 && matches!(self.transport.state, PlayState::Playing | PlayState::Tail);
-            self.automate(length, run);
+            self.automate(length, run, &regions);
             let info = self.block_info();
-            let regions = self.region_run(length, monitored, offset);
             let mut o = Out {
                 sinks: &mut self.sinks,
                 shared: &self.shared,
@@ -1025,8 +1027,9 @@ impl Renderer {
     /// the next automation point (never under `MIN_RUN` frames after the
     /// run's start) and at the loop end or the sequence end while a
     /// schedule with automation or audio plays (Plan 4d Ruling 10, 5a
-    /// Ruling 12). // RT
-    fn next_run(&self, length: u64, left: u32) -> u32 {
+    /// Ruling 12). Cut at each lane's next point at its own arrival
+    /// (pre-flight I13). // RT
+    fn next_run(&self, length: u64, left: u32, regions: &crate::graph::RegionRun) -> u32 {
         let Some(s) = self.schedule.as_deref() else {
             return left;
         };
@@ -1037,8 +1040,15 @@ impl Renderer {
             return left;
         };
         let mut run = u64::from(left);
-        if let Some(c) = s.automation.next_cut(pos) {
-            run = run.min((c - pos).max(u64::from(MIN_RUN)));
+        let g = self.graph.as_deref();
+        let auto = &s.automation;
+        for lane in auto.lanes() {
+            let r = auto_frame(regions, pos, lane_arrival(g, lane));
+            let pts = auto.points(lane);
+            let i = pts.partition_point(|p| p.frame <= r);
+            if let Some(p) = pts.get(i) {
+                run = run.min(p.frame.saturating_sub(r).max(u64::from(MIN_RUN)));
+            }
         }
         if let Some(b) = self.transport.boundary(length) {
             if b > pos {
@@ -1053,8 +1063,9 @@ impl Renderer {
     /// start values, then ramp to its end values (mute and solo switch hard,
     /// at the run boundary nearest their point); a plugin parameter gets
     /// its start value and, on a ramp, a value every `max(MIN_RUN, run /
-    /// 16)` frames, each only when it changed. // RT
-    fn automate(&mut self, length: u64, run: u32) {
+    /// 16)` frames, each only when it changed. Each lane is read at its
+    /// strip's arrival (`auto_frame`, plan 5e-1 Ruling 5). // RT
+    fn automate(&mut self, length: u64, run: u32, regions: &crate::graph::RegionRun) {
         let Some(s) = self.schedule.as_deref() else {
             return;
         };
@@ -1065,20 +1076,21 @@ impl Renderer {
         let Some(pos) = self.transport.play_pos(length) else {
             return;
         };
-        let end = pos.saturating_add(u64::from(run));
         // A mute or solo point inside the run (one shorter than `MIN_RUN`
         // stretched over it) switches at the run boundary nearest to it:
         // the run's start when at most half way in, else the next run's.
         // A fader, pan or send jump inside such a run (Ruling 11's "two
         // points on one frame") is not switched hard: it fades over the
         // run, at most `MIN_RUN` frames (under 1 ms), which avoids a click.
-        let mid = pos.saturating_add(u64::from(run / 2));
         if let Some(g) = self.graph.as_deref_mut() {
             for ramp in [false, true] {
                 let mut any = false;
                 for lane in auto.lanes() {
+                    let f0 = auto_frame(regions, pos, lane_arrival(Some(g), lane));
+                    let mid = f0.saturating_add(u64::from(run / 2));
+                    let end = f0.saturating_add(u64::from(run));
                     let v = match (ramp, lane.dest) {
-                        (false, _) => auto.value(lane, pos, false),
+                        (false, _) => auto.value(lane, f0, false),
                         (true, AutoDest::Strip(_, StripParam::Mute | StripParam::Solo)) => {
                             auto.value(lane, mid, false)
                         }
@@ -1106,12 +1118,13 @@ impl Renderer {
             let AutoDest::Plugin(id, param) = lane.dest else {
                 continue;
             };
+            let f0 = auto_frame(regions, pos, lane_arrival(self.graph.as_deref(), lane));
             let Some(last) = self.auto_last.get_mut(k) else {
                 break;
             };
             let mut f = 0u32;
             loop {
-                let v = auto.value(lane, pos.saturating_add(u64::from(f)), false);
+                let v = auto.value(lane, f0.saturating_add(u64::from(f)), false);
                 // Recorded as sent only once the plugin's queue took it, so
                 // a refused value is sent again on the next run (Plan 4d
                 // final review I1).
@@ -1775,6 +1788,36 @@ fn reset_controllers(s: &Schedule, o: &mut Out<'_>, offset: u32) {
                 o.send(target, offset, &[0xB0 | ch, 121, 0x00]);
             }
         }
+    }
+}
+
+/// The frame automation is read at for a control whose audio is `arrival`
+/// frames behind the renderer (plan 5e-1 Ruling 5): where a led region
+/// with that lead reads, else that far back. // RT
+fn auto_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64) -> u64 {
+    if arrival == 0 {
+        return pos;
+    }
+    run.read_frame(arrival)
+        .unwrap_or(pos.saturating_sub(arrival))
+}
+
+/// A lane's arrival (plan 5e-1 Ruling 5): a strip's fader and pan at its
+/// strip's (they scale the strip's output); its mute and solo at its main
+/// output's edge and a send's level at that send's edge (they are edge
+/// gains, applied after the edge's delay line); an insert's parameter at
+/// the insert's; a plugin instrument's parameter (and every lane without a
+/// graph) at 0. // RT
+fn lane_arrival(graph: Option<&Graph>, lane: &crate::schedule::AutoLane) -> u64 {
+    let Some(g) = graph else {
+        return 0;
+    };
+    match lane.dest {
+        AutoDest::Strip(s, StripParam::Fader | StripParam::Pan) => g.strip_arrival(s),
+        AutoDest::Strip(s, StripParam::Mute | StripParam::Solo) => g.feed_arrival(s, None),
+        AutoDest::Send(s, i) => g.feed_arrival(s, Some(i)),
+        AutoDest::Plugin(id, _) if lane.instrument.is_none() => g.insert_arrival(id),
+        AutoDest::Plugin(..) => 0,
     }
 }
 
