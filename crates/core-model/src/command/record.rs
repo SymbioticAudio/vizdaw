@@ -326,8 +326,12 @@ fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
 /// solo-silenced lane keeps its points. A lane whose events are
 /// transformed (a play shift, its own length or its own loop) does not play
 /// them at their ticks, so it neither takes the write nor loses points to
-/// it (re-review O1). A new lane is not soloed (owner ruling 2026-10-29):
-/// under another lane's solo it is silent until the solo clears.
+/// it (re-review O1). When no playing lane holds the target, the write goes
+/// into the first unmuted, untransformed lane holding it that only a solo
+/// silences (its points in the range go), so under a solo every write for
+/// the target goes into one lane (Task 12 review I2, controller ruling).
+/// A new lane is not soloed (owner ruling 2026-10-29): under another
+/// lane's solo it is silent until the solo clears.
 /// Automation inside referenced sequences is left: their lanes cannot
 /// record (spec Ruling 15).
 fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Result<()> {
@@ -338,25 +342,39 @@ fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Re
     let mut gone = Vec::new();
     let seq = d.sequence(w.seq)?;
     let any_solo = seq.lanes.iter().any(|l| l.solo);
+    // The first unmuted, untransformed lane holding the target that only
+    // a solo silences, with its points in the range (review I2).
+    let mut silenced: Option<(LaneId, Vec<crate::ids::EventId>)> = None;
+    let in_range = |take: &crate::lane::Take| -> Vec<crate::ids::EventId> {
+        take.events
+            .values()
+            .filter(|e| is_target(&e.body) && e.tick >= w.start && e.tick <= w.end)
+            .map(|e| e.id)
+            .collect()
+    };
     for lane in &seq.lanes {
-        if lane.mute || (any_solo && !lane.solo) {
-            continue;
-        }
         // Its events play at other ticks than their own (re-review O1).
-        if lane.play_shift != Tick::ZERO || lane.length.is_some() || lane.looped {
+        if lane.mute || lane.play_shift != Tick::ZERO || lane.length.is_some() || lane.looped {
             continue;
         }
         let Some(take) = lane.active() else { continue };
         if !take.events.values().any(|e| is_target(&e.body)) {
             continue;
         }
+        if any_solo && !lane.solo {
+            if silenced.is_none() {
+                silenced = Some((lane.id, in_range(take)));
+            }
+            continue;
+        }
         first.get_or_insert(lane.id);
-        gone.extend(
-            take.events
-                .values()
-                .filter(|e| is_target(&e.body) && e.tick >= w.start && e.tick <= w.end)
-                .map(|e| e.id),
-        );
+        gone.extend(in_range(take));
+    }
+    if first.is_none()
+        && let Some((lane, ids)) = silenced
+    {
+        first = Some(lane);
+        gone = ids;
     }
     for id in gone {
         d.remove_event(id)?;

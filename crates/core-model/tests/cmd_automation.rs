@@ -455,12 +455,12 @@ fn a_write_skips_a_lane_another_lanes_solo_silences() {
 }
 
 /// When no lane plays the target (here the note lane is soloed, which
-/// silences B and C), the write makes a new lane at the end; the silent
-/// lanes keep their points. The new lane is not soloed (owner ruling
-/// 2026-10-29, re-review N1): it follows the solo like any lane, silent
-/// until the solo clears, so a later unsolo is not trapped by it.
+/// silences B and C), the write goes into B, the first lane holding the
+/// target that only the solo silences (Task 12 review I2): silent until
+/// the solo clears, and no new lane. With every lane holding the target
+/// muted and no solo, a new, unsoloed lane is made.
 #[test]
-fn a_write_with_no_playing_lane_makes_a_new_lane_that_follows_the_solo() {
+fn a_write_with_no_playing_lane_goes_into_the_first_solo_silenced_lane() {
     let d = set_flags(&doc(), 0, None, Some(true));
     assert!(heard(&d).is_empty());
     let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
@@ -468,20 +468,25 @@ fn a_write_with_no_playing_lane_makes_a_new_lane_that_follows_the_solo() {
     h.execute(&Command::Record(pass(vec![w])), &ViewFilter::default())
         .unwrap();
     let out = h.doc().clone();
-    let s = out.sequence(SeqId(0)).unwrap();
-    assert_eq!(s.lanes.len(), 4);
-    let last = s.lanes.last().unwrap();
-    assert_eq!(last.name, "Master Fader");
-    assert!(!last.solo && !last.mute, "the new lane is not soloed");
+    assert_eq!(
+        out.sequence(SeqId(0)).unwrap().lanes.len(),
+        3,
+        "no new lane"
+    );
     assert!(heard(&out).is_empty(), "silent while A is soloed");
     assert_eq!(
-        points(&out, 3),
-        RIDE.to_vec(),
-        "the new lane holds the ride"
+        points(&out, 1),
+        vec![
+            (0, 0.2),
+            (Q - 1, 0.5),
+            (Q, 0.9),
+            (4 * Q, 0.9),
+            (4 * Q + 1, 0.5),
+            (8 * Q, 0.8)
+        ]
     );
-    assert_eq!(points(&out, 1), vec![(0, 0.2), (8 * Q, 0.8)]);
-    assert_eq!(points(&out, 2), vec![(2 * Q, 0.5)]);
-    // Unsoloing A: everything plays again, the ride included (no trap).
+    assert_eq!(points(&out, 2), vec![(2 * Q, 0.5)], "C keeps its point");
+    // Unsoloing A: the ride plays.
     let open = set_flags(&out, 0, None, Some(false));
     let all = heard(&open);
     for p in RIDE {
@@ -491,7 +496,7 @@ fn a_write_with_no_playing_lane_makes_a_new_lane_that_follows_the_solo() {
         );
     }
     h.undo().unwrap();
-    assert_eq!(h.doc(), &d, "one undo takes the lane back");
+    assert_eq!(h.doc(), &d, "one undo takes it back");
     // Every lane holding the target muted, no solo: a new, unsoloed lane.
     let d = set_flags(&set_flags(&doc(), 1, Some(true), None), 2, Some(true), None);
     let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
@@ -602,4 +607,87 @@ fn a_write_skips_a_shifted_or_looped_lane() {
     assert_eq!(points(&out, 2), RIDE.to_vec(), "C (untransformed) has it");
     assert_eq!(points(&out, 1), vec![(0, 0.2), (8 * Q, 0.8)]);
     assert_eq!(out.sequence(SeqId(0)).unwrap().lanes.len(), 3);
+}
+
+/// Task 12 review I2 (controller ruling): when no playing lane holds the
+/// target, a write goes into the first unmuted, untransformed lane holding
+/// it that only a solo silences, before a new lane is made. So under a
+/// solo every write for the target goes into one lane. With B and C
+/// muted (so no lane qualifies at first), two writes landed one after the
+/// other (two wraps) and two writes in one pass each leave one new lane,
+/// not soloed (owner ruling N1), which holds both rides.
+#[test]
+fn writes_under_a_solo_go_into_one_lane() {
+    let base = set_flags(
+        &set_flags(&set_flags(&doc(), 0, None, Some(true)), 1, Some(true), None),
+        2,
+        Some(true),
+        None,
+    );
+    let w1 = write(
+        &base,
+        Q - 1,
+        2 * Q + 1,
+        &[(Q - 1, 0.5), (Q, 0.9), (2 * Q, 0.9), (2 * Q + 1, 0.5)],
+    );
+    let w2 = write(
+        &base,
+        5 * Q - 1,
+        6 * Q + 1,
+        &[
+            (5 * Q - 1, 0.5),
+            (5 * Q, 0.3),
+            (6 * Q, 0.3),
+            (6 * Q + 1, 0.5),
+        ],
+    );
+    // (a) two landings.
+    let one = apply(&base, &Command::Record(pass(vec![w1.clone()])))
+        .unwrap()
+        .doc;
+    let two = apply(&one, &Command::Record(pass(vec![w2.clone()])))
+        .unwrap()
+        .doc;
+    // (b) one pass.
+    let both = apply(&base, &Command::Record(pass(vec![w1, w2])))
+        .unwrap()
+        .doc;
+    for (name, d) in [("two landings", two), ("one pass", both)] {
+        let s = d.sequence(SeqId(0)).unwrap();
+        assert_eq!(s.lanes.len(), 4, "{name}: one new lane");
+        assert!(!s.lanes.last().unwrap().solo, "{name}: not soloed");
+        let p = points(&d, 3);
+        assert!(
+            p.contains(&(Q, 0.9)) && p.contains(&(5 * Q, 0.3)),
+            "{name}: {p:?}"
+        );
+        assert_eq!(
+            points(&d, 1),
+            vec![(0, 0.2), (8 * Q, 0.8)],
+            "{name}: B kept"
+        );
+        assert_eq!(points(&d, 2), vec![(2 * Q, 0.5)], "{name}: C kept");
+    }
+}
+
+/// Task 12 review I2: the solo-silenced lane that takes the write must be
+/// unmuted: a muted lane holding the target keeps its points and is not
+/// chosen; the first unmuted one is (and loses its points in the range).
+#[test]
+fn a_write_under_a_solo_skips_a_muted_lane_for_the_first_silenced_one() {
+    // A soloed; B muted; C (2Q) silenced only by A's solo.
+    let d = set_flags(&set_flags(&doc(), 0, None, Some(true)), 1, Some(true), None);
+    let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert_eq!(
+        out.sequence(SeqId(0)).unwrap().lanes.len(),
+        3,
+        "no new lane"
+    );
+    assert_eq!(
+        points(&out, 1),
+        vec![(0, 0.2), (8 * Q, 0.8)],
+        "the muted lane B is left"
+    );
+    assert_eq!(points(&out, 2), RIDE.to_vec(), "C takes the ride");
 }

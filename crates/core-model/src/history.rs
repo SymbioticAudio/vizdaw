@@ -299,15 +299,21 @@ impl History {
     /// undo step), when the present is the step with serial `step`, there
     /// is a step to undo, and no transaction or group is open: one Undo
     /// then reverts the step with everything amended into it. Clears the
-    /// redo stack when it changes the document. `Ok(false)`, changing
-    /// nothing, when it may not amend; on an error nothing changes.
-    pub fn amend(&mut self, cmd: &Command, filter: &ViewFilter, step: u64) -> Result<bool> {
+    /// redo stack when it changes the document. Answers the command's
+    /// report, or `None`, changing nothing, when it may not amend; on an
+    /// error nothing changes.
+    pub fn amend(
+        &mut self,
+        cmd: &Command,
+        filter: &ViewFilter,
+        step: u64,
+    ) -> Result<Option<Report>> {
         if self.txn.is_some()
             || self.group.is_some()
             || self.past.is_empty()
             || self.present.serial != step
         {
-            return Ok(false);
+            return Ok(None);
         }
         let applied = apply_in(
             &self.present.doc,
@@ -324,7 +330,7 @@ impl History {
         }
         let sel = applied.selection.unwrap_or_else(|| self.selection.clone());
         self.selection = sel.retain_existing(&self.present.doc);
-        Ok(true)
+        Ok(Some(applied.report))
     }
 
     /// Replays the last modification on the current selection.

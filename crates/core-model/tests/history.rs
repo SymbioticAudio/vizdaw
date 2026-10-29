@@ -312,8 +312,8 @@ fn amend_merges_into_the_present_step_only() {
     let original = h.doc().clone();
     h.execute(&rename("A"), &f()).unwrap();
     let step = h.present_serial();
-    assert!(h.amend(&insert_note(60), &f(), step).unwrap());
-    assert!(h.amend(&insert_note(62), &f(), step).unwrap());
+    assert!(h.amend(&insert_note(60), &f(), step).unwrap().is_some());
+    assert!(h.amend(&insert_note(62), &f(), step).unwrap().is_some());
     assert_eq!(h.present_serial(), step, "still the same step");
     assert_eq!(h.undo_label(), Some("Rename Sequence"));
     assert_eq!(h.undo_depth(), 1, "one step");
@@ -339,23 +339,23 @@ fn amend_merges_into_the_present_step_only() {
     h.execute(&rename("B"), &f()).unwrap();
     assert_ne!(h.present_serial(), step);
     let before = h.doc().clone();
-    assert!(!h.amend(&insert_note(64), &f(), step).unwrap());
+    assert!(!h.amend(&insert_note(64), &f(), step).unwrap().is_some());
     assert_eq!(h.doc(), &before, "refused: nothing changes");
     // Undone back to it: the present is the step again.
     h.undo().unwrap();
     assert_eq!(h.present_serial(), step);
-    assert!(h.amend(&insert_note(64), &f(), step).unwrap());
+    assert!(h.amend(&insert_note(64), &f(), step).unwrap().is_some());
     assert!(h.redo().is_err(), "an amend clears the redo stack");
     // Undone past it: refused.
     h.undo().unwrap();
-    assert!(!h.amend(&insert_note(65), &f(), step).unwrap());
+    assert!(!h.amend(&insert_note(65), &f(), step).unwrap().is_some());
     // Inside a transaction or a group: refused.
     h.redo().unwrap();
     h.begin("Drag").unwrap();
-    assert!(!h.amend(&insert_note(66), &f(), step).unwrap());
+    assert!(!h.amend(&insert_note(66), &f(), step).unwrap().is_some());
     h.abort().unwrap();
     h.begin_group().unwrap();
-    assert!(!h.amend(&insert_note(66), &f(), step).unwrap());
+    assert!(!h.amend(&insert_note(66), &f(), step).unwrap().is_some());
     h.end_group("Record").unwrap();
     // A command that fails: the error, nothing changes.
     let at = h.doc().clone();
@@ -368,5 +368,5 @@ fn amend_merges_into_the_present_step_only() {
     // The first state (nothing to undo) is no step.
     let mut fresh = hist();
     let s0 = fresh.present_serial();
-    assert!(!fresh.amend(&rename("X"), &f(), s0).unwrap());
+    assert!(!fresh.amend(&rename("X"), &f(), s0).unwrap().is_some());
 }
