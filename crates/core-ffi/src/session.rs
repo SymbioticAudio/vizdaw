@@ -4995,7 +4995,7 @@ impl Session {
             None => "Record",
         };
         inner.landed_in_group = false;
-        let before = inner.doc().clone();
+        let mut created: Vec<core_model::ids::AnyId> = Vec::new();
         // The automation that landed, if any (plan 5e-1 Ruling 25).
         let mut landed: Vec<AutomationWrite> = Vec::new();
         if let Some(p) = pass {
@@ -5015,11 +5015,13 @@ impl Session {
                     inner.keep_recordings.extend(files);
                     // Its automation still lands, inside the group (plan
                     // 5e-1 Ruling 25).
-                    if self.land_automation_alone(inner, automation.clone()) {
+                    if let Some(r) = self.land_automation_alone(inner, automation.clone()) {
+                        created = r.created;
                         landed = automation;
                     }
                 }
-                Ok(_) => {
+                Ok(r) => {
+                    created = r.created;
                     landed = automation;
                     for (key, seq, lane) in mutes {
                         inner.synth_mutes.remove(&key);
@@ -5043,7 +5045,7 @@ impl Session {
         // 5e-1 Ruling 9).
         self.after_write_in_group(inner, !landed.is_empty());
         let _ = inner.history.end_group(label);
-        let silent = crate::automation::silent_new_lanes(&before, inner.doc(), &landed);
+        let silent = crate::automation::silent_new_lanes(inner.doc(), &created, &landed);
         inner.news.problems.extend(silent);
         inner.version += 1;
         inner.news.doc_changed = true;
@@ -5458,7 +5460,8 @@ fn finite(v: f64) -> Result<f64, VizError> {
 fn host_time(host_ns: Option<u64>) -> u64 {
     host_ns.unwrap_or_else(|| {
         if host::offline_mode() {
-            0
+            // A live-like offline device (test hook) has a clock.
+            host::offline_clock_ns().unwrap_or(0)
         } else {
             crate::clock::now_ns()
         }
@@ -5482,7 +5485,15 @@ fn drain_tap(w: &mut Writing) {
         }
         w.marks.push(m);
     }
+    let run = w.handles.status.run();
     while let Ok(s) = w.handles.stamps.pop() {
+        // A writing stamp for a pass already landed (Task 12 review I1).
+        if w.landed > 0
+            && s.tag != 0
+            && crate::autowrite::pass_of(&w.marks, run, s.run).is_some_and(|p| p < w.landed)
+        {
+            w.late = w.late.saturating_add(1);
+        }
         w.stamps.entry(s.dest.target()).or_default().push(s);
     }
 }
@@ -6289,6 +6300,8 @@ impl Session {
             landed: 0,
             step: None,
             after_done: false,
+            late: 0,
+            late_said: 0,
         });
         let tag = WriteMode::Write.tag();
         let ns = host_time(None);
@@ -6413,6 +6426,17 @@ impl Session {
         // in the ring by then (Task 12's landing at a wrap).
         let run = w.handles.status.run();
         drain_tap(w);
+        // A stamp for a pass already landed is lost: said once per batch
+        // (Task 12 review I1).
+        if w.late > w.late_said {
+            w.late_said = w.late;
+            inner.news.problems.push(
+                "Some automation moves came after their loop pass had landed and were lost.".into(),
+            );
+        }
+        let Some(w) = inner.writing.as_mut() else {
+            return;
+        };
         let (closed, seq) = (w.handles.status.closed(), w.seq);
         // Re-review m4: the holds went out right after the Play's (or the
         // Locate's) command; a command swap the renderer put off could
@@ -6502,7 +6526,24 @@ impl Session {
         let Some(w) = inner.writing.as_ref() else {
             return;
         };
-        let margin = (crate::automation::WRAP_MARGIN_MS * w.rate / 1000.0).round() as u64;
+        // Heard, not rendered (Task 12 review I1): a device with a clock
+        // renders two buffers and its output latency ahead of what is
+        // heard; the graph latency is in the pass's marks.
+        let forced = *crate::automation::WRAP_LAG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let lag = if let Some(l) = forced {
+            l
+        } else if !host::offline_mode() || host::offline_clock_ns().is_some() {
+            host::input_info(self.id).map_or(0, |(_, i)| {
+                u64::from(i.output_latency_frames)
+                    .saturating_add(u64::from(i.buffer_frames).saturating_mul(2))
+            })
+        } else {
+            0
+        };
+        let margin = ((crate::automation::WRAP_MARGIN_MS * w.rate / 1000.0).round() as u64)
+            .saturating_add(lag);
         let over = crate::autowrite::passes_over(&w.marks, run, margin);
         if over <= w.landed {
             return;
@@ -6516,19 +6557,27 @@ impl Session {
         }
         let writes = w.model_writes(self.id, inner.doc(), run, Some(over));
         let (step, after, after_done) = (w.step, w.after_write, w.after_done);
-        let strips: Vec<StripId> = if after_done {
-            Vec::new()
-        } else {
-            w.write_strips.iter().copied().collect()
-        };
+        let strips: Vec<StripId> = w.write_strips.iter().copied().collect();
         if let Some(w) = inner.writing.as_mut() {
             w.landed = over;
+            // The landed passes' stamps are done with: a later pass's
+            // writes never read them (a wrap reopens nothing), so each
+            // landing costs only its own passes (Task 12 review m5).
+            let pieces =
+                crate::passes::writing_pieces(&w.marks, i64::try_from(run).unwrap_or(i64::MAX));
+            for list in w.stamps.values_mut() {
+                list.retain(|s| {
+                    crate::passes::piece_of(&pieces, s.run).is_none_or(|p| p.pass >= over)
+                });
+            }
+            w.stamps.retain(|_, list| !list.is_empty());
         }
         let landing = crate::automation::Landing {
             writes,
             strips,
             after,
             step,
+            after_done,
         };
         inner.last_step = None;
         if self.land(inner, landing) {
@@ -6561,6 +6610,7 @@ impl Session {
                 strips: Vec::new(),
                 after: AutomationMode::Latch,
                 step: None,
+                after_done: false,
             };
         };
         if host::holder() == Some(self.id) {
@@ -6584,7 +6634,11 @@ impl Session {
             }
         }
         let dropped = host::gestures_dropped(self.id).is_some_and(|d| d > w.dropped_at_start);
-        if w.handles.status.lost_stamps() > 0 || w.handles.status.lost_marks() > 0 || dropped {
+        if w.handles.status.lost_stamps() > 0
+            || w.handles.status.lost_marks() > 0
+            || dropped
+            || w.late > w.late_said
+        {
             inner
                 .news
                 .problems
@@ -6594,7 +6648,7 @@ impl Session {
         // (Task 12): only the rest lands now.
         let writes = w.model_writes(self.id, inner.doc(), end_run, None);
         let writes = self.drop_gone(inner, writes);
-        let strips = if writes.is_empty() || w.after_done {
+        let strips = if writes.is_empty() {
             Vec::new()
         } else {
             let m = inner.doc().mixer();
@@ -6609,6 +6663,7 @@ impl Session {
             strips,
             after: w.after_write,
             step: w.step,
+            after_done: w.after_done,
         }
     }
 
@@ -6649,11 +6704,26 @@ impl Session {
             writes,
             strips,
             after,
+            after_done,
             ..
         } = self.take_writes(inner);
         if writes.is_empty() {
             return pass;
         }
+        // After Write went with a loop pass's landing: only strips still
+        // in Write get it now (Task 12 review m6).
+        let strips = if after_done {
+            let m = inner.doc().mixer();
+            strips
+                .into_iter()
+                .filter(|s| {
+                    m.strip(*s)
+                        .is_ok_and(|x| x.automation == AutomationMode::Write)
+                })
+                .collect()
+        } else {
+            strips
+        };
         inner.after_write_pending = Some((strips, after));
         Some(match pass {
             Some(mut p) => {
@@ -6688,11 +6758,15 @@ impl Session {
     }
 
     /// A recording's pass the model refused: its automation alone, inside
-    /// the group (Ruling 25). True when it landed.
-    fn land_automation_alone(&self, inner: &mut Inner, automation: Vec<AutomationWrite>) -> bool {
+    /// the group (Ruling 25). Its report when it landed.
+    fn land_automation_alone(
+        &self,
+        inner: &mut Inner,
+        automation: Vec<AutomationWrite>,
+    ) -> Option<core_model::command::Report> {
         let automation = self.drop_gone(inner, automation);
         if automation.is_empty() {
-            return false;
+            return None;
         }
         let pass = RecordPass {
             automation,
@@ -6702,13 +6776,13 @@ impl Session {
             .history
             .execute(&Command::Record(pass), &ViewFilter::default())
         {
-            Ok(_) => true,
+            Ok(r) => Some(r),
             Err(e) => {
                 inner
                     .news
                     .problems
                     .push(format!("The automation could not be written ({e})."));
-                false
+                None
             }
         }
     }
@@ -6739,6 +6813,7 @@ impl Session {
             strips,
             after,
             step,
+            after_done,
         } = landing;
         let writes = self.drop_gone(inner, writes);
         if writes.is_empty() {
@@ -6746,83 +6821,105 @@ impl Session {
         }
         let m = inner.doc().mixer();
         let strips: Vec<StripId> = strips.into_iter().filter(|s| m.strip(*s).is_ok()).collect();
-        let before = inner.doc().clone();
+        // After Write went with an earlier landing; if that step was undone
+        // (or another step covers it) the strips still in Write get it
+        // again with this one (Task 12 review m6).
+        let still_write: Vec<StripId> = strips
+            .iter()
+            .copied()
+            .filter(|s| {
+                m.strip(*s)
+                    .is_ok_and(|x| x.automation == AutomationMode::Write)
+            })
+            .collect();
+        let mode_of = |strips: Vec<StripId>| {
+            (!strips.is_empty()).then(|| {
+                Command::Mixer(MixerCmd::SetAutomationMode {
+                    strips,
+                    mode: after,
+                })
+            })
+        };
         let pass = Command::Record(RecordPass {
             automation: writes.clone(),
             ..Default::default()
-        });
-        let mode = (!strips.is_empty()).then(|| {
-            Command::Mixer(MixerCmd::SetAutomationMode {
-                strips,
-                mode: after,
-            })
         });
         let f = ViewFilter::default();
         let in_group = inner.history.in_group();
         let amended = match step {
             Some(serial) if !in_group => inner.history.amend(&pass, &f, serial),
-            _ => Ok(false),
+            _ => Ok(None),
         };
-        let landed = match amended {
-            Err(e) => Err(e),
-            Ok(true) => {
-                if let Some(cmd) = &mode
-                    && let Some(serial) = step
-                    && let Err(e) = inner.history.amend(cmd, &f, serial)
-                {
-                    inner
-                        .news
-                        .problems
-                        .push(format!("The automation mode could not be set ({e})."));
-                }
-                Ok(())
-            }
-            Ok(false) if in_group => {
-                let r = inner.history.execute(&pass, &f).map(|_| ());
-                if r.is_ok() {
-                    inner.landed_in_group = true;
-                    if let Some(cmd) = &mode
-                        && let Err(e) = inner.history.execute(cmd, &f)
-                    {
-                        inner
-                            .news
-                            .problems
-                            .push(format!("The automation mode could not be set ({e})."));
-                    }
-                }
-                r
-            }
-            Ok(false) => match &mode {
-                None => inner.history.execute(&pass, &f).map(|_| ()),
-                Some(cmd) => match inner.history.begin_group() {
-                    Err(e) => Err(e),
-                    Ok(()) => {
-                        let r = inner.history.execute(&pass, &f).map(|_| ());
-                        if r.is_ok()
-                            && let Err(e) = inner.history.execute(cmd, &f)
-                        {
-                            inner
-                                .news
-                                .problems
-                                .push(format!("The automation mode could not be set ({e})."));
-                        }
-                        let _ = inner.history.end_group("Write Automation");
-                        r
-                    }
-                },
-            },
-        };
-        if let Err(e) = landed {
+        let mode_failed = |inner: &mut Inner, e: core_model::error::ModelError| {
             inner
                 .news
                 .problems
-                .push(format!("The automation could not be written ({e})."));
-            return false;
-        }
+                .push(format!("The automation mode could not be set ({e})."));
+        };
+        let landed: Result<core_model::command::Report, core_model::error::ModelError> =
+            match amended {
+                Err(e) => Err(e),
+                Ok(Some(report)) => {
+                    let mode = if after_done { None } else { mode_of(strips) };
+                    if let Some(cmd) = &mode
+                        && let Some(serial) = step
+                        && let Err(e) = inner.history.amend(cmd, &f, serial)
+                    {
+                        mode_failed(inner, e);
+                    }
+                    Ok(report)
+                }
+                Ok(None) => {
+                    let mode = if after_done {
+                        mode_of(still_write)
+                    } else {
+                        mode_of(strips)
+                    };
+                    if in_group {
+                        let r = inner.history.execute(&pass, &f);
+                        if r.is_ok() {
+                            inner.landed_in_group = true;
+                            if let Some(cmd) = &mode
+                                && let Err(e) = inner.history.execute(cmd, &f)
+                            {
+                                mode_failed(inner, e);
+                            }
+                        }
+                        r
+                    } else {
+                        match &mode {
+                            None => inner.history.execute(&pass, &f),
+                            Some(cmd) => match inner.history.begin_group() {
+                                Err(e) => Err(e),
+                                Ok(()) => {
+                                    let r = inner.history.execute(&pass, &f);
+                                    if r.is_ok()
+                                        && let Err(e) = inner.history.execute(cmd, &f)
+                                    {
+                                        mode_failed(inner, e);
+                                    }
+                                    let _ = inner.history.end_group("Write Automation");
+                                    r
+                                }
+                            },
+                        }
+                    }
+                }
+            };
+        let report = match landed {
+            Ok(r) => r,
+            Err(e) => {
+                inner
+                    .news
+                    .problems
+                    .push(format!("The automation could not be written ({e})."));
+                return false;
+            }
+        };
         if !in_group {
             inner.last_step = Some(inner.history.present_serial());
         }
-        let silent = crate::automation::silent_new_lanes(&before, inner.doc(), &writes);
+        let silent = crate::automation::silent_new_lanes(inner.doc(), &report.created, &writes);
         inner.news.problems.extend(silent);
         inner.version += 1;
         inner.news.doc_changed = true;

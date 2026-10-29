@@ -884,12 +884,21 @@ fn lane_at(points: &[(Tick, f64)], t: Tick, stepped: bool) -> f64 {
     }
 }
 
+/// The pass of a capture with `marks` (as of output run `run`) a stamp at
+/// run `at` is placed in; `None` when no piece takes it.
+pub fn pass_of(marks: &[Mark], run: u64, at: i64) -> Option<usize> {
+    let run = i64::try_from(run).unwrap_or(i64::MAX);
+    let all = writing_pieces(marks, run);
+    piece_of(&all, at).map(|p| p.pass)
+}
+
 /// How many passes of a capture with `marks` are over by output run `run`
 /// (plan 5e-1 Task 12: a looped pass lands each pass once it is over): a
 /// pass is over once the next pass's first piece has been heard for
-/// `margin` frames, so no stamp heard before that start (the gesture tap
-/// stamps a message up to the graph latency later than its block, or a
-/// little before it) can still arrive for it.
+/// `margin` frames (the caller adds the device's lag: a live device's
+/// renderer works its buffer and output latency ahead of what is heard,
+/// and stamps a message that far before its block), so no stamp heard
+/// before that start can still arrive for it.
 pub fn passes_over(marks: &[Mark], run: u64, margin: u64) -> usize {
     let run = i64::try_from(run).unwrap_or(i64::MAX);
     let margin = i64::try_from(margin).unwrap_or(i64::MAX);

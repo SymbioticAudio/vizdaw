@@ -430,6 +430,11 @@ pub(crate) struct Writing {
     pub step: Option<u64>,
     /// After Write went with an earlier landing (Task 12).
     pub after_done: bool,
+    /// Stamps that arrived for a pass already landed (Task 12 review I1):
+    /// lost, and said so.
+    pub late: u64,
+    /// `late` as last said.
+    pub late_said: u64,
 }
 
 impl Writing {
@@ -470,19 +475,31 @@ impl Writing {
 pub(crate) struct Landing {
     /// The writes.
     pub writes: Vec<core_model::command::AutomationWrite>,
-    /// The Write strips that still exist (none once After Write went).
+    /// The pass's Write strips.
     pub strips: Vec<StripId>,
     /// The After Write mode read at Play.
     pub after: AutomationMode,
     /// The pass's undo step so far, to land into while it is the present.
     pub step: Option<u64>,
+    /// After Write went with an earlier landing of the pass.
+    pub after_done: bool,
 }
 
-/// How long after a wrap is heard its pass lands (plan 5e-1 Task 12): a
-/// message the renderer stamps before its block (by its host time) can be
-/// heard up to about a block before it, so a pass is over this long after
-/// the next one began.
+/// How long after a wrap is heard its pass lands (plan 5e-1 Task 12): the
+/// session adds the device's lag (two buffers and its output latency) to
+/// it, so a pass is over this long after the next one began as heard.
 pub(crate) const WRAP_MARGIN_MS: f64 = 20.0;
+
+/// The device lag the wrap landing assumes, when set (test hook, Task 12
+/// review I1): 0 lands as early as before the review, so late stamps
+/// show their "lost" line.
+pub(crate) static WRAP_LAG: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// Overrides the device lag the wrap landing assumes (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_wrap_lag(frames: Option<u64>) {
+    *WRAP_LAG.lock().unwrap_or_else(|e| e.into_inner()) = frames;
+}
 
 /// Ruling 24 (pre-flight C1, M17): a pass ends when its tap closed, when
 /// another session took the engine (`transport_stopped` is `None`), or
@@ -1142,35 +1159,36 @@ impl PassDoc {
     }
 }
 
-/// The status lines for the lanes `writes` made in `after` (from `before`)
-/// that another lane's solo silences: a new automation lane is not soloed
-/// (owner ruling 2026-10-29, re-review N1), so it is silent until the
-/// solo clears, and the user is told.
+/// The status lines for the lanes a landing of `writes` created
+/// (`created`, its report's) that another lane's solo silences in `doc`: a
+/// new automation lane is not soloed (owner ruling 2026-10-29, re-review
+/// N1), so it is silent until the solo clears, and the user is told.
 pub(crate) fn silent_new_lanes(
-    before: &Document,
-    after: &Document,
+    doc: &Document,
+    created: &[core_model::ids::AnyId],
     writes: &[core_model::command::AutomationWrite],
 ) -> Vec<String> {
+    let new: BTreeSet<core_model::ids::LaneId> = created
+        .iter()
+        .filter_map(|id| match id {
+            core_model::ids::AnyId::Lane(l) => Some(*l),
+            _ => None,
+        })
+        .collect();
     let seqs: BTreeSet<SeqId> = writes.iter().map(|w| w.seq).collect();
     let mut out = Vec::new();
     for seq in seqs {
-        let Ok(a) = after.sequence(seq) else {
+        let Ok(a) = doc.sequence(seq) else {
             continue;
         };
         if !a.lanes.iter().any(|l| l.solo) {
             continue;
         }
-        let old: BTreeSet<core_model::ids::LaneId> = before
-            .sequence(seq)
-            .map(|b| b.lanes.iter().map(|l| l.id).collect())
-            .unwrap_or_default();
-        for l in a.lanes.iter().filter(|l| !l.solo && !old.contains(&l.id)) {
-            if writes.iter().any(|w| w.seq == seq && w.lane_name == l.name) {
-                out.push(format!(
-                    "The new automation lane \"{}\" is silent while another lane is soloed; it plays once the solo is cleared.",
-                    l.name
-                ));
-            }
+        for l in a.lanes.iter().filter(|l| !l.solo && new.contains(&l.id)) {
+            out.push(format!(
+                "The new automation lane \"{}\" is silent while another lane is soloed; it plays once the solo is cleared.",
+                l.name
+            ));
         }
     }
     out

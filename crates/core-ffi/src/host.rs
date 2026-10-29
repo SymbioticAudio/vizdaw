@@ -1233,6 +1233,32 @@ pub fn debug_hold_offline(on: bool) {
     OFFLINE_HOLD.store(on, Ordering::Relaxed);
 }
 
+/// A live-like device the offline backend plays (test hook, plan 5e-1
+/// Task 12 review I1): its I/O buffer and output latency in frames. The
+/// driver then renders a buffer ahead of real time, blocks are heard the
+/// output latency later, and gestures carry the driver's clock as their
+/// host time, so they are stamped before their block as on a live device.
+static FAKE_DEVICE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+
+/// When the offline driver's clock started (its host time 0), while a
+/// [`FAKE_DEVICE`] plays.
+static OFFLINE_CLOCK: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Makes the next offline engine a live-like device with an I/O buffer of
+/// `buffer` frames and `output` frames of output latency (test hook);
+/// `None` goes back to the plain offline device.
+#[cfg(feature = "test-hooks")]
+pub fn debug_fake_device(device: Option<(u32, u32)>) {
+    *lock(&FAKE_DEVICE) = device;
+}
+
+/// The offline driver's clock now, in ns, while a fake device plays: the
+/// host time a gesture made now carries. `None` otherwise.
+pub(crate) fn offline_clock_ns() -> Option<u64> {
+    lock(&FAKE_DEVICE).as_ref()?;
+    lock(&OFFLINE_CLOCK).map(|t0| u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+}
+
 /// Renders an offline backend in real time on its own thread.
 struct OfflineDriver {
     stop: Arc<AtomicBool>,
@@ -1247,6 +1273,11 @@ impl OfflineDriver {
         synth: Option<&FakeSynth>,
     ) -> Result<(OfflineDriver, InputInfo), VizError> {
         let mut backend = OfflineBackend::new(rate, OFFLINE_BLOCK);
+        let device = *lock(&FAKE_DEVICE);
+        if let Some((buffer, output)) = device {
+            backend = backend.with_device(buffer, output);
+        }
+        let ahead = device.map_or(0, |d| u64::from(d.0));
         if let Some(k) = input {
             backend = backend.with_input(k);
         }
@@ -1262,6 +1293,9 @@ impl OfflineDriver {
             .name("vizdaw-offline".into())
             .spawn(move || {
                 let mut t0 = Instant::now();
+                if device.is_some() {
+                    *lock(&OFFLINE_CLOCK) = Some(t0);
+                }
                 let mut held: Option<Instant> = None;
                 while !flag.load(Ordering::Relaxed) {
                     if OFFLINE_HOLD.load(Ordering::Relaxed) {
@@ -1272,8 +1306,12 @@ impl OfflineDriver {
                     // The time held is skipped (the clock origin moves on).
                     if let Some(h) = held.take() {
                         t0 += h.elapsed();
+                        if device.is_some() {
+                            *lock(&OFFLINE_CLOCK) = Some(t0);
+                        }
                     }
-                    let due = (t0.elapsed().as_secs_f64() * rate) as u64;
+                    // A live-like device renders its buffer ahead.
+                    let due = (t0.elapsed().as_secs_f64() * rate) as u64 + ahead;
                     if due > backend.frames() {
                         backend.run_frames(due - backend.frames());
                     }

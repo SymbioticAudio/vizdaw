@@ -35,6 +35,8 @@ fn serial() -> MutexGuard<'static, ()> {
     reset_automation_settings();
     set_automation_suspended(false);
     debug_hold_offline(false);
+    vizdaw_ffi::host::debug_fake_device(None);
+    vizdaw_ffi::automation::debug_wrap_lag(None);
     g
 }
 
@@ -2960,4 +2962,147 @@ fn glides_the_wrap_cuts_land_as_far_as_they_went() {
         stop_and_land(&s);
         s.close().unwrap();
     }
+}
+
+/// Task 12 review I1 (controller ruling): a cycle lands only once its wrap
+/// is heard. On a device with a 2048-frame buffer and Bluetooth-class
+/// output latency (150 ms) the renderer runs about 190 ms ahead of what is
+/// heard: a Latch move the user makes while still hearing the end of a
+/// cycle (the renderer already past the wrap) is stamped in that cycle and
+/// lands in its step, not dropped. No "lost" line.
+#[test]
+fn a_move_heard_at_a_cycles_end_lands_in_it_on_a_late_device() {
+    let _g = serial();
+    vizdaw_ffi::host::debug_fake_device(Some((2048, 7200)));
+    let (s, seq, bus, auto) = looping_bus(4);
+    s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.play(seq).unwrap();
+    let mut problems = Vec::new();
+    wait_until("beat 1", || {
+        problems.extend(s.idle().unwrap().problems);
+        tick(&s) > Q
+    });
+    wait_wrap(&s);
+    // The renderer is 60–120 ms past the wrap: still the cycle's end as
+    // heard, past the old 20 ms margin.
+    wait_tick_in(&s, Q / 8, Q / 4);
+    for _ in 0..3 {
+        problems.extend(s.idle().unwrap().problems);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.7 }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_until("the cycle to land", || {
+        problems.extend(s.idle().unwrap().problems);
+        has_value(&points(&s, seq, auto), 0.7)
+    });
+    wait_tick_in(&s, Q, 2 * Q);
+    s.stop().unwrap();
+    wait_until("the transport to stop", || !s.transport().unwrap().playing);
+    problems.extend(s.idle().unwrap().problems);
+    let p = points(&s, seq, auto);
+    let end: Vec<_> = p.iter().filter(|x| x.0 > 3 * Q && x.0 <= 4 * Q).collect();
+    assert!(
+        end.iter().any(|x| (x.1 - 0.7).abs() < 1e-9),
+        "written at the cycle's end: {p:?}"
+    );
+    assert!(!problems.iter().any(|x| x.contains("lost")), "{problems:?}");
+    s.undo().unwrap();
+    assert_eq!(
+        points(&s, seq, auto),
+        vec![(0, 0.2), (4 * Q, 0.2)],
+        "one step"
+    );
+    vizdaw_ffi::host::debug_fake_device(None);
+    s.close().unwrap();
+}
+
+/// Task 12 review I1: a stamp that still arrives for a pass already
+/// landed is never dropped silently. Here the landing is made to ignore
+/// the late device's lag (as before the review), so the move made at the
+/// heard end of a cycle comes too late: a "lost" problem line says so.
+#[test]
+fn a_move_too_late_for_its_landed_pass_is_said_lost() {
+    let _g = serial();
+    vizdaw_ffi::host::debug_fake_device(Some((2048, 7200)));
+    vizdaw_ffi::automation::debug_wrap_lag(Some(0));
+    let (s, seq, bus, _) = looping_bus(4);
+    s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.play(seq).unwrap();
+    let mut problems = Vec::new();
+    wait_until("beat 1", || {
+        problems.extend(s.idle().unwrap().problems);
+        tick(&s) > Q
+    });
+    wait_wrap(&s);
+    wait_tick_in(&s, Q / 8, Q / 4);
+    for _ in 0..3 {
+        problems.extend(s.idle().unwrap().problems);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_until("the lost line", || {
+        problems.extend(s.idle().unwrap().problems);
+        problems.iter().any(|x| x.contains("lost"))
+    });
+    let _ = seq;
+    stop_and_land(&s);
+    vizdaw_ffi::automation::debug_wrap_lag(None);
+    vizdaw_ffi::host::debug_fake_device(None);
+    s.close().unwrap();
+}
+
+/// Task 12 review m6: an Undo of the looped pass's step mid-loop takes its
+/// After Write back too (the strip is Write again); the next landing, a
+/// new step, gives the strip its After Write mode again.
+#[test]
+fn an_undo_mid_loop_does_not_leave_a_write_strip_in_write() {
+    let _g = serial();
+    let (s, seq, bus, auto) = looping_bus(2);
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
+    let t = Target::StripFader { strip: bus };
+    let mode = |s: &Session| {
+        s.automation_state()
+            .unwrap()
+            .modes
+            .into_iter()
+            .find(|m| m.strip == bus)
+            .map(|m| m.mode)
+    };
+    s.play(seq).unwrap();
+    wait_tick_in(&s, Q / 2, Q);
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_wrap(&s);
+    wait_until("cycle 0 to land", || {
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.6)
+    });
+    assert_eq!(mode(&s), Some(Mode::Latch));
+    s.undo().unwrap();
+    assert_eq!(
+        mode(&s),
+        Some(Mode::Write),
+        "the Undo took After Write back"
+    );
+    wait_tick_in(&s, Q / 4, Q);
+    s.gesture(t, Phase::Touch { value: Some(0.8) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_wrap(&s);
+    wait_until("the next cycle to land", || {
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.8)
+    });
+    stop_and_land(&s);
+    assert_eq!(mode(&s), Some(Mode::Latch), "After Write again");
+    s.close().unwrap();
 }
