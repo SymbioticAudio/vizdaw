@@ -499,3 +499,29 @@ fn riding_a_fader_ramps_each_value() {
     let (a, b) = halves(&r);
     assert!((a / b - 1.0).abs() < 0.05, "settled: {a} {b}");
 }
+
+/// Controller ruling on Task 5 fix round 1: a release returns to the
+/// automation over one run (at once to the ear) instead of stepping.
+#[test]
+fn a_release_ramps_back_over_a_run() {
+    let mut r = rig();
+    r.engine.play().unwrap();
+    r.blocks(8);
+    r.send(fader(r.synth), GesturePhase::Touch(fader_norm(0.0)));
+    r.blocks(2);
+    r.send(fader(r.synth), GesturePhase::Release);
+    r.blocks(1);
+    let (a, b) = halves(&r);
+    assert!(
+        a > 1.5 * b,
+        "the return to -12 dB ramps over the block: {a} {b}"
+    );
+    assert!(
+        near(r.fader_db(r.synth), -12.0),
+        "{:?}",
+        r.fader_db(r.synth)
+    );
+    r.blocks(1);
+    let (a, b) = halves(&r);
+    assert!((a / b - 1.0).abs() < 0.05, "settled: {a} {b}");
+}

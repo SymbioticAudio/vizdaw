@@ -1229,6 +1229,16 @@ impl Renderer {
             }
         }
         live.advance(run);
+        // A release ramped back over this run (or a glide ended): its
+        // gains already stand at the value under it, so its override is
+        // dropped and mirrored now; the next run's commits write the gains
+        // (and drop it again, idempotently).
+        if live.released() {
+            if let Some(g) = self.graph.as_deref_mut() {
+                g.release_overrides(|d| auto.is_some_and(|a| a.drives(d)) || live.has(d));
+                g.publish_overrides();
+            }
+        }
         // A plugin parameter let go gets its automation again, even a flat
         // or stepped lane whose value was last sent before the touch
         // (pre-flight I10).

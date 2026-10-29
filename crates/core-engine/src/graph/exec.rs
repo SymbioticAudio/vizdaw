@@ -701,6 +701,12 @@ impl Graph {
         self.controls.set_send(strip, index, v);
     }
 
+    /// Mirrors the overrides for the control thread without writing the
+    /// gains (they take effect at the next `commit_controls`). // RT
+    pub fn publish_overrides(&self) {
+        self.controls.publish();
+    }
+
     /// Drops the overrides of the controls `driven` says no lane drives;
     /// the next commit writes their static values. // RT
     ///

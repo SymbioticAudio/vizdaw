@@ -328,7 +328,7 @@ impl Controls {
     }
 
     /// Mirrors the overrides for the control thread. // RT
-    fn publish(&self) {
+    pub(crate) fn publish(&self) {
         for (s, m) in self.strips.iter().zip(self.mirror.strips.iter()) {
             let o = s.over;
             let b = |v: Option<bool>| v.map(|v| if v { 1.0 } else { 0.0 });

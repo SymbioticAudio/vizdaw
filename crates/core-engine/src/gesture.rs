@@ -121,6 +121,9 @@ enum LiveState {
     Gliding { from: f64, done: u32, frames: u32 },
     /// Let go, an offset gliding from `from` to 0.
     GlidingOffset { from: f64, done: u32, frames: u32 },
+    /// Released (a strip or send target): returns to what is under it
+    /// over one run, then ends (controller ruling on Task 5 fix round 1).
+    Releasing,
 }
 
 /// Where a strip or send target's next run starts (Task 5 review I2):
@@ -312,7 +315,16 @@ impl LiveTable {
             return true;
         };
         let next = match (phase, state) {
-            (GesturePhase::Release | GesturePhase::Glide(0), _) => None,
+            // A plugin keeps the user's value until its automation is sent
+            // again: it ends at once.
+            (GesturePhase::Release | GesturePhase::Glide(0), _)
+                if matches!(dest, AutoDest::Plugin(..)) =>
+            {
+                None
+            }
+            // A strip or send ramps back over one run, from the value its
+            // last run ended at (`Start::Was`).
+            (GesturePhase::Release | GesturePhase::Glide(0), _) => Some(LiveState::Releasing),
             (GesturePhase::Hold, LiveState::Touched(v) | LiveState::Held(v)) => {
                 Some(LiveState::Held(v))
             }
@@ -370,6 +382,7 @@ impl LiveTable {
             LiveState::GlidingOffset { from, done, frames } => {
                 offset(dest, under, from * left(done, frames, at))
             }
+            LiveState::Releasing => under,
         })
     }
 
@@ -439,6 +452,7 @@ impl LiveTable {
                 *done = done.saturating_add(frames);
                 *done < *n
             }
+            LiveState::Releasing => false,
             _ => true,
         });
     }
@@ -454,6 +468,12 @@ impl LiveTable {
     /// under it (Task 5 review M5). // RT
     pub fn take_released(&mut self) -> bool {
         std::mem::take(&mut self.released)
+    }
+
+    /// Whether an entry ended since the last `take_released`, without
+    /// taking it. // RT
+    pub fn released(&self) -> bool {
+        self.released
     }
 
     /// Calls `f` with each `Plugin` dest whose entry ended since the last call, then forgets them (pre-flight I10); true when more ended than it kept (64), so every plugin lane must be reset. // RT
