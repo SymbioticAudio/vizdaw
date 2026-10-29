@@ -459,8 +459,8 @@ Rules common to all modes:
 - **Replacing.** The written range replaces existing automation for that target in `[first sample, last sample]`. A point is added at each edge so that values outside the range are unchanged. Trim modifies existing points in place, plus the edge points.
 
 ### 7.4 Where points go
-- Automation events live in ordinary lanes (4d). A write for target T goes into the first lane of the top-level playing sequence that already holds automation for T.
-- If there is none, a new lane named "<strip> <parameter>" is created at the end of that sequence, with its Strip Chart view set to T.
+- Automation events live in ordinary lanes (4d). A write for target T goes into the first lane of the top-level playing sequence that plays (not muted, and soloed when any lane of the sequence is) and already holds automation for T, so what is written is what plays (plan 5e-1 final review I1). The written range is replaced in the lanes that play; a muted or solo-silenced lane keeps its points.
+- If there is none, a new lane named "<strip> <parameter>" is created at the end of that sequence, with its Strip Chart view set to T (soloed when another lane is, so that it plays).
 - Writes are collected while playing and applied:
   - as part of the `RecordPass` when audio or MIDI is also recording;
   - otherwise as their own `Command::Record` with label "Write Automation", one undo step per pass, at Stop.

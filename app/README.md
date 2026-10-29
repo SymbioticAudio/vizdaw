@@ -1469,14 +1469,20 @@ The e2e `touch_writes_a_fader_over_the_channel` runs step 160.
      bar as heard, with and without the plugin. Zoom in on a bounce
      (plan 5f) to check to the sample.
 165. Hardware checks for automation recording (owner checklist, plan
-     5e-1): with a real control surface or the mouse, and a real AU and a
-     real CLAP plugin.
-     a. Write, Touch, Latch and Trim: for each mode, play and ride a
-        fader (surface or mouse). Write replaces from the play point;
-        Touch writes only while held and glides back on release; Latch
-        holds the last value until Stop; Trim moves the existing
-        automation by the offset you ride, relative, without a jump when
-        you grab. Stop each pass: one "Write Automation" step.
+     5e-1): by ear, with a real AU and a real CLAP plugin. In 5e-1 a
+     fader is ridden through the control channel; riding it with the
+     mouse comes with plan 5e-2 (the mixer's gestures) and with a control
+     surface with plan 5f, which complete step a for those.
+     a. Write, Touch, Latch and Trim: for each mode, set the strip with
+        `automation.set_mode`, play and ride its fader with `$V run
+        automation.gesture` (`touch`, a few `value` calls a moment apart,
+        `release`). Write replaces from the play point; Touch writes only
+        while held and glides back on release; Latch holds the last value
+        until Stop; Trim moves the existing automation by the offset you
+        ride, relative, without a jump when you grab. Stop each pass: one
+        "Write Automation" step. With the strip's automation lane muted
+        (or another lane soloed), the pass writes into a lane that plays
+        (a new one when none plays) and the muted lane keeps its points.
      b. Plugin-window rides: in an AU's own window and in a CLAP's own
         window, ride a parameter in Touch while playing; it is written to
         a lane named for the strip and the parameter, with no "Change
