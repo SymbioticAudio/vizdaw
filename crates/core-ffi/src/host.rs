@@ -1221,6 +1221,18 @@ pub fn reset() {
     retire(old);
 }
 
+/// While set, the offline driver renders nothing and skips the time held
+/// (plan 5e-1 check I-1: code then runs before the roll).
+static OFFLINE_HOLD: AtomicBool = AtomicBool::new(false);
+
+/// Holds (`on`) or lets go the offline renderer (test hook): while held
+/// it renders nothing, and the time held is skipped, not caught up in one
+/// burst at the release.
+#[cfg(feature = "test-hooks")]
+pub fn debug_hold_offline(on: bool) {
+    OFFLINE_HOLD.store(on, Ordering::Relaxed);
+}
+
 /// Renders an offline backend in real time on its own thread.
 struct OfflineDriver {
     stop: Arc<AtomicBool>,
@@ -1249,8 +1261,18 @@ impl OfflineDriver {
         let thread = std::thread::Builder::new()
             .name("vizdaw-offline".into())
             .spawn(move || {
-                let t0 = Instant::now();
+                let mut t0 = Instant::now();
+                let mut held: Option<Instant> = None;
                 while !flag.load(Ordering::Relaxed) {
+                    if OFFLINE_HOLD.load(Ordering::Relaxed) {
+                        held.get_or_insert_with(Instant::now);
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    // The time held is skipped (the clock origin moves on).
+                    if let Some(h) = held.take() {
+                        t0 += h.elapsed();
+                    }
                     let due = (t0.elapsed().as_secs_f64() * rate) as u64;
                     if due > backend.frames() {
                         backend.run_frames(due - backend.frames());
@@ -2106,6 +2128,10 @@ impl Host {
         self.engine.set_media(media_of(owner));
         self.engine.set_inputs(input_spec(doc, seq));
         self.engine.set_return_dests(return_dests(doc, seq));
+        // Off strips play no automation unless it is suspended (plan 5e-1
+        // Ruling 3).
+        self.engine
+            .set_automation_suspended(crate::automation::suspended());
         let report = self.engine.load(doc, seq)?;
         self.report = report_lines(&report);
         self.engine.set_loop(looped)?;
@@ -3470,6 +3496,66 @@ pub fn midi_sender(owner: u64) -> Option<MidiSender> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.midi_sender())
+}
+
+/// Sends a gesture to `owner`'s engine (plan 5e-1 Ruling 6): false when
+/// another session holds the engine (or none is), or the queue is full.
+pub fn gesture(owner: u64, msg: core_engine::gesture::GestureMsg) -> bool {
+    let sender = lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.gesture_sender());
+    // Sent without the host lock: the sender has its own.
+    sender.is_some_and(|s| s.send(msg))
+}
+
+/// Installs a gesture tap in `owner`'s engine (plan 5e-1 Ruling 7);
+/// `None` when another session holds the engine or its command queue is
+/// full.
+pub fn start_gestures(owner: u64) -> Option<core_engine::gesture::GestureHandles> {
+    lock(&HOST)
+        .as_mut()
+        .filter(|h| h.owner == owner)
+        .and_then(|h| h.engine.start_gestures().ok())
+}
+
+/// Removes `owner`'s gesture tap. A full queue is ignored: the tap goes
+/// with the engine anyway.
+pub fn stop_gestures(owner: u64) {
+    if let Some(h) = lock(&HOST).as_mut().filter(|h| h.owner == owner) {
+        let _ = h.engine.stop_gestures();
+    }
+}
+
+/// The value `owner`'s engine plays for a strip or send target now, as
+/// its override snapshot holds it (plan 5e-1 Ruling 26), when `owner`
+/// holds the engine and the snapshot has the control.
+pub fn heard(owner: u64, t: core_model::automation::AutomationTarget) -> Option<f64> {
+    let dest = core_engine::schedule::AutoDest::of(t)?;
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)?
+        .engine
+        .overrides()?
+        .value(dest)
+}
+
+/// The gestures `owner`'s engine dropped so far (pre-flight M10), when it
+/// holds it.
+pub fn gestures_dropped(owner: u64) -> Option<u64> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.gestures_dropped())
+}
+
+/// Whether the engine, whoever holds it, compiles with automation
+/// suspended (test hook, plan 5e-1 Task 2 review M5).
+#[cfg(feature = "test-hooks")]
+pub fn debug_automation_suspended() -> Option<bool> {
+    lock(&HOST)
+        .as_ref()
+        .map(|h| h.engine.automation_suspended())
 }
 
 /// The input routes the engine was last given, whoever holds it (test

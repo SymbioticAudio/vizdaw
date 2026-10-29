@@ -459,6 +459,12 @@ impl Engine {
         self.automation_suspended = on;
     }
 
+    /// Whether the next [`Engine::load`] compiles with automation
+    /// suspended.
+    pub fn automation_suspended(&self) -> bool {
+        self.automation_suspended
+    }
+
     /// Compiles `seq` and the mixer graph and sends them (and sinks for new
     /// targets) to the renderer. Call again after every committed edit.
     pub fn load(&mut self, doc: &Document, seq: SeqId) -> Result<CompileReport, EngineError> {

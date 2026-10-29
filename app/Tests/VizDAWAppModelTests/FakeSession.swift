@@ -759,6 +759,29 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         measures.append(dest)
         return MeasureRow(returnLatencyMs: measured, onsets: 5, snapshot: commandResult())
     }
+
+    // MARK: Automation (plan 5e-1)
+
+    var gestures: [(AutomationTargetRow, GesturePhaseRow)] = []
+    /// Thrown by `gesture` while set.
+    var gestureError: VizError?
+    var automationRow = AutomationStateRow(modes: [], touched: [], suspended: false, writing: false)
+    var modeCalls: [([UInt64], AutomationModeRow)] = []
+    var previewRows: [PreviewPointRow] = []
+
+    func gesture(target: AutomationTargetRow, phase: GesturePhaseRow) throws {
+        if let e = gestureError { throw e }
+        gestures.append((target, phase))
+    }
+
+    func setAutomationMode(strips: [UInt64], mode: AutomationModeRow) throws -> DocSnapshot {
+        modeCalls.append((strips, mode))
+        return commandResult()
+    }
+
+    func automationState() throws -> AutomationStateRow { automationRow }
+
+    func automationPreview(target: AutomationTargetRow) throws -> [PreviewPointRow] { previewRows }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {
@@ -801,7 +824,7 @@ func stripRow(
     StripRow(
         id: id, name: name, kind: kind, kindLabel: "\(kind)", instrument: nil, inserts: inserts,
         gainDb: 0, pan: 0, mute: false, solo: false, soloMuted: false, sends: sends,
-        output: output, freeOutputs: [])
+        output: output, freeOutputs: [], automation: .read)
 }
 
 /// A mixer: Synth (built-in, one insert) and Bus 1, then Master.
