@@ -93,8 +93,8 @@ pub struct AutomationWrite {
     pub end: Tick,
     /// The new points, inside `[start, end]`, by tick.
     pub points: Vec<(Tick, f64)>,
-    /// The name of the lane made when no lane of `seq` holds the target's
-    /// automation.
+    /// The name of the lane made when no playing lane of `seq` holds the
+    /// target's automation.
     pub lane_name: String,
 }
 
@@ -316,19 +316,27 @@ fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
     Ok(())
 }
 
-/// Places one write (plan 5e-1 Ruling 4): the target's points in
-/// `[start, end]` leave the active take of every lane of `seq` that holds
-/// the target's automation, and the new points go into the first such
-/// lane, else into a new lane at the end named `lane_name`. Automation
-/// inside referenced sequences is left: their lanes cannot record (spec
-/// Ruling 15).
+/// Places one write (plan 5e-1 Ruling 4; final review I1): the target's
+/// points in `[start, end]` leave the active take of every lane of `seq`
+/// that plays and holds the target's automation, and the new points go
+/// into the first such lane, else into a new lane at the end named
+/// `lane_name`. A lane plays as `query::flatten` plays it, which is what
+/// the writer read: not muted, and soloed when any lane is; a muted or
+/// solo-silenced lane keeps its points. A new lane is soloed when another
+/// lane is, so that it plays. Automation inside referenced sequences is
+/// left: their lanes cannot record (spec Ruling 15).
 fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Result<()> {
     check_write(d, w)?;
     let is_target =
         |b: &EventBody| matches!(b, EventBody::Automation { target, .. } if *target == w.target);
     let mut first: Option<LaneId> = None;
     let mut gone = Vec::new();
-    for lane in &d.sequence(w.seq)?.lanes {
+    let seq = d.sequence(w.seq)?;
+    let any_solo = seq.lanes.iter().any(|l| l.solo);
+    for lane in &seq.lanes {
+        if lane.mute || (any_solo && !lane.solo) {
+            continue;
+        }
         let Some(take) = lane.active() else { continue };
         if !take.events.values().any(|e| is_target(&e.body)) {
             continue;
@@ -350,9 +358,9 @@ fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Re
         None => {
             let c = d.counters_mut();
             let (lane, take) = (c.alloc_lane(), c.alloc_take());
-            d.seq_mut(w.seq)?
-                .lanes
-                .push_back(Lane::new(lane, take, w.lane_name.clone()));
+            let mut new = Lane::new(lane, take, w.lane_name.clone());
+            new.solo = any_solo;
+            d.seq_mut(w.seq)?.lanes.push_back(new);
             r.created.extend([AnyId::Lane(lane), AnyId::Take(take)]);
             lane
         }

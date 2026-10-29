@@ -1,8 +1,10 @@
 //! Automation a pass wrote (plan 5e-1 Task 3; sub-project 5 spec §4.7,
 //! §7.3, §7.4): each write goes into the first lane of its sequence that
-//! already holds its target, else into a new lane at the end; it replaces
-//! the target's points in its range in every lane that holds the target
-//! (pre-flight I5), and nothing else; a bad write refuses the whole pass;
+//! plays and already holds its target, else into a new lane at the end;
+//! it replaces the target's points in its range in every playing lane
+//! that holds the target (pre-flight I5; final review I1: muted and
+//! solo-silenced lanes are left), and nothing else; a bad write refuses
+//! the whole pass;
 //! a pass with only automation is "Write Automation".
 
 use core_model::automation::AutomationTarget;
@@ -151,7 +153,7 @@ fn a_write_goes_into_the_first_lane_holding_its_target() {
 }
 
 /// Amended Ruling 4: a write removes the target's points in its range
-/// from every lane holding the target, and leaves their points outside
+/// from every playing lane holding the target, and leaves their points outside
 /// it.
 #[test]
 fn a_write_leaves_other_lanes_outside_its_range() {
@@ -283,4 +285,132 @@ fn a_pass_with_lanes_keeps_its_record_label() {
     assert_eq!(Command::Record(p.clone()).name(), "Record");
     p.lanes.clear();
     assert_eq!(Command::Record(p).name(), "Write Automation");
+}
+
+fn set_flags(d: &Document, lane: u64, mute: Option<bool>, solo: Option<bool>) -> Document {
+    apply(
+        d,
+        &Command::Lane(LaneCmd::SetFlags {
+            seq: SeqId(0),
+            lane: LaneId(lane),
+            mute,
+            solo,
+            arm: None,
+        }),
+    )
+    .unwrap()
+    .doc
+}
+
+fn insert(d: &Document, lane: u64, events: Vec<EventSpec>) -> Document {
+    apply(
+        d,
+        &Command::Event(EventCmd::Insert {
+            seq: SeqId(0),
+            lane: LaneId(lane),
+            events,
+        }),
+    )
+    .unwrap()
+    .doc
+}
+
+/// The master fader's automation as it plays (`query::flatten`, which
+/// honours lane mute, solo and the active take).
+fn heard(d: &Document) -> Vec<(i64, f64)> {
+    let mut v: Vec<(i64, f64)> =
+        core_model::query::flatten(d, SeqId(0), None, &ViewFilter::default())
+            .unwrap()
+            .filter_map(|e| match e.body {
+                EventBody::Automation { value, .. } => Some((e.tick.0, value)),
+                _ => None,
+            })
+            .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v
+}
+
+const RIDE: [(i64, f64); 4] = [(Q - 1, 0.5), (Q, 0.9), (4 * Q, 0.9), (4 * Q + 1, 0.5)];
+
+/// Final review I1: a write goes into the first lane that PLAYS its
+/// target, so what is written is what plays; a muted lane keeps its own
+/// points, inside the range too.
+#[test]
+fn a_write_skips_a_muted_first_lane() {
+    let d = doc();
+    let f = fader(&d);
+    let d = insert(&d, 1, vec![point(3 * Q, f, 0.1)]);
+    let d = set_flags(&d, 1, Some(true), None);
+    assert_eq!(heard(&d), vec![(2 * Q, 0.5)]);
+    let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert_eq!(heard(&out), RIDE.to_vec(), "the ride is what plays");
+    assert_eq!(
+        points(&out, 2),
+        RIDE.to_vec(),
+        "C (the playing lane) has it"
+    );
+    assert_eq!(
+        points(&out, 1),
+        vec![(0, 0.2), (3 * Q, 0.1), (8 * Q, 0.8)],
+        "the muted lane B is left alone"
+    );
+    assert_eq!(out.sequence(SeqId(0)).unwrap().lanes.len(), 3);
+}
+
+/// A lane silenced by another lane's solo does not play: the write goes
+/// into the soloed lane holding the target and leaves the silenced one.
+#[test]
+fn a_write_skips_a_lane_another_lanes_solo_silences() {
+    let d = set_flags(&doc(), 2, None, Some(true));
+    let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert_eq!(heard(&out), RIDE.to_vec());
+    assert_eq!(points(&out, 2), RIDE.to_vec());
+    assert_eq!(points(&out, 1), vec![(0, 0.2), (8 * Q, 0.8)]);
+}
+
+/// When no lane plays the target (here the note lane is soloed, which
+/// silences B and C), the write makes a new lane at the end, soloed so
+/// that it plays; the silent lanes keep their points.
+#[test]
+fn a_write_with_no_playing_lane_makes_a_new_playing_lane() {
+    let d = set_flags(&doc(), 0, None, Some(true));
+    assert!(heard(&d).is_empty());
+    let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
+    let mut h = History::new(d.clone());
+    h.execute(&Command::Record(pass(vec![w])), &ViewFilter::default())
+        .unwrap();
+    let out = h.doc().clone();
+    let s = out.sequence(SeqId(0)).unwrap();
+    assert_eq!(s.lanes.len(), 4);
+    let last = s.lanes.last().unwrap();
+    assert_eq!(last.name, "Master Fader");
+    assert!(last.solo && !last.mute, "the new lane plays under the solo");
+    assert_eq!(heard(&out), RIDE.to_vec());
+    assert_eq!(points(&out, 1), vec![(0, 0.2), (8 * Q, 0.8)]);
+    assert_eq!(points(&out, 2), vec![(2 * Q, 0.5)]);
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &d, "one undo takes the lane back");
+    // Every lane holding the target muted, no solo: a new, unsoloed lane.
+    let d = set_flags(&set_flags(&doc(), 1, Some(true), None), 2, Some(true), None);
+    let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    let s = out.sequence(SeqId(0)).unwrap();
+    assert_eq!(s.lanes.len(), 4);
+    assert!(!s.lanes.last().unwrap().solo);
+    assert_eq!(heard(&out), RIDE.to_vec());
+    assert_eq!(points(&out, 2), vec![(2 * Q, 0.5)]);
+}
+
+/// The reviewer's probe (final review I1): B (first, muted) and C
+/// (playing, a point at 2Q); before the fix the ride went into B and C's
+/// point went, so nothing was heard.
+#[test]
+fn the_final_review_probe_hears_the_ride() {
+    let d = set_flags(&doc(), 1, Some(true), None);
+    assert_eq!(heard(&d), vec![(2 * Q, 0.5)]);
+    let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert_eq!(heard(&out), RIDE.to_vec());
 }
