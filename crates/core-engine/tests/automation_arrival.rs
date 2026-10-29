@@ -541,6 +541,72 @@ fn flat_lanes_do_not_cut_runs_at_the_loop_seam() {
     assert_eq!(runs(true), plain, "flat lanes add no runs at the seams");
 }
 
+/// Final re-review m1 (plan 5e-1 Task 12): flatness at the seam is judged
+/// per side of the jump, so a lane written over the loop (points inside
+/// it, but one value on both sides of the seam) does not cut at every
+/// wrap either. 16 latent buses whose lanes have points at a quarter, a
+/// half and three quarters of a one-beat loop: no more runs than the
+/// point cuts at their distinct arrivals add (12 here), where judging the
+/// whole hull of the reads added one per bus at every wrap (76).
+#[test]
+fn lanes_with_points_inside_the_loop_do_not_cut_at_a_flat_seam() {
+    let runs = |latent: bool| -> u64 {
+        let mut b = Builder::new();
+        let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+        let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+        b.notes(seq, notes, &[(0, 60, 0x8000, 64 * Q)]).unwrap();
+        for i in 0..16u32 {
+            let bus = b.bus(&format!("B{i}")).unwrap();
+            let l = if latent { 1000 + i } else { 0 };
+            b.insert(bus, TestInserts::plugin(&format!("latency={l}")))
+                .unwrap();
+            for (t, v) in [
+                (0, 0.5),
+                (Q / 4, 0.5),
+                (Q / 2, 0.7),
+                (3 * Q / 4, 0.5),
+                (4 * Q, 0.5),
+            ] {
+                b.event(
+                    seq,
+                    notes,
+                    t,
+                    EventBody::Automation {
+                        target: AutomationTarget::StripFader(bus),
+                        value: v,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        let doc = b.finish();
+        let count = Arc::new(AtomicU64::new(0));
+        let (mut engine, renderer) =
+            Engine::new(EngineConfig::new(48_000.0), Box::new(OfflineSinks::new(64))).unwrap();
+        engine.set_insert_factory(Box::new(Counting(TestInserts::new(), Arc::clone(&count))));
+        engine.load(&doc, seq).unwrap();
+        engine.set_loop_range(Some((0, QF))).unwrap();
+        let mut out = OfflineBackend::new(48_000.0, BLOCK);
+        out.start(renderer).unwrap();
+        out.reserve(4096);
+        engine.play().unwrap();
+        for _ in 0..8 {
+            out.block(BLOCK);
+        }
+        let before = count.load(Ordering::Relaxed);
+        for _ in 0..200 {
+            out.block(BLOCK);
+        }
+        (count.load(Ordering::Relaxed) - before) / 16
+    };
+    let (plain, latent) = (runs(false), runs(true));
+    assert!(plain >= 200, "{plain}");
+    assert!(
+        latent <= plain + 16,
+        "no seam cut per bus at each wrap: {latent} runs against {plain}"
+    );
+}
+
 /// Task 4 review (parked): a send's level is an edge gain on the send
 /// edge, so it arrives at the fed bus's input time, not at the strip's
 /// main edge or its own output. A 150-frame Latent bus routed into Fx

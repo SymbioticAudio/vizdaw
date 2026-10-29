@@ -894,6 +894,10 @@ impl Renderer {
         }
         self.block_ns = time.host_time_ns;
         self.drain_commands();
+        // What is left queued (a deferred swap and what follows it): a
+        // command sent after this drain holds the gestures back (see
+        // `live_gestures`).
+        let queued = self.cmds.slots();
         // A count-in that ends at this block's start rolls the transport.
         let roll = self
             .counting
@@ -921,7 +925,7 @@ impl Renderer {
             }
         }
         self.live_midi();
-        self.live_gestures();
+        self.live_gestures(queued);
         self.measure_sends();
         let monitored = self.copy_monitored(input, frames);
         // No run is in flight (`try_finish` succeeded above): the streamer
@@ -1297,8 +1301,15 @@ impl Renderer {
     /// time as `live_midi` offsets MIDI, and heard the graph latency less
     /// its control's arrival after the renderer: the live value acts at
     /// once at a control that renders the timeline its arrival behind
-    /// (Task 5 review M3). // RT
-    fn live_gestures(&mut self) {
+    /// (Task 5 review M3). A gesture never acts before a command sent
+    /// before it: when a command arrived after this block drained them
+    /// (`queued` were left), the gestures wait for the next block, which
+    /// applies it first, so a Play's gesture tap is in before the touch
+    /// it must stamp (plan 5e-1 re-review N3). // RT
+    fn live_gestures(&mut self, queued: usize) {
+        if self.cmds.slots() > queued {
+            return;
+        }
         let sr = self.cfg.sample_rate;
         let block_ns = self.block_ns;
         let latency = i64::try_from(self.latency).unwrap_or(i64::MAX);
@@ -2021,10 +2032,12 @@ fn auto_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64) -> u64 {
 
 /// True when lane `lane` (points `pts`, arrival `a`) holds one value over
 /// everything a `run`-frame run starting at read frame `r` reads, though
-/// its read jumps `span` frames in: no point lies between the lowest and
-/// highest frame read, on either side of the jump, and the value is the
-/// same at both, so the run need not be cut at the jump (final review
-/// m1). False when either side reads silence. // RT
+/// its read jumps `span` frames in: on each side of the jump no point lies
+/// inside the frames read (after the side's first frame), and the value is
+/// the same at both ends of both sides, so the lane is one constant over
+/// the run and it need not be cut at the jump (final review m1; judged per
+/// side, not over the hull of both, final re-review m1). False when either
+/// side reads silence. // RT
 #[allow(clippy::too_many_arguments)]
 fn flat_across(
     auto: &crate::schedule::Automation,
@@ -2042,11 +2055,21 @@ fn flat_across(
     let Some(g) = regions.read_frame_at(a, k) else {
         return false;
     };
-    let lo = f0.min(g);
-    let hi = f0.saturating_add(run).max(g.saturating_add(run - span));
-    let next = pts.partition_point(|p| p.frame <= lo);
-    pts.get(next).is_none_or(|p| p.frame > hi)
-        && auto.value(lane, lo, false) == auto.value(lane, hi, false)
+    // No point in `(from, to]`: the lane is one straight piece there.
+    let clear = |from: u64, to: u64| {
+        let next = pts.partition_point(|p| p.frame <= from);
+        pts.get(next).is_none_or(|p| p.frame > to)
+    };
+    let (b0, g1) = (
+        f0.saturating_add(span),
+        g.saturating_add(run.saturating_sub(span)),
+    );
+    let v = auto.value(lane, f0, false);
+    clear(f0, b0)
+        && clear(g, g1)
+        && auto.value(lane, b0, false) == v
+        && auto.value(lane, g, false) == v
+        && auto.value(lane, g1, false) == v
 }
 
 /// The frame a lane with arrival `arrival` reads at in the run starting
