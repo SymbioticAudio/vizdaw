@@ -677,6 +677,7 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         return Ok(None);
     }
     Ok(Some(RecordPass {
+        automation: Vec::new(),
         with_gaps: c.with_gaps,
         media,
         lanes,

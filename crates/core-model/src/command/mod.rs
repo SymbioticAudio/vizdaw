@@ -20,7 +20,10 @@ pub use event::EventCmd;
 pub use lane::LaneCmd;
 pub use media::{MediaCmd, MediaSwap};
 pub use mixer::MixerCmd;
-pub use record::{LaneRecord, RecordPass, RecordedContent, RecordedMedia, RecordedRegion};
+pub use record::{
+    AutomationWrite, LaneRecord, MAX_WRITE_POINTS, RecordPass, RecordedContent, RecordedMedia,
+    RecordedRegion,
+};
 pub use reference::ReferenceCmd;
 pub use routing::RoutingCmd;
 pub use sequence::SequenceCmd;
