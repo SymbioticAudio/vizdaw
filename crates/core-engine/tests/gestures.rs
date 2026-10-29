@@ -888,3 +888,66 @@ fn a_trim_while_stopped_plays_over_the_heard_automation() {
     r.blocks(4);
     assert!(near(r.fader_db(r.synth), -8.0), "{:?}", r.fader_db(r.synth));
 }
+
+/// Plan 5e-1 re-review N3, Task 12 review m3/m4: a gesture never acts
+/// before an engine command sent before it. Here the commands that swap
+/// the gesture tap wait behind a deferred swap (the retire ring full, the
+/// collector paused), and the touch sent after them waits too: it is
+/// neither heard nor stamped on the old tap, and once the swap goes
+/// through it is stamped on the new tap.
+#[test]
+fn a_gesture_waits_for_the_commands_sent_before_it() {
+    let mut b = Builder::new();
+    let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0x8000, 64 * Q)]).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let bus = b.bus("Bus").unwrap();
+    let insert = b.insert(bus, TestInserts::plugin("gain=1")).unwrap();
+    let doc = b.finish();
+    let mut r = rig_of(&doc, seq, synth, bus, insert);
+    let mut old = r.engine.start_gestures().unwrap();
+    r.engine.play().unwrap();
+    r.blocks(2);
+    assert!(old.status.rolled());
+    r.engine.pause_collector(true);
+    // Each load retires a schedule and a graph: fill the ring.
+    for _ in 0..core_engine::render::RETIRE_CAPACITY / 2 {
+        r.engine.load(&doc, seq).unwrap();
+        r.blocks(1);
+    }
+    // This swap is deferred; the tap swap waits behind it.
+    r.engine.load(&doc, seq).unwrap();
+    r.engine.stop_gestures().unwrap();
+    let mut new = r.engine.start_gestures().unwrap();
+    let f = fader(synth);
+    r.send(f, GesturePhase::Touch(0.25));
+    r.blocks(3);
+    assert!(
+        r.engine
+            .faults()
+            .contains(core_engine::render::Faults::SWAP_DEFERRED)
+    );
+    assert!(r.fader_db(synth).is_none(), "not heard before the commands");
+    assert!(drain(&mut old).1.is_empty(), "not stamped on the old tap");
+    r.engine.pause_collector(false);
+    let start = std::time::Instant::now();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        r.blocks(1);
+        if r.fader_db(synth).is_some() {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "the swap stayed deferred"
+        );
+    }
+    let (_, stamps) = drain(&mut new);
+    assert!(
+        stamps
+            .iter()
+            .any(|s| s.dest == f && s.phase == GesturePhase::Touch(0.25)),
+        "stamped on the new tap: {stamps:?}"
+    );
+}

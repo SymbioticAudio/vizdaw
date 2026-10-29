@@ -241,6 +241,8 @@ pub struct Engine {
     midi_tx: crate::input::MidiSender,
     /// Feeds the renderer's gesture queue (plan 5e-1 Ruling 6).
     gesture_tx: crate::gesture::GestureSender,
+    /// Commands sent so far (the gesture queue's order, Task 12 review m3).
+    cmds_sent: Arc<AtomicU64>,
     /// Automation is suspended (spec §7.5); read by the next load.
     automation_suspended: bool,
     /// The routes last sent to the renderer: a load sends them only when
@@ -329,7 +331,8 @@ impl Engine {
             None
         };
         let (midi_tx, midi_rx) = crate::input::midi_queue();
-        let (gesture_tx, gesture_rx) = crate::gesture::gesture_queue();
+        let cmds_sent = Arc::new(AtomicU64::new(0));
+        let (gesture_tx, gesture_rx) = crate::gesture::gesture_queue(Arc::clone(&cmds_sent));
         let (streamer, reader) =
             Streamer::new(cfg.sample_rate, cfg.stream, cfg.disk).map_err(|e| {
                 EngineError::Thread {
@@ -388,6 +391,7 @@ impl Engine {
             input_spec: crate::input::InputSpec::default(),
             midi_tx,
             gesture_tx,
+            cmds_sent,
             automation_suspended: false,
             inputs_sent: crate::input::InputRoutes::default(),
             return_dests: Vec::new(),
@@ -941,7 +945,10 @@ impl Engine {
     }
 
     fn push(&mut self, cmd: EngineCmd) -> Result<(), EngineError> {
-        self.cmds.push(cmd).map_err(|_| EngineError::Busy)
+        self.cmds.push(cmd).map_err(|_| EngineError::Busy)?;
+        // Counted once queued: a gesture sent from now on waits for it.
+        self.cmds_sent.fetch_add(1, Ordering::Release);
+        Ok(())
     }
 
     /// Sends a note on (`on`) or off for `pitch` straight to the targets

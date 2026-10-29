@@ -63,8 +63,23 @@ pub struct GestureMsg {
 /// Control-side threads only; never the RT thread.
 #[derive(Clone)]
 pub struct GestureSender {
-    tx: Arc<Mutex<Producer<GestureMsg>>>,
+    tx: Arc<Mutex<Producer<Queued>>>,
     dropped: Arc<AtomicU64>,
+    /// The engine's commands sent so far ([`Queued::after`]).
+    sent: Arc<AtomicU64>,
+}
+
+/// A gesture in the queue with the number of engine commands sent before
+/// it: the renderer applies it only once it applied that many, so a
+/// gesture never acts before a command sent before it (a Play's gesture
+/// tap is in before the touch it must stamp; plan 5e-1 re-review N3,
+/// Task 12 review m3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Queued {
+    /// The message.
+    pub msg: GestureMsg,
+    /// Engine commands sent before it.
+    pub after: u64,
 }
 
 impl std::fmt::Debug for GestureSender {
@@ -79,12 +94,11 @@ impl GestureSender {
         // Pre-flight I3: a blocking lock, so two senders at once never
         // drop. A sender that panicked while pushing left the producer
         // sound (`push` either wrote the slot or did not).
-        let ok = self
-            .tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(m)
-            .is_ok();
+        let mut tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        // Read under the lock: queued in the order of what they follow.
+        let after = self.sent.load(Ordering::Acquire);
+        let ok = tx.push(Queued { msg: m, after }).is_ok();
+        drop(tx);
         if !ok {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -97,13 +111,15 @@ impl GestureSender {
     }
 }
 
-/// The gesture queue: the sender and the renderer's end.
-pub(crate) fn gesture_queue() -> (GestureSender, Consumer<GestureMsg>) {
+/// The gesture queue: the sender and the renderer's end. `sent` counts
+/// the engine's commands sent ([`Queued::after`]).
+pub(crate) fn gesture_queue(sent: Arc<AtomicU64>) -> (GestureSender, Consumer<Queued>) {
     let (tx, rx) = RingBuffer::new(GESTURE_CAPACITY);
     (
         GestureSender {
             tx: Arc::new(Mutex::new(tx)),
             dropped: Arc::new(AtomicU64::new(0)),
+            sent,
         },
         rx,
     )

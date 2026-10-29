@@ -574,7 +574,9 @@ pub struct Renderer {
     /// MIDI from sources (spec §6.6).
     midi_in: Consumer<MidiIn>,
     /// Gestures from the control side (spec §7.1; plan 5e-1 Ruling 6).
-    gesture_in: Consumer<crate::gesture::GestureMsg>,
+    /// Commands applied so far (see `live_gestures`).
+    cmds_applied: u64,
+    gesture_in: Consumer<crate::gesture::Queued>,
     /// The touched targets (boxed: the renderer moves between threads by
     /// value).
     live: Box<crate::gesture::LiveTable>,
@@ -723,7 +725,7 @@ impl Renderer {
         pool: Option<Arc<PoolShared>>,
         reader: core_media::stream::StreamReader,
         midi_in: Consumer<MidiIn>,
-        gesture_in: Consumer<crate::gesture::GestureMsg>,
+        gesture_in: Consumer<crate::gesture::Queued>,
     ) -> Renderer {
         let mut r = Renderer {
             cfg,
@@ -750,6 +752,7 @@ impl Renderer {
             gestures: None,
             midi_in,
             gesture_in,
+            cmds_applied: 0,
             live: Box::new(crate::gesture::LiveTable::new()),
             inputs: None,
             thru: Box::default(),
@@ -894,10 +897,6 @@ impl Renderer {
         }
         self.block_ns = time.host_time_ns;
         self.drain_commands();
-        // What is left queued (a deferred swap and what follows it): a
-        // command sent after this drain holds the gestures back (see
-        // `live_gestures`).
-        let queued = self.cmds.slots();
         // A count-in that ends at this block's start rolls the transport.
         let roll = self
             .counting
@@ -925,7 +924,7 @@ impl Renderer {
             }
         }
         self.live_midi();
-        self.live_gestures(queued);
+        self.live_gestures();
         self.measure_sends();
         let monitored = self.copy_monitored(input, frames);
         // No run is in flight (`try_finish` succeeded above): the streamer
@@ -1302,21 +1301,24 @@ impl Renderer {
     /// its control's arrival after the renderer: the live value acts at
     /// once at a control that renders the timeline its arrival behind
     /// (Task 5 review M3). A gesture never acts before a command sent
-    /// before it: when a command arrived after this block drained them
-    /// (`queued` were left), the gestures wait for the next block, which
-    /// applies it first, so a Play's gesture tap is in before the touch
-    /// it must stamp (plan 5e-1 re-review N3). // RT
-    fn live_gestures(&mut self, queued: usize) {
-        if self.cmds.slots() > queued {
-            return;
-        }
+    /// before it: it waits in the queue until the renderer has applied as
+    /// many commands as were sent before it (a command still deferred or
+    /// sent during this block), so a Play's gesture tap is in before the
+    /// touch it must stamp (plan 5e-1 re-review N3, Task 12 review m3).
+    /// Commands sent after it never hold it back. // RT
+    fn live_gestures(&mut self) {
         let sr = self.cfg.sample_rate;
         let block_ns = self.block_ns;
         let latency = i64::try_from(self.latency).unwrap_or(i64::MAX);
         for _ in 0..crate::gesture::GESTURES_PER_BLOCK {
-            let Ok(m) = self.gesture_in.pop() else {
+            match self.gesture_in.peek() {
+                Ok(q) if q.after <= self.cmds_applied => {}
+                _ => break,
+            }
+            let Ok(q) = self.gesture_in.pop() else {
                 break;
             };
+            let m = q.msg;
             if !self.live.apply(m.dest, m.phase) {
                 self.shared.count_gesture_drop();
             }
@@ -1433,6 +1435,7 @@ impl Renderer {
             let Ok(cmd) = self.cmds.pop() else {
                 break;
             };
+            self.cmds_applied = self.cmds_applied.saturating_add(1);
             self.apply(cmd);
         }
     }
