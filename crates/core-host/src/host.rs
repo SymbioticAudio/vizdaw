@@ -565,6 +565,36 @@ impl PluginHost {
         }
     }
 
+    /// Puts parameter `param` of running instance `id` back to what the
+    /// document says: its overlay value, else its value before the
+    /// overlay. A value the document never caught up with (one sent by
+    /// [`PluginHost::set_param`] or by the plugin's own window) is dropped
+    /// (plan 5e-1 Ruling 15: a ride written as automation leaves the static
+    /// value as it was). What does not fit the queue is left as it was.
+    pub fn reset_param(&mut self, id: PluginInstanceId, param: ParamId) {
+        let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
+            return;
+        };
+        let State::Live(l) = state else {
+            return;
+        };
+        let overlay = want.params.get(&param).copied();
+        let Some(v) = overlay.or_else(|| l.base.get(&param).copied()) else {
+            return;
+        };
+        if push(l, param, v) {
+            l.pending.remove(&param);
+            match overlay {
+                Some(v) => {
+                    l.sent.insert(param, v);
+                }
+                None => {
+                    l.sent.remove(&param);
+                }
+            }
+        }
+    }
+
     /// Call after every committed edit (and on open): starts loading the
     /// slots `doc` gained, drops the ones it lost, and sends overlay and
     /// state changes to running instances. Returns true when no load is in

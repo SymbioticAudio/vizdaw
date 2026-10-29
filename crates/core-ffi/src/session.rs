@@ -155,6 +155,11 @@ struct Inner {
     /// The plugin windows' touches (Ruling 15): a value-only plugin's are
     /// released 500 ms after its last value.
     plugin_touches: PluginTouches,
+    /// The document whose plugin-parameter automation `plugin_auto`
+    /// holds (Task 9 review I-1): its sequences are compared by pointer.
+    plugin_auto_doc: Document,
+    /// Every plugin parameter's automation in `plugin_auto_doc`.
+    plugin_auto: std::collections::BTreeMap<AutomationTarget, Vec<(SeqId, Tick, u64)>>,
     /// Gesture ends the engine's queue refused (Ruling 10).
     unsent_ends: UnsentEnds,
     /// The pass writing while playing (Rulings 7, 23, 24).
@@ -205,6 +210,8 @@ struct News {
 impl Inner {
     fn new(doc: Document, path: Option<PathBuf>) -> Inner {
         let key = path.as_deref().map(recovery::key);
+        let plugin_auto = crate::automation::plugin_automation(&doc);
+        let plugin_auto_doc = doc.clone();
         Inner {
             key,
             revs: crate::revs::Revisions::new(&doc),
@@ -248,6 +255,8 @@ impl Inner {
             static_edit: None,
             sampler: Sampler::default(),
             plugin_touches: PluginTouches::default(),
+            plugin_auto_doc,
+            plugin_auto,
             unsent_ends: UnsentEnds::default(),
             writing: None,
             pending_automation: Vec::new(),
@@ -875,6 +884,7 @@ impl Session {
         if crate::edit::retries_input_cmd(&cmd) {
             records_busy(&inner)?;
         }
+        let before = inner.doc().clone();
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
         // An arm or input change that went through lets a failed input
@@ -887,6 +897,7 @@ impl Session {
         self.mark(&mut inner);
         // Touches of what the edit removed end (plan 5e-1 M9).
         self.release_vanished(&mut inner);
+        self.resync_plugin_automation(&mut inner, Some(&before));
         inner.snapshot()
     }
 
@@ -1020,6 +1031,7 @@ impl Session {
         inner.reload_host(self.id);
         self.mark(&mut inner);
         self.release_vanished(&mut inner);
+        self.resync_plugin_automation(&mut inner, Some(&before));
         let snapshot = inner.snapshot()?;
         // An undone or redone arm, monitor or input edit claims as the
         // edit did (Task 8 review m6).
@@ -1719,6 +1731,9 @@ impl Session {
                 inner.reload_host(self.id);
             }
             let changed = self.pump(&mut inner);
+            // Every other path that changes a plugin parameter's
+            // automation (Task 9 review I-1).
+            self.resync_plugin_automation(&mut inner, None);
             // Jobs applied when an edit closed (outside `idle`) count too.
             let owed = std::mem::take(&mut inner.news.media_changed);
             let jobs_changed = self.apply_jobs(&mut inner);
@@ -4964,6 +4979,7 @@ impl Session {
         self.mark(inner);
         if !landed.is_empty() {
             self.sync_written_plugins(inner, &landed);
+            self.resync_plugin_automation(inner, None);
         }
         self.release_vanished(inner);
         self.save_after_pass_now(inner);
@@ -5752,17 +5768,7 @@ impl Session {
             let driven =
                 seq.is_some_and(|s| !crate::automation::existing(inner.doc(), s, t).is_empty());
             if !driven {
-                let info = crate::automation::param_info(self.id, t);
-                let v = crate::automation::fixed_value(inner.doc(), t, info.as_ref());
-                if let (Some(info), AutomationTarget::PluginParam(slot, param)) = (info, t) {
-                    let plain =
-                        core_model::automation::param_plain(v, info.min, info.max, info.stepped);
-                    let _ = plugins::with(self.id, |p| {
-                        if let Some(p) = p {
-                            p.set_param(slot, param, plain);
-                        }
-                    });
-                }
+                self.reset_plugin_param(t);
             }
         }
     }
@@ -5837,7 +5843,10 @@ impl Session {
     /// parameter's range (one the instance does not list is skipped), goes
     /// through [`PluginTouches`] onto the gesture path as `Source::Plugin`,
     /// stamped at the drain time. A target the app touches (plan 5e-2's
-    /// sliders) is the app's: the plugin's report of it is skipped. Answers
+    /// sliders) is the app's: the plugin's report of it is skipped (so a
+    /// knob the plugin grabbed while the app held it is, once the app lets
+    /// go, a value-only touch, released 500 ms after its last move; review
+    /// m4). Answers
     /// the parameters on a writing path (touched as a write in these
     /// events, or still touched as one), whose grouped gestures are not
     /// parameter steps (pre-flight M13).
@@ -5851,6 +5860,9 @@ impl Session {
         if !events.is_empty() {
             let slots: std::collections::BTreeSet<PluginInstanceId> =
                 events.iter().map(|(s, _)| *s).collect();
+            // `pump` has just borrowed the registry, so this does not fail
+            // today; if it did, Begin and Value wait for nothing (they are
+            // dropped) but an End still releases (review m3).
             let ranges = plugins::with(self.id, |p| {
                 let mut out = std::collections::BTreeMap::new();
                 let Some(p) = p else {
@@ -5864,8 +5876,9 @@ impl Session {
                     }
                 }
                 out
-            })
-            .unwrap_or_default();
+            });
+            let busy = ranges.is_err();
+            let ranges = ranges.unwrap_or_default();
             // Up to one timer tick late (pre-flight M12).
             let ns = host_time(None);
             let now = crate::automation::now();
@@ -5887,15 +5900,14 @@ impl Session {
                     ParamEvent::Value(p, v) => (p, PluginMove::Value(v)),
                     ParamEvent::End(p) => (p, PluginMove::End),
                 };
-                let Some(&(min, max)) = ranges.get(&(*slot, param)) else {
-                    continue;
-                };
-                let m = match m {
-                    PluginMove::Value(v) if max > min => {
-                        PluginMove::Value(core_model::automation::unit((v - min) / (max - min)))
+                let m = match (ranges.get(&(*slot, param)), m) {
+                    (Some(&(min, max)), PluginMove::Value(v)) => {
+                        PluginMove::Value(crate::automation::norm(v, min, max))
                     }
-                    PluginMove::Value(_) => PluginMove::Value(0.5),
-                    m => m,
+                    (Some(_), m) => m,
+                    (None, PluginMove::End) if busy => PluginMove::End,
+                    // A parameter the instance does not list.
+                    (None, _) => continue,
                 };
                 let t = AutomationTarget::PluginParam(*slot, param);
                 if inner
@@ -5986,6 +5998,89 @@ impl Session {
                 self.release(inner, t, ns);
             }
         }
+    }
+
+    /// Task 9 review I-1 (Ruling 15, "the static value stays"): after a
+    /// change that added, removed or changed a plugin parameter's
+    /// automation (an undo or redo of a pass, a lane deleted, a landing),
+    /// the plugin is sent what now plays there: the automation's value at
+    /// the position where the playing (or last) sequence automates it,
+    /// else its static value. A target touched now is left to the hand.
+    ///
+    /// `before` is the document the change started from, when the caller
+    /// has it; else the one last seen here (every edit, undo, redo and
+    /// landing calls this, and `idle` catches the rest).
+    fn resync_plugin_automation(&self, inner: &mut Inner, before: Option<&Document>) {
+        let doc = inner.doc().clone();
+        let seen = inner.plugin_auto_doc.sequences().ptr_eq(doc.sequences());
+        // The change from `before` (an undo can come back to the very
+        // document last seen here, so that alone says nothing).
+        let from_before = before
+            .filter(|b| !b.sequences().ptr_eq(doc.sequences()))
+            .map(crate::automation::plugin_automation);
+        if seen && from_before.is_none() {
+            return;
+        }
+        let now = crate::automation::plugin_automation(&doc);
+        let cached = std::mem::take(&mut inner.plugin_auto);
+        let mut changed: std::collections::BTreeSet<AutomationTarget> = Default::default();
+        for old in std::iter::once(&cached).chain(from_before.as_ref()) {
+            changed.extend(
+                old.keys()
+                    .chain(now.keys())
+                    .filter(|t| old.get(t) != now.get(t))
+                    .copied(),
+            );
+        }
+        inner.plugin_auto = now;
+        inner.plugin_auto_doc = doc;
+        if changed.is_empty() {
+            return;
+        }
+        let (seq, tick) = match host::position(self.id) {
+            Some((s, t)) => (Some(s), Some(t)),
+            None => (inner.cursor_seq, inner.cursor),
+        };
+        let tick = tick.unwrap_or(Tick::ZERO);
+        for t in changed {
+            if inner.touches.contains_key(&t) {
+                continue;
+            }
+            let AutomationTarget::PluginParam(slot, param) = t else {
+                continue;
+            };
+            let points =
+                seq.map_or_else(Vec::new, |s| crate::automation::existing(inner.doc(), s, t));
+            if points.is_empty() {
+                self.reset_plugin_param(t);
+                continue;
+            }
+            let Some(info) = crate::automation::param_info(self.id, t) else {
+                continue;
+            };
+            let Some(v) = crate::automation::value_at(&points, tick, self.stepped(t)) else {
+                continue;
+            };
+            let plain = core_model::automation::param_plain(v, info.min, info.max, info.stepped);
+            let _ = plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    p.set_param(slot, param, plain);
+                }
+            });
+        }
+    }
+
+    /// Puts plugin parameter `t` back at its static value: the document's
+    /// overlay, else the plugin's own value before it (no commit).
+    fn reset_plugin_param(&self, t: AutomationTarget) {
+        let AutomationTarget::PluginParam(slot, param) = t else {
+            return;
+        };
+        let _ = plugins::with(self.id, |p| {
+            if let Some(p) = p {
+                p.reset_param(slot, param);
+            }
+        });
     }
 
     /// Ends kept gesture messages the queue refused, while it refuses them
@@ -6469,6 +6564,7 @@ impl Session {
         inner.reload_host(self.id);
         self.mark(inner);
         self.sync_written_plugins(inner, &writes);
+        self.resync_plugin_automation(inner, None);
         self.release_vanished(inner);
     }
 

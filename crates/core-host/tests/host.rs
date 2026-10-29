@@ -890,6 +890,29 @@ fn a_gesture_the_host_closes_reports_its_end() {
     drop(engine);
 }
 
+/// Task 9 review m6 (pre-flight I7): a plugin that restarts while its
+/// gesture is open reports an End for it, from the restart path.
+#[test]
+fn a_restart_reports_the_end_of_its_open_gesture() {
+    let (hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.5)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(r.param_events.len(), 2);
+    script.restart.store(true, Ordering::Relaxed);
+    let mut seen = Vec::new();
+    for _ in 0..500 {
+        seen.extend(tick(&mut host, &mut engine, &mut be, &hist, song).param_events);
+        if !seen.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(seen, vec![(id, ParamEvent::End(GAIN))]);
+    drop(engine);
+}
+
 #[test]
 fn a_restart_in_the_middle_of_a_gesture_does_not_lose_it() {
     let (hist, song, _id, mut host, script) = with_fake();

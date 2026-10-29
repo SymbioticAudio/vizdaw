@@ -313,3 +313,63 @@ fn a_ui_gesture_on_a_plugin_parameter_reaches_the_plugin() {
     s.undo().unwrap();
     idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
 }
+
+/// Task 9 review I-1 (plan 5e-1 Ruling 15: "the static value stays"): a
+/// ride on a Latch strip, from the plugin's own window or from the app,
+/// leaves the plugin at the ride's value while its lane plays; undoing
+/// "Write Automation" puts the plugin back at its static value (Gain's
+/// 1.0), a redo plays the lane's value again, and a save after the undo
+/// keeps the static value in the plugin's state.
+#[test]
+fn undoing_a_plugin_parameter_write_puts_back_its_static_value() {
+    use vizdaw_ffi::AutomationTargetRow as Target;
+    use vizdaw_ffi::automation::{AutomationModeRow, GesturePhaseRow as Phase};
+    let _g = serial();
+    for from_plugin in [true, false] {
+        let (d, s, id) = playing_gain();
+        let synth = s.mixer().unwrap().strips[0].id;
+        let before = param(&s, id, GAIN).value;
+        assert_eq!(before, 1.0);
+        s.set_automation_mode(vec![synth], AutomationModeRow::Latch)
+            .unwrap();
+        let ridden = if from_plugin {
+            s.set_param(id, WIGGLE, 0.4).unwrap();
+            0.4
+        } else {
+            let t = Target::PluginParam {
+                slot: id,
+                param: GAIN,
+            };
+            s.gesture(t, Phase::Touch { value: Some(0.25) }).unwrap();
+            std::thread::sleep(Duration::from_millis(15));
+            s.gesture(t, Phase::Value { value: 0.3 }).unwrap();
+            s.gesture(t, Phase::Release).unwrap();
+            0.6
+        };
+        let t0 = Instant::now();
+        idle_until(&s, |_| t0.elapsed() > Duration::from_millis(400));
+        s.stop().unwrap();
+        idle_until(&s, |s| {
+            s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
+        });
+        idle_until(&s, |s| (param(s, id, GAIN).value - ridden).abs() < 1e-6);
+        s.undo().unwrap();
+        idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
+        s.redo().unwrap();
+        idle_until(&s, |s| (param(s, id, GAIN).value - ridden).abs() < 1e-6);
+        s.undo().unwrap();
+        idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
+        s.save().unwrap();
+        let path = d.path().join("p.vizdaw").to_string_lossy().into_owned();
+        drop(s);
+        let s = Session::open(path).unwrap();
+        idle_until(&s, |s| {
+            s.plugin_slots().unwrap()[0].status == SlotStatus::Live
+        });
+        assert_eq!(
+            param(&s, id, GAIN).value,
+            before,
+            "from the plugin: {from_plugin}"
+        );
+    }
+}

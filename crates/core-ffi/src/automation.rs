@@ -673,12 +673,44 @@ pub(crate) struct ParamInfo {
 impl ParamInfo {
     /// A plain value, normalised by the range.
     pub fn norm(&self, plain: f64) -> f64 {
-        if self.max > self.min {
-            unit((plain - self.min) / (self.max - self.min))
-        } else {
-            0.5
+        norm(plain, self.min, self.max)
+    }
+}
+
+/// Plain value `plain` of a parameter ranging `min`–`max`, normalised
+/// (clamped to 0–1; 0.5 for an empty range).
+pub(crate) fn norm(plain: f64, min: f64, max: f64) -> f64 {
+    if max > min {
+        unit((plain - min) / (max - min))
+    } else {
+        0.5
+    }
+}
+
+/// Every plugin parameter's automation in `doc`, every take of every lane
+/// of every sequence, as `(sequence, tick, value bits)`: compared before
+/// and after a change to find the parameters whose automation it added,
+/// removed or changed (Task 9 review I-1).
+pub(crate) fn plugin_automation(
+    doc: &Document,
+) -> BTreeMap<AutomationTarget, Vec<(SeqId, Tick, u64)>> {
+    let mut out: BTreeMap<AutomationTarget, Vec<(SeqId, Tick, u64)>> = BTreeMap::new();
+    for (id, seq) in doc.sequences() {
+        for lane in &seq.lanes {
+            for take in &lane.takes {
+                for e in take.events.values() {
+                    if let EventBody::Automation { target, value } = &e.body {
+                        if matches!(target, AutomationTarget::PluginParam(..)) {
+                            out.entry(*target)
+                                .or_default()
+                                .push((*id, e.tick, value.to_bits()));
+                        }
+                    }
+                }
+            }
         }
     }
+    out
 }
 
 /// The host's word on `t` (a plugin parameter) in session `owner`'s
@@ -1087,6 +1119,18 @@ mod tests {
         assert!(
             p.event(t, PluginMove::End, ms(9002), false).is_empty(),
             "an End with no touch"
+        );
+        // A Begin on a value-only touch (review m7): from then on only its
+        // End releases it.
+        assert_eq!(
+            p.event(t, PluginMove::Value(0.6), ms(9100), false),
+            vec![Move::Touch(Some(0.6))]
+        );
+        assert!(p.event(t, PluginMove::Begin, ms(9110), false).is_empty());
+        assert!(p.idle(ms(9700)).is_empty(), "gesture-driven now");
+        assert_eq!(
+            p.event(t, PluginMove::End, ms(9800), false),
+            vec![Move::Release]
         );
         // Pre-flight I8: an automated parameter's value-only events are
         // echoes of playback; a Begin still touches it.
