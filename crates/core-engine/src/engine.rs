@@ -239,6 +239,12 @@ pub struct Engine {
     input_spec: crate::input::InputSpec,
     /// Feeds the renderer's MIDI input queue.
     midi_tx: crate::input::MidiSender,
+    /// Feeds the renderer's gesture queue (plan 5e-1 Ruling 6).
+    gesture_tx: crate::gesture::GestureSender,
+    /// Commands sent so far (the gesture queue's order, Task 12 review m3).
+    cmds_sent: Arc<AtomicU64>,
+    /// Automation is suspended (spec §7.5); read by the next load.
+    automation_suspended: bool,
     /// The routes last sent to the renderer: a load sends them only when
     /// they change, so a load still retires just a schedule and a graph.
     inputs_sent: crate::input::InputRoutes,
@@ -325,6 +331,8 @@ impl Engine {
             None
         };
         let (midi_tx, midi_rx) = crate::input::midi_queue();
+        let cmds_sent = Arc::new(AtomicU64::new(0));
+        let (gesture_tx, gesture_rx) = crate::gesture::gesture_queue(Arc::clone(&cmds_sent));
         let (streamer, reader) =
             Streamer::new(cfg.sample_rate, cfg.stream, cfg.disk).map_err(|e| {
                 EngineError::Thread {
@@ -345,6 +353,7 @@ impl Engine {
             pool.as_ref().map(Pool::handle),
             reader,
             midi_rx,
+            gesture_rx,
         );
         let engine = Engine {
             cfg,
@@ -381,6 +390,9 @@ impl Engine {
             stream_seen: (AtomicU64::new(0), AtomicU64::new(0)),
             input_spec: crate::input::InputSpec::default(),
             midi_tx,
+            gesture_tx,
+            cmds_sent,
+            automation_suspended: false,
             inputs_sent: crate::input::InputRoutes::default(),
             return_dests: Vec::new(),
         };
@@ -445,6 +457,18 @@ impl Engine {
         &self.targets
     }
 
+    /// Whether automation is suspended (spec §7.5): the next
+    /// [`Engine::load`] compiles with it.
+    pub fn set_automation_suspended(&mut self, on: bool) {
+        self.automation_suspended = on;
+    }
+
+    /// Whether the next [`Engine::load`] compiles with automation
+    /// suspended.
+    pub fn automation_suspended(&self) -> bool {
+        self.automation_suspended
+    }
+
     /// Compiles `seq` and the mixer graph and sends them (and sinks for new
     /// targets) to the renderer. Call again after every committed edit.
     pub fn load(&mut self, doc: &Document, seq: SeqId) -> Result<CompileReport, EngineError> {
@@ -464,6 +488,7 @@ impl Engine {
                 .filter(|m| !self.online.contains(m))
                 .copied()
                 .collect(),
+            suspend_automation: self.automation_suspended,
         };
         let (sr, max) = (self.cfg.sample_rate, self.block_frames());
         // Indices released by an earlier load are free only once a load
@@ -920,7 +945,10 @@ impl Engine {
     }
 
     fn push(&mut self, cmd: EngineCmd) -> Result<(), EngineError> {
-        self.cmds.push(cmd).map_err(|_| EngineError::Busy)
+        self.cmds.push(cmd).map_err(|_| EngineError::Busy)?;
+        // Counted once queued: a gesture sent from now on waits for it.
+        self.cmds_sent.fetch_add(1, Ordering::Release);
+        Ok(())
     }
 
     /// Sends a note on (`on`) or off for `pitch` straight to the targets
@@ -1244,6 +1272,18 @@ impl Engine {
         self.push(EngineCmd::Record(None))
     }
 
+    /// Installs a gesture tap (replacing one installed): from the next block that plays, gestures are stamped and the transport marked. Returns the control side.
+    pub fn start_gestures(&mut self) -> Result<crate::gesture::GestureHandles, EngineError> {
+        let (tap, handles) = crate::gesture::gesture_tap(self.latency);
+        self.push(EngineCmd::Gestures(Some(Box::new(tap))))?;
+        Ok(handles)
+    }
+
+    /// Removes the gesture tap; its status reads closed.
+    pub fn stop_gestures(&mut self) -> Result<(), EngineError> {
+        self.push(EngineCmd::Gestures(None))
+    }
+
     /// What lanes listen to (spec §6.6); the next [`Engine::load`]
     /// resolves and publishes it.
     pub fn set_inputs(&mut self, spec: crate::input::InputSpec) {
@@ -1259,6 +1299,20 @@ impl Engine {
     /// `midi.inject`).
     pub fn midi_sender(&self) -> crate::input::MidiSender {
         self.midi_tx.clone()
+    }
+
+    /// Feeds this engine's gesture queue (plan 5e-1 Ruling 6; control-side
+    /// threads only).
+    pub fn gesture_sender(&self) -> crate::gesture::GestureSender {
+        self.gesture_tx.clone()
+    }
+
+    /// Gestures dropped so far: the queue's (full) and the renderer's (a
+    /// touch with no free live entry).
+    pub fn gestures_dropped(&self) -> u64 {
+        self.gesture_tx
+            .dropped()
+            .saturating_add(self.shared.gestures_dropped())
     }
 
     /// The destinations whose return the loaded sequence's lanes record

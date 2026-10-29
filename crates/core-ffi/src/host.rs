@@ -1120,8 +1120,10 @@ fn audio_input_channels_body() -> Option<crate::live::InputChannelsRow> {
     let device = lock(&INPUT_DEVICE).clone();
     let (channels, names) = if offline_mode() {
         // As an offline host's input (`OfflineBackend`): the fake input's
-        // channels, named as it names them.
-        let _ = fake_input().filter(|_| device.is_none())?;
+        // channels, named as it names them. The input that host opens,
+        // which the fake synth brings when no input was chosen (5e-1
+        // Task 1: Measure's channel check reads this before its claim).
+        let _ = offline_choice().0.filter(|_| device.is_none())?;
         let n = core_engine::offline::FAKE_INPUT_CHANNELS as u32;
         (n, (1..=n).map(|k| format!("Fake In {k}")).collect())
     } else {
@@ -1219,6 +1221,44 @@ pub fn reset() {
     retire(old);
 }
 
+/// While set, the offline driver renders nothing and skips the time held
+/// (plan 5e-1 check I-1: code then runs before the roll).
+static OFFLINE_HOLD: AtomicBool = AtomicBool::new(false);
+
+/// Holds (`on`) or lets go the offline renderer (test hook): while held
+/// it renders nothing, and the time held is skipped, not caught up in one
+/// burst at the release.
+#[cfg(feature = "test-hooks")]
+pub fn debug_hold_offline(on: bool) {
+    OFFLINE_HOLD.store(on, Ordering::Relaxed);
+}
+
+/// A live-like device the offline backend plays (test hook, plan 5e-1
+/// Task 12 review I1): its I/O buffer and output latency in frames. The
+/// driver then renders a buffer ahead of real time, blocks are heard the
+/// output latency later, and gestures carry the driver's clock as their
+/// host time, so they are stamped before their block as on a live device.
+static FAKE_DEVICE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+
+/// When the offline driver's clock started (its host time 0), while a
+/// [`FAKE_DEVICE`] plays.
+static OFFLINE_CLOCK: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Makes the next offline engine a live-like device with an I/O buffer of
+/// `buffer` frames and `output` frames of output latency (test hook);
+/// `None` goes back to the plain offline device.
+#[cfg(feature = "test-hooks")]
+pub fn debug_fake_device(device: Option<(u32, u32)>) {
+    *lock(&FAKE_DEVICE) = device;
+}
+
+/// The offline driver's clock now, in ns, while a fake device plays: the
+/// host time a gesture made now carries. `None` otherwise.
+pub(crate) fn offline_clock_ns() -> Option<u64> {
+    lock(&FAKE_DEVICE).as_ref()?;
+    lock(&OFFLINE_CLOCK).map(|t0| u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+}
+
 /// Renders an offline backend in real time on its own thread.
 struct OfflineDriver {
     stop: Arc<AtomicBool>,
@@ -1233,6 +1273,11 @@ impl OfflineDriver {
         synth: Option<&FakeSynth>,
     ) -> Result<(OfflineDriver, InputInfo), VizError> {
         let mut backend = OfflineBackend::new(rate, OFFLINE_BLOCK);
+        let device = *lock(&FAKE_DEVICE);
+        if let Some((buffer, output)) = device {
+            backend = backend.with_device(buffer, output);
+        }
+        let ahead = device.map_or(0, |d| u64::from(d.0));
         if let Some(k) = input {
             backend = backend.with_input(k);
         }
@@ -1247,9 +1292,26 @@ impl OfflineDriver {
         let thread = std::thread::Builder::new()
             .name("vizdaw-offline".into())
             .spawn(move || {
-                let t0 = Instant::now();
+                let mut t0 = Instant::now();
+                if device.is_some() {
+                    *lock(&OFFLINE_CLOCK) = Some(t0);
+                }
+                let mut held: Option<Instant> = None;
                 while !flag.load(Ordering::Relaxed) {
-                    let due = (t0.elapsed().as_secs_f64() * rate) as u64;
+                    if OFFLINE_HOLD.load(Ordering::Relaxed) {
+                        held.get_or_insert_with(Instant::now);
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    // The time held is skipped (the clock origin moves on).
+                    if let Some(h) = held.take() {
+                        t0 += h.elapsed();
+                        if device.is_some() {
+                            *lock(&OFFLINE_CLOCK) = Some(t0);
+                        }
+                    }
+                    // A live-like device renders its buffer ahead.
+                    let due = (t0.elapsed().as_secs_f64() * rate) as u64 + ahead;
                     if due > backend.frames() {
                         backend.run_frames(due - backend.frames());
                     }
@@ -1549,6 +1611,9 @@ struct Host {
     /// Where the asked Play stops (Play Selection, plan 4f): a rebuild
     /// resumes with it.
     until: Option<Tick>,
+    /// The tick a device rebuild resumed this host from (plan 5e-1
+    /// re-review N1: its renderer publishes no position until it runs).
+    resumed_at: Option<Tick>,
     /// Changed by every Play, Stop and release: a Play that waited for
     /// the disk without the lock goes on only if nothing came meanwhile
     /// ([`finish_play`]).
@@ -1730,6 +1795,7 @@ impl Host {
             looped: false,
             want_play: false,
             until: None,
+            resumed_at: None,
             epoch: next_epoch(),
             device: device.to_string(),
             sample_rate,
@@ -2104,6 +2170,10 @@ impl Host {
         self.engine.set_media(media_of(owner));
         self.engine.set_inputs(input_spec(doc, seq));
         self.engine.set_return_dests(return_dests(doc, seq));
+        // Off strips play no automation unless it is suspended (plan 5e-1
+        // Ruling 3).
+        self.engine
+            .set_automation_suspended(crate::automation::suspended());
         let report = self.engine.load(doc, seq)?;
         self.report = report_lines(&report);
         self.engine.set_loop(looped)?;
@@ -2413,6 +2483,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     }
     new.load(owner, doc, seq, looped)?;
     new.engine.locate_tick(at)?;
+    new.resumed_at = Some(at);
     if playing {
         match until {
             Some(t) => new.engine.play_until(t)?,
@@ -2489,6 +2560,10 @@ pub struct HostPlay {
     /// The host is live: `finish_play` connects the MIDI sources, without
     /// the host lock (M7, Task 12 review).
     connect_midi: bool,
+    /// The tick this Play located to, when it located (plan 5e-1 review
+    /// I-2: the engine's published position shows the old one until the
+    /// renderer applies it).
+    located: Option<Tick>,
 }
 
 /// What a [`claim_host`] waits for before it takes the engine.
@@ -2625,6 +2700,9 @@ pub fn play(
         message: "engine host missing".into(),
     })?;
     host.faults.clear();
+    // A song that ended by itself before any poll saw it must not end
+    // this Play (plan 5e-1 Task 12, re-review N2).
+    let _ = host.engine.take_ended();
     // Still unavailable: said again (Task 12 review M2).
     let midi_fault = lock(&MIDI_UNAVAILABLE).clone();
     note_midi_fault(host, midi_fault);
@@ -2634,7 +2712,9 @@ pub fn play(
         host.pending_input = None;
     }
     host.ensure_input(wants_audio_input(doc, seq));
+    let mut located = None;
     if host.owner != owner || host.seq != seq || start.is_some() {
+        located = Some(start.unwrap_or(Tick::ZERO));
         host.engine.stop()?;
         if host.owner != owner {
             // Another session's recording ends here: its tap must not
@@ -2660,6 +2740,7 @@ pub fn play(
         epoch: host.epoch,
         pending,
         connect_midi: host.is_live(),
+        located,
     })
 }
 
@@ -2668,6 +2749,12 @@ impl HostPlay {
     /// Ruling 7).
     pub fn count_in(&mut self, c: Option<core_engine::count_in::CountIn>) {
         self.pending.set_count_in(c);
+    }
+
+    /// The tick this Play located to; `None` when it resumes where the
+    /// transport stands.
+    pub fn located(&self) -> Option<Tick> {
+        self.located
     }
 }
 
@@ -3221,8 +3308,10 @@ pub fn stop_recording(owner: u64) -> Result<(), VizError> {
 /// `Model` for a destination that is not an external MIDI synth (the
 /// engine leaves that check to its caller, Task 5) and for a channel the
 /// input lacks, refused as Record refuses it (with the denied or
-/// failed-open reason when there is one). The caller waits without any
-/// lock, then calls [`end_measure`].
+/// failed-open reason when there is one). The channel check comes before
+/// the claim, so a missing channel is reported ahead of the claim's
+/// `Busy` ("Stop first"). The caller waits without any lock, then calls
+/// [`end_measure`].
 pub fn start_measure(
     owner: u64,
     doc: &Document,
@@ -3233,6 +3322,15 @@ pub fn start_measure(
     plugins: Option<&mut PluginHost>,
 ) -> Result<Arc<MeasureStatus>, VizError> {
     crate::synth::external_dest(doc, dest)?;
+    // A channel the device lacks needs no engine to refuse (5d-2 carry):
+    // refused here, before the claim, which may retire another window's
+    // plugin engine. Unknown channels (no device read) are left to the
+    // check after the input opens.
+    if let Some(c) = audio_input_channels().filter(|c| c.channels > 0) {
+        if let Some(why) = crate::record::channel_refusal(lane, channels, c.channels, &[]) {
+            return Err(crate::events::bad(&why));
+        }
+    }
     let (generation, holder, asked) = {
         let (mut slot, _) = claim_host(owner, doc, plugins, Idle::Stopped)?;
         let host = slot.as_mut().ok_or_else(|| VizError::Internal {
@@ -3375,6 +3473,25 @@ pub fn transport_stopped(owner: u64) -> Option<bool> {
         .map(|h| h.engine.state() == PlayState::Stopped)
 }
 
+/// The tick a device rebuild resumed `owner`'s host from, when it holds
+/// the engine and its host came from a rebuild.
+pub fn resumed_at(owner: u64) -> Option<Tick> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .and_then(|h| h.resumed_at)
+}
+
+/// Whether `owner`'s host means to play (its Play intent, ahead of the
+/// renderer), when it holds the engine. A song that ended by itself is
+/// seen first, as `busy` sees it (final review m4).
+pub fn wants_play(owner: u64) -> Option<bool> {
+    lock(&HOST).as_mut().filter(|h| h.owner == owner).map(|h| {
+        h.collect_faults();
+        h.want_play
+    })
+}
+
 /// The session holding the engine, if any.
 pub fn holder() -> Option<u64> {
     lock(&HOST).as_ref().map(|h| h.owner).filter(|o| *o != 0)
@@ -3459,6 +3576,76 @@ pub fn midi_sender(owner: u64) -> Option<MidiSender> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.midi_sender())
+}
+
+/// Sends a gesture to `owner`'s engine (plan 5e-1 Ruling 6): false when
+/// another session holds the engine (or none is), or the queue is full.
+pub fn gesture(owner: u64, msg: core_engine::gesture::GestureMsg) -> bool {
+    let sender = lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.gesture_sender());
+    // Sent without the host lock: the sender has its own.
+    sender.is_some_and(|s| s.send(msg))
+}
+
+/// Installs a gesture tap in `owner`'s engine (plan 5e-1 Ruling 7);
+/// `None` when another session holds the engine or its command queue is
+/// full.
+pub fn start_gestures(owner: u64) -> Option<core_engine::gesture::GestureHandles> {
+    lock(&HOST)
+        .as_mut()
+        .filter(|h| h.owner == owner)
+        .and_then(|h| h.engine.start_gestures().ok())
+}
+
+/// Removes `owner`'s gesture tap. A full queue is ignored: the tap goes
+/// with the engine anyway.
+pub fn stop_gestures(owner: u64) {
+    if let Some(h) = lock(&HOST).as_mut().filter(|h| h.owner == owner) {
+        let _ = h.engine.stop_gestures();
+    }
+}
+
+/// The value `owner`'s engine plays for a strip or send target now, as
+/// its override snapshot holds it (plan 5e-1 Ruling 26), when `owner`
+/// holds the engine and the snapshot has the control.
+pub fn heard(owner: u64, t: core_model::automation::AutomationTarget) -> Option<f64> {
+    let dest = core_engine::schedule::AutoDest::of(t)?;
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)?
+        .engine
+        .overrides()?
+        .value(dest)
+}
+
+/// The gestures `owner`'s engine dropped so far (pre-flight M10), when it
+/// holds it.
+pub fn gestures_dropped(owner: u64) -> Option<u64> {
+    lock(&HOST)
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.engine.gestures_dropped())
+}
+
+/// Whether the engine, whoever holds it, compiles with automation
+/// suspended (test hook, plan 5e-1 Task 2 review M5).
+#[cfg(feature = "test-hooks")]
+pub fn debug_automation_suspended() -> Option<bool> {
+    lock(&HOST)
+        .as_ref()
+        .map(|h| h.engine.automation_suspended())
+}
+
+/// Whether the engine, whoever holds it, has stopped, read without
+/// collecting its ended flag as every poll does (test hook, plan 5e-1
+/// Task 12, re-review N2).
+#[cfg(feature = "test-hooks")]
+pub fn debug_engine_stopped() -> Option<bool> {
+    lock(&HOST)
+        .as_ref()
+        .map(|h| h.engine.state() == PlayState::Stopped)
 }
 
 /// The input routes the engine was last given, whoever holds it (test

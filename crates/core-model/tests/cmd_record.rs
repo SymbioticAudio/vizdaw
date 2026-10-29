@@ -101,6 +101,7 @@ fn replace_clears_only_midi_starting_in_the_range() {
     l.clear = vec![(Tick(Q), Tick(3 * Q))];
     l.active.events = vec![note(2, 70)];
     let pass = RecordPass {
+        automation: Vec::new(),
         lanes: vec![l],
         ..RecordPass::default()
     };
@@ -121,6 +122,7 @@ fn overdub_merges_with_what_is_there() {
     let mut l = lane_record(0);
     l.active.events = vec![note(2, 70), note(3, 71)];
     let pass = RecordPass {
+        automation: Vec::new(),
         lanes: vec![l],
         ..RecordPass::default()
     };
@@ -157,6 +159,7 @@ fn a_pass_adds_its_media_regions_and_takes_and_selects_the_last() {
         ),
     ];
     let pass = RecordPass {
+        automation: Vec::new(),
         media: vec![media(100_000)],
         lanes: vec![l],
         ..RecordPass::default()
@@ -188,6 +191,7 @@ fn a_pass_adds_its_media_regions_and_takes_and_selects_the_last() {
     assert!(lane.audio_out.is_some());
     assert_eq!(Command::Record(pass).name(), "Record");
     let gaps = RecordPass {
+        automation: Vec::new(),
         with_gaps: true,
         ..RecordPass::default()
     };
@@ -210,24 +214,28 @@ fn a_bad_part_refuses_the_whole_pass() {
     for pass in [
         // A region past its file's end.
         RecordPass {
+            automation: Vec::new(),
             media: vec![media(100_000)],
             lanes: vec![ok.clone(), bad.clone()],
             ..RecordPass::default()
         },
         // A region naming a file the pass does not have.
         RecordPass {
+            automation: Vec::new(),
             media: vec![],
             lanes: vec![ok.clone(), bad.clone()],
             ..RecordPass::default()
         },
         // An empty file.
         RecordPass {
+            automation: Vec::new(),
             media: vec![media(0)],
             lanes: vec![ok.clone()],
             ..RecordPass::default()
         },
         // A path outside the package.
         RecordPass {
+            automation: Vec::new(),
             media: vec![RecordedMedia {
                 path: "../x.caf".into(),
                 ..media(10)
@@ -237,6 +245,7 @@ fn a_bad_part_refuses_the_whole_pass() {
         },
         // An empty clear range, and an unknown lane.
         RecordPass {
+            automation: Vec::new(),
             lanes: vec![LaneRecord {
                 clear: vec![(Tick(Q), Tick(Q))],
                 ..ok.clone()
@@ -244,6 +253,7 @@ fn a_bad_part_refuses_the_whole_pass() {
             ..RecordPass::default()
         },
         RecordPass {
+            automation: Vec::new(),
             lanes: vec![ok.clone(), lane_record(9)],
             ..RecordPass::default()
         },
@@ -304,6 +314,7 @@ fn a_group_makes_one_record_step_of_everything_inside_it() {
     l.active.events = vec![note(6, 80)];
     h.execute(
         &Command::Record(RecordPass {
+            automation: Vec::new(),
             lanes: vec![l],
             ..RecordPass::default()
         }),
@@ -394,6 +405,7 @@ fn a_pass_with_too_many_takes_is_refused_whole() {
         .collect();
     let mut h = History::new(d.clone());
     let pass = RecordPass {
+        automation: Vec::new(),
         lanes: vec![l],
         ..RecordPass::default()
     };
@@ -409,6 +421,7 @@ fn a_pass_with_too_many_takes_is_refused_whole() {
 fn media_paths_are_write_once() {
     let f = ViewFilter::default();
     let with = |paths: &[&str]| RecordPass {
+        automation: Vec::new(),
         media: paths
             .iter()
             .map(|p| RecordedMedia {
@@ -447,6 +460,7 @@ fn media_in_an_open_group_stays_referenced() {
     let f = ViewFilter::default();
     let path = "Media/Recorded/B 2026-10-20 120000.caf";
     let pass = RecordPass {
+        automation: Vec::new(),
         media: vec![media(10)],
         ..RecordPass::default()
     };
@@ -519,6 +533,7 @@ fn pass_of(parts: &[(u64, Part)]) -> RecordPass {
         }
     }
     RecordPass {
+        automation: Vec::new(),
         with_gaps: false,
         media: vec![media(100_000)],
         lanes,

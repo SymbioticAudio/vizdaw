@@ -1,9 +1,12 @@
 //! Automation targets and how a normalised value drives each (editors
 //! spec §4d; Plan 4d Rulings 2–5). Values are `f64` in `0.0..=1.0`.
 
+use crate::document::{Document, SlotOwner};
+use crate::event::EventBody;
 use crate::ids::{DestId, PluginInstanceId, StripId};
-use crate::mixer::{GAIN_FLOOR_DB, GAIN_MAX_DB, ParamId};
+use crate::mixer::{GAIN_FLOOR_DB, GAIN_MAX_DB, ParamId, StripKind};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// A send's position in its strip's send list (Plan 4d Ruling 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -55,6 +58,144 @@ impl AutomationTarget {
             AutomationTarget::PluginParam(p, id) => format!("{p} parameter {}", id.0),
             AutomationTarget::VelocityScale(d) => format!("{d} velocity scale"),
         }
+    }
+}
+
+/// A strip's automation mode (sub-project 5 spec §4.6: "`Off` plays the
+/// static values and ignores automation. `Read` plays automation").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationMode {
+    /// Plays the static values and ignores automation.
+    Off,
+    /// Plays automation.
+    #[default]
+    Read,
+    /// Writes from touch to release, then returns to the automation.
+    Touch,
+    /// Writes from touch until Stop or the next loop wrap.
+    Latch,
+    /// Writes every target from play start to Stop or the next wrap.
+    Write,
+    /// Adds the touch's offset to the existing automation.
+    Trim,
+}
+
+impl AutomationMode {
+    /// Every mode, in menu order.
+    pub const ALL: [AutomationMode; 6] = [
+        AutomationMode::Off,
+        AutomationMode::Read,
+        AutomationMode::Touch,
+        AutomationMode::Latch,
+        AutomationMode::Write,
+        AutomationMode::Trim,
+    ];
+
+    /// True for Read, the mode that is not saved (plan 5e-1 Ruling 2).
+    pub fn is_read(&self) -> bool {
+        *self == AutomationMode::Read
+    }
+
+    /// True for the modes that write automation (Touch, Latch, Write,
+    /// Trim).
+    pub fn writes(self) -> bool {
+        matches!(
+            self,
+            AutomationMode::Touch
+                | AutomationMode::Latch
+                | AutomationMode::Write
+                | AutomationMode::Trim
+        )
+    }
+
+    /// The mode's name as menus show it ("Off" … "Trim").
+    pub fn name(self) -> &'static str {
+        match self {
+            AutomationMode::Off => "Off",
+            AutomationMode::Read => "Read",
+            AutomationMode::Touch => "Touch",
+            AutomationMode::Latch => "Latch",
+            AutomationMode::Write => "Write",
+            AutomationMode::Trim => "Trim",
+        }
+    }
+}
+
+/// The strip whose automation mode governs `t` (plan 5e-1 Ruling 3): a
+/// strip's own controls and sends, an insert's strip, a plugin
+/// instrument's Instrument strip; `None` for velocity scale or a target
+/// whose strip or slot does not exist.
+pub fn strip_of(doc: &Document, t: AutomationTarget) -> Option<StripId> {
+    match t {
+        AutomationTarget::StripFader(s)
+        | AutomationTarget::StripPan(s)
+        | AutomationTarget::StripMute(s)
+        | AutomationTarget::StripSolo(s)
+        | AutomationTarget::SendLevel(s, _) => doc.mixer().strip(s).ok().map(|x| x.id),
+        AutomationTarget::PluginParam(p, _) => match doc.find_slot(p)? {
+            SlotOwner::Insert(s, _) => Some(s),
+            SlotOwner::Instrument(dest) => doc.mixer().find_kind(StripKind::Instrument(dest)),
+        },
+        AutomationTarget::VelocityScale(_) => None,
+    }
+}
+
+/// The parameters of plugin slot `slot` that automation drives (plan
+/// 5e-1 Task 9b): every one some automation event of any take of any
+/// lane of any sequence targets, muted or not, whether or not it plays.
+pub fn automated_params(doc: &Document, slot: PluginInstanceId) -> BTreeSet<ParamId> {
+    slot_params(&automated_targets(doc), slot)
+}
+
+/// Every automated plugin parameter of the document, as `(slot,
+/// parameter)` (see [`automated_params`]): one scan of the events for
+/// all slots.
+pub fn automated_targets(doc: &Document) -> BTreeSet<(PluginInstanceId, ParamId)> {
+    let mut out = BTreeSet::new();
+    for seq in doc.sequences().values() {
+        for lane in &seq.lanes {
+            for take in &lane.takes {
+                for e in take.events.values() {
+                    if let EventBody::Automation {
+                        target: AutomationTarget::PluginParam(s, p),
+                        ..
+                    } = e.body
+                    {
+                        out.insert((s, p));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The parameters of `targets` that belong to plugin slot `slot`.
+pub fn slot_params(
+    targets: &BTreeSet<(PluginInstanceId, ParamId)>,
+    slot: PluginInstanceId,
+) -> BTreeSet<ParamId> {
+    targets
+        .range((slot, ParamId(0))..=(slot, ParamId(u64::MAX)))
+        .map(|(_, p)| *p)
+        .collect()
+}
+
+/// Whether an automation target's strip, send, plugin or destination
+/// exists.
+pub fn target_exists(doc: &Document, t: AutomationTarget) -> bool {
+    let m = doc.mixer();
+    match t {
+        AutomationTarget::StripFader(s)
+        | AutomationTarget::StripPan(s)
+        | AutomationTarget::StripMute(s)
+        | AutomationTarget::StripSolo(s) => m.strip(s).is_ok(),
+        AutomationTarget::SendLevel(s, i) => {
+            m.strip(s).is_ok_and(|x| usize::from(i.0) < x.sends.len())
+        }
+        AutomationTarget::PluginParam(p, _) => doc.plugin_slot(p).is_some(),
+        AutomationTarget::VelocityScale(d) => doc.instruments().contains_key(&d),
     }
 }
 

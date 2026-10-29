@@ -5,7 +5,9 @@ use core_model::history::{History, Timestamp};
 use core_model::ids::{PluginInstanceId, StateBlobId};
 use core_model::mixer::ParamId;
 use core_model::selection::ViewFilter;
-use core_model::state::{blob_file_name, blob_id, capture, parse_blob_file_name, states_in_json};
+use core_model::state::{
+    blob_file_name, blob_id, capture, capture_keeping, parse_blob_file_name, states_in_json,
+};
 use std::path::PathBuf;
 
 fn temp_package(tag: &str) -> PathBuf {
@@ -84,6 +86,61 @@ fn capture_sets_state_and_clears_the_overlay_without_an_undo_step() {
         d2.plugin_slot(PluginInstanceId(0)).unwrap().state,
         Some(id3)
     );
+}
+
+/// Task 9b: a capture keeps the overlay entries it is given (an
+/// automated parameter's static value) and drops the rest; a value that
+/// is not finite is not kept.
+#[test]
+fn capture_keeping_keeps_the_given_overlay_entries() {
+    let mut h = History::new(pad());
+    let f = ViewFilter::default();
+    h.execute(
+        &Command::Mixer(MixerCmd::SetPluginParams {
+            slot: PluginInstanceId(0),
+            params: vec![(ParamId(1), 0.5), (ParamId(2), 0.7)],
+        }),
+        &f,
+    )
+    .unwrap();
+    let depth = h.undo_depth();
+    let keep = std::collections::BTreeMap::from([
+        (ParamId(1), 0.5),
+        (ParamId(3), 0.2),
+        (ParamId(4), f64::NAN),
+    ]);
+    let id = h
+        .capture_state_keeping(PluginInstanceId(0), b"state-1", &keep)
+        .unwrap();
+    assert_eq!(h.undo_depth(), depth, "no undo step");
+    let slot = h.doc().plugin_slot(PluginInstanceId(0)).unwrap();
+    assert_eq!(slot.state, Some(id));
+    let kept: Vec<(ParamId, f64)> = slot.params.iter().map(|(k, v)| (*k, *v)).collect();
+    assert_eq!(kept, vec![(ParamId(1), 0.5), (ParamId(3), 0.2)]);
+    // Refused like a plain capture.
+    assert!(
+        h.capture_state_keeping(PluginInstanceId(9), b"x", &keep)
+            .is_err()
+    );
+    // The pure form; an empty map is a plain capture.
+    let (d, _) = capture_keeping(&pad(), PluginInstanceId(0), b"z", &keep).unwrap();
+    assert_eq!(d.plugin_slot(PluginInstanceId(0)).unwrap().params.len(), 2);
+    let (d, _) = capture_keeping(h.doc(), PluginInstanceId(0), b"z", &Default::default()).unwrap();
+    assert!(
+        d.plugin_slot(PluginInstanceId(0))
+            .unwrap()
+            .params
+            .is_empty()
+    );
+    // A file with kept entries saves and loads.
+    let pkg = temp_package("keep");
+    save(h.doc(), &pkg).unwrap();
+    let back = load(&pkg).unwrap();
+    assert_eq!(
+        back.plugin_slot(PluginInstanceId(0)).unwrap().params.len(),
+        2
+    );
+    let _ = std::fs::remove_dir_all(&pkg);
 }
 
 #[test]

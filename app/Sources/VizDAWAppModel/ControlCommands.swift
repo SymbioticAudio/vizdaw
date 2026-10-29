@@ -192,6 +192,7 @@ public enum ControlCommands {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
+            .union(AutomationCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -230,6 +231,8 @@ public enum ControlCommands {
             return .done(ran(id, nil))
         case AudioCommands.set:
             return AudioCommands.runSet(args, host: host)
+        case AutomationCommands.suspend:
+            return AutomationCommands.runSuspend(args)
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }
@@ -393,6 +396,8 @@ public enum ControlCommands {
             }
         case _ where SynthCommands.ids.contains(id):
             return SynthCommands.run(id, args: args, doc: docID, m)
+        case _ where AutomationCommands.ids.contains(id):
+            return AutomationCommands.run(id, args: args, doc: docID, m)
         case AudioCommands.addMidi:
             return AudioCommands.runAddMidi(args, doc: docID, m)
         case RegionCommands.normalize:
@@ -663,6 +668,9 @@ public enum ControlStates {
         case .record:
             guard let s = try? m.session.recordState() else { return nil }
             return .record(doc: doc, state: s)
+        case .automation:
+            guard let s = try? m.session.automationState() else { return nil }
+            return .automation(doc: doc, state: s)
         case .input:
             guard let info = try? m.session.inputInfo() else { return nil }
             return .inputState(doc: doc, info: info, levels: m.inputs.takeChannelLevels())

@@ -190,13 +190,13 @@ pub struct Captured<'a> {
 /// A stretch of heard runs `[run, end)` that played schedule frames from
 /// `frame` on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Piece {
-    pass: usize,
+pub(crate) struct Piece {
+    pub(crate) pass: usize,
     /// The heard run of the mark that started it (`run` reaches back
     /// further for the first piece).
-    from: i64,
-    run: i64,
-    end: i64,
+    pub(crate) from: i64,
+    pub(crate) run: i64,
+    pub(crate) end: i64,
     frame: i64,
     /// Where a message is placed in this piece from: before `run` only
     /// after a latency rise, whose gap is this piece's (at its start).
@@ -214,7 +214,21 @@ impl Piece {
 /// piece reaches back before the roll (pre-roll handles); the last ends
 /// at output run `end_run`, as heard. Each piece is moved by its own
 /// latency (module docs).
-fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
+pub(crate) fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
+    pieces_with(marks, end_run, true)
+}
+
+/// [`pieces`] as the automation writer needs them (plan 5e-1 Task 7,
+/// Ruling 23): a mark that jumps back inside a pass does not cut the piece
+/// before it (pre-flight M1's cut is for recorded content, which a newer
+/// piece replaces); the writer breaks its segments there instead. A piece
+/// heard over after a latency fall is still cut.
+pub(crate) fn writing_pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
+    pieces_with(marks, end_run, false)
+}
+
+/// [`pieces`], cutting a piece a later mark jumps back into when `cut`.
+fn pieces_with(marks: &[Mark], end_run: i64, cut: bool) -> Vec<Piece> {
     let mut m: Vec<Mark> = Vec::with_capacity(marks.len());
     for x in marks {
         match m.last_mut() {
@@ -237,7 +251,8 @@ fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
             pass += 1;
         }
         let at = i64::try_from(x.run).unwrap_or(i64::MAX);
-        if !x.wrap
+        if cut
+            && !x.wrap
             && let Some(prev) = out.last_mut()
         {
             // Pre-flight M1: cut where the timeline reached the mark's
@@ -304,15 +319,25 @@ fn pieces(marks: &[Mark], end_run: i64) -> Vec<Piece> {
 /// The piece a message heard at run `u` was played in. A piece a later one
 /// cut to nothing (`end <= from`) played nothing and takes no message, so
 /// a live piece covering `u` gets it.
-fn piece_of(pieces: &[Piece], u: i64) -> Option<&Piece> {
+pub(crate) fn piece_of(pieces: &[Piece], u: i64) -> Option<&Piece> {
     pieces
         .iter()
         .find(|p| p.end > p.from && u >= p.catch && u < p.end)
 }
 
 /// Where in piece `p` a message heard at run `u` lands.
-fn place(p: &Piece, u: i64) -> i64 {
+pub(crate) fn place(p: &Piece, u: i64) -> i64 {
     p.at(u.max(p.run))
+}
+
+/// The schedule frames pass `pass` was heard over: from its first piece's
+/// start to its last piece's end, as heard (plan 5e-1 Task 7). Pieces a
+/// later one cut to nothing played nothing and do not count.
+pub(crate) fn pass_window(pieces: &[Piece], pass: usize) -> Option<(i64, i64)> {
+    let mut live = pieces.iter().filter(|p| p.pass == pass && p.end > p.from);
+    let first = live.next()?;
+    let last = live.next_back().unwrap_or(first);
+    Some((place(first, first.from), place(last, last.end)))
 }
 
 /// The timeline `[t0, t1)` piece `p` played, inside the range.
@@ -677,6 +702,7 @@ pub fn plan(c: &Captured<'_>) -> Result<Option<RecordPass>, String> {
         return Ok(None);
     }
     Ok(Some(RecordPass {
+        automation: Vec::new(),
         with_gaps: c.with_gaps,
         media,
         lanes,

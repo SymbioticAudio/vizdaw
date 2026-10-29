@@ -679,3 +679,36 @@ fn the_transport_says_when_it_counts_in() {
     });
     assert_eq!(t["counting_in"], json!(false), "{t}");
 }
+
+/// Plan 5e-1 Task 10: `state.get automation` spells modes as the
+/// registry's Choice does and targets as the channel does (Ruling 17).
+#[test]
+fn automation_state_answers_in_the_channels_spelling() {
+    use vizdaw_ffi::{AutomationModeRow, AutomationStateRow, AutomationTargetRow, StripModeRow};
+    let r = ControlResult::Automation {
+        doc: "d".into(),
+        state: AutomationStateRow {
+            modes: vec![
+                StripModeRow {
+                    strip: 1,
+                    mode: AutomationModeRow::Touch,
+                },
+                StripModeRow {
+                    strip: 0,
+                    mode: AutomationModeRow::Read,
+                },
+            ],
+            touched: vec![AutomationTargetRow::SendLevel { strip: 1, send: 0 }],
+            suspended: true,
+            writing: false,
+        },
+    };
+    assert_eq!(
+        result_json(&r),
+        json!({
+            "doc": "d", "suspended": true, "writing": false,
+            "modes": [{"strip": 1, "mode": "touch"}, {"strip": 0, "mode": "read"}],
+            "touched": ["send:1:1"],
+        })
+    );
+}

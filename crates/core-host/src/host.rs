@@ -49,6 +49,11 @@ pub struct IdleReport {
     pub restart: Vec<PluginInstanceId>,
     /// Finished UI gestures.
     pub gestures: Vec<Gesture>,
+    /// Every parameter event the plugins reported, in order, beside the
+    /// grouped gestures, with an `End` for each parameter of a gesture the
+    /// host closed itself (plan 5e-1 Ruling 15): automation writes from
+    /// them.
+    pub param_events: Vec<(PluginInstanceId, ParamEvent)>,
     /// Saved states a plugin rejected on load (it plays with its defaults).
     pub rejected_state: Vec<(PluginInstanceId, String)>,
     /// Instances whose parameter list or values changed outside a gesture
@@ -73,6 +78,7 @@ impl IdleReport {
         self.failed.extend(o.failed);
         self.restart.extend(o.restart);
         self.gestures.extend(o.gestures);
+        self.param_events.extend(o.param_events);
         self.rejected_state.extend(o.rejected_state);
         self.params_changed.extend(o.params_changed);
         self.state_dirty.extend(o.state_dirty);
@@ -263,6 +269,10 @@ pub struct PluginHost {
     /// Gestures closed by [`PluginHost::end_gestures`], reported by the
     /// next `idle` or `service`.
     ended: Vec<Gesture>,
+    /// Every parameter event read since the last report, in the order
+    /// read (with the ends the host made itself), reported by the next
+    /// `idle` or `service` as `param_events`.
+    raw: Vec<(PluginInstanceId, ParamEvent)>,
     gesture_timeout: Duration,
     shelf: Shelf,
     back_tx: Sender<Returned>,
@@ -319,6 +329,7 @@ impl PluginHost {
             held: BTreeMap::new(),
             evicted: BTreeSet::new(),
             ended: Vec::new(),
+            raw: Vec::new(),
             gesture_timeout: GESTURE_TIMEOUT,
             shelf: Shelf::new(),
             back_tx,
@@ -526,7 +537,8 @@ impl PluginHost {
         let State::Live(live) = state else {
             return;
         };
-        collect_gestures(id, live, &want.params, &mut self.ended);
+        collect_gestures(id, live, &want.params, &mut self.ended, &mut self.raw);
+        end_open(id, live, &mut self.raw);
         live.open.clear();
         flush_gesture(id, live, &mut self.ended);
     }
@@ -549,6 +561,38 @@ impl PluginHost {
                         doc: want.params.get(&param).copied(),
                     },
                 );
+            }
+        }
+    }
+
+    /// Puts parameter `param` of running instance `id` back to what the
+    /// document says: its overlay value, else its value before the
+    /// overlay. A value the document never caught up with (one sent by
+    /// [`PluginHost::set_param`] or by the plugin's own window) is dropped
+    /// (plan 5e-1 Ruling 15: a ride written as automation leaves the static
+    /// value as it was). What does not fit the queue is sent again by the
+    /// next `sync` (`apply_want` sends what the document says once nothing
+    /// is pending).
+    pub fn reset_param(&mut self, id: PluginInstanceId, param: ParamId) {
+        let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
+            return;
+        };
+        let State::Live(l) = state else {
+            return;
+        };
+        let overlay = want.params.get(&param).copied();
+        let Some(v) = overlay.or_else(|| l.base.get(&param).copied()) else {
+            return;
+        };
+        l.pending.remove(&param);
+        if push(l, param, v) {
+            match overlay {
+                Some(v) => {
+                    l.sent.insert(param, v);
+                }
+                None => {
+                    l.sent.remove(&param);
+                }
             }
         }
     }
@@ -638,6 +682,9 @@ impl PluginHost {
     fn fail(&mut self, id: PluginInstanceId, why: String) {
         self.shelf.set_reason(id, why.clone());
         if let Some(s) = self.slots.get_mut(&id) {
+            if let State::Live(l) = &s.state {
+                end_open(id, l, &mut self.raw);
+            }
             s.state = State::Failed(why);
         }
     }
@@ -705,6 +752,7 @@ impl PluginHost {
             return;
         };
         if let State::Live(mut l) = state {
+            end_open(id, &l, &mut self.raw);
             // The editor goes before the instance does (moved to `retiring`
             // it could no longer be reached): the app frees the parent view
             // once the slot is gone, and a plugin GUI must not outlive it.
@@ -818,6 +866,7 @@ impl PluginHost {
         for id in ids {
             self.service_instance(id, &mut r);
         }
+        r.param_events.append(&mut self.raw);
         r
     }
 
@@ -972,7 +1021,8 @@ impl PluginHost {
         live.processor = None;
         // Its gesture queue goes with it: report what is in it, and close
         // a gesture the deactivation cut off (its `End` never comes).
-        collect_gestures(id, &mut live, &doc, &mut r.gestures);
+        collect_gestures(id, &mut live, &doc, &mut r.gestures, &mut self.raw);
+        end_open(id, &live, &mut self.raw);
         live.open.clear();
         flush_gesture(id, &mut live, &mut r.gestures);
         if self.refused.is_some() {
@@ -1010,12 +1060,13 @@ impl PluginHost {
             return;
         };
         let ev = live.inst.idle();
-        collect_gestures(id, live, &want.params, &mut r.gestures);
+        collect_gestures(id, live, &want.params, &mut r.gestures, &mut self.raw);
         let stale = live
             .last_event
             .is_some_and(|t| t.elapsed() >= self.gesture_timeout);
         if !live.open.is_empty() && stale {
             // Its `End` was lost: what it changed so far is one gesture.
+            end_open(id, live, &mut self.raw);
             live.open.clear();
             flush_gesture(id, live, &mut r.gestures);
         }
@@ -1107,6 +1158,8 @@ impl PluginHost {
             self.owed_load = true;
         }
         let ready = self.sync(doc);
+        // The ends of gestures the sync closed (a slot that went).
+        r.param_events.append(&mut self.raw);
         let changed = self.refused.as_ref().is_some_and(|f| {
             !r.loaded.is_empty()
                 || !r.failed.is_empty()
@@ -1216,28 +1269,83 @@ impl PluginHost {
     /// §4: on save, autosave and before removal; no undo step). The app
     /// calls it before it commits a removal whose plugin state must be
     /// kept: the host cannot capture an instance after `sync` removed it.
+    /// An automated parameter keeps its static value in the overlay (see
+    /// [`PluginHost::capture_with`]).
     pub fn capture(
         &mut self,
         history: &mut History,
         id: PluginInstanceId,
     ) -> Result<StateBlobId, HostError> {
-        let Some(State::Live(live)) = self.slots.get_mut(&id).map(|s| &mut s.state) else {
+        self.capture_with(history, id, &BTreeSet::new())
+    }
+
+    /// [`PluginHost::capture`] that also keeps the parameters in `riding`
+    /// (touched or written in an open pass, whose lane does not exist
+    /// yet) like automated ones.
+    ///
+    /// Spec §7, plan 5e-1 Ruling 15 and Task 9b: for a parameter that is
+    /// automated (some lane of the document holds automation of it, in
+    /// any take, muted or not) or in `riding`, the overlay is the static
+    /// value and the source of truth. Such a parameter keeps its overlay
+    /// entry, else gets one holding its value from before the overlay (its
+    /// static value, not what a ride or automation sent since); what the
+    /// plugin holds now goes into the state blob only, which the overlay
+    /// overrides at load. The host then counts that entry as sent, so
+    /// the plugin is not snapped back to it while it plays. A parameter
+    /// the plugin does not list is never kept. Every other parameter is
+    /// folded into the state as before.
+    pub fn capture_with(
+        &mut self,
+        history: &mut History,
+        id: PluginInstanceId,
+        riding: &BTreeSet<ParamId>,
+    ) -> Result<StateBlobId, HostError> {
+        let mut automated = core_model::automation::automated_params(history.doc(), id);
+        automated.extend(riding.iter().copied());
+        self.capture_kept(history, id, &automated)
+    }
+
+    /// [`PluginHost::capture_with`] with the automated set given
+    /// (document automation and riding parameters together).
+    fn capture_kept(
+        &mut self,
+        history: &mut History,
+        id: PluginInstanceId,
+        automated: &BTreeSet<ParamId>,
+    ) -> Result<StateBlobId, HostError> {
+        let Some(Slot { want, state }) = self.slots.get_mut(&id) else {
+            return Err(HostError::NotFound(format!("instance {id} is not loaded")));
+        };
+        let State::Live(live) = state else {
             return Err(HostError::NotFound(format!("instance {id} is not loaded")));
         };
         let bytes = live.inst.save_state()?;
+        let overlay = history.doc().plugin_slot(id).map(|s| &s.params);
+        let keep: BTreeMap<ParamId, f64> = automated
+            .iter()
+            .copied()
+            .filter_map(|p| {
+                let before = live.base.get(&p).copied()?;
+                let static_value = overlay.and_then(|o| o.get(&p)).copied();
+                Some((p, static_value.unwrap_or(before)))
+            })
+            .filter(|(_, v)| v.is_finite())
+            .collect();
         let blob = history
-            .capture_state(id, &bytes)
+            .capture_state_keeping(id, &bytes, &keep)
             .map_err(|e| HostError::StateRejected(e.to_string()))?;
         live.applied_state = Some(blob);
         // The overlay, and values the document had not caught up with, are
-        // now part of the state.
+        // now part of the state; a kept parameter's are not.
         let sent = std::mem::take(&mut live.sent);
-        live.base.extend(sent);
+        live.base
+            .extend(sent.into_iter().filter(|(p, _)| !keep.contains_key(p)));
         live.pending.clear();
-        if let Some(s) = self.slots.get_mut(&id) {
-            s.want.state = history.doc().state_blob(blob).map(|b| (blob, Arc::from(b)));
-            s.want.params.clear();
-        }
+        // The document's overlay; as sent, so `apply_want` leaves what the
+        // plugin plays alone.
+        live.sent.clone_from(&keep);
+        want.state = history.doc().state_blob(blob).map(|b| (blob, Arc::from(b)));
+        want.params = keep;
         Ok(blob)
     }
 
@@ -1272,7 +1380,9 @@ impl PluginHost {
     pub fn unload_unavailable(
         &mut self,
         history: &mut History,
+        riding: &BTreeSet<(PluginInstanceId, ParamId)>,
     ) -> Vec<(PluginInstanceId, Result<StateBlobId, HostError>)> {
+        let all = automated_and(history.doc(), riding);
         let due: Vec<PluginInstanceId> = self
             .slots
             .iter()
@@ -1297,7 +1407,8 @@ impl PluginHost {
                 .cloned()
                 .unwrap_or_default();
             if live {
-                out.push((id, self.capture(history, id)));
+                let mine = core_model::automation::slot_params(&all, id);
+                out.push((id, self.capture_kept(history, id, &mine)));
                 self.evicted.insert(id);
             }
             // `capture` updated what the slot wants (the captured state).
@@ -1326,14 +1437,25 @@ impl PluginHost {
         std::mem::take(&mut self.evicted).into_iter().collect()
     }
 
-    /// Captures every live instance with state (before saving).
-    pub fn capture_all(&mut self, history: &mut History) -> Vec<(PluginInstanceId, HostError)> {
+    /// Captures every live instance with state (before saving), through
+    /// [`PluginHost::capture_with`]: the parameters in `riding` (by slot)
+    /// are kept like automated ones.
+    pub fn capture_all(
+        &mut self,
+        history: &mut History,
+        riding: &BTreeSet<(PluginInstanceId, ParamId)>,
+    ) -> Vec<(PluginInstanceId, HostError)> {
         let ids: Vec<PluginInstanceId> = self.slots.keys().copied().collect();
+        // One scan of the document for every slot (Task 9b review m4).
+        let all = automated_and(history.doc(), riding);
         ids.into_iter()
-            .filter_map(|id| match self.capture(history, id) {
-                Ok(_) => None,
-                Err(HostError::NotFound(_)) => None,
-                Err(e) => Some((id, e)),
+            .filter_map(|id| {
+                let mine = core_model::automation::slot_params(&all, id);
+                match self.capture_kept(history, id, &mine) {
+                    Ok(_) => None,
+                    Err(HostError::NotFound(_)) => None,
+                    Err(e) => Some((id, e)),
+                }
             })
             .collect()
     }
@@ -1376,18 +1498,21 @@ fn address(p: &dyn AudioProcessor) -> usize {
 /// second `Begin` of an open parameter means its `End` was lost: the
 /// gesture so far is closed first. An `End` of a parameter that is not
 /// open only closes when nothing else is open. Every value counts as sent
-/// and is pending until the document has it.
+/// and is pending until the document has it. Every event read is also
+/// appended to `raw`, in order (plan 5e-1 Ruling 15).
 fn collect_gestures(
     id: PluginInstanceId,
     l: &mut Live,
     doc: &BTreeMap<ParamId, f64>,
     out: &mut Vec<Gesture>,
+    raw: &mut Vec<(PluginInstanceId, ParamEvent)>,
 ) {
     let mut events = l.gestures.drain();
     events.extend(l.inst.gestures());
     if !events.is_empty() {
         l.last_event = Some(Instant::now());
     }
+    raw.extend(events.iter().map(|e| (id, *e)));
     for e in events {
         match e {
             ParamEvent::Begin(p) => {
@@ -1420,6 +1545,14 @@ fn collect_gestures(
             }
         }
     }
+}
+
+/// Reports an `End` for every parameter of `l`'s open gesture: called
+/// wherever the host closes a gesture itself, before `open` is cleared or
+/// the instance goes (pre-flight I7, plan 5e-1 Ruling 15), so whoever
+/// follows the raw events releases its touches.
+fn end_open(id: PluginInstanceId, l: &Live, raw: &mut Vec<(PluginInstanceId, ParamEvent)>) {
+    raw.extend(l.open.iter().map(|p| (id, ParamEvent::End(*p))));
 }
 
 /// Reports the gesture so far, if it has values.
@@ -1496,6 +1629,16 @@ fn apply_want(l: &mut Live, want: &Want) {
             l.sent.insert(*p, *v);
         }
     }
+}
+
+/// The document's automated plugin parameters plus `riding` (by slot).
+fn automated_and(
+    doc: &Document,
+    riding: &BTreeSet<(PluginInstanceId, ParamId)>,
+) -> BTreeSet<(PluginInstanceId, ParamId)> {
+    let mut all = core_model::automation::automated_targets(doc);
+    all.extend(riding.iter().copied());
+    all
 }
 
 fn current_values(inst: &mut dyn PluginInstance) -> BTreeMap<ParamId, f64> {

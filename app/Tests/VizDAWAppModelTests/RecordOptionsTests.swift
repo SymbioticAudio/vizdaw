@@ -89,6 +89,29 @@ import VizDAWCore
         #expect(r.punchText(.punchIn) == m.fieldText(.punchIn))
     }
 
+    /// 5d-2 final re-review N1: a punch draft that is not a position (or
+    /// is past the song limit) refuses Record, so the pass never punches
+    /// at the old range; the status line says why. Once the field is
+    /// right, Record records at the typed time.
+    @Test func aRefusedPunchDraftRefusesRecord() throws {
+        let (m, f) = try armed()
+        let r = m.record
+        r.setPunch(true)
+        r.showsPopover = true
+        let before = m.fieldText(.punchIn)
+        r.setPunchText(.punchIn, "x")
+        r.pressRecord()
+        #expect(!r.isRecording && f.recordCalls.isEmpty)
+        #expect(m.editor.status?.contains("is not a position") == true)
+        // 5e-1 Task 1 review m3: the old punch range is kept.
+        #expect(m.fieldText(.punchIn) == before && r.punchText(.punchIn) == before)
+        r.setPunchText(.punchIn, "2")
+        m.editor.clearStatus()
+        r.pressRecord()
+        #expect(r.isRecording)
+        #expect(f.recordCalls.count == 1 && f.recordCalls.last?.spec.punch?.start == 61_440)
+    }
+
     @Test func theTimeLeftCountsTheArmedAudioChannels() throws {
         let (m, f) = try armed()
         let r = m.record

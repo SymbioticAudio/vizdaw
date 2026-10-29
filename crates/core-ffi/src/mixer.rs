@@ -83,6 +83,8 @@ pub struct StripRow {
     /// Outputs of its multi-output instrument that have no strip yet
     /// ("Add Outputs…").
     pub free_outputs: Vec<u16>,
+    /// Its automation mode (sub-project 5 spec §4.6).
+    pub automation: crate::automation::AutomationModeRow,
 }
 
 /// A destination of the instrument list (lanes play through these).
@@ -256,6 +258,7 @@ fn strip_row(
             Output::Bus(b) => Some(b.0),
         },
         free_outputs,
+        automation: s.automation.into(),
     }
 }
 

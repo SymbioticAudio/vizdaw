@@ -22,6 +22,9 @@ const WAIT_MS: u64 = 60_000;
 struct App {
     launched: Launched,
     client: Client,
+    /// The throwaway home: removed when the app is dropped (declared
+    /// last, so the process and the client go first).
+    _home: tempfile::TempDir,
 }
 
 impl App {
@@ -48,13 +51,12 @@ impl App {
         let home = tempfile::Builder::new()
             .prefix("vze")
             .tempdir_in("/tmp")
-            .unwrap()
-            .keep();
+            .unwrap();
         // Media retention moves files here, never to the real Trash (plan 5b).
-        let trash = home.join("Trash").display().to_string();
+        let trash = home.path().join("Trash").display().to_string();
         let launched = launch(&LaunchOptions {
             app,
-            home: Some(home),
+            home: Some(home.path().to_path_buf()),
             demo: false,
             timeout: Duration::from_secs(180),
             env: [
@@ -67,7 +69,11 @@ impl App {
         })
         .unwrap_or_else(|e| panic!("launch: {e}"));
         let client = Client::connect(&launched.socket).unwrap();
-        App { launched, client }
+        App {
+            launched,
+            client,
+            _home: home,
+        }
     }
 
     /// Calls `cmd`; panics with the app's log on an error.
@@ -1389,5 +1395,101 @@ fn arms_meters_counts_in_and_draws_the_take() {
         (m["items"][0]["peak"].as_f64().unwrap() - 0.251).abs() < 0.01,
         "{m}"
     );
+    app.quit();
+}
+
+/// Spec §12.3 through the channel (plan 5e-1): with the Built-in Synth
+/// strip on Touch, a fader touched, moved and released while playing
+/// lands at Stop as one "Write Automation" step in a lane "Built-in Synth
+/// Fader"; hostile gestures are refused before anything changes.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn touch_writes_a_fader_over_the_channel() {
+    let mut app = App::start();
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["suspended"], false, "{state}");
+    let synth = state["modes"][0]["strip"]
+        .as_u64()
+        .expect("the synth strip first");
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    run(
+        &mut app,
+        "automation.set_mode",
+        json!({"strips": synth.to_string(), "mode": "touch"}),
+    );
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["modes"][0]["mode"], "touch", "{state}");
+    // Hostile input: refused, nothing touched.
+    for (params, code) in [
+        (
+            json!({"target": "fader:999999", "phase": "touch"}),
+            core_control::ErrorCode::Failed,
+        ),
+        (
+            json!({"target": format!("fader:{synth}"), "phase": "value", "value": "nan"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+        (
+            json!({"target": "fader", "phase": "touch"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "automation.gesture", "params": params, "window": w}),
+        );
+        assert_eq!(e.code, code, "{e}");
+    }
+    run(&mut app, "transport.play_stop", json!({}));
+    app.wait(&w, json!({"condition": "playing"}));
+    // Pre-flight C1 (Ruling 24): the first idle after Play must not end
+    // the pass.
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["writing"], true, "{state}");
+    let target = format!("fader:{synth}");
+    run(
+        &mut app,
+        "automation.gesture",
+        json!({"target": target, "phase": "touch", "value": "0.5"}),
+    );
+    for v in ["0.55", "0.6", "0.65", "0.7"] {
+        std::thread::sleep(Duration::from_millis(30));
+        run(
+            &mut app,
+            "automation.gesture",
+            json!({"target": target, "phase": "value", "value": v}),
+        );
+    }
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["touched"][0], target, "{state}");
+    assert_eq!(state["writing"], true, "{state}");
+    run(
+        &mut app,
+        "automation.gesture",
+        json!({"target": target, "phase": "release"}),
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    run(&mut app, "transport.play_stop", json!({}));
+    app.wait(&w, json!({"condition": "stopped"}));
+    let doc = wait_for_state(&mut app, &w, "document", |d| {
+        d["undo"] == "Write Automation"
+    });
+    assert!(
+        doc["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["name"] == "Built-in Synth Fader"),
+        "{doc}"
+    );
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["touched"], json!([]), "{state}");
     app.quit();
 }

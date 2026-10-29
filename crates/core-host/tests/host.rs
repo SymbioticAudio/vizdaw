@@ -790,6 +790,129 @@ fn unpaired_gesture_events_still_become_gestures() {
     drop(engine);
 }
 
+/// Plan 5e-1 Ruling 15: beside the grouped gestures, the host reports
+/// every parameter event in the order the plugin sent it, from the main
+/// thread (the path an AU's listener takes) and from the audio side (a
+/// CLAP plugin's output events).
+#[test]
+fn idle_reports_every_param_event_in_order() {
+    let (hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[
+        ParamEvent::Begin(GAIN),
+        ParamEvent::Value(GAIN, 0.5),
+        ParamEvent::End(GAIN),
+        ParamEvent::Value(OTHER, 3.0),
+    ]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events,
+        vec![
+            (id, ParamEvent::Begin(GAIN)),
+            (id, ParamEvent::Value(GAIN, 0.5)),
+            (id, ParamEvent::End(GAIN)),
+            (id, ParamEvent::Value(OTHER, 3.0)),
+        ]
+    );
+    assert_eq!(r.gestures.len(), 2, "the gestures are grouped as before");
+    drop(engine);
+    // The CLAP test plugin's "Wiggle": a gesture from its process call.
+    let (hist, song, gain) = with_gain();
+    let mut host = crate::host(4096);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    let (mut engine, mut be) = crate::engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    host.set_param(gain, ParamId(2), 0.4);
+    peak(&mut be, 512);
+    let r = host.service(&mut engine, hist.doc(), song).unwrap();
+    assert_eq!(
+        r.param_events,
+        vec![
+            (gain, ParamEvent::Begin(ParamId(0))),
+            (gain, ParamEvent::Value(ParamId(0), 0.4)),
+            (gain, ParamEvent::End(ParamId(0))),
+        ]
+    );
+    drop(engine);
+}
+
+/// Pre-flight I7, plan 5e-1 Ruling 15: a gesture the host closes by
+/// itself (its End lost and the timeout passed, or its editor closed)
+/// reports an End for its open parameter, so the session's touch is
+/// released.
+#[test]
+fn a_gesture_the_host_closes_reports_its_end() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    host.set_gesture_timeout(Duration::from_millis(50));
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.5)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events,
+        vec![
+            (id, ParamEvent::Begin(GAIN)),
+            (id, ParamEvent::Value(GAIN, 0.5))
+        ]
+    );
+    std::thread::sleep(Duration::from_millis(60));
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events.last(),
+        Some(&(id, ParamEvent::End(GAIN))),
+        "{:?}",
+        r.param_events
+    );
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.25)]);
+    let _ = tick(&mut host, &mut engine, &mut be, &hist, song);
+    host.end_gestures(id);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events.last(),
+        Some(&(id, ParamEvent::End(GAIN))),
+        "{:?}",
+        r.param_events
+    );
+    // A slot removed while its gesture is open (check m9).
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.75)]);
+    let _ = tick(&mut host, &mut engine, &mut be, &hist, song);
+    run(&mut hist, MixerCmd::RemoveInsert { slot: id });
+    host.sync(hist.doc());
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events.last(),
+        Some(&(id, ParamEvent::End(GAIN))),
+        "{:?}",
+        r.param_events
+    );
+    drop(engine);
+}
+
+/// Task 9 review m6 (pre-flight I7): a plugin that restarts while its
+/// gesture is open reports an End for it, from the restart path.
+#[test]
+fn a_restart_reports_the_end_of_its_open_gesture() {
+    let (hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.5)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(r.param_events.len(), 2);
+    script.restart.store(true, Ordering::Relaxed);
+    let mut seen = Vec::new();
+    for _ in 0..500 {
+        seen.extend(tick(&mut host, &mut engine, &mut be, &hist, song).param_events);
+        if !seen.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(seen, vec![(id, ParamEvent::End(GAIN))]);
+    drop(engine);
+}
+
 #[test]
 fn a_restart_in_the_middle_of_a_gesture_does_not_lose_it() {
     let (hist, song, _id, mut host, script) = with_fake();
@@ -1018,7 +1141,7 @@ fn disabling_a_running_plugin_captures_and_unloads_it_and_enabling_restores_it()
     cat.set_enabled(PluginFormat::Clap, "vizdaw.test.synth4", false);
     cat.apply(&mut host);
     assert!(host.unloads_due(), "running instances of disabled plugins");
-    let unloaded = host.unload_unavailable(&mut hist);
+    let unloaded = host.unload_unavailable(&mut hist, &Default::default());
     let ids: Vec<PluginInstanceId> = unloaded.iter().map(|(id, _)| *id).collect();
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&gain) && ids.contains(&synth));
@@ -1118,7 +1241,11 @@ fn a_load_in_progress_of_a_disabled_plugin_is_abandoned() {
     assert!(!host.unloads_due(), "unavailable, not turned off");
     host.set_disabled(PluginFormat::Clap, "vizdaw.test.gain", true);
     assert!(host.unloads_due());
-    assert!(host.unload_unavailable(&mut hist).is_empty(), "nothing ran");
+    assert!(
+        host.unload_unavailable(&mut hist, &Default::default())
+            .is_empty(),
+        "nothing ran"
+    );
     host.wait_ready(WAIT);
     assert!(host.instance(gain).is_none());
     assert_eq!(
@@ -1177,7 +1304,11 @@ fn only_turning_a_plugin_off_unloads_it_blocklisted_and_missing_ones_keep_runnin
     cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", false);
     cat.apply(&mut host);
     assert!(host.unloads_due());
-    assert_eq!(host.unload_unavailable(&mut hist).len(), 1);
+    assert_eq!(
+        host.unload_unavailable(&mut hist, &Default::default())
+            .len(),
+        1
+    );
     assert!(host.instance(gain).is_none());
     // On again but still missing: it waits as a placeholder.
     cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", true);
@@ -1187,5 +1318,238 @@ fn only_turning_a_plugin_off_unloads_it_blocklisted_and_missing_ones_keep_runnin
         host.state(gain),
         Some(core_host::SlotState::Failed("Missing".into()))
     );
+    drop(engine);
+}
+
+// ---------------------------------------------------------------------------
+// Task 9b: an automated parameter keeps its static value across a capture.
+
+/// The scripted plugin as an insert on the synth's strip, with a lane of
+/// `Song` automating `params` of it (plus hostile automation: a parameter
+/// it does not list, and a second slot's parameter whose slot is then
+/// removed), loaded, with the static values `statics` committed first.
+fn with_fake_automated(
+    params: &[ParamId],
+    statics: &[(ParamId, f64)],
+) -> (History, SeqId, PluginInstanceId, PluginHost, Arc<Script>) {
+    use core_model::automation::AutomationTarget;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::time::Tick;
+    let doc = demo_document().unwrap();
+    let song = find_sequence(&doc, "Song").unwrap();
+    let mut b = Builder::from_doc(doc);
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let id = b.insert(synth, fake_ref()).unwrap();
+    let gone = b.insert(synth, plugin("vizdaw.test.gain")).unwrap();
+    let lane = b.lane(song, "Auto", None).unwrap();
+    let mut targets: Vec<AutomationTarget> = params
+        .iter()
+        .map(|p| AutomationTarget::PluginParam(id, *p))
+        .collect();
+    targets.push(AutomationTarget::PluginParam(id, ParamId(999)));
+    targets.push(AutomationTarget::PluginParam(gone, OTHER));
+    let events = targets
+        .into_iter()
+        .map(|target| EventSpec::new(Tick(0), EventBody::Automation { target, value: 0.5 }))
+        .collect();
+    b.events(song, lane, events).unwrap();
+    b.mixer(MixerCmd::RemoveInsert { slot: gone }).unwrap();
+    let mut hist = History::new(b.finish());
+    if !statics.is_empty() {
+        run(
+            &mut hist,
+            MixerCmd::SetPluginParams {
+                slot: id,
+                params: statics.to_vec(),
+            },
+        );
+    }
+    let script = Arc::new(Script::default());
+    let mut h = host(4096);
+    h.add_format(Box::new(FakeFormat(script.clone())));
+    h.sync(hist.doc());
+    let r = h.wait_ready(WAIT);
+    assert_eq!(r.loaded, vec![id], "{:?}", r.failed);
+    (hist, song, id, h, script)
+}
+
+/// The plugin's saved state as `(param, value)` pairs.
+fn blob_values(hist: &History, id: PluginInstanceId) -> BTreeMap<u64, f64> {
+    let slot = hist.doc().plugin_slot(id).unwrap();
+    let bytes = hist.doc().state_blob(slot.state.unwrap()).unwrap();
+    String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(|kv| {
+            let (k, v) = kv.split_once('=').unwrap();
+            (k.parse().unwrap(), v.parse().unwrap())
+        })
+        .collect()
+}
+
+/// Spec §7, plan 5e-1 Ruling 15, Task 9b: a capture while an automated
+/// parameter is ridden keeps the parameter's static value in the overlay
+/// (its overlay value, else its value before the ride), does not snap the
+/// playing plugin back, and a new host plays the static value; a
+/// parameter that is not automated is captured as before (the plugin's
+/// own value, no overlay entry). Hostile automation adds nothing.
+#[test]
+fn a_capture_keeps_an_automated_parameters_static_value() {
+    for statics in [vec![], vec![(GAIN, 0.8)]] {
+        let static_gain = statics.first().map_or(1.0, |(_, v)| *v);
+        let (mut hist, song, id, mut host, script) = with_fake_automated(&[GAIN], &statics);
+        let (mut engine, mut be) = engine(&host, 4096);
+        engine.load(hist.doc(), song).unwrap();
+        tick(&mut host, &mut engine, &mut be, &hist, song);
+        // The ride (a written gesture: never committed) and a move of a
+        // parameter nobody automates.
+        script.emit(&[
+            ParamEvent::Begin(GAIN),
+            ParamEvent::Value(GAIN, 0.4),
+            ParamEvent::End(GAIN),
+            ParamEvent::Value(OTHER, 0.6),
+        ]);
+        tick(&mut host, &mut engine, &mut be, &hist, song);
+        assert_eq!(script.held(GAIN), 0.4);
+        host.capture(&mut hist, id).unwrap();
+        assert_eq!(gain_params(&hist, id), vec![(GAIN, static_gain)]);
+        let blob = blob_values(&hist, id);
+        assert_eq!(blob.get(&0), Some(&0.4), "the plugin's own state");
+        assert_eq!(blob.get(&1), Some(&0.6), "not automated: as before");
+        for _ in 0..3 {
+            tick(&mut host, &mut engine, &mut be, &hist, song);
+        }
+        peak(&mut be, 512);
+        assert_eq!(script.held(GAIN), 0.4, "not snapped back while it plays");
+        assert_eq!(script.held(OTHER), 0.6);
+        // A second capture keeps it too (the overlay entry is now there).
+        host.capture(&mut hist, id).unwrap();
+        assert_eq!(gain_params(&hist, id), vec![(GAIN, static_gain)]);
+        // The undo-free reset puts the plugin at the static value.
+        host.reset_param(id, GAIN);
+        tick(&mut host, &mut engine, &mut be, &hist, song);
+        peak(&mut be, 512);
+        assert_eq!(script.held(GAIN), static_gain);
+        drop(engine);
+        // A new host (a reopen): state, then the kept overlay.
+        let doc = hist.doc().clone();
+        let fresh_script = Arc::new(Script::default());
+        let mut fresh = self::host(4096);
+        fresh.add_format(Box::new(FakeFormat(fresh_script.clone())));
+        fresh.sync(&doc);
+        fresh.wait_ready(WAIT);
+        assert_eq!(fresh_script.held(GAIN), static_gain);
+        assert_eq!(fresh_script.held(OTHER), 0.6);
+    }
+}
+
+/// Task 9b: a parameter touched or written in an open pass (no lane yet,
+/// a mid-pass autosave) is kept like an automated one, through
+/// `capture_with` and `capture_all`; a parameter the plugin does not list
+/// is never kept.
+#[test]
+fn a_capture_keeps_the_parameters_a_pass_writes() {
+    let (mut hist, song, id, mut host, script) = with_fake_automated(&[], &[]);
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    script.emit(&[ParamEvent::Value(GAIN, 0.3), ParamEvent::Value(OTHER, 0.7)]);
+    tick(&mut host, &mut engine, &mut be, &hist, song);
+    let riding = std::collections::BTreeSet::from([OTHER, ParamId(999)]);
+    host.capture_with(&mut hist, id, &riding).unwrap();
+    assert_eq!(gain_params(&hist, id), vec![(OTHER, 0.0)]);
+    for _ in 0..3 {
+        tick(&mut host, &mut engine, &mut be, &hist, song);
+    }
+    peak(&mut be, 512);
+    assert_eq!(script.held(OTHER), 0.7, "not snapped back");
+    let all = std::collections::BTreeSet::from([(id, OTHER), (PluginInstanceId(4242), GAIN)]);
+    assert!(host.capture_all(&mut hist, &all).is_empty());
+    assert_eq!(gain_params(&hist, id), vec![(OTHER, 0.0)]);
+    // No longer written: captured as before.
+    assert!(host.capture_all(&mut hist, &Default::default()).is_empty());
+    assert!(gain_params(&hist, id).is_empty());
+    assert_eq!(blob_values(&hist, id).get(&1), Some(&0.7));
+    drop(engine);
+}
+
+/// Task 9b: a plugin whose state capture fails changes nothing: the
+/// document keeps its overlay and the host its values.
+#[test]
+fn a_failed_capture_of_an_automated_plugin_changes_nothing() {
+    use core_model::automation::AutomationTarget;
+    use core_model::event::{EventBody, EventSpec};
+    use core_model::time::Tick;
+    let doc = demo_document().unwrap();
+    let song = find_sequence(&doc, "Song").unwrap();
+    let mut b = Builder::from_doc(doc);
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let id = b.insert(synth, plugin("vizdaw.test.nan")).unwrap();
+    let lane = b.lane(song, "Auto", None).unwrap();
+    b.events(
+        song,
+        lane,
+        vec![EventSpec::new(
+            Tick(0),
+            EventBody::Automation {
+                target: AutomationTarget::PluginParam(id, ParamId(0)),
+                value: 0.5,
+            },
+        )],
+    )
+    .unwrap();
+    let mut hist = History::new(b.finish());
+    let mut host = host(4096);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    let before = hist.doc().clone();
+    assert!(host.capture(&mut hist, id).is_err());
+    let all = std::collections::BTreeSet::from([(id, ParamId(0))]);
+    assert_eq!(host.capture_all(&mut hist, &all).len(), 1);
+    assert_eq!(hist.doc(), &before);
+}
+
+/// Task 9b review m2: a plugin turned off in the Plugin Manager while a
+/// pass rides one of its parameters (no lane yet) keeps that parameter's
+/// static value, not the ride, in the captured overlay.
+#[test]
+fn disabling_a_plugin_mid_ride_keeps_the_ridden_parameters_static_value() {
+    use core_host::catalog::{Catalog, CatalogEntry, ScanStatus, Source};
+    let (mut hist, song, gain) = with_gain();
+    let src = Source::clap_bundle(&test_plugins::bundle());
+    let mut cat = Catalog::new();
+    cat.record(
+        &src,
+        vec![CatalogEntry {
+            source: src.clone(),
+            plugin: plugin("vizdaw.test.gain"),
+            kind: Some(PluginKind::Effect),
+            info: None,
+            status: ScanStatus::Ok,
+        }],
+    );
+    let mut host = host(4096);
+    cat.apply(&mut host);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    host.set_param(gain, ParamId(0), 0.3);
+    for _ in 0..500 {
+        peak(&mut be, 256);
+        host.idle();
+        if host.instance(gain).unwrap().param_value(ParamId(0)) == Some(0.3) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    cat.set_enabled(PluginFormat::Clap, "vizdaw.test.gain", false);
+    cat.apply(&mut host);
+    let riding = std::collections::BTreeSet::from([(gain, ParamId(0))]);
+    let unloaded = host.unload_unavailable(&mut hist, &riding);
+    assert_eq!(unloaded.len(), 1);
+    assert!(unloaded[0].1.is_ok());
+    assert_eq!(gain_params(&hist, gain), vec![(ParamId(0), 1.0)]);
     drop(engine);
 }

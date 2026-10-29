@@ -1,7 +1,14 @@
 //! `Session`: one open document (one window).
 
+use crate::automation::{
+    AutomationModeRow, AutomationStateRow, GesturePhaseRow, Holder, Move, PassStep,
+    Path as TouchPath, PluginMove, PluginTouches, PreviewPointRow, Release, Sampler, Source,
+    StripModeRow, Touching, UnsentEnds, Writing,
+};
+use crate::autowrite::WriteMode;
 use crate::editor::{self, EditorSize};
 use crate::error::VizError;
+use crate::events::{AutomationTargetRow, automation_target_of, automation_target_row};
 use crate::guard::{ffi_guard, lock};
 use crate::host;
 use crate::mixer::{self, DestRow, MixerLevels, MixerSnapshot};
@@ -12,12 +19,16 @@ use crate::snapshot::{
     seq_id, seq_rows, warnings,
 };
 use crate::snapshot::{ParamRow, ParamValue, PluginRefRow};
+use core_engine::gesture::{GestureMsg, GesturePhase};
+use core_engine::schedule::AutoDest;
 use core_host::PluginHost;
+use core_model::automation::{AutomationMode, AutomationTarget};
 use core_model::command::Command;
 use core_model::command::MixerCmd;
 use core_model::command::RoutingCmd;
 use core_model::command::lane::LaneCmd;
 use core_model::command::sequence::SequenceCmd;
+use core_model::command::{AutomationWrite, RecordPass};
 use core_model::document::DestKind;
 use core_model::document::Document;
 use core_model::file;
@@ -133,6 +144,54 @@ struct Inner {
     /// A Save came while recording: the pass is saved when it lands (plan
     /// 5d-1 Ruling 19).
     save_after_pass: bool,
+    /// The targets touched now, with their paths (plan 5e-1 Rulings 14,
+    /// 20).
+    touches: std::collections::BTreeMap<AutomationTarget, Touching>,
+    /// The shared static edit's label and its open static touches
+    /// (Ruling 14).
+    static_edit: Option<(String, usize)>,
+    /// The 10 ms sampler (Ruling 8).
+    sampler: Sampler,
+    /// The plugin windows' touches (Ruling 15): a value-only plugin's are
+    /// released 500 ms after its last value.
+    plugin_touches: PluginTouches,
+    /// The document whose plugin-parameter automation `plugin_auto`
+    /// holds (Task 9 review I-1): its sequences are compared by pointer.
+    plugin_auto_doc: Document,
+    /// Every plugin parameter's automation in `plugin_auto_doc`.
+    plugin_auto: std::collections::BTreeMap<AutomationTarget, Vec<(SeqId, Tick, u64)>>,
+    /// Gesture ends the engine's queue refused (Ruling 10).
+    unsent_ends: UnsentEnds,
+    /// The pass writing while playing (Rulings 7, 23, 24).
+    writing: Option<Writing>,
+    /// A finished pass's writes, the Write strips that still exist and
+    /// the After Write mode, waiting for an open edit to end.
+    /// A pass a device rebuild ended, to start again in this sequence once
+    /// the rebuilt engine plays (controller ruling 3 on Task 8).
+    restart_writing: Option<SeqId>,
+    /// One entry per pass, landed as one step each (review m2), or into
+    /// the step its loop passes landed in (plan 5e-1 Task 12).
+    pending_automation: Vec<crate::automation::Landing>,
+    /// The Write strips (and the After Write mode) whose mode changes
+    /// when a recording's pass with automation lands (Ruling 9).
+    after_write_pending: Option<(Vec<StripId>, AutomationMode)>,
+    /// The undo step the last landing outside a recording made or went
+    /// into (Task 12: a looped pass a rebuild restarts keeps its step).
+    last_step: Option<u64>,
+    /// The step a pass a rebuild ended had, for the pass that restarts.
+    restart_step: Option<u64>,
+    /// Loop passes of the recording landed into its group (Task 12): its
+    /// step is "Write Automation" when it recorded nothing else.
+    landed_in_group: bool,
+}
+
+/// Slot `id`'s overlay in `doc` (what a capture into a copy of the
+/// history kept, plan 5e-1 Task 9b), to store with the same blob in the
+/// real history.
+fn kept_overlay(doc: &Document, id: PluginInstanceId) -> std::collections::BTreeMap<ParamId, f64> {
+    doc.plugin_slot(id)
+        .map(|s| s.params.iter().map(|(k, v)| (*k, *v)).collect())
+        .unwrap_or_default()
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -169,6 +228,8 @@ struct News {
 impl Inner {
     fn new(doc: Document, path: Option<PathBuf>) -> Inner {
         let key = path.as_deref().map(recovery::key);
+        let plugin_auto = crate::automation::plugin_automation(&doc);
+        let plugin_auto_doc = doc.clone();
         Inner {
             key,
             revs: crate::revs::Revisions::new(&doc),
@@ -208,6 +269,20 @@ impl Inner {
             synth_mutes: Default::default(),
             settings_seen: crate::audio::epoch(),
             save_after_pass: false,
+            touches: Default::default(),
+            static_edit: None,
+            sampler: Sampler::default(),
+            plugin_touches: PluginTouches::default(),
+            plugin_auto_doc,
+            plugin_auto,
+            unsent_ends: UnsentEnds::default(),
+            writing: None,
+            pending_automation: Vec::new(),
+            restart_writing: None,
+            after_write_pending: None,
+            last_step: None,
+            restart_step: None,
+            landed_in_group: false,
         }
     }
 
@@ -365,6 +440,38 @@ impl Inner {
         self.offline = offline;
         self.media_seen = Some((doc.clone(), root));
         changed
+    }
+
+    /// The plugin parameters touched or written in an open pass, or
+    /// written by a pass not landed yet (plan 5e-1 Task 9b): a capture
+    /// keeps their static values like an automated parameter's, since
+    /// their lane may not exist yet (a mid-pass autosave).
+    fn riding_params(&self) -> std::collections::BTreeSet<(PluginInstanceId, ParamId)> {
+        let mut targets: Vec<AutomationTarget> = self
+            .touches
+            .iter()
+            .filter(|(_, x)| matches!(x.path, crate::automation::Path::Write(..)))
+            .map(|(t, _)| *t)
+            .collect();
+        if let Some(w) = &self.writing {
+            targets.extend(w.stamps.keys().copied());
+            targets.extend(w.moved.iter().copied());
+            targets.extend(w.ended.iter().copied());
+            targets.extend(w.holds.iter().map(|(t, _)| *t));
+        }
+        for p in &self.pending_automation {
+            targets.extend(p.writes.iter().map(|w| w.target));
+        }
+        if let Some((Some(pass), _)) = &self.pending_pass {
+            targets.extend(pass.automation.iter().map(|w| w.target));
+        }
+        targets
+            .into_iter()
+            .filter_map(|t| match t {
+                AutomationTarget::PluginParam(slot, p) => Some((slot, p)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The sequence a position set without the engine belongs to: the one
@@ -608,9 +715,11 @@ impl Session {
     /// plugin call is on the stack: nothing is captured, and the caller
     /// must not write a half-captured file.
     fn capture_all(&self, inner: &mut Inner) -> Result<bool, VizError> {
+        let riding = inner.riding_params();
         let history = &mut inner.history;
         let failed = plugins::with(self.id, |p| {
-            p.map(|p| p.capture_all(history)).unwrap_or_default()
+            p.map(|p| p.capture_all(history, &riding))
+                .unwrap_or_default()
         })?;
         let all = failed.is_empty();
         for (id, e) in failed {
@@ -715,7 +824,18 @@ impl Session {
             // The title shows Edited.
             inner.news.doc_changed = true;
         }
-        inner.held.extend(r.gestures);
+        self.sync_loaded_plugins(inner, &r.loaded);
+        // A plugin window's moves are gestures too (spec §7.1); the
+        // parameters they write as automation are not parameter steps
+        // (plan 5e-1 Ruling 15, pre-flight M13).
+        let written = self.plugin_events(inner, &r.param_events);
+        inner
+            .held
+            .extend(r.gestures.into_iter().filter_map(|mut g| {
+                let slot = g.slot;
+                g.values.retain(|(p, _)| !written.contains(&(slot, *p)));
+                (!g.values.is_empty()).then_some(g)
+            }));
         let changed = self.commit_held(inner);
         self.mark(inner);
         self.maybe_autosave(inner);
@@ -820,6 +940,7 @@ impl Session {
         if crate::edit::retries_input_cmd(&cmd) {
             records_busy(&inner)?;
         }
+        let before = inner.doc().clone();
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
         // An arm or input change that went through lets a failed input
@@ -830,6 +951,9 @@ impl Session {
         }
         inner.reload_host(self.id);
         self.mark(&mut inner);
+        // Touches of what the edit removed end (plan 5e-1 M9).
+        self.release_vanished(&mut inner);
+        self.resync_plugin_automation(&mut inner, Some(&before));
         inner.snapshot()
     }
 
@@ -844,7 +968,7 @@ impl Session {
     /// plugin call is on the stack: the removal is refused rather than
     /// losing the state.
     fn capture_removed(&self, next: &Document) -> Result<(), VizError> {
-        let (mut scratch, gone) = {
+        let (mut scratch, gone, riding) = {
             let inner = lock(&self.inner);
             let before = mixer::slot_ids(inner.doc());
             let after = mixer::slot_ids(next);
@@ -852,20 +976,28 @@ impl Session {
             if gone.is_empty() {
                 return Ok(());
             }
-            (inner.history.clone(), gone)
+            (inner.history.clone(), gone, inner.riding_params())
         };
         let captured = plugins::with(self.id, |p| {
             let Some(p) = p else { return Vec::new() };
             gone.into_iter()
                 // A placeholder has nothing to capture; its saved state
                 // stays in the document.
-                .filter_map(|id| p.capture(&mut scratch, id).ok().map(|blob| (id, blob)))
+                .filter_map(|id| {
+                    let mine = core_model::automation::slot_params(&riding, id);
+                    p.capture_with(&mut scratch, id, &mine)
+                        .ok()
+                        .map(|blob| (id, blob))
+                })
                 .collect::<Vec<_>>()
         })?;
         let mut inner = lock(&self.inner);
         for (id, blob) in captured {
             if let Some(bytes) = scratch.doc().state_blob(blob) {
-                inner.history.capture_state(id, bytes)?;
+                // The overlay the capture kept (Task 9b), as in `scratch`.
+                inner
+                    .history
+                    .capture_state_keeping(id, bytes, &kept_overlay(scratch.doc(), id))?;
             }
         }
         Ok(())
@@ -886,15 +1018,15 @@ impl Session {
         if due != Ok(true) {
             return false;
         }
-        let mut scratch = {
+        let (mut scratch, riding) = {
             let inner = lock(&self.inner);
             if inner.history.in_transaction() {
                 return false;
             }
-            inner.history.clone()
+            (inner.history.clone(), inner.riding_params())
         };
         let Ok(unloaded) = plugins::with(self.id, |p| {
-            p.map(|p| p.unload_unavailable(&mut scratch))
+            p.map(|p| p.unload_unavailable(&mut scratch, &riding))
                 .unwrap_or_default()
         }) else {
             return false;
@@ -908,7 +1040,7 @@ impl Session {
                     .ok_or_else(|| "captured state missing".to_string())?;
                 inner
                     .history
-                    .capture_state(id, bytes)
+                    .capture_state_keeping(id, bytes, &kept_overlay(scratch.doc(), id))
                     .map_err(|e| e.to_string())
             });
             // Reported like a save's capture failure; the document keeps
@@ -962,6 +1094,8 @@ impl Session {
         inner.version += 1;
         inner.reload_host(self.id);
         self.mark(&mut inner);
+        self.release_vanished(&mut inner);
+        self.resync_plugin_automation(&mut inner, Some(&before));
         let snapshot = inner.snapshot()?;
         // An undone or redone arm, monitor or input edit claims as the
         // edit did (Task 8 review m6).
@@ -986,6 +1120,10 @@ impl Session {
         if inner.recording.is_some() || inner.finishing {
             return Err(recording_busy());
         }
+        // A Play while a pass writes lands it first (plan 5e-1 Ruling 23):
+        // the new position is a new pass.
+        self.finish_writing(&mut inner);
+        self.apply_pending_automation(&mut inner);
         let id = seq_id(inner.doc(), seq)?;
         let start = start.or(match (inner.cursor, inner.cursor_seq) {
             (Some(t), None) => Some(t),
@@ -1010,10 +1148,25 @@ impl Session {
         inner.reload_fault = None;
         inner.cursor = None;
         inner.cursor_seq = Some(id);
+        // The gesture tap goes in before the Play, so the roll is its
+        // first mark (plan 5e-1 Ruling 7); Write strips' controls are held
+        // from the roll (Ruling 9), at the tick the Play starts from.
+        let at = pending
+            .located()
+            .or_else(|| host::position(self.id).map(|p| p.1))
+            .unwrap_or(Tick::ZERO);
+        self.begin_writing(&mut inner, id, at);
         // The disk wait (up to 250 ms) holds no lock: this session's
         // transport poll and every other session go on meanwhile.
         drop(inner);
-        host::finish_play(pending)
+        let played = host::finish_play(pending);
+        if played.is_err() {
+            // A Play that did not start writes nothing (Ruling 24).
+            let mut inner = lock(&self.inner);
+            self.finish_writing(&mut inner);
+            self.apply_pending_automation(&mut inner);
+        }
+        played
     }
 
     /// After an edit of a lane's arm, monitor or input in `seq` (plan 5d-1
@@ -1466,8 +1619,13 @@ impl Session {
             // Behind a rebuild this session's poll is running (its drain
             // has taken the host out of the slot): the Stop must not be
             // lost to an empty slot.
-            let _inner = lock(&self.inner);
-            host::stop(self.id)
+            let mut inner = lock(&self.inner);
+            inner.restart_writing = None;
+            let stopped = host::stop(self.id);
+            // What was written lands now (spec §7.4).
+            self.finish_writing(&mut inner);
+            self.apply_pending_automation(&mut inner);
+            stopped
         })
     }
 
@@ -1478,9 +1636,26 @@ impl Session {
             if inner.recording.is_some() {
                 return Err(recording_busy());
             }
+            // A Locate while a pass writes lands it; the new position is a
+            // new pass (plan 5e-1 Ruling 23).
+            let writing = inner
+                .writing
+                .as_ref()
+                .map(|w| (w.seq, w.handles.status.rolled()));
+            self.finish_writing(&mut inner);
+            self.apply_pending_automation(&mut inner);
             if !host::locate(self.id, Tick(tick))? {
                 inner.cursor = Some(Tick(tick));
                 inner.cursor_seq = inner.selected_seq();
+            }
+            // Again from the new position: when it plays, or when the old
+            // pass had not rolled yet (check I-2: the Play is still on its
+            // way to the renderer).
+            let stopped = host::transport_stopped(self.id);
+            if let Some((seq, _)) = writing
+                .filter(|(_, rolled)| stopped == Some(false) || (!rolled && stopped.is_some()))
+            {
+                self.begin_writing(&mut inner, seq, Tick(tick));
             }
             Ok(())
         })
@@ -1598,6 +1773,7 @@ impl Session {
             plugins::tick_closing();
             self.unload_disabled();
             self.service_recording()?;
+            self.service_writing();
             // An arm's claim another window's opening input put off (Task
             // 8 parked n2); the sources were reconnected at the arm.
             let owed = lock(&self.inner).claim_owed;
@@ -1606,6 +1782,7 @@ impl Session {
             }
             let mut inner = lock(&self.inner);
             self.apply_pending_pass(&mut inner);
+            self.apply_pending_automation(&mut inner);
             // A save at Stop the busy registry put off (Task 9 review M4).
             self.save_after_pass_now(&mut inner);
             // A setting a load publishes changed (plan 5d-1 Ruling 12).
@@ -1618,6 +1795,9 @@ impl Session {
                 inner.reload_host(self.id);
             }
             let changed = self.pump(&mut inner);
+            // Every other path that changes a plugin parameter's
+            // automation (Task 9 review I-1).
+            self.resync_plugin_automation(&mut inner, None);
             // Jobs applied when an edit closed (outside `idle`) count too.
             let owed = std::mem::take(&mut inner.news.media_changed);
             let jobs_changed = self.apply_jobs(&mut inner);
@@ -1826,12 +2006,15 @@ impl Session {
     pub fn end_edit(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
-            if inner.history.in_transaction() {
+            // The static gestures' shared edit is theirs to close (plan
+            // 5e-1 Ruling 14).
+            if inner.history.in_transaction() && inner.static_edit.is_none() {
                 inner.history.commit()?;
                 inner.version += 1;
             }
             inner.edit_label = None;
             self.commit_held(&mut inner);
+            self.apply_pending_automation(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
         })
@@ -2465,6 +2648,10 @@ impl Session {
             // `idle` follows a close, and the take was promised saved
             // (Task 9 parked m3; a failure is printed below).
             self.save_after_pass_now(&mut inner);
+            // Touches end and a pass in progress lands (plan 5e-1 Ruling 20).
+            self.release_touches(&mut inner);
+            self.finish_writing(&mut inner);
+            self.apply_pending_automation(&mut inner);
             for line in inner.news.problems.iter().skip(before) {
                 eprintln!("VizDAW: {line}");
             }
@@ -2958,7 +3145,7 @@ impl Session {
     pub fn abort_edit(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
-            if inner.history.in_transaction() {
+            if inner.history.in_transaction() && inner.static_edit.is_none() {
                 inner.history.abort()?;
                 inner.version += 1;
                 inner.reload_host(self.id);
@@ -4447,6 +4634,10 @@ impl Session {
                 message: "Finish the open edit first.".into(),
             });
         }
+        // A Record while a pass writes lands it first (plan 5e-1 Ruling
+        // 23), before the recording is planned on the document.
+        self.finish_writing(&mut inner);
+        self.apply_pending_automation(&mut inner);
         // Review I-1: the take would be planned at the old rate and land
         // in a project at the new one.
         if inner.jobs.pending(&[crate::jobs::JobKindRow::Format]) {
@@ -4691,6 +4882,7 @@ impl Session {
         if let Err(e) = inner.history.begin_group() {
             return fail(e.into());
         }
+        inner.landed_in_group = false;
         inner.recording = Some(recording);
         inner.record_faults.clear();
         inner.looped = spec.looped;
@@ -4698,6 +4890,11 @@ impl Session {
         inner.reload_fault = None;
         inner.cursor = None;
         inner.cursor_seq = Some(id);
+        let at = pending
+            .located()
+            .or_else(|| host::position(self.id).map(|p| p.1))
+            .unwrap_or(Tick::ZERO);
+        self.begin_writing(&mut inner, id, at);
         drop(inner);
         // A Play that cannot be sent ends the recording it started
         // (pre-flight M4): nothing would ever roll or end it.
@@ -4773,6 +4970,8 @@ impl Session {
                 None
             }
         };
+        // Automation written while it recorded joins the pass (spec §7.4).
+        let pass = self.writes_into_pass(&mut inner, pass);
         inner.pending_pass = Some((pass, files));
         inner.finishing_files.clear();
         self.apply_pending_pass(&mut inner);
@@ -4788,14 +4987,23 @@ impl Session {
         let Some((pass, files)) = inner.pending_pass.take() else {
             return;
         };
-        let label = pass
-            .as_ref()
-            .map_or("Record", core_model::command::RecordPass::name);
+        // A recording that recorded nothing but whose loop passes landed
+        // automation into its group (Task 12) is "Write Automation".
+        let label = match &pass {
+            Some(p) => p.name(),
+            None if inner.landed_in_group => "Write Automation",
+            None => "Record",
+        };
+        inner.landed_in_group = false;
+        let mut created: Vec<core_model::ids::AnyId> = Vec::new();
+        // The automation that landed, if any (plan 5e-1 Ruling 25).
+        let mut landed: Vec<AutomationWrite> = Vec::new();
         if let Some(p) = pass {
             // Track Synth's "Mute the MIDI lane after recording" (spec
             // §6.7): inside the group, so the mute is part of "Record"
             // (plan 5c-2 Ruling 6).
             let mutes = crate::synth::mutes_after(&p, &inner.synth_mutes);
+            let automation = p.automation.clone();
             match inner
                 .history
                 .execute(&Command::Record(p), &ViewFilter::default())
@@ -4805,8 +5013,16 @@ impl Session {
                         "The recording could not be added ({e}). Its files are kept."
                     ));
                     inner.keep_recordings.extend(files);
+                    // Its automation still lands, inside the group (plan
+                    // 5e-1 Ruling 25).
+                    if let Some(r) = self.land_automation_alone(inner, automation.clone()) {
+                        created = r.created;
+                        landed = automation;
+                    }
                 }
-                Ok(_) => {
+                Ok(r) => {
+                    created = r.created;
+                    landed = automation;
                     for (key, seq, lane) in mutes {
                         inner.synth_mutes.remove(&key);
                         let mute = Command::Lane(LaneCmd::SetFlags {
@@ -4825,12 +5041,22 @@ impl Session {
                 }
             }
         }
+        // Write strips become the After Write mode in the same step (plan
+        // 5e-1 Ruling 9).
+        self.after_write_in_group(inner, !landed.is_empty());
         let _ = inner.history.end_group(label);
+        let silent = crate::automation::silent_new_lanes(inner.doc(), &created, &landed);
+        inner.news.problems.extend(silent);
         inner.version += 1;
         inner.news.doc_changed = true;
         inner.news.media_changed = true;
         inner.reload_host(self.id);
         self.mark(inner);
+        if !landed.is_empty() {
+            self.sync_written_plugins(inner, &landed);
+            self.resync_plugin_automation(inner, None);
+        }
+        self.release_vanished(inner);
         self.save_after_pass_now(inner);
     }
 
@@ -4868,7 +5094,8 @@ impl Session {
     fn service_recording(&self) -> Result<(), VizError> {
         let ending = {
             let mut inner = lock(&self.inner);
-            let stopped = host::transport_stopped(self.id).unwrap_or(false);
+            let id = self.id;
+            let stopped = || host::transport_stopped(id).unwrap_or(false);
             let (mut problems, mut faults) = (Vec::new(), Vec::new());
             let e = inner
                 .recording
@@ -5069,6 +5296,1671 @@ impl Session {
                 ms,
             }))
         })
+    }
+}
+
+/// Automation recording (plan 5e-1; sub-project 5 spec §7).
+#[uniffi::export]
+impl Session {
+    /// A gesture on `target` from the app or the channel (spec §7.1;
+    /// Rulings 14, 16, 20, 26). `Model` for a target that cannot be
+    /// gestured or a non-finite value; `Busy` for a static touch while an
+    /// edit the gesture path did not open is open.
+    pub fn gesture(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+    ) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let t = automation_target_of(target);
+            let mut inner = lock(&self.inner);
+            // A release with no touch does nothing (Ruling 20), also for a
+            // target that went meanwhile.
+            if phase == GesturePhaseRow::Release {
+                self.release(&mut inner, t, None);
+                return Ok(());
+            }
+            self.check_gesture(&inner, t)?;
+            match phase {
+                GesturePhaseRow::Touch { value } => {
+                    let v = value.map(finite).transpose()?;
+                    self.touch(&mut inner, t, v, Source::Ui, None)
+                }
+                GesturePhaseRow::Value { value } => {
+                    let v = finite(value)?;
+                    self.move_to(&mut inner, t, v, Source::Ui, None)
+                }
+                GesturePhaseRow::Release => Ok(()),
+            }
+        })
+    }
+
+    /// Sets the mode of `strips` (spec §4.6) as one undo step "Set
+    /// Automation Mode"; `Busy` while a static touch's step is open.
+    pub fn set_automation_mode(
+        &self,
+        strips: Vec<u64>,
+        mode: AutomationModeRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            // Not inside an open static touch's step (Task 10 review M2).
+            if lock(&self.inner).static_edit.is_some() {
+                return Err(VizError::Busy {
+                    message: "Release the touched control first.".into(),
+                });
+            }
+            self.execute(Command::Mixer(MixerCmd::SetAutomationMode {
+                strips: strips.into_iter().map(StripId).collect(),
+                mode: mode.into(),
+            }))
+        })
+    }
+
+    /// Every strip's mode, the targets touched now, suspend, and whether
+    /// this session writes.
+    pub fn automation_state(&self) -> Result<AutomationStateRow, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let m = inner.doc().mixer();
+            let modes = m
+                .order()
+                .iter()
+                .copied()
+                .chain(std::iter::once(m.master()))
+                .filter_map(|id| m.strip(id).ok())
+                .map(|s| StripModeRow {
+                    strip: s.id.0,
+                    mode: s.automation.into(),
+                })
+                .collect();
+            Ok(AutomationStateRow {
+                modes,
+                touched: inner
+                    .touches
+                    .keys()
+                    .map(|t| automation_target_row(*t))
+                    .collect(),
+                suspended: crate::automation::suspended(),
+                writing: inner.writing.is_some(),
+            })
+        })
+    }
+
+    /// The write in progress for `target` in the current pass, as it
+    /// would land now, as `(tick, value)` in the playing sequence (Ruling
+    /// 18); empty when it is not being written.
+    pub fn automation_preview(
+        &self,
+        target: AutomationTargetRow,
+    ) -> Result<Vec<PreviewPointRow>, VizError> {
+        ffi_guard(|| {
+            let t = automation_target_of(target);
+            let mut inner = lock(&self.inner);
+            let Some(w) = inner.writing.as_mut() else {
+                return Ok(Vec::new());
+            };
+            drain_tap(w);
+            let end_run = w.handles.status.run();
+            let stamps = w.stamps.get(&t).cloned().unwrap_or_default();
+            let holds: Vec<(AutomationTarget, f64)> =
+                w.holds.iter().filter(|h| h.0 == t).copied().collect();
+            let Some(w) = inner.writing.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let doc = inner.doc();
+            let pd =
+                crate::automation::PassDoc::read(self.id, doc, w.seq, w.rate, std::iter::once(t));
+            // The loop passes landed at their wraps are in the document
+            // already (Task 12).
+            let made: Vec<_> = pd
+                .writes(
+                    doc,
+                    &w.marks,
+                    end_run,
+                    &stamps,
+                    &holds,
+                    w.thinning,
+                    w.after_write,
+                )
+                .into_iter()
+                .filter(|x| x.pass >= w.landed)
+                .collect();
+            let Some(last) = made.iter().map(|x| x.pass).max() else {
+                return Ok(Vec::new());
+            };
+            // The earlier passes' writes go first, as at landing (their
+            // edges inform the last pass's).
+            let before: Vec<_> = made.iter().filter(|x| x.pass < last).cloned().collect();
+            let skip = pd.to_model(doc, &before).len();
+            Ok(pd
+                .to_model(doc, &made)
+                .into_iter()
+                .skip(skip)
+                .flat_map(|w| w.points)
+                .map(|(tick, value)| PreviewPointRow {
+                    tick: tick.0,
+                    value,
+                })
+                .collect())
+        })
+    }
+}
+
+/// A gesture value, finite (Ruling 16), clamped to 0–1.
+fn finite(v: f64) -> Result<f64, VizError> {
+    if v.is_finite() {
+        Ok(core_model::automation::unit(v))
+    } else {
+        Err(crate::events::bad("gesture values must be finite"))
+    }
+}
+
+/// The host time of a gesture: the given one, else now on a live device
+/// and 0 offline (Ruling 7).
+fn host_time(host_ns: Option<u64>) -> u64 {
+    host_ns.unwrap_or_else(|| {
+        if host::offline_mode() {
+            // A live-like offline device (test hook) has a clock.
+            host::offline_clock_ns().unwrap_or(0)
+        } else {
+            crate::clock::now_ns()
+        }
+    })
+}
+
+/// The stamp tag of a path (its write mode; 0 off a writing path).
+fn tag_of(path: TouchPath) -> u8 {
+    match path {
+        TouchPath::Write(m, _) => m.tag(),
+        TouchPath::Static | TouchPath::Live => 0,
+    }
+}
+
+/// Moves the tap's marks and stamps into the pass (stamps by target); a
+/// wrap mark sets `wrapped`.
+fn drain_tap(w: &mut Writing) {
+    while let Ok(m) = w.handles.marks.pop() {
+        if m.wrap {
+            w.wrapped = true;
+        }
+        w.marks.push(m);
+    }
+    let run = w.handles.status.run();
+    while let Ok(s) = w.handles.stamps.pop() {
+        // A writing stamp for a pass already landed (Task 12 review I1).
+        if w.landed > 0
+            && s.tag != 0
+            && crate::autowrite::pass_of(&w.marks, run, s.run).is_some_and(|p| p < w.landed)
+        {
+            w.late = w.late.saturating_add(1);
+        }
+        w.stamps.entry(s.dest.target()).or_default().push(s);
+    }
+}
+
+/// The controls a Write strip holds from the roll (Ruling 9): fader, pan
+/// (not master), mute and send levels.
+fn held_controls(doc: &Document, strip: StripId) -> Vec<AutomationTarget> {
+    let Ok(s) = doc.mixer().strip(strip) else {
+        return Vec::new();
+    };
+    let mut out = vec![AutomationTarget::StripFader(strip)];
+    if strip != doc.mixer().master() {
+        out.push(AutomationTarget::StripPan(strip));
+    }
+    out.push(AutomationTarget::StripMute(strip));
+    for i in 0..s.sends.len() {
+        if let Ok(i) = u16::try_from(i) {
+            out.push(AutomationTarget::SendLevel(
+                strip,
+                core_model::automation::SendIndex(i),
+            ));
+        }
+    }
+    out
+}
+
+/// The gesture path and the writing lifecycle (plan 5e-1 Task 8).
+impl Session {
+    /// Ruling 16: what cannot be gestured is refused.
+    fn check_gesture(&self, inner: &Inner, t: AutomationTarget) -> Result<(), VizError> {
+        if matches!(t, AutomationTarget::VelocityScale(_)) {
+            return Err(crate::events::bad("velocity scale cannot be gestured"));
+        }
+        if !core_model::automation::target_exists(inner.doc(), t) {
+            return Err(crate::events::bad(&format!(
+                "{} does not exist",
+                t.describe()
+            )));
+        }
+        if matches!(t, AutomationTarget::PluginParam(..))
+            && crate::automation::param_info(self.id, t).is_none()
+        {
+            return Err(crate::events::bad(&format!(
+                "{} is not a parameter of the running plugin",
+                t.describe()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether `t` is stepped (mute, solo, a stepped plugin parameter).
+    fn stepped(&self, t: AutomationTarget) -> bool {
+        t.is_stepped() || crate::automation::param_info(self.id, t).is_some_and(|p| p.stepped)
+    }
+
+    /// The write mode a touch of `t` takes now (Rulings 3, 9, 14): when
+    /// this session writes a pass and plays (or is about to roll), the
+    /// target's strip writes, and automation is not suspended.
+    fn write_mode_of(&self, inner: &Inner, t: AutomationTarget) -> Option<WriteMode> {
+        let w = inner.writing.as_ref()?;
+        if crate::automation::suspended() {
+            return None;
+        }
+        // The roll first, then the state (the renderer publishes the
+        // state before it sets `rolled`).
+        let rolled = w.handles.status.rolled();
+        let plays = match host::transport_stopped(self.id) {
+            Some(false) => true,
+            // Before the roll the transport still reads stopped, while the
+            // Play is meant (a Play that ended at once is not; final
+            // review m4).
+            Some(true) => !rolled && host::wants_play(self.id) == Some(true),
+            None => false,
+        };
+        if !plays {
+            return None;
+        }
+        let doc = inner.doc();
+        let strip = core_model::automation::strip_of(doc, t)?;
+        let mode = doc.mixer().strip(strip).ok()?.automation;
+        match mode {
+            // From the first wrap on, the After Write mode (Ruling 9).
+            AutomationMode::Write if w.write_strips.contains(&strip) && w.wrapped => {
+                WriteMode::of(w.after_write)
+            }
+            AutomationMode::Write if w.write_strips.contains(&strip) => Some(WriteMode::Write),
+            // Switched to Write while playing: Latch until the next Play.
+            AutomationMode::Write => Some(WriteMode::Latch),
+            m => WriteMode::of(m),
+        }
+    }
+
+    /// How a writing touch of `t` in `mode` ends (Rulings 10, 11).
+    fn release_of(&self, inner: &Inner, t: AutomationTarget, mode: WriteMode) -> Release {
+        let stepped = self.stepped(t);
+        match mode {
+            WriteMode::Latch | WriteMode::Write => Release::Hold,
+            _ if stepped => Release::Hold,
+            WriteMode::Touch => Release::Glide,
+            WriteMode::Trim => {
+                let automated = inner.writing.as_ref().is_some_and(|w| {
+                    !crate::automation::existing(inner.doc(), w.seq, t).is_empty()
+                });
+                if automated {
+                    Release::Offsets
+                } else {
+                    Release::Glide
+                }
+            }
+        }
+    }
+
+    /// The value heard now (Ruling 26).
+    fn heard_value(&self, inner: &Inner, t: AutomationTarget) -> f64 {
+        let doc = inner.doc();
+        if let AutomationTarget::PluginParam(..) = t {
+            let info = crate::automation::param_info(self.id, t);
+            return match info.as_ref().and_then(|p| p.value.map(|v| p.norm(v))) {
+                Some(v) => v,
+                None => crate::automation::fixed_value(doc, t, info.as_ref()),
+            };
+        }
+        if let Some(v) = host::heard(self.id, t) {
+            return v;
+        }
+        if host::transport_stopped(self.id) == Some(false) {
+            if let Some((seq, tick)) = host::position(self.id) {
+                let points = crate::automation::existing(doc, seq, t);
+                if let Some(v) = crate::automation::value_at(&points, tick, t.is_stepped()) {
+                    return v;
+                }
+            }
+        }
+        crate::automation::fixed_value(doc, t, None)
+    }
+
+    /// Sends one gesture message for `t`; an end the queue refused while
+    /// this session holds the engine is kept for `idle` (pre-flight I3).
+    fn send_gesture(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        phase: GesturePhase,
+        tag: u8,
+        host_ns: u64,
+    ) {
+        let Some(dest) = AutoDest::of(t) else {
+            return;
+        };
+        let msg = GestureMsg {
+            dest,
+            phase,
+            host_ns,
+            tag,
+        };
+        if host::gesture(self.id, msg) {
+            inner.unsent_ends.clear(t);
+        } else if matches!(
+            phase,
+            GesturePhase::Release | GesturePhase::Glide(_) | GesturePhase::Hold
+        ) && host::holder() == Some(self.id)
+        {
+            inner.unsent_ends.put(t, msg);
+        }
+    }
+
+    /// A `Ui` value of a plugin parameter goes to the plugin (plain;
+    /// Ruling 15).
+    fn set_plugin(&self, t: AutomationTarget, v: f64) {
+        let AutomationTarget::PluginParam(slot, param) = t else {
+            return;
+        };
+        let Some(info) = crate::automation::param_info(self.id, t) else {
+            return;
+        };
+        let plain = core_model::automation::param_plain(v, info.min, info.max, info.stepped);
+        let _ = plugins::with(self.id, |p| {
+            if let Some(p) = p {
+                p.set_param(slot, param, plain);
+            }
+        });
+    }
+
+    /// Sets `t`'s static value to `v` inside the shared static edit.
+    fn run_static(&self, inner: &mut Inner, t: AutomationTarget, v: f64) {
+        let Some(cmd) = crate::automation::static_command(inner.doc(), t, v) else {
+            return;
+        };
+        if inner.history.execute(&cmd, &ViewFilter::default()).is_ok() {
+            inner.version += 1;
+            inner.news.doc_changed = true;
+            inner.reload_host(self.id);
+            self.mark(inner);
+        }
+    }
+
+    /// A touch (Rulings 14, 20, 26): its value resolved, its path picked
+    /// once, the engine told.
+    fn touch(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        value: Option<f64>,
+        source: Source,
+        host_ns: Option<u64>,
+    ) -> Result<(), VizError> {
+        if inner.touches.contains_key(&t) {
+            // Touched already: a touch at a value moves it.
+            return match value {
+                Some(v) => self.move_to(inner, t, v, source, host_ns),
+                None => Ok(()),
+            };
+        }
+        let v = match value {
+            Some(v) => core_model::automation::unit(v),
+            None => self.heard_value(inner, t),
+        };
+        let path = match self.write_mode_of(inner, t) {
+            Some(m) => TouchPath::Write(m, self.release_of(inner, t, m)),
+            // The host's grouped gesture is the plugin's static step
+            // (Ruling 15).
+            None if source == Source::Plugin => TouchPath::Live,
+            None => TouchPath::Static,
+        };
+        if path == TouchPath::Static {
+            match inner.static_edit.as_mut() {
+                Some((_, n)) => *n += 1,
+                None => {
+                    if inner.history.in_transaction() {
+                        return Err(VizError::Busy {
+                            message: "Finish the open edit first.".into(),
+                        });
+                    }
+                    let label = crate::automation::static_label(t);
+                    inner.history.begin(label)?;
+                    inner.static_edit = Some((label.to_string(), 1));
+                }
+            }
+        }
+        if let Some(w) = inner.writing.as_mut() {
+            w.moved.insert(t);
+        }
+        inner.touches.insert(
+            t,
+            Touching {
+                path,
+                value: v,
+                base: v,
+                source,
+            },
+        );
+        let ns = host_time(host_ns);
+        // The touch is a sample (Ruling 8).
+        inner.sampler.flush(t);
+        let _ = inner.sampler.value(t, v, crate::automation::now(), ns);
+        // Only a touch that carries a value sets it (review I-3): a click
+        // on an automated fader (`Touch{None}`) changes nothing until it
+        // moves.
+        if value.is_some() {
+            if path == TouchPath::Static {
+                self.run_static(inner, t, v);
+            }
+            if source == Source::Ui {
+                self.set_plugin(t, v);
+            }
+        }
+        // Trim on automation grabs at an offset of 0 (pre-flight I12).
+        let phase = match path {
+            TouchPath::Write(_, Release::Offsets) => GesturePhase::Offset(0.0),
+            _ => GesturePhase::Touch(v),
+        };
+        self.send_gesture(inner, t, phase, tag_of(path), ns);
+        Ok(())
+    }
+
+    /// A move (a value with no touch is a touch first; Ruling 20), through
+    /// the sampler (Ruling 8).
+    fn move_to(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        v: f64,
+        source: Source,
+        host_ns: Option<u64>,
+    ) -> Result<(), VizError> {
+        let v = core_model::automation::unit(v);
+        let Some(touching) = inner.touches.get_mut(&t) else {
+            return self.touch(inner, t, Some(v), source, host_ns);
+        };
+        touching.value = v;
+        let ns = host_time(host_ns);
+        if let Some(v) = inner.sampler.value(t, v, crate::automation::now(), ns) {
+            self.send_value(inner, t, v, ns);
+        }
+        Ok(())
+    }
+
+    /// A sampled value of touched `t`: the static command on the static
+    /// path, the plugin for a `Ui` plugin parameter, and the engine.
+    fn send_value(&self, inner: &mut Inner, t: AutomationTarget, v: f64, host_ns: u64) {
+        let Some(touching) = inner.touches.get(&t).copied() else {
+            return;
+        };
+        if touching.path == TouchPath::Static {
+            self.run_static(inner, t, v);
+        }
+        if touching.source == Source::Ui {
+            self.set_plugin(t, v);
+        }
+        let phase = match touching.path {
+            TouchPath::Write(_, Release::Offsets) => {
+                let d = match AutoDest::of(t) {
+                    Some(dest) if dest.is_db() => {
+                        core_model::automation::fader_db(v)
+                            - core_model::automation::fader_db(touching.base)
+                    }
+                    _ => v - touching.base,
+                };
+                GesturePhase::Offset(d)
+            }
+            _ => GesturePhase::Value(v),
+        };
+        self.send_gesture(inner, t, phase, tag_of(touching.path), host_ns);
+    }
+
+    /// A release (Rulings 10, 14, 15): the kept value first, then the
+    /// path's end; a static release ends its share of the static edit.
+    fn release(&self, inner: &mut Inner, t: AutomationTarget, host_ns: Option<u64>) {
+        let Some(touching) = inner.touches.get(&t).copied() else {
+            return;
+        };
+        if let Some((v, ns)) = inner.sampler.flush(t) {
+            self.send_value(inner, t, v, ns);
+        }
+        inner.touches.remove(&t);
+        if touching.source == Source::Plugin {
+            inner.plugin_touches.forget(t);
+        }
+        let return_frames = inner
+            .writing
+            .as_ref()
+            .map_or(0, |w| u32::try_from(w.return_frames).unwrap_or(u32::MAX));
+        // Stopped, or the pass landed: a Hold or Glide would play on
+        // through the next Play (pre-flight I2).
+        let phase = match (inner.writing.is_some(), touching.path) {
+            (false, _) | (true, TouchPath::Static | TouchPath::Live) => GesturePhase::Release,
+            (true, TouchPath::Write(_, Release::Hold)) => GesturePhase::Hold,
+            (true, TouchPath::Write(_, Release::Glide | Release::Offsets)) => {
+                GesturePhase::Glide(return_frames)
+            }
+        };
+        self.send_gesture(inner, t, phase, tag_of(touching.path), host_time(host_ns));
+        if let (Some(w), GesturePhase::Glide(_) | GesturePhase::Hold) =
+            (inner.writing.as_mut(), phase)
+        {
+            w.ended.insert(t);
+        }
+        if touching.path == TouchPath::Static {
+            self.keep_static_param(inner, t, touching);
+            self.end_static_share(inner);
+        }
+        // A Touch or Trim plugin parameter no lane drives plays its static
+        // value again (pre-flight M14).
+        if let (
+            TouchPath::Write(WriteMode::Touch | WriteMode::Trim, _),
+            AutomationTarget::PluginParam(..),
+        ) = (touching.path, t)
+        {
+            let seq = inner
+                .writing
+                .as_ref()
+                .map(|w| w.seq)
+                .or_else(|| host::position(self.id).map(|p| p.0));
+            let driven =
+                seq.is_some_and(|s| !crate::automation::existing(inner.doc(), s, t).is_empty());
+            if !driven {
+                self.reset_plugin_param(t);
+            }
+        }
+    }
+
+    /// A static `Ui` touch of a plugin parameter keeps its value in the
+    /// document as it leaves the static edit.
+    fn keep_static_param(&self, inner: &mut Inner, t: AutomationTarget, touching: Touching) {
+        let (Source::Ui, AutomationTarget::PluginParam(slot, param)) = (touching.source, t) else {
+            return;
+        };
+        let Some(info) = crate::automation::param_info(self.id, t) else {
+            return;
+        };
+        let plain =
+            core_model::automation::param_plain(touching.value, info.min, info.max, info.stepped);
+        let cmd = Command::Mixer(MixerCmd::SetPluginParams {
+            slot,
+            params: vec![(param, plain)],
+        });
+        if inner.history.execute(&cmd, &ViewFilter::default()).is_ok() {
+            inner.version += 1;
+            inner.reload_host(self.id);
+        }
+    }
+
+    /// One static touch ended: the last closes the shared edit (Ruling
+    /// 14), and what waited for it lands.
+    fn end_static_share(&self, inner: &mut Inner) {
+        let Some((_, n)) = inner.static_edit.as_mut() else {
+            return;
+        };
+        *n = n.saturating_sub(1);
+        if *n > 0 {
+            return;
+        }
+        inner.static_edit = None;
+        if inner.history.in_transaction() && inner.history.commit().is_ok() {
+            inner.version += 1;
+            // `idle` sends the snapshot (review m3).
+            inner.news.doc_changed = true;
+        }
+        self.commit_held(inner);
+        self.apply_pending_pass(inner);
+        self.apply_pending_automation(inner);
+        self.apply_jobs_after_edit(inner);
+    }
+
+    /// Releases every touch (close).
+    fn release_touches(&self, inner: &mut Inner) {
+        let all: Vec<AutomationTarget> = inner.touches.keys().copied().collect();
+        for t in all {
+            self.release(inner, t, None);
+        }
+    }
+
+    /// Releases the touches whose target no longer exists (pre-flight
+    /// M9), after a document change.
+    fn release_vanished(&self, inner: &mut Inner) {
+        let gone: Vec<AutomationTarget> = inner
+            .touches
+            .keys()
+            .filter(|t| !core_model::automation::target_exists(inner.doc(), **t))
+            .copied()
+            .collect();
+        for t in gone {
+            self.release(inner, t, None);
+        }
+    }
+
+    /// A plugin window's parameter events (spec §7.1; Rulings 15, 27;
+    /// pre-flight I8, I9, M12): each, its value normalised by the
+    /// parameter's range (one the instance does not list is skipped), goes
+    /// through [`PluginTouches`] onto the gesture path as `Source::Plugin`,
+    /// stamped at the drain time. A target the app touches (plan 5e-2's
+    /// sliders) is the app's: the plugin's report of it is skipped (so a
+    /// knob the plugin grabbed while the app held it is, once the app lets
+    /// go, a value-only touch, released 500 ms after its last move; review
+    /// m4). Answers
+    /// the parameters on a writing path (touched as a write in these
+    /// events, or still touched as one), whose grouped gestures are not
+    /// parameter steps (pre-flight M13).
+    fn plugin_events(
+        &self,
+        inner: &mut Inner,
+        events: &[(PluginInstanceId, core_host::ParamEvent)],
+    ) -> std::collections::BTreeSet<(PluginInstanceId, ParamId)> {
+        use core_host::ParamEvent;
+        let mut written = std::collections::BTreeSet::new();
+        if !events.is_empty() {
+            let slots: std::collections::BTreeSet<PluginInstanceId> =
+                events.iter().map(|(s, _)| *s).collect();
+            // `pump` has just borrowed the registry, so this does not fail
+            // today; if it did, Begin and Value wait for nothing (they are
+            // dropped) but an End still releases (review m3).
+            let ranges = plugins::with(self.id, |p| {
+                let mut out = std::collections::BTreeMap::new();
+                let Some(p) = p else {
+                    return out;
+                };
+                for slot in slots {
+                    if let Some(inst) = p.instance(slot) {
+                        for i in &inst.info().params {
+                            out.insert((slot, i.id), (i.min, i.max));
+                        }
+                    }
+                }
+                out
+            });
+            let busy = ranges.is_err();
+            let ranges = ranges.unwrap_or_default();
+            // Up to one timer tick late (pre-flight M12).
+            let ns = host_time(None);
+            let now = crate::automation::now();
+            // Ruling 27: what the playing schedule automates.
+            let seq = (host::holder() == Some(self.id))
+                .then(|| {
+                    inner
+                        .writing
+                        .as_ref()
+                        .map(|w| w.seq)
+                        .or_else(|| host::position(self.id).map(|p| p.0))
+                })
+                .flatten();
+            let mut automated: std::collections::BTreeMap<AutomationTarget, bool> =
+                Default::default();
+            for (slot, e) in events {
+                let (param, m) = match *e {
+                    ParamEvent::Begin(p) => (p, PluginMove::Begin),
+                    ParamEvent::Value(p, v) => (p, PluginMove::Value(v)),
+                    ParamEvent::End(p) => (p, PluginMove::End),
+                };
+                let m = match (ranges.get(&(*slot, param)), m) {
+                    (Some(&(min, max)), PluginMove::Value(v)) => {
+                        PluginMove::Value(crate::automation::norm(v, min, max))
+                    }
+                    (Some(_), m) => m,
+                    (None, PluginMove::End) if busy => PluginMove::End,
+                    // A parameter the instance does not list.
+                    (None, _) => continue,
+                };
+                let t = AutomationTarget::PluginParam(*slot, param);
+                if inner
+                    .touches
+                    .get(&t)
+                    .is_some_and(|x| x.source == Source::Ui)
+                {
+                    continue;
+                }
+                let doc = inner.doc();
+                let auto = *automated.entry(t).or_insert_with(|| {
+                    seq.is_some_and(|s| !crate::automation::existing(doc, s, t).is_empty())
+                });
+                let writes = |inner: &Inner| {
+                    inner
+                        .touches
+                        .get(&t)
+                        .is_some_and(|x| matches!(x.path, TouchPath::Write(..)))
+                };
+                let was = writes(inner);
+                for mv in inner.plugin_touches.event(t, m, now, auto) {
+                    // The plugin path never opens an edit, so it is never
+                    // refused.
+                    let _ = match mv {
+                        Move::Touch(v) => self.touch(inner, t, v, Source::Plugin, Some(ns)),
+                        Move::Value(v) => self.move_to(inner, t, v, Source::Plugin, Some(ns)),
+                        Move::Release => {
+                            self.release(inner, t, Some(ns));
+                            Ok(())
+                        }
+                    };
+                }
+                if was || writes(inner) {
+                    written.insert((*slot, param));
+                }
+            }
+        }
+        for (t, x) in &inner.touches {
+            if let (AutomationTarget::PluginParam(slot, param), TouchPath::Write(..)) = (t, x.path)
+            {
+                written.insert((*slot, *param));
+            }
+        }
+        written
+    }
+
+    /// Releases the plugin windows' touches that ended by themselves
+    /// (spec §7.1, pre-flight I7): value-only touches 500 ms after their
+    /// last value (stamped then on a live device), and the touches of
+    /// slots that no longer run.
+    fn release_plugin_touches(&self, inner: &mut Inner) {
+        let now = crate::automation::now();
+        let mut ended: Vec<(AutomationTarget, Option<u64>)> = Vec::new();
+        for (t, at) in inner.plugin_touches.idle(now) {
+            let ns = if host::offline_mode() {
+                0
+            } else {
+                let ago = u64::try_from(now.saturating_sub(at).as_nanos()).unwrap_or(u64::MAX);
+                crate::clock::now_ns().saturating_sub(ago)
+            };
+            ended.push((t, Some(ns)));
+        }
+        let slots = inner.plugin_touches.slots();
+        if !slots.is_empty() {
+            let live = plugins::with(self.id, |p| {
+                slots
+                    .iter()
+                    .filter(|s| {
+                        p.as_ref()
+                            .is_some_and(|p| p.state(**s) == Some(core_host::SlotState::Live))
+                    })
+                    .copied()
+                    .collect::<std::collections::BTreeSet<PluginInstanceId>>()
+            });
+            // A busy registry says nothing: they wait for the next idle.
+            if let Ok(live) = live {
+                for t in inner.plugin_touches.release_slots(|s| live.contains(&s)) {
+                    ended.push((t, None));
+                }
+            }
+        }
+        for (t, ns) in ended {
+            if inner
+                .touches
+                .get(&t)
+                .is_some_and(|x| x.source == Source::Plugin)
+            {
+                self.release(inner, t, ns);
+            }
+        }
+    }
+
+    /// Task 9 review I-1 (Ruling 15, "the static value stays"): after a
+    /// change that added, removed or changed a plugin parameter's
+    /// automation (an undo or redo of a pass, a lane deleted, a landing),
+    /// the plugin is sent what now plays there: the automation's value at
+    /// the position where the playing (or last) sequence automates it,
+    /// else its static value. A target touched now is left to the hand.
+    ///
+    /// `before` is the document the change started from, when the caller
+    /// has it; else the one last seen here (every edit, undo, redo and
+    /// landing calls this, and `idle` catches the rest).
+    fn resync_plugin_automation(&self, inner: &mut Inner, before: Option<&Document>) {
+        let doc = inner.doc().clone();
+        let seen = inner.plugin_auto_doc.sequences().ptr_eq(doc.sequences());
+        // The change from `before` (an undo can come back to the very
+        // document last seen here, so that alone says nothing).
+        let from_before = before
+            .filter(|b| !b.sequences().ptr_eq(doc.sequences()))
+            .map(crate::automation::plugin_automation);
+        if seen && from_before.is_none() {
+            return;
+        }
+        let now = crate::automation::plugin_automation(&doc);
+        let cached = std::mem::take(&mut inner.plugin_auto);
+        let mut changed: std::collections::BTreeSet<AutomationTarget> = Default::default();
+        for old in std::iter::once(&cached).chain(from_before.as_ref()) {
+            changed.extend(
+                old.keys()
+                    .chain(now.keys())
+                    .filter(|t| old.get(t) != now.get(t))
+                    .copied(),
+            );
+        }
+        inner.plugin_auto = now;
+        inner.plugin_auto_doc = doc;
+        self.sync_plugin_targets(inner, changed);
+    }
+
+    /// Plan 5e-1 Task 9b, item 4: a plugin that finished loading (at open,
+    /// or loaded again) got its state, then its overlay (the static
+    /// values); its automated parameters are put where their automation
+    /// plays at the position, once, through the same path as
+    /// [`Session::resync_plugin_automation`].
+    fn sync_loaded_plugins(&self, inner: &mut Inner, loaded: &[PluginInstanceId]) {
+        if loaded.is_empty() {
+            return;
+        }
+        // One scan of the document for every loaded slot (review m4).
+        let all = core_model::automation::automated_targets(inner.doc());
+        let targets: std::collections::BTreeSet<AutomationTarget> = all
+            .into_iter()
+            .filter(|(slot, _)| loaded.contains(slot))
+            .map(|(slot, p)| AutomationTarget::PluginParam(slot, p))
+            .collect();
+        self.sync_plugin_targets(inner, targets);
+    }
+
+    /// Sends each plugin parameter in `targets` the value its automation
+    /// plays at the position (the playing sequence's, else the cursor's),
+    /// else its static value. A target touched now is left to the hand.
+    fn sync_plugin_targets(
+        &self,
+        inner: &mut Inner,
+        changed: std::collections::BTreeSet<AutomationTarget>,
+    ) {
+        if changed.is_empty() {
+            return;
+        }
+        let (seq, tick) = match host::position(self.id) {
+            Some((s, t)) => (Some(s), Some(t)),
+            None => (inner.cursor_seq, inner.cursor),
+        };
+        let tick = tick.unwrap_or(Tick::ZERO);
+        for t in changed {
+            if inner.touches.contains_key(&t) {
+                continue;
+            }
+            let AutomationTarget::PluginParam(slot, param) = t else {
+                continue;
+            };
+            let points =
+                seq.map_or_else(Vec::new, |s| crate::automation::existing(inner.doc(), s, t));
+            if points.is_empty() {
+                self.reset_plugin_param(t);
+                continue;
+            }
+            let Some(info) = crate::automation::param_info(self.id, t) else {
+                continue;
+            };
+            let Some(v) = crate::automation::value_at(&points, tick, self.stepped(t)) else {
+                continue;
+            };
+            let plain = core_model::automation::param_plain(v, info.min, info.max, info.stepped);
+            let _ = plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    p.set_param(slot, param, plain);
+                }
+            });
+        }
+    }
+
+    /// Puts plugin parameter `t` back at its static value: the document's
+    /// overlay, else the plugin's own value before it (no commit).
+    fn reset_plugin_param(&self, t: AutomationTarget) {
+        let AutomationTarget::PluginParam(slot, param) = t else {
+            return;
+        };
+        let _ = plugins::with(self.id, |p| {
+            if let Some(p) = p {
+                p.reset_param(slot, param);
+            }
+        });
+    }
+
+    /// Ends kept gesture messages the queue refused, while it refuses them
+    /// (pre-flight I3).
+    fn resend_ends(&self, inner: &mut Inner) {
+        let id = self.id;
+        inner.unsent_ends.resend(|m| host::gesture(id, m));
+    }
+
+    /// Starts writing a pass of `seq` once Play went out (Rulings 7, 9,
+    /// 19, 20): the tap, the settings, Write strips' holds, and every held
+    /// touch's path picked again.
+    fn begin_writing(&self, inner: &mut Inner, seq: SeqId, at: Tick) {
+        inner.restart_writing = None;
+        if inner.writing.is_some() {
+            return;
+        }
+        let Some(handles) = host::start_gestures(self.id) else {
+            inner
+                .news
+                .problems
+                .push("Automation is not being written this pass: the engine was busy.".into());
+            return;
+        };
+        let (after_write, return_ms, thinning) = crate::automation::pass_settings();
+        let rate = host::device(self.id)
+            .map(|(_, r)| r)
+            .filter(|r| *r > 0.0)
+            .unwrap_or_else(|| f64::from(inner.doc().settings().format.sample_rate));
+        let return_frames = (f64::from(return_ms) * rate / 1000.0).round() as u64;
+        let doc = inner.doc();
+        let m = doc.mixer();
+        let write_strips: std::collections::BTreeSet<StripId> = m
+            .order()
+            .iter()
+            .copied()
+            .chain(std::iter::once(m.master()))
+            .filter(|s| {
+                m.strip(*s)
+                    .is_ok_and(|x| x.automation == AutomationMode::Write)
+            })
+            .collect();
+        // Every Write strip's controls, at their values at the play-start
+        // tick (Ruling 9; the punch and record range play no part, Ruling
+        // 28). None while suspended (Ruling 3).
+        let mut holds: Vec<(AutomationTarget, f64)> = Vec::new();
+        if !crate::automation::suspended() {
+            // The pass's own start: the engine's published position still
+            // shows where it stood before a queued Locate (review I-2).
+            let tick = at;
+            let all = crate::automation::existing_all(doc, seq);
+            for s in &write_strips {
+                for t in held_controls(doc, *s) {
+                    // A control the hand holds over the pass's start is held
+                    // at the hand's value (re-review 2 N4).
+                    let v = match inner.touches.get(&t) {
+                        Some(x) => x.value,
+                        None => all
+                            .get(&t)
+                            .and_then(|p| crate::automation::value_at(p, tick, t.is_stepped()))
+                            .unwrap_or_else(|| crate::automation::fixed_value(doc, t, None)),
+                    };
+                    holds.push((t, v));
+                }
+            }
+        }
+        inner.writing = Some(Writing {
+            seq,
+            handles,
+            marks: Vec::new(),
+            stamps: Default::default(),
+            holds: holds.clone(),
+            write_strips,
+            wrapped: false,
+            return_frames,
+            after_write,
+            thinning,
+            dropped_at_start: host::gestures_dropped(self.id).unwrap_or(0),
+            rate,
+            ended: holds.iter().map(|h| h.0).collect(),
+            holds_resent: false,
+            // Touches held over the pass's start count as moved: the holds
+            // re-sent at the roll spare them (re-review 2 N4).
+            moved: inner.touches.keys().copied().collect(),
+            landed: 0,
+            step: None,
+            after_done: false,
+            late: 0,
+            late_said: 0,
+        });
+        let tag = WriteMode::Write.tag();
+        let ns = host_time(None);
+        for (t, v) in holds {
+            self.send_gesture(inner, t, GesturePhase::Touch(v), tag, ns);
+            // A touched control stays touched; its release holds it.
+            if !inner.touches.contains_key(&t) {
+                self.send_gesture(inner, t, GesturePhase::Hold, tag, ns);
+            }
+        }
+        // Touches held over the pass's start (Ruling 20 as amended, M2):
+        // each writes when its strip writes now, else is heard only. A
+        // static touch (held over Play from while stopped) writes too when
+        // its strip writes now (re-review 3 n1, fix round 4): a fader held
+        // on a Write strip while Play is pressed writes its ride, and its
+        // release follows the strip's mode. It leaves the static edit (its
+        // share ends below); on a strip that does not write it keeps the
+        // static path.
+        let held: Vec<(AutomationTarget, Touching)> =
+            inner.touches.iter().map(|(t, x)| (*t, *x)).collect();
+        let mut left_static = 0usize;
+        for (t, x) in held {
+            let mut converted = false;
+            if x.path == TouchPath::Static && inner.static_edit.is_some() {
+                if self.write_mode_of(inner, t).is_none() {
+                    continue;
+                }
+                self.keep_static_param(inner, t, x);
+                left_static += 1;
+                converted = true;
+            }
+            // A Trim offset stays an offset from its own grab (review I-1,
+            // Ruling 11: the engine keeps `Offset` entries over a Stop or a
+            // Locate); an absolute touch stays absolute. A converted static
+            // touch on an automated Trim lane grabs at an offset of 0 from
+            // the hand's value now, as a Trim grab does (re-review 4 N1,
+            // pre-flight I12): its stopped moves were static edits, so it
+            // carries no offset.
+            let was_offset = matches!(x.path, TouchPath::Write(_, Release::Offsets));
+            let path = match self.write_mode_of(inner, t) {
+                Some(m) => TouchPath::Write(
+                    m,
+                    match self.release_of(inner, t, m) {
+                        Release::Offsets if !was_offset && !converted => Release::Glide,
+                        r => r,
+                    },
+                ),
+                None => TouchPath::Live,
+            };
+            let is_offset = matches!(path, TouchPath::Write(_, Release::Offsets));
+            if was_offset && !is_offset {
+                // The engine's entry becomes absolute at the value heard,
+                // so the next value does not jump from an offset.
+                let v = host::heard(self.id, t).unwrap_or(x.value);
+                self.send_gesture(inner, t, GesturePhase::Touch(v), tag_of(path), ns);
+            }
+            if converted && is_offset {
+                self.send_gesture(inner, t, GesturePhase::Offset(0.0), tag_of(path), ns);
+            }
+            if let Some(y) = inner.touches.get_mut(&t) {
+                y.path = path;
+                if !is_offset || converted {
+                    y.base = y.value;
+                }
+            }
+        }
+        // The static touches that now write end their share of the static
+        // edit as their release would: the last closes it as its own step
+        // (what was set while stopped), and what waited for it lands.
+        for _ in 0..left_static {
+            self.end_static_share(inner);
+        }
+    }
+
+    /// `idle`'s writing step: the kept ends, the sampler's due values, the
+    /// tap's marks and stamps, and the pass's end (Ruling 24).
+    fn service_writing(&self) {
+        let mut inner = lock(&self.inner);
+        self.resend_ends(&mut inner);
+        self.release_plugin_touches(&mut inner);
+        for (t, v, ns) in inner.sampler.due(crate::automation::now()) {
+            self.send_value(&mut inner, t, v, ns);
+        }
+        let holder = match host::holder() {
+            Some(h) if h == self.id => Holder::This,
+            Some(_) => Holder::Other,
+            None => Holder::Nobody,
+        };
+        // The roll is read before the state (see `write_mode_of`).
+        let rolled = inner
+            .writing
+            .as_ref()
+            .is_some_and(|w| w.handles.status.rolled());
+        let stopped = host::transport_stopped(self.id);
+        // The intent, not the renderer's state: a rebuilt engine's Play
+        // reads stopped until it applies it.
+        let wants_play = host::wants_play(self.id) == Some(true);
+        let Some(w) = inner.writing.as_mut() else {
+            // A pass a rebuild ended starts again once the rebuilt engine
+            // plays; a Stop or another session's engine ends the wait.
+            if let Some(seq) = inner.restart_writing {
+                match (holder, wants_play) {
+                    (Holder::This, true) => {
+                        // The old pass lands first (re-review N1).
+                        inner.last_step = None;
+                        self.apply_pending_automation(&mut inner);
+                        let step = inner.last_step.take().or(inner.restart_step.take());
+                        let at = self.resume_tick();
+                        self.begin_writing(&mut inner, seq, at);
+                        self.keep_loop_step(&mut inner, step);
+                    }
+                    (Holder::Nobody, _) => {}
+                    _ => {
+                        inner.restart_writing = None;
+                        inner.restart_step = None;
+                    }
+                }
+            }
+            return;
+        };
+        // The run before the stamps: every stamp of a block up to it is
+        // in the ring by then (Task 12's landing at a wrap).
+        let run = w.handles.status.run();
+        drain_tap(w);
+        // A stamp for a pass already landed is lost: said once per batch
+        // (Task 12 review I1).
+        if w.late > w.late_said {
+            w.late_said = w.late;
+            inner.news.problems.push(
+                "Some automation moves came after their loop pass had landed and were lost.".into(),
+            );
+        }
+        let Some(w) = inner.writing.as_mut() else {
+            return;
+        };
+        let (closed, seq) = (w.handles.status.closed(), w.seq);
+        // Re-review m4: the holds went out right after the Play's (or the
+        // Locate's) command; a command swap the renderer put off could
+        // apply that Locate, whose `end_holds` ends them, after them. The
+        // tap is installed by a command queued after the Locate, so once it
+        // rolled the Locate applied: the holds go again, at the same
+        // values (a flat stretch gains no point), sparing targets touched
+        // now or earlier in the pass.
+        let resend: Vec<(AutomationTarget, f64)> = if rolled && !w.holds_resent && !closed {
+            w.holds_resent = true;
+            // Not one a touch already moved this pass.
+            w.holds
+                .iter()
+                .filter(|(t, _)| !w.moved.contains(t))
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !resend.is_empty() {
+            let (tag, ns) = (WriteMode::Write.tag(), host_time(None));
+            for (t, v) in resend {
+                if inner.touches.contains_key(&t) {
+                    continue;
+                }
+                self.send_gesture(&mut inner, t, GesturePhase::Touch(v), tag, ns);
+                self.send_gesture(&mut inner, t, GesturePhase::Hold, tag, ns);
+            }
+        }
+        // A recording ends its own pass and takes the writes with it; its
+        // loop passes land into its group as they end (Task 12).
+        if inner.finishing {
+            return;
+        }
+        if inner.recording.is_some() {
+            if !closed {
+                self.land_wraps(&mut inner, run);
+            }
+            return;
+        }
+        match crate::automation::pass_step(closed, rolled, stopped, wants_play, holder) {
+            PassStep::Go => self.land_wraps(&mut inner, run),
+            PassStep::Land => self.finish_writing(&mut inner),
+            PassStep::Restart => {
+                // The rebuilt engine plays on (Ruling 21; controller
+                // ruling 3): what was written lands as Stop lands it (After
+                // Write included, so the new pass holds the strips' new
+                // modes), then writing goes on from where it resumed
+                // (re-review N1). A looped pass keeps its one step (Task
+                // 12).
+                let old = inner.writing.as_ref().and_then(|w| w.step);
+                inner.last_step = None;
+                self.finish_writing(&mut inner);
+                self.apply_pending_automation(&mut inner);
+                let step = inner.last_step.take().or(old);
+                let at = self.resume_tick();
+                self.begin_writing(&mut inner, seq, at);
+                self.keep_loop_step(&mut inner, step);
+            }
+            PassStep::RestartLater => {
+                let old = inner.writing.as_ref().and_then(|w| w.step);
+                inner.last_step = None;
+                self.finish_writing(&mut inner);
+                inner.restart_writing = Some(seq);
+                inner.restart_step = old;
+            }
+        }
+    }
+
+    /// A looped pass a rebuild restarted goes on landing into the step its
+    /// part before the rebuild landed in (plan 5e-1 Task 12: one undo step
+    /// per looped pass).
+    fn keep_loop_step(&self, inner: &mut Inner, step: Option<u64>) {
+        let looped = inner.looped;
+        if let Some(w) = inner.writing.as_mut().filter(|_| looped) {
+            w.step = step;
+        }
+    }
+
+    /// Plan 5e-1 Task 12 (owner 2026-10-29; spec §7.4): while looping, the
+    /// loop passes that are over as of tap run `run` (the next pass heard
+    /// for [`crate::automation::WRAP_MARGIN_MS`]) land now, so the next
+    /// cycle plays what was just written: into the pass's one undo step,
+    /// or into the recording's group. Put off while an edit is open (the
+    /// next `idle` lands them). A pass that wrote nothing makes no step.
+    fn land_wraps(&self, inner: &mut Inner, run: u64) {
+        let Some(w) = inner.writing.as_ref() else {
+            return;
+        };
+        // Heard, not rendered (Task 12 review I1): a device with a clock
+        // renders two buffers and its output latency ahead of what is
+        // heard; the graph latency is in the pass's marks.
+        let forced = *crate::automation::WRAP_LAG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let lag = if let Some(l) = forced {
+            l
+        } else if !host::offline_mode() || host::offline_clock_ns().is_some() {
+            host::input_info(self.id).map_or(0, |(_, i)| {
+                u64::from(i.output_latency_frames)
+                    .saturating_add(u64::from(i.buffer_frames).saturating_mul(2))
+            })
+        } else {
+            0
+        };
+        let margin = ((crate::automation::WRAP_MARGIN_MS * w.rate / 1000.0).round() as u64)
+            .saturating_add(lag);
+        let over = crate::autowrite::passes_over(&w.marks, run, margin);
+        if over <= w.landed {
+            return;
+        }
+        let recording = inner.recording.is_some();
+        if inner.history.in_transaction()
+            || inner.static_edit.is_some()
+            || inner.history.in_group() != recording
+        {
+            return;
+        }
+        let writes = w.model_writes(self.id, inner.doc(), run, Some(over));
+        let (step, after, after_done) = (w.step, w.after_write, w.after_done);
+        let strips: Vec<StripId> = w.write_strips.iter().copied().collect();
+        if let Some(w) = inner.writing.as_mut() {
+            w.landed = over;
+            // The landed passes' stamps are done with: a later pass's
+            // writes never read them (a wrap reopens nothing), so each
+            // landing costs only its own passes (Task 12 review m5).
+            let pieces =
+                crate::passes::writing_pieces(&w.marks, i64::try_from(run).unwrap_or(i64::MAX));
+            for list in w.stamps.values_mut() {
+                list.retain(|s| {
+                    crate::passes::piece_of(&pieces, s.run).is_none_or(|p| p.pass >= over)
+                });
+            }
+            w.stamps.retain(|_, list| !list.is_empty());
+        }
+        let landing = crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            step,
+            after_done,
+        };
+        inner.last_step = None;
+        if self.land(inner, landing) {
+            let step = inner.last_step.take();
+            if let Some(w) = inner.writing.as_mut() {
+                w.after_done = true;
+                if !recording {
+                    w.step = step;
+                }
+            }
+        }
+    }
+
+    /// Where a rebuilt engine resumed: the rebuild's tick (its renderer
+    /// may not have published a position yet), else the position.
+    fn resume_tick(&self) -> Tick {
+        host::resumed_at(self.id)
+            .or_else(|| host::position(self.id).map(|p| p.1))
+            .unwrap_or(Tick::ZERO)
+    }
+
+    /// Ends the pass and answers its landing: the writes of the passes
+    /// not landed yet, the Write strips that still exist (none once After
+    /// Write went), the After Write mode and the pass's step (nothing
+    /// without a pass).
+    fn take_writes(&self, inner: &mut Inner) -> crate::automation::Landing {
+        let Some(mut w) = inner.writing.take() else {
+            return crate::automation::Landing {
+                writes: Vec::new(),
+                strips: Vec::new(),
+                after: AutomationMode::Latch,
+                step: None,
+                after_done: false,
+            };
+        };
+        if host::holder() == Some(self.id) {
+            host::stop_gestures(self.id);
+            // The renderer marks the Stop first (M1).
+            let until = Instant::now() + std::time::Duration::from_millis(250);
+            while !w.handles.status.closed() && Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        drain_tap(&mut w);
+        let end_run = w.handles.status.run();
+        // A glide or hold the renderer took after the Stop (or that a Play
+        // while playing, which ends no hold, would carry on) ends now; a
+        // Release with no live entry does nothing. Touched targets keep
+        // their touch (Ruling 20).
+        let ns = host_time(None);
+        for t in std::mem::take(&mut w.ended) {
+            if !inner.touches.contains_key(&t) {
+                self.send_gesture(inner, t, GesturePhase::Release, 0, ns);
+            }
+        }
+        let dropped = host::gestures_dropped(self.id).is_some_and(|d| d > w.dropped_at_start);
+        if w.handles.status.lost_stamps() > 0
+            || w.handles.status.lost_marks() > 0
+            || dropped
+            || w.late > w.late_said
+        {
+            inner
+                .news
+                .problems
+                .push("Some automation moves were lost while writing.".into());
+        }
+        // The loop passes landed at their wraps are in the document
+        // (Task 12): only the rest lands now.
+        let writes = w.model_writes(self.id, inner.doc(), end_run, None);
+        let writes = self.drop_gone(inner, writes);
+        let strips = if writes.is_empty() {
+            Vec::new()
+        } else {
+            let m = inner.doc().mixer();
+            w.write_strips
+                .iter()
+                .copied()
+                .filter(|s| m.strip(*s).is_ok())
+                .collect()
+        };
+        crate::automation::Landing {
+            writes,
+            strips,
+            after: w.after_write,
+            step: w.step,
+            after_done: w.after_done,
+        }
+    }
+
+    /// Ruling 25: writes whose target or sequence went are dropped, one
+    /// problem line per target.
+    fn drop_gone(&self, inner: &mut Inner, writes: Vec<AutomationWrite>) -> Vec<AutomationWrite> {
+        let mut said: std::collections::BTreeSet<AutomationTarget> = Default::default();
+        let mut kept = Vec::with_capacity(writes.len());
+        for w in writes {
+            let doc = inner.doc();
+            if core_model::automation::target_exists(doc, w.target) && doc.sequence(w.seq).is_ok() {
+                kept.push(w);
+            } else if said.insert(w.target) {
+                inner.news.problems.push(format!(
+                    "Automation of {} was not written: it no longer exists.",
+                    w.target.describe()
+                ));
+            }
+        }
+        kept
+    }
+
+    /// Ends the pass; its writes wait to land as "Write Automation"
+    /// (Stop, the jumps of Ruling 23, a failed Play, close).
+    fn finish_writing(&self, inner: &mut Inner) {
+        let landing = self.take_writes(inner);
+        if landing.writes.is_empty() {
+            return;
+        }
+        inner.pending_automation.push(landing);
+    }
+
+    /// Ends the pass into a recording's pass (spec §7.4): its writes join
+    /// `pass`, or make one when the recording recorded nothing (Ruling
+    /// 25).
+    fn writes_into_pass(&self, inner: &mut Inner, pass: Option<RecordPass>) -> Option<RecordPass> {
+        let crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            after_done,
+            ..
+        } = self.take_writes(inner);
+        if writes.is_empty() {
+            return pass;
+        }
+        // After Write went with a loop pass's landing: only strips still
+        // in Write get it now (Task 12 review m6).
+        let strips = if after_done {
+            let m = inner.doc().mixer();
+            strips
+                .into_iter()
+                .filter(|s| {
+                    m.strip(*s)
+                        .is_ok_and(|x| x.automation == AutomationMode::Write)
+                })
+                .collect()
+        } else {
+            strips
+        };
+        inner.after_write_pending = Some((strips, after));
+        Some(match pass {
+            Some(mut p) => {
+                p.automation.extend(writes);
+                p
+            }
+            None => RecordPass {
+                automation: writes,
+                ..Default::default()
+            },
+        })
+    }
+
+    /// Inside a recording's group: the Write strips become the After
+    /// Write mode when automation landed (Ruling 9).
+    fn after_write_in_group(&self, inner: &mut Inner, landed: bool) {
+        let Some((strips, mode)) = inner.after_write_pending.take() else {
+            return;
+        };
+        let m = inner.doc().mixer();
+        let strips: Vec<StripId> = strips.into_iter().filter(|s| m.strip(*s).is_ok()).collect();
+        if !landed || strips.is_empty() {
+            return;
+        }
+        let cmd = Command::Mixer(MixerCmd::SetAutomationMode { strips, mode });
+        if let Err(e) = inner.history.execute(&cmd, &ViewFilter::default()) {
+            inner
+                .news
+                .problems
+                .push(format!("The automation mode could not be set ({e})."));
+        }
+    }
+
+    /// A recording's pass the model refused: its automation alone, inside
+    /// the group (Ruling 25). Its report when it landed.
+    fn land_automation_alone(
+        &self,
+        inner: &mut Inner,
+        automation: Vec<AutomationWrite>,
+    ) -> Option<core_model::command::Report> {
+        let automation = self.drop_gone(inner, automation);
+        if automation.is_empty() {
+            return None;
+        }
+        let pass = RecordPass {
+            automation,
+            ..Default::default()
+        };
+        match inner
+            .history
+            .execute(&Command::Record(pass), &ViewFilter::default())
+        {
+            Ok(r) => Some(r),
+            Err(e) => {
+                inner
+                    .news
+                    .problems
+                    .push(format!("The automation could not be written ({e})."));
+                None
+            }
+        }
+    }
+
+    /// Lands a finished pass's writes as one undo step "Write Automation"
+    /// (with After Write in the same step), or into the step its loop
+    /// passes landed in (Task 12), once no edit is open.
+    fn apply_pending_automation(&self, inner: &mut Inner) {
+        if inner.history.in_transaction() || inner.history.in_group() || inner.static_edit.is_some()
+        {
+            return;
+        }
+        // Oldest first, each pass its own step (Ruling 23, review m2).
+        for landing in std::mem::take(&mut inner.pending_automation) {
+            self.land(inner, landing);
+        }
+    }
+
+    /// Lands one pass's writes (see [`Session::apply_pending_automation`];
+    /// plan 5e-1 Task 12): inside a recording's group as part of its step;
+    /// else into `step` while that step is still the present (one Undo
+    /// takes back the whole looped pass), else as a new step "Write
+    /// Automation"; After Write for `strips` with it. True when it landed;
+    /// outside a recording `last_step` is then its step.
+    fn land(&self, inner: &mut Inner, landing: crate::automation::Landing) -> bool {
+        let crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            step,
+            after_done,
+        } = landing;
+        let writes = self.drop_gone(inner, writes);
+        if writes.is_empty() {
+            return false;
+        }
+        let m = inner.doc().mixer();
+        let strips: Vec<StripId> = strips.into_iter().filter(|s| m.strip(*s).is_ok()).collect();
+        // After Write went with an earlier landing; if that step was undone
+        // (or another step covers it) the strips still in Write get it
+        // again with this one (Task 12 review m6).
+        let still_write: Vec<StripId> = strips
+            .iter()
+            .copied()
+            .filter(|s| {
+                m.strip(*s)
+                    .is_ok_and(|x| x.automation == AutomationMode::Write)
+            })
+            .collect();
+        let mode_of = |strips: Vec<StripId>| {
+            (!strips.is_empty()).then(|| {
+                Command::Mixer(MixerCmd::SetAutomationMode {
+                    strips,
+                    mode: after,
+                })
+            })
+        };
+        let pass = Command::Record(RecordPass {
+            automation: writes.clone(),
+            ..Default::default()
+        });
+        let f = ViewFilter::default();
+        let in_group = inner.history.in_group();
+        let amended = match step {
+            Some(serial) if !in_group => inner.history.amend(&pass, &f, serial),
+            _ => Ok(None),
+        };
+        let mode_failed = |inner: &mut Inner, e: core_model::error::ModelError| {
+            inner
+                .news
+                .problems
+                .push(format!("The automation mode could not be set ({e})."));
+        };
+        let landed: Result<core_model::command::Report, core_model::error::ModelError> =
+            match amended {
+                Err(e) => Err(e),
+                Ok(Some(report)) => {
+                    let mode = if after_done { None } else { mode_of(strips) };
+                    if let Some(cmd) = &mode
+                        && let Some(serial) = step
+                        && let Err(e) = inner.history.amend(cmd, &f, serial)
+                    {
+                        mode_failed(inner, e);
+                    }
+                    Ok(report)
+                }
+                Ok(None) => {
+                    let mode = if after_done {
+                        mode_of(still_write)
+                    } else {
+                        mode_of(strips)
+                    };
+                    if in_group {
+                        let r = inner.history.execute(&pass, &f);
+                        if r.is_ok() {
+                            inner.landed_in_group = true;
+                            if let Some(cmd) = &mode
+                                && let Err(e) = inner.history.execute(cmd, &f)
+                            {
+                                mode_failed(inner, e);
+                            }
+                        }
+                        r
+                    } else {
+                        match &mode {
+                            None => inner.history.execute(&pass, &f),
+                            Some(cmd) => match inner.history.begin_group() {
+                                Err(e) => Err(e),
+                                Ok(()) => {
+                                    let r = inner.history.execute(&pass, &f);
+                                    if r.is_ok()
+                                        && let Err(e) = inner.history.execute(cmd, &f)
+                                    {
+                                        mode_failed(inner, e);
+                                    }
+                                    let _ = inner.history.end_group("Write Automation");
+                                    r
+                                }
+                            },
+                        }
+                    }
+                }
+            };
+        let report = match landed {
+            Ok(r) => r,
+            Err(e) => {
+                inner
+                    .news
+                    .problems
+                    .push(format!("The automation could not be written ({e})."));
+                return false;
+            }
+        };
+        if !in_group {
+            inner.last_step = Some(inner.history.present_serial());
+        }
+        let silent = crate::automation::silent_new_lanes(inner.doc(), &report.created, &writes);
+        inner.news.problems.extend(silent);
+        inner.version += 1;
+        inner.news.doc_changed = true;
+        inner.reload_host(self.id);
+        self.mark(inner);
+        self.sync_written_plugins(inner, &writes);
+        self.resync_plugin_automation(inner, None);
+        self.release_vanished(inner);
+        true
+    }
+
+    /// After a landing, each written plugin parameter is sent the landed
+    /// automation's value at the transport tick (Ruling 15, M13).
+    fn sync_written_plugins(&self, inner: &mut Inner, writes: &[AutomationWrite]) {
+        let tick = host::position(self.id)
+            .map(|p| p.1)
+            .or(inner.cursor)
+            .unwrap_or(Tick::ZERO);
+        let mut done: std::collections::BTreeSet<AutomationTarget> = Default::default();
+        for w in writes {
+            let t = w.target;
+            let AutomationTarget::PluginParam(slot, param) = t else {
+                continue;
+            };
+            if !done.insert(t) {
+                continue;
+            }
+            let Some(info) = crate::automation::param_info(self.id, t) else {
+                continue;
+            };
+            let points = crate::automation::existing(inner.doc(), w.seq, t);
+            let Some(v) = crate::automation::value_at(&points, tick, self.stepped(t)) else {
+                continue;
+            };
+            let plain = core_model::automation::param_plain(v, info.min, info.max, info.stepped);
+            let _ = plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    p.set_param(slot, param, plain);
+                }
+            });
+        }
     }
 }
 

@@ -4,8 +4,9 @@
 use crate::document::Document;
 use crate::error::Result;
 use crate::ids::{PluginInstanceId, StateBlobId};
+use crate::mixer::ParamId;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The package folder holding blobs.
@@ -43,11 +44,29 @@ pub fn capture(
     slot: PluginInstanceId,
     bytes: &[u8],
 ) -> Result<(Document, StateBlobId)> {
+    capture_keeping(doc, slot, bytes, &BTreeMap::new())
+}
+
+/// Like [`capture`], but the overlay becomes `keep` instead of empty:
+/// the static values of the slot's automated parameters (spec §7, plan
+/// 5e-1 Task 9b: for a parameter that automation drives, the overlay is
+/// the static value and the state's value does not count). A value that
+/// is not finite is not kept.
+pub fn capture_keeping(
+    doc: &Document,
+    slot: PluginInstanceId,
+    bytes: &[u8],
+    keep: &BTreeMap<ParamId, f64>,
+) -> Result<(Document, StateBlobId)> {
     let mut d = doc.clone();
     let id = blob_id(bytes);
     let s = d.slot_mut(slot)?;
     s.state = Some(id);
-    s.params.clear();
+    s.params = keep
+        .iter()
+        .filter(|(_, v)| v.is_finite())
+        .map(|(k, v)| (*k, *v))
+        .collect();
     d.states_mut().insert(id, Arc::from(bytes));
     let keep = d.referenced_states();
     let stale: Vec<StateBlobId> = d

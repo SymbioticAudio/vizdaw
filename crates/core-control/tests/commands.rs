@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        129,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi"
+        132,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1285,4 +1285,89 @@ fn audio_and_destination_commands_check_their_params() {
         let (code, _) = err("command.run", run(id, params.clone()));
         assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
     }
+}
+
+/// Plan 5e-1 Task 10: the automation commands take their parameters by
+/// type and range; hostile values never reach the app.
+#[test]
+fn automation_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        (
+            "automation.set_mode",
+            json!({ "strips": "all", "mode": "touch" }),
+        ),
+        (
+            "automation.set_mode",
+            json!({ "strips": "1,2,3", "mode": "off" }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": "fader:3", "phase": "touch" }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": "send:3:1", "phase": "value", "value": "0.25" }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": "param:9:100", "phase": "release" }),
+        ),
+        ("automation.suspend", json!({})),
+        ("automation.suspend", json!({ "on": true })),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("automation.set_mode", json!({ "mode": "touch" })),
+        ("automation.set_mode", json!({ "strips": "all" })),
+        (
+            "automation.set_mode",
+            json!({ "strips": "all", "mode": "loud" }),
+        ),
+        (
+            "automation.set_mode",
+            json!({ "strips": [1, 2], "mode": "read" }),
+        ),
+        (
+            "automation.set_mode",
+            json!({ "strips": "1".repeat(100_000), "mode": "read" }),
+        ),
+        ("automation.gesture", json!({ "phase": "touch" })),
+        ("automation.gesture", json!({ "target": "fader:3" })),
+        (
+            "automation.gesture",
+            json!({ "target": "fader:3", "phase": "wiggle" }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": "fader:3", "phase": "value", "value": 0.5 }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": 3, "phase": "touch" }),
+        ),
+        ("automation.suspend", json!({ "on": "yes" })),
+        ("automation.suspend", json!({ "now": true })),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let spec = |id: &str| registry::find(id).unwrap();
+    assert!(!spec("automation.set_mode").menu_item && spec("automation.set_mode").document);
+    assert!(spec("automation.gesture").document);
+    assert!(!spec("automation.suspend").document);
+    assert_eq!(
+        ok("state.get", json!({"target": "automation"})),
+        Command::StateGet {
+            target: StateTarget::Automation,
+            window: None
+        }
+    );
 }

@@ -148,3 +148,57 @@ fn automation_serialises_as_an_appended_variant_and_round_trips() {
     assert!(!to_json(&plain).unwrap().contains("automation"));
     assert_eq!(from_json(&to_json(&plain).unwrap()).unwrap(), plain);
 }
+
+/// Task 9b: a plugin parameter is automated when any lane of any
+/// sequence holds automation of it, in any take, muted or not; another
+/// slot's or another target's automation does not count.
+#[test]
+fn automated_params_lists_every_automated_parameter_of_a_slot() {
+    use core_model::automation::automated_params;
+    use core_model::command::LaneCmd;
+    let slot = PluginInstanceId(0);
+    let p = |id| AutomationTarget::PluginParam(slot, ParamId(id));
+    let d = doc_with(vec![
+        auto(0, p(3), 0.5),
+        auto(10, p(3), 0.6),
+        auto(0, p(7), 0.1),
+        auto(
+            0,
+            AutomationTarget::PluginParam(PluginInstanceId(5), ParamId(1)),
+            0.2,
+        ),
+        auto(0, AutomationTarget::StripFader(StripId(0)), 0.2),
+    ])
+    .unwrap();
+    let want: std::collections::BTreeSet<ParamId> = [ParamId(3), ParamId(7)].into();
+    assert_eq!(automated_params(&d, slot), want);
+    assert_eq!(
+        automated_params(&d, PluginInstanceId(9)),
+        Default::default()
+    );
+    // Muted, and with a new (empty) take playing: still automated.
+    let d = apply(
+        &d,
+        &Command::Lane(LaneCmd::SetFlags {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            mute: Some(true),
+            solo: None,
+            arm: None,
+        }),
+    )
+    .unwrap()
+    .doc;
+    let d = apply(
+        &d,
+        &Command::Lane(LaneCmd::AddTake {
+            seq: SeqId(0),
+            lane: LaneId(0),
+            name: "Take 2".into(),
+        }),
+    )
+    .unwrap()
+    .doc;
+    assert_eq!(automated_params(&d, slot), want);
+    assert!(automated_params(&doc_with(vec![]).unwrap(), slot).is_empty());
+}

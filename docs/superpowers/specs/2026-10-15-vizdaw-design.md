@@ -253,6 +253,8 @@ vizdaw/
 6. **Import:** SMF and MIDI Clip File, then OMF, then AAF.
 7. **UI polish:** the full modern Mac UX pass.
 
+**Order (owner, 2026-10-28):** sub-project 7 (UI polish) runs right after 5, before 6 (Import); a working UI matters more than import. The numbers stay as they are, since plans and notes already say "SP7" for the UI pass. Standard MIDI File import and export (and the MIDI Clip File) stay in the launch release. OMF and AAF import may move to after launch.
+
 ## 12. Testing
 
 - **core-model:** property tests (`proptest`) checking that for any command sequence, applying then undoing returns exactly the original state; checks that nested subsequences never form cycles; a track can reference a large number of distinct sequences with no fixed cap; private copy, flatten and delete-in-use keep use counts correct.

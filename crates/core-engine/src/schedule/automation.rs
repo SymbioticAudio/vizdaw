@@ -4,7 +4,7 @@
 
 use super::TargetIdx;
 use crate::schedule::TargetKind;
-use core_model::automation::{AutomationTarget, unit};
+use core_model::automation::{AutomationTarget, SendIndex, unit};
 use core_model::document::{Document, SlotOwner};
 use core_model::ids::{PluginInstanceId, StripId};
 use core_model::mixer::ParamId;
@@ -52,6 +52,28 @@ impl AutoDest {
             AutomationTarget::PluginParam(p, id) => AutoDest::Plugin(p, id),
             AutomationTarget::VelocityScale(_) => return None,
         })
+    }
+
+    /// The target this destination drives (the inverse of
+    /// [`AutoDest::of`]).
+    pub fn target(self) -> AutomationTarget {
+        match self {
+            AutoDest::Strip(s, StripParam::Fader) => AutomationTarget::StripFader(s),
+            AutoDest::Strip(s, StripParam::Pan) => AutomationTarget::StripPan(s),
+            AutoDest::Strip(s, StripParam::Mute) => AutomationTarget::StripMute(s),
+            AutoDest::Strip(s, StripParam::Solo) => AutomationTarget::StripSolo(s),
+            AutoDest::Send(s, i) => AutomationTarget::SendLevel(s, SendIndex(i)),
+            AutoDest::Plugin(p, id) => AutomationTarget::PluginParam(p, id),
+        }
+    }
+
+    /// A level in dB (a fader or a send): Trim offsets it in dB (plan
+    /// 5e-1 Ruling 11). // RT
+    pub fn is_db(self) -> bool {
+        matches!(
+            self,
+            AutoDest::Strip(_, StripParam::Fader) | AutoDest::Send(..)
+        )
     }
 }
 
@@ -190,7 +212,9 @@ impl Automation {
         }
     }
 
-    /// The first point frame after `frame`. // RT
+    /// The first point frame after `frame`, over every lane. The renderer
+    /// no longer uses it (it cuts each lane at its own arrival, plan 5e-1
+    /// Ruling 5); kept for tests and diagnostics. // RT
     pub fn next_cut(&self, frame: u64) -> Option<u64> {
         let i = self.cuts.partition_point(|c| *c <= frame);
         self.cuts.get(i).copied()

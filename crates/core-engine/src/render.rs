@@ -2,6 +2,7 @@
 
 use crate::backend::{BlockInfo, BlockTime, InputBlock, MidiOut, StereoBuf};
 use crate::count_in::{CountIn, Counting};
+use crate::gesture::GestureTap;
 use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::regions::InputCopy;
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
@@ -168,6 +169,8 @@ pub struct Shared {
     faults: AtomicU32,
     ended: AtomicBool,
     midi_dropped: AtomicU64,
+    /// Gestures dropped by the renderer (a touch with no free live entry).
+    gestures_dropped: AtomicU64,
     swaps_deferred: AtomicU64,
     graphs_applied: AtomicU64,
     xruns: AtomicU64,
@@ -206,6 +209,7 @@ impl Default for Shared {
             faults: AtomicU32::new(0),
             ended: AtomicBool::new(false),
             midi_dropped: AtomicU64::new(0),
+            gestures_dropped: AtomicU64::new(0),
             swaps_deferred: AtomicU64::new(0),
             graphs_applied: AtomicU64::new(0),
             xruns: AtomicU64::new(0),
@@ -403,6 +407,16 @@ impl Shared {
         self.raise(Faults::XRUN);
         self.busy_blocks.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Counts a gesture the live table refused (plan 5e-1 Ruling 6). // RT
+    pub(crate) fn count_gesture_drop(&self) {
+        self.gestures_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Gestures the live table refused so far.
+    pub fn gestures_dropped(&self) -> u64 {
+        self.gestures_dropped.load(Ordering::Relaxed)
+    }
 }
 
 /// Where a target's events go.
@@ -470,6 +484,10 @@ pub enum EngineCmd {
     /// installed (its sounding note ends; it goes back through the retire
     /// ring).
     Measure(Option<Box<MeasureTap>>),
+    /// Install a gesture tap (plan 5e-1 Ruling 7), or remove the one
+    /// installed (it goes back through the retire ring; its status reads
+    /// closed).
+    Gestures(Option<Box<GestureTap>>),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -487,6 +505,8 @@ pub enum Retired {
     Inputs(Box<InputRoutes>),
     /// A removed measurement.
     Measure(Box<MeasureTap>),
+    /// A removed gesture tap.
+    Gestures(Box<GestureTap>),
 }
 
 /// Capacity of the command ring.
@@ -549,8 +569,17 @@ pub struct Renderer {
     auto_last: Box<[f64; MAX_AUTO_LANES]>,
     /// The recording's tap (spec §6.2), while one is installed.
     tap: Option<Box<RecordTap>>,
+    /// The gesture tap (plan 5e-1 Ruling 7), while one is installed.
+    gestures: Option<Box<GestureTap>>,
     /// MIDI from sources (spec §6.6).
     midi_in: Consumer<MidiIn>,
+    /// Gestures from the control side (spec §7.1; plan 5e-1 Ruling 6).
+    /// Commands applied so far (see `live_gestures`).
+    cmds_applied: u64,
+    gesture_in: Consumer<crate::gesture::Queued>,
+    /// The touched targets (boxed: the renderer moves between threads by
+    /// value).
+    live: Box<crate::gesture::LiveTable>,
     /// The live input routes.
     inputs: Option<Box<InputRoutes>>,
     /// Notes sounding through thru (boxed: the renderer moves between
@@ -686,6 +715,8 @@ fn clamp_master(out: &mut [&mut [f32]], offset: usize, frames: u32, shared: &Sha
 }
 
 impl Renderer {
+    // One argument per queue and shared part the engine hands over.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         cfg: RenderConfig,
         cmds: Consumer<EngineCmd>,
@@ -694,6 +725,7 @@ impl Renderer {
         pool: Option<Arc<PoolShared>>,
         reader: core_media::stream::StreamReader,
         midi_in: Consumer<MidiIn>,
+        gesture_in: Consumer<crate::gesture::Queued>,
     ) -> Renderer {
         let mut r = Renderer {
             cfg,
@@ -717,7 +749,11 @@ impl Renderer {
             pending_skip: 0,
             auto_last: Box::new([f64::NAN; MAX_AUTO_LANES]),
             tap: None,
+            gestures: None,
             midi_in,
+            gesture_in,
+            cmds_applied: 0,
+            live: Box::new(crate::gesture::LiveTable::new()),
             inputs: None,
             thru: Box::default(),
             input_copy: Box::new(InputCopy::new(0, 0)),
@@ -789,12 +825,15 @@ impl Renderer {
         crate::rt_check::disarm();
     }
 
-    /// The tap's end of a block (see [`RecordTap::end_block`]), and the
-    /// measurement's (it watches every block's input, played or not:
-    /// [`MeasureTap::capture`]). // RT
+    /// The taps' end of a block (see [`RecordTap::end_block`] and
+    /// [`GestureTap::end_block`]), and the measurement's (it watches every
+    /// block's input, played or not: [`MeasureTap::capture`]). // RT
     fn end_tap(&mut self, input: &InputBlock<'_>, frames: u32, advanced: bool) {
         if let Some(t) = self.tap.as_deref_mut() {
             t.end_block(input.channels, frames, advanced);
+        }
+        if let Some(t) = self.gestures.as_deref_mut() {
+            t.end_block(frames, advanced);
         }
         if let Some(m) = self.measure.as_deref_mut() {
             m.capture(input.channels, frames, input.delay_frames);
@@ -876,7 +915,16 @@ impl Renderer {
                 _ => t.stop(0, self.transport.pos),
             }
         }
+        // The gesture tap's clock follows the record tap's (Ruling 7).
+        if let Some(t) = self.gestures.as_deref_mut() {
+            match (self.transport.state, self.transport.play_pos(length)) {
+                (PlayState::Playing, Some(at)) => t.begin_block(at),
+                (PlayState::Playing, None) => {}
+                _ => t.stop(0, self.transport.pos),
+            }
+        }
         self.live_midi();
+        self.live_gestures();
         self.measure_sends();
         let monitored = self.copy_monitored(input, frames);
         // No run is in flight (`try_finish` succeeded above): the streamer
@@ -909,16 +957,18 @@ impl Renderer {
                     g.settle();
                 }
             }
-            let run = self.next_run(length, frames - offset);
+            // Built before the run's length: automation is read at each
+            // strip's arrival through it (plan 5e-1 Ruling 5).
+            let regions = self.region_run(length, monitored, offset);
+            let run = self.next_run(length, frames - offset, &regions);
             let end = offset + run;
             let run_start = offset;
             // A run that starts at or past the end of playing plays out
             // the led regions' last frames (Ruling 3).
             let past_end = self.transport.play_pos(length).is_none()
                 && matches!(self.transport.state, PlayState::Playing | PlayState::Tail);
-            self.automate(length, run);
+            self.automate(length, run, &regions);
             let info = self.block_info();
-            let regions = self.region_run(length, monitored, offset);
             let mut o = Out {
                 sinks: &mut self.sinks,
                 shared: &self.shared,
@@ -954,6 +1004,11 @@ impl Renderer {
                         if let Some(t) = self.tap.as_deref_mut() {
                             t.wrap(offset, to);
                         }
+                        if let Some(t) = self.gestures.as_deref_mut() {
+                            t.wrap(offset, to);
+                        }
+                        // A wrap ends held values (plan 5e-1 Ruling 10).
+                        self.live.end_holds();
                         // Led regions read the loop's end before its start.
                         let now = self.since_start + u64::from(offset - run_start);
                         self.wrapped = wrapped_at(
@@ -973,6 +1028,9 @@ impl Renderer {
                         // The run ends where the sequence does (pre-flight
                         // M2).
                         if let Some(t) = self.tap.as_deref_mut() {
+                            t.stop(offset, self.transport.pos);
+                        }
+                        if let Some(t) = self.gestures.as_deref_mut() {
                             t.stop(offset, self.transport.pos);
                         }
                         release_all(&mut self.notes, &mut o, offset);
@@ -1013,6 +1071,12 @@ impl Renderer {
         }
         self.end_tap(input, frames, !missed);
         self.publish();
+        if let Some(t) = self.tap.as_deref_mut() {
+            t.published();
+        }
+        if let Some(t) = self.gestures.as_deref_mut() {
+            t.published();
+        }
         if block_s > 0.0 {
             let load = (started.elapsed().as_secs_f64() / block_s) as f32;
             // A missed deadline lost the block: at least full load.
@@ -1025,20 +1089,43 @@ impl Renderer {
     /// the next automation point (never under `MIN_RUN` frames after the
     /// run's start) and at the loop end or the sequence end while a
     /// schedule with automation or audio plays (Plan 4d Ruling 10, 5a
-    /// Ruling 12). // RT
-    fn next_run(&self, length: u64, left: u32) -> u32 {
+    /// Ruling 12). Cut at each lane's next point at its own arrival
+    /// (pre-flight I13), and where that lane's read jumps; past the end,
+    /// only the lanes still reading (`auto_pos`). // RT
+    fn next_run(&self, length: u64, left: u32, regions: &crate::graph::RegionRun) -> u32 {
         let Some(s) = self.schedule.as_deref() else {
             return left;
         };
         if s.automation.is_empty() && s.audio.is_empty() {
             return left;
         }
-        let Some(pos) = self.transport.play_pos(length) else {
+        let Some((pos, past)) = self.auto_pos(length, regions) else {
             return left;
         };
         let mut run = u64::from(left);
-        if let Some(c) = s.automation.next_cut(pos) {
-            run = run.min((c - pos).max(u64::from(MIN_RUN)));
+        let g = self.graph.as_deref();
+        let auto = &s.automation;
+        for lane in auto.lanes() {
+            let a = lane_arrival(g, lane);
+            let r = lane_frame(regions, pos, a, past);
+            let pts = auto.points(lane);
+            if a > 0 {
+                // Where this lane's read jumps (its loop seam, the roll's
+                // floor, the end), so no run reads across it (Task 4
+                // review I1); not where the lane holds one value across
+                // the jump (final review m1).
+                let span = regions.read_span(a, run).1;
+                if span < run && !flat_across(auto, lane, pts, regions, r, a, span, run) {
+                    run = span;
+                }
+            }
+            let Some(r) = r else {
+                continue;
+            };
+            let i = pts.partition_point(|p| p.frame <= r);
+            if let Some(p) = pts.get(i) {
+                run = run.min(p.frame.saturating_sub(r).max(u64::from(MIN_RUN)));
+            }
         }
         if let Some(b) = self.transport.boundary(length) {
             if b > pos {
@@ -1053,100 +1140,223 @@ impl Renderer {
     /// start values, then ramp to its end values (mute and solo switch hard,
     /// at the run boundary nearest their point); a plugin parameter gets
     /// its start value and, on a ramp, a value every `max(MIN_RUN, run /
-    /// 16)` frames, each only when it changed. // RT
-    fn automate(&mut self, length: u64, run: u32) {
-        let Some(s) = self.schedule.as_deref() else {
-            return;
-        };
-        let auto = &s.automation;
-        if auto.is_empty() {
-            return;
-        }
-        let Some(pos) = self.transport.play_pos(length) else {
-            return;
-        };
-        let end = pos.saturating_add(u64::from(run));
+    /// 16)` frames, each only when it changed. Each lane is read at its
+    /// strip's arrival (`auto_frame`, plan 5e-1 Ruling 5).
+    ///
+    /// Live gestures (plan 5e-1 Rulings 6, 10, 11): a live target's value
+    /// replaces its lane's in both commits; live targets no lane set
+    /// (`apply_live`) join the same two commits, so neither undoes the
+    /// other's ramp; an ended entry's override goes before them; a touched
+    /// or held plugin parameter gets no automation; then glides move on
+    /// and ended plugin entries have their lanes sent again (pre-flight
+    /// I10). // RT
+    fn automate(&mut self, length: u64, run: u32, regions: &crate::graph::RegionRun) {
+        let at = self.auto_pos(length, regions);
+        let auto = self
+            .schedule
+            .as_deref()
+            .map(|s| &s.automation)
+            .filter(|a| !a.is_empty());
+        let live = &mut *self.live;
         // A mute or solo point inside the run (one shorter than `MIN_RUN`
         // stretched over it) switches at the run boundary nearest to it:
         // the run's start when at most half way in, else the next run's.
         // A fader, pan or send jump inside such a run (Ruling 11's "two
         // points on one frame") is not switched hard: it fades over the
         // run, at most `MIN_RUN` frames (under 1 ms), which avoids a click.
-        let mid = pos.saturating_add(u64::from(run / 2));
         if let Some(g) = self.graph.as_deref_mut() {
+            // An entry ended: its override goes, unless a lane or another
+            // entry drives the control.
+            let released = live.take_released();
+            if released {
+                g.release_overrides(|d| auto.is_some_and(|a| a.drives(d)) || live.has(d));
+            }
             for ramp in [false, true] {
-                let mut any = false;
-                for lane in auto.lanes() {
-                    let v = match (ramp, lane.dest) {
-                        (false, _) => auto.value(lane, pos, false),
-                        (true, AutoDest::Strip(_, StripParam::Mute | StripParam::Solo)) => {
-                            auto.value(lane, mid, false)
+                let mut any = released;
+                let into = if ramp { run } else { 0 };
+                if let (Some((pos, past)), Some(auto)) = (at, auto) {
+                    for lane in auto.lanes() {
+                        let a = lane_arrival(Some(g), lane);
+                        let Some(f0) = lane_frame(regions, pos, a, past) else {
+                            continue;
+                        };
+                        let mid = f0.saturating_add(u64::from(run / 2));
+                        let end = f0.saturating_add(u64::from(run));
+                        let v = match (ramp, lane.dest) {
+                            (false, _) => auto.value(lane, f0, false),
+                            (true, AutoDest::Strip(_, StripParam::Mute | StripParam::Solo)) => {
+                                auto.value(lane, mid, false)
+                            }
+                            (true, _) => auto.value(lane, end, true),
+                        };
+                        let under = v;
+                        let v = match live.value(lane.dest, v, into) {
+                            Some(lv) => {
+                                // The next run starts here; offsets and
+                                // glides play over this when the lane
+                                // reads nothing (Task 5 review I1, I2).
+                                if ramp {
+                                    live.note(lane.dest, lv, Some(under));
+                                }
+                                lv
+                            }
+                            None => v,
+                        };
+                        match lane.dest {
+                            AutoDest::Strip(id, p) => {
+                                g.automate_strip(id, p, v);
+                                any = true;
+                            }
+                            AutoDest::Send(id, i) => {
+                                g.automate_send(id, i, v);
+                                any = true;
+                            }
+                            AutoDest::Plugin(..) => {}
                         }
-                        (true, _) => auto.value(lane, end, true),
-                    };
-                    match lane.dest {
-                        AutoDest::Strip(id, p) => {
-                            g.automate_strip(id, p, v);
-                            any = true;
-                        }
-                        AutoDest::Send(id, i) => {
-                            g.automate_send(id, i, v);
-                            any = true;
-                        }
-                        AutoDest::Plugin(..) => {}
                     }
                 }
+                any |= apply_live(g, live, auto, regions, at, into, ramp);
                 if any {
                     g.commit_controls(ramp);
                 }
             }
         }
-        let every = (run / 16).max(MIN_RUN);
-        for (k, lane) in auto.lanes().iter().enumerate() {
-            let AutoDest::Plugin(id, param) = lane.dest else {
-                continue;
-            };
-            let Some(last) = self.auto_last.get_mut(k) else {
+        if let (Some((pos, past)), Some(auto)) = (at, auto) {
+            let every = (run / 16).max(MIN_RUN);
+            for (k, lane) in auto.lanes().iter().enumerate() {
+                let AutoDest::Plugin(id, param) = lane.dest else {
+                    continue;
+                };
+                // Touched or held: the plugin keeps the user's value (Ruling 6).
+                if live.holds(lane.dest) {
+                    continue;
+                }
+                let a = lane_arrival(self.graph.as_deref(), lane);
+                let Some(f0) = lane_frame(regions, pos, a, past) else {
+                    continue;
+                };
+                let Some(last) = self.auto_last.get_mut(k) else {
+                    break;
+                };
+                let mut f = 0u32;
+                loop {
+                    let v = auto.value(lane, f0.saturating_add(u64::from(f)), false);
+                    // An offset or a glide plays over the automation.
+                    let v = live.value(lane.dest, v, f).unwrap_or(v);
+                    // Recorded as sent only once the plugin's queue took it, so
+                    // a refused value is sent again on the next run (Plan 4d
+                    // final review I1).
+                    if v.to_bits() != last.to_bits()
+                        && send_param(
+                            self.graph.as_deref_mut(),
+                            &mut self.sinks,
+                            lane.instrument,
+                            id,
+                            f,
+                            param,
+                            v,
+                        )
+                    {
+                        *last = v;
+                    }
+                    if lane.stepped {
+                        break;
+                    }
+                    f = f.saturating_add(every);
+                    if f >= run {
+                        break;
+                    }
+                }
+            }
+        }
+        live.advance(run);
+        // A release ramped back over this run (or a glide ended): its
+        // gains already stand at the value under it, so its override is
+        // dropped and mirrored now; the next run's commits write the gains
+        // (and drop it again, idempotently).
+        if live.released() {
+            if let Some(g) = self.graph.as_deref_mut() {
+                g.release_overrides(|d| auto.is_some_and(|a| a.drives(d)) || live.has(d));
+                g.publish_overrides();
+            }
+        }
+        // A plugin parameter let go gets its automation again, even a flat
+        // or stepped lane whose value was last sent before the touch
+        // (pre-flight I10).
+        let last = &mut self.auto_last;
+        let all = live.take_ended_plugins(|d| {
+            let k = auto.and_then(|a| a.lanes().binary_search_by_key(&d, |l| l.dest).ok());
+            if let Some(x) = k.and_then(|k| last.get_mut(k)) {
+                *x = f64::NAN;
+            }
+        });
+        if all {
+            last.fill(f64::NAN);
+        }
+    }
+
+    /// Takes the queued gestures into the live table (plan 5e-1 Ruling 6)
+    /// and stamps each on the gesture tap (Ruling 7), offset by its host
+    /// time as `live_midi` offsets MIDI, and heard the graph latency less
+    /// its control's arrival after the renderer: the live value acts at
+    /// once at a control that renders the timeline its arrival behind
+    /// (Task 5 review M3). A gesture never acts before a command sent
+    /// before it: it waits in the queue until the renderer has applied as
+    /// many commands as were sent before it (a command still deferred or
+    /// sent during this block), so a Play's gesture tap is in before the
+    /// touch it must stamp (plan 5e-1 re-review N3, Task 12 review m3).
+    /// Commands sent after it never hold it back. // RT
+    fn live_gestures(&mut self) {
+        let sr = self.cfg.sample_rate;
+        let block_ns = self.block_ns;
+        let latency = i64::try_from(self.latency).unwrap_or(i64::MAX);
+        for _ in 0..crate::gesture::GESTURES_PER_BLOCK {
+            match self.gesture_in.peek() {
+                Ok(q) if q.after <= self.cmds_applied => {}
+                _ => break,
+            }
+            let Ok(q) = self.gesture_in.pop() else {
                 break;
             };
-            let mut f = 0u32;
-            loop {
-                let v = auto.value(lane, pos.saturating_add(u64::from(f)), false);
-                // Recorded as sent only once the plugin's queue took it, so
-                // a refused value is sent again on the next run (Plan 4d
-                // final review I1).
-                if v.to_bits() != last.to_bits()
-                    && send_param(
-                        self.graph.as_deref_mut(),
-                        &mut self.sinks,
-                        lane.instrument,
-                        id,
-                        f,
-                        param,
-                        v,
-                    )
-                {
-                    *last = v;
-                }
-                if lane.stepped {
-                    break;
-                }
-                f = f.saturating_add(every);
-                if f >= run {
-                    break;
-                }
+            let m = q.msg;
+            if !self.live.apply(m.dest, m.phase) {
+                self.shared.count_gesture_drop();
+            }
+            if let Some(t) = self.gestures.as_deref_mut() {
+                let offset = if m.host_ns == 0 {
+                    0
+                } else {
+                    let ns = i128::from(m.host_ns) - i128::from(block_ns);
+                    (ns as f64 * sr / 1e9).round() as i64
+                };
+                let arrival = dest_arrival(self.graph.as_deref(), m.dest);
+                let ahead = latency.saturating_sub(i64::try_from(arrival).unwrap_or(i64::MAX));
+                t.stamp(m.dest, offset, ahead, m.phase, m.tag);
             }
         }
     }
 
+    /// Where automation reads in the run starting now: the transport's
+    /// play position, or (`true`) past the end while the end plays out,
+    /// the renderer's frame, where only lanes behind latency still read
+    /// (`lane_frame`; Task 4 review M3). `None` while not playing. // RT
+    fn auto_pos(&self, length: u64, regions: &crate::graph::RegionRun) -> Option<(u64, bool)> {
+        if let Some(p) = self.transport.play_pos(length) {
+            return Some((p, false));
+        }
+        let ending = matches!(self.transport.state, PlayState::Playing | PlayState::Tail);
+        (ending && regions.playing).then_some((regions.frame, true))
+    }
+
     /// Drops the overrides of the controls the schedule no longer
-    /// automates (Plan 4d Ruling 13). // RT
+    /// automates and no live gesture holds (Plan 4d Ruling 13). // RT
     fn forget_unautomated(&mut self) {
         let Some(g) = self.graph.as_deref_mut() else {
             return;
         };
         let auto = self.schedule.as_deref().map(|s| &s.automation);
-        g.release_overrides(|d| auto.is_some_and(|a| a.drives(d)));
+        let live = &*self.live;
+        g.release_overrides(|d| auto.is_some_and(|a| a.drives(d)) || live.has(d));
         g.commit_controls(false);
     }
 
@@ -1211,6 +1421,7 @@ impl Renderer {
                 Ok(EngineCmd::SetGraph(_)) => self.graph.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::RemoveSink(_)) => self.retire.slots() == 0,
                 Ok(EngineCmd::Record(_)) => self.tap.is_some() && self.retire.slots() == 0,
+                Ok(EngineCmd::Gestures(_)) => self.gestures.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::SetInputs(_)) => self.inputs.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::Measure(_)) => self.measure.is_some() && self.retire.slots() == 0,
                 Ok(_) => false,
@@ -1224,6 +1435,7 @@ impl Renderer {
             let Ok(cmd) = self.cmds.pop() else {
                 break;
             };
+            self.cmds_applied = self.cmds_applied.saturating_add(1);
             self.apply(cmd);
         }
     }
@@ -1289,6 +1501,9 @@ impl Renderer {
                 if let Some(t) = self.tap.as_deref_mut() {
                     t.resync();
                 }
+                if let Some(t) = self.gestures.as_deref_mut() {
+                    t.resync();
+                }
                 self.auto_last.fill(f64::NAN);
                 if self.transport.state == PlayState::Playing {
                     self.forget_unautomated();
@@ -1309,6 +1524,9 @@ impl Renderer {
                 // What a recording captures from here on is heard with the
                 // new latency (final review I1).
                 if let Some(t) = self.tap.as_deref_mut() {
+                    t.set_latency(self.latency);
+                }
+                if let Some(t) = self.gestures.as_deref_mut() {
                     t.set_latency(self.latency);
                 }
                 self.graph = Some(new);
@@ -1338,15 +1556,23 @@ impl Renderer {
                     if let Some(t) = self.tap.as_deref_mut() {
                         t.stop(0, self.transport.pos);
                     }
+                    if let Some(t) = self.gestures.as_deref_mut() {
+                        t.stop(0, self.transport.pos);
+                    }
                 }
                 self.release_now(true);
                 self.transport.stop();
+                // Held values end at a Stop (plan 5e-1 Ruling 10).
+                self.live.end_holds();
                 // A count-in still playing never rolls.
                 self.counting = None;
             }
             EngineCmd::Locate(frame) => {
                 self.release_now(true);
                 self.transport.locate(frame);
+                // Held values do not play on over the new position (plan
+                // 5e-1 Ruling 23).
+                self.live.end_holds();
                 self.roll_floor = frame;
                 self.wrapped = None;
                 self.seg_mark = 0;
@@ -1354,6 +1580,9 @@ impl Renderer {
                 // A jump while recording is a cut: the next block marks
                 // where the transport landed (review fix M1).
                 if let Some(t) = self.tap.as_deref_mut() {
+                    t.resync();
+                }
+                if let Some(t) = self.gestures.as_deref_mut() {
                     t.resync();
                 }
                 self.since_start = 0;
@@ -1415,6 +1644,21 @@ impl Renderer {
                 if let Some(old) = std::mem::replace(&mut self.tap, new) {
                     old.close();
                     if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Tap(old)) {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+            }
+            EngineCmd::Gestures(mut new) => {
+                // The latency the graph has now (as `Record`).
+                if let Some(t) = new.as_deref_mut() {
+                    t.set_latency(self.latency);
+                }
+                if let Some(old) = std::mem::replace(&mut self.gestures, new) {
+                    old.close();
+                    if let Err(rtrb::PushError::Full(old)) =
+                        self.retire.push(Retired::Gestures(old))
+                    {
                         // Unreachable: room was checked in `drain_commands`.
                         std::mem::forget(old);
                     }
@@ -1776,6 +2020,183 @@ fn reset_controllers(s: &Schedule, o: &mut Out<'_>, offset: u32) {
             }
         }
     }
+}
+
+/// The frame automation is read at for a control whose audio is `arrival`
+/// frames behind the renderer (plan 5e-1 Ruling 5): where a led region
+/// with that lead reads, else that far back. // RT
+fn auto_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64) -> u64 {
+    if arrival == 0 {
+        return pos;
+    }
+    run.read_frame(arrival)
+        .unwrap_or(pos.saturating_sub(arrival))
+}
+
+/// True when lane `lane` (points `pts`, arrival `a`) holds one value over
+/// everything a `run`-frame run starting at read frame `r` reads, though
+/// its read jumps `span` frames in: on each side of the jump no point lies
+/// inside the frames read (after the side's first frame), and the value is
+/// the same at both ends of both sides, so the lane is one constant over
+/// the run and it need not be cut at the jump (final review m1; judged per
+/// side, not over the hull of both, final re-review m1). False when either
+/// side reads silence. // RT
+#[allow(clippy::too_many_arguments)]
+fn flat_across(
+    auto: &crate::schedule::Automation,
+    lane: &crate::schedule::AutoLane,
+    pts: &[crate::schedule::AutoPoint],
+    regions: &crate::graph::RegionRun,
+    r: Option<u64>,
+    a: u64,
+    span: u64,
+    run: u64,
+) -> bool {
+    let (Some(f0), Ok(k)) = (r, u32::try_from(span)) else {
+        return false;
+    };
+    let Some(g) = regions.read_frame_at(a, k) else {
+        return false;
+    };
+    // No point in `(from, to]`: the lane is one straight piece there.
+    let clear = |from: u64, to: u64| {
+        let next = pts.partition_point(|p| p.frame <= from);
+        pts.get(next).is_none_or(|p| p.frame > to)
+    };
+    let (b0, g1) = (
+        f0.saturating_add(span),
+        g.saturating_add(run.saturating_sub(span)),
+    );
+    let v = auto.value(lane, f0, false);
+    clear(f0, b0)
+        && clear(g, g1)
+        && auto.value(lane, b0, false) == v
+        && auto.value(lane, g, false) == v
+        && auto.value(lane, g1, false) == v
+}
+
+/// The frame a lane with arrival `arrival` reads at in the run starting
+/// at `pos`: `auto_frame`; past the end (`past`), only a lane behind
+/// latency reads, and only while its audio still plays (Task 4 review
+/// M3). // RT
+fn lane_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64, past: bool) -> Option<u64> {
+    if !past {
+        return Some(auto_frame(run, pos, arrival));
+    }
+    if arrival == 0 {
+        return None;
+    }
+    run.read_frame(arrival)
+}
+
+/// A lane's arrival (plan 5e-1 Ruling 5): a strip's fader and pan at its
+/// strip's (they scale the strip's output); its mute and solo at its main
+/// output's edge and a send's level at that send's edge (they are edge
+/// gains, applied after the edge's delay line); an insert's parameter at
+/// the insert's; a plugin instrument's parameter (and every lane without a
+/// graph) at 0. // RT
+fn lane_arrival(graph: Option<&Graph>, lane: &crate::schedule::AutoLane) -> u64 {
+    if matches!(lane.dest, AutoDest::Plugin(..)) && lane.instrument.is_some() {
+        return 0;
+    }
+    dest_arrival(graph, lane.dest)
+}
+
+/// `dest`'s arrival, as [`lane_arrival`] reads its lane: a plugin
+/// instrument's parameter is no insert's, so it is 0 here too. // RT
+fn dest_arrival(graph: Option<&Graph>, dest: AutoDest) -> u64 {
+    let Some(g) = graph else {
+        return 0;
+    };
+    match dest {
+        AutoDest::Strip(s, StripParam::Fader | StripParam::Pan) => g.strip_arrival(s),
+        AutoDest::Strip(s, StripParam::Mute | StripParam::Solo) => g.feed_arrival(s, None),
+        AutoDest::Send(s, i) => g.feed_arrival(s, Some(i)),
+        AutoDest::Plugin(id, _) => g.insert_arrival(id),
+    }
+}
+
+/// Sets, for the next commit, the value of every live strip and send
+/// target this run's lanes did not set (no lane drives it, its lane reads
+/// nothing past the end, or the transport is not playing: `at` is `None`);
+/// true when one was set. Its value plays over the static value, or, for a
+/// target a lane drives, over what was last heard under it (Task 5 review
+/// I1). The ramped commit's value is noted as the next run's start (I2).
+/// // RT
+fn apply_live(
+    g: &mut Graph,
+    live: &mut crate::gesture::LiveTable,
+    auto: Option<&crate::schedule::Automation>,
+    regions: &crate::graph::RegionRun,
+    at: Option<(u64, bool)>,
+    into: u32,
+    ramp: bool,
+) -> bool {
+    let mut any = false;
+    for i in 0..live.len() {
+        let Some(dest) = live.dest_at(i) else {
+            break;
+        };
+        if matches!(dest, AutoDest::Plugin(..)) {
+            continue;
+        }
+        let lane = auto.and_then(|a| {
+            let lanes = a.lanes();
+            lanes
+                .binary_search_by_key(&dest, |l| l.dest)
+                .ok()
+                .and_then(|i| lanes.get(i))
+        });
+        if let (Some((pos, past)), Some(l)) = (at, lane) {
+            if lane_frame(regions, pos, lane_arrival(Some(g), l), past).is_some() {
+                continue;
+            }
+        }
+        let under = if lane.is_some() {
+            // Released while stopped: the control stays at the value the
+            // hand left (controller ruling 1 on the Task 5 forward; final
+            // review m3) until Play gives it to its lane again.
+            match (at, live.left_at(dest), live.base(dest)) {
+                (None, Some(v), _) => Some(v),
+                (_, _, Some(b)) => Some(b),
+                _ => {
+                    let h = g.heard_value(dest);
+                    if let Some(h) = h {
+                        live.set_base(dest, h);
+                    }
+                    h
+                }
+            }
+        } else {
+            // What plays under it if a lane appears while it is live
+            // (final review m2): the static value, not its own output.
+            let s = g.static_value(dest);
+            if let Some(s) = s {
+                live.set_base(dest, s);
+            }
+            s
+        };
+        let Some(v) = under.and_then(|under| live.value(dest, under, into)) else {
+            continue;
+        };
+        // A new entry starts from what is heard now (a hold just ended
+        // may still be heard; final review m2), not from what is under it.
+        let v = if !ramp && live.is_new(dest) {
+            g.heard_value(dest).unwrap_or(v)
+        } else {
+            v
+        };
+        match dest {
+            AutoDest::Strip(id, p) => g.automate_strip(id, p, v),
+            AutoDest::Send(id, i) => g.automate_send(id, i, v),
+            AutoDest::Plugin(..) => continue,
+        }
+        if ramp {
+            live.note(dest, v, None);
+        }
+        any = true;
+    }
+    any
 }
 
 /// Sends a plugin parameter's automated value: to its plugin

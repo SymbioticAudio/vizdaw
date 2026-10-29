@@ -34,6 +34,9 @@ pub struct Version {
     pub label: String,
     /// When it was made.
     pub at: Timestamp,
+    /// Which step made it: unique within its history, kept through undo
+    /// and redo ([`History::present_serial`]).
+    pub serial: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +77,8 @@ pub struct History {
     selection: Selection,
     txn: Option<Txn>,
     group: Option<Group>,
+    /// The serial the next step gets.
+    next_serial: u64,
 }
 
 impl History {
@@ -85,12 +90,14 @@ impl History {
                 doc,
                 label: String::new(),
                 at: Timestamp::now(),
+                serial: 0,
             },
             future: Vec::new(),
             last_modify: None,
             selection: Selection::default(),
             txn: None,
             group: None,
+            next_serial: 1,
         }
     }
 
@@ -255,10 +262,13 @@ impl History {
         // A command that changes nothing (e.g. a modify of an empty
         // selection) is not an undo step and keeps the redo stack.
         if !selection_only && applied.doc != self.present.doc {
+            let serial = self.next_serial;
+            self.next_serial = self.next_serial.saturating_add(1);
             let next = Version {
                 doc: applied.doc,
                 label: cmd.name().to_string(),
                 at: Timestamp::now(),
+                serial,
             };
             self.past.push(std::mem::replace(&mut self.present, next));
             self.future.clear();
@@ -275,6 +285,52 @@ impl History {
         let sel = applied.selection.unwrap_or_else(|| self.selection.clone());
         self.selection = sel.retain_existing(&self.present.doc);
         Ok(applied.report)
+    }
+
+    /// The present version's serial: which step made it. Each step gets
+    /// its own; undo and redo keep them, a transaction or group that
+    /// collapses into one step keeps its last step's.
+    pub fn present_serial(&self) -> u64 {
+        self.present.serial
+    }
+
+    /// Applies `cmd` into the present step instead of making a new one
+    /// (plan 5e-1 Task 12: a looped pass lands at each wrap into its one
+    /// undo step), when the present is the step with serial `step`, there
+    /// is a step to undo, and no transaction or group is open: one Undo
+    /// then reverts the step with everything amended into it. Clears the
+    /// redo stack when it changes the document. Answers the command's
+    /// report, or `None`, changing nothing, when it may not amend; on an
+    /// error nothing changes.
+    pub fn amend(
+        &mut self,
+        cmd: &Command,
+        filter: &ViewFilter,
+        step: u64,
+    ) -> Result<Option<Report>> {
+        if self.txn.is_some()
+            || self.group.is_some()
+            || self.past.is_empty()
+            || self.present.serial != step
+        {
+            return Ok(None);
+        }
+        let applied = apply_in(
+            &self.present.doc,
+            Context {
+                selection: &self.selection,
+                filter,
+            },
+            cmd,
+        )?;
+        if applied.doc != self.present.doc {
+            self.present.doc = applied.doc;
+            self.present.at = Timestamp::now();
+            self.future.clear();
+        }
+        let sel = applied.selection.unwrap_or_else(|| self.selection.clone());
+        self.selection = sel.retain_existing(&self.present.doc);
+        Ok(Some(applied.report))
     }
 
     /// Replays the last modification on the current selection.
@@ -440,12 +496,24 @@ impl History {
     /// overlay in the present version, without an undo step (Plan Ruling
     /// 9). Refused inside an open transaction.
     pub fn capture_state(&mut self, slot: PluginInstanceId, bytes: &[u8]) -> Result<StateBlobId> {
+        self.capture_state_keeping(slot, bytes, &std::collections::BTreeMap::new())
+    }
+
+    /// Like [`History::capture_state`], but the slot's overlay becomes
+    /// `keep` (its automated parameters' static values; see
+    /// [`crate::state::capture_keeping`]).
+    pub fn capture_state_keeping(
+        &mut self,
+        slot: PluginInstanceId,
+        bytes: &[u8],
+        keep: &std::collections::BTreeMap<crate::mixer::ParamId, f64>,
+    ) -> Result<StateBlobId> {
         if self.txn.is_some() {
             return Err(ModelError::invalid(
                 "cannot capture plugin state inside a transaction",
             ));
         }
-        let (doc, id) = crate::state::capture(&self.present.doc, slot, bytes)?;
+        let (doc, id) = crate::state::capture_keeping(&self.present.doc, slot, bytes, keep)?;
         self.present.doc = doc;
         Ok(id)
     }

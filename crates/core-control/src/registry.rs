@@ -520,6 +520,44 @@ const ADD_MIDI_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `automation.set_mode` (plan 5e-1 Ruling 17).
+const AUTOMATION_MODE_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "strips",
+        kind: ParamKind::Text,
+        required: true,
+        help: "`all`, or strip IDs separated by commas (see `state.get automation`).",
+    },
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(&["off", "read", "touch", "latch", "write", "trim"]),
+        required: true,
+        help: "off, read, touch, latch, write or trim.",
+    },
+];
+
+/// `automation.gesture` (plan 5e-1 Rulings 17, 20, 26).
+const AUTOMATION_GESTURE_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "target",
+        kind: ParamKind::Text,
+        required: true,
+        help: "`fader:<strip>`, `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or `param:<slot>:<param>`.",
+    },
+    ParamSpec {
+        name: "phase",
+        kind: ParamKind::Choice(&["touch", "value", "release"]),
+        required: true,
+        help: "touch, value or release.",
+    },
+    ParamSpec {
+        name: "value",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The normalised value 0–1 as text (\"0.5\"); needed for value, optional for touch.",
+    },
+];
+
 /// `destination.measure_return` (plan 5c-2 Ruling 11).
 const MEASURE_RETURN_PARAMS: &[ParamSpec] = &[id_param(
     "dest",
@@ -1065,6 +1103,36 @@ pub const COMMANDS: &[CommandSpec] = &[
             "New MIDI Destination",
             None,
             true,
+        ))
+    },
+    CommandSpec {
+        params: AUTOMATION_MODE_PARAMS,
+        ..key_only(cmd(
+            "automation.set_mode",
+            "Mixer",
+            "Set Automation Mode",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: AUTOMATION_GESTURE_PARAMS,
+        ..key_only(cmd(
+            "automation.gesture",
+            "Mixer",
+            "Automation Gesture",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: ON,
+        ..key_only(cmd(
+            "automation.suspend",
+            "Mixer",
+            "Suspend Automation",
+            None,
+            false,
         ))
     },
     CommandSpec {

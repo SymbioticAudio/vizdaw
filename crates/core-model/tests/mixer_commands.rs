@@ -578,3 +578,141 @@ proptest! {
         prop_assert_eq!(h.doc(), &after);
     }
 }
+
+/// Sub-project 5 spec §4.6, plan 5e-1 Ruling 2: the mode is set on any
+/// number of strips as one undo step, refused for none or an unknown
+/// strip (a strip listed twice is set once), and saved only when it is
+/// not Read (older files and all-Read projects are unchanged).
+#[test]
+fn the_automation_mode_is_one_undo_step_and_saved_only_when_not_read() {
+    use core_model::automation::AutomationMode;
+    use core_model::file::{from_json, to_json};
+    let d = base();
+    let plain = to_json(&d).unwrap();
+    assert!(!plain.contains("\"automation\""), "Read is not written");
+    assert!(
+        d.mixer()
+            .strips()
+            .values()
+            .all(|s| s.automation == AutomationMode::Read)
+    );
+    let mut h = History::new(d.clone());
+    h.execute(
+        &Command::Mixer(MixerCmd::SetAutomationMode {
+            strips: vec![StripId(1), StripId(4)],
+            mode: AutomationMode::Touch,
+        }),
+        &ViewFilter::default(),
+    )
+    .unwrap();
+    assert_eq!(h.undo_label(), Some("Set Automation Mode"));
+    let modes = |d: &Document| -> Vec<(u64, AutomationMode)> {
+        d.mixer()
+            .strips()
+            .values()
+            .map(|s| (s.id.0, s.automation))
+            .collect()
+    };
+    let touched = modes(h.doc());
+    assert!(
+        touched.contains(&(1, AutomationMode::Touch))
+            && touched.contains(&(4, AutomationMode::Touch))
+    );
+    assert!(touched.contains(&(5, AutomationMode::Read)));
+    // Saved and read back.
+    let text = to_json(h.doc()).unwrap();
+    assert!(text.contains("\"automation\": \"touch\""), "{text}");
+    assert_eq!(modes(&from_json(&text).unwrap()), touched);
+    h.undo().unwrap();
+    assert_eq!(to_json(h.doc()).unwrap(), plain);
+    // A strip listed twice is set once (pre-flight M21). Setting it twice
+    // to one mode would look the same, so this half of the dedupe is not
+    // observable here; the app's half is pinned by `"1,1"` (Task 10).
+    let twice = mx(
+        &d,
+        MixerCmd::SetAutomationMode {
+            strips: vec![StripId(1), StripId(1)],
+            mode: AutomationMode::Latch,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        twice.mixer().strip(StripId(1)).unwrap().automation,
+        AutomationMode::Latch
+    );
+    // Refused, each for its own reason (Task 2 review M2): no strips, an
+    // unknown strip (nothing changes).
+    let refused = |strips: Vec<StripId>| {
+        mx(
+            &d,
+            MixerCmd::SetAutomationMode {
+                strips,
+                mode: AutomationMode::Off,
+            },
+        )
+        .unwrap_err()
+    };
+    assert!(
+        matches!(refused(vec![]), ModelError::Invalid { .. }),
+        "no strips"
+    );
+    assert_eq!(
+        refused(vec![StripId(1), StripId(99)]),
+        ModelError::UnknownId(AnyId::Strip(StripId(99)))
+    );
+    assert_eq!(
+        AutomationMode::ALL.map(AutomationMode::name),
+        ["Off", "Read", "Touch", "Latch", "Write", "Trim"]
+    );
+    assert!(AutomationMode::ALL.iter().filter(|m| m.writes()).count() == 4);
+}
+
+/// Plan 5e-1 Ruling 3: a target's strip: its own controls and sends, an
+/// insert's strip, a plugin instrument's strip; velocity scale has none.
+#[test]
+fn every_target_names_the_strip_whose_mode_governs_it() {
+    use core_model::automation::{AutomationTarget as T, SendIndex, strip_of, target_exists};
+    let mut d = base();
+    let plugin = PluginRef {
+        format: core_model::mixer::PluginFormat::Clap,
+        id: "vizdaw.test:gain=1".into(),
+        name: "Gain".into(),
+        vendor: "V".into(),
+        version: "1".into(),
+    };
+    d = mx(
+        &d,
+        MixerCmd::AddInsert {
+            strip: StripId(4),
+            index: None,
+            plugin,
+        },
+    )
+    .unwrap();
+    let insert = d.mixer().strip(StripId(4)).unwrap().inserts[0].id;
+    let pad = match &d.instruments().get(&DestId(1)).unwrap().kind {
+        DestKind::PluginInstrument { slot } => slot.id,
+        _ => unreachable!(),
+    };
+    assert_eq!(strip_of(&d, T::StripFader(StripId(3))), Some(StripId(3)));
+    assert_eq!(
+        strip_of(&d, T::SendLevel(StripId(1), SendIndex(0))),
+        Some(StripId(1))
+    );
+    assert_eq!(
+        strip_of(&d, T::PluginParam(insert, ParamId(0))),
+        Some(StripId(4))
+    );
+    assert_eq!(
+        strip_of(&d, T::PluginParam(pad, ParamId(0))),
+        Some(StripId(2))
+    );
+    assert_eq!(strip_of(&d, T::VelocityScale(DestId(0))), None);
+    assert_eq!(
+        strip_of(&d, T::PluginParam(PluginInstanceId(77), ParamId(0))),
+        None
+    );
+    assert!(target_exists(&d, T::StripMute(StripId(5))));
+    assert!(!target_exists(&d, T::StripMute(StripId(50))));
+    assert!(!target_exists(&d, T::SendLevel(StripId(1), SendIndex(3))));
+}

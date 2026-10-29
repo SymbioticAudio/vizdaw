@@ -17,6 +17,8 @@
 uniffi::setup_scaffolding!();
 
 pub mod audio;
+pub mod automation;
+pub mod autowrite;
 pub mod blocks;
 pub mod catalog;
 pub mod clock;
@@ -53,6 +55,10 @@ pub mod synth;
 pub mod templates;
 
 pub use audio::AudioSettingsRow;
+pub use automation::{
+    AutomationModeRow, AutomationSettingsRow, AutomationStateRow, GesturePhaseRow, PreviewPointRow,
+    StripModeRow, ThinningRow,
+};
 pub use blocks::{BlockKind, BlockRow, BlockRule};
 pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
