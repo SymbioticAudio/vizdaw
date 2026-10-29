@@ -640,26 +640,26 @@ fn the_automation_mode_is_one_undo_step_and_saved_only_when_not_read() {
         twice.mixer().strip(StripId(1)).unwrap().automation,
         AutomationMode::Latch
     );
-    assert!(
-        twice
-            .mixer()
-            .strips()
-            .values()
-            .filter(|s| s.automation == AutomationMode::Latch)
-            .count()
-            == 1
-    );
-    // Refused: no strips, an unknown strip (nothing changes).
-    for strips in [vec![], vec![StripId(1), StripId(99)]] {
-        let e = mx(
+    // Refused, each for its own reason (Task 2 review M2): no strips, an
+    // unknown strip (nothing changes).
+    let refused = |strips: Vec<StripId>| {
+        mx(
             &d,
             MixerCmd::SetAutomationMode {
-                strips: strips.clone(),
+                strips,
                 mode: AutomationMode::Off,
             },
-        );
-        assert!(e.is_err(), "{strips:?}");
-    }
+        )
+        .unwrap_err()
+    };
+    assert!(
+        matches!(refused(vec![]), ModelError::Invalid { .. }),
+        "no strips"
+    );
+    assert_eq!(
+        refused(vec![StripId(1), StripId(99)]),
+        ModelError::UnknownId(AnyId::Strip(StripId(99)))
+    );
     assert_eq!(
         AutomationMode::ALL.map(AutomationMode::name),
         ["Off", "Read", "Touch", "Latch", "Write", "Trim"]

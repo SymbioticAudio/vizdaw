@@ -341,6 +341,10 @@ fn an_off_strip_plays_no_automation_unless_suspended() {
     b.notes(seq, notes, &[(0, 60, 0x8000, 4 * Q)]).unwrap();
     let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
     let bus = b.bus("Bus").unwrap();
+    let insert = b
+        .insert(synth, core_engine::graph::TestInserts::plugin("gain=1"))
+        .unwrap();
+    let param = core_model::mixer::ParamId(0);
     let lane = b.lane(seq, "Auto", None).unwrap();
     b.events(
         seq,
@@ -348,6 +352,8 @@ fn an_off_strip_plays_no_automation_unless_suspended() {
         vec![
             auto(0, AutomationTarget::StripFader(synth), 0.25),
             auto(0, AutomationTarget::StripFader(bus), 0.75),
+            // Task 2 review M1: the Off strip's insert parameter too.
+            auto(0, AutomationTarget::PluginParam(insert, param), 0.5),
         ],
     )
     .unwrap();
@@ -362,16 +368,18 @@ fn an_off_strip_plays_no_automation_unless_suspended() {
             table.intern(k.clone()).map(Ok)
         })
         .unwrap();
-        sch.automation.lanes().iter().map(|l| l.dest).collect()
+        let mut v: Vec<AutoDest> = sch.automation.lanes().iter().map(|l| l.dest).collect();
+        v.sort();
+        v
     };
     let mut opts = CompileOptions::new(SR);
     assert_eq!(dests(&opts), vec![AutoDest::Strip(bus, StripParam::Fader)]);
     opts.suspend_automation = true;
-    assert_eq!(
-        dests(&opts),
-        vec![
-            AutoDest::Strip(synth, StripParam::Fader),
-            AutoDest::Strip(bus, StripParam::Fader)
-        ]
-    );
+    let mut all = vec![
+        AutoDest::Strip(synth, StripParam::Fader),
+        AutoDest::Strip(bus, StripParam::Fader),
+        AutoDest::Plugin(insert, param),
+    ];
+    all.sort();
+    assert_eq!(dests(&opts), all);
 }
