@@ -53,7 +53,7 @@ Read the whole spec (its §3 rules bind here), plan 5d-1 (`docs/superpowers/plan
 - **Lints.** Every crate keeps `#![deny(missing_docs)]` and `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic))]`. New non-test Rust code uses `.get()`, iterators and `checked_*`/`saturating_*`, never indexing or unwraps.
 - **Platform-neutral cores.** `core-model`, `core-engine`, `core-media` and `core-control` stay free of OS APIs.
 - **Linux CI.** CI runs `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on `ubuntu-latest` as well as macOS (`.github/workflows/ci.yml`). Every task's Rust code and tests compile warning-free and pass without macOS: macOS-only items sit behind `#[cfg(target_os = "macos")]`, and a binding only mutated on macOS uses `#[cfg_attr(not(target_os = "macos"), allow(unused_mut))]` (the pattern of `crates/core-ffi/src/host.rs:1968`). Every task that changes Rust checks it with `cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu --target-dir target/linux-check -- -D warnings` (the target is installed; nothing is linked, `target/` is ignored by git).
-- **TDD.** Every new test is run and seen to fail (RED) before the code that makes it pass. One exemption: Task 1's `a_device_chosen_during_a_measure_reaches_the_input_at_its_end` is a missing test for behaviour that already works (the 5d-2 re-reviewer proved it times out with the old `end_measuring`); record that it passes before any change and cite that proof.
+- **TDD.** Every new test is run and seen to fail (RED) before the code that makes it pass. Two exemptions: Task 1's `a_device_chosen_during_a_measure_reaches_the_input_at_its_end` is a missing test for behaviour that already works (the 5d-2 re-reviewer proved it times out with the old `end_measuring`); record that it passes before any change and cite that proof. Task 4's `each_point_cuts_once_on_a_latent_session` guards a design choice the tree at `1f6057a` (one arrival) already meets; record that it passes before the change.
 - **Real-time rules (spec §3).** The real-time thread never allocates, frees, locks or does file I/O. Everything new on it is marked `// RT`: `LiveTable` (`apply`, `value`, `holds`, `advance`, `end_holds`, `take_released`, `take_ended_plugins`; sorted, binary-searched, shifted in place), `GestureTap` (`begin_block`, `stop`, `wrap`, `resync`, `set_latency`, `end_block`, `stamp`), `RunClock`, the renderer's `live_gestures`, `apply_live`, `auto_frame` and the arrival reads in `automate`/`next_run`, and `Graph::strip_arrival`/`insert_arrival`/`static_value`. **rt-check gates** (Tasks 4, 5, 6 and 11): `cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings` and `cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures` (the last is new in Task 5).
 - **Media is write-once.** Nothing here writes media.
 - **File compatibility.** `core_model::file::VERSION` stays 3. `Strip.automation` is `#[serde(default, skip_serializing_if = "AutomationMode::is_read")]`, so a project whose strips are all Read saves byte-for-byte as before and older projects open as Read (Ruling 2). Automation points are ordinary automation events (4d).
@@ -95,11 +95,11 @@ Read the whole spec (its §3 rules bind here), plan 5d-1 (`docs/superpowers/plan
 
 The five failure modes a user is most likely to hit that the spec implies but does not spell out, most likely first; each is pinned by named tests in its task.
 
-1. **The transport moves under a pass** (the first `idle` after Play runs before the renderer has rolled; a click in the ruler, a marker step or `transport.locate` while writing; Play or Play Selection pressed again while playing; an xrun's resync). Expected: the pass is not ended before it has rolled; a Locate or a new Play lands what was written so far as its own "Write Automation" step and writing goes on from the new position; held Latch and Write values do not play on over the new material; no write spans the jump. Pinned by `a_pass_ends_only_after_its_roll`, `writing_survives_the_idle_before_the_roll` and `a_locate_while_writing_lands_and_starts_a_new_pass` (Task 8), `a_jump_inside_a_pass_breaks_the_segment` (Task 7), `a_locate_ends_held_values` (Task 5), and the e2e's `writing` check right after Play (Task 11).
-2. **A gesture that outlives its context** (the transport stops while the fader is held and is released later, a loop wraps while it is held, the engine is rebuilt by a device change mid-pass, the window closes, the touched strip is deleted mid-pass, a fader and a pan dragged at once while stopped). Expected: what was written up to then lands; a late release leaves nothing held for the next Play; nothing hangs touched forever; a deleted target's write is dropped with a problem line while the rest lands; overlapping static drags are one undo step. Pinned by `a_target_held_over_a_wrap_writes_both_passes` (Task 7), `a_device_rebuild_mid_pass_keeps_what_was_written`, `a_stop_while_touched_lands_the_write_and_keeps_the_touch`, `writes_to_a_target_deleted_mid_pass_are_dropped_and_the_rest_lands` and `two_static_gestures_at_once_are_one_step` (Task 8).
+1. **The transport moves under a pass** (the first `idle` after Play runs before the renderer has rolled; a click in the ruler, a marker step or `transport.locate` while writing; Play or Play Selection pressed again while playing; an xrun's resync). Expected: the pass is not ended before it has rolled; a Locate or a new Play lands what was written so far as its own "Write Automation" step and writing goes on from the new position; held Latch and Write values do not play on over the new material; no write spans the jump. Pinned by `a_pass_ends_only_after_its_roll`, `writing_survives_the_idle_before_the_roll`, `a_locate_before_the_roll_keeps_writing`, `a_locate_while_writing_lands_and_starts_a_new_pass` and `a_play_while_writing_lands_and_starts_a_new_pass` (Task 8), `a_jump_inside_a_pass_breaks_the_segment` (Task 7), `a_locate_ends_held_values` (Task 5), and the e2e's `writing` check right after Play (Task 11).
+2. **A gesture that outlives its context** (the transport stops while the fader is held and is released later, a loop wraps while it is held, the engine is rebuilt by a device change mid-pass, the window closes, the touched strip is deleted mid-pass, a fader and a pan dragged at once while stopped). Expected: what was written up to then lands; a late release leaves nothing held for the next Play; nothing hangs touched forever; a deleted target's write is dropped with a problem line while the rest lands; overlapping static drags are one undo step. Pinned by `a_target_held_over_a_wrap_writes_both_passes` (Task 7), `a_device_rebuild_mid_pass_keeps_what_was_written`, `a_stop_while_touched_lands_the_write_and_keeps_the_touch`, `writes_to_a_target_deleted_mid_pass_are_dropped_and_the_rest_lands`, `writes_land_when_the_recording_records_nothing`, `a_touch_held_over_stop_takes_its_strips_mode_at_the_next_play` and `two_static_gestures_at_once_are_one_step` (Task 8).
 3. **Automation on a strip behind latency** (a track whose audio is led because a linear-phase EQ sits on another bus, a bus behind a latent insert, the master). Expected: a mute or a fader move written at bar 3 changes what is heard exactly where bar 3 is heard, with and without region leads, through loop wraps. Pinned by `a_led_paths_mute_lands_on_its_audio` and `arrivals_follow_the_plan` (Task 4).
-4. **Plugins that report gestures badly** (values with no Begin/End, an End lost or never sent because the host closed the gesture itself, echoes of the automation the plugin is playing, a gesture while the plugin restarts). Expected: a value-only plugin writes from its first value to 500 ms after its last; a gesture the host closes releases its touch; playback echoes are not touches; the plugin's move never becomes a parameter undo step while it is being written as automation, and still does when not writing. Pinned by `values_without_gesture_events_release_500_ms_after_the_last`, `idle_reports_every_param_event_in_order`, `a_gesture_the_host_closes_reports_its_end` and `a_plugin_windows_gesture_writes_its_parameter` (Task 9).
-5. **Writing where the user does not expect, or from careless input** (the target automated in two lanes, a lane in a referenced sequence, a lane whose active take is not the first; a grab of an automated fader; a target spelt wrong or naming a strip that does not exist, a value of `nan`, `1e400`, `-0.5` or `1e-1`, a release with no touch, a strip listed twice). Expected: the first lane of the playing sequence that holds the target gets the write and the target's other lanes lose their points in the range, so the written value is what plays; a grab starts at the value heard, not the static one; `invalid_params` or a `failed` reply naming the problem before anything changes. Pinned by `a_write_goes_into_the_first_lane_holding_its_target` and `a_write_leaves_other_lanes_outside_its_range` (Task 3), `a_touch_without_a_value_starts_at_the_heard_value` and `hostile_gestures_are_refused` (Task 8), `automation_commands_check_their_params`, `automationCommandsCheckTheirArguments` and `targets_parse_only_in_their_own_spelling` (Task 10).
+4. **Plugins that report gestures badly** (values with no Begin/End, an End lost or never sent because the host closed the gesture itself, echoes of the automation the plugin is playing, a gesture while the plugin restarts). Expected: a value-only plugin writes from its first value to 500 ms after its last; a gesture the host closes releases its touch; playback echoes are not touches; the plugin's move never becomes a parameter undo step while it is being written as automation, and still does when not writing. Pinned by `values_without_gesture_events_release_500_ms_after_the_last`, `idle_reports_every_param_event_in_order`, `a_gesture_the_host_closes_reports_its_end`, `a_plugin_windows_gesture_writes_its_parameter` and `a_ui_gesture_on_a_plugin_parameter_reaches_the_plugin` (Task 9).
+5. **Writing where the user does not expect, or from careless input** (the target automated in two lanes, a lane in a referenced sequence, a lane whose active take is not the first; a grab of an automated fader; a target spelt wrong or naming a strip that does not exist, a value of `nan`, `1e400`, `-0.5` or `1e-1`, a release with no touch, a strip listed twice). Expected: the first lane of the playing sequence that holds the target gets the write and the target's other lanes lose their points in the range, so the written value is what plays; a grab starts at the value heard, not the static one; `invalid_params` or a `failed` reply naming the problem before anything changes. Pinned by `a_write_goes_into_the_first_lane_holding_its_target` and `a_write_leaves_other_lanes_outside_its_range` (Task 3), `a_touch_without_a_value_starts_at_the_heard_value`, `a_trim_grab_does_not_jump` and `hostile_gestures_are_refused` (Task 8), `automation_commands_check_their_params`, `automationCommandsCheckTheirArguments` and `targets_parse_only_in_their_own_spelling` (Task 10).
 
 ## Plan Rulings
 
@@ -123,6 +123,7 @@ Decisions the spec leaves open, in the format "what — why — cost if wrong".
 6. **Ruling (the gesture queue and the live table; amended by pre-flight I3, I4):** one control → RT queue per engine (`GestureSender`, 4096 messages), drained at most 256 messages per block. `GestureSender::send` takes the producer with a blocking `lock()` (poison-tolerant), never `try_lock`: only control-side threads send, the RT thread only consumes; it returns false only when the queue is full. The renderer keeps at most 1024 live targets (`MAX_LIVE`) in a fixed boxed array kept sorted by `AutoDest`, found by binary search; insert and remove shift elements and never allocate. A message that does not fit, or a touch with no free entry, is dropped and counted (`Engine::gestures_dropped`); an *end* (Release, Glide, Hold) the session could not send is kept and re-sent at each `idle` (Ruling 10). The live value of a touched target replaces its automation (or static) value in the run's ramped commit, so moves ramp over a run instead of stepping; a plugin parameter that is touched or held is not sent automation at all (the plugin holds the user's value).
    - Why: §3's RT rules need fixed capacities; Ruling 9 holds every control of every Write strip, so "Set all strips to Write" on a 16-strip session already needs more than 64 entries; a dropped end would leave a target overriding its automation for good.
    - Cost if wrong: a 1025th simultaneous live target is ignored until another ends.
+   - Tests: `a_full_queue_refuses_and_counts` and the floor `const` (Task 5), `an_unsent_end_is_resent_…` (Task 8). The problem lines for lost stamps, marks and drops and for a missing tap (M10) have no test: reaching them needs the engine's rings to overflow or `start_gestures` to fail, which no test hook provides; they are one `push` each (pre-flight check m7).
 7. **Ruling (stamping):** the renderer stamps each gesture message with the output run frame of the block that took it, offset by its host time exactly as MIDI input is (`(host_ns − block_ns) × rate`), and a dedicated **gesture tap** marks rolls, wraps, stops and resyncs with the record tap's own run clock (`RunClock`, extracted from `RecordTap` without changing its behaviour); its status says when it has rolled (`GestureStatus::rolled`, for Ruling 24). The control side turns runs into heard schedule frames and passes with the record placement's pieces (`passes::pieces`, made `pub(crate)`), so automation and recorded MIDI share one mapping ("the same mapping as MIDI", §7.3). `host_ns` is `clock::now_ns()` on a live device and 0 offline (placed at the block that takes it, as `midi.inject` is: the offline device's clock is not the host's). The tap is installed at every Play and Record start and removed at Stop.
    - Why: one mapping for MIDI and automation; independence from recording ("Recording audio or MIDI is not needed").
    - Cost if wrong: offline, a sample lands up to one block (about 10 ms) late.
@@ -164,7 +165,7 @@ Decisions the spec leaves open, in the format "what — why — cost if wrong".
     - Cost if wrong: scripts spell targets one way only.
 18. **Ruling (preview):** `Session.automation_preview(target)` answers the write in progress for the target in the current pass, as it would land now (thinned with the pass's thinning, edges included), as `(tick, value)` in the playing sequence; empty when the target is not being written. The pass keeps its stamps per target, so a preview runs the writer over that target's stamps and the marks only (M15).
     - Cost if wrong: the Strip Chart preview (5e-2) recomputes a little per poll.
-19. **Ruling (settings):** `AutomationSettingsRow { after_write, return_ms, thinning }`, process-wide like the audio settings (the app keeps them in its preferences, 5e-2): `after_write` any mode but Write (default Latch), `return_ms` 0–2000 (default 250), `thinning` Low/Medium/High (default Medium); a refusal (`Model`) changes nothing. All three are read when a pass starts and kept with it, so the preview equals the landing (M4); the return time is turned into frames at the engine's current sample rate, else the project rate (M5). "Write plugin parameters only when touched" is always on and has no field.
+19. **Ruling (settings):** `AutomationSettingsRow { after_write, return_ms, thinning }`, process-wide like the audio settings (the app keeps them in its preferences, 5e-2): `after_write` any mode but Write (default Latch), `return_ms` 0–2000 (default 250), `thinning` Low/Medium/High (default Medium); a refusal (`Model`) changes nothing. All three are read when a pass starts and kept with it, so the preview equals the landing (M4; `settings_changed_mid_pass_apply_from_the_next_play`, Task 8); the return time is turned into frames at the engine's current sample rate, else the project rate (M5; not tested: the offline device runs at the project rate, and a device-rate change rebuilds the engine and ends the pass, so no test can glide at another rate; pre-flight check m7). "Write plugin parameters only when touched" is always on and has no field.
     - Cost if wrong: a setting changed mid-pass applies from the next Play.
 20. **Ruling (touches that never end; amended by pre-flight M2, M9):** touches from the mixer and the channel last until their release; only plugin (and, in 5f, surface) sources release by themselves. A Stop lands what was written and keeps a touch that is still held. A touch still held at the next Play writes from its next value (messages sent while stopped are not stamped); its path is re-picked at Play: Write when its strip writes now, else live-only (no static edit is opened mid-touch); a static touch whose edit is open keeps the static path. Touches whose target no longer exists (an Undo of a strip, a removed insert) are released after every document change the session makes. Closing the document releases every touch. A release with no touch does nothing; a value with no touch is a touch first.
     - Cost if wrong: a script that never releases keeps its target overriding automation until the window closes.
@@ -172,20 +173,23 @@ Decisions the spec leaves open, in the format "what — why — cost if wrong".
     - Cost if wrong: a held value is unheard for up to one 10 ms sample after a device change.
 22. **Ruling (existing automation):** the "existing automation" a glide, Trim or an edge reads, and the value Write holds from, is the target's points in the playing sequence flattened as the engine plays it (`query::flatten`, references included), valued by Plan 4d's lane rule (the first value before the first point, the last after the last, linear between unless stepped).
     - Cost if wrong: none (it is what the user hears).
-23. **Ruling (a transport jump lands the pass; pre-flight C2):** while a pass is writing, `locate`, `play`, `play_from` and `start_recording` first finish the writing pass and land it as Stop does ("Write Automation", After Write included); then they act, and the new position starts a new pass with a new tap. The renderer ends live holds at `EngineCmd::Locate` as at a wrap. The writer breaks a segment at any non-wrap mark whose frame does not continue the piece before it (an xrun's resync), as a wrap does but without After Write.
+23. **Ruling (a transport jump lands the pass; pre-flight C2):** while a pass is writing, `locate`, `play`, `play_from` and `start_recording` first finish the writing pass and land it as Stop does ("Write Automation", After Write included); then they act, and the new position starts a new pass with a new tap. After a Locate the new pass starts when the transport plays, or when the old pass had not rolled yet and this session still holds the engine (a Locate queued while `play` waited for the disk lands before the renderer rolls: pre-flight check I-2). The renderer ends live holds at `EngineCmd::Locate` as at a wrap. The writer breaks a segment at any non-wrap mark whose frame does not continue the piece before it (an xrun's resync), as a wrap does but without After Write.
     - Why: the record placement's pieces assume the transport cannot jump while recording (5c refuses Locate then), but writing allows it; a write spanning a jump would erase the automation between or be refused whole, and held values would play over unrelated material.
     - Cost if wrong: one undo step per contiguous stretch played.
-24. **Ruling (when a pass ends; pre-flight C1, M17):** a writing pass ends only when its tap's status reads closed; when the tap has rolled and `host::transport_stopped(self.id) != Some(false)` (stopped, or this session no longer holds the engine); at Stop, at Ruling 23's jumps, or at close. A `host::finish_play` that fails finishes writing.
+24. **Ruling (when a pass ends; pre-flight C1, M17; check m3):** a writing pass ends only when its tap's status reads closed; when this session no longer holds the engine (`host::transport_stopped(self.id) == None`, rolled or not: another session's engine never closes this tap); when the tap has rolled and the transport reads stopped (`Some(true)`); at Stop, at Ruling 23's jumps, or at close. A `host::finish_play` that fails finishes writing.
     - Why: `transport_stopped` reads stopped until the renderer applies the Play, a block after `play` returns, and the idle timer that queued during `play`'s disk wait fires first.
     - Cost if wrong: none (recording guards the same way with `status.run() > 0`).
+    - Tests: `a_pass_ends_only_after_its_roll`, `writing_survives_the_idle_before_the_roll` and `a_locate_before_the_roll_keeps_writing` (Task 8, the last two holding the offline renderer with `debug_hold_offline`). Stop's wait for the tap to close before the last drain (M1) is not tested: what it saves is at most one block at the end of a held value, under the transport poll's resolution (pre-flight check m7).
 25. **Ruling (a landing never refuses more than the bad write; pre-flight I6):** the session drops writes whose target (`target_exists`) or sequence no longer exists, one problem line each: "Automation of <describe> was not written: it no longer exists." `to_model` splits a write longer than `MAX_WRITE_POINTS` into consecutive writes. When a recording's pass cannot be built, or the model refuses it, its automation lands as its own step ("Write Automation") inside the recording's group. After Write's `SetAutomationMode` lists only strips that still exist, and runs only when some write landed.
     - Cost if wrong: none (the model still refuses a bad pass whole; the session no longer hands it one).
 26. **Ruling (what `Touch { value: None }` means; pre-flight I11):** it is the value heard now. For strip and send targets: the engine's override snapshot (`Engine::overrides()`) when this session holds the engine and the snapshot has the control; else, while playing, the existing automation at the transport tick; else the static value. For plugin parameters: the plugin's current value. The mixer sends `touch(value: nil)` on mouse-down (plan 5e-2).
     - Why: the mixer shows static values, so a touch at the shown value would jump the heard value, and the write, to the static value when an automated fader is grabbed.
     - Cost if wrong: none; a backlog row covers showing the heard value in the mixer (Task 11).
+    - Tests: the strip half by `a_touch_without_a_value_starts_at_the_heard_value` (Task 8). The plugin half (a `Begin` touches at the plugin's value) has none: the test plugin's Wiggle changes its value in the same drain as its `Begin`, so "the value before" cannot be observed (pre-flight check m8).
 27. **Ruling (value-only plugin events on automated parameters; pre-flight I8):** a plugin `Value` with no open `Begin`, on a parameter the playing schedule automates, is not a touch: the gesture path ignores it. Begin/End gestures touch automated parameters as before; value-only plugins still write parameters that have no automation.
     - Why: the AU echo filter remembers 16 host writes per parameter and a ramp writes more per drain, so the surplus echoes of playback arrive as user values; as touches they would pause the parameter's automation and record its own playback.
     - Cost if wrong: a plugin that never sends Begin/End cannot overwrite a parameter that is already automated (its first pass, on an unautomated parameter, still writes).
+    - Tests: `PluginTouches`' unit test pins the rule; the session's `automated` flag has no end-to-end test, because no plugin the core-ffi tests can load sends value-only events (the CLAP test plugin's Wiggle always sends Begin and End; the scripted fake lives in `core-host`'s tests). Not worth a new test plugin (pre-flight check m8).
 28. **Ruling (the record range does not bound automation; pre-flight M16):** automation writes ignore the punch and record range ("Recording audio or MIDI is not needed"). Write holds are heard from Play, including during a count-in.
     - Cost if wrong: a punch-in take writes automation outside its punch range.
 
@@ -512,7 +516,9 @@ fn the_automation_mode_is_one_undo_step_and_saved_only_when_not_read() {
     assert_eq!(modes(&from_json(&text).unwrap()), touched);
     h.undo().unwrap();
     assert_eq!(to_json(h.doc()).unwrap(), plain);
-    // A strip listed twice is set once (pre-flight M21).
+    // A strip listed twice is set once (pre-flight M21). Setting it twice
+    // to one mode would look the same, so this half of the dedupe is not
+    // observable here; the app's half is pinned by `"1,1"` (Task 10).
     let twice = mx(&d, MixerCmd::SetAutomationMode { strips: vec![StripId(1), StripId(1)], mode: AutomationMode::Latch })
         .unwrap();
     assert_eq!(twice.mixer().strip(StripId(1)).unwrap().automation, AutomationMode::Latch);
@@ -1079,11 +1085,13 @@ cat > crates/core-engine/tests/automation_arrival.rs <<'VIZDAW_EOF'
 //! audio is at, so a point at bar 3 changes what is heard where bar 3 is
 //! heard, on a led (read-ahead) path as on a delayed one.
 
-use core_engine::backend::AudioBackend;
+use core_engine::backend::{AudioBackend, StereoBuf};
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
 use core_engine::graph::mixer::mixer_spec;
-use core_engine::graph::{Graph, InsertInit, InstrumentFeed, TestInserts, plan};
+use core_engine::graph::{
+    EffectNode, Graph, InsertFactory, InsertInit, InstrumentFeed, ProcessStatus, TestInserts, plan,
+};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::schedule::TargetIdx;
 use core_media::caf::{CafWriter, WriteMode};
@@ -1093,8 +1101,10 @@ use core_model::document::Document;
 use core_model::event::{EventBody, Fade};
 use core_model::format::BitDepth;
 use core_model::ids::{MediaId, SeqId};
-use core_model::mixer::{PluginSlot, StripKind};
+use core_model::mixer::{ParamId, PluginSlot, StripKind};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const QF: u64 = 24_000;
 const FILE_FRAMES: u64 = 480_000;
@@ -1196,6 +1206,76 @@ fn arrivals_follow_the_plan() {
     assert_eq!(g.arrivals(), &[0, 100, 150]);
     assert_eq!(g.strip_arrival(core_model::ids::StripId(999)), 0);
 }
+
+/// An insert that counts its `process` calls: one per run the renderer
+/// makes.
+struct Counted(Arc<AtomicU64>, Box<dyn EffectNode>);
+
+impl EffectNode for Counted {
+    fn latency(&self) -> u32 {
+        self.1.latency()
+    }
+    fn process(&mut self, frames: u32, io: &mut StereoBuf, sc: Option<&StereoBuf>) -> ProcessStatus {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        self.1.process(frames, io, sc)
+    }
+    fn reset(&mut self) {
+        self.1.reset();
+    }
+    fn automate(&mut self, frame: u32, param: ParamId, v: f64) -> bool {
+        self.1.automate(frame, param, v)
+    }
+}
+
+struct Counting(TestInserts, Arc<AtomicU64>);
+
+impl InsertFactory for Counting {
+    fn make(&mut self, slot: &PluginSlot, sr: f64, max: u32) -> Result<Box<dyn EffectNode>, String> {
+        Ok(Box::new(Counted(Arc::clone(&self.1), self.0.make(slot, sr, max)?)))
+    }
+}
+
+/// Pre-flight I13 (Ruling 5): each automation point cuts a run once,
+/// however many distinct arrivals the graph has, so a latent session is
+/// not rendered in slices around every point. Two inserts on a bus count
+/// the runs; with latencies 100 and 150 (arrivals 0, 100, 250) the runs
+/// are the same as with latencies 0 and 0 (arrival 0 only).
+#[test]
+fn each_point_cuts_once_on_a_latent_session() {
+    let runs = |latencies: [u32; 2]| -> u64 {
+        let mut b = Builder::new();
+        let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+        let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+        b.notes(seq, notes, &[(0, 60, 0x8000, 64 * Q)]).unwrap();
+        let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+        let bus = b.bus("A").unwrap();
+        for l in latencies {
+            b.insert(bus, TestInserts::plugin(&format!("latency={l}"))).unwrap();
+        }
+        let fader = AutomationTarget::StripFader(synth);
+        for (t, v) in [(0, 0.2), (Q / 4, 0.8), (Q / 2, 0.3), (3 * Q / 4, 0.6)] {
+            b.event(seq, notes, t, EventBody::Automation { target: fader, value: v }).unwrap();
+        }
+        let doc = b.finish();
+        let count = Arc::new(AtomicU64::new(0));
+        let (mut engine, renderer) = Engine::new(EngineConfig::new(48_000.0), Box::new(OfflineSinks::new(64))).unwrap();
+        engine.set_insert_factory(Box::new(Counting(TestInserts::new(), Arc::clone(&count))));
+        engine.load(&doc, seq).unwrap();
+        let mut out = OfflineBackend::new(48_000.0, BLOCK);
+        out.start(renderer).unwrap();
+        out.reserve(4096);
+        engine.play().unwrap();
+        out.block(BLOCK);
+        let before = count.load(Ordering::Relaxed);
+        for _ in 0..60 {
+            out.block(BLOCK);
+        }
+        count.load(Ordering::Relaxed) - before
+    };
+    let plain = runs([0, 0]);
+    assert!(plain > 2 * 60, "the points cut some runs: {plain}");
+    assert_eq!(runs([100, 150]), plain, "a latent session cuts at the same points");
+}
 VIZDAW_EOF
 ```
 
@@ -1209,7 +1289,7 @@ cd /Users/lattawb/workspace/vizdaw
 cargo test -p core-engine --test automation_arrival 2>&1 | tail -3
 ```
 
-Expected: FAIL to compile (`strip_arrival` does not exist). With the accessors stubbed to 0, `a_led_paths_mute_lands_on_its_audio` fails "heard up to beat 3" (the mute fell `l` early).
+Expected: FAIL to compile (`strip_arrival` does not exist). With the accessors stubbed to 0, `a_led_paths_mute_lands_on_its_audio` fails "heard up to beat 3" (the mute fell `l` early). `each_point_cuts_once_on_a_latent_session` is a guard on the design, not on today's code: at `1f6057a` there is one arrival, so it passes; it fails against the per-arrival cut the pre-revision plan wrote (each of the four points cut again at 100 and 250 frames after it). It is the plan's second RED exemption (Global Constraints, "TDD"); record that it passed before the change, and the reviewer checks that `next_run` cuts per lane.
 
 - [ ] **Step 3: Arrivals in the graph**
 
@@ -1273,7 +1353,7 @@ cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings 2>&
 cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record 2>&1 | grep "test result"
 ```
 
-Expected: every `core-engine` test passes (`automation.rs`, `graph_controls.rs`, `region_leads.rs` unchanged: their strips have arrival 0, or no automation); `automation_arrival` 2 passed (Rust 1475); the rt-check gates pass.
+Expected: every `core-engine` test passes (`automation.rs`, `graph_controls.rs`, `region_leads.rs` unchanged: their strips have arrival 0, or no automation); `automation_arrival` 3 passed (Rust 1476); the rt-check gates pass.
 
 - [ ] **Step 6: Commit**
 
@@ -1384,7 +1464,7 @@ use core_engine::backend::AudioBackend;
 use core_engine::backend::StereoBuf;
 use core_engine::engine::{Engine, EngineConfig};
 use core_engine::fixtures::{Builder, Q};
-use core_engine::gesture::{GESTURES_PER_BLOCK, GestureMsg, GesturePhase, MAX_LIVE};
+use core_engine::gesture::{GESTURE_CAPACITY, GESTURES_PER_BLOCK, GestureMsg, GesturePhase, MAX_LIVE};
 use core_engine::graph::{EffectNode, InsertFactory, ProcessStatus, TestInserts};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::schedule::{AutoDest, StripParam};
@@ -1641,6 +1721,36 @@ fn a_released_plugin_parameter_gets_flat_automation_again() {
     r.blocks(2);
     assert!(r.sent() > during, "sent again after the release");
     assert!((r.last() - 0.3).abs() < 1e-9, "{}", r.last());
+    // More plugin entries end in one block than the renderer keeps (64):
+    // the real one ends last, after 64 others, and is still reset.
+    for k in 0..64u64 {
+        r.send(AutoDest::Plugin(r.insert, ParamId(100 + k)), GesturePhase::Touch(0.5));
+    }
+    r.send(dest, GesturePhase::Touch(0.9));
+    r.blocks(2);
+    let during = r.sent();
+    for k in 0..64u64 {
+        r.send(AutoDest::Plugin(r.insert, ParamId(100 + k)), GesturePhase::Release);
+    }
+    r.send(dest, GesturePhase::Release);
+    r.blocks(2);
+    assert!(r.sent() > during, "the overflow resets every plugin lane");
+}
+
+/// Ruling 6 (pre-flight I3): a sender waits for another sender instead of
+/// dropping; only a full queue refuses, and that is counted.
+#[test]
+fn a_full_queue_refuses_and_counts() {
+    let r = rig();
+    let m = GestureMsg { dest: fader(r.bus), phase: GesturePhase::Value(0.5), host_ns: 0, tag: 0 };
+    let (tx, tx2) = (r.engine.gesture_sender(), r.engine.gesture_sender());
+    // Two threads send at once into a queue nothing drains (no block runs).
+    let other = std::thread::spawn(move || (0..GESTURE_CAPACITY / 2).all(|_| tx2.send(m)));
+    let mine = (0..GESTURE_CAPACITY / 2).all(|_| tx.send(m));
+    assert!(other.join().unwrap() && mine, "no send is refused while the queue has room");
+    assert_eq!(r.engine.gestures_dropped(), 0);
+    assert!(!tx.send(m), "the queue is full");
+    assert_eq!(r.engine.gestures_dropped(), 1);
 }
 
 /// Ruling 23: a Locate ends held values, as a wrap does.
@@ -1845,7 +1955,7 @@ Expected: FAIL to compile (`core_engine::gesture` does not exist).
 
 - [ ] **Step 3: The queue and the table**
 
-Create `crates/core-engine/src/gesture.rs` with the module doc "Live gestures (sub-project 5 spec §7.1, §7.2; plan 5e-1 Rulings 6, 10, 11): the control side's messages, the renderer's table of touched targets and (Task 6) the gesture tap. // RT (the table and the tap)" and the items of the Interfaces block. `GestureSender` is shaped like `input::MidiSender` (an `Arc<Mutex<Producer>>` and a drop counter) but takes the producer with `lock().unwrap_or_else(|e| e.into_inner())`, never `try_lock` (pre-flight I3), with the doc "Control-side threads only; never the RT thread."; only a full queue drops and counts. `LiveTable` keeps a boxed slice of `MAX_LIVE` entries (filled with placeholders in `new`, off the RT thread) and a length, the first `len` sorted by `dest`, with `Live { dest, state }` and `enum LiveState { Touched(f64), Offset(f64), Held(f64), HeldOffset(f64), Gliding { from: f64, done: u32, frames: u32 }, GlidingOffset { from: f64, done: u32, frames: u32 } }`; lookups by `binary_search_by_key` over the first `len` entries (pre-flight I4). (`AutoDest` is `Ord`: `Automation::drives` already searches by it.) `#[derive(Debug)]` on all.
+Create `crates/core-engine/src/gesture.rs` with the module doc "Live gestures (sub-project 5 spec §7.1, §7.2; plan 5e-1 Rulings 6, 10, 11): the control side's messages, the renderer's table of touched targets and (Task 6) the gesture tap. // RT (the table and the tap)" and the items of the Interfaces block. `GestureSender` is shaped like `input::MidiSender` (an `Arc<Mutex<Producer>>` and a drop counter) but takes the producer with `lock().unwrap_or_else(|e| e.into_inner())`, never `try_lock` (pre-flight I3), with the doc "Control-side threads only; never the RT thread."; only a full queue drops and counts. `LiveTable` keeps a boxed slice of `MAX_LIVE` entries (filled with placeholders in `new`, off the RT thread) and a length, the first `len` sorted by `dest`, with `Live { dest, state }` and `enum LiveState { Touched(f64), Offset(f64), Held(f64), HeldOffset(f64), Gliding { from: f64, done: u32, frames: u32 }, GlidingOffset { from: f64, done: u32, frames: u32 } }`; lookups by `binary_search_by_key` over the first `len` entries (pre-flight I4). (`AutoDest` is `Ord`: `Automation::drives` already searches by it.) `#[derive(Debug)]` on all. Right after `MAX_LIVE`, pin its floor at compile time (pre-flight check m4; a test assertion on a constant would trip `clippy::assertions_on_constants`): `const _: () = assert!(MAX_LIVE >= 1024, "Ruling 6: every control of 16 Write strips fits");`.
 
 In `crates/core-engine/src/schedule/automation.rs`, add `AutoDest::target` and `AutoDest::is_db` (`Strip(_, Fader)` and `Send(..)`).
 
@@ -1872,7 +1982,7 @@ Replace:
 ```
 `Renderer::new` takes `gesture_in: Consumer<crate::gesture::GestureMsg>` after `midi_in` and fills both fields (`live: Box::new(LiveTable::new())`); `Engine::with_platform` makes the queue next to `midi_queue()` (`let (gesture_tx, gesture_rx) = crate::gesture::gesture_queue();`), passes `gesture_rx` after `midi_rx` and keeps `gesture_tx` in a new `Engine` field beside `midi_tx`.
 
-After `        self.live_midi();` in `process_inner`, add `        self.live_gestures();`. Write `live_gestures` (doc: "Takes the queued gestures into the live table (plan 5e-1 Ruling 6). // RT"), the lane substitutions in `automate` and `apply_live` (called right after `self.automate(length, run, &regions);`) as the paragraph above the steps says, `self.live.end_holds()` in the `EngineCmd::Stop` arm and in the `Step::Wrap` arm, and `Shared`'s `gestures_dropped: AtomicU64` (zero in `Default`) with `pub(crate) fn count_gesture_drop(&self)` and `pub fn gestures_dropped(&self) -> u64`. `Engine::gesture_sender` and `Engine::gestures_dropped` are as in the Interfaces block.
+After `        self.live_midi();` in `process_inner`, add `        self.live_gestures();`. Write `live_gestures` (doc: "Takes the queued gestures into the live table (plan 5e-1 Ruling 6). // RT"), the lane substitutions in `automate` and `apply_live` (called right after `self.automate(length, run, &regions);`) as the paragraph above the steps says, `self.live.end_holds()` in the `EngineCmd::Stop` arm, the `EngineCmd::Locate` arm and the `Step::Wrap` arm (Ruling 23), and `Shared`'s `gestures_dropped: AtomicU64` (zero in `Default`) with `pub(crate) fn count_gesture_drop(&self)` and `pub fn gestures_dropped(&self) -> u64`. `Engine::gesture_sender` and `Engine::gestures_dropped` are as in the Interfaces block.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -1887,7 +1997,7 @@ cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings 2>&
 cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures 2>&1 | grep "test result"
 ```
 
-Expected: every `core-engine` test passes; `gestures` 9 passed (Rust 1485 with `rt_alloc_gestures`); the four rt-check tests pass.
+Expected: every `core-engine` test passes; `gestures` 10 passed (Rust 1487 with `rt_alloc_gestures`); the four rt-check tests pass. `a_full_queue_refuses_and_counts` is the RED for the blocking `lock()`: with `try_lock` two senders at once drop messages (run it a few times if a first run happens to pass).
 
 - [ ] **Step 6: Commit**
 
@@ -2086,7 +2196,7 @@ cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings 2>&
 cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures 2>&1 | grep "test result"
 ```
 
-Expected: "workspace done" with no failure lines (Rust 1486); the rt-check gates pass.
+Expected: "workspace done" with no failure lines (Rust 1488); the rt-check gates pass.
 
 - [ ] **Step 5: Commit**
 
@@ -2177,7 +2287,7 @@ git log -1 --oneline && git show --stat HEAD | tail -3
 
 Pass windows come from `pass_window`: from the frame where the pass's first piece starts being heard (`place(p, p.from)`) to where its last piece ends (`place(p, p.end)`).
 
-**`to_model`'s split** (Ruling 25): when a write's points with its two edges would exceed `MAX_WRITE_POINTS`, its points (after the tick conversion) are cut into chunks of at most `MAX_WRITE_POINTS − 2`, in order, each its own `AutomationWrite` with the same `seq`, `target` and `lane_name`. The first chunk's range starts at the write's `start` (first tick − 1, with the edge point there) and ends at its own last tick; inner chunks range from their own first to their own last tick, without edges; the last chunk ranges from its own first tick to the write's `end` (last tick + 1, with the edge point there). So the ranges never overlap and only the outer ends carry edges.
+**`to_model`'s split** (Ruling 25): when a write's points with its two edges would exceed `MAX_WRITE_POINTS`, its points (after the tick conversion) are cut into chunks of at most `MAX_WRITE_POINTS − 2`, in order, each its own `AutomationWrite` with the same `seq`, `target` and `lane_name`. The first chunk's range starts at the write's `start` (first tick − 1, with the edge point there); every chunk but the last ends one tick before the next chunk's first tick; every chunk but the first starts at its own first tick; the last ends at the write's `end` (last tick + 1, with the edge point there). So the ranges are contiguous and disjoint (no existing point between two chunks survives inside the written stretch; pre-flight check m2, amending the addendum's "own first and last ticks"), and only the outer ends carry edges.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2469,6 +2579,14 @@ fn thinning_stays_within_its_tolerance() {
     assert!((Thinning::Low.tolerance(FADER) - 0.04).abs() < 1e-12);
 }
 
+/// Ruling 12 (pre-flight M7): on equal maximum distance the earliest
+/// index splits, so the result is deterministic.
+#[test]
+fn thinning_splits_the_earliest_of_equal_distances() {
+    let samples = [(0, 0.0), (100, 1.0), (200, 1.0), (300, 0.0)];
+    assert_eq!(thin(&samples, 0.6, false, false), vec![(0, 0.0), (100, 1.0), (300, 0.0)]);
+}
+
 /// Ruling 7: stamps are heard the graph latency after their run, as
 /// recorded MIDI is.
 #[test]
@@ -2580,7 +2698,7 @@ fn a_write_longer_than_the_model_limit_is_split() {
         assert!(w.points.len() <= MAX_WRITE_POINTS, "{}", w.points.len());
         assert!(w.points.iter().all(|(t, _)| *t >= w.start && *t <= w.end));
     }
-    assert!(model.windows(2).all(|p| p[0].end < p[1].start), "the ranges do not overlap");
+    assert!(model.windows(2).all(|p| p[0].end.0 + 1 == p[1].start.0), "the ranges are contiguous and disjoint");
     let all: Vec<(Tick, f64)> = model.iter().flat_map(|w| w.points.iter().copied()).collect();
     assert_eq!(all.len(), input.len() + 2, "the input and the two edges");
     assert!(all.windows(2).all(|p| p[0].0 < p[1].0), "ticks rise");
@@ -2618,7 +2736,7 @@ cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu --targe
 cargo test -p core-ffi --test autowrite --test passes 2>&1 | grep -E "test result|FAILED"
 ```
 
-Expected: `autowrite` 12 passed (Rust 1498); `passes` unchanged.
+Expected: `autowrite` 13 passed (Rust 1501); `passes` unchanged.
 
 - [ ] **Step 5: Commit**
 
@@ -2637,7 +2755,7 @@ git log -1 --oneline && git show --stat HEAD | tail -3
 
 **Files:**
 - Create: `crates/core-ffi/src/automation.rs`, `crates/core-ffi/tests/automation.rs`
-- Modify: `crates/core-ffi/src/lib.rs` (`pub mod automation;` and its re-exports), `crates/core-ffi/src/audio.rs` (`pub(crate) fn bump_epoch()`), `crates/core-ffi/src/host.rs` (`gesture`, `start_gestures`, `stop_gestures`, `heard`, `gestures_dropped`; `Host::load` passes suspend), `crates/core-ffi/src/session.rs` (the gesture path, the writing lifecycle, the jumps, the new methods), `crates/core-ffi/src/mixer.rs` (`StripRow.automation`)
+- Modify: `crates/core-ffi/src/lib.rs` (`pub mod automation;` and its re-exports), `crates/core-ffi/src/audio.rs` (`pub(crate) fn bump_epoch()`), `crates/core-ffi/src/host.rs` (`gesture`, `start_gestures`, `stop_gestures`, `heard`, `gestures_dropped`, the test hook `debug_hold_offline`; `Host::load` passes suspend), `crates/core-ffi/src/session.rs` (the gesture path, the writing lifecycle, the jumps, the new methods), `crates/core-ffi/src/mixer.rs` (`StripRow.automation`)
 - Modify: `app/Tests/VizDAWAppModelTests/FakeSession.swift` (the four new methods; `stripRow(…)` passes `automation: .read`)
 
 **Interfaces:**
@@ -2691,13 +2809,13 @@ git log -1 --oneline && git show --stat HEAD | tail -3
       pub fn automation_preview(&self, target: AutomationTargetRow) -> Result<Vec<PreviewPointRow>, VizError>;
   }
   ```
-  `StripRow.automation: AutomationModeRow`. Internal (`crate::automation`): `pub(crate) enum Source { Ui, Plugin }` (Ruling 15); `pub(crate) fn writing_ended(closed: bool, rolled: bool, transport_stopped: Option<bool>) -> bool` (Ruling 24: `closed || (rolled && transport_stopped != Some(false))`); `Sampler` (Ruling 8: `INTERVAL = 10 ms`; `fn value(&mut self, t, v, now: Duration, host_ns: u64) -> Option<f64>`, `fn due(&mut self, now: Duration) -> Vec<(AutomationTarget, f64, u64)>` and `fn flush(&mut self, t) -> Option<(f64, u64)>`, each kept value with the host time it arrived at, M6), `fn lane_name(doc: &Document, t: AutomationTarget, param_name: Option<&str>) -> String` (Ruling 4), `fn existing(doc, seq, t) -> Vec<(Tick, f64)>` (the target's points in `seq` flattened, by tick) with `fn value_at(points: &[(Tick, f64)], tick: Tick, stepped: bool) -> Option<f64>` (Plan 4d's lane rule; `None` with no points), `fn fixed_value(doc, t, default: Option<f64>) -> f64` (the static value, normalised; a plugin parameter's from the slot's overlay, else its default from the host's parameter list normalised by its range, else 0.5), `fn static_command(doc, t, v) -> Option<Command>` (SetGain/SetPan/SetMute/SetSolo/EditSend; `None` for plugin parameters). Host: `host::gesture(owner, msg: GestureMsg) -> bool`, `host::start_gestures(owner) -> Option<GestureHandles>`, `host::stop_gestures(owner)`, `host::heard(owner, t: AutomationTarget) -> Option<f64>` (the engine's override snapshot value for a strip or send target, through `AutoDest::of` and `OverrideSnapshot::value`, when `owner` holds the engine; Ruling 26), `host::gestures_dropped(owner) -> Option<u64>` (M10).
+  `StripRow.automation: AutomationModeRow`. Internal (`crate::automation`): `pub(crate) enum Source { Ui, Plugin }` (Ruling 15); `pub(crate) fn writing_ended(closed: bool, rolled: bool, transport_stopped: Option<bool>) -> bool` (Ruling 24: `closed || transport_stopped.is_none() || (rolled && transport_stopped == Some(true))`); `pub(crate) struct UnsentEnds` (pre-flight I3: `fn put(&mut self, t: AutomationTarget, m: GestureMsg)`, `fn clear(&mut self, t: AutomationTarget)`, `fn resend(&mut self, send: impl FnMut(GestureMsg) -> bool)` keeping what is refused, `fn len(&self) -> usize`); `Sampler` (Ruling 8: `INTERVAL = 10 ms`; `fn value(&mut self, t, v, now: Duration, host_ns: u64) -> Option<f64>`, `fn due(&mut self, now: Duration) -> Vec<(AutomationTarget, f64, u64)>` and `fn flush(&mut self, t) -> Option<(f64, u64)>`, each kept value with the host time it arrived at, M6), `fn lane_name(doc: &Document, t: AutomationTarget, param_name: Option<&str>) -> String` (Ruling 4), `fn existing(doc, seq, t) -> Vec<(Tick, f64)>` (the target's points in `seq` flattened, by tick) with `fn value_at(points: &[(Tick, f64)], tick: Tick, stepped: bool) -> Option<f64>` (Plan 4d's lane rule; `None` with no points), `fn fixed_value(doc, t, default: Option<f64>) -> f64` (the static value, normalised; a plugin parameter's from the slot's overlay, else its default from the host's parameter list normalised by its range, else 0.5), `fn static_command(doc, t, v) -> Option<Command>` (SetGain/SetPan/SetMute/SetSolo/EditSend; `None` for plugin parameters). Host: `host::gesture(owner, msg: GestureMsg) -> bool`, `host::start_gestures(owner) -> Option<GestureHandles>`, `host::stop_gestures(owner)`, `host::heard(owner, t: AutomationTarget) -> Option<f64>` (the engine's override snapshot value for a strip or send target, through `AutoDest::of` and `OverrideSnapshot::value`, when `owner` holds the engine; Ruling 26), `host::gestures_dropped(owner) -> Option<u64>` (M10); test hook `#[cfg(feature = "test-hooks")] pub fn debug_hold_offline(on: bool)` (check I-1: while on, the offline driver renders nothing, so a test can run code before the roll).
 
 **How the session does it** (Rulings 3, 7–10, 14, 15, 19–28):
 - **State** in `Inner`:
   - `touches: BTreeMap<AutomationTarget, Touching>` (`Touching { path: Path, value: f64, base: f64, source: Source }`): `Path::Static` (inside the shared static edit), `Path::Live` (heard only: a plugin-source touch off a writing path, or a touch re-picked at Play on a strip that does not write), `Path::Write(WriteMode, release: Release)` where `Release` is `Glide`, `Hold` or `Offsets`;
   - `static_edit: Option<(String, usize)>`: the shared static edit's label and its open static touches (Ruling 14);
-  - `sampler: Sampler`; `unsent_ends: BTreeMap<AutomationTarget, GestureMsg>` (Ruling 10);
+  - `sampler: Sampler`; `unsent_ends: UnsentEnds` (Ruling 10);
   - `writing: Option<Writing>`: `Writing { seq, handles, marks: Vec<Mark>, stamps: BTreeMap<AutomationTarget, Vec<Stamped>>` (per target, M15)`, holds: Vec<(AutomationTarget, f64)>, write_strips: BTreeSet<StripId>, wrapped: bool, return_frames: u64, after_write: AutomationMode, thinning: Thinning, dropped_at_start: u64 }`;
   - `pending_automation: Option<(Vec<AutomationWrite>, Vec<StripId>)>` and `after_write_pending: Vec<StripId>` (the Write strips whose mode changes when a recording's pass lands).
 - **gesture(target, phase)** calls the internal path with `Source::Ui` and no host time: `touch(inner, target, value: Option<f64>, source, host_ns: Option<u64>)`, `move_to(inner, target, v, source, host_ns)`, `release(inner, target, source, host_ns)`. It refuses (Ruling 16) velocity scale, a target `target_exists` denies, a plugin parameter the host's running instance does not list, non-finite values; clamps values to 0–1. A `Value` with no touch is a touch first (at that value); a `Release` with no touch does nothing.
@@ -2716,15 +2834,15 @@ git log -1 --oneline && git show --stat HEAD | tail -3
   - live → `Release`; Touch → `Glide(return_frames)`; Latch, Write → `Hold`; Trim → `Glide(return_frames)`; a stepped target on Touch or Trim → `Hold` (Ruling 10);
   - a Touch or Trim path `PluginParam` that no schedule lane drives is set to its static value (`fixed_value`, plain; `set_param`, no commit; pre-flight M14).
   Trim's path uses offsets only where the playing sequence automates the target (`existing` not empty); otherwise it sends absolute values like Touch (Ruling 11).
-- **Unsent ends** (pre-flight I3): a `Release`, `Glide` or `Hold` that `host::gesture` could not send while this session holds the engine goes to `unsent_ends[target]`; `idle` re-sends them first; any later message sent for that target replaces (removes) its entry.
+- **Unsent ends** (pre-flight I3): a `Release`, `Glide` or `Hold` that `host::gesture` could not send while this session holds the engine goes to `unsent_ends.put(target, msg)`; `idle` calls `unsent_ends.resend(|m| host::gesture(self.id, m))` first; any later message sent for that target calls `unsent_ends.clear(target)`.
 - **Play and Record** (`start_playing`, `start_recording`): a pass still writing is finished and landed first, before `host::play` (Ruling 23). Once `host::play` succeeded and before `finish_play`, `begin_writing(inner, seq)`:
   - `host::start_gestures(self.id)`; none: the problem line "Automation is not being written this pass: the engine was busy." (M10) and no `writing`;
   - the settings read now and kept (After Write, thinning, the return time in frames at the engine's current rate: `host::device(self.id)`'s rate, else the project rate; M4, M5), and `dropped_at_start = host::gestures_dropped(self.id)`;
   - every Write strip's fader, pan (not master), mute and send levels held: the value at the play-start tick (`existing` there, else `fixed_value`) sent as `Touch(v)` then `Hold`, tagged Write, recorded in `holds` (Ruling 9); the punch and record range play no part (Ruling 28);
   - every still-held touch has its path re-picked (Ruling 20 as amended, M2): a static touch whose edit is open keeps `Static`; else `Write(mode)` when its strip writes now, else `Live`; its next value is tagged accordingly (nothing is stamped at the roll).
   A `host::finish_play` that fails finishes writing (`finish_writing`, `apply_pending_automation`; Ruling 24).
-- **locate** (Ruling 23): with `writing` set, its `seq` is kept, then `finish_writing` and `apply_pending_automation`, then `host::locate`; then, when the transport plays (`host::transport_stopped(self.id) == Some(false)`), `begin_writing(inner, seq)` again.
-- **idle** (`service_writing`, right after `service_recording`): re-sends `unsent_ends`; drains the tap's marks and stamps into `writing` (stamps by target); sends the sampler's due values; a wrap mark sets `wrapped` (touches from then on on a Write strip are tagged with After Write's mode); ends the pass, `finish_writing`, when `writing_ended(status.closed(), status.rolled(), host::transport_stopped(self.id))` (Ruling 24: never before the roll; `None`, another session took the engine, ends it once rolled, M17). `apply_pending_automation` runs in `idle` after the `self.apply_pending_pass(&mut inner);` at `session.rs:1608` and in `end_edit` after the `self.commit_held(&mut inner);` at `session.rs:1834`.
+- **locate** (Ruling 23): with `writing` set, its `seq` and whether its tap had rolled are kept, then `finish_writing` and `apply_pending_automation`, then `host::locate`; then `begin_writing(inner, seq)` again when the transport plays (`host::transport_stopped(self.id) == Some(false)`) or when the old pass had not rolled and this session still holds the engine (`Some(_)`; check I-2).
+- **idle** (`service_writing`, right after `service_recording`): re-sends `unsent_ends`; drains the tap's marks and stamps into `writing` (stamps by target); sends the sampler's due values; a wrap mark sets `wrapped` (touches from then on on a Write strip are tagged with After Write's mode); ends the pass, `finish_writing`, when `writing_ended(status.closed(), status.rolled(), host::transport_stopped(self.id))` (Ruling 24: never before the roll while this session holds the engine; `None`, another session took it, ends the pass at once, M17). `apply_pending_automation` runs in `idle` after the `self.apply_pending_pass(&mut inner);` at `session.rs:1608` and in `end_edit` after the `self.commit_held(&mut inner);` at `session.rs:1834`.
 - **take_writes(inner) -> (Vec<AutomationWrite>, Vec<StripId>)** ends the pass and answers its writes and the Write strips that still exist (none without `writing`; `writing` is `None` after it). **finish_writing** (called by `stop` after `host::stop`, by the jumps of Ruling 23, by a failed `finish_play` and by `close`) is `take_writes` plus `pending_automation`; **writes_into_pass** (called by `finish_recording` before its pass is set pending) is `take_writes` plus the pass. `take_writes`:
   - `host::stop_gestures`, then up to 250 ms of 2 ms polls for `status.closed()` (M1: the renderer marks the Stop first), a last drain, `end_run = status.run()`;
   - one problem line "Some automation moves were lost while writing." when `lost_stamps` or `lost_marks` > 0 or `host::gestures_dropped` grew since `dropped_at_start` (M10);
@@ -2766,7 +2884,7 @@ use vizdaw_ffi::automation::{
     AutomationModeRow as Mode, AutomationSettingsRow, GesturePhaseRow as Phase, ThinningRow,
     reset_automation_settings, set_automation_settings, set_automation_suspended,
 };
-use vizdaw_ffi::host::{fader_override, force_offline, reset_host, simulate_event};
+use vizdaw_ffi::host::{debug_hold_offline, fader_override, force_offline, reset_host, simulate_event};
 use vizdaw_ffi::{AutomationTargetRow as Target, EventRow, Session, VizError};
 
 const Q: i64 = 15_360;
@@ -2779,6 +2897,7 @@ fn serial() -> MutexGuard<'static, ()> {
     reset_host();
     reset_automation_settings();
     set_automation_suspended(false);
+    debug_hold_offline(false);
     g
 }
 
@@ -2920,6 +3039,8 @@ fn write_and_latch_land_at_stop_and_write_becomes_latch() {
     s.set_automation_mode(vec![synth], Mode::Write).unwrap();
     s.play(song).unwrap();
     wait_until("two beats", || tick(&s) > 2 * Q);
+    // Pre-flight M8: Write holds are not touches (5e-2's rings).
+    assert!(s.automation_state().unwrap().touched.is_empty(), "{:?}", s.automation_state().unwrap().touched);
     stop_and_land(&s);
     assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Write Automation"));
     for name in ["Built-in Synth Fader", "Built-in Synth Pan", "Built-in Synth Mute"] {
@@ -2974,14 +3095,15 @@ fn a_stop_while_touched_lands_the_write_and_keeps_the_touch() {
     assert!(!s.automation_state().unwrap().touched.contains(&t));
     assert_eq!(s.snapshot().unwrap().version, version, "no step for the late release");
     // Pre-flight I2: the late release sent Release, so nothing is held
-    // through the next Play: before the write's start the fader plays the
-    // write's edge (the static value), not 0.4.
-    s.locate(0).unwrap();
+    // through the next Play. The landed lane goes first, so nothing drives
+    // the fader; no Locate (a Locate would end a wrong hold by itself).
+    s.undo().unwrap();
+    let from = tick(&s);
     s.play(song).unwrap();
-    wait_until("a quarter beat", || tick(&s) > Q / 4);
+    wait_until("a quarter beat on", || tick(&s) > from + Q / 4);
     let heard = fader_override(synth);
-    assert!(tick(&s) < Q, "still before the write");
-    assert!(heard.is_some_and(|d| (d - fader_db(fader_norm(gain))).abs() < 1e-6), "{heard:?}");
+    assert!(heard.is_none_or(|d| (d - fader_db(0.4)).abs() > 1e-3), "nothing held from the late release: {heard:?}");
+    assert!(heard.is_none_or(|d| (d - gain).abs() < 1e-6), "{heard:?}");
     stop_and_land(&s);
     s.close().unwrap();
 }
@@ -3157,11 +3279,16 @@ fn writing_survives_the_idle_before_the_roll() {
     let (s, song) = demo();
     let synth = strip(&s, "Built-in Synth");
     s.set_automation_mode(vec![synth], Mode::Touch).unwrap();
+    // The renderer is held, so these idles certainly run before the roll
+    // (pre-flight check I-1).
+    debug_hold_offline(true);
     s.play(song).unwrap();
+    assert!(!s.transport().unwrap().playing, "not rolled yet");
     for _ in 0..3 {
         s.idle().unwrap();
     }
-    assert!(s.automation_state().unwrap().writing, "still writing after the first idles");
+    assert!(s.automation_state().unwrap().writing, "still writing after the idles before the roll");
+    debug_hold_offline(false);
     wait_until("beat 1", || tick(&s) > Q);
     let t = Target::StripFader { strip: synth };
     s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
@@ -3220,6 +3347,141 @@ fn a_locate_while_writing_lands_and_starts_a_new_pass() {
     s.close().unwrap();
 }
 
+/// Pre-flight check I-2, Ruling 23: a Locate that arrives after Play
+/// returned but before the renderer rolled (a ruler click queued during
+/// the disk wait) starts the new pass all the same.
+#[test]
+fn a_locate_before_the_roll_keeps_writing() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    debug_hold_offline(true);
+    s.play(song).unwrap();
+    s.locate(Q).unwrap();
+    s.idle().unwrap();
+    debug_hold_offline(false);
+    wait_until("playing", || s.transport().unwrap().playing);
+    assert!(s.automation_state().unwrap().writing, "a pass after the Locate");
+    let t = Target::StripFader { strip: synth };
+    wait_until("past beat 1", || tick(&s) > Q + Q / 4);
+    s.gesture(t, Phase::Touch { value: Some(0.4) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    stop_and_land(&s);
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Write Automation"));
+    let lane = lane_named(&s, song, "Built-in Synth Fader").expect("the write landed");
+    assert!(points(&s, song, lane).iter().any(|p| (p.1 - 0.4).abs() < 1e-9));
+    s.close().unwrap();
+}
+
+/// Pre-flight C2 (its third failure), Ruling 23: Play pressed again while
+/// writing lands what was written (the new tap would drop it) and writes
+/// on as a new pass; each pass undoes on its own.
+#[test]
+fn a_play_while_writing_lands_and_starts_a_new_pass() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: synth };
+    s.play(song).unwrap();
+    wait_until("beat 2", || tick(&s) > 2 * Q);
+    s.gesture(t, Phase::Touch { value: Some(0.4) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let at = tick(&s);
+    wait_until("a beat on", || tick(&s) > at + Q);
+    s.play(song).unwrap();
+    s.idle().unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Write Automation"));
+    let lane = lane_named(&s, song, "Built-in Synth Fader").expect("the first pass landed");
+    let first = points(&s, song, lane);
+    assert!(first.iter().any(|p| (p.1 - 0.4).abs() < 1e-9), "{first:?}");
+    assert!(s.automation_state().unwrap().writing, "a new pass");
+    wait_until("playing", || s.transport().unwrap().playing);
+    s.gesture(t, Phase::Touch { value: Some(0.8) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    stop_and_land(&s);
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Write Automation"));
+    assert!(points(&s, song, lane).iter().any(|p| (p.1 - 0.8).abs() < 1e-9));
+    s.undo().unwrap();
+    assert_eq!(points(&s, song, lane), first, "one step per pass");
+    s.undo().unwrap();
+    assert_eq!(lane_named(&s, song, "Built-in Synth Fader"), None, "both passes undone");
+    s.close().unwrap();
+}
+
+/// Pre-flight M2, Ruling 20 as amended: a touch held over Stop has its
+/// path picked again at the next Play: its strip set to Read meanwhile,
+/// its next value writes nothing and changes no static value.
+#[test]
+fn a_touch_held_over_stop_takes_its_strips_mode_at_the_next_play() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    let gain = s.mixer().unwrap().strips.iter().find(|x| x.id == synth).unwrap().gain_db;
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: synth };
+    s.play(song).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: Some(0.4) }).unwrap();
+    pace(&s);
+    stop_and_land(&s);
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Write Automation"));
+    let lane = lane_named(&s, song, "Built-in Synth Fader").unwrap();
+    let landed = points(&s, song, lane);
+    s.set_automation_mode(vec![synth], Mode::Read).unwrap();
+    s.play(song).unwrap();
+    wait_until("a beat on", || s.transport().unwrap().playing);
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.6 }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Set Automation Mode"), "no step for the held touch");
+    assert_eq!(points(&s, song, lane), landed, "nothing more written");
+    let g2 = s.mixer().unwrap().strips.iter().find(|x| x.id == synth).unwrap().gain_db;
+    assert_eq!(g2, gain, "and no static change");
+    s.close().unwrap();
+}
+
+/// Pre-flight M4, Ruling 19: a setting changed mid-pass applies from the
+/// next Play; the landing equals the preview taken before the change.
+#[test]
+fn settings_changed_mid_pass_apply_from_the_next_play() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Touch).unwrap();
+    let t = Target::StripFader { strip: synth };
+    s.play(song).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    // Steps of 0.15 dB: kept at Medium (0.1 dB), thinned away at High (0.2 dB).
+    s.gesture(t, Phase::Touch { value: Some(fader_norm(-6.0)) }).unwrap();
+    for k in 1..=6 {
+        pace(&s);
+        s.gesture(t, Phase::Value { value: fader_norm(-6.0 + 0.15 * f64::from(k % 2)) }).unwrap();
+    }
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let at = tick(&s);
+    wait_until("the glide to pass", || tick(&s) > at + Q);
+    let preview = s.automation_preview(t).unwrap();
+    assert!(preview.len() >= 6, "{preview:?}");
+    let high = AutomationSettingsRow { thinning: ThinningRow::High, ..vizdaw_ffi::automation::automation_settings() };
+    set_automation_settings(high).unwrap();
+    stop_and_land(&s);
+    let lane = lane_named(&s, song, "Built-in Synth Fader").unwrap();
+    let landed = points(&s, song, lane);
+    let want: Vec<(i64, f64)> = preview.iter().map(|p| (p.tick, p.value)).collect();
+    assert_eq!(landed, want, "landed with the thinning read at Play");
+    s.close().unwrap();
+}
+
 /// Pre-flight I1, Ruling 14: two static gestures at once (a fader and a
 /// pan, stopped) share one edit: one undo step, named after the first
 /// touch, and one Undo puts both back.
@@ -3252,24 +3514,30 @@ fn two_static_gestures_at_once_are_one_step() {
 /// Pre-flight I11, Ruling 26: a touch with no value starts at the value
 /// heard now (here the bus fader's flat automation, 0.3), not at the
 /// static value, so grabbing an automated fader writes no jump.
-#[test]
-fn a_touch_without_a_value_starts_at_the_heard_value() {
+/// A session whose bus fader is automated flat at `v` in lane "Auto":
+/// `(session, sequence, bus strip, lane)`.
+fn automated_bus(v: f64) -> (Arc<Session>, u64, u64, u64) {
     use core_engine::fixtures::{Builder, Q as FQ};
     use core_model::automation::AutomationTarget;
     use core_model::event::EventBody;
-    let _g = serial();
     let mut b = Builder::new();
     let synth_dest = b.dest("Synth", "builtin:synth", 0).unwrap();
     let (seq, notes) = b.sequence("S", "Notes", Some(synth_dest)).unwrap();
     b.notes(seq, notes, &[(0, 60, 0x8000, 64 * FQ)]).unwrap();
     let bus = b.bus("Bus").unwrap();
     let auto = b.lane(seq, "Auto", None).unwrap();
-    b.event(seq, auto, 0, EventBody::Automation { target: AutomationTarget::StripFader(bus), value: 0.3 }).unwrap();
-    let s = Session::from_document(b.finish()).unwrap();
-    let t = Target::StripFader { strip: bus.0 };
+    b.event(seq, auto, 0, EventBody::Automation { target: AutomationTarget::StripFader(bus), value: v }).unwrap();
+    (Session::from_document(b.finish()).unwrap(), seq.0, bus.0, auto.0)
+}
+
+#[test]
+fn a_touch_without_a_value_starts_at_the_heard_value() {
+    let _g = serial();
+    let (s, seq, bus, auto) = automated_bus(0.3);
+    let t = Target::StripFader { strip: bus };
     assert!((fader_norm(0.0) - 0.3).abs() > 0.1, "the static value is not the automation's");
-    s.set_automation_mode(vec![bus.0], Mode::Touch).unwrap();
-    s.play(seq.0).unwrap();
+    s.set_automation_mode(vec![bus], Mode::Touch).unwrap();
+    s.play(seq).unwrap();
     wait_until("beat 1", || tick(&s) > Q);
     s.gesture(t, Phase::Touch { value: None }).unwrap();
     pace(&s);
@@ -3280,9 +3548,35 @@ fn a_touch_without_a_value_starts_at_the_heard_value() {
     wait_until("the glide to pass", || tick(&s) > at + Q);
     stop_and_land(&s);
     assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Write Automation"));
-    let p = points(&s, seq.0, auto.0);
+    let p = points(&s, seq, auto);
     let moved = p.iter().position(|x| (x.1 - 0.6).abs() < 1e-9).expect("the move is written");
     assert!(p[..moved].iter().all(|x| (x.1 - 0.3).abs() < 1e-6), "no jump before the move: {p:?}");
+    s.close().unwrap();
+}
+
+/// Pre-flight I12, Ruling 11: a Trim grab is sent as an offset of 0, so
+/// the automation is heard unchanged until the hand moves (an absolute
+/// touch value would play for a block first); a move of +3 dB adds 3 dB.
+#[test]
+fn a_trim_grab_does_not_jump() {
+    let _g = serial();
+    let (s, seq, bus, _) = automated_bus(fader_norm(-12.0));
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Trim).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: Some(fader_norm(0.0)) }).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(50) {
+        let d = fader_override(bus);
+        assert!(d.is_some_and(|d| (d + 12.0).abs() < 1e-6), "the grab is heard as the automation: {d:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    pace(&s);
+    s.gesture(t, Phase::Value { value: fader_norm(3.0) }).unwrap();
+    wait_until("+3 dB on the automation", || fader_override(bus).is_some_and(|d| (d + 9.0).abs() < 1e-6));
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
     s.close().unwrap();
 }
 
@@ -3295,7 +3589,10 @@ fn writes_to_a_target_deleted_mid_pass_are_dropped_and_the_rest_lands() {
     s.add_bus("Gone".into()).unwrap();
     let synth = strip(&s, "Built-in Synth");
     let bus = strip(&s, "Gone");
-    s.set_automation_mode(vec![synth, bus], Mode::Latch).unwrap();
+    // The bus writes (Write) and becomes After Write at landing, unless
+    // it is gone (Ruling 25: After Write leaves out deleted strips).
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    s.set_automation_mode(vec![bus], Mode::Write).unwrap();
     let targets = [Target::StripFader { strip: synth }, Target::StripFader { strip: bus }];
     s.play(song).unwrap();
     wait_until("beat 1", || tick(&s) > Q);
@@ -3303,11 +3600,11 @@ fn writes_to_a_target_deleted_mid_pass_are_dropped_and_the_rest_lands() {
         s.gesture(t, Phase::Touch { value: Some(0.45) }).unwrap();
     }
     pace(&s);
-    for t in targets {
-        s.gesture(t, Phase::Release).unwrap();
-    }
+    s.gesture(targets[0], Phase::Release).unwrap();
     pace(&s);
     s.remove_bus(bus).unwrap();
+    // Pre-flight M9: the bus fader's touch goes with its strip.
+    assert!(!s.automation_state().unwrap().touched.contains(&targets[1]));
     pace(&s);
     s.stop().unwrap();
     wait_until("the transport to stop", || !s.transport().unwrap().playing);
@@ -3321,6 +3618,67 @@ fn writes_to_a_target_deleted_mid_pass_are_dropped_and_the_rest_lands() {
         "{:?}",
         news.problems
     );
+    let modes = s.automation_state().unwrap().modes;
+    assert!(modes.iter().any(|m| m.strip == synth && m.mode == Mode::Latch), "{modes:?}");
+    assert!(modes.iter().all(|m| m.strip != bus));
+    s.close().unwrap();
+}
+
+/// Ruling 25, Ruling 28 (pre-flight I6, M16): a recording that records
+/// nothing (its punch range is never reached) still lands the automation
+/// written meanwhile, as "Write Automation", outside the punch range.
+#[test]
+fn writes_land_when_the_recording_records_nothing() {
+    use core_engine::fixtures::{Builder, Q as FQ};
+    use core_model::command::{Command, LaneCmd, SequenceCmd};
+    use core_model::lane::LaneInput;
+    use core_model::sequence::SeqLength;
+    use core_model::time::Tick;
+    let _g = serial();
+    let mut b = Builder::new();
+    let synth_dest = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("S", "Keys", Some(synth_dest)).unwrap();
+    b.run(Command::Lane(LaneCmd::SetInput {
+        seq,
+        lane: keys,
+        input: Some(LaneInput::Midi { port: Some("Keys".into()), channel: None }),
+    }))
+    .unwrap();
+    b.run(Command::Lane(LaneCmd::SetFlags { seq, lane: keys, mute: None, solo: None, arm: Some(true) })).unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength { seq, length: SeqLength::Locked(Tick(32 * FQ)) })).unwrap();
+    let s = Session::from_document(b.finish()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    s.debug_set_trash_dir(Some(dir.path().display().to_string()));
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Touch).unwrap();
+    let punch = vizdaw_ffi::selection::TickRange { start: 16 * Q, end: 17 * Q };
+    s.record(
+        seq.0,
+        vizdaw_ffi::RecordSpecRow {
+            replace: true,
+            punch: Some(punch),
+            looped: false,
+            count_in_bars: 0,
+            pre_roll_bars: 0,
+            passes_as_takes: true,
+        },
+    )
+    .unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.6 }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let at = tick(&s);
+    wait_until("a beat on", || tick(&s) > at + Q);
+    stop_and_land(&s);
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Write Automation"));
+    let lane = lane_named(&s, seq.0, "Built-in Synth Fader").expect("the automation landed");
+    let p = points(&s, seq.0, lane);
+    assert!(p.iter().any(|x| (x.1 - 0.6).abs() < 1e-9), "{p:?}");
+    assert!(p.iter().all(|x| x.0 < punch.start), "written outside the punch range: {p:?}");
     s.close().unwrap();
 }
 VIZDAW_EOF
@@ -3328,7 +3686,7 @@ VIZDAW_EOF
 
 The `pace` sleeps only space the gesture samples past the 10 ms sampler; every result is waited for with `wait_until` (`common::wait_limit()`).
 
-In `crates/core-ffi/src/automation.rs`'s `#[cfg(test)]` module (written in Step 3), the sampler's and the pass end's unit tests:
+In `crates/core-ffi/src/automation.rs`'s `#[cfg(test)]` module (written in Step 3), the sampler's, the pass end's and the unsent ends' unit tests:
 
 ```rust
     /// Ruling 8: at most one value per 10 ms; the last kept value is sent
@@ -3358,7 +3716,7 @@ In `crates/core-ffi/src/automation.rs`'s `#[cfg(test)]` module (written in Step 
     fn a_pass_ends_only_after_its_roll() {
         for (closed, rolled, stopped, ended) in [
             (false, false, Some(true), false), // right after Play: still reads stopped
-            (false, false, None, false),
+            (false, false, None, true),        // another session took the engine before the roll
             (false, false, Some(false), false),
             (false, true, Some(false), false), // playing
             (false, true, Some(true), true),   // stopped by itself
@@ -3368,6 +3726,34 @@ In `crates/core-ffi/src/automation.rs`'s `#[cfg(test)]` module (written in Step 
         ] {
             assert_eq!(writing_ended(closed, rolled, stopped), ended, "{closed} {rolled} {stopped:?}");
         }
+    }
+
+    /// Pre-flight I3, Ruling 10: an end the queue refused is re-sent until
+    /// it goes; a later message sent for its target replaces it.
+    #[test]
+    fn an_unsent_end_is_resent_until_it_goes_and_a_later_message_replaces_it() {
+        use core_engine::gesture::{GestureMsg, GesturePhase};
+        use core_engine::schedule::AutoDest;
+        let (t, u) = (AutomationTarget::StripFader(StripId(1)), AutomationTarget::StripPan(StripId(1)));
+        let msg = |x: AutomationTarget, phase| GestureMsg { dest: AutoDest::of(x).unwrap(), phase, host_ns: 0, tag: 2 };
+        let mut q = UnsentEnds::default();
+        q.put(t, msg(t, GesturePhase::Hold));
+        q.put(u, msg(u, GesturePhase::Release));
+        let mut tried = Vec::new();
+        q.resend(|m| {
+            tried.push(m.phase);
+            false
+        });
+        assert_eq!((tried.len(), q.len()), (2, 2), "both kept while the queue is full");
+        q.clear(u); // a later message for the pan went through
+        tried.clear();
+        q.resend(|m| {
+            tried.push(m.phase);
+            true
+        });
+        assert_eq!(tried, vec![GesturePhase::Hold]);
+        assert_eq!(q.len(), 0);
+        q.resend(|_| panic!("nothing is left"));
     }
 ```
 
@@ -3379,7 +3765,7 @@ cd /Users/lattawb/workspace/vizdaw
 cargo test -p core-ffi --test automation 2>&1 | tail -3
 ```
 
-Expected: FAIL to compile (`vizdaw_ffi::automation` does not exist). Each new behaviour is RED for its own reason once the module compiles with the pre-revision lifecycle (record it if you build in that order): `writing_survives_the_idle_before_the_roll` ends the pass at the first idle; `a_locate_while_writing_lands_and_starts_a_new_pass` lands nothing at the Locate; `two_static_gestures_at_once_are_one_step` gets `Busy`; `a_touch_without_a_value_starts_at_the_heard_value` writes the static value first; `writes_to_a_target_deleted_mid_pass_are_dropped_and_the_rest_lands` lands nothing; `a_stop_while_touched_lands_the_write_and_keeps_the_touch` hears 0.4.
+Expected: FAIL to compile (`vizdaw_ffi::automation` does not exist). Each new behaviour is RED for its own reason once the module compiles with the pre-revision lifecycle (record it if you build in that order): `writing_survives_the_idle_before_the_roll` ends the pass at the first idle; `a_locate_while_writing_lands_and_starts_a_new_pass` lands nothing at the Locate; `two_static_gestures_at_once_are_one_step` gets `Busy`; `a_touch_without_a_value_starts_at_the_heard_value` writes the static value first; `writes_to_a_target_deleted_mid_pass_are_dropped_and_the_rest_lands` lands nothing; `a_stop_while_touched_lands_the_write_and_keeps_the_touch` hears 0.4 at the next Play (the late release's Hold, with nothing driving the fader); `a_locate_before_the_roll_keeps_writing` and `a_play_while_writing_lands_and_starts_a_new_pass` write nothing (or lose the first pass); `a_touch_held_over_stop_takes_its_strips_mode_at_the_next_play` writes 0.6; `settings_changed_mid_pass_apply_from_the_next_play` lands fewer points than the preview; `a_trim_grab_does_not_jump` hears 0 dB; `writes_land_when_the_recording_records_nothing` lands nothing.
 
 - [ ] **Step 3: Rows, settings, the sampler and the helpers**
 
@@ -3407,7 +3793,7 @@ and set it from `s.automation` in `strip_row`'s literal. In `FakeSession.swift`'
 
 - [ ] **Step 4: The host's three calls**
 
-In `crates/core-ffi/src/host.rs`, after `midi_sender`, add `gesture`, `start_gestures`, `stop_gestures`, `heard` and `gestures_dropped` with the same holder check (`h.owner == owner`): `gesture` sends through `h.engine.gesture_sender()` (false when another session holds the engine or the queue is full); `start_gestures` returns `h.engine.start_gestures().ok()`; `stop_gestures` ignores a full queue (the tap goes with the engine anyway); `heard` reads `h.engine.overrides()?.value(AutoDest::of(t)?)`; `gestures_dropped` answers `h.engine.gestures_dropped()`. None of them is `cfg`-gated: they build and are linted on Linux. In `Host::load`:
+In `crates/core-ffi/src/host.rs`, after `midi_sender`, add `gesture`, `start_gestures`, `stop_gestures`, `heard` and `gestures_dropped` with the same holder check (`h.owner == owner`): `gesture` sends through `h.engine.gesture_sender()` (false when another session holds the engine or the queue is full); `start_gestures` returns `h.engine.start_gestures().ok()`; `stop_gestures` ignores a full queue (the tap goes with the engine anyway); `heard` reads `h.engine.overrides()?.value(AutoDest::of(t)?)`; `gestures_dropped` answers `h.engine.gestures_dropped()`. None of them is `cfg`-gated: they build and are linted on Linux. Add `static OFFLINE_HOLD: AtomicBool` (not gated) and the gated setter `debug_hold_offline`; `OfflineDriver`'s loop, while it is set, renders nothing and moves its clock origin on by the time held, so the held time is skipped, not caught up in one burst at the release. `finish_play`'s `pending.wait()` is the disk prefetch, which does not need the render thread; if it turns out to wait on the renderer (`play` then never returns while held), stop and report it rather than weaken the tests. `serial()` in the tests resets it. In `Host::load`:
 
 Find:
 ```rust
@@ -3527,14 +3913,18 @@ Replace:
 ```rust
             // A Locate while a pass writes lands it; the new position is a
             // new pass (plan 5e-1 Ruling 23).
-            let writing = inner.writing.as_ref().map(|w| w.seq);
+            let writing = inner.writing.as_ref().map(|w| (w.seq, w.handles.status.rolled()));
             self.finish_writing(&mut inner);
             self.apply_pending_automation(&mut inner);
             if !host::locate(self.id, Tick(tick))? {
                 inner.cursor = Some(Tick(tick));
                 inner.cursor_seq = inner.selected_seq();
             }
-            if let Some(seq) = writing.filter(|_| host::transport_stopped(self.id) == Some(false)) {
+            // Again from the new position: when it plays, or when the old
+            // pass had not rolled yet (check I-2: the Play is still on its
+            // way to the renderer).
+            let stopped = host::transport_stopped(self.id);
+            if let Some((seq, _)) = writing.filter(|(_, rolled)| stopped == Some(false) || (!rolled && stopped.is_some())) {
                 self.begin_writing(&mut inner, seq);
             }
             Ok(())
@@ -3629,7 +4019,7 @@ scripts/build-ffi.sh && scripts/swift.sh build 2>&1 | grep -E "error:|warning:" 
 scripts/swift.sh test 2>&1 | grep -E "Test run"
 ```
 
-Expected: "workspace done" with no failure lines (Rust 1514: `automation` 14 and the two unit tests); Swift 846 tests pass.
+Expected: "workspace done" with no failure lines (Rust 1524: `automation` 20 and the three unit tests); Swift 846 tests pass.
 
 - [ ] **Step 7: Commit**
 
@@ -3724,7 +4114,7 @@ fn idle_reports_every_param_event_in_order() {
 /// released.
 #[test]
 fn a_gesture_the_host_closes_reports_its_end() {
-    let (hist, song, id, mut host, script) = with_fake();
+    let (mut hist, song, id, mut host, script) = with_fake();
     host.set_gesture_timeout(Duration::from_millis(50));
     let (mut engine, mut be) = engine(&host, 4096);
     engine.load(hist.doc(), song).unwrap();
@@ -3737,6 +4127,13 @@ fn a_gesture_the_host_closes_reports_its_end() {
     script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.25)]);
     let _ = tick(&mut host, &mut engine, &mut be, &hist, song);
     host.end_gestures(id);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(r.param_events.last(), Some(&(id, ParamEvent::End(GAIN))), "{:?}", r.param_events);
+    // A slot removed while its gesture is open (check m9).
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.75)]);
+    let _ = tick(&mut host, &mut engine, &mut be, &hist, song);
+    run(&mut hist, MixerCmd::RemoveInsert { slot: id });
+    host.sync(hist.doc());
     let r = tick(&mut host, &mut engine, &mut be, &hist, song);
     assert_eq!(r.param_events.last(), Some(&(id, ParamEvent::End(GAIN))), "{:?}", r.param_events);
     drop(engine);
@@ -3789,6 +4186,45 @@ fn a_plugin_windows_gesture_writes_its_parameter() {
     s.set_param(id, WIGGLE, 0.8).unwrap();
     idle_until(&s, |s| s.snapshot().unwrap().undo_label.as_deref() == Some("Change Plugin Parameter"));
     s.stop().unwrap();
+}
+
+/// Pre-flight I9, Ruling 15 (and M13, M14): a gesture from the app on a
+/// plugin parameter (plan 5e-2's sliders) reaches the plugin on every
+/// path. While writing it is automation and no parameter step, and after
+/// landing the plugin plays the landed value (the glide back: its value
+/// before); stopped, it is one "Change Plugin Parameter" step. Gain is
+/// 0–2, so 0.3 is 0.6.
+#[test]
+fn a_ui_gesture_on_a_plugin_parameter_reaches_the_plugin() {
+    use vizdaw_ffi::AutomationTargetRow as Target;
+    use vizdaw_ffi::automation::{AutomationModeRow, GesturePhaseRow as Phase};
+    let _g = serial();
+    let (_d, s, id) = playing_gain();
+    let synth = s.mixer().unwrap().strips[0].id;
+    let before = param(&s, id, GAIN).value;
+    s.set_automation_mode(vec![synth], AutomationModeRow::Touch).unwrap();
+    let t = Target::PluginParam { slot: id, param: GAIN };
+    s.gesture(t, Phase::Touch { value: Some(0.25) }).unwrap();
+    std::thread::sleep(Duration::from_millis(15));
+    s.gesture(t, Phase::Value { value: 0.3 }).unwrap();
+    idle_until(&s, |s| (param(s, id, GAIN).value - 0.6).abs() < 1e-6);
+    s.gesture(t, Phase::Release).unwrap();
+    let t0 = Instant::now();
+    idle_until(&s, |_| t0.elapsed() > Duration::from_millis(400));
+    s.stop().unwrap();
+    idle_until(&s, |s| s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation"));
+    idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
+    s.undo().unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Set Automation Mode"), "no parameter step");
+    // Stopped: the static path, one step.
+    s.gesture(t, Phase::Touch { value: Some(0.25) }).unwrap();
+    std::thread::sleep(Duration::from_millis(15));
+    s.gesture(t, Phase::Value { value: 0.25 }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Change Plugin Parameter"));
+    idle_until(&s, |s| (param(s, id, GAIN).value - 0.5).abs() < 1e-6);
+    s.undo().unwrap();
+    idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
 }
 ```
 
@@ -3898,7 +4334,7 @@ scripts/build-ffi.sh && scripts/swift.sh build 2>&1 | grep -E "error:|warning:" 
 scripts/swift.sh test 2>&1 | grep -E "Test run"
 ```
 
-Expected: every `core-host` test passes (the existing gesture tests unchanged); `params` and `automation` pass (Rust 1518); Swift 846.
+Expected: every `core-host` test passes (the existing gesture tests unchanged); `params` and `automation` pass (Rust 1529); Swift 846.
 
 - [ ] **Step 5: Commit**
 
@@ -4208,7 +4644,7 @@ scripts/build-ffi.sh && scripts/swift.sh build 2>&1 | grep -E "error:|warning:" 
 scripts/swift.sh test 2>&1 | grep -E "Test run"
 ```
 
-Expected: all pass (Rust 1521); Swift "Test run with 848 tests … passed" (`everyRegisteredMenuCommandHasAHandler` sees the three new IDs handled). `app/Sources/VizDAW/ControlChannel.swift` is not touched (M19).
+Expected: all pass (Rust 1532); Swift "Test run with 848 tests … passed" (`everyRegisteredMenuCommandHasAHandler` sees the three new IDs handled). `app/Sources/VizDAW/ControlChannel.swift` is not touched (M19).
 
 - [ ] **Step 6: Commit**
 
@@ -4398,7 +4834,7 @@ VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --no
 pgrep -lf MacOS/VizDAW; ls -d /tmp/vze* 2>/dev/null | wc -l
 ```
 
-Expected: everything clean (the Linux clippy too); "workspace done" with no failure lines (Rust about 1521 passed, 14 ignored with the new e2e; re-run a known flake once); Swift "Test run with 848 tests … passed"; the 10 e2e tests pass; `pgrep` prints nothing and no new `/tmp/vze*` home is left (the count is what it was before the run; remove older ones with `rm -rf /tmp/vze*`).
+Expected: everything clean (the Linux clippy too); "workspace done" with no failure lines (Rust about 1532 passed, 14 ignored with the new e2e; re-run a known flake once); Swift "Test run with 848 tests … passed"; the 10 e2e tests pass; `pgrep` prints nothing and no new `/tmp/vze*` home is left (the count is what it was before the run; remove older ones with `rm -rf /tmp/vze*`).
 
 - [ ] **Step 5: Commit**
 
@@ -4421,4 +4857,5 @@ git log -1 --oneline && git show --stat HEAD | tail -3
 - **Type consistency.** `AutomationMode` (Task 2) is what `WriteMode::of` (Task 7), `AutomationModeRow` (Task 8) and the registry's Choice (Task 10) convert; `AutomationWrite` and `MAX_WRITE_POINTS` (Task 3) are what `to_model` makes and splits at (Task 7) and the session lands (Task 8); `GesturePhase`, `GestureMsg`, `Stamped`, `GestureHandles`, `GestureStatus::rolled` (Tasks 5–6) are what Tasks 7–9 consume; `OverrideSnapshot::value` (Task 5) is what `host::heard` reads (Task 8); `AutoCapture.after_write` (Task 7) is filled from `Writing.after_write` (Task 8); `Source`, `writing_ended`, `Sampler`'s host times (Task 8) are what Task 9's forwarding uses; `PluginTouches::{event(…, automated), idle, release_slots}`/`Move` (Task 9) feed Task 8's gesture path; `parse_automation_target`/`automation_target_text` (Task 10) are the spelling in the e2e and the README.
 - **Proportion.** Tests and golden values are given whole; implementations are given as signatures, rules and the algorithms the tests leave open.
 - **Review Focus.** Each of the five lines names its tests: Tasks 5, 7, 8 and 11 (1), Tasks 7–8 (2), Task 4 (3), Task 9 (4), Tasks 3, 8 and 10 (5).
-- **Counts.** Rust 1462 → 1464 (Task 1) → 1467 (2) → 1473 (3) → 1475 (4) → 1485 (5) → 1486 (6) → 1498 (7) → 1514 (8) → 1518 (9) → 1521 (10); Task 11 adds one ignored e2e (14 ignored). Swift 845 → 846 (Task 1) → 848 (Task 10). e2e 9 → 10.
+- **Counts.** Rust 1462 → 1464 (Task 1) → 1467 (2) → 1473 (3) → 1476 (4) → 1487 (5) → 1488 (6) → 1501 (7) → 1524 (8) → 1529 (9) → 1532 (10); Task 11 adds one ignored e2e (14 ignored). Swift 845 → 846 (Task 1) → 848 (Task 10). e2e 9 → 10.
+- **Revision check (`plan-revision-check.md`).** I-1: `debug_hold_offline` (Task 8). I-2: Ruling 23, `locate`, `a_locate_before_the_roll_keeps_writing`. I-3: `a_play_while_writing_…`. I-4: the I2 test rewritten without a Locate, its RED line corrected. I-5: `a_full_queue_refuses_and_counts`, `UnsentEnds` and its unit test. I-6: the deleted strip is a Write strip, `writes_land_when_the_recording_records_nothing`. I-7: `a_ui_gesture_on_a_plugin_parameter_reaches_the_plugin`. I-8: `a_trim_grab_does_not_jump`. I-9: `each_point_cuts_once_on_a_latent_session` (a RED exemption). m1 Task 5 Step 4; m2 contiguous split ranges; m3 Ruling 24 and its table; m4 the `const` floor; m5 a test comment; m6 the overflow phase; m7 M2, M4, M7, M8, M9, M13/M14, M16 tested, M1, M5, M10 said untested in Rulings 6, 19, 24; m8 Rulings 26, 27; m9 a removed slot in the host test.

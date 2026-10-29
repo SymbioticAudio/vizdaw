@@ -62,7 +62,7 @@ Read the spec (§3 and §7), plan 5e-1 (`docs/superpowers/plans/2026-10-28-autom
   - Task 4 also `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p core-control`, `scripts/build-ffi.sh`.
   - Task 9 runs every gate of plan 5e-1 (the rt-check gates and the workspace included) and the whole e2e.
   - Known flaky tests: the `damaged_files` proptest, the MIDI listener tests (the reconnect test), `core-ffi` catalog tests under parallel load and the latency e2e timing. Re-run once before investigating, and say so in the report.
-  - Baseline at plan 5e-1's end (its Task 11): Rust about 1521 passed, 0 failed, 14 ignored; Swift 848 tests; e2e 10 tests. Report the measured counts.
+  - Baseline at plan 5e-1's end (its Task 11): Rust about 1532 passed, 0 failed, 14 ignored; Swift 848 tests; e2e 10 tests. Report the measured counts.
 - **How code is given.** As in plan 5e-1: tests whole; new files as their public items with doc lines and the rules the tests leave open; changes to existing files as Find / Replace excerpts (replayed against `1f6057a`, where each matches exactly once; plan 5e-1's excerpts do not touch them) or "after the Find, add …". If an excerpt does not match, make the same change to the current text and say so in the report.
 - **Spec values used verbatim:**
   - "each strip gets an automation-mode popup (Off / Read / Touch / Latch / Write / Trim), each mode with its own colour, and touched controls get a ring";
@@ -1404,7 +1404,7 @@ VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --no
 pgrep -lf MacOS/VizDAW; ls -d /tmp/vze* 2>/dev/null | wc -l
 ```
 
-Expected: everything clean (the Linux clippy too); "workspace done" with no failure lines (Rust about 1522 passed, 14 ignored: plan 5e-1's and this plan's registry test); Swift "Test run with 871 tests … passed"; the 10 e2e tests pass; `pgrep` prints nothing; no new `/tmp/vze*` home.
+Expected: everything clean (the Linux clippy too); "workspace done" with no failure lines (Rust about 1533 passed, 14 ignored: plan 5e-1's and this plan's registry test); Swift "Test run with 871 tests … passed"; the 10 e2e tests pass; `pgrep` prints nothing; no new `/tmp/vze*` home.
 
 - [ ] **Step 3: Commit**
 
