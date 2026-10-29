@@ -464,6 +464,7 @@ Rules common to all modes:
 - Writes are collected while playing and applied:
   - as part of the `RecordPass` when audio or MIDI is also recording;
   - otherwise as their own `Command::Record` with label "Write Automation", one undo step per pass, at Stop.
+  - **While looping, at each loop wrap as well** (owner, 2026-10-29): when the loop end point is reached, the cycle's writes land, so the next cycle plays back what was just written. Every landing of one looped pass merges into that pass's single undo step (one Undo removes the whole looped pass, takes included). The loop-wrap rule in §7.3 still applies: writing of every target ends at the wrap and the next cycle starts again in the strip's mode.
 - The Strip Chart draws the in-progress write live from `Session.automation_preview(target)`.
 
 ### 7.5 UI
