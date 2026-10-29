@@ -494,3 +494,24 @@ fn the_roll_blocks_run_waits_for_its_publish() {
     t.end_block(&input, 256, true);
     assert_eq!(h.status.run(), 512, "a later block as before");
 }
+
+/// Task 9b re-review 2 n3: the renderer calls `published` after the roll
+/// block publishes, so the run is seen after that block, and a take whose
+/// sequence ends inside the roll block ends at the frames it played
+/// rather than at 0.
+#[test]
+fn the_renderer_publishes_the_roll_blocks_run() {
+    let (mut engine, mut b) = setup(FakeInput::Signals, 256, OfflineSinks::new(10_000));
+    let h = engine.start_recording(&request(vec![0], 48_000)).unwrap();
+    engine.play().unwrap();
+    b.run_frames(256);
+    assert_eq!(h.status.run(), 256, "seen after the roll block");
+    engine.stop().unwrap();
+    let length = engine.length_frames();
+    let (mut engine, mut b) = setup(FakeInput::Signals, 256, OfflineSinks::new(10_000));
+    let h = engine.start_recording(&request(vec![0], 48_000)).unwrap();
+    engine.locate_frame(length - 100).unwrap();
+    engine.play().unwrap();
+    b.run_frames(256 * 3);
+    assert_eq!(h.status.run(), 100, "rolled and ended in one block");
+}

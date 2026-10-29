@@ -228,6 +228,12 @@ impl RunClock {
         true
     }
 
+    /// Whether the next [`RunClock::begin_block`] rolls or resumes after
+    /// a stop (its mark starts a run of the tap). // RT
+    pub(crate) fn begins(&self) -> bool {
+        !self.rolling || self.stopped
+    }
+
     /// At a block's start while playing: rolls (run 0 plays `frame`), or
     /// marks where the transport is after a block it did not advance
     /// through, after a jump or after a stop. Says which, and whether its
@@ -444,10 +450,12 @@ impl RecordTap {
     /// through, after a jump or after a stop. A resume after a stop takes
     /// the device's input delay as it is then (review fix M4). // RT
     pub fn begin_block(&mut self, frame: u64, delay: i64) {
-        let (begun, fit) = self.clock.begin_block(frame);
-        if matches!(begun, Begun::Rolled | Begun::Resumed) {
+        // The delay first: a reader that took the roll or resume mark sees
+        // it (Task 6 review m1).
+        if self.clock.begins() {
             self.status.delay.store(delay, Ordering::Release);
         }
+        let (begun, fit) = self.clock.begin_block(frame);
         // Set for this block only: a block that did not roll stores its
         // run at its end as before.
         self.roll_due = begun == Begun::Rolled;
@@ -536,5 +544,37 @@ impl RecordTap {
         if !self.roll_due {
             self.status.run.store(run, Ordering::Release);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review m5 (Task 6 review m1): the record tap stores the input
+    /// delay before the clock pushes a roll or resume mark, so it asks the
+    /// clock first; `begins` must answer exactly when `begin_block` then
+    /// rolls or resumes.
+    #[test]
+    fn begins_tells_a_roll_or_resume_before_the_mark() {
+        let (tx, _rx) = RingBuffer::new(64);
+        let mut c = RunClock::new(tx, 0);
+        let step = |c: &mut RunClock| {
+            let will = c.begins();
+            let (begun, _) = c.begin_block(0);
+            assert_eq!(
+                will,
+                matches!(begun, Begun::Rolled | Begun::Resumed),
+                "{begun:?}"
+            );
+            begun
+        };
+        assert_eq!(step(&mut c), Begun::Rolled);
+        assert_eq!(step(&mut c), Begun::Going);
+        c.resync();
+        assert_eq!(step(&mut c), Begun::Going, "a remark is no resume");
+        c.stop(0, 0);
+        assert_eq!(step(&mut c), Begun::Resumed);
+        assert_eq!(step(&mut c), Begun::Going);
     }
 }
