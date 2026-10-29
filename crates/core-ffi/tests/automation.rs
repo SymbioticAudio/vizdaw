@@ -1965,16 +1965,25 @@ fn a_write_touch_held_over_the_pass_start_is_heard_after_stop() {
 }
 
 /// Rides a Trim fader held over Play (re-review 4 N1): the ramped bus in
-/// Trim is touched with `touch` while stopped, Play, at about 1 Q moved
-/// to `to`, held to 4 Q and released. Answers the offsets heard over the
+/// Trim is touched with `touch` while stopped (then moved to `stopped`,
+/// when given, still stopped), Play, at about 1 Q moved to `to`, held to
+/// 4 Q and released. Answers the offsets heard over the
 /// lane at about 2 Q and 3.5 Q, and those landed between the move and the
 /// release, in dB (heard or landed minus the ramp).
-fn trim_ride_over_play(touch: Option<f64>, to: f64) -> (Vec<f64>, Vec<(i64, f64)>) {
+fn trim_ride_over_play(
+    touch: Option<f64>,
+    stopped: Option<f64>,
+    to: f64,
+) -> (Vec<f64>, Vec<(i64, f64)>) {
     let (s, seq, _, bus, lane) = ramped_bus();
     s.set_automation_mode(vec![bus], Mode::Trim).unwrap();
     let t = Target::StripFader { strip: bus };
     s.gesture(t, Phase::Touch { value: touch }).unwrap();
     pace(&s);
+    if let Some(v) = stopped {
+        s.gesture(t, Phase::Value { value: v }).unwrap();
+        pace(&s);
+    }
     s.play(seq).unwrap();
     wait_until("beat 1", || {
         s.idle().unwrap();
@@ -2054,7 +2063,23 @@ fn assert_shape_kept(landed: &[(i64, f64)], off: f64) {
 #[test]
 fn a_trim_fader_held_over_play_rides_as_an_offset() {
     let _g = serial();
-    let (heard, landed) = trim_ride_over_play(Some(0.5), fader_norm(fader_db(0.5) + 3.0));
+    let (heard, landed) = trim_ride_over_play(Some(0.5), None, fader_norm(fader_db(0.5) + 3.0));
+    assert!(
+        heard.iter().all(|d| (d - 3.0).abs() < 0.5),
+        "heard as the lane plus 3 dB: {heard:?}"
+    );
+    assert_shape_kept(&landed, 3.0);
+}
+
+/// Task 8 re-review 5 m1: a Trim fader moved while stopped (static edits)
+/// and held over Play grabs from where the hand is at the pass's start, so
+/// a push of 3 dB after Play is heard as the lane plus 3 dB, not plus the
+/// stopped move too.
+#[test]
+fn a_trim_fader_moved_while_stopped_then_held_over_play_rides_from_the_hand() {
+    let _g = serial();
+    let (heard, landed) =
+        trim_ride_over_play(Some(0.5), Some(0.6), fader_norm(fader_db(0.6) + 3.0));
     assert!(
         heard.iter().all(|d| (d - 3.0).abs() < 0.5),
         "heard as the lane plus 3 dB: {heard:?}"
@@ -2067,7 +2092,7 @@ fn a_trim_fader_held_over_play_rides_as_an_offset() {
 #[test]
 fn a_trim_fader_held_at_no_value_over_play_rides_as_an_offset() {
     let _g = serial();
-    let (heard, landed) = trim_ride_over_play(None, 0.5);
+    let (heard, landed) = trim_ride_over_play(None, None, 0.5);
     assert!(
         (heard[0] - heard[1]).abs() < 0.5,
         "one offset heard: {heard:?}"
