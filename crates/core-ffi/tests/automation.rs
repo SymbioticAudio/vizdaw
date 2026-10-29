@@ -1937,3 +1937,100 @@ fn a_write_touch_held_over_the_pass_start_is_heard_after_stop() {
     stop_and_land(&s);
     s.close().unwrap();
 }
+
+/// Rides a Trim fader held over Play (re-review 4 N1): the ramped bus in
+/// Trim is touched with `touch` while stopped, Play, at about 1 Q moved
+/// to `to`, held to 4 Q and released. Answers the offsets heard over the
+/// lane at about 2 Q and 3.5 Q, and those landed between the move and the
+/// release, in dB (heard or landed minus the ramp).
+fn trim_ride_over_play(touch: Option<f64>, to: f64) -> (Vec<f64>, Vec<(i64, f64)>) {
+    let (s, seq, _, bus, lane) = ramped_bus();
+    s.set_automation_mode(vec![bus], Mode::Trim).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.gesture(t, Phase::Touch { value: touch }).unwrap();
+    pace(&s);
+    s.play(seq).unwrap();
+    wait_until("beat 1", || {
+        s.idle().unwrap();
+        tick(&s) > Q
+    });
+    let before = fader_override(bus);
+    let lane_db = fader_db(ramp_at(tick(&s)));
+    assert!(
+        before.is_some_and(|d| (d - lane_db).abs() < 0.5),
+        "the lane is heard until the hand moves: {before:?}, lane {lane_db}"
+    );
+    s.gesture(t, Phase::Value { value: to }).unwrap();
+    let moved = tick(&s);
+    let mut heard = Vec::new();
+    for at in [2 * Q, 7 * Q / 2] {
+        wait_until("playing on", || {
+            s.idle().unwrap();
+            tick(&s) > at
+        });
+        let d = fader_override(bus).expect("the bus is heard");
+        heard.push(d - fader_db(ramp_at(tick(&s))));
+    }
+    wait_until("4 Q", || {
+        s.idle().unwrap();
+        tick(&s) > 4 * Q
+    });
+    s.gesture(t, Phase::Release).unwrap();
+    let released = tick(&s);
+    stop_and_land(&s);
+    // The ride's points, from the move to the release; the edge's second
+    // half (one tick after the release's point) is the lane again.
+    let p = points(&s, seq, lane);
+    let landed = p
+        .iter()
+        .enumerate()
+        .filter(|(i, x)| {
+            x.0 >= moved - Q / 16
+                && x.0 <= released
+                && !(*i > 0 && p[i - 1].0 == x.0 - 1 && p[i - 1].0 >= moved)
+        })
+        .map(|(_, &(k, v))| (k, fader_db(v) - fader_db(ramp_at(k))))
+        .collect();
+    s.close().unwrap();
+    (heard, landed)
+}
+
+/// The landed offsets are one offset (the ramp's shape kept, no flat
+/// absolute line), spread over the ride.
+fn assert_shape_kept(landed: &[(i64, f64)], off: f64) {
+    assert!(
+        landed.len() >= 2 && landed.last().unwrap().0 - landed[0].0 > Q,
+        "points over the ride: {landed:?}"
+    );
+    assert!(
+        landed.iter().all(|x| (x.1 - off).abs() < 0.3),
+        "the lane plus {off} dB, its shape kept: {landed:?}"
+    );
+}
+
+/// Re-review 4 N1 (Ruling 11, spec §7.3 Trim): a Trim fader held over
+/// Play becomes an offset from the hand's value at the pass's start; a
+/// push of 3 dB is heard and written as the lane plus 3 dB.
+#[test]
+fn a_trim_fader_held_over_play_rides_as_an_offset() {
+    let _g = serial();
+    let (heard, landed) = trim_ride_over_play(Some(0.5), fader_norm(fader_db(0.5) + 3.0));
+    assert!(
+        heard.iter().all(|d| (d - 3.0).abs() < 0.5),
+        "heard as the lane plus 3 dB: {heard:?}"
+    );
+    assert_shape_kept(&landed, 3.0);
+}
+
+/// The same with a touch at no value: whatever the hand's start, the ride
+/// is one offset over the lane, heard and written.
+#[test]
+fn a_trim_fader_held_at_no_value_over_play_rides_as_an_offset() {
+    let _g = serial();
+    let (heard, landed) = trim_ride_over_play(None, 0.5);
+    assert!(
+        (heard[0] - heard[1]).abs() < 0.5,
+        "one offset heard: {heard:?}"
+    );
+    assert_shape_kept(&landed, (heard[0] + heard[1]) / 2.0);
+}

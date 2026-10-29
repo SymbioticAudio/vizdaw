@@ -5918,22 +5918,28 @@ impl Session {
             inner.touches.iter().map(|(t, x)| (*t, *x)).collect();
         let mut left_static = 0usize;
         for (t, x) in held {
+            let mut converted = false;
             if x.path == TouchPath::Static && inner.static_edit.is_some() {
                 if self.write_mode_of(inner, t).is_none() {
                     continue;
                 }
                 self.keep_static_param(inner, t, x);
                 left_static += 1;
+                converted = true;
             }
             // A Trim offset stays an offset from its own grab (review I-1,
             // Ruling 11: the engine keeps `Offset` entries over a Stop or a
-            // Locate); an absolute touch stays absolute.
+            // Locate); an absolute touch stays absolute. A converted static
+            // touch on an automated Trim lane grabs at an offset of 0 from
+            // the hand's value now, as a Trim grab does (re-review 4 N1,
+            // pre-flight I12): its stopped moves were static edits, so it
+            // carries no offset.
             let was_offset = matches!(x.path, TouchPath::Write(_, Release::Offsets));
             let path = match self.write_mode_of(inner, t) {
                 Some(m) => TouchPath::Write(
                     m,
                     match self.release_of(inner, t, m) {
-                        Release::Offsets if !was_offset => Release::Glide,
+                        Release::Offsets if !was_offset && !converted => Release::Glide,
                         r => r,
                     },
                 ),
@@ -5946,9 +5952,12 @@ impl Session {
                 let v = host::heard(self.id, t).unwrap_or(x.value);
                 self.send_gesture(inner, t, GesturePhase::Touch(v), tag_of(path), ns);
             }
+            if converted && is_offset {
+                self.send_gesture(inner, t, GesturePhase::Offset(0.0), tag_of(path), ns);
+            }
             if let Some(y) = inner.touches.get_mut(&t) {
                 y.path = path;
-                if !is_offset {
+                if !is_offset || converted {
                     y.base = y.value;
                 }
             }
