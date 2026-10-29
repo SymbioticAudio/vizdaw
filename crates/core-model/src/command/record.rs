@@ -323,9 +323,13 @@ fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
 /// `lane_name` (none for a write with no points). Of points at one tick
 /// the last is kept. A lane plays as `query::flatten` plays it, which is what
 /// the writer read: not muted, and soloed when any lane is; a muted or
-/// solo-silenced lane keeps its points. A new lane is soloed when another
-/// lane is, so that it plays. Automation inside referenced sequences is
-/// left: their lanes cannot record (spec Ruling 15).
+/// solo-silenced lane keeps its points. A lane whose events are
+/// transformed (a play shift, its own length or its own loop) does not play
+/// them at their ticks, so it neither takes the write nor loses points to
+/// it (re-review O1). A new lane is not soloed (owner ruling 2026-10-29):
+/// under another lane's solo it is silent until the solo clears.
+/// Automation inside referenced sequences is left: their lanes cannot
+/// record (spec Ruling 15).
 fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Result<()> {
     check_write(d, w)?;
     let is_target =
@@ -336,6 +340,10 @@ fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Re
     let any_solo = seq.lanes.iter().any(|l| l.solo);
     for lane in &seq.lanes {
         if lane.mute || (any_solo && !lane.solo) {
+            continue;
+        }
+        // Its events play at other ticks than their own (re-review O1).
+        if lane.play_shift != Tick::ZERO || lane.length.is_some() || lane.looped {
             continue;
         }
         let Some(take) = lane.active() else { continue };
@@ -361,8 +369,7 @@ fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Re
         None => {
             let c = d.counters_mut();
             let (lane, take) = (c.alloc_lane(), c.alloc_take());
-            let mut new = Lane::new(lane, take, w.lane_name.clone());
-            new.solo = any_solo;
+            let new = Lane::new(lane, take, w.lane_name.clone());
             d.seq_mut(w.seq)?.lanes.push_back(new);
             r.created.extend([AnyId::Lane(lane), AnyId::Take(take)]);
             lane

@@ -455,10 +455,12 @@ fn a_write_skips_a_lane_another_lanes_solo_silences() {
 }
 
 /// When no lane plays the target (here the note lane is soloed, which
-/// silences B and C), the write makes a new lane at the end, soloed so
-/// that it plays; the silent lanes keep their points.
+/// silences B and C), the write makes a new lane at the end; the silent
+/// lanes keep their points. The new lane is not soloed (owner ruling
+/// 2026-10-29, re-review N1): it follows the solo like any lane, silent
+/// until the solo clears, so a later unsolo is not trapped by it.
 #[test]
-fn a_write_with_no_playing_lane_makes_a_new_playing_lane() {
+fn a_write_with_no_playing_lane_makes_a_new_lane_that_follows_the_solo() {
     let d = set_flags(&doc(), 0, None, Some(true));
     assert!(heard(&d).is_empty());
     let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
@@ -470,10 +472,24 @@ fn a_write_with_no_playing_lane_makes_a_new_playing_lane() {
     assert_eq!(s.lanes.len(), 4);
     let last = s.lanes.last().unwrap();
     assert_eq!(last.name, "Master Fader");
-    assert!(last.solo && !last.mute, "the new lane plays under the solo");
-    assert_eq!(heard(&out), RIDE.to_vec());
+    assert!(!last.solo && !last.mute, "the new lane is not soloed");
+    assert!(heard(&out).is_empty(), "silent while A is soloed");
+    assert_eq!(
+        points(&out, 3),
+        RIDE.to_vec(),
+        "the new lane holds the ride"
+    );
     assert_eq!(points(&out, 1), vec![(0, 0.2), (8 * Q, 0.8)]);
     assert_eq!(points(&out, 2), vec![(2 * Q, 0.5)]);
+    // Unsoloing A: everything plays again, the ride included (no trap).
+    let open = set_flags(&out, 0, None, Some(false));
+    let all = heard(&open);
+    for p in RIDE {
+        assert!(
+            all.contains(&p),
+            "{p:?} plays once the solo clears: {all:?}"
+        );
+    }
     h.undo().unwrap();
     assert_eq!(h.doc(), &d, "one undo takes the lane back");
     // Every lane holding the target muted, no solo: a new, unsoloed lane.
@@ -497,4 +513,93 @@ fn the_final_review_probe_hears_the_ride() {
     let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
     let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
     assert_eq!(heard(&out), RIDE.to_vec());
+}
+
+/// Re-review O1 (controller ruling): a lane whose events are transformed
+/// (a play shift, its own length, its own loop) does not play them at
+/// their ticks, so a write never goes into it: here B is the only lane
+/// that plays the fader (C muted). B keeps its points and the ride lands
+/// in a new, untransformed lane, whose points play at their own ticks.
+#[test]
+fn a_write_skips_a_shifted_or_looped_lane() {
+    let base = set_flags(&doc(), 2, Some(true), None);
+    let shifted = apply(
+        &base,
+        &Command::Lane(LaneCmd::SetPlayShift {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            shift: Tick(100),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let looped = apply(
+        &base,
+        &Command::Lane(LaneCmd::SetLength {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            length: Some(Tick(2 * Q)),
+            looped: true,
+            locked: false,
+        }),
+    )
+    .unwrap()
+    .doc;
+    let cut = apply(
+        &base,
+        &Command::Lane(LaneCmd::SetLength {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            length: Some(Tick(16 * Q)),
+            looped: false,
+            locked: false,
+        }),
+    )
+    .unwrap()
+    .doc;
+    for (name, d) in [
+        ("shifted", shifted),
+        ("looped", looped),
+        ("own length", cut),
+    ] {
+        let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
+        let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+        assert_eq!(
+            points(&out, 1),
+            vec![(0, 0.2), (8 * Q, 0.8)],
+            "{name}: B keeps its points"
+        );
+        let s = out.sequence(SeqId(0)).unwrap();
+        assert_eq!(s.lanes.len(), 4, "{name}: a new lane");
+        let new = s.lanes.last().unwrap();
+        assert_eq!(new.name, "Master Fader", "{name}");
+        assert_eq!(
+            points(&out, 3),
+            RIDE.to_vec(),
+            "{name}: the new lane has the ride"
+        );
+        let heard = heard(&out);
+        for p in RIDE {
+            assert!(
+                heard.contains(&p),
+                "{name}: {p:?} plays at its tick: {heard:?}"
+            );
+        }
+    }
+    // An untransformed lane after a transformed one still takes the write.
+    let d = apply(
+        &doc(),
+        &Command::Lane(LaneCmd::SetPlayShift {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            shift: Tick(100),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let w = write(&d, Q - 1, 4 * Q + 1, &RIDE);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert_eq!(points(&out, 2), RIDE.to_vec(), "C (untransformed) has it");
+    assert_eq!(points(&out, 1), vec![(0, 0.2), (8 * Q, 0.8)]);
+    assert_eq!(out.sequence(SeqId(0)).unwrap().lanes.len(), 3);
 }
