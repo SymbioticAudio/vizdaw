@@ -20,6 +20,8 @@
 
 Read the spec (§3 and §7), plan 5e-1 (`docs/superpowers/plans/2026-10-28-automation-engine.md`: its Interfaces blocks are what this plan calls) and plan 5d-2 (`docs/superpowers/plans/2026-10-26-record-ui.md`).
 
+**Revision.** This text follows plan 5e-1 as revised for its pre-flight at `1f6057a`: a touch with no value is the value heard now and the mixer sends none (5e-1 Ruling 26); overlapping static touches share one edit, so two controls touched at once are fine against the real core (Ruling 14); the gesture path has a source, and the core itself sends a UI value of a plugin parameter to the plugin on every path (Ruling 15); `automation_state().touched` lists active touches only (M8); all three automation settings are read when a pass starts (Ruling 19); the app's `body` has room for one more top-level menu (pre-flight M22).
+
 ## Global Constraints
 
 - **Shell setup.**
@@ -27,7 +29,7 @@ Read the spec (§3 and §7), plan 5e-1 (`docs/superpowers/plans/2026-10-28-autom
   - A `git commit` without `DEVELOPER_DIR` fails silently: check every commit with `git log -1 --oneline` and `git show --stat HEAD`.
 - **Swift only through the scripts, from the repo root.** `scripts/build-ffi.sh` (after any Rust change that touches the FFI, before Swift), `scripts/swift.sh build`, `scripts/swift.sh test`, `scripts/make-app.sh`. Swift tests run only via `scripts/swift.sh test` from the repo root. Never call `swift`, `xcodebuild` or `xcrun` directly.
 - **Branch and commits.**
-  - Work on branch `sp5-audio`, after plan 5e-1's last commit. Never switch branches, never push.
+  - Work on branch `sp5-audio`, after plan 5e-1's last commit (plan 5e-1 starts from `1f6057a`). Never switch branches, never push.
   - Commit at the end of every task, adding only the files the task lists, by path (never `git add -A`). No manifest changes, so `Cargo.lock` never changes. Never commit `.superpowers/`, `.DS_Store` or generated files.
   - End every commit message with the two attribution lines your dispatch gives you. The blocks below show:
     ```
@@ -42,6 +44,8 @@ Read the spec (§3 and §7), plan 5e-1 (`docs/superpowers/plans/2026-10-28-autom
   - Never save a project in a `vizctl`-launched app.
 - **Tests never open real audio input and never trigger the microphone prompt (TCC).** Swift tests never call the FFI's device functions; the statics that read them (`LaneInputs.softwareMonitoring`, `RecordModel.freeSpace`, …) are replaced in the tests that read them and put back. The one real core setter a test calls is `setAutomationSuspended(on:)` (plan 5e-1; process-wide state with no device or file behind it), reset with `defer`.
 - **Crates and dependencies.** No new crate and no new dependency. License GPL-3.0-only. Rust lints as in plan 5e-1.
+- **Linux CI.** CI also runs `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on `ubuntu-latest`. The one Rust change here (Task 4's registry) is platform-neutral; Tasks 4 and 9 check it with `cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu --target-dir target/linux-check -- -D warnings`.
+- **TDD.** Every new test is run and seen to fail before the code that makes it pass; Task 8's tests of existing behaviour (the 5d-2 test gaps) are the exception the task names, and say so in the report when they pass at once.
 - **Real-time rules (spec §3).** Nothing in this plan runs on the real-time thread; Task 9 runs the rt-check gates to show nothing changed there.
 - **Media is write-once.** Nothing here writes media.
 - **File compatibility.** `core_model::file::VERSION` stays 3; nothing here is saved in a project. The automation settings are app preferences (key `VizDAW.automation`, JSON); the strip selection is per window session, never saved.
@@ -58,8 +62,8 @@ Read the spec (§3 and §7), plan 5e-1 (`docs/superpowers/plans/2026-10-28-autom
   - Task 4 also `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p core-control`, `scripts/build-ffi.sh`.
   - Task 9 runs every gate of plan 5e-1 (the rt-check gates and the workspace included) and the whole e2e.
   - Known flaky tests: the `damaged_files` proptest, the MIDI listener tests (the reconnect test), `core-ffi` catalog tests under parallel load and the latency e2e timing. Re-run once before investigating, and say so in the report.
-  - Baseline at plan 5e-1's end (its Task 11): Rust about 1508 passed, 0 failed, 13 ignored; Swift 848 tests; e2e 10 tests.
-- **How code is given.** As in plan 5e-1: tests whole; new files as their public items with doc lines and the rules the tests leave open; changes to existing files as Find / Replace excerpts (checked against `39a4cc1` plus plan 5e-1's own excerpts, which these Finds do not touch) or "after the Find, add …". If an excerpt does not match, make the same change to the current text and say so in the report.
+  - Baseline at plan 5e-1's end (its Task 11): Rust about 1521 passed, 0 failed, 14 ignored; Swift 848 tests; e2e 10 tests. Report the measured counts.
+- **How code is given.** As in plan 5e-1: tests whole; new files as their public items with doc lines and the rules the tests leave open; changes to existing files as Find / Replace excerpts (replayed against `1f6057a`, where each matches exactly once; plan 5e-1's excerpts do not touch them) or "after the Find, add …". If an excerpt does not match, make the same change to the current text and say so in the report.
 - **Spec values used verbatim:**
   - "each strip gets an automation-mode popup (Off / Read / Touch / Latch / Write / Trim), each mode with its own colour, and touched controls get a ring";
   - "**Strip menu:** a "Set all strips to…" command";
@@ -72,20 +76,20 @@ Read the spec (§3 and §7), plan 5e-1 (`docs/superpowers/plans/2026-10-28-autom
 
 The five failure modes a user is most likely to hit that the spec implies but does not spell out; each is pinned by named tests in its task.
 
-1. **A drag the window never finishes** (the mixer closes mid-drag, the dragged strip is deleted by an Undo, the core refuses the touch because another edit is open, two faders dragged at once with a trackpad and a surface). Expected: every touch is released exactly once; a refused touch sends no release; concurrent touches on different targets are fine. Pinned by `touchesAreReleasedOnceWhenTheWindowClosesOrTheStripGoes`, `aRefusedTouchSendsNoRelease` and `twoTargetsTouchedAtOnceAreIndependent` (Task 2).
-2. **What the fader shows while writing** (Touch on a playing strip whose automation moves the fader, Write's held value, a Read strip's snap-back on release). Expected: while touched the control follows the hand, not the snapshot; after release it shows the core's value again at the next refetch. Pinned by `aTouchedControlShowsItsLiveValue` (Task 2).
-3. **Settings changed at the wrong moment or damaged** (a return time typed as 3000, After Write set to Write, a damaged preferences file, a change while a pass is writing). Expected: out-of-range values are clamped or refused and say why; damaged fields fall back one by one; a change applies from the next Play (plan 5e-1 Ruling 19). Pinned by `damagedAutomationSettingsKeepTheirDefaults` and `settingsAreKeptOnlyOnceTheCoreTookThem` (Task 1).
+1. **A drag the window never finishes** (the mixer closes mid-drag, the dragged strip is deleted by an Undo, the core refuses the touch because a non-gesture edit is open, two faders dragged at once with a trackpad and a surface). Expected: every touch is released exactly once; a refused touch sends no release; concurrent touches on different targets are fine (plan 5e-1 Ruling 14: they share one static edit in the core, so this holds against the real core too, not only `FakeSession`). Pinned by `touchesAreReleasedOnceWhenTheWindowClosesOrTheStripGoes`, `aRefusedTouchSendsNoRelease` and `twoTargetsTouchedAtOnceAreIndependent` (Task 2), and in the core by plan 5e-1's `two_static_gestures_at_once_are_one_step`.
+2. **What the fader shows and sends while writing** (grabbing a fader whose automation is moving it, Write's held value, a Read strip's snap-back on release). Expected: mouse-down sends a touch with no value, so the core starts from the value heard now and nothing jumps (plan 5e-1 Ruling 26); while touched the control follows the hand from its first move; after release it shows the core's value again at the next refetch. Pinned by `aFaderDragIsAGestureOnTheCore` and `aTouchedControlShowsItsLiveValue` (Task 2), and in the core by plan 5e-1's `a_touch_without_a_value_starts_at_the_heard_value`.
+3. **Settings changed at the wrong moment or damaged** (a return time typed as 3000, After Write set to Write, a damaged preferences file, a change while a pass is writing). Expected: out-of-range values are clamped or refused and say why; damaged fields fall back one by one; a change applies from the next Play, thinning included (plan 5e-1 Ruling 19: all three are read when a pass starts). Pinned by `damagedAutomationSettingsKeepTheirDefaults` and `settingsAreKeptOnlyOnceTheCoreTookThem` (Task 1).
 4. **Mode commands with nothing or something odd selected** (no strip selected, master selected, the selection's strip deleted, the mixer window closed). Expected: `unavailable` with "Select strips in the mixer first." when none; master's mode can be set; a deleted strip leaves the selection at the next refetch. Pinned by `modeCommandsSetTheSelectedStrips` and `theSelectionForgetsStripsThatGo` (Tasks 3–4).
 5. **The Strip Chart while a write runs** (the shown lane is not the one written, the write's target is not in the rows, the transport stops, the lane appears mid-pass). Expected: the preview is drawn only for rows whose target is being written, disappears at Stop, and a lane holding only one target's automation opens on that target. Pinned by `thePreviewShowsOnlyWhileItsTargetIsWritten` and `anAutomationLaneOpensOnItsTarget` (Task 6).
 
 ## Plan Rulings
 
-1. **Ruling (mixer moves are gestures):** `MixerModel`'s fader, pan and send-level drags and its mute and solo clicks go through `Session.gesture` (plan 5e-1): mouse down → `touch` at the control's value, each move → `move`, mouse up → `release`; a click → touch, value and release at once. `setGain`, `setPan`, `dragStarted`, `dragEnded` go (the core opens and closes the static edit); a double-click on the dB label is a click at 0 dB. Send "Pre" and "On" and every routing control stay plain edits (no automation target).
+1. **Ruling (mixer moves are gestures):** `MixerModel`'s fader, pan and send-level drags and its mute and solo clicks go through `Session.gesture` (plan 5e-1): mouse down → `touch(value: nil)` (the core starts from the value heard now, plan 5e-1 Ruling 26: the mixer shows static values, so its own value would jump an automated fader), each move → `move`, mouse up → `release`; a click → touch at the toggled value, value and release at once. `setGain`, `setPan`, `dragStarted`, `dragEnded` go (the core opens and closes the static edit); a double-click on the dB label is a click at 0 dB. Send "Pre" and "On" and every routing control stay plain edits (no automation target).
    - Why: §7.1 "It replaces direct `set_gain`/`set_pan`/`set_param` calls for user moves".
    - Cost if wrong: none (the undo labels stay "Set Fader", "Set Pan", "Set Send Level", "Mute", "Solo").
-2. **Ruling (what a touched control shows):** while touched, a control shows the value the hand set (`MixerModel.live`), not the snapshot; after release, the snapshot's (refetched as today). Values go to the core as automation's normalised values: faders and sends through `AutomationLaw.faderNorm` of the dB the slider position gives (`MixerMath.faderDb`), pan as `(pan + 1) / 2`.
+2. **Ruling (what a touched control shows):** while touched, a control shows the value the hand set (`MixerModel.live`, from its first move; until then what it showed), not the snapshot; after release, the snapshot's (refetched as today). Showing the heard (automated or held) value while playing is a backlog row (plan 5e-1 Task 11). Values go to the core as automation's normalised values: faders and sends through `AutomationLaw.faderNorm` of the dB the slider position gives (`MixerMath.faderDb`), pan as `(pan + 1) / 2`.
    - Cost if wrong: a fader in Read jumps back to the static value at release instead of following its automation (the next refetch shows the static value; automation drives what is heard).
-3. **Ruling (rings):** a control has a ring while its target is touched here or in the core (`automation_state().touched`, polled with the meters at 30 Hz), so a channel or plugin touch shows too.
+3. **Ruling (rings):** a control has a ring while its target is touched here or in the core (`automation_state().touched`, polled with the meters at 30 Hz), so a channel or plugin touch shows too. The core lists active touches only, never Write holds or released Latch holds (plan 5e-1 M8), so a Write strip's controls are not all ringed.
 4. **Ruling (colours):** Off gray, Read green, Touch yellow, Latch orange, Write red, Trim purple (system colours), the popup's title tinted; Read's green is the dim default so a strip that writes stands out.
    - Cost if wrong: a theme pass (SP7) recolours.
 5. **Ruling (the selected strips):** the mixer keeps a strip selection on `DocumentModel.selectedStrips`: a click on a strip's name selects it, ⌘-click adds or removes; a double-click still renames. `automation.mode.<mode>` sets the selected strips' mode (one undo step), `unavailable` "Select strips in the mixer first." with none. Strips that go leave the selection at the next refetch.
@@ -94,7 +98,7 @@ The five failure modes a user is most likely to hit that the spec implies but do
 6. **Ruling (the Automation menu):** a new menu "Automation" with the six `automation.mode.<mode>` items (titles "Off" … "Trim" under a "Selected Strips" header) and "Suspend Automation" (a checkmark toggle, `automation.suspend`); no default keys. "Set All Strips to ▸ <mode>" is in every strip's name menu and calls `automation.set_mode` with all strips.
    - Cost if wrong: the menu moves later.
 7. **Ruling (Settings › Automation):** a tab "Automation" with After Write (Off, Read, Touch, Latch, Trim: Write is refused by the core, plan 5e-1 Ruling 19), Return time (a stepper 0–2000 ms in 50 ms steps, the typed value clamped), Thinning (Low, Medium, High) and "Write plugin parameters only when touched" (on, disabled, with the spec's note). Kept in the preferences (`VizDAW.automation`), handed to the core at launch and on change; a refusal keeps the old value and says why.
-8. **Ruling (the plugin window's sliders):** `PluginWindowModel.setParam` touches the parameter on its first move and moves it after; `commitParam` releases it (the core commits "Change Plugin Parameter" on the static path); values normalised by the parameter's range.
+8. **Ruling (the plugin window's sliders):** `PluginWindowModel.setParam` touches the parameter at the slider's value on its first move and moves it after; `commitParam` releases it; values normalised by the parameter's range. The core's gesture path (source UI) sends each value to the plugin on every path and commits "Change Plugin Parameter" only on the static path (plan 5e-1 Ruling 15), so the window no longer calls `setParam`/`commitParams` on the session itself.
 9. **Ruling (the preview):** the Strip Chart asks `automation_preview` for each automation row while the document plays and its shown sequence is the playing one, at the transport poll's rate, and draws the points as a red line over the row; nothing when stopped.
    - Cost if wrong: a little more work per poll while playing.
 10. **Ruling (an automation lane's own row):** when the Strip Chart's shown lane holds automation events of exactly one target and nothing else, and its saved rows have no automation row, that target's row comes first (the spec's "with its Strip Chart view set to T"); editing a row then saves it as usual.
@@ -326,12 +330,13 @@ git log -1 --oneline && git show --stat HEAD | tail -3
       nonisolated public static func colorName(_ m: AutomationModeRow) -> String
   }
   extension MixerModel {
-      /// Shown values of touched targets (normalised), Ruling 2.
+      /// Shown values of touched targets (normalised) once moved, Ruling 2.
       public var live: [AutomationTargetRow: Double] { get }
+      /// Mouse-down: `touch(value: nil)` on the core (the value heard now, plan 5e-1 Ruling 26).
       public func touch(_ t: AutomationTargetRow)
       public func move(_ t: AutomationTargetRow, to v: Double)
       public func release(_ t: AutomationTargetRow)
-      /// Touch, value and release at once (mute, solo, the 0 dB double-click).
+      /// Touch at `v`, value and release at once (mute, solo, the 0 dB double-click).
       public func click(_ t: AutomationTargetRow, _ v: Double)
       public func isTouched(_ t: AutomationTargetRow) -> Bool
       /// The fader dB, pan and send level as shown (live while touched).
@@ -347,7 +352,7 @@ git log -1 --oneline && git show --stat HEAD | tail -3
   ```
   `toggleMute(_:)` and `toggleSolo(_:)` become clicks; `endOpenDrag()` releases every local touch; `DocumentModel.selectedStrips: Set<UInt64>`.
 
-Rulings 1–3 and 5. The control's value now (for `touch`): a fader's `AutomationLaw.faderNorm(gain_db)`, pan `(pan + 1) / 2`, mute and solo 1 or 0, a send's `faderNorm(level_db)`. A touch the core refuses raises the alert "Fader Failed"/"Pan Failed"/"Send Failed"/"Mute Failed"/"Solo Failed" (as today) and is not kept (so no release is sent); `refetch` drops touches and selection of strips that went (releasing their touches once).
+Rulings 1–3 and 5. `touch` sends `.touch(value: nil)` and keeps the target touched without a `live` value; the first `move` sets `live`. A click's value is the toggled one (mute and solo 1 or 0, the double-click `faderNorm(0)`). For values the model computes itself (pan from the shown pan): pan `(pan + 1) / 2`, a fader or send `AutomationLaw.faderNorm(db)`. A touch the core refuses raises the alert "Fader Failed"/"Pan Failed"/"Send Failed"/"Mute Failed"/"Solo Failed" (as today) and is not kept (so no release is sent); `refetch` drops touches and selection of strips that went (releasing their touches once).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -379,9 +384,8 @@ import VizDAWCore
         m.move(fader, to: 0.4)
         m.release(fader)
         #expect(
-            f.gestures.map(\.1) == [
-                .touch(value: AutomationLaw.faderNorm(0)), .value(value: 0.5), .value(value: 0.4), .release,
-            ])
+            f.gestures.map(\.1) == [.touch(value: nil), .value(value: 0.5), .value(value: 0.4), .release],
+            "mouse-down sends no value: the core starts from the value heard now (5e-1 Ruling 26)")
         #expect(f.gestures.allSatisfy { $0.0 == fader })
         #expect(f.calls.isEmpty, "no direct setGain any more")
     }
@@ -402,6 +406,7 @@ import VizDAWCore
         let strip = try #require(m.strips.first)
         #expect(m.gainDb(strip) == 0)
         m.touch(fader)
+        #expect(m.isTouched(fader) && m.gainDb(strip) == 0, "touched, still showing what it showed")
         m.move(fader, to: AutomationLaw.faderNorm(-6))
         #expect(abs(m.gainDb(strip) + 6) < 1e-9, "the hand's value")
         #expect(m.isTouched(fader))
@@ -424,6 +429,8 @@ import VizDAWCore
         #expect(!m.isTouched(.stripPan(strip: 2)))
     }
 
+    /// Two controls touched at once (plan 5e-1 Ruling 14: one shared
+    /// static edit in the core, so the real core takes both).
     @Test func twoTargetsTouchedAtOnceAreIndependent() throws {
         let (m, f) = try model()
         let other = AutomationTargetRow.stripFader(strip: 2)
@@ -446,7 +453,7 @@ import VizDAWCore
         m.touch(other)
         f.mixerSnap.strips.removeAll { $0.id == 2 }
         m.load([])  // a refetch sees strip 2 gone
-        #expect(f.gestures.map(\.1) == [.touch(value: AutomationLaw.faderNorm(0)), .release])
+        #expect(f.gestures.map(\.1) == [.touch(value: nil), .release])
         m.release(other)
         #expect(f.gestures.filter { $0.1 == .release }.count == 1)
     }
@@ -641,7 +648,7 @@ Expected: FAIL (the count is 132; `automation.mode.off` is unknown).
 
 - [ ] **Step 3: The registry, the handlers, the menu**
 
-In `crates/core-control/src/registry.rs`, add the six `cmd("automation.mode.<m>", "Automation", "<Title>", None, true)` entries and change `automation.suspend`'s spec to a menu item in menu "Automation". In `AutomationCommands.swift`, add `modeIDs`, include them in `ids`, and the `MenuCommands` conformance; `run(_:args:doc:_:)` (the channel's) sends a mode ID to the menu `run` (mapping its `KeyOutcome` with `ControlCommands.failure`). In `app/Sources/VizDAW/AppCommands.swift`, after the `CommandMenu("Step") { … }` block:
+In `crates/core-control/src/registry.rs`, add the six `cmd("automation.mode.<m>", "Automation", "<Title>", None, true)` entries and change `automation.suspend`'s spec to a menu item in menu "Automation". In `AutomationCommands.swift`, add `modeIDs`, include them in `ids`, and the `MenuCommands` conformance; `run(_:args:doc:_:)` (the channel's) sends a mode ID to the menu `run` (mapping its `KeyOutcome` with `ControlCommands.failure`). In `app/Sources/VizDAW/AppCommands.swift`, after the `CommandMenu("Step") { … }` block (its `body` has 8 top-level builders at `1f6057a`: the `Group` and seven `CommandMenu`s; this menu is the 9th, and older SDKs' `CommandsBuilder` takes at most 10, so add no other top-level item: pre-flight M22):
 
 ```swift
         CommandMenu("Automation") {
@@ -661,6 +668,7 @@ export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLin
 cd /Users/lattawb/workspace/vizdaw
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -2
+cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu --target-dir target/linux-check -- -D warnings 2>&1 | tail -2
 cargo test -p core-control 2>&1 | grep -E "test result|FAILED" | grep -v " 0 failed"
 scripts/build-ffi.sh && scripts/swift.sh build 2>&1 | grep -E "error:|warning:" | grep -v MemoryDefaults | sort -u
 scripts/swift.sh test 2>&1 | grep -E "Test run"
@@ -749,7 +757,7 @@ Expected: the three tests FAIL (`gestures` is empty; `liveSets` and `commitParam
 
 - [ ] **Step 3: Gestures in the window model**
 
-Rewrite `setParam`, `commitParam` and `endOpenDrags` as the Interfaces block says (a refused touch shows "Parameter Failed" and is not kept).
+Rewrite `setParam`, `commitParam` and `endOpenDrags` as the Interfaces block says (a refused touch shows "Parameter Failed" and is not kept). The window no longer sends the value to the session's `setParam` or commits `SetPluginParams` itself: the core's gesture path does both (plan 5e-1 Ruling 15).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1270,7 +1278,7 @@ Expected: FAIL to compile (`GrowingTake.slice` and `LaneHeaderLayout.showsMeter`
 
 - [ ] **Step 3: The two extractions**
 
-Move `drawGrowingTakes`' slice arithmetic (from `let vis = …` to `let columns = …`) into `GrowingTake.slice` and call it there; move the `laneHeight >= 46` check in `LaneHeaderView.draw` into `LaneHeaderLayout.showsMeter(laneHeight:)` (in `ArrangementLayout.swift`, beside `meterRect`) and call it.
+Move `drawGrowingTakes`' slice arithmetic (from its `let vis = …` to `let columns = …`, `ArrangementView.swift:173–184` at `1f6057a`; `drawRegions` has another `let vis`, not this one) into `GrowingTake.slice` and call it there; move the `laneHeight >= 46` check in `LaneHeaderView.draw` into `LaneHeaderLayout.showsMeter(laneHeight:)` (in `ArrangementLayout.swift`, beside `meterRect`) and call it.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1345,7 +1353,10 @@ channel.
      a second. Stop: "Undo Write Automation"; the lane "Built-in Synth
      Fader" appears at the end of the sequence and the Strip Chart opens on
      its fader row. While playing, the Strip Chart on that lane draws the
-     move in red as you make it. Latch: the fader holds where you let go
+     move in red as you make it. Play again and grab the fader while its
+     new automation moves it: the sound does not jump (the write starts at
+     the heard value); the fader's knob shows the static value until you
+     move it (showing the heard value is a backlog row). Latch: the fader holds where you let go
      until Stop. Write: play without touching: at Stop the strip's fader,
      pan and mute lanes hold their values from the play point, and the
      strip's popup reads Latch (Settings › Automation's After Write). Trim
@@ -1381,6 +1392,7 @@ export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLin
 cd /Users/lattawb/workspace/vizdaw
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -3
+cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu --target-dir target/linux-check -- -D warnings 2>&1 | tail -2
 cargo clippy -p core-ffi --lib -- -D warnings 2>&1 | tail -2
 cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings 2>&1 | tail -2
 cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures 2>&1 | grep "test result"
@@ -1392,7 +1404,7 @@ VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --no
 pgrep -lf MacOS/VizDAW; ls -d /tmp/vze* 2>/dev/null | wc -l
 ```
 
-Expected: everything clean; "workspace done" with no failure lines (Rust about 1509 passed: plan 5e-1's and this plan's registry test); Swift "Test run with 871 tests … passed"; the 10 e2e tests pass; `pgrep` prints nothing; no new `/tmp/vze*` home.
+Expected: everything clean (the Linux clippy too); "workspace done" with no failure lines (Rust about 1522 passed, 14 ignored: plan 5e-1's and this plan's registry test); Swift "Test run with 871 tests … passed"; the 10 e2e tests pass; `pgrep` prints nothing; no new `/tmp/vze*` home.
 
 - [ ] **Step 3: Commit**
 
@@ -1411,6 +1423,7 @@ git log -1 --oneline && git show --stat HEAD | tail -3
 
 - **Spec coverage.** §7.1's on-screen mixer (Tasks 2–3) and the plugin window's own controls (Task 5; editors' gestures are plan 5e-1 Task 9's). §7.4's live preview and the new lane's row (Task 6). §7.5: popups, colours, rings (Tasks 2–3), "Set all strips to…" (Task 3), Settings › Automation (Task 1), `automation.mode.<mode>` and `automation.suspend` as commands (Task 4). The 5d-2 carries that belong to the record UI (Tasks 7–8; "Carried items").
 - **Placeholders.** None: every step names its file, its signatures and its test.
+- **Plan 5e-1's revision.** Checked against its interface as revised: `GesturePhaseRow.touch(value: nil)` from the mixer (Task 2, Ruling 1), clicks and the plugin window's first move with explicit values; concurrent static touches sharing one edit (Review Focus 1); the core sending a UI value of a plugin parameter to the plugin (Task 5, Ruling 8); `touched` as active touches only (Ruling 3); settings read at pass start (Review Focus 3); one top-level menu left in `AppCommands` (Task 4). No other 5e-1 name this plan uses changed.
 - **Type consistency.** `AutomationModes` (Task 2) is what Tasks 1, 3 and 4 show; `MixerModel`'s gesture API (Task 2) is what Task 3's views call; `DocumentModel.selectedStrips` (Task 2) is what Task 4's commands read; `SaveAction` (Task 7) is what `AppCommands.save(as:)` switches on; plan 5e-1's `FakeSession` fields (`gestures`, `gestureError`, `automationRow`, `modeCalls`, `previewRows`) are what Tasks 2, 4, 5 and 6 read.
 - **Proportion.** Tests are whole; views are described by what they bind to (no view test can drive them); the extractions of Task 8 move code unchanged.
 - **Review Focus.** Each line names its tests: Task 2 (1, 2), Task 1 (3), Tasks 2 and 4 (4), Task 6 (5).
