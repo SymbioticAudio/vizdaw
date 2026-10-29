@@ -1120,8 +1120,10 @@ fn audio_input_channels_body() -> Option<crate::live::InputChannelsRow> {
     let device = lock(&INPUT_DEVICE).clone();
     let (channels, names) = if offline_mode() {
         // As an offline host's input (`OfflineBackend`): the fake input's
-        // channels, named as it names them.
-        let _ = fake_input().filter(|_| device.is_none())?;
+        // channels, named as it names them. The input that host opens,
+        // which the fake synth brings when no input was chosen (5e-1
+        // Task 1: Measure's channel check reads this before its claim).
+        let _ = offline_choice().0.filter(|_| device.is_none())?;
         let n = core_engine::offline::FAKE_INPUT_CHANNELS as u32;
         (n, (1..=n).map(|k| format!("Fake In {k}")).collect())
     } else {
@@ -3233,6 +3235,15 @@ pub fn start_measure(
     plugins: Option<&mut PluginHost>,
 ) -> Result<Arc<MeasureStatus>, VizError> {
     crate::synth::external_dest(doc, dest)?;
+    // A channel the device lacks needs no engine to refuse (5d-2 carry):
+    // refused here, before the claim, which may retire another window's
+    // plugin engine. Unknown channels (no device read) are left to the
+    // check after the input opens.
+    if let Some(c) = audio_input_channels().filter(|c| c.channels > 0) {
+        if let Some(why) = crate::record::channel_refusal(lane, channels, c.channels, &[]) {
+            return Err(crate::events::bad(&why));
+        }
+    }
     let (generation, holder, asked) = {
         let (mut slot, _) = claim_host(owner, doc, plugins, Idle::Stopped)?;
         let host = slot.as_mut().ok_or_else(|| VizError::Internal {

@@ -39,17 +39,23 @@ extension RecordModel {
     }
 
     /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
-    /// the status line and keeps the old value).
-    public func commitPunch(_ f: TransportField) {
-        guard let text = punchDrafts.removeValue(forKey: f) else { return }
-        _ = document?.commitField(f, text)
+    /// the status line and keeps the old value). A refused draft is dropped: the
+    /// field shows the old value again. Returns whether every draft was taken.
+    @discardableResult public func commitPunch(_ f: TransportField) -> Bool {
+        guard let text = punchDrafts.removeValue(forKey: f) else { return true }
+        return document?.commitField(f, text) == true
     }
 
     /// Commits every punch draft, In first (5d-2 final review I3: the
     /// popover closing or Record pressed never leaves a typed time shown
-    /// but unused). A refusal says why in the status line.
-    public func commitPunchDrafts() {
-        for f in [TransportField.punchIn, .punchOut] { commitPunch(f) }
+    /// but unused). A refusal says why in the status line. Returns whether
+    /// every draft was taken.
+    @discardableResult public func commitPunchDrafts() -> Bool {
+        // Both are committed even when In is refused, so each refusal is
+        // said once and the last stays in the status line.
+        let punchIn = commitPunch(.punchIn)
+        let punchOut = commitPunch(.punchOut)
+        return punchIn && punchOut
     }
 
     /// The count-in is playing (the timeline waits).

@@ -1655,3 +1655,95 @@ fn measures_off_the_plugin_thread_keep_the_engine() {
     );
     a.close().unwrap();
 }
+
+/// 5d-2 final review I1, the Measure half (carry to 5e): a device chosen
+/// while a Measure runs is not opened under it, but when it ends: the
+/// input is closed, then reopened on the new device (two input changes).
+#[test]
+fn a_device_chosen_during_a_measure_reaches_the_input_at_its_end() {
+    let g = serial(Some(DELAY_MS), None);
+    vizdaw_ffi::host::set_audio_input_device(None);
+    let d = doc(true, 2);
+    let s = untitled(&g, d.doc.clone());
+    let s2 = Arc::clone(&s);
+    let dest = d.synth.0;
+    vizdaw_ffi::host::debug_hold_measure(true);
+    let t = std::thread::spawn(move || s2.measure_return(dest));
+    wait_until("the measurement to start", vizdaw_ffi::host::measuring);
+    wait_until("the input to open", || s.debug_input_open() == Some(true));
+    let n = s.debug_input_changes().unwrap();
+    vizdaw_ffi::host::set_audio_input_device(Some("Other In".into()));
+    assert_eq!(
+        s.debug_input_changes(),
+        Some(n),
+        "not under the measurement"
+    );
+    vizdaw_ffi::host::debug_hold_measure(false);
+    assert_eq!(t.join().unwrap().unwrap().onsets, 5);
+    wait_until("the input to reopen", || {
+        s.debug_input_changes() == Some(n + 2) && s.debug_input_open() == Some(true)
+    });
+    vizdaw_ffi::host::set_audio_input_device(None);
+    s.close().unwrap();
+}
+
+/// 5d-2 re-review Minor (carry to 5e): a Measure refused because its
+/// lane records a channel the device lacks is refused before it claims
+/// the engine, so another window's plugin engine (and with it that
+/// window's monitoring) is left as it was.
+#[test]
+fn a_measure_refused_for_its_channel_leaves_another_windows_plugin_engine() {
+    let g = serial(Some(DELAY_MS), None);
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    let d = doc(true, 2);
+    let (with_gain, slot) = with_gain(&d);
+    let a = untitled(&g, with_gain);
+    a.play(d.seq.0).unwrap();
+    idle_until(&a, |s| {
+        s.plugin_slots()
+            .unwrap()
+            .iter()
+            .any(|r| r.id == slot.0 && r.status == SlotStatus::Live)
+            && s.transport().unwrap().playing
+    });
+    a.stop().unwrap();
+    wait_until("A to stop", || !a.transport().unwrap().playing);
+    let a_id = vizdaw_ffi::host::factory_owner().unwrap();
+    let created = vizdaw_ffi::host::hosts_created();
+    // B's return lane records fake input 8 of 3, set before B exists (an
+    // input edit in B would claim the engine itself).
+    let mut b = Builder::from_doc(d.doc.clone());
+    b.run(Command::Lane(LaneCmd::SetInput {
+        seq: d.seq,
+        lane: d.rec,
+        input: Some(LaneInput::Audio {
+            channels: InputChannels::Mono(7),
+            return_of: Some(d.synth),
+        }),
+    }))
+    .unwrap();
+    let other = untitled(&g, b.finish());
+    let o2 = Arc::clone(&other);
+    let dest = d.synth.0;
+    let r = std::thread::spawn(move || o2.measure_return(dest))
+        .join()
+        .unwrap();
+    match r {
+        Err(VizError::Model { message }) => {
+            assert!(
+                message.contains("the audio input has 3 channel(s)"),
+                "{message}"
+            )
+        }
+        other => panic!("expected the channel refusal, got {other:?}"),
+    }
+    assert_eq!(
+        vizdaw_ffi::host::factory_owner(),
+        Some(a_id),
+        "A's plugin engine stays"
+    );
+    assert_eq!(vizdaw_ffi::host::holder(), Some(a_id));
+    assert_eq!(vizdaw_ffi::host::hosts_created(), created, "no host made");
+    other.close().unwrap();
+    a.close().unwrap();
+}

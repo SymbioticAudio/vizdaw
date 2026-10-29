@@ -87,7 +87,11 @@ public final class RecordModel {
         guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
         // A punch time typed in the popover is what this pass punches at
         // (5d-2 final review I3).
-        commitPunchDrafts()
+        // A draft that is not a position refuses the pass (5d-2 final
+        // re-review N1): it must not punch at the old range.
+        guard commitPunchDrafts() else {
+            return .refused(m.editor.status ?? "The punch time is not a position.")
+        }
         do {
             try m.session.record(seq: seq, spec: spec())
         } catch {
