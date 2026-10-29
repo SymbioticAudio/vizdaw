@@ -98,6 +98,10 @@ fn gestures_never_allocate() {
     for _ in 0..8 {
         b.block(512);
     }
+    let mut handles = engine.start_gestures().unwrap();
+    for _ in 0..2 {
+        b.block(512);
+    }
     let before = rt_check::count();
     for round in 0..6u32 {
         if round == 1 {
@@ -155,10 +159,16 @@ fn gestures_never_allocate() {
             send(dests[0], GesturePhase::Touch(0.3));
             armed_block(&mut b, 512);
             engine.play().unwrap();
+            // A tap replaced while playing.
+            handles = engine.start_gestures().unwrap();
         }
         for _ in 0..30 {
             armed_block(&mut b, 512);
         }
     }
+    engine.stop_gestures().unwrap();
+    armed_block(&mut b, 512);
+    // Draining is the control side's, outside the count.
+    while handles.stamps.pop().is_ok() {}
     assert_eq!(rt_check::count(), before, "the render path allocated");
 }

@@ -1259,6 +1259,18 @@ impl Engine {
         self.push(EngineCmd::Record(None))
     }
 
+    /// Installs a gesture tap (replacing one installed): from the next block that plays, gestures are stamped and the transport marked. Returns the control side.
+    pub fn start_gestures(&mut self) -> Result<crate::gesture::GestureHandles, EngineError> {
+        let (tap, handles) = crate::gesture::gesture_tap(self.latency);
+        self.push(EngineCmd::Gestures(Some(Box::new(tap))))?;
+        Ok(handles)
+    }
+
+    /// Removes the gesture tap; its status reads closed.
+    pub fn stop_gestures(&mut self) -> Result<(), EngineError> {
+        self.push(EngineCmd::Gestures(None))
+    }
+
     /// What lanes listen to (spec §6.6); the next [`Engine::load`]
     /// resolves and publishes it.
     pub fn set_inputs(&mut self, spec: crate::input::InputSpec) {

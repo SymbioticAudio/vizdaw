@@ -136,15 +136,25 @@ pub struct RecordHandles {
     pub status: Arc<RecordStatus>,
 }
 
-/// The real-time side of a recording, owned by the renderer.
+/// What [`RunClock::begin_block`] found at a block's start while
+/// playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Begun {
+    /// The transport rolled: run 0 plays this block.
+    Rolled,
+    /// Playing resumed after a stop.
+    Resumed,
+    /// Playing goes on.
+    Going,
+}
+
+/// A tap's run frames and marks (plan 5e-1 Ruling 7): the record tap's
+/// clock, shared by the gesture tap. Each method that pushes a mark
+/// returns false when it did not fit; the tap counts it in its status.
+/// // RT
 #[derive(Debug)]
-pub struct RecordTap {
-    ring: RingWriter,
-    channels: Box<[u16]>,
+pub(crate) struct RunClock {
     marks: Producer<Mark>,
-    midi: Producer<RecordedMidi>,
-    status: Arc<RecordStatus>,
-    range: Option<(u64, u64)>,
     rolling: bool,
     run: u64,
     remark: bool,
@@ -162,8 +172,192 @@ pub struct RecordTap {
     /// nothing (a roll exactly at the loop end is no wrap too).
     last_mark: Option<(u64, u64)>,
     /// The graph latency the marks carry (the renderer's, kept current by
-    /// [`RecordTap::set_latency`]).
+    /// [`RunClock::set_latency`]).
     latency: u64,
+}
+
+impl RunClock {
+    /// A clock that has not rolled, pushing its marks to `marks`, which
+    /// carry graph latency `latency` until the renderer says otherwise.
+    pub(crate) fn new(marks: Producer<Mark>, latency: u64) -> RunClock {
+        RunClock {
+            marks,
+            rolling: false,
+            run: 0,
+            remark: false,
+            stopped: false,
+            stop_at: None,
+            resumed_at: None,
+            last_mark: None,
+            latency,
+        }
+    }
+
+    /// Whether the transport rolled since the tap was installed. // RT
+    pub(crate) fn rolling(&self) -> bool {
+        self.rolling
+    }
+
+    /// The run frame of the block about to render. // RT
+    pub(crate) fn run(&self) -> u64 {
+        self.run
+    }
+
+    /// Pushes a mark; a wrap that repeats the last mark is dropped (review
+    /// fix M3: a roll exactly at the loop end would also mark a wrap at run
+    /// 0). Other repeats stay: a resume after a stop must be marked. False
+    /// when it did not fit. // RT
+    fn mark(&mut self, run: u64, frame: u64, wrap: bool) -> bool {
+        if wrap && self.last_mark == Some((run, frame)) {
+            return true;
+        }
+        let latency = self.latency;
+        if self
+            .marks
+            .push(Mark {
+                run,
+                frame,
+                wrap,
+                latency,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.last_mark = Some((run, frame));
+        true
+    }
+
+    /// At a block's start while playing: rolls (run 0 plays `frame`), or
+    /// marks where the transport is after a block it did not advance
+    /// through, after a jump or after a stop. Says which, and whether its
+    /// mark fitted. // RT
+    pub(crate) fn begin_block(&mut self, frame: u64) -> (Begun, bool) {
+        let mut begun = Begun::Going;
+        let mut fit = true;
+        if !self.rolling {
+            self.rolling = true;
+            self.run = 0;
+            begun = Begun::Rolled;
+            fit = self.mark(0, frame, false);
+        } else if self.remark || self.stopped {
+            if self.stopped {
+                self.resumed_at = Some(self.run);
+                begun = Begun::Resumed;
+            }
+            fit = self.mark(self.run, frame, false);
+        }
+        self.remark = false;
+        self.stopped = false;
+        self.stop_at = None;
+        (begun, fit)
+    }
+
+    /// The transport left Playing at block offset `offset` (0: before the
+    /// block, a Stop), standing at schedule frame `frame`: marks the stop
+    /// and stops the run there (pre-flight M2). // RT
+    pub(crate) fn stop(&mut self, offset: u32, frame: u64) -> bool {
+        if !self.rolling || self.stopped {
+            return true;
+        }
+        let run = self.run.saturating_add(u64::from(offset));
+        let fit = self.mark(run, frame, false);
+        self.stopped = true;
+        self.stop_at = Some(offset);
+        self.remark = false;
+        fit
+    }
+
+    /// A loop wrap at block offset `offset` continues at schedule frame
+    /// `to`. // RT
+    pub(crate) fn wrap(&mut self, offset: u32, to: u64) -> bool {
+        if !self.rolling {
+            return true;
+        }
+        let run = self.run.saturating_add(u64::from(offset));
+        self.mark(run, to, true)
+    }
+
+    /// The schedule changed under the transport, or the transport jumped:
+    /// the next block marks where it is. // RT
+    pub(crate) fn resync(&mut self) {
+        if self.rolling {
+            self.remark = true;
+        }
+    }
+
+    /// The graph latency is `latency` from the next block on: a change
+    /// while rolling marks where it took effect (final review I1). // RT
+    pub(crate) fn set_latency(&mut self, latency: u64) {
+        if latency != self.latency {
+            self.latency = latency;
+            self.resync();
+        }
+    }
+
+    /// The run of a message heard at block offset `offset` (negative:
+    /// before the block); `None` before the roll, after a stop (except
+    /// before the stop in its own block) and before the last resume after
+    /// a stop. // RT
+    pub(crate) fn stamp_run(&self, offset: i64) -> Option<i64> {
+        if !self.rolling {
+            return None;
+        }
+        if self.stopped {
+            // Only what was heard before the stop in its own block.
+            match self.stop_at {
+                Some(k) if offset < i64::from(k) => {}
+                _ => return None,
+            }
+        }
+        let run = i64::try_from(self.run)
+            .unwrap_or(i64::MAX)
+            .saturating_add(offset);
+        if self
+            .resumed_at
+            .is_some_and(|r| run < i64::try_from(r).unwrap_or(i64::MAX))
+        {
+            return None;
+        }
+        Some(run)
+    }
+
+    /// At a block's end: the run its counted frames start at and how many
+    /// count (in the block the transport stopped in, those before the
+    /// stop; after it none), advancing the run past them. `advanced` is
+    /// false when the transport did not play the whole block (an xrun or
+    /// a missed deadline): the next block marks where it is. // RT
+    pub(crate) fn end_block(&mut self, frames: u32, advanced: bool) -> Option<(u64, u32)> {
+        if !self.rolling {
+            return None;
+        }
+        let frames = if self.stopped {
+            self.stop_at.take()?.min(frames)
+        } else {
+            frames
+        };
+        if frames == 0 {
+            return None;
+        }
+        let start = self.run;
+        self.run = self.run.saturating_add(u64::from(frames));
+        if !advanced && !self.stopped {
+            self.remark = true;
+        }
+        Some((start, frames))
+    }
+}
+
+/// The real-time side of a recording, owned by the renderer.
+#[derive(Debug)]
+pub struct RecordTap {
+    ring: RingWriter,
+    channels: Box<[u16]>,
+    midi: Producer<RecordedMidi>,
+    status: Arc<RecordStatus>,
+    range: Option<(u64, u64)>,
+    /// The run frames and marks (plan 5e-1 Ruling 7).
+    clock: RunClock,
 }
 
 impl Drop for RecordTap {
@@ -191,18 +385,10 @@ pub fn tap(req: &RecordRequest, latency: u64) -> (RecordTap, RecordHandles) {
         RecordTap {
             ring,
             channels: req.channels.clone().into_boxed_slice(),
-            marks: mark_tx,
             midi: midi_tx,
             status: Arc::clone(&status),
             range: req.range,
-            rolling: false,
-            run: 0,
-            remark: false,
-            stopped: false,
-            stop_at: None,
-            resumed_at: None,
-            last_mark: None,
-            latency,
+            clock: RunClock::new(mark_tx, latency),
         },
         RecordHandles {
             ring: reader,
@@ -216,12 +402,12 @@ pub fn tap(req: &RecordRequest, latency: u64) -> (RecordTap, RecordHandles) {
 impl RecordTap {
     /// Whether the transport rolled since the tap was installed.
     pub fn rolling(&self) -> bool {
-        self.rolling
+        self.clock.rolling()
     }
 
     /// The run frame of the block about to render.
     pub fn run(&self) -> u64 {
-        self.run
+        self.clock.run()
     }
 
     /// The tap is removed: the control side reads it closed now, before
@@ -241,27 +427,10 @@ impl RecordTap {
         self.range.is_none_or(|(a, b)| frame >= a && frame < b)
     }
 
-    /// Pushes a mark; a wrap that repeats the last mark is dropped (review
-    /// fix M3: a roll exactly at the loop end would also mark a wrap at run
-    /// 0). Other repeats stay: a resume after a stop must be marked. // RT
-    fn mark(&mut self, run: u64, frame: u64, wrap: bool) {
-        if wrap && self.last_mark == Some((run, frame)) {
-            return;
-        }
-        let latency = self.latency;
-        if self
-            .marks
-            .push(Mark {
-                run,
-                frame,
-                wrap,
-                latency,
-            })
-            .is_err()
-        {
+    /// Counts a mark that did not fit. // RT
+    fn count(&self, fit: bool) {
+        if !fit {
             self.status.lost_marks.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.last_mark = Some((run, frame));
         }
     }
 
@@ -270,53 +439,33 @@ impl RecordTap {
     /// through, after a jump or after a stop. A resume after a stop takes
     /// the device's input delay as it is then (review fix M4). // RT
     pub fn begin_block(&mut self, frame: u64, delay: i64) {
-        if !self.rolling {
-            self.rolling = true;
-            self.run = 0;
+        let (begun, fit) = self.clock.begin_block(frame);
+        if matches!(begun, Begun::Rolled | Begun::Resumed) {
             self.status.delay.store(delay, Ordering::Release);
-            self.mark(0, frame, false);
-        } else if self.remark || self.stopped {
-            if self.stopped {
-                self.status.delay.store(delay, Ordering::Release);
-                self.resumed_at = Some(self.run);
-            }
-            self.mark(self.run, frame, false);
         }
-        self.remark = false;
-        self.stopped = false;
-        self.stop_at = None;
+        self.count(fit);
     }
 
     /// The transport left Playing at block offset `offset` (0: before the
     /// block, a Stop), standing at schedule frame `frame`: marks the stop
     /// and stops the run there (pre-flight M2). // RT
     pub fn stop(&mut self, offset: u32, frame: u64) {
-        if !self.rolling || self.stopped {
-            return;
-        }
-        let run = self.run.saturating_add(u64::from(offset));
-        self.mark(run, frame, false);
-        self.stopped = true;
-        self.stop_at = Some(offset);
-        self.remark = false;
+        let fit = self.clock.stop(offset, frame);
+        self.count(fit);
     }
 
     /// A loop wrap at block offset `offset` continues at schedule frame
     /// `to`. // RT
     pub fn wrap(&mut self, offset: u32, to: u64) {
-        if self.rolling {
-            let run = self.run.saturating_add(u64::from(offset));
-            self.mark(run, to, true);
-        }
+        let fit = self.clock.wrap(offset, to);
+        self.count(fit);
     }
 
     /// The schedule changed under the transport (an edit while recording
     /// recompiled it), or the transport jumped (a Locate): the next block
     /// marks where it is. // RT
     pub fn resync(&mut self) {
-        if self.rolling {
-            self.remark = true;
-        }
+        self.clock.resync();
     }
 
     /// The graph latency is `latency` from the next block on (the renderer
@@ -324,35 +473,16 @@ impl RecordTap {
     /// marks where it took effect, so what follows is placed with its own
     /// latency (final review I1). // RT
     pub fn set_latency(&mut self, latency: u64) {
-        if latency != self.latency {
-            self.latency = latency;
-            self.resync();
-        }
+        self.clock.set_latency(latency);
     }
 
     /// Records an armed lane's message heard at block offset `offset`
     /// (negative: before the block), unless it was heard before the last
     /// resume after a stop. // RT
     pub fn midi(&mut self, lane: LaneId, offset: i64, msg: Midi1Msg) {
-        if !self.rolling {
+        let Some(run) = self.clock.stamp_run(offset) else {
             return;
-        }
-        if self.stopped {
-            // Only what was heard before the stop in its own block.
-            match self.stop_at {
-                Some(k) if offset < i64::from(k) => {}
-                _ => return,
-            }
-        }
-        let run = i64::try_from(self.run)
-            .unwrap_or(i64::MAX)
-            .saturating_add(offset);
-        if self
-            .resumed_at
-            .is_some_and(|r| run < i64::try_from(r).unwrap_or(i64::MAX))
-        {
-            return;
-        }
+        };
         if self.midi.push(RecordedMidi { lane, run, msg }).is_err() {
             self.status.lost_midi.fetch_add(1, Ordering::Relaxed);
         }
@@ -365,23 +495,12 @@ impl RecordTap {
     /// transport stopped in, only the frames before the stop are pushed;
     /// after it nothing is. // RT
     pub fn end_block(&mut self, input: &[&[f32]], frames: u32, advanced: bool) {
-        if !self.rolling {
+        let Some((start, frames)) = self.clock.end_block(frames, advanced) else {
             return;
-        }
-        let frames = if self.stopped {
-            match self.stop_at.take() {
-                Some(k) => k.min(frames),
-                None => return,
-            }
-        } else {
-            frames
         };
-        if frames == 0 {
-            return;
-        }
         let channels = &self.channels;
         if !channels.is_empty() {
-            let pushed = self.ring.push(self.run, frames, |c, f| {
+            let pushed = self.ring.push(start, frames, |c, f| {
                 channels
                     .get(c)
                     .and_then(|d| input.get(usize::from(*d)))
@@ -393,11 +512,8 @@ impl RecordTap {
                 self.status.lost_blocks.fetch_add(1, Ordering::Relaxed);
             }
         }
-        self.run = self.run.saturating_add(u64::from(frames));
-        self.ring.set_end(self.run);
-        self.status.run.store(self.run, Ordering::Release);
-        if !advanced && !self.stopped {
-            self.remark = true;
-        }
+        let run = self.clock.run();
+        self.ring.set_end(run);
+        self.status.run.store(run, Ordering::Release);
     }
 }

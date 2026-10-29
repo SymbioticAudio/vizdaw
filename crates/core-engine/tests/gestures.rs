@@ -525,3 +525,247 @@ fn a_release_ramps_back_over_a_run() {
     let (a, b) = halves(&r);
     assert!((a / b - 1.0).abs() < 0.05, "settled: {a} {b}");
 }
+
+fn drain(
+    h: &mut core_engine::gesture::GestureHandles,
+) -> (
+    Vec<core_engine::record::Mark>,
+    Vec<core_engine::gesture::Stamped>,
+) {
+    let mut marks = Vec::new();
+    while let Ok(m) = h.marks.pop() {
+        marks.push(m);
+    }
+    let mut stamps = Vec::new();
+    while let Ok(s) = h.stamps.pop() {
+        stamps.push(s);
+    }
+    (marks, stamps)
+}
+
+/// Ruling 7: a gesture with no host time is stamped at the run frame of
+/// the block that took it; the roll, a wrap and the Stop are marked as
+/// the record tap marks them; nothing is stamped while stopped; the
+/// status says when the tap has rolled (Ruling 24).
+#[test]
+fn stamps_carry_the_run_frame_of_the_block_that_took_them() {
+    let mut r = rig();
+    let mut h = r.engine.start_gestures().unwrap();
+    let d = fader(r.synth);
+    r.send(d, GesturePhase::Touch(0.5));
+    r.blocks(1);
+    assert!(drain(&mut h).1.is_empty(), "stopped: nothing is stamped");
+    assert!(!h.status.rolled(), "not rolled while stopped");
+    let lp = 16 * u64::from(BLOCK);
+    r.engine.set_loop_range(Some((0, lp))).unwrap();
+    r.engine.play().unwrap();
+    r.blocks(10);
+    assert!(h.status.rolled(), "rolled once a block played");
+    r.send(d, GesturePhase::Value(0.6));
+    r.blocks(1);
+    r.send(d, GesturePhase::Glide(100));
+    r.blocks(10);
+    r.engine.stop().unwrap();
+    r.blocks(1);
+    r.send(d, GesturePhase::Touch(0.1));
+    r.blocks(1);
+    let (marks, stamps) = drain(&mut h);
+    // The Play is applied at the block after the call, so the roll is the
+    // first block that played: run 0 plays frame 0.
+    assert_eq!((marks[0].run, marks[0].frame, marks[0].wrap), (0, 0, false));
+    assert!(
+        marks.iter().any(|m| m.wrap && m.run == lp && m.frame == 0),
+        "{marks:?}"
+    );
+    assert!(!marks.last().unwrap().wrap, "the Stop is marked last");
+    let runs: Vec<(i64, GesturePhase)> = stamps.iter().map(|s| (s.run, s.phase)).collect();
+    assert_eq!(
+        runs,
+        vec![
+            (10 * i64::from(BLOCK), GesturePhase::Value(0.6)),
+            (11 * i64::from(BLOCK), GesturePhase::Glide(100)),
+        ]
+    );
+    assert!(stamps.iter().all(|s| s.dest == d && s.tag == 0));
+    assert_eq!(h.status.run(), 21 * u64::from(BLOCK));
+    r.engine.stop_gestures().unwrap();
+    r.blocks(1);
+    assert!(h.status.closed());
+}
+
+/// The latent session of the arrival tests below: the synth's strip
+/// carries an insert of latency `A` (its fader acts `A` frames behind the
+/// renderer) and an idle bus one of `2 A`, so the graph latency is `2 A`
+/// and the synth's audio waits `A` more on its way to the master.
+const A: u64 = 1004;
+
+/// The synth's fader ramps from 0 dB at frame `at` to −20 dB 100 frames
+/// later (`at` a multiple of 25 frames: a whole tick at 120 BPM).
+fn latent_doc(at: Option<u64>) -> (Document, SeqId, StripId) {
+    let mut b = Builder::new();
+    let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+    b.notes(seq, notes, &[(0, 60, 0x8000, 64 * Q)]).unwrap();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    b.insert(synth, TestInserts::plugin(&format!("latency={A}")))
+        .unwrap();
+    let bus = b.bus("Latent").unwrap();
+    b.insert(bus, TestInserts::plugin(&format!("latency={}", 2 * A)))
+        .unwrap();
+    if let Some(at) = at {
+        assert_eq!(at % 25, 0, "a whole tick");
+        let auto = b.lane(seq, "Auto", None).unwrap();
+        let tick = |f: u64| (f as i64) * Q / 24_000;
+        for (f, db) in [(at, 0.0), (at + 100, -20.0)] {
+            b.event(
+                seq,
+                auto,
+                tick(f),
+                EventBody::Automation {
+                    target: AutomationTarget::StripFader(synth),
+                    value: fader_norm(db),
+                },
+            )
+            .unwrap();
+        }
+    }
+    (b.finish(), seq, synth)
+}
+
+/// What a render of `doc` gave: the master's left channel, and the
+/// gesture tap's marks and stamps.
+type Heard = (
+    Vec<f32>,
+    Vec<core_engine::record::Mark>,
+    Vec<core_engine::gesture::Stamped>,
+);
+
+/// `blocks` blocks of `doc` from frame 0 (looping `lp` when given), the
+/// synth's fader touched at −20 dB before block `touch` when given.
+fn render_latent(
+    doc: &Document,
+    seq: SeqId,
+    synth: StripId,
+    lp: Option<u64>,
+    touch: Option<usize>,
+    blocks: usize,
+) -> Heard {
+    let (mut engine, renderer) = Engine::new(
+        EngineConfig::new(48_000.0),
+        Box::new(OfflineSinks::new(1 << 16).with_tone()),
+    )
+    .unwrap();
+    engine.set_insert_factory(Box::new(TestInserts::new()));
+    engine.load(doc, seq).unwrap();
+    let mut out = OfflineBackend::new(48_000.0, BLOCK);
+    out.start(renderer).unwrap();
+    out.reserve(4096);
+    let mut h = engine.start_gestures().unwrap();
+    if lp.is_some() {
+        engine.set_loop_range(lp.map(|e| (0, e))).unwrap();
+    }
+    engine.play().unwrap();
+    let mut left = Vec::new();
+    for k in 0..blocks {
+        if touch == Some(k) {
+            assert!(engine.gesture_sender().send(GestureMsg {
+                dest: fader(synth),
+                phase: GesturePhase::Touch(fader_norm(-20.0)),
+                host_ns: 0,
+                tag: 0,
+            }));
+        }
+        out.block(BLOCK);
+        left.extend_from_slice(out.output(BLOCK).0);
+    }
+    let (marks, stamps) = drain(&mut h);
+    (left, marks, stamps)
+}
+
+/// Where the placement (the record tap's mapping, plan 5c) puts a stamp:
+/// the timeline heard at run `u` is `S(u − L)`, `S` mapping output runs
+/// to schedule frames through the marks.
+fn placed(marks: &[core_engine::record::Mark], u: i64) -> i64 {
+    let m = marks
+        .iter()
+        .rev()
+        .find(|m| (m.run as i64) <= u - m.latency as i64)
+        .unwrap_or(&marks[0]);
+    m.frame as i64 + (u - m.latency as i64 - m.run as i64)
+}
+
+/// The first frame where `a` and `b` differ.
+fn first_change(a: &[f32], b: &[f32]) -> usize {
+    a.iter().zip(b).position(|(x, y)| x != y).unwrap()
+}
+
+/// Task 5 review M3: a live value applies at the strip in the run being
+/// processed, whose lane reads `A` frames behind the transport; the stamp
+/// maps the gesture to that frame, so the automation written from it
+/// plays back exactly where the touch was heard (not `L − A` early).
+#[test]
+fn a_written_gesture_plays_back_where_it_was_heard_on_a_latent_strip() {
+    let (doc, seq, synth) = latent_doc(None);
+    let blocks = 40;
+    let k = 17;
+    let (dry, _, _) = render_latent(&doc, seq, synth, None, None, blocks);
+    let (live, marks, stamps) = render_latent(&doc, seq, synth, None, Some(k), blocks);
+    assert_eq!(marks[0].latency, 2 * A, "the graph latency");
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+    let block = (k as u64 * u64::from(BLOCK)) as i64;
+    assert_eq!(
+        stamps[0].run,
+        block + A as i64,
+        "heard when the strip's change reaches the master"
+    );
+    let at = placed(&marks, stamps[0].run);
+    assert_eq!(at, block - A as i64, "the frame the strip's lane read");
+    let (doc2, seq2, synth2) = latent_doc(Some(at as u64));
+    let (played, _, _) = render_latent(&doc2, seq2, synth2, None, None, blocks);
+    let heard = first_change(&dry, &live);
+    assert_eq!(heard as i64, block + A as i64 + 1, "the live touch's ramp");
+    assert_eq!(
+        first_change(&dry, &played),
+        heard,
+        "the written automation is heard where the touch was"
+    );
+    // Both stand at −20 dB once their ramps are done.
+    let from = heard + 600;
+    for (i, (x, y)) in live[from..].iter().zip(&played[from..]).enumerate() {
+        assert!((x - y).abs() < 1e-6, "frame {}: {x} {y}", from + i);
+    }
+}
+
+/// Task 4's loop seam: just after a wrap, a strip `A` frames behind still
+/// renders the end of the previous pass; a gesture taken there is
+/// stamped into that pass, at the frame the lane read, and its written
+/// automation is heard where the touch was.
+#[test]
+fn a_gesture_just_after_a_wrap_maps_to_the_pass_its_strip_rendered() {
+    let (doc, seq, synth) = latent_doc(None);
+    let lp = 16 * u64::from(BLOCK);
+    let blocks = 24;
+    let k = 17;
+    let (dry, _, _) = render_latent(&doc, seq, synth, Some(lp), None, blocks);
+    let (live, marks, stamps) = render_latent(&doc, seq, synth, Some(lp), Some(k), blocks);
+    assert!(marks.iter().any(|m| m.wrap && m.run == lp), "{marks:?}");
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+    let block = k as i64 * i64::from(BLOCK);
+    let pos = block - lp as i64;
+    assert!(pos < A as i64, "the strip still reads before the seam");
+    let at = placed(&marks, stamps[0].run);
+    assert_eq!(
+        at,
+        lp as i64 - (A as i64 - pos),
+        "the previous pass's end, where the lane read"
+    );
+    let (doc2, seq2, synth2) = latent_doc(Some(at as u64));
+    let (played, _, _) = render_latent(&doc2, seq2, synth2, Some(lp), None, blocks);
+    let heard = first_change(&dry, &live);
+    assert_eq!(heard as i64, block + A as i64 + 1, "the live touch's ramp");
+    assert_eq!(
+        first_change(&dry, &played),
+        heard,
+        "the written automation is heard where the touch was"
+    );
+}

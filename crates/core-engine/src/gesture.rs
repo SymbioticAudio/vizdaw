@@ -1,13 +1,16 @@
 //! Live gestures (sub-project 5 spec §7.1, §7.2; plan 5e-1 Rulings 6, 10,
 //! 11): the control side's messages, the renderer's table of touched
 //! targets and (Task 6) the gesture tap. // RT (the table and the tap)
+//!
+//! The status says when the tap has rolled: until then the transport still reads stopped (plan 5e-1 Ruling 24).
 
+use crate::record::{Begun, MARK_CAPACITY, MarkReader, RunClock};
 use crate::schedule::automation::AutoDest;
 use core_model::automation::{fader_db, fader_norm, unit};
 use core_model::ids::PluginInstanceId;
 use core_model::mixer::ParamId;
 use rtrb::{Consumer, Producer, RingBuffer};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Capacity of the gesture queue (control → RT).
@@ -488,5 +491,195 @@ impl LiveTable {
     /// The live entries' destinations. // RT
     pub fn dests(&self) -> impl Iterator<Item = AutoDest> + '_ {
         self.live().iter().map(|l| l.dest)
+    }
+}
+
+/// Stamps a gesture tap can hold until the control side reads them.
+pub const STAMP_CAPACITY: usize = 16_384;
+
+/// A gesture as the renderer took it (Ruling 7).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stamped {
+    /// What it moves.
+    pub dest: AutoDest,
+    /// The output run frame it was heard at (graph latency not yet taken off), as `RecordedMidi.run`.
+    ///
+    /// A live value acts at once at its control, which renders the
+    /// timeline its arrival behind the renderer (Ruling 5; Task 5 review
+    /// M3): it is heard at the master the graph latency less that arrival
+    /// later, so the placement (`S(run − L)`) puts it at the frame the
+    /// control's lane reads, across a loop seam too.
+    pub run: i64,
+    /// What it did.
+    pub phase: GesturePhase,
+    /// The control side's tag ([`GestureMsg::tag`]).
+    pub tag: u8,
+}
+
+/// What a gesture tap shares with the control side.
+#[derive(Debug)]
+pub struct GestureStatus {
+    run: AtomicU64,
+    rolled: AtomicBool,
+    closed: AtomicBool,
+    lost_marks: AtomicU64,
+    lost_stamps: AtomicU64,
+}
+
+impl GestureStatus {
+    /// Run frames played so far.
+    pub fn run(&self) -> u64 {
+        self.run.load(Ordering::Acquire)
+    }
+
+    /// The tap has pushed its roll mark (set with Release ordering when it does; pre-flight C1, Ruling 24).
+    pub fn rolled(&self) -> bool {
+        self.rolled.load(Ordering::Acquire)
+    }
+
+    /// The tap is gone: removed, or dropped with its renderer.
+    pub fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Marks that did not fit.
+    pub fn lost_marks(&self) -> u64 {
+        self.lost_marks.load(Ordering::Relaxed)
+    }
+
+    /// Stamps that did not fit.
+    pub fn lost_stamps(&self) -> u64 {
+        self.lost_stamps.load(Ordering::Relaxed)
+    }
+}
+
+/// The control side of a gesture tap.
+#[derive(Debug)]
+pub struct GestureHandles {
+    /// Marks, oldest first.
+    pub marks: MarkReader,
+    /// Stamped gestures, oldest first.
+    pub stamps: Consumer<Stamped>,
+    /// Counters, the run and whether it rolled.
+    pub status: Arc<GestureStatus>,
+}
+
+/// The real-time side of the gesture tap (Ruling 7), owned by the
+/// renderer: the record tap's run clock and the stamps.
+#[derive(Debug)]
+pub struct GestureTap {
+    clock: RunClock,
+    stamps: Producer<Stamped>,
+    status: Arc<GestureStatus>,
+}
+
+/// A tap and its control side, its marks carrying graph latency `latency`. Allocates; call off the RT thread.
+pub fn gesture_tap(latency: u64) -> (GestureTap, GestureHandles) {
+    let (mark_tx, mark_rx) = RingBuffer::new(MARK_CAPACITY);
+    let (stamp_tx, stamp_rx) = RingBuffer::new(STAMP_CAPACITY);
+    let status = Arc::new(GestureStatus {
+        run: AtomicU64::new(0),
+        rolled: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+        lost_marks: AtomicU64::new(0),
+        lost_stamps: AtomicU64::new(0),
+    });
+    (
+        GestureTap {
+            clock: RunClock::new(mark_tx, latency),
+            stamps: stamp_tx,
+            status: Arc::clone(&status),
+        },
+        GestureHandles {
+            marks: mark_rx,
+            stamps: stamp_rx,
+            status,
+        },
+    )
+}
+
+impl Drop for GestureTap {
+    fn drop(&mut self) {
+        self.status.closed.store(true, Ordering::Release);
+    }
+}
+
+impl GestureTap {
+    /// Counts a mark that did not fit. // RT
+    fn count(&self, fit: bool) {
+        if !fit {
+            self.status.lost_marks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// At a block's start while playing (see `RecordTap::begin_block`);
+    /// the roll sets the status's `rolled`. // RT
+    pub fn begin_block(&mut self, frame: u64) {
+        let (begun, fit) = self.clock.begin_block(frame);
+        self.count(fit);
+        if begun == Begun::Rolled {
+            self.status.rolled.store(true, Ordering::Release);
+        }
+    }
+
+    /// The transport left Playing at block offset `offset`, standing at
+    /// `frame`. // RT
+    pub fn stop(&mut self, offset: u32, frame: u64) {
+        let fit = self.clock.stop(offset, frame);
+        self.count(fit);
+    }
+
+    /// A loop wrap at block offset `offset` continues at `to`. // RT
+    pub fn wrap(&mut self, offset: u32, to: u64) {
+        let fit = self.clock.wrap(offset, to);
+        self.count(fit);
+    }
+
+    /// The schedule changed or the transport jumped: the next block marks
+    /// where it is. // RT
+    pub fn resync(&mut self) {
+        self.clock.resync();
+    }
+
+    /// The graph latency is `latency` from the next block on. // RT
+    pub fn set_latency(&mut self, latency: u64) {
+        self.clock.set_latency(latency);
+    }
+
+    /// At a block's end: advances the run over the frames that played. // RT
+    pub fn end_block(&mut self, frames: u32, advanced: bool) {
+        if self.clock.end_block(frames, advanced).is_some() {
+            self.status.run.store(self.clock.run(), Ordering::Release);
+        }
+    }
+
+    /// Stamps a message heard at block offset `offset` (negative: before the block), by `RecordTap::midi`'s rule.
+    ///
+    /// `ahead` is how long after the renderer its change is heard at the
+    /// master: the graph latency less its control's arrival (Task 5
+    /// review M3; see [`Stamped::run`]). // RT
+    pub fn stamp(&mut self, dest: AutoDest, offset: i64, ahead: i64, phase: GesturePhase, tag: u8) {
+        let Some(run) = self.clock.stamp_run(offset) else {
+            return;
+        };
+        let run = run.saturating_add(ahead);
+        if self
+            .stamps
+            .push(Stamped {
+                dest,
+                run,
+                phase,
+                tag,
+            })
+            .is_err()
+        {
+            self.status.lost_stamps.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The tap is removed: the control side reads it closed now, before
+    /// the retire thread frees it. // RT
+    pub fn close(&self) {
+        self.status.closed.store(true, Ordering::Release);
     }
 }

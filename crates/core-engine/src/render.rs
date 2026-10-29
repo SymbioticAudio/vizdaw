@@ -2,6 +2,7 @@
 
 use crate::backend::{BlockInfo, BlockTime, InputBlock, MidiOut, StereoBuf};
 use crate::count_in::{CountIn, Counting};
+use crate::gesture::GestureTap;
 use crate::graph::exec::{Exec, RunResult, SinkTable};
 use crate::graph::regions::InputCopy;
 use crate::graph::{Graph, MAX_INSERTS, MAX_NODES};
@@ -483,6 +484,10 @@ pub enum EngineCmd {
     /// installed (its sounding note ends; it goes back through the retire
     /// ring).
     Measure(Option<Box<MeasureTap>>),
+    /// Install a gesture tap (plan 5e-1 Ruling 7), or remove the one
+    /// installed (it goes back through the retire ring; its status reads
+    /// closed).
+    Gestures(Option<Box<GestureTap>>),
 }
 
 /// Something the renderer hands back for freeing off the audio thread.
@@ -500,6 +505,8 @@ pub enum Retired {
     Inputs(Box<InputRoutes>),
     /// A removed measurement.
     Measure(Box<MeasureTap>),
+    /// A removed gesture tap.
+    Gestures(Box<GestureTap>),
 }
 
 /// Capacity of the command ring.
@@ -562,6 +569,8 @@ pub struct Renderer {
     auto_last: Box<[f64; MAX_AUTO_LANES]>,
     /// The recording's tap (spec §6.2), while one is installed.
     tap: Option<Box<RecordTap>>,
+    /// The gesture tap (plan 5e-1 Ruling 7), while one is installed.
+    gestures: Option<Box<GestureTap>>,
     /// MIDI from sources (spec §6.6).
     midi_in: Consumer<MidiIn>,
     /// Gestures from the control side (spec §7.1; plan 5e-1 Ruling 6).
@@ -738,6 +747,7 @@ impl Renderer {
             pending_skip: 0,
             auto_last: Box::new([f64::NAN; MAX_AUTO_LANES]),
             tap: None,
+            gestures: None,
             midi_in,
             gesture_in,
             live: Box::new(crate::gesture::LiveTable::new()),
@@ -812,12 +822,15 @@ impl Renderer {
         crate::rt_check::disarm();
     }
 
-    /// The tap's end of a block (see [`RecordTap::end_block`]), and the
-    /// measurement's (it watches every block's input, played or not:
-    /// [`MeasureTap::capture`]). // RT
+    /// The taps' end of a block (see [`RecordTap::end_block`] and
+    /// [`GestureTap::end_block`]), and the measurement's (it watches every
+    /// block's input, played or not: [`MeasureTap::capture`]). // RT
     fn end_tap(&mut self, input: &InputBlock<'_>, frames: u32, advanced: bool) {
         if let Some(t) = self.tap.as_deref_mut() {
             t.end_block(input.channels, frames, advanced);
+        }
+        if let Some(t) = self.gestures.as_deref_mut() {
+            t.end_block(frames, advanced);
         }
         if let Some(m) = self.measure.as_deref_mut() {
             m.capture(input.channels, frames, input.delay_frames);
@@ -896,6 +909,14 @@ impl Renderer {
                 // At the end already: the block's `Step::End` stops the tap.
                 (PlayState::Playing, None) => {}
                 // Stopped or in the tail: the run ends here (pre-flight M2).
+                _ => t.stop(0, self.transport.pos),
+            }
+        }
+        // The gesture tap's clock follows the record tap's (Ruling 7).
+        if let Some(t) = self.gestures.as_deref_mut() {
+            match (self.transport.state, self.transport.play_pos(length)) {
+                (PlayState::Playing, Some(at)) => t.begin_block(at),
+                (PlayState::Playing, None) => {}
                 _ => t.stop(0, self.transport.pos),
             }
         }
@@ -980,6 +1001,9 @@ impl Renderer {
                         if let Some(t) = self.tap.as_deref_mut() {
                             t.wrap(offset, to);
                         }
+                        if let Some(t) = self.gestures.as_deref_mut() {
+                            t.wrap(offset, to);
+                        }
                         // A wrap ends held values (plan 5e-1 Ruling 10).
                         self.live.end_holds();
                         // Led regions read the loop's end before its start.
@@ -1001,6 +1025,9 @@ impl Renderer {
                         // The run ends where the sequence does (pre-flight
                         // M2).
                         if let Some(t) = self.tap.as_deref_mut() {
+                            t.stop(offset, self.transport.pos);
+                        }
+                        if let Some(t) = self.gestures.as_deref_mut() {
                             t.stop(offset, self.transport.pos);
                         }
                         release_all(&mut self.notes, &mut o, offset);
@@ -1254,14 +1281,33 @@ impl Renderer {
         }
     }
 
-    /// Takes the queued gestures into the live table (plan 5e-1 Ruling 6). // RT
+    /// Takes the queued gestures into the live table (plan 5e-1 Ruling 6)
+    /// and stamps each on the gesture tap (Ruling 7), offset by its host
+    /// time as `live_midi` offsets MIDI, and heard the graph latency less
+    /// its control's arrival after the renderer: the live value acts at
+    /// once at a control that renders the timeline its arrival behind
+    /// (Task 5 review M3). // RT
     fn live_gestures(&mut self) {
+        let sr = self.cfg.sample_rate;
+        let block_ns = self.block_ns;
+        let latency = i64::try_from(self.latency).unwrap_or(i64::MAX);
         for _ in 0..crate::gesture::GESTURES_PER_BLOCK {
             let Ok(m) = self.gesture_in.pop() else {
                 break;
             };
             if !self.live.apply(m.dest, m.phase) {
                 self.shared.count_gesture_drop();
+            }
+            if let Some(t) = self.gestures.as_deref_mut() {
+                let offset = if m.host_ns == 0 {
+                    0
+                } else {
+                    let ns = i128::from(m.host_ns) - i128::from(block_ns);
+                    (ns as f64 * sr / 1e9).round() as i64
+                };
+                let arrival = dest_arrival(self.graph.as_deref(), m.dest);
+                let ahead = latency.saturating_sub(i64::try_from(arrival).unwrap_or(i64::MAX));
+                t.stamp(m.dest, offset, ahead, m.phase, m.tag);
             }
         }
     }
@@ -1351,6 +1397,7 @@ impl Renderer {
                 Ok(EngineCmd::SetGraph(_)) => self.graph.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::RemoveSink(_)) => self.retire.slots() == 0,
                 Ok(EngineCmd::Record(_)) => self.tap.is_some() && self.retire.slots() == 0,
+                Ok(EngineCmd::Gestures(_)) => self.gestures.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::SetInputs(_)) => self.inputs.is_some() && self.retire.slots() == 0,
                 Ok(EngineCmd::Measure(_)) => self.measure.is_some() && self.retire.slots() == 0,
                 Ok(_) => false,
@@ -1429,6 +1476,9 @@ impl Renderer {
                 if let Some(t) = self.tap.as_deref_mut() {
                     t.resync();
                 }
+                if let Some(t) = self.gestures.as_deref_mut() {
+                    t.resync();
+                }
                 self.auto_last.fill(f64::NAN);
                 if self.transport.state == PlayState::Playing {
                     self.forget_unautomated();
@@ -1449,6 +1499,9 @@ impl Renderer {
                 // What a recording captures from here on is heard with the
                 // new latency (final review I1).
                 if let Some(t) = self.tap.as_deref_mut() {
+                    t.set_latency(self.latency);
+                }
+                if let Some(t) = self.gestures.as_deref_mut() {
                     t.set_latency(self.latency);
                 }
                 self.graph = Some(new);
@@ -1478,6 +1531,9 @@ impl Renderer {
                     if let Some(t) = self.tap.as_deref_mut() {
                         t.stop(0, self.transport.pos);
                     }
+                    if let Some(t) = self.gestures.as_deref_mut() {
+                        t.stop(0, self.transport.pos);
+                    }
                 }
                 self.release_now(true);
                 self.transport.stop();
@@ -1499,6 +1555,9 @@ impl Renderer {
                 // A jump while recording is a cut: the next block marks
                 // where the transport landed (review fix M1).
                 if let Some(t) = self.tap.as_deref_mut() {
+                    t.resync();
+                }
+                if let Some(t) = self.gestures.as_deref_mut() {
                     t.resync();
                 }
                 self.since_start = 0;
@@ -1560,6 +1619,21 @@ impl Renderer {
                 if let Some(old) = std::mem::replace(&mut self.tap, new) {
                     old.close();
                     if let Err(rtrb::PushError::Full(old)) = self.retire.push(Retired::Tap(old)) {
+                        // Unreachable: room was checked in `drain_commands`.
+                        std::mem::forget(old);
+                    }
+                }
+            }
+            EngineCmd::Gestures(mut new) => {
+                // The latency the graph has now (as `Record`).
+                if let Some(t) = new.as_deref_mut() {
+                    t.set_latency(self.latency);
+                }
+                if let Some(old) = std::mem::replace(&mut self.gestures, new) {
+                    old.close();
+                    if let Err(rtrb::PushError::Full(old)) =
+                        self.retire.push(Retired::Gestures(old))
+                    {
                         // Unreachable: room was checked in `drain_commands`.
                         std::mem::forget(old);
                     }
@@ -1955,15 +2029,23 @@ fn lane_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64, past: bool)
 /// the insert's; a plugin instrument's parameter (and every lane without a
 /// graph) at 0. // RT
 fn lane_arrival(graph: Option<&Graph>, lane: &crate::schedule::AutoLane) -> u64 {
+    if matches!(lane.dest, AutoDest::Plugin(..)) && lane.instrument.is_some() {
+        return 0;
+    }
+    dest_arrival(graph, lane.dest)
+}
+
+/// `dest`'s arrival, as [`lane_arrival`] reads its lane: a plugin
+/// instrument's parameter is no insert's, so it is 0 here too. // RT
+fn dest_arrival(graph: Option<&Graph>, dest: AutoDest) -> u64 {
     let Some(g) = graph else {
         return 0;
     };
-    match lane.dest {
+    match dest {
         AutoDest::Strip(s, StripParam::Fader | StripParam::Pan) => g.strip_arrival(s),
         AutoDest::Strip(s, StripParam::Mute | StripParam::Solo) => g.feed_arrival(s, None),
         AutoDest::Send(s, i) => g.feed_arrival(s, Some(i)),
-        AutoDest::Plugin(id, _) if lane.instrument.is_none() => g.insert_arrival(id),
-        AutoDest::Plugin(..) => 0,
+        AutoDest::Plugin(id, _) => g.insert_arrival(id),
     }
 }
 
