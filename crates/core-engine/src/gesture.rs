@@ -686,7 +686,7 @@ impl GestureTap {
         }
     }
 
-    /// Stamps a message heard at block offset `offset` (negative: before the block), by `RecordTap::midi`'s rule.
+    /// Stamps a message heard at block offset `offset` (negative: before the block), by `RecordTap::midi`'s rule, then shifted by `ahead`.
     ///
     /// `ahead` is how long after the renderer its change is heard at the
     /// master: the graph latency less its control's arrival (Task 5
