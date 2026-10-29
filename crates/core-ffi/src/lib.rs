@@ -17,6 +17,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod audio;
+pub mod autowrite;
 pub mod blocks;
 pub mod catalog;
 pub mod clock;
