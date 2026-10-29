@@ -474,3 +474,23 @@ fn marks_carry_the_graph_latency_and_a_change_is_marked() {
         ]
     );
 }
+
+/// Task 9b re-review m5: the roll block's run reaches the control side
+/// only once that block has published its transport state (the renderer
+/// calls `published` right after `publish`), so a run seen implies the
+/// Playing state is visible; later blocks store their run at their end.
+#[test]
+fn the_roll_blocks_run_waits_for_its_publish() {
+    let (mut t, h) = core_engine::record::tap(&request(vec![0], 4800), 0);
+    let ch = [0.0f32; 256];
+    let input: [&[f32]; 1] = [&ch];
+    t.begin_block(100, 0);
+    t.end_block(&input, 256, true);
+    assert_eq!(h.status.run(), 0, "not before the roll block publishes");
+    t.published();
+    assert_eq!(h.status.run(), 256);
+    t.published();
+    t.begin_block(356, 0);
+    t.end_block(&input, 256, true);
+    assert_eq!(h.status.run(), 512, "a later block as before");
+}

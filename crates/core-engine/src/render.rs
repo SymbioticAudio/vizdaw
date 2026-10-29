@@ -1068,6 +1068,9 @@ impl Renderer {
         }
         self.end_tap(input, frames, !missed);
         self.publish();
+        if let Some(t) = self.tap.as_deref_mut() {
+            t.published();
+        }
         if let Some(t) = self.gestures.as_deref_mut() {
             t.published();
         }

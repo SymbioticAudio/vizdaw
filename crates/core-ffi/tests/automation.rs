@@ -1978,23 +1978,35 @@ fn trim_ride_over_play(touch: Option<f64>, to: f64) -> (Vec<f64>, Vec<(i64, f64)
     s.gesture(t, Phase::Release).unwrap();
     let released = tick(&s);
     stop_and_land(&s);
-    // The ride's points, from the move to the release; the edge's second
-    // half (one tick after the release's point) is the lane again. The
-    // renderer takes the release up to a block after the tick read here
-    // (Task 9b review m1), so the release point may be a little later.
+    // The landed lane inside the ride, away from both edges (where the
+    // move and the release land depends on the block that took them;
+    // Task 9b re-review m1): read every Q/4 from the move plus Q/8 to the
+    // release minus Q/8, as the lane plays (linear between points).
     let p = points(&s, seq, lane);
-    let landed = p
-        .iter()
-        .enumerate()
-        .filter(|(i, x)| {
-            x.0 >= moved - Q / 16
-                && x.0 <= released + Q / 16
-                && !(*i > 0 && p[i - 1].0 == x.0 - 1 && p[i - 1].0 >= moved)
-        })
-        .map(|(_, &(k, v))| (k, fader_db(v) - fader_db(ramp_at(k))))
-        .collect();
+    let mut landed = Vec::new();
+    let mut k = moved + Q / 8;
+    while k <= released - Q / 8 {
+        let v = lane_at(&p, k).expect("the lane plays inside the ride");
+        landed.push((k, fader_db(v) - fader_db(ramp_at(k))));
+        k += Q / 4;
+    }
     s.close().unwrap();
     (heard, landed)
+}
+
+/// The value lane points `p` (by tick) play at tick `k`: linear between
+/// the points around it, the last one at the same tick winning; `None`
+/// before the first point.
+fn lane_at(p: &[(i64, f64)], k: i64) -> Option<f64> {
+    let after = p.iter().position(|x| x.0 > k);
+    let before = match after {
+        Some(0) => return None,
+        Some(a) => p.get(a - 1)?,
+        None => return p.last().map(|x| x.1),
+    };
+    let next = p.get(after?)?;
+    let span = (next.0 - before.0) as f64;
+    Some(before.1 + (next.1 - before.1) * (k - before.0) as f64 / span)
 }
 
 /// The landed offsets are one offset (the ramp's shape kept, no flat

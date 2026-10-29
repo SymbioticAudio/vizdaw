@@ -358,6 +358,10 @@ pub struct RecordTap {
     range: Option<(u64, u64)>,
     /// The run frames and marks (plan 5e-1 Ruling 7).
     clock: RunClock,
+    /// The tap rolled this block: its run is stored for the control side
+    /// once the block has published its transport state
+    /// ([`RecordTap::published`]; Task 9b re-review m5).
+    roll_due: bool,
 }
 
 impl Drop for RecordTap {
@@ -389,6 +393,7 @@ pub fn tap(req: &RecordRequest, latency: u64) -> (RecordTap, RecordHandles) {
             status: Arc::clone(&status),
             range: req.range,
             clock: RunClock::new(mark_tx, latency),
+            roll_due: false,
         },
         RecordHandles {
             ring: reader,
@@ -443,7 +448,20 @@ impl RecordTap {
         if matches!(begun, Begun::Rolled | Begun::Resumed) {
             self.status.delay.store(delay, Ordering::Release);
         }
+        // Set for this block only: a block that did not roll stores its
+        // run at its end as before.
+        self.roll_due = begun == Begun::Rolled;
         self.count(fit);
+    }
+
+    /// After the block published its transport state: the roll block's
+    /// run is stored now, so a control side that reads the run and then
+    /// the state never sees the run of the first block with the state
+    /// from before the Play (Task 9b re-review m5). // RT
+    pub fn published(&mut self) {
+        if std::mem::take(&mut self.roll_due) {
+            self.status.run.store(self.clock.run(), Ordering::Release);
+        }
     }
 
     /// The transport left Playing at block offset `offset` (0: before the
@@ -514,6 +532,9 @@ impl RecordTap {
         }
         let run = self.clock.run();
         self.ring.set_end(run);
-        self.status.run.store(run, Ordering::Release);
+        // The roll block's run waits for its publish (`published`).
+        if !self.roll_due {
+            self.status.run.store(run, Ordering::Release);
+        }
     }
 }
