@@ -1057,3 +1057,104 @@ fn to_model_steps_stepped_targets() {
         ]
     );
 }
+
+/// A tempo table from `(tick, bpm, ramp)` points.
+fn table(pts: &[(i64, u32, bool)]) -> TempoTable {
+    use core_model::tempo::{Bpm, TempoMap, TempoPoint};
+    let m = TempoMap::new(
+        pts.iter()
+            .map(|(t, b, r)| TempoPoint {
+                tick: Tick(*t),
+                bpm: Bpm::whole(*b),
+                ramp: *r,
+            })
+            .collect(),
+    )
+    .unwrap();
+    TempoTable::build(&m, Tick(0), 48_000.0)
+}
+
+/// Re-review 2 N4: a Write touch whose first value comes 1–4 frames
+/// after it (click-to-position: Touch and Value microseconds apart) keeps
+/// the hold before the touch at any tempo: where the step and the hold
+/// share a tick and the next point owns the tick after, the hold stays
+/// and the value that lasted under a tick goes.
+#[test]
+fn a_write_touch_with_a_value_just_after_keeps_its_hold() {
+    let tables = [
+        table(&[(0, 60, false)]),
+        table(&[(0, 120, false)]),
+        table(&[(0, 177, false)]),
+        table(&[(0, 120, false), (19_200, 177, false)]),
+        table(&[(0, 60, true), (40_000, 177, false)]),
+    ];
+    for (n, tempo) in tables.iter().enumerate() {
+        for k in 1..5i64 {
+            for f in 48_000..48_400i64 {
+                let stamps = [
+                    st(PAN, f, GesturePhase::Touch(0.8), WriteMode::Write),
+                    st(PAN, f + k, GesturePhase::Value(0.6), WriteMode::Write),
+                    st(PAN, f + 5_000, GesturePhase::Hold, WriteMode::Write),
+                ];
+                let w = run(
+                    &[roll(0, 0)],
+                    96_000,
+                    &stamps,
+                    &[(PAN, 0.2)],
+                    &half,
+                    &no_points,
+                );
+                let m = to_model(&w, SeqId(0), tempo, &|_, _| 0.5, &|_| "Pan".into(), &|t| {
+                    t.is_stepped()
+                });
+                let p: Vec<(i64, f64)> = m[0].points.iter().map(|(t, v)| (t.0, *v)).collect();
+                assert!(
+                    p.windows(2).all(|x| x[0].0 < x[1].0),
+                    "table {n} k={k} f={f}: {p:?}"
+                );
+                let mid = tempo.frame_to_tick(20_000).0;
+                assert!(
+                    (lane_value(&p, mid) - 0.2).abs() < 1e-12,
+                    "table {n} k={k} f={f}: {p:?}"
+                );
+                let late = tempo.frame_to_tick(f as u64 + 2_000).0;
+                assert!(
+                    (lane_value(&p, late) - 0.6).abs() < 1e-12,
+                    "table {n} k={k} f={f}: {p:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Re-review 2 nit: a Touch glide stamped in a gap lands where its segment
+/// reopened, after the engine had begun it: like a Release there, it
+/// writes nothing (a Glide(0) no stale frame).
+#[test]
+fn a_glide_where_its_segment_reopened_writes_nothing() {
+    let marks = [
+        roll(0, 0),
+        Mark {
+            run: 100,
+            frame: 100,
+            wrap: false,
+            latency: 1_000,
+        },
+        Mark {
+            run: 200,
+            frame: 200,
+            wrap: false,
+            latency: 0,
+        },
+    ];
+    for n in [0, 1_000] {
+        let stamps = [
+            st(PAN, 20, GesturePhase::Touch(0.4), WriteMode::Touch),
+            st(PAN, 60, GesturePhase::Value(0.6), WriteMode::Touch),
+            st(PAN, 150, GesturePhase::Glide(n), WriteMode::Touch),
+        ];
+        let w = run(&marks, 96_000, &stamps, &[], &half, &no_points);
+        assert_eq!(w.len(), 1, "Glide({n}): {w:?}");
+        close(&w[0].points, &[(20, 0.4), (60, 0.6), (100, 0.6)]);
+    }
+}

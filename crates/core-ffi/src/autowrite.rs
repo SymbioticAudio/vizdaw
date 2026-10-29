@@ -403,6 +403,12 @@ fn segments(
             }
             GesturePhase::Glide(n) => {
                 if let Some(mut seg) = open.take() {
+                    // Like a Release where its segment reopened: the
+                    // engine had begun the glide before, so nothing is
+                    // written there (re-review 2 nit).
+                    if seg.reopened && seg.samples.iter().all(|x| x.0 == f) {
+                        continue;
+                    }
                     seg.end_at(f);
                     let stretch_end = spans.get(s.piece).map_or(f, |x| x.stretch_end);
                     // A glide of 0 frames is a step one frame after the
@@ -763,6 +769,16 @@ pub fn to_model(
             .collect();
         let mut pts: Vec<(Tick, f64)> = Vec::with_capacity(w.points.len());
         for (i, (t, (_, v))) in ticks.iter().zip(&w.points).enumerate() {
+            // The last point holds the value of the one before it (the
+            // corner before a step: a release's hold, Write's hold before
+            // a touch).
+            let corner = !step
+                && pts
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|k| pts.get(k))
+                    .zip(pts.last())
+                    .is_some_and(|(a, b)| a.1 == b.1);
             match pts.last_mut() {
                 // A point rounding onto the tick before (adjacent frames
                 // share a tick about a third of the time at 120 BPM)
@@ -777,9 +793,13 @@ pub fn to_model(
                     let room = ticks.get(i + 1).is_none_or(|n| *n > next);
                     if !step && l.1 != *v && room {
                         pts.push((next, *v));
-                    } else {
+                    } else if !(corner && l.1 != *v) {
                         l.1 = *v;
                     }
+                    // Else no room and the last point is a hold corner:
+                    // it stays and `v`, which lasted under a tick before
+                    // the next point, goes (re-review 2 N4), so the hold
+                    // does not become a ramp from the point before.
                 }
                 _ => pts.push((*t, *v)),
             }
