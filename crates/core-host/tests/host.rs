@@ -790,6 +790,106 @@ fn unpaired_gesture_events_still_become_gestures() {
     drop(engine);
 }
 
+/// Plan 5e-1 Ruling 15: beside the grouped gestures, the host reports
+/// every parameter event in the order the plugin sent it, from the main
+/// thread (the path an AU's listener takes) and from the audio side (a
+/// CLAP plugin's output events).
+#[test]
+fn idle_reports_every_param_event_in_order() {
+    let (hist, song, id, mut host, script) = with_fake();
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[
+        ParamEvent::Begin(GAIN),
+        ParamEvent::Value(GAIN, 0.5),
+        ParamEvent::End(GAIN),
+        ParamEvent::Value(OTHER, 3.0),
+    ]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events,
+        vec![
+            (id, ParamEvent::Begin(GAIN)),
+            (id, ParamEvent::Value(GAIN, 0.5)),
+            (id, ParamEvent::End(GAIN)),
+            (id, ParamEvent::Value(OTHER, 3.0)),
+        ]
+    );
+    assert_eq!(r.gestures.len(), 2, "the gestures are grouped as before");
+    drop(engine);
+    // The CLAP test plugin's "Wiggle": a gesture from its process call.
+    let (hist, song, gain) = with_gain();
+    let mut host = crate::host(4096);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    let (mut engine, mut be) = crate::engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    host.set_param(gain, ParamId(2), 0.4);
+    peak(&mut be, 512);
+    let r = host.service(&mut engine, hist.doc(), song).unwrap();
+    assert_eq!(
+        r.param_events,
+        vec![
+            (gain, ParamEvent::Begin(ParamId(0))),
+            (gain, ParamEvent::Value(ParamId(0), 0.4)),
+            (gain, ParamEvent::End(ParamId(0))),
+        ]
+    );
+    drop(engine);
+}
+
+/// Pre-flight I7, plan 5e-1 Ruling 15: a gesture the host closes by
+/// itself (its End lost and the timeout passed, or its editor closed)
+/// reports an End for its open parameter, so the session's touch is
+/// released.
+#[test]
+fn a_gesture_the_host_closes_reports_its_end() {
+    let (mut hist, song, id, mut host, script) = with_fake();
+    host.set_gesture_timeout(Duration::from_millis(50));
+    let (mut engine, mut be) = engine(&host, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.5)]);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events,
+        vec![
+            (id, ParamEvent::Begin(GAIN)),
+            (id, ParamEvent::Value(GAIN, 0.5))
+        ]
+    );
+    std::thread::sleep(Duration::from_millis(60));
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events.last(),
+        Some(&(id, ParamEvent::End(GAIN))),
+        "{:?}",
+        r.param_events
+    );
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.25)]);
+    let _ = tick(&mut host, &mut engine, &mut be, &hist, song);
+    host.end_gestures(id);
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events.last(),
+        Some(&(id, ParamEvent::End(GAIN))),
+        "{:?}",
+        r.param_events
+    );
+    // A slot removed while its gesture is open (check m9).
+    script.emit(&[ParamEvent::Begin(GAIN), ParamEvent::Value(GAIN, 0.75)]);
+    let _ = tick(&mut host, &mut engine, &mut be, &hist, song);
+    run(&mut hist, MixerCmd::RemoveInsert { slot: id });
+    host.sync(hist.doc());
+    let r = tick(&mut host, &mut engine, &mut be, &hist, song);
+    assert_eq!(
+        r.param_events.last(),
+        Some(&(id, ParamEvent::End(GAIN))),
+        "{:?}",
+        r.param_events
+    );
+    drop(engine);
+}
+
 #[test]
 fn a_restart_in_the_middle_of_a_gesture_does_not_lose_it() {
     let (hist, song, _id, mut host, script) = with_fake();

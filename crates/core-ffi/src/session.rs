@@ -1,8 +1,9 @@
 //! `Session`: one open document (one window).
 
 use crate::automation::{
-    AutomationModeRow, AutomationStateRow, GesturePhaseRow, Holder, PassStep, Path as TouchPath,
-    PreviewPointRow, Release, Sampler, Source, StripModeRow, Touching, UnsentEnds, Writing,
+    AutomationModeRow, AutomationStateRow, GesturePhaseRow, Holder, Move, PassStep,
+    Path as TouchPath, PluginMove, PluginTouches, PreviewPointRow, Release, Sampler, Source,
+    StripModeRow, Touching, UnsentEnds, Writing,
 };
 use crate::autowrite::WriteMode;
 use crate::editor::{self, EditorSize};
@@ -151,6 +152,9 @@ struct Inner {
     static_edit: Option<(String, usize)>,
     /// The 10 ms sampler (Ruling 8).
     sampler: Sampler,
+    /// The plugin windows' touches (Ruling 15): a value-only plugin's are
+    /// released 500 ms after its last value.
+    plugin_touches: PluginTouches,
     /// Gesture ends the engine's queue refused (Ruling 10).
     unsent_ends: UnsentEnds,
     /// The pass writing while playing (Rulings 7, 23, 24).
@@ -243,6 +247,7 @@ impl Inner {
             touches: Default::default(),
             static_edit: None,
             sampler: Sampler::default(),
+            plugin_touches: PluginTouches::default(),
             unsent_ends: UnsentEnds::default(),
             writing: None,
             pending_automation: Vec::new(),
@@ -755,7 +760,17 @@ impl Session {
             // The title shows Edited.
             inner.news.doc_changed = true;
         }
-        inner.held.extend(r.gestures);
+        // A plugin window's moves are gestures too (spec §7.1); the
+        // parameters they write as automation are not parameter steps
+        // (plan 5e-1 Ruling 15, pre-flight M13).
+        let written = self.plugin_events(inner, &r.param_events);
+        inner
+            .held
+            .extend(r.gestures.into_iter().filter_map(|mut g| {
+                let slot = g.slot;
+                g.values.retain(|(p, _)| !written.contains(&(slot, *p)));
+                (!g.values.is_empty()).then_some(g)
+            }));
         let changed = self.commit_held(inner);
         self.mark(inner);
         self.maybe_autosave(inner);
@@ -5696,6 +5711,9 @@ impl Session {
             self.send_value(inner, t, v, ns);
         }
         inner.touches.remove(&t);
+        if touching.source == Source::Plugin {
+            inner.plugin_touches.forget(t);
+        }
         let return_frames = inner
             .writing
             .as_ref()
@@ -5811,6 +5829,162 @@ impl Session {
             .collect();
         for t in gone {
             self.release(inner, t, None);
+        }
+    }
+
+    /// A plugin window's parameter events (spec §7.1; Rulings 15, 27;
+    /// pre-flight I8, I9, M12): each, its value normalised by the
+    /// parameter's range (one the instance does not list is skipped), goes
+    /// through [`PluginTouches`] onto the gesture path as `Source::Plugin`,
+    /// stamped at the drain time. A target the app touches (plan 5e-2's
+    /// sliders) is the app's: the plugin's report of it is skipped. Answers
+    /// the parameters on a writing path (touched as a write in these
+    /// events, or still touched as one), whose grouped gestures are not
+    /// parameter steps (pre-flight M13).
+    fn plugin_events(
+        &self,
+        inner: &mut Inner,
+        events: &[(PluginInstanceId, core_host::ParamEvent)],
+    ) -> std::collections::BTreeSet<(PluginInstanceId, ParamId)> {
+        use core_host::ParamEvent;
+        let mut written = std::collections::BTreeSet::new();
+        if !events.is_empty() {
+            let slots: std::collections::BTreeSet<PluginInstanceId> =
+                events.iter().map(|(s, _)| *s).collect();
+            let ranges = plugins::with(self.id, |p| {
+                let mut out = std::collections::BTreeMap::new();
+                let Some(p) = p else {
+                    return out;
+                };
+                for slot in slots {
+                    if let Some(inst) = p.instance(slot) {
+                        for i in &inst.info().params {
+                            out.insert((slot, i.id), (i.min, i.max));
+                        }
+                    }
+                }
+                out
+            })
+            .unwrap_or_default();
+            // Up to one timer tick late (pre-flight M12).
+            let ns = host_time(None);
+            let now = crate::automation::now();
+            // Ruling 27: what the playing schedule automates.
+            let seq = (host::holder() == Some(self.id))
+                .then(|| {
+                    inner
+                        .writing
+                        .as_ref()
+                        .map(|w| w.seq)
+                        .or_else(|| host::position(self.id).map(|p| p.0))
+                })
+                .flatten();
+            let mut automated: std::collections::BTreeMap<AutomationTarget, bool> =
+                Default::default();
+            for (slot, e) in events {
+                let (param, m) = match *e {
+                    ParamEvent::Begin(p) => (p, PluginMove::Begin),
+                    ParamEvent::Value(p, v) => (p, PluginMove::Value(v)),
+                    ParamEvent::End(p) => (p, PluginMove::End),
+                };
+                let Some(&(min, max)) = ranges.get(&(*slot, param)) else {
+                    continue;
+                };
+                let m = match m {
+                    PluginMove::Value(v) if max > min => {
+                        PluginMove::Value(core_model::automation::unit((v - min) / (max - min)))
+                    }
+                    PluginMove::Value(_) => PluginMove::Value(0.5),
+                    m => m,
+                };
+                let t = AutomationTarget::PluginParam(*slot, param);
+                if inner
+                    .touches
+                    .get(&t)
+                    .is_some_and(|x| x.source == Source::Ui)
+                {
+                    continue;
+                }
+                let doc = inner.doc();
+                let auto = *automated.entry(t).or_insert_with(|| {
+                    seq.is_some_and(|s| !crate::automation::existing(doc, s, t).is_empty())
+                });
+                let writes = |inner: &Inner| {
+                    inner
+                        .touches
+                        .get(&t)
+                        .is_some_and(|x| matches!(x.path, TouchPath::Write(..)))
+                };
+                let was = writes(inner);
+                for mv in inner.plugin_touches.event(t, m, now, auto) {
+                    // The plugin path never opens an edit, so it is never
+                    // refused.
+                    let _ = match mv {
+                        Move::Touch(v) => self.touch(inner, t, v, Source::Plugin, Some(ns)),
+                        Move::Value(v) => self.move_to(inner, t, v, Source::Plugin, Some(ns)),
+                        Move::Release => {
+                            self.release(inner, t, Some(ns));
+                            Ok(())
+                        }
+                    };
+                }
+                if was || writes(inner) {
+                    written.insert((*slot, param));
+                }
+            }
+        }
+        for (t, x) in &inner.touches {
+            if let (AutomationTarget::PluginParam(slot, param), TouchPath::Write(..)) = (t, x.path)
+            {
+                written.insert((*slot, *param));
+            }
+        }
+        written
+    }
+
+    /// Releases the plugin windows' touches that ended by themselves
+    /// (spec §7.1, pre-flight I7): value-only touches 500 ms after their
+    /// last value (stamped then on a live device), and the touches of
+    /// slots that no longer run.
+    fn release_plugin_touches(&self, inner: &mut Inner) {
+        let now = crate::automation::now();
+        let mut ended: Vec<(AutomationTarget, Option<u64>)> = Vec::new();
+        for (t, at) in inner.plugin_touches.idle(now) {
+            let ns = if host::offline_mode() {
+                0
+            } else {
+                let ago = u64::try_from(now.saturating_sub(at).as_nanos()).unwrap_or(u64::MAX);
+                crate::clock::now_ns().saturating_sub(ago)
+            };
+            ended.push((t, Some(ns)));
+        }
+        let slots = inner.plugin_touches.slots();
+        if !slots.is_empty() {
+            let live = plugins::with(self.id, |p| {
+                slots
+                    .iter()
+                    .filter(|s| {
+                        p.as_ref()
+                            .is_some_and(|p| p.state(**s) == Some(core_host::SlotState::Live))
+                    })
+                    .copied()
+                    .collect::<std::collections::BTreeSet<PluginInstanceId>>()
+            });
+            // A busy registry says nothing: they wait for the next idle.
+            if let Ok(live) = live {
+                for t in inner.plugin_touches.release_slots(|s| live.contains(&s)) {
+                    ended.push((t, None));
+                }
+            }
+        }
+        for (t, ns) in ended {
+            if inner
+                .touches
+                .get(&t)
+                .is_some_and(|x| x.source == Source::Plugin)
+            {
+                self.release(inner, t, ns);
+            }
         }
     }
 
@@ -5975,6 +6149,7 @@ impl Session {
     fn service_writing(&self) {
         let mut inner = lock(&self.inner);
         self.resend_ends(&mut inner);
+        self.release_plugin_touches(&mut inner);
         for (t, v, ns) in inner.sampler.due(crate::automation::now()) {
             self.send_value(&mut inner, t, v, ns);
         }

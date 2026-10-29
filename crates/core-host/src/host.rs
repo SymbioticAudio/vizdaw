@@ -49,6 +49,11 @@ pub struct IdleReport {
     pub restart: Vec<PluginInstanceId>,
     /// Finished UI gestures.
     pub gestures: Vec<Gesture>,
+    /// Every parameter event the plugins reported, in order, beside the
+    /// grouped gestures, with an `End` for each parameter of a gesture the
+    /// host closed itself (plan 5e-1 Ruling 15): automation writes from
+    /// them.
+    pub param_events: Vec<(PluginInstanceId, ParamEvent)>,
     /// Saved states a plugin rejected on load (it plays with its defaults).
     pub rejected_state: Vec<(PluginInstanceId, String)>,
     /// Instances whose parameter list or values changed outside a gesture
@@ -73,6 +78,7 @@ impl IdleReport {
         self.failed.extend(o.failed);
         self.restart.extend(o.restart);
         self.gestures.extend(o.gestures);
+        self.param_events.extend(o.param_events);
         self.rejected_state.extend(o.rejected_state);
         self.params_changed.extend(o.params_changed);
         self.state_dirty.extend(o.state_dirty);
@@ -263,6 +269,10 @@ pub struct PluginHost {
     /// Gestures closed by [`PluginHost::end_gestures`], reported by the
     /// next `idle` or `service`.
     ended: Vec<Gesture>,
+    /// Every parameter event read since the last report, in the order
+    /// read (with the ends the host made itself), reported by the next
+    /// `idle` or `service` as `param_events`.
+    raw: Vec<(PluginInstanceId, ParamEvent)>,
     gesture_timeout: Duration,
     shelf: Shelf,
     back_tx: Sender<Returned>,
@@ -319,6 +329,7 @@ impl PluginHost {
             held: BTreeMap::new(),
             evicted: BTreeSet::new(),
             ended: Vec::new(),
+            raw: Vec::new(),
             gesture_timeout: GESTURE_TIMEOUT,
             shelf: Shelf::new(),
             back_tx,
@@ -526,7 +537,8 @@ impl PluginHost {
         let State::Live(live) = state else {
             return;
         };
-        collect_gestures(id, live, &want.params, &mut self.ended);
+        collect_gestures(id, live, &want.params, &mut self.ended, &mut self.raw);
+        end_open(id, live, &mut self.raw);
         live.open.clear();
         flush_gesture(id, live, &mut self.ended);
     }
@@ -638,6 +650,9 @@ impl PluginHost {
     fn fail(&mut self, id: PluginInstanceId, why: String) {
         self.shelf.set_reason(id, why.clone());
         if let Some(s) = self.slots.get_mut(&id) {
+            if let State::Live(l) = &s.state {
+                end_open(id, l, &mut self.raw);
+            }
             s.state = State::Failed(why);
         }
     }
@@ -705,6 +720,7 @@ impl PluginHost {
             return;
         };
         if let State::Live(mut l) = state {
+            end_open(id, &l, &mut self.raw);
             // The editor goes before the instance does (moved to `retiring`
             // it could no longer be reached): the app frees the parent view
             // once the slot is gone, and a plugin GUI must not outlive it.
@@ -818,6 +834,7 @@ impl PluginHost {
         for id in ids {
             self.service_instance(id, &mut r);
         }
+        r.param_events.append(&mut self.raw);
         r
     }
 
@@ -972,7 +989,8 @@ impl PluginHost {
         live.processor = None;
         // Its gesture queue goes with it: report what is in it, and close
         // a gesture the deactivation cut off (its `End` never comes).
-        collect_gestures(id, &mut live, &doc, &mut r.gestures);
+        collect_gestures(id, &mut live, &doc, &mut r.gestures, &mut self.raw);
+        end_open(id, &live, &mut self.raw);
         live.open.clear();
         flush_gesture(id, &mut live, &mut r.gestures);
         if self.refused.is_some() {
@@ -1010,12 +1028,13 @@ impl PluginHost {
             return;
         };
         let ev = live.inst.idle();
-        collect_gestures(id, live, &want.params, &mut r.gestures);
+        collect_gestures(id, live, &want.params, &mut r.gestures, &mut self.raw);
         let stale = live
             .last_event
             .is_some_and(|t| t.elapsed() >= self.gesture_timeout);
         if !live.open.is_empty() && stale {
             // Its `End` was lost: what it changed so far is one gesture.
+            end_open(id, live, &mut self.raw);
             live.open.clear();
             flush_gesture(id, live, &mut r.gestures);
         }
@@ -1107,6 +1126,8 @@ impl PluginHost {
             self.owed_load = true;
         }
         let ready = self.sync(doc);
+        // The ends of gestures the sync closed (a slot that went).
+        r.param_events.append(&mut self.raw);
         let changed = self.refused.as_ref().is_some_and(|f| {
             !r.loaded.is_empty()
                 || !r.failed.is_empty()
@@ -1376,18 +1397,21 @@ fn address(p: &dyn AudioProcessor) -> usize {
 /// second `Begin` of an open parameter means its `End` was lost: the
 /// gesture so far is closed first. An `End` of a parameter that is not
 /// open only closes when nothing else is open. Every value counts as sent
-/// and is pending until the document has it.
+/// and is pending until the document has it. Every event read is also
+/// appended to `raw`, in order (plan 5e-1 Ruling 15).
 fn collect_gestures(
     id: PluginInstanceId,
     l: &mut Live,
     doc: &BTreeMap<ParamId, f64>,
     out: &mut Vec<Gesture>,
+    raw: &mut Vec<(PluginInstanceId, ParamEvent)>,
 ) {
     let mut events = l.gestures.drain();
     events.extend(l.inst.gestures());
     if !events.is_empty() {
         l.last_event = Some(Instant::now());
     }
+    raw.extend(events.iter().map(|e| (id, *e)));
     for e in events {
         match e {
             ParamEvent::Begin(p) => {
@@ -1420,6 +1444,14 @@ fn collect_gestures(
             }
         }
     }
+}
+
+/// Reports an `End` for every parameter of `l`'s open gesture: called
+/// wherever the host closes a gesture itself, before `open` is cleared or
+/// the instance goes (pre-flight I7, plan 5e-1 Ruling 15), so whoever
+/// follows the raw events releases its touches.
+fn end_open(id: PluginInstanceId, l: &Live, raw: &mut Vec<(PluginInstanceId, ParamEvent)>) {
+    raw.extend(l.open.iter().map(|p| (id, ParamEvent::End(*p))));
 }
 
 /// Reports the gesture so far, if it has values.

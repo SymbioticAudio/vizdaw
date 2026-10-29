@@ -15,7 +15,7 @@ use core_model::automation::{
 use core_model::command::{Command, MixerCmd};
 use core_model::document::Document;
 use core_model::event::EventBody;
-use core_model::ids::{SeqId, StripId};
+use core_model::ids::{PluginInstanceId, SeqId, StripId};
 use core_model::mixer::AuxSend;
 use core_model::selection::ViewFilter;
 use core_model::time::Tick;
@@ -268,8 +268,7 @@ pub(crate) fn pass_settings() -> (AutomationMode, u32, Thinning) {
 pub(crate) enum Source {
     /// The mixer, the plugin window's generic sliders, the channel.
     Ui,
-    /// The plugin's own editor (Task 9 forwards its events).
-    #[allow(dead_code)]
+    /// The plugin's own editor (its events forwarded from the host).
     Plugin,
 }
 
@@ -495,6 +494,156 @@ impl Sampler {
     pub fn flush(&mut self, t: AutomationTarget) -> Option<(f64, u64)> {
         self.sent.remove(&t);
         self.kept.remove(&t)
+    }
+}
+
+/// One parameter event of a plugin's own editor, its value normalised
+/// (Ruling 15).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum PluginMove {
+    /// The user grabbed the control.
+    Begin,
+    /// A value.
+    Value(f64),
+    /// The user let go.
+    End,
+}
+
+/// What a plugin event does on the gesture path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Move {
+    /// A touch, at this value (`None`: the plugin's value now, Ruling 26).
+    Touch(Option<f64>),
+    /// A move.
+    Value(f64),
+    /// A release.
+    Release,
+}
+
+/// One plugin parameter a plugin touches.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PluginTouch {
+    /// Touched by a `Begin` (released by its `End` only), not by a value.
+    gesture: bool,
+    /// When its last value (or its `Begin`) came.
+    last: Duration,
+}
+
+/// The plugin windows' touches (spec §7.1, Ruling 15, Ruling 27): a
+/// `Begin` touches until its `End`; a value with no touch touches at that
+/// value and is released [`PluginTouches::IDLE`] after the last value,
+/// except on an automated parameter, where it is an echo of playback.
+#[derive(Debug, Default)]
+pub(crate) struct PluginTouches {
+    touches: BTreeMap<AutomationTarget, PluginTouch>,
+}
+
+impl PluginTouches {
+    /// A value-only touch is released this long after its last value
+    /// (spec §7.1).
+    pub(crate) const IDLE: Duration = Duration::from_millis(500);
+
+    /// Plugin event `m` of `t` at `now`; `automated`: the playing schedule
+    /// automates `t`. Answers what the gesture path does.
+    pub fn event(
+        &mut self,
+        t: AutomationTarget,
+        m: PluginMove,
+        now: Duration,
+        automated: bool,
+    ) -> Vec<Move> {
+        match (m, self.touches.get_mut(&t)) {
+            (PluginMove::Begin, Some(p)) => {
+                // A repeated Begin, or one after the values that touched
+                // it: from now on its End releases it.
+                p.gesture = true;
+                p.last = now;
+                Vec::new()
+            }
+            (PluginMove::Begin, None) => {
+                self.touches.insert(
+                    t,
+                    PluginTouch {
+                        gesture: true,
+                        last: now,
+                    },
+                );
+                vec![Move::Touch(None)]
+            }
+            (PluginMove::Value(v), Some(p)) => {
+                p.last = now;
+                vec![Move::Value(v)]
+            }
+            // Ruling 27: an echo of the automation it plays.
+            (PluginMove::Value(_), None) if automated => Vec::new(),
+            (PluginMove::Value(v), None) => {
+                self.touches.insert(
+                    t,
+                    PluginTouch {
+                        gesture: false,
+                        last: now,
+                    },
+                );
+                vec![Move::Touch(Some(v))]
+            }
+            (PluginMove::End, Some(_)) => {
+                self.touches.remove(&t);
+                vec![Move::Release]
+            }
+            (PluginMove::End, None) => Vec::new(),
+        }
+    }
+
+    /// The value-only touches whose last value is [`PluginTouches::IDLE`]
+    /// old by `now`, forgotten, each with its release time (its last value
+    /// + `IDLE`).
+    pub fn idle(&mut self, now: Duration) -> Vec<(AutomationTarget, Duration)> {
+        let mut out = Vec::new();
+        self.touches.retain(|t, p| {
+            let at = p.last.saturating_add(Self::IDLE);
+            let due = !p.gesture && now >= at;
+            if due {
+                out.push((*t, at));
+            }
+            !due
+        });
+        out
+    }
+
+    /// Forgets and answers the touches of the slots `live` denies
+    /// (pre-flight I7).
+    pub fn release_slots(
+        &mut self,
+        live: impl Fn(PluginInstanceId) -> bool,
+    ) -> Vec<AutomationTarget> {
+        let mut out = Vec::new();
+        self.touches.retain(|t, _| {
+            let keep = match t {
+                AutomationTarget::PluginParam(slot, _) => live(*slot),
+                _ => true,
+            };
+            if !keep {
+                out.push(*t);
+            }
+            keep
+        });
+        out
+    }
+
+    /// The slots it touches parameters of.
+    pub fn slots(&self) -> BTreeSet<PluginInstanceId> {
+        self.touches
+            .keys()
+            .filter_map(|t| match t {
+                AutomationTarget::PluginParam(slot, _) => Some(*slot),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Forgets `t` (its touch was released another way).
+    pub fn forget(&mut self, t: AutomationTarget) {
+        self.touches.remove(&t);
     }
 }
 
@@ -821,6 +970,7 @@ mod tests {
     use super::*;
     use core_model::automation::AutomationTarget;
     use core_model::ids::StripId;
+    use core_model::mixer::ParamId;
     use std::time::Duration;
 
     /// Ruling 8: at most one value per 10 ms; the last kept value is sent
@@ -891,6 +1041,81 @@ mod tests {
                 "{closed} {rolled} {stopped:?} {wants} {holder:?}"
             );
         }
+    }
+
+    /// Spec §7.1 (Ruling 15): a plugin that sends values without gesture
+    /// events is touched by its first value and released 500 ms after its
+    /// last; one with Begin/End is released by its End only; on an
+    /// automated parameter a value with no Begin is an echo, not a touch
+    /// (Ruling 27); a slot that went releases its touches.
+    #[test]
+    fn values_without_gesture_events_release_500_ms_after_the_last() {
+        let t = AutomationTarget::PluginParam(PluginInstanceId(3), ParamId(0));
+        let ms = Duration::from_millis;
+        let mut p = PluginTouches::default();
+        assert_eq!(
+            p.event(t, PluginMove::Value(0.2), ms(0), false),
+            vec![Move::Touch(Some(0.2))]
+        );
+        assert_eq!(
+            p.event(t, PluginMove::Value(0.3), ms(100), false),
+            vec![Move::Value(0.3)]
+        );
+        assert!(p.idle(ms(599)).is_empty());
+        assert_eq!(p.idle(ms(600)), vec![(t, ms(600))]);
+        assert!(p.idle(ms(2000)).is_empty(), "released once");
+        assert_eq!(
+            p.event(t, PluginMove::Begin, ms(3000), false),
+            vec![Move::Touch(None)]
+        );
+        assert!(
+            p.event(t, PluginMove::Begin, ms(3001), false).is_empty(),
+            "a repeated Begin"
+        );
+        assert_eq!(
+            p.event(t, PluginMove::Value(0.5), ms(3010), false),
+            vec![Move::Value(0.5)]
+        );
+        assert!(
+            p.idle(ms(9000)).is_empty(),
+            "gesture-driven: no idle release"
+        );
+        assert_eq!(
+            p.event(t, PluginMove::End, ms(9001), false),
+            vec![Move::Release]
+        );
+        assert!(
+            p.event(t, PluginMove::End, ms(9002), false).is_empty(),
+            "an End with no touch"
+        );
+        // Pre-flight I8: an automated parameter's value-only events are
+        // echoes of playback; a Begin still touches it.
+        let t2 = AutomationTarget::PluginParam(PluginInstanceId(3), ParamId(1));
+        assert!(
+            p.event(t2, PluginMove::Value(0.2), ms(10_000), true)
+                .is_empty(),
+            "an echo"
+        );
+        assert!(p.idle(ms(20_000)).is_empty(), "no touch was made");
+        assert_eq!(
+            p.event(t2, PluginMove::Begin, ms(20_001), true),
+            vec![Move::Touch(None)]
+        );
+        assert_eq!(
+            p.event(t2, PluginMove::Value(0.4), ms(20_002), true),
+            vec![Move::Value(0.4)]
+        );
+        assert_eq!(
+            p.event(t2, PluginMove::End, ms(20_003), true),
+            vec![Move::Release]
+        );
+        // Pre-flight I7: the touches of a slot that went are released once.
+        assert_eq!(
+            p.event(t2, PluginMove::Value(0.5), ms(21_000), false),
+            vec![Move::Touch(Some(0.5))]
+        );
+        assert_eq!(p.release_slots(|_| false), vec![t2]);
+        assert!(p.idle(ms(30_000)).is_empty(), "released once");
     }
 
     /// Pre-flight I3, Ruling 10: an end the queue refused is re-sent until

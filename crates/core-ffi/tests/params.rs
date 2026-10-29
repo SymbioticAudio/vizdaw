@@ -210,3 +210,106 @@ fn an_undo_while_the_registry_is_busy_is_refused_and_changes_nothing() {
     );
     idle_until(&s, |s| param(s, id, GAIN).value == 1.0);
 }
+
+/// Spec §7.1, plan 5e-1 Ruling 15: a gesture in a CLAP plugin's own
+/// window while its strip writes (Touch) becomes automation of that
+/// parameter, normalised by its range (Gain 0–2: 0.4 is 0.2), in a lane
+/// named after it, and no "Change Plugin Parameter" step; in Read it is
+/// still one.
+#[test]
+fn a_plugin_windows_gesture_writes_its_parameter() {
+    use vizdaw_ffi::automation::AutomationModeRow;
+    let _g = serial();
+    let (_d, s, id) = playing_gain();
+    let synth = s.mixer().unwrap().strips[0].id;
+    let song = s.transport().unwrap().seq.unwrap();
+    s.set_automation_mode(vec![synth], AutomationModeRow::Touch)
+        .unwrap();
+    s.set_param(id, WIGGLE, 0.4).unwrap();
+    let t0 = Instant::now();
+    idle_until(&s, |_| t0.elapsed() > Duration::from_millis(400));
+    s.stop().unwrap();
+    idle_until(&s, |s| {
+        s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
+    });
+    let lane = s
+        .lanes(song)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Built-in Synth Gain")
+        .expect("a lane named after the parameter");
+    let values: Vec<f64> = s
+        .lane_events(song, lane.id)
+        .unwrap()
+        .events
+        .iter()
+        .filter_map(|e| e.automation.map(|a| a.value))
+        .collect();
+    assert!(values.iter().any(|v| (v - 0.2).abs() < 1e-9), "{values:?}");
+    s.undo().unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Automation Mode"),
+        "no parameter step under the write"
+    );
+    s.set_automation_mode(vec![synth], AutomationModeRow::Read)
+        .unwrap();
+    s.play(song).unwrap();
+    s.set_param(id, WIGGLE, 0.8).unwrap();
+    idle_until(&s, |s| {
+        s.snapshot().unwrap().undo_label.as_deref() == Some("Change Plugin Parameter")
+    });
+    s.stop().unwrap();
+}
+
+/// Pre-flight I9, Ruling 15 (and M13, M14): a gesture from the app on a
+/// plugin parameter (plan 5e-2's sliders) reaches the plugin on every
+/// path. While writing it is automation and no parameter step, and after
+/// landing the plugin plays the landed value (the glide back: its value
+/// before); stopped, it is one "Change Plugin Parameter" step. Gain is
+/// 0–2, so 0.3 is 0.6.
+#[test]
+fn a_ui_gesture_on_a_plugin_parameter_reaches_the_plugin() {
+    use vizdaw_ffi::AutomationTargetRow as Target;
+    use vizdaw_ffi::automation::{AutomationModeRow, GesturePhaseRow as Phase};
+    let _g = serial();
+    let (_d, s, id) = playing_gain();
+    let synth = s.mixer().unwrap().strips[0].id;
+    let before = param(&s, id, GAIN).value;
+    s.set_automation_mode(vec![synth], AutomationModeRow::Touch)
+        .unwrap();
+    let t = Target::PluginParam {
+        slot: id,
+        param: GAIN,
+    };
+    s.gesture(t, Phase::Touch { value: Some(0.25) }).unwrap();
+    std::thread::sleep(Duration::from_millis(15));
+    s.gesture(t, Phase::Value { value: 0.3 }).unwrap();
+    idle_until(&s, |s| (param(s, id, GAIN).value - 0.6).abs() < 1e-6);
+    s.gesture(t, Phase::Release).unwrap();
+    let t0 = Instant::now();
+    idle_until(&s, |_| t0.elapsed() > Duration::from_millis(400));
+    s.stop().unwrap();
+    idle_until(&s, |s| {
+        s.snapshot().unwrap().undo_label.as_deref() == Some("Write Automation")
+    });
+    idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
+    s.undo().unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Automation Mode"),
+        "no parameter step"
+    );
+    // Stopped: the static path, one step.
+    s.gesture(t, Phase::Touch { value: Some(0.25) }).unwrap();
+    std::thread::sleep(Duration::from_millis(15));
+    s.gesture(t, Phase::Value { value: 0.25 }).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Change Plugin Parameter")
+    );
+    idle_until(&s, |s| (param(s, id, GAIN).value - 0.5).abs() < 1e-6);
+    s.undo().unwrap();
+    idle_until(&s, |s| (param(s, id, GAIN).value - before).abs() < 1e-6);
+}
