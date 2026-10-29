@@ -141,6 +141,14 @@ fn a_write_goes_into_the_first_lane_holding_its_target() {
         points(&out, 2)
     );
     assert_eq!(out.sequence(SeqId(0)).unwrap().lanes.len(), 3);
+    let notes = |d: &Document| {
+        d.lane(SeqId(0), LaneId(0))
+            .unwrap()
+            .active()
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(notes(&out), notes(&d), "A is untouched");
     // A second write at C's old tick still goes to B (C is not first).
     let w = write(&d, 2 * Q, 2 * Q, &[(2 * Q, 0.1)]);
     let out = apply(&out, &Command::Record(pass(vec![w]))).unwrap().doc;
@@ -149,7 +157,18 @@ fn a_write_goes_into_the_first_lane_holding_its_target() {
         "C's point inside the range is replaced too: {:?}",
         points(&out, 2)
     );
-    assert!(points(&out, 1).contains(&(2 * Q, 0.1)));
+    assert_eq!(
+        points(&out, 1),
+        vec![
+            (0, 0.2),
+            (Q - 1, 0.3),
+            (Q, 0.9),
+            (2 * Q, 0.1),
+            (4 * Q, 0.9),
+            (4 * Q + 1, 0.4),
+            (8 * Q, 0.8)
+        ]
+    );
 }
 
 /// Amended Ruling 4: a write removes the target's points in its range
@@ -225,44 +244,109 @@ fn a_loop_passes_later_write_wins_where_they_overlap() {
 fn bad_writes_refuse_the_whole_pass() {
     let d = doc();
     let good = write(&d, 0, Q, &[(0, 0.5)]);
-    let mut cases: Vec<AutomationWrite> = Vec::new();
+    // Each bad write with the words its refusal names (Task 3 review
+    // minors 4 and 6: each case is refused for its own reason).
+    let mut cases: Vec<(AutomationWrite, &str)> = Vec::new();
     let mut w = good.clone();
     w.points = vec![(Tick(0), f64::NAN)];
-    cases.push(w);
+    cases.push((w, "automation.value"));
     let mut w = good.clone();
     w.points = vec![(Tick(0), 1.5)];
-    cases.push(w);
+    cases.push((w, "automation.value"));
     let mut w = good.clone();
     w.points = vec![(Tick(2 * Q), 0.5)];
-    cases.push(w); // outside its range
+    cases.push((w, "automation.tick")); // outside its range
     let mut w = good.clone();
     w.start = Tick(Q);
     w.end = Tick(0);
-    cases.push(w);
+    w.points.clear(); // only the reversed range is wrong
+    cases.push((w, "automation.end"));
     let mut w = good.clone();
     w.end = Tick(1 << 41);
-    cases.push(w);
+    cases.push((w, "automation.end"));
     let mut w = good.clone();
     w.seq = SeqId(7);
-    cases.push(w);
+    cases.push((w, "unknown id"));
     let mut w = good.clone();
     w.target = AutomationTarget::StripMute(StripId(99));
-    cases.push(w);
+    cases.push((w, "does not exist"));
     let mut w = good.clone();
     w.points = (0..=core_model::command::MAX_WRITE_POINTS as i64)
         .map(|t| (Tick(t.min(Q)), 0.5))
         .collect();
-    cases.push(w);
+    cases.push((w, "automation.points"));
     let mut w = AutomationWrite {
         lane_name: "  ".into(),
         ..good.clone()
     };
     w.target = AutomationTarget::StripSolo(d.mixer().master());
-    cases.push(w); // a new lane needs a name
-    for bad in cases {
+    cases.push((w, "lane name")); // a new lane needs a name
+    for (bad, why) in cases {
         let r = apply(&d, &Command::Record(pass(vec![good.clone(), bad.clone()])));
-        assert!(r.is_err(), "{bad:?}");
+        let e = r
+            .err()
+            .unwrap_or_else(|| panic!("refused: {bad:?}"))
+            .to_string();
+        assert!(e.contains(why), "{why}: {e} for {bad:?}");
     }
+}
+
+/// Task 3 review minor 1: the range is inclusive at both ends; points
+/// just outside it stay.
+#[test]
+fn a_write_replaces_its_range_inclusive_at_both_ends() {
+    let f = fader(&doc());
+    let d = insert(
+        &doc(),
+        1,
+        vec![
+            point(Q - 1, f, 0.1),
+            point(Q, f, 0.2),
+            point(3 * Q, f, 0.3),
+            point(3 * Q + 1, f, 0.4),
+        ],
+    );
+    let w = write(&d, Q, 3 * Q, &[(Q, 0.6), (3 * Q, 0.7)]);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert_eq!(
+        points(&out, 1),
+        vec![
+            (0, 0.2),
+            (Q - 1, 0.1),
+            (Q, 0.6),
+            (3 * Q, 0.7),
+            (3 * Q + 1, 0.4),
+            (8 * Q, 0.8)
+        ]
+    );
+}
+
+/// Task 3 review minor 2: a write with no points for a target no lane
+/// plays makes no empty lane; its range is still cleared.
+#[test]
+fn an_empty_write_makes_no_lane() {
+    let d = doc();
+    let mut w = write(&d, 0, Q, &[]);
+    w.target = AutomationTarget::StripPan(d.mixer().master());
+    w.lane_name = "Master Pan".into();
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert_eq!(out.sequence(SeqId(0)).unwrap().lanes.len(), 3);
+    let w = write(&d, Q - 1, 4 * Q + 1, &[]);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert!(points(&out, 2).is_empty(), "the range is cleared");
+}
+
+/// Task 3 review minor 3: of two points of one write at one tick, the
+/// later one is kept, so playback does not depend on event IDs.
+#[test]
+fn a_write_keeps_the_last_of_equal_ticks() {
+    let d = doc();
+    let w = write(&d, Q, 2 * Q, &[(Q, 0.3), (Q, 0.6), (2 * Q, 0.1)]);
+    let out = apply(&d, &Command::Record(pass(vec![w]))).unwrap().doc;
+    assert_eq!(
+        points(&out, 1),
+        vec![(0, 0.2), (Q, 0.6), (2 * Q, 0.1), (8 * Q, 0.8)]
+    );
 }
 
 #[test]

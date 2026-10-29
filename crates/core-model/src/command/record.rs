@@ -320,7 +320,8 @@ fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
 /// points in `[start, end]` leave the active take of every lane of `seq`
 /// that plays and holds the target's automation, and the new points go
 /// into the first such lane, else into a new lane at the end named
-/// `lane_name`. A lane plays as `query::flatten` plays it, which is what
+/// `lane_name` (none for a write with no points). Of points at one tick
+/// the last is kept. A lane plays as `query::flatten` plays it, which is what
 /// the writer read: not muted, and soloed when any lane is; a muted or
 /// solo-silenced lane keeps its points. A new lane is soloed when another
 /// lane is, so that it plays. Automation inside referenced sequences is
@@ -355,6 +356,8 @@ fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Re
     }
     let lane = match first {
         Some(l) => l,
+        // Nothing to put in a new lane (Task 3 review minor 2).
+        None if w.points.is_empty() => return Ok(()),
         None => {
             let c = d.counters_mut();
             let (lane, take) = (c.alloc_lane(), c.alloc_take());
@@ -367,6 +370,11 @@ fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Re
     };
     let mut points = w.points.clone();
     points.sort_by_key(|p| p.0);
+    // Of equal ticks the last given wins (the sort is stable), so what
+    // plays does not depend on event IDs (Task 3 review minor 3).
+    points.reverse();
+    points.dedup_by_key(|p| p.0);
+    points.reverse();
     for (tick, value) in points {
         let spec = EventSpec::new(
             tick,
