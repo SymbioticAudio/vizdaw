@@ -483,3 +483,60 @@ fn edge_gains_arrive_at_the_fed_node() {
     assert_eq!(g.feed_arrival(master, None), 150, "master: its own arrival");
     assert_eq!(g.arrivals(), &[0, 150]);
 }
+
+/// Final review m1 (Task 4 re-review N1): a lane that holds one value
+/// across its loop seam does not cut the run there, so 16 buses behind
+/// distinct latencies with flat fader lanes render a looping beat in as
+/// many runs as with no latency, instead of one more run per bus at each
+/// wrap.
+#[test]
+fn flat_lanes_do_not_cut_runs_at_the_loop_seam() {
+    let runs = |latent: bool| -> u64 {
+        let mut b = Builder::new();
+        let d = b.dest("Synth", "builtin:synth", 0).unwrap();
+        let (seq, notes) = b.sequence("S", "Notes", Some(d)).unwrap();
+        b.notes(seq, notes, &[(0, 60, 0x8000, 64 * Q)]).unwrap();
+        for i in 0..16u32 {
+            let bus = b.bus(&format!("B{i}")).unwrap();
+            let l = if latent { 1000 + i } else { 0 };
+            b.insert(bus, TestInserts::plugin(&format!("latency={l}")))
+                .unwrap();
+            for t in [0, 4 * Q] {
+                b.event(
+                    seq,
+                    notes,
+                    t,
+                    EventBody::Automation {
+                        target: AutomationTarget::StripFader(bus),
+                        value: 0.5,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        let doc = b.finish();
+        let count = Arc::new(AtomicU64::new(0));
+        let (mut engine, renderer) =
+            Engine::new(EngineConfig::new(48_000.0), Box::new(OfflineSinks::new(64))).unwrap();
+        engine.set_insert_factory(Box::new(Counting(TestInserts::new(), Arc::clone(&count))));
+        engine.load(&doc, seq).unwrap();
+        engine.set_loop_range(Some((0, QF))).unwrap();
+        let mut out = OfflineBackend::new(48_000.0, BLOCK);
+        out.start(renderer).unwrap();
+        out.reserve(4096);
+        engine.play().unwrap();
+        // Past the roll (each lane's read starts once at its floor).
+        for _ in 0..8 {
+            out.block(BLOCK);
+        }
+        let before = count.load(Ordering::Relaxed);
+        // About four wraps.
+        for _ in 0..200 {
+            out.block(BLOCK);
+        }
+        (count.load(Ordering::Relaxed) - before) / 16
+    };
+    let plain = runs(false);
+    assert!(plain >= 200, "{plain}");
+    assert_eq!(runs(true), plain, "flat lanes add no runs at the seams");
+}

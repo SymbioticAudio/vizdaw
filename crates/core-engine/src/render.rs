@@ -1104,16 +1104,21 @@ impl Renderer {
         let auto = &s.automation;
         for lane in auto.lanes() {
             let a = lane_arrival(g, lane);
+            let r = lane_frame(regions, pos, a, past);
+            let pts = auto.points(lane);
             if a > 0 {
                 // Where this lane's read jumps (its loop seam, the roll's
                 // floor, the end), so no run reads across it (Task 4
-                // review I1).
-                run = run.min(regions.read_span(a, run).1);
+                // review I1); not where the lane holds one value across
+                // the jump (final review m1).
+                let span = regions.read_span(a, run).1;
+                if span < run && !flat_across(auto, lane, pts, regions, r, a, span, run) {
+                    run = span;
+                }
             }
-            let Some(r) = lane_frame(regions, pos, a, past) else {
+            let Some(r) = r else {
                 continue;
             };
-            let pts = auto.points(lane);
             let i = pts.partition_point(|p| p.frame <= r);
             if let Some(p) = pts.get(i) {
                 run = run.min(p.frame.saturating_sub(r).max(u64::from(MIN_RUN)));
@@ -2012,6 +2017,36 @@ fn auto_frame(run: &crate::graph::RegionRun, pos: u64, arrival: u64) -> u64 {
     }
     run.read_frame(arrival)
         .unwrap_or(pos.saturating_sub(arrival))
+}
+
+/// True when lane `lane` (points `pts`, arrival `a`) holds one value over
+/// everything a `run`-frame run starting at read frame `r` reads, though
+/// its read jumps `span` frames in: no point lies between the lowest and
+/// highest frame read, on either side of the jump, and the value is the
+/// same at both, so the run need not be cut at the jump (final review
+/// m1). False when either side reads silence. // RT
+#[allow(clippy::too_many_arguments)]
+fn flat_across(
+    auto: &crate::schedule::Automation,
+    lane: &crate::schedule::AutoLane,
+    pts: &[crate::schedule::AutoPoint],
+    regions: &crate::graph::RegionRun,
+    r: Option<u64>,
+    a: u64,
+    span: u64,
+    run: u64,
+) -> bool {
+    let (Some(f0), Ok(k)) = (r, u32::try_from(span)) else {
+        return false;
+    };
+    let Some(g) = regions.read_frame_at(a, k) else {
+        return false;
+    };
+    let lo = f0.min(g);
+    let hi = f0.saturating_add(run).max(g.saturating_add(run - span));
+    let next = pts.partition_point(|p| p.frame <= lo);
+    pts.get(next).is_none_or(|p| p.frame > hi)
+        && auto.value(lane, lo, false) == auto.value(lane, hi, false)
 }
 
 /// The frame a lane with arrival `arrival` reads at in the run starting
