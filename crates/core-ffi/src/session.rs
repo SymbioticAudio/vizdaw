@@ -5313,13 +5313,19 @@ impl Session {
     }
 
     /// Sets the mode of `strips` (spec §4.6) as one undo step "Set
-    /// Automation Mode".
+    /// Automation Mode"; `Busy` while a static touch's step is open.
     pub fn set_automation_mode(
         &self,
         strips: Vec<u64>,
         mode: AutomationModeRow,
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
+            // Not inside an open static touch's step (Task 10 review M2).
+            if lock(&self.inner).static_edit.is_some() {
+                return Err(VizError::Busy {
+                    message: "Release the touched control first.".into(),
+                });
+            }
             self.execute(Command::Mixer(MixerCmd::SetAutomationMode {
                 strips: strips.into_iter().map(StripId).collect(),
                 mode: mode.into(),

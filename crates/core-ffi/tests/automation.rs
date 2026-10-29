@@ -600,6 +600,36 @@ fn a_device_rebuild_mid_pass_keeps_what_was_written() {
     s.close().unwrap();
 }
 
+/// Task 10 review M2: a mode change while a static touch is open is
+/// refused instead of joining the touch's "Set Fader" step; after the
+/// release it is its own undo step.
+#[test]
+fn a_mode_change_waits_for_a_static_touch() {
+    let _g = serial();
+    let (s, _song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    assert!(
+        matches!(
+            s.set_automation_mode(vec![synth], Mode::Latch),
+            Err(VizError::Busy { .. })
+        ),
+        "refused while the touch is open"
+    );
+    s.gesture(t, Phase::Release).unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader")
+    );
+    s.set_automation_mode(vec![synth], Mode::Latch).unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Automation Mode")
+    );
+    s.close().unwrap();
+}
+
 /// Final review m4: a Play that ends at once (a range past the sequence's
 /// end) never rolls; its pass lands instead of sending touches down the
 /// write path while the transport stands still.
