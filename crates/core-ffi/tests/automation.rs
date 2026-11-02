@@ -3261,3 +3261,94 @@ fn the_preview_after_a_wrap_landing_shows_only_the_next_cycle() {
     stop_and_land(&s);
     s.close().unwrap();
 }
+
+/// A Touch pass on [`automated_bus`] at 0.3, its glide back passed and
+/// the renderer held: `(session, sequence, target, lane)`.
+fn held_glide() -> (Arc<Session>, u64, Target, u64) {
+    let (s, seq, bus, auto) = automated_bus(0.3);
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Touch).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.7 }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let at = tick(&s);
+    wait_until("the glide to pass", || tick(&s) > at + Q);
+    hold(&s);
+    (s, seq, t, auto)
+}
+
+/// The value a preview ends at.
+fn last_value(p: &[vizdaw_ffi::automation::PreviewPointRow]) -> f64 {
+    p.last().expect("a preview").value
+}
+
+/// Task 6 review M5: an Undo and a Redo mid-pass are read by the next
+/// preview.
+#[test]
+fn the_preview_follows_undo_and_redo_mid_pass() {
+    let _g = serial();
+    let (s, seq, t, auto) = held_glide();
+    assert!((last_value(&s.automation_preview(t).unwrap()) - 0.3).abs() < 1e-6);
+    let mut row = s.lane_events(seq, auto).unwrap().events[0].clone();
+    row.automation = Some(vizdaw_ffi::AutomationRow {
+        target: t,
+        value: 0.8,
+    });
+    s.edit(
+        vizdaw_ffi::EditCommand::Event {
+            edit: vizdaw_ffi::EventEdit::Replace {
+                event: row.id,
+                row: row.clone(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    assert!((last_value(&s.automation_preview(t).unwrap()) - 0.8).abs() < 1e-6);
+    s.undo().unwrap();
+    let undone = s.automation_preview(t).unwrap();
+    assert!((last_value(&undone) - 0.3).abs() < 1e-6, "{undone:?}");
+    assert_eq!(
+        uncached_preview(&s, t),
+        undone,
+        "the same without the cache"
+    );
+    s.redo().unwrap();
+    let redone = s.automation_preview(t).unwrap();
+    assert!((last_value(&redone) - 0.8).abs() < 1e-6, "{redone:?}");
+    assert_eq!(
+        uncached_preview(&s, t),
+        redone,
+        "the same without the cache"
+    );
+    debug_hold_offline(false);
+    stop_and_land(&s);
+    s.close().unwrap();
+}
+
+/// Task 6 review M5: muting the lane that holds the existing automation
+/// mid-pass is read by the next preview, as without the cache.
+#[test]
+fn the_preview_follows_a_lane_mute_mid_pass() {
+    let _g = serial();
+    let (s, seq, t, auto) = held_glide();
+    let before = s.automation_preview(t).unwrap();
+    s.set_lane_mute(seq, auto, true).unwrap();
+    let muted = s.automation_preview(t).unwrap();
+    assert_eq!(uncached_preview(&s, t), muted, "the same without the cache");
+    assert!(
+        (last_value(&muted) - 0.3).abs() > 0.1,
+        "a muted lane is not existing automation: {muted:?}"
+    );
+    s.set_lane_mute(seq, auto, false).unwrap();
+    let back = s.automation_preview(t).unwrap();
+    assert_eq!(back, before, "unmuted: as before");
+    assert_eq!(uncached_preview(&s, t), back);
+    debug_hold_offline(false);
+    stop_and_land(&s);
+    s.close().unwrap();
+}

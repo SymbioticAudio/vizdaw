@@ -21,7 +21,7 @@ use core_model::selection::ViewFilter;
 use core_model::time::Tick;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// A strip's automation mode (sub-project 5 spec §4.6).
@@ -941,11 +941,13 @@ pub(crate) fn lane_name(doc: &Document, t: AutomationTarget, param_name: Option<
 }
 
 /// How many times [`existing_all`] flattened a sequence (plan 5e-2
-/// ruling P4: the preview's polls must not flatten per call).
-static FLATTENS: AtomicU64 = AtomicU64::new(0);
+/// ruling P4: the preview's polls must not flatten per call; test hook).
+#[cfg(feature = "test-hooks")]
+static FLATTENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Whether a pass caches its flattened existing automation (always, but
-/// in tests that compare with and without it).
+/// in tests that compare with and without it; test hook).
+#[cfg(feature = "test-hooks")]
 static CACHE_ON: AtomicBool = AtomicBool::new(true);
 
 /// How many times the existing automation was flattened (test hook).
@@ -993,6 +995,7 @@ impl ExistingCache {
     /// `seq`'s existing automation in `doc`: the cached reading while
     /// `doc`'s sequences are the ones it read, else a new one.
     pub fn get(&self, doc: &Document, seq: SeqId) -> std::sync::Arc<Existing> {
+        #[cfg(feature = "test-hooks")]
         if !CACHE_ON.load(Ordering::Relaxed) {
             return std::sync::Arc::new(existing_all(doc, seq));
         }
@@ -1023,6 +1026,7 @@ impl ExistingCache {
 /// Every target's points in `seq` flattened as the engine plays it
 /// (Ruling 22), by tick.
 pub(crate) fn existing_all(doc: &Document, seq: SeqId) -> Existing {
+    #[cfg(feature = "test-hooks")]
     FLATTENS.fetch_add(1, Ordering::Relaxed);
     let mut out: Existing = BTreeMap::new();
     if let Ok(events) = core_model::query::flatten(doc, seq, None, &ViewFilter::default()) {
