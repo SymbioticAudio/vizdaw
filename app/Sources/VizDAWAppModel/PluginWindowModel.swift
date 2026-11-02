@@ -87,7 +87,19 @@ public final class PluginWindowModel {
         } catch {
             ok = false
         }
-        if let p = try? session.params(slot: slot) { params = p } else { ok = false }
+        let slotGone = ok && row == nil
+        var present: Set<UInt64>?
+        if let p = try? session.params(slot: slot) {
+            params = p
+            // A slider mid-drag keeps showing where it is.
+            for (id, v) in live {
+                if let i = params.firstIndex(where: { $0.id == id }) { params[i].value = v }
+            }
+            present = Set(p.map(\.id))
+        } else {
+            ok = false
+        }
+        forgetGone(slotGone: slotGone, present: present)
         return ok
     }
 
@@ -134,8 +146,14 @@ public final class PluginWindowModel {
     /// `retryClose()` each tick.
     public private(set) var closePending = false
 
-    /// Parameters whose slider is mid-drag.
+    /// Parameters whose slider is mid-drag and touched in the core, in the
+    /// order they were touched.
     private var dragging: [UInt64] = []
+    /// The plain value shown for each dragged parameter.
+    private var live: [UInt64: Double] = [:]
+    /// Parameters whose drag the core refused at the touch: nothing more is
+    /// sent for them until the drag ends.
+    private var refused: Set<UInt64> = []
 
     /// The window closes: a drag still open ends (one undo step), the editor
     /// detaches (ending any gesture it left open) and the project no longer
@@ -176,11 +194,16 @@ public final class PluginWindowModel {
         return true
     }
 
-    /// Commits every slider still mid-drag (the window closing, the slot
-    /// going away): the undo step must not be lost.
+    /// Releases every slider still mid-drag (the window closing), each
+    /// once: the core lands the step and no gesture is left open.
     public func endOpenDrags() {
-        for id in dragging { commitParam(id) }
+        refused = []
+        guard !dragging.isEmpty else { return }
+        let open = dragging
         dragging = []
+        live = [:]
+        for id in open { send(id, .release) }
+        gestureLanded()
     }
 
     // MARK: Intents
@@ -195,21 +218,86 @@ public final class PluginWindowModel {
         refresh()
     }
 
-    /// A parameter control moves: heard now, no undo step yet.
+    /// A parameter control moves (`value` plain, in the parameter's
+    /// range): the first move of a drag touches the parameter at its
+    /// normalised value, later ones move it (plan 5e-2 Task 5). The core
+    /// sends each value to the plugin and keeps the step at the release
+    /// (plan 5e-1 Ruling 15). A refused touch alerts and is not kept.
     public func setParam(_ id: UInt64, _ value: Double) {
-        try? session.setParam(slot: slot, param: id, value: value)
-        if !dragging.contains(id) { dragging.append(id) }
-        if let i = params.firstIndex(where: { $0.id == id }) { params[i].value = value }
+        guard !refused.contains(id), let i = params.firstIndex(where: { $0.id == id }) else { return }
+        let p = params[i]
+        let n = Self.normalised(value, p)
+        if dragging.contains(id) {
+            // A refused move keeps the touch: its release still follows.
+            send(id, .value(value: n))
+        } else {
+            guard send(id, .touch(value: n)) else {
+                refused.insert(id)
+                return
+            }
+            dragging.append(id)
+        }
+        let shown = Self.clamped(value, p)
+        live[id] = shown
+        params[i].value = shown
     }
 
-    /// The control is let go: one undo step with its final value.
+    /// The control is let go: the core closes the gesture (stopped, one
+    /// undo step "Change Plugin Parameter") and the window shows it.
     public func commitParam(_ id: UInt64) {
-        dragging.removeAll { $0 == id }
-        guard let p = params.first(where: { $0.id == id }) else { return }
+        if refused.remove(id) != nil { return }
+        guard let i = dragging.firstIndex(of: id) else { return }
+        dragging.remove(at: i)
+        live[id] = nil
+        send(id, .release)
+        gestureLanded()
+    }
+
+    /// Ruling 8: `(v − min) / (max − min)` clamped to 0–1; 0 for a range
+    /// with `max <= min` (or not a number), and never NaN.
+    static func normalised(_ v: Double, _ p: ParamRow) -> Double {
+        guard p.max > p.min, !v.isNaN else { return 0 }
+        let n = (v - p.min) / (p.max - p.min)
+        return n.isNaN ? 0 : Swift.min(Swift.max(n, 0), 1)
+    }
+
+    /// `v` as the slider shows it: inside the range, never NaN.
+    static func clamped(_ v: Double, _ p: ParamRow) -> Double {
+        guard p.max > p.min, !v.isNaN else { return p.min }
+        return Swift.min(Swift.max(v, p.min), p.max)
+    }
+
+    // MARK: Plumbing
+
+    /// Sends one gesture phase for parameter `id`; false (with an alert)
+    /// when the core refuses.
+    @discardableResult
+    private func send(_ id: UInt64, _ phase: GesturePhaseRow) -> Bool {
         do {
-            document.apply(try session.commitParams(slot: slot, values: [ParamValue(id: id, value: p.value)]))
+            try session.gesture(target: .pluginParam(slot: slot, param: id), phase: phase)
+            return true
         } catch {
-            document.alert = AlertItem(error, title: "Parameter Failed")
+            let item = AlertItem(error, title: "Parameter Failed")
+            if let a = document.alert, a.title == item.title, a.message == item.message { return false }
+            document.alert = item
+            return false
+        }
+    }
+
+    /// A gesture closed: the document shows its step now (idle would
+    /// report it a tick later). The slider keeps its last value until the
+    /// window's next refresh reads the kept one.
+    private func gestureLanded() {
+        if let s = try? session.snapshot() { document.apply(s) }
+    }
+
+    /// Releases (once, quietly: the control went) the drags whose slot or
+    /// parameter a successful read no longer has.
+    private func forgetGone(slotGone: Bool, present: Set<UInt64>?) {
+        for id in dragging where slotGone || present.map({ !$0.contains(id) }) == true {
+            dragging.removeAll { $0 == id }
+            live[id] = nil
+            try? session.gesture(target: .pluginParam(slot: slot, param: id), phase: .release)
         }
     }
 }
