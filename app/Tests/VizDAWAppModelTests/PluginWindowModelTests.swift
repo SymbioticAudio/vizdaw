@@ -108,6 +108,47 @@ import VizDAWCore
         #expect(f.gestures.map(\.1) == [.touch(value: 0.3), .release])
     }
 
+    /// A refused mark lives only for its drag: it goes with the parameter,
+    /// so the parameter's next drag touches again.
+    @Test func aRefusedMarkGoesWithItsDragOrItsParameter() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        // Refused, then let go: the next drag is heard.
+        f.gestureError = .Busy(message: "busy")
+        w.setParam(0, 0.7)
+        f.gestureError = nil
+        w.commitParam(0)
+        w.setParam(0, 0.4)
+        w.commitParam(0)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.4), .release])
+        // Refused, then the parameter goes and comes back before the drag
+        // ends: the next drag touches.
+        f.gestureError = .Busy(message: "busy")
+        w.setParam(0, 0.7)
+        f.gestureError = nil
+        f.paramTable[10] = []
+        w.refresh()
+        f.paramTable[10] = [param(0, "Gain")]
+        w.refresh()
+        w.setParam(0, 0.6)
+        w.commitParam(0)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.4), .release, .touch(value: 0.6), .release])
+        // The same when the slot goes and comes back.
+        f.gestureError = .Busy(message: "busy")
+        w.setParam(0, 0.7)
+        f.gestureError = nil
+        let inserts = f.mixerSnap.strips[0].inserts
+        f.mixerSnap.strips[0].inserts = []
+        w.refresh()
+        f.mixerSnap.strips[0].inserts = inserts
+        w.refresh()
+        w.setParam(0, 0.3)
+        w.commitParam(0)
+        #expect(f.gestures.suffix(2).map(\.1) == [.touch(value: 0.3), .release])
+        #expect(f.gestures.count == 6)
+    }
+
     /// A move the core refuses keeps the taken touch: the release follows.
     @Test func aFailingMoveStillReleasesTheTakenTouch() throws {
         let f = mixerFake()

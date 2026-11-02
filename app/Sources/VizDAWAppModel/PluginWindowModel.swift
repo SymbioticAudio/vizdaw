@@ -292,9 +292,12 @@ public final class PluginWindowModel {
     }
 
     /// Releases (once, quietly: the control went) the drags whose slot or
-    /// parameter a successful read no longer has.
+    /// parameter a successful read no longer has, and drops their refused
+    /// marks: a mark lives only for its drag.
     private func forgetGone(slotGone: Bool, present: Set<UInt64>?) {
-        for id in dragging where slotGone || present.map({ !$0.contains(id) }) == true {
+        func gone(_ id: UInt64) -> Bool { slotGone || present.map { !$0.contains(id) } == true }
+        refused = refused.filter { !gone($0) }
+        for id in dragging where gone(id) {
             dragging.removeAll { $0 == id }
             live[id] = nil
             try? session.gesture(target: .pluginParam(slot: slot, param: id), phase: .release)
