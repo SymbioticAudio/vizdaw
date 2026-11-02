@@ -21,7 +21,7 @@ use core_model::selection::ViewFilter;
 use core_model::time::Tick;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// A strip's automation mode (sub-project 5 spec §4.6).
@@ -435,6 +435,9 @@ pub(crate) struct Writing {
     pub late: u64,
     /// `late` as last said.
     pub late_said: u64,
+    /// The playing sequence's existing automation, as last read (plan
+    /// 5e-2 ruling P4).
+    pub existing: ExistingCache,
 }
 
 impl Writing {
@@ -937,13 +940,91 @@ pub(crate) fn lane_name(doc: &Document, t: AutomationTarget, param_name: Option<
     }
 }
 
+/// How many times [`existing_all`] flattened a sequence (plan 5e-2
+/// ruling P4: the preview's polls must not flatten per call).
+static FLATTENS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a pass caches its flattened existing automation (always, but
+/// in tests that compare with and without it).
+static CACHE_ON: AtomicBool = AtomicBool::new(true);
+
+/// How many times the existing automation was flattened (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_existing_flattens() -> u64 {
+    FLATTENS.load(Ordering::Relaxed)
+}
+
+/// Turns the pass's cache of the existing automation off or on (test
+/// hook): off, every read flattens the sequence again.
+#[cfg(feature = "test-hooks")]
+pub fn debug_existing_cache(on: bool) {
+    CACHE_ON.store(on, Ordering::Relaxed);
+}
+
+/// Every target's existing points in a sequence, by tick (Ruling 22).
+pub(crate) type Existing = BTreeMap<AutomationTarget, Vec<(Tick, f64)>>;
+
+/// Whether a document's sequences are still the ones a cache read.
+type Unchanged = Box<dyn Fn(&Document) -> bool + Send>;
+
+/// A pass's flattened existing automation (plan 5e-2 ruling P4): the
+/// preview, polled per row at the transport's rate, and Trim's release
+/// read it without flattening the sequence each time. Held on the control
+/// thread only (in [`Writing`], under the session's lock). It is read
+/// again whenever the document's sequences changed since: an edit, an
+/// undo, a landing at a loop wrap or at Stop. The sequences map is
+/// persistent: the cache holds a clone of the one it read, so any change
+/// to it makes a new root and `ptr_eq` cannot answer a stale yes.
+#[derive(Default)]
+pub(crate) struct ExistingCache {
+    held: std::cell::RefCell<Option<(SeqId, Unchanged, std::sync::Arc<Existing>)>>,
+}
+
+impl std::fmt::Debug for ExistingCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let held = self.held.borrow();
+        f.debug_struct("ExistingCache")
+            .field("seq", &held.as_ref().map(|h| h.0))
+            .finish()
+    }
+}
+
+impl ExistingCache {
+    /// `seq`'s existing automation in `doc`: the cached reading while
+    /// `doc`'s sequences are the ones it read, else a new one.
+    pub fn get(&self, doc: &Document, seq: SeqId) -> std::sync::Arc<Existing> {
+        if !CACHE_ON.load(Ordering::Relaxed) {
+            return std::sync::Arc::new(existing_all(doc, seq));
+        }
+        if let Some((s, unchanged, e)) = self.held.borrow().as_ref()
+            && *s == seq
+            && unchanged(doc)
+        {
+            return e.clone();
+        }
+        let e = std::sync::Arc::new(existing_all(doc, seq));
+        self.put(doc, seq, e.clone());
+        e
+    }
+
+    /// Keeps `e`, read from `doc` for `seq`.
+    fn put(&self, doc: &Document, seq: SeqId, e: std::sync::Arc<Existing>) {
+        let read = doc.sequences().clone();
+        let unchanged: Unchanged = Box::new(move |d: &Document| d.sequences().ptr_eq(&read));
+        *self.held.borrow_mut() = Some((seq, unchanged, e));
+    }
+
+    /// Forgets the reading.
+    pub fn clear(&self) {
+        *self.held.borrow_mut() = None;
+    }
+}
+
 /// Every target's points in `seq` flattened as the engine plays it
 /// (Ruling 22), by tick.
-pub(crate) fn existing_all(
-    doc: &Document,
-    seq: SeqId,
-) -> BTreeMap<AutomationTarget, Vec<(Tick, f64)>> {
-    let mut out: BTreeMap<AutomationTarget, Vec<(Tick, f64)>> = BTreeMap::new();
+pub(crate) fn existing_all(doc: &Document, seq: SeqId) -> Existing {
+    FLATTENS.fetch_add(1, Ordering::Relaxed);
+    let mut out: Existing = BTreeMap::new();
     if let Ok(events) = core_model::query::flatten(doc, seq, None, &ViewFilter::default()) {
         for e in events {
             if let EventBody::Automation { target, value } = e.body {
@@ -1052,7 +1133,7 @@ pub(crate) struct PassDoc {
     /// Its tempo, in the engine's frames.
     pub tempo: core_engine::schedule::TempoTable,
     /// Every target's existing points, by tick.
-    pub existing: BTreeMap<AutomationTarget, Vec<(Tick, f64)>>,
+    pub existing: std::sync::Arc<Existing>,
     /// The plugin parameters among the targets.
     pub params: BTreeMap<AutomationTarget, ParamInfo>,
 }
@@ -1066,6 +1147,26 @@ impl PassDoc {
         seq: SeqId,
         rate: f64,
         targets: impl Iterator<Item = AutomationTarget>,
+    ) -> PassDoc {
+        PassDoc::read_with(
+            owner,
+            doc,
+            seq,
+            rate,
+            targets,
+            std::sync::Arc::new(existing_all(doc, seq)),
+        )
+    }
+
+    /// [`PassDoc::read`] with `seq`'s existing automation in `doc` read
+    /// already (a pass's [`ExistingCache`]).
+    pub fn read_with(
+        owner: u64,
+        doc: &Document,
+        seq: SeqId,
+        rate: f64,
+        targets: impl Iterator<Item = AutomationTarget>,
+        existing: std::sync::Arc<Existing>,
     ) -> PassDoc {
         let tempo = match doc.sequence(seq) {
             Ok(s) => {
@@ -1086,7 +1187,7 @@ impl PassDoc {
         PassDoc {
             seq,
             tempo,
-            existing: existing_all(doc, seq),
+            existing,
             params,
         }
     }

@@ -5408,8 +5408,16 @@ impl Session {
                 return Ok(Vec::new());
             };
             let doc = inner.doc();
-            let pd =
-                crate::automation::PassDoc::read(self.id, doc, w.seq, w.rate, std::iter::once(t));
+            // The pass's cached reading of the existing automation (plan
+            // 5e-2 ruling P4): the Strip Chart polls this per row.
+            let pd = crate::automation::PassDoc::read_with(
+                self.id,
+                doc,
+                w.seq,
+                w.rate,
+                std::iter::once(t),
+                w.existing.get(doc, w.seq),
+            );
             // The loop passes landed at their wraps are in the document
             // already (Task 12).
             let made: Vec<_> = pd
@@ -5594,8 +5602,12 @@ impl Session {
             _ if stepped => Release::Hold,
             WriteMode::Touch => Release::Glide,
             WriteMode::Trim => {
+                // The pass's cached reading (plan 5e-2 ruling P4).
                 let automated = inner.writing.as_ref().is_some_and(|w| {
-                    !crate::automation::existing(inner.doc(), w.seq, t).is_empty()
+                    w.existing
+                        .get(inner.doc(), w.seq)
+                        .get(&t)
+                        .is_some_and(|p| !p.is_empty())
                 });
                 if automated {
                     Release::Offsets
@@ -6259,11 +6271,12 @@ impl Session {
         // tick (Ruling 9; the punch and record range play no part, Ruling
         // 28). None while suspended (Ruling 3).
         let mut holds: Vec<(AutomationTarget, f64)> = Vec::new();
+        let existing = crate::automation::ExistingCache::default();
         if !crate::automation::suspended() {
             // The pass's own start: the engine's published position still
             // shows where it stood before a queued Locate (review I-2).
             let tick = at;
-            let all = crate::automation::existing_all(doc, seq);
+            let all = existing.get(doc, seq);
             for s in &write_strips {
                 for t in held_controls(doc, *s) {
                     // A control the hand holds over the pass's start is held
@@ -6302,6 +6315,7 @@ impl Session {
             after_done: false,
             late: 0,
             late_said: 0,
+            existing,
         });
         let tag = WriteMode::Write.tag();
         let ns = host_time(None);
@@ -6580,7 +6594,15 @@ impl Session {
             after_done,
         };
         inner.last_step = None;
-        if self.land(inner, landing) {
+        let landed = self.land(inner, landing);
+        // The landed cycle is existing automation now: the next read of
+        // the pass's cache flattens the document that holds it (plan 5e-2
+        // ruling P4; its sequences changed, so the cache would see that
+        // anyway).
+        if let Some(w) = inner.writing.as_ref() {
+            w.existing.clear();
+        }
+        if landed {
             let step = inner.last_step.take();
             if let Some(w) = inner.writing.as_mut() {
                 w.after_done = true;

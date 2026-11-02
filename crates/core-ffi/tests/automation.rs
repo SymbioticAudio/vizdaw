@@ -37,6 +37,7 @@ fn serial() -> MutexGuard<'static, ()> {
     debug_hold_offline(false);
     vizdaw_ffi::host::debug_fake_device(None);
     vizdaw_ffi::automation::debug_wrap_lag(None);
+    vizdaw_ffi::automation::debug_existing_cache(true);
     g
 }
 
@@ -3104,5 +3105,159 @@ fn an_undo_mid_loop_does_not_leave_a_write_strip_in_write() {
     });
     stop_and_land(&s);
     assert_eq!(mode(&s), Some(Mode::Latch), "After Write again");
+    s.close().unwrap();
+}
+
+// the preview's cache (plan 5e-2 ruling P4) ----
+
+/// The preview with the pass's cache off, then on again.
+fn uncached_preview(s: &Session, t: Target) -> Vec<vizdaw_ffi::automation::PreviewPointRow> {
+    vizdaw_ffi::automation::debug_existing_cache(false);
+    let p = s.automation_preview(t).unwrap();
+    vizdaw_ffi::automation::debug_existing_cache(true);
+    p
+}
+
+/// Holds the offline renderer and lets a buffer already started finish,
+/// so the pass stands still while the preview is read.
+fn hold(s: &Session) {
+    debug_hold_offline(true);
+    std::thread::sleep(Duration::from_millis(30));
+    s.idle().unwrap();
+}
+
+/// Ruling P4: the Strip Chart polls the preview per automation row at the
+/// transport's rate; the pass flattens the playing sequence's existing
+/// automation once, not per call, and the preview is the same as without
+/// the cache.
+#[test]
+fn the_preview_does_not_flatten_the_sequence_per_call() {
+    let _g = serial();
+    let (s, seq, bus, _) = automated_bus(0.3);
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Touch).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.7 }).unwrap();
+    pace(&s);
+    hold(&s);
+    let first = s.automation_preview(t).unwrap();
+    assert!(!first.is_empty(), "the write in progress");
+    let n = vizdaw_ffi::automation::debug_existing_flattens();
+    for _ in 0..20 {
+        assert_eq!(s.automation_preview(t).unwrap(), first);
+    }
+    assert_eq!(
+        vizdaw_ffi::automation::debug_existing_flattens(),
+        n,
+        "no flatten per call"
+    );
+    assert_eq!(uncached_preview(&s, t), first, "the same without the cache");
+    debug_hold_offline(false);
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
+    s.close().unwrap();
+}
+
+/// Ruling P4: an edit of the existing automation mid-pass is read by the
+/// next preview (here the glide's end follows the lane's new value).
+#[test]
+fn the_preview_follows_an_edit_mid_pass() {
+    let _g = serial();
+    let (s, seq, bus, auto) = automated_bus(0.3);
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Touch).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.7 }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let at = tick(&s);
+    wait_until("the glide to pass", || tick(&s) > at + Q);
+    hold(&s);
+    let before = s.automation_preview(t).unwrap();
+    assert!(
+        (before.last().expect("a preview").value - 0.3).abs() < 1e-6,
+        "glides back to the lane: {before:?}"
+    );
+    let mut row = s.lane_events(seq, auto).unwrap().events[0].clone();
+    row.automation = Some(vizdaw_ffi::AutomationRow {
+        target: t,
+        value: 0.8,
+    });
+    s.edit(
+        vizdaw_ffi::EditCommand::Event {
+            edit: vizdaw_ffi::EventEdit::Replace {
+                event: row.id,
+                row: row.clone(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(points(&s, seq, auto), vec![(0, 0.8)], "edited");
+    let after = s.automation_preview(t).unwrap();
+    assert!(
+        (after.last().unwrap().value - 0.8).abs() < 1e-6,
+        "glides back to the edited lane: {after:?}"
+    );
+    assert_eq!(uncached_preview(&s, t), after, "the same without the cache");
+    debug_hold_offline(false);
+    stop_and_land(&s);
+    s.close().unwrap();
+}
+
+/// Ruling P4 with plan 5e-1 Task 12: after a loop wrap lands a cycle, the
+/// preview shows only the cycle not landed yet, read against the document
+/// that holds the landed one.
+#[test]
+fn the_preview_after_a_wrap_landing_shows_only_the_next_cycle() {
+    let _g = serial();
+    let (s, seq, bus, auto) = looping_bus(4);
+    s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
+    let t = Target::StripFader { strip: bus };
+    s.play(seq).unwrap();
+    // Cycle 0: Latch 0.4 from about beat 1, the preview read meanwhile.
+    wait_tick_in(&s, Q, 2 * Q);
+    s.gesture(t, Phase::Touch { value: Some(0.3) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.4 }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    let p0 = s.automation_preview(t).unwrap();
+    assert!(has_value(
+        &p0.iter().map(|p| (p.tick, p.value)).collect::<Vec<_>>(),
+        0.4
+    ));
+    wait_wrap(&s);
+    wait_until("cycle 0 to land", || {
+        s.idle().unwrap();
+        has_value(&points(&s, seq, auto), 0.4)
+    });
+    // Cycle 1: Latch 0.7 from about beat 2.5.
+    wait_tick_in(&s, 5 * Q / 2, 3 * Q);
+    let from = tick(&s);
+    s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
+    pace(&s);
+    hold(&s);
+    let p1 = s.automation_preview(t).unwrap();
+    let pts: Vec<(i64, f64)> = p1.iter().map(|p| (p.tick, p.value)).collect();
+    assert!(has_value(&pts, 0.7), "{pts:?}");
+    assert!(
+        pts.iter().all(|p| p.0 >= from - Q / 8),
+        "only the cycle not landed: {pts:?} from {from}"
+    );
+    assert!(
+        (pts[0].1 - 0.4).abs() < 1e-6,
+        "its edge reads the landed cycle: {pts:?}"
+    );
+    assert_eq!(uncached_preview(&s, t), p1, "the same without the cache");
+    debug_hold_offline(false);
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
     s.close().unwrap();
 }
