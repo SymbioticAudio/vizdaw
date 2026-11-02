@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        132,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend"
+        138,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1370,4 +1370,29 @@ fn automation_commands_check_their_params() {
             window: None
         }
     );
+}
+
+/// Plan 5e-2 Task 4: the mode commands are Automation menu items with no
+/// parameters; Suspend Automation is a menu item now.
+#[test]
+fn automation_menu_commands_take_no_params() {
+    for m in ["off", "read", "touch", "latch", "write", "trim"] {
+        let id = format!("automation.mode.{m}");
+        let spec = registry::find(&id).unwrap();
+        assert!(
+            spec.menu_item && spec.document && spec.menu == "Automation",
+            "{id}"
+        );
+        assert!(matches!(
+            ok("command.run", json!({ "id": id })),
+            Command::CommandRun { .. }
+        ));
+        let (code, _) = err(
+            "command.run",
+            json!({ "id": id, "params": { "strips": "all" } }),
+        );
+        assert_eq!(code, ErrorCode::InvalidParams, "{id}");
+    }
+    let s = registry::find("automation.suspend").unwrap();
+    assert!(s.menu_item && s.menu == "Automation" && !s.document);
 }

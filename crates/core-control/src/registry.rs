@@ -1125,15 +1125,21 @@ pub const COMMANDS: &[CommandSpec] = &[
             true,
         ))
     },
+    cmd("automation.mode.off", "Automation", "Off", None, true),
+    cmd("automation.mode.read", "Automation", "Read", None, true),
+    cmd("automation.mode.touch", "Automation", "Touch", None, true),
+    cmd("automation.mode.latch", "Automation", "Latch", None, true),
+    cmd("automation.mode.write", "Automation", "Write", None, true),
+    cmd("automation.mode.trim", "Automation", "Trim", None, true),
     CommandSpec {
         params: ON,
-        ..key_only(cmd(
+        ..cmd(
             "automation.suspend",
-            "Mixer",
+            "Automation",
             "Suspend Automation",
             None,
             false,
-        ))
+        )
     },
     CommandSpec {
         params: AUDIO_SET_PARAMS,

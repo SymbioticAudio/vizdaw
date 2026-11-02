@@ -149,4 +149,16 @@ import VizDAWCore
         #expect(code(AutomationCommands.runSuspend([arg("on", "yes")])) == .invalidParams)
         #expect(automationSuspended() == was, "a refused call does not toggle")
     }
+
+    @Test func modeCommandsSetTheSelectedStrips() throws {
+        let (_, m, f) = try doc()
+        #expect(!AutomationCommands.enabled("automation.mode.write", m))
+        #expect(AutomationCommands.run("automation.mode.write", on: nil, m) == .unavailable("Select strips in the mixer first."))
+        m.selectedStrips = [2, 0]
+        #expect(AutomationCommands.enabled("automation.mode.write", m))
+        #expect(AutomationCommands.run("automation.mode.write", on: nil, m) == .done)
+        #expect(f.modeCalls.last?.0 == [0, 2] && f.modeCalls.last?.1 == .write)
+        #expect(AutomationCommands.enabled(AutomationCommands.suspend, m))
+        #expect(Set(AutomationCommands.modeIDs.keys).isSubset(of: ControlCommands.handled))
+    }
 }

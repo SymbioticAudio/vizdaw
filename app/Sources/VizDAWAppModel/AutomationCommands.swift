@@ -26,7 +26,12 @@ public enum AutomationCommands {
     public static let setMode = "automation.set_mode"
     public static let gesture = "automation.gesture"
     public static let suspend = "automation.suspend"
-    public static let ids: Set<String> = [setMode, gesture, suspend]
+    /// The Automation menu's mode commands (plan 5e-2 Task 4).
+    public static let modeIDs: [String: AutomationModeRow] = [
+        "automation.mode.off": .off, "automation.mode.read": .read, "automation.mode.touch": .touch,
+        "automation.mode.latch": .latch, "automation.mode.write": .write, "automation.mode.trim": .trim,
+    ]
+    public static let ids: Set<String> = Set([setMode, gesture, suspend]).union(modeIDs.keys)
 
     /// The longest `strips` text read (the registry's string limit).
     nonisolated static let maxStripsText = 4096
@@ -104,6 +109,8 @@ public enum AutomationCommands {
         switch id {
         case setMode: return runSetMode(args, doc: doc, m)
         case gesture: return runGesture(args, doc: doc, m)
+        case _ where modeIDs[id] != nil:
+            return ControlCommands.failure(run(id, on: nil, m)) ?? .done(ControlCommands.ran(id, doc, m))
         default: return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }
     }
@@ -156,5 +163,32 @@ public enum AutomationCommands {
         // A static gesture changes the document (its edit, Ruling 14).
         if let s = try? m.session.snapshot(), s.version != m.snapshot.version { m.apply(s) }
         return .done(ControlCommands.ran(gesture, doc, m))
+    }
+}
+
+/// The Automation menu and the keys (plan 5e-2 Task 4).
+extension AutomationCommands: MenuCommands {
+    public static func enabled(_ id: String, _ m: DocumentModel) -> Bool {
+        modeIDs[id] != nil ? !m.selectedStrips.isEmpty : true
+    }
+
+    public static func isOn(_ id: String, _ m: DocumentModel) -> Bool {
+        id == suspend ? automationSuspended() : false
+    }
+
+    public static func run(_ id: String, on: Bool?, _ m: DocumentModel) -> KeyOutcome {
+        if id == suspend {
+            setAutomationSuspended(on: on ?? !automationSuspended())
+            return .done
+        }
+        guard let mode = modeIDs[id] else { return .refused("VizDAW has no handler for \(id).") }
+        guard m.editor.gesture == nil else { return .busy(EditorModel.gestureOpenMessage) }
+        guard !m.selectedStrips.isEmpty else { return .unavailable("Select strips in the mixer first.") }
+        do {
+            m.apply(try m.session.setAutomationMode(strips: m.selectedStrips.sorted(), mode: mode))
+            return .done
+        } catch {
+            return .refused(AlertItem(error, title: "Automation Failed").message)
+        }
     }
 }

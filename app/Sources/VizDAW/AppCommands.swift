@@ -234,6 +234,14 @@ struct AppCommands: Commands {
             commandItem("step.rest", StepCommands.self)
             commandItem("step.delete_last", StepCommands.self)
         }
+        CommandMenu("Automation") {
+            Text("Selected Strips")
+            ForEach(["off", "read", "touch", "latch", "write", "trim"], id: \.self) {
+                commandItem("automation.mode.\($0)", AutomationCommands.self)
+            }
+            Divider()
+            commandToggle(AutomationCommands.suspend, AutomationCommands.self)
+        }
     }
 
     /// A menu item for a command of `kind` (plan 4f): its title and key
