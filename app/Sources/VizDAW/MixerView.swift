@@ -84,6 +84,7 @@ struct MixerView: View {
             while !Task.isCancelled {
                 model.refreshIfNeeded()
                 model.pollLevels()
+                model.pollAutomation()
                 try? await Task.sleep(for: .milliseconds(33))
             }
         }
@@ -101,6 +102,28 @@ struct MixerView: View {
     }
 }
 
+extension View {
+    /// The touched ring (plan 5e-2 Ruling 3): shown while `touched`.
+    func touchRing(_ touched: Bool, radius: CGFloat = 4) -> some View {
+        overlay(
+            RoundedRectangle(cornerRadius: radius)
+                .stroke(Color.accentColor, lineWidth: 2)
+                .opacity(touched ? 1 : 0))
+    }
+}
+
+/// An automation mode's system colour (Ruling 4).
+func automationColor(_ m: AutomationModeRow) -> Color {
+    switch AutomationModes.colorName(m) {
+    case "green": .green
+    case "yellow": .yellow
+    case "orange": .orange
+    case "red": .red
+    case "purple": .purple
+    default: .gray
+    }
+}
+
 /// One strip: name, kind, slots, sends, output, pan, fader, mute/solo,
 /// meter.
 struct StripView: View {
@@ -111,6 +134,7 @@ struct StripView: View {
     var body: some View {
         VStack(spacing: 4) {
             header
+            modeMenu
             if let inst = strip.instrument {
                 SlotView(model: model, strip: strip, slot: inst, index: nil)
             }
@@ -129,10 +153,12 @@ struct StripView: View {
                 Toggle("M", isOn: Binding(get: { strip.mute }, set: { _ in model.toggleMute(strip) }))
                     .toggleStyle(.button)
                     .tint(.orange)
+                    .touchRing(model.isTouched(.stripMute(strip: strip.id)))
                 if strip.kind != .master {
                     Toggle("S", isOn: Binding(get: { strip.solo }, set: { _ in model.toggleSolo(strip) }))
                         .toggleStyle(.button)
                         .tint(.yellow)
+                        .touchRing(model.isTouched(.stripSolo(strip: strip.id)))
                 }
             }
             .help(strip.soloMuted ? "Silent: other strips are soloed" : "Mute / Solo")
@@ -140,6 +166,9 @@ struct StripView: View {
         .padding(6)
         .frame(width: 120)
         .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(strip.soloMuted ? 0.3 : 0.6)))
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.accentColor.opacity(model.isSelected(strip.id) ? 0.25 : 0)))
     }
 
     @ViewBuilder private var header: some View {
@@ -154,8 +183,14 @@ struct StripView: View {
                 .font(.headline)
                 .lineLimit(1)
                 .onTapGesture(count: 2) { model.beginRename(strip) }
+                .onTapGesture { model.select(strip.id, adding: NSEvent.modifierFlags.contains(.command)) }
                 .contextMenu {
                     Button("Rename…") { model.beginRename(strip) }
+                    Menu("Set All Strips to") {
+                        ForEach(AutomationModes.all, id: \.self) { m in
+                            Button(AutomationModes.title(m)) { model.setAllModes(m) }
+                        }
+                    }
                     if strip.kind == .bus {
                         Button("Remove Bus") { model.removeBus(strip.id) }
                     }
@@ -178,6 +213,26 @@ struct StripView: View {
                 .controlSize(.small)
                 .help("Safe mode kept these plugins off")
         }
+    }
+
+    /// The automation mode popup, tinted by the mode.
+    private var modeMenu: some View {
+        Menu(AutomationModes.title(strip.automation)) {
+            ForEach(AutomationModes.all, id: \.self) { m in
+                Button {
+                    model.setMode(strip.id, m)
+                } label: {
+                    if m == strip.automation {
+                        Label(AutomationModes.title(m), systemImage: "checkmark")
+                    } else {
+                        Text(AutomationModes.title(m))
+                    }
+                }
+            }
+        }
+        .tint(automationColor(strip.automation))
+        .controlSize(.small)
+        .help("Automation: \(AutomationModes.title(strip.automation))")
     }
 
     private var inserts: some View {
@@ -263,6 +318,7 @@ struct StripView: View {
                     }
                 }
                 .controlSize(.mini)
+                .touchRing(model.isTouched(.stripPan(strip: strip.id)))
                 Text(MixerMath.panLabel(model.pan(strip)))
                     .font(.caption2.monospacedDigit())
                     .frame(width: 28)
@@ -395,12 +451,13 @@ struct SendView: View {
                 if editing { model.touch(target) } else { model.release(target) }
             }
             .controlSize(.mini)
+            .touchRing(model.isTouched(target))
         }
         .contextMenu { Button("Remove Send") { model.removeSend(strip.id, index) } }
         .help("Send to \(model.stripName(send.target)): \(MixerMath.dbLabel(model.sendLevelDb(strip, index))) dB")
     }
 
-    private var target: AutomationTargetRow { .sendLevel(strip: strip.id, send: UInt16(index)) }
+    private var target: AutomationTargetRow { .sendLevel(strip: strip.id, send: MixerModel.sendIndex(index)) }
 }
 
 /// A vertical fader (a horizontal slider turned); a drag is one undo step.
@@ -421,6 +478,7 @@ struct FaderView: View {
             .frame(width: 140)
             .rotationEffect(.degrees(-90))
             .frame(width: 30, height: 140)
+            .touchRing(model.isTouched(target))
             Text(MixerMath.dbLabel(model.gainDb(strip)))
                 .font(.caption2.monospacedDigit())
                 .onTapGesture(count: 2) { model.click(target, AutomationLaw.faderNorm(0)) }

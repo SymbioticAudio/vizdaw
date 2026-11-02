@@ -7,9 +7,18 @@ import VizDAWCore
 struct AutomationSettingsView: View {
     @Bindable var prefs: AutomationPreferences
 
-    private static let modeTitles = [
-        ("off", "Off"), ("read", "Read"), ("touch", "Touch"), ("latch", "Latch"), ("trim", "Trim"),
-    ]
+    /// The After Write choices (the preference's spelling) with the mixer's titles.
+    private static let modeTitles: [(String, String)] = AutomationSettings.afterWriteModes.map { key in
+        let mode: AutomationModeRow =
+            switch key {
+            case "off": .off
+            case "read": .read
+            case "touch": .touch
+            case "trim": .trim
+            default: .latch
+            }
+        return (key, AutomationModes.title(mode))
+    }
 
     var body: some View {
         Form {

@@ -384,10 +384,25 @@ public final class MixerModel {
     /// Touch at `v`, value and release at once (mute, solo, the 0 dB
     /// double-click). Ignored while the target is touched here.
     public func click(_ t: AutomationTargetRow, _ v: Double) {
-        guard !touches.contains(t), send(t, .touch(value: v)) else { return }
-        send(t, .value(value: v))
-        send(t, .release)
+        guard !touches.contains(t) else { return }
+        do {
+            try Self.clickGesture(session, t, v)
+        } catch {
+            raise(AlertItem(error, title: Self.failureTitle(t)))
+            return
+        }
         gestureLanded()
+    }
+
+    /// The click as the core sees it: touch at `v`, value `v`, release.
+    /// Shared by the mixer and the piano roll's output mute/solo (spec
+    /// §7.1). A refused touch throws before anything else is sent.
+    public static func clickGesture(
+        _ session: any SessionProtocol, _ t: AutomationTargetRow, _ v: Double
+    ) throws {
+        try session.gesture(target: t, phase: .touch(value: v))
+        try session.gesture(target: t, phase: .value(value: v))
+        try session.gesture(target: t, phase: .release)
     }
 
     /// Touched here or in the core (a channel or plugin touch): the ring.
@@ -405,9 +420,12 @@ public final class MixerModel {
         live[.stripPan(strip: s.id)].map(AutomationLaw.pan) ?? s.pan
     }
 
+    /// A send's position as the automation target spells it.
+    public static func sendIndex(_ index: Int) -> UInt16 { UInt16(clamping: index) }
+
     /// Send `index`'s level as shown (live while touched).
     public func sendLevelDb(_ s: StripRow, _ index: Int) -> Double {
-        if let v = live[.sendLevel(strip: s.id, send: UInt16(clamping: index))] {
+        if let v = live[.sendLevel(strip: s.id, send: Self.sendIndex(index))] {
             return AutomationLaw.faderDb(v)
         }
         return index >= 0 && index < s.sends.count ? s.sends[index].levelDb : MixerMath.floorDb
@@ -460,7 +478,9 @@ public final class MixerModel {
         }
     }
 
-    /// A gesture closed: the document and the mixer show its step.
+    /// A gesture closed: the document and the mixer show its step now.
+    /// Idle would report it a tick later (the core sets `news.doc_changed`);
+    /// reading here keeps the control from flicking back for a frame.
     private func gestureLanded() {
         if let s = try? session.snapshot() { document.apply(s) }
         refetch()

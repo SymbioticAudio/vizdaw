@@ -765,6 +765,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var gestures: [(AutomationTargetRow, GesturePhaseRow)] = []
     /// Thrown by `gesture` while set.
     var gestureError: VizError?
+    /// Thrown by `automationState` while set.
+    var automationError: VizError?
     var automationRow = AutomationStateRow(modes: [], touched: [], suspended: false, writing: false)
     var modeCalls: [([UInt64], AutomationModeRow)] = []
     var previewRows: [PreviewPointRow] = []
@@ -779,7 +781,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
-    func automationState() throws -> AutomationStateRow { automationRow }
+    func automationState() throws -> AutomationStateRow {
+        if let e = automationError { throw e }
+        return automationRow
+    }
 
     func automationPreview(target: AutomationTargetRow) throws -> [PreviewPointRow] { previewRows }
 }

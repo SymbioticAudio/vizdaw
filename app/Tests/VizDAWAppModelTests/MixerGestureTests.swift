@@ -67,6 +67,19 @@ import VizDAWCore
         #expect(!m.isTouched(.stripPan(strip: 2)))
     }
 
+    @Test func pollingKeepsTheLastTouchedSetWhenTheCoreIsBusy() throws {
+        let (m, f) = try model()
+        f.automationRow.touched = [.stripPan(strip: 2)]
+        m.pollAutomation()
+        f.automationError = .Busy(message: "Finish the open edit first.")
+        f.automationRow.touched = []
+        m.pollAutomation()
+        #expect(m.isTouched(.stripPan(strip: 2)), "Busy keeps the last set")
+        f.automationError = nil
+        m.pollAutomation()
+        #expect(!m.isTouched(.stripPan(strip: 2)))
+    }
+
     /// Two controls touched at once (plan 5e-1 Ruling 14: one shared
     /// static edit in the core, so the real core takes both).
     @Test func twoTargetsTouchedAtOnceAreIndependent() throws {

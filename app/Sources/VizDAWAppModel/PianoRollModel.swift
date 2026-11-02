@@ -154,11 +154,22 @@ public final class PianoRollModel {
     public static let noStripMessage = "This output has no mixer strip."
 
     public func setOutputMute(_ output: UInt64, _ on: Bool) {
-        mixerEdit(output) { s, strip in try s.setStripMute(strip: strip, mute: on) }
+        clickOutput(output, { .stripMute(strip: $0) }, on)
     }
 
     public func setOutputSolo(_ output: UInt64, _ on: Bool) {
-        mixerEdit(output) { s, strip in try s.setStripSolo(strip: strip, solo: on) }
+        clickOutput(output, { .stripSolo(strip: $0) }, on)
+    }
+
+    /// Mute or solo as the mixer's click gesture (spec §7.1), so a strip
+    /// that writes records it.
+    private func clickOutput(
+        _ output: UInt64, _ target: (UInt64) -> AutomationTargetRow, _ on: Bool
+    ) {
+        mixerEdit(output) { s, strip in
+            try MixerModel.clickGesture(s, target(strip), on ? 1 : 0)
+            return try s.snapshot()
+        }
     }
 
     private func mixerEdit(_ output: UInt64, _ body: (any SessionProtocol, UInt64) throws -> DocSnapshot) {

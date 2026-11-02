@@ -44,7 +44,12 @@ func audioFake() -> FakeSession {
         r.setOutputMute(7, true)
         r.setOutputSolo(7, true)
         r.setOutputMute(99, true)
-        #expect(f.calls.filter { $0.hasPrefix("mute") || $0.hasPrefix("solo") } == ["mute 40 true", "solo 40 true"])
+        #expect(f.calls.filter { $0.hasPrefix("mute") || $0.hasPrefix("solo") }.isEmpty, "no direct call: spec §7.1")
+        #expect(f.gestures.map(\.1) == [.touch(value: 1), .value(value: 1), .release, .touch(value: 1), .value(value: 1), .release])
+        #expect(f.gestures.map(\.0) == Array(repeating: .stripMute(strip: 40), count: 3) + Array(repeating: .stripSolo(strip: 40), count: 3))
+        f.gestures = []
+        r.setOutputMute(7, false)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0), .value(value: 0), .release])
     }
 
     @Test func outputButtonsWaitForAnOpenDrag() throws {
@@ -54,6 +59,7 @@ func audioFake() -> FakeSession {
         #expect(m.editor.beginGesture("Move Notes", lanes: [LaneKey(3, 31)], origin: .other))
         m.pianoRoll(.pane).setOutputMute(7, true)
         #expect(!f.calls.contains("mute 40 true"))
+        #expect(f.gestures.isEmpty)
         #expect(m.editor.status == EditorModel.gestureOpenMessage)
     }
 
@@ -64,6 +70,7 @@ func audioFake() -> FakeSession {
         m.pianoRoll(.pane).setOutputSolo(99, true)
         #expect(m.editor.status == PianoRollModel.noStripMessage)
         #expect(!f.calls.contains { $0.hasPrefix("solo") })
+        #expect(f.gestures.isEmpty)
     }
 
     @Test func theStoreMakesTheDemoWithAudio() throws {
