@@ -1520,7 +1520,11 @@ channel.
      "Mute" step, as before. With Full Keyboard Access on, Tab to a fader
      and press the arrow keys: each press is heard and is one "Set Fader"
      step stopped, and afterwards other edits work (no touch left open;
-     the same for a plugin window's slider).
+     the same for a plugin window's slider). Stopped, click a fader's
+     track away from its knob and drag: one Edit > Undo puts the fader back
+     where it was (not two steps); opening the mixer or a plugin window
+     adds no undo step (note it if either fails: the slider's event order,
+     final re-review N1).
 167. Record popover keys (5d-2 T3 M1): open the record popover without
      clicking a field: R records and Space plays (if the popover passes
      keys on; note it if it does not). Click Punch In: typing R or Space

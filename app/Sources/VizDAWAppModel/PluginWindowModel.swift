@@ -222,16 +222,17 @@ public final class PluginWindowModel {
         refresh()
     }
 
-    /// A parameter control moves (`value` plain, in the parameter's
-    /// range): the first move of a drag touches the parameter at its
-    /// normalised value, later ones move it (plan 5e-2 Task 5). The core
-    /// sends each value to the plugin and keeps the step at the release
-    /// (plan 5e-1 Ruling 15). A refused touch alerts and is not kept.
     /// The control's editing span begins (the slider's mouse-down).
     public func beginParam(_ id: UInt64) {
         editing.insert(id)
     }
 
+    /// A parameter control moves (`value` plain, in the parameter's
+    /// range): the first move of a drag touches the parameter at its
+    /// normalised value, later ones move it (plan 5e-2 Task 5). The core
+    /// sends each value to the plugin and keeps the step at the release
+    /// (plan 5e-1 Ruling 15). A refused touch alerts and is not kept.
+    ///
     /// A value with no editing span open (a keyboard or accessibility
     /// increment sends no editing-began) is a click: touch, value and
     /// release at once, so no touch is left open (final review m6).
