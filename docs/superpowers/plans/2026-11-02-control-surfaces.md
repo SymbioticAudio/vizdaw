@@ -40,7 +40,7 @@ Read the whole spec (its §3 rules bind here), the 5e-1 plan's Rulings 14–20 a
   - The scripts: `scripts/build-ffi.sh` (after any Rust change that touches the FFI, before Swift), `scripts/swift.sh build`, `scripts/swift.sh test` and `scripts/make-app.sh`.
   - Never call `swift`, `xcodebuild` or `xcrun` directly.
 - **Branch and commits.**
-  - Work on branch `sp5-audio`. The code base is the tree at `f3291d0` (the 5f plans' commit, on top of `00b15ea`, which made one `core-ffi/tests/record.rs` test macOS-only); this plan's revision commit sits on top and changes no code. Never switch branches, never push.
+  - Work on branch `sp5-audio`. The code base is the tree at `276c855`, the last code commit (`e633e1c`, `c13432c` and `276c855` landed after the 5f plans' commit `f3291d0`); the plan revisions on top (`4d29b4c` and its successor) change no code. Never switch branches, never push.
   - Commit at the end of every task, adding only the files the task lists, by path (never `git add -A`).
   - `Cargo.lock` changes once, in Task 1: it gains the `core-surface` workspace package and `core-ffi`'s dependency on it. No registry crate is added.
   - Never commit `.superpowers/`, `.DS_Store` or generated files.
@@ -112,13 +112,13 @@ Read the whole spec (its §3 rules bind here), the 5e-1 plan's Rulings 14–20 a
 - **Generated files** are never committed: `app/Sources/VizDAWCore/vizdaw_ffi.swift`, `app/Sources/vizdaw_ffiFFI/include/`, `target/ffi/`, `dist/`.
 - **Each task ends green.**
   - Always: `cargo fmt --all` then `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the Linux clippy, and `cargo test` for the crates the task touches (the whole workspace in Tasks 6, 9 and 12).
-  - Tasks 6–12 also run `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`.
+  - Tasks 6–12 also run `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. Tasks 7–12 also run `cargo clippy -p core-ffi --lib --target x86_64-unknown-linux-gnu --target-dir target/linux-check -- -D warnings`, the one gate that compiles `NoPorts` (the workspace clippies unify `test-hooks`).
   - Tasks 11 and 12 also run `scripts/make-app.sh` and the e2e (`VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1`).
   - Known flaky tests: the `damaged_files` proptest, the MIDI listener tests (`platform-macos/tests/midi.rs`, the reconnect test), `core-ffi` catalog tests under parallel load, and the latency e2e timing. Re-run once before investigating, and say so in the report.
-  - Baseline at `f3291d0`: Rust workspace 1632 passed, 0 failed, 14 ignored (measured at `8d38c51`; the commits since only gate tests to macOS, so the macOS count holds); Swift 899 tests; e2e 10 tests; registry 138. Each task's last step gives the counts it adds. Report the measured counts; a slip of the writer's arithmetic is not a failure.
+  - Baseline at `276c855`: Rust workspace 1634 passed, 0 failed, 14 ignored (1632 measured at `8d38c51`, plus the two core-engine gesture tests `e633e1c` added; the other commits since only gate tests to macOS or fix them); Swift 899 tests; e2e 10 tests; registry 138. Each task's last step gives the counts it adds. Report the measured counts; a slip of the writer's arithmetic is not a failure.
 - **How code is given.**
   - New files are written whole (`cat > … <<'VIZDAW_EOF'`) where their exact text matters (tests, byte tables). For new implementation files, the step gives the module's public items with their doc lines, and the algorithm where the signature and the tests leave a choice.
-  - Changes to existing files are **Find / Replace** excerpts, applied in order with the Edit tool. Each Find occurs exactly once in its file at `f3291d0` (or in the file an earlier task of this plan left, which the step says).
+  - Changes to existing files are **Find / Replace** excerpts, applied in order with the Edit tool. Each Find occurs exactly once in its file at `276c855` (or in the file an earlier task of this plan left, which the step says).
   - If an excerpt does not match, make the same change to the current text. If a name differs from the tree, use the tree's name and say so in the report.
   - Tests added to an existing test file are given whole, as code, and appended or inserted where the step says.
 - **Spec values used verbatim:**
@@ -140,7 +140,7 @@ These are the five failure modes a user is most likely to hit that the spec impl
 
 1. **Two hands on one control.** A touch-sensing fader is held while the same fader is grabbed with the mouse. A learned knob turns a pan while a `vizctl` script holds it. The surface lets go first, or the mouse does, while stopped or while a pass writes.
    - Expected: the target stays touched until the last holder releases. Releasing one holder does not commit, glide back or hold the other's move: while writing, the write follows the remaining hand. A static edit is one undo step. A second Touch from the same holder is a move, never a second hold.
-   - Pinned by `a_surface_and_the_mouse_hold_one_target_until_both_let_go`, `each_holder_releases_only_its_own_touch`, `a_holder_touching_twice_holds_once` and `two_holders_on_a_writing_strip_end_only_at_the_last_release` (Task 6), and by `a_surface_touch_and_a_mouse_touch_share_the_target` (Task 8).
+   - Pinned by `a_surface_and_the_mouse_hold_one_target_until_both_let_go`, `each_holder_releases_only_its_own_touch`, `a_holder_touching_twice_holds_once` and `two_holders_on_a_writing_strip_end_only_at_the_last_release` (Task 6), and by `a_surface_touch_and_a_mouse_touch_share_the_target` and `a_learned_cc_writes_its_targets_automation_in_touch` (Task 8).
 2. **Motor faders that do not follow what plays.** Automation plays a fader ramp in Read; another unit or the mouse rides a fader in Touch; a muted-by-automation strip's LED.
    - Expected:
      - every fader, ring and LED shows the *heard* value (the engine's live value, else the automation at the transport, else the static value), so a motor fader moves with its automation;
@@ -149,10 +149,12 @@ These are the five failure modes a user is most likely to hit that the spec impl
    - Pinned by `motor_faders_follow_automation_playback`, `a_touch_ride_moves_the_partner_and_glides_back_on_release` and `feedback_waits_20_ms_but_partners_go_at_once` (Task 8), and `no_fader_feedback_while_touched_then_one_on_release` (Task 2) and `hui_fader_touch_blocks_feedback` (Task 3).
 3. **A resting hand.** A hand rests on a touch-sensing MCU or HUI fader for minutes while the user edits notes, adds a bus, learns a knob or changes an automation mode.
    - Expected: a touch with no value opens no undo step and blocks nothing: drags begin, one-shot edits are their own undo steps, Write Automation landings and mode changes are not held up. The first moved value opens the touch's own step ("Set Fader"), and Undo of it restores only the fader.
-   - Pinned by `a_resting_touch_does_not_open_an_edit` (Task 6) and `a_resting_surface_touch_does_not_open_an_edit` (Task 8).
+   - Expected too: a hand resting on a Read strip's fader when Play starts keeps the static path, and its move is a static edit; on a writing strip it writes, and a Trim strip grabs at an offset of 0.
+   - Pinned by `a_resting_touch_does_not_open_an_edit` and `a_resting_touch_held_over_play_keeps_its_path` (Task 6) and `a_resting_surface_touch_does_not_open_an_edit` (Task 8).
 4. **Surface and learned traffic leaking into the lanes.** A MIDI lane armed on All MIDI Inputs while an MCU fader is touched (note 0x68, pitch bend on channel 1); a keyboard knob learned to a fader; step entry while pressing Play on the unit.
    - Expected: nothing a surface port sends, and no message a learn map (or a waiting learn) takes, is recorded, played thru, step-entered or heard as note input; unlearned messages from the same keyboard pass as before; the lane input picker marks surface ports "(used by a surface)".
-   - Pinned by `surface_ports_and_learned_controls_stay_out_of_the_lanes` (Task 8), `the_maps_say_which_messages_they_take` (Task 5) and `aSurfacesPortIsMarkedInThePicker` (Task 10).
+   - Expected too: after Undo of "MIDI Learn" (or Redo, Revert, Open), the knob no longer drives the target, and its messages reach the lanes again.
+   - Pinned by `surface_ports_and_learned_controls_stay_out_of_the_lanes`, `a_learned_cc_is_neither_recorded_nor_played_thru` and `an_undone_learn_stops_driving_and_taking` (Task 8), `the_maps_say_which_messages_they_take` (Task 5) and `aSurfacesPortIsMarkedInThePicker` (Task 10).
 5. **A surface or learned control that goes away and comes back.** A USB unit unplugged mid-ride (while it counts as connected), a unit removed in Settings while held, a port renamed, `surfaces.json` damaged or written by a newer VizDAW, focus moving to another window, or the focused window closing while a surface or a learned knob holds a fader.
    - Expected:
      - an unplugged unit is seen within 2 s, shows "Disconnected", and its held touches (touch-sensing faders and idle holds) are released at once (the ride lands as written so far);
@@ -183,7 +185,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
    - A value from any holder moves the target (the last value wins).
    - A Release from a holder that does not hold the target does nothing. A Release that is not the last flushes the sampler and sends the flushed value (`send_value`), as `release` does, so the joining holder's last pending move is not lost; it sends no Glide or Hold.
    - The touch's path (static, live or write) is that of the first holder, as today. Its `Source` is `Source::Plugin` for the plugin holder only, and `Source::Ui` for Mouse, Channel, Surface and Learn, so a V-pot in plug-in mode reaches the plugin (`set_plugin`).
-   - **The static edit opens at the first value, never at the touch (pre-flight C2).** On the static path (stopped, or Off/Read while playing) a touch opens no history transaction. The touch's first static value opens the shared static edit (or joins it), counted then; a touch that ends with no value opens and commits nothing; while a touch rests with no value, other edits, Write Automation landings and mode changes run normally. A first value while another (non-static) edit is open is refused with Busy as the touch is today: the mouse and the channel get the Busy; a surface or learn holder counts it in its unit's `ignored`.
+   - **The static edit opens at the first value, never at the touch (pre-flight C2).** On the static path (stopped, or Off/Read while playing) a touch opens no history transaction. The touch's first static value opens the shared static edit (or joins it), counted then, and marks the touch `shared`; a touch that ends with no value opens and commits nothing; while a touch rests with no value, other edits, Write Automation landings and mode changes run normally. A first value while another (non-static) edit is open is refused with Busy as the touch is today: the mouse and the channel get the Busy; a surface or learn holder counts it in its unit's `ignored`. **At a pass's start** (Play) a static touch converts by its strip, whether or not it shares the edit: on a strip that does not write it stays static (its first value opens the static edit while playing, as stopped); on a writing strip it writes (a Trim strip grabs at an offset of 0), and only a touch that is `shared` ends a share of the static edit then. Keying the conversion on "some static edit is open", as 5e-1 could while every static touch held a share, would turn a resting touch on a Read strip into a heard-only touch whose ride is lost, and write absolutes on a Trim strip (fold check C1).
    - `Session.gesture` keeps its signature and means `Mouse`. The channel's `automation.gesture` calls the new `Session.gesture_from(…, .channel)`, so a mouse release no longer ends a touch only the channel holds. Surfaces and learn call the internals (`gesture_held`) with their holder, `Source::Ui` and the message's host time.
    - Releases after idle (V-pots, untouched faders, learned maps) are stamped at their last value's time, as `release_plugin_touches` back-dates, so Touch does not write a 500 ms flat before the glide.
    - Closing a window, a vanished target, a vanished port and a removed surface release every holder concerned (the existing `release_touches`/`release_vanished`, plus the releases a session is owed, Ruling 11).
@@ -265,7 +267,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
    - **Notes:** a note-on toggles a stepped target (mute, solo). On a continuous target, note-on sets `velocity / 127` and note-off does nothing.
    - **Relative modes:** each detent adds ±1/127 of the normalised range to the target's current value (the map's own last value while its idle touch is open, else `current`). A value of 64 in binary offset (or 0 in 2's complement) is no move and sends nothing.
    - **`current`** is the heard value of the target (Ruling 13), the same value the surfaces show.
-   - **Release:** every learned gesture uses holder `Learn` and releases 500 ms after its last value, stamped at that value's time.
+   - **Release:** every learned gesture uses holder `Learn` and releases 500 ms after its last value, stamped at that value's time; it writes by the strip's mode like any other hand (`a_learned_cc_writes_its_targets_automation_in_touch`).
    - **Feedback:** absolute maps send the current value back to the output port with the same name as the source port, if one exists, whenever it differs from what was last sent. A map whose target is touched by the learn holder sends nothing.
    - **Command maps:** a note-on, or a CC rising through 64, runs the command once. Only IDs that Settings › Keys can bind can be learnt (no required parameter, no `always` dialog), so a learned pad never runs `automation.gesture` or `surface.add` without arguments.
    - **What maps take stays out of the lanes (owner answer 2026-11-02, Ruling 17).**
@@ -286,7 +288,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
     - `CoreMidiPorts` (macOS live builds) uses `platform_macos::midi::SourceListener::connect_all("VizDAW Surfaces", sink)` for input and `MidiSystem::new("VizDAW Surfaces")` with `open_destination` for output. Its sink gets the source's port key (`core_engine::input::port_key` of its name) and maps it to a name through a snapshot that `refresh()` updates. The sink's body runs in `catch_unwind`.
     - `NoPorts` (other live builds) has no sources and no destinations.
     - It is created on the first `surface_add`, learn or loaded surface, and never before.
-    - Its sink pushes `(port, host time, bytes)` into the registry's input queue: its own `Mutex<VecDeque>` (4096 messages), separate from the registry, held only to push and to `mem::take` the whole batch; `try_lock`, drop and count. Drops show in `state.get surfaces` `problems` ("N MIDI messages from surfaces were dropped"). Injected bytes carry host time 0 (now).
+    - Its sink pushes `(port, host time, bytes)` into the registry's input queue: its own `Mutex<VecDeque>` (4096 messages), separate from the registry, held only to push and to `mem::take` the whole batch; `try_lock`, drop and count. Drops show in `state.get surfaces` `problems` ("N MIDI messages from surfaces were dropped"). Injected bytes carry host time 0 (now). Each item also carries the surfaces clock's `Instant` at push (`input()` reads `now()`): the learner, the mapper and the shuttle use it; `host_ns` only stamps gestures.
     - **While any surface exists**, the service calls `refresh()` (the listener's `reconnect` and a reopen of the outputs) at most every 2 s, so a unit unplugged while connected is seen within 2 s. A `send` that fails also marks its surface disconnected at once.
     - Why: the spec asks for CoreMIDI notifications. The existing listener has no notification callback, and its `sources()` changes only at `reconnect()`, so polling only while something is disconnected would never see a connected unit vanish (pre-flight I2). Polling reuses tested code (`SourceListener::reconnect`).
     - Cost if wrong:
@@ -294,9 +296,9 @@ Each ruling decides something the spec leaves open, in the format "what — why 
       - a CoreMIDI query on the main thread every 2 s while any surface is configured (the backlog row "Input pickers' MIDI source list off the main thread" covers moving it).
 11. **Ruling (which document the surfaces drive): the app's command target (`DocumentStore.noteTarget`). The ticker calls `Session.focus_surfaces()` when the command target changes (not every tick).**
     - The focused session's `idle` services the surfaces: it drains input, decides its learns, maps, applies actions and sends feedback.
-    - **Owed releases.** The registry keeps `owed: session id → Vec<(Holder, AutomationTarget)>`. A focus change owes the old session every surface holder's targets and every `Mapper::held()` target; a disconnect and a `surface_remove` owe the unit's `release_all()` to the session that holds them. **Every** session's `idle` (focused or not) first takes and applies its own owed releases; an unfocused session then stops.
+    - **Owed releases.** The registry keeps `owed: session id → Vec<(TouchHolder, AutomationTarget)>`. A focus change owes the old session every surface holder's targets and every `Mapper::held()` target; a disconnect and a `surface_remove` owe the unit's `release_all()` to the session that holds them. **Every** session's `idle` (focused or not) first takes and applies its own owed releases; an unfocused session then decides a learn it asked for (Ruling 7) and stops.
     - With no document open, nothing is serviced: input past the queue's capacity is dropped and counted, and Settings › Keys "Learn MIDI" is disabled ("Open a project to learn MIDI").
-    - When focus moves, the units get a full refresh from the new session. When the focused session closes, its touches end (`release_touches`), its learn is cancelled, focus goes to none, and the units get a blank refresh (names cleared, faders down, LEDs off, displays blank) until a session is focused again.
+    - When focus moves, the units get a full refresh from the new session. When the focused session closes, its touches end (`release_touches`), its learn is cancelled, focus goes to none, and the units get a blank refresh (names cleared, faders down, LEDs off, displays blank; a fader the unit still reports touched is left alone, §8.1) until a session is focused again.
     - `surface.inject` focuses the target window's session and services it at once. Because the ticker refocuses only when the command target changes, an injected window keeps the focus until the user picks a window.
     - A learn records the session that asked (Ruling 7).
     - Why: notes already follow the command target (plan 4c Ruling 11); one owner keeps the gesture holders simple. Owed releases must reach the session that holds them, which may no longer be the focused one.
@@ -356,7 +358,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
     - Cost if wrong: two registry IDs to retire.
 17. **Ruling (surface and learned traffic stays out of the lanes; pre-flight I5 for surfaces, owner answer 2026-11-02 for learned messages).**
     - A message is **taken** when it comes from a configured surface's input port; or it is a channel message (CC, pitch bend, note on/off) from a port no surface uses while a learn waits; or it matches a command map, or a learn map of the focused session (`Cc7 {ch, cc}`: `Bn cc`; `Cc14 {ch, cc}`: `Bn cc` and `Bn cc+32`; `PitchBend {ch}`: `En`; `Note {ch, note}`: `9n note` and `8n note`).
-    - Taken messages are not recorded, not played thru, not step-entered and not note input. Every consumer asks one process-wide function, `surfaces::takes(port_key, bytes) -> bool`, which reads a claims set (`RwLock`, `try_read`) the registry rewrites when a surface, a map, a learn or the focus changes:
+    - Taken messages are not recorded, not played thru, not step-entered and not note input. Every consumer asks one process-wide function, `surfaces::takes(port_key, bytes) -> bool`, which reads a claims set (`RwLock`, `try_read`) the registry rewrites when a surface, a map, a learn or the focus changes. The focused session's maps are also re-read when its document changes (undo, redo, revert and load change `Settings.learn` without the learn API): at step 3 the service compares `Settings.learn` with the Mapper's maps; when they differ it calls `Mapper::set`, keeping the state (engaged, MSB holds, idle) of maps whose source and target are unchanged, owes `release_from(TouchHolder::Learn)` for held targets no map drives any more, and rewrites the claims. The consumers:
       - the lane path: `host::midi_from_source` (record, thru, monitoring, "All MIDI Inputs" and named-source lanes alike);
       - the note-input path (note input and step entry): `NoteInput` listens through `SourceListener` (which knows each message's port) instead of `NoteListener`, and its sink drops what `takes` claims;
       - `Session.inject_midi`: taken messages go only to `surfaces::input`.
@@ -1513,7 +1515,19 @@ fn a_learn_map_is_checked_by_the_model() {
     let ok = src("K", LearnKind::Cc7 { channel: 0, cc: 1 });
     let gone = T::StripFader(core_model::ids::StripId(987_654));
     assert!(apply(&d, &set(map(ok.clone(), gone))).is_err(), "the target must exist");
-    assert!(apply(&d, &set(map(ok, T::VelocityScale(core_model::ids::DestId(1))))).is_err());
+    // A destination the document has, so only the velocity-scale rule can refuse it.
+    let d = apply(
+        &d,
+        &Command::Routing(core_model::command::RoutingCmd::AddDestination {
+            name: "Plug".into(),
+            kind: core_model::document::DestKind::plugin("p"),
+            default_patch: None,
+        }),
+    )
+    .unwrap()
+    .doc;
+    let dest = *d.instruments().keys().next().unwrap();
+    assert!(apply(&d, &set(map(ok, T::VelocityScale(dest)))).is_err(), "velocity scale cannot be learned");
 }
 
 #[test]
@@ -1980,7 +1994,7 @@ Counts: Rust +12.
 ### Task 6: Gesture holders (carry m8): `Session.gesture_from`, the static edit at the first value
 
 **Files:**
-- Modify: `crates/core-ffi/src/automation.rs` (`SurfaceId`, `Holder`, `Holders`, `GestureHolderRow`, `Touching.holders`, `Touching.shared`), `crates/core-ffi/src/session.rs` (`gesture`, `gesture_from`, `gesture_held`, `touch`, `move_to`, `release_from`, `share_static`), `app/Sources/VizDAWAppModel/AutomationCommands.swift` (the channel's holder; its doc comment), `app/Tests/VizDAWAppModelTests/FakeSession.swift`, `app/Tests/VizDAWAppModelTests/AutomationCommandsTests.swift`
+- Modify: `crates/core-ffi/src/automation.rs` (`SurfaceId`, `TouchHolder`, `TouchHolders`, `GestureHolderRow`, `Touching.holders`, `Touching.shared`), `crates/core-ffi/src/session.rs` (`gesture`, `gesture_from`, `gesture_held`, `touch`, `move_to`, `release_from`, `share_static`), `app/Sources/VizDAWAppModel/AutomationCommands.swift` (the channel's holder; its doc comment), `app/Tests/VizDAWAppModelTests/FakeSession.swift`, `app/Tests/VizDAWAppModelTests/AutomationCommandsTests.swift`
 - Test: create `crates/core-ffi/tests/holders.rs`
 
 **Interfaces:**
@@ -1992,30 +2006,32 @@ Counts: Rust +12.
   #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub(crate) struct SurfaceId(u8);
   impl SurfaceId { pub const COUNT: u8 = 16; pub fn new(id: u32) -> Option<SurfaceId>; pub fn get(self) -> u32; }
-  /// Who holds a touch (Ruling 2).
+  /// Who holds a touch (Ruling 2). Not `Holder`: `crate::automation::Holder`
+  /// (`This`, `Other`, `Nobody`, automation.rs:517) is the engine's, and stays.
   #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-  pub(crate) enum Holder { Mouse, Channel, Plugin, Learn, Surface(SurfaceId) }
+  pub(crate) enum TouchHolder { Mouse, Channel, Plugin, Learn, Surface(SurfaceId) }
   /// A set of holders: bits 0–3 Mouse, Channel, Plugin, Learn; bits 4–19 surfaces 0–15.
   #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-  pub(crate) struct Holders(u32);
-  impl Holders { pub fn of(h: Holder) -> Holders; pub fn has(self, h: Holder) -> bool; pub fn with(self, h: Holder) -> Holders; pub fn without(self, h: Holder) -> Holders; pub fn is_empty(self) -> bool; }
+  pub(crate) struct TouchHolders(u32);
+  impl TouchHolders { pub fn of(h: TouchHolder) -> TouchHolders; pub fn has(self, h: TouchHolder) -> bool; pub fn with(self, h: TouchHolder) -> TouchHolders; pub fn without(self, h: TouchHolder) -> TouchHolders; pub fn is_empty(self) -> bool; }
   /// The app's holders (the channel is its own, Ruling 2).
   #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
   pub enum GestureHolderRow { Mouse, Channel }
   ```
-  - `Touching` gains `holders: Holders` and `shared: bool` (whether this touch holds a share of the static edit).
-  - `Session::touch(…, holder: Holder)` and `Session::move_to(…, holder: Holder)` take the holder (every call site passes one: the export passes its row's, and the plugin paths pass `Holder::Plugin`).
+  - `Touching` gains `holders: TouchHolders` and `shared: bool` (whether this touch holds a share of the static edit).
+  - `Session::touch(…, holder: TouchHolder)` and `Session::move_to(…, holder: TouchHolder)` take the holder (every call site passes one: the export passes its row's, and the plugin paths pass `TouchHolder::Plugin`).
   - `fn share_static(&self, inner: &mut Inner, t: AutomationTarget) -> Result<(), VizError>`: on a static touch not yet `shared`, opens the shared static edit (or joins it: `n += 1`) and sets `shared`; Busy ("Finish the open edit first.") when a non-static transaction is open; nothing on a touch already sharing.
-  - `fn release_from(&self, inner: &mut Inner, t: AutomationTarget, h: Holder, host_ns: Option<u64>)` removes `h`. When the set becomes empty it calls `release`; otherwise it flushes the sampler and sends the flushed value through `send_value`, and sends no Glide or Hold.
+  - `fn release_from(&self, inner: &mut Inner, t: AutomationTarget, h: TouchHolder, host_ns: Option<u64>)` removes `h`. When the set becomes empty it calls `release`; otherwise it flushes the sampler and sends the flushed value through `send_value`, and sends no Glide or Hold.
   - `release` itself still ends the touch whoever holds it; `release_touches` and `release_vanished` keep calling it. It ends a static share (`end_static_share`, `keep_static_param`) only when the touch is `shared`.
   - Exported: `Session::gesture_from(&self, target: AutomationTargetRow, phase: GesturePhaseRow, holder: GestureHolderRow) -> Result<(), VizError>`. `Session::gesture` is `self.gesture_from(target, phase, GestureHolderRow::Mouse)`.
-  - For later tasks: `pub(crate) fn gesture_held(&self, inner: &mut Inner, t: AutomationTarget, phase: core_surface::Phase, h: Holder, host_ns: Option<u64>) -> Result<(), VizError>`, the same path for surfaces and learn, with `Source::Ui` (Ruling 2) and the message's host time (an idle release passes its last value's time, converted as `release_plugin_touches` converts it: 0 in offline mode).
+  - For later tasks: `pub(crate) fn gesture_held(&self, inner: &mut Inner, t: AutomationTarget, phase: core_surface::Phase, h: TouchHolder, host_ns: Option<u64>) -> Result<(), VizError>`, the same path for surfaces and learn, with `Source::Ui` (Ruling 2) and the message's host time (an idle release passes its last value's time, converted as `release_plugin_touches` converts it: 0 in offline mode).
 
 Joining, the static edit and the plugin rules:
 - In `touch`, the existing "Touched already" branch adds `holder` to `holders` before it moves the target.
 - **The static edit opens at the first value (pre-flight C2).** The block in `touch` that opens the shared static edit for every static touch becomes a call to `share_static` that runs only when the touch carries a value (`Touch(Some(v))`), still before the touch is inserted, so a Busy refuses that touch as today. `move_to` calls `share_static` for a static touch that is not yet `shared` before the value reaches the sampler; on Busy the value is not applied and `move_to` returns the Busy (the mouse and the channel see it; Task 8's surfaces and learn count it in `ignored`). `Touch(None)` opens nothing.
-- The plugin paths keep their 500 ms release through `plugin_touches`, which calls `release_from(…, Holder::Plugin, …)`, and keep `Source::Plugin`.
-- The plugin check at session.rs:6113 (`x.source == Source::Plugin`) stays.
+- The plugin paths keep their 500 ms release through `plugin_touches`, which calls `release_from(…, TouchHolder::Plugin, …)`, and keep `Source::Plugin`.
+- The plugin check at session.rs:6119 (`x.source == Source::Plugin`) stays.
+- **A resting touch held over Play** (session.rs, the pass-start loop "Touches held over the pass's start"): the conversion keys on the touch's own path and share, not on whether some static edit is open (Ruling 2; Step 3 gives the Find). A resting touch on a strip that does not write stays Static; on a writing strip it converts, and `shared` is cleared when it does.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2194,14 +2210,40 @@ fn two_holders_on_a_writing_strip_end_only_at_the_last_release() {
         .filter_map(|e| e.automation.map(|a| (e.tick, a.value)))
         .collect();
     p.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    for v in [0.5, 0.45, 0.3] {
+    for v in [0.5, 0.3] {
         assert!(p.iter().any(|x| (x.1 - v).abs() < 1e-9), "{v} from both hands: {p:?}");
     }
+    assert!(
+        p.iter().any(|x| x.0 > t0 && x.0 < t1 && x.1 < 0.5 - 1e-9 && x.1 > 0.4 - 1e-9),
+        "the mouse's second value is in the ride (thinning may move it): {p:?}"
+    );
     let ride: Vec<f64> = p.iter().filter(|x| x.0 > t0 && x.0 < t1).map(|x| x.1).collect();
     assert!(
         ride.windows(2).all(|w| w[1] <= w[0] + 1e-9),
         "falling all the way: no glide back toward the static value at the first release: {p:?}"
     );
+}
+
+/// Pre-flight C2 held over Play (fold check C1): a hand resting on a Read
+/// strip's fader when Play starts keeps the static path; its move is a
+/// static edit.
+#[test]
+fn a_resting_touch_held_over_play_keeps_its_path() {
+    let _g = serial();
+    let (s, synth) = demo();
+    let seq = song(&s);
+    let t = Target::StripFader { strip: synth };
+    let before = gain(&s, synth);
+    s.gesture_from(t, Phase::Touch { value: None }, H::Channel).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick > Q);
+    s.gesture_from(t, Phase::Value { value: 0.25 }, H::Channel).unwrap();
+    s.gesture_from(t, Phase::Release, H::Channel).unwrap();
+    s.stop().unwrap();
+    wait_until("the stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Set Fader"), "a Read strip's move is a static edit");
+    assert!((gain(&s, synth) - before).abs() > 0.1, "and it stays after the release");
 }
 VIZDAW_EOF
 ```
@@ -2221,7 +2263,7 @@ The ride falls from 0.5 to 0.3 while the synth's static fader sits near unity (w
    ```
    Replace (inside the new `gesture_from`):
    ```rust
-               let h = Holder::from(holder);
+               let h = TouchHolder::from(holder);
                if phase == GesturePhaseRow::Release {
                    self.release_from(&mut inner, t, h, None);
                    return Ok(());
@@ -2271,9 +2313,62 @@ The ride falls from 0.5 to 0.3 while the synth's static fader sits near unity (w
                self.open_static_share(inner, t)?;
            }
    ```
-   where `open_static_share` holds the removed block's body (join with `n += 1`, or Busy, or `begin` with `static_label(t)`), `share_static` calls it for a touch that is not yet `shared` and then sets the flag, and the `Touching { … }` literal at `inner.touches.insert(` gains `holders: Holders::of(holder),` and `shared,`. `move_to` calls `share_static(inner, t)?` when the touch's path is `Static` and it is not `shared`, before `inner.sampler.value(…)`. `release` calls `keep_static_param` and `end_static_share` only when `touching.shared`.
+   where `open_static_share` holds the removed block's body (join with `n += 1`, or Busy, or `begin` with `static_label(t)`), `share_static` calls it for a touch that is not yet `shared` and then sets the flag, and the `Touching { … }` literal at `inner.touches.insert(` gains `holders: TouchHolders::of(holder),` and `shared,`. `move_to` calls `share_static(inner, t)?` when the touch's path is `Static` and it is not `shared`, before `inner.sampler.value(…)`. `release` calls `keep_static_param` and `end_static_share` only when `touching.shared`.
 
-   In the plugin paths, replace `self.release(inner, t, Some(ns))` and `self.release(inner, t, ns)` (session.rs:6055 and :6115) with `self.release_from(inner, t, Holder::Plugin, …)`.
+   The pass start (Ruling 2; fold check C1):
+
+   Find:
+   ```rust
+               if x.path == TouchPath::Static && inner.static_edit.is_some() {
+                   if self.write_mode_of(inner, t).is_none() {
+                       continue;
+                   }
+                   self.keep_static_param(inner, t, x);
+                   left_static += 1;
+                   converted = true;
+               }
+   ```
+   Replace:
+   ```rust
+               // By the touch's own path and share (plan 5f-1 Ruling 2): a
+               // resting static touch holds no share, yet stays static on a
+               // strip that does not write and converts on one that does.
+               if x.path == TouchPath::Static {
+                   if self.write_mode_of(inner, t).is_none() {
+                       continue;
+                   }
+                   if x.shared {
+                       self.keep_static_param(inner, t, x);
+                       left_static += 1;
+                   }
+                   converted = true;
+               }
+   ```
+
+   Find:
+   ```rust
+               if let Some(y) = inner.touches.get_mut(&t) {
+                   y.path = path;
+                   if !is_offset || converted {
+                       y.base = y.value;
+                   }
+               }
+   ```
+   Replace:
+   ```rust
+               if let Some(y) = inner.touches.get_mut(&t) {
+                   y.path = path;
+                   if !is_offset || converted {
+                       y.base = y.value;
+                   }
+                   // A converted touch leaves the static edit.
+                   if converted {
+                       y.shared = false;
+                   }
+               }
+   ```
+
+   In the plugin paths, replace `self.release(inner, t, Some(ns))` and `self.release(inner, t, ns)` (session.rs:6061 and :6121) with `self.release_from(inner, t, TouchHolder::Plugin, …)`.
 
    In `app/Sources/VizDAWAppModel/AutomationCommands.swift`:
 
@@ -2312,7 +2407,7 @@ The ride falls from 0.5 to 0.3 while the synth's static fader sits near unity (w
    }
    ```
 
-- [ ] **Step 4: Run the tests and the gates.** Run `cargo test --workspace`, both clippies, `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: Rust +5, Swift +1, and every existing automation test green (`tests/automation.rs`, `autowrite.rs` and `params.rs` use `gesture`, which still means Mouse; a mouse click with no move committed nothing before and commits nothing now).
+- [ ] **Step 4: Run the tests and the gates.** Run `cargo test --workspace`, both clippies, `cargo clippy -p core-ffi --lib -- -D warnings`, `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`. Expected: Rust +6, Swift +1, and every existing automation test green (`tests/automation.rs`, `autowrite.rs` and `params.rs` use `gesture`, which still means Mouse; a mouse click with no move committed nothing before and commits nothing now).
 
 - [ ] **Step 5: Commit**
 
@@ -2326,7 +2421,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
 git log -1 --oneline && git show --stat HEAD | tail -8
 ```
-Counts: Rust +5, Swift +1.
+Counts: Rust +6, Swift +1.
 
 ---
 
@@ -2338,7 +2433,7 @@ Counts: Rust +5, Swift +1.
 - Test: create `crates/core-ffi/tests/surfaces.rs`
 
 **Interfaces:**
-- Consumes: `core_surface::{new_surface, Surface, SurfaceKind, Bank, learn::CommandMap}`, `crate::automation::{Holder, SurfaceId}`, `crate::recovery::support_dir`, `crate::host::offline_mode()` (public at `f3291d0`), `core_engine::input::port_key`.
+- Consumes: `core_surface::{new_surface, Surface, SurfaceKind, Bank, learn::CommandMap}`, `crate::automation::{TouchHolder, SurfaceId}`, `crate::recovery::support_dir`, `crate::host::offline_mode()` (public at `276c855`), `core_engine::input::port_key`.
 - Produces:
   ```rust
   // surfaces.rs
@@ -2364,7 +2459,7 @@ Counts: Rust +5, Swift +1.
   /// time (0: now), never waits. True when a surface, a waiting learn or a map listens to `port`.
   pub(crate) fn input(port: &str, bytes: &[u8], host_ns: u64) -> bool;
   /// Process-wide state (`surfaces::lock()`): surfaces, the group banks, focus,
-  /// `owed: BTreeMap<u64, Vec<(Holder, AutomationTarget)>>`, the ports, the clock.
+  /// `owed: BTreeMap<u64, Vec<(TouchHolder, AutomationTarget)>>`, the ports, the clock.
   pub(crate) struct Registry { … }
   /// The input queue, its own lock (Ruling 10): `(port, host_ns, bytes)`, at most 4096, drops counted.
   static INPUT: Mutex<Queue>;
@@ -2385,7 +2480,7 @@ Counts: Rust +5, Swift +1.
 
 Connection handling:
 - A surface is `connected` when its input is in `sources()` and its output is in `destinations()`.
-- `surface_add` (and `surfaces_load`) checks the ports at once; a connected surface is sent its `hello()` before the call returns.
+- `surface_add` (and `surfaces_load`) calls `refresh()` first and stamps the 2 s timer, then checks the ports; a connected surface is sent its `hello()` before the call returns.
 - **While any surface exists**, the service calls `refresh()` at most every 2 s (Ruling 10), measured on the surfaces clock, then re-checks every surface. A `send` that returns false also marks its surface disconnected at once.
 - When a connected surface's port vanishes:
   - the registry records `owed` for the unit's `release_all()` under the session that holds its touches (the focused one), which Task 8 applies;
@@ -2592,7 +2687,7 @@ VIZDAW_EOF
                // Control surfaces and MIDI learn (plan 5f-1 Ruling 11).
                self.service_surfaces();
    ```
-   with `fn service_surfaces(&self)` in a new `impl Session` block in `surfaces.rs` (connection checks only in this task).
+   with `fn service_surfaces(&self)` (connection checks only in this task) in an `impl Session` block in `session.rs`, or in a child module `session/surfaces.rs`, because `Inner`, `Session.inner`, `heard_value`, `gesture_held` and `release_from` are private to `session`; it calls `crate::surfaces` for the registry. Task 8's `take_meters` and its exported `Session` methods go in the same block.
 
    In `FakeSession.swift`, add `var focusCalls = 0` and `func focusSurfaces() throws { focusCalls += 1 }`.
 
@@ -2663,6 +2758,7 @@ Counts: Rust +6.
   pub(crate) fn session_closed(id: u64);
   // Session (exported)
   pub fn focus_surfaces(&self) -> Result<(), VizError>;
+  /// Unknown IDs are ignored; more than 1024 strips is refused (`Model`).
   pub fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError>;
   /// Feeds `bytes` to surface `surface` as if from its input, focuses this session and services it at once.
   pub fn inject_surface(&self, surface: u32, bytes: Vec<u8>) -> Result<(), VizError>;
@@ -2678,13 +2774,13 @@ Counts: Rust +6.
   pub fn unlearn_target(&self, target: AutomationTargetRow) -> Result<DocSnapshot, VizError>;
   ```
 
-`service_surfaces` runs in this order (every session's `idle` runs step 1; the focused session's runs all):
+`service_surfaces` runs in this order (every session's `idle` runs steps 1 and 6; the focused session's runs all):
 0. **Connection checks** (Task 7): the 2 s refresh while any surface exists, vanishes (owing `release_all()`), returns (refresh and hello).
-1. **Owed releases**: take `owed[self.id]` from the registry, drop the registry, and apply each through `release_from(…, holder)`. An unfocused session stops here.
+1. **Owed releases**: take `owed[self.id]` from the registry, drop the registry, and apply each through `release_from(…, holder)`. An unfocused session then runs only step 6, for a learn it asked for, and stops.
 2. **Input**: `mem::take` the input queue's batch (port, host time, bytes).
-3. **Route** each message: to the surface whose input port it came from (`Surface::input`); else to the learner, when a learn waits and this port is no surface's; else to the `Mapper` (this session's `Settings.learn` plus the command maps). The learner is fed by whichever session is focused; the decision belongs to the session that asked (step 6).
+3. **Route** each message: to the surface whose input port it came from (`Surface::input`); else to the learner, when a learn waits and this port is no surface's; else to the `Mapper` (this session's `Settings.learn` plus the command maps). Before routing, the service compares `Settings.learn` with the Mapper's maps and re-sets them when the document changed them (undo, redo, revert, open; Ruling 17), keeping the state of unchanged maps, owing `release_from(TouchHolder::Learn)` for held targets no map drives any more, and rewriting the claims. The learner is fed by whichever session is focused; the decision belongs to the session that asked (step 6).
 4. **Apply** the actions (copied out of the registry first):
-   - `Gesture` → `gesture_held` with the unit's `Holder::Surface(id)` or `Holder::Learn`, `Source::Ui`, and the message's host time. A refused gesture (a vanished target, a Busy first value) is counted in that surface's `ignored`, never raised.
+   - `Gesture` → `gesture_held` with the unit's `TouchHolder::Surface(id)` or `TouchHolder::Learn`, `Source::Ui`, and the message's host time. A refused gesture (a vanished target, a Busy first value) is counted in that surface's `ignored`, never raised.
    - `IdleRelease(t, at)` → `gesture_held(…, Release, …)` stamped at `at` (Ruling 2).
    - `Bank`/`Channel` → the group's `Bank::shift`, then a full refresh of that group.
    - `Skip(±1)` → a locate of the transport's sequence (`host::position`) to `marker_step`, else the previous/next bar line of the sequence's meter map, never below 0. `Wind(q)` → a locate to `base + round(q × PPQ)`, where `base` is the tick the last wind or skip went to when it was less than 250 ms ago, else the transport's tick. Both go through the same internal path as `Session::locate` (split its body out as `locate_in(inner, tick)` if the export does the work inline). While recording, or with no sequence loaded, they are counted in `ignored`.
@@ -2695,7 +2791,7 @@ Counts: Rust +6.
 8. **Feedback** by Ruling 13: units whose last feedback was ≥ 20 ms ago, plus at once any unit or learn map showing a target that a holder other than it moved in this pass; the mapper's feedback with the same heard values.
 
 The rest of the core:
-- **The claims** (Ruling 17): a `RwLock<Claims>` holding the port keys of configured surfaces' inputs, whether a learn waits, and the command maps and the focused session's learn maps by port key. The registry rewrites it on every surface, map, learn or focus change. `takes(port_key, bytes)` reads it with `try_read` and answers false when it cannot (Global Constraints). `input(port, …)` answers whether a surface, learn or map listens to `port`, from the same claims.
+- **The claims** (Ruling 17): a `RwLock<Claims>` holding the port keys of configured surfaces' inputs, whether a learn waits, and the command maps and the focused session's learn maps by port key. The registry rewrites it on every surface, map, learn or focus change, and when step 3 finds the focused document's maps changed. `takes(port_key, bytes)` reads it with `try_read` and answers false when it cannot (Global Constraints). `input(port, …)` answers whether a surface, learn or map listens to `port`, from the same claims.
 - **The lanes:** in `host.rs`, `midi_from_source` returns early when `takes` claims the message:
 
    Find:
@@ -2919,6 +3015,7 @@ fn feedback_waits_20_ms_but_partners_go_at_once() {
     s.inject_surface(a, vec![0x90, 0x68 + ch, 0x7F, 0xE0 + ch, 0x7F, 0x7F]).unwrap();
     let hui = debug_sent("H Out");
     assert!(hui.contains(&vec![0xB0, ch, 0x7F]), "the HUI fader follows at once: {hui:?}");
+    debug_advance(30);
     s.idle().unwrap();
     assert!(debug_sent("T Out").iter().all(|m| m[0] & 0xF0 != 0xE0), "no fader feedback to the hand");
     let _ = b;
@@ -3121,7 +3218,11 @@ fn closing_the_focused_window_releases_and_blanks() {
     let _ = debug_sent("T Out");
     s.close().unwrap();
     let sent = debug_sent("T Out");
-    assert!(sent.contains(&vec![0xE0, 0x00, 0x00]), "faders down: {sent:?}");
+    assert!(sent.contains(&vec![0xE1, 0x00, 0x00]), "faders down: {sent:?}");
+    assert!(
+        !sent.iter().any(|m| m.first() == Some(&(0xE0 + k as u8))),
+        "but not the one under the hand (spec §8.1): {sent:?}"
+    );
     assert!(
         sent.iter().any(|m| m.starts_with(&[0xF0, 0x00, 0x00, 0x66, 0x14, 0x12, 0x00])
             && m[7..m.len() - 1].iter().all(|b| *b == b' ')),
@@ -3217,7 +3318,7 @@ fn surface_meters_leave_the_mixers_peaks() {
     let mut heard = 0;
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(20));
-        debug_advance(30);
+        debug_advance(300);
         s.idle().unwrap();
         if peak(&s) > 0.0 {
             heard += 1;
@@ -3343,6 +3444,15 @@ fn rewind_and_forward_skip_to_markers_then_bars_and_wind_while_held() {
     s.idle().unwrap();
     at(2 * BAR + 15_360 * 4 / 10);
     s.inject_surface(id, vec![0x90, 0x5C, 0x00]).unwrap();
+    // Back: the marker, then bar lines (no marker before), never below 0.
+    tap(0x5B);
+    at(2 * BAR);
+    tap(0x5B);
+    at(BAR);
+    tap(0x5B);
+    at(0);
+    tap(0x5B);
+    at(0);
 }
 
 #[test]
@@ -3355,6 +3465,8 @@ fn malformed_bytes_are_ignored_and_counted() {
     assert!(s.inject_surface(id, vec![]).is_err(), "no bytes");
     assert!(s.inject_surface(id, vec![0; 70_000]).is_err(), "too many");
     assert!(s.inject_surface(9_999, vec![0x90, 0, 0]).is_err(), "no such surface");
+    s.set_surface_selection(vec![987_654]).unwrap();
+    assert!(s.set_surface_selection(vec![1; 100_000]).is_err(), "at most 1024 strips");
 }
 ```
 
@@ -3471,12 +3583,152 @@ fn a_learn_lands_in_the_session_that_asked() {
     assert!(b.learn_maps().unwrap().is_empty(), "not in the focused one");
 }
 
+fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let until = std::time::Instant::now() + common::wait_limit();
+    while !ok() {
+        assert!(std::time::Instant::now() < until, "timed out waiting for {what}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn song(s: &Session) -> u64 {
+    s.snapshot().unwrap().sequences.iter().find(|r| r.name == "Song").unwrap().id
+}
+
+/// Knobs CC 7 learned to the synth's fader, pick-up off (the jump).
+fn learned_fader(s: &Session) -> Target {
+    let t = synth_fader(s);
+    s.learn_target(t).unwrap();
+    s.inject_midi("Knobs".into(), vec![0xB0, 7, 64]).unwrap();
+    debug_advance(301);
+    s.idle().unwrap();
+    let source = s.learn_maps().unwrap()[0].source.clone();
+    s.set_learn_pickup(source, false).unwrap();
+    t
+}
+
+/// The owner's rule (2026-11-02), first half: the learned control drives
+/// its target as a gesture (holder Learn), so the strip's mode writes it.
+#[test]
+fn a_learned_cc_writes_its_targets_automation_in_touch() {
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let t = learned_fader(&s);
+    let Target::StripFader { strip } = t else { unreachable!() };
+    let seq = song(&s);
+    s.set_automation_mode(vec![strip], vizdaw_ffi::automation::AutomationModeRow::Touch).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick > 15_360);
+    for v in [20u8, 40, 60] {
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        assert!(s.inject_midi("Knobs".into(), vec![0xB0, 7, v]).unwrap(), "the map takes it");
+        s.idle().unwrap();
+    }
+    assert!(s.automation_state().unwrap().touched.contains(&t), "held by Learn");
+    debug_advance(501);
+    s.idle().unwrap();
+    assert!(s.automation_state().unwrap().touched.is_empty(), "released 500 ms after its last value");
+    s.stop().unwrap();
+    wait_until("the stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    assert_eq!(s.snapshot().unwrap().undo_label.as_deref(), Some("Write Automation"));
+    let lane = s.lanes(seq).unwrap().into_iter().find(|l| l.name == "Built-in Synth Fader").expect("the fader's lane").id;
+    let written: Vec<f64> =
+        s.lane_events(seq, lane).unwrap().events.iter().filter_map(|e| e.automation.map(|a| a.value)).collect();
+    assert!(written.iter().any(|v| (v - 60.0 / 127.0).abs() < 1e-9), "the learned ride is the lane's: {written:?}");
+}
+
+/// The owner's rule (2026-11-02), second half: the learned CC itself is
+/// never recorded or played thru; an unlearned note from the same port is.
+#[test]
+fn a_learned_cc_is_neither_recorded_nor_played_thru() {
+    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+    use vizdaw_ffi::{EditCommand, EventKindRow, LaneEdit, LaneInputRow};
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let seq = song(&s);
+    let chords = s.lanes(seq).unwrap().into_iter().find(|l| l.name == "Chords").unwrap().id;
+    let edit = |e: LaneEdit| s.edit(EditCommand::Lane { edit: e }, None).unwrap();
+    edit(LaneEdit::SetInput { seq, lane: chords, input: Some(LaneInputRow::Midi { port: None, channel: None }) });
+    edit(LaneEdit::SetFlags { seq, lane: chords, mute: None, solo: None, arm: Some(true) });
+    let _ = learned_fader(&s);
+    let kinds = |s: &Session| {
+        let ev = s.lane_events(seq, chords).unwrap().events;
+        (
+            ev.iter().filter(|e| e.kind == EventKindRow::Cc).count(),
+            ev.iter().filter(|e| e.kind == EventKindRow::Note).count(),
+        )
+    };
+    let (ccs, notes) = kinds(&s);
+    s.record(
+        seq,
+        vizdaw_ffi::record::RecordSpecRow {
+            replace: false,
+            punch: None,
+            looped: false,
+            count_in_bars: 0,
+            pre_roll_bars: 0,
+            passes_as_takes: false,
+        },
+    )
+    .unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick > 15_360);
+    drain_offline_log();
+    for v in [20u8, 40, 60] {
+        assert!(s.inject_midi("Knobs".into(), vec![0xB0, 7, v]).unwrap(), "the map takes it");
+        debug_midi_from_source("Knobs", 0, &[0xB0, 7, v + 1]);
+        s.idle().unwrap();
+    }
+    assert!(s.inject_midi("Knobs".into(), vec![0x90, 62, 100]).unwrap());
+    let mut log = Vec::new();
+    wait_until("the unlearned note's thru", || {
+        log.extend(drain_offline_log());
+        log.iter().any(|(_, b): &(u64, Vec<u8>)| b == &vec![0x90, 62, 100])
+    });
+    assert!(s.inject_midi("Knobs".into(), vec![0x80, 62, 0]).unwrap());
+    wait_until("a beat on", || s.transport().unwrap().tick > 2 * 15_360);
+    s.stop().unwrap();
+    wait_until("the stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    log.extend(drain_offline_log());
+    assert!(
+        !log.iter().any(|(_, b)| b.first().is_some_and(|x| x & 0xF0 == 0xB0) && b.get(1) == Some(&7)),
+        "no CC 7 thru: {log:?}"
+    );
+    let (ccs_after, notes_after) = kinds(&s);
+    assert_eq!(ccs_after, ccs, "the learned CC is not in the take");
+    assert_eq!(notes_after, notes + 1, "the unlearned note is");
+}
+
+/// Fold check I5: Undo changes `Settings.learn` without the learn API; the
+/// map stops driving its target and taking its messages.
+#[test]
+fn an_undone_learn_stops_driving_and_taking() {
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let t = synth_fader(&s);
+    s.learn_target(t).unwrap();
+    s.inject_midi("Knobs".into(), vec![0xB0, 7, 100]).unwrap();
+    debug_advance(301);
+    s.idle().unwrap();
+    s.undo().unwrap();
+    assert!(s.learn_maps().unwrap().is_empty());
+    s.idle().unwrap();
+    assert!(!s.inject_midi("Knobs".into(), vec![0xB0, 7, 0]).unwrap(), "no map takes it (and no engine yet)");
+    s.idle().unwrap();
+    assert!(s.automation_state().unwrap().touched.is_empty());
+}
+
 #[test]
 fn hostile_learn_calls_are_refused() {
     let _g = serial();
     let s = Session::new_demo().unwrap();
     assert!(s.learn_target(Target::StripFader { strip: 987_654 }).is_err());
-    assert!(s.learn_target(Target::VelocityScale { dest: 1 }).is_err());
+    let dest = s.destinations().unwrap()[0].id;
+    assert!(s.learn_target(Target::VelocityScale { dest }).is_err(), "an existing destination: only the rule refuses it");
     assert!(learn_command("no.such_command".into()).is_err(), "registry IDs only");
     assert!(learn_command(String::new()).is_err());
     for id in ["automation.gesture", "surface.add"] {
@@ -3498,13 +3750,13 @@ fn hostile_learn_calls_are_refused() {
 }
 ```
 
-The target-row variant names (`VelocityScale { dest }`, `StripMute { strip }`) must match `crate::events::AutomationTargetRow` in the tree; adapt if they differ.
+`a_learned_cc_is_neither_recorded_nor_played_thru` reads the take as `tests/record.rs`' `notes` helper finds a MIDI take; if the take lands elsewhere (a take lane rather than "Chords"), read it there and say so in the report. The target-row variant names (`VelocityScale { dest }`, `StripMute { strip }`) must match `crate::events::AutomationTargetRow` in the tree; adapt if they differ.
 
 - [ ] **Step 2: Run them to see them fail** (`cargo test -p core-ffi --test surfaces --test learn`). Expected: FAIL — the new methods are not found.
 
 - [ ] **Step 3: Implement the service, the claims, the meter holds, the learn glue and the exports**, and change `midi_from_source`, `NoteInput`, `inject_midi`, `levels` and `close` as shown.
 
-- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p core-ffi`, both clippies and `cargo clippy -p core-ffi --lib -- -D warnings` (it compiles `CoreMidiPorts` and the new `NoteInput` sink on macOS). Then run `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`: add `FakeSession` stubs for the ten new `Session` methods, recording calls and returning empty rows. Expected: Rust +25; `live_input.rs`'s `!inject_midi(…)` stays false (no surface, learn or map listens to "Keys", and there is no engine yet), and its thru and source tests stay green.
+- [ ] **Step 4: Run the tests and the gates.** Run `cargo test -p core-ffi`, both clippies and `cargo clippy -p core-ffi --lib -- -D warnings` (it compiles `CoreMidiPorts` and the new `NoteInput` sink on macOS). Then run `scripts/build-ffi.sh`, `scripts/swift.sh build` and `scripts/swift.sh test`: add `FakeSession` stubs for the ten new `Session` methods, recording calls and returning empty rows. Expected: Rust +28; `live_input.rs`'s `!inject_midi(…)` stays false (no surface, learn or map listens to "Keys", and there is no engine yet), and its thru and source tests stay green.
 
 - [ ] **Step 5: Commit**
 
@@ -3518,7 +3770,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
 git log -1 --oneline && git show --stat HEAD | tail -10
 ```
-Counts: Rust +25.
+Counts: Rust +28.
 
 ---
 
@@ -3758,7 +4010,7 @@ Add to `TransportCommandsTests.swift`, after `stopGoesBackToWherePlayingStarted`
     }
 ```
 
-`FakeSession`'s `injectSurface`, `learnTarget` and `unlearnTarget` stubs (Task 8) record into `surfaceInjections: [(UInt32, Data)]`, `learnTargets: [AutomationTargetRow]` and `unlearnTargets: [AutomationTargetRow]`; add the arrays now if Task 8's stubs only returned. Use the tree's `ControlArg` value case names (`.text(value:)`, `.int(value:)` at `f3291d0`) and its `ControlOutcome` cases; adapt the literals if they differ.
+`FakeSession`'s `injectSurface`, `learnTarget` and `unlearnTarget` stubs (Task 8) record into `surfaceInjections: [(UInt32, Data)]`, `learnTargets: [AutomationTargetRow]` and `unlearnTargets: [AutomationTargetRow]`; add the arrays now if Task 8's stubs only returned. Use the tree's `ControlArg` value case names (`.text(value:)`, `.int(value:)` at `276c855`) and its `ControlOutcome` cases; adapt the literals if they differ.
 
 - [ ] **Step 2: Run them to see them fail** (`cargo test -p core-control --test commands`; `scripts/swift.sh test`). Expected: FAIL — count 138, unknown IDs, `SurfaceCore` not found.
 
@@ -4299,7 +4551,7 @@ Counts: Swift +7.
   }
   ```
   - `DocumentModel.learn: LearnModel` (lazy, with `surfaceCore`).
-  - `PluginWindowModel` gains `public private(set) var lastTouched: (slot: UInt64, param: UInt64)?`, set wherever the window reports a parameter gesture (it has none at `f3291d0`).
+  - `PluginWindowModel` gains `public private(set) var lastTouched: (slot: UInt64, param: UInt64)?`, set wherever the window reports a parameter gesture (it has none at `276c855`).
 
 The menu item titles are "MIDI Learn" (controls) and "MIDI Learn Maps…" (strip menu). The banner shows at the top of the mixer window and the plugin window while learning. The MIDI Learn Maps sheet lists each map (source text, target or "(missing)", the mode picker, a "Pick-up" checkbox enabled when `picksUp`, with `pickupHelp` as its help, and Remove).
 
@@ -4389,6 +4641,9 @@ import VizDAWCore
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn drives_a_fader_and_a_button_from_an_mcu() {
     let mut app = App::start();
+    // Pre-flight M29: surfaces are app-wide, so `state.get surfaces` answers without a document.
+    let st = app.call("state.get", json!({"target": "surfaces"}));
+    assert!(st["doc"].is_null() && st["feedback"].as_array().is_some_and(|f| f.is_empty()), "{st}");
     let w = app.call("app.new_demo", json!({}))["window"].clone();
     app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
     let run = |app: &mut App, id: &str, params: Value| {
@@ -4434,7 +4689,7 @@ fn drives_a_fader_and_a_button_from_an_mcu() {
 }
 ```
 
-`wait_for_state` is the file's helper (it polls `state.get` with a condition). If the demo's first strip is not the synth, or the document JSON's undo field has another name, read the strip index from `state.get surfaces`' feedback or the document, and adapt; say so in the report.
+`wait_for_state` is the file's helper (it polls `state.get` with a condition). The first `state.get` assumes the app starts with no document window; if it opens one at launch, make the call against a window that has none (or after closing it) and say so in the report. If the demo's first strip is not the synth, or the document JSON's undo field has another name, read the strip index from `state.get surfaces`' feedback or the document, and adapt; say so in the report.
 
 - [ ] **Step 2: Run them to see them fail.** Run `scripts/swift.sh test`, and the e2e after `scripts/make-app.sh`. Expected: FAIL.
 
@@ -4534,7 +4789,7 @@ By eye and by hand; the protocols are tested byte by byte
 | HUI V-pot assignment | Plan 5f-1 Ruling 5: HUI V-pots drive pan only; the HUI's V-Sel and assignment switches (send, plug-in) are ignored. Map them from a public HUI description and a real unit. |
 ```
 
-- [ ] **Step 3: Run the full gates.** Run every Global Constraints gate, including the rt-check gates, the workspace tests, the Swift tests, `scripts/make-app.sh` and the e2e. Expected: Rust 1632 + 9 + 10 + 6 + 6 + 12 + 5 + 6 + 25 + 1 = **1712 passed**, 15 ignored (the new e2e is one more `#[ignore]` test); Swift 899 + 1 + 4 + 7 + 5 = **916**; e2e **11**; registry **144**.
+- [ ] **Step 3: Run the full gates.** Run every Global Constraints gate, including the rt-check gates, the workspace tests, the Swift tests, `scripts/make-app.sh` and the e2e. Expected: Rust 1634 + 9 + 10 + 6 + 6 + 12 + 6 + 6 + 28 + 1 = **1718 passed**, 15 ignored (the new e2e is one more `#[ignore]` test); Swift 899 + 1 + 4 + 7 + 5 = **916**; e2e **11**; registry **144**.
 
 - [ ] **Step 4: Commit**
 
@@ -4580,7 +4835,7 @@ git log -1 --oneline && git show --stat HEAD | tail -4
    - Task 2's `first.len() + 0` reads `first.len()`;
    - Task 7's `keep` helper only keeps `common` used in that task. Keep it, or drop it once Task 8's tests use `wait_limit`.
 3. **Type consistency.**
-   - `SurfaceId`/`Holder`/`Holders`/`GestureHolderRow` come from Task 6 and are used in Tasks 7–8; `SurfaceRow.id` (u32) is always below 16.
+   - `SurfaceId`/`TouchHolder`/`TouchHolders`/`GestureHolderRow` come from Task 6 and are used in Tasks 7–8; `SurfaceRow.id` (u32) is always below 16.
    - `SurfaceKind` maps to `SurfaceKindRow`, and `LearnKind`/`LearnMode` to `LearnKindRow`/`LearnModeRow` (Task 8). `LearnSourceRow.number` is the CC or note (0 for pitch bend). `LearnMap.pickup` and `picks_up()` become `LearnMapRow.pickup`/`picks_up`.
    - `SurfaceAction::{IdleRelease, Skip, Wind}` (Task 1) are applied by the service (Task 8); `Skip`/`Wind` never reach the app.
    - `Bank` (Task 2) is used by the registry (Task 7).
@@ -4592,4 +4847,4 @@ git log -1 --oneline && git show --stat HEAD | tail -4
 
 ## Execution handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-11-02-control-surfaces.md`. The controller runs it subagent-driven under the standing authorization (spec §13). Tasks 1–5 are pure and independent of the app, and Tasks 6–8 share the session internals; a fresh reviewer per task catches protocol slips before the service builds on them. Task 8 is the largest (the service, the claims, the meter holds and 25 tests); its reviewer should replay the lock order (Global Constraints) and the owed releases across two sessions.
+Plan complete and saved to `docs/superpowers/plans/2026-11-02-control-surfaces.md`. The controller runs it subagent-driven under the standing authorization (spec §13). Tasks 1–5 are pure and independent of the app, and Tasks 6–8 share the session internals; a fresh reviewer per task catches protocol slips before the service builds on them. Task 8 is the largest (the service, the claims, the meter holds and 28 tests); its reviewer should replay the lock order (Global Constraints) and the owed releases across two sessions.
