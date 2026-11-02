@@ -145,10 +145,15 @@ public final class StripChartModel {
     }
 
     /// The rows, without automation rows whose strip, slot or destination
-    /// was deleted since they were saved (parked T12).
+    /// was deleted since they were saved (parked T12). Saved rows with no
+    /// automation row, over a lane holding one target's automation and
+    /// nothing else, have that target's row first (plan 5e-2 Ruling 10).
     public var rows: [StripLane] {
         let saved = state?.stripRows ?? [.velocity]
-        guard saved.contains(where: { if case .automation = $0 { true } else { false } }) else { return saved }
+        guard saved.contains(where: { if case .automation = $0 { true } else { false } }) else {
+            guard let t = Self.onlyTarget(events()) else { return saved }
+            return Array(([.automation(t)] + saved).prefix(Self.maxRows))
+        }
         let n = names
         let kept = saved.filter { lane in
             if case let .automation(t) = lane { return n.knows(t) }
@@ -195,6 +200,29 @@ public final class StripChartModel {
 
     public func values(_ row: StripLane) -> [StripValue] {
         row.values(events(), tempo: seq.flatMap { editor.info($0)?.tempo } ?? [])
+    }
+
+    /// The one target `events` automate, when they are all automation
+    /// points of it (Ruling 10); nil for an empty lane, notes or more
+    /// than one target.
+    nonisolated static func onlyTarget(_ events: [EventRow]) -> AutoTarget? {
+        guard let first = events.first?.automation?.target else { return nil }
+        for e in events where e.kind != .automation || e.automation?.target != first { return nil }
+        return AutoTarget(first)
+    }
+
+    /// The write in progress on `row` (plan 5e-2 Ruling 9): the session's
+    /// preview of its target while the document plays the chart's
+    /// sequence; empty for other rows, when stopped, or while another
+    /// sequence plays.
+    public func preview(_ row: StripLane) -> [StripValue] {
+        guard case .automation(let t) = row, let doc = document, doc.transport.playing,
+            let s = seq, doc.transport.seq == s
+        else { return [] }
+        let points = (try? doc.session.automationPreview(target: t.row)) ?? []
+        return points.map {
+            StripValue(id: nil, tick: $0.tick, length: 0, value: AutomationLaw.v32($0.value), ramp: true)
+        }
     }
 
     public var names: StripNames { targets().names }

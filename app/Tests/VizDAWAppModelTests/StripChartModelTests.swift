@@ -274,4 +274,60 @@ private let q: Int64 = 15_360
         #expect(StripBarChoices.phases(5).last! == ("1.8°", 5))
         #expect(StripBarChoices.phases(125).map(\.0) == ["0°", "45°", "90°", "180°", "270°"])
     }
+
+    /// An automation point of `target` at `tick`.
+    func autoRow(_ id: UInt64, tick: Int64, _ target: AutomationTargetRow, _ v: Double) -> EventRow {
+        var r = noteRow(id, tick: tick)
+        r.kind = .automation
+        r.duration = 0
+        r.automation = AutomationRow(target: target, value: v)
+        r.value = AutomationLaw.v32(v)
+        return r
+    }
+
+    /// Plan 5e-2 Ruling 9: the write in progress shows on its row while
+    /// the chart's sequence plays, and nowhere else.
+    @Test func thePreviewShowsOnlyWhileItsTargetIsWritten() throws {
+        let (f, m, s) = try make()
+        defer { withExtendedLifetime(m) {} }
+        let row = StripLane.automation(.fader(strip: 1))
+        f.previewRows = [PreviewPointRow(tick: 0, value: 0.5), PreviewPointRow(tick: 960, value: 1)]
+        #expect(s.preview(row).isEmpty, "stopped")
+        f.state.playing = true
+        f.state.seq = 3
+        m.poll()
+        let p = s.preview(row)
+        #expect(p.map(\.tick) == [0, 960])
+        #expect(p.map(\.value) == [AutomationLaw.v32(0.5), AutomationLaw.v32(1)])
+        #expect(p.allSatisfy { $0.id == nil && $0.ramp && $0.length == 0 })
+        #expect(s.preview(.velocity).isEmpty, "only automation rows")
+        f.state.seq = 4
+        m.poll()
+        #expect(s.preview(row).isEmpty, "another sequence plays")
+    }
+
+    /// Groove (lane 30) holding `events`, shown in the pane's chart.
+    func groove(_ events: [EventRow]) throws -> (DocumentModel, StripChartModel) {
+        let f = rollFake()
+        f.laneEventTable["3/30"] = LaneEvents(seq: 3, lane: 30, rev: 0, events: events)
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.lane(seq: 3, lane: 30), kind: .stripChart)
+        return (m, StripChartModel.pane(m))
+    }
+
+    /// Ruling 10 (spec §7.4 "with its Strip Chart view set to T"): a lane
+    /// holding only one target's automation opens on that target's row.
+    @Test func anAutomationLaneOpensOnItsTarget() throws {
+        let pan = AutomationTargetRow.stripPan(strip: 1)
+        let (m, s) = try groove([autoRow(1, tick: 0, pan, 0.5), autoRow(2, tick: 960, pan, 0.25)])
+        defer { withExtendedLifetime(m) {} }
+        #expect(s.rows == [.automation(.pan(strip: 1)), .velocity], "its target first, then the saved rows")
+        let (m2, s2) = try groove([autoRow(1, tick: 0, pan, 0.5), noteRow(3, tick: 0)])
+        defer { withExtendedLifetime(m2) {} }
+        #expect(s2.rows == [.velocity], "a lane with notes keeps its rows")
+        let fader = AutomationTargetRow.stripFader(strip: 1)
+        let (m3, s3) = try groove([autoRow(1, tick: 0, pan, 0.5), autoRow(2, tick: 0, fader, 0.5)])
+        defer { withExtendedLifetime(m3) {} }
+        #expect(s3.rows == [.velocity], "two targets: no guess")
+    }
 }
