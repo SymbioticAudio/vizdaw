@@ -5,7 +5,9 @@
 mod common;
 
 use core_media::caf::{CafWriter, WriteMode, hash_file};
+#[cfg(target_os = "macos")]
 use core_model::command::{Command, MediaCmd, apply};
+#[cfg(target_os = "macos")]
 use core_model::document::Document;
 use core_model::format::BitDepth;
 use std::path::{Path, PathBuf};
@@ -28,11 +30,13 @@ fn caf(path: &Path, rate: u32, ch: u16, frames: usize, depth: BitDepth, value: f
 }
 
 /// A 16-bit PCM WAV of silence at 48 kHz.
+#[cfg(target_os = "macos")]
 fn wav(path: &Path, channels: u16, frames: u32) {
     wav_at(path, 48_000, channels, frames);
 }
 
 /// A 16-bit PCM WAV of silence at `rate`.
+#[cfg(target_os = "macos")]
 fn wav_at(path: &Path, rate: u32, channels: u16, frames: u32) {
     let data = frames * u32::from(channels) * 2;
     let mut b = Vec::new();
@@ -291,6 +295,9 @@ fn relink_uses_a_file_already_in_the_package() {
 }
 
 /// Review Focus 4.
+// Resampling and WAV decoding need the system importer (ExtAudioFile);
+// elsewhere the CAF importer converts depth only (core-media Ruling 8).
+#[cfg(target_os = "macos")]
 #[test]
 fn relink_refuses_short_and_wide_files_and_converts_rates() {
     let dir = tempfile::tempdir().unwrap();
@@ -481,6 +488,9 @@ fn an_import_never_takes_a_name_the_history_references() {
 
 /// 5a Task 11 review Minor 6: converting an item never claims the name of
 /// a missing one.
+// Resampling and WAV decoding need the system importer (ExtAudioFile);
+// elsewhere the CAF importer converts depth only (core-media Ruling 8).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_conversion_never_claims_a_missing_items_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -601,6 +611,9 @@ fn names_compare_without_case() {
 /// Preflight M2: a relink to a file at another rate rescales the item's
 /// regions by the rate ratio, and the engine's media table names the new
 /// file.
+// Resampling and WAV decoding need the system importer (ExtAudioFile);
+// elsewhere the CAF importer converts depth only (core-media Ruling 8).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_relink_at_another_rate_rescales_regions_and_reaches_the_engine() {
     use core_model::command::{AudioCmd, SequenceCmd};
@@ -718,8 +731,10 @@ fn media_jobs_are_busy_while_a_format_convert_or_relink_job_runs() {
         0.5,
     );
     let o = other.display().to_string();
+    // A depth-only change, so the job runs on every platform (resampling
+    // needs the macOS importer).
     let f44 = vizdaw_ffi::ProjectFormatRow {
-        sample_rate: 44_100,
+        sample_rate: 48_000,
         depth: vizdaw_ffi::BitDepthRow::Int16,
     };
     let busy = |s: &Session| {
