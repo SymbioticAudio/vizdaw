@@ -1305,7 +1305,10 @@ impl Renderer {
     /// many commands as were sent before it (a command still deferred or
     /// sent during this block), so a Play's gesture tap is in before the
     /// touch it must stamp (plan 5e-1 re-review N3, Task 12 review m3).
-    /// Commands sent after it never hold it back. // RT
+    /// Commands sent after it never hold it back, and a gesture sent
+    /// before a Stop or Locate is taken before that command acts, so its
+    /// end of holds sees it (CI flake fix: a release just before Stop).
+    /// // RT
     fn live_gestures(&mut self) {
         let sr = self.cfg.sample_rate;
         let block_ns = self.block_ns;
@@ -1411,7 +1414,8 @@ impl Renderer {
 
     /// Applies queued commands. A `SetSchedule` or `SetGraph` waits when
     /// the retire ring is full (and everything after it waits too, to keep
-    /// order). // RT
+    /// order). Gestures sent before a Stop or Locate are taken just
+    /// before it acts (see `live_gestures`). // RT
     fn drain_commands(&mut self) {
         loop {
             let deferred = match self.cmds.peek() {

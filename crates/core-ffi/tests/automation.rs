@@ -3074,7 +3074,11 @@ fn a_move_too_late_for_its_landed_pass_is_said_lost() {
     // and a fresh tick read, and a cycle whose move was taken too late (it
     // lands in the next cycle, not lost) is tried again. Every idle's
     // problems are kept: whichever idle drains the move says it is lost.
-    let lost = |p: &[String]| p.iter().any(|x| x.contains("lost"));
+    // The landed-pass line only: "lost while writing" is the ring overflow.
+    let lost = |p: &[String]| {
+        p.iter()
+            .any(|x| x.contains("after their loop pass had landed"))
+    };
     for attempt in 0..6u32 {
         let v = 0.6 + 0.05 * f64::from(attempt);
         let before = s.debug_loop_passes_landed().unwrap_or(0);
