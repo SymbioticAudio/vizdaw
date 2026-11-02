@@ -306,29 +306,29 @@ impl Mcu {
     }
 
     fn touch(&mut self, slot: usize, down: bool, out: &mut Vec<SurfaceAction>) -> Heard {
+        // A touch-up releases the strip that was touched, whatever the slot
+        // shows now: a bank change or a deleted strip may have emptied it.
+        if !down && let Some(was) = self.touched.get_mut(slot).and_then(Option::take) {
+            out.push(SurfaceAction::Gesture(
+                AutomationTarget::StripFader(was),
+                Phase::Release,
+            ));
+            return Heard::Known;
+        }
         let Some(id) = self.fader_strip(slot) else {
             return Heard::Unknown;
         };
         let Some(held) = self.touched.get_mut(slot) else {
             return Heard::Unknown;
         };
-        match (down, *held) {
-            (true, None) => {
-                *held = Some(id);
-                out.push(SurfaceAction::Gesture(
-                    AutomationTarget::StripFader(id),
-                    Phase::Touch(None),
-                ));
-            }
-            (false, Some(was)) => {
-                *held = None;
-                out.push(SurfaceAction::Gesture(
-                    AutomationTarget::StripFader(was),
-                    Phase::Release,
-                ));
-            }
-            // A repeated touch or a release of an untouched fader.
-            _ => {}
+        // A repeated touch or a release of an untouched fader does nothing.
+        if down && held.is_none() {
+            *held = Some(id);
+            let t = AutomationTarget::StripFader(id);
+            // The touch owns the gesture now: an idle hold opened by a move
+            // before the touch note must not release it (Ruling 2).
+            self.idle.forget(t);
+            out.push(SurfaceAction::Gesture(t, Phase::Touch(None)));
         }
         Heard::Known
     }

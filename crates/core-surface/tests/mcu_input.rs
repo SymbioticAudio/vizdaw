@@ -338,3 +338,44 @@ fn malformed_bytes_are_ignored_and_counted() {
     );
     assert_eq!(fresh.ignored(), 1);
 }
+
+/// Review I1 (fix round 1): a fader touched on a strip the next view no
+/// longer shows still releases that strip on touch-up.
+#[test]
+fn a_touched_fader_releases_its_strip_after_its_slot_empties() {
+    let (mut m, now) = shown(false, &view(8));
+    let _ = m.input(&[0x90, 0x6F, 0x7F], now);
+    let _ = m.feedback(&view(2), 0, now);
+    let before = m.ignored();
+    assert_eq!(
+        m.input(&[0x90, 0x6F, 0x00], now),
+        vec![A::Gesture(T::StripFader(StripId(8)), Phase::Release)]
+    );
+    assert_eq!(m.ignored(), before, "not counted");
+    assert!(m.touched().is_empty());
+}
+
+/// Review I2 (fix round 1): a move before the touch note does not leave
+/// an idle hold that ends the touch 500 ms later.
+#[test]
+fn a_touch_takes_over_an_idle_hold_on_its_fader() {
+    let (mut m, now) = shown(false, &view(8));
+    let _ = m.input(&[0xE0, 0x00, 0x20], now);
+    let _ = m.input(&[0x90, 0x68, 0x7F], now);
+    let _ = m.input(&[0xE0, 0x00, 0x30], now);
+    assert!(
+        m.tick(now + IDLE_RELEASE + Duration::from_millis(5))
+            .is_empty(),
+        "the touch holds it"
+    );
+    assert_eq!(m.touched(), vec![T::StripFader(StripId(1))]);
+    assert_eq!(
+        m.input(&[0x90, 0x68, 0x00], now + IDLE_RELEASE * 2),
+        vec![A::Gesture(T::StripFader(StripId(1)), Phase::Release)]
+    );
+    assert_eq!(
+        m.release_all(),
+        Vec::<T>::new(),
+        "nothing held after the release"
+    );
+}

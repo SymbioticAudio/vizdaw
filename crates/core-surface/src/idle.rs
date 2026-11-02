@@ -39,8 +39,13 @@ impl IdleTouches {
     }
 
     /// The last value sent for `t` while its idle touch is open.
-    pub fn last(&self, t: AutomationTarget) -> Option<f64> {
+    pub(crate) fn last(&self, t: AutomationTarget) -> Option<f64> {
         self.open.get(&t).map(|&(v, _)| v)
+    }
+
+    /// Closes `t`'s idle touch without a release: a real touch took it over.
+    pub(crate) fn forget(&mut self, t: AutomationTarget) {
+        self.open.remove(&t);
     }
 
     /// The targets held open.
