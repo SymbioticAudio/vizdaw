@@ -1492,3 +1492,70 @@ The e2e `touch_writes_a_fader_over_the_channel` runs step 160.
      d. Save and reopen: save a project with a plugin parameter that has a
         static value (set in Read) and a written lane; reopen it: the
         static value is kept, and the lane plays back as written.
+
+### Automation recording, the UI (plan 5e-2)
+
+By eye; the models are tested (`MixerGestureTests`,
+`AutomationPreferencesTests`, `AutomationCommandsTests`,
+`StripChartModelTests`, `RecordUiCarryTests`) and the e2e
+`touch_writes_a_fader_over_the_channel` drives the same core through the
+channel.
+
+166. Mixer: each strip shows its automation mode above the fader ("Read",
+     green); the popup lists Off, Read, Touch, Latch, Write, Trim, each in
+     its colour (gray, green, yellow, orange, red, purple). Choose Touch:
+     one undo step "Set Automation Mode". Click a strip's name: it is
+     selected (tinted); ⌘-click adds another; double-clicking the name
+     still renames it. The name's menu has "Set All Strips to ▸ …": every
+     strip changes in one undo step. While you drag a fader, pan or send
+     level, or hold a mute, a ring shows around it; the fader's ring
+     should sit around the visible fader track (the slider is rotated). A
+     touch from `vizctl` (`automation.gesture`) or a plugin window rings
+     too, and so does a mute or solo pressed in the piano roll's output
+     (it counts as a mute/solo gesture). Stopped, a fader drag is one "Set
+     Fader" step, a mute click one "Mute" step, as before.
+167. Record popover keys (5d-2 T3 M1): open the record popover without
+     clicking a field: R records and Space plays (if the popover passes
+     keys on; note it if it does not). Click Punch In: typing R or Space
+     types into the field; Tab to Punch Out, then click outside the field:
+     the keys work again.
+168. Writing from the mixer: riding a fader with the mouse now completes
+     165a's mouse half. On Touch, play and move the Built-in Synth
+     fader: you hear it at once; let go: it glides back over a quarter of
+     a second. Drag a fader slowly while playing: no zipper noise (note it
+     if there is). Stop: "Undo Write Automation"; the lane "Built-in Synth
+     Fader" appears at the end of the sequence and the Strip Chart opens on
+     its fader row, even if you edited the Strip Chart's rows before.
+     While playing, the Strip Chart on that lane draws the move in red as
+     you make it. While looping, the next cycle plays what was just
+     written, and one Undo removes the whole looped pass. A new lane made
+     while another lane is soloed is not soloed (the status line says so).
+     Play again and grab the fader while its new automation moves it: the
+     sound does not jump (the write starts at the heard value); the
+     fader's knob shows the static value until you move it (showing the
+     heard value is a backlog row). Latch: the fader holds where you let
+     go until Stop. Write: play without touching: at Stop the strip's
+     fader, pan and mute lanes hold their values from the play point, and
+     the strip's popup reads Latch (Settings › Automation's After Write).
+     Trim on a strip with a fader ramp: moving the fader up 3 dB raises the
+     whole ramp under it by 3 dB, keeping its shape.
+169. Automation menu: with two strips selected, Automation › Selected
+     Strips › Write sets both (one step); with none selected it is dimmed.
+     Suspend Automation (checked) makes every strip play as Read: Off
+     strips play their automation again and nothing is written; uncheck it.
+170. Settings › Automation: After Write (Off, Read, Touch, Latch, Trim),
+     Return time (0–2000 ms; at 0 the fader jumps back), Thinning (High
+     writes fewer points: compare a lane's points in the List editor), and
+     "Write plugin parameters only when touched", on and dimmed. Quit and
+     relaunch: kept.
+171. Plugin windows: a plugin without its own editor shows sliders; on
+     Touch, playing, dragging one writes a lane "Built-in Synth <parameter>"
+     (no "Change Plugin Parameter" step); stopped, a drag is one "Change
+     Plugin Parameter" step.
+172. Settings › Audio: with Settings open, arm an audio lane: within a
+     second the round-trip readout shows the device's latencies (5d-2 T7
+     Minor 2). Turn Software Monitoring off: an Input-monitored lane's
+     meter goes at once. Hover the lane header's monitor button (A, I or
+     –): its tooltip explains the mode. ⌘S in an untitled project while
+     recording says "Stop recording to save this new project: its take is
+     being written into it."
