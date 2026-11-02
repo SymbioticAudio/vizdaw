@@ -765,6 +765,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var gestures: [(AutomationTargetRow, GesturePhaseRow)] = []
     /// Thrown by `gesture` while set.
     var gestureError: VizError?
+    /// Thrown by `gesture` for value phases only, while set.
+    var valueError: VizError?
     /// Thrown by `automationState` while set.
     var automationError: VizError?
     var automationRow = AutomationStateRow(modes: [], touched: [], suspended: false, writing: false)
@@ -773,6 +775,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     func gesture(target: AutomationTargetRow, phase: GesturePhaseRow) throws {
         if let e = gestureError { throw e }
+        if case .value = phase, let e = valueError { throw e }
         gestures.append((target, phase))
     }
 

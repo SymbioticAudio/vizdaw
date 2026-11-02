@@ -80,6 +80,24 @@ import VizDAWCore
         #expect(!m.isTouched(.stripPan(strip: 2)))
     }
 
+    @Test func aClickWhoseValueFailsStillReleasesTheTouch() throws {
+        let (m, f) = try model()
+        let strip = try #require(m.strips.first)
+        f.valueError = .Model(message: "boom")
+        m.toggleMute(strip)
+        #expect(f.gestures.map(\.1) == [.touch(value: 1), .release], "the touch is closed")
+        #expect(m.document.alert?.message == "boom", "one alert")
+    }
+
+    @Test func aRefusedTouchIsNotReleased() throws {
+        let (m, f) = try model()
+        let strip = try #require(m.strips.first)
+        f.gestureError = .Model(message: "no")
+        m.toggleMute(strip)
+        #expect(f.gestures.isEmpty)
+        #expect(m.document.alert?.message == "no")
+    }
+
     /// Two controls touched at once (plan 5e-1 Ruling 14: one shared
     /// static edit in the core, so the real core takes both).
     @Test func twoTargetsTouchedAtOnceAreIndependent() throws {

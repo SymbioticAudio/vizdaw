@@ -396,13 +396,21 @@ public final class MixerModel {
 
     /// The click as the core sees it: touch at `v`, value `v`, release.
     /// Shared by the mixer and the piano roll's output mute/solo (spec
-    /// §7.1). A refused touch throws before anything else is sent.
+    /// §7.1). A refused touch throws before anything else is sent (and is not
+    /// released); a later failure still releases the taken touch.
     public static func clickGesture(
         _ session: any SessionProtocol, _ t: AutomationTargetRow, _ v: Double
     ) throws {
         try session.gesture(target: t, phase: .touch(value: v))
-        try session.gesture(target: t, phase: .value(value: v))
-        try session.gesture(target: t, phase: .release)
+        do {
+            try session.gesture(target: t, phase: .value(value: v))
+            try session.gesture(target: t, phase: .release)
+        } catch {
+            // The touch was taken: close it (best effort) and report the
+            // first failure.
+            try? session.gesture(target: t, phase: .release)
+            throw error
+        }
     }
 
     /// Touched here or in the core (a channel or plugin touch): the ring.

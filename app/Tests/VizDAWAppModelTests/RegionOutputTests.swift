@@ -52,6 +52,15 @@ func audioFake() -> FakeSession {
         #expect(f.gestures.map(\.1) == [.touch(value: 0), .value(value: 0), .release])
     }
 
+    @Test func anOutputClickWhoseValueFailsStillReleases() throws {
+        let f = audioFake()
+        let m = try DocumentModel(session: f)
+        m.editor.openDetail(.sequence(3), kind: .pianoRoll)
+        f.valueError = .Model(message: "boom")
+        m.pianoRoll(.pane).setOutputMute(7, true)
+        #expect(f.gestures.map(\.1) == [.touch(value: 1), .release])
+    }
+
     @Test func outputButtonsWaitForAnOpenDrag() throws {
         let f = audioFake()
         let m = try DocumentModel(session: f)
