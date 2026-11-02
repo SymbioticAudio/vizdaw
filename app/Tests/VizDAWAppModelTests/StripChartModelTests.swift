@@ -377,4 +377,46 @@ private let q: Int64 = 15_360
         #expect(s.rows.first == .controller(1), "a replaced row is not added back")
         #expect(s.rows.count == StripChartModel.maxRows)
     }
+
+    /// Task 6 re-review N1 (controller ruling T6-2): rows saved on another
+    /// lane do not stop an automation lane opening on its target (spec
+    /// §7.4); on the lane they were saved for, they are used as saved.
+    @Test func rowsSavedOnAnotherLaneLetAnAutomationLaneOpenOnItsTarget() throws {
+        let pan = AutomationTargetRow.stripPan(strip: 1)
+        let f = rollFake()
+        f.laneEventTable["3/32"] = LaneEvents(
+            seq: 3, lane: 32, rev: 0, events: [autoRow(1, tick: 0, pan, 0.5), autoRow(2, tick: 960, pan, 0.25)])
+        let m = try DocumentModel(session: f)
+        defer { withExtendedLifetime(m) {} }
+        m.editor.openDetail(.lane(seq: 3, lane: 30), kind: .stripChart)
+        let s = StripChartModel.pane(m)
+        s.addRow()
+        #expect(s.rows == [.velocity, .controller(7)], "saved on lane 30")
+        #expect(m.editor.layout.detail?.stripRowsLane == LaneKey(3, 30))
+        m.editor.openDetail(.lane(seq: 3, lane: 32), kind: .stripChart)
+        #expect(s.rows == [.automation(.pan(strip: 1)), .velocity, .controller(7)], "its target first, then the saved rows")
+        s.removeRow(0)
+        #expect(s.rows == [.velocity, .controller(7)], "removed, and it stays removed")
+        #expect(m.editor.layout.detail?.stripRowsLane == LaneKey(3, 32), "saved for this lane now")
+        m.editor.openDetail(.lane(seq: 3, lane: 30), kind: .stripChart)
+        #expect(s.rows == [.velocity, .controller(7)], "lane 30: as saved")
+    }
+
+    /// T6-2: the target's row goes first once, the saved rows after it as
+    /// they are (none dropped by the row cap).
+    @Test func theTargetsRowJoinsTheSavedRowsOnce() {
+        let pan = AutoTarget.pan(strip: 1)
+        #expect(StripChartModel.opening(pan, on: [.velocity, .automation(pan)]) == [.automation(pan), .velocity])
+        let full: [StripLane] = [.velocity, .controller(1), .controller(7), .duration]
+        #expect(StripChartModel.opening(pan, on: full) == [.automation(pan)] + full)
+    }
+
+    /// T6-2: a layout saved before `stripRowsLane` existed still loads.
+    @Test func aDetailSavedWithoutItsRowsLaneDecodes() throws {
+        let d = DetailState(kind: .stripChart, target: .lane(seq: 3, lane: 30), stripRows: [.velocity])
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(d)) as! [String: Any]
+        json.removeValue(forKey: "stripRowsLane")
+        let old = try JSONDecoder().decode(DetailState.self, from: JSONSerialization.data(withJSONObject: json))
+        #expect(old.stripRows == [.velocity] && old.stripRowsLane == nil)
+    }
 }

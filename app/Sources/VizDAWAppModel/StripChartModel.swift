@@ -145,14 +145,20 @@ public final class StripChartModel {
     }
 
     /// The rows, without automation rows whose strip, slot or destination
-    /// was deleted since they were saved (parked T12). Before any rows are
-    /// saved, a lane holding one target's automation and nothing else
-    /// opens on that target's row, then Velocity (plan 5e-2 Ruling 10);
-    /// once saved, the saved rows are used as they are (Task 6 review I2).
+    /// was deleted since they were saved (parked T12). A lane holding one
+    /// target's automation and nothing else opens on that target's row
+    /// (plan 5e-2 Ruling 10) unless the rows were saved for this very lane,
+    /// where they are used as saved (ruling T6-2; Task 6 reviews I2, N1).
     public var rows: [StripLane] {
-        guard let saved = state?.stripRows else {
-            return Self.onlyTarget(events()).map { [.automation($0), .velocity] } ?? [.velocity]
-        }
+        let saved = state?.stripRows
+        let kept = saved.map(known) ?? [.velocity]
+        guard saved == nil || state?.stripRowsLane != lane, let t = Self.onlyTarget(events()) else { return kept }
+        return Self.opening(t, on: kept)
+    }
+
+    /// `saved` without automation rows the mixer no longer has; Velocity
+    /// when nothing is left.
+    private func known(_ saved: [StripLane]) -> [StripLane] {
         guard saved.contains(where: { if case .automation = $0 { true } else { false } }) else { return saved }
         let n = names
         let kept = saved.filter { lane in
@@ -185,6 +191,7 @@ public final class StripChartModel {
         var r = rows
         change(&r)
         s.stripRows = r
+        s.stripRowsLane = lane
         write(s)
     }
 
@@ -209,6 +216,15 @@ public final class StripChartModel {
         guard let first = events.first?.automation?.target else { return nil }
         for e in events where e.kind != .automation || e.automation?.target != first { return nil }
         return AutoTarget(first)
+    }
+
+    /// The rows a lane automating only `t` opens on (ruling T6-2): `t`'s
+    /// row first, then `kept` without it. The row cap does not drop any of
+    /// `kept`: with four saved rows the chart shows five, and Add Row stays
+    /// off until one goes.
+    nonisolated static func opening(_ t: AutoTarget, on kept: [StripLane]) -> [StripLane] {
+        let own = StripLane.automation(t)
+        return [own] + kept.filter { $0 != own }
     }
 
     /// The write in progress on `row` (plan 5e-2 Ruling 9): the session's
