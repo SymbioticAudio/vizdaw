@@ -419,6 +419,51 @@ fn a_locate_ends_held_values() {
     );
 }
 
+/// Ruling 10 (core-ffi CI flake, 2026-11-02): a release sent just before
+/// a Stop, so that both reach the renderer in the same block, still ends
+/// at the Stop. The gesture went out first, so it acts first: a Hold or a
+/// Glide must not slip in after the Stop and play on into the next Play.
+#[test]
+fn a_release_sent_just_before_a_stop_ends_at_the_stop() {
+    for phase in [GesturePhase::Hold, GesturePhase::Glide(64 * BLOCK)] {
+        let mut r = rig();
+        r.engine.play().unwrap();
+        r.blocks(2);
+        r.send(fader(r.synth), GesturePhase::Touch(fader_norm(-3.0)));
+        r.blocks(1);
+        // Both in before the next block.
+        r.send(fader(r.synth), phase);
+        r.engine.stop().unwrap();
+        r.blocks(1);
+        // Resumed where it stopped (no Locate, which ends holds itself).
+        r.engine.play().unwrap();
+        r.blocks(2);
+        assert!(
+            near(r.fader_db(r.synth), -12.0),
+            "{phase:?} ended at the Stop: {:?}",
+            r.fader_db(r.synth)
+        );
+    }
+}
+
+/// Ruling 23: the same for a Locate sent right after the release.
+#[test]
+fn a_hold_sent_just_before_a_locate_ends_at_the_locate() {
+    let mut r = rig();
+    r.engine.play().unwrap();
+    r.blocks(2);
+    r.send(fader(r.synth), GesturePhase::Touch(fader_norm(-3.0)));
+    r.blocks(1);
+    r.send(fader(r.synth), GesturePhase::Hold);
+    r.engine.locate_frame(0).unwrap();
+    r.blocks(2);
+    assert!(
+        near(r.fader_db(r.synth), -12.0),
+        "the Locate ended the hold: {:?}",
+        r.fader_db(r.synth)
+    );
+}
+
 /// Ruling 6: at most `MAX_LIVE` live targets; the next touch is dropped
 /// and counted, and the others still work.
 #[test]

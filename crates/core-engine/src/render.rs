@@ -1435,6 +1435,12 @@ impl Renderer {
             let Ok(cmd) = self.cmds.pop() else {
                 break;
             };
+            // The gestures sent before a Stop or a Locate act before it, so
+            // the holds and glides it ends include theirs (Rulings 10, 23):
+            // a release sent just before a Stop reaches the same block.
+            if matches!(cmd, EngineCmd::Stop | EngineCmd::Locate(_)) {
+                self.live_gestures();
+            }
             self.cmds_applied = self.cmds_applied.saturating_add(1);
             self.apply(cmd);
         }
