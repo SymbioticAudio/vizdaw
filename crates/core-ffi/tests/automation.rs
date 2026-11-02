@@ -461,8 +461,20 @@ fn off_ignores_automation_and_suspend_plays_it() {
     )
     .unwrap();
     pace(&s);
+    // On a slow runner the touch may not be heard yet: release only once
+    // the write is in progress, and check it landed, so a missing lane
+    // fails here and not as a silent "suspend never plays it" timeout.
+    wait_until("the write in progress", || {
+        s.idle().unwrap();
+        !s.automation_preview(t).unwrap().is_empty()
+    });
     s.gesture(t, Phase::Release).unwrap();
     stop_and_land(&s);
+    wait_until("the written lane", || {
+        s.idle().unwrap();
+        lane_named(&s, song, "Built-in Synth Fader")
+            .is_some_and(|l| !points(&s, song, l).is_empty())
+    });
     s.set_automation_mode(vec![synth], Mode::Off).unwrap();
     s.play(song).unwrap();
     wait_until("beat 1", || tick(&s) > Q);
@@ -473,10 +485,20 @@ fn off_ignores_automation_and_suspend_plays_it() {
         std::thread::sleep(Duration::from_millis(10));
     }
     set_automation_suspended(true);
-    wait_until("suspended: the automation plays", || {
+    let until = Instant::now() + common::wait_limit();
+    loop {
         s.idle().unwrap();
-        fader_override(synth).is_some()
-    });
+        if fader_override(synth).is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "timed out waiting for suspended: the automation plays (transport {:?}, state {:?})",
+            s.transport().unwrap(),
+            s.automation_state().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     set_automation_suspended(false);
     stop_and_land(&s);
     s.close().unwrap();
