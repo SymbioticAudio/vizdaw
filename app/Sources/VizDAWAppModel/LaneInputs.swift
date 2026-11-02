@@ -278,14 +278,19 @@ public final class LaneInputs {
         }
     }
 
+    /// Reads the Software Monitoring setting now (the meters follow it).
+    public func refreshMonitoring() {
+        let on = Self.softwareMonitoring()
+        if on != monitoringOn { monitoringOn = on }
+    }
+
     /// Reads the input's peaks since the last read (the poll calls this
     /// while metering): each metered lane takes the louder of its channels;
     /// a peak at full scale, or a recording's new clipped samples, lights
     /// the clip mark for two seconds. While metering it also notes an
     /// input that is still opening.
     public func pollMeters() {
-        let on = Self.softwareMonitoring()
-        if on != monitoringOn { monitoringOn = on }
+        refreshMonitoring()
         guard let m = document else { return }
         // Clip counts are per recording (pre-flight M6).
         if !m.record.isRecording { clippedCounts = [:] }

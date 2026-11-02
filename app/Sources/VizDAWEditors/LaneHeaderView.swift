@@ -7,10 +7,15 @@ import VizDAWCore
 /// renames), monitor/mute/solo/arm, destination and input menus, the input
 /// meter (plan 5d-2 Task 5), and an "Add Lane" row.
 @MainActor
-public final class LaneHeaderView: NSView, NSTextFieldDelegate {
+public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwner {
     public let document: DocumentModel
     var editor: EditorModel { document.editor }
-    public var verticalOffset: CGFloat = 0 { didSet { needsDisplay = true } }
+    public var verticalOffset: CGFloat = 0 {
+        didSet {
+            needsDisplay = true
+            needsLayout = true
+        }
+    }
     /// The lane being renamed, fixed when editing began (the shown
     /// sequence may change before it ends).
     private(set) var renaming: (seq: UInt64, lane: UInt64, name: String, field: NSTextField)?
@@ -34,6 +39,37 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         ControlUI.isChannel(event) || super.acceptsFirstMouse(for: event)
     }
 
+    /// The monitor button's tooltip: `LaneInputs.help` for its mode.
+    func toolTipText(at p: CGPoint) -> String? {
+        guard let i = row(at: p.y), document.lanes.indices.contains(i),
+            LaneHeaderLayout.control(at: p, rowTop: rowTop(i)) == .monitor
+        else { return nil }
+        return LaneInputs.help(document.lanes[i].monitor)
+    }
+
+    public func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?)
+        -> String
+    {
+        toolTipText(at: point) ?? ""
+    }
+
+    /// One tooltip rect per row's monitor button, rebuilt when rows or
+    /// layout change.
+    private func rebuildToolTips() {
+        removeAllToolTips()
+        for i in document.lanes.indices {
+            guard let r = LaneHeaderLayout.controls(rowTop: rowTop(i)).first(where: { $0.0 == .monitor })?.1 else {
+                continue
+            }
+            addToolTip(r, owner: self, userData: nil)
+        }
+    }
+
+    public override func layout() {
+        super.layout()
+        rebuildToolTips()
+    }
+
     var laneHeight: CGFloat { CGFloat(editor.layout.laneHeight) }
 
     private func observe() {
@@ -47,6 +83,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.needsDisplay = true
+                self?.needsLayout = true
                 self?.observe()
             }
         }
@@ -105,8 +142,6 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill()
     }
 
-    /// The thin input meter and its clip mark (spec §6.9); the track is
-    /// yellow while the input is still opening (pre-flight I5).
     /// Secondary text on one line, cut by `mode`.
     static func oneLine(_ font: NSFont, _ mode: NSLineBreakMode) -> [NSAttributedString.Key: Any] {
         let p = NSMutableParagraphStyle()
@@ -114,6 +149,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate {
         return [.font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: p]
     }
 
+    /// The thin input meter and its clip mark (spec §6.9); the track is
+    /// yellow while the input is still opening (pre-flight I5).
     private func meter(_ lane: UInt64, rowTop top: CGFloat, inputs: LaneInputs) {
         let r = LaneHeaderLayout.meterRect(rowTop: top)
         (inputs.opening ? NSColor.systemYellow.withAlphaComponent(0.5) : NSColor.quaternaryLabelColor).setFill()

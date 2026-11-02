@@ -24,7 +24,12 @@ public final class RecordModel {
     /// The toolbar's record popover is open; closing it commits the punch
     /// drafts (5d-2 final review I3).
     public var showsPopover = false {
-        didSet { if !showsPopover { commitPunchDrafts() } }
+        didSet {
+            if !showsPopover {
+                commitPunchDrafts()
+                document?.editor.endTextEditing("recordPopover")
+            }
+        }
     }
     /// Text typed in the popover's punch fields, until Return, the field
     /// losing focus, the popover closing or Record.

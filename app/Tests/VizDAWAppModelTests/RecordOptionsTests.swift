@@ -164,18 +164,53 @@ import VizDAWCore
         f.savedPath = "/tmp/P.vizdaw"
         _ = m.record.toggle()
         f.savesAfterPassRow = true
-        #expect(!m.wantsSavePanel(forceAs: false))
+        #expect(m.saveAction(forceAs: false) == .save)
         m.save()
         #expect(m.editor.status == RecordModel.savedDuringPass)
         #expect(m.alert == nil)
         // Save As cannot move a recording project: it waits for Stop.
-        #expect(!m.wantsSavePanel(forceAs: true))
-        #expect(m.editor.status == RecordModel.saveAsWhileRecording)
+        m.editor.clearStatus()
+        #expect(m.saveAction(forceAs: true) == .refused(RecordModel.saveAsWhileRecording))
+        #expect(m.editor.status == nil, "no side effect (T2 M2)")
+        // Untitled: its own words (T2 M1).
+        f.savedPath = nil
+        #expect(m.saveAction(forceAs: false) == .refused(RecordModel.saveUntitledWhileRecording))
         _ = m.record.toggle()
         f.savesAfterPassRow = false
-        #expect(m.wantsSavePanel(forceAs: true))
-        f.savedPath = nil
-        #expect(m.wantsSavePanel(forceAs: false))
+        #expect(m.saveAction(forceAs: false) == .panel)
+        f.savedPath = "/tmp/P.vizdaw"
+        #expect(m.saveAction(forceAs: true) == .panel)
+        #expect(m.saveAction(forceAs: false) == .save)
+    }
+
+    /// 5d-2 T2 M2: a pass that ended by itself since the last poll does
+    /// not refuse a Save As.
+    @Test func saveActionReadsTheRecordingNow() throws {
+        let (m, f) = try armed()
+        f.savedPath = "/tmp/P.vizdaw"
+        _ = m.record.toggle()
+        f.recordRow.recording = false  // it ended at the song's end; no poll since
+        #expect(m.saveAction(forceAs: true) == .panel)
+    }
+
+    /// 5d-2 T3 M1 (Ruling 12): text editing is held only while a punch
+    /// field has focus, so R, Space and Return reach the window otherwise.
+    @Test func textEditingIsHeldOnlyWhileAPunchFieldHasFocus() throws {
+        let (m, _) = try demo()
+        m.select(3)
+        let r = m.record
+        r.showsPopover = true
+        #expect(!m.editor.textEditing)
+        r.punchFocusChanged(from: nil, to: .punchIn)
+        #expect(m.editor.textEditing)
+        r.setPunchText(.punchIn, "3")
+        r.punchFocusChanged(from: .punchIn, to: .punchOut)
+        #expect(m.editor.textEditing && m.editor.layout.transport.punchIn == 122_880, "the old field's draft is in")
+        r.punchFocusChanged(from: .punchOut, to: nil)
+        #expect(!m.editor.textEditing)
+        r.punchFocusChanged(from: nil, to: .punchOut)
+        r.showsPopover = false
+        #expect(!m.editor.textEditing, "closing ends it")
     }
 
     @Test func theRecordButtonShowsWhyItWasRefused() throws {

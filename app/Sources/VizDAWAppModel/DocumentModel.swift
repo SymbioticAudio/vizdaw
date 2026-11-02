@@ -542,16 +542,19 @@ public final class DocumentModel {
         if alert == nil, (try? session.savesAfterPass()) == true { editor.status = RecordModel.savedDuringPass }
     }
 
-    /// Whether File › Save (or Save As, `forceAs`) asks for a location.
-    /// While recording it never does: Save As waits for Stop (the status
-    /// line says so) and an untitled project's Save does too.
-    public func wantsSavePanel(forceAs: Bool) -> Bool {
-        guard forceAs || needsSaveAs else { return false }
+    /// What File › Save (or Save As, `forceAs`) does. While recording it
+    /// never asks for a location: Save As and an untitled project's Save
+    /// wait for Stop. Reads the path once and the recording now; sets no
+    /// status (the caller shows a refusal).
+    public func saveAction(forceAs: Bool) -> SaveAction {
+        record.refresh(quiet: true)
+        let untitled = needsSaveAs
         if record.isRecording {
-            editor.status = RecordModel.saveAsWhileRecording
-            return false
+            if forceAs { return .refused(RecordModel.saveAsWhileRecording) }
+            if untitled { return .refused(RecordModel.saveUntitledWhileRecording) }
+            return .save
         }
-        return true
+        return forceAs || untitled ? .panel : .save
     }
 
     public func saveAs(path: String) {
@@ -656,3 +659,6 @@ public struct PlayKey: Equatable, Sendable {
         self.init(playing: t.playing, seq: t.seq, stoppedTick: t.playing ? nil : t.tick)
     }
 }
+
+/// What a Save command does (`DocumentModel.saveAction`).
+public enum SaveAction: Equatable, Sendable { case panel, save, refused(String) }

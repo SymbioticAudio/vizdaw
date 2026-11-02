@@ -13,6 +13,8 @@ extension RecordModel {
     public static let savedDuringPass = "Saved. The take is saved when recording stops."
     /// Save As while recording: the take is being written inside this
     /// project's package, which the core refuses to move.
+    public static let saveUntitledWhileRecording =
+        "Stop recording to save this new project: its take is being written into it."
     public static let saveAsWhileRecording = "Stop recording to use Save As: the take is being written into this project."
     /// Recording stops below this much free space (spec §6.2: 100 MiB).
     public static let stopBytes: UInt64 = 100 << 20
@@ -41,6 +43,17 @@ extension RecordModel {
     /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
     /// the status line and keeps the old value). A refused draft is dropped: the
     /// field shows the old value again. Returns whether every draft was taken.
+    /// The popover's punch focus moved (Ruling 12): the old field's draft
+    /// is committed; text editing is held while a field has focus.
+    public func punchFocusChanged(from old: TransportField?, to new: TransportField?) {
+        if let old { commitPunch(old) }
+        if new != nil {
+            document?.editor.beginTextEditing("recordPopover")
+        } else {
+            document?.editor.endTextEditing("recordPopover")
+        }
+    }
+
     @discardableResult public func commitPunch(_ f: TransportField) -> Bool {
         guard let text = punchDrafts.removeValue(forKey: f) else { return true }
         return document?.commitField(f, text) == true

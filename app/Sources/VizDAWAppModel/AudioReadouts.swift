@@ -30,6 +30,10 @@ extension AudioPreferences {
 
     /// The device's input as last read (Settings opens, the buffer size
     /// changes): its latencies and the round trip.
+    public static func inputHolder(_ sessions: [any SessionProtocol]) -> (any SessionProtocol)? {
+        sessions.first { ((try? $0.inputInfo())?.device ?? "") != "" }
+    }
+
     public func readDevice(_ session: (any SessionProtocol)?) {
         let info = try? session?.inputInfo()
         if info != device { device = info }

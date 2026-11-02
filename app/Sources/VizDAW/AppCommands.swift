@@ -355,12 +355,15 @@ struct AppCommands: Commands {
 
     private func save(as forceAs: Bool) {
         guard let doc else { return }
-        if doc.wantsSavePanel(forceAs: forceAs) {
+        switch doc.saveAction(forceAs: forceAs) {
+        case .panel:
             if let path = Panels.chooseSaveLocation(title: doc.snapshot.title) {
                 doc.saveAs(path: path)
             }
-        } else if !(forceAs || doc.needsSaveAs) {
+        case .save:
             doc.save()
+        case .refused(let why):
+            doc.editor.status = why
         }
     }
 }

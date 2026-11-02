@@ -27,7 +27,12 @@ struct AudioSettingsView: View {
                 Toggle(
                     "Software Monitoring",
                     isOn: Binding(
-                        get: { prefs.settings.softwareMonitoring }, set: { prefs.setSoftwareMonitoring($0) }))
+                        
+                        get: { prefs.settings.softwareMonitoring },
+                        set: {
+                            prefs.setSoftwareMonitoring($0)
+                            for d in store.documents.values { d.inputs.refreshMonitoring() }
+                        }))
                 Text(
                     "Off: VizDAW never plays an input back; listen through your interface's direct monitoring. "
                         + "Recording and MIDI thru are unaffected."
@@ -91,13 +96,17 @@ struct AudioSettingsView: View {
         .formStyle(.grouped)
         .frame(width: 500)
         .padding()
-        .onAppear { readDevice() }
+        .task {
+            while !Task.isCancelled {
+                readDevice()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 
     /// Any open document reads the one device.
     private func readDevice() {
-        let holder = store.documents.values.first { ((try? $0.session.inputInfo())?.device ?? "") != "" }
-        prefs.readDevice(holder?.session)
+        prefs.readDevice(AudioPreferences.inputHolder(store.documents.values.map(\.session)))
     }
 }
 
