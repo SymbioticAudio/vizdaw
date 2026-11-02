@@ -145,15 +145,15 @@ public final class StripChartModel {
     }
 
     /// The rows, without automation rows whose strip, slot or destination
-    /// was deleted since they were saved (parked T12). Saved rows with no
-    /// automation row, over a lane holding one target's automation and
-    /// nothing else, have that target's row first (plan 5e-2 Ruling 10).
+    /// was deleted since they were saved (parked T12). Before any rows are
+    /// saved, a lane holding one target's automation and nothing else
+    /// opens on that target's row, then Velocity (plan 5e-2 Ruling 10);
+    /// once saved, the saved rows are used as they are (Task 6 review I2).
     public var rows: [StripLane] {
-        let saved = state?.stripRows ?? [.velocity]
-        guard saved.contains(where: { if case .automation = $0 { true } else { false } }) else {
-            guard let t = Self.onlyTarget(events()) else { return saved }
-            return Array(([.automation(t)] + saved).prefix(Self.maxRows))
+        guard let saved = state?.stripRows else {
+            return Self.onlyTarget(events()).map { [.automation($0), .velocity] } ?? [.velocity]
         }
+        guard saved.contains(where: { if case .automation = $0 { true } else { false } }) else { return saved }
         let n = names
         let kept = saved.filter { lane in
             if case let .automation(t) = lane { return n.knows(t) }
@@ -223,6 +223,18 @@ public final class StripChartModel {
         return points.map {
             StripValue(id: nil, tick: $0.tick, length: 0, value: AutomationLaw.v32($0.value), ramp: true)
         }
+    }
+
+    /// What the view observes for the moving preview (Ruling 9, Task 6
+    /// review I1): the transport's tick while the chart's sequence plays,
+    /// else nil. It reads `transport` only behind the play key, so a
+    /// stopped chart, or one whose sequence is not the playing one, is
+    /// not redrawn by every poll.
+    public var previewClock: Int64? {
+        guard let doc = document else { return nil }
+        let key = doc.playKey
+        guard key.playing, let s = seq, key.seq == s else { return nil }
+        return doc.transport.tick
     }
 
     public var names: StripNames { targets().names }

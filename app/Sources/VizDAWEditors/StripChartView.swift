@@ -83,10 +83,9 @@ public final class StripChartView: EditorCanvas {
             _ = model.chosenLane
             _ = model.stroke
             // The write in progress moves with the transport poll while
-            // the chart's sequence plays (plan 5e-2 Ruling 9).
-            if let doc = document, doc.transport.playing, doc.transport.seq == model.seq {
-                _ = doc.transport.tick
-            }
+            // the chart's sequence plays (plan 5e-2 Ruling 9); the clock
+            // reads the transport only then (Task 6 review I1).
+            _ = model.previewClock
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.refresh()

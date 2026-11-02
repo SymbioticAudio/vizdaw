@@ -330,4 +330,51 @@ private let q: Int64 = 15_360
         defer { withExtendedLifetime(m3) {} }
         #expect(s3.rows == [.velocity], "two targets: no guess")
     }
+
+    /// Task 6 review I1: the chart's preview clock (what the view observes
+    /// for the moving preview) changes with the poll only while the
+    /// chart's own sequence plays; a stopped chart, or one whose sequence
+    /// is not the playing one, does not redraw on every poll.
+    @Test func thePreviewClockMovesOnlyWhileTheChartsSequencePlays() throws {
+        final class Flag: @unchecked Sendable { var on = false }
+        let (f, m, s) = try make()
+        defer { withExtendedLifetime(m) {} }
+        func fires(_ change: () -> Void) -> Bool {
+            let flag = Flag()
+            withObservationTracking { _ = s.previewClock } onChange: { flag.on = true }
+            change()
+            m.poll()
+            return flag.on
+        }
+        #expect(s.previewClock == nil)
+        #expect(!fires { f.state.seconds += 1 }, "stopped: a poll is not a redraw")
+        f.state.playing = true
+        f.state.seq = 4
+        m.poll()
+        #expect(s.previewClock == nil)
+        #expect(!fires { f.state.tick += 960 }, "another sequence plays")
+        f.state.seq = 3
+        m.poll()
+        #expect(s.previewClock == f.state.tick)
+        #expect(fires { f.state.tick += 960 }, "the chart's sequence plays")
+    }
+
+    /// Task 6 review I2/M1 (controller ruling): Ruling 10 holds only until
+    /// the chart's rows are saved; then the saved rows are used as they
+    /// are.
+    @Test func anAutomationLanesOwnRowGivesWayToSavedRows() throws {
+        let pan = AutomationTargetRow.stripPan(strip: 1)
+        let (m, s) = try groove([autoRow(1, tick: 0, pan, 0.5), autoRow(2, tick: 960, pan, 0.25)])
+        defer { withExtendedLifetime(m) {} }
+        #expect(s.rows == [.automation(.pan(strip: 1)), .velocity])
+        s.removeRow(0)
+        #expect(s.rows == [.velocity], "removed, and it stays removed")
+        s.addRow()
+        s.addRow()
+        s.addRow()
+        #expect(s.rows == [.velocity, .controller(7), .controller(7), .controller(7)], "a full saved list is kept whole")
+        s.setRow(0, to: .controller(1))
+        #expect(s.rows.first == .controller(1), "a replaced row is not added back")
+        #expect(s.rows.count == StripChartModel.maxRows)
+    }
 }
