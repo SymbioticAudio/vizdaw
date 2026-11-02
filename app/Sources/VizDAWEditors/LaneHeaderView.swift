@@ -12,6 +12,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     var editor: EditorModel { document.editor }
     public var verticalOffset: CGFloat = 0 {
         didSet {
+            guard verticalOffset != oldValue else { return }
             needsDisplay = true
             needsLayout = true
         }
@@ -54,16 +55,38 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         toolTipText(at: point) ?? ""
     }
 
-    /// One tooltip rect per row's monitor button, rebuilt when rows or
-    /// layout change.
+    /// The installed tooltip rects (one per monitor button in view) and
+    /// how often they were rebuilt (tests).
+    private(set) var toolTipRects: [CGRect] = []
+    private(set) var toolTipRebuilds = 0
+
+    /// One tooltip rect per monitor button in view (final review m9).
+    /// AppKit's rects are in this view's coordinates and the rows scroll by
+    /// `verticalOffset`, so a scroll moves them: only the rows in view get
+    /// one (a screenful, however many lanes), and rects that did not change
+    /// are not rebuilt (a layout for anything else, the same offset). The
+    /// text is read when shown, so a monitor mode change needs no rebuild.
     private func rebuildToolTips() {
+        let rects = visibleMonitorRects()
+        guard rects != toolTipRects else { return }
         removeAllToolTips()
-        for i in document.lanes.indices {
-            guard let r = LaneHeaderLayout.controls(rowTop: rowTop(i)).first(where: { $0.0 == .monitor })?.1 else {
-                continue
-            }
-            addToolTip(r, owner: self, userData: nil)
-        }
+        toolTipRebuilds += 1
+        toolTipRects = rects
+        for r in rects { addToolTip(r, owner: self, userData: nil) }
+    }
+
+    private func visibleMonitorRects() -> [CGRect] {
+        let n = document.lanes.count
+        guard n > 0, laneHeight > 0, laneHeight.isFinite, bounds.height > 0 else { return [] }
+        let first = ((verticalOffset - EditorCanvas.rulerHeight) / laneHeight).rounded(.down)
+        let last = ((verticalOffset - EditorCanvas.rulerHeight + bounds.height) / laneHeight).rounded(.up)
+        guard first.isFinite, last.isFinite else { return [] }
+        let lo = Int(max(0, min(first, CGFloat(n))))
+        let hi = Int(max(0, min(last, CGFloat(n - 1))))
+        guard lo <= hi else { return [] }
+        return (lo...hi).compactMap { i in
+            LaneHeaderLayout.controls(rowTop: rowTop(i)).first { $0.0 == .monitor }?.1
+        }.filter { $0.maxY > 0 && $0.minY < bounds.height }
     }
 
     public override func layout() {

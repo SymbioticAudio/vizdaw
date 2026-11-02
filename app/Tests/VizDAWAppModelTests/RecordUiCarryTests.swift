@@ -83,4 +83,38 @@ import VizDAWCore
         h.mouseDown(with: e)
         #expect(f.edits.last == .lane(edit: .setMonitor(seq: 3, lane: 31, monitor: .input)))
     }
+
+    /// Final review m9: the monitor tooltips cover the visible rows only,
+    /// are rebuilt only when what they cover changes, and follow a scroll.
+    @Test func monitorTooltipsCoverTheVisibleRowsAndFollowAScroll() throws {
+        let f = editorFake()
+        let base = try #require(f.laneTable[3]?.first)
+        f.laneTable[3] = (0..<200).map { i in
+            var l = base
+            l.id = 1000 + UInt64(i)
+            l.monitor = i == 10 ? .input : .off
+            return l
+        }
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        let h = LaneHeaderView(document: m)
+        h.frame = NSRect(x: 0, y: 0, width: LaneHeaderLayout.width, height: 300)
+        func monitorRect(_ i: Int) -> CGRect? { LaneHeaderLayout.controls(rowTop: h.rowTop(i)).first { $0.0 == .monitor }?.1 }
+        h.layout()
+        let visible = Int((300 / h.laneHeight).rounded(.up)) + 1
+        #expect(!h.toolTipRects.isEmpty && h.toolTipRects.count <= visible, "\(h.toolTipRects.count) rects")
+        #expect(h.toolTipRects.first == monitorRect(0))
+        let rebuilds = h.toolTipRebuilds
+        h.layout()
+        #expect(h.toolTipRebuilds == rebuilds, "nothing moved: no rebuild")
+        // Scrolled by ten rows: row 10's button is where row 0's was, and
+        // its tooltip names row 10's mode.
+        h.verticalOffset = 10 * h.laneHeight
+        h.layout()
+        #expect(h.toolTipRects.count <= visible)
+        let r = try #require(monitorRect(10))
+        #expect(h.toolTipRects.contains(r))
+        #expect(h.toolTipText(at: CGPoint(x: r.midX, y: r.midY)) == LaneInputs.help(.input))
+        #expect(h.toolTipRects.allSatisfy { $0.maxY > 0 && $0.minY < 300 }, "only rows in view")
+    }
 }
