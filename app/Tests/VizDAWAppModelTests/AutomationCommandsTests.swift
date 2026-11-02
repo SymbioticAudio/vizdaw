@@ -161,4 +161,50 @@ import VizDAWCore
         #expect(AutomationCommands.enabled(AutomationCommands.suspend, m))
         #expect(Set(AutomationCommands.modeIDs.keys).isSubset(of: ControlCommands.handled))
     }
+
+    /// Fix round 1 (M1, M3): a drag open answers like `automation.set_mode`.
+    @Test func aModeCommandWithADragOpenIsUnavailableLikeSetMode() throws {
+        let (id, m, f) = try doc()
+        m.selectedStrips = [1]
+        #expect(m.editor.beginGesture("drag", lanes: [], origin: .other))
+        let before = f.modeCalls.count
+        #expect(AutomationCommands.run("automation.mode.read", on: nil, m) == .unavailable(EditorModel.gestureOpenMessage))
+        let viaChannel = AutomationCommands.run("automation.mode.read", args: [], doc: id, m)
+        let viaSetMode = AutomationCommands.run(
+            AutomationCommands.setMode, args: [arg("strips", "1"), arg("mode", "read")], doc: id, m)
+        #expect(code(viaChannel) == .unavailable && code(viaChannel) == code(viaSetMode))
+        #expect(f.modeCalls.count == before)
+    }
+
+    /// Fix round 1 (M2): the channel branch.
+    @Test func theChannelRunsModeCommandsAndIgnoresStrayArguments() throws {
+        let (id, m, f) = try doc()
+        let none = AutomationCommands.run("automation.mode.latch", args: [], doc: id, m)
+        #expect(code(none) == .unavailable && f.modeCalls.isEmpty)
+        m.selectedStrips = [2, 1]
+        #expect(code(AutomationCommands.run("automation.mode.latch", args: [], doc: id, m)) == nil)
+        #expect(f.modeCalls.last?.0 == [1, 2] && f.modeCalls.last?.1 == .latch)
+        let n = f.modeCalls.count
+        let hostile = [
+            arg("strips", "all"), arg("mode", "off"), ControlArg(name: "strips", value: .flag(value: true)),
+            ControlArg(name: "mode", value: .flag(value: false)),
+        ]
+        #expect(code(AutomationCommands.run("automation.mode.trim", args: hostile, doc: id, m)) == nil)
+        #expect(f.modeCalls.count == n + 1)
+        #expect(f.modeCalls.last?.0 == [1, 2] && f.modeCalls.last?.1 == .trim, "the selection and the ID decide")
+    }
+
+    /// Fix round 1 (M3): Suspend Automation from the menu run, and `isOn`.
+    @Test func theMenuTogglesSuspendAndIsOnReadsIt() throws {
+        let (_, m, _) = try doc()
+        defer { setAutomationSuspended(on: false) }
+        setAutomationSuspended(on: false)
+        #expect(!AutomationCommands.isOn(AutomationCommands.suspend, m))
+        #expect(AutomationCommands.run(AutomationCommands.suspend, on: true, m) == .done)
+        #expect(AutomationCommands.isOn(AutomationCommands.suspend, m) && automationSuspended())
+        #expect(AutomationCommands.run(AutomationCommands.suspend, on: false, m) == .done)
+        #expect(!AutomationCommands.isOn(AutomationCommands.suspend, m))
+        #expect(AutomationCommands.run(AutomationCommands.suspend, on: nil, m) == .done && automationSuspended())
+        #expect(!AutomationCommands.isOn("automation.mode.read", m))
+    }
 }

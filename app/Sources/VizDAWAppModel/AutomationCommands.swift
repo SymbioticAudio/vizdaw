@@ -182,7 +182,7 @@ extension AutomationCommands: MenuCommands {
             return .done
         }
         guard let mode = modeIDs[id] else { return .refused("VizDAW has no handler for \(id).") }
-        guard m.editor.gesture == nil else { return .busy(EditorModel.gestureOpenMessage) }
+        guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
         guard !m.selectedStrips.isEmpty else { return .unavailable("Select strips in the mixer first.") }
         do {
             m.apply(try m.session.setAutomationMode(strips: m.selectedStrips.sorted(), mode: mode))
