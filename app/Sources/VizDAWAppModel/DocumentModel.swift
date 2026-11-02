@@ -610,7 +610,11 @@ public final class DocumentModel {
     /// Takes a new snapshot: keeps the selection if the sequence still
     /// exists (else the first top-level one), refetches lanes if needed.
     func apply(_ s: DocSnapshot) {
+        let moved = s.version != snapshot.version
         snapshot = s
+        // A strip can go with the mixer closed (an Undo of Add Bus): no
+        // mixer refetch prunes the selection then (final review I1).
+        if moved && !selectedStrips.isEmpty { _ = try? selectedStripsThatExist() }
         editor.sync(s)
         if selectedSeq.map({ id in !s.sequences.contains { $0.id == id } }) ?? true {
             selectedSeq = s.sequences.first(where: \.topLevel)?.id ?? s.sequences.first?.id
@@ -620,6 +624,16 @@ public final class DocumentModel {
         }
         refreshLanes()
         stepEntry.checkTarget()
+    }
+
+    /// The selected strips the mixer has now, in ID order; the selection
+    /// keeps only those (strips can go while the mixer window is closed,
+    /// and only the open mixer's refetch prunes it otherwise).
+    func selectedStripsThatExist() throws -> [UInt64] {
+        let ids = Set(try session.mixer().strips.map(\.id))
+        let kept = selectedStrips.intersection(ids)
+        if kept != selectedStrips { selectedStrips = kept }
+        return kept.sorted()
     }
 
     private func refreshLanes() {

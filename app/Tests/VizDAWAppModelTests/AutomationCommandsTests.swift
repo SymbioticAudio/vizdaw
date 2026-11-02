@@ -207,4 +207,71 @@ import VizDAWCore
         #expect(AutomationCommands.run(AutomationCommands.suspend, on: nil, m) == .done && automationSuspended())
         #expect(!AutomationCommands.isOn("automation.mode.read", m))
     }
+
+    /// Final review I1: a selected strip that went while the mixer was
+    /// closed (no refetch prunes it) is left out; the strips that remain
+    /// get the mode; with none left the command is unavailable. Menu and
+    /// channel alike.
+    @Test func modeCommandsSkipStripsThatWentWithTheMixerClosed() throws {
+        let (id, m, f) = try doc()
+        m.selectedStrips = [1, 2]
+        f.mixerSnap.strips.removeAll { $0.id == 2 }  // Undo "Add Bus", mixer closed
+        #expect(AutomationCommands.run("automation.mode.write", on: nil, m) == .done)
+        #expect(f.modeCalls.last?.0 == [1] && f.modeCalls.last?.1 == .write)
+        #expect(m.selectedStrips == [1], "the selection is pruned")
+        // The channel path.
+        m.selectedStrips = [1, 2]
+        #expect(code(AutomationCommands.run("automation.mode.latch", args: [], doc: id, m)) == nil)
+        #expect(f.modeCalls.last?.0 == [1] && f.modeCalls.last?.1 == .latch)
+        // None left: unavailable, the core not called, the menu dimmed.
+        f.mixerSnap.strips.removeAll { $0.id == 1 }
+        let n = f.modeCalls.count
+        m.selectedStrips = [1, 2]
+        #expect(AutomationCommands.run("automation.mode.read", on: nil, m) == .unavailable("Select strips in the mixer first."))
+        #expect(m.selectedStrips.isEmpty)
+        m.selectedStrips = [1, 2]
+        #expect(code(AutomationCommands.run("automation.mode.read", args: [], doc: id, m)) == .unavailable)
+        #expect(f.modeCalls.count == n)
+        // `enabled` dims once the document moves on (the Undo's snapshot).
+        m.selectedStrips = [1, 2]
+        f.snap.version += 1
+        m.apply(f.snap)
+        #expect(m.selectedStrips.isEmpty)
+        #expect(!AutomationCommands.enabled("automation.mode.read", m))
+    }
+
+    /// Final review m1: the core's Busy answers `busy`, as set_mode does.
+    @Test func aBusyModeCommandAnswersBusyLikeSetMode() throws {
+        let (id, m, f) = try doc()
+        m.selectedStrips = [1]
+        f.modeError = .Busy(message: "Release the touched control first.")
+        #expect(AutomationCommands.run("automation.mode.read", on: nil, m) == .busy("Release the touched control first."))
+        let viaChannel = AutomationCommands.run("automation.mode.read", args: [], doc: id, m)
+        let viaSetMode = AutomationCommands.run(
+            AutomationCommands.setMode, args: [arg("strips", "1"), arg("mode", "read")], doc: id, m)
+        #expect(code(viaChannel) == .busy && code(viaSetMode) == .busy)
+    }
+
+    /// Final review m2: one failure title for a mode change, wherever it
+    /// comes from (the mixer's popup and Set All use it too).
+    @Test func aModeChangeFailsUnderOneTitle() throws {
+        let (id, m, f) = try doc()
+        m.selectedStrips = [1]
+        f.modeError = .Model(message: "boom")
+        func message(_ o: ControlOutcome) -> String? {
+            if case .failed(let x) = o { return x.message }
+            return nil
+        }
+        let viaChannel = message(AutomationCommands.run("automation.mode.read", args: [], doc: id, m))
+        let viaSetMode = message(
+            AutomationCommands.run(AutomationCommands.setMode, args: [arg("strips", "1"), arg("mode", "read")], doc: id, m))
+        #expect(viaChannel == "Automation Mode Failed: boom")
+        #expect(viaSetMode == "Automation Mode Failed: boom")
+        let mixer = try MixerModel(document: m)
+        mixer.setMode(1, .read)
+        #expect(m.alert?.title == "Automation Mode Failed")
+        m.alert = nil
+        mixer.setAllModes(.read)
+        #expect(m.alert?.title == "Automation Mode Failed")
+    }
 }

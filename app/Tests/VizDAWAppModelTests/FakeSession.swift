@@ -779,7 +779,10 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         gestures.append((target, phase))
     }
 
+    /// Thrown by `setAutomationMode` (before it is recorded).
+    var modeError: VizError?
     func setAutomationMode(strips: [UInt64], mode: AutomationModeRow) throws -> DocSnapshot {
+        if let e = modeError { throw e }
         modeCalls.append((strips, mode))
         return commandResult()
     }

@@ -32,6 +32,11 @@ public enum AutomationCommands {
         "automation.mode.latch": .latch, "automation.mode.write": .write, "automation.mode.trim": .trim,
     ]
     public static let ids: Set<String> = Set([setMode, gesture, suspend]).union(modeIDs.keys)
+    /// The title of a failed mode change, wherever it was asked for (the
+    /// mixer's popup and Set All, the menu, `automation.set_mode`).
+    public static let modeFailed = "Automation Mode Failed"
+    /// Why a mode command has nothing to set.
+    public static let noSelection = "Select strips in the mixer first."
 
     /// The longest `strips` text read (the registry's string limit).
     nonisolated static let maxStripsText = 4096
@@ -110,7 +115,11 @@ public enum AutomationCommands {
         case setMode: return runSetMode(args, doc: doc, m)
         case gesture: return runGesture(args, doc: doc, m)
         case _ where modeIDs[id] != nil:
-            return ControlCommands.failure(run(id, on: nil, m)) ?? .done(ControlCommands.ran(id, doc, m))
+            switch runMode(id, m) {
+            case .done: return .done(ControlCommands.ran(id, doc, m))
+            case .unavailable(let why): return ControlCommands.unavailable(why)
+            case .failed(let error): return .failed(.thrown(error, modeFailed))
+            }
         default: return .failed(.of(.unknownId, "VizDAW has no handler for \(id)."))
         }
     }
@@ -131,7 +140,7 @@ public enum AutomationCommands {
             m.apply(try m.session.setAutomationMode(strips: ids, mode: mode))
             return .done(ControlCommands.ran(setMode, doc, m))
         } catch {
-            return .failed(.thrown(error, "Automation Failed"))
+            return .failed(.thrown(error, modeFailed))
         }
     }
 
@@ -181,14 +190,35 @@ extension AutomationCommands: MenuCommands {
             setAutomationSuspended(on: on ?? !automationSuspended())
             return .done
         }
-        guard let mode = modeIDs[id] else { return .refused("VizDAW has no handler for \(id).") }
+        guard modeIDs[id] != nil else { return .refused("VizDAW has no handler for \(id).") }
+        switch runMode(id, m) {
+        case .done: return .done
+        case .unavailable(let why): return .unavailable(why)
+        case .failed(let error):
+            if case VizError.Busy(let message) = error { return .busy(message) }
+            return .refused(AlertItem(error, title: modeFailed).message)
+        }
+    }
+
+    enum ModeRun {
+        case done
+        case unavailable(String)
+        case failed(any Error)
+    }
+
+    /// `automation.mode.<mode>` for the menu and the channel: the selected
+    /// strips that exist now get the mode, as one undo step.
+    static func runMode(_ id: String, _ m: DocumentModel) -> ModeRun {
+        guard let mode = modeIDs[id] else { return .unavailable("VizDAW has no handler for \(id).") }
         guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
-        guard !m.selectedStrips.isEmpty else { return .unavailable("Select strips in the mixer first.") }
+        guard !m.selectedStrips.isEmpty else { return .unavailable(noSelection) }
         do {
-            m.apply(try m.session.setAutomationMode(strips: m.selectedStrips.sorted(), mode: mode))
+            let ids = try m.selectedStripsThatExist()
+            guard !ids.isEmpty else { return .unavailable(noSelection) }
+            m.apply(try m.session.setAutomationMode(strips: ids, mode: mode))
             return .done
         } catch {
-            return .refused(AlertItem(error, title: "Automation Failed").message)
+            return .failed(error)
         }
     }
 }
