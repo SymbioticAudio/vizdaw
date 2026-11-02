@@ -75,8 +75,9 @@ public struct MeterLevel: Equatable, Sendable {
 }
 
 /// One document's mixer window (spec §11): strips, slots, sends, routing,
-/// meters at 30 Hz. Edits go through the session as undo steps; a drag
-/// (fader, pan, send level) is one step.
+/// meters at 30 Hz. Edits go through the session as undo steps; fader,
+/// pan, send-level, mute and solo moves are automation gestures on the core
+/// (plan 5e-2 Ruling 1), which makes each one undo step.
 @Observable
 @MainActor
 public final class MixerModel {
@@ -118,8 +119,13 @@ public final class MixerModel {
         }
     }
 
-    private var dragOpen = false
-    private var dragStrip: UInt64?
+    /// Shown values of touched targets (normalised) once moved, Ruling 2.
+    public private(set) var live: [AutomationTargetRow: Double] = [:]
+    /// Targets touched here (mouse down to mouse up) whose touch the core
+    /// took.
+    private var touches: Set<AutomationTargetRow> = []
+    /// Targets the core lists as touched (`automation_state`, Ruling 3).
+    private var coreTouched: Set<AutomationTargetRow> = []
     /// A refetch hit Busy and is still owed.
     private var refetchOwed = false
     @ObservationIgnored private var browserModels: [String: PluginBrowserModel] = [:]
@@ -251,44 +257,26 @@ public final class MixerModel {
 
     public func cancelRename() { renamingStrip = nil }
 
-    /// A drag starts: until `dragEnded`, edits are one undo step.
-    public func dragStarted(_ label: String, strip: UInt64? = nil) {
-        endOpenDrag()
-        do {
-            try session.beginEdit(label: label)
-            dragOpen = true
-            dragStrip = strip
-        } catch {
-            raise(AlertItem(error, title: "Edit Failed"))
-        }
-    }
-
-    public func dragEnded() { endOpenDrag() }
-
-    /// Ends the open drag, if any (the window closing, the dragged strip
-    /// going away or the document closing must not leave the undo
-    /// transaction open).
+    /// Releases every touch still open here (the window or the document
+    /// closing must not leave a gesture open), each once.
     public func endOpenDrag() {
-        guard dragOpen else { return }
-        dragOpen = false
-        dragStrip = nil
-        command("Edit Failed") { try $0.endEdit() }
-    }
-
-    public func setGain(_ strip: UInt64, db: Double) {
-        command("Fader Failed") { try $0.setGain(strip: strip, gainDb: db) }
-    }
-
-    public func setPan(_ strip: UInt64, _ pan: Double) {
-        command("Pan Failed") { try $0.setPan(strip: strip, pan: pan) }
+        guard !touches.isEmpty else { return }
+        let open = touches
+        touches = []
+        for t in open {
+            live[t] = nil
+            coreTouched.remove(t)
+            send(t, .release)
+        }
+        gestureLanded()
     }
 
     public func toggleMute(_ strip: StripRow) {
-        command("Mute Failed") { try $0.setStripMute(strip: strip.id, mute: !strip.mute) }
+        click(.stripMute(strip: strip.id), strip.mute ? 0 : 1)
     }
 
     public func toggleSolo(_ strip: StripRow) {
-        command("Solo Failed") { try $0.setStripSolo(strip: strip.id, solo: !strip.solo) }
+        click(.stripSolo(strip: strip.id), strip.solo ? 0 : 1)
     }
 
     public func setOutput(_ strip: UInt64, bus: UInt64?) {
@@ -366,7 +354,157 @@ public final class MixerModel {
         refetch()
     }
 
+    // MARK: Gestures (plan 5e-2 Rulings 1–3)
+
+    /// Mouse-down: `touch(value: nil)` on the core (the value heard now,
+    /// plan 5e-1 Ruling 26). A touch the core refuses is not kept, so no
+    /// value or release follows it.
+    public func touch(_ t: AutomationTargetRow) {
+        guard !touches.contains(t), send(t, .touch(value: nil)) else { return }
+        touches.insert(t)
+    }
+
+    /// A move of a touched target: heard at once and shown from now on.
+    public func move(_ t: AutomationTargetRow, to v: Double) {
+        guard touches.contains(t) else { return }
+        live[t] = v
+        send(t, .value(value: v))
+    }
+
+    /// Mouse-up: the core closes the gesture; the control shows the
+    /// snapshot's value again.
+    public func release(_ t: AutomationTargetRow) {
+        guard touches.remove(t) != nil else { return }
+        live[t] = nil
+        coreTouched.remove(t)
+        send(t, .release)
+        gestureLanded()
+    }
+
+    /// Touch at `v`, value and release at once (mute, solo, the 0 dB
+    /// double-click). Ignored while the target is touched here.
+    public func click(_ t: AutomationTargetRow, _ v: Double) {
+        guard !touches.contains(t), send(t, .touch(value: v)) else { return }
+        send(t, .value(value: v))
+        send(t, .release)
+        gestureLanded()
+    }
+
+    /// Touched here or in the core (a channel or plugin touch): the ring.
+    public func isTouched(_ t: AutomationTargetRow) -> Bool {
+        touches.contains(t) || coreTouched.contains(t)
+    }
+
+    /// The fader dB as shown (live while touched).
+    public func gainDb(_ s: StripRow) -> Double {
+        live[.stripFader(strip: s.id)].map(AutomationLaw.faderDb) ?? s.gainDb
+    }
+
+    /// The pan as shown (live while touched).
+    public func pan(_ s: StripRow) -> Double {
+        live[.stripPan(strip: s.id)].map(AutomationLaw.pan) ?? s.pan
+    }
+
+    /// Send `index`'s level as shown (live while touched).
+    public func sendLevelDb(_ s: StripRow, _ index: Int) -> Double {
+        if let v = live[.sendLevel(strip: s.id, send: UInt16(clamping: index))] {
+            return AutomationLaw.faderDb(v)
+        }
+        return index >= 0 && index < s.sends.count ? s.sends[index].levelDb : MixerMath.floorDb
+    }
+
+    /// Reads the core's touched targets (the window calls it with the
+    /// meters); `Busy` and errors keep the last.
+    public func pollAutomation() {
+        guard let a = try? session.automationState() else { return }
+        let now = Set(a.touched)
+        if now != coreTouched { coreTouched = now }
+    }
+
+    // MARK: Modes and selection (Rulings 5, 6)
+
+    public func setMode(_ strip: UInt64, _ mode: AutomationModeRow) {
+        command("Automation Mode Failed") { try $0.setAutomationMode(strips: [strip], mode: mode) }
+    }
+
+    /// Every strip, master included, in the snapshot's order.
+    public func setAllModes(_ mode: AutomationModeRow) {
+        let all = snapshot.strips.map(\.id)
+        command("Automation Mode Failed") { try $0.setAutomationMode(strips: all, mode: mode) }
+    }
+
+    /// A click selects `strip` alone; ⌘-click (`adding`) adds or removes it.
+    public func select(_ strip: UInt64, adding: Bool) {
+        if !adding {
+            document.selectedStrips = [strip]
+        } else if document.selectedStrips.contains(strip) {
+            document.selectedStrips.remove(strip)
+        } else {
+            document.selectedStrips.insert(strip)
+        }
+    }
+
+    public func isSelected(_ strip: UInt64) -> Bool { document.selectedStrips.contains(strip) }
+
     // MARK: Plumbing
+
+    /// Sends one gesture phase; false (with an alert) when the core refuses.
+    @discardableResult
+    private func send(_ t: AutomationTargetRow, _ phase: GesturePhaseRow) -> Bool {
+        do {
+            try session.gesture(target: t, phase: phase)
+            return true
+        } catch {
+            raise(AlertItem(error, title: Self.failureTitle(t)))
+            return false
+        }
+    }
+
+    /// A gesture closed: the document and the mixer show its step.
+    private func gestureLanded() {
+        if let s = try? session.snapshot() { document.apply(s) }
+        refetch()
+    }
+
+    private static func failureTitle(_ t: AutomationTargetRow) -> String {
+        switch t {
+        case .stripFader: "Fader Failed"
+        case .stripPan: "Pan Failed"
+        case .sendLevel: "Send Failed"
+        case .stripMute: "Mute Failed"
+        case .stripSolo: "Solo Failed"
+        case .pluginParam: "Parameter Failed"
+        case .velocityScale: "Velocity Failed"
+        }
+    }
+
+    /// Whether `t` still names a control of `snap` (a strip, or a send of
+    /// one); targets the mixer does not touch count as present.
+    private static func exists(_ t: AutomationTargetRow, in snap: MixerSnapshot) -> Bool {
+        func strip(_ id: UInt64) -> StripRow? { snap.strips.first { $0.id == id } }
+        switch t {
+        case .stripFader(let s), .stripPan(let s), .stripMute(let s), .stripSolo(let s):
+            return strip(s) != nil
+        case .sendLevel(let s, let send):
+            return strip(s).map { Int(send) < $0.sends.count } ?? false
+        case .pluginParam, .velocityScale:
+            return true
+        }
+    }
+
+    /// Releases (once, quietly: the control went) the touches whose
+    /// control `snap` no longer has, and drops strips that went from the
+    /// selection (Ruling 5).
+    private func forgetGone(_ snap: MixerSnapshot) {
+        for t in touches where !Self.exists(t, in: snap) {
+            touches.remove(t)
+            live[t] = nil
+            try? session.gesture(target: t, phase: .release)
+        }
+        let ids = Set(snap.strips.map(\.id))
+        let kept = document.selectedStrips.intersection(ids)
+        if kept != document.selectedStrips { document.selectedStrips = kept }
+    }
 
     private func command(_ title: String, _ body: (any SessionProtocol) throws -> DocSnapshot) {
         do {
@@ -389,7 +527,7 @@ public final class MixerModel {
             held = heldNow
             destinations = dests
             fetches += 1
-            if let d = dragStrip, !snap.strips.contains(where: { $0.id == d }) { endOpenDrag() }
+            forgetGone(snap)
         } catch {
             if case .Busy = error as? VizError {
                 refetchOwed = true

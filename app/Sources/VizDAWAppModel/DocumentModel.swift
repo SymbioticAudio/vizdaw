@@ -40,6 +40,8 @@ public final class DocumentModel {
     public var slotDraft: KeySlotDraft?
     public var pendingDelete: UInt64?
     public var alert: AlertItem?
+    /// The mixer's selected strips (plan 5e-2 Ruling 5), for `automation.mode.<mode>`.
+    public var selectedStrips: Set<UInt64> = []
     /// Version and selection the current `lanes` were fetched for.
     private var lanesKey: LanesKey?
     /// How often `lanes` were fetched (tests check refetch rules).

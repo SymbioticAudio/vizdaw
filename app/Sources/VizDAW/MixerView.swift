@@ -251,13 +251,19 @@ struct StripView: View {
         if strip.kind != .master {
             HStack(spacing: 2) {
                 Slider(
-                    value: Binding(get: { strip.pan }, set: { model.setPan(strip.id, $0) }),
+                    value: Binding(
+                        get: { model.pan(strip) },
+                        set: { model.move(.stripPan(strip: strip.id), to: ($0 + 1) / 2) }),
                     in: -1...1
                 ) { editing in
-                    if editing { model.dragStarted("Set Pan", strip: strip.id) } else { model.dragEnded() }
+                    if editing {
+                        model.touch(.stripPan(strip: strip.id))
+                    } else {
+                        model.release(.stripPan(strip: strip.id))
+                    }
                 }
                 .controlSize(.mini)
-                Text(MixerMath.panLabel(strip.pan))
+                Text(MixerMath.panLabel(model.pan(strip)))
                     .font(.caption2.monospacedDigit())
                     .frame(width: 28)
             }
@@ -382,17 +388,19 @@ struct SendView: View {
             }
             Slider(
                 value: Binding(
-                    get: { MixerMath.faderPosition(send.levelDb) },
-                    set: { p in model.editSend(strip.id, index) { $0.levelDb = MixerMath.faderDb(p) } }),
+                    get: { MixerMath.faderPosition(model.sendLevelDb(strip, index)) },
+                    set: { p in model.move(target, to: AutomationLaw.faderNorm(MixerMath.faderDb(p))) }),
                 in: 0...1
             ) { editing in
-                if editing { model.dragStarted("Set Send Level", strip: strip.id) } else { model.dragEnded() }
+                if editing { model.touch(target) } else { model.release(target) }
             }
             .controlSize(.mini)
         }
         .contextMenu { Button("Remove Send") { model.removeSend(strip.id, index) } }
-        .help("Send to \(model.stripName(send.target)): \(MixerMath.dbLabel(send.levelDb)) dB")
+        .help("Send to \(model.stripName(send.target)): \(MixerMath.dbLabel(model.sendLevelDb(strip, index))) dB")
     }
+
+    private var target: AutomationTargetRow { .sendLevel(strip: strip.id, send: UInt16(index)) }
 }
 
 /// A vertical fader (a horizontal slider turned); a drag is one undo step.
@@ -404,21 +412,23 @@ struct FaderView: View {
         VStack(spacing: 2) {
             Slider(
                 value: Binding(
-                    get: { MixerMath.faderPosition(strip.gainDb) },
-                    set: { model.setGain(strip.id, db: MixerMath.faderDb($0)) }),
+                    get: { MixerMath.faderPosition(model.gainDb(strip)) },
+                    set: { model.move(target, to: AutomationLaw.faderNorm(MixerMath.faderDb($0))) }),
                 in: 0...1
             ) { editing in
-                if editing { model.dragStarted("Set Fader", strip: strip.id) } else { model.dragEnded() }
+                if editing { model.touch(target) } else { model.release(target) }
             }
             .frame(width: 140)
             .rotationEffect(.degrees(-90))
             .frame(width: 30, height: 140)
-            Text(MixerMath.dbLabel(strip.gainDb))
+            Text(MixerMath.dbLabel(model.gainDb(strip)))
                 .font(.caption2.monospacedDigit())
-                .onTapGesture(count: 2) { model.setGain(strip.id, db: 0) }
+                .onTapGesture(count: 2) { model.click(target, AutomationLaw.faderNorm(0)) }
                 .help("Double-click: 0 dB")
         }
     }
+
+    private var target: AutomationTargetRow { .stripFader(strip: strip.id) }
 }
 
 /// Peak meter, left and right.
