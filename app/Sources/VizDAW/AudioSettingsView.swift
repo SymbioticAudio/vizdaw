@@ -27,7 +27,6 @@ struct AudioSettingsView: View {
                 Toggle(
                     "Software Monitoring",
                     isOn: Binding(
-                        
                         get: { prefs.settings.softwareMonitoring },
                         set: {
                             prefs.setSoftwareMonitoring($0)

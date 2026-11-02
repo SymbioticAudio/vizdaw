@@ -11,10 +11,12 @@ extension RecordModel {
     public static let overdubNote = "Audio overdub replaces what it overlaps: record into another lane or take to layer."
     /// File › Save while recording (plan 5d-1 Ruling 19).
     public static let savedDuringPass = "Saved. The take is saved when recording stops."
-    /// Save As while recording: the take is being written inside this
-    /// project's package, which the core refuses to move.
+    /// Save of a new, untitled project while recording: it has no package
+    /// to save into until the take is stopped.
     public static let saveUntitledWhileRecording =
         "Stop recording to save this new project: its take is being written into it."
+    /// Save As while recording: the take is being written inside this
+    /// project's package, which the core refuses to move.
     public static let saveAsWhileRecording = "Stop recording to use Save As: the take is being written into this project."
     /// Recording stops below this much free space (spec §6.2: 100 MiB).
     public static let stopBytes: UInt64 = 100 << 20
@@ -40,9 +42,6 @@ extension RecordModel {
         punchDrafts[f] = text
     }
 
-    /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
-    /// the status line and keeps the old value). A refused draft is dropped: the
-    /// field shows the old value again. Returns whether every draft was taken.
     /// The popover's punch focus moved (Ruling 12): the old field's draft
     /// is committed; text editing is held while a field has focus.
     public func punchFocusChanged(from old: TransportField?, to new: TransportField?) {
@@ -54,6 +53,9 @@ extension RecordModel {
         }
     }
 
+    /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
+    /// the status line and keeps the old value). A refused draft is dropped: the
+    /// field shows the old value again. Returns whether every draft was taken.
     @discardableResult public func commitPunch(_ f: TransportField) -> Bool {
         guard let text = punchDrafts.removeValue(forKey: f) else { return true }
         return document?.commitField(f, text) == true

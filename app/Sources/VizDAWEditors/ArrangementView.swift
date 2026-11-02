@@ -177,13 +177,9 @@ public final class ArrangementView: EditorCanvas {
             shape.fill()
             NSColor.systemRed.setStroke()
             shape.stroke()
-            let span = Double(t.toFrame - t.fromFrame)
-            let f0 = t.fromFrame + UInt64(span * Double((vis.minX - rect.minX) / rect.width))
-            let f1 = t.fromFrame + UInt64(span * Double((vis.maxX - rect.minX) / rect.width))
-            guard f1 > f0 else { continue }
-            let columns = UInt32(clamping: min(Int(vis.width.rounded(.up)), 8192))
-            guard columns > 0,
-                let rows = try? document.session.recordingWaveform(
+            guard let (f0, f1, columns) = GrowingTake.slice(rect: rect, visible: vis, from: t.fromFrame, to: t.toFrame)
+            else { continue }
+            guard let rows = try? document.session.recordingWaveform(
                     lane: t.lane, fromFileFrame: f0, toFileFrame: f1, columns: columns)
             else { continue }
             let wave = CGRect(x: vis.minX, y: rect.minY + 2, width: vis.width, height: max(rect.height - 4, 1))

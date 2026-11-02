@@ -119,4 +119,18 @@ import VizDAWCore
         let call = try #require(f.recordingWaveformCalls.last)
         #expect(call.lane == 30 && call.from == 96_000 && call.to == 192_000 && call.columns > 0)
     }
+
+    /// 5d-2 T9 M3: only the visible slice's frames are asked for, at most
+    /// 8192 columns.
+    @Test func theVisibleSliceAsksForItsFramesAndAtMost8192Columns() {
+        let rect = CGRect(x: 0, y: 0, width: 1000, height: 40)
+        let all = GrowingTake.slice(rect: rect, visible: rect, from: 0, to: 48_000)
+        #expect(all?.from == 0 && all?.to == 48_000 && all?.columns == 1000)
+        let half = GrowingTake.slice(rect: rect, visible: CGRect(x: 500, y: 0, width: 600, height: 40), from: 0, to: 48_000)
+        #expect(half?.from == 24_000 && half?.to == 48_000 && half?.columns == 500)
+        let wide = CGRect(x: 0, y: 0, width: 20_000, height: 40)
+        #expect(GrowingTake.slice(rect: wide, visible: wide, from: 0, to: 960_000)?.columns == 8192)
+        #expect(GrowingTake.slice(rect: rect, visible: CGRect(x: 2000, y: 0, width: 10, height: 40), from: 0, to: 48_000) == nil)
+        #expect(GrowingTake.slice(rect: rect, visible: rect, from: 5, to: 5) == nil)
+    }
 }

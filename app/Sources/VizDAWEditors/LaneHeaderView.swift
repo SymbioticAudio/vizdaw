@@ -27,6 +27,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         super.init(frame: .zero)
         wantsLayer = true
         observe()
+        observeMeters()
     }
 
     public required init?(coder: NSCoder) { nil }
@@ -73,9 +74,24 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     var laneHeight: CGFloat { CGFloat(editor.layout.laneHeight) }
 
     private func observe() {
+        // What the tooltip rects depend on (rows, lane heights): redraw
+        // and relayout.
         withObservationTracking {
             _ = document.lanes
             _ = editor.layout
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.needsDisplay = true
+                self?.needsLayout = true
+                self?.observe()
+            }
+        }
+    }
+
+    /// The meters and the monitoring state only redraw: no tooltip
+    /// rebuild at the poll rate (5e-2 Task 7 review M1).
+    private func observeMeters() {
+        withObservationTracking {
             _ = document.inputs.levels
             _ = document.inputs.clipped
             _ = document.inputs.monitoringOn
@@ -83,8 +99,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.needsDisplay = true
-                self?.needsLayout = true
-                self?.observe()
+                self?.observeMeters()
             }
         }
     }
@@ -128,7 +143,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                         in: r, withAttributes: Self.oneLine(small, .byTruncatingMiddle))
                 }
             }
-            if laneHeight >= 46, inputs.showsMeter(lane) { meter(lane.id, rowTop: top, inputs: inputs) }
+            if LaneHeaderLayout.showsMeter(laneHeight: laneHeight), inputs.showsMeter(lane) { meter(lane.id, rowTop: top, inputs: inputs) }
             NSColor.separatorColor.setFill()
             NSRect(x: 0, y: top + laneHeight - 0.5, width: bounds.width, height: 1).fill()
         }

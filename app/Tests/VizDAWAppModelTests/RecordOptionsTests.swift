@@ -225,4 +225,38 @@ import VizDAWCore
         m.record.pressRecord()
         #expect(!m.record.isRecording)
     }
+
+    /// 5d-2 T2 M4: the time left counts the depth and mono lanes, and
+    /// says nothing without a reading.
+    @Test func theTimeLeftCountsEveryDepthAndMonoLanes() throws {
+        let (m, f) = try armed()
+        let r = m.record
+        defer { RecordModel.freeSpace = RecordModel.volumeFreeSpace }
+        f.laneTable[3]?[0].input = .audio(first: 0, stereo: false, returnOf: nil)
+        f.snap.version += 1
+        m.refreshAfterJob()
+        f.info.format = ProjectFormatRow(sampleRate: 44_100, depth: .int16)
+        m.refreshProjectInfo()
+        // 44.1 kHz, 16-bit, one channel: 88 200 bytes a second.
+        RecordModel.freeSpace = { _ in 88_200 * 600 + RecordModel.stopBytes }
+        #expect(r.remainingText == "10 min left")
+        f.info.format = ProjectFormatRow(sampleRate: 48_000, depth: .float32)
+        m.refreshProjectInfo()
+        RecordModel.freeSpace = { _ in 192_000 * 3_600 + RecordModel.stopBytes }
+        #expect(r.remainingText == "1 h left")
+        RecordModel.freeSpace = { _ in nil }
+        #expect(r.remainingText == nil, "no reading, no readout")
+        RecordModel.freeSpace = { _ in 0 }
+        #expect(r.remainingText == "Less than a minute left")
+    }
+
+    /// 5d-2 T2 M3: a titled Save while recording reaches the session.
+    @Test func saveWhileRecordingReachesTheSession() throws {
+        let (m, f) = try armed()
+        f.savedPath = "/tmp/P.vizdaw"
+        f.snap.dirty = true
+        _ = m.record.toggle()
+        m.save()
+        #expect(!f.snap.dirty, "the session saved")
+    }
 }

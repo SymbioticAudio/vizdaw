@@ -12,6 +12,24 @@ public struct GrowingTake: Equatable, Sendable {
     public let toFrame: UInt64
 }
 
+extension GrowingTake {
+    /// The frames to ask the writer's file for, and the columns to draw
+    /// them in, for the part of a take's `rect` that is `visible` (at most
+    /// 8192 columns); nil when nothing is visible or the frames are empty.
+    public nonisolated static func slice(
+        rect: CGRect, visible: CGRect, from: UInt64, to: UInt64
+    ) -> (from: UInt64, to: UInt64, columns: UInt32)? {
+        let vis = rect.intersection(visible)
+        guard !vis.isNull, vis.width > 0, rect.width > 0, to > from else { return nil }
+        let span = Double(to - from)
+        let f0 = from + UInt64(span * Double((vis.minX - rect.minX) / rect.width))
+        let f1 = from + UInt64(span * Double((vis.maxX - rect.minX) / rect.width))
+        guard f1 > f0 else { return nil }
+        let columns = UInt32(clamping: min(Int(vis.width.rounded(.up)), 8192))
+        return columns > 0 ? (f0, f1, columns) : nil
+    }
+}
+
 extension RecordModel {
     /// The shown sequence's armed audio lanes' takes while a pass records
     /// (spec §6.2: "the region draws as it grows"): from the later of the

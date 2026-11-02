@@ -231,6 +231,23 @@ import VizDAWCore
         #expect(f.loadedPlugins == [[10]])
         #expect(m.held.isEmpty)
     }
+
+    /// 5d-2 T6 Minor 3: a strip's input lane plays through its own path,
+    /// in the shown sequence only.
+    @Test func anAudioPathStripIgnoresOtherPathsAndOtherSequences() throws {
+        let f = mixerFake()
+        f.mixerSnap.strips.insert(stripRow(4, "Vocal", kind: .audioPath(path: 7)), at: 0)
+        var other = lane(30, "Elsewhere")
+        other.audioOut = 8
+        f.laneTable[3] = [other]
+        var hidden = lane(40, "Hidden")
+        hidden.audioOut = 7
+        f.laneTable[4] = [hidden]
+        let m = try model(f)
+        m.document.select(3)
+        let strip = try #require(m.strips.first)
+        #expect(m.inputLane(for: strip) == nil, "another path, and another sequence's lane")
+    }
 }
 
 @MainActor

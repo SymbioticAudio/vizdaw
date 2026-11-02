@@ -46,4 +46,41 @@ import VizDAWCore
         let name = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1)).first { $0.0 == .name }?.1)
         #expect(h.toolTipText(at: CGPoint(x: name.midX, y: name.midY)) == nil)
     }
+
+    /// 5d-2 T4 M4: disarming clears "opening" and its status line.
+    @Test func openingIsClearedOnDisarm() throws {
+        let f = editorFake()
+        f.laneTable[3]?[1].arm = true
+        f.laneTable[3]?[1].input = .audio(first: 0, stereo: false, returnOf: nil)
+        f.inputRow = InputInfoRow(
+            device: "Fake", channels: 2, names: ["L", "R"], inputLatencyFrames: 0, outputLatencyFrames: 0)
+        f.inputRow.opening = true
+        let m = try DocumentModel(session: f)
+        m.inputs.pollMeters()
+        #expect(m.inputs.opening && m.editor.status == LaneInputs.openingNote)
+        f.laneTable[3]?[1].arm = false
+        f.snap.version += 1
+        m.refreshAfterJob()
+        m.inputs.pollMeters()
+        #expect(!m.inputs.opening && m.editor.status == nil)
+    }
+
+    /// 5d-2 T5 M5: the meter hides under 46 points; a click on the
+    /// monitor button goes through `mouseDown` to one undo step.
+    @Test func theMeterHidesUnder46PointsAndTheMonitorClickCycles() throws {
+        #expect(!LaneHeaderLayout.showsMeter(laneHeight: 45))
+        for h in [46.0, 47, 48, 96] { #expect(LaneHeaderLayout.showsMeter(laneHeight: h), "\(h)") }
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        let h = LaneHeaderView(document: m)
+        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1)).first { $0.0 == .monitor }?.1)
+        let at = h.convert(NSPoint(x: r.midX, y: r.midY), to: nil)
+        let e = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: at, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+        h.mouseDown(with: e)
+        #expect(f.edits.last == .lane(edit: .setMonitor(seq: 3, lane: 31, monitor: .input)))
+    }
 }

@@ -28,12 +28,14 @@ extension AudioPreferences {
         return out
     }
 
-    /// The device's input as last read (Settings opens, the buffer size
-    /// changes): its latencies and the round trip.
+    /// The first open session whose device has opened an input: the one
+    /// whose latencies and round trip Settings shows.
     public static func inputHolder(_ sessions: [any SessionProtocol]) -> (any SessionProtocol)? {
         sessions.first { ((try? $0.inputInfo())?.device ?? "") != "" }
     }
 
+    /// The device's input as last read (Settings opens, the buffer size
+    /// changes): its latencies and the round trip.
     public func readDevice(_ session: (any SessionProtocol)?) {
         let info = try? session?.inputInfo()
         if info != device { device = info }
