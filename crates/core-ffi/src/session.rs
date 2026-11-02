@@ -2837,6 +2837,12 @@ impl Session {
         host::debug_media(self.id)
     }
 
+    /// How many loop passes of the pass being written have landed (plan
+    /// 5e-1 Task 12), or `None` when none is being written (test hook).
+    pub fn debug_loop_passes_landed(&self) -> Option<usize> {
+        lock(&self.inner).writing.as_ref().map(|w| w.landed)
+    }
+
     /// The input routes the engine was last given for this session (test
     /// hook, plan 5c Task 8).
     pub fn debug_engine_inputs(&self) -> Option<core_engine::input::InputSpec> {

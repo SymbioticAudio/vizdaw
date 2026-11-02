@@ -476,8 +476,13 @@ fn off_ignores_automation_and_suspend_plays_it() {
             .is_some_and(|l| !points(&s, song, l).is_empty())
     });
     s.set_automation_mode(vec![synth], Mode::Off).unwrap();
+    // Play resumes past beat 1, so wait for the roll itself: stopped, the
+    // strip keeps the override its lane left (Plan 4d Ruling 13) until the
+    // roll drops it, and on a slow runner Play returns before the
+    // renderer has rolled.
+    let at = tick(&s);
     s.play(song).unwrap();
-    wait_until("beat 1", || tick(&s) > Q);
+    wait_until("the roll", || tick(&s) > at);
     let start = Instant::now();
     while start.elapsed() < Duration::from_millis(300) {
         s.idle().unwrap();
@@ -3053,7 +3058,7 @@ fn a_move_too_late_for_its_landed_pass_is_said_lost() {
     let _g = serial();
     vizdaw_ffi::host::debug_fake_device(Some((2048, 7200)));
     vizdaw_ffi::automation::debug_wrap_lag(Some(0));
-    let (s, seq, bus, _) = looping_bus(4);
+    let (s, seq, bus, auto) = looping_bus(4);
     s.set_automation_mode(vec![bus], Mode::Latch).unwrap();
     let t = Target::StripFader { strip: bus };
     s.play(seq).unwrap();
@@ -3062,20 +3067,42 @@ fn a_move_too_late_for_its_landed_pass_is_said_lost() {
         problems.extend(s.idle().unwrap().problems);
         tick(&s) > Q
     });
-    wait_wrap(&s);
-    wait_tick_in(&s, Q / 8, Q / 4);
-    for _ in 0..3 {
+    // The move must be taken after the cycle before the wrap landed, yet
+    // while it is still heard in that cycle (the device's lag, about 190
+    // ms of rendering past the wrap). A slow runner's idles can use up
+    // that window, so the move is made right after the landing is seen
+    // and a fresh tick read, and a cycle whose move was taken too late (it
+    // lands in the next cycle, not lost) is tried again. Every idle's
+    // problems are kept: whichever idle drains the move says it is lost.
+    let lost = |p: &[String]| p.iter().any(|x| x.contains("lost"));
+    for attempt in 0..6u32 {
+        let v = 0.6 + 0.05 * f64::from(attempt);
+        let before = s.debug_loop_passes_landed().unwrap_or(0);
+        wait_wrap(&s);
+        wait_until("the cycle before the wrap to land", || {
+            problems.extend(s.idle().unwrap().problems);
+            s.debug_loop_passes_landed().unwrap_or(0) > before
+        });
+        // A move taken up to about Q / 3 into the cycle (8000 frames; the
+        // device's lag is over 9000) is still heard before the wrap.
+        if tick(&s) >= Q / 3 {
+            continue;
+        }
+        s.gesture(t, Phase::Touch { value: Some(v) }).unwrap();
+        // As `pace`, but every idle's problems are kept: on a slow runner
+        // the move's stamp is drained, and said lost, by this idle.
+        std::thread::sleep(Duration::from_millis(12));
         problems.extend(s.idle().unwrap().problems);
-        std::thread::sleep(Duration::from_millis(2));
+        s.gesture(t, Phase::Release).unwrap();
+        wait_until("the move said lost, or landing in the next cycle", || {
+            problems.extend(s.idle().unwrap().problems);
+            lost(&problems) || has_value(&points(&s, seq, auto), v)
+        });
+        if lost(&problems) {
+            break;
+        }
     }
-    s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
-    pace(&s);
-    s.gesture(t, Phase::Release).unwrap();
-    wait_until("the lost line", || {
-        problems.extend(s.idle().unwrap().problems);
-        problems.iter().any(|x| x.contains("lost"))
-    });
-    let _ = seq;
+    assert!(lost(&problems), "no move was said lost: {problems:?}");
     stop_and_land(&s);
     vizdaw_ffi::automation::debug_wrap_lag(None);
     vizdaw_ffi::host::debug_fake_device(None);
