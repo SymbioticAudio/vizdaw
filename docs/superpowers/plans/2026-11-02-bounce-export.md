@@ -198,9 +198,14 @@ Each ruling decides something the spec leaves open, in the format "what — why 
    - Rendering stops when the quiet run reaches 0.5 s or the cap is reached.
    - Why: §9.1's tail rule, with one length for all files of a bounce, so stems line up end to end.
    - Cost if wrong: if the owner wants each stem trimmed to its own tail, compute per source.
-5. **Ruling (stems are post-fader and pan, before mute and solo).** A stem is the strip node's post-fader output (`st.post`: inserts, fader and pan). Mute and solo are edge gains in the graph (plan 5e-1 controller ruling), so a muted strip's stem still sounds and a soloed strip does not silence the other stems.
-   - Why: a stem is the strip's own signal; muting is a mix decision. It is also the only signal the graph holds per strip.
-   - Cost if wrong: an owner who expects "as heard" stems mutes in the sheet's strip list instead. A later option can apply the strip's main-edge gate.
+5. **Ruling (stems: export to files ignores mute and solo; bounce in place respects them). Owner answer 2026-11-02, replacing this plan's first reading ("every stem is post-fader and pan, before mute and solo").**
+   - **Export to files** (`path`): a stem is the strip node's post-fader output (`st.post`: inserts, fader and pan), before mute and solo, as an OMF-style export hands every track over. Mute and solo are edge gains in the graph (plan 5e-1 controller ruling), so a muted strip's stem file still sounds and a soloed strip does not silence the other stem files.
+   - **Bounce in place** ("Add to project"): each imported stem is that post-fader output gated by the strip's audibility as the mix hears it (the graph's `audible`: its own mute, another strip's solo, static or automated). A muted or solo-silenced strip bounces silent, and a mute written at a bar line cuts the imported stem exactly where it cuts the mix.
+   - The Mix is always as heard; mute and solo are in it either way, so one Mix source serves both the file and the import.
+   - With both a `path` and "Add to project", one pass renders each chosen strip twice: `BounceSpec.stems` (the files) and `BounceSpec.heard_stems` (the imports).
+   - **How the gate lines up.** Mute and solo act at the strip's main edge, after that edge's delay line (`Graph::feed_arrival(strip, None)`), while the stem is read at the strip's output (`strip_arrival`). A heard stem is therefore delayed by the edge's delay (`feed_arrival − strip_arrival` frames) before each frame is multiplied by the audibility in force at it, and drops `feed_arrival` frames instead of `strip_arrival`, so it lines up with the file stems and the mix to the sample. The audibility switches only at run boundaries (plan 4d Ruling 11), so the renderer reports it per run (`StripOutput.gates`).
+   - Why: the owner's answer. A bounce in place replaces what the user hears in the project, so it must sound as heard; an export hands raw stems to another program, which makes its own mix.
+   - Cost if wrong: heard stems to files, or raw stems in place, become a sheet option; rendering both kinds in one pass costs one more stem buffer (and a delay line of at most the graph's latency) per chosen strip.
 6. **Ruling (plugin copies on the main thread): `Session::bounce` makes the copies on the session's plugin thread (the main thread in the app).**
    1. It first captures the live states into the document exactly as Save does (`capture_all`).
    2. It builds a new `PluginHost` at the project rate with `set_offline_render(true)` and syncs it to that document.
@@ -639,8 +644,12 @@ Counts: Rust +13 (11 on Linux).
   pub struct BounceSpec {
       /// Render the mix (source 0 when set).
       pub mix: bool,
-      /// Strips whose post-fader output is a stem, in order (after the mix).
+      /// Strips whose post-fader output is a stem, before mute and solo
+      /// (export to files, Ruling 5), in order (after the mix).
       pub stems: Vec<StripId>,
+      /// Strips whose stem is gated by mute and solo as heard (Add to
+      /// project, Ruling 5), in order (after `stems`).
+      pub heard_stems: Vec<StripId>,
       pub start: Tick, pub end: Tick,
       /// The longest tail, in frames.
       pub tail_cap: u64,
@@ -659,10 +668,30 @@ Counts: Rust +13 (11 on Linux).
   impl Engine { /// The frame of `tick` in the loaded sequence (0 before a load).
       pub fn tick_frame(&self, tick: Tick) -> u64; }
   // render.rs
-  impl Renderer { /// `strip`'s post-fader output of the last block and its arrival. // not RT
-      pub fn strip_output(&self, strip: StripId, frames: u32) -> Option<(&[f32], &[f32], u64)>; }
+  /// One strip's output of the last block (Rulings 4, 5).
+  pub struct StripOutput<'a> {
+      pub left: &'a [f32], pub right: &'a [f32],
+      /// `Graph::strip_arrival`: where the post-fader signal is read.
+      pub arrival: u64,
+      /// `Graph::feed_arrival(strip, None)`: where its mute and solo act.
+      pub gate_arrival: u64,
+      /// The strip's audibility through the block: `(first frame, audible)` per
+      /// change, the first at frame 0 (the renderer's runs, plan 4d Ruling 11).
+      pub gates: &'a [(u32, bool)],
+  }
+  impl Renderer {
+      /// `strip`'s post-fader output of the last block. // not RT
+      pub fn strip_output(&self, strip: StripId, frames: u32) -> Option<StripOutput<'_>>;
+      /// The strips whose audibility each run records (the heard stems); allocates the
+      /// lists once, `frames / MIN_RUN + 2` entries each. Called before a bounce. // not RT
+      pub fn set_gate_taps(&mut self, strips: &[StripId]);
+  }
   // graph/exec.rs
-  impl Graph { pub fn strip_post(&self, strip: StripId, frames: u32) -> Option<(&[f32], &[f32])>; } // not RT
+  impl Graph {
+      pub fn strip_post(&self, strip: StripId, frames: u32) -> Option<(&[f32], &[f32])>; // not RT
+      /// The strip's `audible` now (mute and solo as the mix hears them). // RT
+      pub fn strip_audible(&self, strip: StripId) -> Option<bool>;
+  }
   // graph/node.rs
   TestMode::Ring(u32)  // id key `ring=<frames>`: passes input; after it falls silent, outputs 0.25 for that many frames
   ```
@@ -671,11 +700,13 @@ Counts: Rust +13 (11 on Linux).
 - It reads the strip node's `NodeState::post` through its `UnsafeCell`. The `// SAFETY:` line says that it is called only between blocks, by the thread that ran the last block, while no job is published.
 - `Graph` gains `strip_nodes: Vec<(StripId, usize)>`, sorted, built in `build` beside `strip_arrive`.
 
+The gate taps (Ruling 5): at the start of each run, after `automate` committed the run's controls, the renderer appends `(run offset, strip_audible(strip))` to each tapped strip's list when it differs from the list's last entry, into the lists `set_gate_taps` allocated (no allocation on the real-time thread; the rt-check gates cover it). Each block starts each list afresh with its first run's value. With no taps (every live engine), nothing is recorded.
+
 The algorithm of `bounce` (Ruling 4):
 1. Refuse `end <= start` with `Empty`.
 2. `range = tick_frame(end) − tick_frame(start)`.
 3. Run `locate_tick(start)`, `set_loop(false)` and `play_until(end)`.
-4. Per block: `engine.streamer().service()`, then `out.block(block)`. Start counting at the first block after which `engine.state()` is playing. Source `k`'s skip is `latency_frames()` for the mix and `strip_output(strip).2` for a stem; its frames are handed on once the block counter passes its skip.
+4. Before the first block, `out.renderer_mut().set_gate_taps(&spec.heard_stems)`. Per block: `engine.streamer().service()`, then `out.block(block)`. Start counting at the first block after which `engine.state()` is playing. Source `k`'s skip is `latency_frames()` for the mix, `strip_output(strip).arrival` for a stem and `gate_arrival` for a heard stem; its frames are handed on once the block counter passes its skip. A heard stem's frames first pass through a delay line of `gate_arrival − arrival` frames, then each frame is multiplied by 1 or 0 by the audibility `gates` hold for its frame in the block (Ruling 5).
 5. After every source has handed on `range` frames, track `quiet` (consecutive frames where every source's samples are all below `TAIL_THRESHOLD` in magnitude) and `last_loud`. Stop when `quiet ≥ TAIL_QUIET_SECONDS × rate` or `tail_rendered ≥ tail_cap`.
 6. `frames = range + min(last_loud_after_range, tail_cap)`.
 7. Check `cancel` every block.
@@ -761,7 +792,7 @@ fn rig(doc: &Document, seq: SeqId) -> Rig {
 }
 
 fn run(r: &mut Rig, spec: &BounceSpec) -> (Vec<Vec<f32>>, core_engine::bounce::BounceStats) {
-    let sources = usize::from(spec.mix) + spec.stems.len();
+    let sources = usize::from(spec.mix) + spec.stems.len() + spec.heard_stems.len();
     let mut got = vec![Vec::new(); sources];
     let stats = bounce(&mut r.engine, &mut r.out, spec, BLOCK, &mut |k, l, _| {
         got[k].extend_from_slice(l);
@@ -776,7 +807,15 @@ fn run(r: &mut Rig, spec: &BounceSpec) -> (Vec<Vec<f32>>, core_engine::bounce::B
 }
 
 fn spec(end_beats: i64) -> BounceSpec {
-    BounceSpec { mix: true, stems: vec![], start: Tick::ZERO, end: Tick(end_beats * Q), tail_cap: 480_000 }
+    BounceSpec { mix: true, stems: vec![], heard_stems: vec![], start: Tick::ZERO, end: Tick(end_beats * Q), tail_cap: 480_000 }
+}
+
+/// The region's AudioPath strip and the "Latent" bus of `doc(latency > 0, _)`.
+fn path_and_bus(d: &Document) -> (StripId, StripId) {
+    let find = |want: fn(&StripKind) -> bool| {
+        d.mixer().order().iter().copied().find(|s| d.mixer().strip(*s).is_ok_and(|x| want(&x.kind))).unwrap()
+    };
+    (find(|k| matches!(k, StripKind::AudioPath(_))), find(|k| matches!(k, StripKind::Bus)))
 }
 
 #[test]
@@ -818,6 +857,37 @@ fn stems_line_up_and_add_up_to_the_mix() {
         let sum: f32 = got[1..].iter().map(|s| s[f]).sum();
         assert!((sum - got[0][f]).abs() < 1e-5, "frame {f}: stems sum to the mix at 0 dB master");
     }
+}
+
+/// Owner answer 2026-11-02 (Ruling 5): a heard stem (Add to project)
+/// respects mute and solo; a file stem does not; unmuted they are equal.
+#[test]
+fn heard_stems_respect_mute_and_solo_and_file_stems_do_not() {
+    use core_model::command::MixerCmd;
+    for how in ["mute", "solo another strip"] {
+        let (d, seq) = doc(1000, None);
+        let (path, bus) = path_and_bus(&d);
+        let mut b = Builder::from_doc(d);
+        b.mixer(if how == "mute" {
+            MixerCmd::SetMute { strip: path, mute: true }
+        } else {
+            MixerCmd::SetSolo { strip: bus, solo: true }
+        })
+        .unwrap();
+        let d = b.finish();
+        let mut r = rig(&d, seq);
+        let (got, stats) = run(&mut r, &BounceSpec { stems: vec![path], heard_stems: vec![path], ..spec(8) });
+        assert_eq!(stats.frames, 8 * QF, "{how}");
+        assert!(got[0].iter().all(|x| *x == 0.0), "{how}: the mix is as heard");
+        assert!(got[1][QF as usize] != 0.0, "{how}: the file stem ignores it");
+        assert!(got[2].iter().all(|x| *x == 0.0), "{how}: the heard stem is silent");
+    }
+    let (d, seq) = doc(1000, None);
+    let (path, _) = path_and_bus(&d);
+    let mut r = rig(&d, seq);
+    let (got, _) = run(&mut r, &BounceSpec { stems: vec![path], heard_stems: vec![path], ..spec(8) });
+    assert!(got[2][QF as usize] != 0.0);
+    assert_eq!(got[1], got[2], "unmuted, the heard stem is the file stem, sample for sample");
 }
 
 #[test]
@@ -951,7 +1021,7 @@ VIZDAW_EOF
 
    Write `strip_post` and `strip_output`, and `bounce.rs` by the algorithm above.
 
-- [ ] **Step 4: Run the tests and the gates**, including the rt-check gates. Expected: core-engine +8, and rt-check green.
+- [ ] **Step 4: Run the tests and the gates**, including the rt-check gates. Expected: core-engine +9, and rt-check green.
 
 - [ ] **Step 5: Commit**
 
@@ -965,7 +1035,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
 git log -1 --oneline && git show --stat HEAD | tail -9
 ```
-Counts: Rust +8.
+Counts: Rust +9.
 
 ---
 
@@ -1116,10 +1186,10 @@ Counts: Rust +2.
 Then it runs `capture_all`, and for a document with plugin slots it calls `plugins::start_bounce`. It spawns `JobKindRow::Bounce`, whose thread:
 1. waits for `ready` (or the cancel, or the 60 s deadline);
 2. builds `Engine::new(cfg at the project rate, DiskMode::Manual, sinks by Ruling 8)`, the insert factory (the copies' or `NoInserts`), `set_media(media::files(…))` and `load(doc, seq)`;
-3. starts an `OfflineBackend` and runs `core_engine::bounce::bounce`, writing each source to a temporary float CAF in `Media/.incoming/`;
+3. starts an `OfflineBackend` and runs `core_engine::bounce::bounce`, writing each source to a temporary float CAF in `Media/.incoming/`. The `BounceSpec` follows Ruling 5: `mix` for a Mix; for Stems, `stems` = the strips when there is a `path` and `heard_stems` = the strips when `add_to_project` is set (both when both are);
 4. drops the engine;
-5. exports each source (`core_media::export::export`, `frames: Some(stats.frames)`);
-6. if `add_to_project`, imports each temporary CAF with `import_reserved(caf_importer, …, project format, stem)`;
+5. exports the files' sources (`core_media::export::export`, `frames: Some(stats.frames)`): the Mix, or each of `stems`;
+6. if `add_to_project`, imports the project's sources with `import_reserved(caf_importer, …, project format, stem)`: the Mix, or each of `heard_stems`;
 7. removes the temporaries, and returns `Work::Bounce`.
 
 On cancel or error, every file it wrote is removed: partials, temporaries, exported files, and imported media.
@@ -1169,6 +1239,7 @@ The refactor:
   - `a_bounce_equals_an_offline_render_of_the_range`: `Session::new_demo_audio()`, Mix of the song to `<tmp>/mix.wav` at 48 kHz/24-bit, no dither. The job is Done. The WAV (read with Task 1's helper, copied here) has `frames == bounce_check(...).frames` and is not silent where the demo's region plays. Its samples equal, to one 24-bit step, the region's media frames from the overview-free CAF read (`CafReader` on the media file) scaled by the constant `k` measured at the region start (the Task 2 method). The result row names the file.
   - `stem_files_get_safe_unique_names`: rename two strips "A/B" and "A:B" (both become "A-B"). Bounce Stems to a temp folder that already holds `A-B.wav`, without replace: refused before rendering ("exists"). With an empty folder: files `A-B.wav` and `A-B 2.wav`.
   - `add_to_project_places_the_bounce_on_a_new_lane`: `path: None, add_to_project: true`. After Done, the undo label is "Bounce", the new last lane of the song is named "Mix" with a region at tick 0, `media()` has a `Bounced` item in the project format, and one undo removes lane and item.
+  - `add_to_project_respects_mute_and_solo_and_files_do_not` (Ruling 5): `Session::new_demo_audio()` with its audio strip muted (`set_strip_mute`), Stems of that strip and of one unmuted strip, to a temp folder *and* added to the project. After Done: the muted strip's stem file is not silent where the demo's region plays; its imported media item is silent throughout (every sample of its file in `Media/` is 0); the unmuted strip's file and import both sound. Then unmute it and solo the other strip (`set_strip_solo`): a second bounce gives the same result for the solo-silenced strip.
   - `cancel_removes_everything_the_bounce_wrote`: hold jobs (`debug_hold_jobs(true)`), start, `cancel_job`, release; the state is Cancelled, and there is no `.partial`, no file in `Media/.incoming`, no destination file and no new media.
   - `copies_render_offline_with_the_live_state`: a project with `vizdaw.test.gain` on the synth strip, with its gain parameter set live to 0 (`set_param`, not saved). A Mix bounce is silent (the copy has the live state). `plugins` host count is back to the session's after Done + idle (the copies went to closing).
   - `a_bounce_while_playing_keeps_playback_running`: play the song, bounce, wait. The transport is still playing and `host::loads()` (the engine-load counter test hook) did not change during the bounce.
@@ -1246,7 +1317,7 @@ The refactor:
        Cancelled,
    ```
 
-- [ ] **Step 4: Run the tests and the gates** (the workspace; FFI; Swift with `FakeSession` stubs: `bounce` records the request and returns a job ID, `bounceCheck` returns `checkRow`, `bounceResult` returns `resultRow`). Expected: core-ffi +11 on macOS (+11 on Linux, with the other cfg test).
+- [ ] **Step 4: Run the tests and the gates** (the workspace; FFI; Swift with `FakeSession` stubs: `bounce` records the request and returns a job ID, `bounceCheck` returns `checkRow`, `bounceResult` returns `resultRow`). Expected: core-ffi +12 on macOS (+12 on Linux, with the other cfg test).
 
 - [ ] **Step 5: Commit**
 
@@ -1260,7 +1331,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
 git log -1 --oneline && git show --stat HEAD | tail -10
 ```
-Counts: Rust +11.
+Counts: Rust +12.
 
 ---
 
@@ -1325,6 +1396,8 @@ Each has a help line saying its default:
 - source mix, range song, format wav;
 - bits and rate: the project's;
 - dither on for 16 bits, add_to_project false, replace false.
+
+The `add_to_project` help also says what Ruling 5 decides: "bounces as heard: a muted or solo-silenced strip is silent; files ignore mute and solo".
 
 `range: selection` without `start`/`end` uses the editor's time selection, else is refused ("no time selection"). `source: selection` is mix plus `range: selection`. In `ControlChannel.swift`:
 
@@ -1402,7 +1475,7 @@ Counts: Rust +1, Swift +2.
 
 Behaviour:
 - `DocumentModel` owns `bounce` (lazy).
-- The sheet has the source picker, a strip checklist for stems, "Time selection only", format, bits, rate (with "Other…" as a field from 8,000 to 384,000), Dither (disabled for float), "Add to project", the warning line, and Bounce/Cancel.
+- The sheet has the source picker, a strip checklist for stems, "Time selection only", format, bits, rate (with "Other…" as a field from 8,000 to 384,000), Dither (disabled for float), "Add to project", the warning line, and Bounce/Cancel. Under the stems checklist a caption says Ruling 5: "Files ignore mute and solo. Add to project bounces as heard: muted and solo-silenced strips are silent."
 - Bounce opens an `NSSavePanel` (file) or an `NSOpenPanel` set to folders only (stems), unless only "Add to project" is on.
 - While the job runs, the sheet shows progress and Cancel. On Done it closes; on Failed it alerts "Bounce Failed".
 - `AppCommands` adds `Button("Bounce…") { doc?.bounce.shown = true }.disabled(doc == nil)` after "Relink Media…".
@@ -1478,11 +1551,15 @@ and the e2e `bounces_the_demo_and_checks_the_file`.
      plays: playback goes on; the file plays in Finder's preview and
      sounds like the mix, reverb tails included.
 181. README 164's check: with a latent plugin on a bus, bounce Stems of
-     two tracks and the Mix; zoom in on them in another editor (or import
-     them back): every file starts at the same sample, and a mute
-     written at a bar line cuts exactly there.
+     two tracks and the Mix to files; zoom in on them in another editor
+     (or import them back): every file starts at the same sample, a mute
+     written at a bar line cuts the Mix exactly there, and the muted
+     track's stem file plays on through it (files ignore mute and solo).
 182. Add to project: the bounce appears on a new lane "Mix" at the range
-     start, in the media pool as Bounced; one Undo removes it.
+     start, in the media pool as Bounced; one Undo removes it. Mute one
+     track, solo nothing, and bounce Stems with Add to project: the muted
+     track's new lane is silent and the others sound; with a mute written
+     at a bar line, its lane cuts there, as the mix does.
 183. A project with a lane playing a hardware synth: the sheet says
      "1 lane plays external MIDI and will be silent. Track it as audio
      first: Track Synth…", and the synth is silent in the file.
@@ -1492,7 +1569,7 @@ and the e2e `bounces_the_demo_and_checks_the_file`.
      complete.
 ```
 
-- [ ] **Step 3: Run the full gates**, including the rt-check gates, the workspace tests, Swift, `scripts/make-app.sh` and the e2e. Expected: Rust baseline + 13 + 8 + 2 + 11 + 1 = **+35** (macOS); Swift +7; e2e 12; registry 144.
+- [ ] **Step 3: Run the full gates**, including the rt-check gates, the workspace tests, Swift, `scripts/make-app.sh` and the e2e. Expected: Rust baseline + 13 + 9 + 2 + 12 + 1 = **+37** (macOS); Swift +7; e2e 12; registry 144.
 
 - [ ] **Step 4: Commit**
 
@@ -1537,7 +1614,7 @@ git log -1 --oneline && git show --stat HEAD | tail -4
 2. **Step scan.** Every step names its files, its signatures and the spec values. The test bodies for Tasks 3–6 are given as named tests with their assertions in prose, because they follow those files' existing harnesses (`clap_host.rs`, `FakeSession`).
 3. **Type consistency.**
    - `Container` (core-media) maps to `ContainerRow` (core-ffi), and `BitDepth` to the existing `BitDepthRow`.
-   - `BounceSpec.stems` takes `StripId`s from `BounceSourceRow::Stems { strips }`.
+   - `BounceSpec.stems` (files) and `BounceSpec.heard_stems` (Add to project) take `StripId`s from `BounceSourceRow::Stems { strips }` (Ruling 5).
    - `Work::Bounce.exported` holds `BouncedFileRow` (Task 4), which `ControlJobs.answer(…, bounce:)` reads (Task 5).
    - `ImportAs` is used by both import and bounce.
 4. **Review Focus.** Each of the five lines names its tests in its owning task.
