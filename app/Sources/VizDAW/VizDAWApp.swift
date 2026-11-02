@@ -56,6 +56,7 @@ struct VizDAWApp: App {
         // The audio settings reach the core before any document opens
         // (plan 5d-2 Ruling 2; 5d-1 carry: before the first host opens).
         audioPreferences.applyAll()
+        automationPreferences.applyAll()
         MediaModel.channelIsOn = { ControlChannel.active }
         // The control channel (control spec §8) starts before any document
         // opens, so launch-time dialogs already go to it instead of the screen.
@@ -95,6 +96,8 @@ struct VizDAWApp: App {
                     .tabItem { Label("Audio", systemImage: "hifispeaker") }
                 RecordingSettingsView(prefs: audioPreferences, store: appStore)
                     .tabItem { Label("Recording", systemImage: "record.circle") }
+                AutomationSettingsView(prefs: automationPreferences)
+                    .tabItem { Label("Automation", systemImage: "slider.vertical.3") }
             }
         }
     }
