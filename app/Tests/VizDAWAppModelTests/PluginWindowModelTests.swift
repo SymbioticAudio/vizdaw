@@ -26,6 +26,7 @@ import VizDAWCore
         let f = mixerFake()
         f.paramTable[10] = [param(0, "Gain")]
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(0)
         w.setParam(0, 0.7)
         w.setParam(0, 0.2)
         w.commitParam(0)
@@ -44,6 +45,7 @@ import VizDAWCore
                 stepped: false, automatable: true, hidden: false)
         ]
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(3)
         w.setParam(3, 10_020)
         w.setParam(3, 99_999)
         w.commitParam(3)
@@ -60,8 +62,10 @@ import VizDAWCore
             param(2, "Gain"),
         ]
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(1)
         w.setParam(1, 7)
         w.commitParam(1)
+        w.beginParam(2)
         w.setParam(2, .nan)
         w.setParam(2, .infinity)
         w.setParam(2, -.infinity)
@@ -79,6 +83,7 @@ import VizDAWCore
         f.paramTable[10] = [param(0, "Gain")]
         let doc = try DocumentModel(session: f)
         let w = PluginWindowModel(document: doc, slot: 10)
+        w.beginParam(0)
         w.setParam(0, 0.7)
         f.snap.version += 1
         w.commitParam(0)
@@ -94,6 +99,7 @@ import VizDAWCore
         let doc = try DocumentModel(session: f)
         let w = PluginWindowModel(document: doc, slot: 10)
         f.gestureError = .Busy(message: "Finish the open edit first.")
+        w.beginParam(0)
         w.setParam(0, 0.7)
         #expect(doc.alert?.title == "Parameter Failed")
         f.gestureError = nil
@@ -103,6 +109,7 @@ import VizDAWCore
         #expect(w.params.first?.value == 0.5, "not heard, not shown")
         w.endOpenDrags()
         #expect(f.gestures.isEmpty)
+        w.beginParam(0)
         w.setParam(0, 0.3)
         w.commitParam(0)
         #expect(f.gestures.map(\.1) == [.touch(value: 0.3), .release])
@@ -116,26 +123,31 @@ import VizDAWCore
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
         // Refused, then let go: the next drag is heard.
         f.gestureError = .Busy(message: "busy")
+        w.beginParam(0)
         w.setParam(0, 0.7)
         f.gestureError = nil
         w.commitParam(0)
+        w.beginParam(0)
         w.setParam(0, 0.4)
         w.commitParam(0)
         #expect(f.gestures.map(\.1) == [.touch(value: 0.4), .release])
         // Refused, then the parameter goes and comes back before the drag
         // ends: the next drag touches.
         f.gestureError = .Busy(message: "busy")
+        w.beginParam(0)
         w.setParam(0, 0.7)
         f.gestureError = nil
         f.paramTable[10] = []
         w.refresh()
         f.paramTable[10] = [param(0, "Gain")]
         w.refresh()
+        w.beginParam(0)
         w.setParam(0, 0.6)
         w.commitParam(0)
         #expect(f.gestures.map(\.1) == [.touch(value: 0.4), .release, .touch(value: 0.6), .release])
         // The same when the slot goes and comes back.
         f.gestureError = .Busy(message: "busy")
+        w.beginParam(0)
         w.setParam(0, 0.7)
         f.gestureError = nil
         let inserts = f.mixerSnap.strips[0].inserts
@@ -143,6 +155,7 @@ import VizDAWCore
         w.refresh()
         f.mixerSnap.strips[0].inserts = inserts
         w.refresh()
+        w.beginParam(0)
         w.setParam(0, 0.3)
         w.commitParam(0)
         #expect(f.gestures.suffix(2).map(\.1) == [.touch(value: 0.3), .release])
@@ -155,6 +168,7 @@ import VizDAWCore
         f.paramTable[10] = [param(0, "Gain")]
         let doc = try DocumentModel(session: f)
         let w = PluginWindowModel(document: doc, slot: 10)
+        w.beginParam(0)
         w.setParam(0, 0.7)
         f.valueError = .Model(message: "refused")
         w.setParam(0, 0.2)
@@ -169,7 +183,9 @@ import VizDAWCore
         let f = mixerFake()
         f.paramTable[10] = [param(0, "Gain"), param(1, "Pan")]
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(0)
         w.setParam(0, 0.7)
+        w.beginParam(1)
         w.setParam(1, 0.1)
         f.paramTable[10] = [param(1, "Pan")]
         w.refresh()
@@ -193,6 +209,7 @@ import VizDAWCore
         let f = mixerFake()
         f.paramTable[10] = [param(0, "Gain")]
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(0)
         w.setParam(0, 0.7)
         f.readBusy = true
         f.mixerFetchError = VizError.Busy(message: "busy")
@@ -204,6 +221,32 @@ import VizDAWCore
         #expect(w.params.first?.value == 0.7, "the dragged value stays shown")
         w.commitParam(0)
         #expect(f.gestures.map(\.1) == [.touch(value: 0.7), .release])
+    }
+
+    /// Final review m6: a value with no editing span open (a keyboard or
+    /// accessibility increment) is a click: touch, value and release at
+    /// once, so no touch is left open to hold the document's edit.
+    @Test func aValueWithNoEditingSpanIsAClick() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let doc = try DocumentModel(session: f)
+        let w = PluginWindowModel(document: doc, slot: 10)
+        f.snap.version += 1
+        w.setParam(0, 0.3)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.3), .value(value: 0.3), .release])
+        #expect(f.gestures.allSatisfy { $0.0 == .pluginParam(slot: 10, param: 0) })
+        #expect(w.params.first?.value == 0.3, "shown at once")
+        #expect(doc.snapshot.version == f.snap.version, "its step lands")
+        w.commitParam(0)
+        w.endOpenDrags()
+        #expect(f.gestures.count == 3, "nothing left to release")
+        // A refused click sends nothing more and keeps nothing.
+        f.gestureError = .Busy(message: "busy")
+        w.setParam(0, 0.6)
+        f.gestureError = nil
+        #expect(f.gestures.count == 3 && doc.alert?.title == "Parameter Failed")
+        w.setParam(0, 0.6)
+        #expect(f.gestures.count == 6, "the next value clicks again")
     }
 
     @Test func theEditorOpensWhenThePluginHasOneElseParametersShow() throws {
@@ -283,6 +326,7 @@ import VizDAWCore
         let f = mixerFake()
         f.paramTable[10] = [param(0, "Gain")]
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(0)
         w.setParam(0, 0.9)
         #expect(w.closed())
         #expect(f.gestures.map(\.1) == [.touch(value: 0.9), .release])

@@ -154,6 +154,9 @@ public final class PluginWindowModel {
     /// Parameters whose drag the core refused at the touch: nothing more is
     /// sent for them until the drag ends.
     private var refused: Set<UInt64> = []
+    /// Parameters whose slider's editing span is open (mouse down to
+    /// mouse up), touched or not: a value outside one is a click.
+    private var editing: Set<UInt64> = []
 
     /// The window closes: a drag still open ends (one undo step), the editor
     /// detaches (ending any gesture it left open) and the project no longer
@@ -198,6 +201,7 @@ public final class PluginWindowModel {
     /// once: the core lands the step and no gesture is left open.
     public func endOpenDrags() {
         refused = []
+        editing = []
         guard !dragging.isEmpty else { return }
         let open = dragging
         dragging = []
@@ -223,10 +227,23 @@ public final class PluginWindowModel {
     /// normalised value, later ones move it (plan 5e-2 Task 5). The core
     /// sends each value to the plugin and keeps the step at the release
     /// (plan 5e-1 Ruling 15). A refused touch alerts and is not kept.
+    /// The control's editing span begins (the slider's mouse-down).
+    public func beginParam(_ id: UInt64) {
+        editing.insert(id)
+    }
+
+    /// A value with no editing span open (a keyboard or accessibility
+    /// increment sends no editing-began) is a click: touch, value and
+    /// release at once, so no touch is left open (final review m6).
     public func setParam(_ id: UInt64, _ value: Double) {
         guard !refused.contains(id), let i = params.firstIndex(where: { $0.id == id }) else { return }
         let p = params[i]
         let n = Self.normalised(value, p)
+        if !editing.contains(id) && !dragging.contains(id) {
+            click(id, n)
+            params[i].value = Self.clamped(value, p)
+            return
+        }
         if dragging.contains(id) {
             // A refused move keeps the touch: its release still follows.
             send(id, .value(value: n))
@@ -245,6 +262,7 @@ public final class PluginWindowModel {
     /// The control is let go: the core closes the gesture (stopped, one
     /// undo step "Change Plugin Parameter") and the window shows it.
     public func commitParam(_ id: UInt64) {
+        editing.remove(id)
         if refused.remove(id) != nil { return }
         guard let i = dragging.firstIndex(of: id) else { return }
         dragging.remove(at: i)
@@ -284,6 +302,20 @@ public final class PluginWindowModel {
         }
     }
 
+    /// Touch, value and release of parameter `id` at normalised `n`; a
+    /// refused touch alerts and leaves nothing open.
+    private func click(_ id: UInt64, _ n: Double) {
+        do {
+            try MixerModel.clickGesture(session, .pluginParam(slot: slot, param: id), n)
+        } catch {
+            let item = AlertItem(error, title: "Parameter Failed")
+            if let a = document.alert, a.title == item.title, a.message == item.message { return }
+            document.alert = item
+            return
+        }
+        gestureLanded()
+    }
+
     /// A gesture closed: the document shows its step now (idle would
     /// report it a tick later). The slider keeps its last value until the
     /// window's next refresh reads the kept one.
@@ -297,6 +329,7 @@ public final class PluginWindowModel {
     private func forgetGone(slotGone: Bool, present: Set<UInt64>?) {
         func gone(_ id: UInt64) -> Bool { slotGone || present.map { !$0.contains(id) } == true }
         refused = refused.filter { !gone($0) }
+        editing = editing.filter { !gone($0) }
         for id in dragging where gone(id) {
             dragging.removeAll { $0 == id }
             live[id] = nil

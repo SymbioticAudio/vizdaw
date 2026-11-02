@@ -138,6 +138,31 @@ import VizDAWCore
         #expect(f.gestures.isEmpty, "nothing after a refused touch")
     }
 
+    /// Final review m6: a value with no editing span open (a keyboard or
+    /// accessibility increment, no mouse-down) is a click: touch at the
+    /// value, value and release, so it is heard and no touch stays open.
+    @Test func aValueWithNoEditingSpanIsAClick() throws {
+        let (m, f) = try model()
+        m.move(fader, to: 0.3)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.3), .value(value: 0.3), .release])
+        #expect(f.gestures.allSatisfy { $0.0 == fader })
+        #expect(!m.isTouched(fader), "no touch left open")
+        m.release(fader)
+        m.endOpenDrag()
+        #expect(f.gestures.count == 3, "nothing left to release")
+        // Inside a drag whose touch the core refused, values still send
+        // nothing (no click per move).
+        f.gestureError = .Busy(message: "busy")
+        m.touch(fader)
+        f.gestureError = nil
+        m.move(fader, to: 0.4)
+        m.release(fader)
+        #expect(f.gestures.count == 3)
+        // After that drag ends, a lone value clicks again.
+        m.move(fader, to: 0.5)
+        #expect(f.gestures.count == 6)
+    }
+
     @Test func modesAreSetPerStripAndForAll() throws {
         let (m, f) = try model()
         m.setMode(2, .touch)

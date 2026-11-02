@@ -124,6 +124,10 @@ public final class MixerModel {
     /// Targets touched here (mouse down to mouse up) whose touch the core
     /// took.
     private var touches: Set<AutomationTargetRow> = []
+    /// Targets whose editing span is open (mouse down to mouse up), the
+    /// core's touch taken or not: a value inside one is part of the drag,
+    /// a value outside one is a click (final review m6).
+    private var editing: Set<AutomationTargetRow> = []
     /// Targets the core lists as touched (`automation_state`, Ruling 3).
     private var coreTouched: Set<AutomationTargetRow> = []
     /// A refetch hit Busy and is still owed.
@@ -260,6 +264,7 @@ public final class MixerModel {
     /// Releases every touch still open here (the window or the document
     /// closing must not leave a gesture open), each once.
     public func endOpenDrag() {
+        editing = []
         guard !touches.isEmpty else { return }
         let open = touches
         touches = []
@@ -360,13 +365,21 @@ public final class MixerModel {
     /// plan 5e-1 Ruling 26). A touch the core refuses is not kept, so no
     /// value or release follows it.
     public func touch(_ t: AutomationTargetRow) {
+        editing.insert(t)
         guard !touches.contains(t), send(t, .touch(value: nil)) else { return }
         touches.insert(t)
     }
 
     /// A move of a touched target: heard at once and shown from now on.
+    /// Inside a drag whose touch the core refused it sends nothing. A
+    /// value with no drag open (a keyboard or accessibility increment
+    /// sends no editing-began) is a click at `v`, so it is heard and no
+    /// touch is left open (final review m6).
     public func move(_ t: AutomationTargetRow, to v: Double) {
-        guard touches.contains(t) else { return }
+        guard touches.contains(t) else {
+            if !editing.contains(t) { click(t, v) }
+            return
+        }
         live[t] = v
         send(t, .value(value: v))
     }
@@ -374,6 +387,7 @@ public final class MixerModel {
     /// Mouse-up: the core closes the gesture; the control shows the
     /// snapshot's value again.
     public func release(_ t: AutomationTargetRow) {
+        editing.remove(t)
         guard touches.remove(t) != nil else { return }
         live[t] = nil
         coreTouched.remove(t)
@@ -450,13 +464,13 @@ public final class MixerModel {
     // MARK: Modes and selection (Rulings 5, 6)
 
     public func setMode(_ strip: UInt64, _ mode: AutomationModeRow) {
-        command("Automation Mode Failed") { try $0.setAutomationMode(strips: [strip], mode: mode) }
+        command(AutomationCommands.modeFailed) { try $0.setAutomationMode(strips: [strip], mode: mode) }
     }
 
     /// Every strip, master included, in the snapshot's order.
     public func setAllModes(_ mode: AutomationModeRow) {
         let all = snapshot.strips.map(\.id)
-        command("Automation Mode Failed") { try $0.setAutomationMode(strips: all, mode: mode) }
+        command(AutomationCommands.modeFailed) { try $0.setAutomationMode(strips: all, mode: mode) }
     }
 
     /// A click selects `strip` alone; ⌘-click (`adding`) adds or removes it.
@@ -524,6 +538,7 @@ public final class MixerModel {
     /// control `snap` no longer has, and drops strips that went from the
     /// selection (Ruling 5).
     private func forgetGone(_ snap: MixerSnapshot) {
+        editing = editing.filter { Self.exists($0, in: snap) }
         for t in touches where !Self.exists(t, in: snap) {
             touches.remove(t)
             live[t] = nil

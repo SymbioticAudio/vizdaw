@@ -307,7 +307,7 @@ struct ParameterList: View {
                                 value: Binding(get: { p.value }, set: { model.setParam(p.id, $0) }),
                                 in: p.min...max(p.max, p.min + 1e-9)
                             ) { editing in
-                                if !editing { model.commitParam(p.id) }
+                                if editing { model.beginParam(p.id) } else { model.commitParam(p.id) }
                             }
                             Text(PluginWindowModel.valueText(p))
                                 .font(.caption.monospacedDigit())
