@@ -669,6 +669,8 @@ fn bad_requests_are_refused_and_recording_holds_the_transport() {
 /// state: the real permission is never read), Record refuses with why, not
 /// with a channel count, every time: the reason outlives the faults Play
 /// clears.
+// Microphone permission (TCC) and its fake denial exist on macOS only.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_refused_microphone_is_why_record_refuses() {
     let g = serial(None);
