@@ -247,6 +247,16 @@ import VizDAWCore
         m.document.select(3)
         let strip = try #require(m.strips.first)
         #expect(m.inputLane(for: strip) == nil, "another path, and another sequence's lane")
+
+        // Positive control: a lane on the strip's own path in the shown
+        // sequence is the input lane (the nil above is not a blind spot).
+        var own = lane(31, "Own")
+        own.audioOut = 7
+        f.laneTable[3] = [other, own]
+        let m2 = try model(f)
+        m2.document.select(3)
+        let strip2 = try #require(m2.strips.first)
+        #expect(m2.inputLane(for: strip2)?.id == 31)
     }
 }
 

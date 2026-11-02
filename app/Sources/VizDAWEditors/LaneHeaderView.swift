@@ -143,7 +143,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                         in: r, withAttributes: Self.oneLine(small, .byTruncatingMiddle))
                 }
             }
-            if LaneHeaderLayout.showsMeter(laneHeight: laneHeight), inputs.showsMeter(lane) { meter(lane.id, rowTop: top, inputs: inputs) }
+            if LaneHeaderLayout.showsMeter(laneHeight: laneHeight), inputs.showsMeter(lane) {
+                meter(lane.id, rowTop: top, inputs: inputs)
+            }
             NSColor.separatorColor.setFill()
             NSRect(x: 0, y: top + laneHeight - 0.5, width: bounds.width, height: 1).fill()
         }
