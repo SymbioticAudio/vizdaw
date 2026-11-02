@@ -1922,8 +1922,10 @@ impl Session {
         })
     }
 
-    /// Sends a value to the running plugin now, without an undo step (a
-    /// control being dragged); `commit_params` records the final value.
+    /// Sends a value to the running plugin now, without an undo step: a
+    /// non-gesture edit (a typed value; tests). Kept for those (spec §7.1);
+    /// the app's sliders go through `gesture` instead. `commit_params`
+    /// records the final value.
     pub fn set_param(&self, slot: u64, param: u64, value: f64) -> Result<(), VizError> {
         ffi_guard(|| {
             if !value.is_finite() {
@@ -1940,7 +1942,8 @@ impl Session {
     }
 
     /// Records parameter values in the slot's overlay as one undo step
-    /// (`SetPluginParams`, spec §4).
+    /// (`SetPluginParams`, spec §4): the step of a non-gesture edit made
+    /// with `set_param` (spec §7.1; gestures land their own step).
     pub fn commit_params(
         &self,
         slot: u64,
