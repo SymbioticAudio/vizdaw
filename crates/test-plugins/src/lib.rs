@@ -16,7 +16,7 @@
 mod bundle;
 mod plugin;
 
-pub use bundle::{bundle, scanner};
+pub use bundle::{bundle, copy_bundle, scanner};
 
 use clack_plugin::entry::prelude::*;
 use clack_plugin::prelude::*;

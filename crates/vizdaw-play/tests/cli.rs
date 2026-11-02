@@ -196,8 +196,7 @@ fn scan_fills_the_catalog_and_plugins_lists_it() {
     let dir = temp("scan");
     let plugins = dir.join("clap");
     std::fs::create_dir_all(&plugins).unwrap();
-    let bundle = test_plugins::bundle();
-    copy_dir(&bundle, &plugins.join("VizDAW Test.clap"));
+    test_plugins::copy_bundle(&plugins.join("VizDAW Test.clap"));
     let catalog = dir.join("plugins.json");
     let out = bin()
         .args([
@@ -268,18 +267,6 @@ fn bad_plugin_arguments_are_errors() {
         assert_eq!(out.status.code(), Some(1), "{arg}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains(want), "{arg}: {err}");
-    }
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    if from.is_file() {
-        std::fs::copy(from, to).unwrap();
-        return;
-    }
-    std::fs::create_dir_all(to).unwrap();
-    for e in std::fs::read_dir(from).unwrap() {
-        let e = e.unwrap();
-        copy_dir(&e.path(), &to.join(e.file_name()));
     }
 }
 
