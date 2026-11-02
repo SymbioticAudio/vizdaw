@@ -1508,12 +1508,19 @@ channel.
      selected (tinted); ⌘-click adds another; double-clicking the name
      still renames it. The name's menu has "Set All Strips to ▸ …": every
      strip changes in one undo step. While you drag a fader, pan or send
-     level, or hold a mute, a ring shows around it; the fader's ring
-     should sit around the visible fader track (the slider is rotated). A
-     touch from `vizctl` (`automation.gesture`) or a plugin window rings
-     too, and so does a mute or solo pressed in the piano roll's output
-     (it counts as a mute/solo gesture). Stopped, a fader drag is one "Set
-     Fader" step, a mute click one "Mute" step, as before.
+     level, a ring shows around it; the fader's ring should sit around the
+     visible fader track (the slider is rotated). A mute or solo click
+     shows no ring (its touch and release are sent at once); a mute or
+     solo pressed in the piano roll's output writes like the mixer's but
+     shows no ring either. A touch held from `vizctl` rings: `$V run
+     automation.gesture '{"target": "mute:<synth>", "phase": "touch"}'`
+     rings the synth's mute until the same call with `"phase":
+     "release"`; a fader or pan touched that way rings too.
+     Stopped, a fader drag is one "Set Fader" step, a mute click one
+     "Mute" step, as before. With Full Keyboard Access on, Tab to a fader
+     and press the arrow keys: each press is heard and is one "Set Fader"
+     step stopped, and afterwards other edits work (no touch left open;
+     the same for a plugin window's slider).
 167. Record popover keys (5d-2 T3 M1): open the record popover without
      clicking a field: R records and Space plays (if the popover passes
      keys on; note it if it does not). Click Punch In: typing R or Space
@@ -1546,8 +1553,10 @@ channel.
 170. Settings › Automation: After Write (Off, Read, Touch, Latch, Trim),
      Return time (0–2000 ms; at 0 the fader jumps back), Thinning (High
      writes fewer points: compare a lane's points in the List editor), and
-     "Write plugin parameters only when touched", on and dimmed. Quit and
-     relaunch: kept.
+     "Write plugin parameters only when touched", on and dimmed, and the
+     line "Changes apply from the next Play.": change After Write during a
+     Write pass, and the strip takes the old setting at that Stop. Quit
+     and relaunch: kept.
 171. Plugin windows: a plugin without its own editor shows sliders; on
      Touch, playing, dragging one writes a lane "Built-in Synth <parameter>"
      (no "Change Plugin Parameter" step); stopped, a drag is one "Change

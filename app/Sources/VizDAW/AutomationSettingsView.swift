@@ -48,6 +48,10 @@ struct AutomationSettingsView: View {
             Text("Always on: writing every parameter of every plugin would bury the lanes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            // Read when a pass starts (5e-1 Ruling 19; final review m7).
+            Text("Changes apply from the next Play.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if let problem = prefs.problem {
                 Text(problem).foregroundStyle(.red)
             }
