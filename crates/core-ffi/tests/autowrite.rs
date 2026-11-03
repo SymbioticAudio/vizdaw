@@ -1236,3 +1236,25 @@ fn a_glide_where_its_segment_reopened_writes_nothing() {
         close(&w[0].points, &[(20, 0.4), (60, 0.6), (100, 0.6)]);
     }
 }
+
+/// Ruling T8-1 (plan 5f-1 final wave): a Value stamped past the pass's end
+/// (a move then Stop in one block) lands at the end of the last piece, as
+/// the Release after it does, so the hand's last move is written.
+#[test]
+fn a_value_past_the_pass_end_lands_at_its_end() {
+    let end: u64 = 9_600;
+    let e = end as i64;
+    let stamps = [
+        st(PAN, 10, GesturePhase::Touch(0.3), WriteMode::Touch),
+        st(PAN, 20, GesturePhase::Value(0.3), WriteMode::Touch),
+        st(PAN, e + 5, GesturePhase::Value(0.8), WriteMode::Touch),
+        st(PAN, e + 6, GesturePhase::Release, WriteMode::Touch),
+    ];
+    let w = run(&[roll(0, 0)], end, &stamps, &[], &half, &no_points);
+    assert_eq!(w.len(), 1, "{w:?}");
+    let last = *w[0].points.last().unwrap();
+    assert!(
+        last.0 == end && (last.1 - 0.8).abs() < 1e-9,
+        "ends with the last value at the end: {w:?}"
+    );
+}

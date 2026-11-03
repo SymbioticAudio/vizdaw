@@ -597,6 +597,20 @@ pub fn writes(c: &AutoCapture<'_>) -> Vec<TargetWrite> {
                     },
                 }
             }
+            None if matches!(
+                s.phase,
+                GesturePhase::Value(_) | GesturePhase::Offset(_) | GesturePhase::Touch(_)
+            ) && live.iter().all(|q| q.end <= s.run) =>
+            {
+                // Past the pass's end (a move then Stop in one block,
+                // e633e1c's window; Ruling T8-1): the last value lands at
+                // the end of the last piece. A value in a gap between
+                // pieces is still dropped.
+                match live.last() {
+                    Some(q) => (*q, place(q, q.end)),
+                    None => continue,
+                }
+            }
             None => continue,
         };
         let Some(piece) = live.iter().position(|q| std::ptr::eq(*q, p)) else {

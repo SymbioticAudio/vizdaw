@@ -3558,3 +3558,39 @@ fn a_resting_touch_writes_once_an_undo_puts_touch_back() {
     let p = points(&s, seq, lane);
     assert!(p.len() > 2, "more than the ramp's two points: {p:?}");
 }
+
+/// Ruling T8-1 (plan 5f-1 final wave): a move sent right before Stop,
+/// with no idle between, reaches the block the Stop ends the pass in; its
+/// stamp may lie past the pass's end. It is written there, at the end,
+/// instead of being lost while the touch's end is kept.
+#[test]
+fn a_move_then_stop_in_one_block_is_written() {
+    let _g = serial();
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Touch).unwrap();
+    s.play(song).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.4) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.4 }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Value { value: 0.9 }).unwrap();
+    stop_and_land(&s);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation")
+    );
+    let lane = lane_named(&s, song, "Built-in Synth Fader").expect("a new lane");
+    let p = points(&s, song, lane);
+    let ride: Vec<_> = p
+        .iter()
+        .filter(|x| (x.1 - 0.4).abs() < 1e-9 || (x.1 - 0.9).abs() < 1e-9)
+        .collect();
+    assert!(
+        ride.last().is_some_and(|x| (x.1 - 0.9).abs() < 1e-9),
+        "the last move is written at the pass's end: {p:?}"
+    );
+    s.close().unwrap();
+}
