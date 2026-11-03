@@ -210,9 +210,52 @@ pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Moves `from` to `to`, failing with `AlreadyExists` (and changing
-/// nothing) if `to` exists: copy into a new file, then remove the source.
+/// nothing) if `to` exists. Linux (glibc): `renameat2(RENAME_NOREPLACE)`,
+/// atomic. Where that is unavailable: a hard link, then the source is
+/// removed (also atomic). Only on a volume without hard links: a synced
+/// copy into a new file, then the source is removed (not atomic: a crash
+/// mid-copy can leave a short file under `to`). Once `to` holds the whole
+/// file the move has succeeded, even if the source cannot be removed.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| {
+            std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+        };
+        let (f, t) = (c(from)?, c(to)?);
+        // SAFETY: both pointers are valid NUL-terminated strings for the call.
+        let r = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if r == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        // Older kernels and some file systems lack the flag: fall back.
+        if !matches!(
+            e.raw_os_error(),
+            Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP)
+        ) {
+            return Err(e);
+        }
+    }
+    match std::fs::hard_link(from, to) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(from);
+            return Ok(());
+        }
+        Err(e) if !no_hard_links(&e) => return Err(e),
+        Err(_) => {}
+    }
     let mut src = std::fs::File::open(from)?;
     let mut dst = std::fs::OpenOptions::new()
         .write(true)
@@ -224,7 +267,8 @@ pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
         return Err(e);
     }
     drop(dst);
-    std::fs::remove_file(from)
+    let _ = std::fs::remove_file(from);
+    Ok(())
 }
 
 /// Links `from` into `media` as `<stem>.caf`, `<stem> 2.caf`, … (the

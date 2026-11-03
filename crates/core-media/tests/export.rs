@@ -609,3 +609,86 @@ fn hostile_exports_are_refused() {
     );
     assert_eq!(names(d.path()), ["folder.wav", "junk.caf", "render.caf"]);
 }
+
+/// Fix round 1 (review I1, ruling T1-1): a partial a crash left behind is
+/// stale (nobody holds its lock), so it is replaced: with and without
+/// `replace`, and for a numbered stem.
+#[test]
+fn a_stale_partial_does_not_block_the_export() {
+    let d = tempfile::tempdir().unwrap();
+    let src = float_caf(d.path(), 100);
+    let f = fmt(Container::Wav, BitDepth::Int16, true);
+    let dest = d.path().join("Song.wav");
+    std::fs::write(partial_path(&dest), b"left by a crash").unwrap();
+    assert_eq!(run(&src, &dest, &f, false).unwrap().frames, 100);
+    assert!(!partial_path(&dest).exists());
+    std::fs::write(partial_path(&dest), b"left by a crash").unwrap();
+    assert_eq!(run(&src, &dest, &f, true).unwrap().frames, 100);
+    assert_eq!(read_wav(&dest).4, 100);
+    assert!(!partial_path(&dest).exists());
+    let stem = d.path().join("Bass.wav");
+    std::fs::write(&stem, b"keep").unwrap();
+    std::fs::write(partial_path(&stem), b"left by a crash").unwrap();
+    let p = write_partial(
+        &CafImporter,
+        &src,
+        &stem,
+        &f,
+        None,
+        false,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        p.commit_numbered().unwrap().path,
+        d.path().join("Bass 2.wav")
+    );
+    assert_eq!(std::fs::read(&stem).unwrap(), b"keep");
+    assert_eq!(
+        names(d.path()),
+        ["Bass 2.wav", "Bass.wav", "Song.wav", "render.caf"]
+    );
+}
+
+/// Fix round 1 (ruling T1-1): a partial another export holds (locked) is
+/// refused and left alone; a symlink in its place is never followed.
+#[cfg(unix)]
+#[test]
+fn a_held_partial_refuses() {
+    let d = tempfile::tempdir().unwrap();
+    let src = float_caf(d.path(), 100);
+    let f = fmt(Container::Wav, BitDepth::Int16, true);
+    let dest = d.path().join("Song.wav");
+    let held = std::fs::File::create(partial_path(&dest)).unwrap();
+    // Another export holds it (MSRV 1.85: no `File::try_lock`).
+    use std::os::fd::AsRawFd;
+    // SAFETY: `held` owns a valid open descriptor for the call.
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let e = run(&src, &dest, &f, true).unwrap_err();
+    assert!(
+        e.to_string().contains("is being written by another bounce"),
+        "{e}"
+    );
+    assert!(partial_path(&dest).is_file() && !dest.exists());
+    // The writer that holds it finishes: the lock is free again.
+    drop(held);
+    assert_eq!(run(&src, &dest, &f, false).unwrap().frames, 100);
+    // A symlink where the partial goes: refused, its target untouched.
+    let target = d.path().join("target.txt");
+    std::fs::write(&target, b"mine").unwrap();
+    let other = d.path().join("Other.wav");
+    std::os::unix::fs::symlink(&target, partial_path(&other)).unwrap();
+    assert!(run(&src, &other, &f, false).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+    assert!(
+        std::fs::symlink_metadata(partial_path(&other))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!other.exists());
+}

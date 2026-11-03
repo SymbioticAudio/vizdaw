@@ -26,8 +26,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const MIN_RATE: u32 = 8_000;
 /// The highest export rate in Hz.
 pub const MAX_RATE: u32 = 384_000;
-/// The most data bytes a WAV or AIFF file holds (its sizes are 32-bit).
-const MAX_DATA_BYTES: u64 = u32::MAX as u64 - 64;
 /// The most channels an export writes (a VizDAW render is mono or stereo).
 const MAX_CHANNELS: u16 = crate::caf::MAX_CHANNELS;
 /// The highest number `commit_numbered` tries.
@@ -134,6 +132,8 @@ enum Inner {
         dither: Tpdf,
         /// Sample bytes written.
         data_bytes: u64,
+        /// The most sample bytes the container's 32-bit sizes allow.
+        max_data: u64,
         /// A write failed: the file may hold bytes the counts leave out.
         poisoned: bool,
     },
@@ -254,6 +254,24 @@ fn header(fmt: &ExportFormat, channels: u16) -> (Vec<u8>, Header) {
     )
 }
 
+/// The most sample bytes a WAV or AIFF file of `fmt` holds: its outer
+/// size (header less 8, data, a pad byte) must fit 32 bits. `None` for CAF.
+fn max_data_bytes(fmt: &ExportFormat, channels: u16) -> Option<u64> {
+    if fmt.container == Container::Caf {
+        return None;
+    }
+    let head = header(fmt, channels).0.len() as u64;
+    Some(u64::from(u32::MAX).saturating_sub(head.saturating_sub(8) + 1))
+}
+
+/// The refusal for data a WAV or AIFF file cannot hold.
+fn too_big(fmt: &ExportFormat) -> MediaError {
+    MediaError::Unsupported(format!(
+        "{} files hold at most 4 GB; choose CAF",
+        fmt.container.label()
+    ))
+}
+
 impl PcmWriter {
     /// Creates `path` (never overwriting) for `channels` (1–2) in `fmt`.
     pub fn create(path: &Path, fmt: &ExportFormat, channels: u16) -> Result<PcmWriter, MediaError> {
@@ -269,6 +287,7 @@ impl PcmWriter {
             Inner::Caf(Box::new(w))
         } else {
             let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+            let max_data = max_data_bytes(fmt, channels).unwrap_or(0);
             let (bytes, header) = header(fmt, channels);
             if let Err(e) = file.write_all(&bytes) {
                 drop(file);
@@ -280,6 +299,7 @@ impl PcmWriter {
                 header,
                 dither: Tpdf::new(),
                 data_bytes: 0,
+                max_data,
                 poisoned: false,
             }
         };
@@ -296,7 +316,8 @@ impl PcmWriter {
 
     /// Appends interleaved float frames (a whole number of frames).
     /// Integer depths clip, counting each clipped sample; float keeps
-    /// samples above full scale. Non-finite samples are written as 0.
+    /// samples above full scale. Non-finite samples are treated as 0
+    /// (silence; dithered like silence when dither is on).
     pub fn write(&mut self, interleaved: &[f32]) -> Result<(), MediaError> {
         let ch = usize::from(self.channels);
         let frames = (interleaved.len() / ch) as u64;
@@ -306,7 +327,7 @@ impl PcmWriter {
                 interleaved.len()
             )));
         }
-        let (file, dither, data_bytes, poisoned) = match &mut self.inner {
+        let (file, dither, data_bytes, max_data, poisoned) = match &mut self.inner {
             Inner::Caf(w) => {
                 let before = w.clipped();
                 w.write(interleaved)?;
@@ -318,20 +339,18 @@ impl PcmWriter {
                 file,
                 dither,
                 data_bytes,
+                max_data,
                 poisoned,
                 ..
-            } => (file, dither, data_bytes, poisoned),
+            } => (file, dither, data_bytes, *max_data, poisoned),
         };
         if *poisoned {
             return Err(MediaError::Io("an earlier write failed".into()));
         }
         let size = self.fmt.depth.bytes();
         let adding = (interleaved.len() * size) as u64;
-        if data_bytes.saturating_add(adding) > MAX_DATA_BYTES {
-            return Err(MediaError::Unsupported(format!(
-                "{} files hold at most 4 GB; choose CAF",
-                self.fmt.container.label()
-            )));
+        if data_bytes.saturating_add(adding) > max_data {
+            return Err(too_big(&self.fmt));
         }
         let little = self.fmt.container == Container::Wav;
         let mut clipped = 0u64;
@@ -473,6 +492,10 @@ pub struct PendingExport {
     replace: bool,
     exported: Exported,
     committed: bool,
+    /// The partial's advisory lock, held while it lives (Unix): another
+    /// export of the same name sees it busy, not stale. Released after the
+    /// partial is renamed or removed.
+    _lock: Option<File>,
 }
 
 impl Drop for PendingExport {
@@ -573,6 +596,106 @@ fn scale_frames(n: u64, from: u32, to: u32) -> u64 {
     u64::try_from((n * to + from / 2) / from).unwrap_or(u64::MAX)
 }
 
+/// Checks a destination as [`write_partial`] does: `fmt` is valid, the
+/// extension is the container's, the folder exists and `dest` is not a
+/// folder; and, without `replace`, that `dest` does not exist ("<name>
+/// exists; choose another name or replace it"; a dangling symlink counts).
+/// For a caller that refuses before rendering (plan 5f-2 Ruling 3).
+pub fn check_destination(dest: &Path, fmt: &ExportFormat, replace: bool) -> Result<(), MediaError> {
+    check_dest(dest, fmt)?;
+    if !replace && std::fs::symlink_metadata(dest).is_ok() {
+        return Err(exists(dest));
+    }
+    Ok(())
+}
+
+/// The refusal for a partial another export holds.
+fn busy(dest: &Path) -> MediaError {
+    MediaError::Unsupported(format!(
+        "{} is being written by another bounce.",
+        display_name(dest)
+    ))
+}
+
+/// Opens `partial` without following a symlink and takes its advisory lock
+/// without waiting: `Ok(Some(file))` holds it, `Ok(None)` means another
+/// export holds it.
+#[cfg(unix)]
+fn try_lock(partial: &Path) -> Result<Option<File>, MediaError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(partial)?;
+    // SAFETY: `f` owns a valid open descriptor for the call; the lock goes
+    // with the descriptor when `f` is closed.
+    let r = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if r == 0 {
+        return Ok(Some(f));
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(None)
+    } else {
+        Err(e.into())
+    }
+}
+
+/// Clears the way for `dest`'s partial (review I1, ruling T1-1). A regular
+/// file there whose lock is free was left by a crash: it is removed. One
+/// whose lock is held is another export's: refused. Anything else (a
+/// folder, a symlink) is left alone, and the exclusive create refuses it.
+#[cfg(unix)]
+fn clear_stale_partial(partial: &Path, dest: &Path) -> Result<(), MediaError> {
+    let Ok(meta) = std::fs::symlink_metadata(partial) else {
+        return Ok(());
+    };
+    if !meta.file_type().is_file() {
+        return Ok(());
+    }
+    match try_lock(partial)? {
+        Some(_stale) => {
+            std::fs::remove_file(partial)?;
+            Ok(())
+        }
+        None => Err(busy(dest)),
+    }
+}
+
+/// Without advisory locks a leftover partial cannot be told from a live
+/// one, so it is reported, never removed.
+#[cfg(not(unix))]
+fn clear_stale_partial(partial: &Path, dest: &Path) -> Result<(), MediaError> {
+    if std::fs::symlink_metadata(partial).is_ok() {
+        return Err(MediaError::Unsupported(format!(
+            "a leftover {} blocks the export of {}; remove it",
+            display_name(partial),
+            display_name(dest)
+        )));
+    }
+    Ok(())
+}
+
+/// Locks the partial this export just created, and checks that the name
+/// still holds that file (another export may have taken it as stale
+/// between the create and the lock).
+#[cfg(unix)]
+fn lock_own_partial(partial: &Path, dest: &Path) -> Result<Option<File>, MediaError> {
+    use std::os::unix::fs::MetadataExt;
+    let f = try_lock(partial)?.ok_or_else(|| busy(dest))?;
+    let (ours, now) = (f.metadata()?, std::fs::symlink_metadata(partial)?);
+    if (ours.dev(), ours.ino()) != (now.dev(), now.ino()) {
+        return Err(busy(dest));
+    }
+    Ok(Some(f))
+}
+
+#[cfg(not(unix))]
+fn lock_own_partial(_: &Path, _: &Path) -> Result<Option<File>, MediaError> {
+    Ok(None)
+}
+
 /// Refuses a destination before anything is written.
 fn check_dest(dest: &Path, fmt: &ExportFormat) -> Result<(), MediaError> {
     fmt.check()?;
@@ -604,7 +727,9 @@ fn check_dest(dest: &Path, fmt: &ExportFormat) -> Result<(), MediaError> {
 /// `source` (a VizDAW float CAF) → `.<name>.partial` beside `dest` in
 /// `fmt`: at most `frames` source frames (scaled by the rate ratio).
 /// Refuses before writing anything (a bad format, extension or folder, a
-/// destination that is a folder, a source that is not a VizDAW CAF). A
+/// destination that is a folder, a source that is not a VizDAW CAF, a WAV
+/// or AIFF over 4 GB, a partial another export is writing). A partial a
+/// crash left behind is replaced (Unix: nobody holds its lock). A
 /// destination that exists is left to the commit: [`PendingExport::commit`]
 /// without `replace` refuses it at the rename, and
 /// [`PendingExport::commit_numbered`] numbers around it. A cancel or error
@@ -628,10 +753,28 @@ pub fn write_partial(
     };
     let limit = frames.map(|f| scale_frames(f, src_rate, fmt.rate));
     let expected = limit.unwrap_or_else(|| scale_frames(src_frames, src_rate, fmt.rate));
+    let bytes = expected
+        .saturating_mul(u64::from(channels))
+        .saturating_mul(fmt.depth.bytes() as u64);
+    if max_data_bytes(fmt, channels).is_some_and(|m| bytes > m) {
+        return Err(too_big(fmt));
+    }
     let partial = partial_path(dest);
+    clear_stale_partial(&partial, dest)?;
     let mut w = PcmWriter::create(&partial, fmt, channels)?;
     // From here on the partial is ours: any way out but success removes it.
     let mut guard = PartialGuard(Some(partial.clone()));
+    let lock = match lock_own_partial(&partial, dest) {
+        Ok(l) => l,
+        Err(e) => {
+            // Busy (`Unsupported`): another export holds the name now, so
+            // remove nothing. An I/O error leaves the guard to remove ours.
+            if matches!(e, MediaError::Unsupported(_)) {
+                guard.0 = None;
+            }
+            return Err(e);
+        }
+    };
     let ch = usize::from(channels);
     let mut written = 0u64;
     let mut reached = false;
@@ -676,6 +819,7 @@ pub fn write_partial(
         replace,
         exported,
         committed: false,
+        _lock: lock,
     })
 }
 
@@ -694,10 +838,7 @@ pub fn export(
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
 ) -> Result<Exported, MediaError> {
-    check_dest(dest, fmt)?;
-    if !replace && std::fs::symlink_metadata(dest).is_ok() {
-        return Err(exists(dest));
-    }
+    check_destination(dest, fmt, replace)?;
     write_partial(
         importer, source, dest, fmt, frames, replace, progress, cancel,
     )?
