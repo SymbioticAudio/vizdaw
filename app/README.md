@@ -1572,3 +1572,73 @@ channel.
      –): its tooltip explains the mode. ⌘S in an untitled project while
      recording says "Stop recording to save this new project: its take is
      being written into it."
+
+### Control surfaces and MIDI learn (plan 5f-1)
+
+By eye and by hand; the protocols are tested byte by byte
+(`core-surface` tests), the core through the fake ports
+(`core-ffi/tests/surfaces.rs`, `learn.rs`, `holders.rs`) and the e2e
+`drives_a_fader_and_a_button_from_an_mcu`.
+
+173. Settings › Surfaces: Add Surface lists MCU-compatible, MCU
+     XT-compatible and HUI-compatible; the port pickers list your MIDI
+     ports. A unit with no ports plugged in shows "Disconnected"; plug
+     it in: within 2 s it shows "Connected" and its display fills. A
+     lane's input picker now shows the unit's port as "(used by a
+     surface)". Record-arm a MIDI lane on All MIDI Inputs and touch a
+     fader or press Play on the unit: nothing is recorded, played thru or
+     step-entered. Surface buttons keep working while you type in a text
+     field, except Go to Position, Edit In and Punch, which wait.
+174. MIDI learn: in the mixer, right-click a fader › MIDI Learn: the
+     banner says "Waiting for MIDI…". Turn a knob on a controller: the
+     banner goes, Edit shows "Undo MIDI Learn". Turn the knob from far
+     below the fader's position: nothing moves until the knob passes the
+     fader (pick-up, kept per map), then the fader follows; let go: half
+     a second later the move is one "Set Fader" step. Mixer strip menu >
+     MIDI Learn Maps… lists the map; untick Pick-up and the fader jumps
+     to the knob at once. A 14-bit fader learns as "CC n/n+32" and moves
+     smoothly; an endless encoder learns as Relative (no Pick-up box);
+     the mode picker changes one. With a MIDI lane armed on that
+     keyboard, the learned knob is not recorded, played thru or
+     step-entered; the keys and other knobs are. Learned messages stay
+     out of the lanes, and only the learned target's automation is
+     written.
+175. A real MCU-compatible unit, if one is available (manual checklist
+     "a real MCU or HUI unit"): faders move by motor to the mixer's
+     values and do not fight your hand; with fader automation in Read,
+     play: the motor faders follow it; names and pan values show on the
+     scribble strips; bank and channel buttons move eight and one strip;
+     mute, solo and select light up; Play only starts the transport
+     (pressing it while playing does nothing), Stop stops (its LED is lit
+     at rest), Record records; tap Rewind or Fast Forward: the position
+     jumps to the previous or next marker (or bar line, without markers);
+     hold one: the position winds, faster the longer you hold; the jog
+     wheel moves by sixteenths; the position display counts bars and
+     beats; meters move, and the mixer window's meters keep moving too.
+     Power-cycle check: unplug the unit and plug it back at once (and, for
+     a virtual or network port, delete and recreate it within 2 s): the
+     faders and displays come back each time.
+176. A real HUI-compatible unit, if one is available: the same checks
+     (its V-pots move pan only); the unit stays online (the ping), and
+     the 40-character display shows the position and the selected strip.
+     Check the timecode digits (leading zeros show), that a ring value of
+     0 is dark, and that a fader moves to the right place after a lone
+     low byte (it combines with the last high byte).
+177. README 165a, the surface half: on Touch, Latch, Write and Trim,
+     play and ride the Built-in Synth fader from the unit (or a learnt
+     knob): you hear it at once, the strip's ring shows the touch, and
+     Stop lands one "Write Automation" step. Hold the same fader with the
+     mouse and with the unit: it stays touched until you let go of both,
+     and letting go of the mouse first neither glides back nor holds; a
+     mouse release never ends a hold the unit or a `vizctl` script has.
+     Rest a hand on a stopped unit's fader and edit notes, add a bus and
+     change an automation mode: each works and is its own undo step.
+178. Settings › Keys › Learn MIDI next to a command, then press a pad:
+     the pad runs the command (with a project open). Settings › Surfaces
+     lists the command maps; Remove takes one away.
+179. Pull a unit's cable while holding a fader: within 2 s the unit
+     shows "Disconnected", the fader is released (the ride lands as
+     written); plug it back: the unit refreshes completely and that fader
+     moves by motor again. Remove a unit in Settings › Surfaces while
+     holding a fader: it is released. Close the project the unit drives:
+     its displays go blank and its faders go down.

@@ -58,6 +58,11 @@ pub fn note_event(bytes: &[u8]) -> Option<NoteInRow> {
     }
 }
 
+/// Only the macOS listener and the test hooks push.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "test-hooks")),
+    allow(dead_code)
+)]
 fn push(q: &Queue, bytes: &[u8]) {
     if let Some(n) = note_event(bytes) {
         let mut q = lock(q);

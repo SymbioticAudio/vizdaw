@@ -1373,6 +1373,7 @@ impl JobFlags {
     /// [`Drop for Host`](Host)'s store of `cancel` before its load of
     /// `asked` (both `SeqCst`), either the thread sees the cancel or the
     /// host sees `asked` and waits for it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn past_prompt(&self) -> bool {
         self.asked.store(true, Ordering::SeqCst);
         !self.cancel.load(Ordering::SeqCst)
@@ -1414,6 +1415,7 @@ enum Opener {
 }
 
 /// What an input thread found.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum Opened {
     /// The device reopened: what it offers, the workers' environment, and
     /// why its input failed to open (it then reopened without input).
@@ -1440,6 +1442,7 @@ enum Opened {
 /// closed). Runs on the input thread, with no lock but the device's.
 /// `None` when the host went meanwhile (pre-flight I1: checked right
 /// after the prompt, before the device is touched).
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 fn open_input(opener: Opener, want: bool, flags: &JobFlags) -> Option<Opened> {
     match opener {
         #[cfg(target_os = "macos")]
@@ -2322,6 +2325,7 @@ impl Host {
 }
 
 /// How a buffer-size reopen ended (review I1).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum Reopened {
     /// The device runs at the new size.
     Done,
