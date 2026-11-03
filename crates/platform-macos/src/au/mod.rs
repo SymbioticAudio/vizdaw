@@ -13,7 +13,7 @@ use core_host::catalog::Source;
 use core_host::{
     AudioPortInfo, AudioProcessor, HostError, InstanceEvents, LoadRequest, OfflineRender,
     ParamEvent, ParamInfo, ParentView, PluginEditor, PluginFormat, PluginInfo, PluginInstance,
-    PluginKind, PortRole, PrepareJob, Prepared, ProcessCtx, Tail,
+    PluginKind, PortRole, PrepareJob, Prepared, Presets, ProcessCtx, Tail,
 };
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
 use ffi::{ComponentInfo, Feed, GestureListener, HostTransport, Unit};
@@ -704,6 +704,39 @@ impl PluginInstance for AuInstance {
             latency_changed,
             ..InstanceEvents::default()
         }
+    }
+
+    fn presets(&mut self) -> Presets {
+        let list = self.unit.factory_presets();
+        let current = self
+            .unit
+            .present_preset()
+            .and_then(|n| list.iter().position(|(number, _)| *number == n));
+        Presets {
+            names: list.into_iter().map(|(_, name)| name).collect(),
+            current,
+        }
+    }
+
+    fn load_preset(&mut self, index: usize) -> Result<(), HostError> {
+        let list = self.unit.factory_presets();
+        let Some((number, name)) = list.get(index) else {
+            return Err(HostError::StateRejected(format!(
+                "no preset {index} (the plug-in has {})",
+                list.len()
+            )));
+        };
+        self.unit
+            .set_present_preset(*number, name)
+            .map_err(HostError::StateRejected)?;
+        // The notices the load causes are the host's own (pre-flight I2):
+        // note every watched value as written, so they are echoes.
+        for &id in &*self.writes.ids {
+            if let Some(v) = self.unit.get_param(id) {
+                self.writes.note(id, v);
+            }
+        }
+        Ok(())
     }
 
     fn set_offline(&mut self, on: bool) -> OfflineRender {

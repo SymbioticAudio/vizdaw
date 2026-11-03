@@ -348,3 +348,64 @@ fn an_automation_ramp_through_process_is_not_taken_for_the_user() {
     );
     inst.deactivate(p);
 }
+
+const DISTORTION: &str = "aufx/dist/appl";
+
+/// Plan 5f-4 Ruling 7: an AU's factory presets are listed and loaded.
+/// Listed and loaded twice (pre-flight C2: the entries' names belong to the
+/// array and must not be released; AUDistortion's are constants, so this is
+/// a weak guard and the Task 5 review is the real one).
+#[test]
+fn factory_presets_are_listed_and_loaded() {
+    let mut inst = load(DISTORTION);
+    let p = inst.presets();
+    assert!(p.names.len() > 1, "{p:?}");
+    assert!(p.names.iter().all(|n| !n.is_empty()));
+    assert_eq!(inst.presets().names, p.names, "listed twice, the same");
+    inst.load_preset(1).unwrap();
+    assert_eq!(inst.presets().current, Some(1));
+    inst.load_preset(0).unwrap();
+    inst.load_preset(1).unwrap();
+    assert_eq!(inst.presets().current, Some(1), "loaded twice");
+    assert!(inst.load_preset(p.names.len()).is_err(), "past the last");
+    assert_eq!(
+        inst.presets().current,
+        Some(1),
+        "a refused load changes nothing"
+    );
+    assert_eq!(inst.presets().names, p.names);
+}
+
+/// Pre-flight I2 (Ruling 7): the parameter notices a preset load causes are
+/// the host's own writes, never gestures, so a load makes no "Set …" undo
+/// step and writes no automation.
+#[test]
+fn a_preset_load_is_not_a_gesture() {
+    let mut inst = load(DISTORTION);
+    let n = inst.presets().names.len();
+    assert!(n > 1);
+    for i in [1, 0, n - 1] {
+        inst.load_preset(i).unwrap();
+    }
+    let until = Instant::now() + Duration::from_millis(300);
+    let mut got = Vec::new();
+    while Instant::now() < until {
+        got.extend(inst.gestures());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(got, Vec::new(), "a preset load is the host's write");
+    // The notice of a value the load set is the host's own echo (I2).
+    let id = inst
+        .info()
+        .params
+        .iter()
+        .find(|p| p.automatable)
+        .unwrap()
+        .id;
+    let v = inst.param_value(id).unwrap();
+    inst.simulate_ui_gesture(id, v);
+    assert_eq!(
+        gestures_until_end(&mut inst),
+        vec![ParamEvent::Begin(id), ParamEvent::End(id)]
+    );
+}

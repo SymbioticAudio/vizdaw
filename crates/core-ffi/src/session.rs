@@ -8962,6 +8962,9 @@ const MAX_SURFACE_EVENTS: usize = 1024;
 /// A skip or wind this recent winds on from where it went (Ruling 5).
 const WIND_RECENT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How long the focused slot's presets are read once (plan 5f-4 Ruling 7).
+const PRESETS_FRESH: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The mixer's strips in display order, master excluded (Ruling 4).
 fn display_order(doc: &Document) -> Vec<StripId> {
     let m = doc.mixer();
@@ -9221,8 +9224,7 @@ impl Session {
                 A::Bank(_) | A::Channel(_) => true,
                 A::PluginSlot(i) => self.surface_plugin_slot(inner, i),
                 A::PluginPage(n) => self.surface_plugin_page(inner, n),
-                // Task 5 applies presets (plan 5f-4).
-                A::Preset(_) => false,
+                A::Preset(dir) => self.surface_preset(inner, dir, now),
                 // Task 7 applies the keyboard's tempo and count-in (plan 5f-4).
                 A::Tempo { .. } | A::CountIn => false,
             };
@@ -9353,6 +9355,9 @@ impl Session {
         let cached = self.surface_existing(&mut inner);
         let meters = inner.meters.take_surfaces();
         Self::sync_page_focus(&mut inner);
+        if due.page {
+            self.sync_presets(&mut inner, now);
+        }
         let shared: &Inner = &inner;
         let view = self.surface_view(shared, &order, &due, cached.as_ref(), &meters);
         let current = |t| Some(self.surface_heard(shared, t, cached.as_ref()));
@@ -9580,6 +9585,19 @@ impl Session {
         let pages = Self::page_count(self.slot_param_count(id)?);
         let page = inner.surfaces.page.page.min(pages.saturating_sub(1));
         let (params, _) = self.slot_param_views(inner, id, page.saturating_mul(8), cached);
+        // From the cache `feed_surfaces` keeps (Ruling 7: no call per feedback).
+        let shown = inner
+            .surfaces
+            .presets
+            .as_ref()
+            .filter(|(s, _, _)| *s == id)
+            .map(|(_, p, _)| p);
+        let preset = shown.and_then(|p| p.current);
+        let presets = shown.map_or(0, |p| p.names.len());
+        let preset_name = shown
+            .and_then(|p| p.current.and_then(|c| p.names.get(c)))
+            .cloned()
+            .unwrap_or_default();
         Some(core_surface::PluginPageView {
             chain: chain.into_iter().map(|(_, name)| name).collect(),
             slot,
@@ -9587,11 +9605,75 @@ impl Session {
             page,
             pages,
             page_name: format!("Page {}", page.saturating_add(1)),
-            // Task 5 fills the presets (plan 5f-4).
-            preset: None,
-            presets: 0,
-            preset_name: String::new(),
+            preset,
+            presets,
+            preset_name,
         })
+    }
+
+    /// Keeps `inner.surfaces.presets` for the focused slot: read again when
+    /// it is for another slot, older than [`PRESETS_FRESH`], or a parameter
+    /// notice named the slot (Ruling 7: no preset call per feedback).
+    fn sync_presets(&self, inner: &mut Inner, now: Instant) {
+        let Some((_, _, id)) = Self::page_chain(inner) else {
+            inner.surfaces.presets = None;
+            return;
+        };
+        let fresh = matches!(
+            &inner.surfaces.presets,
+            Some((s, _, at)) if *s == id
+                && now.saturating_duration_since(*at) < PRESETS_FRESH
+                && !inner.news.params_changed.contains(&id.0)
+        );
+        if !fresh {
+            inner.surfaces.presets = plugins::presets(self.id, id).map(|p| (id, p, now));
+        }
+    }
+
+    /// `Preset(dir)`: steps the focused plug-in's presets without wrapping;
+    /// from none, Next loads the first and Previous the last. Nothing to
+    /// step, or a step to the one loaded, is an uncounted no-op; a plug-in
+    /// not running or a failed load is refused (Ruling 7). A load is no
+    /// undo step: a change made in the plug-in.
+    fn surface_preset(&self, inner: &mut Inner, dir: i32, now: Instant) -> bool {
+        Self::sync_page_focus(inner);
+        let Some((_, _, id)) = Self::page_chain(inner) else {
+            return false;
+        };
+        let Some(p) = plugins::presets(self.id, id) else {
+            return false;
+        };
+        let Some(last) = p.names.len().checked_sub(1) else {
+            return true;
+        };
+        let to = match (p.current, dir) {
+            (_, 0) => return true,
+            (None, d) if d > 0 => 0,
+            (None, _) => last,
+            (Some(c), d) => {
+                let to = i64::try_from(c)
+                    .unwrap_or(i64::MAX)
+                    .saturating_add(i64::from(d))
+                    .clamp(0, i64::try_from(last).unwrap_or(i64::MAX));
+                usize::try_from(to).unwrap_or(last)
+            }
+        };
+        if p.current == Some(to) {
+            return true;
+        }
+        match plugins::load_preset(self.id, id, to) {
+            Ok(()) => {
+                inner.plugin_dirty = true;
+                inner.news.doc_changed = true;
+                inner.news.params_changed.insert(id.0);
+                inner.surfaces.presets = plugins::presets(self.id, id).map(|p| (id, p, now));
+                true
+            }
+            Err(e) => {
+                inner.news.problems.push(format!("Preset: {e}"));
+                false
+            }
+        }
     }
 
     /// `PluginSlot(i)`: slot `i` of the focused chain, page 0; refused

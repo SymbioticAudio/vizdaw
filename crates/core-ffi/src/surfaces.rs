@@ -2404,6 +2404,12 @@ pub(crate) struct SessionSurfaces {
     pub last_ns: BTreeMap<(TouchHolder, AutomationTarget), u64>,
     /// The plug-in page a Kontrol shows (plan 5f-4 Ruling 6).
     pub page: PageFocus,
+    /// The focused slot's presets as last read, and when (plan 5f-4 Ruling 7).
+    pub presets: Option<(
+        core_model::ids::PluginInstanceId,
+        core_host::Presets,
+        Instant,
+    )>,
 }
 
 // ---------------------------------------------------------------------

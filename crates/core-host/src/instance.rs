@@ -37,6 +37,15 @@ pub struct InstanceEvents {
     pub state_dirty: bool,
 }
 
+/// A plug-in's own presets (plan 5f-4 Ruling 7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Presets {
+    /// Their names, in the plug-in's order.
+    pub names: Vec<String>,
+    /// The one loaded, when the plug-in says.
+    pub current: Option<usize>,
+}
+
 /// How a plugin answered [`PluginInstance::set_offline`] (plan 5f-2
 /// Ruling 7, Ruling T3-1: a bounce reports only `RealtimeRequired` and
 /// `Refused`).
@@ -127,6 +136,19 @@ pub trait PluginInstance {
     /// main thread (AU listeners); CLAP reports them from `process`.
     fn gestures(&mut self) -> Vec<crate::process::ParamEvent> {
         Vec::new()
+    }
+
+    /// The plug-in's own presets (plan 5f-4 Ruling 7); none by default.
+    fn presets(&mut self) -> Presets {
+        Presets::default()
+    }
+
+    /// Loads preset `index` of [`PluginInstance::presets`].
+    fn load_preset(&mut self, index: usize) -> Result<(), HostError> {
+        let _ = index;
+        Err(HostError::StateRejected(
+            "this plug-in has no presets".into(),
+        ))
     }
 
     /// Asks the plugin to render offline (`on`) or in real time (spec §9.1)

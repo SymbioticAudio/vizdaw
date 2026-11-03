@@ -392,6 +392,78 @@ pub fn host_count() -> usize {
     REGISTRY.with(|r| r.borrow().hosts.len())
 }
 
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    /// Fake presets by slot id (test hook; the test CLAP plug-ins have none).
+    static FAKE_PRESETS: RefCell<BTreeMap<u64, core_host::Presets>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+/// `slot`'s presets in session `id`'s host; `None` without a running
+/// instance (plan 5f-4 Ruling 7).
+pub fn presets(id: u64, slot: PluginInstanceId) -> Option<core_host::Presets> {
+    #[cfg(feature = "test-hooks")]
+    if let Some(p) = FAKE_PRESETS.with(|f| f.borrow().get(&slot.0).cloned()) {
+        return Some(p);
+    }
+    with(id, |h| {
+        h.and_then(|h| h.instance(slot)).map(|i| i.presets())
+    })
+    .ok()
+    .flatten()
+}
+
+/// Loads preset `index` of `slot`.
+pub fn load_preset(id: u64, slot: PluginInstanceId, index: usize) -> Result<(), VizError> {
+    #[cfg(feature = "test-hooks")]
+    {
+        let fake = FAKE_PRESETS.with(|f| {
+            f.borrow_mut().get_mut(&slot.0).map(|p| {
+                if index < p.names.len() {
+                    p.current = Some(index);
+                    true
+                } else {
+                    false
+                }
+            })
+        });
+        match fake {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                return Err(VizError::Model {
+                    message: format!("no preset {index}"),
+                });
+            }
+            None => {}
+        }
+    }
+    with(id, |h| {
+        h.and_then(|h| h.instance(slot))
+            .map(|i| i.load_preset(index))
+    })?
+    .ok_or_else(|| VizError::Model {
+        message: "the plug-in is not running".into(),
+    })?
+    .map_err(|e| VizError::Model {
+        message: e.to_string(),
+    })
+}
+
+/// Makes `slot` answer `names` and `current` as its presets (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_set_presets(slot: u64, names: Vec<String>, current: Option<usize>) {
+    FAKE_PRESETS.with(|f| {
+        f.borrow_mut()
+            .insert(slot, core_host::Presets { names, current });
+    });
+}
+
+/// The preset last loaded into `slot`'s fake list (test hook).
+#[cfg(feature = "test-hooks")]
+pub fn debug_current_preset(slot: u64) -> Option<usize> {
+    FAKE_PRESETS.with(|f| f.borrow().get(&slot).and_then(|p| p.current))
+}
+
 /// The row of `slot` (an instrument's own slot when `instrument`), with
 /// what `host` knows about its instance.
 pub fn slot_row(

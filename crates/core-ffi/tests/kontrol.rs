@@ -624,3 +624,73 @@ fn chain_and_page_buttons_with_nothing_to_show_are_counted() {
         "no selected strip: no page to turn"
     );
 }
+
+#[test]
+fn preset_buttons_step_the_focused_plugins_presets() {
+    use vizdaw_ffi::plugins::{debug_current_preset, debug_set_presets};
+    let _g = serial();
+    let (s, id, _, slots) = plugin_mode(&[("vizdaw.test.gain", "Test Gain")]);
+    let slot = slots[0];
+    debug_set_presets(
+        slot,
+        vec!["Init".into(), "Warm".into(), "Bright".into()],
+        None,
+    );
+    s.inject_surface(id, vec![0xBF, 0x36, 0x01]).unwrap();
+    assert_eq!(
+        debug_current_preset(slot),
+        Some(0),
+        "from none, Next loads the first"
+    );
+    has(&feed(&s), &sysex(0x76, 0, 0, b"Init"));
+    s.inject_surface(id, [0xBF, 0x36, 0x01].repeat(3)).unwrap();
+    assert_eq!(debug_current_preset(slot), Some(2), "no wrap past the last");
+    s.inject_surface(id, vec![0xBF, 0x36, 0x7F]).unwrap();
+    assert_eq!(debug_current_preset(slot), Some(1));
+    let sent = feed(&s);
+    has(&sent, &sysex(0x76, 0, 0, b"Warm"));
+    has(&sent, &[0xBF, 0x36, 0x03]);
+    debug_set_presets(slot, vec!["A".into(), "B".into()], None);
+    s.inject_surface(id, vec![0xBF, 0x36, 0x7F]).unwrap();
+    assert_eq!(
+        debug_current_preset(slot),
+        Some(1),
+        "from none, Previous loads the last"
+    );
+    s.stop().unwrap();
+}
+
+#[test]
+fn a_preset_load_refreshes_the_parameters_and_is_no_undo_step() {
+    use vizdaw_ffi::plugins::debug_set_presets;
+    let _g = serial();
+    let (s, id, _, slots) = plugin_mode(&[("vizdaw.test.gain", "Test Gain")]);
+    let _ = s.idle().unwrap();
+    let undo = s.snapshot().unwrap().undo_label;
+    debug_set_presets(slots[0], vec!["Init".into()], None);
+    s.inject_surface(id, vec![0xBF, 0x36, 0x01]).unwrap();
+    let news = s.idle().unwrap();
+    assert!(news.params_changed.contains(&slots[0]), "{news:?}");
+    let snap = s.snapshot().unwrap();
+    assert_eq!(snap.undo_label, undo, "not an undo step");
+    assert!(
+        news.snapshot.is_some(),
+        "the title hears Edited (doc_changed)"
+    );
+    s.stop().unwrap();
+}
+
+#[test]
+fn a_plugin_without_presets_ignores_the_preset_buttons() {
+    let _g = serial();
+    let (s, id, _, _) = plugin_mode(&[("vizdaw.test.gain", "Test Gain")]);
+    // Pre-flight M15: the mode switch in `plugin_mode` sent the page at once.
+    let sent = debug_sent(DAW);
+    has(&sent, &[0xBF, 0x36, 0x00]);
+    has(&sent, &sysex(0x76, 0, 0, b""));
+    let before = row(id).ignored;
+    s.inject_surface(id, vec![0xBF, 0x36, 0x01, 0xBF, 0x36, 0x7F])
+        .unwrap();
+    assert_eq!(row(id).ignored, before, "nothing to step is not a fault");
+    s.stop().unwrap();
+}

@@ -9,7 +9,7 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{MainThreadMarker, msg_send};
 use objc2_audio_toolbox::{
-    AUListenerDispose, AUParameterListenerRef, AUParameterSet, AURenderCallbackStruct,
+    AUListenerDispose, AUParameterListenerRef, AUParameterSet, AUPreset, AURenderCallbackStruct,
     AudioComponent, AudioComponentCopyName, AudioComponentDescription, AudioComponentFindNext,
     AudioComponentFlags, AudioComponentGetDescription, AudioComponentGetVersion,
     AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioComponentInstantiate,
@@ -20,10 +20,11 @@ use objc2_audio_toolbox::{
     AudioUnitRenderActionFlags, AudioUnitReset, AudioUnitScope, AudioUnitSetParameter,
     AudioUnitSetProperty, AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent,
     kAudioUnitErr_InvalidProperty, kAudioUnitErr_PropertyNotWritable, kAudioUnitProperty_ClassInfo,
-    kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount, kAudioUnitProperty_HostCallbacks,
-    kAudioUnitProperty_Latency, kAudioUnitProperty_MaximumFramesPerSlice,
-    kAudioUnitProperty_OfflineRender, kAudioUnitProperty_ParameterInfo,
-    kAudioUnitProperty_ParameterList, kAudioUnitProperty_RequestViewController,
+    kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount, kAudioUnitProperty_FactoryPresets,
+    kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
+    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_OfflineRender,
+    kAudioUnitProperty_ParameterInfo, kAudioUnitProperty_ParameterList,
+    kAudioUnitProperty_PresentPreset, kAudioUnitProperty_RequestViewController,
     kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat,
     kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
 };
@@ -33,9 +34,9 @@ use objc2_core_audio_types::{
     kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 use objc2_core_foundation::{
-    CFBundle, CFData, CFPropertyList, CFPropertyListCreateData, CFPropertyListCreateWithData,
-    CFPropertyListFormat, CFRetained, CFRunLoop, CFString, CFURL, CGPoint, CGRect, CGSize,
-    kCFRunLoopDefaultMode,
+    CFArray, CFBundle, CFData, CFPropertyList, CFPropertyListCreateData,
+    CFPropertyListCreateWithData, CFPropertyListFormat, CFRetained, CFRunLoop, CFString, CFURL,
+    CGPoint, CGRect, CGSize, kCFRunLoopDefaultMode,
 };
 use std::ffi::CString;
 use std::ffi::c_void;
@@ -387,6 +388,88 @@ impl Unit {
             0,
             &u32::from(on),
         ))
+    }
+
+    /// (presetNumber, name) of the factory presets; empty when the unit has none.
+    pub(crate) fn factory_presets(&self) -> Vec<(i32, String)> {
+        let mut array: *const CFArray = ptr::null();
+        let mut size = size_of::<*const CFArray>() as u32;
+        // SAFETY: `array` receives a +1 CFArrayRef of `*const AUPreset`.
+        let st = unsafe {
+            AudioUnitGetProperty(
+                self.unit,
+                kAudioUnitProperty_FactoryPresets,
+                kAudioUnitScope_Global,
+                0,
+                NonNull::from(&mut array).cast::<c_void>(),
+                NonNull::from(&mut size),
+            )
+        };
+        if st != 0 {
+            return Vec::new();
+        }
+        let Some(array) = NonNull::new(array.cast_mut()) else {
+            return Vec::new();
+        };
+        // SAFETY: only the array is ours (+1); its entries and their names
+        // belong to it and are read while it is alive (never released here).
+        let array = unsafe { CFRetained::from_raw(array) };
+        let n = array.count().max(0);
+        let mut out = Vec::new();
+        for i in 0..n {
+            // SAFETY: `i` is in range; the values are `*const AUPreset`.
+            let entry = unsafe { array.value_at_index(i) }.cast::<AUPreset>();
+            if entry.is_null() {
+                continue;
+            }
+            // SAFETY: a non-null entry of a live array points at an AUPreset.
+            let AUPreset {
+                presetNumber,
+                presetName,
+            } = unsafe { *entry };
+            let name = if presetName.is_null() {
+                String::new()
+            } else {
+                // SAFETY: a borrowed CFString, valid while the array lives.
+                unsafe { &*presetName }.to_string()
+            };
+            out.push((presetNumber, name));
+        }
+        out
+    }
+
+    /// The present preset's number.
+    pub(crate) fn present_preset(&self) -> Option<i32> {
+        let zero = AUPreset {
+            presetNumber: 0,
+            presetName: ptr::null(),
+        };
+        let p = self.get(
+            kAudioUnitProperty_PresentPreset,
+            kAudioUnitScope_Global,
+            0,
+            zero,
+        )?;
+        // The name came back +1: released here.
+        drop(cfstring(p.presetName));
+        Some(p.presetNumber)
+    }
+
+    /// Makes `number`/`name` the present preset.
+    pub(crate) fn set_present_preset(&self, number: i32, name: &str) -> Result<(), String> {
+        let name = CFString::from_str(name);
+        let preset = AUPreset {
+            presetNumber: number,
+            presetName: CFRetained::as_ptr(&name).as_ptr().cast_const(),
+        };
+        // The name is borrowed for the call; the unit copies what it keeps.
+        self.set(
+            "AudioUnitSetProperty(PresentPreset)",
+            kAudioUnitProperty_PresentPreset,
+            kAudioUnitScope_Global,
+            0,
+            &preset,
+        )
     }
 
     /// Feeds input bus `element` from `callback` with `refcon`.
