@@ -2,7 +2,9 @@ import Foundation
 import VizDAWCore
 
 /// So `BounceCommands.request` can answer a `Result` (the generated record is
-/// already `Sendable`).
+/// already `Sendable`). Not `@retroactive`: VizDAWCore is in this package,
+/// and Swift refuses the attribute there. If UniFFI ever generates the
+/// conformance, this line fails to compile and goes.
 extension ControlFailure: Error {}
 
 /// `file.bounce` over the control channel (plan 5f-2 Task 5; Rulings 2, 3,
@@ -91,11 +93,12 @@ public enum BounceCommands {
                 dither: dither, path: path, addToProject: add, replace: args.flag("replace") ?? false))
     }
 
-    /// Ruling 10's status: each file, the media added, the warnings.
-    public static func status(_ r: BounceResultRow, problems: [String]) -> String {
+    /// Ruling 10's status: each file, the media added, the warnings; nil
+    /// when there is nothing to say.
+    public static func status(_ r: BounceResultRow, problems: [String]) -> String? {
         var parts = r.files.map { "wrote \($0.path) (\($0.frames) frames, \($0.rate) Hz, \($0.bits))" }
         if !r.media.isEmpty { parts.append("added \(r.media.count) media") }
         if !problems.isEmpty { parts.append("warnings: " + problems.joined(separator: "; ")) }
-        return parts.joined(separator: "; ")
+        return parts.isEmpty ? nil : parts.joined(separator: "; ")
     }
 }

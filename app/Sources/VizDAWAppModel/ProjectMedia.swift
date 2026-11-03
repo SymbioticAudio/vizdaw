@@ -95,6 +95,14 @@ extension DocumentModel {
         }
     }
 
+    /// `ControlJobs.answer` for `r`, with the bounce's files when `r` is a
+    /// bounce (plan 5f-2 Ruling 10); the app's polling and the control
+    /// channel both answer through here.
+    public func jobAnswer(_ r: JobRow) -> JobAnswer {
+        let bounced = r.kind == .bounce ? (try? session.bounceResult(job: r.id)) ?? nil : nil
+        return ControlJobs.answer(r, bounce: bounced)
+    }
+
     /// Reads every running job (the plugin timer calls this through
     /// `idle` while any is listed); an ended one is applied by the session
     /// and refreshes the document. The outcome is `ControlJobs.answer`'s,
@@ -112,8 +120,7 @@ extension DocumentModel {
                 if case .Busy = error as? VizError { still.append(j) }
                 continue
             }
-            let bounced = r.kind == .bounce ? (try? session.bounceResult(job: r.id)) ?? nil : nil
-            switch ControlJobs.answer(r, bounce: bounced) {
+            switch jobAnswer(r) {
             case .wait:
                 still.append(r)
             case .ok:

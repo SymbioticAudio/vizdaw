@@ -49,7 +49,11 @@ public enum ControlJobs {
             }
             return .ok(status: j.problems.isEmpty ? nil : "warnings: " + j.problems.joined(separator: "; "))
         case .failed, .cancelled:
-            return .failed(([j.message ?? "the job was cancelled"] + j.problems).joined(separator: "; "))
+            // A bounce that failed after some renames names what is on disk
+            // (plan 5f-2 Ruling 12: renamed files stay).
+            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : []
+            let tail = written.isEmpty ? [] : ["already written: " + written.joined(separator: ", ")]
+            return .failed(([j.message ?? "the job was cancelled"] + j.problems + tail).joined(separator: "; "))
         }
     }
 
