@@ -92,6 +92,19 @@ pub enum AudioCmd {
         /// The events (non-regions are ignored).
         events: Vec<EventId>,
     },
+    /// Points one region at `media` from `source_offset` for `length`
+    /// frames, its fades clamped (spec §11; plan 5f-3 Ruling 1). Its start
+    /// tick, gain and fade shapes stay.
+    SetSource {
+        /// The region.
+        event: EventId,
+        /// The new media item.
+        media: MediaId,
+        /// Start within it (frames).
+        source_offset: u64,
+        /// Length (frames, >= 1).
+        length: u64,
+    },
 }
 
 /// Which fade a [`AudioCmd::FadeTo`] sets.
@@ -121,6 +134,7 @@ impl AudioCmd {
                 ..
             } => "Fade Out from Cursor",
             AudioCmd::RemoveFades { .. } => "Remove Fades",
+            AudioCmd::SetSource { .. } => "Set Region Source",
         }
     }
 }
@@ -397,6 +411,29 @@ pub(crate) fn apply(d: &mut Document, cmd: &AudioCmd, r: &mut Report) -> Result<
                     "select audio regions to remove their fades",
                 ));
             }
+        }
+        AudioCmd::SetSource {
+            event,
+            media,
+            source_offset,
+            length,
+        } => {
+            // `region` refuses a non-region and an unknown event; `store`
+            // refuses an unknown media, a span past its end and length 0.
+            let (mut ev, _, _) = region(d, *event)?;
+            if let EventBody::AudioRegion {
+                media: m,
+                source_offset: o,
+                length: l,
+                ..
+            } = &mut ev.body
+            {
+                *m = *media;
+                *o = *source_offset;
+                *l = *length;
+            }
+            clamp_fades(&mut ev);
+            store(d, ev)?;
         }
     }
     Ok(())
