@@ -5933,11 +5933,18 @@ impl Session {
         joined
     }
 
-    /// Ruling T6-1 (review M1): while a pass plays, a touch that rests
-    /// with no value and no share takes the path its strip gives now, as
-    /// if touched now, after a mode change or a suspend toggle. A touch
-    /// that has a value or a share keeps its path (Ruling 14). `only`:
-    /// just that target.
+    /// Rulings T6-1 and T6-2 (review M1, re-review m1): while a pass
+    /// plays, a touch that rests with no value and no share, on a path
+    /// that writes nothing (static or heard only), takes the path its
+    /// strip gives now, as if touched now, after a mode change, a suspend
+    /// toggle or an Undo of either. A touch that has a value or a share
+    /// keeps its path (Ruling 14), and so does a resting touch on a write
+    /// path: it has written its held value since its touch, and ends as
+    /// its mode's release says, so nothing it wrote is cut. A touch
+    /// resting on a Write strip at the first wrap therefore keeps its
+    /// Write path; it does not take the After Write path (re-review m3).
+    /// The value is the one heard now (as at the pass start, re-review
+    /// N1). `only`: just that target.
     fn repick_resting(&self, inner: &mut Inner, only: Option<AutomationTarget>) {
         let Some(w) = inner.writing.as_ref() else {
             return;
@@ -5948,7 +5955,12 @@ impl Session {
         let resting: Vec<(AutomationTarget, Touching)> = inner
             .touches
             .iter()
-            .filter(|(t, x)| !x.valued && !x.shared && only.is_none_or(|o| o == **t))
+            .filter(|(t, x)| {
+                !x.valued
+                    && !x.shared
+                    && matches!(x.path, TouchPath::Static | TouchPath::Live)
+                    && only.is_none_or(|o| o == **t)
+            })
             .map(|(t, x)| (*t, *x))
             .collect();
         let ns = host_time(None);
@@ -5963,16 +5975,18 @@ impl Session {
             if same {
                 continue;
             }
+            let v = host::heard(self.id, t).unwrap_or(x.value);
             if let Some(y) = inner.touches.get_mut(&t) {
                 y.path = path;
-                y.base = y.value;
+                y.value = v;
+                y.base = v;
             }
             if let Some(w) = inner.writing.as_mut() {
                 w.moved.insert(t);
             }
             // The engine's entry takes the new path's tag; Trim on
             // automation grabs at an offset of 0 (pre-flight I12).
-            self.send_gesture(inner, t, GesturePhase::Touch(x.value), tag_of(path), ns);
+            self.send_gesture(inner, t, GesturePhase::Touch(v), tag_of(path), ns);
             if let TouchPath::Write(_, Release::Offsets) = path {
                 self.send_gesture(inner, t, GesturePhase::Offset(0.0), tag_of(path), ns);
             }

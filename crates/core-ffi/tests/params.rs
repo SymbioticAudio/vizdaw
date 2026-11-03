@@ -712,3 +712,40 @@ fn a_hand_joining_a_plugins_touch_takes_it_over() {
     assert_eq!(snap.undo_label.as_deref(), Some("Change Plugin Parameter"));
     gain_is(&s, id, 0.6);
 }
+
+/// Ruling T6-1 (re-review m2): a touch that has a value keeps its path
+/// over a mode change mid-play. The plugin's value-only knob is heard
+/// only on a Read strip; set to Touch while it turns, it still writes
+/// nothing.
+#[test]
+fn a_touch_with_a_value_keeps_its_path_over_a_mode_change() {
+    use vizdaw_ffi::automation::AutomationModeRow;
+    let _g = serial();
+    let (_d, s, id) = playing_gain();
+    let synth = s.mixer().unwrap().strips[0].id;
+    let song = s.transport().unwrap().seq.unwrap();
+    s.debug_plugin_value(id, GAIN, 1.5).unwrap();
+    s.set_automation_mode(vec![synth], AutomationModeRow::Touch)
+        .unwrap();
+    for v in [1.4, 1.3, 1.2] {
+        settle(&s, 100);
+        s.debug_plugin_value(id, GAIN, v).unwrap();
+    }
+    // The 500 ms release.
+    settle(&s, 700);
+    assert!(s.automation_state().unwrap().touched.is_empty());
+    s.stop().unwrap();
+    idle_until(&s, |s| !s.transport().unwrap().playing);
+    settle(&s, 100);
+    assert!(
+        s.lanes(song)
+            .unwrap()
+            .iter()
+            .all(|l| l.name != "Built-in Synth Gain"),
+        "heard only: nothing written"
+    );
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Automation Mode")
+    );
+}

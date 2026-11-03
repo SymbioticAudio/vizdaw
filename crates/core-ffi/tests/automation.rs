@@ -3405,3 +3405,145 @@ fn the_preview_follows_a_lane_mute_mid_pass() {
     stop_and_land(&s);
     s.close().unwrap();
 }
+
+/// Plan 5f-1 Task 6 re-review N1 and Ruling T6-2: a hand resting on a
+/// Trim strip's automated fader holds an offset of 0, so it is heard
+/// following the lane; a mode change while it rests does not move it back
+/// to the value it was touched at, and what it writes follows the lane.
+#[test]
+fn a_resting_trim_touch_does_not_jump_at_a_mode_change() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Trim).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    let touched_at = tick(&s);
+    s.gesture_from(
+        t,
+        Phase::Touch { value: None },
+        vizdaw_ffi::automation::GestureHolderRow::Channel,
+    )
+    .unwrap();
+    wait_until("beat 5", || tick(&s) > 5 * Q);
+    s.set_automation_mode(vec![bus], Mode::Touch).unwrap();
+    let changed_at = tick(&s);
+    pace(&s);
+    let stale = fader_db(ramp_at(touched_at));
+    let now = fader_db(ramp_at(changed_at));
+    assert!(now - stale > 2.0, "the lane rose: {stale} -> {now}");
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(50) {
+        let d = fader_override(bus);
+        assert!(
+            d.is_some_and(|d| d > now - 1.0),
+            "heard on the lane, not back at {stale}: {d:?} (lane {now})"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    s.gesture_from(
+        t,
+        Phase::Release,
+        vizdaw_ffi::automation::GestureHolderRow::Channel,
+    )
+    .unwrap();
+    stop_and_land(&s);
+    let p = points(&s, seq, lane);
+    assert!(
+        p.iter()
+            .filter(|x| x.0 > changed_at + Q / 4)
+            .all(|x| (x.1 - ramp_at(touched_at)).abs() > 0.02),
+        "no stale level written after the change: {p:?}"
+    );
+}
+
+/// Ruling T6-2: a hand resting on a Touch strip writes its held value
+/// from the touch; a mode change to Read while it rests does not cut that
+/// write: it holds until the release, then glides back.
+#[test]
+fn a_resting_touch_that_writes_keeps_its_path_over_a_mode_change() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Touch).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: None }).unwrap();
+    let held = ramp_at(tick(&s));
+    wait_until("beat 3", || tick(&s) > 3 * Q);
+    s.set_automation_mode(vec![bus], Mode::Read).unwrap();
+    let changed_at = tick(&s);
+    pace(&s);
+    wait_until("beat 5", || tick(&s) > 5 * Q);
+    let released_at = tick(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    wait_until("the glide to pass", || tick(&s) > released_at + Q);
+    stop_and_land(&s);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation")
+    );
+    let p = points(&s, seq, lane);
+    assert!(
+        p.iter().any(|x| x.0 > changed_at + Q
+            && x.0 <= released_at + Q / 4
+            && (x.1 - held).abs() < 0.02),
+        "the hold goes on past the change to the release: {p:?}"
+    );
+}
+
+/// Ruling T6-1 (re-review m2): the idle re-picks a resting touch after a
+/// suspend toggle: touched on a Touch strip while suspended, it is static;
+/// automation back on, it writes its held value with no move.
+#[test]
+fn a_resting_touch_writes_once_suspend_ends() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Touch).unwrap();
+    set_automation_suspended(true);
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.gesture(t, Phase::Touch { value: None }).unwrap();
+    set_automation_suspended(false);
+    pace(&s);
+    let from = tick(&s);
+    wait_until("beat 4", || tick(&s) > from + 3 * Q);
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation"),
+        "the resting touch wrote"
+    );
+    let p = points(&s, seq, lane);
+    assert!(p.len() > 2, "more than the ramp's two points: {p:?}");
+}
+
+/// Ruling T6-1 (re-review m2): the idle re-picks a resting touch after an
+/// Undo of a mode change: touched on a strip just set to Read, it writes
+/// once the Undo puts Touch back, with no move.
+#[test]
+fn a_resting_touch_writes_once_an_undo_puts_touch_back() {
+    let _g = serial();
+    let (s, seq, _, bus, lane) = ramped_bus();
+    let t = Target::StripFader { strip: bus };
+    s.set_automation_mode(vec![bus], Mode::Touch).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || tick(&s) > Q);
+    s.set_automation_mode(vec![bus], Mode::Read).unwrap();
+    s.gesture(t, Phase::Touch { value: None }).unwrap();
+    s.undo().unwrap();
+    pace(&s);
+    let from = tick(&s);
+    wait_until("beat 4", || tick(&s) > from + 3 * Q);
+    s.gesture(t, Phase::Release).unwrap();
+    stop_and_land(&s);
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation"),
+        "the resting touch wrote"
+    );
+    let p = points(&s, seq, lane);
+    assert!(p.len() > 2, "more than the ramp's two points: {p:?}");
+}
