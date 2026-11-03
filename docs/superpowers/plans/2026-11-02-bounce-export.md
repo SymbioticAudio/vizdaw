@@ -130,7 +130,7 @@ These are the five failure modes a user is most likely to hit that the spec impl
 
 1. **A bounce that does not line up with what was heard.** A track behind a latent plugin on another bus (PDC leads), a stem of a bus fed by sends, automation that splits blocks into runs, a range end that is not a block multiple, and the mix, all bounced together.
    - Expected: every file starts at the range start as heard. Stems and the mix line up to the sample over the whole file, with the latency neither cut nor padded, and every run of every block is in every stem (pre-flight C1). The stems sum to the mix when master is at 0 dB with no inserts. A bounce equals a plain offline render of the same document.
-   - Pinned by `the_mix_is_the_region_as_heard_with_and_without_latency`, `stems_line_up_and_add_up_to_the_mix` (range end at 7.5 beats, a fader ramp, a send) and `a_bounce_equals_a_plain_offline_render` (Task 2), `rt_alloc_bounce` (Task 2), and `a_bounce_equals_an_offline_render_of_the_range` (Task 4).
+   - Pinned by `the_mix_is_the_region_as_heard_with_and_without_latency`, `stems_line_up_and_add_up_to_the_mix` (range end at 7.5 beats, a fader ramp, a send), `a_bounce_equals_a_plain_offline_render`, `a_selection_starts_mid_song` (a sounding stem across the end-of-playing split), `a_written_mute_cuts_the_heard_stem_where_it_cuts_the_mix` and `a_written_bus_mute_cuts_the_heard_stem_where_it_cuts_the_mix` (each chain strip's gate at its own feed arrival) (Task 2), `rt_alloc_bounce` (Task 2), and `a_bounce_equals_an_offline_render_of_the_range` (Task 4).
 2. **The tail cuts a reverb short, or never ends.** Silence after the range; a plugin that rings; a plugin that hisses forever; a tail cap of 0.
    - Expected:
      - with silence, the file is exactly the range;
@@ -259,10 +259,10 @@ Each ruling decides something the spec leaves open, in the format "what — why 
    - Each gets a new lane at the end of the bounced sequence, named like its media item, with a region at the range start.
    - All of it is one undo step "Bounce".
    - This reuses the import's apply, generalised to a label, a lane name and an origin.
-   - A bounce with "Add to project" is a media job: it waits for, and holds off, Format, Convert and Relink jobs (`media_jobs_idle`), so it never imports at a format that is being changed (pre-flight I9).
+   - Every bounce holds off Format, Convert and Relink jobs (`JobKindRow::Bounce` is in `media_jobs_idle`'s list: its streamer reads the project's media); a bounce with "Add to project" also waits for them before it starts, so it never imports at a format that is being changed (pre-flight I9).
    - Why: §9.2. The import's apply already does lanes, regions, overviews and the failure clean-up.
    - Cost if wrong: an owner who wants the bounce on the selected lane moves the region.
-10. **Ruling (the result): `Session::bounce_result(job) -> Option<BounceResultRow>` returns `files` (path, frames, rate, bits, channels, clipped) and `media` (items added), for a bounce that wrote files or media (Done, or Failed after its renames).**
+10. **Ruling (the result): `Session::bounce_result(job) -> Option<BounceResultRow>` returns `files` (path, frames, rate, bits, channels, clipped) and `media` (items added), for a bounce that wrote files or media (Done; Failed when the apply of "Add to project" failed after its renames; Failed when a rename failed after earlier ones, naming the files already in place).**
     - The channel's answer status is `"wrote <path> (<frames> frames, <rate> Hz, <bits>)"` per file, joined by `; `, plus `"; added <n> media"` when it added any, plus `"; warnings: <problems joined by '; '>"` when the job has problems.
     - `ControlJobs.answer(_ j: JobRow, bounce: BounceResultRow? = nil)` (pre-flight M10): a Done bounce answers `.ok` with that status even when it created no media and has problems (clipped samples, placeholders), unlike an import (pre-flight I7). The app's own job polling uses the same answer.
     - Why: §12.1's "returns the file info". `JobRow` stays unchanged.
@@ -278,7 +278,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
     2. "Add to project" imports into `Media/` (0.8–0.9): new files the job can still remove;
     3. every export written to its `.partial` (`write_partial`, 0.9–1.0);
     4. all renames last (`commit` for the mix, `commit_numbered` for stems), with cancel checked only before the first rename.
-    - On cancel or an error before step 4, everything is removed: partials (dropping a `PendingExport` removes it), temporaries and imported media. An error during step 4 keeps the files already renamed and removes the rest.
+    - On cancel or an error before step 4, everything is removed: partials (dropping a `PendingExport` removes it), temporaries and imported media. An error during step 4 keeps the files already renamed, removes the rest and the imports, and is reported as a Failed job whose `bounce_result` names the files in place (`Work::Bounce.failed`).
     - A file renamed into place is never removed afterwards: not by the job, not by `discard` (which removes only files inside the package), not at session close. If the later apply of "Add to project" fails (its sequence was deleted meanwhile), the job is Failed, its imported media are removed, and the exported files stay, named in `bounce_result`.
     - Why: the user's chosen file (and, with `replace`, the one it replaced) must never be lost to a step after it.
     - Cost if wrong: none; the order costs nothing.
@@ -349,8 +349,9 @@ Each ruling decides something the spec leaves open, in the format "what — why 
       /// with "exists" (and removes the partial) if the destination appeared.
       pub fn commit(self) -> Result<Exported, MediaError>;
       /// Renames the partial onto the destination or, when that name is taken,
-      /// onto "<stem> 2.<ext>", "<stem> 3.<ext>", … (never replacing; owner
-      /// answer 2); `Exported.path` is the name it took.
+      /// onto "<base> 2.<ext>", "<base> 3.<ext>", … where `<base>` is the stem
+      /// without a trailing " <n>" (never replacing; owner answer 2);
+      /// `Exported.path` is the name it took.
       pub fn commit_numbered(self) -> Result<Exported, MediaError>;
   }
   /// `source` (a VizDAW float CAF) → `.<name>.partial` beside `dest` in
@@ -713,6 +714,10 @@ fn numbered_commits_never_replace() {
     assert_eq!(std::fs::read(d.path().join("Bass 2.wav")).unwrap(), b"keep 2");
     assert_eq!(read_wav(&e.path).4, 100);
     assert_eq!(names(d.path()), ["Bass 2.wav", "Bass 3.wav", "Bass.wav", "render.caf"]);
+    // A numbered name taken meanwhile numbers on from its base (pre-check M-11).
+    let p = write_partial(&CafImporter, &src, &d.path().join("Bass 2.wav"), &f, None, false, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert_eq!(p.commit_numbered().unwrap().path, d.path().join("Bass 4.wav"));
+    assert_eq!(std::fs::read(d.path().join("Bass 2.wav")).unwrap(), b"keep 2");
 }
 
 #[test]
@@ -868,7 +873,7 @@ fn export_resamples_48k_to_44k1() {
    - `dest` exists and `replace` is false (`MediaError::Unsupported("<name> exists; choose another name or replace it")`);
    - the source is not a VizDAW CAF (`CafReader::open` fails).
 
-   It decodes through `importer.decode(source, fmt.rate, …)` and writes with `PcmWriter` to `partial_path(dest)` (`<dir>/.<file name>.partial`, created exclusively). After every decoded chunk it calls `progress(written / expected)` (expected: `frames` scaled by `fmt.rate / source rate`, else the source's frames scaled) and returns `Cancelled` when `cancel` is set. On any error or cancel it removes the partial it created (never a path it did not create). `PendingExport` holds the partial, the destination, `replace` and the `Exported`; its `Drop` removes an uncommitted partial. `commit` uses `std::fs::rename` with `replace`, else `rename_excl`. `commit_numbered` tries `dest`, then `"<stem> <n>.<ext>"` for n = 2, 3, … (up to 9999) with `rename_excl`, taking the first that succeeds. `export` is `write_partial(…)?.commit()`.
+   It decodes through `importer.decode(source, fmt.rate, …)` and writes with `PcmWriter` to `partial_path(dest)` (`<dir>/.<file name>.partial`, created exclusively). After every decoded chunk it calls `progress(written / expected)` (expected: `frames` scaled by `fmt.rate / source rate`, else the source's frames scaled) and returns `Cancelled` when `cancel` is set. On any error or cancel it removes the partial it created (never a path it did not create). `PendingExport` holds the partial, the destination, `replace` and the `Exported`; its `Drop` removes an uncommitted partial. `commit` uses `std::fs::rename` with `replace`, else `rename_excl`. `commit_numbered` tries `dest`, then, after stripping a trailing ` <n>` from the stem (so a precomputed `A-B 2` taken meanwhile becomes `A-B 3`, not `A-B 2 2`), `"<base> <n>.<ext>"` for n = 2, 3, … (up to 9999) with `rename_excl`, taking the first that succeeds. `export` is `write_partial(…)?.commit()`.
 
 - [ ] **Step 4: Run the tests and the gates.** Expected: core-media +12, platform-macos +2.
 
@@ -988,26 +993,28 @@ Counts: Rust +14 on macOS (core-media 12, platform-macos 2); +12 on Linux.
 
 **The stem taps (pre-flight C1).** `Renderer::process_inner` loops over runs, and each run's graph buffers hold only that run, so a strip's `post` read after the block holds only the last run. The taps capture every run instead:
 1. `Renderer` gains `stems: Option<Box<StemTaps>>` (None in `new`). `set_stem_taps` (not RT) builds it: master and the given strips, deduplicated, each with `left`/`right` of `cfg.max_frames` and `gates` with capacity `cfg.max_frames / MIN_RUN + 2`. Strips are resolved to nodes lazily, per run, with `Graph::strip_node` (a binary search: the graph may arrive after the taps are set).
-2. At the start of each block (before the run loop), `begin_block(frames)` zero-fills `0..frames` of each tap and clears its gates (no deallocation). // RT
-3. In `render_graph`'s `RunResult::Done` arm, after `write_master`, `capture(g, at, frames)` copies each tap's post into `tap[at..at + frames]` with `Graph::copy_strip_post` (its `// SAFETY:` is `write_master`'s: after `Done`, before the next run) and pushes `(at, node_audible(node))` when it differs from the last entry (or is the first). A run the graph skips (no graph yet, the `max_frames` guard) leaves zeros and no gate. // RT
+2. First in each block (right after the output is zeroed, before `process_inner`'s early returns), `begin_block(frames)` zero-fills `0..frames` of each tap and clears its gates (no deallocation). // RT
+3. In `render_graph`'s `RunResult::Done` arm, after `write_master`, `capture(g, at, frames)` copies each tap's post into `tap[at..at + frames]` with `Graph::copy_strip_post` (its `// SAFETY:` is `write_master`'s: after `Done`, before the next run) and pushes `(at, node_audible(node))` when it differs from the last entry (or is the first). The push is skipped when `gates.len() == gates.capacity()` (the entry then overwrites the last one), so `capture` never allocates whatever the run count. A run the graph skips (no graph yet, the `max_frames` guard) leaves zeros and no gate. // RT
 4. `stem_taps` (not RT) answers each tap's block with the current graph's `strip_arrival` / `feed_arrival` (master: `latency` for both).
 5. No live engine sets taps, so playback does nothing new. `rt_alloc_bounce` proves the capture allocation-free under rt-check.
 
-In `render.rs`, the per-block reset:
+In `render.rs`, the per-block reset, first in `process_inner` (before its early returns: a busy block and an oversized block then read as zeros with no gates; the taps are renderer-owned and never touched by workers):
 
 Find:
 ```rust
-        let mut missed = false;
-        let mut offset = 0u32;
+        for ch in out.iter_mut() {
+            ch.fill(0.0);
+        }
 ```
 Replace:
 ```rust
-        let mut missed = false;
+        for ch in out.iter_mut() {
+            ch.fill(0.0);
+        }
         // A bounce's stem taps start the block afresh (plan 5f-2, pre-flight C1). // RT
         if let Some(t) = self.stems.as_deref_mut() {
             t.begin_block(frames);
         }
-        let mut offset = 0u32;
 ```
 
 and the per-run capture:
@@ -1348,6 +1355,36 @@ fn a_written_mute_cuts_the_heard_stem_where_it_cuts_the_mix() {
     assert!(file[cut] != 0.0 && file[(6 * QF) as usize] != 0.0, "the file stem plays on");
 }
 
+/// Owner answer 3 (Ruling 5): a mute written on the latent bus a track
+/// plays into cuts the track's heard stem on the mix's own frame: each
+/// chain strip's gate is read at its own feed arrival (here 1000 frames
+/// after the track's). The file stem plays on.
+#[test]
+fn a_written_bus_mute_cuts_the_heard_stem_where_it_cuts_the_mix() {
+    let (d, seq) = doc(1000, None);
+    let (path, bus) = path_and_bus(&d);
+    let mut b = Builder::from_doc(d);
+    b.mixer(MixerCmd::SetOutput { strip: path, output: Output::Bus(bus) }).unwrap();
+    let l = b.lane(seq, "Auto", None).unwrap();
+    let at = 3 * Q + 320;
+    let points = [(0, 0.0), (at, 1.0)]
+        .into_iter()
+        .map(|(t, v)| EventSpec::new(Tick(t), EventBody::Automation { target: AutomationTarget::StripMute(bus), value: v }))
+        .collect();
+    b.events(seq, l, points).unwrap();
+    let d = b.finish();
+    let heard = HeardStem::of(d.mixer(), path);
+    assert!(heard.chain.contains(&bus), "{heard:?}");
+    let mut r = rig(&d, seq);
+    let (got, _) = run(&mut r, &BounceSpec { stems: vec![path], heard_stems: vec![heard], ..spec(8) });
+    let (mix, file, inplace) = (&got[0], &got[1], &got[2]);
+    let cut = (QF as usize..mix.len()).find(|f| mix[*f..].iter().all(|x| *x == 0.0)).unwrap();
+    assert!(cut.abs_diff(72_500) <= 32, "the mix cuts at the bus's written mute: {cut}");
+    assert!(inplace[cut - 1] != 0.0 && inplace[cut..].iter().all(|x| *x == 0.0), "the heard stem cuts at {cut} too");
+    assert_eq!(&inplace[..cut], &file[..cut], "and is the file stem before it");
+    assert!(file[cut] != 0.0, "the file stem plays on");
+}
+
 #[test]
 fn a_silent_end_adds_no_tail() {
     let (d, seq) = doc(0, None);
@@ -1388,11 +1425,17 @@ fn a_zero_cap_is_the_range() {
 fn a_selection_starts_mid_song() {
     let (d, seq) = doc(1000, None);
     let mut r = rig(&d, seq);
-    let (got, stats) = run(&mut r, &BounceSpec { start: Tick(3 * Q), end: Tick(5 * Q), ..spec(0) });
+    // A stem too: it sounds across the end-of-playing split (120 000 frames
+    // is not a block multiple), so every run of the last block is in it.
+    let stem = path_and_bus(&d).0;
+    let (got, stats) = run(&mut r, &BounceSpec { stems: vec![stem], start: Tick(3 * Q), end: Tick(5 * Q), ..spec(0) });
     assert_eq!(stats.range, 2 * QF);
+    assert_ne!(stats.range % u64::from(BLOCK), 0);
     let k = got[0][0] / value(100 + 2 * QF);
+    let ks = got[1][0] / value(100 + 2 * QF);
     for i in 0..(2 * QF) {
         assert!((got[0][i as usize] - k * value(100 + 2 * QF + i)).abs() < 1e-6, "frame {i}");
+        assert!((got[1][i as usize] - ks * value(100 + 2 * QF + i)).abs() < 1e-6, "stem frame {i}");
     }
 }
 
@@ -1608,7 +1651,7 @@ VIZDAW_EOF
 
    In `graph/exec.rs`, `Graph` gains `strip_nodes: Box<[(StripId, usize)]>`, sorted, built in `build` beside `strip_arrive`, and `strip_node`, `copy_strip_post` (the `write_master` pattern: `// SAFETY:` after `Exec::run` returned `Done`, before another run) and `node_audible`. In `render.rs`, `StemTaps` (private: a `Vec` of taps, each `strip`, `left`, `right`, `gates`), `begin_block` and `capture` (both `// RT`), the two Find/Replace edits above, `set_stem_taps`, `stem_taps` and `StemTap`. Then `bounce.rs` by the algorithm above, with `HeardStem::of` following `Strip::output` (`Output::Bus(b)` → `b`, `Output::Master` → master) and `SilentMidi`.
 
-- [ ] **Step 4: Run the tests and the gates**, including the rt-check gates with `--test rt_alloc_bounce`. Expected: core-engine +13 (12 in `bounce.rs`, 1 in `rt_alloc_bounce.rs`), and rt-check green.
+- [ ] **Step 4: Run the tests and the gates**, including the rt-check gates with `--test rt_alloc_bounce`. Expected: core-engine +15 (14 in `bounce.rs`, 1 in `rt_alloc_bounce.rs`), and rt-check green.
 
 - [ ] **Step 5: Commit**
 
@@ -1622,7 +1665,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01F7df6grqTdqHgc2d2X359P"
 git log -1 --oneline && git show --stat HEAD | tail -10
 ```
-Counts: Rust +13 (Linux too).
+Counts: Rust +15 (Linux too).
 
 ---
 
@@ -1829,7 +1872,7 @@ Counts: Rust +3 on macOS (core-host 2, platform-macos 1); +2 on Linux.
   // jobs.rs
   JobKindRow::Bounce
   Work::Bounce { files: Vec<(String, Result<Vec<Imported>, String>)>, target: Option<ImportTargetRow>,
-      exported: Vec<crate::bounce::BouncedFileRow>, problems: Vec<String> }
+      exported: Vec<crate::bounce::BouncedFileRow>, problems: Vec<String>, failed: Option<String> }
   // plugins.rs
   pub struct BounceCopies { pub token: u64, pub factory: core_host::ShelfFactory, pub ready: Arc<AtomicBool>, pub problems: Arc<Mutex<Vec<String>>> }
   pub fn start_bounce(session: u64, doc: &Document, rate: f64, max: u32) -> Result<BounceCopies, VizError>;
@@ -1864,7 +1907,7 @@ The job thread (Ruling 12):
 4. drops the engine; adds `stats.nonfinite`, `stats.underruns`, `take_stream_errors` and the copies' problems to the job's problems;
 5. if `add_to_project`, imports the project's sources with `import_reserved(caf_importer, …, project format, name)`: the Mix ("Mix" or the file's stem), or each heard stem (the strip's stem file name, or the strip name) (0.8–0.9);
 6. writes every export's partial (`core_media::export::write_partial`, `frames: Some(stats.frames)`): the Mix, or each of `stems`, to `path` or `stem_paths(folder, names, ext)` (0.9–1.0);
-7. checks `cancel` a last time, then renames: `commit` for the mix, `commit_numbered` for stems. A file's `clipped > 0` adds "<file name>: <n> samples clipped" to the problems;
+7. checks `cancel` a last time, then renames: `commit` for the mix, `commit_numbered` for stems. A file's `clipped > 0` adds "<file name>: <n> samples clipped" to the problems. On a rename error the job removes its imports and the remaining partials, and still returns `Work::Bounce` with `files` empty, `exported` = the files already in place and `failed: Some(<error>)`, so the result names them (Rulings 10, 12);
 8. removes the temporaries, and returns `Work::Bounce` (or `Work::Cancelled` after removing the imports, partials and temporaries).
 
 `apply_jobs` applies `Work::Bounce` through `apply_import_as`, the import's apply generalised by this refactor:
@@ -1920,10 +1963,14 @@ Replace:
                     target,
                     exported,
                     problems,
+                    failed,
                 } => {
                     // Exported files are already in place (Ruling 12): kept
-                    // whatever the import's apply does.
-                    let applied = if files.is_empty() {
+                    // whatever the import's apply does, and named even when
+                    // a later rename failed.
+                    let applied = if let Some(why) = failed {
+                        Err((VizError::Io { message: why }, Vec::new()))
+                    } else if files.is_empty() {
                         Ok((Vec::new(), Vec::new()))
                     } else {
                         apply_import_as(inner, &root, files, target, &ImportAs::BOUNCE)
@@ -2032,7 +2079,7 @@ Replace:
             ])
 ```
 
-`Inner` gains `bounce_copies: Option<(u64, u64)>`, `bounce_results: BTreeMap<u64, BounceResultRow>` and (test hook) `bounce_cancel_at: Option<f32>`, all empty in `Session::with`. Save As already refuses while any job is unapplied ("Wait for the import or conversion to finish, then save."), which covers a running bounce (pre-flight M15).
+`Inner` gains `bounce_copies: Option<(u64, u64)>`, `bounce_results: BTreeMap<u64, BounceResultRow>` and (test hook) `bounce_cancel_at: Option<f32>`, all empty in `Session::with`. `Inner.bounce_cancel_at`, its initialiser and the line that hands it to the job are `#[cfg(feature = "test-hooks")]` like `debug_bounce_cancel_at` itself; without the feature the job never cancels itself (so `cargo clippy -p core-ffi --lib` builds and ships no hook). Save As already refuses while any job is unapplied ("Wait for the import or conversion to finish, then save."), which covers a running bounce (pre-flight M15).
 
 In `plugins.rs`, the registry gains `bounces: BTreeMap<u64, BounceEntry>` (`{ session, host, ready, problems }`, tokens from a counter). `start_bounce` makes a `PluginHost::new(rate, max)` with AU on macOS, `catalog::apply`, `set_offline_render(true)`, `sync(doc)`. `tick_bounces` idles each bounce host; when `pending() == 0` it fills `problems` (the slots whose `offline_state` is `Some(false)`: "<name> renders in real time only") and sets `ready`. `end_bounce` removes the entry, `sync(&Document::new())`, `idle()`, and moves the host to `closing` while it has `retiring() > 0`. A dropped session's bounce hosts end too:
 
@@ -2123,6 +2170,9 @@ Replace:
         /// Clipped samples, placeholders, plugins without offline mode,
         /// underruns, offline media (Rulings 6–8, 13).
         problems: Vec<String>,
+        /// A rename failed after `exported` were in place (Ruling 12): the
+        /// job is Failed with this message, its files still reported.
+        failed: Option<String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,
@@ -2202,7 +2252,7 @@ use core_model::document::Document;
 use core_model::event::Fade;
 use core_model::format::{AudioFormat, BitDepth};
 use core_model::ids::{SeqId, StripId};
-use core_model::mixer::{Output, PluginFormat, PluginRef, StripKind};
+use core_model::mixer::{AuxSend, Output, PluginFormat, PluginRef, StripKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -2444,23 +2494,36 @@ fn stem_files_get_safe_unique_names() {
         b.mixer(MixerCmd::RenameStrip { strip: path, name: "A/B".into() }).unwrap();
         extra.push(b.bus("A:B").unwrap());
         extra.push(b.bus(".hidden").unwrap());
+        let empty = b.bus("Unnamed").unwrap();
+        b.mixer(MixerCmd::RenameStrip { strip: empty, name: String::new() }).unwrap();
+        extra.push(empty);
+        extra.push(b.bus(&"é".repeat(200)).unwrap());
     });
     let folder = p.dir.path().join("stems");
     std::fs::create_dir(&folder).unwrap();
     std::fs::write(folder.join("A-B.wav"), b"keep").unwrap();
-    let strips = vec![p.path, extra[0].0, extra[1].0];
+    let strips = vec![p.path, extra[0].0, extra[1].0, extra[2].0, extra[3].0];
     let req = BounceRequestRow {
         source: BounceSourceRow::Stems { strips },
         path: Some(folder.display().to_string()),
         replace: true,
         ..mix_to(&p, &folder)
     };
-    let want: Vec<String> = ["A-B 2.wav", "A-B 3.wav", "-hidden.wav"].iter().map(|n| folder.join(n).display().to_string()).collect();
-    assert_eq!(p.s.bounce_check(req.clone()).unwrap().files, want);
+    let mut want: Vec<String> = ["A-B 2.wav", "A-B 3.wav", "-hidden.wav"].iter().map(|n| folder.join(n).display().to_string()).collect();
+    want.push(folder.join(format!("Strip {}.wav", extra[2].0)).display().to_string());
+    let files = p.s.bounce_check(req.clone()).unwrap().files;
+    assert_eq!(files[..4], want[..], "an empty name becomes Strip <id>");
+    // The long name is cut at a character boundary so that `.<name> NN.wav.partial` fits 255 bytes.
+    let long = Path::new(&files[4]).file_name().unwrap().to_str().unwrap().to_string();
+    assert!(long.ends_with(".wav") && long.len() <= 255 - ".partial".len() - 1, "{} bytes", long.len());
+    assert!(long.starts_with('é'));
+    want.push(files[4].clone());
     let j = wait_job(&p.s, p.s.bounce(req).unwrap());
     assert_eq!(j.state, JobStateRow::Done, "{j:?}");
     assert_eq!(std::fs::read(folder.join("A-B.wav")).unwrap(), b"keep", "never replaced, even with replace");
-    assert_eq!(names(&folder), ["-hidden.wav", "A-B 2.wav", "A-B 3.wav", "A-B.wav"]);
+    let mut on_disk = vec!["-hidden.wav".to_string(), "A-B 2.wav".into(), "A-B 3.wav".into(), "A-B.wav".into(), format!("Strip {}.wav", extra[2].0), long.clone()];
+    on_disk.sort();
+    assert_eq!(names(&folder), on_disk);
     assert!(sounds(&wav_channel(&folder.join("A-B 2.wav"), 0)), "the track's stem");
     let res = p.s.bounce_result(j.id).unwrap().unwrap();
     assert_eq!(res.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(), want);
@@ -2513,21 +2576,30 @@ fn add_to_project_respects_mute_and_solo_through_the_routing_and_files_do_not() 
         let bus = b.bus("Bus").unwrap();
         b.mixer(MixerCmd::SetOutput { strip: path, output: Output::Bus(bus) }).unwrap();
         ids.push(bus);
-        ids.push(b.bus("Other").unwrap());
+        // "Other" gets a send from the track; "Third" is fed by nothing.
+        let other = b.bus("Other").unwrap();
+        b.mixer(MixerCmd::AddSend { strip: path, send: AuxSend::new(other) }).unwrap();
+        ids.push(other);
+        ids.push(b.bus("Third").unwrap());
     });
-    let (track, bus, other) = (p.path, ids[0].0, ids[1].0);
+    let (track, bus, other, third) = (p.path, ids[0].0, ids[1].0, ids[2].0);
     // (case, file track, file bus, heard track, heard bus)
-    let cases: [(&str, bool, bool, bool, bool); 4] = [
+    let cases: [(&str, bool, bool, bool, bool); 5] = [
         ("nothing", true, true, true, true),
         ("mute the track", true, false, false, false),
         ("mute the bus", true, true, false, false),
         // The track's solo-silenced edge carries nothing into the bus.
         ("solo another strip", true, false, false, false),
+        // The track feeds the soloed bus (by its send), so it is kept and
+        // still feeds Bus; Bus is solo-silenced, and the heard track (its
+        // main path, Ruling 5: sends are not in the chain) is silent.
+        ("solo the send's bus", true, true, false, false),
     ];
     for (k, (case, ft, fb, ht, hb)) in cases.into_iter().enumerate() {
         p.s.set_strip_mute(track, case == "mute the track").unwrap();
         p.s.set_strip_mute(bus, case == "mute the bus").unwrap();
-        p.s.set_strip_solo(other, case == "solo another strip").unwrap();
+        p.s.set_strip_solo(third, case == "solo another strip").unwrap();
+        p.s.set_strip_solo(other, case == "solo the send's bus").unwrap();
         let folder = p.dir.path().join(format!("case {k}"));
         std::fs::create_dir(&folder).unwrap();
         let req = BounceRequestRow {
@@ -2548,8 +2620,9 @@ fn add_to_project_respects_mute_and_solo_through_the_routing_and_files_do_not() 
     }
 }
 
-/// Ruling 12: a cancel while the imports are written (progress 0.85)
-/// removes the imports, the temporaries and every partial; the copies end.
+/// Ruling 12: a cancel during the render (0.4), while the imports are
+/// written (0.85) or before the start removes the imports, the temporaries
+/// and every partial; the copies end.
 #[test]
 fn cancel_removes_everything_the_bounce_wrote() {
     let _g = serial();
@@ -2566,6 +2639,14 @@ fn cancel_removes_everything_the_bounce_wrote() {
         add_to_project: true,
         ..mix_to(&p, &folder)
     };
+    // During the render (pre-check M-6): the temporary CAFs go.
+    p.s.debug_bounce_cancel_at(Some(0.4)).unwrap();
+    let j = wait_job(&p.s, p.s.bounce(req.clone()).unwrap());
+    assert_eq!(j.state, JobStateRow::Cancelled, "{j:?}");
+    assert!(names(&folder).is_empty() && incoming(&p).is_empty(), "no file, no temporary");
+    assert_eq!(p.s.media().unwrap().len(), items);
+    assert_eq!(vizdaw_ffi::plugins::bounce_hosts(), 0);
+    // While the imports are written.
     p.s.debug_bounce_cancel_at(Some(0.85)).unwrap();
     let j = wait_job(&p.s, p.s.bounce(req.clone()).unwrap());
     assert_eq!(j.state, JobStateRow::Cancelled, "{j:?}");
@@ -2652,7 +2733,13 @@ fn a_copy_that_fails_is_a_pass_through_and_named() {
 #[test]
 fn a_bounce_while_playing_keeps_playback_running() {
     let _g = serial();
-    let p = project(|_, _, _| {});
+    // A second region at bar 100 keeps the song playing for minutes, so a
+    // slow build never reaches its end while the bounce runs (pre-check M-13).
+    let p = project(|b, seq, _| {
+        let m = *b.doc().media().keys().next().unwrap();
+        let l = b.lane(seq, "Late", None).unwrap();
+        b.region(seq, l, 400 * Q, m, 0, FRAMES, 0.0, Fade::default(), Fade::default()).unwrap();
+    });
     p.s.play(p.seq).unwrap();
     idle_until(&p.s, |s| s.transport().unwrap().playing);
     let loads = vizdaw_ffi::host::loads();
@@ -2664,7 +2751,8 @@ fn a_bounce_while_playing_keeps_playback_running() {
 }
 
 /// Rulings 6 and 12; pre-flight M13, M15: one bounce per session; not inside
-/// an open edit; no Save As while it runs; the copies always end.
+/// an open edit; no Save As while it runs; the copies always end, also
+/// at close.
 #[test]
 fn one_bounce_at_a_time() {
     let _g = serial();
@@ -2685,7 +2773,13 @@ fn one_bounce_at_a_time() {
     p.s.debug_hold_jobs(false).unwrap();
     assert_eq!(wait_job(&p.s, id).state, JobStateRow::Cancelled);
     assert_eq!(vizdaw_ffi::plugins::bounce_hosts(), 0);
-    assert_eq!(wait_job(&p.s, p.s.bounce(req).unwrap()).state, JobStateRow::Done, "then the next one runs");
+    assert_eq!(wait_job(&p.s, p.s.bounce(req.clone()).unwrap()).state, JobStateRow::Done, "then the next one runs");
+    // Closing the session ends a held bounce's copies (pre-flight I2).
+    p.s.debug_hold_jobs(true).unwrap();
+    p.s.bounce(req).unwrap();
+    assert_eq!(vizdaw_ffi::plugins::bounce_hosts(), 1);
+    p.s.close().unwrap();
+    assert_eq!(vizdaw_ffi::plugins::bounce_hosts(), 0, "close ends the copies");
 }
 
 /// Ruling 9, pre-flight I9.
@@ -2793,6 +2887,8 @@ fn hostile_bounce_requests_are_refused() {
     let p = project(|_, _, _| {});
     let d = p.dir.path();
     std::fs::create_dir(d.join("folder.wav")).unwrap();
+    // A real folder, so the `..` case fails for its `..` alone (pre-check M-4).
+    std::fs::create_dir(d.join("sub")).unwrap();
     std::fs::write(d.join("file.txt"), b"x").unwrap();
     let before = names(d);
     let ok = mix_to(&p, &d.join("x.wav"));
@@ -3995,7 +4091,7 @@ VIZDAW_EOF
 tail -2 docs/feature-backlog.md
 ```
 
-- [ ] **Step 4: Run the full gates**, including the rt-check gates (with `--test rt_alloc_bounce`), the workspace tests, the Linux clippy, Swift, `scripts/make-app.sh` and the e2e. Expected (from the baseline Rust 1802 / 15 ignored, Swift 933, e2e 11, registry 144): Rust +14 +13 +3 +17 +1 = **+48 → 1850 passed, 16 ignored** (macOS; the e2e adds one ignored test); on Linux +45 (12 + 13 + 2 + 17 + 1); Swift +8 → **941**; e2e **12**; registry **145**.
+- [ ] **Step 4: Run the full gates**, including the rt-check gates (with `--test rt_alloc_bounce`), the workspace tests, the Linux clippy, Swift, `scripts/make-app.sh` and the e2e. Expected (from the baseline Rust 1802 / 15 ignored, Swift 933, e2e 11, registry 144): Rust +14 +15 +3 +17 +1 = **+50 → 1852 passed, 16 ignored** (macOS; the e2e adds one ignored test); on Linux +47 (12 + 15 + 2 + 17 + 1); Swift +8 → **941**; e2e **12**; registry **145**.
 
 - [ ] **Step 5: Commit**
 
