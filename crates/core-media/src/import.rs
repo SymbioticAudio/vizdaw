@@ -162,7 +162,8 @@ pub fn import_file(
 }
 
 /// Characters a file name may not hold: path separators and NUL become
-/// "-"; leading dots are dropped (no hidden files).
+/// "-"; leading dots are dropped, with the spaces between them, until
+/// neither starts the stem (no hidden files; final review M5).
 fn clean_stem(stem: &str) -> String {
     let s: String = stem
         .chars()
@@ -174,7 +175,10 @@ fn clean_stem(stem: &str) -> String {
             }
         })
         .collect();
-    let s = s.trim_start_matches('.').trim().to_string();
+    let s = s
+        .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
+        .trim_end()
+        .to_string();
     if s.is_empty() { "Audio".into() } else { s }
 }
 
@@ -580,6 +584,16 @@ mod tests {
             v
         };
         (names(pkg.join(MEDIA_DIR)), names(pkg.join(INCOMING_DIR)))
+    }
+
+    /// Final review M5: no leading dot is left, however dots and spaces
+    /// are mixed.
+    #[test]
+    fn clean_stems_never_start_with_a_dot() {
+        assert_eq!(clean_stem(". .Kick"), "Kick");
+        assert_eq!(clean_stem(" . .a/b"), "a-b");
+        assert_eq!(clean_stem(". . "), "Audio");
+        assert_eq!(clean_stem("..Kick"), "Kick");
     }
 
     #[test]

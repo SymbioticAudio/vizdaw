@@ -1527,19 +1527,33 @@ impl Session {
                 // Its edit copies go to the Trash first, never unlinked
                 // (plan 5f-3 Ruling 3, owner answer 2026-11-03): Save As
                 // does not carry them, so their next apply says they are
-                // gone. A titled session has no scratch package.
+                // gone. So do its recordings the project did not carry
+                // (ruling F-1; spec §6.5): those it carried were copied
+                // into the new package. A titled session has no scratch
+                // package.
                 let scratch = crate::media::scratch_root(self.id);
                 let trash = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                let mut carried: std::collections::BTreeSet<String> = inner
+                    .history
+                    .referenced_media_anywhere()
+                    .into_keys()
+                    .collect();
+                carried.extend(inner.recorded_keep());
+                let recorded = crate::record::RECORDED_DIR;
                 let left = crate::external::trash_files_in(
                     &scratch.join(crate::external::EDITS_DIR),
                     trash.as_deref(),
-                    true,
+                    &crate::external::partial,
+                ) + crate::external::trash_files_in(
+                    &scratch.join(recorded),
+                    trash.as_deref(),
+                    &|name| carried.contains(&format!("{recorded}/{name}")),
                 );
                 if left == 0 {
                     let _ = std::fs::remove_dir_all(&scratch);
                 } else {
                     inner.news.problems.push(format!(
-                        "{left} edit copies were left in {}.",
+                        "{left} recordings or edit copies were left in {}.",
                         scratch.display()
                     ));
                 }
@@ -2818,15 +2832,12 @@ impl Session {
                 // (dot-named partials) go with the package (ruling T3-1).
                 // A copy still being written keeps the package (review M1).
                 let mut left = inner.edits_writing as usize;
-                for (d, skip_partials) in [
-                    (crate::record::RECORDED_DIR, false),
-                    (crate::external::EDITS_DIR, true),
+                let none = |_: &str| false;
+                for (d, skip) in [
+                    (crate::record::RECORDED_DIR, &none as &dyn Fn(&str) -> bool),
+                    (crate::external::EDITS_DIR, &crate::external::partial),
                 ] {
-                    left += crate::external::trash_files_in(
-                        &scratch.join(d),
-                        dir.as_deref(),
-                        skip_partials,
-                    );
+                    left += crate::external::trash_files_in(&scratch.join(d), dir.as_deref(), skip);
                 }
                 if left == 0 {
                     let _ = std::fs::remove_dir_all(scratch);
@@ -8217,12 +8228,14 @@ impl Session {
                     .media()
                     .get(&media)
                     .ok_or_else(|| crate::events::bad(crate::external::OFFLINE))?;
+                let name = crate::external::root_name(inner.doc(), media)
+                    .unwrap_or_else(|| item.name.clone());
                 let out = (
                     root.join(&item.path),
                     start,
                     frames,
                     root.join(crate::external::EDITS_DIR),
-                    crate::external::safe_stem(&item.name),
+                    crate::external::safe_stem(&name),
                     core_media::export::ExportFormat {
                         container: core_media::export::Container::Wav,
                         depth: format.depth,
@@ -8276,7 +8289,8 @@ impl Session {
     /// What Reload finds for region `event` (Ruling 7; pre-flight I10):
     /// its copy in this session; `Gone` when that copy is not on disk, or
     /// when there is none in this session and the region's media came from
-    /// an external edit (the project was reopened); `NoEdit` otherwise.
+    /// an external edit (the project was reopened) that no live copy here
+    /// shares; `NoEdit` otherwise (final review M12).
     /// `Model` for an unknown event or a non-region.
     pub fn external_edit(
         &self,
@@ -8302,13 +8316,22 @@ impl Session {
                     },
                 );
             }
-            let edited = inner.doc().media().get(&media).is_some_and(|m| {
-                matches!(
-                    m.origin,
-                    core_model::document::MediaOrigin::ExternalEdit { .. }
-                )
+            let origin = inner
+                .doc()
+                .media()
+                .get(&media)
+                .and_then(|m| match m.origin {
+                    core_model::document::MediaOrigin::ExternalEdit { from } => Some(from),
+                    _ => None,
+                });
+            // A region sharing an edit whose copy is live here (a split
+            // part, a pasted duplicate) has no edit of its own (final
+            // review M12).
+            let sibling = inner.edits.iter().any(|(e, c)| {
+                Some(c.from) == origin
+                    || crate::external::region_span(inner.doc(), *e).is_ok_and(|(m, ..)| m == media)
             });
-            Ok(if edited {
+            Ok(if origin.is_some() && !sibling {
                 ExternalEditStateRow::Gone
             } else {
                 ExternalEditStateRow::NoEdit
@@ -8320,8 +8343,9 @@ impl Session {
     /// External Edit job (Ruling 6): the job ID; `job` reports it and
     /// applies it as one undo step "External Edit". `Model` for a path
     /// that is not the region's copy (relative, over
-    /// [`crate::external::MAX_PATH_BYTES`], or naming another file, e.g.
-    /// through `..`; `Path`'s `==` takes `//` or `/./` as the same), a
+    /// [`crate::external::MAX_PATH_BYTES`], holding `..`, or naming another
+    /// file; the same file under another spelling of its package, as after
+    /// Save As, is the copy: final review I1), a
     /// region without a copy, a region that is gone (its copy is then
     /// forgotten), or a copy that is gone; `Busy` inside an open edit and
     /// while a Format, Convert, Relink, Bounce or External Edit job is
@@ -8349,7 +8373,10 @@ impl Session {
             let Some(copy) = inner.edits.get(&ev).cloned() else {
                 return Err(crate::events::bad(NO_EDIT));
             };
-            if copy.abs != p {
+            let on_disk = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+            // The copy under any spelling of its package (final review I1);
+            // a copy that is gone says so below, whatever `path` was.
+            if !crate::external::names_copy(&copy.abs, &p) && on_disk(&copy.abs) {
                 return Err(VizError::Model {
                     message: format!("{path} is not this region's edit copy"),
                 });
@@ -8358,9 +8385,11 @@ impl Session {
                 inner.edits.remove(&ev);
                 return Err(crate::events::bad(REGION_DELETED));
             }
-            if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
+            if !on_disk(&copy.abs) {
                 return Err(crate::events::bad(GONE));
             }
+            // Imported under the core's spelling.
+            let p = copy.abs.clone();
             inner.media_jobs_idle()?;
             let root = inner.root(self.id);
             let format = inner.doc().settings().format;

@@ -715,6 +715,57 @@ fn save_as_onto_the_same_package_spelled_otherwise_keeps_the_copy() {
     );
 }
 
+/// Final review I1: after Save As onto the same package spelled another
+/// way, the app still watches the copy under the spelling Open returned;
+/// an apply with that spelling is taken (it names the same file), while
+/// another file, and a `..` spelling, are still refused.
+#[test]
+fn the_apps_spelling_of_the_copy_applies_after_save_as_spelled_otherwise() {
+    let _g = serial();
+    let p = build(BitDepthRow::Int24, true);
+    // What the app holds and sends with every apply.
+    let held = p.s.open_external(p.second).unwrap().path;
+    let link = p.dir.path().join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(p.dir.path(), &link).unwrap();
+    let mut spellings = vec![
+        format!("{}/", p.pkg().display()),
+        link.join("P.vizdaw").display().to_string(),
+    ];
+    if cfg!(target_os = "macos") {
+        // APFS is case-insensitive by default.
+        spellings.push(p.dir.path().join("p.vizdaw").display().to_string());
+    }
+    for spelling in spellings {
+        p.s.save_as(spelling.clone()).unwrap();
+        let job =
+            p.s.apply_external_edit(p.second, held.clone())
+                .unwrap_or_else(|e| panic!("{spelling}: {e}"));
+        let j = wait_job(&p.s, job);
+        // macOS only: importing a WAV goes through ExtAudioFile (the CAF
+        // importer reads CAF only); elsewhere the job ends Failed.
+        #[cfg(target_os = "macos")]
+        assert_eq!(j.state, JobStateRow::Done, "{spelling}: {j:?}");
+        let _ = j;
+    }
+    let other = Path::new(&held).with_file_name("other.wav");
+    std::fs::copy(&held, &other).unwrap();
+    let dotted = format!(
+        "{}/../Edits/tone edit 1.wav",
+        Path::new(&held).parent().unwrap().display()
+    );
+    for bad in [other.display().to_string(), dotted] {
+        assert!(
+            matches!(
+                p.s.apply_external_edit(p.second, bad.clone()),
+                Err(VizError::Model { .. })
+            ),
+            "{bad}"
+        );
+    }
+    p.s.close().unwrap();
+}
+
 /// Owner answer 2026-11-03 (pre-flight I2): an untitled project's copies
 /// go to the Trash at close and at Save As, never unlinked; after Save As
 /// the copy is gone.
@@ -1075,5 +1126,79 @@ fn a_split_or_moved_region_is_relinked_where_it_is() {
         "the split's other part keeps the original"
     );
     assert_eq!(p.region(p.first).media, Some(p.media));
+    p.s.close().unwrap();
+}
+
+/// Final review M10: a second Open on an edited region names its copy after
+/// the media the edits started from, so names do not grow on every round
+/// trip ("tone edit 2", not "tone edit 1 edit 1").
+#[cfg(target_os = "macos")] // macOS only: importing a WAV goes through ExtAudioFile (the CAF importer reads CAF only)
+#[test]
+fn a_round_trip_does_not_grow_the_name() {
+    let _g = serial();
+    let p = build(BitDepthRow::Int24, true);
+    let mut names = Vec::new();
+    for _ in 0..2 {
+        let copy = p.s.open_external(p.second).unwrap().path;
+        names.push(
+            Path::new(&copy)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        replace_with_wav(Path::new(&copy), 2, 48_000, 12_000);
+        let job = p.s.apply_external_edit(p.second, copy).unwrap();
+        assert_eq!(wait_job(&p.s, job).state, JobStateRow::Done);
+        names.push(media_row(&p.s, p.region(p.second).media.unwrap()).name);
+    }
+    assert_eq!(
+        names,
+        [
+            "tone edit 1.wav",
+            "tone edit 1",
+            "tone edit 2.wav",
+            "tone edit 2"
+        ]
+    );
+    p.s.close().unwrap();
+}
+
+/// Final review M12: a region sharing edited media with a region whose
+/// copy is live in this session (a split part with a new ID) has no edit
+/// of its own: Reload says so, not that a copy is gone.
+#[cfg(target_os = "macos")] // macOS only: importing a WAV goes through ExtAudioFile (the CAF importer reads CAF only)
+#[test]
+fn a_part_of_an_edited_region_has_no_edit_of_its_own() {
+    let _g = serial();
+    let p = build(BitDepthRow::Int24, true);
+    let copy = p.s.open_external(p.second).unwrap().path;
+    replace_with_wav(Path::new(&copy), 2, 48_000, 12_000);
+    let job = p.s.apply_external_edit(p.second, copy).unwrap();
+    assert_eq!(wait_job(&p.s, job).state, JobStateRow::Done);
+    let edited = p.region(p.second);
+    p.s.edit(
+        EditCommand::Audio {
+            edit: AudioEdit::Split {
+                event: p.second,
+                at: edited.tick + edited.duration / 2,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let part = region_rows(&p.s, p.seq, p.lane)
+        .into_iter()
+        .find(|r| r.id != p.first && r.id != p.second)
+        .unwrap();
+    assert_eq!(part.media, edited.media, "the part plays the edit");
+    assert_eq!(
+        p.s.external_edit(part.id).unwrap(),
+        ExternalEditStateRow::NoEdit
+    );
+    assert!(matches!(
+        p.s.external_edit(p.second).unwrap(),
+        ExternalEditStateRow::Copy { .. }
+    ));
     p.s.close().unwrap();
 }

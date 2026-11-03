@@ -907,7 +907,13 @@ pub fn file_safe(name: &str) -> String {
         })
         .take(100)
         .collect();
-    let s = s.trim().trim_start_matches('.').trim().to_string();
+    // Dots and spaces go from the start until neither is left (". .Vox"
+    // is "Vox"; final review M5): a dot-name is hidden, and the recovery
+    // offer and retention skip it.
+    let s = s
+        .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
+        .trim_end()
+        .to_string();
     if s.is_empty() { "Lane".into() } else { s }
 }
 
@@ -1458,5 +1464,10 @@ mod tests {
         );
         assert_eq!(file_safe("../a/b:c"), "-a-b-c");
         assert_eq!(file_safe(" .. "), "Lane");
+        // Final review M5: no leading dot is left, however they are mixed
+        // with spaces.
+        assert_eq!(file_safe(". .Vox"), "Vox");
+        assert_eq!(file_safe(" . . .x. "), "x.");
+        assert_eq!(file_safe(". . "), "Lane");
     }
 }

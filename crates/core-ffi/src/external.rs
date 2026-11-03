@@ -5,7 +5,7 @@
 
 use crate::error::VizError;
 use core_media::export::ExportFormat;
-use core_model::document::Document;
+use core_model::document::{Document, MediaOrigin};
 use core_model::event::EventBody;
 use core_model::ids::{EventId, MediaId};
 use std::path::{Component, Path, PathBuf};
@@ -94,9 +94,61 @@ pub fn safe_stem(name: &str) -> String {
     }
 }
 
-/// The copy's file name for media `name` and number `n`.
+/// The copy's file name for media `name` and number `n`, through the one
+/// pattern [`core_media::export::write_span`] writes (final review M11).
 pub fn copy_name(name: &str, n: u32) -> String {
-    format!("{} edit {n}.wav", safe_stem(name))
+    core_media::export::edit_copy_name(&safe_stem(name), n)
+}
+
+/// Whether `p`, a path the app sent, names `abs`, a region's copy (final
+/// review I1): the same path, or, with no `..` in it, the same regular
+/// file on disk (the same package spelled another way after Save As: a
+/// symlinked folder, another case). Any other file is not the copy.
+pub(crate) fn names_copy(abs: &Path, p: &Path) -> bool {
+    if abs == p {
+        return true;
+    }
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    same_file(abs, p)
+}
+
+/// Whether `a` and `b` are one regular file (its device and inode; a
+/// symlink in the last place is not followed).
+#[cfg(unix)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+        (Ok(x), Ok(y)) => x.is_file() && y.is_file() && x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// Whether `a` and `b` are one regular file (their canonical paths).
+#[cfg(not(unix))]
+fn same_file(a: &Path, b: &Path) -> bool {
+    let file = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+    file(a) && file(b) && matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
+
+/// The name a copy of `media` is called after (final review M10): the
+/// item the edits started from, following `ExternalEdit { from }` back,
+/// so names do not grow on every round trip; `media`'s own when that item
+/// is gone.
+pub(crate) fn root_name(doc: &Document, media: MediaId) -> Option<String> {
+    let items = doc.media();
+    let mut item = items.get(&media)?;
+    for _ in 0..items.len() {
+        match &item.origin {
+            MediaOrigin::ExternalEdit { from } => match items.get(from) {
+                Some(up) => item = up,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    Some(item.name.clone())
 }
 
 /// Region `event`'s media and span; `Model` for an unknown event or one
@@ -156,16 +208,28 @@ pub(crate) fn write_copy(
         })
 }
 
+/// Whether `name` in `Media/Edits` is a partial a copy is writing (or a
+/// crash left): not media; it goes with the folder (fold check M8).
+pub(crate) fn partial(name: &str) -> bool {
+    name.starts_with('.')
+}
+
 /// Moves every regular file in `dir` to the Trash (`trash`: the folder
 /// standing for it, as [`crate::retention::trash_dir`] resolved it, else
-/// the platform's); the count left behind (`dir` unreadable, an entry not
-/// read, or a file not moved), each named on stderr. With `skip_partials`
-/// (`Media/Edits`) dot-names are skipped: only a copy being written or a
-/// crash's partial is dot-named there. `Media/Recorded` passes `false`: a
-/// take may be dot-named, and recordings are never unlinked (spec §6.5;
-/// plan 5f-3 fix round 1, ruling T3-1). A missing `dir` leaves none. Never
-/// unlinks (plan 5c Ruling 15; plan 5f-3 owner answer 2026-11-03).
-pub(crate) fn trash_files_in(dir: &Path, trash: Option<&Path>, skip_partials: bool) -> usize {
+/// the platform's), except those whose file name `skip` takes; the count
+/// left behind (`dir` unreadable, an entry not read, or a file not moved),
+/// each named on stderr. `Media/Edits` skips dot-names ([`partial`]): only
+/// a copy being written or a crash's partial is dot-named there.
+/// `Media/Recorded` skips none at close (a take may be dot-named, and
+/// recordings are never unlinked: spec §6.5; plan 5f-3 fix round 1, ruling
+/// T3-1), and at an untitled Save As only those the project carried
+/// (ruling F-1). A missing `dir` leaves none. Never unlinks (plan 5c
+/// Ruling 15; plan 5f-3 owner answer 2026-11-03).
+pub(crate) fn trash_files_in(
+    dir: &Path,
+    trash: Option<&Path>,
+    skip: &dyn Fn(&str) -> bool,
+) -> usize {
     let rd = match std::fs::read_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
         // Unreadable: files may be in it (5c review minor b).
@@ -186,9 +250,7 @@ pub(crate) fn trash_files_in(dir: &Path, trash: Option<&Path>, skip_partials: bo
                 continue;
             }
         };
-        // A dot-name in `Media/Edits` is a partial a copy is writing (or a
-        // crash left): not media; it goes with the folder (fold check M8).
-        if skip_partials && e.file_name().to_string_lossy().starts_with('.') {
+        if skip(&e.file_name().to_string_lossy()) {
             continue;
         }
         if e.path().is_file() {
