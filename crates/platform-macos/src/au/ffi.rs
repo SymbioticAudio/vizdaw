@@ -20,10 +20,10 @@ use objc2_audio_toolbox::{
     AudioUnitSetProperty, AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent,
     kAudioUnitProperty_ClassInfo, kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount,
     kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
-    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_ParameterInfo,
-    kAudioUnitProperty_ParameterList, kAudioUnitProperty_RequestViewController,
-    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat,
-    kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
+    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_OfflineRender,
+    kAudioUnitProperty_ParameterInfo, kAudioUnitProperty_ParameterList,
+    kAudioUnitProperty_RequestViewController, kAudioUnitProperty_SetRenderCallback,
+    kAudioUnitProperty_StreamFormat, kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
@@ -361,6 +361,19 @@ impl Unit {
             kAudioUnitScope_Global,
             0,
             &frames,
+        )
+    }
+
+    /// Asks the unit to render offline (`on`) or in real time
+    /// (`kAudioUnitProperty_OfflineRender`, global scope; plan 5f-2
+    /// Ruling 7).
+    pub(crate) fn set_offline_render(&self, on: bool) -> Result<(), String> {
+        self.set(
+            "AudioUnitSetProperty(OfflineRender)",
+            kAudioUnitProperty_OfflineRender,
+            kAudioUnitScope_Global,
+            0,
+            &u32::from(on),
         )
     }
 

@@ -706,6 +706,10 @@ impl PluginInstance for AuInstance {
         }
     }
 
+    fn set_offline(&mut self, on: bool) -> bool {
+        self.unit.set_offline_render(on).is_ok()
+    }
+
     fn gestures(&mut self) -> Vec<ParamEvent> {
         let Some(l) = &self.listener else {
             return Vec::new();

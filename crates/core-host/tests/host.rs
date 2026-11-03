@@ -1553,3 +1553,29 @@ fn disabling_a_plugin_mid_ride_keeps_the_ridden_parameters_static_value() {
     assert_eq!(gain_params(&hist, gain), vec![(ParamId(0), 1.0)]);
     drop(engine);
 }
+
+/// Plan 5f-2 Ruling 7: a bounce host asks every copy to render offline
+/// before it activates it and keeps the answers; a live host never asks.
+#[test]
+fn a_bounce_host_renders_its_copies_offline() {
+    let (hist, _, gain) = with_gain();
+    let mut b = Builder::from_doc(hist.doc().clone());
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let bank = b.insert(synth, plugin("vizdaw.test.bank")).unwrap();
+    let doc = b.finish();
+    let mut copies = host(1024);
+    copies.set_offline_render(true);
+    copies.sync(&doc);
+    let r = copies.wait_ready(WAIT);
+    assert_eq!(r.loaded.len(), 2, "{:?}", r.failed);
+    assert_eq!(copies.offline_state(gain), Some(true));
+    assert_eq!(
+        copies.offline_state(bank),
+        Some(false),
+        "no render extension: real time only"
+    );
+    let mut live = host(1024);
+    live.sync(&doc);
+    live.wait_ready(WAIT);
+    assert_eq!(live.offline_state(gain), None, "a live host never asks");
+}

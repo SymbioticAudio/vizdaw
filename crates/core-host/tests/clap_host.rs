@@ -282,3 +282,20 @@ fn a_dropped_processor_does_not_block_reactivation() {
     let p = inst.activate(48_000.0, 512).unwrap();
     inst.deactivate(p);
 }
+
+/// Plan 5f-2 Ruling 7: the gain kind offers CLAP's render extension and
+/// takes both modes; the bank kind has none, so it renders in real time.
+#[test]
+fn clap_copies_are_told_to_render_offline() {
+    let mut gain = load("vizdaw.test.gain");
+    assert!(gain.set_offline(true), "offline");
+    assert!(gain.set_offline(false), "and back to real time");
+    let mut bank = load("vizdaw.test.bank");
+    assert!(!bank.set_offline(true), "no render extension");
+    // Still a working plugin after the mode change.
+    let mut p = gain.activate(48_000.0, 512).unwrap();
+    let mut b = Block::new(2, 2, 0.5);
+    assert_eq!(b.run(p.as_mut()), ProcessStatus::Ok);
+    assert!(b.outputs[0][..N].iter().all(|x| *x == 0.5));
+    gain.deactivate(p);
+}

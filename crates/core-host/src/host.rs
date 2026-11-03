@@ -280,6 +280,12 @@ pub struct PluginHost {
     jobs: Option<Sender<Job>>,
     done: Receiver<Done>,
     loader: Option<JoinHandle<()>>,
+    /// Instances activated from now on are asked to render offline (a
+    /// bounce's copies, plan 5f-2 Ruling 7).
+    offline: bool,
+    /// What each instance answered when asked to render offline; an entry
+    /// goes when its slot is dropped.
+    offline_states: BTreeMap<PluginInstanceId, bool>,
 }
 
 impl std::fmt::Debug for PluginHost {
@@ -337,7 +343,20 @@ impl PluginHost {
             jobs: Some(jobs),
             done,
             loader: Some(loader),
+            offline: false,
+            offline_states: BTreeMap::new(),
         })
+    }
+
+    /// Instances activated from now on are asked to render offline (Ruling 7).
+    pub fn set_offline_render(&mut self, on: bool) {
+        self.offline = on;
+    }
+
+    /// What instance `id` answered when asked to render offline; `None` when
+    /// it was never asked (a live host, or not activated yet).
+    pub fn offline_state(&self, id: PluginInstanceId) -> Option<bool> {
+        self.offline_states.get(&id).copied()
     }
 
     /// Adds a format (AU on macOS).
@@ -748,6 +767,7 @@ impl PluginHost {
     fn remove(&mut self, id: PluginInstanceId) {
         self.shelf.clear_reason(id);
         self.parked.remove(&id);
+        self.offline_states.remove(&id);
         let Some(Slot { want, state }) = self.slots.remove(&id) else {
             return;
         };
@@ -955,6 +975,12 @@ impl PluginHost {
         live: &mut Live,
         instrument: bool,
     ) -> Result<(), HostError> {
+        if self.offline {
+            // A bounce's copies render offline (plan 5f-2 Ruling 7); the
+            // job names those that cannot.
+            let took = live.inst.set_offline(true);
+            self.offline_states.insert(id, took);
+        }
         let proc = live.inst.activate(self.sample_rate, self.max_frames)?;
         let ((params, gestures), audio) = param_queues();
         live.params = params;

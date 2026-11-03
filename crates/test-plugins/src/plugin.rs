@@ -15,6 +15,7 @@ use clack_extensions::params::{
     ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
     PluginMainThreadParams, PluginParams,
 };
+use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_plugin::events::event_types::{
     ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent,
@@ -22,6 +23,7 @@ use clack_plugin::events::event_types::{
 use clack_plugin::events::spaces::CoreEventSpace;
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
+use std::cell::Cell;
 use std::ffi::CStr;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
@@ -44,7 +46,8 @@ impl Plugin for TestPlugin {
             builder
                 .register::<PluginParams>()
                 .register::<PluginState>()
-                .register::<PluginLatency>();
+                .register::<PluginLatency>()
+                .register::<PluginRender>();
         }
         if kind.is_none_or(|k| k == Kind::Synth4) {
             builder.register::<PluginNotePorts>();
@@ -167,11 +170,16 @@ impl<'a> PluginShared<'a> for Shared<'a> {}
 
 pub struct MainThread<'a> {
     shared: &'a Shared<'a>,
+    /// The render mode the host last set (gain kind only).
+    render: Cell<RenderMode>,
 }
 
 impl<'a> MainThread<'a> {
     pub fn new(_host: HostMainThreadHandle<'a>, shared: &'a Shared<'a>) -> MainThread<'a> {
-        MainThread { shared }
+        MainThread {
+            shared,
+            render: Cell::new(RenderMode::Realtime),
+        }
     }
 }
 
@@ -341,6 +349,17 @@ impl PluginStateImpl for MainThread<'_> {
         self.shared.set_gain(f64::from_le_bytes(g));
         self.shared
             .set_param(PARAM_LATENCY, f64::from(u32::from_le_bytes(l)), false);
+        Ok(())
+    }
+}
+
+impl PluginRenderImpl for MainThread<'_> {
+    fn has_hard_realtime_requirement(&self) -> bool {
+        false
+    }
+
+    fn set(&self, mode: RenderMode) -> Result<(), PluginError> {
+        self.render.set(mode);
         Ok(())
     }
 }

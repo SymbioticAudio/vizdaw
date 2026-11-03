@@ -10,6 +10,7 @@ use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer};
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize};
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags};
+use clack_extensions::render::RenderMode;
 use clack_extensions::tail::TailLength;
 use clack_host::events::event_types::ParamValueEvent;
 use clack_host::prelude::*;
@@ -315,6 +316,24 @@ impl PluginInstance for ClapInstance {
             params_changed: Flags::take(&self.flags.params) || ports,
             state_dirty: Flags::take(&self.flags.state_dirty),
         }
+    }
+
+    fn set_offline(&mut self, on: bool) -> bool {
+        let Some(render) = self.exts().render else {
+            return false;
+        };
+        let h = self.inst.plugin_handle();
+        // A plugin with a hard real-time requirement (a hardware proxy)
+        // renders in real time whatever it is told (pre-flight M3).
+        if on && render.has_realtime_requirement(&h) {
+            return false;
+        }
+        let mode = if on {
+            RenderMode::Offline
+        } else {
+            RenderMode::Realtime
+        };
+        render.set(&h, mode).is_ok()
     }
 }
 

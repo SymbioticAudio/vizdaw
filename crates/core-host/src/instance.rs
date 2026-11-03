@@ -107,6 +107,13 @@ pub trait PluginInstance {
     fn gestures(&mut self) -> Vec<crate::process::ParamEvent> {
         Vec::new()
     }
+
+    /// Asks the plugin to render offline (`on`) or in real time (spec §9.1);
+    /// false when it cannot (no such mode, or a hard real-time requirement).
+    fn set_offline(&mut self, on: bool) -> bool {
+        let _ = on;
+        false
+    }
 }
 
 /// What to load.

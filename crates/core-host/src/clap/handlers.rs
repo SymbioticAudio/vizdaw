@@ -70,6 +70,7 @@ pub(crate) struct PluginExts {
     pub latency: Option<PluginLatency>,
     pub tail: Option<PluginTail>,
     pub gui: Option<PluginGui>,
+    pub render: Option<clack_extensions::render::PluginRender>,
 }
 
 /// `[thread-safe]` host data.
@@ -101,6 +102,7 @@ impl<'a> SharedHandler<'a> for Shared {
             latency: instance.get_extension(),
             tail: instance.get_extension(),
             gui: instance.get_extension(),
+            render: instance.get_extension(),
         });
     }
 

@@ -151,3 +151,24 @@ fn au_wait() -> Duration {
             .unwrap_or(60),
     )
 }
+
+/// Plan 5f-2 Ruling 7: a bounce host sets kAudioUnitProperty_OfflineRender
+/// on every AU copy and keeps the answer. Apple's DLS synth takes it; Apple's
+/// effects (the delay among them) answer kAudioUnitErr_InvalidProperty on
+/// macOS 26, so the delay is asked, loads, and renders in real time.
+#[test]
+fn au_units_take_offline_render() {
+    let doc = demo_document().unwrap();
+    let mut b = Builder::from_doc(doc);
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let delay = b.insert(synth, au("aufx/dely/appl")).unwrap();
+    let (_, dls) = b.plugin_dest("GM", au("aumu/dls /appl")).unwrap();
+    let doc = b.finish();
+    let mut h = host();
+    h.set_offline_render(true);
+    h.sync(&doc);
+    let r = h.wait_ready(au_wait());
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+    assert_eq!(h.offline_state(dls), Some(true));
+    assert!(h.offline_state(delay).is_some(), "the delay is asked too");
+}
