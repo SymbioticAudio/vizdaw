@@ -1631,6 +1631,101 @@ fn drives_a_fader_and_a_button_from_an_mcu() {
     app.quit();
 }
 
+/// Plan 5f-4 Task 8 (spec §8.4): a Kontrol S-Series MK3 added and fed
+/// through the channel (offline: the fake port transport) answers the
+/// handshake and gets its display, rides fader 1 from knob 1 as one "Set
+/// Fader" step, starts and stops the transport, sets the tempo as one "Set
+/// Tempo" step (owner, 2026-11-03), and counts a cut SysEx.
+/// (`messages` keeps the last 64 sent, so the identity at the head of the
+/// first refresh may have scrolled out: the test waits for any NI SysEx;
+/// `core-ffi/tests/kontrol.rs` pins the identity.)
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn drives_the_mixer_from_a_kontrol_mk3() {
+    let mut app = App::start();
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    let port = "KONTROL S88 MK3 DAW";
+    run(
+        &mut app,
+        "surface.add",
+        json!({"type": "kontrol_mk3", "input": port, "output": port}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(st["surfaces"][0]["type"], "kontrol_mk3", "{st}");
+    assert_eq!(st["surfaces"][0]["online"], false, "{st}");
+    let id = st["surfaces"][0]["id"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 01 04"}),
+    );
+    let ni = "f0 00 21 09 00 00 44 43 01 00";
+    let st = wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"].as_array().is_some_and(|m| {
+            m.iter()
+                .any(|x| x.as_str().is_some_and(|t| t.starts_with(ni)))
+        })
+    });
+    assert_eq!(st["surfaces"][0]["online"], true, "{st}");
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    let synth = auto["modes"][0]["strip"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 50 05"}),
+    );
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(auto["touched"][0], format!("fader:{synth}"), "{auto}");
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Fader");
+    // The ride ends 500 ms after the last turn; the tempo is refused while
+    // its edit is open.
+    wait_for_state(&mut app, &w, "automation", |a| {
+        a["touched"].as_array().is_some_and(|t| t.is_empty())
+    });
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 10 01"}),
+    );
+    app.wait(&w, json!({"condition": "playing"}));
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 14 01"}),
+    );
+    app.wait(&w, json!({"condition": "stopped"}));
+    // The keyboard's tempo control: 100 BPM is 60 000 000 × 10 ns, sent as
+    // 00 0e 4e 1c 00 (Ruling 5).
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "f0 00 21 09 00 00 44 43 01 00 19 00 00 00 0e 4e 1c 00 f7"}),
+    );
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Tempo");
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    let ignored = st["surfaces"][0]["ignored"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "f0 00 21 09 00 00 44 43 01 00 48"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(
+        st["surfaces"][0]["ignored"].as_u64(),
+        Some(ignored + 1),
+        "a cut SysEx is ignored and counted: {st}"
+    );
+    run(&mut app, "surface.remove", json!({"surface": id}));
+    app.quit();
+}
+
 /// `(rate, channels, bits, frames, 16-bit samples)` of a 16-bit PCM WAV.
 fn read_wav16(path: &std::path::Path) -> (u32, u16, u16, u64, Vec<i16>) {
     let b = std::fs::read(path).unwrap();

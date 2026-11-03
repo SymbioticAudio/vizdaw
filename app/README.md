@@ -1733,3 +1733,126 @@ By hand; the watcher is tested (`ExternalEditWatcherTests`), the core
      first saved (Save As). Save As of a saved project does not move the
      copies: they stay in the old package, still watched, until that
      package is next saved or closed.
+
+### Kontrol S-Series MK3 keyboards (plan 5f-4)
+
+By hand, on the owner's S88 MK3 (newest firmware, MIDI 1.0 mode). The
+protocol is tested byte by byte (`core-surface` `kontrol_*` tests), the
+core through the fake ports (`core-ffi/tests/kontrol.rs`), presets on
+Apple's AUDistortion (`platform-macos/tests/au.rs`) and the e2e
+`drives_the_mixer_from_a_kontrol_mk3`. Each step is an action, then what
+you should see; report anything else, and every value step 198 asks for.
+
+189. Plug the keyboard in by USB and open Settings › Surfaces › Add
+     Surface…. Choose Type "Kontrol S-Series MK3 (DAW mode)": Input and
+     Output both switch to the keyboard's DAW port (named like "KONTROL
+     S88 MK3 DAW"), and the sheet shows the help line and "Kontrol and
+     Native Instruments are trademarks of Native Instruments GmbH. VizDAW
+     is not affiliated with or endorsed by Native Instruments." Write down
+     the exact names the Input and Output pickers list for every port of
+     the keyboard. Click Add: the row says "Connected", the same notice
+     shows under the surface list, and within 2 s the keyboard's screen
+     leaves its own view and shows the mixer with the project's first
+     eight tracks' names. With the keyboard unplugged, choosing the type
+     says "No Kontrol S-Series MK3 “DAW” port is connected: pick its
+     ports by hand." and leaves the pickers as they were. With firmware
+     older than 2.0, the row says "Connected · not answering" and, under
+     it in orange, "the keyboard answered protocol version …; VizDAW needs
+     version 4 (keyboard firmware 2.0 or later)".
+190. Arm a MIDI lane on All MIDI Inputs and play the keys: the notes
+     record and play thru. Turn a knob and press Play on the keyboard:
+     the knob moves a fader and the transport starts, and neither the
+     knob nor the button is recorded or played thru. The lane's input
+     picker shows the DAW port as "(used by a surface)" and the Main port
+     as a normal input.
+191. Transport: Play starts (pressing it again while playing does
+     nothing); Stop stops; Record records; Loop turns the loop on and
+     off; Shift+Play (Restart) jumps to the start and plays; Undo and Redo
+     undo and redo the last edit. Their lights follow VizDAW, including
+     when you use VizDAW's own buttons. Press Count-in: the record
+     popover's Count-in reads 1 bar (or the bars it had before), and the
+     button lights; press it again: Count-in reads off and the light goes
+     dark. Set Count-in to 2 bars in the record popover: the button lights
+     within a moment. Press Automation: Automation › Suspend Automation is
+     checked and the button lights; press again: unchecked, dark; choose
+     the menu item: the light follows. Metro and Quantize stay dark and do
+     nothing. Turning the 4-D encoder in its transport function moves the
+     position by sixteenths.
+192. Mixer: turn knob 1: the first track's fader moves in VizDAW's mixer
+     and the screen shows its level ("-6.1 dB" style; "-inf dB" all the
+     way down); let go: half a second later Edit shows "Undo Set Fader".
+     Pan knobs (push the encoder up or down to switch volume/pan) move pan
+     and show "C", "L23", "R50". Mute and solo buttons light and mute or
+     solo the track in VizDAW; one press toggles exactly once (if it
+     toggles twice, the keyboard sends a release: report that as a bug); with one track soloed, the others show
+     muted-by-solo. Play: the meters move with the mixer's. The track
+     colours are: instruments blue, audio green, buses orange.
+193. Navigation: the track left/right buttons select the next/previous
+     track, and VizDAW's mixer selection follows; past the eighth track
+     the screen moves along with it. The bank buttons move by eight. At
+     the first and last track and bank the matching light is dark. An
+     MCU-compatible unit, if added, keeps its own bank throughout.
+194. Tempo: the screen shows VizDAW's tempo (120 in the demo). Change the
+     tempo in VizDAW: the screen follows within a moment. Stopped at bar
+     1, turn the keyboard's tempo control from 120 to 125 and let go:
+     VizDAW's tempo at bar 1 reads 125, and Edit shows "Undo Set Tempo";
+     one Undo puts it back to 120 (the whole turn is one step). Tap Tap
+     Tempo four times about half a second apart: the tempo reads about
+     120 and the taps are one more "Set Tempo" step. Do the same while
+     playing: the tempo changes at the playhead and the song keeps
+     playing. Start recording and turn the tempo control: VizDAW's tempo
+     does not change, the screen goes back to it within a moment, and Tap
+     Tempo's light is dark until you stop.
+195. Plug-in mode: select a track with a plug-in instrument and an insert
+     (for example an Apple AU instrument plus AUDelay) and press the
+     keyboard's Plug-in button: at once the soft buttons name the chain
+     (the instrument first), the screen shows eight parameter names and
+     values, "Page 1" and the page count. Turn knob 1: that parameter
+     moves in the plug-in's window. The page buttons move through the
+     pages; the soft buttons pick another plug-in of the chain, starting
+     at its page 1. Select another track: the view starts over at its
+     first plug-in. Write down how readable the background is.
+196. Presets: with AUDistortion focused, the preset buttons step through
+     its factory presets and the screen names each one; the title shows
+     Edited, and Edit's Undo is unchanged. At the first and last preset
+     the button does nothing more. Put the track in Write and play while
+     stepping presets: no automation lane appears for the plug-in's
+     parameters. Repeat with a third-party AU you own (a JUCE-built one if
+     you have it): Undo still unchanged, no lane. Save, close and reopen
+     the project: the last preset's sound and parameter values are back;
+     an automated parameter keeps its own static value, as it does after
+     picking a preset in the plug-in's own window. With a JUCE-built AU, stepping presets from the keyboard adds no undo
+     step and writes no automation, even on a strip that is writing
+     automation; parameters must not pass through intermediate values as
+     gestures. A CLAP plug-in's preset buttons stay dark.
+197. Pull the USB cable while turning a knob: within 2 s the row says
+     "Disconnected" and the fader is released (the ride lands as one
+     step). Plug it back: it says "Connected", the screen fills again, and
+     the knobs work. Switch the keyboard out of DAW mode (to MIDI mode, or
+     its own browser view) and wait 5 s: VizDAW pulls it back into DAW
+     mode (owner, 2026-11-03), the screen shows the whole mixer again, and
+     the knobs work; write down how long it took and whether the row read
+     "Connected · not answering" meanwhile. Turn a knob and, while it is
+     still moving, remove the surface: the keyboard leaves DAW mode at
+     once, and Edit shows "Undo Set Fader" (the ride ended). Add it again
+     and quit VizDAW: the keyboard leaves DAW mode.
+198. Hardware checks to report (the research could not settle them):
+     the firmware version the keyboard shows; the macOS port names (step
+     189), including in MIDI 2.0 mode, and whether the DAW port works with
+     NI's Hardware Connection Service quit; where the page name (SysEx
+     0x75) appears; how many characters of a long track name, parameter
+     name, value and volume text fit; whether the "Generic" background is
+     readable (else try "VizDAW", Ruling 4); whether mute and solo work on
+     instrument (MIDI-type) tracks; how the knob step feels (200 steps for
+     the whole travel, Ruling 5); whether the meters' scale and the
+     colours look right; whether the Plug-in button ever toggles twice per
+     press and whether the keyboard echoes the mode; how the parameter
+     names look with the 0x72 type at 0 (unipolar); whether the navigation
+     lights' bits are the right way round (left = previous); whether
+     switching out of DAW mode makes the keyboard say goodbye (`BF 02`)
+     and whether a hello brings it back, and that after VizDAW's own goodbye
+     the keyboard also gets CC 123, all notes off; how an empty track instance
+     (0x41) shows; whether the keyboard ever sends a page number (0x74);
+     whether it echoes VizDAW's tempo (0x19) back, and how the tempo
+     control steps (half a second between turns makes a new Undo step);
+     and whether the Count-in, Tap and Automation lights light.
