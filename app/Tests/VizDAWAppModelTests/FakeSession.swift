@@ -563,7 +563,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
             message: nil, problems: [], created: [])
         return id
     }
+    var checkError: VizError?
     func bounceCheck(req: BounceRequestRow) throws -> BounceCheckRow {
+        if let e = checkError { throw e }
         checkRequests.append(req)
         return checkRow
     }

@@ -90,6 +90,7 @@ extension Panels {
     static func chooseBounceFile(name: String, ext: String) -> String? {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "\(name).\(ext)"
+        if let t = UTType(filenameExtension: ext) { panel.allowedContentTypes = [t] }
         panel.canCreateDirectories = true
         panel.prompt = "Bounce"
         return panel.runModal() == .OK ? panel.url?.path : nil

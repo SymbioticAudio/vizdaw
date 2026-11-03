@@ -71,15 +71,13 @@ struct BounceSheet: View {
                 Label(w, systemImage: "exclamationmark.triangle")
                     .font(.callout)
             }
-            if !bounce.files.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(bounce.files, id: \.self) { f in
-                        Text((f as NSString).lastPathComponent).font(.caption)
-                    }
-                }
-            }
             if !bounce.length.isEmpty {
                 Text("Length \(bounce.length)").font(.caption).foregroundStyle(.secondary)
+            }
+            if let e = bounce.error {
+                Label(e, systemImage: "xmark.octagon")
+                    .font(.callout)
+                    .foregroundStyle(.red)
             }
             if let p = bounce.progress {
                 ProgressView(value: Double(p))
@@ -112,10 +110,14 @@ struct BounceSheet: View {
         }
         if bounce.source == .stems {
             guard let folder = Panels.chooseBounceFolder() else { return }
-            bounce.check(path: folder)
             bounce.start(path: folder, replace: false)
         } else {
-            let ext = bounce.container == .aiff ? "aif" : "\(bounce.container)"
+            let ext: String
+            switch bounce.container {
+            case .wav: ext = "wav"
+            case .aiff: ext = "aif"
+            case .caf: ext = "caf"
+            }
             guard let file = Panels.chooseBounceFile(name: "Bounce", ext: ext) else { return }
             bounce.start(path: file, replace: true)
         }

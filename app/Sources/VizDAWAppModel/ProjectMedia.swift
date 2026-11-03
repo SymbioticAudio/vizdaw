@@ -85,13 +85,21 @@ extension DocumentModel {
     }
 
     /// Starts a job and lists it; a refusal is an alert titled `title`.
-    func startJob(_ kind: JobKindRow, _ title: String, _ body: (any SessionProtocol) throws -> UInt64) {
+    /// With `failure` the refusal goes there instead (a sheet that shows
+    /// it itself). Answers the new job's ID.
+    @discardableResult
+    func startJob(
+        _ kind: JobKindRow, _ title: String, failure: ((Error) -> Void)? = nil,
+        _ body: (any SessionProtocol) throws -> UInt64
+    ) -> UInt64? {
         do {
             let id = try body(session)
             jobs.append(JobRow(id: id, kind: kind, progress: 0, state: .running, message: nil, problems: [], created: []))
             pollJobs()
+            return id
         } catch {
-            alert = AlertItem(error, title: title)
+            if let failure { failure(error) } else { alert = AlertItem(error, title: title) }
+            return nil
         }
     }
 

@@ -72,24 +72,66 @@ import VizDAWCore
         let m = try model(f)
         m.bounce.shown = true
         m.bounce.start(path: "/tmp/x.wav", replace: false)
-        #expect(m.alert?.title == "Bounce Failed")
+        #expect(m.alert == nil, "shown in the sheet, not behind it")
+        #expect(m.bounce.error == "x.wav exists; choose another name or replace it")
         #expect(m.bounce.job == nil)
     }
 
-    /// Owner answer 2: stems never replace; the sheet shows the numbered
-    /// names the core will take, and asks nothing.
-    @Test func existingStemFilesAreNumberedNotReplaced() throws {
+    /// Owner answer 2: stems never replace (the core numbers them; the
+    /// finished bounce reports each file, ruling T6-1: no preview).
+    @Test func stemsNeverReplace() throws {
         let f = demoFake()
-        f.checkRow = BounceCheckRow(externalLanes: 0, frames: 96_000, files: ["/tmp/s/Bass 2.wav"], warning: nil)
         let m = try model(f)
         m.bounce.shown = true
         m.bounce.source = .stems
         m.bounce.stems = [1]
-        m.bounce.check(path: "/tmp/s")
-        #expect(m.bounce.files == ["/tmp/s/Bass 2.wav"])
-        #expect(f.checkRequests.last?.path == "/tmp/s")
         m.bounce.start(path: "/tmp/s", replace: true)
         #expect(f.bounces.last?.replace == false, "stems never replace")
+    }
+
+    @Test func aFailedCheckIsShownAndCleared() throws {
+        let f = demoFake()
+        f.checkError = VizError.Model(message: "bad rate")
+        let m = try model(f)
+        m.bounce.shown = true
+        #expect(m.bounce.error == "bad rate" && m.bounce.warning == nil)
+        f.checkError = nil
+        m.bounce.rate = 96_000
+        #expect(m.bounce.error == nil)
+    }
+
+    @Test func aFinishedBounceSaysWhatItWrote() throws {
+        let f = demoFake()
+        f.resultRow = BounceResultRow(
+            files: [BouncedFileRow(path: "/tmp/s/Bass 2.wav", frames: 96_000, rate: 48_000, bits: "24-bit", channels: 2, clipped: 0)], media: [])
+        let m = try model(f)
+        m.bounce.shown = true
+        m.bounce.start(path: "/tmp/s/Bass.wav", replace: true)
+        #expect(m.editor.status?.contains("/tmp/s/Bass 2.wav") == true)
+        #expect(!m.bounce.shown && m.bounce.job == nil, "instant Done closes")
+    }
+
+    @Test func rateChoiceAndSelectionAndDestination() throws {
+        let m = try model(demoFake())
+        m.bounce.shown = true
+        m.bounce.rateChoice = 0
+        #expect(m.bounce.otherRate)
+        m.bounce.setOtherRate(5)
+        #expect(m.bounce.rate == 8_000)
+        m.bounce.setOtherRate(999_999)
+        #expect(m.bounce.rate == 384_000)
+        m.bounce.rateChoice = 96_000
+        #expect(!m.bounce.otherRate && m.bounce.rate == 96_000)
+        #expect(m.bounce.needsDestination)
+        m.bounce.addToProject = true
+        m.bounce.writeFiles = false
+        #expect(!m.bounce.needsDestination)
+        m.bounce.addToProject = false
+        #expect(m.bounce.needsDestination, "a stale writeFiles cannot skip the panel")
+        m.editor.setSelection(SelectionRow(timeRange: TickRange(start: 0, end: 960), lanes: [], events: []))
+        m.bounce.useSelection = true
+        #expect(m.bounce.hasSelection)
+        #expect(m.bounce.request(path: "/tmp/x.wav", replace: false)?.range == .ticks(start: 0, end: 960))
     }
 
     /// Pre-flight I10: kept, clamped, applied on change and at launch.

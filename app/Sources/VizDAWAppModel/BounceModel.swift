@@ -34,14 +34,13 @@ public final class BounceModel {
     public var addToProject = false { didSet { changed() } }
     /// Write the files. Always so unless "Add to project" is on, which
     /// may be used alone (no panel, no files).
-    public var writeFiles = true
+    public var writeFiles = true { didSet { changed() } }
     /// "Other…" is the chosen rate (a field from 8,000 to 384,000).
     public var otherRate = false
     /// Ruling 8's sentences (from `bounceCheck`), refreshed on every change.
     public private(set) var warning: String?
-    /// The files the bounce would write (`bounceCheck.files`): for stems, the
-    /// numbered names it will take in the chosen folder (owner answer 2).
-    public private(set) var files: [String] = []
+    /// Why the last start or check was refused, shown in the sheet.
+    public private(set) var error: String?
     /// "1:32.4 + tail".
     public private(set) var length = ""
     /// The strips the stems checklist offers (every strip but master).
@@ -133,41 +132,58 @@ public final class BounceModel {
             path: path, addToProject: addToProject, replace: source == .mix && replace)
     }
 
-    /// Refreshes `warning`, `files` and `length` for `path`; a failure
-    /// clears them (the core's message comes with Bounce).
+    /// Refreshes `warning` and `length` for `path`; a refusal clears them
+    /// and is the sheet's `error`. The numbered stem names are not
+    /// previewed (ruling T6-1): the finished bounce reports every file.
     public func check(path: String?) {
         lastPath = path
-        guard let document, let req = request(path: path, replace: false),
-            let row = try? document.session.bounceCheck(req: req)
-        else {
+        error = nil
+        guard let document else { return }
+        guard let req = request(path: path, replace: false) else {
             warning = nil
-            files = []
             length = ""
+            error = "No sequence is shown."
             return
         }
-        warning = row.warning
-        files = row.files
-        length = MediaModel.duration(frames: row.frames, rate: req.rate) + " + tail"
+        do {
+            let row = try document.session.bounceCheck(req: req)
+            warning = row.warning
+            length = MediaModel.duration(frames: row.frames, rate: req.rate) + " + tail"
+        } catch {
+            warning = nil
+            length = ""
+            self.error = AlertItem(error, title: "").message
+        }
     }
 
     /// Starts the job (`DocumentModel.startJob(.bounce, "Bounce Failed")`).
     public func start(path: String?, replace: Bool) {
-        guard let document, let req = request(path: path, replace: replace) else { return }
-        job = nil
-        var id: UInt64?
-        document.startJob(.bounce, "Bounce Failed") {
-            let i = try $0.bounce(req: req)
-            id = i
-            return i
+        guard let document else { return }
+        error = nil
+        guard let req = request(path: path, replace: replace) else {
+            error = "No sequence is shown."
+            return
         }
-        job = id
+        job = document.startJob(
+            .bounce, "Bounce Failed",
+            failure: { [self] in error = AlertItem($0, title: "").message }
+        ) { try $0.bounce(req: req) }
         // Done at once: nothing to wait for.
-        if id != nil, !running { finished() }
+        if let id = job, !running { finished(id) }
     }
 
     /// The job ended (the sheet watches `running`): close. A failure is the
-    /// document's alert, warnings its Problems banner.
-    public func finished() {
+    /// document's alert, warnings its Problems banner; a bounce that wrote
+    /// or added something says so in the editor status, each file under its
+    /// final name (Ruling 10).
+    public func finished() { finished(job) }
+
+    private func finished(_ id: UInt64?) {
+        if let id, let document, let r = (try? document.session.bounceResult(job: id)) ?? nil,
+            let text = BounceCommands.status(r, problems: [])
+        {
+            document.editor.status = text
+        }
         job = nil
         shown = false
     }
