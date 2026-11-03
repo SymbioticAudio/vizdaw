@@ -154,6 +154,22 @@ pub enum SurfaceAction {
     Skip(i32),
     /// Rewind / Fast Forward held: move by this many quarter notes (negative: back).
     Wind(f64),
+    /// Show chain slot n of the selected strip (plan 5f-4 Ruling 6).
+    PluginSlot(usize),
+    /// Move the plug-in page by n.
+    PluginPage(i32),
+    /// Step the shown plug-in's presets by n (Ruling 7).
+    Preset(i32),
+    /// Set the tempo at the playhead (plan 5f-4 Ruling 15); `new_step`: this
+    /// starts a gesture, else it lands in the gesture's undo step.
+    Tempo {
+        /// Beats per minute.
+        bpm: f64,
+        /// The first of a gesture.
+        new_step: bool,
+    },
+    /// Toggle the document's record count-in (plan 5f-4 Ruling 16).
+    CountIn,
 }
 
 /// The V-pot assignment (Ruling 5).
@@ -181,6 +197,29 @@ pub struct ParamView {
     pub text: String,
 }
 
+/// One page of a plug-in (plan 5f-4 Ruling 6).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PluginPageView {
+    /// The selected strip's chain: its plug-in instrument, then its inserts.
+    pub chain: Vec<String>,
+    /// The chain slot shown.
+    pub slot: usize,
+    /// Up to 8 parameters of the page.
+    pub params: Vec<ParamView>,
+    /// The page shown (0-based).
+    pub page: usize,
+    /// How many pages (at least 1).
+    pub pages: usize,
+    /// "Page 1"...
+    pub page_name: String,
+    /// The loaded preset, if the plug-in says.
+    pub preset: Option<usize>,
+    /// How many presets it has.
+    pub presets: usize,
+    /// The loaded preset's name ("" with none).
+    pub preset_name: String,
+}
+
 /// One strip as the surface shows it (normalised heard values, as automation uses them; Ruling 13).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StripView {
@@ -206,6 +245,8 @@ pub struct StripView {
     pub mode: AutomationMode,
     /// Linear peaks since the last view.
     pub meter: (f32, f32),
+    /// The strip's kind.
+    pub kind: TrackKind,
 }
 
 /// The MixerView snapshot (spec §8.1).
@@ -225,6 +266,16 @@ pub struct MixerView {
     pub recording: bool,
     /// The loop is on.
     pub looping: bool,
+    /// The tempo at the transport in BPM (0: unknown).
+    pub tempo: f64,
+    /// Some strip is soloed (muted-by-solo, plan 5f-4 Ruling 8).
+    pub soloing: bool,
+    /// The plug-in page a Kontrol in Plug-in mode shows (plan 5f-4 Ruling 6).
+    pub page: Option<PluginPageView>,
+    /// The document's record count-in is on (plan 5f-4 Ruling 16).
+    pub count_in: bool,
+    /// Automation is suspended (plan 5f-4 Ruling 16).
+    pub automation_suspended: bool,
 }
 
 /// What a unit let go of (final review T8 m6): touched faders, released
@@ -301,6 +352,10 @@ pub trait Surface: Send {
     /// unit is offline after them (plan 5f-4 Ruling 4).
     fn goodbye(&mut self) -> Vec<Vec<u8>> {
         Vec::new()
+    }
+    /// It shows the plug-in page now (plan 5f-4 Ruling 9).
+    fn shows_page(&self) -> bool {
+        false
     }
     /// A problem the unit found since the last call, said once (plan
     /// 5f-4 Ruling 4).

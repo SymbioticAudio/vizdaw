@@ -1656,6 +1656,18 @@ fn new_ports() -> Box<dyn Ports> {
     }
 }
 
+/// The surfaces' kind of a strip (plan 5f-4 Ruling 8).
+pub(crate) fn track_kind(k: core_model::mixer::StripKind) -> core_surface::TrackKind {
+    use core_model::mixer::StripKind as K;
+    use core_surface::TrackKind as T;
+    match k {
+        K::Instrument(_) | K::InstrumentOutput(..) | K::BuiltinSynth => T::Instrument,
+        K::AudioPath(_) => T::Audio,
+        K::Bus => T::Bus,
+        K::Master => T::Master,
+    }
+}
+
 /// A port name is not empty, at most 255 bytes, without control characters
 /// (`core_model::lane::check_port_name`, the one rule; final review N7).
 fn check_port(what: &str, name: &str) -> Result<(), VizError> {
@@ -2650,6 +2662,7 @@ mod tests {
                 select: false,
                 mode: AutomationMode::Read,
                 meter: (0.0, 0.0),
+                kind: core_surface::TrackKind::Audio,
             }],
             ..MixerView::default()
         }

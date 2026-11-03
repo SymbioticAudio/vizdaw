@@ -9219,6 +9219,10 @@ impl Session {
                 }
                 // The registry moved the bank already.
                 A::Bank(_) | A::Channel(_) => true,
+                // Task 4 (pages) and Task 5 (presets) apply these (plan 5f-4).
+                A::PluginSlot(_) | A::PluginPage(_) | A::Preset(_) => false,
+                // Task 7 applies the keyboard's tempo and count-in (plan 5f-4).
+                A::Tempo { .. } | A::CountIn => false,
             };
             if !ok && let Some(u) = a.unit {
                 refused.push((u, a.tag));
@@ -9381,6 +9385,7 @@ impl Session {
                 select: inner.surfaces.selection.contains(&id),
                 mode: s.automation,
                 meter: (0.0, 0.0),
+                kind: crate::surfaces::track_kind(s.kind),
             };
             if shown {
                 v.fader = heard(AutomationTarget::StripFader(id));
@@ -9421,6 +9426,18 @@ impl Session {
             playing: host::transport_stopped(self.id) == Some(false),
             recording: inner.recording.is_some(),
             looping: inner.looped,
+            tempo: seq
+                .and_then(|q| doc.sequence(q).ok())
+                .map_or(0.0, |q| q.tempo.bpm_at(tick)),
+            soloing: m
+                .strips()
+                .keys()
+                .any(|id| heard(AutomationTarget::StripSolo(*id)) >= 0.5),
+            // Task 4 fills the plug-in page (plan 5f-4).
+            page: None,
+            // Task 7 reads the document's count-in (plan 5f-4 Ruling 16).
+            count_in: false,
+            automation_suspended: crate::automation::suspended(),
         }
     }
 

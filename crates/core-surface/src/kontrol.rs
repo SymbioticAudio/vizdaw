@@ -11,7 +11,13 @@
 //! says goodbye with `BF 02 xx`.
 
 use crate::idle::IdleTouches;
-use crate::{Held, Link, MixerView, Surface, SurfaceAction, SurfaceKind, TrackKind, Unit, midi};
+use crate::mcu::{click, toggled};
+use crate::{
+    Held, Link, MixerView, PluginPageView, StripView, Surface, SurfaceAction, SurfaceKind,
+    TrackKind, Unit, midi,
+};
+use core_model::automation::AutomationTarget;
+use core_model::ids::StripId;
 use std::time::{Duration, Instant};
 
 /// NI's SysEx header for the DAW protocol.
@@ -22,6 +28,12 @@ pub const PROTOCOL: u8 = 4;
 pub const HELLO_EVERY: Duration = Duration::from_secs(2);
 /// Display text is at most this many bytes (Ruling 8).
 pub const MAX_TEXT: usize = 32;
+/// One relative step of a knob, in normalised units (Ruling 5).
+pub const KNOB_STEP: f64 = 0.005;
+/// Tempo messages less than this apart are one gesture (Ruling 5).
+pub const TEMPO_RUN: Duration = Duration::from_millis(500);
+/// A tap more than this after the last starts a new series (Ruling 5).
+pub const TAP_RESET: Duration = Duration::from_secs(2);
 /// The name VizDAW gives itself (Ruling 4).
 pub const IDENTITY_NAME: &str = "Generic";
 /// The DAW version sent with it.
@@ -36,6 +48,20 @@ const GOODBYE: u8 = 0x02;
 const CMD_IDENTITY: u8 = 0x07;
 /// The VU command.
 const CMD_VU: u8 = 0x49;
+/// Track buttons (SysEx): select, mute, solo, arm.
+const CMD_SELECT: u8 = 0x42;
+const CMD_MUTE: u8 = 0x43;
+const CMD_SOLO: u8 = 0x44;
+const CMD_ARM: u8 = 0x45;
+/// The tempo (SysEx, both ways).
+const CMD_TEMPO: u8 = 0x19;
+/// The chain's soft buttons and the page buttons (SysEx).
+const CMD_SLOT: u8 = 0x70;
+const CMD_PAGE: u8 = 0x74;
+/// Strips on screen.
+const SLOTS: usize = 8;
+/// Taps kept for the tempo (four intervals).
+const TAPS: usize = 5;
 /// The tempo is a quarter note in units of 10 ns: 6e9 / bpm.
 const TEMPO_UNITS: f64 = 6e9;
 /// What five 7-bit bytes hold.
@@ -194,12 +220,22 @@ pub struct Kontrol {
     link: Link,
     idle: IdleTouches,
     mode: Mode,
-    /// What the last feedback showed: read by input in Task 2.
-    #[allow(dead_code)]
-    view: MixerView,
+    /// The strip IDs of the last feedback's view, in display order.
+    ids: Vec<StripId>,
+    /// The index in `ids` of the selected strip, if any.
+    selected: Option<usize>,
     /// The first strip the last feedback showed.
-    #[allow(dead_code)]
     first: usize,
+    /// The (up to 8) strips the last feedback showed.
+    shown: Vec<StripView>,
+    /// The plug-in page the last feedback showed (kept in Plug-in mode only).
+    page: Option<PluginPageView>,
+    /// The time and kind (`true`: a tap) of the last tempo action.
+    last_tempo: Option<(Instant, bool)>,
+    /// The taps of the current series (at most [`TAPS`]).
+    taps: Vec<Instant>,
+    /// The five tempo bytes last sent (Task 3 fills them).
+    sent_tempo: Option<[u8; 5]>,
     /// `hello` was sent; the next feedback starts the repeat timer.
     hello_sent: bool,
     /// When the hello goes again (`None`: not waiting for an answer).
@@ -224,8 +260,14 @@ impl Kontrol {
             link: Link::default(),
             idle: IdleTouches::default(),
             mode: Mode::default(),
-            view: MixerView::default(),
+            ids: Vec::new(),
+            selected: None,
             first: 0,
+            shown: Vec::new(),
+            page: None,
+            last_tempo: None,
+            taps: Vec::new(),
+            sent_tempo: None,
             hello_sent: false,
             next_hello: None,
             identity_due: false,
@@ -237,6 +279,303 @@ impl Kontrol {
     /// The keyboard's mode.
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    fn ignore(&mut self) {
+        self.ignored = self.ignored.saturating_add(1);
+    }
+
+    /// The strip shown in slot `k`.
+    fn slot(&self, k: usize) -> Option<&StripView> {
+        self.shown.get(k)
+    }
+
+    /// The first shown strip that is selected.
+    fn selected_shown(&self) -> Option<&StripView> {
+        self.shown.iter().find(|s| s.select)
+    }
+
+    /// A relative move of `target` from `shown` (or its open idle touch's
+    /// last value), by `steps` knob steps.
+    fn knob(
+        &mut self,
+        target: AutomationTarget,
+        shown: f64,
+        steps: i32,
+        now: Instant,
+        out: &mut Vec<SurfaceAction>,
+    ) {
+        let current = self.idle.last(target).unwrap_or(shown);
+        let next = (current + f64::from(steps) * KNOB_STEP).clamp(0.0, 1.0);
+        out.push(self.idle.value(target, next, now));
+    }
+
+    /// A volume (`pan` false) or pan knob of the strip in `strip`.
+    fn strip_knob(
+        &mut self,
+        strip: Option<StripView>,
+        pan: bool,
+        steps: i32,
+        now: Instant,
+        out: &mut Vec<SurfaceAction>,
+    ) {
+        if steps == 0 {
+            return;
+        }
+        let Some(s) = strip else {
+            self.ignore();
+            return;
+        };
+        if pan {
+            self.knob(AutomationTarget::StripPan(s.id), s.pan, steps, now, out);
+        } else {
+            self.knob(AutomationTarget::StripFader(s.id), s.fader, steps, now, out);
+        }
+    }
+
+    /// The previous or next strip, from the selected one (else the first
+    /// shown); the bank follows when it leaves the screen.
+    fn navigate(&mut self, steps: i32, out: &mut Vec<SurfaceAction>) {
+        let next = match (self.selected, steps.signum()) {
+            (_, 0) => return,
+            (Some(i), 1) => i.checked_add(1),
+            (Some(i), _) => i.checked_sub(1),
+            (None, _) => Some(self.first),
+        };
+        let Some(idx) = next else { return };
+        let Some(&id) = self.ids.get(idx) else { return };
+        out.push(SurfaceAction::Select(id));
+        if self.selected.is_none() {
+            return;
+        }
+        let top = self.first.saturating_add(SLOTS - 1);
+        let by = if idx < self.first {
+            i32::try_from(self.first - idx).ok().map(|d| -d)
+        } else if idx > top {
+            i32::try_from(idx - top).ok()
+        } else {
+            None
+        };
+        if let Some(d) = by {
+            out.push(SurfaceAction::Channel(d));
+        }
+    }
+
+    /// A tempo from the keyboard's control.
+    fn tempo(&mut self, info: &[u8], now: Instant, out: &mut Vec<SurfaceAction>) {
+        let Some(bytes) = info.get(..5).and_then(|b| <[u8; 5]>::try_from(b).ok()) else {
+            self.ignore();
+            return;
+        };
+        let Some(bpm) = tempo_bpm(bytes) else {
+            self.ignore();
+            return;
+        };
+        if self.sent_tempo == Some(bytes) {
+            // The keyboard's echo of what VizDAW sent.
+            return;
+        }
+        // The next feedback sends VizDAW's tempo again.
+        self.sent_tempo = None;
+        let new_step = self.tempo_step(now, false);
+        out.push(SurfaceAction::Tempo { bpm, new_step });
+    }
+
+    /// Whether a tempo action at `now` starts a gesture (`tap`: it is a
+    /// tap's); records it as the last.
+    fn tempo_step(&mut self, now: Instant, tap: bool) -> bool {
+        let new_step = match self.last_tempo {
+            None => true,
+            Some((_, true)) => true,
+            Some((at, false)) => now.saturating_duration_since(at) >= TEMPO_RUN,
+        };
+        self.last_tempo = Some((now, tap));
+        new_step
+    }
+
+    /// Tap Tempo pressed at `now`.
+    fn tap(&mut self, now: Instant, out: &mut Vec<SurfaceAction>) {
+        if self
+            .taps
+            .last()
+            .is_some_and(|&t| now.saturating_duration_since(t) > TAP_RESET)
+        {
+            self.taps.clear();
+        }
+        self.taps.push(now);
+        if self.taps.len() > TAPS {
+            self.taps.remove(0);
+        }
+        let (Some(&first), Some(&last)) = (self.taps.first(), self.taps.last()) else {
+            return;
+        };
+        let intervals = self.taps.len().saturating_sub(1);
+        if intervals == 0 {
+            return;
+        }
+        let mean = last.saturating_duration_since(first).as_secs_f64() / intervals as f64;
+        if mean <= 0.0 {
+            return;
+        }
+        let bpm = (600.0 / mean).round() / 10.0;
+        let _ = self.tempo_step(now, true);
+        out.push(SurfaceAction::Tempo {
+            bpm,
+            new_step: intervals == 1,
+        });
+    }
+
+    /// A control change other than the handshake.
+    fn control(&mut self, cc: u8, v: u8, now: Instant, out: &mut Vec<SurfaceAction>) {
+        let cmd = |s: &str| SurfaceAction::Command(s.into());
+        let press = v > 0;
+        let steps = relative(v);
+        match cc {
+            0x10..=0x14 | 0x16 | 0x20 | 0x21 | 0x23 => {
+                if !press {
+                    return;
+                }
+                match cc {
+                    0x10 => out.push(cmd("transport.play")),
+                    0x11 => {
+                        out.push(cmd("transport.return_to_start"));
+                        out.push(cmd("transport.play"));
+                    }
+                    0x12 => out.push(cmd("transport.record")),
+                    0x13 => out.push(SurfaceAction::CountIn),
+                    0x14 => out.push(cmd("transport.stop")),
+                    0x16 => out.push(cmd("transport.loop")),
+                    0x20 => out.push(cmd("edit.undo")),
+                    0x21 => out.push(cmd("edit.redo")),
+                    _ => out.push(cmd("automation.suspend")),
+                }
+            }
+            0x18 => {
+                if press {
+                    self.tap(now, out);
+                }
+            }
+            // Clear, Metro, Quantize, Shift, clip and scene navigation and
+            // Move Loop: no VizDAW counterpart, and no fault.
+            0x04 | 0x15 | 0x17 | 0x22 | 0x32 | 0x33 | 0x35 => {}
+            0x05 => match v {
+                0 | 1 => {
+                    let mode = if v == 0 { Mode::Mixer } else { Mode::Plugin };
+                    if mode != self.mode {
+                        self.mode = mode;
+                        if mode == Mode::Mixer {
+                            self.page = None;
+                        }
+                        self.refresh();
+                    }
+                }
+                _ => self.ignore(),
+            },
+            0x30 => self.navigate(steps, out),
+            0x31 => {
+                if steps != 0 {
+                    let n = steps.signum();
+                    out.push(match self.mode {
+                        Mode::Mixer => SurfaceAction::Bank(n),
+                        Mode::Plugin => SurfaceAction::PluginPage(n),
+                    });
+                }
+            }
+            0x34 => {
+                if steps != 0 {
+                    out.push(SurfaceAction::Jog(steps));
+                }
+            }
+            0x36 => {
+                if steps != 0 {
+                    out.push(SurfaceAction::Preset(steps.signum()));
+                }
+            }
+            0x50..=0x5F => {
+                let k = usize::from(cc - 0x50);
+                let strip = self.slot(k % SLOTS).cloned();
+                self.strip_knob(strip, k >= SLOTS, steps, now, out);
+            }
+            0x64 | 0x65 => {
+                let strip = self.selected_shown().cloned();
+                self.strip_knob(strip, cc == 0x65, steps, now, out);
+            }
+            0x66 | 0x67 => {
+                if !press {
+                    return;
+                }
+                match self.selected_shown() {
+                    Some(s) if cc == 0x66 => {
+                        out.extend(click(AutomationTarget::StripMute(s.id), toggled(s.mute)))
+                    }
+                    Some(s) => {
+                        out.extend(click(AutomationTarget::StripSolo(s.id), toggled(s.solo)))
+                    }
+                    None => self.ignore(),
+                }
+            }
+            0x70..=0x77 => {
+                if steps == 0 && self.mode == Mode::Plugin {
+                    return;
+                }
+                let k = usize::from(cc - 0x70);
+                let param = match self.mode {
+                    Mode::Plugin => self
+                        .page
+                        .as_ref()
+                        .and_then(|p| p.params.get(k))
+                        .map(|p| (p.target, p.value)),
+                    Mode::Mixer => None,
+                };
+                match param {
+                    Some((t, shown)) => self.knob(t, shown, steps, now, out),
+                    None => self.ignore(),
+                }
+            }
+            _ => self.ignore(),
+        }
+    }
+
+    /// A SysEx message from the keyboard.
+    fn command(
+        &mut self,
+        (cmd, _value, index, info): (u8, u8, u8, &[u8]),
+        now: Instant,
+        out: &mut Vec<SurfaceAction>,
+    ) {
+        let slot = usize::from(index);
+        match cmd {
+            CMD_SELECT | CMD_MUTE | CMD_SOLO | CMD_ARM => {
+                let Some(s) = self.slot(slot) else {
+                    self.ignore();
+                    return;
+                };
+                let id = s.id;
+                match cmd {
+                    CMD_SELECT => out.push(SurfaceAction::Select(id)),
+                    CMD_MUTE => out.extend(click(AutomationTarget::StripMute(id), toggled(s.mute))),
+                    CMD_SOLO => out.extend(click(AutomationTarget::StripSolo(id), toggled(s.solo))),
+                    _ => out.push(SurfaceAction::Arm(id)),
+                }
+            }
+            CMD_TEMPO => self.tempo(info, now, out),
+            CMD_SLOT => match &self.page {
+                Some(p) if slot < p.chain.len() => out.push(SurfaceAction::PluginSlot(slot)),
+                _ => self.ignore(),
+            },
+            CMD_PAGE => match self.page.as_ref().map(|p| (p.page, p.pages)) {
+                Some((shown, pages)) if slot < pages => {
+                    if slot != shown {
+                        let d = i32::try_from(slot)
+                            .unwrap_or(i32::MAX)
+                            .saturating_sub(i32::try_from(shown).unwrap_or(0));
+                        out.push(SurfaceAction::PluginPage(d));
+                    }
+                }
+                _ => self.ignore(),
+            },
+            _ => self.ignore(),
+        }
     }
 
     /// The keyboard's answer `BF 01 v` (Ruling 4).
@@ -269,8 +608,12 @@ impl Kontrol {
                 self.hello_sent = false;
                 self.next_hello = Some(now + HELLO_EVERY);
             }
-            // Task 2 replaces this arm.
-            _ => self.ignored = self.ignored.saturating_add(1),
+            _ if !self.link.get() => self.ignore(),
+            [CC, cc, v] => self.control(cc, v, now, out),
+            _ => match parse_sysex(msg) {
+                Some(m) => self.command(m, now, out),
+                None => self.ignore(),
+            },
         }
     }
 }
@@ -296,8 +639,21 @@ impl Surface for Kontrol {
     }
 
     fn feedback(&mut self, view: &MixerView, first: usize, now: Instant) -> Vec<Vec<u8>> {
-        self.view = view.clone();
+        self.ids = view.strips.iter().map(|s| s.id).collect();
+        self.selected = view.strips.iter().position(|s| s.select);
         self.first = first;
+        self.shown = view
+            .strips
+            .iter()
+            .skip(first)
+            .take(SLOTS)
+            .cloned()
+            .collect();
+        self.page = if self.mode == Mode::Plugin {
+            view.page.clone()
+        } else {
+            None
+        };
         if !self.link.get() {
             if std::mem::take(&mut self.hello_sent) {
                 self.next_hello = Some(now + HELLO_EVERY);
@@ -318,6 +674,10 @@ impl Surface for Kontrol {
             out.push(sysex(CMD_IDENTITY, major, minor, &ascii(IDENTITY_NAME)));
         }
         out
+    }
+
+    fn shows_page(&self) -> bool {
+        self.mode == Mode::Plugin
     }
 
     fn refresh(&mut self) {

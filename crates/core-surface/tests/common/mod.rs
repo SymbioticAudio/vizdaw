@@ -4,7 +4,7 @@
 
 use core_model::automation::AutomationMode;
 use core_model::ids::StripId;
-use core_surface::{MixerView, StripView};
+use core_surface::{MixerView, StripView, TrackKind};
 
 pub fn strip(id: u64, name: &str) -> StripView {
     StripView {
@@ -19,6 +19,7 @@ pub fn strip(id: u64, name: &str) -> StripView {
         select: false,
         mode: AutomationMode::Read,
         meter: (0.0, 0.0),
+        kind: TrackKind::Audio,
     }
 }
 
