@@ -122,6 +122,22 @@ import VizDAWCore
         #expect(both["Audio"] != nil && both["MIDI Input"] != nil)
     }
 
+    /// Plan 5f-1 Ruling 17: a surface's port hears nothing in a lane, and
+    /// the picker says why.
+    @Test func aSurfacesPortIsMarkedInThePicker() throws {
+        LaneInputs.midiPorts = { ["Keystation", "MCU In"] }
+        LaneInputs.claimedPorts = { ["MCU In"] }
+        defer {
+            LaneInputs.midiPorts = { midiSourcePorts() }
+            LaneInputs.claimedPorts = { [] }
+        }
+        var l = lane(31, "Keys")
+        l.midiDest = 1
+        let (m, _) = try doc([l])
+        let g = titles(m.inputs.groups(for: l))
+        #expect(g["MIDI Input"] == ["All MIDI Inputs", "Keystation", "MCU In (used by a surface)"])
+    }
+
     @Test func theMonitorButtonCyclesAutoInputOff() throws {
         let l = audioLane(30, nil)
         let (m, f) = try doc([l])

@@ -226,6 +226,9 @@ public final class DocumentStore {
 
     /// Brings a document's window to the front (set by the app).
     public var activate: ((UUID) -> Void)?
+    /// Every new model, before any window shows it (set by the app: the
+    /// surfaces' core and command sinks, plan 5f-1 Task 10).
+    public var didMake: ((UUID, DocumentModel) -> Void)?
 
     /// The open document saved at `path` (same file, ignoring case and
     /// symbolic links), if any.
@@ -323,6 +326,7 @@ public final class DocumentStore {
             model.listPreferences = listPreferences
             model.keys = keyBindings
             let id = UUID()
+            didMake?(id, model)
             documents[id] = model
             return id
         } catch {

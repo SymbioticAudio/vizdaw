@@ -50,7 +50,12 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return rows
     }
 
-    func locate(tick: Int64) throws { state.tick = tick }
+    /// `locate` calls (plan 5f-1 Task 10).
+    var locates: [Int64] = []
+    func locate(tick: Int64) throws {
+        locates.append(tick)
+        state.tick = tick
+    }
     func path() throws -> String? { savedPath }
 
     func play(seq: UInt64) throws {

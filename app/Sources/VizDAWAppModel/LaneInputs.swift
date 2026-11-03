@@ -43,6 +43,9 @@ public final class LaneInputs {
 
     /// The MIDI sources the picker offers (tests replace it).
     public static var midiPorts: () -> [String] = { midiSourcePorts() }
+    /// The surfaces' input ports, which reach no lane (plan 5f-1 Ruling
+    /// 17); the app sets it, tests replace it.
+    public static var claimedPorts: () -> Set<String> = { [] }
     /// The chosen input device's channels read without the engine (tests
     /// replace it; 5d-2 final review I4).
     public static var deviceChannels: () -> InputChannelsRow? = { audioInputChannels() }
@@ -112,8 +115,12 @@ public final class LaneInputs {
                 port = p
                 channel = c
             }
+            let claimed = Self.claimedPorts()
             let ports = [InputChoice("All MIDI Inputs", .midi(port: nil, channel: channel))]
-                + Self.midiPorts().map { InputChoice($0, .midi(port: $0, channel: channel)) }
+                + Self.midiPorts().map { p in
+                    InputChoice(
+                        claimed.contains(p) ? "\(p) (used by a surface)" : p, .midi(port: p, channel: channel))
+                }
             out.append(InputGroup(title: "MIDI Input", choices: ports))
             let channels = [InputChoice("Any Channel", .midi(port: port, channel: nil))]
                 + (0..<16).map { InputChoice("Channel \($0 + 1)", .midi(port: port, channel: UInt8($0))) }

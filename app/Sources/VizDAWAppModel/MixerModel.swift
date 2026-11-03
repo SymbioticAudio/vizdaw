@@ -188,8 +188,9 @@ public final class MixerModel {
     /// strips.
     public func inputLane(for strip: StripRow) -> LaneRow? {
         guard case .audioPath(let path) = strip.kind else { return nil }
-        let through = document.lanes.filter { $0.audioOut == path }
-        return through.first(where: \.arm) ?? through.first
+        // One rule for the mixer and the surfaces' rec buttons (plan 5f-1
+        // Ruling 12).
+        return document.inputLane(path: path)
     }
 
     public func stripName(_ id: UInt64) -> String {

@@ -41,7 +41,31 @@ public final class DocumentModel {
     public var pendingDelete: UInt64?
     public var alert: AlertItem?
     /// The mixer's selected strips (plan 5e-2 Ruling 5), for `automation.mode.<mode>`.
-    public var selectedStrips: Set<UInt64> = []
+    /// The surfaces show it (plan 5f-1 Ruling 12).
+    public var selectedStrips: Set<UInt64> = [] {
+        didSet {
+            if selectedStrips != oldValue { try? session.setSurfaceSelection(strips: selectedStrips.sorted()) }
+        }
+    }
+    /// What the app does with surface events (plan 5f-1 Ruling 12).
+    public var surfaceRelay: SurfaceRelay {
+        if let r = relayModel { return r }
+        let r = SurfaceRelay()
+        relayModel = r
+        return r
+    }
+    @ObservationIgnored private var relayModel: SurfaceRelay?
+    /// A real device's command (`KeyMonitor.perform`) and a programmatic
+    /// one (`ControlCommands.run`, no dialog), set by the app where models
+    /// are made.
+    @ObservationIgnored public var surfaceCommandSink: ((String) -> Void)?
+    @ObservationIgnored public var quietCommandSink: ((String) -> Void)?
+    /// NoSurfaceCore until the app passes LiveSurfaceCore (pre-flight M25).
+    @ObservationIgnored public var surfaceCore: any SurfaceCore = NoSurfaceCore()
+    /// A surface's events are applying (ruling T9-1): a surface button is
+    /// not a keystroke, so a text field having the keyboard does not hold
+    /// it back.
+    @ObservationIgnored var surfaceActing = false
     /// Version and selection the current `lanes` were fetched for.
     private var lanesKey: LanesKey?
     /// How often `lanes` were fetched (tests check refetch rules).
@@ -323,14 +347,16 @@ public final class DocumentModel {
     public var canRedo: Bool { snapshot.redoLabel != nil }
     public var isPlaying: Bool { transport.playing }
     /// Transport keys (Space, Return) are off while any name, comment, slot
-    /// or reference field is edited, so typing a space types a space.
+    /// or reference field is edited, so typing a space types a space. A
+    /// surface's button is no key (ruling T9-1): it acts regardless.
     public var transportKeysEnabled: Bool {
-        renamingSeq == nil && commentDraft == nil && slotDraft == nil
-            && editor.referenceDraft == nil && !editor.textEditing && !editor.panelKey
+        surfaceActing
+            || (renamingSeq == nil && commentDraft == nil && slotDraft == nil
+                && editor.referenceDraft == nil && !editor.textEditing && !editor.panelKey)
     }
     /// Return (Return to Start) is also off while a list editor has the
     /// keyboard: there it edits the cursor row (Plan 4c Ruling 20).
-    public var returnKeyEnabled: Bool { transportKeysEnabled && !editor.listFocused }
+    public var returnKeyEnabled: Bool { surfaceActing || (transportKeysEnabled && !editor.listFocused) }
     public var canPlay: Bool { selectedSeq != nil || isPlaying }
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
     public var pollInterval: Duration { .seconds(pollSeconds) }
@@ -529,6 +555,20 @@ public final class DocumentModel {
             pluginProblems.append(contentsOf: u.problems)
             if pluginProblems.count > 50 { pluginProblems.removeFirst(pluginProblems.count - 50) }
         }
+        // What the surfaces asked for in this pass (plan 5f-1 Ruling 12).
+        if let events = try? session.takeSurfaceEvents(), !events.isEmpty {
+            surfaceRelay.apply(
+                events, self, perform: surfaceCommandSink ?? { _ in }, quietly: quietCommandSink ?? { _ in })
+        }
+        surfaceRelay.flush(self)
+    }
+
+    /// Of the shown sequence's lanes that play through `path`, the first
+    /// armed one, else the first (5d-2 Ruling 4): the mixer's input lane
+    /// and the surfaces' rec buttons (plan 5f-1 Ruling 12).
+    public func inputLane(path: UInt64) -> LaneRow? {
+        let through = lanes.filter { $0.audioOut == path }
+        return through.first(where: \.arm) ?? through.first
     }
 
     /// True when Save needs a path first (untitled).

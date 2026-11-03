@@ -19,6 +19,9 @@ import VizDAWCore
 /// by them.
 @MainActor let keyBindings = KeyBindings(defaults: MemoryDefaults.appStore())
 
+/// Settings › Surfaces (plan 5f-1 Rulings 9–11).
+@MainActor let surfaceSettings = SurfaceSettings(core: AppControlHost.shared.surfaces)
+
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
 @MainActor let noteInputHub = NoteInputHub(input: NoteInput())
@@ -36,6 +39,27 @@ struct VizDAWApp: App {
             }
             w?.makeKeyAndOrderFront(nil)
             NSApp.activate()
+        }
+        // Surface buttons run commands in their document (plan 5f-1
+        // Ruling 12): a device's as its key would, a programmatic one
+        // (surface.inject, midi.inject) as the channel does, so it opens
+        // no dialog.
+        appStore.didMake = { id, m in
+            m.surfaceCore = AppControlHost.shared.surfaces
+            m.surfaceCommandSink = { [weak m] command in
+                guard let m else { return }
+                _ = KeyMonitor.perform(.command(command), (id: id, model: m))
+            }
+            m.quietCommandSink = { [weak m] command in
+                guard let m else { return }
+                switch ControlCommands.run(
+                    command, args: [], doc: (id, m), store: appStore, host: AppControlHost.shared)
+                {
+                case .failed(let f): m.editor.status = f.message
+                case .opened(_, let d): ControlWindows.openDocument(d)
+                case .done, .job, .measure: break
+                }
+            }
         }
         appStore.willClose = {
             PluginWindows.closeDocument($0)
@@ -98,6 +122,8 @@ struct VizDAWApp: App {
                     .tabItem { Label("Recording", systemImage: "record.circle") }
                 AutomationSettingsView(prefs: automationPreferences)
                     .tabItem { Label("Automation", systemImage: "slider.vertical.3") }
+                SurfacesSettingsView(settings: surfaceSettings, keys: keyBindings)
+                    .tabItem { Label("Surfaces", systemImage: "dial.medium") }
             }
         }
     }
@@ -171,6 +197,10 @@ enum AppSetup {
         let dir = supportDir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? setSupportDir(path: dir.path)
+        // surfaces.json (plan 5f-1 Ruling 9), before anything can save
+        // it; lanes mark surface ports.
+        try? surfacesLoad()
+        LaneInputs.claimedPorts = { Set(surfaceList().map(\.input)) }
         appPlugins.start(config: AppPlugins.config(supportDir: dir, scanner: scanner), scan: false)
     }
 
@@ -223,12 +253,25 @@ enum PluginAlerts {
 enum PluginTicker {
     private static var timer: Timer?
     private static var ticks = 0
+    /// The command target the surfaces were last focused on (plan 5f-1
+    /// Ruling 11): focus moves only when it changes (pre-flight M22).
+    /// Weak, not an `ObjectIdentifier`: a closed document's address can
+    /// be reused by the next one, which must still be focused.
+    private static weak var surfaceFocus: DocumentModel?
 
     static func start(_ store: DocumentStore) {
         guard timer == nil else { return }
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in
             MainActor.assumeIsolated {
                 for model in store.documents.values { model.idle() }
+                // Surfaces drive the command target (plan 5f-1 Ruling 11),
+                // refocused only when it changes, so `surface.inject` into
+                // another window keeps the focus it took.
+                let target = store.noteTarget
+                if target !== surfaceFocus {
+                    surfaceFocus = target
+                    try? target?.session.focusSurfaces()
+                }
                 // Open documents only; played notes go to the command target.
                 noteInputHub.poll(Array(store.documents.values), focused: store.noteTarget)
                 PluginWindows.tick(store)
