@@ -51,6 +51,7 @@ pub mod session;
 pub mod snapshot;
 pub mod step;
 pub mod strip;
+pub mod surfaces;
 pub mod synth;
 pub mod templates;
 

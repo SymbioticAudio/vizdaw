@@ -1774,6 +1774,8 @@ impl Session {
             self.unload_disabled();
             self.service_recording()?;
             self.service_writing();
+            // Control surfaces and MIDI learn (plan 5f-1 Ruling 11).
+            self.service_surfaces();
             // An arm's claim another window's opening input put off (Task
             // 8 parked n2); the sources were reconnected at the arm.
             let owed = lock(&self.inner).claim_owed;
@@ -7983,6 +7985,28 @@ impl Session {
                     )
                 })
         })
+    }
+}
+
+/// Control surfaces (plan 5f-1 Ruling 11). Task 8 adds the service's
+/// input, actions and feedback, and the surface methods, to these blocks.
+#[uniffi::export]
+impl Session {
+    /// Makes this session the one the surfaces drive: the app's command
+    /// target (Ruling 11; the ticker calls it when the target changes).
+    pub fn focus_surfaces(&self) -> Result<(), VizError> {
+        ffi_guard(|| {
+            crate::surfaces::focus(self.id);
+            Ok(())
+        })
+    }
+}
+
+impl Session {
+    /// `idle`'s surfaces step: when this session is focused, the 2 s port
+    /// check (Task 7). Takes the registry without `inner` (lock order).
+    fn service_surfaces(&self) {
+        crate::surfaces::service(self.id);
     }
 }
 

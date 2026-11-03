@@ -788,6 +788,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         holders.append(holder)
     }
 
+    // MARK: Surfaces (plan 5f-1)
+
+    var focusCalls = 0
+    func focusSurfaces() throws { focusCalls += 1 }
+
     /// Thrown by `setAutomationMode` (before it is recorded).
     var modeError: VizError?
     func setAutomationMode(strips: [UInt64], mode: AutomationModeRow) throws -> DocSnapshot {
