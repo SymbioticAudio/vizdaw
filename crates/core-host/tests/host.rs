@@ -641,6 +641,27 @@ fn a_mixer_value_is_kept_until_the_document_has_it_and_a_newer_edit_wins() {
     drop(engine);
 }
 
+/// Plan 5f-2 Ruling 6: a value sent and not yet in the document is the
+/// live state a bounce's copies take; once the document has it, it is not
+/// uncommitted any more.
+#[test]
+fn uncommitted_values_are_what_the_document_does_not_have_yet() {
+    let (mut hist, _, id, mut host, _) = with_fake();
+    assert_eq!(host.uncommitted(id), vec![]);
+    host.set_param(id, GAIN, 0.2);
+    assert_eq!(host.uncommitted(id), vec![(GAIN, 0.2)]);
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: id,
+            params: vec![(GAIN, 0.2)],
+        },
+    );
+    host.sync(hist.doc());
+    assert_eq!(host.uncommitted(id), vec![]);
+    assert_eq!(host.uncommitted(PluginInstanceId(9_999)), vec![]);
+}
+
 #[test]
 fn a_plugin_gesture_is_not_echoed_before_it_is_committed() {
     let (hist, song, gain) = with_gain();

@@ -193,6 +193,15 @@ pub(crate) struct Inner {
     /// The meter holds of the mixer window and the surfaces (plan 5f-1
     /// Ruling 13, pre-flight I4).
     meters: crate::surfaces::MeterHolds,
+    /// The running bounce's job and its plugin copies' token (plan 5f-2
+    /// Ruling 6): ended once the job is no longer pending, or at close.
+    bounce_copies: Option<(u64, u64)>,
+    /// Finished bounces' files and media, by job (Ruling 10).
+    bounce_results: std::collections::BTreeMap<u64, crate::bounce::BounceResultRow>,
+    /// The next bounce cancels itself once its progress reaches this
+    /// (test hook).
+    #[cfg(feature = "test-hooks")]
+    bounce_cancel_at: Option<f32>,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -295,6 +304,10 @@ impl Inner {
             landed_in_group: false,
             surfaces: Default::default(),
             meters: Default::default(),
+            bounce_copies: None,
+            bounce_results: Default::default(),
+            #[cfg(feature = "test-hooks")]
+            bounce_cancel_at: None,
         }
     }
 
@@ -371,16 +384,19 @@ impl Inner {
             .collect()
     }
 
-    /// `Busy` while a Format, Convert or Relink job has not been applied:
-    /// each captures the project format and the items' files when it
-    /// starts, so another such job may not start meanwhile (5a Task 11
-    /// review Minor 4; preflight M3). An import does not block them.
+    /// `Busy` while a Format, Convert, Relink or Bounce job has not been
+    /// applied: each captures the project format and the items' files when
+    /// it starts, so another such job may not start meanwhile (5a Task 11
+    /// review Minor 4; preflight M3; a bounce's streamer reads the media,
+    /// plan 5f-2 Ruling 9). An import does not block them.
     fn media_jobs_idle(&self) -> Result<(), VizError> {
         use crate::jobs::JobKindRow;
-        if self
-            .jobs
-            .pending(&[JobKindRow::Format, JobKindRow::Convert, JobKindRow::Relink])
-        {
+        if self.jobs.pending(&[
+            JobKindRow::Format,
+            JobKindRow::Convert,
+            JobKindRow::Relink,
+            JobKindRow::Bounce,
+        ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
             });
@@ -1756,6 +1772,8 @@ impl Session {
                 return Ok(nothing());
             }
             plugins::tick_closing();
+            // A bounce's plugin copies load here (plan 5f-2 Ruling 6).
+            plugins::tick_bounces();
             self.unload_disabled();
             self.service_recording()?;
             self.service_writing();
@@ -2582,6 +2600,14 @@ impl Session {
         })
     }
 
+    /// The next bounce cancels itself once its progress reaches `at` (None: never).
+    pub fn debug_bounce_cancel_at(&self, at: Option<f32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).bounce_cancel_at = at;
+            Ok(())
+        })
+    }
+
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
@@ -2679,6 +2705,10 @@ impl Session {
             let keep = inner.kept();
             for w in inner.jobs.shutdown() {
                 discard(&root, w, &keep);
+            }
+            // The bounce's plugin copies go with it (pre-flight I2).
+            if let Some((_, token)) = inner.bounce_copies.take() {
+                plugins::end_bounce(token);
             }
             inner.overviews.shutdown();
             if let Some(p) = inner.path.clone() {
@@ -3464,6 +3494,18 @@ impl Drop for Session {
         if recording {
             let _ = host::stop_recording(self.id);
         }
+        // A bounce still running stops first (plan 5f-2 pre-flight I2):
+        // its engine holds its plugin copies' processors, which end below.
+        {
+            let mut inner = lock(&self.inner);
+            if inner.bounce_copies.is_some() {
+                let root = inner.root(self.id);
+                let keep = inner.kept();
+                for w in inner.jobs.shutdown() {
+                    discard(&root, w, &keep);
+                }
+            }
+        }
         release_packages(self.id);
         if let Some(k) = key {
             recovery::closed(&k, self.id);
@@ -3511,6 +3553,13 @@ pub(crate) fn discard(
             .filter(|r| r.made)
             .map(|r| r.file.path)
             .collect(),
+        // Only the media it imported; the files it exported stay.
+        Work::Bounce { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .map(|i| i.path)
+            .collect(),
         Work::Cancelled => Vec::new(),
     };
     for f in files {
@@ -3539,20 +3588,72 @@ impl Session {
             let root = inner.root(self.id);
             let row = match work {
                 Work::Cancelled => row(id, kind, JobStateRow::Cancelled, None, vec![], vec![]),
-                Work::Import { files, target } => match apply_import(inner, &root, files, target) {
-                    Ok((created, problems)) => {
-                        changed |= !created.is_empty();
-                        row(id, kind, JobStateRow::Done, None, problems, created)
+                Work::Bounce {
+                    files,
+                    target,
+                    exported,
+                    problems,
+                    failed,
+                } => {
+                    // Exported files are already in place (Ruling 12): kept
+                    // whatever the import's apply does, and named even when
+                    // a later rename failed.
+                    let applied = if let Some(why) = failed {
+                        Err((VizError::Io { message: why }, Vec::new()))
+                    } else if files.is_empty() {
+                        Ok((Vec::new(), Vec::new()))
+                    } else {
+                        apply_import_as(inner, &root, files, target, &ImportAs::BOUNCE)
+                    };
+                    match applied {
+                        Ok((created, more)) => {
+                            changed |= !created.is_empty();
+                            inner.bounce_results.insert(
+                                id,
+                                crate::bounce::BounceResultRow {
+                                    files: exported,
+                                    media: created.clone(),
+                                },
+                            );
+                            let all = problems.into_iter().chain(more).collect();
+                            row(id, kind, JobStateRow::Done, None, all, created)
+                        }
+                        Err((e, more)) => {
+                            inner.bounce_results.insert(
+                                id,
+                                crate::bounce::BounceResultRow {
+                                    files: exported,
+                                    media: Vec::new(),
+                                },
+                            );
+                            let all = problems.into_iter().chain(more).collect();
+                            row(
+                                id,
+                                kind,
+                                JobStateRow::Failed,
+                                Some(e.to_string()),
+                                all,
+                                vec![],
+                            )
+                        }
                     }
-                    Err((e, problems)) => row(
-                        id,
-                        kind,
-                        JobStateRow::Failed,
-                        Some(e.to_string()),
-                        problems,
-                        vec![],
-                    ),
-                },
+                }
+                Work::Import { files, target } => {
+                    match apply_import_as(inner, &root, files, target, &ImportAs::IMPORT) {
+                        Ok((created, problems)) => {
+                            changed |= !created.is_empty();
+                            row(id, kind, JobStateRow::Done, None, problems, created)
+                        }
+                        Err((e, problems)) => row(
+                            id,
+                            kind,
+                            JobStateRow::Failed,
+                            Some(e.to_string()),
+                            problems,
+                            vec![],
+                        ),
+                    }
+                }
                 Work::Relink { files } => {
                     let (done, problems) = apply_relink(inner, &root, files);
                     changed |= !done.is_empty();
@@ -3577,6 +3678,15 @@ impl Session {
                 }
             };
             inner.jobs.finish(id, row);
+        }
+        // A bounce's plugin copies end with its job, however it ended:
+        // applied, failed, cancelled or panicked (plan 5f-2 Ruling 6,
+        // pre-flight I2).
+        if inner.bounce_copies.is_some() && !inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce])
+        {
+            if let Some((_, token)) = inner.bounce_copies.take() {
+                plugins::end_bounce(token);
+            }
         }
         if changed {
             inner.version += 1;
@@ -3606,18 +3716,56 @@ type ImportFiles = Vec<(String, Result<Vec<core_media::import::Imported>, String
 /// nothing was applied (with the per-file problems).
 type ImportApplied = Result<(Vec<u64>, Vec<String>), (VizError, Vec<String>)>;
 
+/// How an import job's result is applied: Import Audio, or a bounce's
+/// "Add to project" (plan 5f-2 Ruling 9).
+struct ImportAs {
+    /// The undo step's label.
+    label: &'static str,
+    /// The items' origin.
+    origin: fn(&core_media::import::Imported) -> core_model::document::MediaOrigin,
+    /// New lanes are named after their item (else "Audio <n>").
+    named_lanes: bool,
+}
+
+impl ImportAs {
+    /// Import Audio: `Imported` items on "Audio <n>" lanes.
+    const IMPORT: ImportAs = ImportAs {
+        label: "Import Audio",
+        origin: |item| core_model::document::MediaOrigin::Imported {
+            original_name: item.original_name.clone(),
+        },
+        named_lanes: false,
+    };
+
+    /// A bounce's "Add to project": `Bounced` items on lanes named after them.
+    const BOUNCE: ImportAs = ImportAs {
+        label: "Bounce",
+        origin: |_| core_model::document::MediaOrigin::Bounced,
+        named_lanes: true,
+    };
+
+    /// The name of the new lane for `item`, the sequence's `n`th.
+    fn lane_name(&self, item: &core_media::import::Imported, n: usize) -> String {
+        if self.named_lanes {
+            item.name.clone()
+        } else {
+            format!("Audio {n}")
+        }
+    }
+}
+
 /// One finished import (Ruling 19): the media items and, with a target,
 /// their regions (into the given lane for a single mono/stereo file, else
-/// one new "Audio n" lane per item), as one undo step "Import Audio".
+/// one new lane per item), as one undo step labelled as `how` says.
 /// On an error nothing is applied and the written files are removed.
-fn apply_import(
+fn apply_import_as(
     inner: &mut Inner,
     root: &Path,
     files: ImportFiles,
     target: Option<crate::jobs::ImportTargetRow>,
+    how: &ImportAs,
 ) -> ImportApplied {
     use core_model::command::{AudioCmd, MediaCmd};
-    use core_model::document::MediaOrigin;
     use core_model::event::Fade;
     let mut problems = Vec::new();
     let mut items = Vec::new();
@@ -3641,7 +3789,7 @@ fn apply_import(
         }
         (e, problems)
     };
-    if let Err(e) = h.begin("Import Audio") {
+    if let Err(e) = h.begin(how.label) {
         return Err(fail(e.into(), problems));
     }
     let run = (|| -> Result<Vec<u64>, VizError> {
@@ -3655,9 +3803,7 @@ fn apply_import(
                     length_frames: item.length_frames,
                     content_hash: Some(item.content_hash.clone()),
                     name: Some(item.name.clone()),
-                    origin: Some(MediaOrigin::Imported {
-                        original_name: item.original_name.clone(),
-                    }),
+                    origin: Some((how.origin)(item)),
                 }),
                 &filter,
             )?;
@@ -3681,7 +3827,7 @@ fn apply_import(
                     let r = h.execute(
                         &Command::Lane(LaneCmd::Add {
                             seq,
-                            name: format!("Audio {n}"),
+                            name: how.lane_name(item, n),
                             index: None,
                         }),
                         &filter,
@@ -7802,6 +7948,163 @@ impl Session {
             lock(&self.inner).jobs.cancel(id);
             Ok(())
         })
+    }
+
+    /// Starts a bounce (plan 5f-2; spec §9): the job ID; `job` reports it
+    /// and `bounce_result` names what it wrote. Every refusal of the
+    /// request is `Model`, with nothing written (Ruling 3); `Busy` inside
+    /// an open edit, while another bounce of this session is unapplied,
+    /// and with "Add to project" while a Format, Convert or Relink job is
+    /// (Ruling 9).
+    pub fn bounce(&self, req: crate::bounce::BounceRequestRow) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let plan = self.bounce_plan(&inner, &req)?;
+            if inner.history.in_transaction() {
+                return Err(VizError::Busy {
+                    message: "Finish the open edit first.".into(),
+                });
+            }
+            self.apply_jobs_after_edit(&mut inner);
+            if inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce]) {
+                return Err(VizError::Busy {
+                    message: "A bounce is running.".into(),
+                });
+            }
+            if req.add_to_project {
+                inner.media_jobs_idle()?;
+            }
+            // The live states, as Save captures them (Ruling 6), with the
+            // values the plugins were sent and the document does not have
+            // yet (read first: a capture counts them as saved).
+            let slots = mixer::slot_ids(inner.doc());
+            let sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)> = plugins::with(self.id, |p| {
+                p.map(|p| {
+                    slots
+                        .iter()
+                        .map(|id| (*id, p.uncommitted(*id)))
+                        .filter(|(_, v)| !v.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+            })?;
+            self.capture_all(&mut inner)?;
+            let doc = with_params(inner.doc().clone(), sent);
+            let root = inner.root(self.id);
+            let format = doc.settings().format;
+            let copies = if mixer::slot_ids(&doc).is_empty() {
+                None
+            } else {
+                Some(plugins::start_bounce(
+                    self.id,
+                    &doc,
+                    f64::from(format.sample_rate),
+                    crate::bounce::BLOCK,
+                )?)
+            };
+            let token = copies.as_ref().map(|c| c.token);
+            #[cfg(feature = "test-hooks")]
+            let cancel_at = inner.bounce_cancel_at.take();
+            #[cfg(not(feature = "test-hooks"))]
+            let cancel_at = None;
+            let job = crate::bounce::Job {
+                problems: plan.offline_sentence().into_iter().collect(),
+                plan,
+                media: crate::media::files(&doc, &root, &inner.offline),
+                doc,
+                root,
+                reserved: inner.reserved_names(),
+                format,
+                tail_cap_ms: crate::bounce::bounce_settings().tail_cap_ms,
+                copies: copies.map(|c| crate::bounce::Copies {
+                    factory: c.factory,
+                    ready: c.ready,
+                    problems: c.problems,
+                }),
+                cancel_at,
+            };
+            let spawned = inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Bounce, move |progress, cancel| {
+                    crate::bounce::run(job, progress, cancel)
+                });
+            match spawned {
+                Ok(id) => {
+                    if let Some(t) = token {
+                        inner.bounce_copies = Some((id, t));
+                    }
+                    Ok(id)
+                }
+                Err(e) => {
+                    if let Some(t) = token {
+                        plugins::end_bounce(t);
+                    }
+                    Err(e)
+                }
+            }
+        })
+    }
+
+    /// What `bounce` would do with `req`, checked as `bounce` checks it
+    /// (nothing starts): the range's frames, the files in order (stems
+    /// numbered), the lanes on external MIDI and Ruling 8's sentences.
+    pub fn bounce_check(
+        &self,
+        req: crate::bounce::BounceRequestRow,
+    ) -> Result<crate::bounce::BounceCheckRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let plan = self.bounce_plan(&inner, &req)?;
+            let root = inner.root(self.id);
+            Ok(plan.check_row(
+                crate::bounce::bounce_settings().tail_cap_ms,
+                core_media::record::free_bytes(&root),
+            ))
+        })
+    }
+
+    /// The files and media bounce job `job` wrote (Ruling 10), applying it
+    /// first when it just finished; `None` until it finished, or when it
+    /// was cancelled or is no bounce.
+    pub fn bounce_result(
+        &self,
+        job: u64,
+    ) -> Result<Option<crate::bounce::BounceResultRow>, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            Ok(inner.bounce_results.get(&job).cloned())
+        })
+    }
+}
+
+/// `doc` with `sent` in its slots' overlays (a bounce's copy of the live
+/// state; plan 5f-2 Ruling 6). A value the model refuses is left out.
+fn with_params(doc: Document, sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)>) -> Document {
+    if sent.is_empty() {
+        return doc;
+    }
+    let mut h = History::new(doc);
+    for (slot, params) in sent {
+        let _ = h.execute(
+            &Command::Mixer(MixerCmd::SetPluginParams { slot, params }),
+            &ViewFilter::default(),
+        );
+    }
+    h.doc().clone()
+}
+
+impl Session {
+    /// `req` checked against the document and this session's media roots.
+    fn bounce_plan(
+        &self,
+        inner: &Inner,
+        req: &crate::bounce::BounceRequestRow,
+    ) -> Result<crate::bounce::Plan, VizError> {
+        let roots = [inner.root(self.id), crate::media::scratch_root(self.id)];
+        crate::bounce::plan(inner.doc(), req, &roots, &inner.offline)
     }
 }
 

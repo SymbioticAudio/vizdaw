@@ -533,13 +533,25 @@ impl PendingExport {
         }
     }
 
-    /// Renames the partial onto the destination or, when that name is taken,
-    /// onto "<base> 2.<ext>", "<base> 3.<ext>", … where `<base>` is the stem
-    /// without a trailing " <n>" (never replacing; owner answer 2);
-    /// `Exported.path` is the name it took.
-    pub fn commit_numbered(mut self) -> Result<Exported, MediaError> {
+    /// Renames the partial onto the destination or, when that name is
+    /// taken, onto "<stem> 2.<ext>", "<stem> 3.<ext>", … (never replacing;
+    /// owner answer 2). The stem is kept whole, digits and all (Ruling
+    /// T1-2): "Kick 808.wav" taken gives "Kick 808 2.wav". `Exported.path`
+    /// is the name it took.
+    pub fn commit_numbered(self) -> Result<Exported, MediaError> {
         let dest = self.exported.path.clone();
-        let stem = dest
+        self.commit_numbered_from(&dest)
+    }
+
+    /// [`PendingExport::commit_numbered`] for a destination VizDAW already
+    /// numbered from `base` (a stem whose name was taken when the bounce
+    /// was planned): when the destination is taken too, the numbers go on
+    /// after its own " <n>" from `base`'s stem ("Bass 2.wav" from
+    /// "Bass.wav": "Bass 3.wav", …). Only that suffix is advanced (Ruling
+    /// T1-2); the files stay in the destination's folder.
+    pub fn commit_numbered_from(mut self, base: &Path) -> Result<Exported, MediaError> {
+        let dest = self.exported.path.clone();
+        let stem = base
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -547,16 +559,17 @@ impl PendingExport {
             .extension()
             .map(|e| format!(".{}", e.to_string_lossy()))
             .unwrap_or_default();
-        let base = match stem.rsplit_once(' ') {
-            Some((b, n))
-                if !b.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) =>
-            {
-                b.to_string()
-            }
-            _ => stem.clone(),
-        };
+        let first = dest
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .and_then(|d| {
+                d.strip_prefix(stem.as_str())
+                    .and_then(|r| r.strip_prefix(' '))
+                    .and_then(|n| n.parse::<u32>().ok())
+            })
+            .map_or(2, |n| n.saturating_add(1).max(2));
         let candidates = std::iter::once(dest.clone())
-            .chain((2..=MAX_NUMBER).map(|n| dest.with_file_name(format!("{base} {n}{ext}"))));
+            .chain((first..=MAX_NUMBER).map(|n| dest.with_file_name(format!("{stem} {n}{ext}"))));
         for to in candidates {
             match rename_excl(&self.partial, &to) {
                 Ok(()) => {

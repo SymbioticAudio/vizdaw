@@ -22,6 +22,7 @@ extension ProjectBanner {
         case .import: "Importing audio…"
         case .relink: "Relinking media…"
         case .convert, .format: "Converting media…"
+        case .bounce: "Bouncing…"
         }
     }
 
@@ -31,6 +32,7 @@ extension ProjectBanner {
         case .import: "Import Failed"
         case .relink: "Relink Failed"
         case .convert, .format: "Conversion Failed"
+        case .bounce: "Bounce Failed"
         }
     }
 }

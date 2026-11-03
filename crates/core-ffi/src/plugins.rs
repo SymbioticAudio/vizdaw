@@ -9,12 +9,16 @@ use crate::catalog;
 use crate::error::VizError;
 use crate::guard::lock;
 use core_engine::backend::MAX_FRAMES;
+use core_host::OfflineRender;
 use core_host::PluginHost;
 use core_host::catalog::HostMarks;
+use core_host::shelf::ShelfFactory;
 use core_model::document::Document;
+use core_model::ids::PluginInstanceId;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long a closed session's host waits for its processors to come back
@@ -30,11 +34,41 @@ struct Entry {
     marks: HostMarks,
 }
 
+/// A bounce's plugin copies (plan 5f-2 Ruling 6): a second host per
+/// bounce, rendering offline, made and serviced on this thread.
+struct BounceEntry {
+    /// The session that bounces.
+    session: u64,
+    host: PluginHost,
+    /// Set once nothing is loading.
+    ready: Arc<AtomicBool>,
+    /// The copies that do not render offline, filled when `ready` is set.
+    problems: Arc<Mutex<Vec<String>>>,
+    /// Every slot's plugin name, for the problems.
+    names: BTreeMap<PluginInstanceId, String>,
+}
+
 #[derive(Default)]
 struct Registry {
     hosts: BTreeMap<u64, Entry>,
     /// Hosts of closed sessions, waiting for their processors.
     closing: Vec<(PluginHost, Instant)>,
+    /// Bounce copies by token.
+    bounces: BTreeMap<u64, BounceEntry>,
+    /// The last bounce token given.
+    next_bounce: u64,
+}
+
+/// What a bounce gets of its plugin copies (plan 5f-2 Ruling 6).
+pub struct BounceCopies {
+    /// Ends them ([`end_bounce`]).
+    pub token: u64,
+    /// The copies' insert factory, for the bounce's engine.
+    pub factory: ShelfFactory,
+    /// Set by [`tick_bounces`] once nothing is loading.
+    pub ready: Arc<AtomicBool>,
+    /// The copies that do not render offline (filled before `ready`).
+    pub problems: Arc<Mutex<Vec<String>>>,
 }
 
 thread_local! {
@@ -47,6 +81,8 @@ thread_local! {
     /// successful registry access, engine first.
     static REGISTRY: RefCell<Registry> = RefCell::new(Registry::default());
     static PENDING: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// Bounce copies whose end the busy registry put off.
+    static PENDING_ENDS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     /// The catalog changed while the registry was busy.
     static CATALOG_DIRTY: Cell<bool> = const { Cell::new(false) };
 }
@@ -125,6 +161,10 @@ fn drain() {
             }
         });
     }
+    let ends = PENDING_ENDS.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    for token in ends {
+        end_bounce(token);
+    }
     let pending = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
     for id in pending {
         close_session(id);
@@ -141,6 +181,8 @@ pub fn has_plugins(id: u64) -> Result<bool, VizError> {
 /// then the plugin host closes. When the registry is busy the close is
 /// queued and runs on the next registry access.
 pub fn close_session(id: u64) {
+    // Its bounce's plugin copies first (plan 5f-2, pre-flight I2).
+    end_bounces_of(id);
     match has_plugins(id) {
         Ok(has) => {
             if has && crate::host::factory_owner() == Some(id) {
@@ -187,6 +229,149 @@ pub fn tick_closing() {
         r.closing
             .retain(|(h, t)| h.retiring() > 0 && t.elapsed() < CLOSING_WAIT);
     });
+}
+
+/// Makes a bounce's plugin copies for session `session` (plan 5f-2 Ruling
+/// 6): a new host at `rate` and `max` frames, told what the catalog knows,
+/// rendering offline, synced to `doc` (the live states as Save captures
+/// them). `Model` when this thread has no host for the session (a session
+/// used off its plugin thread), `Busy` while a plugin call is running.
+pub fn start_bounce(
+    session: u64,
+    doc: &Document,
+    rate: f64,
+    max: u32,
+) -> Result<BounceCopies, VizError> {
+    drain();
+    let known = REGISTRY.with(|r| {
+        r.try_borrow()
+            .map(|r| r.hosts.contains_key(&session))
+            .map_err(|_| busy())
+    })?;
+    if !known {
+        return Err(VizError::Model {
+            message: "bounce plugins from the window's thread".into(),
+        });
+    }
+    let mut host = PluginHost::new(rate, max).map_err(|e| VizError::Engine {
+        message: e.to_string(),
+    })?;
+    #[cfg(target_os = "macos")]
+    host.add_format(Box::new(platform_macos::au::AuFormat::new()));
+    let mut marks = HostMarks::default();
+    catalog::apply(&mut host, &mut marks);
+    host.set_offline_render(true);
+    host.sync(doc);
+    let mut names = BTreeMap::new();
+    for d in doc.instruments().values() {
+        if let core_model::document::DestKind::PluginInstrument { slot } = &d.kind {
+            names.insert(slot.id, slot.plugin.name.clone());
+        }
+    }
+    for (_, _, slot) in doc.mixer().inserts() {
+        names.insert(slot.id, slot.plugin.name.clone());
+    }
+    let ready = Arc::new(AtomicBool::new(false));
+    let problems = Arc::new(Mutex::new(Vec::new()));
+    let factory = host.factory();
+    REGISTRY.with(|r| {
+        let mut r = r.try_borrow_mut().map_err(|_| busy())?;
+        r.next_bounce += 1;
+        let token = r.next_bounce;
+        r.bounces.insert(
+            token,
+            BounceEntry {
+                session,
+                host,
+                ready: Arc::clone(&ready),
+                problems: Arc::clone(&problems),
+                names,
+            },
+        );
+        Ok(BounceCopies {
+            token,
+            factory,
+            ready,
+            problems,
+        })
+    })
+}
+
+/// Services the bounce copies (`Session::idle`): their loads finish here;
+/// once nothing is loading, the copies that do not render offline go to
+/// the bounce's problems and `ready` is set (Rulings 6, T3-1, T3-2).
+/// Skipped while the registry is busy.
+pub fn tick_bounces() {
+    REGISTRY.with(|r| {
+        let Ok(mut r) = r.try_borrow_mut() else {
+            return;
+        };
+        for b in r.bounces.values_mut() {
+            b.host.idle();
+            if b.ready.load(Ordering::SeqCst) || b.host.pending() > 0 {
+                continue;
+            }
+            let mut lines = Vec::new();
+            for (id, name) in &b.names {
+                match b.host.offline_state(*id) {
+                    Some(OfflineRender::RealtimeRequired) => {
+                        lines.push(format!("{name} renders in real time only"));
+                    }
+                    Some(OfflineRender::Refused) => {
+                        lines.push(format!("{name} has an offline mode and is not in it"));
+                    }
+                    Some(OfflineRender::Taken | OfflineRender::NoOfflineMode) | None => {}
+                }
+            }
+            lock(&b.problems).extend(lines);
+            b.ready.store(true, Ordering::SeqCst);
+        }
+    });
+}
+
+/// Ends bounce `token`'s copies: every slot is dropped, and a host whose
+/// processors are still out waits in the closing list. Queued while the
+/// registry is busy.
+pub fn end_bounce(token: u64) {
+    REGISTRY.with(|r| {
+        let Ok(mut r) = r.try_borrow_mut() else {
+            PENDING_ENDS.with(|p| p.borrow_mut().push(token));
+            return;
+        };
+        if let Some(mut b) = r.bounces.remove(&token) {
+            b.host.sync(&Document::new());
+            b.host.idle();
+            if b.host.retiring() > 0 {
+                r.closing.push((b.host, Instant::now()));
+            }
+        }
+    });
+}
+
+/// Ends every bounce of session `session` (it was dropped). While the
+/// registry is busy nothing happens here: `close_session` then queues the
+/// whole close, which calls this again.
+fn end_bounces_of(session: u64) {
+    let tokens: Vec<u64> = REGISTRY.with(|r| {
+        r.try_borrow()
+            .map(|r| {
+                r.bounces
+                    .iter()
+                    .filter(|(_, b)| b.session == session)
+                    .map(|(t, _)| *t)
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    for t in tokens {
+        end_bounce(t);
+    }
+}
+
+/// Bounce copy hosts not yet ended (test hook; pre-flight M4).
+#[cfg(feature = "test-hooks")]
+pub fn bounce_hosts() -> usize {
+    REGISTRY.with(|r| r.borrow().bounces.len())
 }
 
 /// Closed hosts still waiting (test hook).

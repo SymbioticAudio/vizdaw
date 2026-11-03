@@ -507,7 +507,8 @@ fn numbered_commits_never_replace() {
         names(d.path()),
         ["Bass 2.wav", "Bass 3.wav", "Bass.wav", "render.caf"]
     );
-    // A numbered name taken meanwhile numbers on from its base (pre-check M-11).
+    // A name VizDAW numbered, taken meanwhile, numbers on from its base
+    // (pre-check M-11).
     let p = write_partial(
         &CafImporter,
         &src,
@@ -520,13 +521,40 @@ fn numbered_commits_never_replace() {
     )
     .unwrap();
     assert_eq!(
-        p.commit_numbered().unwrap().path,
+        p.commit_numbered_from(&dest).unwrap().path,
         d.path().join("Bass 4.wav")
     );
     assert_eq!(
         std::fs::read(d.path().join("Bass 2.wav")).unwrap(),
         b"keep 2"
     );
+}
+
+/// Ruling T1-2: the user's own trailing digits are part of the name, never
+/// a number to advance: "Kick 808.wav" taken gives "Kick 808 2.wav", then
+/// "Kick 808 3.wav".
+#[test]
+fn numbered_names_keep_the_users_own_digits() {
+    let d = tempfile::tempdir().unwrap();
+    let src = float_caf(d.path(), 10);
+    let dest = d.path().join("Kick 808.wav");
+    std::fs::write(&dest, b"keep").unwrap();
+    let f = fmt(Container::Wav, BitDepth::Int16, true);
+    for want in ["Kick 808 2.wav", "Kick 808 3.wav"] {
+        let p = write_partial(
+            &CafImporter,
+            &src,
+            &dest,
+            &f,
+            None,
+            false,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(p.commit_numbered().unwrap().path, d.path().join(want));
+    }
+    assert_eq!(std::fs::read(&dest).unwrap(), b"keep");
 }
 
 #[test]

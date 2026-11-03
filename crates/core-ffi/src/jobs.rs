@@ -20,6 +20,8 @@ pub enum JobKindRow {
     Format,
     /// Relink media (a chosen file, or a folder search; plan 5b).
     Relink,
+    /// Bounce (plan 5f-2).
+    Bounce,
 }
 
 /// Where a job is.
@@ -88,6 +90,22 @@ pub enum Work {
     Relink {
         /// `(item, its new file or why not)`.
         files: Vec<(core_model::ids::MediaId, Result<RelinkFile, String>)>,
+    },
+    /// A bounce (plan 5f-2 Rulings 9, 12): its project imports, the files
+    /// it exported (already renamed into place) and its problems.
+    Bounce {
+        /// Per source: what its project import became (empty without "Add to project").
+        files: Vec<(String, Result<Vec<Imported>, String>)>,
+        /// Where regions go.
+        target: Option<ImportTargetRow>,
+        /// The files written outside the project, in source order.
+        exported: Vec<crate::bounce::BouncedFileRow>,
+        /// Clipped samples, placeholders, plugins without offline mode,
+        /// underruns, offline media (Rulings 6–8, 13).
+        problems: Vec<String>,
+        /// A rename failed after `exported` were in place (Ruling 12): the
+        /// job is Failed with this message, its files still reported.
+        failed: Option<String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,

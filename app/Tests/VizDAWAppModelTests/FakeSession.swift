@@ -549,6 +549,25 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return j
     }
     var cancelled: [UInt64] = []
+    var bounces: [BounceRequestRow] = []
+    var bounceError: VizError?
+    var checkRow = BounceCheckRow(externalLanes: 0, frames: 96_000, files: [], warning: nil)
+    var checkRequests: [BounceRequestRow] = []
+    var resultRow: BounceResultRow?
+    func bounce(req: BounceRequestRow) throws -> UInt64 {
+        if let e = bounceError { throw e }
+        bounces.append(req)
+        let id = UInt64(3000 + bounces.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .bounce, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
+            message: nil, problems: [], created: [])
+        return id
+    }
+    func bounceCheck(req: BounceRequestRow) throws -> BounceCheckRow {
+        checkRequests.append(req)
+        return checkRow
+    }
+    func bounceResult(job: UInt64) throws -> BounceResultRow? { resultRow }
     var jobStartState: JobStateRow = .done
     func cancelJob(id: UInt64) throws { cancelled.append(id) }
     var info = ProjectInfoRow(

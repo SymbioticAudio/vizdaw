@@ -19,12 +19,13 @@ use objc2_audio_toolbox::{
     AudioUnitParameterOptions, AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender,
     AudioUnitRenderActionFlags, AudioUnitReset, AudioUnitScope, AudioUnitSetParameter,
     AudioUnitSetProperty, AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent,
-    kAudioUnitErr_InvalidProperty, kAudioUnitProperty_ClassInfo, kAudioUnitProperty_CocoaUI,
-    kAudioUnitProperty_ElementCount, kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
-    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_OfflineRender,
-    kAudioUnitProperty_ParameterInfo, kAudioUnitProperty_ParameterList,
-    kAudioUnitProperty_RequestViewController, kAudioUnitProperty_SetRenderCallback,
-    kAudioUnitProperty_StreamFormat, kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
+    kAudioUnitErr_InvalidProperty, kAudioUnitErr_PropertyNotWritable, kAudioUnitProperty_ClassInfo,
+    kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount, kAudioUnitProperty_HostCallbacks,
+    kAudioUnitProperty_Latency, kAudioUnitProperty_MaximumFramesPerSlice,
+    kAudioUnitProperty_OfflineRender, kAudioUnitProperty_ParameterInfo,
+    kAudioUnitProperty_ParameterList, kAudioUnitProperty_RequestViewController,
+    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat,
+    kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
 };
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
@@ -380,21 +381,12 @@ impl Unit {
     /// (`kAudioUnitProperty_OfflineRender`, global scope; plan 5f-2
     /// Ruling 7).
     pub(crate) fn set_offline_render(&self, on: bool) -> OfflineRender {
-        match self.set_status(
+        offline_answer(self.set_status(
             kAudioUnitProperty_OfflineRender,
             kAudioUnitScope_Global,
             0,
             &u32::from(on),
-        ) {
-            0 => OfflineRender::Taken,
-            // The unit has no such property: it renders the same either
-            // way (Ruling T3-1; Apple's effects on macOS 26).
-            s if s == kAudioUnitErr_InvalidProperty => OfflineRender::NoOfflineMode,
-            // Anything else (not writable now, a bad value, initialized
-            // when it wanted not to be): it has the mode and did not take
-            // it, so the bounce reports it.
-            _ => OfflineRender::Refused,
-        }
+        ))
     }
 
     /// Feeds input bus `element` from `callback` with `refcon`.
@@ -1583,5 +1575,47 @@ impl Drop for View {
                 let _: () = msg_send![&*self.view, removeFromSuperview];
             }
         }
+    }
+}
+
+/// What a `kAudioUnitProperty_OfflineRender` set's status means (plan 5f-2
+/// Rulings T3-1, T3-2).
+fn offline_answer(status: i32) -> OfflineRender {
+    match status {
+        0 => OfflineRender::Taken,
+        // The unit has no such property, or has it read-only: it renders
+        // the same either way (Rulings T3-1, T3-2; Apple's effects on
+        // macOS 26).
+        s if s == kAudioUnitErr_InvalidProperty || s == kAudioUnitErr_PropertyNotWritable => {
+            OfflineRender::NoOfflineMode
+        }
+        // Anything else (a bad value, initialized when it wanted not to
+        // be): it has the mode and did not take it, so the bounce reports
+        // it.
+        _ => OfflineRender::Refused,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ruling T3-2: a read-only OfflineRender property is no offline mode,
+    /// not a refusal.
+    #[test]
+    fn offline_render_statuses_map_to_answers() {
+        assert_eq!(offline_answer(0), OfflineRender::Taken);
+        assert_eq!(
+            offline_answer(kAudioUnitErr_InvalidProperty),
+            OfflineRender::NoOfflineMode
+        );
+        assert_eq!(
+            offline_answer(kAudioUnitErr_PropertyNotWritable),
+            OfflineRender::NoOfflineMode
+        );
+        assert_eq!(
+            offline_answer(objc2_audio_toolbox::kAudioUnitErr_InvalidPropertyValue),
+            OfflineRender::Refused
+        );
     }
 }

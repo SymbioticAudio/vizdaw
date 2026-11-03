@@ -586,6 +586,18 @@ impl PluginHost {
         }
     }
 
+    /// The values running instance `id` was sent that the document does
+    /// not have yet ([`PluginHost::set_param`], its own window), by
+    /// parameter: what it holds once its processor has run. A bounce's
+    /// copies take them as the live state (plan 5f-2 Ruling 6). Read it
+    /// before a capture, which counts them as saved.
+    pub fn uncommitted(&self, id: PluginInstanceId) -> Vec<(ParamId, f64)> {
+        match self.slots.get(&id).map(|s| &s.state) {
+            Some(State::Live(l)) => l.pending.iter().map(|(p, v)| (*p, v.value)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Puts parameter `param` of running instance `id` back to what the
     /// document says: its overlay value, else its value before the
     /// overlay. A value the document never caught up with (one sent by
