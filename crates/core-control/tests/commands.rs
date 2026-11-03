@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        145,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce"
+        147,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1550,4 +1550,63 @@ fn bounce_commands_check_their_params() {
     let (code, message) = err("command.run", run(json!({})));
     assert_eq!(code, ErrorCode::DialogRequired);
     assert!(message.contains("Bounce"), "{message}");
+}
+
+/// Plan 5f-3 (Ruling 5): `region.open_external` takes an optional
+/// absolute `.app` path and opens no dialog for a programmatic call;
+/// `region.reload_external` takes nothing.
+#[test]
+fn external_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for good in [
+        json!({}),
+        json!({ "app": "/Applications/X.app" }),
+        json!({ "app": "/Applications/Sound Editor.app" }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run("region.open_external", good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    for bad in [
+        json!({ "app": "X.app" }),
+        json!({ "app": "/tmp/x.wav" }),
+        json!({ "app": "/Applications/X" }),
+        json!({ "app": 7 }),
+        json!({ "app": "/tmp/x\u{0}.app" }),
+        json!({ "app": format!("/{}.app", "a".repeat(1100)) }),
+        json!({ "path": "/tmp/x.app" }),
+    ] {
+        let (code, _) = err("command.run", run("region.open_external", bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    assert!(matches!(
+        ok("command.run", run("region.reload_external", json!({}))),
+        Command::CommandRun { .. }
+    ));
+    let (code, _) = err(
+        "command.run",
+        run(
+            "region.reload_external",
+            json!({ "app": "/Applications/X.app" }),
+        ),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams, "Reload takes no parameters");
+    for id in ["region.open_external", "region.reload_external"] {
+        let c = COMMANDS.iter().find(|c| c.id == id).unwrap();
+        assert!(c.document && c.menu == "Region" && c.menu_item, "{id}");
+        assert!(
+            c.dialogs.iter().all(|d| !d.always),
+            "{id}: a programmatic call never needs a dialog"
+        );
+    }
+    let open = COMMANDS
+        .iter()
+        .find(|c| c.id == "region.open_external")
+        .unwrap();
+    assert_eq!(open.dialogs[0].name, "Choose External Editor");
+    assert_eq!(open.dialogs[0].answered_by, ["app"]);
 }

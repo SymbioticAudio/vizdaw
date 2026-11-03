@@ -162,6 +162,10 @@ public protocol ControlHost: AnyObject {
     /// The core's process-wide surfaces, command maps and learn state
     /// (plan 5f-1; tests pass a fake, pre-flight M25).
     var surfaces: any SurfaceCore { get }
+    /// The editor `region.open_external` uses without `app` (plan 5f-3
+    /// Ruling 5): the stub when `VIZDAW_EXTERNAL_EDITOR=stub`, else Settings
+    /// › Editing's choice (pre-flight I7(c)).
+    var externalEditor: ExternalEditorChoice { get }
 }
 
 /// Runs registered menu commands (control spec §6) on a document model
@@ -427,6 +431,8 @@ public enum ControlCommands {
             return AutomationCommands.run(id, args: args, doc: docID, m)
         case AudioCommands.addMidi:
             return AudioCommands.runAddMidi(args, doc: docID, m)
+        case RegionCommands.openExternal, RegionCommands.reloadExternal:
+            return RegionCommands.runExternal(id, args: args, doc: docID, m, editor: host.externalEditor)
         case RegionCommands.normalize:
             guard let text = args.text("peak_db") else { return .failed(.dialog("Normalize", "peak_db")) }
             guard let peak = RegionCommands.parsePeak(text) else {

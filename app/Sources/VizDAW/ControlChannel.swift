@@ -530,6 +530,10 @@ final class AppControlHost: ControlHost {
 
     var nudge: NudgeSettings { editingPreferences.nudge }
     var keys: KeyBindings { keyBindings }
+    var externalEditor: ExternalEditorChoice {
+        if ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub" { return .stub }
+        return editingPreferences.externalEditor.map { .app($0) } ?? .none
+    }
 
     /// `audio.set` (plan 5d-1 Ruling 26): through the app's audio
     /// preferences, which keep it (plan 5d-2 Ruling 2).

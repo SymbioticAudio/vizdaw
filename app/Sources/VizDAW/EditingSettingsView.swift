@@ -92,6 +92,19 @@ struct EditingSettingsView: View {
                 }
                 .disabled(!scaleSteps.wrappedValue || prefs.nudge.followKeySignature)
             }
+            // Plan 5f-3 Ruling 5: applications only, chosen with a panel.
+            Section("External Sample Editor") {
+                LabeledContent("Application") {
+                    Text(prefs.externalEditor.map { FileManager.default.displayName(atPath: $0) } ?? "None")
+                }
+                HStack {
+                    Button("Choose…") {
+                        if let p = ExternalEditorPanel.choose() { prefs.externalEditor = p }
+                    }
+                    Button("Clear") { prefs.externalEditor = nil }
+                        .disabled(prefs.externalEditor == nil)
+                }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)

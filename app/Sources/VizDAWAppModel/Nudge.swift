@@ -85,11 +85,20 @@ public final class EditingPreferences {
         }
     }
 
+    /// The external sample editor's `.app` path (plan 5f-3 Ruling 5).
+    public static let externalEditorKey = "VizDAW.externalEditor"
+
+    /// The chosen external sample editor (nil: none chosen).
+    public var externalEditor: String? {
+        didSet { defaults.set(externalEditor, forKey: Self.externalEditorKey) }
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         nudge =
             defaults.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(NudgeSettings.self, from: $0) }
             ?? NudgeSettings()
+        externalEditor = defaults.string(forKey: Self.externalEditorKey)
     }
 }
 

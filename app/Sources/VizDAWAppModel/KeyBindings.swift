@@ -177,7 +177,10 @@ public enum KeyRouter {
     ) -> KeyRoute {
         if typing && plain(m) { return .typing }
         if let id = keys.command(keyCode: keyCode, modifiers: m, stepEntry: stepEntry) {
-            if menus, !plain(m), let row = keys.row(id), row.menuItem,
+            // Open in External Editor runs here, never through its menu
+            // item: with no editor chosen a key says so and the menu item
+            // alone opens the chooser (plan 5f-3, owner answer 2026-11-03).
+            if menus, !plain(m), id != RegionCommands.openExternal, let row = keys.row(id), row.menuItem,
                 let first = row.keys.first, chord(first, is: keyCode, m)
             {
                 return .pass
@@ -225,6 +228,12 @@ public enum KeyDispatch {
         case .job, .measure: return .handled
         case .failed(let f):
             switch f.code {
+            // No editor chosen (plan 5f-3, owner answer 2026-11-03): the
+            // key or surface button says so; passed on, it would reach the
+            // menu item, which opens the chooser.
+            case .unavailable where f.message == RegionCommands.noEditor:
+                doc?.editor.status = f.message
+                return .handled
             case .unavailable, .dialogRequired, .unknownId, .noDocument: return .pass
             default:
                 doc?.editor.status = f.message

@@ -407,6 +407,14 @@ const NORMALIZE_PARAMS: &[ParamSpec] = &[ParamSpec {
     help: "The peak level in dBFS, -96 to 0, as text (\"-0.3\"); answers the Normalize dialog.",
 }];
 
+/// `region.open_external` (plan 5f-3 Ruling 5).
+const EXTERNAL_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "app",
+    kind: ParamKind::Path("app"),
+    required: false,
+    help: "The editor application (an absolute path to a .app); default: Settings > Editing (answers the Choose External Editor dialog).",
+}];
+
 /// An ID parameter (a sequence, a lane), required.
 const fn id_param(name: &'static str, help: &'static str) -> ParamSpec {
     ParamSpec {
@@ -1062,6 +1070,29 @@ pub const COMMANDS: &[CommandSpec] = &[
         true,
     ),
     cmd("region.remove_fades", "Region", "Remove Fades", None, true),
+    CommandSpec {
+        params: EXTERNAL_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Choose External Editor",
+            when: "no editor is set in Settings > Editing",
+            always: false,
+            answered_by: &["app"],
+        }],
+        ..cmd(
+            "region.open_external",
+            "Region",
+            "Open in External Editor",
+            None,
+            true,
+        )
+    },
+    cmd(
+        "region.reload_external",
+        "Region",
+        "Reload External Edit",
+        None,
+        true,
+    ),
     cmd(
         "transport.play_stop",
         "Transport",
