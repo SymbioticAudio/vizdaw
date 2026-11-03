@@ -25,6 +25,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (core-ffi lib, the shipping port transport)
+        run: cargo clippy -p core-ffi --lib -- -D warnings
       - name: Clippy (rt-check build)
         run: cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings
       - name: Test
