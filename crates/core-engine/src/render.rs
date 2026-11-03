@@ -698,7 +698,11 @@ impl StemTaps {
     /// into frames `at..at + frames` and records its audibility when it
     /// changed (never allocates: with the gates full, the last entry is
     /// overwritten). Call only after `Exec::run` returned `Done`, before
-    /// the next run. // RT
+    /// the next run. Filling the gates takes more audibility changes in
+    /// one block than `max_frames / MIN_RUN + 2` (34 in a 1024-frame
+    /// block), which no automation produces; an overflow merges into the
+    /// last entry: its offset moves to the latest change and it holds the
+    /// latest state (final review T2-M3). // RT
     fn capture(&mut self, g: &Graph, at: usize, frames: u32) {
         let n = frames as usize;
         for t in &mut self.taps {

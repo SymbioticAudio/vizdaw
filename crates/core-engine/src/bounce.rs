@@ -96,7 +96,9 @@ pub struct BounceStats {
     pub tail: u64,
     /// Stream underruns while rendering (`Engine::faults` counters); 0 in Manual mode unless a read failed.
     pub underruns: u64,
-    /// Non-finite samples silenced (Ruling 13).
+    /// Non-finite samples the graph rendered, silenced in what the sink
+    /// received (Ruling 13). Counted over every frame read, including
+    /// held quiet tail frames that were dropped (final review T2-M4).
     pub nonfinite: u64,
 }
 
@@ -115,6 +117,10 @@ pub enum BounceError {
     /// The range holds no frames.
     #[error("the range is empty")]
     Empty,
+    /// The transport never started rolling (the Play did not reach the
+    /// renderer within 10 s of renderer time).
+    #[error("the transport did not start")]
+    NotRolling,
 }
 
 /// One source being bounced.
@@ -166,6 +172,11 @@ fn finite(x: f32, nonfinite: &mut u64) -> f32 {
 /// stereo frames to `sink(source, left, right)` in order. The sink receives
 /// exactly `BounceStats::frames` frames per source (Ruling 4). Sets the
 /// renderer's stem taps before the first block and clears them at the end.
+///
+/// For a dedicated engine with no other load while it runs (final review
+/// T2-M5, T2-M6): it locates to `spec.start`, turns looping off and
+/// plays, and leaves the engine stopped where the render ended, with
+/// looping off (the next bounce locates again).
 // The sink's signature is the plan's interface.
 #[allow(clippy::type_complexity)]
 pub fn bounce(
@@ -255,7 +266,7 @@ fn render(
                 waited = waited.saturating_add(blk);
                 if waited > roll_wait {
                     // The Play never reached the renderer.
-                    return Err(BounceError::Engine(EngineError::Busy));
+                    return Err(BounceError::NotRolling);
                 }
                 continue;
             }

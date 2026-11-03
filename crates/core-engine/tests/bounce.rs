@@ -698,4 +698,36 @@ fn cancel_and_an_empty_range_stop_cleanly() {
         &AtomicBool::new(false),
     );
     assert!(matches!(e, Err(core_engine::bounce::BounceError::Sink(m)) if m == "disk full"));
+    // A Play that never reaches the renderer has its own words (final
+    // review T2-M2), not the engine's Busy.
+    assert_eq!(
+        core_engine::bounce::BounceError::NotRolling.to_string(),
+        "the transport did not start"
+    );
+}
+
+/// Final review T2-M1 (guards Task 2's deviation 3): a range shorter than
+/// a block (100 ticks, under 1024 frames) is exact, the sink gets exactly
+/// its frames, and a second bounce on the same engine equals the first.
+#[test]
+fn a_range_shorter_than_a_block_bounces() {
+    let (d, seq) = doc(0, None);
+    let mut r = rig(&d, seq);
+    let short = BounceSpec {
+        start: Tick(2 * Q),
+        end: Tick(2 * Q + 100),
+        tail_cap: 0,
+        ..spec(0)
+    };
+    let want = r.engine.tick_frame(Tick(2 * Q + 100)) - r.engine.tick_frame(Tick(2 * Q));
+    assert!(want > 0 && want < u64::from(BLOCK), "{want} frames");
+    let (first, stats) = run_lr(&mut r, &short);
+    assert_eq!((stats.range, stats.frames), (want, want));
+    assert!(
+        first[0].0.iter().any(|x| x.abs() > 1e-3),
+        "the region sounds"
+    );
+    let (second, again) = run_lr(&mut r, &short);
+    assert_eq!(again, stats);
+    assert_eq!(second, first, "the same engine bounces it again alike");
 }
