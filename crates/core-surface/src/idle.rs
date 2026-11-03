@@ -38,6 +38,15 @@ impl IdleTouches {
         out
     }
 
+    /// `IdleRelease(t, last value's time)` for every open touch, without
+    /// closing them (Ruling T3-1: the caller forgets them next).
+    pub(crate) fn releases(&self) -> Vec<SurfaceAction> {
+        self.open
+            .iter()
+            .map(|(&t, &(_, last))| SurfaceAction::IdleRelease(t, last))
+            .collect()
+    }
+
     /// The last value sent for `t` while its idle touch is open.
     pub(crate) fn last(&self, t: AutomationTarget) -> Option<f64> {
         self.open.get(&t).map(|&(v, _)| v)

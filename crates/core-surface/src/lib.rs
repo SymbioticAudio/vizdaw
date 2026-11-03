@@ -241,6 +241,82 @@ pub trait Surface: Send {
     fn set_assign(&mut self, _assign: Assign) {}
 }
 
+/// A unit's online state (Ruling T3-1). `Down` is the online→offline
+/// change; `Up` is a return after a `Down` (the first time a unit comes
+/// online is not one: connecting already refreshed it).
+#[derive(Debug, Default)]
+pub(crate) struct Link {
+    online: bool,
+    /// It went offline since it was last online.
+    dropped: bool,
+}
+
+/// What a `Link::set` changed.
+pub(crate) enum Edge {
+    /// Nothing changed (or a first coming online).
+    Same,
+    /// Back online after going offline.
+    Up,
+    /// Online → offline.
+    Down,
+}
+
+impl Link {
+    /// Online now.
+    pub(crate) fn get(&self) -> bool {
+        self.online
+    }
+
+    /// Sets the state, answering the change.
+    pub(crate) fn set(&mut self, on: bool) -> Edge {
+        let was = std::mem::replace(&mut self.online, on);
+        match (was, on) {
+            (true, false) => {
+                self.dropped = true;
+                Edge::Down
+            }
+            (false, true) if std::mem::take(&mut self.dropped) => Edge::Up,
+            _ => Edge::Same,
+        }
+    }
+}
+
+/// What MCU and HUI share for Ruling T3-1: a unit that goes offline while
+/// its port stays connected releases everything it holds, once, as
+/// `release_all` does; back online, it gets a full refresh.
+pub(crate) trait Unit: Surface {
+    /// The unit's online state.
+    fn link(&mut self) -> &mut Link;
+    /// The unit's idle touches.
+    fn idle(&self) -> &IdleTouches;
+    /// `release_all` without the online reset: forgets every hold, touch
+    /// flag, pending byte and the shuttle; held faders are resent.
+    fn forget_all(&mut self) -> Vec<AutomationTarget>;
+
+    /// Sets the online state: going offline answers the releases of what
+    /// the unit held (touched faders `Release`, idle holds `IdleRelease` at
+    /// their last value's time), then forgets them; coming back refreshes.
+    fn set_online(&mut self, on: bool) -> Vec<SurfaceAction> {
+        match self.link().set(on) {
+            Edge::Same => Vec::new(),
+            Edge::Up => {
+                self.refresh();
+                Vec::new()
+            }
+            Edge::Down => {
+                let mut out: Vec<SurfaceAction> = self
+                    .touched()
+                    .into_iter()
+                    .map(|t| SurfaceAction::Gesture(t, Phase::Release))
+                    .collect();
+                out.extend(self.idle().releases());
+                let _ = self.forget_all();
+                out
+            }
+        }
+    }
+}
+
 /// A new state machine of `kind`.
 pub fn new_surface(kind: SurfaceKind) -> Box<dyn Surface> {
     match kind {

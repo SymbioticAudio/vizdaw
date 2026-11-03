@@ -4,8 +4,8 @@
 use crate::idle::IdleTouches;
 use crate::shuttle::Shuttle;
 use crate::{
-    Assign, ECHO_WINDOW, MixerView, ParamView, Phase, StripView, Surface, SurfaceAction,
-    SurfaceKind, midi, seg,
+    Assign, ECHO_WINDOW, Link, MixerView, ParamView, Phase, StripView, Surface, SurfaceAction,
+    SurfaceKind, Unit, midi, seg,
 };
 use core_model::automation::{AutomationMode, AutomationTarget, SendIndex, fader_db, pan_of, unit};
 use core_model::ids::StripId;
@@ -128,7 +128,7 @@ pub struct Mcu {
     cache: Sent,
     /// Replies to send with the next feedback (the handshake).
     replies: Vec<Vec<u8>>,
-    online: bool,
+    link: Link,
     ignored: u64,
 }
 
@@ -270,7 +270,7 @@ impl Mcu {
             sent: [None; 9],
             cache: Sent::default(),
             replies: Vec::new(),
-            online: false,
+            link: Link::default(),
             ignored: 0,
         }
     }
@@ -289,6 +289,17 @@ impl Mcu {
             return self.master.as_ref().map(|s| s.id);
         }
         self.strip(slot).map(|s| s.id)
+    }
+
+    /// The next feedback sends every fader showing `id` once.
+    fn resend_strip(&mut self, id: StripId) {
+        for slot in 0..9 {
+            if self.fader_strip(slot) == Some(id)
+                && let Some(cached) = self.cache.faders.get_mut(slot)
+            {
+                *cached = None;
+            }
+        }
     }
 
     fn strip(&self, slot: usize) -> Option<&StripView> {
@@ -502,12 +513,12 @@ impl Mcu {
 
     fn message(&mut self, msg: &[u8], now: Instant, out: &mut Vec<SurfaceAction>) -> Heard {
         if msg.first() == Some(&0xF0) {
-            return self.sysex(msg);
+            return self.sysex(msg, out);
         }
         let heard = self.channel(msg, now, out);
         if let Heard::Known = heard {
             // Any valid message marks the unit online (Ruling 14).
-            self.online = true;
+            out.extend(self.set_online(true));
         }
         heard
     }
@@ -522,7 +533,7 @@ impl Mcu {
         }
     }
 
-    fn sysex(&mut self, msg: &[u8]) -> Heard {
+    fn sysex(&mut self, msg: &[u8], out: &mut Vec<SurfaceAction>) -> Heard {
         let id = self.device_id();
         let Some(body) = msg.strip_prefix(&HEADER[..]) else {
             return Heard::Unknown;
@@ -544,15 +555,16 @@ impl Mcu {
                 reply.push(0xF7);
                 // Only the latest challenge matters: a flood keeps one reply.
                 self.replies = vec![reply];
-                self.online = true;
+                out.extend(self.set_online(true));
                 Heard::Known
             }
             [d, 0x03, ..] if *d == id => {
-                self.online = true;
+                out.extend(self.set_online(true));
                 Heard::Known
             }
             [d, 0x04, ..] if *d == id => {
-                self.online = false;
+                // Ruling T3-1: going offline releases what the unit holds.
+                out.extend(self.set_online(false));
                 Heard::Known
             }
             _ => Heard::Unknown,
@@ -783,14 +795,8 @@ impl Surface for Mcu {
         let mut out = self.idle.tick(now);
         // An idle-released fader is sent once by the next feedback.
         for a in &out {
-            if let SurfaceAction::IdleRelease(AutomationTarget::StripFader(id), _) = a {
-                for slot in 0..9 {
-                    if self.fader_strip(slot) == Some(*id)
-                        && let Some(cached) = self.cache.faders.get_mut(slot)
-                    {
-                        *cached = None;
-                    }
-                }
+            if let SurfaceAction::IdleRelease(AutomationTarget::StripFader(id), _) = *a {
+                self.resend_strip(id);
             }
         }
         out.extend(self.shuttle.tick(now));
@@ -830,7 +836,7 @@ impl Surface for Mcu {
     }
 
     fn online(&self) -> bool {
-        self.online
+        self.link.get()
     }
 
     fn ignored(&self) -> u64 {
@@ -846,22 +852,9 @@ impl Surface for Mcu {
     }
 
     fn release_all(&mut self) -> Vec<AutomationTarget> {
-        let mut held = self.touched();
-        for t in self.idle.take_all() {
-            if !held.contains(&t) {
-                held.push(t);
-            }
-        }
-        // A formerly touched fader gets feedback again.
-        for (slot, t) in self.touched.iter().enumerate() {
-            if t.is_some()
-                && let Some(cached) = self.cache.faders.get_mut(slot)
-            {
-                *cached = None;
-            }
-        }
-        self.touched = [None; 9];
-        self.shuttle.clear();
+        let held = self.forget_all();
+        // A reconnected unit is online once it says so.
+        self.link = Link::default();
         held
     }
 
@@ -871,5 +864,41 @@ impl Surface for Mcu {
 
     fn set_assign(&mut self, assign: Assign) {
         self.assign = assign;
+    }
+}
+
+impl Unit for Mcu {
+    fn link(&mut self) -> &mut Link {
+        &mut self.link
+    }
+
+    fn idle(&self) -> &IdleTouches {
+        &self.idle
+    }
+
+    fn forget_all(&mut self) -> Vec<AutomationTarget> {
+        let mut held = self.touched();
+        for t in self.idle.take_all() {
+            if !held.contains(&t) {
+                held.push(t);
+            }
+        }
+        // Every fader it held gets feedback again: the touched slots, and
+        // the slots showing an idle-held strip.
+        for (slot, t) in self.touched.iter().enumerate() {
+            if t.is_some()
+                && let Some(cached) = self.cache.faders.get_mut(slot)
+            {
+                *cached = None;
+            }
+        }
+        for t in &held {
+            if let AutomationTarget::StripFader(id) = *t {
+                self.resend_strip(id);
+            }
+        }
+        self.touched = [None; 9];
+        self.shuttle.clear();
+        held
     }
 }

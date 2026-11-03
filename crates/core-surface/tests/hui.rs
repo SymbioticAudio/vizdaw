@@ -270,10 +270,9 @@ fn hui_fader_pairs_hold_the_hi_byte_and_guard_echoes() {
         }
         other => panic!("{other:?}"),
     }
-    // A lone lo of a fader whose hi was never seen is counted.
-    let n = h.ignored();
-    assert!(h.input(&[0xB0, 0x26, 0x05], now).is_empty());
-    assert_eq!(h.ignored(), n + 1);
+    // A lone lo of a fader with no hi seen or sent is counted: see
+    // `hui_release_all_drops_holds_touches_and_the_pending_hi` (since review
+    // M3 the hi `shown` sent counts as seen).
     // The echo guard (Ruling 13): fader 6 was sent 0.5 = 8192 by `shown`.
     let echo = [0xB0, 0x05, 0x40, 0xB0, 0x25, 0x01]; // 8193, within 1 LSB
     let n = h.ignored();
@@ -399,4 +398,162 @@ fn hui_displays_fit_the_unit() {
         !fb.is_empty() && fb.iter().all(|x| x.first() == Some(&0xA0)),
         "{fb:?}"
     );
+}
+
+// Task 3 fix round 1: Ruling T3-1 and the review's Minors.
+
+const REPLY: [u8; 3] = [0x90, 0x00, 0x7F];
+
+#[test]
+fn hui_going_offline_releases_what_it_holds_once() {
+    let (mut h, now) = shown();
+    let _ = h.input(&REPLY, now);
+    let at = now + Duration::from_millis(2800);
+    let _ = h.input(&sw(2, 0, true), at);
+    let _ = h.input(&[0xB0, 0x40, 0x41], at);
+    let _ = h.input(&[0xB0, 0x01, 0x10, 0xB0, 0x21, 0x00], at);
+    let _ = h.input(&sw(0x0E, 2, true), at);
+    // The feedback sees the timeout first; the next tick releases.
+    let fb = h.feedback(&view(8), 0, now + Duration::from_millis(3000));
+    assert!(!h.online());
+    assert!(
+        moves_fader(&fb, 0x02) && moves_fader(&fb, 0x01),
+        "its faders are resent: {fb:?}"
+    );
+    let mut r = h.tick(now + Duration::from_millis(3001));
+    r.sort_by_key(|a| format!("{a:?}"));
+    let mut want = vec![
+        A::Gesture(T::StripFader(StripId(3)), Phase::Release),
+        A::IdleRelease(T::StripPan(StripId(1)), at),
+        A::IdleRelease(T::StripFader(StripId(2)), at),
+    ];
+    want.sort_by_key(|a| format!("{a:?}"));
+    assert_eq!(r, want, "Ruling T3-1");
+    assert!(h.touched().is_empty());
+    assert!(
+        h.tick(now + Duration::from_millis(3600)).is_empty(),
+        "once; no wind"
+    );
+}
+
+#[test]
+fn hui_a_tick_alone_sees_the_timeout() {
+    let (mut h, now) = shown();
+    let _ = h.input(&REPLY, now);
+    let _ = h.input(&sw(0, 0, true), now);
+    assert_eq!(
+        h.tick(now + Duration::from_secs(3)),
+        vec![A::Gesture(T::StripFader(StripId(1)), Phase::Release)]
+    );
+}
+
+#[test]
+fn hui_coming_back_online_refreshes_it() {
+    let (mut h, now) = shown();
+    let _ = h.input(&REPLY, now);
+    let _ = h.tick(now + Duration::from_secs(3));
+    assert!(!h.online());
+    let _ = h.input(&REPLY, now + Duration::from_millis(3100));
+    assert!(h.online());
+    let fb = h.feedback(&view(8), 0, now + Duration::from_millis(3110));
+    assert!(
+        has(
+            &fb,
+            &[
+                0xF0, 0x00, 0x00, 0x66, 0x05, 0x00, 0x10, 0x00, b'S', b't', b'r', b'i', 0xF7
+            ]
+        ),
+        "{fb:?}"
+    );
+}
+
+#[test]
+fn hui_hello_is_the_first_ping_and_release_all_goes_offline() {
+    let now = Instant::now();
+    let mut h = Hui::new();
+    assert_eq!(h.hello(), vec![PING.to_vec()]);
+    assert!(!has(&h.feedback(&view(8), 0, now), &PING), "hello pinged");
+    assert!(has(
+        &h.feedback(&view(8), 0, now + Duration::from_secs(1)),
+        &PING
+    ));
+    let _ = h.input(&REPLY, now);
+    let _ = h.release_all();
+    assert!(
+        !h.online(),
+        "a reconnected unit is online only once it answers"
+    );
+}
+
+#[test]
+fn hui_a_pending_hi_dies_with_its_touch_or_its_strip() {
+    let (mut h, now) = shown();
+    let _ = h.input(&sw(0, 0, true), now);
+    let _ = h.input(&[0xB0, 0x00, 0x30], now);
+    assert_eq!(
+        h.input(&sw(0, 0, false), now),
+        vec![A::Gesture(T::StripFader(StripId(1)), Phase::Release)]
+    );
+    assert!(
+        h.input(&[0xB0, 0x01, 0x30], now).is_empty(),
+        "nothing flushed"
+    );
+    // Fader 2's hi is pending; the bank moves, slot 2 shows another strip.
+    let _ = h.feedback(&view(8), 1, now);
+    assert!(
+        h.input(&[0xB0, 0x02, 0x30], now).is_empty(),
+        "nothing flushed"
+    );
+}
+
+#[test]
+fn hui_a_hi_alone_is_checked_for_an_echo() {
+    let mut v = view(8);
+    v.strips[0].fader = f64::from(0x40u16 << 7 | 0x50) / 16383.0;
+    let now = Instant::now();
+    let mut h = Hui::new();
+    let _ = h.feedback(&v, 0, now);
+    let _ = h.input(&[0xB0, 0x00, 0x40], now);
+    assert!(
+        h.input(&[0xB0, 0x01, 0x30], now).is_empty(),
+        "the echo's hi, flushed alone"
+    );
+}
+
+#[test]
+fn hui_a_lone_lo_uses_the_hi_last_sent() {
+    let (mut h, now) = shown();
+    // `shown` sent 0.5 = 0x40 << 7 to fader 1.
+    match h
+        .input(&[0xB0, 0x20, 0x05], now + Duration::from_millis(200))
+        .as_slice()
+    {
+        [A::Gesture(T::StripFader(StripId(1)), Phase::Touch(Some(x)))] => {
+            assert!((x - f64::from(0x40u16 << 7 | 5) / 16383.0).abs() < 1e-12)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn hui_an_emptied_slot_meters_go_dark_once() {
+    let (mut h, now) = shown();
+    let fb = h.feedback(&view(4), 0, now + Duration::from_millis(100));
+    assert!(
+        has(&fb, &[0xA0, 0x04, 0x00]) && has(&fb, &[0xA0, 0x04, 0x10]),
+        "{fb:?}"
+    );
+    let fb = h.feedback(&view(4), 0, now + Duration::from_millis(200));
+    assert!(!has(&fb, &[0xA0, 0x04, 0x00]), "once");
+}
+
+#[test]
+fn hui_a_switch_release_on_an_empty_slot_is_not_counted() {
+    let (mut h, now) = shown();
+    let _ = h.feedback(&view(4), 0, now);
+    let n = h.ignored();
+    let _ = h.input(&sw(5, 1, false), now);
+    assert_eq!(h.ignored(), n);
+    let _ = h.input(&sw(5, 1, true), now);
+    assert_eq!(h.ignored(), n + 1, "the press is");
 }

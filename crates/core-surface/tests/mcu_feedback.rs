@@ -390,3 +390,67 @@ fn extenders_follow_the_main_units_assignment() {
         assert!(text.starts_with("-24.1  -24.1  "), "{text:?}");
     }
 }
+
+// Task 3 fix round 1: Ruling T3-1 and the release_all parity fix.
+
+const OFFLINE: [u8; 7] = [0xF0, 0x00, 0x00, 0x66, 0x14, 0x04, 0xF7];
+const CONFIRMED: [u8; 7] = [0xF0, 0x00, 0x00, 0x66, 0x14, 0x03, 0xF7];
+
+#[test]
+fn going_offline_releases_what_the_unit_holds_once() {
+    let now = Instant::now();
+    let mut m = Mcu::new(false);
+    let _ = m.feedback(&view(8), 0, now);
+    let _ = m.input(&[0x90, 0x68, 0x7F], now);
+    let _ = m.input(&[0xB0, 0x10, 0x01], now);
+    let _ = m.input(&[0x90, 0x5B, 0x7F], now);
+    assert!(m.online());
+    assert_eq!(
+        m.input(&OFFLINE, now),
+        vec![
+            A::Gesture(T::StripFader(StripId(1)), Phase::Release),
+            A::IdleRelease(T::StripPan(StripId(1)), now),
+        ],
+        "Ruling T3-1: the touched fader and the idle hold"
+    );
+    assert!(!m.online());
+    assert!(m.touched().is_empty());
+    assert!(m.input(&OFFLINE, now).is_empty(), "once");
+    assert!(
+        m.tick(now + Duration::from_secs(2)).is_empty(),
+        "no wind, no idle release"
+    );
+    assert!(
+        m.input(&[0x90, 0x5B, 0x00], now).is_empty(),
+        "the shuttle forgot its press"
+    );
+}
+
+#[test]
+fn coming_back_online_refreshes_the_unit() {
+    let now = Instant::now();
+    let mut m = Mcu::new(false);
+    let _ = m.input(&CONFIRMED, now);
+    let _ = m.feedback(&view(8), 0, now);
+    let _ = m.input(&OFFLINE, now);
+    let _ = m.input(&CONFIRMED, now);
+    assert!(m.online());
+    let fb = m.feedback(&view(8), 0, now + Duration::from_millis(20));
+    assert!(
+        fb.iter()
+            .any(|x| x.starts_with(&[0xF0, 0x00, 0x00, 0x66, 0x14, 0x12])),
+        "a full refresh: {fb:?}"
+    );
+    assert!(has(&fb, &[0xE0, 0x00, 0x40]), "faders too");
+}
+
+#[test]
+fn release_all_resends_an_idle_held_fader() {
+    let now = Instant::now();
+    let mut m = Mcu::new(false);
+    let _ = m.feedback(&view(8), 0, now);
+    let _ = m.input(&[0xE1, 0x00, 0x10], now);
+    assert_eq!(m.release_all(), vec![T::StripFader(StripId(2))]);
+    let fb = m.feedback(&view(8), 0, now + Duration::from_millis(20));
+    assert!(has(&fb, &[0xE1, 0x00, 0x40]), "the motor goes back: {fb:?}");
+}

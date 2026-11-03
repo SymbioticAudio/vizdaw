@@ -8,7 +8,9 @@ use crate::mcu::{
     ECHO_LSB, HEADER, Heard, click, detents, fader_raw, lcd_chars, meter_level, toggled,
 };
 use crate::shuttle::Shuttle;
-use crate::{ECHO_WINDOW, MixerView, Phase, StripView, Surface, SurfaceAction, SurfaceKind, midi};
+use crate::{
+    ECHO_WINDOW, Link, MixerView, Phase, StripView, Surface, SurfaceAction, SurfaceKind, Unit, midi,
+};
 use core_model::automation::{AutomationTarget, unit};
 use core_model::ids::StripId;
 use std::collections::BTreeMap;
@@ -94,6 +96,9 @@ struct Sent {
     timecode: Option<[u8; DIGITS]>,
     /// When the meters are next due (`None`: now).
     meters_due: Option<Instant>,
+    /// Whether each slot's meter was last sent lit (`None`: unknown), so a
+    /// slot that empties goes dark once (review M4).
+    lit: [Option<bool>; 8],
 }
 
 /// A HUI-compatible unit: 8 strips, no master fader, no extenders (Ruling 4).
@@ -115,9 +120,14 @@ pub struct Hui {
     cache: Sent,
     /// When the last ping went out.
     pinged: Option<Instant>,
+    /// `hello` sent a ping that the next feedback times (review M5).
+    hello_pinged: bool,
     /// When the last ping reply arrived.
     replied: Option<Instant>,
-    online: bool,
+    link: Link,
+    /// Releases owed since the unit went offline in `feedback`, which
+    /// cannot answer actions: the next `tick` answers them (Ruling T3-1).
+    owed: Vec<SurfaceAction>,
     ignored: u64,
 }
 
@@ -178,8 +188,10 @@ impl Hui {
             sent: [None; 8],
             cache: Sent::default(),
             pinged: None,
+            hello_pinged: false,
             replied: None,
-            online: false,
+            link: Link::default(),
+            owed: Vec::new(),
             ignored: 0,
         }
     }
@@ -210,7 +222,9 @@ impl Hui {
             .replied
             .is_none_or(|at| now.saturating_duration_since(at) >= OFFLINE_AFTER)
         {
-            self.online = false;
+            // Ruling T3-1: releases go out with the next tick.
+            let owed = self.set_online(false);
+            self.owed.extend(owed);
         }
     }
 
@@ -218,7 +232,7 @@ impl Hui {
         match *msg {
             [0x90, 0x00, 0x7F] => {
                 self.replied = Some(now);
-                self.online = true;
+                out.extend(self.set_online(true));
                 Heard::Known
             }
             [0xB0, ZONE, z] => {
@@ -312,12 +326,13 @@ impl Hui {
             AUTO | V_SEL | INSERT => return Heard::Known,
             _ => {}
         }
-        let Some(s) = self.strip(slot) else {
-            return Heard::Unknown;
-        };
+        // A release does nothing, shown or not (review M6).
         if !press {
             return Heard::Known;
         }
+        let Some(s) = self.strip(slot) else {
+            return Heard::Unknown;
+        };
         let id = s.id;
         match port {
             SELECT => out.push(SurfaceAction::Select(id)),
@@ -334,6 +349,10 @@ impl Hui {
         // shows now (Ruling T1).
         if !down && let Some(was) = self.touched.get_mut(slot).and_then(Option::take) {
             self.resend_fader(slot);
+            // A hi byte whose lo was lost dies with its touch (review M1).
+            if self.pending.is_some_and(|(s, _)| s == slot) {
+                self.pending = None;
+            }
             out.push(SurfaceAction::Gesture(
                 AutomationTarget::StripFader(was),
                 Phase::Release,
@@ -360,7 +379,7 @@ impl Hui {
     /// A fader's hi byte: held for its lo; a pending one is applied alone.
     fn hi(&mut self, slot: usize, hi: u8, now: Instant, out: &mut Vec<SurfaceAction>) -> Heard {
         if let Some((s, h)) = self.pending.take()
-            && let Heard::Unknown = self.fader_value(s, u16::from(h) << 7, now, out)
+            && let Heard::Unknown = self.fader_value(s, u16::from(h) << 7, true, now, out)
         {
             self.ignored = self.ignored.saturating_add(1);
         }
@@ -386,14 +405,16 @@ impl Hui {
                 None => return Heard::Unknown,
             },
         };
-        self.fader_value(slot, u16::from(hi) << 7 | u16::from(lo), now, out)
+        self.fader_value(slot, u16::from(hi) << 7 | u16::from(lo), false, now, out)
     }
 
-    /// Fader `slot` moved to `raw` (0–16383).
+    /// Fader `slot` moved to `raw` (0–16383); `alone`: a hi byte applied
+    /// without its lo.
     fn fader_value(
         &mut self,
         slot: usize,
         raw: u16,
+        alone: bool,
         now: Instant,
         out: &mut Vec<SurfaceAction>,
     ) -> Heard {
@@ -409,10 +430,11 @@ impl Hui {
             return Heard::Unknown;
         };
         if let Some(Some((sent, at))) = self.sent.get(slot)
-            && raw.abs_diff(*sent) <= ECHO_LSB
+            && (raw.abs_diff(*sent) <= ECHO_LSB || alone && raw >> 7 == *sent >> 7)
             && now.saturating_duration_since(*at) < ECHO_WINDOW
         {
             // The echo of a motor move: ignored, not counted (Ruling 13).
+            // A hi byte alone echoes when it is the hi that was sent (review M2).
             return Heard::Known;
         }
         out.push(self.idle.value(AutomationTarget::StripFader(id), v, now));
@@ -457,6 +479,10 @@ impl Hui {
             *cached = Some(raw);
             if let Some(sent) = self.sent.get_mut(slot) {
                 *sent = Some((raw, now));
+            }
+            // A lone lo after this belongs to the hi sent (review M3).
+            if let Some(last) = self.last_hi.get_mut(slot) {
+                *last = Some((raw >> 7) as u8);
             }
             out.push(vec![0xB0, FADER_HI + k, (raw >> 7) as u8]);
             out.push(vec![0xB0, FADER_LO + k, (raw & 0x7F) as u8]);
@@ -578,9 +604,19 @@ impl Hui {
         }
         self.cache.meters_due = now.checked_add(METER_EVERY);
         for k in 0..8u8 {
-            if let Some(s) = self.strip(usize::from(k)) {
-                out.push(vec![0xA0, k, meter_level(s.meter.0)]);
-                out.push(vec![0xA0, k, 0x10 | meter_level(s.meter.1)]);
+            let (left, right) = match self.strip(usize::from(k)) {
+                Some(s) => (meter_level(s.meter.0), meter_level(s.meter.1)),
+                None => (0, 0),
+            };
+            let shown = self.strip(usize::from(k)).is_some();
+            let Some(lit) = self.cache.lit.get_mut(usize::from(k)) else {
+                continue;
+            };
+            // An empty slot is sent dark once, then nothing.
+            if shown || *lit != Some(false) {
+                *lit = Some(shown);
+                out.push(vec![0xA0, k, left]);
+                out.push(vec![0xA0, k, 0x10 | right]);
             }
         }
     }
@@ -606,7 +642,9 @@ impl Surface for Hui {
     }
 
     fn tick(&mut self, now: Instant) -> Vec<SurfaceAction> {
-        let mut out = self.idle.tick(now);
+        self.check_online(now);
+        let mut out = std::mem::take(&mut self.owed);
+        out.extend(self.idle.tick(now));
         // An idle-released fader is sent once by the next feedback (Ruling T2 I1).
         for a in &out {
             if let SurfaceAction::IdleRelease(AutomationTarget::StripFader(id), _) = *a {
@@ -614,16 +652,26 @@ impl Surface for Hui {
             }
         }
         out.extend(self.shuttle.tick(now));
-        self.check_online(now);
         out
     }
 
     fn feedback(&mut self, view: &MixerView, first: usize, now: Instant) -> Vec<Vec<u8>> {
         for (k, slot) in self.shown.iter_mut().enumerate() {
-            *slot = view.strips.get(first.saturating_add(k)).cloned();
+            let next = view.strips.get(first.saturating_add(k)).cloned();
+            // A pending hi byte belongs to the strip it came for (review M1).
+            if slot.as_ref().map(|s| s.id) != next.as_ref().map(|s| s.id)
+                && self.pending.is_some_and(|(p, _)| p == k)
+            {
+                self.pending = None;
+            }
+            *slot = next;
         }
         self.check_online(now);
         let mut out = Vec::new();
+        if std::mem::take(&mut self.hello_pinged) && self.pinged.is_none() {
+            // `hello` sent this ping: time it from now.
+            self.pinged = Some(now);
+        }
         if self
             .pinged
             .is_none_or(|at| now.saturating_duration_since(at) >= PING_EVERY)
@@ -645,11 +693,12 @@ impl Surface for Hui {
     }
 
     fn hello(&mut self) -> Vec<Vec<u8>> {
+        self.hello_pinged = true;
         vec![PING.to_vec()]
     }
 
     fn online(&self) -> bool {
-        self.online
+        self.link.get()
     }
 
     fn ignored(&self) -> u64 {
@@ -665,6 +714,36 @@ impl Surface for Hui {
     }
 
     fn release_all(&mut self) -> Vec<AutomationTarget> {
+        // Releases still owed by a timeout go with the rest.
+        let mut held: Vec<AutomationTarget> = std::mem::take(&mut self.owed)
+            .into_iter()
+            .filter_map(|a| match a {
+                SurfaceAction::Gesture(t, _) | SurfaceAction::IdleRelease(t, _) => Some(t),
+                _ => None,
+            })
+            .collect();
+        for t in self.forget_all() {
+            if !held.contains(&t) {
+                held.push(t);
+            }
+        }
+        // A reconnected unit is online once it answers a ping (review M5).
+        self.link = Link::default();
+        self.replied = None;
+        held
+    }
+}
+
+impl Unit for Hui {
+    fn link(&mut self) -> &mut Link {
+        &mut self.link
+    }
+
+    fn idle(&self) -> &IdleTouches {
+        &self.idle
+    }
+
+    fn forget_all(&mut self) -> Vec<AutomationTarget> {
         let mut held = self.touched();
         for t in self.idle.take_all() {
             if !held.contains(&t) {
