@@ -514,8 +514,9 @@ Rules common to all modes:
   - *Feedback.* Absolute mappings send the value back so that motorised and LED-ring controllers follow.
 
 ### 8.3 Devices and persistence
-- **Settings › Surfaces** lists surfaces: type (MCU, MCU XT, HUI), input port, output port, and the unit's position in the bank.
+- **Settings › Surfaces** lists surfaces: type (MCU, MCU XT, HUI, Kontrol S-Series MK3), input port, output port, the unit's position in the bank, and the unit's problem line when it has one (for example a keyboard's too old firmware).
 - They are stored in app preferences (`~/Library/Application Support/VizDAW/surfaces.json`, beside the 4f key bindings), because hardware belongs to the machine.
+- *Kinds this build does not know* (from plan 5f-4 on): an entry whose kind a newer VizDAW wrote is kept as it is, with its ID and ports reserved, written back on every save, not driven, and named in a problem line; the rest of the file loads. A file that is damaged in any other way is still kept aside as `surfaces.json.bad`. Builds before 5f-4 set a file aside when it lists a Kontrol (a release note).
 - Command learn maps go in the same file. Target learn maps are in the project (§4.8).
 - A missing port leaves the surface listed as "disconnected", and it reconnects when the port appears (CoreMIDI notifications).
 
@@ -531,20 +532,21 @@ Rules common to all modes:
   - The facts come from the public DrivenByMoss sources (LGPL-3.0), cross-checked against ReaKontrol and flmidi. VizDAW's code is its own: nothing is copied, and no NI SDK, NDA material or binary is used.
   - **Handshake:** the host sends `BF 01 04`. The keyboard answers with its version; 4 or more brings the unit online, and less is a problem line ("needs keyboard firmware 2.0 or later").
   - **Identity:** the host then names itself "Generic", version 1.0.
-  - **Goodbye:** the host empties the 8 track slots and sends `BF 02 00` when the surface is removed and when the app quits. A goodbye from the keyboard takes it offline (releasing what it held) until it answers again.
+  - **Goodbye:** the host empties the 8 track slots and sends `BF 02 00` when the surface is removed (after releasing what it held) and when the app quits (the message leaves before the app exits). A goodbye from the keyboard takes it offline (releasing what it held) until it answers again.
+  - **Pulled back** (owner, 2026-11-03): while it is offline the host repeats its hello every 2 s, so a keyboard switched out of DAW mode is brought back; each answer gets the identity and the full state again.
 - **Phase 1: DAW mode.**
-  - **Transport.** Play only starts, Stop stops, Record, Loop, Restart (to the start, then play), Undo and Redo, all with lights. The 4-D encoder's transport move is a jog. Metro, Count-in, Quantize, Tap Tempo and Automation do nothing.
+  - **Transport.** Play only starts, Stop stops, Record, Loop, Restart (to the start, then play), Undo and Redo, all with lights. Count-in toggles the document's record count-in (off ↔ its last bar count) and Automation toggles Suspend Automation; their lights follow VizDAW's state (owner, 2026-11-03). The 4-D encoder's transport move is a jog. Metro, Quantize and Clear do nothing.
   - **Mixer of 8.** The volume and pan knobs ride faders and pans as gestures that release 500 ms after the last turn (§7.1). Mute, solo, arm and select per track; the selected track's volume, pan, mute and solo on the 4-D encoder. Track navigation selects the next or previous strip, and the bank follows; the bank buttons move by 8.
   - **Display.** Track type, name, colour, volume and pan text, mute, solo, arm, selection, muted-by-solo, meters, knob rings, navigation lights and the tempo at the transport. Track colours follow the strip kind until tracks have colours of their own.
-  - **Tempo.** The keyboard's tempo display follows VizDAW. A tempo set on the keyboard does not change VizDAW.
+  - **Tempo** (owner, 2026-11-03). The keyboard's tempo display follows VizDAW. The keyboard's tempo control and Tap Tempo change VizDAW's tempo at the playhead (the tempo point in effect there), one undo step per gesture: a turn (messages less than 500 ms apart) or a tap series (taps less than 2 s apart; the mean of the last four intervals, to 0.1 BPM). While recording they are refused, and the display goes back to VizDAW's tempo.
 - **Phase 2: Plug-in mode** (VizDAW's own pages for any plug-in).
   - The selected strip's **chain** is its plug-in instrument, then its inserts. Its **pages** are the focused plug-in's automatable parameters in the plug-in's order, eight per page ("Page N").
   - The soft buttons pick the plug-in, the page buttons turn pages, and the knobs move the parameters as gestures. The display shows the chain, the parameter names and values, the page and the preset name.
   - The **preset** buttons step the plug-in's own presets (AU factory presets; CLAP plug-ins list none yet), without wrapping. A preset load is a change in the plug-in, like one made in its window: not an undo step, but the project reads Edited.
 - **Not included.** Handing NI plug-ins to the keyboard's own NKS mode (backlog), the light guide (the protocol has no host message for it), NKS library browsing, NI private messaging, custom display graphics, MIDI 2.0 and MIDI-CI.
-- **Wording.** UI text is descriptive only. Settings shows "Kontrol is a trademark of Native Instruments GmbH. VizDAW is not affiliated with or endorsed by Native Instruments." No NI logos or artwork, and no "official" or "NKS Ready" claims.
-- **Errors.** As §12.2: a malformed or unknown message, a cut frame, another header, a note on the DAW port or a slot out of range is ignored and counted. Buttons VizDAW has no use for are not counted.
-- **Owner hardware checks** (README 198): the 0x75 page-name message, display text lengths (VizDAW sends at most 32 ASCII bytes), the "Generic" background, the macOS port names in MIDI 1.0 and 2.0 modes, the knob step, the meter scale and colours, and mute and solo on MIDI-type tracks.
+- **Wording.** UI text is descriptive only; the name stays "Kontrol S-Series MK3 (DAW mode)" (owner, 2026-11-03). Settings shows "Kontrol and Native Instruments are trademarks of Native Instruments GmbH. VizDAW is not affiliated with or endorsed by Native Instruments." in the Add sheet for the Kontrol and under the surface list while one is configured. No NI logos or artwork, and no "official" or "NKS Ready" claims.
+- **Errors.** As §12.2: a malformed or unknown message, a cut frame, another header, a note on the DAW port or a slot out of range is ignored and counted. Buttons VizDAW has no use for are not counted. Every value and index the host sends is 7-bit (a value above 127 is sent as 127), so a plug-in with more than 1016 parameters shows 127 pages.
+- **Owner hardware checks** (README 198): the 0x75 page-name message, display text lengths (VizDAW sends at most 32 ASCII bytes, a volume text at most 8), the "Generic" background, the macOS port names in MIDI 1.0 and 2.0 modes, the knob step, the meter scale and colours, mute and solo on MIDI-type tracks, the 0x72 type, the navigation-light bits, the mode echo, whether leaving DAW mode says goodbye, the empty 0x41, 0x74 from the keyboard, the tempo echo and the Count-in, Tap and Automation lights.
 
 ## 9. Bounce and export
 
