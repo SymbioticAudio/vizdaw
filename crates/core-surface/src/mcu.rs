@@ -68,8 +68,13 @@ const ASSIGN_LEFT: u8 = 0x4B;
 /// The scribble strips' SysEx command, and the characters per row.
 const LCD: u8 = 0x12;
 const ROW: usize = 56;
-/// Characters per strip on a scribble-strip row: 7 and a space.
-const CELL: usize = 7;
+/// Characters per strip on a scribble-strip row (Ruling T2-1): each strip
+/// owns a 7-character zone (8 × 7 = 56), up to 6 characters and a space.
+const ZONE: usize = 7;
+/// The characters of a zone's text: longer text is cut, never wrapped.
+const CELL: usize = ZONE - 1;
+// Eight zones fill a row exactly.
+const _: () = assert!(ROW == 8 * ZONE);
 /// One V-pot detent, in normalised units (Ruling 5).
 const DETENT: f64 = 0.01;
 
@@ -214,7 +219,7 @@ fn lcd_chars(text: &str) -> impl Iterator<Item = u8> + '_ {
     })
 }
 
-/// One strip's cell, left-aligned: 7 characters (truncated or padded) and a space.
+/// One strip's zone, left-aligned: 6 characters (cut or padded) and a space.
 fn cell_left(text: &str, row: &mut Vec<u8>) {
     let mut chars: Vec<u8> = lcd_chars(text).take(CELL).collect();
     chars.resize(CELL, b' ');
@@ -222,7 +227,7 @@ fn cell_left(text: &str, row: &mut Vec<u8>) {
     row.push(b' ');
 }
 
-/// One strip's cell, centred: 7 characters and a space.
+/// One strip's zone, centred: 6 characters and a space.
 fn cell_centred(text: &str, row: &mut Vec<u8>) {
     let chars: Vec<u8> = lcd_chars(text).take(CELL).collect();
     let pad = CELL.saturating_sub(chars.len()) / 2;
@@ -423,10 +428,6 @@ impl Mcu {
             cell_left(&name, &mut names);
             cell_centred(&value, &mut values);
         }
-        // Eight cells of 8 are 64 characters; a row holds 56, so the
-        // eighth strip's cell does not fit (see the Task 2 report).
-        names.truncate(ROW);
-        values.truncate(ROW);
         let id = self.device_id();
         for (r, row) in [names, values].into_iter().enumerate() {
             let Some(cached) = self.cache.rows.get_mut(r) else {

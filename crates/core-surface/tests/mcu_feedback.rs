@@ -102,14 +102,16 @@ fn scribble_strips_hold_names_and_values() {
         .expect("row 1 for the extender");
     let text: String = row1[7..row1.len() - 1].iter().map(|b| *b as char).collect();
     assert_eq!(text.len(), 56);
-    assert!(text.starts_with("Lead Vo Strip 2 "), "{text:?}");
-    assert!(text[16..].chars().all(|c| c == ' '), "blank slots");
+    // Ruling T2-1: each strip owns a 7-character zone (8 × 7 = 56): up to 6
+    // characters, cut (never wrapped), and a space.
+    assert!(text.starts_with("Lead V Strip  "), "{text:?}");
+    assert!(text[14..].chars().all(|c| c == ' '), "blank slots");
     let row2 = fb
         .iter()
         .find(|x| x.starts_with(&[0xF0, 0x00, 0x00, 0x66, 0x15, 0x12, 56]))
         .expect("row 2");
     let text: String = row2[7..row2.len() - 1].iter().map(|b| *b as char).collect();
-    assert!(text.starts_with("   C   "), "pan centre: {text:?}");
+    assert!(text.starts_with("  C    "), "pan centre: {text:?}");
 }
 
 #[test]
@@ -229,7 +231,12 @@ fn plugin_mode_drives_the_selected_inserts_parameters() {
         .find(|x| x.starts_with(&[0xF0, 0x00, 0x00, 0x66, 0x14, 0x12, 0x00]))
         .expect("row 1 changes to the parameter names");
     let text: String = row1[7..row1.len() - 1].iter().map(|b| *b as char).collect();
-    assert!(text.starts_with("Prm0    Prm1    Prm2    "), "{text:?}");
+    assert!(text.starts_with("Prm0   Prm1   Prm2   "), "{text:?}");
+    assert_eq!(
+        &text[49..],
+        "Prm7   ",
+        "Ruling T2-1: the eighth strip shows in its own zone"
+    );
     assert!(has(&fb, &[0x90, 0x2B, 0x7F]), "Plug-in lit");
     assert!(
         has(&fb, &[0xB0, 0x4B, seg('P', false)]) && has(&fb, &[0xB0, 0x4A, seg('L', false)]),
@@ -306,6 +313,6 @@ fn extenders_follow_the_main_units_assignment() {
             .find(|x| x.starts_with(&[0xF0, 0x00, 0x00, 0x66, 0x15, 0x12, 56]))
             .expect("row 2 shows the send levels");
         let text: String = row2[7..row2.len() - 1].iter().map(|b| *b as char).collect();
-        assert!(text.starts_with(" -24.1   -24.1   "), "{text:?}");
+        assert!(text.starts_with("-24.1  -24.1  "), "{text:?}");
     }
 }
