@@ -23,6 +23,7 @@ extension ProjectBanner {
         case .relink: "Relinking media…"
         case .convert, .format: "Converting media…"
         case .bounce: "Bouncing…"
+        case .externalEdit: "Importing the external edit…"
         }
     }
 
@@ -33,6 +34,7 @@ extension ProjectBanner {
         case .relink: "Relink Failed"
         case .convert, .format: "Conversion Failed"
         case .bounce: "Bounce Failed"
+        case .externalEdit: "External Edit Failed"
         }
     }
 }

@@ -570,6 +570,43 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return checkRow
     }
     func bounceResult(job: UInt64) throws -> BounceResultRow? { resultRow }
+
+    // MARK: External sample editor (plan 5f-3)
+
+    /// One `applyExternalEdit` call.
+    struct ExternalApply: Equatable {
+        let event: UInt64
+        let path: String
+    }
+    /// What `openExternal` answers (nil: a row for the event under
+    /// /tmp/p.vizdaw), and its refusal.
+    var externalRow: ExternalEditRow?
+    var externalError: VizError?
+    /// The regions `openExternal` was called for (refused calls too).
+    var externalOpened: [UInt64] = []
+    /// What `externalEdit` answers per region: the copy `openExternal`
+    /// made, else `.noEdit`.
+    var externalStates: [UInt64: ExternalEditStateRow] = [:]
+    /// `applyExternalEdit` calls, and its refusal.
+    var externalApplies: [ExternalApply] = []
+    var applyError: VizError?
+    func openExternal(event: UInt64) throws -> ExternalEditRow {
+        externalOpened.append(event)
+        if let e = externalError { throw e }
+        let row = externalRow ?? ExternalEditRow(event: event, path: "/tmp/p.vizdaw/Media/Edits/Kick edit 1.wav", from: 1)
+        externalStates[event] = .copy(row: row)
+        return row
+    }
+    func externalEdit(event: UInt64) throws -> ExternalEditStateRow { externalStates[event] ?? .noEdit }
+    func applyExternalEdit(event: UInt64, path: String) throws -> UInt64 {
+        if let e = applyError { throw e }
+        externalApplies.append(ExternalApply(event: event, path: path))
+        let id = UInt64(5000 + externalApplies.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .externalEdit, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
+            message: nil, problems: [], created: [])
+        return id
+    }
     var jobStartState: JobStateRow = .done
     func cancelJob(id: UInt64) throws { cancelled.append(id) }
     var info = ProjectInfoRow(

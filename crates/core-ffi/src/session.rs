@@ -198,6 +198,12 @@ pub(crate) struct Inner {
     bounce_copies: Option<(u64, u64)>,
     /// Finished bounces' files and media, by job (Ruling 10).
     bounce_results: std::collections::BTreeMap<u64, crate::bounce::BounceResultRow>,
+    /// Each region's external-edit copy while the project is open (plan
+    /// 5f-3 Ruling 3; runtime only): retention keeps them, close lets them go.
+    edits: std::collections::BTreeMap<core_model::ids::EventId, crate::external::EditCopy>,
+    /// Copies being written without the lock (pre-flight M4): retention
+    /// waits for them.
+    edits_writing: u32,
     /// The next bounce cancels itself once its progress reaches this
     /// (test hook).
     #[cfg(feature = "test-hooks")]
@@ -310,6 +316,8 @@ impl Inner {
             meters: Default::default(),
             bounce_copies: None,
             bounce_results: Default::default(),
+            edits: Default::default(),
+            edits_writing: 0,
             #[cfg(feature = "test-hooks")]
             bounce_cancel_at: None,
             #[cfg(feature = "test-hooks")]
@@ -340,13 +348,21 @@ impl Inner {
     /// Failures become problems for the next `idle`; at `close` no `idle`
     /// follows, so `close` also writes them to stderr (preflight M5).
     fn tidy(&mut self, package: &Path, jobs_done: bool) {
-        if !jobs_done && self.jobs.busy() {
+        if !jobs_done && (self.jobs.busy() || self.edits_writing > 0) {
             return;
         }
         let dir = crate::retention::trash_dir(self.trash_dir.as_deref());
         let mut refs = self.history.referenced_media_anywhere();
         for p in self.recorded_keep() {
             refs.entry(p).or_insert(None);
+        }
+        // Edit copies while the project is open (plan 5f-3 Ruling 3):
+        // `abs` is absolute, retention's paths package-relative; a copy in
+        // another package (after Save As) is not this package's.
+        for e in self.edits.values() {
+            if let Some(rel) = crate::external::package_relative(&e.abs, package) {
+                refs.entry(rel).or_insert(None);
+            }
         }
         let out = crate::retention::run(&refs, package, &|p| {
             crate::retention::trash(dir.as_deref(), p)
@@ -390,11 +406,13 @@ impl Inner {
             .collect()
     }
 
-    /// `Busy` while a Format, Convert, Relink or Bounce job has not been
-    /// applied: each captures the project format and the items' files when
-    /// it starts, so another such job may not start meanwhile (5a Task 11
-    /// review Minor 4; preflight M3; a bounce's streamer reads the media,
-    /// plan 5f-2 Ruling 9). An import does not block them.
+    /// `Busy` while a Format, Convert, Relink, Bounce or External Edit job
+    /// has not been applied: each captures the project format and the
+    /// items' files when it starts, so another such job may not start
+    /// meanwhile (5a Task 11 review Minor 4; preflight M3; a bounce's
+    /// streamer reads the media, plan 5f-2 Ruling 9; an external edit
+    /// imports in the format it started with and relinks a region, plan
+    /// 5f-3 Ruling 6). An import does not block them.
     fn media_jobs_idle(&self) -> Result<(), VizError> {
         use crate::jobs::JobKindRow;
         if self.jobs.pending(&[
@@ -402,6 +420,7 @@ impl Inner {
             JobKindRow::Convert,
             JobKindRow::Relink,
             JobKindRow::Bounce,
+            JobKindRow::ExternalEdit,
         ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
@@ -1484,7 +1503,24 @@ impl Session {
                 // writes nothing more into the scratch package (review m3).
                 inner.refresh_media(self.id, true);
                 // The scratch package of an untitled session is done with.
-                let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
+                // Its edit copies go to the Trash first, never unlinked
+                // (plan 5f-3 Ruling 3, owner answer 2026-11-03): Save As
+                // does not carry them, so their next apply says they are
+                // gone. A titled session has no scratch package.
+                let scratch = crate::media::scratch_root(self.id);
+                let trash = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                let left = crate::external::trash_files_in(
+                    &scratch.join(crate::external::EDITS_DIR),
+                    trash.as_deref(),
+                );
+                if left == 0 {
+                    let _ = std::fs::remove_dir_all(&scratch);
+                } else {
+                    inner.news.problems.push(format!(
+                        "{left} edit copies were left in {}.",
+                        scratch.display()
+                    ));
+                }
                 inner.reload_host(self.id);
                 self.mark(&mut inner);
             }
@@ -2736,6 +2772,9 @@ impl Session {
                 // 10), saved or not.
                 inner.write_kept(&p);
                 before_close_tidy();
+                // Watching ends with the project: its copies may go (plan
+                // 5f-3 Ruling 3).
+                inner.edits.clear();
                 inner.tidy(&p, true);
                 // No `idle` follows a close: the problems would be lost
                 // (preflight M5).
@@ -2750,36 +2789,19 @@ impl Session {
                 // to the Trash before its scratch package is removed
                 // (plan 5c Ruling 15).
                 let dir = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                // Edit copies too (plan 5f-3 Ruling 3, owner answer
+                // 2026-11-03): an editor may hold work VizDAW has not
+                // imported yet.
                 let mut left = 0usize;
-                let recorded = scratch.join(crate::record::RECORDED_DIR);
-                match std::fs::read_dir(&recorded) {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    // Unreadable: recordings may be in it (review minor b).
-                    Err(e) => {
-                        eprintln!("VizDAW: {}: not read ({e})", recorded.display());
-                        left += 1;
-                    }
-                    Ok(rd) => {
-                        for e in rd.flatten() {
-                            if e.path().is_file() {
-                                if let Err(why) = crate::retention::trash(dir.as_deref(), &e.path())
-                                {
-                                    eprintln!(
-                                        "VizDAW: {}: not moved to the Trash ({why})",
-                                        e.path().display()
-                                    );
-                                    left += 1;
-                                }
-                            }
-                        }
-                    }
+                for d in [crate::record::RECORDED_DIR, crate::external::EDITS_DIR] {
+                    left += crate::external::trash_files_in(&scratch.join(d), dir.as_deref());
                 }
                 if left == 0 {
                     let _ = std::fs::remove_dir_all(scratch);
                 } else {
                     // Never unlinked (pre-flight I2): the package stays.
                     eprintln!(
-                        "VizDAW: {left} recording(s) were left in {}",
+                        "VizDAW: {left} recording(s) or edit copies were left in {}",
                         scratch.display()
                     );
                 }
@@ -3579,6 +3601,8 @@ pub(crate) fn discard(
             .flatten()
             .map(|i| i.path)
             .collect(),
+        // What an external edit imported; its copy stays (plan 5f-3).
+        Work::ExternalEdit { file, .. } => file.into_iter().flatten().map(|i| i.path).collect(),
         Work::Cancelled => Vec::new(),
     };
     for f in files {
@@ -3656,6 +3680,11 @@ impl Session {
                             )
                         }
                     }
+                }
+                Work::ExternalEdit { event, from, file } => {
+                    let r = apply_external_edit_work(inner, &root, id, event, from, file);
+                    changed |= r.state == JobStateRow::Done;
+                    r
                 }
                 Work::Import { files, target } => {
                     match apply_import_as(inner, &root, files, target, &ImportAs::IMPORT) {
@@ -8111,6 +8140,343 @@ impl Session {
             self.apply_jobs(&mut inner);
             Ok(inner.bounce_results.get(&job).cloned())
         })
+    }
+}
+
+/// The external sample editor (plan 5f-3; spec §11).
+#[uniffi::export]
+impl Session {
+    /// Open in External Editor (Ruling 2): writes region `event`'s span
+    /// (no gain, no fades, no dither) as a WAV in the project's rate and
+    /// depth to `Media/Edits/<name> edit <n>.wav` and keeps it as the
+    /// region's copy while the project is open (Ruling 3). `Model` for an
+    /// unknown event, a non-region or an offline region; `Busy` while a
+    /// Format, Convert or Relink job is unapplied; `Io` when `Media/Edits`
+    /// is a file or the copy cannot be written. The copy is written
+    /// without the session lock (pre-flight M4); a region that changed
+    /// meanwhile is refused and the file left to retention.
+    pub fn open_external(&self, event: u64) -> Result<crate::external::ExternalEditRow, VizError> {
+        use crate::jobs::JobKindRow;
+        ffi_guard(|| {
+            let ev = core_model::ids::EventId(event);
+            let (source, start, frames, dir, stem, fmt, from) = {
+                let mut inner = lock(&self.inner);
+                if inner.closed {
+                    return Err(crate::events::bad("this project was closed"));
+                }
+                if inner.jobs.pending(&[
+                    JobKindRow::Format,
+                    JobKindRow::Convert,
+                    JobKindRow::Relink,
+                ]) {
+                    return Err(VizError::Busy {
+                        message: "Wait for the media job to finish.".into(),
+                    });
+                }
+                inner.refresh_media(self.id, false);
+                let (media, start, frames) = crate::external::region_span(inner.doc(), ev)?;
+                if inner.offline.contains_key(&media) {
+                    return Err(crate::events::bad(crate::external::OFFLINE));
+                }
+                let format = inner.doc().settings().format;
+                let root = inner.root(self.id);
+                let item = inner
+                    .doc()
+                    .media()
+                    .get(&media)
+                    .ok_or_else(|| crate::events::bad(crate::external::OFFLINE))?;
+                let out = (
+                    root.join(&item.path),
+                    start,
+                    frames,
+                    root.join(crate::external::EDITS_DIR),
+                    crate::external::safe_stem(&item.name),
+                    core_media::export::ExportFormat {
+                        container: core_media::export::Container::Wav,
+                        depth: format.depth,
+                        rate: format.sample_rate,
+                        dither: false,
+                        dither_stream: 0,
+                    },
+                    media,
+                );
+                inner.edits_writing += 1;
+                out
+            };
+            let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::external::write_copy(&source, start, frames, &dir, &stem, &fmt)
+            }));
+            let mut inner = lock(&self.inner);
+            inner.edits_writing = inner.edits_writing.saturating_sub(1);
+            let written = match written {
+                Ok(w) => w?,
+                // Counted down first, so retention runs again; `ffi_guard`
+                // turns the panic into `Internal` (fold check M9).
+                Err(p) => {
+                    drop(inner);
+                    std::panic::resume_unwind(p)
+                }
+            };
+            match crate::external::region_span(inner.doc(), ev) {
+                Ok((m, ..)) if m == from && !inner.closed => {}
+                _ => {
+                    return Err(crate::events::bad(
+                        "The region changed while its copy was written; try again.",
+                    ));
+                }
+            }
+            inner.edits.insert(
+                ev,
+                crate::external::EditCopy {
+                    abs: written.clone(),
+                    from,
+                },
+            );
+            Ok(crate::external::ExternalEditRow {
+                event,
+                path: written.display().to_string(),
+                from: from.0,
+            })
+        })
+    }
+
+    /// What Reload finds for region `event` (Ruling 7; pre-flight I10):
+    /// its copy in this session; `Gone` when that copy is not on disk, or
+    /// when there is none in this session and the region's media came from
+    /// an external edit (the project was reopened); `NoEdit` otherwise.
+    /// `Model` for an unknown event or a non-region.
+    pub fn external_edit(
+        &self,
+        event: u64,
+    ) -> Result<crate::external::ExternalEditStateRow, VizError> {
+        use crate::external::{ExternalEditRow, ExternalEditStateRow};
+        ffi_guard(|| {
+            let ev = core_model::ids::EventId(event);
+            let inner = lock(&self.inner);
+            let (media, ..) = crate::external::region_span(inner.doc(), ev)?;
+            if let Some(c) = inner.edits.get(&ev) {
+                return Ok(
+                    if std::fs::symlink_metadata(&c.abs).is_ok_and(|m| m.is_file()) {
+                        ExternalEditStateRow::Copy {
+                            row: ExternalEditRow {
+                                event,
+                                path: c.abs.display().to_string(),
+                                from: c.from.0,
+                            },
+                        }
+                    } else {
+                        ExternalEditStateRow::Gone
+                    },
+                );
+            }
+            let edited = inner.doc().media().get(&media).is_some_and(|m| {
+                matches!(
+                    m.origin,
+                    core_model::document::MediaOrigin::ExternalEdit { .. }
+                )
+            });
+            Ok(if edited {
+                ExternalEditStateRow::Gone
+            } else {
+                ExternalEditStateRow::NoEdit
+            })
+        })
+    }
+
+    /// Imports `path` — region `event`'s copy, nothing else — as an
+    /// External Edit job (Ruling 6): the job ID; `job` reports it and
+    /// applies it as one undo step "External Edit". `Model` for a path
+    /// that is not the region's copy (relative, over
+    /// [`crate::external::MAX_PATH_BYTES`], another file or spelling), a
+    /// region without a copy, a region that is gone (its copy is then
+    /// forgotten), or a copy that is gone; `Busy` inside an open edit and
+    /// while a Format, Convert, Relink, Bounce or External Edit job is
+    /// unapplied (pre-flight I11).
+    pub fn apply_external_edit(&self, event: u64, path: String) -> Result<u64, VizError> {
+        use crate::external::{GONE, MAX_PATH_BYTES, NO_EDIT, REGION_DELETED};
+        ffi_guard(|| {
+            if path.len() > MAX_PATH_BYTES {
+                return Err(crate::events::bad("the path is too long"));
+            }
+            let p = PathBuf::from(&path);
+            if !p.is_absolute() {
+                return Err(VizError::Model {
+                    message: format!("{path} is not an absolute path"),
+                });
+            }
+            let ev = core_model::ids::EventId(event);
+            let mut inner = lock(&self.inner);
+            if inner.history.in_transaction() {
+                return Err(VizError::Busy {
+                    message: "Finish the open edit first.".into(),
+                });
+            }
+            self.apply_jobs_after_edit(&mut inner);
+            let Some(copy) = inner.edits.get(&ev).cloned() else {
+                return Err(crate::events::bad(NO_EDIT));
+            };
+            if copy.abs != p {
+                return Err(VizError::Model {
+                    message: format!("{path} is not this region's edit copy"),
+                });
+            }
+            if crate::external::region_span(inner.doc(), ev).is_err() {
+                inner.edits.remove(&ev);
+                return Err(crate::events::bad(REGION_DELETED));
+            }
+            if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
+                return Err(crate::events::bad(GONE));
+            }
+            inner.media_jobs_idle()?;
+            let root = inner.root(self.id);
+            let format = inner.doc().settings().format;
+            let reserved = inner.reserved_names();
+            let stem = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let from = copy.from;
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ExternalEdit,
+                move |progress, cancel| {
+                    let importer = crate::media::importer();
+                    let file = crate::relink::regular_file(&p).and_then(|()| {
+                        core_media::import::import_reserved(
+                            importer.as_ref(),
+                            &p,
+                            &root,
+                            format,
+                            &stem,
+                            &reserved,
+                            &mut |f| {
+                                progress.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed)
+                            },
+                            cancel,
+                        )
+                    });
+                    match file {
+                        Err(core_media::MediaError::Cancelled) => crate::jobs::Work::Cancelled,
+                        file => crate::jobs::Work::ExternalEdit {
+                            event: ev,
+                            from,
+                            file: file.map_err(|e| e.to_string()),
+                        },
+                    }
+                },
+            )
+        })
+    }
+}
+
+/// Applies a finished external edit (Ruling 6; pre-flight I3): one undo
+/// step "External Edit" adding the new item (origin `ExternalEdit { from }`)
+/// and pointing that region alone at it (offset 0, its length, fades
+/// clamped). Failed — with what it imported removed — when the import
+/// failed, when it made more than one item (a file wider than stereo),
+/// when the region is gone (its copy is then forgotten, so the app stops
+/// watching it; pre-flight M10), or when the model refuses.
+fn apply_external_edit_work(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    event: core_model::ids::EventId,
+    from: core_model::ids::MediaId,
+    file: Result<Vec<core_media::import::Imported>, String>,
+) -> crate::jobs::JobRow {
+    use crate::jobs::{JobKindRow, JobStateRow, row};
+    use core_model::command::{AudioCmd, MediaCmd};
+    let failed = |m: String| {
+        row(
+            id,
+            JobKindRow::ExternalEdit,
+            JobStateRow::Failed,
+            Some(m),
+            vec![],
+            vec![],
+        )
+    };
+    let items = match file {
+        Ok(v) => v,
+        Err(why) => return failed(why),
+    };
+    let keep = inner.kept();
+    let remove = |items: &[core_media::import::Imported]| {
+        for i in items {
+            remove_unkept(root, &i.path, &keep);
+        }
+    };
+    let item = match items.as_slice() {
+        [one] => one.clone(),
+        _ => {
+            remove(&items);
+            return failed(format!(
+                "The edit has {} channels; regions hold one or two.",
+                items.len()
+            ));
+        }
+    };
+    if crate::external::region_span(inner.doc(), event).is_err() {
+        remove(&items);
+        inner.edits.remove(&event);
+        return failed(crate::external::REGION_DELETED.into());
+    }
+    let filter = ViewFilter::default();
+    let h = &mut inner.history;
+    if let Err(e) = h.begin("External Edit") {
+        remove(&items);
+        return failed(VizError::from(e).to_string());
+    }
+    let run = (|| -> Result<u64, VizError> {
+        let r = h.execute(
+            &Command::Media(MediaCmd::Add {
+                path: item.path.clone(),
+                sample_rate: item.sample_rate,
+                channels: item.channels,
+                length_frames: item.length_frames,
+                content_hash: Some(item.content_hash.clone()),
+                name: Some(item.name.clone()),
+                origin: Some(core_model::document::MediaOrigin::ExternalEdit { from }),
+            }),
+            &filter,
+        )?;
+        let media = r
+            .created
+            .iter()
+            .find_map(|id| match id {
+                core_model::ids::AnyId::Media(m) => Some(*m),
+                _ => None,
+            })
+            .ok_or_else(|| VizError::Internal {
+                message: "no media created".into(),
+            })?;
+        h.execute(
+            &Command::Audio(AudioCmd::SetSource {
+                event,
+                media,
+                source_offset: 0,
+                length: item.length_frames,
+            }),
+            &filter,
+        )?;
+        Ok(media.0)
+    })();
+    let done = run.and_then(|media| h.commit().map(|()| media).map_err(VizError::from));
+    match done {
+        Ok(media) => row(
+            id,
+            JobKindRow::ExternalEdit,
+            JobStateRow::Done,
+            None,
+            vec![],
+            vec![media],
+        ),
+        Err(e) => {
+            if h.in_transaction() {
+                let _ = h.abort();
+            }
+            remove(&items);
+            failed(e.to_string())
+        }
     }
 }
 

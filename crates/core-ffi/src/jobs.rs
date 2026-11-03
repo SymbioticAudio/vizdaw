@@ -22,6 +22,8 @@ pub enum JobKindRow {
     Relink,
     /// Bounce (plan 5f-2).
     Bounce,
+    /// Import an external edit (plan 5f-3).
+    ExternalEdit,
 }
 
 /// Where a job is.
@@ -106,6 +108,16 @@ pub enum Work {
         /// A rename failed after `exported` were in place (Ruling 12): the
         /// job is Failed with this message, its files still reported.
         failed: Option<String>,
+    },
+    /// An external edit's import (plan 5f-3 Ruling 6).
+    ExternalEdit {
+        /// The region it relinks.
+        event: core_model::ids::EventId,
+        /// The item the edit started from (`ExternalEdit { from }`).
+        from: core_model::ids::MediaId,
+        /// What the copy became (more than one item: a file wider than
+        /// stereo), or why not.
+        file: Result<Vec<Imported>, String>,
     },
     /// Cancelled before it finished (whatever it wrote is removed).
     Cancelled,
