@@ -67,7 +67,7 @@ enum KeyMonitor {
     /// Runs the route's command (a window without a document runs only
     /// commands that need none); whether the key was used up.
     static func perform(_ r: KeyRoute, _ doc: (id: UUID, model: DocumentModel)?) -> Bool {
-        let outcome: ControlOutcome
+        let after: KeyAfter
         switch r {
         case .typing, .pass: return false
         case .slot(let seq):
@@ -80,9 +80,10 @@ enum KeyMonitor {
                 return true
             }
         case .command(let id):
-            outcome = ControlCommands.run(id, args: [], doc: doc, store: appStore, host: AppControlHost.shared)
+            // Reload External Edit as its menu item (final review M9).
+            after = KeyDispatch.command(id, doc: doc, store: appStore, host: AppControlHost.shared)
         }
-        switch KeyDispatch.after(outcome, doc: doc?.model) {
+        switch after {
         case .handled: return true
         case .pass: return false
         case .opened(let d):

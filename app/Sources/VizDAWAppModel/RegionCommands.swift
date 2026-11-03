@@ -93,8 +93,9 @@ extension RegionCommands: MenuCommands {}
 extension RegionCommands {
     /// The application `id` opens with: `app` when given, else the
     /// preference; the stub needs none. An application must be an
-    /// existing folder (a bundle), checked before anything is written
-    /// (pre-flight I11).
+    /// absolute path to an existing folder ending in `.app` (a bundle),
+    /// checked before anything is written (pre-flight I11; final review
+    /// M6, M7).
     enum EditorApp {
         case app(URL?)
         case refused(ControlFailure)
@@ -112,7 +113,9 @@ extension RegionCommands {
             }
         }
         var folder: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &folder), folder.boolValue else {
+        guard path.hasPrefix("/"), URL(fileURLWithPath: path).pathExtension == "app",
+            FileManager.default.fileExists(atPath: path, isDirectory: &folder), folder.boolValue
+        else {
             return .refused(.of(.failed, "\(path) is not an application."))
         }
         return .app(URL(fileURLWithPath: path))
@@ -125,7 +128,9 @@ extension RegionCommands {
     }
 
     /// `region.open_external` and `region.reload_external` (Ruling 7), also
-    /// for keys and surface buttons: never a dialog. Open answers
+    /// Open for keys and surface buttons (their Reload goes through
+    /// `runMenu`: `KeyDispatch.command`, final review M9): never a dialog.
+    /// Open answers
     /// "editing <copy>"; Reload answers its import job (`.job`), or
     /// "unchanged".
     public static func runExternal(

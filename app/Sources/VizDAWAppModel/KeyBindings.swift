@@ -243,6 +243,24 @@ public enum KeyDispatch {
     }
 }
 
+extension KeyDispatch {
+    /// Runs command `id` for a key or a surface button in `doc`; the key's
+    /// fate. Reload External Edit on one region goes the menu item's way
+    /// (`RegionCommands.runMenu`, which opens no dialog), so its import
+    /// shows its banner and a failure its alert (final review M9); every
+    /// other command, and a Reload the menu item would not take, runs as
+    /// the channel's (`ControlCommands.run`, then `after`).
+    public static func command(
+        _ id: String, doc: (id: UUID, model: DocumentModel)?, store: DocumentStore, host: any ControlHost
+    ) -> KeyAfter {
+        if id == RegionCommands.reloadExternal, let m = doc?.model, RegionCommands.enabled(id, m) {
+            RegionCommands.runMenu(id, m, editor: host.externalEditor)
+            return .handled
+        }
+        return after(ControlCommands.run(id, args: [], doc: doc, store: store, host: host), doc: doc?.model)
+    }
+}
+
 /// Where a key press VizDAW did not use goes next (controller rulings F1,
 /// F2; fix round 1 I1).
 public enum KeyPass: Equatable, Sendable {

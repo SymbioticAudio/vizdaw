@@ -84,7 +84,16 @@ import VizDAWCore
         let file = dir.appendingPathComponent("Plain.app").path
         #expect(FileManager.default.createFile(atPath: file, contents: Data()))
         host.externalEditor = .stub
-        for bad in ["/Applications/Nope-\(UUID().uuidString).app", file] {
+        // A folder not ending in .app, and a relative path to a real
+        // `.app` folder (final review M6, M7).
+        let plain = dir.appendingPathComponent("Editor")
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+        let bundle = dir.appendingPathComponent("Editor.app")
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        let up = FileManager.default.currentDirectoryPath.split(separator: "/").map { _ in ".." }
+        let relative = (up + [String(bundle.path.dropFirst())]).joined(separator: "/")
+        #expect(FileManager.default.fileExists(atPath: relative), "the relative path names the bundle")
+        for bad in ["/Applications/Nope-\(UUID().uuidString).app", file, plain.path, relative] {
             e = try #require(failure(run(RegionCommands.openExternal, app(bad), s, id)))
             #expect(e.code == .failed && e.message == "\(bad) is not an application.", "\(bad)")
         }
@@ -176,6 +185,46 @@ import VizDAWCore
                 keyCode: 14, modifiers: ModifiersRow(shift: false, control: true, option: true, command: true),
                 typing: false, stepEntry: false, menus: true, keys: keys, sequences: [])
                 == .command(RegionCommands.openExternal))
+    }
+
+    /// Final review M8: the Open key with an editor set opens the copy
+    /// and is used up.
+    @Test func theOpenKeyWithAnEditorSetOpensTheCopy() throws {
+        let (s, id, m, f) = try demo()
+        select(m, [5])
+        host.externalEditor = .stub
+        let keys = KeyBindings(defaults: MemoryDefaults())
+        try keys.bind(RegionCommands.openExternal, keys: ["⌃⌥⌘E"], replace: true)
+        let r = KeyRouter.route(
+            keyCode: 14, modifiers: ModifiersRow(shift: false, control: true, option: true, command: true),
+            typing: false, stepEntry: false, menus: true, keys: keys, sequences: [])
+        guard case .command(let c) = r else {
+            Issue.record("\(r)")
+            return
+        }
+        #expect(KeyDispatch.command(c, doc: (id, m), store: s, host: host) == .handled)
+        #expect(opener.opened.count == 1 && f.externalOpened == [5] && m.external.watched == [5])
+        #expect(m.editor.status == "editing \(path)")
+    }
+
+    /// Final review M9: a key-bound or surface Reload reports as the menu
+    /// item does: an import shows its banner (so a failure gets its
+    /// alert), and nothing changed says so in words.
+    @Test func aKeyOrSurfaceReloadReportsAsTheMenuDoes() throws {
+        let (s, id, m, f) = try demo()
+        host.externalEditor = .stub
+        select(m, [])
+        #expect(
+            KeyDispatch.command(RegionCommands.reloadExternal, doc: (id, m), store: s, host: host) == .pass,
+            "no region: passed on, as before")
+        select(m, [5])
+        _ = run(RegionCommands.openExternal, s, id)
+        #expect(KeyDispatch.command(RegionCommands.reloadExternal, doc: (id, m), store: s, host: host) == .handled)
+        #expect(m.editor.status == "The external edit is unchanged.")
+        probe.stamps[path] = FileStamp(size: 2000, modified: clock.t)
+        #expect(KeyDispatch.command(RegionCommands.reloadExternal, doc: (id, m), store: s, host: host) == .handled)
+        #expect(m.jobs.map(\.kind) == [.externalEdit], "the import shows its banner")
+        #expect(f.externalApplies == [FakeSession.ExternalApply(event: 5, path: path)])
     }
 
     @Test func theMenuItemsReportInTheWindow() throws {
