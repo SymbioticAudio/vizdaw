@@ -392,6 +392,15 @@ fn hostile_learn_calls_are_refused() {
             "{id}: only commands a key can run"
         );
     }
+    // Task 9 review M2: the surface commands take no required parameter,
+    // but a pad that runs one without arguments does nothing.
+    for id in ["surface.learn", "surface.unlearn"] {
+        let e = learn_command(id.into()).unwrap_err();
+        assert!(
+            e.to_string().contains("cannot be learned"),
+            "{id}: the channel's, not a pad's: {e}"
+        );
+    }
     assert!(remove_command_map("transport.play_stop".into()).is_err());
     let bad = vizdaw_ffi::surfaces::LearnSourceRow {
         port: "x".into(),

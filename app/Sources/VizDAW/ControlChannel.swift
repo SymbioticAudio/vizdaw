@@ -221,7 +221,7 @@ enum ControlChannel {
                 let r = ControlStates.state(target, id, m)
             {
                 answer(server, token, .done(r))
-            } else if target == .surfaces {
+            } else if ControlStates.answersAppWide(target, window: window) {
                 // Surfaces are app-wide (plan 5f-1, pre-flight M29).
                 answer(server, token, .done(.surfaces(doc: nil, state: AppControlHost.shared.surfaces.state())))
             } else {

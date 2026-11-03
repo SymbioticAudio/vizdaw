@@ -641,6 +641,14 @@ public enum ControlStates {
         }
     }
 
+    /// Whether `state.get target` without a document answers app-wide
+    /// state: only the surfaces, and only for a call that names no window
+    /// (pre-flight M29; Task 9 review M3). A named window without a
+    /// document is `no_document`.
+    public nonisolated static func answersAppWide(_ target: StateTargetRow, window: WindowRefRow?) -> Bool {
+        target == .surfaces && window == nil
+    }
+
     /// `target` of document `id`; the transport is read fresh.
     public static func state(_ target: StateTargetRow, _ id: UUID, _ m: DocumentModel) -> ControlResult? {
         let doc = id.uuidString

@@ -1474,11 +1474,17 @@ fn check_unit(
 
 /// Whether Settings › Keys can bind command `id` (Ruling 8): it exists,
 /// needs no parameter and never always opens a dialog; why not, if not.
+/// The Surfaces group is the channel's: `surface.learn` and
+/// `surface.unlearn` need no required parameter, but without one of
+/// theirs they do nothing (Task 9 review M2).
 fn bindable(id: &str) -> Result<(), String> {
     let Some(spec) = core_control::registry::find(id) else {
         return Err(format!("unknown command “{id}”"));
     };
-    if spec.params.iter().any(|p| p.required) || spec.dialogs.iter().any(|d| d.always) {
+    if spec.menu == "Surfaces"
+        || spec.params.iter().any(|p| p.required)
+        || spec.dialogs.iter().any(|d| d.always)
+    {
         return Err(format!(
             "“{id}” cannot be learned: only commands a key can run (no required parameter, no dialog)"
         ));

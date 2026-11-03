@@ -57,6 +57,28 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
             ("surface.learn", [arg("target", "fader")]),
             ("surface.unlearn", []),
             ("surface.unlearn", [arg("target", "fader:1"), arg("command", "edit.undo")]),
+            // Task 9 review M1: what the registry refuses is refused here too.
+            ("surface.inject", [arg("bytes", "90 68 7f")]),
+            ("surface.inject", [arg("surface", "1"), arg("bytes", "90 68 7f")]),
+            ("surface.inject", [int("surface", -1), arg("bytes", "90 68 7f")]),
+            ("surface.inject", [int("surface", 4_294_967_296), arg("bytes", "90 68 7f")]),
+            ("surface.inject", [int("surface", 1)]),
+            ("surface.inject", [int("surface", 1), arg("bytes", "9")]),
+            ("surface.inject", [int("surface", 1), arg("bytes", "906")]),
+            ("surface.inject", [int("surface", 1), arg("bytes", Array(repeating: "00", count: 1025).joined(separator: " "))]),
+            ("surface.learn", [arg("command", "")]),
+            ("surface.learn", [int("target", 3)]),
+            ("surface.unlearn", [arg("command", "")]),
+            ("surface.add", [arg("type", "mackie"), arg("input", "In A"), arg("output", "Out A")]),
+            ("surface.add", [arg("input", "In A"), arg("output", "Out A")]),
+            ("surface.add", [arg("type", "mcu"), arg("input", "In A")]),
+            ("surface.add", [arg("type", "mcu"), int("input", 7), arg("output", "Out A")]),
+            ("surface.add", [arg("type", "mcu"), arg("input", "In A"), arg("output", "Out A"), int("position", 4)]),
+            ("surface.add", [arg("type", "mcu"), arg("input", "In A"), arg("output", "Out A"), int("position", -1)]),
+            ("surface.add", [arg("type", "mcu"), arg("input", "In A"), arg("output", "Out A"), arg("position", "2")]),
+            ("surface.remove", []),
+            ("surface.remove", [int("surface", -1)]),
+            ("surface.remove", [arg("surface", "0")]),
         ] {
             guard case .failed(let e) = SurfaceCommands.run(id, args: args, doc: (UUID(), m), surfaces: c) else {
                 Issue.record("\(id) \(args) ran"); continue
@@ -65,6 +87,7 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
         }
         #expect(f.surfaceInjections.isEmpty && f.learnTargets.isEmpty && f.unlearnTargets.isEmpty)
         #expect(c.learnCommands.isEmpty && c.removedCommands.isEmpty)
+        #expect(c.rows.isEmpty && c.removed.isEmpty)
     }
 
     @Test func injectAndLearnReachTheSession() throws {
@@ -79,8 +102,10 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
         #expect(f.surfaceInjections.count == 2, "a cut message is the core's to count")
         _ = SurfaceCommands.run("surface.learn", args: [arg("target", "pan:3")], doc: (UUID(), m), surfaces: c)
         #expect(f.learnTargets == [.stripPan(strip: 3)])
+        let focused = f.focusCalls
         _ = SurfaceCommands.run("surface.learn", args: [arg("command", "edit.undo")], doc: (UUID(), m), surfaces: c)
         #expect(c.learnCommands == ["edit.undo"])
+        #expect(f.focusCalls == focused + 1, "the learn completes in this window's session (review M5)")
         _ = SurfaceCommands.run("surface.unlearn", args: [arg("target", "pan:3")], doc: (UUID(), m), surfaces: c)
         #expect(f.unlearnTargets == [.stripPan(strip: 3)])
         _ = SurfaceCommands.run("surface.unlearn", args: [arg("command", "edit.undo")], doc: (UUID(), m), surfaces: c)
@@ -101,7 +126,10 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
             doc: nil, surfaces: c)
         guard case .done(let r) = o else { Issue.record("\(o)"); return }
         #expect(c.rows.map(\.kind) == [.mcuXt] && c.rows.first?.position == 2)
-        #expect("\(r)".contains("surface 0"))
+        guard case .ran(command: let command, doc: let doc, window: _, undoLabel: _, status: let status) = r else {
+            Issue.record("\(r)"); return
+        }
+        #expect(command == "surface.add" && doc == nil && status == "surface 0", "the ID in `status` (review M6)")
         _ = SurfaceCommands.run("surface.remove", args: [int("surface", 0)], doc: nil, surfaces: c)
         #expect(c.removed == [0])
         guard case .failed(let e) = SurfaceCommands.run(
@@ -109,5 +137,13 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
         else { Issue.record("inject ran without a document"); return }
         #expect(e.code == .noDocument)
         #expect(SurfaceCommands.parseKind("hui") == .hui && SurfaceCommands.parseKind("mackie") == nil)
+    }
+
+    /// Task 9 review M3: only a call that names no window answers the
+    /// app-wide surfaces; a named window without a document is `no_document`.
+    @Test func onlyAWindowlessCallAnswersTheAppWideSurfaces() {
+        #expect(ControlStates.answersAppWide(.surfaces, window: nil))
+        #expect(!ControlStates.answersAppWide(.surfaces, window: .number(number: 3)))
+        #expect(!ControlStates.answersAppWide(.transport, window: nil))
     }
 }
