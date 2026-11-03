@@ -193,7 +193,7 @@ fn no_hard_links(e: &std::io::Error) -> bool {
 /// Moves `from` to `to`, failing with `AlreadyExists` (and changing
 /// nothing) if `to` exists. macOS: `renamex_np(RENAME_EXCL)`.
 #[cfg(target_os = "macos")]
-fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| {
         std::ffi::CString::new(p.as_os_str().as_bytes())
@@ -212,13 +212,14 @@ fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Moves `from` to `to`, failing with `AlreadyExists` (and changing
 /// nothing) if `to` exists: copy into a new file, then remove the source.
 #[cfg(not(target_os = "macos"))]
-fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut src = std::fs::File::open(from)?;
     let mut dst = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(to)?;
-    if let Err(e) = std::io::copy(&mut src, &mut dst) {
+    // The copy reaches the disk before the source goes.
+    if let Err(e) = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all()) {
         let _ = std::fs::remove_file(to);
         return Err(e);
     }
