@@ -52,10 +52,10 @@ const JOG: u8 = 0x3C;
 const VPOT: u8 = 0x10;
 
 /// The SysEx header before the device ID.
-const HEADER: [u8; 4] = [0xF0, 0x00, 0x00, 0x66];
+pub(crate) const HEADER: [u8; 4] = [0xF0, 0x00, 0x00, 0x66];
 /// A fader value within this many LSBs of what was sent, less than
 /// `ECHO_WINDOW` after the send, is an echo (Ruling 13).
-const ECHO_LSB: u16 = 1;
+pub(crate) const ECHO_LSB: u16 = 1;
 /// Meters are resent at most this often (Ruling 13).
 const METER_EVERY: Duration = Duration::from_millis(300);
 /// The V-pot ring CCs, strips 1–8.
@@ -79,7 +79,7 @@ const _: () = assert!(ROW == 8 * ZONE);
 const DETENT: f64 = 0.01;
 
 /// What became of one message.
-enum Heard {
+pub(crate) enum Heard {
     /// Understood (taken or deliberately ignored).
     Known,
     /// Malformed or unknown: counted.
@@ -144,7 +144,7 @@ pub fn handshake_response(challenge: [u8; 4]) -> [u8; 4] {
 }
 
 /// A click: touch, value and release at once (Ruling 5).
-fn click(t: AutomationTarget, v: f64) -> Vec<SurfaceAction> {
+pub(crate) fn click(t: AutomationTarget, v: f64) -> Vec<SurfaceAction> {
     vec![
         SurfaceAction::Gesture(t, Phase::Touch(Some(v))),
         SurfaceAction::Gesture(t, Phase::Value(v)),
@@ -153,19 +153,19 @@ fn click(t: AutomationTarget, v: f64) -> Vec<SurfaceAction> {
 }
 
 /// The toggled value of a switch that is `on`.
-fn toggled(on: bool) -> f64 {
+pub(crate) fn toggled(on: bool) -> f64 {
     if on { 0.0 } else { 1.0 }
 }
 
 /// Detents of a relative control: bit 6 set is counter-clockwise, the low
 /// 6 bits the count.
-fn detents(v: u8) -> i32 {
+pub(crate) fn detents(v: u8) -> i32 {
     let n = i32::from(v & 0x3F);
     if v & 0x40 != 0 { -n } else { n }
 }
 
 /// The 14-bit pitch-bend value of normalised `v`.
-fn fader_raw(v: f64) -> u16 {
+pub(crate) fn fader_raw(v: f64) -> u16 {
     // In 0–16383 after `unit`; float-to-int `as` saturates anyway.
     (unit(v) * 16383.0).round() as u16
 }
@@ -178,7 +178,7 @@ fn ring(mode: u8, v: Option<f64>) -> u8 {
 
 /// The meter level of a linear peak: 0 below −60 dBFS, else
 /// `min(12, floor((dB + 60) / 5) + 1)` (Ruling 14).
-fn meter_level(peak: f32) -> u8 {
+pub(crate) fn meter_level(peak: f32) -> u8 {
     let db = 20.0 * f64::from(peak).log10();
     // Silence is −∞; a NaN peak shows nothing.
     if db.is_nan() || db < -60.0 {
@@ -210,7 +210,7 @@ fn send_text(v: f64) -> String {
 }
 
 /// `text` as LCD characters: printable ASCII as itself, anything else `?`.
-fn lcd_chars(text: &str) -> impl Iterator<Item = u8> + '_ {
+pub(crate) fn lcd_chars(text: &str) -> impl Iterator<Item = u8> + '_ {
     text.chars().map(|c| {
         u8::try_from(c)
             .ok()

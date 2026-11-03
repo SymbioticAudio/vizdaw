@@ -246,7 +246,6 @@ pub fn new_surface(kind: SurfaceKind) -> Box<dyn Surface> {
     match kind {
         SurfaceKind::Mcu => Box::new(mcu::Mcu::new(false)),
         SurfaceKind::McuXt => Box::new(mcu::Mcu::new(true)),
-        // Task 3
-        SurfaceKind::Hui => Box::new(mcu::Mcu::new(false)),
+        SurfaceKind::Hui => Box::new(hui::Hui::new()),
     }
 }
