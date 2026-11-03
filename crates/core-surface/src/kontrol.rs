@@ -16,8 +16,9 @@ use crate::{
     Held, Link, MixerView, PluginPageView, StripView, Surface, SurfaceAction, SurfaceKind,
     TrackKind, Unit, midi,
 };
-use core_model::automation::AutomationTarget;
+use core_model::automation::{AutomationTarget, fader_db, pan_of, unit};
 use core_model::ids::StripId;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// NI's SysEx header for the DAW protocol.
@@ -53,6 +54,22 @@ const CMD_SELECT: u8 = 0x42;
 const CMD_MUTE: u8 = 0x43;
 const CMD_SOLO: u8 = 0x44;
 const CMD_ARM: u8 = 0x45;
+/// Per-slot display commands (SysEx): available/type, name, volume text,
+/// pan text, colour, track instance, muted-by-solo.
+const CMD_TYPE: u8 = 0x40;
+const CMD_INSTANCE: u8 = 0x41;
+const CMD_NAME: u8 = 0x48;
+const CMD_VOLUME: u8 = 0x46;
+const CMD_PAN: u8 = 0x47;
+const CMD_COLOR: u8 = 0x4B;
+const CMD_MUTED_BY_SOLO: u8 = 0x4A;
+/// Plug-in mode's chain, parameter names and value texts, page name and
+/// preset name (SysEx).
+const CMD_CHAIN: u8 = 0x71;
+const CMD_PARAM_NAME: u8 = 0x72;
+const CMD_PARAM_TEXT: u8 = 0x73;
+const CMD_PAGE_NAME: u8 = 0x75;
+const CMD_PRESET_NAME: u8 = 0x76;
 /// The tempo (SysEx, both ways).
 const CMD_TEMPO: u8 = 0x19;
 /// The chain's soft buttons and the page buttons (SysEx).
@@ -167,6 +184,77 @@ pub fn is_daw_port(name: &str) -> bool {
     ["KONTROL", "MK3", "DAW"].iter().all(|w| words.contains(w))
 }
 
+/// `x` as a 7-bit value (at most 127).
+fn b7(x: usize) -> u8 {
+    u8::try_from(x.min(127)).unwrap_or(127)
+}
+
+/// A ring or light value: `round(v × 127)`, 0–127.
+fn ring(v: f64) -> u8 {
+    // Clamped to 0..=127, so the conversion is exact.
+    (unit(v) * 127.0).round().clamp(0.0, 127.0) as u8
+}
+
+/// A volume text of at most 8 characters: "-6.1 dB", "-inf dB" below
+/// −99.95 dB, never "-0.0".
+fn volume_text(fader: f64) -> String {
+    let db = fader_db(fader);
+    if unit(fader) <= 0.0 || db < -99.95 {
+        return "-inf dB".into();
+    }
+    let t = format!("{db:.1}");
+    if t == "-0.0" {
+        "0.0 dB".into()
+    } else {
+        format!("{t} dB")
+    }
+}
+
+/// A pan text: "C", "L50", "R100".
+fn pan_text(pan: f64) -> String {
+    let p = pan_of(pan);
+    let n = (p.abs() * 100.0).round();
+    if n == 0.0 {
+        "C".into()
+    } else if p < 0.0 {
+        format!("L{n}")
+    } else {
+        format!("R{n}")
+    }
+}
+
+/// The messages of one feedback, sent only when they differ from the last
+/// with their key (Ruling 8).
+struct Sender<'a> {
+    cache: &'a mut BTreeMap<Vec<u8>, Vec<u8>>,
+    out: Vec<Vec<u8>>,
+}
+
+impl Sender<'_> {
+    fn put(&mut self, key: Vec<u8>, msg: Vec<u8>) {
+        if self.cache.get(&key) != Some(&msg) {
+            self.cache.insert(key, msg.clone());
+            self.out.push(msg);
+        }
+    }
+
+    fn cc(&mut self, cc: u8, v: u8) {
+        self.put(vec![CC, cc], vec![CC, cc, v.min(0x7F)]);
+    }
+
+    /// Keyed by the command and the index.
+    fn sx(&mut self, cmd: u8, value: u8, index: u8, info: &[u8]) {
+        let m = sysex(cmd, value, index, info);
+        self.put(vec![cmd, index.min(0x7F)], m);
+    }
+
+    /// Keyed by the command alone (the index or value is the datum).
+    fn one(&mut self, cmd: u8, value: u8, index: u8, info: &[u8]) {
+        let m = sysex(cmd, value, index, info);
+        self.put(vec![cmd, 0], m);
+    }
+}
+
 /// A TRACK_VU message (counted as a meter).
 pub fn is_meter(m: &[u8]) -> bool {
     parse_sysex(m).is_some_and(|(cmd, ..)| cmd == CMD_VU)
@@ -234,8 +322,10 @@ pub struct Kontrol {
     last_tempo: Option<(Instant, bool)>,
     /// The taps of the current series (at most [`TAPS`]).
     taps: Vec<Instant>,
-    /// The five tempo bytes last sent (Task 3 fills them).
+    /// The five tempo bytes last sent.
     sent_tempo: Option<[u8; 5]>,
+    /// What was last sent, by key (Ruling 8).
+    cache: BTreeMap<Vec<u8>, Vec<u8>>,
     /// `hello` was sent; the next feedback starts the repeat timer.
     hello_sent: bool,
     /// When the hello goes again (`None`: not waiting for an answer).
@@ -268,6 +358,7 @@ impl Kontrol {
             last_tempo: None,
             taps: Vec::new(),
             sent_tempo: None,
+            cache: BTreeMap::new(),
             hello_sent: false,
             next_hello: None,
             identity_due: false,
@@ -377,6 +468,7 @@ impl Kontrol {
         }
         // The next feedback sends VizDAW's tempo again.
         self.sent_tempo = None;
+        self.cache.remove(&vec![CMD_TEMPO, 0]);
         let new_step = self.tempo_step(now, false);
         out.push(SurfaceAction::Tempo { bpm, new_step });
     }
@@ -599,6 +691,187 @@ impl Kontrol {
         }
     }
 
+    /// Everything the keyboard shows, into `tx` (Ruling 8).
+    fn send_state(&self, view: &MixerView, tx: &mut Sender) -> Option<[u8; 5]> {
+        // Per slot.
+        for k in 0..SLOTS {
+            let slot = b7(k);
+            let s = self.shown.get(k);
+            let kind = s.map(|s| s.kind);
+            let flag = |on: bool| u8::from(on);
+            tx.sx(CMD_TYPE, track_type(kind), slot, &[]);
+            tx.sx(
+                CMD_NAME,
+                0,
+                slot,
+                &s.map(|s| ascii(&s.name)).unwrap_or_default(),
+            );
+            tx.sx(
+                CMD_VOLUME,
+                0,
+                slot,
+                s.map(|s| volume_text(s.fader))
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+            tx.sx(
+                CMD_PAN,
+                0,
+                slot,
+                s.map(|s| pan_text(s.pan)).unwrap_or_default().as_bytes(),
+            );
+            tx.sx(CMD_SELECT, flag(s.is_some_and(|s| s.select)), slot, &[]);
+            tx.sx(CMD_MUTE, flag(s.is_some_and(|s| s.mute)), slot, &[]);
+            tx.sx(CMD_SOLO, flag(s.is_some_and(|s| s.solo)), slot, &[]);
+            tx.sx(CMD_ARM, flag(s.is_some_and(|s| s.arm)), slot, &[]);
+            tx.sx(
+                CMD_MUTED_BY_SOLO,
+                flag(view.soloing && s.is_some_and(|s| !s.solo)),
+                slot,
+                &[],
+            );
+            tx.sx(
+                CMD_COLOR,
+                0,
+                slot,
+                kind.map(|k| color(k).as_bytes()).unwrap_or_default(),
+            );
+            tx.cc(0x50 + slot, s.map_or(0, |s| ring(s.fader)));
+            tx.cc(0x58 + slot, s.map_or(0, |s| ring(s.pan)));
+        }
+        // Once per feedback.
+        let mut levels: Vec<u8> = self
+            .shown
+            .iter()
+            .flat_map(|s| [vu(s.meter.0), vu(s.meter.1)])
+            .collect();
+        levels.resize(2 * SLOTS, 0);
+        tx.one(CMD_VU, 2, 0, &levels);
+        tx.one(CMD_INSTANCE, 0, 0, &[]);
+        let mut tempo = None;
+        if view.tempo > 0.0 {
+            if let Some(b) = tempo_bytes(view.tempo) {
+                tx.one(CMD_TEMPO, 0, 0, &b);
+                tempo = Some(b);
+            }
+        }
+        // Transport.
+        let on = u8::from;
+        tx.cc(0x10, on(view.playing));
+        tx.cc(0x14, on(!view.playing));
+        tx.cc(0x12, on(view.recording));
+        tx.cc(0x16, on(view.looping));
+        tx.cc(0x11, 1);
+        tx.cc(0x20, 1);
+        tx.cc(0x21, 1);
+        tx.cc(0x13, on(view.count_in));
+        tx.cc(0x23, on(view.automation_suspended));
+        tx.cc(0x18, on(!view.recording));
+        tx.cc(0x17, 0);
+        tx.cc(0x22, 0);
+        // Navigation: bit 0 previous, bit 1 next.
+        let mask = |prev: bool, next: bool| u8::from(prev) | (u8::from(next) << 1);
+        let n = self.ids.len();
+        tx.cc(
+            0x30,
+            match self.selected {
+                Some(i) => mask(i > 0, i.saturating_add(1) < n),
+                None => mask(false, n > 0),
+            },
+        );
+        let page = self.page.as_ref();
+        tx.cc(
+            0x31,
+            match (self.mode, page) {
+                (Mode::Mixer, _) => mask(self.first > 0, self.first.saturating_add(SLOTS) < n),
+                (Mode::Plugin, Some(p)) => mask(p.page > 0, p.page.saturating_add(1) < p.pages),
+                (Mode::Plugin, None) => 0,
+            },
+        );
+        tx.cc(0x32, 0);
+        tx.cc(0x33, 0);
+        tx.cc(
+            0x36,
+            match page {
+                Some(p) => match p.preset {
+                    Some(i) => mask(i > 0, i.saturating_add(1) < p.presets),
+                    None => mask(p.presets > 0, p.presets > 0),
+                },
+                None => 0,
+            },
+        );
+        // The selected track.
+        let sel = self.selected_shown();
+        tx.cc(0x68, track_type(sel.map(|s| s.kind)));
+        tx.cc(0x66, u8::from(sel.is_some_and(|s| s.mute)));
+        tx.cc(0x67, u8::from(sel.is_some_and(|s| s.solo)));
+        tx.cc(0x69, u8::from(view.soloing && sel.is_some_and(|s| !s.solo)));
+        tx.cc(
+            0x05,
+            match self.mode {
+                Mode::Mixer => 0,
+                Mode::Plugin => 1,
+            },
+        );
+        if self.mode == Mode::Plugin {
+            self.send_page(tx);
+        }
+        tempo
+    }
+
+    /// Plug-in mode's chain, parameters, page and preset.
+    fn send_page(&self, tx: &mut Sender) {
+        let mut chain = Vec::new();
+        match &self.page {
+            Some(p) => {
+                for name in &p.chain {
+                    chain.extend(ascii(name));
+                    chain.push(0);
+                }
+                chain.push(0);
+            }
+            None => chain.push(0),
+        }
+        tx.one(CMD_CHAIN, 0, 0, &chain);
+        let p = self.page.as_ref();
+        tx.one(CMD_SLOT, 0, p.map_or(0, |p| b7(p.slot)), &[]);
+        for k in 0..SLOTS {
+            let param = p.and_then(|p| p.params.get(k));
+            let i = b7(k);
+            tx.sx(
+                CMD_PARAM_NAME,
+                0,
+                i,
+                &param.map(|q| ascii(&q.name)).unwrap_or_default(),
+            );
+            tx.sx(
+                CMD_PARAM_TEXT,
+                0,
+                i,
+                &param.map(|q| ascii(&q.text)).unwrap_or_default(),
+            );
+            tx.cc(0x70 + i, param.map_or(0, |q| ring(q.value)));
+        }
+        tx.one(
+            CMD_PAGE,
+            p.map_or(0, |p| b7(p.pages)),
+            p.map_or(0, |p| b7(p.page)),
+            &[],
+        );
+        tx.one(
+            CMD_PAGE_NAME,
+            0,
+            0,
+            &p.map(|p| ascii(&p.page_name)).unwrap_or_default(),
+        );
+        tx.one(
+            CMD_PRESET_NAME,
+            0,
+            0,
+            &p.map(|p| ascii(&p.preset_name)).unwrap_or_default(),
+        );
+    }
+
     fn message(&mut self, msg: &[u8], now: Instant, out: &mut Vec<SurfaceAction>) {
         match *msg {
             [CC, HANDSHAKE, v] => self.answer(v, now, out),
@@ -667,11 +940,23 @@ impl Surface for Kontrol {
                 _ => Vec::new(),
             };
         }
-        let mut out = Vec::new();
+        let mut head = Vec::new();
         if std::mem::take(&mut self.identity_due) {
             let (major, minor) = IDENTITY_VERSION;
             // The version rides in value and index, the name is the info.
-            out.push(sysex(CMD_IDENTITY, major, minor, &ascii(IDENTITY_NAME)));
+            head.push(sysex(CMD_IDENTITY, major, minor, &ascii(IDENTITY_NAME)));
+        }
+        let mut cache = std::mem::take(&mut self.cache);
+        let mut tx = Sender {
+            cache: &mut cache,
+            out: head,
+        };
+        let tempo = self.send_state(view, &mut tx);
+        let out = tx.out;
+        self.cache = cache;
+        // Remembered for the echo rule (Ruling 5).
+        if tempo.is_some() {
+            self.sent_tempo = tempo;
         }
         out
     }
@@ -681,7 +966,7 @@ impl Surface for Kontrol {
     }
 
     fn refresh(&mut self) {
-        // Task 3 clears its send cache here.
+        self.cache.clear();
     }
 
     fn hello(&mut self) -> Vec<Vec<u8>> {
@@ -716,10 +1001,13 @@ impl Surface for Kontrol {
     }
 
     fn goodbye(&mut self) -> Vec<Vec<u8>> {
-        // Task 3 adds the empty slots before the goodbye. The registry has
-        // answered the holds already (I1): only the offline mark here.
+        // The registry has answered the holds already (I1): only the
+        // offline mark here. The slots are emptied outside the cache.
         let _ = self.link.set(false);
-        vec![vec![CC, GOODBYE, 0x00]]
+        self.cache.clear();
+        let mut out: Vec<Vec<u8>> = (0..SLOTS).map(|i| sysex(CMD_TYPE, 0, b7(i), &[])).collect();
+        out.push(vec![CC, GOODBYE, 0x00]);
+        out
     }
 
     fn take_problem(&mut self) -> Option<String> {
