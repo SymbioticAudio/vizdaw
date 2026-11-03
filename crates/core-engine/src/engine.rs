@@ -1092,8 +1092,13 @@ impl Engine {
 
     /// Moves to a tick of the loaded sequence.
     pub fn locate_tick(&mut self, tick: Tick) -> Result<(), EngineError> {
-        let frame = self.tempo.as_ref().map_or(0, |t| t.tick_to_frame(tick));
+        let frame = self.tick_frame(tick);
         self.locate_frame(frame)
+    }
+
+    /// The frame of `tick` in the loaded sequence (0 before a load).
+    pub fn tick_frame(&self, tick: Tick) -> u64 {
+        self.tempo.as_ref().map_or(0, |t| t.tick_to_frame(tick))
     }
 
     /// Loops bar 1 to the end of the loaded sequence, or stops looping.

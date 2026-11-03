@@ -256,6 +256,8 @@ pub struct Graph {
     /// Per strip, the frame its controls act at behind the renderer: its
     /// node's output time (plan 5e-1 Ruling 5), by strip.
     strip_arrive: Box<[(StripId, u64)]>,
+    /// Per strip, its node, by strip (a bounce's stem taps, plan 5f-2).
+    strip_nodes: Box<[(StripId, usize)]>,
     /// Per insert instance, its strip's input time plus the inserts
     /// before it, by instance.
     insert_arrive: Box<[(PluginInstanceId, u64)]>,
@@ -283,8 +285,8 @@ pub struct Graph {
 // SAFETY: the only non-`Sync` fields are the `UnsafeCell`s of `nodes` and
 // `inserts`. Through `&Graph` they are reached only by `render_node` (node
 // `i` and its inserts mutably, by the one thread that popped `i`; finished
-// predecessors of `i` immutably) and `write_master` (after a completed
-// run), per the module protocol; their contents are `Send`
+// predecessors of `i` immutably) and `write_master` and `copy_strip_post` (after a
+// completed run), per the module protocol; their contents are `Send`
 // (`Box<dyn EffectNode>` is `Send`), so handing exclusive use between
 // threads is sound. Everything else is immutable after `build` or atomic.
 unsafe impl Sync for Graph {}
@@ -492,6 +494,7 @@ impl Graph {
         // Where each strip's controls and each insert's parameters act
         // behind the renderer (plan 5e-1 Ruling 5).
         let mut strip_arrive: Vec<(StripId, u64)> = Vec::new();
+        let mut strip_nodes: Vec<(StripId, usize)> = Vec::new();
         let mut insert_arrive: Vec<(PluginInstanceId, u64)> = Vec::new();
         for (i, node) in spec.nodes.iter().enumerate() {
             let NodeSpec::Strip(s) = node else {
@@ -499,6 +502,10 @@ impl Graph {
             };
             if let Some(id) = s.strip {
                 strip_arrive.push((id, plan.t_out.get(i).copied().unwrap_or(0)));
+                // A cyclic graph renders no node: it has no strip nodes.
+                if i < defs.len() {
+                    strip_nodes.push((id, i));
+                }
             }
             let mut at = plan.t_in.get(i).copied().unwrap_or(0);
             for ins in &s.inserts {
@@ -509,6 +516,7 @@ impl Graph {
             }
         }
         strip_arrive.sort_by_key(|x| x.0);
+        strip_nodes.sort_by_key(|x| x.0);
         insert_arrive.sort_by_key(|x| x.0);
         let mut arrivals: Vec<u64> = std::iter::once(0)
             .chain(strip_arrive.iter().map(|x| x.1))
@@ -533,6 +541,7 @@ impl Graph {
             latency: plan.latency,
             max_lead: plan.leads.iter().copied().max().unwrap_or(0),
             strip_arrive: strip_arrive.into_boxed_slice(),
+            strip_nodes: strip_nodes.into_boxed_slice(),
             insert_arrive: insert_arrive.into_boxed_slice(),
             arrivals: arrivals.into_boxed_slice(),
             t_in: plan.t_in.clone().into_boxed_slice(),
@@ -566,6 +575,29 @@ impl Graph {
             .ok()
             .and_then(|i| self.strip_arrive.get(i))
             .map_or(0, |x| x.1)
+    }
+
+    /// The node of `strip` (`strip_nodes`, sorted, built in `build` beside
+    /// `strip_arrive`). // RT
+    pub(crate) fn strip_node(&self, strip: StripId) -> Option<usize> {
+        self.strip_nodes
+            .binary_search_by_key(&strip, |x| x.0)
+            .ok()
+            .and_then(|i| self.strip_nodes.get(i))
+            .map(|x| x.1)
+    }
+
+    /// The master node's strip, when it has one (not RT: a scan).
+    pub(crate) fn master_strip(&self) -> Option<StripId> {
+        self.strip_nodes
+            .iter()
+            .find(|x| x.1 == self.master)
+            .map(|x| x.0)
+    }
+
+    /// The master node.
+    pub(crate) fn master_node(&self) -> usize {
+        self.master
     }
 
     /// The frame insert `id`'s parameters act at behind the renderer: its
@@ -922,6 +954,56 @@ impl Graph {
                 d.copy_from_slice(s);
             }
         }
+    }
+}
+
+impl Graph {
+    /// Copies frames `0..frames` of `node`'s post-fader output into the
+    /// slices (after a completed run, before the next; the `write_master`
+    /// protocol). Zeros for a node that is not a strip. // RT
+    pub(crate) fn copy_strip_post(
+        &self,
+        node: usize,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+    ) {
+        let n = frames as usize;
+        let is_strip = matches!(self.defs.get(node), Some(NodeDef::Strip { .. }));
+        let cell = self.nodes.get(node).filter(|_| is_strip);
+        let Some(cell) = cell else {
+            for d in [left, right] {
+                if let Some(d) = d.get_mut(..n) {
+                    d.fill(0.0);
+                }
+            }
+            return;
+        };
+        // SAFETY: as in `write_master`: the caller calls this only after
+        // `Exec::run` returned `Done` (`remaining == 0`, read with
+        // `Acquire`, so every node's writes are visible) and before it
+        // starts another run; threads still leaving the job touch only the
+        // queue and the atomic counters, never node state.
+        let st = unsafe { &*cell.get() };
+        for (d, src) in [left, right]
+            .into_iter()
+            .zip([&st.post.left, &st.post.right])
+        {
+            match (d.get_mut(..n), src.get(..n)) {
+                (Some(d), Some(s)) => d.copy_from_slice(s),
+                (Some(d), None) => d.fill(0.0),
+                _ => {}
+            }
+        }
+    }
+
+    /// `node`'s `audible` as the last commit left it (false for a
+    /// non-strip node). // RT
+    pub(crate) fn node_audible(&self, node: usize) -> bool {
+        matches!(
+            self.defs.get(node),
+            Some(NodeDef::Strip { audible: true, .. })
+        )
     }
 }
 

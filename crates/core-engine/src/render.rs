@@ -15,7 +15,7 @@ use crate::record::RecordTap;
 use crate::schedule::automation::StripParam;
 use crate::schedule::{AutoDest, MAX_AUTO_LANES, MAX_TARGETS, MIN_RUN, Schedule, TargetIdx};
 use crate::transport::{PlayState, Step, Transport};
-use core_model::ids::PluginInstanceId;
+use core_model::ids::{PluginInstanceId, StripId};
 use core_model::mixer::ParamId;
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
@@ -604,6 +604,127 @@ pub struct Renderer {
     /// The count-in playing before the transport rolls, and its last
     /// clicks after (Ruling 7).
     counting: Option<Counting>,
+    /// A bounce's stem taps (plan 5f-2, pre-flight C1), while set.
+    stems: Option<Box<StemTaps>>,
+}
+
+/// One tapped strip's capture of the last block (pre-flight C1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StemTap<'a> {
+    /// The strip (master's own id for the master tap).
+    pub strip: StripId,
+    /// Every frame of the block, from every run (zeros where no graph ran).
+    pub left: &'a [f32],
+    /// The right channel, as `left`.
+    pub right: &'a [f32],
+    /// `(first frame, audible)` per change through the block, the first
+    /// at the first rendered run (empty: no run rendered, silent).
+    pub gates: &'a [(u32, bool)],
+    /// `Graph::strip_arrival` (master: `Graph::latency`): where the
+    /// post-fader signal is read.
+    pub arrival: u64,
+    /// `Graph::feed_arrival(strip, None)` (master: `Graph::latency`): where
+    /// its mute and solo act.
+    pub gate_arrival: u64,
+}
+
+/// One tapped strip's buffers.
+struct StemCapture {
+    /// `None`: master (whatever its id).
+    strip: Option<StripId>,
+    left: Vec<f32>,
+    right: Vec<f32>,
+    gates: Vec<(u32, bool)>,
+}
+
+/// A bounce's per-run capture of tapped strips (plan 5f-2, pre-flight C1):
+/// a strip's graph buffers hold only the last run of a block, so every
+/// completed run is copied here at its offset.
+struct StemTaps {
+    taps: Vec<StemCapture>,
+    /// The last block's frames (at most the buffers' length).
+    frames: usize,
+}
+
+impl StemTaps {
+    /// Master and `strips` (deduplicated), each with `max_frames` per
+    /// channel and `max_frames / MIN_RUN + 2` gate entries. // not RT
+    fn new(strips: &[StripId], max_frames: u32) -> StemTaps {
+        let n = max_frames as usize;
+        let gates = n / MIN_RUN as usize + 2;
+        let mut ids: Vec<Option<StripId>> = vec![None];
+        for s in strips {
+            if !ids.contains(&Some(*s)) {
+                ids.push(Some(*s));
+            }
+        }
+        StemTaps {
+            taps: ids
+                .into_iter()
+                .map(|strip| StemCapture {
+                    strip,
+                    left: vec![0.0; n],
+                    right: vec![0.0; n],
+                    gates: Vec::with_capacity(gates),
+                })
+                .collect(),
+            frames: 0,
+        }
+    }
+
+    /// The strips tapped besides master.
+    fn strips(&self) -> Vec<StripId> {
+        self.taps.iter().filter_map(|t| t.strip).collect()
+    }
+
+    /// Zero-fills `0..frames` of every tap and clears its gates (no
+    /// deallocation). // RT
+    fn begin_block(&mut self, frames: u32) {
+        let mut kept = frames as usize;
+        for t in &mut self.taps {
+            kept = kept.min(t.left.len()).min(t.right.len());
+            for ch in [&mut t.left, &mut t.right] {
+                let n = ch.len().min(frames as usize);
+                if let Some(d) = ch.get_mut(..n) {
+                    d.fill(0.0);
+                }
+            }
+            t.gates.clear();
+        }
+        self.frames = kept;
+    }
+
+    /// Copies every tap's post-fader output of the run just completed
+    /// into frames `at..at + frames` and records its audibility when it
+    /// changed (never allocates: with the gates full, the last entry is
+    /// overwritten). Call only after `Exec::run` returned `Done`, before
+    /// the next run. // RT
+    fn capture(&mut self, g: &Graph, at: usize, frames: u32) {
+        let n = frames as usize;
+        for t in &mut self.taps {
+            let node = match t.strip {
+                None => Some(g.master_node()),
+                Some(id) => g.strip_node(id),
+            };
+            let Some(node) = node else {
+                continue;
+            };
+            let end = at.saturating_add(n);
+            if let (Some(l), Some(r)) = (t.left.get_mut(at..end), t.right.get_mut(at..end)) {
+                g.copy_strip_post(node, l, r, frames);
+            }
+            let on = g.node_audible(node);
+            let offset = u32::try_from(at).unwrap_or(u32::MAX);
+            if t.gates.last().is_some_and(|x| x.1 == on) {
+                continue;
+            }
+            if t.gates.len() < t.gates.capacity() {
+                t.gates.push((offset, on));
+            } else if let Some(last) = t.gates.last_mut() {
+                *last = (offset, on);
+            }
+        }
+    }
 }
 
 /// What a wrap now, after `last` frames played since the roll or the
@@ -763,6 +884,7 @@ impl Renderer {
             seg_mark: 0,
             after_end: 0,
             counting: None,
+            stems: None,
         };
         r.prepare(cfg.max_frames);
         r
@@ -780,6 +902,10 @@ impl Renderer {
         *self.input_copy = InputCopy::new(crate::backend::MAX_INPUT_CHANNELS, max_frames);
         if let Some(g) = self.graph.as_mut() {
             g.prepare(max_frames);
+        }
+        if let Some(t) = self.stems.as_deref() {
+            let strips = t.strips();
+            self.stems = Some(Box::new(StemTaps::new(&strips, max_frames)));
         }
     }
 
@@ -801,6 +927,58 @@ impl Renderer {
     /// [`Engine::clear_input_peaks`]: crate::engine::Engine::clear_input_peaks
     pub fn clear_input_peaks(&self) {
         self.shared.clear_input_peaks();
+    }
+
+    /// Taps on `strips` plus master (deduplicated): allocates, per tap,
+    /// `max_frames` per channel and `max_frames / MIN_RUN + 2` gate
+    /// entries. An empty list removes the taps. Call between blocks.
+    /// // not RT
+    pub fn set_stem_taps(&mut self, strips: &[StripId]) {
+        if strips.is_empty() {
+            self.stems = None;
+        } else {
+            self.tap_stems(strips);
+        }
+    }
+
+    /// Taps on `strips` plus master, also when `strips` is empty (a
+    /// bounce of the mix alone). Between blocks. // not RT
+    pub(crate) fn tap_stems(&mut self, strips: &[StripId]) {
+        self.stems = Some(Box::new(StemTaps::new(strips, self.cfg.max_frames)));
+    }
+
+    /// The taps' capture of the last block, master first, with the
+    /// current graph's arrivals. Between blocks. // not RT
+    pub fn stem_taps(&self) -> Vec<StemTap<'_>> {
+        let Some(t) = self.stems.as_deref() else {
+            return Vec::new();
+        };
+        let g = self.graph.as_deref();
+        let master = g.and_then(Graph::master_strip);
+        let latency = g.map_or(0, Graph::latency);
+        let n = t.frames;
+        let mut taps = Vec::with_capacity(t.taps.len());
+        for c in &t.taps {
+            let (strip, arrival, gate_arrival) = match c.strip {
+                // A graph without strip ids (hand-built): master is "no strip".
+                None => (master.unwrap_or(StripId(u64::MAX)), latency, latency),
+                Some(id) if Some(id) == master => continue,
+                Some(id) => (
+                    id,
+                    g.map_or(0, |g| g.strip_arrival(id)),
+                    g.map_or(0, |g| g.feed_arrival(id, None)),
+                ),
+            };
+            taps.push(StemTap {
+                strip,
+                left: c.left.get(..n).unwrap_or(&[]),
+                right: c.right.get(..n).unwrap_or(&[]),
+                gates: &c.gates,
+                arrival,
+                gate_arrival,
+            });
+        }
+        taps
     }
 
     /// Renders one block of `frames` frames into planar `out` channels.
@@ -861,6 +1039,10 @@ impl Renderer {
         let n = frames as usize;
         for ch in out.iter_mut() {
             ch.fill(0.0);
+        }
+        // A bounce's stem taps start the block afresh (plan 5f-2, pre-flight C1). // RT
+        if let Some(t) = self.stems.as_deref_mut() {
+            t.begin_block(frames);
         }
         // The input meters see every block, rendered or not.
         for (c, ch) in input.channels.iter().enumerate() {
@@ -1400,6 +1582,11 @@ impl Renderer {
         ) {
             RunResult::Done => {
                 g.write_master(out, at, frames);
+                // Every run of every tapped strip, before the master clamp
+                // (plan 5f-2 Rulings 5, 13; pre-flight C1). // RT
+                if let Some(t) = self.stems.as_deref_mut() {
+                    t.capture(g, at, frames);
+                }
                 let covered = g.instruments();
                 skip_sinks(&mut self.sinks, u64::from(frames), covered);
                 clamp_master(out, at, frames, &self.shared);

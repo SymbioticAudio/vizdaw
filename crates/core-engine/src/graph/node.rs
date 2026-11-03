@@ -139,6 +139,9 @@ pub enum TestMode {
     Stall(Arc<AtomicBool>),
     /// Adds a unit impulse at the very first frame it processes.
     Impulse,
+    /// Passes its input; once the input falls silent, outputs 0.25 for
+    /// this many frames (a tail to bounce, plan 5f-2).
+    Ring(u32),
 }
 
 /// A test stand-in for a plugin: a [`TestMode`] followed by a fixed
@@ -150,6 +153,8 @@ pub struct TestNode {
     delay: DelayLine,
     rng: u32,
     fired: bool,
+    /// `Ring`: frames of 0.25 still to play after the input fell silent.
+    ring_left: u32,
 }
 
 impl TestNode {
@@ -165,6 +170,7 @@ impl TestNode {
             delay: DelayLine::new(latency),
             rng,
             fired: false,
+            ring_left: 0,
         }
     }
 }
@@ -252,6 +258,18 @@ impl EffectNode for TestNode {
                     }
                 }
             }
+            // RT: per frame, no allocation.
+            TestMode::Ring(len) => {
+                for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                    if *a != 0.0 || *b != 0.0 {
+                        self.ring_left = *len;
+                    } else if self.ring_left > 0 {
+                        *a = 0.25;
+                        *b = 0.25;
+                        self.ring_left -= 1;
+                    }
+                }
+            }
         }
         self.delay.process(l, r);
         status
@@ -327,6 +345,7 @@ impl TestInserts {
                 "nan" => mode = TestMode::Nan,
                 "error" => mode = TestMode::Error,
                 "impulse" => mode = TestMode::Impulse,
+                "ring" => mode = TestMode::Ring(v.parse().map_err(|_| bad())?),
                 "stall" => {
                     let flag = self.stall.clone().ok_or("this factory has no stall flag")?;
                     mode = TestMode::Stall(flag);
