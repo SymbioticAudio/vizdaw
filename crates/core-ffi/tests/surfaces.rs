@@ -1211,3 +1211,32 @@ fn an_injection_into_an_unfocused_window_refreshes_before_it_routes() {
         Some("Set Fader")
     );
 }
+
+/// Final review I1: with no project focused, surface input is not kept
+/// for later. What was queued but not yet routed when the focused window
+/// closed is dropped, and what arrives while nothing is focused is not
+/// queued, so nothing replays into the project that takes the focus next.
+#[test]
+fn input_while_nothing_is_focused_is_not_replayed() {
+    use vizdaw_ffi::surfaces::SurfaceEventRow as E;
+    let _g = serial();
+    let a = vizdaw_ffi::Session::new_demo().unwrap();
+    let _ = mcu(&a);
+    // Record, queued while `a` is focused and never routed.
+    assert!(
+        a.inject_midi("T In".into(), vec![0x90, 0x5F, 0x7F])
+            .unwrap()
+    );
+    a.close().unwrap();
+    let b = vizdaw_ffi::Session::new_demo().unwrap();
+    // Play, pressed while nothing is focused.
+    b.inject_midi("T In".into(), vec![0x90, 0x5E, 0x7F])
+        .unwrap();
+    b.focus_surfaces().unwrap();
+    b.idle().unwrap();
+    let events = b.take_surface_events().unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(e, E::Command { .. })),
+        "nothing replays into the next project: {events:?}"
+    );
+}

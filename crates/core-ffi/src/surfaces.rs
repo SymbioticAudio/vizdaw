@@ -581,6 +581,8 @@ struct Claims {
     keys: BTreeMap<u32, String>,
     /// Those maps, for `Mapper::takes`.
     mapper: Mapper,
+    /// A session is focused: only then is input queued (final review I1).
+    focused: bool,
 }
 
 impl Claims {
@@ -597,9 +599,11 @@ impl Claims {
             .is_some_and(|name| self.mapper.takes(name, bytes))
     }
 
-    /// Whether a surface, a learn or a map listens to `port`.
+    /// Whether a surface, a learn or a map listens to `port`: never while
+    /// no session is focused, since nothing routes the queue then and a
+    /// backlog would replay into the next project (final review I1).
     fn listens(&self, port: &str) -> bool {
-        self.names.contains(port) || self.learning || self.mapper.listens(port)
+        self.focused && (self.names.contains(port) || self.learning || self.mapper.listens(port))
     }
 }
 
@@ -983,6 +987,7 @@ impl Registry {
             learning: self.learn.is_some(),
             keys,
             mapper,
+            focused: self.focus.is_some(),
         };
         *CLAIMS.write().unwrap_or_else(PoisonError::into_inner) = claims;
     }
@@ -1299,6 +1304,10 @@ impl Registry {
             self.maps.clear();
             self.reset_mapper_commands();
             self.blank(now);
+            // Nothing routes the queue until a session is focused again:
+            // what waits in it must not replay into that one (final review
+            // I1). Registry → input queue is the allowed order.
+            let _ = take_input();
         }
         self.publish();
     }
@@ -1667,6 +1676,11 @@ fn push(port: &str, bytes: &[u8], host_ns: u64, programmatic: bool) -> bool {
     };
     if !listens {
         return false;
+    }
+    // System Real-Time bytes alone (clock, Active Sensing): nothing routes
+    // them (final review I1).
+    if bytes.iter().all(|b| *b >= 0xF8) {
+        return true;
     }
     enqueue(port, bytes, host_ns, programmatic);
     true
@@ -2299,6 +2313,7 @@ mod tests {
             learning,
             keys,
             mapper,
+            focused: true,
         };
     }
 
@@ -2326,6 +2341,29 @@ mod tests {
             take_input().first().is_some_and(|i| i.programmatic),
             "injected"
         );
+        *CLAIMS.write().unwrap() = Claims::default();
+    }
+
+    /// Final review I1: System Real-Time bytes alone (Active Sensing,
+    /// clock) are never queued: nothing routes them, and they would fill
+    /// the queue and report drops for a unit that did nothing wrong.
+    #[test]
+    fn real_time_bytes_are_not_queued() {
+        let _g = CLAIMS_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+        claim_s(false, Vec::new());
+        let _ = take_input();
+        let before = dropped();
+        for _ in 0..5000 {
+            let _ = input("S", &[0xF8], 0);
+            let _ = input("S", &[0xFE, 0xF8], 0);
+        }
+        assert!(take_input().is_empty(), "nothing queued");
+        assert_eq!(dropped(), before, "no drop to report");
+        assert!(
+            input("S", &[0xF8, 0x90, 0x68, 0x7F], 0),
+            "a message among them is"
+        );
+        assert_eq!(take_input().len(), 1);
         *CLAIMS.write().unwrap() = Claims::default();
     }
 
