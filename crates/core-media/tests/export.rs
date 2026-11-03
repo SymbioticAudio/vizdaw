@@ -1,7 +1,10 @@
 //! Bounce files (plan 5f-2 Task 1; spec §9.2, §12.3; Rulings 1, 3, 12, 13).
 
 use core_media::caf::{CafReader, CafWriter, WriteMode};
-use core_media::export::{Container, ExportFormat, PcmWriter, export, partial_path, write_partial};
+use core_media::export::{
+    Container, ExportFormat, PcmWriter, check_destination, check_folder, export, partial_path,
+    write_partial,
+};
 use core_media::import::CafImporter;
 use core_model::format::BitDepth;
 use std::path::{Path, PathBuf};
@@ -30,6 +33,7 @@ fn fmt(container: Container, depth: BitDepth, dither: bool) -> ExportFormat {
         depth,
         rate: 48_000,
         dither,
+        dither_stream: 0,
     }
 }
 
@@ -235,6 +239,38 @@ fn dither_changes_only_the_lowest_bit() {
     }
 }
 
+/// Final review m5: each dither stream is its own sequence (the files of
+/// one bounce do not carry the same dither), and one stream always gives
+/// the same integers.
+#[test]
+fn each_dither_stream_is_its_own() {
+    let d = tempfile::tempdir().unwrap();
+    let src = float_caf(d.path(), 4000);
+    for (container, depth) in [
+        (Container::Wav, BitDepth::Int16),
+        (Container::Aiff, BitDepth::Int24),
+        (Container::Caf, BitDepth::Int16),
+    ] {
+        let ext = container.extension();
+        let samples = |name: &str, stream: u64| {
+            let dest = d.path().join(format!("{name} {depth:?}.{ext}"));
+            let f = ExportFormat {
+                dither_stream: stream,
+                ..fmt(container, depth, true)
+            };
+            run(&src, &dest, &f, false).unwrap();
+            std::fs::read(&dest).unwrap()
+        };
+        let (a, again, b) = (samples("a", 0), samples("again", 0), samples("b", 1));
+        assert_eq!(a, again, "{container:?} {depth:?}: one stream, one result");
+        assert_eq!(a.len(), b.len());
+        assert_ne!(
+            a, b,
+            "{container:?} {depth:?}: another stream, other dither"
+        );
+    }
+}
+
 #[test]
 fn float_ignores_dither() {
     let d = tempfile::tempdir().unwrap();
@@ -265,12 +301,25 @@ fn clipping_is_counted() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("loud.wav");
     let mut w = PcmWriter::create(&p, &fmt(Container::Wav, BitDepth::Int16, false), 1).unwrap();
-    w.write(&[0.5, 1.5, -2.0, 1.0, -1.0]).unwrap();
+    // Within half a step of full scale rounds to full scale: not clipped
+    // (final review m6).
+    w.write(&[
+        0.5,
+        1.5,
+        -2.0,
+        1.0,
+        -1.0,
+        32_767.4 / 32_768.0,
+        -32_768.4 / 32_768.0,
+    ])
+    .unwrap();
     assert_eq!(
         w.finish().unwrap().clipped,
         3,
         "1.0 is one past the largest 16-bit value; -1.0 fits"
     );
+    let (.., s) = read_wav(&p);
+    assert_eq!(s[5..], [32_767, -32_768]);
     let f = d.path().join("loud float.wav");
     let mut w = PcmWriter::create(&f, &fmt(Container::Wav, BitDepth::Float32, false), 1).unwrap();
     w.write(&[0.5, 1.5, -2.0]).unwrap();
@@ -618,6 +667,29 @@ fn hostile_exports_are_refused() {
         )
         .is_err()
     );
+    // Final review m3: refused before anything is written, not at the
+    // partial: a NUL byte, a partial name over 255 bytes, a folder that
+    // cannot be written.
+    let f16 = fmt(Container::Wav, BitDepth::Int16, true);
+    let e = check_destination(&d.path().join("a\u{0}b.wav"), &f16, false).unwrap_err();
+    assert!(e.to_string().contains("NUL"), "{e}");
+    let long = d.path().join(format!("{}.wav", "n".repeat(247)));
+    assert_eq!(long.file_name().unwrap().len(), 251, "a name that fits");
+    let e = check_destination(&long, &f16, false).unwrap_err();
+    assert!(e.to_string().contains("too long"), "{e}");
+    assert!(run(&src, &long, &f16, false).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ro = d.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let e = check_destination(&ro.join("x.wav"), &f16, false).unwrap_err();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(e.to_string().contains("cannot write"), "{e}");
+        assert!(check_folder(&ro).is_ok(), "writable again");
+        std::fs::remove_dir(&ro).unwrap();
+    }
     assert!(
         Container::Aiff.accepts("AIFF")
             && Container::Aiff.accepts("aif")

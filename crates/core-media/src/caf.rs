@@ -25,8 +25,9 @@ const RECORDING_KEY: &[u8] = b"vizdaw-recording";
 pub(crate) const INT16_SCALE: f32 = 32_768.0;
 /// Full scale of a 24-bit sample.
 pub(crate) const INT24_SCALE: f32 = 8_388_608.0;
-/// The dither generator's seed: every writer starts here, so two files of
-/// one signal in one depth hold the same integers.
+/// The dither generator's seed: every writer of one stream starts from
+/// it, so two files of one signal in one depth and stream hold the same
+/// integers.
 const DITHER_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// How a file is written.
@@ -82,7 +83,15 @@ pub(crate) struct Tpdf(u64);
 impl Tpdf {
     /// A generator at the shared seed.
     pub(crate) fn new() -> Tpdf {
-        Tpdf(DITHER_SEED)
+        Tpdf::stream(0)
+    }
+
+    /// The generator of dither stream `stream` (0: the shared seed): the
+    /// seed mixed with the scrambled stream number, never the zero state
+    /// xorshift cannot leave (final review m5).
+    pub(crate) fn stream(stream: u64) -> Tpdf {
+        let s = DITHER_SEED ^ stream.wrapping_mul(0xD1B5_4A32_D192_ED03);
+        Tpdf(if s == 0 { DITHER_SEED } else { s })
     }
 
     fn unit(&mut self) -> f32 {
@@ -101,11 +110,13 @@ impl Tpdf {
 }
 
 /// `x × scale + dither`, rounded and clamped to the integer range of
-/// `scale` (32768 or 8388608), and whether the undithered `x × scale` lay
-/// outside that range (clipped, either sign). `x` must be finite.
+/// `scale` (32768 or 8388608), and whether the undithered `x × scale`,
+/// rounded, lay outside that range (clipped, either sign: a value within
+/// half a step of full scale rounds to it and is not counted; final review
+/// m6). `x` must be finite.
 pub(crate) fn quantize(x: f32, scale: f32, dither: f32) -> (i32, bool) {
     let v = x * scale;
-    let clipped = !(-scale..=scale - 1.0).contains(&v);
+    let clipped = !(-scale..=scale - 1.0).contains(&v.round());
     (
         (v + dither).round().clamp(-scale, scale - 1.0) as i32,
         clipped,
@@ -222,6 +233,12 @@ impl CafWriter {
     /// Dither on or off (default: on at 16 bits only). Float ignores it.
     pub fn set_dither(&mut self, on: bool) {
         self.dither_on = on;
+    }
+
+    /// The dither sequence (default 0, the shared one; see
+    /// `ExportFormat::dither_stream`). Before the first write.
+    pub fn set_dither_stream(&mut self, stream: u64) {
+        self.dither = Tpdf::stream(stream);
     }
 
     /// Appends interleaved float frames (a length that is a whole number

@@ -316,6 +316,7 @@ fn the_system_reader_reads_every_export() {
             depth,
             rate: 48_000,
             dither: false,
+            dither_stream: 0,
         };
         export(
             &ExtAudioImporter,
@@ -362,6 +363,7 @@ fn export_resamples_48k_to_44k1() {
         depth: BitDepth::Int24,
         rate: 44_100,
         dither: false,
+        dither_stream: 0,
     };
     let e = export(
         &ExtAudioImporter,

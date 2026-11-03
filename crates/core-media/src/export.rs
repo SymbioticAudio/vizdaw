@@ -29,7 +29,9 @@ pub const MAX_RATE: u32 = 384_000;
 /// The most channels an export writes (a VizDAW render is mono or stereo).
 const MAX_CHANNELS: u16 = crate::caf::MAX_CHANNELS;
 /// The highest number `commit_numbered` tries.
-const MAX_NUMBER: u32 = 9999;
+pub const MAX_NUMBER: u32 = 9999;
+/// The longest file name, in bytes (the partial's too).
+const MAX_NAME_BYTES: usize = 255;
 
 /// A file container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,11 @@ pub struct ExportFormat {
     pub rate: u32,
     /// TPDF dither at 16 and 24 bits (float ignores it).
     pub dither: bool,
+    /// Which dither sequence (0: the shared one). One bounce gives each
+    /// of its files its own (its source index), so the dither of stems
+    /// summed elsewhere adds as noise, not coherently (final review m5);
+    /// one stream in one depth always gives the same integers.
+    pub dither_stream: u64,
 }
 
 impl ExportFormat {
@@ -284,6 +291,7 @@ impl PcmWriter {
         let inner = if fmt.container == Container::Caf {
             let mut w = CafWriter::create(path, fmt.rate, channels, fmt.depth, WriteMode::Normal)?;
             w.set_dither(fmt.dither);
+            w.set_dither_stream(fmt.dither_stream);
             Inner::Caf(Box::new(w))
         } else {
             let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
@@ -297,7 +305,7 @@ impl PcmWriter {
             Inner::Pcm {
                 file,
                 header,
-                dither: Tpdf::new(),
+                dither: Tpdf::stream(fmt.dither_stream),
                 data_bytes: 0,
                 max_data,
                 poisoned: false,
@@ -461,8 +469,8 @@ pub fn partial_path(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// The display name of `p` (its file name).
-fn display_name(p: &Path) -> String {
+/// The display name of `p` (its file name, else the whole path).
+pub fn display_name(p: &Path) -> String {
     p.file_name().map_or_else(
         || p.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
@@ -610,8 +618,9 @@ fn scale_frames(n: u64, from: u32, to: u32) -> u64 {
 }
 
 /// Checks a destination as [`write_partial`] does: `fmt` is valid, the
-/// extension is the container's, the folder exists and `dest` is not a
-/// folder; and, without `replace`, that `dest` does not exist ("<name>
+/// name has no NUL byte and its partial fits 255 bytes, the extension is
+/// the container's, the folder exists and can be written, and `dest` is
+/// not a folder; and, without `replace`, that `dest` does not exist ("<name>
 /// exists; choose another name or replace it"; a dangling symlink counts).
 /// For a caller that refuses before rendering (plan 5f-2 Ruling 3).
 pub fn check_destination(dest: &Path, fmt: &ExportFormat, replace: bool) -> Result<(), MediaError> {
@@ -620,6 +629,35 @@ pub fn check_destination(dest: &Path, fmt: &ExportFormat, replace: bool) -> Resu
         return Err(exists(dest));
     }
     Ok(())
+}
+
+/// Refuses a folder this process cannot create files in (Unix: `access`
+/// with `W_OK`), before anything is rendered (final review m3). Elsewhere
+/// the exclusive create reports it.
+pub fn check_folder(dir: &Path) -> Result<(), MediaError> {
+    let cannot = || {
+        MediaError::Io(format!(
+            "{}: VizDAW cannot write in this folder",
+            dir.display()
+        ))
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(|_| nul())?;
+        // SAFETY: `c` is a valid NUL-terminated string for the call.
+        if unsafe { libc::access(c.as_ptr(), libc::W_OK) } != 0 {
+            return Err(cannot());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = cannot;
+    Ok(())
+}
+
+/// The refusal for a path holding a NUL byte.
+fn nul() -> MediaError {
+    MediaError::Unsupported("a file name with a NUL character".into())
 }
 
 /// The refusal for a partial another export holds.
@@ -709,10 +747,23 @@ fn lock_own_partial(_: &Path, _: &Path) -> Result<Option<File>, MediaError> {
     Ok(None)
 }
 
-/// Refuses a destination before anything is written.
+/// Refuses a destination before anything is written: also a name with a
+/// NUL byte, one whose partial would be over 255 bytes, and a folder that
+/// cannot be written (final review m3).
 fn check_dest(dest: &Path, fmt: &ExportFormat) -> Result<(), MediaError> {
     fmt.check()?;
+    if dest.as_os_str().as_encoded_bytes().contains(&0) {
+        return Err(nul());
+    }
     let name = display_name(dest);
+    if partial_path(dest)
+        .file_name()
+        .is_some_and(|n| n.len() > MAX_NAME_BYTES)
+    {
+        return Err(MediaError::Unsupported(format!(
+            "{name}: the name is too long; choose a shorter one"
+        )));
+    }
     let ext = dest.extension().map(|e| e.to_string_lossy().into_owned());
     if !ext.is_some_and(|e| fmt.container.accepts(&e)) {
         return Err(MediaError::Unsupported(format!(
@@ -734,7 +785,7 @@ fn check_dest(dest: &Path, fmt: &ExportFormat) -> Result<(), MediaError> {
     if dest.is_dir() {
         return Err(MediaError::Unsupported(format!("{name} is a folder")));
     }
-    Ok(())
+    check_folder(parent)
 }
 
 /// `source` (a VizDAW float CAF) → `.<name>.partial` beside `dest` in

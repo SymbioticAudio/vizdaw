@@ -492,6 +492,7 @@ pub(crate) fn plan(
         },
         rate: req.rate,
         dither: req.dither,
+        dither_stream: 0,
     };
     fmt.check().map_err(|e| model(media_words(&e)))?;
     let table = TempoTable::build(&s.tempo, -s.start_offset, f64::from(project.sample_rate));
