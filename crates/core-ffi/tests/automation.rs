@@ -2691,16 +2691,27 @@ fn a_landed_cycle_is_heard_soon_after_the_wrap() {
         landed < Duration::from_millis(120),
         "landed {landed:?} after the wrap"
     );
-    wait_until("an eighth of a beat", || {
+    // The first tick at which the ride is heard: early in this cycle. The
+    // latency itself is the `landed` bound above; this checks the cycle
+    // plays the ride, with room for a slow runner's idle (CI saw one idle
+    // overshoot a sixteenth of a beat).
+    let ride = |h: Option<f64>| h.is_some_and(|d| (d - fader_db(0.6)).abs() < 0.05);
+    let until = Instant::now() + common::wait_limit();
+    let at = loop {
         s.idle().unwrap();
-        tick(&s) >= Q / 8
-    });
-    let heard = fader_override(bus);
-    let at = tick(&s);
-    assert!(at < Q / 4, "still early in the cycle: {at}");
+        let at = tick(&s);
+        if ride(fader_override(bus)) {
+            break at;
+        }
+        assert!(
+            Instant::now() < until,
+            "the ride is never heard (tick {at})"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
     assert!(
-        heard.is_some_and(|d| (d - fader_db(0.6)).abs() < 0.05),
-        "the ride is heard at tick {at}: {heard:?}"
+        at < Q,
+        "the ride is heard within the cycle's first beat: {at}"
     );
     stop_and_land(&s);
     s.close().unwrap();
