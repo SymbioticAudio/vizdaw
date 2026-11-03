@@ -60,6 +60,8 @@ public enum BounceCommands {
             }
             src = .stems(strips: ids)
         } else if let p = path {
+            // A pre-check only: the rule is the core's `Container::accepts`
+            // (crates/core-media/src/export.rs), which refuses again.
             let ext = (p as NSString).pathExtension.lowercased()
             let fits: Bool
             switch container {

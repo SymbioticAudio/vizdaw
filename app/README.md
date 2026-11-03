@@ -1679,7 +1679,13 @@ and the e2e `bounces_the_demo_and_checks_the_file`.
      files written beside it ignore mute and solo); with a mute written
      at a bar line, its lane cuts there, as the mix does. Route a track
      into a bus and mute the bus: the track's bounced-in-place lane is
-     silent too, as heard.
+     silent too, as heard. In a 16- or 24-bit project, push a track hot
+     and bounce its stem with Add to project: the Problems banner names
+     it ("<track> (added to the project): <n> samples clipped"). With the
+     real audio device (not the offline mode the tests use), put the
+     built-in synth on a lane and bounce the Mix with Add to project:
+     the new lane sounds like the synth did, by ear (the bounce renders
+     it through the system synth, a path no test exercises).
 183. A project with a lane playing a hardware synth: the sheet says
      "1 lane plays external MIDI and will be silent. Track it as audio
      first: Track Synth…", and the synth is silent in the file.
