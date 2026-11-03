@@ -497,6 +497,9 @@ pub(crate) struct Touching {
     /// Whether it holds a share of the static edit: a static touch shares
     /// from its first value (pre-flight C2).
     pub shared: bool,
+    /// Whether it had a value (a touch at one, or a move): a resting touch
+    /// has none, and takes a mode changed while it rests (Ruling T6-1).
+    pub valued: bool,
 }
 
 /// A writing pass (Rulings 7, 9, 19, 23, 24).

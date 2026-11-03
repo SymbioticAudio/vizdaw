@@ -674,3 +674,41 @@ fn a_ride_right_after_stop_and_play_is_written() {
         );
     }
 }
+
+/// Task 6 review I1 (plan 5f-1 Ruling 2: a touch's source follows its
+/// holder): a hand that joins the touch of a plugin's value-only knob
+/// takes it over. Its values reach the plugin and make one "Change Plugin
+/// Parameter" step when stopped, and the plugin idling out does not end
+/// the hand's touch. Gain is 0–2, so 0.3 is 0.6.
+#[test]
+fn a_hand_joining_a_plugins_touch_takes_it_over() {
+    use vizdaw_ffi::AutomationTargetRow as Target;
+    use vizdaw_ffi::automation::GesturePhaseRow as Phase;
+    let _g = serial();
+    let (_d, s, id) = playing_gain();
+    s.stop().unwrap();
+    idle_until(&s, |s| !s.transport().unwrap().playing);
+    let t = Target::PluginParam {
+        slot: id,
+        param: GAIN,
+    };
+    let undo_before = s.snapshot().unwrap().undo_label;
+    s.debug_plugin_value(id, GAIN, 1.5).unwrap();
+    assert!(s.automation_state().unwrap().touched.contains(&t));
+    s.gesture(t, Phase::Touch { value: None }).unwrap();
+    settle(&s, 600);
+    assert!(
+        s.automation_state().unwrap().touched.contains(&t),
+        "the plugin idling out leaves the mouse's touch"
+    );
+    s.gesture(t, Phase::Value { value: 0.3 }).unwrap();
+    gain_is(&s, id, 0.6);
+    // The plugin's later report of the app's target is skipped.
+    s.debug_plugin_value(id, GAIN, 1.8).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    assert!(s.automation_state().unwrap().touched.is_empty());
+    let snap = s.snapshot().unwrap();
+    assert_ne!(snap.undo_label, undo_before, "a step was made");
+    assert_eq!(snap.undo_label.as_deref(), Some("Change Plugin Parameter"));
+    gain_is(&s, id, 0.6);
+}

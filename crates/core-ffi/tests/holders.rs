@@ -75,6 +75,7 @@ fn a_surface_and_the_mouse_hold_one_target_until_both_let_go() {
     let _g = serial();
     let (s, synth) = demo();
     let t = Target::StripFader { strip: synth };
+    let before = gain(&s, synth);
     s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
     s.gesture_from(t, Phase::Touch { value: None }, H::Channel)
         .unwrap();
@@ -103,6 +104,12 @@ fn a_surface_and_the_mouse_hold_one_target_until_both_let_go() {
         (gain(&s, synth) - db).abs() > 0.1,
         "one step undoes both hands' moves"
     );
+    // Review M2: one Undo goes back to before the first hand's touch.
+    assert!(
+        (gain(&s, synth) - before).abs() < 1e-9,
+        "one step, not one per hand"
+    );
+    assert_eq!(s.snapshot().unwrap().undo_label, None);
 }
 
 #[test]
@@ -304,4 +311,150 @@ fn a_resting_touch_held_over_play_keeps_its_path() {
         (gain(&s, synth) - before).abs() > 0.1,
         "and it stays after the release"
     );
+}
+
+/// Review M3: a hand that let go releasing again does nothing while
+/// another hand holds the target.
+#[test]
+fn a_second_release_from_one_hand_does_nothing_while_another_holds() {
+    let _g = serial();
+    let (s, synth) = demo();
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    s.gesture_from(t, Phase::Touch { value: None }, H::Channel)
+        .unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    assert!(
+        s.automation_state().unwrap().touched.contains(&t),
+        "the channel still holds it"
+    );
+    s.gesture_from(t, Phase::Release, H::Channel).unwrap();
+    assert!(s.automation_state().unwrap().touched.is_empty());
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader")
+    );
+}
+
+/// Review M5: a value from a hand that does not hold a touched target
+/// joins, as a value on an untouched target touches it: the other hand's
+/// release does not end it.
+#[test]
+fn a_value_from_a_hand_that_does_not_hold_it_joins() {
+    let _g = serial();
+    let (s, synth) = demo();
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.5) }).unwrap();
+    s.gesture_from(t, Phase::Value { value: 0.4 }, H::Channel)
+        .unwrap();
+    s.gesture(t, Phase::Release).unwrap();
+    assert!(
+        s.automation_state().unwrap().touched.contains(&t),
+        "the channel's value made it a holder"
+    );
+    s.gesture_from(t, Phase::Release, H::Channel).unwrap();
+    assert!(s.automation_state().unwrap().touched.is_empty());
+}
+
+/// Review M3: at Play only a touch that shares the static edit leaves it.
+/// A resting touch on a writing strip converts without closing the edit
+/// a sharing touch on a Read strip still holds open.
+#[test]
+fn only_a_sharing_touch_leaves_the_static_edit_at_play() {
+    let _g = serial();
+    let (s, synth) = demo();
+    let seq = song(&s);
+    let other = s
+        .mixer()
+        .unwrap()
+        .strips
+        .iter()
+        .find(|x| x.id != synth)
+        .unwrap()
+        .id;
+    let rest = Target::StripFader { strip: synth };
+    let held = Target::StripFader { strip: other };
+    s.set_automation_mode(vec![synth], Mode::Touch).unwrap();
+    s.gesture_from(rest, Phase::Touch { value: None }, H::Channel)
+        .unwrap();
+    s.gesture(held, Phase::Touch { value: Some(0.5) }).unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick > Q);
+    assert!(
+        s.begin_edit("Probe".into()).is_err(),
+        "the Read strip's touch still holds the static edit open"
+    );
+    for v in [0.4, 0.3] {
+        pace(&s);
+        s.gesture_from(rest, Phase::Value { value: v }, H::Channel)
+            .unwrap();
+    }
+    pace(&s);
+    s.gesture(held, Phase::Value { value: 0.25 }).unwrap();
+    s.gesture(held, Phase::Release).unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader"),
+        "the shared edit closes at its own release"
+    );
+    s.gesture_from(rest, Phase::Release, H::Channel).unwrap();
+    s.stop().unwrap();
+    wait_until("the stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation"),
+        "the resting touch wrote"
+    );
+}
+
+/// Ruling T6-1 (review M1): a mode change while playing re-picks the path
+/// of a touch that rests with no value, as if it were touched now.
+#[test]
+fn a_resting_touch_takes_the_mode_set_while_it_rests() {
+    let _g = serial();
+    let (s, synth) = demo();
+    let seq = song(&s);
+    let t = Target::StripFader { strip: synth };
+    let before = gain(&s, synth);
+    s.play(seq).unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick > Q);
+    s.gesture_from(t, Phase::Touch { value: None }, H::Channel)
+        .unwrap();
+    s.set_automation_mode(vec![synth], Mode::Touch).unwrap();
+    for v in [0.4, 0.3] {
+        pace(&s);
+        s.gesture_from(t, Phase::Value { value: v }, H::Channel)
+            .unwrap();
+    }
+    pace(&s);
+    s.gesture_from(t, Phase::Release, H::Channel).unwrap();
+    s.stop().unwrap();
+    wait_until("the stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Write Automation"),
+        "the move is written"
+    );
+    assert!(
+        (gain(&s, synth) - before).abs() < 1e-9,
+        "and the static value is left alone"
+    );
+    let lane = s
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Built-in Synth Fader")
+        .expect("a new lane")
+        .id;
+    let values: Vec<f64> = s
+        .lane_events(seq, lane)
+        .unwrap()
+        .events
+        .iter()
+        .filter_map(|e| e.automation.map(|a| a.value))
+        .collect();
+    assert!(values.iter().any(|v| (v - 0.3).abs() < 1e-9), "{values:?}");
 }

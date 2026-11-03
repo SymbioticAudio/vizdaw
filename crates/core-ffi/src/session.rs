@@ -2551,6 +2551,19 @@ impl Session {
         })
     }
 
+    /// Slot `slot`'s own editor reports `value` (plain) for `param` with
+    /// no gesture events, as a knob that sends values only (test hook):
+    /// the plugin path's value-only touch, released 500 ms after its last
+    /// value.
+    pub fn debug_plugin_value(&self, slot: u64, param: u64, value: f64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let e = core_host::ParamEvent::Value(core_model::mixer::ParamId(param), value);
+            let _ = self.plugin_events(&mut inner, &[(PluginInstanceId(slot), e)]);
+            Ok(())
+        })
+    }
+
     /// Slot `slot`'s state blob in the document, if it has one (test
     /// hook).
     pub fn debug_slot_state(&self, slot: u64) -> Result<Option<u64>, VizError> {
@@ -5323,7 +5336,9 @@ impl Session {
 
     /// A gesture on `target` from `holder` (spec §7.1; Rulings 14, 16, 20,
     /// 26; plan 5f-1 Ruling 2): the target stays touched until each of
-    /// its holders released it. `Model` for a target that cannot be
+    /// its holders released it. A Touch, or a value, from a hand that does
+    /// not hold the target joins it; a release from one does nothing.
+    /// `Model` for a target that cannot be
     /// gestured or a non-finite value; `Busy` for a static touch's first
     /// value while an edit the gesture path did not open is open.
     pub fn gesture_from(
@@ -5358,10 +5373,13 @@ impl Session {
                     message: "Release the touched control first.".into(),
                 });
             }
-            self.execute(Command::Mixer(MixerCmd::SetAutomationMode {
+            let snap = self.execute(Command::Mixer(MixerCmd::SetAutomationMode {
                 strips: strips.into_iter().map(StripId).collect(),
                 mode: mode.into(),
-            }))
+            }))?;
+            // Resting touches take the new mode (Ruling T6-1).
+            self.repick_resting(&mut lock(&self.inner), None);
+            Ok(snap)
         })
     }
 
@@ -5569,23 +5587,24 @@ impl Session {
     /// The write mode a touch of `t` takes now (Rulings 3, 9, 14): when
     /// this session writes a pass and plays (or is about to roll), the
     /// target's strip writes, and automation is not suspended.
-    fn write_mode_of(&self, inner: &Inner, t: AutomationTarget) -> Option<WriteMode> {
-        let w = inner.writing.as_ref()?;
-        if crate::automation::suspended() {
-            return None;
-        }
+    /// Whether pass `w` plays now (or its Play is meant before the roll).
+    fn pass_plays(&self, w: &Writing) -> bool {
         // The roll first, then the state (the renderer publishes the
         // state before it sets `rolled`).
         let rolled = w.handles.status.rolled();
-        let plays = match host::transport_stopped(self.id) {
+        match host::transport_stopped(self.id) {
             Some(false) => true,
             // Before the roll the transport still reads stopped, while the
             // Play is meant (a Play that ended at once is not; final
             // review m4).
             Some(true) => !rolled && host::wants_play(self.id) == Some(true),
             None => false,
-        };
-        if !plays {
+        }
+    }
+
+    fn write_mode_of(&self, inner: &Inner, t: AutomationTarget) -> Option<WriteMode> {
+        let w = inner.writing.as_ref()?;
+        if crate::automation::suspended() || !self.pass_plays(w) {
             return None;
         }
         let doc = inner.doc();
@@ -5757,36 +5776,22 @@ impl Session {
         holder: TouchHolder,
         host_ns: Option<u64>,
     ) -> Result<(), VizError> {
-        if let Some(x) = inner.touches.get_mut(&t) {
+        if inner.touches.contains_key(&t) {
             // Touched already: the holder joins, and a touch at a value
-            // moves it (plan 5f-1 Ruling 2).
-            let joined = !x.holders.has(holder);
-            x.holders = x.holders.with(holder);
-            let Some(v) = value else {
-                return Ok(());
+            // moves it (plan 5f-1 Ruling 2; `move_to` joins it too).
+            return match value {
+                Some(v) => self.move_to(inner, t, v, source, holder, host_ns),
+                None => {
+                    self.join(inner, t, holder);
+                    Ok(())
+                }
             };
-            let moved = self.move_to(inner, t, v, source, holder, host_ns);
-            // A refused touch (Busy at its first static value) does not
-            // join: its hand holds nothing it would have to release.
-            if moved.is_err()
-                && joined
-                && let Some(x) = inner.touches.get_mut(&t)
-            {
-                x.holders = x.holders.without(holder);
-            }
-            return moved;
         }
         let v = match value {
             Some(v) => core_model::automation::unit(v),
             None => self.heard_value(inner, t),
         };
-        let path = match self.write_mode_of(inner, t) {
-            Some(m) => TouchPath::Write(m, self.release_of(inner, t, m)),
-            // The host's grouped gesture is the plugin's static step
-            // (Ruling 15).
-            None if source == Source::Plugin => TouchPath::Live,
-            None => TouchPath::Static,
-        };
+        let path = self.path_for(inner, t, source);
         // The static edit opens at the first value, never at the touch
         // (plan 5f-1 Ruling 2, pre-flight C2): a hand resting on a
         // touch-sensing fader holds no transaction open.
@@ -5806,6 +5811,7 @@ impl Session {
                 source,
                 holders: TouchHolders::of(holder),
                 shared,
+                valued: value.is_some(),
             },
         );
         let ns = host_time(host_ns);
@@ -5847,18 +5853,130 @@ impl Session {
         if !inner.touches.contains_key(&t) {
             return self.touch(inner, t, Some(v), source, holder, host_ns);
         }
+        // A value from any hand moves the target, and a hand that did not
+        // hold it joins, as on an untouched target (review M5).
+        let joined = self.join(inner, t, holder);
+        // A resting touch takes the path its strip gives now (Ruling
+        // T6-1), before its first value.
+        self.repick_resting(inner, Some(t));
         // A resting static touch's first value opens (or joins) the
-        // static edit; refused, the value is not applied (pre-flight C2).
-        self.share_static(inner, t)?;
+        // static edit; refused, the value is not applied (pre-flight C2),
+        // and a hand that joined with it holds nothing it would have to
+        // release.
+        if let Err(e) = self.share_static(inner, t) {
+            if joined && let Some(x) = inner.touches.get_mut(&t) {
+                x.holders = x.holders.without(holder);
+                if x.holders.is_empty() {
+                    self.release(inner, t, host_ns);
+                }
+            }
+            return Err(e);
+        }
         let Some(touching) = inner.touches.get_mut(&t) else {
             return Ok(());
         };
         touching.value = v;
+        touching.valued = true;
         let ns = host_time(host_ns);
         if let Some(v) = inner.sampler.value(t, v, crate::automation::now(), ns) {
             self.send_value(inner, t, v, ns);
         }
         Ok(())
+    }
+
+    /// The path a touch of `t` from `source` takes now (Ruling 14): the
+    /// strip's write while a pass plays, else the plugin's heard-only path
+    /// (the host's grouped gesture is the plugin's static step, Ruling 15)
+    /// or the static edit.
+    fn path_for(&self, inner: &Inner, t: AutomationTarget, source: Source) -> TouchPath {
+        match self.write_mode_of(inner, t) {
+            Some(m) => TouchPath::Write(m, self.release_of(inner, t, m)),
+            None if source == Source::Plugin => TouchPath::Live,
+            None => TouchPath::Static,
+        }
+    }
+
+    /// `holder` joins touched `t` (plan 5f-1 Ruling 2); whether it is new.
+    /// A touch's source follows its holders (review I1): a hand that is
+    /// not the plugin takes a plugin's touch over. The touch becomes
+    /// `Source::Ui` (its values reach the plugin), the plugin's hold and
+    /// its 500 ms release go ("a target the app touches is the app's",
+    /// 5e-1 Ruling 15), and a heard-only touch takes the app's path: the
+    /// static edit, from its next value.
+    fn join(&self, inner: &mut Inner, t: AutomationTarget, holder: TouchHolder) -> bool {
+        let Some(x) = inner.touches.get(&t).copied() else {
+            return false;
+        };
+        let joined = !x.holders.has(holder);
+        let mut y = x;
+        y.holders = y.holders.with(holder);
+        if holder != TouchHolder::Plugin && x.source == Source::Plugin {
+            y.source = Source::Ui;
+            y.holders = y.holders.without(TouchHolder::Plugin);
+            if y.path == TouchPath::Live {
+                y.path = self.path_for(inner, t, Source::Ui);
+                y.shared = false;
+                if y.path != TouchPath::Live {
+                    y.base = y.value;
+                    self.send_gesture(
+                        inner,
+                        t,
+                        GesturePhase::Touch(y.value),
+                        tag_of(y.path),
+                        host_time(None),
+                    );
+                }
+            }
+            inner.plugin_touches.forget(t);
+        }
+        inner.touches.insert(t, y);
+        joined
+    }
+
+    /// Ruling T6-1 (review M1): while a pass plays, a touch that rests
+    /// with no value and no share takes the path its strip gives now, as
+    /// if touched now, after a mode change or a suspend toggle. A touch
+    /// that has a value or a share keeps its path (Ruling 14). `only`:
+    /// just that target.
+    fn repick_resting(&self, inner: &mut Inner, only: Option<AutomationTarget>) {
+        let Some(w) = inner.writing.as_ref() else {
+            return;
+        };
+        if !self.pass_plays(w) {
+            return;
+        }
+        let resting: Vec<(AutomationTarget, Touching)> = inner
+            .touches
+            .iter()
+            .filter(|(t, x)| !x.valued && !x.shared && only.is_none_or(|o| o == **t))
+            .map(|(t, x)| (*t, *x))
+            .collect();
+        let ns = host_time(None);
+        for (t, x) in resting {
+            let path = self.path_for(inner, t, x.source);
+            // The same mode keeps its release as the pass start picked it
+            // (an absolute touch stays absolute, 5e-1 review I-1).
+            let same = match (path, x.path) {
+                (TouchPath::Write(a, _), TouchPath::Write(b, _)) => a == b,
+                (a, b) => a == b,
+            };
+            if same {
+                continue;
+            }
+            if let Some(y) = inner.touches.get_mut(&t) {
+                y.path = path;
+                y.base = y.value;
+            }
+            if let Some(w) = inner.writing.as_mut() {
+                w.moved.insert(t);
+            }
+            // The engine's entry takes the new path's tag; Trim on
+            // automation grabs at an offset of 0 (pre-flight I12).
+            self.send_gesture(inner, t, GesturePhase::Touch(x.value), tag_of(path), ns);
+            if let TouchPath::Write(_, Release::Offsets) = path {
+                self.send_gesture(inner, t, GesturePhase::Offset(0.0), tag_of(path), ns);
+            }
+        }
     }
 
     /// A sampled value of touched `t`: the static command on the static
@@ -6533,6 +6651,8 @@ impl Session {
         let mut inner = lock(&self.inner);
         self.resend_ends(&mut inner);
         self.release_plugin_touches(&mut inner);
+        // A suspend toggle or an undone mode change (Ruling T6-1).
+        self.repick_resting(&mut inner, None);
         for (t, v, ns) in inner.sampler.due(crate::automation::now()) {
             self.send_value(&mut inner, t, v, ns);
         }

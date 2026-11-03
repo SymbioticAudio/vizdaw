@@ -138,6 +138,26 @@ import VizDAWCore
         #expect(f.gestures.isEmpty, "nothing after a refused touch")
     }
 
+    /// Plan 5f-1 Task 6 review M4: the core takes a resting touch and
+    /// refuses its first value while another edit is open; the drag ends
+    /// there (released once, the hand's value no longer shown), and its
+    /// later values and mouse-up send nothing.
+    @Test func aRefusedValueEndsTheDrag() throws {
+        let (m, f) = try model()
+        let before = try #require(m.strips.first { $0.id == 1 })
+        m.touch(fader)
+        f.valueError = .Busy(message: "Finish the open edit first.")
+        m.move(fader, to: 0.2)
+        #expect(m.document.alert?.message == "Finish the open edit first.")
+        #expect(f.gestures.map(\.1) == [.touch(value: nil), .release], "released at once")
+        #expect(!m.isTouched(fader))
+        #expect(m.gainDb(before) == before.gainDb, "the hand's value is not shown")
+        f.valueError = nil
+        m.move(fader, to: 0.3)
+        m.release(fader)
+        #expect(f.gestures.count == 2, "nothing more from that drag")
+    }
+
     /// Final review m6: a value with no editing span open (a keyboard or
     /// accessibility increment, no mouse-down) is a click: touch at the
     /// value, value and release, so it is heard and no touch stays open.

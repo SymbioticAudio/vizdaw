@@ -363,7 +363,9 @@ public final class MixerModel {
 
     /// Mouse-down: `touch(value: nil)` on the core (the value heard now,
     /// plan 5e-1 Ruling 26). A touch the core refuses is not kept, so no
-    /// value or release follows it.
+    /// value or release follows it. A resting touch opens no edit (plan
+    /// 5f-1 Ruling 2), so the core refuses its first value instead while
+    /// another edit is open: `move` then ends the drag.
     public func touch(_ t: AutomationTargetRow) {
         editing.insert(t)
         guard !touches.contains(t), send(t, .touch(value: nil)) else { return }
@@ -371,7 +373,9 @@ public final class MixerModel {
     }
 
     /// A move of a touched target: heard at once and shown from now on.
-    /// Inside a drag whose touch the core refused it sends nothing. A
+    /// Inside a drag whose touch or value the core refused it sends
+    /// nothing; a refused value releases the touch at once (plan 5f-1
+    /// Task 6 review M4), so the control shows the snapshot again. A
     /// value with no drag open (a keyboard or accessibility increment
     /// sends no editing-began) is a click at `v`, so it is heard and no
     /// touch is left open (final review m6).
@@ -381,7 +385,15 @@ public final class MixerModel {
             return
         }
         live[t] = v
-        send(t, .value(value: v))
+        guard send(t, .value(value: v)) else {
+            // The value was not applied: the drag ends here (the hand's
+            // later values and mouse-up send nothing, `editing` stays).
+            touches.remove(t)
+            live[t] = nil
+            coreTouched.remove(t)
+            send(t, .release)
+            return
+        }
     }
 
     /// Mouse-up: the core closes the gesture; the control shows the

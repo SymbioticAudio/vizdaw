@@ -11,8 +11,9 @@ import VizDAWCore
 /// missing or wrongly typed one, a mode, target or value not spelt as the
 /// registry says) and is `invalid_params` naming the parameter. The core's
 /// refusals (an unknown strip, send, slot or parameter, a strip that went)
-/// are the call's `failed`; its `Busy` (a static touch while an edit is
-/// open) is `busy`. Nothing here opens a dialog.
+/// are the call's `failed`; its `Busy` (a static touch's first value while
+/// another edit is open, plan 5f-1 Ruling 2) is `busy`. Nothing here opens
+/// a dialog.
 ///
 /// Gestures outlive the call that began them (each `vizctl` call is its
 /// own connection): a touch the channel holds lasts until a channel release
