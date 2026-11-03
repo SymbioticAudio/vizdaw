@@ -109,6 +109,11 @@ enum PluginWindows {
                 c.close()
                 continue
             }
+            // The plugin's own editor touches parameters too: the one the
+            // core lists as touched becomes the Learn button's.
+            if c.model.editorSize != nil, let touched = try? doc.session.automationState().touched {
+                c.model.followTouched(touched)
+            }
             let now = PluginWindowController.Seen(slots: doc.slotsVersion, doc: doc.snapshot.version)
             if doc.paramsChanged.contains(key.slot) || c.seen != now {
                 c.update(now)
@@ -255,7 +260,16 @@ struct PluginWindowContent: View {
                     isOn: Binding(get: { model.row?.bypass ?? false }, set: { _ in model.toggleBypass() })
                 )
                 .toggleStyle(.button)
-                if let r = model.placeholderReason {
+                // MIDI Learn for the parameter last touched here (plan 5f-1
+                // Task 11); disabled before any.
+                Button("Learn") { model.learnLastTouched() }
+                    .disabled(model.lastTouched == nil)
+                    .help(learnHelp)
+                if let text = model.document.learn.banner {
+                    // The banner, at the top of the window while a learn waits.
+                    Text(text).lineLimit(1)
+                    Button("Cancel") { model.document.learn.cancel() }
+                } else if let r = model.placeholderReason {
                     Text(r).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -277,6 +291,13 @@ struct PluginWindowContent: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .learnAlert(model.document.learn)
+    }
+
+    private var learnHelp: String {
+        guard let t = model.lastTouched else { return "Touch a parameter, then learn a MIDI control for it" }
+        let name = model.params.first { $0.id == t.param }?.name ?? "parameter \(t.param)"
+        return "MIDI Learn: \(name)"
     }
 }
 

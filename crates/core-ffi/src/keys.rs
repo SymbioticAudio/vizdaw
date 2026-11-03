@@ -34,6 +34,9 @@ pub struct BindingRow {
     pub menu_key: Option<String>,
     /// The first key's modifiers.
     pub menu_modifiers: ModifiersRow,
+    /// Settings › Keys can learn it to a MIDI control (plan 5f-1 Ruling
+    /// 8): `learn_command` takes it.
+    pub learnable: bool,
 }
 
 fn mods_row(m: u8) -> ModifiersRow {
@@ -98,6 +101,7 @@ impl Keymap {
                     defaults: default_chords(c).iter().map(Chord::text).collect(),
                     menu_key: now.first().map(Chord::menu_key),
                     menu_modifiers: mods_row(now.first().map_or(0, |ch| ch.mods)),
+                    learnable: crate::surfaces::bindable(c.id).is_ok(),
                 }
             })
             .collect()

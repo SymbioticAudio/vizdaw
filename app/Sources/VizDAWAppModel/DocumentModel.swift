@@ -55,6 +55,17 @@ public final class DocumentModel {
         return r
     }
     @ObservationIgnored private var relayModel: SurfaceRelay?
+    /// MIDI learn (plan 5f-1 Task 11), made once, with `surfaceCore`.
+    public var learn: LearnModel {
+        if let l = learnModel { return l }
+        let l = LearnModel(document: self, core: surfaceCore)
+        learnModel = l
+        return l
+    }
+    @ObservationIgnored private var learnModel: LearnModel?
+    /// A learn of this document waits (Esc cancels it); false before
+    /// anything learned.
+    public var isLearning: Bool { learnModel?.banner != nil }
     /// A real device's command (`KeyMonitor.perform`) and a programmatic
     /// one (`ControlCommands.run`, no dialog), set by the app where models
     /// are made.
@@ -564,6 +575,8 @@ public final class DocumentModel {
                 events, self, perform: surfaceCommandSink ?? { _ in }, quietly: quietCommandSink ?? { _ in })
         }
         surfaceRelay.flush(self)
+        // The banner and the maps sheet follow the core (plan 5f-1 Task 11).
+        if let l = learnModel, l.isActive { l.poll() }
     }
 
     /// Of the shown sequence's lanes that play through `path`, the first

@@ -100,6 +100,15 @@ enum KeyMonitor {
             w.sendEvent(e)
             return true
         }
+        // Esc cancels a waiting MIDI learn (plan 5f-1 Task 11), wherever
+        // it is pressed, except into the Keys settings' recorder.
+        if e.keyCode == 53, e.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
+            !(w.firstResponder is KeyCapturing),
+            let learning = appStore.documents.values.first(where: \.isLearning)
+        {
+            learning.learn.cancel()
+            return true
+        }
         let (r, doc) = route(e, in: w, menus: true)
         // A held key: toggles, transport keys and slots run once per press
         // (final review item 8).

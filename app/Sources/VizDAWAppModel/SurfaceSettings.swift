@@ -79,6 +79,16 @@ public struct SurfaceDraft: Equatable, Sendable {
         refresh()
     }
 
+    /// Removes the MIDI controls learned to command `command`.
+    public func removeCommandMap(_ command: String) {
+        do {
+            try core.removeCommandMap(command)
+        } catch {
+            alert = AlertItem(error, title: "Remove MIDI Learn Failed")
+        }
+        refresh()
+    }
+
     /// Opens the Add sheet with the first ports picked.
     public func beginAdd() {
         refresh()

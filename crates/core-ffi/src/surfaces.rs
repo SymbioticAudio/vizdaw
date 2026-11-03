@@ -1477,7 +1477,7 @@ fn check_unit(
 /// The Surfaces group is the channel's: `surface.learn` and
 /// `surface.unlearn` need no required parameter, but without one of
 /// theirs they do nothing (Task 9 review M2).
-fn bindable(id: &str) -> Result<(), String> {
+pub(crate) fn bindable(id: &str) -> Result<(), String> {
     let Some(spec) = core_control::registry::find(id) else {
         return Err(format!("unknown command “{id}”"));
     };

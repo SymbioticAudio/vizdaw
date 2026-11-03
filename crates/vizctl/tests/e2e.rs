@@ -1493,3 +1493,140 @@ fn touch_writes_a_fader_over_the_channel() {
     assert_eq!(state["touched"], json!([]), "{state}");
     app.quit();
 }
+
+/// Plan 5f-1 Task 11 (spec §12.3): an MCU-compatible unit added and fed
+/// through the channel (`surface.inject`, no CoreMIDI port: the offline
+/// app uses the fake port transport) touches, moves and releases fader 1
+/// as one "Set Fader" step, mutes strip 1, gets the ride's value back once
+/// after the release and the mute LED, ignores and counts a cut message.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn drives_a_fader_and_a_button_from_an_mcu() {
+    let mut app = App::start();
+    // The launch window adopts an empty document (`documentForWindow`):
+    // close it first, so the call below has no document to answer for.
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        if let Some(d) = ws["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "document")
+        {
+            let n = d["number"].clone();
+            app.call("command.run", json!({"id": "file.close", "window": n}));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no launch document window in {ws}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Pre-flight M29: surfaces are app-wide, so `state.get surfaces` answers without a document.
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let st = loop {
+        let st = app.call("state.get", json!({"target": "surfaces"}));
+        if st["doc"].is_null() {
+            break st;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the launch document closes: {st}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        st["feedback"].as_array().is_some_and(|f| f.is_empty()),
+        "{st}"
+    );
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    for (params, code) in [
+        (
+            json!({"type": "mcu", "input": "", "output": "E2E Out"}),
+            core_control::ErrorCode::Failed,
+        ),
+        (
+            json!({"type": "nope", "input": "a", "output": "b"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "surface.add", "params": params, "window": w}),
+        );
+        assert_eq!(e.code, code, "{e}");
+    }
+    run(
+        &mut app,
+        "surface.add",
+        json!({"type": "mcu", "input": "E2E In", "output": "E2E Out"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(st["surfaces"][0]["connected"], true, "{st}");
+    let id = st["surfaces"][0]["id"].as_u64().unwrap();
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    let synth = auto["modes"][0]["strip"].as_u64().unwrap();
+    // The synth is the demo's first strip: fader 1, mute 1.
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68 7f e0 00 20"}),
+    );
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(auto["touched"][0], format!("fader:{synth}"), "{auto}");
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68 00"}),
+    );
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Fader");
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 10 7f"}),
+    );
+    let st = wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"]
+            .as_array()
+            .is_some_and(|m| m.iter().any(|x| x == "90 10 7f"))
+    });
+    let messages = st["feedback"][0]["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().any(|x| x == "e0 00 20"),
+        "the fader got the ride's value (0.25) once, after the release: {st}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|x| x.as_str().is_some_and(|t| !t.starts_with("d0 "))),
+        "meters are counted, not listed"
+    );
+    let ignored = st["surfaces"][0]["ignored"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(
+        st["surfaces"][0]["ignored"].as_u64(),
+        Some(ignored + 1),
+        "a cut message is ignored and counted: {st}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "surface.inject", "params": {"surface": id, "bytes": "zz"}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams);
+    run(&mut app, "surface.remove", json!({"surface": id}));
+    app.quit();
+}

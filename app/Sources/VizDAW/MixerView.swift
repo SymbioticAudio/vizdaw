@@ -46,6 +46,21 @@ struct MixerView: View {
     @Bindable var model: MixerModel
 
     var body: some View {
+        VStack(spacing: 0) {
+            LearnBanner(learn: model.document.learn)
+            strips
+        }
+        .sheet(isPresented: mapsShown) { LearnMapsSheet(learn: model.document.learn) }
+        .learnAlert(model.document.learn, shown: !model.document.learn.showsMaps)
+    }
+
+    /// The MIDI Learn Maps sheet (plan 5f-1 Task 11).
+    private var mapsShown: Binding<Bool> {
+        let learn = model.document.learn
+        return Binding(get: { learn.showsMaps }, set: { learn.showsMaps = $0 })
+    }
+
+    private var strips: some View {
         ScrollView(.horizontal) {
             HStack(alignment: .top, spacing: 6) {
                 ForEach(model.strips, id: \.id) { s in
@@ -154,11 +169,13 @@ struct StripView: View {
                     .toggleStyle(.button)
                     .tint(.orange)
                     .touchRing(model.isTouched(.stripMute(strip: strip.id)))
+                    .contextMenu { LearnItem(model: model, target: .stripMute(strip: strip.id)) }
                 if strip.kind != .master {
                     Toggle("S", isOn: Binding(get: { strip.solo }, set: { _ in model.toggleSolo(strip) }))
                         .toggleStyle(.button)
                         .tint(.yellow)
                         .touchRing(model.isTouched(.stripSolo(strip: strip.id)))
+                        .contextMenu { LearnItem(model: model, target: .stripSolo(strip: strip.id)) }
                 }
             }
             .help(strip.soloMuted ? "Silent: other strips are soloed" : "Mute / Solo")
@@ -194,6 +211,8 @@ struct StripView: View {
                     if strip.kind == .bus {
                         Button("Remove Bus") { model.removeBus(strip.id) }
                     }
+                    Divider()
+                    Button("MIDI Learn Maps…") { model.document.learn.showsMaps = true }
                     if !strip.freeOutputs.isEmpty {
                         Menu("Add Outputs") {
                             ForEach(strip.freeOutputs, id: \.self) { i in
@@ -319,6 +338,7 @@ struct StripView: View {
                 }
                 .controlSize(.mini)
                 .touchRing(model.isTouched(.stripPan(strip: strip.id)))
+                .contextMenu { LearnItem(model: model, target: .stripPan(strip: strip.id)) }
                 Text(MixerMath.panLabel(model.pan(strip)))
                     .font(.caption2.monospacedDigit())
                     .frame(width: 28)
@@ -453,7 +473,10 @@ struct SendView: View {
             .controlSize(.mini)
             .touchRing(model.isTouched(target))
         }
-        .contextMenu { Button("Remove Send") { model.removeSend(strip.id, index) } }
+        .contextMenu {
+            LearnItem(model: model, target: target)
+            Button("Remove Send") { model.removeSend(strip.id, index) }
+        }
         .help("Send to \(model.stripName(send.target)): \(MixerMath.dbLabel(model.sendLevelDb(strip, index))) dB")
     }
 
@@ -479,6 +502,7 @@ struct FaderView: View {
             .rotationEffect(.degrees(-90))
             .frame(width: 30, height: 140)
             .touchRing(model.isTouched(target))
+            .contextMenu { LearnItem(model: model, target: target) }
             Text(MixerMath.dbLabel(model.gainDb(strip)))
                 .font(.caption2.monospacedDigit())
                 .onTapGesture(count: 2) { model.click(target, AutomationLaw.faderNorm(0)) }
@@ -487,6 +511,17 @@ struct FaderView: View {
     }
 
     private var target: AutomationTargetRow { .stripFader(strip: strip.id) }
+}
+
+/// "MIDI Learn" in a control's menu (plan 5f-1 Task 11): the next MIDI
+/// control moved drives `target`.
+struct LearnItem: View {
+    let model: MixerModel
+    let target: AutomationTargetRow
+
+    var body: some View {
+        Button("MIDI Learn") { model.document.learn.learn(target) }
+    }
 }
 
 /// Peak meter, left and right.

@@ -17,6 +17,10 @@ public final class PluginWindowModel {
     public private(set) var editorSize: EditorSize?
     /// Why the editor is not shown (no editor, not loaded yet).
     public private(set) var editorProblem: String?
+    /// The parameter a gesture in this window last touched (its sliders,
+    /// or the plugin's own editor as the core reports it): the header's
+    /// Learn button learns it (plan 5f-1 Task 11).
+    public private(set) var lastTouched: (slot: UInt64, param: UInt64)?
 
     public init(document: DocumentModel, slot: UInt64) {
         self.document = document
@@ -225,6 +229,28 @@ public final class PluginWindowModel {
     /// The control's editing span begins (the slider's mouse-down).
     public func beginParam(_ id: UInt64) {
         editing.insert(id)
+        touched(id)
+    }
+
+    private func touched(_ id: UInt64) {
+        if lastTouched?.param != id { lastTouched = (slot, id) }
+    }
+
+    /// The plugin's own editor touched a parameter (the core lists it as
+    /// touched): it becomes the one Learn learns.
+    public func followTouched(_ targets: [AutomationTargetRow]) {
+        for t in targets {
+            if case .pluginParam(let s, let p) = t, s == slot {
+                touched(p)
+                return
+            }
+        }
+    }
+
+    /// Learns a MIDI control for the last touched parameter.
+    public func learnLastTouched() {
+        guard let t = lastTouched else { return }
+        document.learn.learn(.pluginParam(slot: t.slot, param: t.param))
     }
 
     /// A parameter control moves (`value` plain, in the parameter's
@@ -238,6 +264,7 @@ public final class PluginWindowModel {
     /// release at once, so no touch is left open (final review m6).
     public func setParam(_ id: UInt64, _ value: Double) {
         guard !refused.contains(id), let i = params.firstIndex(where: { $0.id == id }) else { return }
+        touched(id)
         let p = params[i]
         let n = Self.normalised(value, p)
         if !editing.contains(id) && !dragging.contains(id) {

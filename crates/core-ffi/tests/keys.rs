@@ -351,3 +351,16 @@ fn taken_by_names_the_other_command_of_the_context() {
         "another context's key is no clash"
     );
 }
+
+/// Plan 5f-1 Task 11 (Ruling 8): Settings › Keys "Learn MIDI" is enabled
+/// only for the commands a key can run, as `learn_command` checks: no
+/// required parameter, no dialog that always opens, not a surface command.
+#[test]
+fn rows_say_which_commands_can_be_learned_to_midi() {
+    let rows = vizdaw_ffi::Keymap::new().rows();
+    let learnable = |id: &str| rows.iter().find(|r| r.id == id).unwrap().learnable;
+    assert!(learnable("edit.undo") && learnable("transport.play"));
+    assert!(!learnable("automation.gesture"), "a required parameter");
+    assert!(!learnable("file.open"), "a dialog that always opens");
+    assert!(!learnable("surface.add"), "a surface command");
+}

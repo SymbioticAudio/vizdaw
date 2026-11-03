@@ -45,6 +45,7 @@ struct SurfacesSettingsView: View {
                         Spacer()
                         Text(keys.row(map.command)?.title ?? map.command)
                             .foregroundStyle(.secondary)
+                        Button("Remove") { settings.removeCommandMap(map.command) }
                     }
                 }
             }

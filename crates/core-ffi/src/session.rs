@@ -8061,6 +8061,11 @@ impl Session {
             }
             crate::surfaces::inject_unit(surface, &bytes)?;
             self.focus_here();
+            // A unit addresses strips only once feedback showed them
+            // (Ruling 3): a window that just took the focus (none was key,
+            // so the ticker focused nothing) or a unit never fed gets its
+            // refresh before the bytes are routed (plan 5f-1 Task 11).
+            self.feed_surfaces(crate::surfaces::now(), &[]);
             self.service_surfaces();
             Ok(())
         })

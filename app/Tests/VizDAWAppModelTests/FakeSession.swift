@@ -804,9 +804,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var surfaceEvents: [SurfaceEventRow] = []
     var learnTargets: [AutomationTargetRow] = []
     var learnMapRows: [LearnMapRow] = []
-    var learnModeCalls: [(LearnSourceRow, LearnModeRow)] = []
-    var learnPickupCalls: [(LearnSourceRow, Bool)] = []
+    var learnModes: [(LearnSourceRow, LearnModeRow)] = []
+    var learnPickups: [(LearnSourceRow, Bool)] = []
     var removedLearns: [LearnSourceRow] = []
+    /// Thrown by `setLearnMode`, `setLearnPickup` and `removeLearn` (Task 11).
+    var learnError: VizError?
     var unlearnTargets: [AutomationTargetRow] = []
     func setSurfaceSelection(strips: [UInt64]) throws { surfaceSelections.append(strips) }
     func injectSurface(surface: UInt32, bytes: Data) throws { surfaceInjections.append((surface, bytes)) }
@@ -820,14 +822,17 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func learnTarget(target: AutomationTargetRow) throws { learnTargets.append(target) }
     func learnMaps() throws -> [LearnMapRow] { learnMapRows }
     func setLearnMode(source: LearnSourceRow, mode: LearnModeRow) throws -> DocSnapshot {
-        learnModeCalls.append((source, mode))
+        if let e = learnError { throw e }
+        learnModes.append((source, mode))
         return commandResult()
     }
     func setLearnPickup(source: LearnSourceRow, on: Bool) throws -> DocSnapshot {
-        learnPickupCalls.append((source, on))
+        if let e = learnError { throw e }
+        learnPickups.append((source, on))
         return commandResult()
     }
     func removeLearn(source: LearnSourceRow) throws -> DocSnapshot {
+        if let e = learnError { throw e }
         removedLearns.append(source)
         return commandResult()
     }

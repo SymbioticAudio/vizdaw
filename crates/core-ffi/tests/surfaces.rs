@@ -1185,3 +1185,29 @@ fn a_removal_after_focus_moved_owes_nothing_to_the_new_session() {
         "the focus move owed it"
     );
 }
+
+/// Plan 5f-1 Task 11 (Ruling 11, the e2e's case): `surface.inject` into a
+/// window that never had the surfaces' focus (no key window, so the ticker
+/// focused nothing) focuses it and refreshes the units before it routes
+/// the bytes, so the unit's strip controls address the strips it now
+/// shows instead of being ignored (Ruling 3).
+#[test]
+fn an_injection_into_an_unfocused_window_refreshes_before_it_routes() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let (synth, k) = synth(&s);
+    let id = surface_add(Kind::Mcu, "T In".into(), "T Out".into(), None).unwrap();
+    let ch = k as u8;
+    s.inject_surface(id, vec![0x90, 0x68 + ch, 0x7F, 0xE0 + ch, 0x00, 0x20])
+        .unwrap();
+    assert_eq!(
+        s.automation_state().unwrap().touched,
+        vec![vizdaw_ffi::AutomationTargetRow::StripFader { strip: synth }]
+    );
+    assert_eq!(surface_list()[0].ignored, 0, "nothing was ignored");
+    s.inject_surface(id, vec![0x90, 0x68 + ch, 0x00]).unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader")
+    );
+}

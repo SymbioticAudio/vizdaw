@@ -370,6 +370,15 @@ public final class StripChartView: EditorCanvas {
             automation.toolTip = "The mixer's targets could not be read just now (busy); open the menu again."
         }
         menu.addItem(automation)
+        // The row's automation target learned to a MIDI control (plan 5f-1
+        // Task 11); a velocity scale cannot be learned (Ruling 6).
+        if case .automation(let t) = current, Self.learnable(t) {
+            let learn = MenuAction(title: "MIDI Learn") { [weak self] in
+                self?.document?.learn.learn(t.row)
+            }.item(checked: false)
+            learn.isEnabled = document != nil
+            menu.addItem(learn)
+        }
         menu.addItem(.separator())
         let add = MenuAction(title: "Add Row") { [weak self] in self?.model.addRow() }.item(checked: false)
         add.isEnabled = model.rows.count < StripChartModel.maxRows
@@ -380,6 +389,12 @@ public final class StripChartView: EditorCanvas {
         menuTarget.lanes = lanes
         menu.autoenablesItems = false
         return menu
+    }
+
+    /// Every automation target but a velocity scale can be MIDI-learned.
+    static func learnable(_ t: AutoTarget) -> Bool {
+        if case .velocityScale = t { return false }
+        return true
     }
 
     // MARK: Accessibility
