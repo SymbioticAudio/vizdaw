@@ -9,13 +9,13 @@ struct SurfacesSettingsView: View {
     @Bindable var settings: SurfaceSettings
     @Bindable var keys: KeyBindings
 
-    private static let kinds: [SurfaceKindRow] = [.mcu, .mcuXt, .hui]
+    private static let kinds: [SurfaceKindRow] = [.mcu, .mcuXt, .hui, .kontrolMk3]
 
     var body: some View {
         Form {
             Section("Surfaces") {
                 if settings.rows.isEmpty {
-                    Text("No surfaces. Add an MCU-compatible, MCU XT-compatible or HUI-compatible unit.")
+                    Text("No surfaces. Add an MCU-compatible, MCU XT-compatible or HUI-compatible unit, or a Kontrol S-Series MK3 keyboard.")
                         .foregroundStyle(.secondary)
                 }
                 ForEach(settings.rows, id: \.id) { row in
@@ -27,10 +27,27 @@ struct SurfacesSettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(SurfaceSettings.status(row))
-                            .foregroundStyle(row.connected && row.online ? Color.primary : Color.secondary)
+                        VStack(alignment: .trailing) {
+                            Text(SurfaceSettings.status(row))
+                                .foregroundStyle(row.connected && row.online ? Color.primary : Color.secondary)
+                            // Why it is not answering (pre-flight I4).
+                            if let why = settings.problem(for: row.id) {
+                                Text(why)
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                        }
                         Button("Remove") { settings.remove(row.id) }
                     }
+                }
+                ForEach(settings.otherProblems, id: \.self) { line in
+                    Text(line).font(.caption).foregroundStyle(.orange)
+                }
+                if settings.showsKontrolNotice {
+                    Text(SurfaceSettings.kontrolNotice)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Button("Add Surface…") { settings.beginAdd() }
             }
@@ -91,7 +108,10 @@ struct SurfacesSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Add Surface").font(.headline)
             Form {
-                Picker("Type", selection: field(\.kind, .mcu)) {
+                Picker("Type", selection: Binding(
+                    get: { settings.draft?.kind ?? .mcu },
+                    set: { settings.setDraftKind($0) })
+                ) {
                     ForEach(Self.kinds, id: \.self) { Text(SurfaceSettings.title($0)).tag($0) }
                 }
                 Picker("Input", selection: field(\.input, "")) {
@@ -101,6 +121,17 @@ struct SurfacesSettingsView: View {
                 Picker("Output", selection: field(\.output, "")) {
                     if settings.ports.destinations.isEmpty { Text("No MIDI destinations").tag("") }
                     ForEach(settings.ports.destinations, id: \.self) { Text($0).tag($0) }
+                }
+                if settings.draft?.kind == .kontrolMk3 {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let note = settings.draftNote {
+                            Text(note).foregroundStyle(.orange)
+                        }
+                        Text(SurfaceSettings.kontrolHelp)
+                        Text(SurfaceSettings.kontrolNotice)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 if settings.draft?.kind == .mcuXt {
                     Stepper(

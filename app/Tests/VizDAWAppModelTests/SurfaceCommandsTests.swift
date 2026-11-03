@@ -18,6 +18,8 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
     var learnRow = LearnStateRow(waiting: nil, last: nil)
     func list() -> [SurfaceRow] { rows }
     func ports() -> SurfacePortsRow { SurfacePortsRow(sources: ["In A"], destinations: ["Out A"]) }
+    var kontrol = SurfacePortsRow(sources: [], destinations: [])
+    func kontrolPorts() -> SurfacePortsRow { kontrol }
     func add(_ k: SurfaceKindRow, _ i: String, _ o: String, _ p: UInt8?) throws -> UInt32 {
         if let e = addError { throw e }
         let id = UInt32(rows.count)

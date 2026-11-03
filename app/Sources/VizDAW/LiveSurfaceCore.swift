@@ -7,6 +7,7 @@ import VizDAWCore
 final class LiveSurfaceCore: SurfaceCore {
     func list() -> [SurfaceRow] { VizDAWCore.surfaceList() }
     func ports() -> SurfacePortsRow { VizDAWCore.surfacePorts() }
+    func kontrolPorts() -> SurfacePortsRow { VizDAWCore.kontrolPorts() }
     func add(_ k: SurfaceKindRow, _ i: String, _ o: String, _ p: UInt8?) throws -> UInt32 {
         try VizDAWCore.surfaceAdd(kind: k, input: i, output: o, position: p)
     }

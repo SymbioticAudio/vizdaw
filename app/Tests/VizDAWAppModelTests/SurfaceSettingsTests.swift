@@ -228,6 +228,69 @@ import VizDAWCore
         #expect(s.draft == nil && s.draftProblem == nil && s.rows.count == 1)
     }
 
+    /// Plan 5f-4 Ruling 10: choosing the Kontrol fills both ports with its
+    /// DAW port, and the unit is added without a position.
+    @Test func aKontrolDraftPicksTheKeyboardsDawPorts() {
+        let c = FakeSurfaceCore()
+        c.kontrol = SurfacePortsRow(sources: ["KONTROL S88 MK3 DAW"], destinations: ["KONTROL S88 MK3 DAW"])
+        let s = SurfaceSettings(core: c)
+        s.beginAdd()
+        #expect(s.draft?.input == "In A")
+        s.setDraftKind(.kontrolMk3)
+        #expect(s.draft?.kind == .kontrolMk3)
+        #expect(s.draft?.input == "KONTROL S88 MK3 DAW" && s.draft?.output == "KONTROL S88 MK3 DAW")
+        #expect(s.draftNote == nil)
+        s.commitAdd()
+        #expect(s.draft == nil)
+        #expect(c.rows.first?.kind == .kontrolMk3 && c.rows.first?.position == 0)
+        #expect(s.showsKontrolNotice, "the list shows the notice once a Kontrol is there (M11)")
+    }
+
+    /// Ruling 10: with no DAW port, the ports stay and the sheet says why.
+    @Test func aKontrolDraftWithoutAKeyboardSaysSo() {
+        let c = FakeSurfaceCore()
+        let s = SurfaceSettings(core: c)
+        s.beginAdd()
+        s.setDraftKind(.kontrolMk3)
+        #expect(s.draft?.input == "In A" && s.draft?.output == "Out A")
+        #expect(s.draftNote == SurfaceSettings.noKontrol)
+        s.setDraftKind(.hui)
+        #expect(s.draftNote == nil && s.draft?.kind == .hui)
+        s.cancelAdd()
+        s.setDraftKind(.kontrolMk3)
+        #expect(s.draft == nil, "no sheet, nothing to set")
+    }
+
+    /// Pre-flight I4 (Ruling 10): a row says why its unit is not answering;
+    /// a line that names no row (an unknown kind kept in surfaces.json) is
+    /// shown under the list.
+    @Test func aKontrolWithOldFirmwareSaysWhy() {
+        let c = FakeSurfaceCore()
+        let s = SurfaceSettings(core: c)
+        #expect(!s.showsKontrolNotice)
+        s.add(.kontrolMk3, input: "KONTROL S88 MK3 DAW", output: "KONTROL S88 MK3 DAW", position: nil)
+        let old = "the keyboard answered protocol version 3; VizDAW needs version 4 (keyboard firmware 2.0 or later)"
+        let kept = "surface 3: “future_box” needs a newer VizDAW; it is kept in surfaces.json and not driven"
+        c.stateRow = SurfaceStateRow(
+            surfaces: [], feedback: [], learning: nil,
+            problems: ["surface 0: an older line", "surface 0: \(old)", kept])
+        s.refresh()
+        #expect(s.problem(for: 0) == old, "the last line about it, without the prefix")
+        #expect(s.problem(for: 1) == nil)
+        #expect(s.otherProblems == [kept])
+        #expect(s.showsKontrolNotice)
+    }
+
+    /// Ruling 11: descriptive wording only.
+    @Test func theKontrolSheetSpeaksDescriptively() {
+        #expect(SurfaceSettings.kontrolNotice
+            == "Kontrol and Native Instruments are trademarks of Native Instruments GmbH. VizDAW is not affiliated with or endorsed by Native Instruments.")
+        for text in [SurfaceSettings.kontrolHelp, SurfaceSettings.noKontrol, SurfaceSettings.title(.kontrolMk3)] {
+            #expect(!text.localizedCaseInsensitiveContains("official"))
+            #expect(!text.contains("NKS"))
+        }
+    }
+
     /// Pre-flight I9: a command `surface.inject` or `midi.inject` caused
     /// never takes the key path, which would open the Save panel.
     @Test func anInjectedSaveOpensNoDialog() throws {

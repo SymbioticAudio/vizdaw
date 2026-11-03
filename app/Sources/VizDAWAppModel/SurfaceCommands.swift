@@ -8,6 +8,8 @@ import VizDAWCore
 public protocol SurfaceCore: AnyObject {
     func list() -> [SurfaceRow]
     func ports() -> SurfacePortsRow
+    /// The ports whose names say KONTROL, MK3 and DAW (plan 5f-4 Ruling 3).
+    func kontrolPorts() -> SurfacePortsRow
     func add(_ k: SurfaceKindRow, _ i: String, _ o: String, _ p: UInt8?) throws -> UInt32
     func remove(_ id: UInt32) throws
     /// `state.get surfaces` without a document.
@@ -27,6 +29,7 @@ public final class NoSurfaceCore: SurfaceCore {
 
     public func list() -> [SurfaceRow] { [] }
     public func ports() -> SurfacePortsRow { SurfacePortsRow(sources: [], destinations: []) }
+    public func kontrolPorts() -> SurfacePortsRow { SurfacePortsRow(sources: [], destinations: []) }
     public func add(_ k: SurfaceKindRow, _ i: String, _ o: String, _ p: UInt8?) throws -> UInt32 {
         throw VizError.Model(message: Self.refusal)
     }
