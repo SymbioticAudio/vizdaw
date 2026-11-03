@@ -57,7 +57,7 @@ pub struct InputInfoRow {
 /// SysEx and system messages are refused), from source `port` (a name:
 /// not empty, at most 255 bytes, no control characters).
 pub fn parse_injection(port: &str, bytes: &[u8]) -> Result<Vec<Midi1Msg>, VizError> {
-    if port.is_empty() || port.len() > 255 || port.chars().any(char::is_control) {
+    if !core_model::lane::check_port_name(port) {
         return Err(crate::events::bad("`port` must name a MIDI source"));
     }
     if bytes.is_empty() || bytes.len() > MAX_INJECT_BYTES {

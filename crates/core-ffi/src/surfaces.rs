@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, TryLockError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 
 /// The file's name in the support folder (Ruling 9).
@@ -52,8 +52,8 @@ const MAX_EXTENDERS: usize = 3;
 /// Positions in the MCU group: 0–3 (Ruling 4).
 const POSITIONS: u8 = 4;
 
-/// The longest port name (as `crate::live::parse_injection`).
-const MAX_PORT: usize = 255;
+/// The longest port name (`core_model::lane::check_port_name`'s).
+const MAX_PORT: usize = core_model::lane::MAX_PORT_NAME;
 
 /// How often the ports are looked at again while any surface exists
 /// (Ruling 10).
@@ -612,16 +612,51 @@ impl Claims {
     }
 }
 
-/// One whole channel message a learn takes: a CC, a pitch bend, a note on
-/// or off (Ruling 17).
+/// One whole channel message a learn takes: a CC, a pitch bend or a note
+/// on (Ruling 17). Not a note-off: the learner ignores it, and taking it
+/// would hang a note played thru (final review T8 m8).
 fn learnable(bytes: &[u8]) -> bool {
     match *bytes {
-        [s, d1, d2] => d1 < 0x80 && d2 < 0x80 && matches!(s & 0xF0, 0x80 | 0x90 | 0xB0 | 0xE0),
+        [s, d1, d2] if d1 < 0x80 && d2 < 0x80 => match s & 0xF0 {
+            0x90 => d2 > 0,
+            0xB0 | 0xE0 => true,
+            _ => false,
+        },
         _ => false,
     }
 }
 
-static CLAIMS: LazyLock<RwLock<Claims>> = LazyLock::new(|| RwLock::new(Claims::default()));
+/// The claims. A rewrite builds the new set first and only swaps the
+/// `Arc` under the write lock, which is held for that swap alone; readers
+/// clone the `Arc` under `try_read` (final review T8 m1).
+static CLAIMS: LazyLock<RwLock<Arc<Claims>>> =
+    LazyLock::new(|| RwLock::new(Arc::new(Claims::default())));
+
+/// How often a reader tries the claims' lock before giving up.
+const CLAIMS_TRIES: usize = 3;
+
+/// The claims now, or `None` while a swap holds the lock through every
+/// try (never waits).
+fn claims() -> Option<Arc<Claims>> {
+    for _ in 0..CLAIMS_TRIES {
+        match CLAIMS.try_read() {
+            Ok(c) => return Some(Arc::clone(&c)),
+            Err(TryLockError::Poisoned(p)) => return Some(Arc::clone(&p.into_inner())),
+            Err(TryLockError::WouldBlock) => std::hint::spin_loop(),
+        }
+    }
+    None
+}
+
+/// Swaps in `claims`; the old set is dropped after the lock is released.
+fn set_claims(claims: Claims) {
+    let new = Arc::new(claims);
+    let old = {
+        let mut g = CLAIMS.write().unwrap_or_else(PoisonError::into_inner);
+        std::mem::replace(&mut *g, new)
+    };
+    drop(old);
+}
 
 /// The process-wide surfaces state (`surfaces::lock()`).
 pub(crate) struct Registry {
@@ -652,6 +687,10 @@ pub(crate) struct Registry {
     mapper_fed: Option<Instant>,
     /// The waiting learn.
     learn: Option<Learning>,
+    /// A decided target learn's control and the session it is for: claimed
+    /// until that session's maps have it, or the learn fails (final review
+    /// N4: the tail of the turn stays out of the lanes).
+    claimed: Option<(u64, LearnSource)>,
     /// What the last learn learnt.
     last: Option<String>,
     /// Input messages routed so far (tags for [`Act`]).
@@ -674,6 +713,7 @@ impl Registry {
             maps: Vec::new(),
             mapper_fed: None,
             learn: None,
+            claimed: None,
             last: None,
             tags: 0,
         }
@@ -845,7 +885,14 @@ impl Registry {
         let loaded = match std::fs::read_to_string(path) {
             Ok(text) => Some(parse_file(&text)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => Some(Err(e.to_string())),
+            Err(e) => {
+                // The file may be fine (a transient EACCES or EIO): left
+                // where it is and unloaded, so no save replaces it and the
+                // next load tries again (final review N5).
+                self.loaded = false;
+                self.problem(format!("{FILE} could not be read now: {e}"));
+                return;
+            }
         };
         self.clear();
         self.commands.clear();
@@ -980,8 +1027,27 @@ impl Registry {
             .chain(self.commands.iter().map(|c| &c.source.port))
             .map(|p| (core_engine::input::port_key(p), p.clone()))
             .collect();
+        // A decided learn's control, for the session that is focused: a
+        // command map with no command, as only `takes` reads this mapper.
+        let claimed = self
+            .claimed
+            .as_ref()
+            .filter(|(s, _)| self.focus == Some(*s))
+            .map(|(_, source)| CommandMap {
+                source: source.clone(),
+                command: String::new(),
+            });
+        let mut keys = keys;
+        if let Some(c) = &claimed {
+            keys.insert(
+                core_engine::input::port_key(&c.source.port),
+                c.source.port.clone(),
+            );
+        }
+        let mut cmds = self.command_maps();
+        cmds.extend(claimed);
         let mut mapper = Mapper::default();
-        mapper.set(maps, self.command_maps());
+        mapper.set(maps, cmds);
         let claims = Claims {
             inputs: names
                 .iter()
@@ -993,7 +1059,7 @@ impl Registry {
             mapper,
             focused: self.focus.is_some(),
         };
-        *CLAIMS.write().unwrap_or_else(PoisonError::into_inner) = claims;
+        set_claims(claims);
     }
 
     /// The 2 s port check (Ruling 10), while any surface exists.
@@ -1054,6 +1120,9 @@ impl Registry {
     /// maps, and queues the releases of targets no map drives (Ruling
     /// T5-1); the claims are rewritten.
     fn set_maps(&mut self, maps: Vec<LearnMap>) {
+        if self.focus.is_some_and(|f| self.took_claimed(f, &maps)) {
+            self.publish();
+        }
         if self.maps == maps {
             return;
         }
@@ -1304,6 +1373,9 @@ impl Registry {
         if self.learn.as_ref().is_some_and(|l| l.session == id) {
             self.learn = None;
         }
+        if self.claimed.as_ref().is_some_and(|(s, _)| *s == id) {
+            self.claimed = None;
+        }
         self.owed.remove(&id);
         if self.focus == Some(id) {
             self.focus = None;
@@ -1331,11 +1403,14 @@ impl Registry {
         let what = format!("{} → {}", source.describe(), l.text);
         self.last = Some(what);
         let out = match l.what {
-            LearnFor::Target(target) => Some(Learnt {
-                source,
-                mode,
-                target,
-            }),
+            LearnFor::Target(target) => {
+                self.claimed = Some((id, source.clone()));
+                Some(Learnt {
+                    source,
+                    mode,
+                    target,
+                })
+            }
             LearnFor::Command(command) => {
                 self.commands.retain(|c| c.source != source);
                 self.commands.push(CommandEntry {
@@ -1350,6 +1425,28 @@ impl Registry {
         };
         self.publish();
         out
+    }
+
+    /// Session `id`'s maps are `maps`: a claimed control they have now is
+    /// theirs (final review N4). True when the claim ended.
+    fn took_claimed(&mut self, id: u64, maps: &[LearnMap]) -> bool {
+        let ends = self
+            .claimed
+            .as_ref()
+            .is_some_and(|(s, src)| *s == id && maps.iter().any(|m| m.source == *src));
+        if ends {
+            self.claimed = None;
+        }
+        ends
+    }
+
+    /// Session `id`'s decided learn did not become a map: its control is
+    /// no longer claimed (final review N4).
+    fn learn_failed(&mut self, id: u64) {
+        if self.claimed.as_ref().is_some_and(|(s, _)| *s == id) {
+            self.claimed = None;
+            self.publish();
+        }
     }
 
     /// A learn for `what`, asked by `session`: the transport is made if
@@ -1410,9 +1507,9 @@ fn new_ports() -> Box<dyn Ports> {
 }
 
 /// A port name is not empty, at most 255 bytes, without control characters
-/// (`crate::live::parse_injection`'s rule).
+/// (`core_model::lane::check_port_name`, the one rule; final review N7).
 fn check_port(what: &str, name: &str) -> Result<(), VizError> {
-    if name.is_empty() || name.len() > MAX_PORT || name.chars().any(char::is_control) {
+    if !core_model::lane::check_port_name(name) {
         return Err(crate::events::bad(&format!(
             "`{what}` must name a MIDI port (1 to {MAX_PORT} bytes, no control characters)"
         )));
@@ -1648,11 +1745,7 @@ pub(crate) static INPUT_BUSY: AtomicU64 = AtomicU64::new(0);
 /// on (false). It answers for one message (`surfaces::takes` is asked per
 /// message on every path; a packet of several is never taken whole).
 pub(crate) fn takes(port_key: u32, bytes: &[u8]) -> bool {
-    match CLAIMS.try_read() {
-        Ok(c) => c.takes(port_key, bytes),
-        Err(TryLockError::Poisoned(p)) => p.into_inner().takes(port_key, bytes),
-        Err(TryLockError::WouldBlock) => false,
-    }
+    claims().is_some_and(|c| c.takes(port_key, bytes))
 }
 
 /// Raw input from a port (CoreMIDI's surfaces listener): queued with its
@@ -1674,14 +1767,10 @@ pub(crate) fn inject(port: &str, bytes: &[u8]) -> bool {
 
 /// Queues `bytes` from `port` when something listens to it.
 fn push(port: &str, bytes: &[u8], host_ns: u64, programmatic: bool) -> bool {
-    let listens = match CLAIMS.try_read() {
-        Ok(c) => c.listens(port),
-        Err(TryLockError::Poisoned(p)) => p.into_inner().listens(port),
-        Err(TryLockError::WouldBlock) => {
-            // Lost to a rewrite: counted, so `problems` explains it.
-            INPUT_BUSY.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
+    let Some(listens) = claims().map(|c| c.listens(port)) else {
+        // Lost to a swap: counted, so `problems` explains it.
+        INPUT_BUSY.fetch_add(1, Ordering::Relaxed);
+        return false;
     };
     if !listens {
         return false;
@@ -1758,9 +1847,18 @@ pub(crate) fn begin(id: u64, now: Instant) -> (Vec<Owed>, bool) {
 /// focused session's count).
 pub(crate) fn sync_maps(id: u64, maps: &[LearnMap]) {
     let mut r = lock();
-    if r.focus == Some(id) && r.maps != maps {
-        r.set_maps(maps.to_vec());
+    if r.focus == Some(id) {
+        if r.maps != maps || r.claimed.is_some() {
+            r.set_maps(maps.to_vec());
+        }
+    } else if r.took_claimed(id, maps) {
+        r.publish();
     }
+}
+
+/// Session `id`'s decided learn did not become a map (final review N4).
+pub(crate) fn learn_failed(id: u64) {
+    lock().learn_failed(id);
 }
 
 /// Steps 2–5 for the focused session `id`: input routed, then every timed
@@ -1865,6 +1963,9 @@ pub(crate) fn session_closed(id: u64) {
     lock().session_closed(id, now());
 }
 
+/// A mixer meter hold unread this long is stale (final review T8 m5).
+const MIXER_STALE: Duration = Duration::from_millis(250);
+
 /// The meters a session holds for its two readers (Ruling 13, pre-flight
 /// I4): one take of the engine's read-and-clear peaks feeds both, and each
 /// is cleared only by its own reader.
@@ -1874,12 +1975,23 @@ pub(crate) struct MeterHolds {
     mixer: Option<crate::mixer::MixerLevels>,
     /// The surfaces' peaks per strip since their last view.
     surfaces: BTreeMap<u64, (f32, f32)>,
+    /// When the mixer last read its hold (final review T8 m5).
+    mixer_read: Option<Instant>,
 }
 
 impl MeterHolds {
     /// Folds one take into both holds as maxima (the DSP peak into the
     /// mixer's only; the rest of the mixer's is the latest).
-    pub(crate) fn fold(&mut self, take: crate::mixer::MixerLevels) {
+    ///
+    /// A mixer hold not read for [`MIXER_STALE`] (its window closed)
+    /// starts again from this take (final review T8 m5).
+    pub(crate) fn fold(&mut self, take: crate::mixer::MixerLevels, now: Instant) {
+        if self
+            .mixer_read
+            .is_none_or(|r| now.saturating_duration_since(r) >= MIXER_STALE)
+        {
+            self.mixer = None;
+        }
         for m in &take.meters {
             let e = self.surfaces.entry(m.strip).or_insert((0.0, 0.0));
             e.0 = e.0.max(m.peak_l);
@@ -1906,7 +2018,8 @@ impl MeterHolds {
     }
 
     /// The mixer's hold, cleared.
-    pub(crate) fn take_mixer(&mut self) -> Option<crate::mixer::MixerLevels> {
+    pub(crate) fn take_mixer(&mut self, now: Instant) -> Option<crate::mixer::MixerLevels> {
+        self.mixer_read = Some(now);
         self.mixer.take()
     }
 
@@ -2319,14 +2432,14 @@ mod tests {
             })
             .collect();
         mapper.set(maps, Vec::new());
-        *CLAIMS.write().unwrap() = Claims {
+        set_claims(Claims {
             inputs: [core_engine::input::port_key("S")].into_iter().collect(),
             names: ["S".to_string()].into_iter().collect(),
             learning,
             keys,
             mapper,
             focused: true,
-        };
+        });
     }
 
     #[test]
@@ -2353,7 +2466,7 @@ mod tests {
             take_input().first().is_some_and(|i| i.programmatic),
             "injected"
         );
-        *CLAIMS.write().unwrap() = Claims::default();
+        set_claims(Claims::default());
     }
 
     /// Final review I1: System Real-Time bytes alone (Active Sensing,
@@ -2376,7 +2489,7 @@ mod tests {
             "a message among them is"
         );
         assert_eq!(take_input().len(), 1);
-        *CLAIMS.write().unwrap() = Claims::default();
+        set_claims(Claims::default());
     }
 
     /// Ruling 17: a surface port is taken whole; a learn takes channel
@@ -2398,7 +2511,10 @@ mod tests {
             takes(key("Keys"), &[0xB0, 7, 1]),
             "a waiting learn takes a CC"
         );
-        assert!(takes(key("Keys"), &[0x80, 60, 0]), "and a note-off");
+        assert!(
+            !takes(key("Keys"), &[0x80, 60, 0]) && !takes(key("Keys"), &[0x90, 60, 0]),
+            "not a note-off: a synth's note would hang (final review T8 m8)"
+        );
         assert!(!takes(key("Keys"), &[0xF8]), "not a clock");
         let map = LearnMap {
             source: LearnSource {
@@ -2418,7 +2534,107 @@ mod tests {
             "a buffer of two is asked per message, never taken whole"
         );
         assert!(!takes(key("Pads"), &[0xB0, 7, 1]), "another port's CC 7");
-        *CLAIMS.write().unwrap() = Claims::default();
+        set_claims(Claims::default());
+    }
+
+    /// Final review N4: a target learn that decided keeps its control's
+    /// messages out of the lanes until the project's map takes over, or
+    /// the learn fails.
+    #[test]
+    fn a_decided_learn_claims_its_control_until_the_map_exists() {
+        let _g = CLAIMS_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let key = core_engine::input::port_key;
+        let mut r = registry();
+        let t = AutomationTarget::StripFader(StripId(1));
+        r.start_learn(7, LearnFor::Target(t), "Fader".into());
+        let t0 = now();
+        r.learn
+            .as_mut()
+            .unwrap()
+            .learner
+            .feed("Knobs", &[0xB0, 7, 64], t0);
+        let l = r.decide(7, t0 + Duration::from_millis(301)).unwrap();
+        assert!(
+            takes(key("Knobs"), &[0xB0, 7, 65]),
+            "the tail of the turn is taken"
+        );
+        assert!(!takes(key("Knobs"), &[0xB0, 8, 65]), "only its control");
+        let map = LearnMap {
+            source: l.source.clone(),
+            target: l.target,
+            mode: l.mode,
+            pickup: true,
+        };
+        r.set_maps(vec![map]);
+        r.set_maps(Vec::new());
+        assert!(!takes(key("Knobs"), &[0xB0, 7, 65]), "the map took over");
+        r.start_learn(7, LearnFor::Target(t), "Fader".into());
+        r.learn
+            .as_mut()
+            .unwrap()
+            .learner
+            .feed("Knobs", &[0xB0, 7, 64], t0);
+        let _ = r.decide(7, t0 + Duration::from_millis(301)).unwrap();
+        assert!(takes(key("Knobs"), &[0xB0, 7, 65]));
+        r.learn_failed(7);
+        assert!(!takes(key("Knobs"), &[0xB0, 7, 65]), "a failed learn");
+        set_claims(Claims::default());
+    }
+
+    /// Final review N5: a read error other than a missing file leaves the
+    /// file where it is and the registry unloaded, so a save cannot
+    /// replace the user's surfaces; the next load tries again.
+    #[test]
+    fn a_file_that_cannot_be_read_is_not_put_aside() {
+        let _g = CLAIMS_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let dir = std::env::temp_dir().join(format!("vizdaw-surfaces-eio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A directory where the file should be: reading it fails.
+        let path = dir.join(FILE);
+        std::fs::create_dir_all(&path).unwrap();
+        let mut r = registry();
+        r.ensure_loaded_from(&path, now());
+        assert!(path.is_dir(), "left where it is");
+        assert!(!bad_file(&path).exists(), "not put aside");
+        assert!(!r.loaded, "unloaded: a save would lose the file");
+        assert!(
+            r.problems.iter().any(|p| p.contains(FILE)),
+            "{:?}",
+            r.problems
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Final review T8 m5: the mixer's meter hold, unread for 250 ms (its
+    /// window closed), starts again from the next take instead of keeping
+    /// an old peak.
+    #[test]
+    fn an_unread_mixer_hold_does_not_keep_a_stale_peak() {
+        use crate::mixer::{MeterRow, MixerLevels};
+        let take = |peak: f32| MixerLevels {
+            meters: vec![MeterRow {
+                strip: 1,
+                peak_l: peak,
+                peak_r: peak,
+            }],
+            ..MixerLevels::empty()
+        };
+        let t0 = now();
+        let ms = Duration::from_millis;
+        let mut h = MeterHolds::default();
+        h.fold(take(0.9), t0);
+        let _ = h.take_mixer(t0);
+        h.fold(take(0.8), t0 + ms(10));
+        h.fold(take(0.1), t0 + ms(20));
+        let read = h.take_mixer(t0 + ms(30)).unwrap();
+        assert!((read.meters[0].peak_l - 0.8).abs() < 1e-6, "read: folded");
+        h.fold(take(0.9), t0 + ms(40));
+        h.fold(take(0.1), t0 + ms(300));
+        let read = h.take_mixer(t0 + ms(310)).unwrap();
+        assert!(
+            (read.meters[0].peak_l - 0.1).abs() < 1e-6,
+            "unread for 250 ms: the latest take, {read:?}"
+        );
     }
 
     /// Task 7 review M4: nothing is saved before the file was read, so a

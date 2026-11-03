@@ -484,3 +484,72 @@ fn an_idle_hold_owed_by_a_focus_move_ends_at_its_last_value() {
         "the hold ends at the last value ({last}), not a beat later: {held:?}"
     );
 }
+
+/// Final review T8 m7: `midi.inject` answers whether something took the
+/// bytes: a note to a port only a CC is learned on, in a project that does
+/// not hold the engine, ran nowhere.
+#[test]
+fn an_injection_nothing_takes_answers_false() {
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let _ = learned_fader(&s);
+    assert!(
+        s.inject_midi("Knobs".into(), vec![0xB0, 7, 30]).unwrap(),
+        "the map takes its CC"
+    );
+    assert!(
+        !s.inject_midi("Knobs".into(), vec![0x90, 60, 100]).unwrap(),
+        "nothing takes the note"
+    );
+}
+
+/// Final review T8 m8: a waiting learn leaves note-offs to the lanes, so a
+/// note played thru while it waits does not hang.
+#[test]
+fn a_waiting_learn_lets_note_offs_through() {
+    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+    use vizdaw_ffi::{EditCommand, LaneEdit, LaneInputRow};
+    let _g = serial();
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let seq = song(&s);
+    let chords = s
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Chords")
+        .unwrap()
+        .id;
+    let edit = |e: LaneEdit| s.edit(EditCommand::Lane { edit: e }, None).unwrap();
+    edit(LaneEdit::SetInput {
+        seq,
+        lane: chords,
+        input: Some(LaneInputRow::Midi {
+            port: None,
+            channel: None,
+        }),
+    });
+    edit(LaneEdit::SetFlags {
+        seq,
+        lane: chords,
+        mute: None,
+        solo: None,
+        arm: Some(true),
+    });
+    s.play(seq).unwrap();
+    wait_until("the engine", || s.transport().unwrap().playing);
+    s.stop().unwrap();
+    s.learn_target(synth_fader(&s)).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    drain_offline_log();
+    debug_midi_from_source("Keys", 0, &[0x80, 60, 0]);
+    debug_midi_from_source("Keys", 0, &[0x90, 62, 0]);
+    let mut log = Vec::new();
+    wait_until("the note-offs' thru", || {
+        log.extend(drain_offline_log());
+        log.iter()
+            .any(|(_, b): &(u64, Vec<u8>)| b.get(1) == Some(&60))
+            && log.iter().any(|(_, b)| b.get(1) == Some(&62))
+    });
+}

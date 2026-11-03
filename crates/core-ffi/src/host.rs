@@ -215,25 +215,29 @@ static SOURCES: Mutex<Option<platform_macos::midi::SourceListener>> = Mutex::new
     allow(dead_code)
 )]
 fn midi_from_source(port: u32, host_ns: u64, bytes: &[u8]) {
-    // Surface ports and learned messages stay out of the lanes (plan
-    // 5f-1 Ruling 17).
-    if crate::surfaces::takes(port, bytes) {
-        return;
-    }
-    let Some(msg) = core_engine::input::channel_message(bytes) else {
-        return;
-    };
-    let to = match MIDI_TO.try_lock() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            MIDI_SOURCE_DROPS.fetch_add(1, Ordering::Relaxed);
+    // A panic must not unwind into CoreMIDI (final review T8 m4: this now
+    // runs the surfaces' claims).
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Surface ports and learned messages stay out of the lanes (plan
+        // 5f-1 Ruling 17).
+        if crate::surfaces::takes(port, bytes) {
             return;
         }
-    };
-    if let Some(tx) = to.as_ref() {
-        let _ = tx.send(MidiIn { port, host_ns, msg });
-    }
+        let Some(msg) = core_engine::input::channel_message(bytes) else {
+            return;
+        };
+        let to = match MIDI_TO.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                MIDI_SOURCE_DROPS.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        };
+        if let Some(tx) = to.as_ref() {
+            let _ = tx.send(MidiIn { port, host_ns, msg });
+        }
+    }));
 }
 
 /// How many source messages were dropped: the engine's MIDI input was

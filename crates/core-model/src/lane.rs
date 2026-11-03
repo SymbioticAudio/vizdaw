@@ -99,6 +99,13 @@ pub const MAX_INPUT_CHANNEL: u16 = 255;
 /// The longest MIDI port name a lane input may name, in bytes.
 pub const MAX_PORT_NAME: usize = 255;
 
+/// The one rule for a MIDI port name (lane inputs, learn sources, surface
+/// ports, injections): not empty, at most [`MAX_PORT_NAME`] bytes, no
+/// control characters. True when `name` keeps it.
+pub fn check_port_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= MAX_PORT_NAME && !name.chars().any(char::is_control)
+}
+
 /// The device input channels an audio lane records (spec §4.5), 0-based.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,7 +182,7 @@ impl LaneInput {
             }
             LaneInput::Midi { port, channel } => {
                 if let Some(p) = port {
-                    if p.is_empty() || p.len() > MAX_PORT_NAME || p.chars().any(char::is_control) {
+                    if !check_port_name(p) {
                         return Err(ModelError::range("input.port", p.len()));
                     }
                 }

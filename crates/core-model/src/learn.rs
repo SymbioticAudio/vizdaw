@@ -6,7 +6,7 @@ use crate::automation::{AutomationTarget, target_exists};
 use crate::command::event::note_name;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
-use crate::lane::MAX_PORT_NAME;
+use crate::lane::check_port_name;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -111,7 +111,7 @@ impl LearnSource {
     /// 0–127 (0–31 for `Cc14`); a note is 0–127.
     pub fn check(&self) -> Result<()> {
         let p = &self.port;
-        if p.is_empty() || p.len() > MAX_PORT_NAME || p.chars().any(char::is_control) {
+        if !check_port_name(p) {
             return range("learn.port", p.len());
         }
         let ch = self.kind.channel();

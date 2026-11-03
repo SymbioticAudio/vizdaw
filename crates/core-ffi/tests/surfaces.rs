@@ -1304,3 +1304,27 @@ fn an_injection_shows_what_it_did_in_the_same_call() {
         "the mute LED at once: {sent:?}"
     );
 }
+
+/// Final review N6: `midi.inject` into a window that is not focused
+/// focuses it, as `surface.inject` does, so what the bytes do happens in
+/// that window and not in the focused one.
+#[test]
+fn midi_injected_into_an_unfocused_window_acts_there() {
+    use vizdaw_ffi::surfaces::SurfaceEventRow as E;
+    let _g = serial();
+    let a = vizdaw_ffi::Session::new_demo().unwrap();
+    let _ = mcu(&a);
+    let b = vizdaw_ffi::Session::new_demo().unwrap();
+    assert!(
+        b.inject_midi("T In".into(), vec![0x90, 0x5E, 0x7F])
+            .unwrap()
+    );
+    b.idle().unwrap();
+    a.idle().unwrap();
+    let play = |e: &E| matches!(e, E::Command { id, .. } if id == "transport.play");
+    assert!(
+        b.take_surface_events().unwrap().iter().any(play),
+        "Play in the window it was injected into"
+    );
+    assert!(!a.take_surface_events().unwrap().iter().any(play));
+}

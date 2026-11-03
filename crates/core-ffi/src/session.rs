@@ -1982,7 +1982,10 @@ impl Session {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
             self.take_meters(&mut inner);
-            Ok(inner.meters.take_mixer().unwrap_or_else(MixerLevels::empty))
+            Ok(inner
+                .meters
+                .take_mixer(Instant::now())
+                .unwrap_or_else(MixerLevels::empty))
         })
     }
 
@@ -7317,21 +7320,33 @@ impl Session {
     /// Feeds `bytes` (channel messages, one after another) to the engine
     /// as if source `port` sent them now (`midi.inject`): lanes listening
     /// to that source play them thru and, armed and recording, record
-    /// them. False when this document does not hold the engine (nothing
-    /// is sent). `Model` for bytes that are not channel messages or a bad
-    /// port name; `Busy` when the input queue is full.
+    /// them. True when something took them: a surface, a learn or a
+    /// learned map (which then act in this window: it takes the surfaces'
+    /// focus, as `surface.inject` does; final review N6), or the engine.
+    /// False when nothing did, e.g. this document does not hold the engine
+    /// and no surface or map takes them (final review T8 m7). `Model` for
+    /// bytes that are not channel messages or a bad port name; `Busy` when
+    /// the input queue is full.
     pub fn inject_midi(&self, port: String, bytes: Vec<u8>) -> Result<bool, VizError> {
         ffi_guard(|| {
-            let msgs = crate::live::parse_injection(&port, &bytes)?;
+            let parsed = crate::live::parse_injection(&port, &bytes)?;
             // Surfaces, MIDI learn and learned maps hear injected bytes
             // too (plan 5f-1 Ruling 16), serviced by the session's idle;
             // what they take stays out of the lanes (Ruling 17).
-            let learnt = crate::surfaces::inject(&port, &bytes);
+            let queued = crate::surfaces::inject(&port, &bytes);
+            if queued && self.focus_here() {
+                // The units show this window before the bytes are routed
+                // (final review N1).
+                self.feed_surfaces(crate::surfaces::now(), &[]);
+            }
             let key = core_engine::input::port_key(&port);
-            let msgs: Vec<_> = msgs
+            let count = parsed.len();
+            let msgs: Vec<_> = parsed
                 .into_iter()
                 .filter(|m| !crate::surfaces::takes(key, m.as_slice()))
                 .collect();
+            // Taken: a surface port's every message, a learn's or a map's.
+            let learnt = queued && msgs.len() < count;
             if msgs.is_empty() {
                 return Ok(learnt);
             }
@@ -8053,6 +8068,8 @@ impl Session {
 
     /// Feeds `bytes` to surface `surface` as if from its input, focuses
     /// this session and services it at once (`surface.inject`; Ruling 11).
+    /// Several refused messages in one call count once in the unit's
+    /// `ignored` (final review T8 m9).
     /// `Model` for no bytes, more than `MAX_INJECT_BYTES` or an unknown
     /// surface.
     pub fn inject_surface(&self, surface: u32, bytes: Vec<u8>) -> Result<(), VizError> {
@@ -8284,7 +8301,7 @@ impl Session {
     /// holds (Ruling 13, pre-flight I4).
     fn take_meters(&self, inner: &mut Inner) {
         if let Some(l) = host::levels(self.id) {
-            inner.meters.fold(l);
+            inner.meters.fold(l, Instant::now());
         }
     }
 
@@ -8341,10 +8358,14 @@ impl Session {
         };
         match self.execute(Command::Settings(SettingsCmd::SetLearn { map })) {
             Ok(_) => lock(&self.inner).news.doc_changed = true,
-            Err(e) => lock(&self.inner)
-                .news
-                .problems
-                .push(format!("MIDI Learn: {e}")),
+            Err(e) => {
+                // Its control is no longer claimed (final review N4).
+                crate::surfaces::learn_failed(self.id);
+                lock(&self.inner)
+                    .news
+                    .problems
+                    .push(format!("MIDI Learn: {e}"));
+            }
         }
         self.sync_learn();
     }
