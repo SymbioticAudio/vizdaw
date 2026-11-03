@@ -284,6 +284,91 @@ const IMPORT_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `file.bounce` (plan 5f-2 Ruling 2): the Bounce dialog's answers.
+const BOUNCE_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "source",
+        kind: ParamKind::Choice(&["mix", "stems", "selection"]),
+        required: false,
+        help: "mix (default), stems (one file per strip in `strips`) or selection (the mix over the time selection).",
+    },
+    ParamSpec {
+        name: "strips",
+        kind: ParamKind::Text,
+        required: false,
+        help: "For stems: strip IDs, comma-separated (see state.get mixer).",
+    },
+    ParamSpec {
+        name: "range",
+        kind: ParamKind::Choice(&["song", "selection"]),
+        required: false,
+        help: "song (default) or selection (`start` and `end`, else the editor's time selection).",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The selection's first tick (with `range: selection`).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The selection's end tick, exclusive (with `range: selection`).",
+    },
+    ParamSpec {
+        name: "format",
+        kind: ParamKind::Choice(&["wav", "aiff", "caf"]),
+        required: false,
+        help: "wav (default), aiff or caf.",
+    },
+    ParamSpec {
+        name: "bits",
+        kind: ParamKind::Choice(DEPTHS),
+        required: false,
+        help: "16, 24 or 32f (float); default the project's depth.",
+    },
+    ParamSpec {
+        name: "rate",
+        kind: ParamKind::Int {
+            min: 8_000,
+            max: 384_000,
+        },
+        required: false,
+        help: "8000–384000; the project's rate by default.",
+    },
+    ParamSpec {
+        name: "dither",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "TPDF dither at 16 and 24 bits; default on for 16 bits; float ignores it.",
+    },
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The mix file, or an existing folder for stems (answers the Bounce dialog); stems never replace: taken names are numbered.",
+    },
+    ParamSpec {
+        name: "add_to_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Also place the bounce on new lanes (default false; answers the Bounce dialog). It bounces as heard: a muted or solo-silenced strip, or one routed into a muted bus, is silent; files ignore mute and solo.",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing mix file (default false); the old file stays until the new one is complete.",
+    },
+];
+
 /// A media item by ID (plan 5b).
 const MEDIA_ID: ParamSpec = ParamSpec {
     name: "media",
@@ -731,6 +816,16 @@ pub const COMMANDS: &[CommandSpec] = &[
             None,
             true,
         )
+    },
+    CommandSpec {
+        params: BOUNCE_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Bounce",
+            when: "always",
+            always: true,
+            answered_by: &["path", "add_to_project"],
+        }],
+        ..cmd("file.bounce", "File", "Bounce…", None, true)
     },
     CommandSpec {
         menu_item: false,

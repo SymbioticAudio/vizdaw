@@ -112,7 +112,8 @@ extension DocumentModel {
                 if case .Busy = error as? VizError { still.append(j) }
                 continue
             }
-            switch ControlJobs.answer(r) {
+            let bounced = r.kind == .bounce ? (try? session.bounceResult(job: r.id)) ?? nil : nil
+            switch ControlJobs.answer(r, bounce: bounced) {
             case .wait:
                 still.append(r)
             case .ok:

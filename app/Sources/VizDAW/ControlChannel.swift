@@ -139,7 +139,8 @@ enum ControlChannel {
                 _ = try? server.fail(token: token, failure: .of(.failed, "the job is unknown"))
                 return true
             }
-            switch ControlJobs.answer(j) {
+            let bounced = j.kind == .bounce ? (try? m.session.bounceResult(job: job)) ?? nil : nil
+            switch ControlJobs.answer(j, bounce: bounced) {
             case .wait:
                 if expired {
                     _ = try? server.fail(

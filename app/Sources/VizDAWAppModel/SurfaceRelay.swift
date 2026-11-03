@@ -23,6 +23,7 @@ import VizDAWCore
     public static let dialogCommands: Set<String> = [
         "file.open", "file.close", "file.save", "file.save_as", "file.project_settings", "keys.save", "keys.load",
         "media.import", "media.relink", "media.rename", "record.recover", RegionCommands.normalize,
+        BounceCommands.id,
     ]
 
     public init(now: @escaping () -> ContinuousClock.Instant = { ContinuousClock.now }) {

@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        144,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn"
+        145,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1473,4 +1473,81 @@ fn surface_commands_check_their_params() {
             window: None
         }
     );
+}
+
+/// Plan 5f-2 Task 5: `file.bounce` takes the Bounce dialog's answers as
+/// parameters; hostile values are refused by type and range before they
+/// reach the app (strip lists are text here; the app checks their form).
+#[test]
+fn bounce_commands_check_their_params() {
+    let run = |params: Value| json!({ "id": "file.bounce", "params": params });
+    for good in [
+        json!({ "source": "mix", "path": "/tmp/x.wav" }),
+        json!({ "add_to_project": true }),
+        json!({ "source": "stems", "strips": "1,2", "path": "/tmp/stems" }),
+        json!({ "range": "selection", "start": 0, "end": 15360, "path": "/tmp/x.aif", "format": "aiff", "bits": "16", "rate": 44100, "dither": false }),
+        json!({ "path": "/tmp/x.wav", "replace": true, "bits": "32f", "rate": 8000 }),
+        // Presence answers the dialog here; the app refuses this one (pre-flight M6).
+        json!({ "add_to_project": false }),
+        json!({ "source": "stems", "strips": "1,,2", "path": "/tmp/stems" }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    for bad in [
+        json!({ "path": "/tmp/x.wav", "format": "mp3" }),
+        json!({ "path": "/tmp/x.wav", "bits": "8" }),
+        json!({ "path": "/tmp/x.wav", "bits": 16 }),
+        json!({ "path": "/tmp/x.wav", "rate": 1000 }),
+        json!({ "path": "/tmp/x.wav", "rate": 384_001 }),
+        json!({ "path": "relative.wav" }),
+        json!({ "path": "/tmp/x.wav", "start": -1 }),
+        json!({ "path": "/tmp/x.wav", "end": i64::MAX }),
+        json!({ "path": "/tmp/x.wav", "source": "both" }),
+        json!({ "path": "/tmp/x.wav", "dither": "yes" }),
+        json!({ "path": format!("/tmp/{}.wav", "a".repeat(1100)) }),
+        json!({ "path": "/tmp/x.wav", "seq": 1 }),
+    ] {
+        let (code, _) = err("command.run", run(bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    // More wrong types and values (Task 5 dispatch): each is refused here.
+    for bad in [
+        json!({ "path": 7 }),
+        json!({ "path": "/tmp/x\u{0}.wav" }),
+        json!({ "path": "/tmp/x.wav", "strips": 12 }),
+        json!({ "path": "/tmp/x.wav", "strips": ["1", "2"] }),
+        json!({ "path": "/tmp/x.wav", "range": "all" }),
+        json!({ "path": "/tmp/x.wav", "rate": "48000" }),
+        json!({ "path": "/tmp/x.wav", "rate": 48_000.5 }),
+        json!({ "path": "/tmp/x.wav", "add_to_project": "true" }),
+        json!({ "path": "/tmp/x.wav", "replace": 1 }),
+        json!({ "path": "/tmp/x.wav", "format": "WAV" }),
+    ] {
+        let (code, _) = err("command.run", run(bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    // These pass here and are refused further in: `..` and a place inside
+    // the open package by the core (Ruling 3, `hostile_bounce_requests_are_refused`),
+    // the largest range by the core's length check.
+    for passes in [
+        json!({ "path": "/tmp/../x.wav" }),
+        json!({ "range": "selection", "start": 0, "end": i64::MAX / 2, "path": "/tmp/x.wav" }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(passes.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{passes}"
+        );
+    }
+    let (code, message) = err("command.run", run(json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Bounce"), "{message}");
 }

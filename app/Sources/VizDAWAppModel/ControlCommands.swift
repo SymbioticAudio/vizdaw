@@ -34,10 +34,16 @@ public enum ControlJobs {
 
     /// The answer for `j`: an import or conversion that created nothing and had problems
     /// failed; a partial success carries its problems as warnings.
-    public static func answer(_ j: JobRow) -> JobAnswer {
+    public static func answer(_ j: JobRow, bounce: BounceResultRow? = nil) -> JobAnswer {
         switch j.state {
         case .running: return .wait
         case .done:
+            // A bounce wrote its files even when it has problems (clipped
+            // samples, a bypassed plugin): ok, with warnings (plan 5f-2
+            // Ruling 10).
+            if j.kind == .bounce {
+                return .ok(status: BounceCommands.status(bounce ?? BounceResultRow(files: [], media: []), problems: j.problems))
+            }
             if j.kind != .format, j.created.isEmpty, !j.problems.isEmpty {
                 return .failed(j.problems.joined(separator: "; "))
             }
@@ -195,7 +201,7 @@ public enum ControlCommands {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
-            .union(AutomationCommands.ids).union(SurfaceCommands.ids)
+            .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -303,6 +309,17 @@ public enum ControlCommands {
                 return .job(command: id, doc: docID, job: try m.session.convertMedia())
             } catch {
                 return .failed(.thrown(error, "Convert Failed"))
+            }
+        case BounceCommands.id:
+            switch BounceCommands.request(args, m) {
+            case .failure(let f):
+                return .failed(f)
+            case .success(let req):
+                do {
+                    return .job(command: id, doc: docID, job: try m.session.bounce(req: req))
+                } catch {
+                    return .failed(.thrown(error, "Bounce Failed"))
+                }
             }
         case "window.mixer":
             host.showMixer(docID)
