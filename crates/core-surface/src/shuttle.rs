@@ -50,7 +50,7 @@ fn wound(a: Duration, b: Duration) -> f64 {
 struct Press {
     forward: bool,
     at: Instant,
-    /// When the last Wind was emitted.
+    /// When the last Wind was emitted (`None`: none yet).
     last: Option<Instant>,
 }
 
@@ -83,14 +83,16 @@ impl Shuttle {
         });
     }
 
-    /// After a tap `Skip(±1)`; after a hold the `Wind` since the last one (none when zero).
+    /// `Skip(±1)` when no wind step was emitted (a tap, or a hold released
+    /// before its first step); else the `Wind` since the last one (none when zero).
     pub fn release(&mut self, forward: bool, now: Instant) -> Vec<SurfaceAction> {
         let Some(p) = self.press.filter(|p| p.forward == forward) else {
             return Vec::new();
         };
         self.press = None;
-        let held = now.saturating_duration_since(p.at);
-        if p.last.is_none() && held < SHUTTLE_HOLD {
+        // A release never does nothing (Ruling T1-M4): before SHUTTLE_HOLD it
+        // is a tap, and at or after it, with no wind step emitted yet, too.
+        if p.last.is_none() {
             return vec![SurfaceAction::Skip(if forward { 1 } else { -1 })];
         }
         let q = p.wind(now);
@@ -113,12 +115,13 @@ impl Shuttle {
             return Vec::new();
         }
         let q = p.wind(now);
-        p.last = Some(now);
         if q == 0.0 {
-            Vec::new()
-        } else {
-            vec![SurfaceAction::Wind(q)]
+            return Vec::new();
         }
+        // `last` is set only by an emitted step, so a release can tell a
+        // hold that wound from one that did not.
+        p.last = Some(now);
+        vec![SurfaceAction::Wind(q)]
     }
 
     /// Forget a press (release_all).

@@ -379,3 +379,31 @@ fn a_touch_takes_over_an_idle_hold_on_its_fader() {
         "nothing held after the release"
     );
 }
+
+/// Ruling T1-M4: a Rewind/Fast Forward release never does nothing. Before
+/// SHUTTLE_HOLD it is a tap; at or after it, with no wind step emitted yet,
+/// it still counts as a tap.
+#[test]
+fn a_release_with_no_wind_step_yet_is_a_tap() {
+    let ms = Duration::from_millis;
+    let v = view(8);
+    let (mut m, now) = shown(false, &v);
+    for (held, button, skip) in [
+        (399, 0x5C, 1),
+        (400, 0x5C, 1),
+        (400, 0x5B, -1),
+        (499, 0x5B, -1),
+    ] {
+        let at = now + ms(held);
+        assert!(m.input(&[0x90, button, 0x7F], now).is_empty());
+        assert!(
+            m.tick(now + ms(held.min(450))).is_empty(),
+            "no wind step before 500 ms"
+        );
+        assert_eq!(
+            m.input(&[0x90, button, 0x00], at),
+            vec![A::Skip(skip)],
+            "released after {held} ms with no wind step: a tap"
+        );
+    }
+}

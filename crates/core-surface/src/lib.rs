@@ -25,7 +25,69 @@ pub use shuttle::{SHUTTLE_HOLD, Shuttle, WIND_EVERY, wind_rate};
 use core_model::automation::{AutomationMode, AutomationTarget};
 use core_model::ids::StripId;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long a sent fader value is an echo (Ruling 13).
+pub const ECHO_WINDOW: Duration = Duration::from_millis(100);
+
+/// A bank group's layout (Ruling 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Bank {
+    /// The first strip the group shows.
+    pub offset: usize,
+    /// How many units the group has.
+    pub units: usize,
+}
+
+impl Bank {
+    /// The strips the group shows: 8 × units.
+    pub fn width(&self) -> usize {
+        self.units.saturating_mul(8)
+    }
+
+    /// The first strip unit `k` (0-based, in position order) shows.
+    pub fn first(&self, k: usize) -> usize {
+        self.offset.saturating_add(k.saturating_mul(8))
+    }
+
+    /// Applies Bank(±n) / Channel(±n) and clamps to `0..=strips − width` (0 when fewer).
+    pub fn shift(&mut self, a: &SurfaceAction, strips: usize) {
+        let step = match *a {
+            SurfaceAction::Bank(n) => Some((n, self.width())),
+            SurfaceAction::Channel(n) => Some((n, 1)),
+            _ => None,
+        };
+        if let Some((n, by)) = step {
+            let d = usize::try_from(n.unsigned_abs())
+                .unwrap_or(usize::MAX)
+                .saturating_mul(by);
+            self.offset = if n < 0 {
+                self.offset.saturating_sub(d)
+            } else {
+                self.offset.saturating_add(d)
+            };
+        }
+        self.clamp(strips);
+    }
+
+    /// Clamps the offset to `0..=strips − width` (0 when fewer).
+    pub fn clamp(&mut self, strips: usize) {
+        self.offset = self.offset.min(strips.saturating_sub(self.width()));
+    }
+}
+
+/// The 7-segment code of one display character (Ruling 14): ASCII
+/// `0x40`–`0x5F` as `− 0x40`, `0x20`–`0x3F` as itself (lower case as upper
+/// case, anything else a blank), plus `0x40` for a following dot.
+pub fn seg(c: char, dot: bool) -> u8 {
+    let c = c.to_ascii_uppercase();
+    let code = match u8::try_from(c) {
+        Ok(b @ 0x40..=0x5F) => b - 0x40,
+        Ok(b @ 0x20..=0x3F) => b,
+        _ => 0x20,
+    };
+    if dot { code | 0x40 } else { code }
+}
 
 /// Unit types (spec §8.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -170,6 +232,13 @@ pub trait Surface: Send {
     /// them, its touch flags, pending hi bytes and the shuttle (Ruling 3:
     /// a disconnect or a removal).
     fn release_all(&mut self) -> Vec<AutomationTarget>;
+    /// The V-pot assignment, for units that have one (MCU and MCU XT).
+    fn assign(&self) -> Option<Assign> {
+        None
+    }
+    /// Sets the V-pot assignment: the group manager passes the main unit's
+    /// to its extenders, which cannot see it (Ruling 3; Ruling T1-M2).
+    fn set_assign(&mut self, _assign: Assign) {}
 }
 
 /// A new state machine of `kind`.
