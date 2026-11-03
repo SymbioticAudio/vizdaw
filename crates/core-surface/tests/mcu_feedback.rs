@@ -7,7 +7,9 @@ use core_model::automation::{AutomationMode, AutomationTarget as T};
 use core_model::ids::{PluginInstanceId, StripId};
 use core_model::mixer::ParamId;
 use core_surface::mcu::Mcu;
-use core_surface::{Bank, ParamView, Phase, Surface, SurfaceAction as A, seg};
+use core_surface::{
+    Bank, ECHO_WINDOW, IDLE_RELEASE, ParamView, Phase, Surface, SurfaceAction as A, seg,
+};
 use std::time::{Duration, Instant};
 
 fn has(fb: &[Vec<u8>], m: &[u8]) -> bool {
@@ -45,6 +47,12 @@ fn faders_leds_and_rings_follow_the_view() {
         "pan hard left: mode 1, position 1"
     );
     assert!(has(&fb, &[0xB0, 0x31, 0x16]), "centre: position 6");
+    assert!(has(&fb, &[0xE8, 0x00, 0x40]), "the master on the main unit");
+    let xt = Mcu::new(true).feedback(&v, 0, now);
+    assert!(
+        xt.iter().all(|x| x.first() != Some(&0xE8)),
+        "no master on an extender"
+    );
 }
 
 #[test]
@@ -87,6 +95,65 @@ fn no_fader_feedback_while_touched_then_one_on_release() {
         has(&fb, &[0xE0, 0x00, 0x20]),
         "0.25 → 4096: lsb 0, msb 0x20"
     );
+    // The master the same way (touch note 0x70).
+    let _ = m.input(&[0x90, 0x70, 0x7F], now);
+    v.master.as_mut().expect("the view has a master").fader = 0.25;
+    let fb = m.feedback(&v, 0, now + Duration::from_millis(60));
+    assert!(fb.iter().all(|x| x.first() != Some(&0xE8)), "{fb:?}");
+    let _ = m.input(&[0x90, 0x70, 0x00], now);
+    let fb = m.feedback(&v, 0, now + Duration::from_millis(80));
+    assert_eq!(fb.iter().filter(|x| x.first() == Some(&0xE8)).count(), 1);
+    assert!(has(&fb, &[0xE8, 0x00, 0x20]));
+}
+
+/// Review I1: a fader without touch sensing is treated as touched by its
+/// first value and released 500 ms after its last, so it gets no feedback
+/// until then, and one after.
+#[test]
+fn an_idle_held_fader_gets_no_feedback_until_its_release() {
+    let mut v = view(8);
+    let now = Instant::now();
+    let mut m = Mcu::new(false);
+    let _ = m.feedback(&v, 0, now);
+    match m.input(&[0xE0, 0x00, 0x20], now).as_slice() {
+        [A::Gesture(T::StripFader(StripId(1)), Phase::Touch(Some(_)))] => {}
+        other => panic!("an untouched move: {other:?}"),
+    }
+    v.strips[0].fader = 0.3;
+    let fb = m.feedback(&v, 0, now + Duration::from_millis(20));
+    assert!(fb.iter().all(|x| x.first() != Some(&0xE0)), "held: {fb:?}");
+    let at = now + IDLE_RELEASE;
+    assert!(matches!(
+        m.tick(at).as_slice(),
+        [A::IdleRelease(T::StripFader(StripId(1)), _)]
+    ));
+    let fb = m.feedback(&v, 0, at + Duration::from_millis(20));
+    assert_eq!(
+        fb.iter().filter(|x| x.first() == Some(&0xE0)).count(),
+        1,
+        "{fb:?}"
+    );
+    // 0.3 → round(4914.9) = 4915: lsb 0x33, msb 0x26.
+    assert!(has(&fb, &[0xE0, 0x33, 0x26]));
+}
+
+/// Review M2: a flood of host connection queries keeps one reply, the latest.
+#[test]
+fn a_flood_of_handshake_queries_keeps_one_reply() {
+    let v = view(8);
+    let now = Instant::now();
+    let mut m = Mcu::new(false);
+    for c in 0..100u8 {
+        let mut q = vec![0xF0, 0x00, 0x00, 0x66, 0x14, 0x01, 1, 2, 3, 4, 5, 6, 7];
+        q.extend_from_slice(&[c, 0x20, 0x30, 0x40]);
+        q.push(0xF7);
+        let _ = m.input(&q, now);
+    }
+    let fb = m.feedback(&v, 0, now);
+    let replies: Vec<_> = fb.iter().filter(|x| x.get(5) == Some(&0x02)).collect();
+    assert_eq!(replies.len(), 1);
+    let r = core_surface::mcu::handshake_response([99, 0x20, 0x30, 0x40]);
+    assert_eq!(replies[0][13..17], r, "the latest challenge's answer");
 }
 
 #[test]
@@ -264,6 +331,13 @@ fn an_echo_of_a_motor_move_is_ignored() {
     {
         [A::Gesture(T::StripFader(StripId(1)), Phase::Touch(Some(_)))] => {}
         other => panic!("after the echo window it is a move: {other:?}"),
+    }
+    // Review M1: "less than ECHO_WINDOW": at exactly the window it is a move.
+    let mut m = Mcu::new(false);
+    let _ = m.feedback(&v, 0, now);
+    match m.input(&[0xE0, 0x01, 0x40], now + ECHO_WINDOW).as_slice() {
+        [A::Gesture(T::StripFader(StripId(1)), Phase::Touch(Some(_)))] => {}
+        other => panic!("at the window's end it is a move: {other:?}"),
     }
 }
 

@@ -313,7 +313,14 @@ impl Mcu {
     fn feedback_faders(&mut self, now: Instant, out: &mut Vec<Vec<u8>>) {
         let slots = if self.extender { 8 } else { 9 };
         for slot in 0..slots {
-            if self.touched.get(slot).is_some_and(Option::is_some) {
+            // A touched fader gets no feedback, nor one held by an idle
+            // touch: a fader without touch sensing is touched by its first
+            // value until its idle release (spec §8; review I1).
+            if self.touched.get(slot).is_some_and(Option::is_some)
+                || self
+                    .fader_strip(slot)
+                    .is_some_and(|id| self.idle.holds(AutomationTarget::StripFader(id)))
+            {
                 continue;
             }
             let v = if slot == 8 {
@@ -535,7 +542,8 @@ impl Mcu {
                 reply.extend_from_slice(serial);
                 reply.extend_from_slice(&handshake_response(challenge));
                 reply.push(0xF7);
-                self.replies.push(reply);
+                // Only the latest challenge matters: a flood keeps one reply.
+                self.replies = vec![reply];
                 self.online = true;
                 Heard::Known
             }
@@ -773,6 +781,18 @@ impl Surface for Mcu {
 
     fn tick(&mut self, now: Instant) -> Vec<SurfaceAction> {
         let mut out = self.idle.tick(now);
+        // An idle-released fader is sent once by the next feedback.
+        for a in &out {
+            if let SurfaceAction::IdleRelease(AutomationTarget::StripFader(id), _) = a {
+                for slot in 0..9 {
+                    if self.fader_strip(slot) == Some(*id)
+                        && let Some(cached) = self.cache.faders.get_mut(slot)
+                    {
+                        *cached = None;
+                    }
+                }
+            }
+        }
         out.extend(self.shuttle.tick(now));
         out
     }

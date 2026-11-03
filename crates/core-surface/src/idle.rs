@@ -43,6 +43,11 @@ impl IdleTouches {
         self.open.get(&t).map(|&(v, _)| v)
     }
 
+    /// `t`'s idle touch is open: treated as touched (spec §8).
+    pub(crate) fn holds(&self, t: AutomationTarget) -> bool {
+        self.open.contains_key(&t)
+    }
+
     /// Closes `t`'s idle touch without a release: a real touch took it over.
     pub(crate) fn forget(&mut self, t: AutomationTarget) {
         self.open.remove(&t);
