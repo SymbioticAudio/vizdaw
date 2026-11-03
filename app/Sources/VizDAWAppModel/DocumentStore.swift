@@ -210,6 +210,9 @@ public final class DocumentStore {
     public var listPreferences = ListPreferences()
     /// The app's key bindings, handed to every document (plan 4f).
     public var keyBindings: KeyBindings?
+    /// The external sample editor's opener and watching, handed to every
+    /// document (plan 5f-3; the app sets the live ones, nil: fakes).
+    @ObservationIgnored public var externalTools: ExternalTools?
 
     public func newDemoAudio() -> UUID? {
         guard let make = makeDemoAudio else { return nil }
@@ -325,6 +328,8 @@ public final class DocumentStore {
             // No list outlives its document (none keeps MIDI input running).
             doc.dropLists()
             if doc.isPlaying { try? doc.session.stop() }
+            // Watching lasts until the project closes (spec §11).
+            doc.stopExternalEdits()
             try? doc.session.close()
         }
     }
@@ -339,6 +344,7 @@ public final class DocumentStore {
             let model = try DocumentModel(session: make())
             model.listPreferences = listPreferences
             model.keys = keyBindings
+            model.externalTools = externalTools
             let id = UUID()
             didMake?(id, model)
             documents[id] = model

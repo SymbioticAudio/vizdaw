@@ -32,6 +32,12 @@ struct VizDAWApp: App {
 
     init() {
         appStore.keyBindings = keyBindings
+        // The external sample editor (plan 5f-3 Ruling 5): the stub launches
+        // nothing (CI, the e2e).
+        let stub = ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub"
+        appStore.externalTools = ExternalTools(
+            opener: stub ? StubOpener() as any ExternalOpener : WorkspaceOpener(),
+            watching: LiveFileWatching())
         appStore.activate = { id in
             let w = ControlWindows.windows().first {
                 let t = ControlWindows.tagOf($0)

@@ -102,6 +102,11 @@ public final class DocumentModel {
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
     @ObservationIgnored private var synthModel: SynthSheets?
+    @ObservationIgnored private var externalModel: ExternalEditModel?
+    /// How this document opens and watches edit copies (plan 5f-3): the
+    /// store hands on the app's; nil gives fakes, which launch and watch
+    /// nothing.
+    @ObservationIgnored public var externalTools: ExternalTools?
 
     /// The Track Synth and New MIDI Destination sheets (plan 5d-2), made
     /// once.
@@ -136,6 +141,20 @@ public final class DocumentModel {
         bounceModel = m
         return m
     }
+
+    /// The external sample editor (plan 5f-3), made once from
+    /// `externalTools`.
+    public var external: ExternalEditModel {
+        if let m = externalModel { return m }
+        let t = externalTools ?? ExternalTools()
+        let m = ExternalEditModel(document: self, opener: t.opener, watching: t.watching, probe: t.probe, now: t.now)
+        externalModel = m
+        return m
+    }
+
+    /// The document closes: every external-edit watch stops
+    /// (`DocumentStore.close`; pre-flight I7(b)).
+    public func stopExternalEdits() { externalModel?.stopAll() }
 
     /// The media pool (plan 5b), made once.
     public var media: MediaModel {
@@ -572,6 +591,8 @@ public final class DocumentModel {
         }
         if u.overviewsChanged { overviewVersion += 1 }
         if !jobs.isEmpty { pollJobs() }
+        // Edit copies that are due start their import (plan 5f-3 Ruling 4).
+        externalModel?.tick()
         if u.slotsChanged { slotsVersion += 1 }
         if !u.paramsChanged.isEmpty { paramsChanged.formUnion(u.paramsChanged) }
         if !u.problems.isEmpty {
@@ -624,7 +645,11 @@ public final class DocumentModel {
 
     public func saveAs(path: String) {
         editor.storeLayout()
+        let untitled = needsSaveAs
         perform("Save Failed") { try $0.saveAs(path: path) }
+        // An untitled project's copies went to the Trash (plan 5f-3 Ruling
+        // 3, owner answer 2026-11-03): their watches stop (fold check M7).
+        if untitled, !needsSaveAs { externalModel?.forgetGone() }
     }
 
     // MARK: Plumbing
