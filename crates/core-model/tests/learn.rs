@@ -360,3 +360,44 @@ fn learn_maps_load_checked_and_undo_as_one_step() {
         "more than MAX_LEARN_MAPS"
     );
 }
+
+/// Plan 5f-1 Task 4 review: a kind refuses fields it does not know, as the
+/// other learn types do, and every kind as the app writes it still loads.
+#[test]
+fn learn_kinds_refuse_unknown_fields_and_still_load() {
+    for (text, kind) in [
+        (
+            r#"{"cc7":{"channel":0,"cc":7}}"#,
+            LearnKind::Cc7 { channel: 0, cc: 7 },
+        ),
+        (
+            r#"{"cc14":{"channel":1,"cc":2}}"#,
+            LearnKind::Cc14 { channel: 1, cc: 2 },
+        ),
+        (
+            r#"{"pitch_bend":{"channel":2}}"#,
+            LearnKind::PitchBend { channel: 2 },
+        ),
+        (
+            r#"{"note":{"channel":9,"note":36}}"#,
+            LearnKind::Note {
+                channel: 9,
+                note: 36,
+            },
+        ),
+    ] {
+        assert_eq!(serde_json::from_str::<LearnKind>(text).unwrap(), kind);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), text);
+    }
+    for text in [
+        r#"{"cc7":{"channel":0,"cc":7,"extra":1}}"#,
+        r#"{"pitch_bend":{"channel":2,"cc":1}}"#,
+    ] {
+        assert!(serde_json::from_str::<LearnKind>(text).is_err(), "{text}");
+    }
+    let map: LearnMap = serde_json::from_str(
+        r#"{"source":{"port":"Knobs","kind":{"cc7":{"channel":0,"cc":7}}},"target":{"strip_fader":1},"mode":"absolute","pickup":false}"#,
+    )
+    .unwrap();
+    assert!(!map.pickup && map.picks_up(), "can pick up, does not");
+}

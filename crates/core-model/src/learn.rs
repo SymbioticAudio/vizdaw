@@ -15,7 +15,7 @@ pub const MAX_LEARN_MAPS: usize = 512;
 
 /// What a control sends (spec §4.8); channels 0–15.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LearnKind {
     /// A 7-bit controller.
     Cc7 {
@@ -140,7 +140,9 @@ impl LearnSource {
 }
 
 impl LearnMap {
-    /// Whether pick-up applies to it (absolute CC, 14-bit or pitch bend).
+    /// Whether this map *can* use pick-up, from its kind and mode
+    /// (absolute CC, 14-bit or pitch bend). Its `pickup` flag says whether
+    /// it does: a map picks up when `pickup && picks_up()`.
     pub fn picks_up(&self) -> bool {
         self.mode == LearnMode::Absolute && !matches!(self.source.kind, LearnKind::Note { .. })
     }
