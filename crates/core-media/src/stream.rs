@@ -1039,6 +1039,21 @@ fn start_over(s: &Shared, d: &mut Disk, media: MediaId) {
     }
 }
 
+/// The lowest file frame of voice `v` (streaming need `n`) the real-time
+/// side may read: under the published playhead, or under the hint should
+/// the locate land first, or under the led seam (never past the playhead);
+/// with none of them in the voice, its `base`.
+fn floor(v: &Voice, n: &Need, at: [Option<u64>; 3]) -> u64 {
+    let (base, hi) = (v.base.load(Ordering::Relaxed), v.hi.load(Ordering::Acquire));
+    at.into_iter()
+        .flatten()
+        .filter(|&p| p >= n.start && p < n.end())
+        .map(|p| n.file_frame + (p - n.start))
+        .filter(|&f| f >= base && f <= hi)
+        .min()
+        .unwrap_or(base)
+}
+
 /// One disk pass (see the module docs).
 fn pass(s: &Shared, d: &mut Disk) {
     if s.stalled.load(Ordering::Relaxed) {
@@ -1133,7 +1148,16 @@ fn pass(s: &Shared, d: &mut Disk) {
                     && v.start.load(Ordering::Relaxed) == n.start
                     && v.origin.load(Ordering::Relaxed) == n.file_frame;
                 let (lo, hi) = v.range();
-                (live && lo <= want && want <= hi).then_some(i)
+                // A full voice whose floor is held below `want` (by a
+                // playhead before or elsewhere in the need) cannot grow
+                // to `until`; this window gets its own voice instead of
+                // dropping the one that could (a seam behind a voice
+                // filled from the region's start).
+                let stuck = || {
+                    let floor = floor(v, n, [Some(pos), hint, seam_at]);
+                    want > floor && hi >= floor + v.cap && hi < until
+                };
+                (live && lo <= want && want <= hi && !stuck()).then_some(i)
             });
             let slot = match found {
                 Some(i) => i,
@@ -1184,18 +1208,8 @@ fn pass(s: &Shared, d: &mut Disk) {
         let Some(path) = media.get(&n.media).cloned() else {
             continue;
         };
-        let (base, hi) = (v.base.load(Ordering::Relaxed), v.hi.load(Ordering::Acquire));
-        // The floor is the lowest frame of this voice the real-time side
-        // may read: under the published playhead, or under the hint
-        // should the locate land first (never past the playhead).
-        let floor = [Some(pos), hint, seam_at]
-            .into_iter()
-            .flatten()
-            .filter(|&p| p >= n.start && p < n.end())
-            .map(|p| n.file_frame + (p - n.start))
-            .filter(|&f| f >= base && f <= hi)
-            .min()
-            .unwrap_or(base);
+        let hi = v.hi.load(Ordering::Acquire);
+        let floor = floor(v, &n, [Some(pos), hint, seam_at]);
         let space = (floor + v.cap).saturating_sub(hi);
         let count = space.min(until.saturating_sub(hi));
         let fb = 4 * v.stride as u64;
@@ -1430,6 +1444,44 @@ mod tests {
             s.service();
             assert_eq!(read(&r, &n, pos, 512, false), Read::Done, "at {pos}");
             pos += 512;
+        }
+    }
+
+    /// A region's loop seam keeps its own voice: the full voice filled
+    /// from the region's start (its floor held there by a playhead before
+    /// the region) is not taken for the seam, so the seam's voice is not
+    /// retired and the whole seam is prefilled, also after a locate past
+    /// the region (the proptest case 2a949a7a of
+    /// `streamed_render_equals_cached_render`).
+    #[test]
+    fn a_seam_past_a_full_voice_keeps_its_own_voice() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 30_000, 2);
+        // Voices hold 4_800 frames; the seam is 2_400.
+        for into in [4_800u64, 3_000] {
+            let (s, r) = manual(small());
+            s.set_media(vec![MediaFile {
+                id: MediaId(0),
+                path: p.clone(),
+            }]);
+            let n = need(0, 1_000, 20_000, 0);
+            s.set_plan(Arc::from(vec![n]));
+            let ls = n.start + into;
+            s.set_loop(Some((ls, 26_000)));
+            // Stopped before the region: its start and its seam fill.
+            r.begin_block(0);
+            s.service();
+            s.service();
+            // A locate inside the loop, past the region.
+            r.begin_block(25_000);
+            s.service();
+            s.service();
+            // The wrap plays the region's whole seam.
+            assert_eq!(
+                read(&r, &n, into, 2_400, true),
+                Read::Done,
+                "loop start {into} frames in"
+            );
         }
     }
 
