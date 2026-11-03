@@ -137,6 +137,8 @@ pub use templates::SequenceTemplate;
 #[uniffi::export]
 pub fn shutdown() -> Result<(), VizError> {
     ffi_guard(|| {
+        // Surfaces that say goodbye hear it before the app goes (plan 5f-4 Ruling 4).
+        surfaces::goodbye_all();
         host::reset();
         Ok(())
     })

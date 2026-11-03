@@ -1141,6 +1141,7 @@ pub fn result_json(r: &ControlResult) -> Value {
                     crate::surfaces::SurfaceKindRow::Mcu => "mcu",
                     crate::surfaces::SurfaceKindRow::McuXt => "mcu_xt",
                     crate::surfaces::SurfaceKindRow::Hui => "hui",
+                    crate::surfaces::SurfaceKindRow::KontrolMk3 => "kontrol_mk3",
                 },
                 "input": u.input, "output": u.output, "position": u.position,
                 "connected": u.connected, "online": u.online, "ignored": u.ignored,

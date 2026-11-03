@@ -36,6 +36,8 @@ pub(crate) trait Ports: Send {
 pub(crate) struct FakePorts {
     /// The names the surfaces use.
     wanted: BTreeSet<String>,
+    /// Other names present (test hook: ports no surface uses yet).
+    extra: BTreeSet<String>,
     /// Names that are not present.
     missing: BTreeSet<String>,
     /// Answer the last refresh's lists.
@@ -55,6 +57,14 @@ impl FakePorts {
         self.missing = ports.into_iter().collect();
     }
 
+    /// Adds ports present beside the wanted ones.
+    pub(crate) fn add_ports(&mut self, names: Vec<String>) {
+        self.extra.extend(names);
+        if !self.stale {
+            self.seen = self.present();
+        }
+    }
+
     /// Turns stale lists on or off.
     pub(crate) fn set_stale(&mut self, on: bool) {
         self.stale = on;
@@ -68,7 +78,11 @@ impl FakePorts {
 
     /// The names present now.
     fn present(&self) -> Vec<String> {
-        self.wanted.difference(&self.missing).cloned().collect()
+        self.wanted
+            .union(&self.extra)
+            .filter(|p| !self.missing.contains(*p))
+            .cloned()
+            .collect()
     }
 
     /// The list `sources` and `destinations` answer.

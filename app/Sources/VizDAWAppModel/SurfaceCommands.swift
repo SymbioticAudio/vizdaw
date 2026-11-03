@@ -69,6 +69,7 @@ public enum SurfaceCommands {
         case "mcu": .mcu
         case "mcu_xt": .mcuXt
         case "hui": .hui
+        case "kontrol_mk3": .kontrolMk3
         default: nil
         }
     }
@@ -177,7 +178,7 @@ public enum SurfaceCommands {
     /// `surface.add`: answers the new surface's ID in `status` ("surface 3").
     static func runAdd(_ args: [ControlArg], _ surfaces: any SurfaceCore) -> ControlOutcome {
         guard let kind = args.text("type").flatMap(parseKind) else {
-            return invalid("surface.add: `type` is mcu, mcu_xt or hui")
+            return invalid("surface.add: `type` is mcu, mcu_xt, hui or kontrol_mk3")
         }
         // The ports go as given: the core matches CoreMIDI names and refuses
         // a blank one (`failed`, as the e2e expects).

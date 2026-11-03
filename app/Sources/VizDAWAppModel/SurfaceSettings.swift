@@ -63,7 +63,8 @@ public struct SurfaceDraft: Equatable, Sendable {
     private func tryAdd(_ kind: SurfaceKindRow, input: String, output: String, position: UInt8?) -> String? {
         defer { refresh() }
         do {
-            _ = try core.add(kind, input, output, kind == .hui ? nil : position)
+            // A HUI-compatible unit and a Kontrol are banks of their own.
+            _ = try core.add(kind, input, output, kind == .hui || kind == .kontrolMk3 ? nil : position)
             return nil
         } catch {
             return AlertItem(error, title: "Add Surface Failed").message
@@ -121,6 +122,7 @@ public struct SurfaceDraft: Equatable, Sendable {
         case .mcu: "MCU-compatible"
         case .mcuXt: "MCU XT-compatible"
         case .hui: "HUI-compatible"
+        case .kontrolMk3: "Kontrol S-Series MK3 (DAW mode)"
         }
     }
 

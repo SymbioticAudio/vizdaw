@@ -143,6 +143,18 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
         #expect(SurfaceCommands.parseKind("hui") == .hui && SurfaceCommands.parseKind("mackie") == nil)
     }
 
+    /// Plan 5f-4 Rulings 2 and 11: the type is parsed, named descriptively,
+    /// and added without a position (a bank of its own).
+    @Test func aKontrolIsAddedWithoutAPosition() throws {
+        #expect(SurfaceCommands.parseKind("kontrol_mk3") == .kontrolMk3)
+        #expect(SurfaceSettings.title(.kontrolMk3) == "Kontrol S-Series MK3 (DAW mode)")
+        let c = FakeSurfaceCore()
+        let s = SurfaceSettings(core: c)
+        s.add(.kontrolMk3, input: "In A", output: "Out A", position: 3)
+        #expect(c.rows.map(\.kind) == [.kontrolMk3])
+        #expect(c.rows.first?.position == 0, "no position is passed")
+    }
+
     /// Task 9 review M3: only a call that names no window answers the
     /// app-wide surfaces; a named window without a document is `no_document`.
     @Test func onlyAWindowlessCallAnswersTheAppWideSurfaces() {

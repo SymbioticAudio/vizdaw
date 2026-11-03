@@ -1610,3 +1610,19 @@ fn external_commands_check_their_params() {
     assert_eq!(open.dialogs[0].name, "Choose External Editor");
     assert_eq!(open.dialogs[0].answered_by, ["app"]);
 }
+
+/// Plan 5f-4 Ruling 2: `surface.add` takes the Kontrol type.
+#[test]
+fn kontrol_mk3_is_a_surface_type() {
+    let run = |params: Value| json!({ "id": "surface.add", "params": params });
+    assert!(matches!(
+        ok(
+            "command.run",
+            run(json!({ "type": "kontrol_mk3", "input": "A", "output": "A" }))
+        ),
+        Command::CommandRun { .. }
+    ));
+    let spec = registry::find("surface.add").unwrap();
+    let help = spec.params.iter().find(|p| p.name == "type").unwrap().help;
+    assert!(help.contains("kontrol_mk3"), "{help}");
+}

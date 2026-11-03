@@ -666,9 +666,9 @@ const SURFACE_ID: ParamSpec = ParamSpec {
 const SURFACE_ADD_PARAMS: &[ParamSpec] = &[
     ParamSpec {
         name: "type",
-        kind: ParamKind::Choice(&["mcu", "mcu_xt", "hui"]),
+        kind: ParamKind::Choice(&["mcu", "mcu_xt", "hui", "kontrol_mk3"]),
         required: true,
-        help: "mcu, mcu_xt or hui.",
+        help: "mcu, mcu_xt, hui or kontrol_mk3 (a Kontrol S-Series MK3 keyboard's DAW port).",
     },
     ParamSpec {
         name: "input",

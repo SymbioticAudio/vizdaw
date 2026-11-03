@@ -87,6 +87,8 @@ pub enum SurfaceKindRow {
     McuXt,
     /// A HUI-compatible unit.
     Hui,
+    /// A Kontrol S-Series MK3 keyboard's DAW port (plan 5f-4).
+    KontrolMk3,
 }
 
 impl From<SurfaceKindRow> for SurfaceKind {
@@ -95,6 +97,7 @@ impl From<SurfaceKindRow> for SurfaceKind {
             SurfaceKindRow::Mcu => SurfaceKind::Mcu,
             SurfaceKindRow::McuXt => SurfaceKind::McuXt,
             SurfaceKindRow::Hui => SurfaceKind::Hui,
+            SurfaceKindRow::KontrolMk3 => SurfaceKind::KontrolMk3,
         }
     }
 }
@@ -105,6 +108,7 @@ impl From<SurfaceKind> for SurfaceKindRow {
             SurfaceKind::Mcu => SurfaceKindRow::Mcu,
             SurfaceKind::McuXt => SurfaceKindRow::McuXt,
             SurfaceKind::Hui => SurfaceKindRow::Hui,
+            SurfaceKind::KontrolMk3 => SurfaceKindRow::KontrolMk3,
         }
     }
 }
@@ -120,7 +124,8 @@ pub struct SurfaceRow {
     pub input: String,
     /// The MIDI destination it is sent to.
     pub output: String,
-    /// Its place in the MCU bank group (0–3; 0 for a HUI-compatible unit).
+    /// Its place in the MCU bank group (0–3; 0 for a HUI-compatible unit
+    /// or a Kontrol S-Series MK3 keyboard, each a bank of its own).
     pub position: u8,
     /// Both ports present.
     pub connected: bool,
@@ -371,6 +376,8 @@ pub(crate) enum Group {
     Mcu,
     /// One HUI-compatible unit.
     Hui(SurfaceId),
+    /// One Kontrol S-Series MK3 keyboard (plan 5f-4 Ruling 2).
+    Kontrol(SurfaceId),
 }
 
 /// A release a session is owed (Ruling 11): whose hand, the target, and
@@ -441,6 +448,7 @@ impl Unit {
         match self.kind {
             SurfaceKind::Mcu | SurfaceKind::McuXt => Group::Mcu,
             SurfaceKind::Hui => Group::Hui(self.id),
+            SurfaceKind::KontrolMk3 => Group::Kontrol(self.id),
         }
     }
 
@@ -469,6 +477,22 @@ struct Entry {
     position: u8,
 }
 
+/// An entry of a kind this build does not know, kept verbatim (controller
+/// ruling K-0, pre-flight C1; Ruling 9). A known entry that shares a port
+/// with one is kept the same way (fold check M-6). Not driven, not listed.
+struct Kept {
+    id: SurfaceId,
+    /// The kind as written (named in its problem line).
+    #[allow(dead_code)]
+    kind: String,
+    /// Its `input` and `output`, when it has them.
+    ports: Vec<String>,
+    /// The entry as written.
+    raw: serde_json::Value,
+    /// The line each load adds for it.
+    problem: String,
+}
+
 /// One learned command in `surfaces.json` (Ruling 9).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -487,8 +511,10 @@ pub(crate) struct CommandEntry {
 #[serde(deny_unknown_fields)]
 struct SurfacesFile {
     version: u32,
+    /// Each entry as written: a known kind is read as an [`Entry`], any
+    /// other kind is kept verbatim (plan 5f-4, controller ruling K-0).
     #[serde(default)]
-    surfaces: Vec<Entry>,
+    surfaces: Vec<serde_json::Value>,
     #[serde(default)]
     commands: Vec<CommandEntry>,
 }
@@ -700,6 +726,11 @@ pub(crate) struct Registry {
     /// `surfaces.json` was read (or found missing): saving cannot lose a
     /// file not yet read (Task 7 review M4).
     loaded: bool,
+    /// Entries of kinds this build does not know, kept as written.
+    kept: Vec<Kept>,
+    /// The app is quitting: the units have been let go of and nothing more
+    /// is sent (after `goodbye_all`).
+    quit: bool,
     /// The focused session's maps and the command maps, driving targets.
     mapper: Mapper,
     /// The focused session's maps as `mapper` has them.
@@ -733,6 +764,8 @@ impl Registry {
             commands: Vec::new(),
             problems: Vec::new(),
             loaded: false,
+            kept: Vec::new(),
+            quit: false,
             mapper: Mapper::default(),
             maps: Vec::new(),
             mapper_fed: None,
@@ -771,6 +804,9 @@ impl Registry {
 
     /// Refreshes the transport, stamps the 2 s timer, then checks every unit.
     fn refresh_and_check(&mut self, now: Instant) {
+        if self.quit {
+            return;
+        }
         let names = self.names();
         let ports = self.ports();
         ports.want(&names);
@@ -783,6 +819,9 @@ impl Registry {
     /// that lost a port releases what it holds; one that got both back is
     /// refreshed and greeted.
     fn check(&mut self) {
+        if self.quit {
+            return;
+        }
         let ports = self.ports();
         let sources = ports.sources();
         let dests = ports.destinations();
@@ -810,6 +849,9 @@ impl Registry {
 
     /// Sends `messages` to unit `i`; a failed send disconnects it at once.
     fn send(&mut self, i: usize, messages: &[Vec<u8>]) -> bool {
+        if self.quit {
+            return true;
+        }
         let Some(out) = self.units.get(i).map(|u| u.output.clone()) else {
             return false;
         };
@@ -892,7 +934,9 @@ impl Registry {
     fn free_id(&self) -> Option<SurfaceId> {
         (0..u32::from(SurfaceId::COUNT))
             .filter_map(SurfaceId::new)
-            .find(|id| self.units.iter().all(|u| u.id != *id))
+            .find(|id| {
+                self.units.iter().all(|u| u.id != *id) && self.kept.iter().all(|k| k.id != *id)
+            })
     }
 
     /// Reads `path` once (Task 7 review M4), before anything is saved: a
@@ -921,11 +965,16 @@ impl Registry {
         };
         self.clear();
         self.commands.clear();
+        self.kept.clear();
         self.loaded = true;
         match loaded {
             None => {}
-            Some(Ok((units, commands))) => {
+            Some(Ok((units, kept, commands))) => {
                 self.units = units;
+                for k in &kept {
+                    self.problem(k.problem.clone());
+                }
+                self.kept = kept;
                 self.commands = commands;
             }
             Some(Err(why)) => {
@@ -957,7 +1006,7 @@ impl Registry {
         position: Option<u8>,
         now: Instant,
     ) -> Result<SurfaceId, VizError> {
-        let position = check_unit(&self.units, kind, &input, &output, position)?;
+        let position = check_unit(&self.units, &self.kept, kind, &input, &output, position)?;
         let id = self
             .free_id()
             .ok_or_else(|| crate::events::bad("VizDAW drives at most 16 surfaces"))?;
@@ -977,9 +1026,21 @@ impl Registry {
             .iter()
             .position(|u| u.id.get() == id)
             .ok_or_else(|| crate::events::bad(&format!("there is no surface {id}")))?;
-        let mut u = self.units.remove(i);
-        let held = u.surface.release_all();
-        self.owe(TouchHolder::Surface(u.id), held);
+        // Its holds are answered first; then it is told it is let go of,
+        // while it is still there (plan 5f-4 Ruling 4, pre-flight I1): the
+        // goodbye neither forgets nor answers holds.
+        let mut bye = Vec::new();
+        if let Some(u) = self.units.get_mut(i) {
+            let online = u.surface.online();
+            let held = u.surface.release_all();
+            if u.connected && online {
+                bye = u.surface.goodbye();
+            }
+            let id = u.id;
+            self.owe(TouchHolder::Surface(id), held);
+        }
+        self.send(i, &bye);
+        self.units.remove(i);
         self.rebank();
         Ok(())
     }
@@ -995,19 +1056,28 @@ impl Registry {
 
     /// The file as it stands now.
     fn file(&self) -> SurfacesFile {
-        SurfacesFile {
-            version: VERSION,
-            surfaces: self
-                .units
-                .iter()
-                .map(|u| Entry {
+        let mut entries: Vec<(u32, serde_json::Value)> = self
+            .units
+            .iter()
+            .map(|u| {
+                let entry = Entry {
                     id: u.id.get(),
                     kind: u.kind,
                     input: u.input.clone(),
                     output: u.output.clone(),
                     position: u.position,
-                })
-                .collect(),
+                };
+                (
+                    u.id.get(),
+                    serde_json::to_value(entry).unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .chain(self.kept.iter().map(|k| (k.id.get(), k.raw.clone())))
+            .collect();
+        entries.sort_by_key(|(id, _)| *id);
+        SurfacesFile {
+            version: VERSION,
+            surfaces: entries.into_iter().map(|(_, v)| v).collect(),
             commands: self.commands.clone(),
         }
     }
@@ -1249,10 +1319,20 @@ impl Registry {
             // Injected bytes and an unknown host time are stamped now.
             let host_ns = (item.host_ns != 0).then_some(item.host_ns);
             if let Some(i) = self.units.iter().position(|u| u.input == item.port) {
-                let acts = match self.units.get_mut(i) {
-                    Some(u) => u.surface.input(&item.bytes, item.at),
+                let (acts, problem) = match self.units.get_mut(i) {
+                    Some(u) => {
+                        let acts = u.surface.input(&item.bytes, item.at);
+                        let problem = u
+                            .surface
+                            .take_problem()
+                            .map(|p| format!("surface {}: {p}", u.id.get()));
+                        (acts, problem)
+                    }
                     None => continue,
                 };
+                if let Some(p) = problem {
+                    self.problem(p);
+                }
                 let from = Origin {
                     tag,
                     host_ns,
@@ -1378,7 +1458,7 @@ impl Registry {
             };
             self.send(i, &msgs);
         }
-        if due.mapper {
+        if due.mapper && !self.quit {
             self.mapper_fed = Some(now);
             let dests = self.ports().destinations();
             for (port, msg) in self.mapper.feedback(current) {
@@ -1408,6 +1488,27 @@ impl Registry {
                 // The next session's feedback is complete.
                 u.surface.refresh();
             }
+        }
+    }
+
+    /// The app quits (plan 5f-4 Ruling 4, M2): every connected, online unit
+    /// is let go of, then nothing more is sent. Their holds are not
+    /// answered here: the sessions end with the app.
+    fn goodbye_all(&mut self) {
+        for i in 0..self.units.len() {
+            let bye = match self.units.get_mut(i) {
+                Some(u) if u.connected && u.surface.online() => u.surface.goodbye(),
+                _ => continue,
+            };
+            self.send(i, &bye);
+        }
+        self.quit = true;
+        // Dropping the CoreMIDI transport joins its sender after its last
+        // drain, so the goodbye leaves before the app exits. The fake one
+        // stays, so `debug_sent` reads the goodbye.
+        #[cfg(not(feature = "test-hooks"))]
+        {
+            self.ports = None;
         }
     }
 
@@ -1567,6 +1668,7 @@ fn check_port(what: &str, name: &str) -> Result<(), VizError> {
 /// (`None`: the next free one in its group).
 fn check_unit(
     units: &[Unit],
+    kept: &[Kept],
     kind: SurfaceKind,
     input: &str,
     output: &str,
@@ -1574,7 +1676,7 @@ fn check_unit(
 ) -> Result<u8, VizError> {
     check_port("input", input)?;
     check_port("output", output)?;
-    if units.len() >= MAX_SURFACES {
+    if units.len().saturating_add(kept.len()) >= MAX_SURFACES {
         return Err(crate::events::bad("VizDAW drives at most 16 surfaces"));
     }
     let count = |k: SurfaceKind| units.iter().filter(|u| u.kind == k).count();
@@ -1588,6 +1690,14 @@ fn check_unit(
         _ => {}
     }
     let position = match kind {
+        SurfaceKind::KontrolMk3 => match position {
+            None | Some(0) => 0,
+            Some(_) => {
+                return Err(crate::events::bad(
+                    "a Kontrol S-Series MK3 keyboard is a bank of its own: `position` must be 0",
+                ));
+            }
+        },
         SurfaceKind::Hui => match position {
             None | Some(0) => 0,
             Some(_) => {
@@ -1616,6 +1726,16 @@ fn check_unit(
             }
         }
     };
+    for k in kept {
+        for port in [input, output] {
+            if k.ports.iter().any(|p| p == port) {
+                return Err(crate::events::bad(&format!(
+                    "“{port}” is used by surface {}",
+                    k.id.get()
+                )));
+            }
+        }
+    }
     for u in units {
         if u.input == input {
             return Err(crate::events::bad(&format!(
@@ -1660,10 +1780,15 @@ fn check_command(c: &CommandEntry) -> Result<(), String> {
     bindable(&c.command)
 }
 
-/// The units and commands of a file's text, or why it is refused (Ruling
-/// 9: it parses, has version 1, and every entry passes `surface_add`'s
-/// checks with a unique ID below 16).
-fn parse_file(text: &str) -> Result<(Vec<Unit>, Vec<CommandEntry>), String> {
+/// What a file holds: its driven units, kept entries and commands.
+type Parsed = (Vec<Unit>, Vec<Kept>, Vec<CommandEntry>);
+
+/// The units, kept entries and commands of a file's text, or why it is
+/// refused (Ruling 9: it parses, has version 1, and every entry of a known
+/// kind passes `surface_add`'s checks, with a unique ID below 16; an entry
+/// of a kind this build does not know is kept as written, controller ruling
+/// K-0).
+fn parse_file(text: &str) -> Result<Parsed, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     match value.get("version").and_then(serde_json::Value::as_u64) {
         Some(v) if v == u64::from(VERSION) => {}
@@ -1672,16 +1797,97 @@ fn parse_file(text: &str) -> Result<(Vec<Unit>, Vec<CommandEntry>), String> {
     }
     let file: SurfacesFile = serde_json::from_value(value).map_err(|e| e.to_string())?;
     let mut units: Vec<Unit> = Vec::new();
-    for e in file.surfaces {
-        let id = SurfaceId::new(e.id).ok_or_else(|| format!("surface ID {} is not 0–15", e.id))?;
-        if units.iter().any(|u| u.id == id) {
-            return Err(format!("surface ID {} appears twice", e.id));
+    // The known entries as written, by ID, in case one has to be kept.
+    let mut raws: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
+    let mut kept: Vec<Kept> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for raw in file.surfaces {
+        let n = raw
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "a surface has no ID (an integer 0–15)".to_string())?;
+        let id = u32::try_from(n)
+            .ok()
+            .and_then(SurfaceId::new)
+            .ok_or_else(|| format!("surface ID {n} is not 0–15"))?;
+        if !seen.insert(id.get()) {
+            return Err(format!("surface ID {n} appears twice"));
         }
-        let position = check_unit(&units, e.kind, &e.input, &e.output, Some(e.position))
-            .map_err(|err| format!("surface {}: {err}", e.id))?;
-        units.push(Unit::new(id, e.kind, e.input, e.output, position));
+        let kind = raw
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("surface {n} has no kind"))?
+            .to_string();
+        if serde_json::from_value::<SurfaceKind>(serde_json::Value::String(kind.clone())).is_ok() {
+            let e: Entry =
+                serde_json::from_value(raw.clone()).map_err(|err| format!("surface {n}: {err}"))?;
+            let position = check_unit(&units, &[], e.kind, &e.input, &e.output, Some(e.position))
+                .map_err(|err| format!("surface {n}: {err}"))?;
+            raws.insert(id.get(), raw);
+            units.push(Unit::new(id, e.kind, e.input, e.output, position));
+        } else {
+            let ports = ["input", "output"]
+                .iter()
+                .filter_map(|f| raw.get(*f).and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .collect();
+            let problem = format!(
+                "surface {n}: “{kind}” needs a newer VizDAW; it is kept in {FILE} and not driven"
+            );
+            kept.push(Kept {
+                id,
+                kind,
+                ports,
+                raw,
+                problem,
+            });
+        }
     }
+    if units.len().saturating_add(kept.len()) > MAX_SURFACES {
+        return Err("VizDAW drives at most 16 surfaces".to_string());
+    }
+    kept.sort_by_key(|k| k.id);
+    for (i, k) in kept.iter().enumerate() {
+        for other in kept.iter().skip(i.saturating_add(1)) {
+            if let Some(port) = other.ports.iter().find(|p| k.ports.contains(p)) {
+                return Err(format!("“{port}” is used by surface {}", k.id.get()));
+            }
+        }
+    }
+    // A known unit on a port an unknown kind uses is kept as written, not
+    // driven (fold check M-6).
+    let unknown = kept.len();
+    let mut driven = Vec::new();
+    for u in units {
+        let shared = kept.iter().take(unknown).find_map(|k| {
+            [&u.input, &u.output]
+                .into_iter()
+                .find(|p| k.ports.contains(p))
+                .map(|p| (k.id.get(), p.clone()))
+        });
+        match (shared, raws.remove(&u.id.get())) {
+            (Some((k, port)), Some(raw)) => {
+                let problem = format!(
+                    "surface {}: “{port}” is also used by surface {k}, of a kind this build does not know; kept and not driven",
+                    u.id.get()
+                );
+                kept.push(Kept {
+                    id: u.id,
+                    kind: serde_json::to_value(u.kind)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                    ports: vec![u.input.clone(), u.output.clone()],
+                    raw,
+                    problem,
+                });
+            }
+            _ => driven.push(u),
+        }
+    }
+    let mut units = driven;
     units.sort_by_key(|u| u.id);
+    kept.sort_by_key(|k| k.id);
     let mut sources = BTreeSet::new();
     for c in &file.commands {
         check_command(c)?;
@@ -1689,7 +1895,7 @@ fn parse_file(text: &str) -> Result<(Vec<Unit>, Vec<CommandEntry>), String> {
             return Err(format!("{} is learned twice", c.source.describe()));
         }
     }
-    Ok((units, file.commands))
+    Ok((units, kept, file.commands))
 }
 
 /// Writes `file` to `path` with the codebase's atomic writer (temp file,
@@ -2025,6 +2231,11 @@ pub(crate) fn state_with_feedback() -> SurfaceStateRow {
     lock().state(true)
 }
 
+/// Every connected unit is let go of (`shutdown`).
+pub(crate) fn goodbye_all() {
+    lock().goodbye_all();
+}
+
 /// The session closes: cancel its learn; if it was focused, blank the
 /// units (Ruling 11).
 pub(crate) fn session_closed(id: u64) {
@@ -2124,7 +2335,8 @@ pub(crate) struct SessionSurfaces {
 
 /// Reads surfaces.json (Ruling 9); problems go to `state.get surfaces`.
 /// A file that does not parse, is newer or fails a check is renamed
-/// `surfaces.json.bad` and VizDAW starts with no surfaces.
+/// `surfaces.json.bad` and VizDAW starts with no surfaces; an entry of a
+/// kind this build does not know is kept (plan 5f-4).
 #[uniffi::export]
 pub fn surfaces_load() -> Result<(), VizError> {
     ffi_guard(|| {
@@ -2208,6 +2420,25 @@ fn system_ports() -> SurfacePortsRow {
         }
     }
     SurfacePortsRow::default()
+}
+
+/// The MIDI ports whose names say KONTROL, MK3 and DAW (plan 5f-4 Ruling
+/// 3), in the transport's order.
+#[uniffi::export]
+pub fn kontrol_ports() -> SurfacePortsRow {
+    std::panic::catch_unwind(|| {
+        let all = surface_ports();
+        let keep = |v: Vec<String>| {
+            v.into_iter()
+                .filter(|n| core_surface::kontrol::is_daw_port(n))
+                .collect::<Vec<_>>()
+        };
+        SurfacePortsRow {
+            sources: keep(all.sources),
+            destinations: keep(all.destinations),
+        }
+    })
+    .unwrap_or_default()
 }
 
 /// `state.get surfaces` without a document (pre-flight M29): no feedback
@@ -2329,6 +2560,12 @@ fn with_fake<T>(f: impl FnOnce(&mut ports::FakePorts) -> T) -> T {
 #[cfg(feature = "test-hooks")]
 pub fn debug_set_missing(ports: Vec<String>) {
     with_fake(|f| f.set_missing(ports));
+}
+
+/// Adds ports no surface uses yet to the fake transport.
+#[cfg(feature = "test-hooks")]
+pub fn debug_add_ports(names: Vec<String>) {
+    with_fake(|f| f.add_ports(names));
 }
 
 /// Makes `sources()` and `destinations()` answer the last `refresh()`.
@@ -2753,7 +2990,8 @@ mod tests {
     #[test]
     fn a_file_is_checked_entry_by_entry() {
         let ok = r#"{"version": 1, "surfaces": [{"id": 3, "kind": "mcu_xt", "input": "a", "output": "b", "position": 2}], "commands": [{"source": {"port": "K", "kind": {"note": {"channel": 0, "note": 60}}}, "command": "transport.stop"}]}"#;
-        let (units, commands) = parse_file(ok).unwrap();
+        let (units, kept, commands) = parse_file(ok).unwrap();
+        assert!(kept.is_empty());
         assert_eq!(
             units.first().map(|u| (u.id.get(), u.position)),
             Some((3, 2))
@@ -2774,8 +3012,24 @@ mod tests {
                 "a duplicate ID",
             ),
             (
-                r#"{"version": 1, "surfaces": [{"id": 0, "kind": "tape", "input": "a", "output": "b", "position": 0}]}"#,
-                "an unknown kind",
+                r#"{"version": 1, "surfaces": [{"id": 16, "kind": "tape", "input": "a", "output": "b"}]}"#,
+                "a kept entry with ID 16",
+            ),
+            (
+                r#"{"version": 1, "surfaces": [{"id": 0, "kind": "hui", "input": "a", "output": "b", "position": 0}, {"id": 0, "kind": "tape", "input": "c", "output": "d"}]}"#,
+                "a kept entry repeating a known entry's ID",
+            ),
+            (
+                r#"{"version": 1, "surfaces": [{"id": 0, "kind": 5, "input": "a", "output": "b"}]}"#,
+                "a kind that is not a string",
+            ),
+            (
+                r#"{"version": 1, "surfaces": [{"id": 0, "input": "a", "output": "b"}]}"#,
+                "an entry with no kind",
+            ),
+            (
+                r#"{"version": 1, "surfaces": [{"id": 0, "kind": "tape", "input": "a", "output": "b"}, {"id": 1, "kind": "reel", "input": "a", "output": "c"}]}"#,
+                "two kept entries sharing an input",
             ),
             (
                 r#"{"version": 1, "surfaces": [{"id": 0, "kind": "hui", "input": "", "output": "b", "position": 0}]}"#,
@@ -2796,5 +3050,44 @@ mod tests {
         ] {
             assert!(parse_file(bad).is_err(), "{why}");
         }
+        let many = |n: usize| {
+            let entries: Vec<_> = (0..n)
+                .map(|i| {
+                    let kind = if i < 3 { "tape" } else { "hui" };
+                    serde_json::json!({
+                        "id": i, "kind": kind, "input": format!("i{i}"),
+                        "output": format!("o{i}"), "position": 0
+                    })
+                })
+                .collect();
+            serde_json::json!({ "version": 1, "surfaces": entries }).to_string()
+        };
+        assert!(parse_file(&many(16)).is_ok(), "16 entries are fine");
+        assert!(
+            parse_file(&many(17)).is_err(),
+            "17 entries, three of them kept"
+        );
+        // An unknown kind is kept, not refused (controller ruling K-0).
+        let tape = r#"{"version": 1, "surfaces": [{"id": 0, "kind": "tape", "input": "a", "output": "b"}]}"#;
+        let (units, kept, _) = parse_file(tape).unwrap();
+        assert!(units.is_empty());
+        assert_eq!(
+            kept.iter()
+                .map(|k| (k.id.get(), k.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "tape")]
+        );
+        // A known entry on a port a kept entry uses is kept too (fold check M-6).
+        let shared = r#"{"version": 1, "surfaces": [{"id": 0, "kind": "tape", "input": "a", "output": "b"}, {"id": 1, "kind": "hui", "input": "a", "output": "c", "position": 0}]}"#;
+        let (units, kept, _) = parse_file(shared).unwrap();
+        assert!(units.is_empty());
+        assert_eq!(kept.len(), 2);
+        let second = kept.get(1).unwrap();
+        assert_eq!(second.kind, "hui");
+        assert!(
+            second.problem.contains("also used by surface 0"),
+            "{}",
+            second.problem
+        );
     }
 }

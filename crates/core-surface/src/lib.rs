@@ -14,6 +14,7 @@
 
 pub mod hui;
 mod idle;
+pub mod kontrol;
 pub mod learn;
 pub mod mcu;
 pub mod midi;
@@ -102,6 +103,21 @@ pub enum SurfaceKind {
     McuXt,
     /// A HUI-compatible unit.
     Hui,
+    /// A Kontrol S-Series MK3 keyboard's DAW port (plan 5f-4).
+    KontrolMk3,
+}
+
+/// What kind of track a strip is, for surfaces that show it (plan 5f-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrackKind {
+    /// Fed by an instrument (plug-in or built-in).
+    Instrument,
+    /// An audio output path.
+    Audio,
+    /// An aux bus.
+    Bus,
+    /// The master.
+    Master,
 }
 
 /// A gesture phase (spec §7.1); `Touch(None)`: at the value heard now.
@@ -281,6 +297,16 @@ pub trait Surface: Send {
     /// Sets the V-pot assignment: the group manager passes the main unit's
     /// to its extenders, which cannot see it (Ruling 3; Ruling T1-M2).
     fn set_assign(&mut self, _assign: Assign) {}
+    /// Messages that let the unit go (a removal, the app quitting); the
+    /// unit is offline after them (plan 5f-4 Ruling 4).
+    fn goodbye(&mut self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+    /// A problem the unit found since the last call, said once (plan
+    /// 5f-4 Ruling 4).
+    fn take_problem(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// A unit's online state (Ruling T3-1). `Down` is the online→offline
@@ -365,5 +391,6 @@ pub fn new_surface(kind: SurfaceKind) -> Box<dyn Surface> {
         SurfaceKind::Mcu => Box::new(mcu::Mcu::new(false)),
         SurfaceKind::McuXt => Box::new(mcu::Mcu::new(true)),
         SurfaceKind::Hui => Box::new(hui::Hui::new()),
+        SurfaceKind::KontrolMk3 => Box::new(kontrol::Kontrol::new()),
     }
 }
