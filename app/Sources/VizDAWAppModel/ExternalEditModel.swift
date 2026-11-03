@@ -119,6 +119,9 @@ public final class ExternalEditModel {
     private var watchers: [UInt64: ExternalEditWatcher] = [:]
     private struct Running {
         let job: UInt64
+        /// The copy imported: a copy Open wrote since is not marked by
+        /// this job's end (Task 4 review M3).
+        let path: String
         let stamp: FileStamp
     }
     private var running: [UInt64: Running] = [:]
@@ -126,6 +129,10 @@ public final class ExternalEditModel {
     private var written: [UInt64: FileStamp] = [:]
     /// Regions whose import waits on another job; told once (fold check M1).
     private var waiting: Set<UInt64> = []
+    /// Regions whose menu Reload met a busy core: the tick retries them
+    /// until the core takes the import, without the second's wait or the
+    /// skip (Task 4 review I1).
+    private var retries: Set<UInt64> = []
     private var closed = false
 
     public init(
@@ -193,17 +200,28 @@ public final class ExternalEditModel {
             guard let s = w.changedSinceApplied() else {
                 return probe.stamp(row.path) == nil ? .failed(Self.goneMessage) : .unchanged
             }
-            return start(region, w, s, announce: announce)
+            return start(region, w, s, announce: announce, retry: announce)
         }
     }
 
     /// The document's tick (`DocumentModel.idle`): ended imports are noted,
-    /// then each copy that is due and has no import running starts one.
+    /// then each copy with no import running starts one when a menu Reload
+    /// waits on it (its copy still differs from the one applied) or its
+    /// change is due.
     public func tick() {
         guard !closed else { return }
         poll()
         for (region, w) in watchers where running[region] == nil {
-            if let s = w.due() { _ = start(region, w, s, announce: true) }
+            if retries.contains(region) {
+                if let s = w.changedSinceApplied() {
+                    _ = start(region, w, s, announce: true, retry: true)
+                } else {
+                    retries.remove(region)
+                    waiting.remove(region)
+                }
+            } else if let s = w.due() {
+                _ = start(region, w, s, announce: true)
+            }
         }
     }
 
@@ -223,6 +241,8 @@ public final class ExternalEditModel {
         for w in watchers.values { w.stop() }
         watchers = [:]
         running = [:]
+        retries = []
+        waiting = []
     }
 
     private func watch(_ region: UInt64, _ path: String, applied: FileStamp?) {
@@ -233,14 +253,19 @@ public final class ExternalEditModel {
 
     private func stopWatching(_ region: UInt64) {
         watchers.removeValue(forKey: region)?.stop()
+        retries.remove(region)
+        waiting.remove(region)
     }
 
-    /// Starts importing `s` of `w`. A busy core is retried at the next
-    /// tick, without an alert (pre-flight I11); any other refusal skips
-    /// `s` (and, from the tick, is an alert).
-    private func start(_ region: UInt64, _ w: ExternalEditWatcher, _ s: FileStamp, announce: Bool)
-        -> ExternalOutcome
-    {
+    /// Starts importing `s` of `w`. A busy core is no failure (pre-flight
+    /// I11): a tick-started import is retried at the next tick while its
+    /// change stays due, and a menu Reload's (`retry`) at every tick until
+    /// the core takes it (Task 4 review I1); the channel's answers Busy to
+    /// its caller. Any other refusal skips `s` (and, announced, is an
+    /// alert).
+    private func start(
+        _ region: UInt64, _ w: ExternalEditWatcher, _ s: FileStamp, announce: Bool, retry: Bool = false
+    ) -> ExternalOutcome {
         let path = w.path
         var refused: (any Error)?
         var job: UInt64?
@@ -256,17 +281,20 @@ public final class ExternalEditModel {
             }
         }
         if let job {
-            running[region] = Running(job: job, stamp: s)
+            running[region] = Running(job: job, path: path, stamp: s)
             waiting.remove(region)
+            retries.remove(region)
             return .importing(job)
         }
         let outcome = refusal(refused)
         if case .busy = outcome {
             // Retried at the next tick; said once (fold check M1).
+            if retry { retries.insert(region) }
             if announce, waiting.insert(region).inserted { document.editor.status = Self.waitingMessage }
             return outcome
         }
         waiting.remove(region)
+        retries.remove(region)
         w.skip(s)
         if announce, case .failed(let why) = outcome {
             document.alert = AlertItem(title: Self.failedTitle, message: why)
@@ -292,6 +320,9 @@ public final class ExternalEditModel {
             }
             guard j.state != .running else { continue }
             running[region] = nil
+            // Open wrote another copy meanwhile: its watch keeps the stamp
+            // Open recorded (Task 4 review M3).
+            guard watchers[region]?.path == r.path else { continue }
             if j.state == .done {
                 watchers[region]?.applied(r.stamp)
             } else {

@@ -7,8 +7,13 @@ import VizDAWCore
 /// Stamps the tests set by path.
 final class FakeProbe: FileProbe {
     var stamps: [String: FileStamp] = [:]
+    /// How many stamps were read.
+    var reads = 0
 
-    func stamp(_ path: String) -> FileStamp? { stamps[path] }
+    func stamp(_ path: String) -> FileStamp? {
+        reads += 1
+        return stamps[path]
+    }
 }
 
 /// One document's external edits (plan 5f-3 Task 4; Rulings 4, 5, 7;
@@ -239,5 +244,137 @@ final class FakeProbe: FileProbe {
         m.alert = nil
         m.idle()
         #expect(m.alert == nil, "once")
+    }
+
+    // MARK: Fix round 1 (Task 4 review)
+
+    /// Review I1: a menu Reload the core refuses Busy waits for the job
+    /// and then imports, though no event came and the second never ran.
+    @Test func aBusyReloadIsRetried() throws {
+        let (m, f) = try model()
+        try m.external.open(7, app: nil)
+        probe.stamps[path] = stamp(2000)  // changed, no event
+        f.applyError = .Busy(message: "Wait for the media job to finish.")
+        #expect(m.external.reload(7) == .busy("Wait for the media job to finish."))
+        #expect(m.editor.status == ExternalEditModel.waitingMessage)
+        m.editor.status = nil
+        m.idle()
+        #expect(f.externalApplies.isEmpty && m.alert == nil, "still busy: still waiting")
+        #expect(m.editor.status == nil, "the wait is said once")
+        f.applyError = nil
+        clock.advance(2)
+        m.idle()
+        m.idle()
+        #expect(f.externalApplies.count == 1, "the wait the status line promised")
+        f.jobRows[5001]?.state = .done
+        clock.advance(2)
+        m.idle()
+        #expect(f.externalApplies.count == 1 && m.external.importing.isEmpty)
+        #expect(m.external.reload(7) == .unchanged)
+    }
+
+    /// Review I1: a cancelled change is retried by a Reload that first
+    /// meets a busy core (the skip does not stop the retry).
+    @Test func aBusyReloadRetriesASkippedChange() throws {
+        let (m, f) = try model()
+        try m.external.open(7, app: nil)
+        save(2000)
+        clock.advance(1)
+        m.idle()
+        f.jobRows[5001]?.state = .cancelled
+        m.idle()
+        f.applyError = .Busy(message: "Wait for the media job to finish.")
+        #expect(m.external.reload(7) == .busy("Wait for the media job to finish."))
+        f.applyError = nil
+        m.idle()
+        #expect(f.externalApplies.count == 2, "Reload's retry ignores the skip")
+    }
+
+    /// The channel's Reload (no announce) answers Busy itself: no retry.
+    @Test func aBusyChannelReloadIsNotRetried() throws {
+        let (m, f) = try model()
+        try m.external.open(7, app: nil)
+        probe.stamps[path] = stamp(2000)
+        f.applyError = .Busy(message: "Wait for the media job to finish.")
+        #expect(m.external.reload(7, announce: false) == .busy("Wait for the media job to finish."))
+        #expect(m.editor.status == nil)
+        f.applyError = nil
+        clock.advance(2)
+        m.idle()
+        #expect(f.externalApplies.isEmpty, "the caller retries")
+    }
+
+    /// Review M2 (fold check M7).
+    @Test func anUntitledSaveAsStopsTheTrashedCopiesWatches() throws {
+        let (m, f) = try model()
+        #expect(m.needsSaveAs)
+        try m.external.open(7, app: nil)
+        #expect(watching.live == 1 && m.external.watched == [7])
+        // Save As trashes the scratch package's copies: the core says gone.
+        f.externalStates[7] = .gone
+        m.saveAs(path: "/tmp/q.vizdaw")
+        #expect(!m.needsSaveAs)
+        #expect(watching.live == 0 && m.external.watched.isEmpty, "the trashed copy is not watched")
+        save(2000)
+        clock.advance(2)
+        m.idle()
+        #expect(f.externalApplies.isEmpty && m.alert == nil, "a later save raises nothing")
+    }
+
+    @Test func aTitledSaveAsKeepsWatching() throws {
+        let (m, f) = try model()
+        f.savedPath = "/tmp/p.vizdaw"
+        try m.external.open(7, app: nil)
+        m.saveAs(path: "/tmp/q.vizdaw")
+        #expect(watching.live == 1 && m.external.watched == [7], "the copy stays in the old package (pre-flight I1)")
+        save(2000)
+        clock.advance(1)
+        m.idle()
+        #expect(f.externalApplies.count == 1, "and still applies")
+    }
+
+    @Test func anUntitledSaveAsKeepsACopyLeftBehind() throws {
+        let (m, _) = try model()
+        try m.external.open(7, app: nil)
+        // The Trash refused it: the copy is still a copy.
+        m.saveAs(path: "/tmp/q.vizdaw")
+        #expect(watching.live == 1 && m.external.watched == [7])
+    }
+
+    /// Review M1: a settled change that needs no import stops being read
+    /// each tick.
+    @Test func aSettledUnchangedCopyIsNotReadEachTick() throws {
+        let (m, _) = try model()
+        try m.external.open(7, app: nil)
+        watching.fire(path)  // the editor opened it; nothing changed
+        clock.advance(2)
+        m.idle()
+        let reads = probe.reads
+        m.idle()
+        m.idle()
+        #expect(probe.reads == reads, "no event, no read")
+        save(2000)
+        clock.advance(1)
+        m.idle()
+        #expect(probe.reads > reads, "the next event is read again")
+    }
+
+    /// Review M3: an import of the old copy ending after Open wrote a new
+    /// one does not mark the new copy applied.
+    @Test func reopeningDuringAnImportKeepsTheNewCopysStamp() throws {
+        let (m, f) = try model()
+        try m.external.open(7, app: nil)
+        save(2000)
+        clock.advance(1)
+        m.idle()
+        #expect(m.external.importing == [7])
+        let second = "/tmp/p.vizdaw/Media/Edits/Kick edit 2.wav"
+        f.externalRow = ExternalEditRow(event: 7, path: second, from: 1)
+        probe.stamps[second] = stamp(500)
+        try m.external.open(7, app: nil)
+        f.jobRows[5001]?.state = .done
+        m.idle()
+        #expect(m.external.reload(7) == .unchanged, "the new copy is as Open wrote it")
+        #expect(f.externalApplies.count == 1)
     }
 }

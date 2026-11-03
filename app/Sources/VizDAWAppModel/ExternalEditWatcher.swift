@@ -116,7 +116,7 @@ public final class ExternalEditWatcher {
         token = watching.watch(path) { [weak self] in self?.changed() }
     }
 
-    /// A watch event (Reload calls it too): the stamp now, and when.
+    /// A watch event: the stamp now, and when.
     public func changed() {
         guard !isStopped else { return }
         change = (now(), probe.stamp(path))
@@ -132,9 +132,14 @@ public final class ExternalEditWatcher {
             change = (now(), s)
             return nil
         }
-        guard let s, s != appliedStamp, s != skipped,
-            now().timeIntervalSince(c.at) >= Self.stableSeconds
-        else { return nil }
+        guard let s, now().timeIntervalSince(c.at) >= Self.stableSeconds else { return nil }
+        if s == appliedStamp || s == skipped {
+            // Settled with nothing to import: not read again until the
+            // next event (Task 4 review M1). A missing file's change stays,
+            // for its return.
+            change = nil
+            return nil
+        }
         return s
     }
 
