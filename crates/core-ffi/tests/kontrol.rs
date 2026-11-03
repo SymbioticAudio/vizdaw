@@ -1,6 +1,8 @@
 //! The Kontrol S-Series MK3 in the core (plan 5f-4 Tasks 1, 4, 5; spec
 //! §8.4). The fake port transport only: no CoreMIDI client is created.
 
+mod common;
+
 use core_surface::kontrol::sysex;
 use std::sync::{Mutex, MutexGuard};
 use vizdaw_ffi::surfaces::{
@@ -254,5 +256,371 @@ fn a_surfaces_file_with_an_unknown_kind_keeps_the_rest() {
     assert!(
         surface_remove(3).is_err(),
         "not listed, so not removable here"
+    );
+}
+
+fn synth(s: &vizdaw_ffi::Session) -> (u64, usize) {
+    let m = s.mixer().unwrap();
+    let i = m
+        .strips
+        .iter()
+        .position(|x| x.name == "Built-in Synth")
+        .unwrap();
+    (m.strips[i].id, i)
+}
+
+fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let until = std::time::Instant::now() + common::wait_limit();
+    while !ok() {
+        assert!(
+            std::time::Instant::now() < until,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Feedback is due: 30 ms on, one idle.
+fn feed(s: &vizdaw_ffi::Session) -> Vec<Vec<u8>> {
+    debug_advance(30);
+    s.idle().unwrap();
+    debug_sent(DAW)
+}
+
+#[track_caller]
+fn has(sent: &[Vec<u8>], m: &[u8]) {
+    assert!(sent.iter().any(|x| x == m), "{m:02x?} not in {sent:02x?}");
+}
+
+/// Inserts `plugins` (CLAP test ids and names) on the synth, plays until
+/// they run, focuses a Kontrol in Plug-in mode on the synth: (session,
+/// kontrol, synth, slot ids in chain order).
+fn plugin_mode(
+    plugins: &[(&str, &str)],
+) -> (std::sync::Arc<vizdaw_ffi::Session>, u32, u64, Vec<u64>) {
+    use vizdaw_ffi::{PluginFormatTag, PluginRefRow, SlotStatus};
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let (synth, _) = synth(&s);
+    for (id, name) in plugins {
+        s.add_insert(
+            synth,
+            None,
+            PluginRefRow {
+                format: PluginFormatTag::Clap,
+                id: (*id).into(),
+                name: (*name).into(),
+                vendor: "VizDAW".into(),
+                version: "1.0.0".into(),
+            },
+        )
+        .unwrap();
+    }
+    s.play(song(&s)).unwrap();
+    wait_until("the plugins to run", || {
+        s.idle().unwrap();
+        s.plugin_slots()
+            .unwrap()
+            .iter()
+            .all(|x| x.status == SlotStatus::Live)
+    });
+    let slots = s
+        .mixer()
+        .unwrap()
+        .strips
+        .into_iter()
+        .find(|x| x.id == synth)
+        .unwrap()
+        .inserts
+        .into_iter()
+        .map(|x| x.id)
+        .collect();
+    let id = kontrol(&s);
+    s.set_surface_selection(vec![synth]).unwrap();
+    s.inject_surface(id, vec![0xBF, 0x05, 0x01]).unwrap();
+    (s, id, synth, slots)
+}
+
+#[test]
+fn a_volume_knob_ride_is_one_set_fader_step() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let (synth, k) = synth(&s);
+    let id = kontrol(&s);
+    let before = s.mixer().unwrap().strips[k].gain_db;
+    s.inject_surface(id, vec![0xBF, 0x50 + k as u8, 0x05])
+        .unwrap();
+    assert_eq!(
+        s.automation_state().unwrap().touched,
+        vec![vizdaw_ffi::AutomationTargetRow::StripFader { strip: synth }]
+    );
+    debug_advance(600);
+    s.idle().unwrap();
+    assert!(
+        s.automation_state().unwrap().touched.is_empty(),
+        "released half a second after the last turn"
+    );
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader")
+    );
+    assert!(s.mixer().unwrap().strips[k].gain_db > before);
+}
+
+/// Pre-flight I1 (Ruling 4): a knob held when the surface is removed is
+/// released once, before the goodbye, which neither forgets nor answers it.
+#[test]
+fn removing_a_kontrol_while_a_knob_is_held_releases_it_once() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let (synth, k) = synth(&s);
+    let id = kontrol(&s);
+    s.inject_surface(id, vec![0xBF, 0x50 + k as u8, 0x05])
+        .unwrap();
+    assert_eq!(
+        s.automation_state().unwrap().touched,
+        vec![vizdaw_ffi::AutomationTargetRow::StripFader { strip: synth }]
+    );
+    let _ = debug_sent(DAW);
+    surface_remove(id).unwrap();
+    assert_eq!(
+        debug_sent(DAW).last(),
+        Some(&vec![0xBF, 0x02, 0x00]),
+        "it is let go of"
+    );
+    s.idle().unwrap();
+    assert!(
+        s.automation_state().unwrap().touched.is_empty(),
+        "released at the removal, not left held"
+    );
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader")
+    );
+    debug_advance(600);
+    s.idle().unwrap();
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Fader"),
+        "released once"
+    );
+}
+
+/// Ruling 4 (owner, 2026-11-03): a keyboard switched out of DAW mode (its
+/// goodbye) is asked again 2 s later and, once it answers, gets its name
+/// and the full state through the core.
+#[test]
+fn a_keyboard_switched_out_of_daw_mode_is_pulled_back_with_a_full_refresh() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let id = kontrol(&s);
+    let first = s.mixer().unwrap().strips[0].name.clone();
+    s.inject_surface(id, vec![0xBF, 0x02, 0x00]).unwrap();
+    assert!(!row(id).online);
+    let _ = debug_sent(DAW);
+    debug_advance(2_000);
+    s.idle().unwrap();
+    assert!(
+        debug_sent(DAW).contains(&V4.to_vec()),
+        "VizDAW asks again: it pulls the keyboard back"
+    );
+    s.inject_surface(id, V4.to_vec()).unwrap();
+    assert!(row(id).online);
+    let sent = feed(&s);
+    assert_eq!(
+        sent.first(),
+        Some(&sysex(0x07, 1, 0, b"Generic")),
+        "{sent:02x?}"
+    );
+    has(
+        &sent,
+        &sysex(0x48, 0, 0, &core_surface::kontrol::ascii(&first)),
+    );
+}
+
+#[test]
+fn kontrol_buttons_become_events_for_the_app() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let (synth, k) = synth(&s);
+    let id = kontrol(&s);
+    let _ = s.take_surface_events().unwrap();
+    let bytes = [
+        vec![0xBF, 0x10, 0x01, 0xBF, 0x11, 0x01, 0xBF, 0x14, 0x01],
+        sysex(0x42, 1, k as u8, &[]),
+    ]
+    .concat();
+    s.inject_surface(id, bytes).unwrap();
+    use vizdaw_ffi::surfaces::SurfaceEventRow as E;
+    let c = |id: &str| E::Command {
+        id: id.into(),
+        programmatic: true,
+    };
+    assert_eq!(
+        s.take_surface_events().unwrap(),
+        vec![
+            c("transport.play"),
+            c("transport.return_to_start"),
+            c("transport.play"),
+            c("transport.stop"),
+            E::Select { strip: synth },
+        ]
+    );
+}
+
+#[test]
+fn track_navigation_moves_the_kontrols_own_bank_with_the_selection() {
+    use vizdaw_ffi::surfaces::SurfaceEventRow as E;
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    for i in 0..12 {
+        s.add_bus(format!("Extra {i}")).unwrap();
+    }
+    let mcu = surface_add(Kind::Mcu, "M In".into(), "M Out".into(), None).unwrap();
+    let id = kontrol(&s);
+    let strips = s.mixer().unwrap().strips;
+    s.set_surface_selection(vec![strips[7].id]).unwrap();
+    let _ = feed(&s);
+    let _ = s.take_surface_events().unwrap();
+    s.inject_surface(id, vec![0xBF, 0x30, 0x01]).unwrap();
+    assert_eq!(
+        s.take_surface_events().unwrap(),
+        vec![E::Select {
+            strip: strips[8].id
+        }]
+    );
+    let sent = feed(&s);
+    let name = core_surface::kontrol::ascii(&strips[1].name);
+    has(&sent, &sysex(0x48, 0, 0, &name));
+    s.inject_surface(mcu, vec![0x90, 0x18, 0x7F]).unwrap();
+    assert_eq!(
+        s.take_surface_events().unwrap(),
+        vec![E::Select {
+            strip: strips[0].id
+        }],
+        "the MCU group keeps its bank"
+    );
+}
+
+#[test]
+fn the_kontrol_sees_kinds_colours_tempo_and_solo() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    // The demo's bank shows one strip: a bus gives the solo another slot.
+    s.add_bus("Extra".into()).unwrap();
+    let (_, k) = synth(&s);
+    let slot = k as u8;
+    let id = kontrol(&s);
+    let sent = debug_sent(DAW);
+    has(&sent, &sysex(0x40, 2, slot, &[]));
+    has(&sent, &sysex(0x4B, 0, slot, b"#3C8CE6"));
+    assert!(
+        sent.iter()
+            .any(|m| m.get(10) == Some(&0x19) && m.len() == 19),
+        "the tempo"
+    );
+    s.inject_surface(id, sysex(0x44, 1, slot, &[])).unwrap();
+    let sent = feed(&s);
+    has(&sent, &sysex(0x44, 1, slot, &[]));
+    let other = if k == 0 { 1u8 } else { 0 };
+    has(&sent, &sysex(0x4A, 1, other, &[]));
+}
+
+#[test]
+fn kontrol_meters_are_counted_not_listed() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let id = kontrol(&s);
+    let st = s.surface_state().unwrap();
+    let f = st.feedback.iter().find(|f| f.surface == id).unwrap();
+    assert!(f.meters_sent >= 1);
+    let ni = "f0 00 21 09 00 00 44 43 01 00";
+    let vu = "f0 00 21 09 00 00 44 43 01 00 49";
+    assert!(
+        f.messages.iter().all(|m| !m.starts_with(vu)),
+        "{:?}",
+        f.messages
+    );
+    // The log keeps the last 64; a full refresh holds fewer than 64 CCs.
+    assert!(
+        f.messages.iter().any(|m| m.starts_with(ni)),
+        "SysEx is listed"
+    );
+}
+
+#[test]
+fn plugin_mode_pages_through_the_chain_and_a_knob_moves_the_parameter() {
+    let _g = serial();
+    let (s, id, _, slots) = plugin_mode(&[
+        ("vizdaw.test.gain", "Test Gain"),
+        ("vizdaw.test.bank", "Test Bank"),
+    ]);
+    // Pre-flight M15: the mode switch made the unit due at once; no time
+    // passed since the Mixer-mode feedback.
+    let sent = debug_sent(DAW);
+    has(&sent, &sysex(0x71, 0, 0, b"Test Gain\0Test Bank\0\0"));
+    has(&sent, &sysex(0x72, 0, 0, b"Gain"));
+    has(&sent, &sysex(0x74, 1, 0, &[]));
+    s.inject_surface(id, sysex(0x70, 0, 1, &[])).unwrap();
+    let sent = feed(&s);
+    has(&sent, &sysex(0x70, 0, 1, &[]));
+    has(&sent, &sysex(0x74, 3, 0, &[]));
+    has(&sent, &sysex(0x72, 0, 0, b"Bank"));
+    s.inject_surface(id, vec![0xBF, 0x31, 0x01]).unwrap();
+    let sent = feed(&s);
+    has(&sent, &sysex(0x74, 3, 1, &[]));
+    has(&sent, &sysex(0x75, 0, 0, b"Page 2"));
+    let bank = slots[1];
+    let value = |s: &vizdaw_ffi::Session| {
+        s.params(bank)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == 108)
+            .unwrap()
+            .value
+    };
+    let before = value(&s);
+    s.inject_surface(id, vec![0xBF, 0x70, 0x10]).unwrap();
+    s.stop().unwrap();
+    assert!(
+        value(&s) > before,
+        "knob 1 of page 2 moved the ninth parameter"
+    );
+}
+
+#[test]
+fn the_plugin_page_starts_over_when_the_selection_changes() {
+    let _g = serial();
+    let (s, id, synth, _) = plugin_mode(&[("vizdaw.test.bank", "Test Bank")]);
+    s.inject_surface(id, vec![0xBF, 0x31, 0x01]).unwrap();
+    has(&feed(&s), &sysex(0x74, 3, 1, &[]));
+    let bus = s
+        .mixer()
+        .unwrap()
+        .strips
+        .iter()
+        .find(|x| x.id != synth)
+        .unwrap()
+        .id;
+    s.set_surface_selection(vec![bus]).unwrap();
+    has(&feed(&s), &sysex(0x71, 0, 0, b"\0"));
+    s.set_surface_selection(vec![synth]).unwrap();
+    has(&feed(&s), &sysex(0x74, 3, 0, &[]));
+    s.stop().unwrap();
+}
+
+#[test]
+fn chain_and_page_buttons_with_nothing_to_show_are_counted() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let id = kontrol(&s);
+    s.inject_surface(id, vec![0xBF, 0x05, 0x01]).unwrap();
+    has(&feed(&s), &sysex(0x71, 0, 0, b"\0"));
+    let before = row(id).ignored;
+    s.inject_surface(id, vec![0xBF, 0x31, 0x01]).unwrap();
+    assert_eq!(
+        row(id).ignored,
+        before + 1,
+        "no selected strip: no page to turn"
     );
 }

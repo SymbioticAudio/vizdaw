@@ -9219,8 +9219,10 @@ impl Session {
                 }
                 // The registry moved the bank already.
                 A::Bank(_) | A::Channel(_) => true,
-                // Task 4 (pages) and Task 5 (presets) apply these (plan 5f-4).
-                A::PluginSlot(_) | A::PluginPage(_) | A::Preset(_) => false,
+                A::PluginSlot(i) => self.surface_plugin_slot(inner, i),
+                A::PluginPage(n) => self.surface_plugin_page(inner, n),
+                // Task 5 applies presets (plan 5f-4).
+                A::Preset(_) => false,
                 // Task 7 applies the keyboard's tempo and count-in (plan 5f-4).
                 A::Tempo { .. } | A::CountIn => false,
             };
@@ -9350,6 +9352,7 @@ impl Session {
         };
         let cached = self.surface_existing(&mut inner);
         let meters = inner.meters.take_surfaces();
+        Self::sync_page_focus(&mut inner);
         let shared: &Inner = &inner;
         let view = self.surface_view(shared, &order, &due, cached.as_ref(), &meters);
         let current = |t| Some(self.surface_heard(shared, t, cached.as_ref()));
@@ -9426,15 +9429,21 @@ impl Session {
             playing: host::transport_stopped(self.id) == Some(false),
             recording: inner.recording.is_some(),
             looping: inner.looped,
+            // With no transport or cursor sequence yet, the sequence a
+            // play would start (the demo shows 120 before any play).
             tempo: seq
+                .or_else(|| inner.selected_seq())
                 .and_then(|q| doc.sequence(q).ok())
                 .map_or(0.0, |q| q.tempo.bpm_at(tick)),
             soloing: m
                 .strips()
                 .keys()
                 .any(|id| heard(AutomationTarget::StripSolo(*id)) >= 0.5),
-            // Task 4 fills the plug-in page (plan 5f-4).
-            page: None,
+            page: if due.page {
+                self.surface_page(inner, cached)
+            } else {
+                None
+            },
             // Task 7 reads the document's count-in (plan 5f-4 Ruling 16).
             count_in: false,
             automation_suspended: crate::automation::suspended(),
@@ -9458,21 +9467,55 @@ impl Session {
         else {
             return Vec::new();
         };
-        let infos = plugins::with(self.id, |p| {
+        self.slot_param_views(inner, slot, 0, cached).0
+    }
+
+    /// How many automatable, non-hidden parameters `slot` has (the MCU's
+    /// filter); `None` when it is not running (plan 5f-4 Ruling 6).
+    fn slot_param_count(&self, slot: PluginInstanceId) -> Option<usize> {
+        plugins::with(self.id, |p| {
+            p.and_then(|p| p.instance(slot)).map(|inst| {
+                inst.info()
+                    .params
+                    .iter()
+                    .filter(|i| i.automatable && !i.hidden)
+                    .count()
+            })
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// Parameters `skip..skip+8` of `slot` as the surfaces show them, and
+    /// how many there are: the automatable, non-hidden ones in the plugin's
+    /// list order, with heard values and their plain text (Rulings 5, 6).
+    fn slot_param_views(
+        &self,
+        inner: &Inner,
+        slot: PluginInstanceId,
+        skip: usize,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> (Vec<core_surface::ParamView>, usize) {
+        let (infos, n) = plugins::with(self.id, |p| {
             p.and_then(|p| p.instance(slot))
                 .map(|inst| {
-                    inst.info()
+                    let all = inst
+                        .info()
                         .params
                         .iter()
-                        .filter(|i| i.automatable && !i.hidden)
+                        .filter(|i| i.automatable && !i.hidden);
+                    let n = all.clone().count();
+                    let infos = all
+                        .skip(skip)
                         .take(8)
                         .map(|i| (i.id, i.name.clone(), i.min, i.max, i.stepped))
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    (infos, n)
                 })
                 .unwrap_or_default()
         })
         .unwrap_or_default();
-        infos
+        let views = infos
             .into_iter()
             .map(|(id, name, min, max, stepped)| {
                 let target = AutomationTarget::PluginParam(slot, id);
@@ -9485,9 +9528,119 @@ impl Session {
                     text: format!("{plain:.2}"),
                 }
             })
-            .collect()
+            .collect();
+        (views, n)
+    }
+
+    /// Resets the focus when the first selected strip changed (Ruling 6):
+    /// that strip, slot 0, page 0.
+    fn sync_page_focus(inner: &mut Inner) {
+        let first = {
+            let m = inner.doc().mixer();
+            inner
+                .surfaces
+                .selection
+                .iter()
+                .copied()
+                .find(|s| m.strip(*s).is_ok())
+        };
+        if inner.surfaces.page.strip != first {
+            inner.surfaces.page = crate::surfaces::PageFocus {
+                strip: first,
+                slot: 0,
+                page: 0,
+            };
+        }
+    }
+
+    /// The focused chain and its slot (clamped to the chain), or `None`
+    /// with no focused strip or an empty chain (Ruling 6).
+    fn page_chain(inner: &Inner) -> Option<(PageChain, usize, PluginInstanceId)> {
+        let f = inner.surfaces.page;
+        let chain = crate::surfaces::chain(inner.doc(), f.strip?);
+        let slot = f.slot.min(chain.len().checked_sub(1)?);
+        let id = chain.get(slot)?.0;
+        Some((chain, slot, id))
+    }
+
+    /// Ruling 6's page count: `min(127, max(1, ceil(n / 8)))`.
+    fn page_count(n: usize) -> usize {
+        n.div_ceil(8).clamp(1, 127)
+    }
+
+    /// The plug-in page a Kontrol in Plug-in mode shows (Ruling 6): the
+    /// focused strip's chain, its slot's page of parameters; `None` with
+    /// no selected strip, an empty chain or a plug-in that is not running.
+    fn surface_page(
+        &self,
+        inner: &Inner,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> Option<core_surface::PluginPageView> {
+        let (chain, slot, id) = Self::page_chain(inner)?;
+        let pages = Self::page_count(self.slot_param_count(id)?);
+        let page = inner.surfaces.page.page.min(pages.saturating_sub(1));
+        let (params, _) = self.slot_param_views(inner, id, page.saturating_mul(8), cached);
+        Some(core_surface::PluginPageView {
+            chain: chain.into_iter().map(|(_, name)| name).collect(),
+            slot,
+            params,
+            page,
+            pages,
+            page_name: format!("Page {}", page.saturating_add(1)),
+            // Task 5 fills the presets (plan 5f-4).
+            preset: None,
+            presets: 0,
+            preset_name: String::new(),
+        })
+    }
+
+    /// `PluginSlot(i)`: slot `i` of the focused chain, page 0; refused
+    /// past the chain, with no focused strip or a plug-in not running.
+    fn surface_plugin_slot(&self, inner: &mut Inner, i: usize) -> bool {
+        Self::sync_page_focus(inner);
+        let Some(f) = inner.surfaces.page.strip else {
+            return false;
+        };
+        let Some(id) = crate::surfaces::chain(inner.doc(), f).get(i).map(|x| x.0) else {
+            return false;
+        };
+        if self.slot_param_count(id).is_none() {
+            return false;
+        }
+        inner.surfaces.page.slot = i;
+        inner.surfaces.page.page = 0;
+        true
+    }
+
+    /// `PluginPage(n)`: the page moves by `n`; past either end nothing
+    /// happens (uncounted). Refused with no focused strip, an empty chain
+    /// or a plug-in not running.
+    fn surface_plugin_page(&self, inner: &mut Inner, n: i32) -> bool {
+        Self::sync_page_focus(inner);
+        let Some((_, slot, id)) = Self::page_chain(inner) else {
+            return false;
+        };
+        let Some(count) = self.slot_param_count(id) else {
+            return false;
+        };
+        let pages = Self::page_count(count);
+        let shown = inner.surfaces.page.page.min(pages.saturating_sub(1));
+        let to = i64::try_from(shown)
+            .unwrap_or(i64::MAX)
+            .saturating_add(i64::from(n));
+        inner.surfaces.page.slot = slot;
+        inner.surfaces.page.page = shown;
+        if let Ok(to) = usize::try_from(to)
+            && to < pages
+        {
+            inner.surfaces.page.page = to;
+        }
+        true
     }
 }
+
+/// A chain's slots and names (plan 5f-4 Ruling 6).
+type PageChain = Vec<(PluginInstanceId, String)>;
 
 #[cfg(test)]
 mod tests {

@@ -455,7 +455,9 @@ impl Unit {
     /// Notes a message sent: meters are counted, the rest kept in hex.
     fn sent(&mut self, m: &[u8]) {
         // MCU meters are channel pressure, HUI's polyphonic pressure.
-        if m.first().is_some_and(|b| matches!(b & 0xF0, 0xD0 | 0xA0)) {
+        if m.first().is_some_and(|b| matches!(b & 0xF0, 0xD0 | 0xA0))
+            || core_surface::kontrol::is_meter(m)
+        {
             self.meters_sent = self.meters_sent.saturating_add(1);
             return;
         }
@@ -598,6 +600,8 @@ pub(crate) struct Due {
     pub visible: BTreeSet<usize>,
     /// A due main MCU in Plug-in shows the plugin's parameters.
     pub plugin: bool,
+    /// A due Kontrol in Plug-in mode shows the plug-in page (plan 5f-4 Ruling 9).
+    pub page: bool,
     /// The learn maps' feedback is due.
     mapper: bool,
 }
@@ -1324,7 +1328,12 @@ impl Registry {
             if let Some(i) = self.units.iter().position(|u| u.input == item.port) {
                 let (acts, problem) = match self.units.get_mut(i) {
                     Some(u) => {
+                        let page = u.surface.shows_page();
                         let acts = u.surface.input(&item.bytes, item.at);
+                        if u.surface.shows_page() != page {
+                            // A mode change shows at once (plan 5f-4 M15).
+                            u.fed = None;
+                        }
                         let problem = u
                             .surface
                             .take_problem()
@@ -1399,6 +1408,7 @@ impl Registry {
             units: Vec::new(),
             visible: BTreeSet::new(),
             plugin: false,
+            page: false,
             mapper: false,
         };
         for i in 0..self.units.len() {
@@ -1413,7 +1423,7 @@ impl Registry {
                     return false;
                 }
                 if matches!(m.target, AutomationTarget::PluginParam(..)) {
-                    return main;
+                    return main || u.surface.shows_page();
                 }
                 match m.strip.map(index) {
                     Some(Some(k)) => (first..first.saturating_add(8)).contains(&k),
@@ -1428,6 +1438,7 @@ impl Registry {
             if timed || moved.iter().any(shows) {
                 due.visible.extend(first..first.saturating_add(8));
                 due.plugin |= main && u.surface.assign() == Some(core_surface::Assign::Plugin);
+                due.page |= u.surface.shows_page();
                 due.units.push((u.id, first));
             }
         }
@@ -1666,6 +1677,42 @@ pub(crate) fn track_kind(k: core_model::mixer::StripKind) -> core_surface::Track
         K::Bus => T::Bus,
         K::Master => T::Master,
     }
+}
+
+/// Which plug-in and page a Kontrol shows, per document (plan 5f-4 Ruling 6).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PageFocus {
+    /// The strip whose chain is shown (the first selected one).
+    pub strip: Option<StripId>,
+    /// The chain slot shown.
+    pub slot: usize,
+    /// The page shown (0-based).
+    pub page: usize,
+}
+
+/// The chain of `strip`: its plug-in instrument, then its inserts (Ruling 6).
+pub(crate) fn chain(
+    doc: &core_model::document::Document,
+    strip: StripId,
+) -> Vec<(core_model::ids::PluginInstanceId, String)> {
+    use core_model::mixer::StripKind as K;
+    let Ok(s) = doc.mixer().strip(strip) else {
+        return Vec::new();
+    };
+    let instrument = match s.kind {
+        K::Instrument(d) | K::InstrumentOutput(d, _) => {
+            doc.instruments().get(&d).and_then(|x| match &x.kind {
+                core_model::document::DestKind::PluginInstrument { slot } => Some(slot),
+                core_model::document::DestKind::MidiEndpoint { .. } => None,
+            })
+        }
+        _ => None,
+    };
+    instrument
+        .into_iter()
+        .chain(s.inserts.iter())
+        .map(|x| (x.id, x.plugin.name.clone()))
+        .collect()
 }
 
 /// A port name is not empty, at most 255 bytes, without control characters
@@ -2355,6 +2402,8 @@ pub(crate) struct SessionSurfaces {
     /// The host time of each surface or learn hand's last value, which
     /// its idle release is stamped at (Ruling 2).
     pub last_ns: BTreeMap<(TouchHolder, AutomationTarget), u64>,
+    /// The plug-in page a Kontrol shows (plan 5f-4 Ruling 6).
+    pub page: PageFocus,
 }
 
 // ---------------------------------------------------------------------
