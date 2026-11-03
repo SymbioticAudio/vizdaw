@@ -3,7 +3,7 @@
 //!
 //! | id | what it does |
 //! |---|---|
-//! | `vizdaw.test.gain` | stereo gain (param 0) with a configurable latency (param 1, restarts); param 2 "Wiggle" makes it perform a UI-style gesture setting Gain; state round-trips both values |
+//! | `vizdaw.test.gain` | stereo gain (param 0) with a configurable latency (param 1, restarts); param 2 "Wiggle" makes it perform a UI-style gesture setting Gain; state round-trips both values; CLAP `render`, with unlisted test switches 3 (reads the offline mode) and 4 (declares a hard real-time requirement) |
 //! | `vizdaw.test.ducker` | main × (1 − min(1, peak(sidechain))) per block; sidechain on input port 1 |
 //! | `vizdaw.test.synth4` | instrument with 4 stereo outputs: notes on MIDI channel k sound on output k |
 //! | `vizdaw.test.nan` | writes NaN into every block |
@@ -98,6 +98,12 @@ pub const PARAM_LATENCY: u32 = 1;
 /// "Wiggle": setting it to `v` makes the plugin perform a gesture that sets
 /// Gain to `v`, as if a user dragged its knob.
 pub const PARAM_WIGGLE: u32 = 2;
+/// Test switch, not in the gain plugin's parameter list: reads 1 while the
+/// host has it rendering offline (CLAP `render`), else 0.
+pub const PARAM_RENDER_OFFLINE: u32 = 3;
+/// Test switch, not in the gain plugin's parameter list: set it to 1 (while
+/// inactive) and the gain plugin declares a hard real-time requirement.
+pub const PARAM_HARD_REALTIME: u32 = 4;
 /// The bank plugin's first parameter id (0 … 1, default 0).
 pub const PARAM_BANK_FIRST: u32 = 100;
 /// How many parameters the bank plugin has (ids `PARAM_BANK_FIRST..+24`).

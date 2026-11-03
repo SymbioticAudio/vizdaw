@@ -37,6 +37,27 @@ pub struct InstanceEvents {
     pub state_dirty: bool,
 }
 
+/// How a plugin answered [`PluginInstance::set_offline`] (plan 5f-2
+/// Ruling 7, Ruling T3-1: a bounce reports only `RealtimeRequired` and
+/// `Refused`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineRender {
+    /// It took the mode it was asked for (in a bounce host: it renders
+    /// offline).
+    Taken,
+    /// It has no render mode to switch (no CLAP `render` extension; an AU
+    /// that answers `kAudioUnitErr_InvalidProperty`): it renders the same
+    /// either way.
+    NoOfflineMode,
+    /// It declares a hard real-time requirement (CLAP
+    /// `has_hard_realtime_requirement`, a hardware proxy) and was not
+    /// switched: it renders in real time only.
+    RealtimeRequired,
+    /// It has a render mode but declined or failed to switch (CLAP `set`
+    /// returned false; an AU's other errors): it renders in real time.
+    Refused,
+}
+
 /// The native view an editor attaches to (an `NSView *` on macOS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentView(pub(crate) *mut c_void);
@@ -108,11 +129,11 @@ pub trait PluginInstance {
         Vec::new()
     }
 
-    /// Asks the plugin to render offline (`on`) or in real time (spec §9.1);
-    /// false when it cannot (no such mode, or a hard real-time requirement).
-    fn set_offline(&mut self, on: bool) -> bool {
+    /// Asks the plugin to render offline (`on`) or in real time (spec §9.1)
+    /// and says how it answered.
+    fn set_offline(&mut self, on: bool) -> OfflineRender {
         let _ = on;
-        false
+        OfflineRender::NoOfflineMode
     }
 }
 

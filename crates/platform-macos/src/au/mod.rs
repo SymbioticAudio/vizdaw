@@ -11,9 +11,9 @@ use core_engine::backend::BlockInfo;
 use core_engine::graph::ProcessStatus;
 use core_host::catalog::Source;
 use core_host::{
-    AudioPortInfo, AudioProcessor, HostError, InstanceEvents, LoadRequest, ParamEvent, ParamInfo,
-    ParentView, PluginEditor, PluginFormat, PluginInfo, PluginInstance, PluginKind, PortRole,
-    PrepareJob, Prepared, ProcessCtx, Tail,
+    AudioPortInfo, AudioProcessor, HostError, InstanceEvents, LoadRequest, OfflineRender,
+    ParamEvent, ParamInfo, ParentView, PluginEditor, PluginFormat, PluginInfo, PluginInstance,
+    PluginKind, PortRole, PrepareJob, Prepared, ProcessCtx, Tail,
 };
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
 use ffi::{ComponentInfo, Feed, GestureListener, HostTransport, Unit};
@@ -706,8 +706,15 @@ impl PluginInstance for AuInstance {
         }
     }
 
-    fn set_offline(&mut self, on: bool) -> bool {
-        self.unit.set_offline_render(on).is_ok()
+    fn set_offline(&mut self, on: bool) -> OfflineRender {
+        // Set on the unit the loader already initialized: the AU SDK's
+        // AUBase takes the property in either state, and Apple's units
+        // answer the same initialized or not (probed for plan 5f-2 Task 3:
+        // the DLS synth takes it, the effects answer InvalidProperty both
+        // ways). A unit that wants it set uninitialized answers
+        // kAudioUnitErr_Initialized, which counts as `Refused` and is
+        // reported, never taken silently for "no offline mode".
+        self.unit.set_offline_render(on)
     }
 
     fn gestures(&mut self) -> Vec<ParamEvent> {

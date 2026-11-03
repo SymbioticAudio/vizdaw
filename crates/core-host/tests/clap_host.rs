@@ -5,8 +5,8 @@ use core_engine::backend::BlockInfo;
 use core_engine::graph::ProcessStatus;
 use core_host::clap::{ClapFormat, list_bundle};
 use core_host::{
-    AudioProcessor, LoadRequest, MidiEvent, ParamChange, ParamOut, PluginFormat, PluginKind,
-    PortRole, ProcessCtx,
+    AudioProcessor, LoadRequest, MidiEvent, OfflineRender, ParamChange, ParamOut, PluginFormat,
+    PluginKind, PortRole, ProcessCtx,
 };
 use core_model::mixer::{ParamId, PluginRef};
 
@@ -284,18 +284,40 @@ fn a_dropped_processor_does_not_block_reactivation() {
 }
 
 /// Plan 5f-2 Ruling 7: the gain kind offers CLAP's render extension and
-/// takes both modes; the bank kind has none, so it renders in real time.
+/// takes both modes (and is really told: its hidden read-back parameter
+/// follows); the bank kind has none, so it renders the same either way.
 #[test]
 fn clap_copies_are_told_to_render_offline() {
+    let mode = ParamId(u64::from(test_plugins::PARAM_RENDER_OFFLINE));
     let mut gain = load("vizdaw.test.gain");
-    assert!(gain.set_offline(true), "offline");
-    assert!(gain.set_offline(false), "and back to real time");
+    assert_eq!(gain.param_value(mode), Some(0.0), "real time until told");
+    assert_eq!(gain.set_offline(true), OfflineRender::Taken, "offline");
+    assert_eq!(gain.param_value(mode), Some(1.0), "the plugin got it");
+    assert_eq!(gain.set_offline(false), OfflineRender::Taken, "and back");
+    assert_eq!(gain.param_value(mode), Some(0.0));
     let mut bank = load("vizdaw.test.bank");
-    assert!(!bank.set_offline(true), "no render extension");
+    assert_eq!(bank.set_offline(true), OfflineRender::NoOfflineMode);
     // Still a working plugin after the mode change.
     let mut p = gain.activate(48_000.0, 512).unwrap();
     let mut b = Block::new(2, 2, 0.5);
     assert_eq!(b.run(p.as_mut()), ProcessStatus::Ok);
     assert!(b.outputs[0][..N].iter().all(|x| *x == 0.5));
     gain.deactivate(p);
+}
+
+/// Plan 5f-2 Ruling T3-1: a plugin that declares a hard real-time
+/// requirement is never switched, and says so (the only answer a bounce
+/// reports).
+#[test]
+fn a_hard_realtime_plugin_is_not_switched() {
+    let mode = ParamId(u64::from(test_plugins::PARAM_RENDER_OFFLINE));
+    let hard = ParamId(u64::from(test_plugins::PARAM_HARD_REALTIME));
+    let mut gain = load("vizdaw.test.gain");
+    gain.set_params(&[(hard, 1.0)]).unwrap();
+    assert_eq!(gain.set_offline(true), OfflineRender::RealtimeRequired);
+    assert_eq!(
+        gain.param_value(mode),
+        Some(0.0),
+        "never told to go offline"
+    );
 }

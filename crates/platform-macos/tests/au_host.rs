@@ -7,7 +7,7 @@ use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig, find_sequence};
 use core_engine::fixtures::{Builder, Q, demo_document};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
-use core_host::PluginHost;
+use core_host::{OfflineRender, PluginHost};
 use core_model::command::{Command, MixerCmd};
 use core_model::history::History;
 use core_model::mixer::{ParamId, PluginFormat, PluginRef, StripKind};
@@ -155,7 +155,8 @@ fn au_wait() -> Duration {
 /// Plan 5f-2 Ruling 7: a bounce host sets kAudioUnitProperty_OfflineRender
 /// on every AU copy and keeps the answer. Apple's DLS synth takes it; Apple's
 /// effects (the delay among them) answer kAudioUnitErr_InvalidProperty on
-/// macOS 26, so the delay is asked, loads, and renders in real time.
+/// macOS 26: no offline mode, so they render the same either way and a
+/// bounce never reports them (Ruling T3-1).
 #[test]
 fn au_units_take_offline_render() {
     let doc = demo_document().unwrap();
@@ -169,6 +170,13 @@ fn au_units_take_offline_render() {
     h.sync(&doc);
     let r = h.wait_ready(au_wait());
     assert!(r.failed.is_empty(), "{:?}", r.failed);
-    assert_eq!(h.offline_state(dls), Some(true));
-    assert!(h.offline_state(delay).is_some(), "the delay is asked too");
+    assert_eq!(h.offline_state(dls), Some(OfflineRender::Taken));
+    assert!(
+        matches!(
+            h.offline_state(delay),
+            Some(OfflineRender::NoOfflineMode | OfflineRender::Taken)
+        ),
+        "{:?}",
+        h.offline_state(delay)
+    );
 }

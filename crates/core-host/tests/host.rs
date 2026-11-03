@@ -10,7 +10,7 @@ use core_engine::backend::AudioBackend;
 use core_engine::engine::{Engine, EngineConfig, find_sequence};
 use core_engine::fixtures::{Builder, demo_document};
 use core_engine::offline::{OfflineBackend, OfflineSinks};
-use core_host::{PluginHost, PluginKind};
+use core_host::{OfflineRender, PluginHost, PluginKind};
 use core_model::command::{Command, MixerCmd};
 use core_model::document::Document;
 use core_model::history::History;
@@ -1568,11 +1568,11 @@ fn a_bounce_host_renders_its_copies_offline() {
     copies.sync(&doc);
     let r = copies.wait_ready(WAIT);
     assert_eq!(r.loaded.len(), 2, "{:?}", r.failed);
-    assert_eq!(copies.offline_state(gain), Some(true));
+    assert_eq!(copies.offline_state(gain), Some(OfflineRender::Taken));
     assert_eq!(
         copies.offline_state(bank),
-        Some(false),
-        "no render extension: real time only"
+        Some(OfflineRender::NoOfflineMode),
+        "no render extension: renders the same either way"
     );
     let mut live = host(1024);
     live.sync(&doc);

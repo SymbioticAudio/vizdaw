@@ -4,6 +4,7 @@
 //! UI gestures.
 
 use block2::RcBlock;
+use core_host::OfflineRender;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{MainThreadMarker, msg_send};
@@ -18,8 +19,8 @@ use objc2_audio_toolbox::{
     AudioUnitParameterOptions, AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender,
     AudioUnitRenderActionFlags, AudioUnitReset, AudioUnitScope, AudioUnitSetParameter,
     AudioUnitSetProperty, AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent,
-    kAudioUnitProperty_ClassInfo, kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount,
-    kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
+    kAudioUnitErr_InvalidProperty, kAudioUnitProperty_ClassInfo, kAudioUnitProperty_CocoaUI,
+    kAudioUnitProperty_ElementCount, kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
     kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_OfflineRender,
     kAudioUnitProperty_ParameterInfo, kAudioUnitProperty_ParameterList,
     kAudioUnitProperty_RequestViewController, kAudioUnitProperty_SetRenderCallback,
@@ -293,9 +294,20 @@ impl Unit {
         element: u32,
         v: &T,
     ) -> Result<(), String> {
+        os(call, self.set_status(id, scope, element, v))
+    }
+
+    /// [`Unit::set`] with the unit's own `OSStatus` (0 on success).
+    fn set_status<T>(
+        &self,
+        id: AudioUnitPropertyID,
+        scope: AudioUnitScope,
+        element: u32,
+        v: &T,
+    ) -> i32 {
         // SAFETY: `v` outlives the call and its size matches the property's
         // type (named by the caller).
-        os(call, unsafe {
+        unsafe {
             AudioUnitSetProperty(
                 self.unit,
                 id,
@@ -304,7 +316,7 @@ impl Unit {
                 (v as *const T).cast::<c_void>(),
                 size_of::<T>() as u32,
             )
-        })
+        }
     }
 
     /// Buses in `scope` (input or output).
@@ -367,14 +379,22 @@ impl Unit {
     /// Asks the unit to render offline (`on`) or in real time
     /// (`kAudioUnitProperty_OfflineRender`, global scope; plan 5f-2
     /// Ruling 7).
-    pub(crate) fn set_offline_render(&self, on: bool) -> Result<(), String> {
-        self.set(
-            "AudioUnitSetProperty(OfflineRender)",
+    pub(crate) fn set_offline_render(&self, on: bool) -> OfflineRender {
+        match self.set_status(
             kAudioUnitProperty_OfflineRender,
             kAudioUnitScope_Global,
             0,
             &u32::from(on),
-        )
+        ) {
+            0 => OfflineRender::Taken,
+            // The unit has no such property: it renders the same either
+            // way (Ruling T3-1; Apple's effects on macOS 26).
+            s if s == kAudioUnitErr_InvalidProperty => OfflineRender::NoOfflineMode,
+            // Anything else (not writable now, a bad value, initialized
+            // when it wanted not to be): it has the mode and did not take
+            // it, so the bounce reports it.
+            _ => OfflineRender::Refused,
+        }
     }
 
     /// Feeds input bus `element` from `callback` with `refcon`.

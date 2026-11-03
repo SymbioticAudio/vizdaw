@@ -5,7 +5,9 @@ use super::handlers::{AudioThread, Flags, MainThread, PluginExts, Shared, VizHos
 use super::processor::ClapProcessor;
 use crate::error::HostError;
 use crate::info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Tail};
-use crate::instance::{AudioProcessor, InstanceEvents, ParentView, PluginEditor, PluginInstance};
+use crate::instance::{
+    AudioProcessor, InstanceEvents, OfflineRender, ParentView, PluginEditor, PluginInstance,
+};
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer};
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize};
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer};
@@ -318,22 +320,25 @@ impl PluginInstance for ClapInstance {
         }
     }
 
-    fn set_offline(&mut self, on: bool) -> bool {
+    fn set_offline(&mut self, on: bool) -> OfflineRender {
         let Some(render) = self.exts().render else {
-            return false;
+            return OfflineRender::NoOfflineMode;
         };
         let h = self.inst.plugin_handle();
         // A plugin with a hard real-time requirement (a hardware proxy)
         // renders in real time whatever it is told (pre-flight M3).
         if on && render.has_realtime_requirement(&h) {
-            return false;
+            return OfflineRender::RealtimeRequired;
         }
         let mode = if on {
             RenderMode::Offline
         } else {
             RenderMode::Realtime
         };
-        render.set(&h, mode).is_ok()
+        match render.set(&h, mode) {
+            Ok(()) => OfflineRender::Taken,
+            Err(_) => OfflineRender::Refused,
+        }
     }
 }
 

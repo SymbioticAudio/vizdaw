@@ -8,7 +8,9 @@
 use crate::adapt::{PluginEffect, PluginSynth, Returned};
 use crate::clap::ClapFormat;
 use crate::error::HostError;
-use crate::instance::{AudioProcessor, LoadRequest, PluginFormat, PluginInstance, Prepared};
+use crate::instance::{
+    AudioProcessor, LoadRequest, OfflineRender, PluginFormat, PluginInstance, Prepared,
+};
 use crate::process::ParamEvent;
 use crate::queue::{GestureReceiver, ParamSender, param_queues};
 use crate::shelf::{Ready, Shelf, ShelfFactory};
@@ -285,7 +287,7 @@ pub struct PluginHost {
     offline: bool,
     /// What each instance answered when asked to render offline; an entry
     /// goes when its slot is dropped.
-    offline_states: BTreeMap<PluginInstanceId, bool>,
+    offline_states: BTreeMap<PluginInstanceId, OfflineRender>,
 }
 
 impl std::fmt::Debug for PluginHost {
@@ -355,7 +357,7 @@ impl PluginHost {
 
     /// What instance `id` answered when asked to render offline; `None` when
     /// it was never asked (a live host, or not activated yet).
-    pub fn offline_state(&self, id: PluginInstanceId) -> Option<bool> {
+    pub fn offline_state(&self, id: PluginInstanceId) -> Option<OfflineRender> {
         self.offline_states.get(&id).copied()
     }
 
@@ -975,13 +977,20 @@ impl PluginHost {
         live: &mut Live,
         instrument: bool,
     ) -> Result<(), HostError> {
-        if self.offline {
-            // A bounce's copies render offline (plan 5f-2 Ruling 7); the
-            // job names those that cannot.
-            let took = live.inst.set_offline(true);
-            self.offline_states.insert(id, took);
+        // A bounce's copies render offline (plan 5f-2 Ruling 7); the job
+        // names those that cannot. The answer is kept only for an instance
+        // that activated (`offline_state`: `None` until then).
+        let answer = self.offline.then(|| live.inst.set_offline(true));
+        let proc = match live.inst.activate(self.sample_rate, self.max_frames) {
+            Ok(p) => p,
+            Err(e) => {
+                self.offline_states.remove(&id);
+                return Err(e);
+            }
+        };
+        if let Some(a) = answer {
+            self.offline_states.insert(id, a);
         }
-        let proc = live.inst.activate(self.sample_rate, self.max_frames)?;
         let ((params, gestures), audio) = param_queues();
         live.params = params;
         live.gestures = gestures;
