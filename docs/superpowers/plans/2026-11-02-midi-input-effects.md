@@ -1,5 +1,7 @@
 # VizDAW 5g-1 — MIDI Input Effects Implementation Plan
 
+> **Deferred (owner, 2026-11-03):** this plan runs right after sub-project 7 (UI polish), not in sub-project 5. It stays in the 1.0 release. Before it runs it gets a fresh pre-flight against the tree as it stands then. For 5g-1 the binding owner ruling also applies: a learned message is kept out of the lanes.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Each MIDI lane gets a chain of up to 8 built-in input effects: Arpeggiator, Transpose, Velocity, Chord and Input Quantize. The chain runs on the real-time thread while the lane is armed or monitoring its input. What it plays thru is exactly what is recorded, with Input Quantize applied to recorded note starts only. The chain is an undoable lane edit, edited from an FX button and popover on the lane header and from `lane.set_input_fx` on the control channel.

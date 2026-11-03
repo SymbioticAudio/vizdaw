@@ -742,6 +742,8 @@ Rules common to all modes:
 
 Plans run one after another by subagent-driven development under the standing authorization, with rulings in each ledger. Push and merge need the user's say-so.
 
+**Order (owner, 2026-11-03):** sub-project 5 ends with 5f-4 and merges to main then. Plans 5g-1 and 5g-2 run right after sub-project 7 (UI polish) instead, and both stay in the 1.0 release. Their plans and spec sections (§4.5, §6.8, the MPE sections) stay as written; each gets a fresh pre-flight against the tree as it stands then.
+
 | Plan | Deliverable |
 |---|---|
 | **5a — Audio playback** | `core-media` (CAF in all three depths, `MediaImporter`, streamer, RAM cache); ExtAudioFile importer; project format (`Settings.format`, New Project sheet, Project Settings, convert on change, migration) and device-rate handling; fades in frames with migration; `MediaCmd`; segments in the schedule; `RegionSource` node; offline media as silence; `media.import` and `state.get media`. Imported audio plays, loops, locates and underruns safely. |

@@ -255,6 +255,8 @@ vizdaw/
 
 **Order (owner, 2026-10-28):** sub-project 7 (UI polish) runs right after 5, before 6 (Import); a working UI matters more than import. The numbers stay as they are, since plans and notes already say "SP7" for the UI pass. Standard MIDI File import and export (and the MIDI Clip File) stay in the launch release. OMF and AAF import may move to after launch.
 
+**Order (owner, 2026-11-03):** plans 5g-1 (MIDI input effects) and 5g-2 (MPE) move out of sub-project 5 to run right after sub-project 7, so the owner can start using the app sooner. Both stay in the 1.0 release. Sub-project 5 ends with plan 5f-4 and merges to main then.
+
 ## 12. Testing
 
 - **core-model:** property tests (`proptest`) checking that for any command sequence, applying then undoing returns exactly the original state; checks that nested subsequences never form cycles; a track can reference a large number of distinct sequences with no fixed cap; private copy, flatten and delete-in-use keep use counts correct.
