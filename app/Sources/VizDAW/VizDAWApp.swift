@@ -267,10 +267,15 @@ enum PluginTicker {
                 // Surfaces drive the command target (plan 5f-1 Ruling 11),
                 // refocused only when it changes, so `surface.inject` into
                 // another window keeps the focus it took.
+                // Remembered only once the core took it, so a refused call
+                // (Busy in a nested run loop) is retried next tick.
                 let target = store.noteTarget
                 if target !== surfaceFocus {
-                    surfaceFocus = target
-                    try? target?.session.focusSurfaces()
+                    if let target {
+                        if (try? target.session.focusSurfaces()) != nil { surfaceFocus = target }
+                    } else {
+                        surfaceFocus = nil
+                    }
                 }
                 // Open documents only; played notes go to the command target.
                 noteInputHub.poll(Array(store.documents.values), focused: store.noteTarget)

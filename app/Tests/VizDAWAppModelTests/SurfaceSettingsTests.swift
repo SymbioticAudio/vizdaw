@@ -96,6 +96,115 @@ import VizDAWCore
         #expect(!m.transportKeysEnabled, "the keys still wait for the field")
     }
 
+    /// Fix round 1 I1: a jog then Play in one batch locates first, so
+    /// Play starts from the jogged place and no locate lands mid-pass.
+    @Test func aJogIsLocatedBeforeALaterCommandInTheBatch() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        let start = m.transport.tick
+        var seen: [[Int64]] = []
+        SurfaceRelay().apply(
+            [.jog(detents: 4), .command(id: "transport.play", programmatic: false)], m,
+            perform: { _ in seen.append(f.locates) }, quietly: { _ in })
+        #expect(seen == [[start + Int64(4) * MeterMath.ppq / 4]])
+    }
+
+    /// Fix round 1 I1: the same across two batches inside the window.
+    @Test func aJogIsLocatedBeforeACommandInTheNextBatch() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        let clock = RelayClock()
+        let relay = SurfaceRelay(now: { clock.now })
+        let start = m.transport.tick
+        relay.apply([.jog(detents: 2)], m, perform: { _ in }, quietly: { _ in })
+        clock.now += .milliseconds(40)
+        relay.flush(m)
+        #expect(f.locates.isEmpty)
+        var seen: [[Int64]] = []
+        relay.apply(
+            [.command(id: "transport.play", programmatic: true)], m,
+            perform: { _ in }, quietly: { _ in seen.append(f.locates) })
+        #expect(seen == [[start + Int64(2) * MeterMath.ppq / 4]])
+        clock.now += SurfaceRelay.jogWindow
+        relay.flush(m)
+        #expect(f.locates.count == 1, "nothing left to locate")
+    }
+
+    /// Review M2: the jog counts from where the transport stands now (a
+    /// core-side marker jump the last poll has not seen), not below 0.
+    @Test func aJogCountsFromTheCurrentTickAndStopsAtZero() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        let clock = RelayClock()
+        let relay = SurfaceRelay(now: { clock.now })
+        f.state.tick = 7680
+        relay.apply([.jog(detents: 1)], m, perform: { _ in }, quietly: { _ in })
+        clock.now += SurfaceRelay.jogWindow
+        relay.flush(m)
+        #expect(f.locates == [7680 + MeterMath.ppq / 4])
+        relay.apply([.jog(detents: -100)], m, perform: { _ in }, quietly: { _ in })
+        clock.now += SurfaceRelay.jogWindow
+        relay.flush(m)
+        #expect(f.locates.last == 0)
+    }
+
+    /// Review M1: Go to Position and the other field keys move the
+    /// keyboard focus, so they still wait while a field is edited.
+    @Test func aFieldKeyStillWaitsForTheTextField() throws {
+        let f = demoFake()
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        let host = FakeControlHost()
+        m.editor.panelKey = true
+        var codes: [ControlErrorCode] = []
+        SurfaceRelay().apply(
+            [.command(id: "transport.go_position", programmatic: false)], m,
+            perform: {
+                if case .failed(let e) = ControlCommands.run($0, args: [], doc: (id, m), store: s, host: host) {
+                    codes.append(e.code)
+                }
+            }, quietly: { _ in })
+        #expect(codes == [.unavailable])
+        #expect(host.calls.isEmpty, "no field took the focus")
+    }
+
+    /// Review M5: the selection reaches the surfaces only when it changes.
+    @Test func theSelectionIsReportedWhenItChanges() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        m.selectedStrips = [2]
+        m.selectedStrips = [2]
+        m.selectedStrips = [3, 1]
+        #expect(f.surfaceSelections == [[2], [1, 3]])
+    }
+
+    /// Review M5: `idle` drains the session's surface events into the relay.
+    @Test func idleDrainsSurfaceEvents() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        var performed: [String] = []
+        m.surfaceCommandSink = { performed.append($0) }
+        f.surfaceEvents = [.select(strip: 2), .command(id: "transport.stop", programmatic: false)]
+        m.idle()
+        #expect(m.selectedStrips == [2] && performed == ["transport.stop"])
+        #expect(f.surfaceEvents.isEmpty)
+    }
+
+    /// Review M4: a refused add keeps the sheet open and says why in it.
+    @Test func aRefusedAddKeepsTheSheet() {
+        let c = FakeSurfaceCore()
+        let s = SurfaceSettings(core: c)
+        s.beginAdd()
+        c.addError = .Model(message: "VizDAW drives one MCU-compatible main unit and up to three extenders")
+        s.commitAdd()
+        #expect(s.draft != nil && s.alert == nil)
+        #expect(s.draftProblem == "VizDAW drives one MCU-compatible main unit and up to three extenders")
+        c.addError = nil
+        s.commitAdd()
+        #expect(s.draft == nil && s.draftProblem == nil && s.rows.count == 1)
+    }
+
     /// Pre-flight I9: a command `surface.inject` or `midi.inject` caused
     /// never takes the key path, which would open the Save panel.
     @Test func anInjectedSaveOpensNoDialog() throws {

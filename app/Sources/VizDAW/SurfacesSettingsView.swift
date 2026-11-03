@@ -60,7 +60,7 @@ struct SurfacesSettingsView: View {
             }
         }
         .sheet(
-            isPresented: Binding(get: { settings.draft != nil }, set: { if !$0 { settings.draft = nil } })
+            isPresented: Binding(get: { settings.draft != nil }, set: { if !$0 { settings.cancelAdd() } })
         ) {
             addSheet
         }
@@ -109,9 +109,12 @@ struct SurfacesSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if let problem = settings.draftProblem {
+                Text(problem).foregroundStyle(.red)
+            }
             HStack {
                 Spacer()
-                Button("Cancel", role: .cancel) { settings.draft = nil }
+                Button("Cancel", role: .cancel) { settings.cancelAdd() }
                     .keyboardShortcut(.cancelAction)
                 Button("Add") { settings.commitAdd() }
                     .keyboardShortcut(.defaultAction)

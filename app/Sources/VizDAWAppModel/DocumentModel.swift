@@ -349,10 +349,13 @@ public final class DocumentModel {
     /// Transport keys (Space, Return) are off while any name, comment, slot
     /// or reference field is edited, so typing a space types a space. A
     /// surface's button is no key (ruling T9-1): it acts regardless.
-    public var transportKeysEnabled: Bool {
-        surfaceActing
-            || (renamingSeq == nil && commentDraft == nil && slotDraft == nil
-                && editor.referenceDraft == nil && !editor.textEditing && !editor.panelKey)
+    public var transportKeysEnabled: Bool { surfaceActing || !textFieldHasKeyboard }
+    /// A name, comment, slot, reference or panel field is edited. Commands
+    /// that move the keyboard focus wait for it even from a surface
+    /// (review M1): taking the focus would cut the edit short.
+    public var textFieldHasKeyboard: Bool {
+        renamingSeq != nil || commentDraft != nil || slotDraft != nil
+            || editor.referenceDraft != nil || editor.textEditing || editor.panelKey
     }
     /// Return (Return to Start) is also off while a list editor has the
     /// keyboard: there it edits the cursor row (Plan 4c Ruling 20).

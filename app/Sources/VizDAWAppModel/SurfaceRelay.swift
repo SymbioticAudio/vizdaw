@@ -29,6 +29,10 @@ import VizDAWCore
         m.surfaceActing = true
         defer { m.surfaceActing = was }
         for e in events {
+            // Detents waiting for the window are located first, so a Play
+            // or Record right after a spin starts from the jogged place and
+            // no locate lands mid-pass (review I1).
+            if case .jog = e {} else { locatePending(m) }
             switch e {
             case .command(let id, let programmatic):
                 // `surface.inject` and `midi.inject` never take the key
@@ -50,10 +54,19 @@ import VizDAWCore
     /// lands a writing pass, so a spun wheel is one locate (pre-flight M3).
     public func flush(_ m: DocumentModel) {
         guard let since = jogSince, now() - since >= Self.jogWindow else { return }
+        locatePending(m)
+    }
+
+    /// Locates by the detents not yet located by, from where the transport
+    /// stands now: a fresh read, since the core may have moved it (a
+    /// surface's marker jump) since the last poll (review M2).
+    private func locatePending(_ m: DocumentModel) {
+        guard jogSince != nil else { return }
         let detents = jogDetents
         jogSince = nil
         jogDetents = 0
         guard detents != 0 else { return }
+        m.poll()
         let target = max(0, m.transport.tick + detents * MeterMath.ppq / 4)
         do {
             try m.moveTo(target)

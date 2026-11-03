@@ -486,8 +486,9 @@ public enum ControlCommands {
             if let f = failure(DrumCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where fieldKeys[id] != nil:
             // A bare key: it waits while a text field has the keyboard
-            // (final review M-5), as the other bare-key commands do.
-            guard m.transportKeysEnabled else { return unavailable(TransportCommands.textFieldHasKeyboard) }
+            // (final review M-5), as the other bare-key commands do, and
+            // from a surface too: it moves the focus (plan 5f-1 Task 10 M1).
+            guard !m.textFieldHasKeyboard else { return unavailable(TransportCommands.textFieldHasKeyboard) }
             guard host.focus(fieldKeys[id] ?? .position, docID) else {
                 return unavailable("The window shows no transport fields.")
             }

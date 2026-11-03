@@ -29,6 +29,9 @@ public struct SurfaceDraft: Equatable, Sendable {
     public var alert: AlertItem?
     /// The open Add Surface sheet.
     public var draft: SurfaceDraft?
+    /// Why the core refused the sheet's unit (shown in the sheet, which
+    /// stays open so the user can change it; review M4).
+    public private(set) var draftProblem: String?
 
     /// Reads nothing yet: Settings refreshes when it opens, so making this
     /// at launch asks the core nothing before `surfacesLoad`.
@@ -51,12 +54,20 @@ public struct SurfaceDraft: Equatable, Sendable {
     /// Adds a unit; a refusal is an alert. A HUI-compatible unit is a bank
     /// of its own, so it is added without a position.
     public func add(_ kind: SurfaceKindRow, input: String, output: String, position: UInt8?) {
+        if let problem = tryAdd(kind, input: input, output: output, position: position) {
+            alert = AlertItem(title: "Add Surface Failed", message: problem)
+        }
+    }
+
+    /// The core's refusal, if any.
+    private func tryAdd(_ kind: SurfaceKindRow, input: String, output: String, position: UInt8?) -> String? {
+        defer { refresh() }
         do {
             _ = try core.add(kind, input, output, kind == .hui ? nil : position)
+            return nil
         } catch {
-            alert = AlertItem(error, title: "Add Surface Failed")
+            return AlertItem(error, title: "Add Surface Failed").message
         }
-        refresh()
     }
 
     public func remove(_ id: UInt32) {
@@ -71,14 +82,27 @@ public struct SurfaceDraft: Equatable, Sendable {
     /// Opens the Add sheet with the first ports picked.
     public func beginAdd() {
         refresh()
+        draftProblem = nil
         draft = SurfaceDraft(input: ports.sources.first ?? "", output: ports.destinations.first ?? "")
     }
 
-    /// Adds what the sheet says and closes it.
+    /// Adds what the sheet says and closes it; a refusal keeps it open
+    /// with the reason in it (review M4).
     public func commitAdd() {
         guard let d = draft else { return }
+        let position = d.kind == .mcuXt ? UInt8(clamping: d.position) : nil
+        if let problem = tryAdd(d.kind, input: d.input, output: d.output, position: position) {
+            draftProblem = problem
+        } else {
+            draftProblem = nil
+            draft = nil
+        }
+    }
+
+    /// Closes the sheet without adding.
+    public func cancelAdd() {
+        draftProblem = nil
         draft = nil
-        add(d.kind, input: d.input, output: d.output, position: d.kind == .mcuXt ? UInt8(clamping: d.position) : nil)
     }
 
     /// "MCU-compatible", "MCU XT-compatible", "HUI-compatible".
