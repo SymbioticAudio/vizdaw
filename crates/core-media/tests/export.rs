@@ -678,8 +678,11 @@ fn hostile_exports_are_refused() {
     let e = check_destination(&long, &f16, false).unwrap_err();
     assert!(e.to_string().contains("too long"), "{e}");
     assert!(run(&src, &long, &f16, false).is_err());
+    // Root writes anywhere: the read-only folder case is left out when the
+    // effective user is root (re-review n2).
+    // SAFETY: `geteuid` takes no arguments and cannot fail.
     #[cfg(unix)]
-    {
+    if unsafe { libc::geteuid() } != 0 {
         use std::os::unix::fs::PermissionsExt;
         let ro = d.path().join("ro");
         std::fs::create_dir(&ro).unwrap();

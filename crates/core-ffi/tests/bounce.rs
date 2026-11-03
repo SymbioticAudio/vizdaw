@@ -1034,7 +1034,17 @@ fn hostile_bounce_requests_are_refused() {
     std::fs::write(d.join("file.txt"), b"x").unwrap();
     // Another project's package (final review T4-M10).
     std::fs::create_dir_all(d.join("Other.vizdaw/Media")).unwrap();
-    // A folder this process cannot write (final review m3).
+    // A folder this process cannot write (final review m3). Root writes
+    // anywhere, so those cases are left out when the effective user is
+    // root (re-review n2): a file this process creates is owned by it.
+    let root = {
+        use std::os::unix::fs::MetadataExt;
+        let probe = d.join("uid-probe");
+        std::fs::write(&probe, b"").unwrap();
+        let uid = std::fs::metadata(&probe).unwrap().uid();
+        std::fs::remove_file(&probe).unwrap();
+        uid == 0
+    };
     let ro = d.join("ro");
     std::fs::create_dir(&ro).unwrap();
     {
@@ -1232,6 +1242,9 @@ fn hostile_bounce_requests_are_refused() {
         ),
     ];
     for (what, req) in cases {
+        if root && what.contains("cannot be written") {
+            continue;
+        }
         let e = p.s.bounce(req.clone()).unwrap_err();
         assert!(matches!(e, VizError::Model { .. }), "{what}: {e:?}");
         assert!(
@@ -1340,8 +1353,21 @@ fn a_failed_import_aborts_the_bounce() {
             name: "Track".into(),
         })
         .unwrap();
+        // Hot, so the first import clips in the 24-bit project (re-review n1).
+        b.mixer(MixerCmd::SetGain {
+            strip: path,
+            gain_db: 12.0,
+        })
+        .unwrap();
         bus = b.bus("Bus").unwrap();
     });
+    let f =
+        p.s.set_project_format(ProjectFormatRow {
+            sample_rate: 48_000,
+            depth: BitDepthRow::Int24,
+        })
+        .unwrap();
+    assert_eq!(wait_job(&p.s, f).state, JobStateRow::Done);
     let items = p.s.media().unwrap().len();
     let lanes = p.s.lanes(p.seq).unwrap().len();
     let media_before = names(&p.pkg.join("Media"));
@@ -1364,6 +1390,12 @@ fn a_failed_import_aborts_the_bounce() {
     assert!(
         j.message.as_deref().is_some_and(|m| m.contains("Bus")),
         "the message names the second stem: {j:?}"
+    );
+    assert!(
+        !j.problems
+            .iter()
+            .any(|m| m.contains("added to the project")),
+        "nothing was added, so no clip line says so: {j:?}"
     );
     assert!(names(&folder).is_empty(), "no export, no partial");
     assert!(incoming(&p).is_empty(), "no temporary");

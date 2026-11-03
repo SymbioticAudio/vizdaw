@@ -931,6 +931,10 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
     // 5. "Add to project" imports the Mix or each heard stem (0.8–0.9).
     let mut imported = Owned::default();
     let mut files: Vec<(String, Result<Vec<Imported>, String>)> = Vec::new();
+    // Clip lines join the problems only when the job succeeds, so a failed
+    // import, export or rename never claims "added to the project"
+    // (re-review n1).
+    let mut clips: Vec<String> = Vec::new();
     if plan.add {
         let importer = crate::media::caf_importer();
         let n = plan.import_names.len().max(1) as f32;
@@ -960,7 +964,7 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
                     // The project format clips what the float render kept
                     // (final review I1; owner answer 1: clips are reported).
                     for i in v.iter().filter(|i| i.clipped > 0) {
-                        problems.push(format!(
+                        clips.push(format!(
                             "{name} (added to the project): {}",
                             clipped_words(i.clipped)
                         ));
@@ -1062,6 +1066,7 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
     prog.set(1.0);
     // 8. The imports are the session's now; the temporaries go.
     imported.0.clear();
+    problems.extend(clips);
     Work::Bounce {
         files,
         target,
