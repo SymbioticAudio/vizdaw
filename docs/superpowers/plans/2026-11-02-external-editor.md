@@ -132,7 +132,7 @@ These are the five failure modes a user is most likely to hit that the spec impl
      - a second save within that second restarts the wait;
      - one edit makes one undo step;
      - a save during a running import is picked up after it.
-   - Pinned by `aRenameOverTheFileRearmsTheWatch`, `aSecondSaveRestartsTheSecond`, `aFileStillGrowingIsNotDue`, `oneChangeIsAppliedOnce` (Task 4 watcher), `aStableChangeStartsOneImport`, `aSaveDuringAnImportIsAppliedAfterIt` (Task 4 model), and the e2e's second, in-place save after the rename-over save (Task 6): only a watch re-armed on the replaced inode sees it (pre-flight I8).
+   - Pinned by `theProbeReadsTheFileARenamePutThere` (the probe only), `aSecondSaveRestartsTheSecond`, `aFileStillGrowingIsNotDue`, `oneChangeIsAppliedOnce` (Task 4 watcher), `aStableChangeStartsOneImport`, `aSaveDuringAnImportIsAppliedAfterIt` (Task 4 model), and, for the re-arm itself, the e2e's second, in-place save after the rename-over save alone (Task 6): only a watch re-armed on the replaced inode sees it (pre-flight I8; fold check M3).
 2. **What the editor hands back.** A different length; a different rate; mono instead of stereo; more than two channels; an empty or truncated file; garbage; a file deleted and never recreated.
    - Expected:
      - the region takes the new length, with its fades clamped (fade in first, then fade out within what is left);
@@ -177,7 +177,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
    - `open_external` reads the path, span and format under the session lock, writes **without** it (hundreds of MB must not hold the main thread's lock; pre-flight M4), then re-locks to record the copy, refusing if the region changed meanwhile ("The region changed while its copy was written; try again."; the file is left to retention). While a copy is written, retention waits (`Inner.edits_writing`).
    - `Busy` while a Format, Convert or Relink job is unapplied (each replaces media files).
    - Why: §11 and spec Ruling 32.
-   - Cost if wrong: none expected.
+   - Cost if wrong: a long region blocks the window while its copy is written (the app calls `open_external` on the main thread; the lock is free meanwhile); an async Open is a later change (fold check M10).
 3. **Ruling (edit copies are runtime state, kept until close): the session keeps `edits: BTreeMap<EventId, EditCopy { abs: PathBuf, from: MediaId }>`.**
    - `abs` is **absolute** (pre-flight I1). `Inner::tidy` inserts `abs` stripped of the package prefix, `/`-joined, only when it lies under that package: retention's paths are package-relative. A titled Save As leaves `abs` where it was, so watching and applying go on at the old package, whose files stay until that package is next saved or closed (pre-flight M14; README 188). `apply_external_edit` compares absolute paths.
    - Rust keeps no "applied" stamp: Swift owns the stable rule (Ruling 4; pre-flight M2).
@@ -193,7 +193,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
      - a tick whose probe differs from the recorded pair records a new change itself (an event lost or coalesced, a file still growing; pre-flight M1);
      - a tick at least 1 s after the recorded change, with the probe equal to it, existing, and different from the pair last **applied** and the pair last **skipped**, is due;
      - Open records the pair it wrote as applied, so Reload right after Open is "unchanged" (pre-flight I10);
-     - a region with an import running is not due until the import ends; a Done import marks its pair applied; a Failed or Cancelled one marks it skipped (not retried by itself, watch kept armed; Reload retries it); a `Busy` refusal is retried at the next tick, without an alert (pre-flight I11);
+     - a region with an import running is not due until the import ends; a Done import marks its pair applied; a Failed or Cancelled one marks it skipped (not retried by itself, watch kept armed; Reload retries it); a `Busy` refusal is retried at the next tick, without an alert (pre-flight I11), and the status line says once "The external edit waits for the media job to finish." (fold check M1);
      - Reload asks for no second: the user asked.
    - `FileWatching.watch` returns nil for a path it cannot open; the model then waits for Reload (pre-flight M15).
    - Why: §11 names `DispatchSource` (an app API). §12.3 tests the rule in Swift with temp files.
@@ -202,6 +202,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
    - "Open in External Editor" uses it, through `NSWorkspace.open(_:withApplicationAt:configuration:completionHandler:)`. `WorkspaceOpener.open` checks only that the app exists; the system's later failure, in its completion, becomes the alert "Open in External Editor Failed" on the main actor, and the watch stays (pre-flight M9).
    - With none chosen, **only the Region menu item** opens the chooser first (a menu action, not a programmatic call). A key, a surface button or the channel gets `unavailable` "Choose an external editor in Settings › Editing." (owner answer 2026-11-03; pre-flight M12); `KeyDispatch.after` shows that message in the status line and uses the key up, because passing it on would reach the menu item and its panel.
    - `region.open_external { app? }` takes `app` (an absolute path ending in `.app`, checked by core-control) over the preference; the app refuses before anything is written an `app` that is missing or not a folder: "<path> is not an application." (pre-flight I11). The registry declares the dialog `Choose External Editor` (`always: false`, answered by `app`) so `state.get commands` documents it (pre-flight M13).
+   - `KeyRouter.route` never leaves Open in External Editor's chord to its menu item (the item would open the chooser): even the chord the menu shows runs `ControlCommands.run`, so with no editor it shows the message, and with one it opens as the menu would, without a panel (fold check I1).
    - `VIZDAW_EXTERNAL_EDITOR=stub` makes the app use `StubOpener`, which launches nothing, and `ControlHost.externalEditor` answers `.stub` (pre-flight I7(c)): the channel then needs no `app`.
    - Why: §11 and §12.1's "configured stub editor command".
    - Cost if wrong: none expected.
@@ -251,6 +252,7 @@ Each ruling decides something the spec leaves open, in the format "what — why 
 | M13 dialog spec | Ruling 5; Task 5 registry |
 | M14 old package | Ruling 3; README 188 |
 | M15 counts, nil watch | Global Constraints table; Ruling 4 |
+| Fold check (revision 2) I1, M1–M10 | Ruling 5 and Task 5 `KeyRouter.route`; Ruling 4 and `waitingMessage`; `copy_name("€"…)`; `theProbeReadsTheFileARenamePutThere`; `poll()` skip; `written` stamps; `forgetGone` after an untitled Save As; dot-names kept by `trash_files_in`; `catch_unwind` round the unlocked write; Ruling 2's cost |
 
 ## Carried items
 
@@ -1151,7 +1153,7 @@ pub(crate) fn write_copy(
 /// Moves every regular file in `dir` to the Trash (`trash`: the folder
 /// standing for it, as [`crate::retention::trash_dir`] resolved it, else
 /// the platform's); the count left behind (`dir` unreadable, or a file
-/// not moved), each named on stderr. A missing `dir` leaves none. Never
+/// not moved), each named on stderr; dot-names are skipped. A missing `dir` leaves none. Never
 /// unlinks (plan 5c Ruling 15; plan 5f-3 owner answer 2026-11-03).
 pub(crate) fn trash_files_in(dir: &Path, trash: Option<&Path>) -> usize {
     let rd = match std::fs::read_dir(dir) {
@@ -1165,6 +1167,11 @@ pub(crate) fn trash_files_in(dir: &Path, trash: Option<&Path>) -> usize {
     };
     let mut left = 0;
     for e in rd.flatten() {
+        // A dot-name is a partial a copy is writing (or a crash left): not
+        // media; it goes with the folder (fold check M8).
+        if e.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         if e.path().is_file() {
             if let Err(why) = crate::retention::trash(trash, &e.path()) {
                 eprintln!(
@@ -1544,10 +1551,20 @@ impl Session {
                 inner.edits_writing += 1;
                 out
             };
-            let written = crate::external::write_copy(&source, start, frames, &dir, &stem, &fmt);
+            let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::external::write_copy(&source, start, frames, &dir, &stem, &fmt)
+            }));
             let mut inner = lock(&self.inner);
             inner.edits_writing = inner.edits_writing.saturating_sub(1);
-            let written = written?;
+            let written = match written {
+                Ok(w) => w?,
+                // Counted down first, so retention runs again; `ffi_guard`
+                // turns the panic into `Internal` (fold check M9).
+                Err(p) => {
+                    drop(inner);
+                    std::panic::resume_unwind(p)
+                }
+            };
             match crate::external::region_span(inner.doc(), ev) {
                 Ok((m, ..)) if m == from && !inner.closed => {}
                 _ => {
@@ -2249,8 +2266,8 @@ fn edit_copies_get_safe_free_names() {
         format!("{} edit 2.wav", "a".repeat(200))
     );
     assert_eq!(
-        copy_name(&"é".repeat(150), 1),
-        format!("{} edit 1.wav", "é".repeat(100)),
+        copy_name(&"€".repeat(100), 1),
+        format!("{} edit 1.wav", "€".repeat(66)),
         "cut at a character boundary, within 200 bytes"
     );
     let _g = serial();
@@ -2851,7 +2868,7 @@ Counts: Rust +12 on macOS (1889 / 16 ignored), +7 on Linux.
 
 **Files:**
 - Create: `app/Sources/VizDAWAppModel/ExternalEditWatcher.swift`, `app/Sources/VizDAWAppModel/ExternalEditModel.swift`, `app/Sources/VizDAW/ExternalEditing.swift`, `app/Tests/VizDAWAppModelTests/ExternalEditWatcherTests.swift`, `app/Tests/VizDAWAppModelTests/ExternalEditModelTests.swift`
-- Modify: `app/Sources/VizDAWAppModel/DocumentModel.swift` (`externalTools`, `external`, `stopExternalEdits`, the tick in `idle`), `app/Sources/VizDAWAppModel/DocumentStore.swift` (`externalTools`, handed to each model; `close` stops the watches before the session closes), `app/Sources/VizDAW/VizDAWApp.swift` (the live tools)
+- Modify: `app/Sources/VizDAWAppModel/DocumentModel.swift` (`externalTools`, `external`, `stopExternalEdits`, the tick in `idle`, `forgetGone` after an untitled Save As), `app/Sources/VizDAWAppModel/DocumentStore.swift` (`externalTools`, handed to each model; `close` stops the watches before the session closes), `app/Sources/VizDAW/VizDAWApp.swift` (the live tools)
 
 **Interfaces:**
 - Consumes: `openExternal(event:)`, `externalEdit(event:)`, `applyExternalEdit(event:path:)`, `job(id:)` (Task 3); `DocumentModel.startJob` (`ProjectMedia.swift`, internal to the module), `DocumentModel.alert`, `pollJobs`.
@@ -3159,6 +3176,7 @@ public final class ExternalEditModel {
     public static let goneMessage = "The edit copy is gone; Open in External Editor again."
     public static let noEditMessage = "This region has no external edit; use Open in External Editor."
     public static let importingMessage = "The external edit is being imported."
+    public static let waitingMessage = "The external edit waits for the media job to finish."
 
     private unowned let document: DocumentModel
     private let opener: any ExternalOpener
@@ -3171,6 +3189,10 @@ public final class ExternalEditModel {
         let stamp: FileStamp
     }
     private var running: [UInt64: Running] = [:]
+    /// The stamp each region's copy had when Open wrote it.
+    private var written: [UInt64: FileStamp] = [:]
+    /// Regions whose import waits on another job; told once (fold check M1).
+    private var waiting: Set<UInt64> = []
     private var closed = false
 
     public init(
@@ -3198,10 +3220,15 @@ public final class ExternalEditModel {
     @discardableResult
     public func open(_ region: UInt64, app: URL?) throws -> String {
         let row = try document.session.openExternal(event: region)
+        // The stamp the core wrote, read before an editor can rewrite the
+        // file (fold check M5); Reload counts it as applied even when the
+        // launch below fails (M6).
+        let wrote = probe.stamp(row.path)
+        written[region] = wrote
         try opener.open(URL(fileURLWithPath: row.path), with: app) { [weak d = document] message in
             d?.alert = AlertItem(title: ExternalEditModel.openFailedTitle, message: message)
         }
-        watch(region, row.path, applied: probe.stamp(row.path))
+        watch(region, row.path, applied: wrote)
         return row.path
     }
 
@@ -3225,9 +3252,10 @@ public final class ExternalEditModel {
         case .gone:
             return .failed(Self.goneMessage)
         case .copy(let row):
-            // A watch the region lost (its copy forgotten, then undone)
-            // starts again with nothing applied.
-            if watchers[region]?.path != row.path { watch(region, row.path, applied: nil) }
+            // A watch the region lost or never had (a failed launch, a copy
+            // forgotten then undone) starts from the stamp Open wrote, if
+            // any (fold check M6).
+            if watchers[region]?.path != row.path { watch(region, row.path, applied: written[region]) }
             guard let w = watchers[region] else { return .failed(Self.goneMessage) }
             guard let s = w.changedSinceApplied() else {
                 return probe.stamp(row.path) == nil ? .failed(Self.goneMessage) : .unchanged
@@ -3243,6 +3271,16 @@ public final class ExternalEditModel {
         poll()
         for (region, w) in watchers where running[region] == nil {
             if let s = w.due() { _ = start(region, w, s, announce: true) }
+        }
+    }
+
+    /// After an untitled project's Save As its copies are in the Trash
+    /// (Ruling 3): their watches stop, so none polls a path that never
+    /// returns (fold check M7).
+    public func forgetGone() {
+        for region in Array(watchers.keys) {
+            if case .copy? = try? document.session.externalEdit(event: region) { continue }
+            stopWatching(region)
         }
     }
 
@@ -3286,10 +3324,16 @@ public final class ExternalEditModel {
         }
         if let job {
             running[region] = Running(job: job, stamp: s)
+            waiting.remove(region)
             return .importing(job)
         }
         let outcome = refusal(refused)
-        if case .busy = outcome { return outcome }
+        if case .busy = outcome {
+            // Retried at the next tick; said once (fold check M1).
+            if announce, waiting.insert(region).inserted { document.editor.status = Self.waitingMessage }
+            return outcome
+        }
+        waiting.remove(region)
         w.skip(s)
         if announce, case .failed(let why) = outcome {
             document.alert = AlertItem(title: Self.failedTitle, message: why)
@@ -3308,6 +3352,8 @@ public final class ExternalEditModel {
                 j = try document.session.job(id: r.job)
             } catch {
                 if case .Busy? = error as? VizError { continue }
+                // Not retried every tick (fold check M4).
+                watchers[region]?.skip(r.stamp)
                 running[region] = nil
                 continue
             }
@@ -3497,6 +3543,19 @@ Replace:
 
 Find in `app/Sources/VizDAWAppModel/DocumentModel.swift`:
 ```swift
+        perform("Save Failed") { try $0.saveAs(path: path) }
+```
+Replace:
+```swift
+        let untitled = needsSaveAs
+        perform("Save Failed") { try $0.saveAs(path: path) }
+        // An untitled project's copies went to the Trash (plan 5f-3 Ruling
+        // 3, owner answer 2026-11-03): their watches stop (fold check M7).
+        if untitled, !needsSaveAs { externalModel?.forgetGone() }
+```
+
+Find in `app/Sources/VizDAWAppModel/DocumentModel.swift`:
+```swift
         if !jobs.isEmpty { pollJobs() }
 ```
 Replace:
@@ -3666,7 +3725,7 @@ final class FakeClock {
         #expect(w.due() == nil)
     }
 
-    @Test func aRenameOverTheFileRearmsTheWatch() throws {
+    @Test func theProbeReadsTheFileARenamePutThere() throws {
         defer { try? FileManager.default.removeItem(at: dir) }
         try write(100)
         let w = watcher()
@@ -3869,6 +3928,8 @@ final class FakeProbe: FileProbe {
         opener.error = .Io(message: "/Applications/Nope.app is not an application.")
         #expect(throws: VizError.self) { try m.external.open(7, app: nil) }
         #expect(watching.started.isEmpty && opener.opened.isEmpty, "nothing is watched or opened")
+        #expect(m.external.reload(7) == .unchanged, "a failed launch's copy is not imported back (fold check M6)")
+        #expect(f.externalApplies.isEmpty)
         opener.error = nil
         opener.lateFailure = "The application could not open the file."
         try m.external.open(7, app: nil)
@@ -3928,6 +3989,7 @@ final class FakeProbe: FileProbe {
         clock.advance(1)
         m.idle()
         #expect(f.externalApplies.isEmpty && m.alert == nil, "a busy core is no failure")
+        #expect(m.editor.status == ExternalEditModel.waitingMessage, "the wait is said once")
         f.applyError = nil
         m.idle()
         #expect(f.externalApplies.count == 1, "retried at the next tick")
@@ -4345,6 +4407,24 @@ Replace:
             case .unavailable, .dialogRequired, .unknownId, .noDocument: return .pass
 ```
 
+`KeyRouter.route` never leaves this command's chord to the menu (fold check I1, owner answer 2026-11-03):
+
+Find in `app/Sources/VizDAWAppModel/KeyBindings.swift`:
+```swift
+        if let id = keys.command(keyCode: keyCode, modifiers: m, stepEntry: stepEntry) {
+            if menus, !plain(m), let row = keys.row(id), row.menuItem,
+                let first = row.keys.first, chord(first, is: keyCode, m)
+```
+Replace:
+```swift
+        if let id = keys.command(keyCode: keyCode, modifiers: m, stepEntry: stepEntry) {
+            // Open in External Editor runs here, never through its menu
+            // item: with no editor chosen a key says so and the menu item
+            // alone opens the chooser (plan 5f-3, owner answer 2026-11-03).
+            if menus, !plain(m), id != RegionCommands.openExternal, let row = keys.row(id), row.menuItem,
+                let first = row.keys.first, chord(first, is: keyCode, m)
+```
+
 In `Nudge.swift`:
 
 Find in `app/Sources/VizDAWAppModel/Nudge.swift`:
@@ -4650,6 +4730,15 @@ import VizDAWCore
         #expect(opener.opened.isEmpty)
         select(m, [])
         #expect(KeyDispatch.after(run(RegionCommands.removeFades, s, id), doc: m) == .pass, "others still pass")
+        // The chord the menu item shows, too: never left to the menu, whose
+        // item opens the chooser (fold check I1, owner answer 2026-11-03).
+        let keys = KeyBindings(defaults: MemoryDefaults())
+        try keys.bind(RegionCommands.openExternal, keys: ["⌃⌥⌘E"], replace: true)
+        #expect(
+            KeyRouter.route(
+                keyCode: 14, modifiers: ModifiersRow(shift: false, control: true, option: true, command: true),
+                typing: false, stepEntry: false, menus: true, keys: keys, sequences: [])
+                == .command(RegionCommands.openExternal))
     }
 
     @Test func theMenuItemsReportInTheWindow() throws {
