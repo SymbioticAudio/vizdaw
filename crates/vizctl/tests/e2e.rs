@@ -1759,3 +1759,143 @@ fn bounces_the_demo_and_checks_the_file() {
     );
     app.quit();
 }
+
+/// A 48 kHz mono 16-bit WAV of `frames` frames at `level`: an editor's
+/// save (plan 5f-3).
+fn wav(path: &std::path::Path, frames: usize, level: f32) {
+    let fmt = core_media::export::ExportFormat {
+        container: core_media::export::Container::Wav,
+        depth: core_model::format::BitDepth::Int16,
+        rate: 48_000,
+        dither: false,
+        dither_stream: 0,
+    };
+    let mut w = core_media::export::PcmWriter::create(path, &fmt, 1).unwrap();
+    w.write(&vec![level; frames]).unwrap();
+    w.finish().unwrap();
+}
+
+/// README steps 185–188 through the channel (plan 5f-3; spec §11, §12.1):
+/// with `VIZDAW_EXTERNAL_EDITOR=stub`, which launches nothing, a region of
+/// an imported tone opens in the "editor"; the test saves the copy as an
+/// editor that replaces its file would, and the region plays the edit as
+/// one "External Edit" step; a second save in place, on the file the
+/// rename put there, lands too, which pins the watch re-armed on the
+/// replaced file (pre-flight I8); Reload with nothing changed is
+/// "unchanged"; hostile calls are refused.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn edits_a_region_through_the_stub_editor() {
+    let mut app = App::start_with(&[("VIZDAW_EXTERNAL_EDITOR", "stub")]);
+    let home = app.launched.home.clone();
+    let tone = home.join("tone.caf");
+    audio_file(&tone, 96_000);
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+
+    // 1. Nothing selected: refused; a relative `app`: refused by type.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.open_external", "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Unavailable, "{e}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.open_external", "params": {"app": "relative.app"}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
+
+    // 2. The tone at bar 1 (the demo's own audio is offline: pre-flight
+    // C1), its region selected by its element.
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": tone, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let (region, label) = wait_for_label_like(&mut app, &w, "Region tone on ", "gain 0.0 dB");
+    app.call("ui.click", json!({"window": w, "element": region}));
+    let sel = app.call("state.get", json!({"target": "selection", "window": w}));
+    assert_eq!(sel["events"].as_array().unwrap().len(), 1, "{label}: {sel}");
+
+    // 3. Open: the copy's path, in the scratch package in the home.
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.open_external", "window": w}),
+    );
+    let status = r["status"].as_str().unwrap_or("").to_string();
+    let copy = PathBuf::from(
+        status
+            .strip_prefix("editing ")
+            .unwrap_or_else(|| panic!("{r}")),
+    );
+    assert!(
+        copy.starts_with(&home) && copy.ends_with("Media/Edits/tone edit 1.wav"),
+        "{r}"
+    );
+    assert!(copy.is_file(), "{}", copy.display());
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.reload_external", "window": w}),
+    );
+    assert_eq!(
+        r["status"], "unchanged",
+        "right after Open (pre-flight I10): {r}"
+    );
+
+    // 4. The editor saves by replacing the file (pre-flight M11).
+    let tmp = copy.with_file_name(".tone edit 1.tmp.wav");
+    wav(&tmp, 24_000, 0.5);
+    std::fs::rename(&tmp, &copy).unwrap();
+    wait_for_undo(&mut app, &w, "External Edit");
+    let edited = |m: &Value, frames: u64| {
+        m["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["origin"] == "external_edit" && i["frames"] == frames)
+    };
+    wait_for_state(&mut app, &w, "media", |m| edited(m, 24_000));
+
+    // 5. A second save, in place on the file the rename put there: it
+    // lands only if the watch followed the rename (pre-flight I8).
+    let bytes = {
+        let t = home.join("short.wav");
+        wav(&t, 12_000, 0.25);
+        std::fs::read(&t).unwrap()
+    };
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&copy)
+            .unwrap();
+        f.write_all(&bytes).unwrap();
+        f.sync_all().unwrap();
+    }
+    let m = wait_for_state(&mut app, &w, "media", |m| edited(m, 12_000));
+    let edits = m["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["origin"] == "external_edit")
+        .count();
+    assert_eq!(edits, 2, "one import per save: {m}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(doc["undo"], "External Edit", "{doc}");
+
+    // 6. Reload with nothing changed since; an `app` that is no application.
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.reload_external", "window": w}),
+    );
+    assert_eq!(r["status"], "unchanged", "{r}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.open_external", "params": {"app": "/Applications/Nope-VizDAW-e2e.app"}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Failed, "{e}");
+    app.quit();
+}

@@ -1697,3 +1697,39 @@ and the e2e `bounces_the_demo_and_checks_the_file`.
      numbered ("Bass 2.wav"); the status lists them under those names.
      A name ending in your own digits keeps them: a taken "Kick 808.wav"
      becomes "Kick 808 2.wav".
+
+### External sample editor (plan 5f-3)
+
+By hand; the watcher is tested (`ExternalEditWatcherTests`), the core
+(`core-ffi/tests/external.rs`) and the e2e
+`edits_a_region_through_the_stub_editor`.
+
+185. Settings › Editing › External Sample Editor › Choose… lists your
+     applications; choose a sample editor. Clear forgets it. With none
+     chosen, only Region › Open in External Editor asks for one first; a
+     key bound to it (or a control-surface button) says "Choose an
+     external editor in Settings › Editing." in the status line and
+     opens nothing.
+186. The manual checklist's "external editor round trip": select one
+     audio region, Region › Open in External Editor: the editor opens
+     "<name> edit 1.wav". Trim it shorter and save: about a second later
+     the region plays the edit, Edit shows "Undo External Edit", and the
+     media pool lists the edit as External Edit. Other regions using the
+     original sound as before. Undo puts the original back.
+187. Save again in the editor, twice quickly: one more "External Edit"
+     step, not two. Region › Reload External Edit with nothing changed
+     says the edit is unchanged and imports nothing. Start a long media
+     job (File › Bounce… of a long song) and save in the editor
+     meanwhile: the status line says "The external edit waits for the
+     media job to finish." once, and the edit lands when the job ends;
+     Reload External Edit pressed during the job is retried the same way. Delete the
+     region and save in the editor: the alert says the region was
+     deleted, and later saves say nothing.
+188. Edit copies exist only while the project is open. Move the copy to
+     the Trash in Finder, then put it back: it imports. Close the
+     project: the edit copies go to the Trash (with the other unused
+     files); reopen it: Reload External Edit says the copy is gone. An
+     untitled project's copies go to the Trash too, when it closes or is
+     first saved (Save As). Save As of a saved project does not move the
+     copies: they stay in the old package, still watched, until that
+     package is next saved or closed.
