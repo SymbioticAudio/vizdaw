@@ -1229,9 +1229,13 @@ fn input_while_nothing_is_focused_is_not_replayed() {
     );
     a.close().unwrap();
     let b = vizdaw_ffi::Session::new_demo().unwrap();
-    // Play, pressed while nothing is focused.
-    b.inject_midi("T In".into(), vec![0x90, 0x5E, 0x7F])
-        .unwrap();
+    // Play, pressed on the unit while nothing is focused (raw input, as
+    // CoreMIDI's listener gives it; `midi.inject` decides from its own
+    // window and would focus `b`: final re-review).
+    assert!(
+        !vizdaw_ffi::surfaces::debug_input("T In", &[0x90, 0x5E, 0x7F]),
+        "not queued"
+    );
     b.focus_surfaces().unwrap();
     b.idle().unwrap();
     let events = b.take_surface_events().unwrap();

@@ -588,6 +588,10 @@ struct Claims {
     mapper: Mapper,
     /// A session is focused: only then is input queued (final review I1).
     focused: bool,
+    /// Every open session's maps, by session, with their ports by key:
+    /// the engine holder's take its learned messages out of its own lanes
+    /// even while it is not focused (ruling F-1; they do not drive then).
+    sessions: BTreeMap<u64, (BTreeMap<u32, String>, Mapper)>,
 }
 
 impl Claims {
@@ -599,9 +603,18 @@ impl Claims {
         if self.learning && learnable(bytes) {
             return true;
         }
-        self.keys
+        if self
+            .keys
             .get(&key)
             .is_some_and(|name| self.mapper.takes(name, bytes))
+        {
+            return true;
+        }
+        // The lanes that hear input are the engine holder's: its own maps
+        // keep their messages out of them, focused or not (ruling F-1).
+        self.sessions
+            .get(&crate::host::holder_now())
+            .is_some_and(|(keys, m)| keys.get(&key).is_some_and(|name| m.takes(name, bytes)))
     }
 
     /// Whether a surface, a learn or a map listens to `port`: never while
@@ -648,14 +661,22 @@ fn claims() -> Option<Arc<Claims>> {
     None
 }
 
-/// Swaps in `claims`; the old set is dropped after the lock is released.
+/// The set the last swap replaced, kept until the next one (final
+/// re-review N-a): a reader on CoreMIDI's thread that still holds a clone
+/// then only lets go of a count, and the set is freed here, by the thread
+/// that publishes.
+static RETIRED: Mutex<Option<Arc<Claims>>> = Mutex::new(None);
+
+/// Swaps in `claims`; the set it replaces is retired, and the one retired
+/// before is dropped, after the lock is released.
 fn set_claims(claims: Claims) {
     let new = Arc::new(claims);
     let old = {
         let mut g = CLAIMS.write().unwrap_or_else(PoisonError::into_inner);
         std::mem::replace(&mut *g, new)
     };
-    drop(old);
+    let gone = lock_mutex(&RETIRED).replace(old);
+    drop(gone);
 }
 
 /// The process-wide surfaces state (`surfaces::lock()`).
@@ -691,6 +712,9 @@ pub(crate) struct Registry {
     /// until that session's maps have it, or the learn fails (final review
     /// N4: the tail of the turn stays out of the lanes).
     claimed: Option<(u64, LearnSource)>,
+    /// Every open session's maps, as its document has them (ruling F-1):
+    /// claimed for the engine holder, driving only for the focused one.
+    session_maps: BTreeMap<u64, Vec<LearnMap>>,
     /// What the last learn learnt.
     last: Option<String>,
     /// Input messages routed so far (tags for [`Act`]).
@@ -714,6 +738,7 @@ impl Registry {
             mapper_fed: None,
             learn: None,
             claimed: None,
+            session_maps: BTreeMap::new(),
             last: None,
             tags: 0,
         }
@@ -1058,6 +1083,25 @@ impl Registry {
             keys,
             mapper,
             focused: self.focus.is_some(),
+            sessions: self
+                .session_maps
+                .iter()
+                .filter(|(_, maps)| !maps.is_empty())
+                .map(|(id, maps)| {
+                    let keys = maps
+                        .iter()
+                        .map(|m| {
+                            (
+                                core_engine::input::port_key(&m.source.port),
+                                m.source.port.clone(),
+                            )
+                        })
+                        .collect();
+                    let mut m = Mapper::default();
+                    m.set(maps.clone(), Vec::new());
+                    (*id, (keys, m))
+                })
+                .collect(),
         };
         set_claims(claims);
     }
@@ -1080,6 +1124,7 @@ impl Registry {
     /// online; final review T8 m2); the units get a full refresh from the
     /// new one, due at once. True when the focus moved.
     fn focus(&mut self, id: u64, maps: Vec<LearnMap>) -> bool {
+        self.session_maps.insert(id, maps.clone());
         if self.focus == Some(id) {
             self.set_maps(maps);
             return false;
@@ -1376,6 +1421,7 @@ impl Registry {
         if self.claimed.as_ref().is_some_and(|(s, _)| *s == id) {
             self.claimed = None;
         }
+        self.session_maps.remove(&id);
         self.owed.remove(&id);
         if self.focus == Some(id) {
             self.focus = None;
@@ -1847,6 +1893,14 @@ pub(crate) fn begin(id: u64, now: Instant) -> (Vec<Owed>, bool) {
 /// focused session's count).
 pub(crate) fn sync_maps(id: u64, maps: &[LearnMap]) {
     let mut r = lock();
+    // Every session's maps are kept: the engine holder's are claimed even
+    // while it is not focused (ruling F-1).
+    if r.session_maps.get(&id).map(Vec::as_slice) != Some(maps) {
+        r.session_maps.insert(id, maps.to_vec());
+        if r.focus != Some(id) {
+            r.publish();
+        }
+    }
     if r.focus == Some(id) {
         if r.maps != maps || r.claimed.is_some() {
             r.set_maps(maps.to_vec());
@@ -1854,6 +1908,20 @@ pub(crate) fn sync_maps(id: u64, maps: &[LearnMap]) {
     } else if r.took_claimed(id, maps) {
         r.publish();
     }
+}
+
+/// Whether surfaces would hear `port` for session `id` were it focused: a
+/// surface's input, a waiting learn, a command map or one of `id`'s own
+/// maps (final re-review: `midi.inject` decides from its window's own
+/// document, not from the focused one's claims).
+pub(crate) fn would_listen(id: u64, port: &str) -> bool {
+    let r = lock();
+    r.units.iter().any(|u| u.input == port)
+        || r.learn.is_some()
+        || r.commands.iter().any(|c| c.source.port == port)
+        || r.session_maps
+            .get(&id)
+            .is_some_and(|maps| maps.iter().any(|m| m.source.port == port))
 }
 
 /// Session `id`'s decided learn did not become a map (final review N4).
@@ -2275,6 +2343,14 @@ pub fn debug_sent(port: &str) -> Vec<Vec<u8>> {
     with_fake(|f| f.take_sent(port))
 }
 
+/// Raw input from `port`, as CoreMIDI's surfaces listener gives it (host
+/// time 0): queued only when something listens (final re-review: the I1
+/// test's hardware stand-in).
+#[cfg(feature = "test-hooks")]
+pub fn debug_input(port: &str, bytes: &[u8]) -> bool {
+    input(port, bytes, 0)
+}
+
 /// Moves the surfaces clock on by `ms`.
 #[cfg(feature = "test-hooks")]
 pub fn debug_advance(ms: u64) {
@@ -2439,6 +2515,7 @@ mod tests {
             keys,
             mapper,
             focused: true,
+            sessions: BTreeMap::new(),
         });
     }
 

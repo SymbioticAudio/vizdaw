@@ -328,6 +328,10 @@ fn a_learned_cc_is_neither_recorded_nor_played_thru() {
     wait_until("a beat on", || s.transport().unwrap().tick > 2 * 15_360);
     s.stop().unwrap();
     wait_until("the stop", || !s.transport().unwrap().playing);
+    // The take waits for the ride's static edit, which the Learn hold
+    // ends 500 ms (IDLE_RELEASE) after the last CC on the surfaces clock
+    // (final re-review, concern 1: a test race, not a loss).
+    debug_advance(500);
     s.idle().unwrap();
     log.extend(drain_offline_log());
     // The demo's Chords lane has its own CC 7 = 100 at bar 1, which the
@@ -552,4 +556,122 @@ fn a_waiting_learn_lets_note_offs_through() {
             .any(|(_, b): &(u64, Vec<u8>)| b.get(1) == Some(&60))
             && log.iter().any(|(_, b)| b.get(1) == Some(&62))
     });
+}
+
+/// Controller ruling F-1 (owner rule, final re-review concern 2): a CC
+/// project B learned stays out of B's lanes while another project is
+/// focused. B holds the engine (it records), A has the focus: B's CC 7 is
+/// neither recorded into B's take nor played thru, and B's fader is not
+/// driven (only the focused project's maps drive); a CC B did not learn
+/// still records.
+#[test]
+fn a_cc_learned_in_an_unfocused_project_stays_out_of_its_lanes() {
+    use vizdaw_ffi::host::{debug_midi_from_source, drain_offline_log};
+    use vizdaw_ffi::{EditCommand, EventKindRow, LaneEdit, LaneInputRow};
+    let _g = serial();
+    let b = Session::new_demo().unwrap();
+    b.focus_surfaces().unwrap();
+    let seq = song(&b);
+    let chords = b
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Chords")
+        .unwrap()
+        .id;
+    let edit = |e: LaneEdit| b.edit(EditCommand::Lane { edit: e }, None).unwrap();
+    edit(LaneEdit::SetInput {
+        seq,
+        lane: chords,
+        input: Some(LaneInputRow::Midi {
+            port: None,
+            channel: None,
+        }),
+    });
+    edit(LaneEdit::SetFlags {
+        seq,
+        lane: chords,
+        mute: None,
+        solo: None,
+        arm: Some(true),
+    });
+    let t = learned_fader(&b);
+    let ccs = |s: &Session| {
+        s.lane_events(seq, chords)
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| e.kind == EventKindRow::Cc)
+            .count()
+    };
+    let before = ccs(&b);
+    let a = Session::new_demo().unwrap();
+    a.focus_surfaces().unwrap();
+    b.record(
+        seq,
+        vizdaw_ffi::record::RecordSpecRow {
+            replace: false,
+            punch: None,
+            looped: false,
+            count_in_bars: 0,
+            pre_roll_bars: 0,
+            passes_as_takes: false,
+        },
+    )
+    .unwrap();
+    wait_until("beat 1", || b.transport().unwrap().tick > 15_360);
+    drain_offline_log();
+    for v in [20u8, 40, 60] {
+        debug_midi_from_source("Knobs", 0, &[0xB0, 7, v]);
+        a.idle().unwrap();
+        b.idle().unwrap();
+    }
+    debug_midi_from_source("Knobs", 0, &[0xB0, 8, 50]);
+    let mut log = Vec::new();
+    wait_until("the unlearned CC's thru", || {
+        log.extend(drain_offline_log());
+        log.iter()
+            .any(|(_, m): &(u64, Vec<u8>)| m == &vec![0xB0, 8, 50])
+    });
+    assert!(
+        !b.automation_state().unwrap().touched.contains(&t),
+        "B's fader is not driven while A is focused"
+    );
+    let after = b.transport().unwrap().tick + 15_360 / 4;
+    wait_until("a quarter beat on", || b.transport().unwrap().tick > after);
+    b.stop().unwrap();
+    wait_until("the stop", || !b.transport().unwrap().playing);
+    wait_until("the take", || {
+        b.idle().unwrap();
+        ccs(&b) > before
+    });
+    log.extend(drain_offline_log());
+    assert!(
+        !log.iter()
+            .any(|(_, m)| m.first().is_some_and(|x| x & 0xF0 == 0xB0)
+                && m.get(1) == Some(&7)
+                && m.get(2).is_some_and(|v| [20u8, 40, 60].contains(v))),
+        "no CC 7 thru: {log:?}"
+    );
+    assert_eq!(ccs(&b), before + 1, "only the unlearned CC is in the take");
+}
+
+/// Final re-review (concern 2, injection): `midi.inject` decides from its
+/// window's own document. B learned CC 7, A is focused and learned
+/// nothing: the CC injected into B focuses B and drives B's fader.
+#[test]
+fn midi_injected_for_an_unfocused_projects_map_drives_it() {
+    let _g = serial();
+    let b = Session::new_demo().unwrap();
+    b.focus_surfaces().unwrap();
+    let t = learned_fader(&b);
+    let a = Session::new_demo().unwrap();
+    a.focus_surfaces().unwrap();
+    a.idle().unwrap();
+    assert!(
+        b.inject_midi("Knobs".into(), vec![0xB0, 7, 30]).unwrap(),
+        "B's map takes it"
+    );
+    b.idle().unwrap();
+    assert!(b.automation_state().unwrap().touched.contains(&t));
 }

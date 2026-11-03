@@ -7333,12 +7333,15 @@ impl Session {
             // Surfaces, MIDI learn and learned maps hear injected bytes
             // too (plan 5f-1 Ruling 16), serviced by the session's idle;
             // what they take stays out of the lanes (Ruling 17).
-            let queued = crate::surfaces::inject(&port, &bytes);
-            if queued && self.focus_here() {
+            // This window's own document decides (final re-review): when
+            // a surface, a learn, a command map or one of its maps hears the
+            // port, it takes the focus first, so the bytes act here.
+            if crate::surfaces::would_listen(self.id, &port) && self.focus_here() {
                 // The units show this window before the bytes are routed
                 // (final review N1).
                 self.feed_surfaces(crate::surfaces::now(), &[]);
             }
+            let queued = crate::surfaces::inject(&port, &bytes);
             let key = core_engine::input::port_key(&port);
             let count = parsed.len();
             let msgs: Vec<_> = parsed
@@ -8322,8 +8325,10 @@ impl Session {
                 let last = inner.surfaces.last_ns.remove(&(h, t));
                 self.release_from(&mut inner, t, h, last.filter(|_| idle));
             }
+            // Every session's maps are kept: the engine holder's stay out of
+            // its lanes while it is not focused (ruling F-1).
+            crate::surfaces::sync_maps(self.id, &inner.doc().settings().learn);
             if focused {
-                crate::surfaces::sync_maps(self.id, &inner.doc().settings().learn);
                 let strips = display_order(inner.doc()).len();
                 let acts = {
                     let shared: &Inner = &inner;

@@ -73,6 +73,46 @@ fn measuring_busy() -> VizError {
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
+
+/// The session holding the engine (0: none), copied from the host slot
+/// each time its lock is let go, so CoreMIDI's thread reads it without a
+/// lock (plan 5f-1 ruling F-1: the claims take the holder's learned
+/// messages out of its lanes).
+static HOLDER: AtomicU64 = AtomicU64::new(0);
+
+/// The host slot's guard: on drop (still under the lock) it copies the
+/// holder into [`HOLDER`], so every change of the owner is seen.
+struct HostGuard(std::sync::MutexGuard<'static, Option<Host>>);
+
+impl std::ops::Deref for HostGuard {
+    type Target = Option<Host>;
+    fn deref(&self) -> &Option<Host> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for HostGuard {
+    fn deref_mut(&mut self) -> &mut Option<Host> {
+        &mut self.0
+    }
+}
+
+impl Drop for HostGuard {
+    fn drop(&mut self) {
+        HOLDER.store(self.0.as_ref().map_or(0, |h| h.owner), Ordering::Relaxed);
+    }
+}
+
+/// The host slot (poison-tolerant), as [`HostGuard`].
+fn lock_host() -> HostGuard {
+    HostGuard(lock(&HOST))
+}
+
+/// The session holding the engine now, without a lock (0: none): for
+/// CoreMIDI's thread (ruling F-1).
+pub(crate) fn holder_now() -> u64 {
+    HOLDER.load(Ordering::Relaxed)
+}
 static FORCE_OFFLINE: AtomicBool = AtomicBool::new(false);
 /// Engine loads made by the host (test hook counter).
 static LOADS: AtomicU64 = AtomicU64::new(0);
@@ -362,7 +402,7 @@ fn note_midi_fault(h: &mut Host, fault: Option<String>) {
 /// Connects without the host lock, then reports a failure on the host.
 fn connect_and_report() {
     let fault = connect_midi_sources();
-    if let Some(h) = lock(&HOST).as_mut() {
+    if let Some(h) = lock_host().as_mut() {
         note_midi_fault(h, fault);
     }
 }
@@ -372,7 +412,7 @@ fn connect_and_report() {
 /// `Output::Hal`): offline hosts, the e2e's among them, never connect the
 /// machine's real MIDI sources (pre-flight M7).
 pub fn listen_to_midi_sources() {
-    let live = lock(&HOST).as_ref().is_some_and(Host::is_live);
+    let live = lock_host().as_ref().is_some_and(Host::is_live);
     #[cfg(feature = "test-hooks")]
     let live = live || PRETEND_LIVE_MIDI.load(Ordering::Relaxed);
     if live {
@@ -465,7 +505,7 @@ pub fn set_audio_input_device(name: Option<String>) {
         // two input changes. Under a record
         // hold or a measurement it applies when that ends
         // ([`Host::settle_input`]; 5d-2 final review I1).
-        if let Some(h) = lock(&HOST).as_mut() {
+        if let Some(h) = lock_host().as_mut() {
             if !h.record_hold && h.measure.is_none() && h.asked_input() {
                 h.ensure_input(false);
                 h.ensure_input(true);
@@ -477,7 +517,7 @@ pub fn set_audio_input_device(name: Option<String>) {
 /// Lets the next input open try the device again after it failed (plan
 /// 5d-1 Ruling 15: the input picker and the arm button).
 pub fn clear_input_failure() {
-    if let Some(h) = lock(&HOST).as_mut() {
+    if let Some(h) = lock_host().as_mut() {
         h.input_failed = None;
     }
 }
@@ -485,7 +525,7 @@ pub fn clear_input_failure() {
 /// [`clear_input_failure`] when `owner` holds the engine (an edit of its
 /// lanes; Task 7 review m6: another window's edit leaves it).
 pub fn clear_input_failure_of(owner: u64) {
-    if let Some(h) = lock(&HOST).as_mut().filter(|h| h.owner == owner) {
+    if let Some(h) = lock_host().as_mut().filter(|h| h.owner == owner) {
         h.input_failed = None;
     }
 }
@@ -493,7 +533,7 @@ pub fn clear_input_failure_of(owner: u64) {
 /// Whether `owner`'s host is opening or closing its input on the input
 /// thread (plan 5d-1 Ruling 13).
 pub fn input_opening(owner: u64) -> bool {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .is_some_and(|h| h.owner == owner && h.job.is_some())
 }
@@ -502,7 +542,7 @@ pub fn input_opening(owner: u64) -> bool {
 /// hook, Task 8 review m1).
 #[cfg(feature = "test-hooks")]
 pub fn debug_input_job() -> bool {
-    lock(&HOST).as_ref().is_some_and(|h| h.job.is_some())
+    lock_host().as_ref().is_some_and(|h| h.job.is_some())
 }
 
 /// Waits up to `limit`, with no lock held between looks, until no input
@@ -510,7 +550,7 @@ pub fn debug_input_job() -> bool {
 pub fn wait_input(limit: Duration) -> bool {
     let until = Instant::now() + limit;
     loop {
-        if !lock(&HOST).as_ref().is_some_and(|h| h.job.is_some()) {
+        if !lock_host().as_ref().is_some_and(|h| h.job.is_some()) {
             return true;
         }
         if Instant::now() >= until {
@@ -834,7 +874,7 @@ fn media_of(owner: u64) -> Vec<core_media::stream::MediaFile> {
 
 /// Media whose reads failed while `owner` played (each once).
 pub fn take_stream_errors(owner: u64) -> Vec<(core_model::ids::MediaId, String)> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.take_stream_errors())
@@ -847,7 +887,7 @@ pub fn take_stream_errors(owner: u64) -> Vec<(core_model::ids::MediaId, String)>
 #[cfg(feature = "test-hooks")]
 pub fn stall_disk(on: bool) {
     STALL_DISK.store(on, Ordering::Relaxed);
-    if let Some(h) = lock(&HOST).as_ref() {
+    if let Some(h) = lock_host().as_ref() {
         h.engine.streamer().set_stalled(on);
     }
 }
@@ -891,7 +931,7 @@ pub fn reset_host() {
 /// owner's next `state` call handles it.
 #[cfg(feature = "test-hooks")]
 pub fn simulate_event(ev: BackendEvent) {
-    if let Some(h) = lock(&HOST).as_mut() {
+    if let Some(h) = lock_host().as_mut() {
         h.injected.push(ev);
     }
 }
@@ -906,7 +946,7 @@ pub fn hosts_created() -> u64 {
 /// one (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn fader_override(strip: u64) -> Option<f64> {
-    lock(&HOST)
+    lock_host()
         .as_ref()?
         .engine
         .overrides()?
@@ -924,7 +964,7 @@ static RETIRED_LOG: Mutex<Vec<(u64, Vec<u8>)>> = Mutex::new(Vec::new());
 #[cfg(feature = "test-hooks")]
 pub fn drain_offline_log() -> Vec<(u64, Vec<u8>)> {
     let mut events = std::mem::take(&mut *lock(&RETIRED_LOG));
-    let host = lock(&HOST);
+    let host = lock_host();
     if let Some(log) = host.as_ref().and_then(|h| h.log.as_ref()) {
         events.extend(log.drain().iter().map(|r| (r.frame, r.bytes().to_vec())));
     }
@@ -1021,7 +1061,7 @@ pub fn closing_hosts_waiting() -> usize {
 /// targets (test hook; empty without a host).
 #[cfg(feature = "test-hooks")]
 pub fn midi_destination_targets() -> Vec<String> {
-    lock(&HOST).as_ref().map_or_else(Vec::new, |h| {
+    lock_host().as_ref().map_or_else(Vec::new, |h| {
         h.engine
             .targets()
             .iter()
@@ -1062,7 +1102,7 @@ pub fn midi_destination_ports() -> Vec<String> {
 
 /// [`midi_destination_ports`]' body, which may panic.
 fn destination_ports() -> Vec<String> {
-    if let Some(ports) = lock(&HOST).as_ref().map(|h| h.engine.ports()) {
+    if let Some(ports) = lock_host().as_ref().map(|h| h.engine.ports()) {
         return ports.into_iter().map(|p| p.name).collect();
     }
     if offline_mode() {
@@ -1182,13 +1222,13 @@ pub fn loads() -> u64 {
 /// The live engine's worker count (test hook; `None` without a host).
 #[cfg(feature = "test-hooks")]
 pub fn engine_workers() -> Option<usize> {
-    lock(&HOST).as_ref().map(|h| h.engine.config().workers)
+    lock_host().as_ref().map(|h| h.engine.config().workers)
 }
 
 /// True when a host exists and its engine is not stopped (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn engine_active() -> bool {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .is_some_and(|h| h.engine.state() != PlayState::Stopped)
 }
@@ -1221,7 +1261,7 @@ fn retire(old: Option<Host>) {
 /// output plays them and the host goes, without the host lock (as in
 /// `play`'s handover).
 pub fn reset() {
-    let mut old = lock(&HOST).take();
+    let mut old = lock_host().take();
     // No engine: nothing hears the sources until the next host.
     *lock(&MIDI_TO) = None;
     if let Some(h) = old.as_mut() {
@@ -1583,8 +1623,8 @@ fn hand_back(generation: u64, flags: &JobFlags, want: bool, done: Opened) {
             return;
         }
         let mut slot = match HOST.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Ok(g) => HostGuard(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => HostGuard(p.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
@@ -2507,7 +2547,7 @@ fn rebuild(r: Rebuild, doc: &Document, plugins: Option<&mut PluginHost>) -> Resu
     }
     new.owner = owner;
     new.seq = seq;
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     let spare = if slot.is_none() {
         install(&mut slot, new);
         None
@@ -2605,11 +2645,11 @@ fn claim_host(
     doc: &Document,
     mut plugins: Option<&mut PluginHost>,
     idle: Idle,
-) -> Result<(std::sync::MutexGuard<'static, Option<Host>>, bool), VizError> {
+) -> Result<(HostGuard, bool), VizError> {
     let idle_only = idle != Idle::Any;
     let project = project_rate(doc);
     let mut slot = loop {
-        let mut slot = lock(&HOST);
+        let mut slot = lock_host();
         if let Some(h) = slot.as_mut() {
             if h.measure.is_some() {
                 return Err(measuring_busy());
@@ -2780,7 +2820,7 @@ pub fn finish_play(p: HostPlay) -> Result<(), VizError> {
     if p.connect_midi {
         connect_and_report();
     }
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == p.owner && h.epoch == p.epoch => {
             Ok(h.engine.finish_play(p.pending)?)
@@ -2791,7 +2831,7 @@ pub fn finish_play(p: HostPlay) -> Result<(), VizError> {
 
 /// Stops if `owner` is playing.
 pub fn stop(owner: u64) -> Result<(), VizError> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             h.want_play = false;
@@ -2806,7 +2846,7 @@ pub fn stop(owner: u64) -> Result<(), VizError> {
 /// Moves `owner`'s transport. Returns false when `owner` does not hold
 /// the engine (the caller keeps the position for its next Play).
 pub fn locate(owner: u64, tick: Tick) -> Result<bool, VizError> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             h.engine.locate_tick(tick)?;
@@ -2818,7 +2858,7 @@ pub fn locate(owner: u64, tick: Tick) -> Result<bool, VizError> {
 
 /// Turns looping on or off if `owner` holds the engine.
 pub fn set_loop(owner: u64, on: bool) -> Result<(), VizError> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             h.engine.set_loop(on)?;
@@ -2839,7 +2879,7 @@ pub fn audition(
     velocity: u16,
     on: bool,
 ) -> Result<bool, VizError> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == owner => Ok(h.engine.audition(doc, dest, pitch, velocity, on)?),
         _ => Ok(false),
@@ -2859,7 +2899,7 @@ pub fn reload(
         crate::recovery::before_sync();
         p.sync(doc)
     });
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             #[cfg(feature = "test-hooks")]
@@ -2934,7 +2974,7 @@ pub fn claim_idle(
     // The heal keeps the engine's playhead (the session's cursor is unset
     // while it holds the engine; re-review-2 R2), across a retire too.
     let hosted = plugins.is_some();
-    let held = match lock(&HOST).as_ref() {
+    let held = match lock_host().as_ref() {
         Some(h) if h.owner == owner && h.seq == seq => {
             if h.factory_owner == owner || !hosted {
                 return Ok(false);
@@ -2990,7 +3030,7 @@ pub fn state(
     doc: &Document,
     plugins: Option<&mut PluginHost>,
 ) -> Result<Option<HostState>, VizError> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_ref() {
         Some(h) if h.owner == owner => {}
         _ => return Ok(None),
@@ -2998,7 +3038,7 @@ pub fn state(
     if let Some(r) = handle_events(&mut slot)? {
         drop(slot);
         rebuild(r, doc, plugins)?;
-        slot = lock(&HOST);
+        slot = lock_host();
     }
     let Some(h) = slot.as_mut().filter(|h| h.owner == owner) else {
         return Ok(None);
@@ -3025,7 +3065,7 @@ pub fn state(
 
 /// `(rate_mismatch, device rate)` if `owner` holds the engine.
 pub fn device(owner: u64) -> Option<(bool, f64)> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| (h.rate_mismatch, h.sample_rate))
@@ -3036,7 +3076,7 @@ pub fn device(owner: u64) -> Option<(bool, f64)> {
 /// playback stops and the next Play asks the device for the new rate. The
 /// note-offs drain without the host lock, as in [`reset`].
 pub fn reset_if_owner(owner: u64, project: f64) {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     if !slot
         .as_ref()
         .is_some_and(|h| h.owner == owner && !same_rate(h.project_rate, project))
@@ -3061,7 +3101,7 @@ pub(crate) fn set_buffer_frames(frames: u32) -> Result<(), VizError> {
     // waited for without the lock (plan 5d-1 Ruling 13); then the checks
     // and the reopen run under one lock with nothing else at the device.
     let mut slot = loop {
-        let slot = lock(&HOST);
+        let slot = lock_host();
         if !slot.as_ref().is_some_and(|h| h.job.is_some()) {
             break slot;
         }
@@ -3121,7 +3161,7 @@ pub(crate) fn set_buffer_frames(frames: u32) -> Result<(), VizError> {
 /// wants live input (pre-flight I2: dropping it would silence armed lanes
 /// and thru until the next arm or Play).
 pub fn drop_if_idle() {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     if !slot
         .as_mut()
         .is_some_and(|h| h.measure.is_none() && h.job.is_none() && !h.busy() && !h.wants_live())
@@ -3140,7 +3180,7 @@ pub fn drop_if_idle() {
 
 /// Releases the engine if `owner` holds it (a session is closing).
 pub fn release(owner: u64) {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     if let Some(h) = slot.as_mut() {
         if h.owner == owner {
             let _ = h.engine.stop();
@@ -3181,7 +3221,7 @@ pub fn release(owner: u64) {
 /// the host's own `idle`. An engine error is kept as a fault (the host
 /// retries once something changes).
 pub fn service(owner: u64, doc: &Document, plugins: &mut PluginHost) -> IdleReport {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == owner && h.factory_owner == owner => {
             h.plugins_in_engine |= has_slots(doc);
@@ -3224,7 +3264,7 @@ fn has_slots(doc: &Document) -> bool {
 
 /// The session whose plugin host feeds the engine, if any.
 pub fn factory_owner() -> Option<u64> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .map(|h| h.factory_owner)
         .filter(|o| *o != 0)
@@ -3233,7 +3273,7 @@ pub fn factory_owner() -> Option<u64> {
 /// `owner`'s meters, DSP load, latency and fault-bypassed instances, or
 /// `None` when it does not hold the engine.
 pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     let h = slot.as_mut().filter(|h| h.owner == owner)?;
     h.faulted
         .extend(h.engine.plugin_faults().into_iter().map(|i| i.0));
@@ -3260,7 +3300,7 @@ pub fn levels(owner: u64) -> Option<crate::mixer::MixerLevels> {
 /// that plays starts capturing. Fails only when `owner` does not hold the
 /// engine or its command queue is full.
 pub fn start_recording(owner: u64, req: &RecordRequest) -> Result<RecordHandles, VizError> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             if h.measure.is_some() {
@@ -3280,7 +3320,7 @@ pub fn start_recording(owner: u64, req: &RecordRequest) -> Result<RecordHandles,
 /// another session holds the engine: its tap went with the old engine,
 /// or that session's Play removed it).
 pub fn stop_recording(owner: u64) -> Result<(), VizError> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             h.want_play = false;
@@ -3361,7 +3401,7 @@ pub fn start_measure(
     // The input opens on its own thread, without the host lock (plan 5d-1
     // Ruling 13); then nothing may have taken the engine meanwhile.
     let opened = wait_input(INPUT_WAIT);
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     let host = slot
         .as_mut()
         .filter(|h| h.generation == generation)
@@ -3460,7 +3500,7 @@ pub fn end_measure(
     seq: SeqId,
     status: &Arc<MeasureStatus>,
 ) -> Result<bool, VizError> {
-    let mut slot = lock(&HOST);
+    let mut slot = lock_host();
     match slot.as_mut() {
         Some(h) if h.measure.as_ref().is_some_and(|m| Arc::ptr_eq(m, status)) => {
             let want = (h.owner == owner).then(|| wants_audio_input(doc, seq));
@@ -3473,14 +3513,14 @@ pub fn end_measure(
 
 /// Whether a return-latency measurement runs (in any session).
 pub fn measuring() -> bool {
-    lock(&HOST).as_ref().is_some_and(|h| h.measure.is_some())
+    lock_host().as_ref().is_some_and(|h| h.measure.is_some())
 }
 
 /// Whether `owner`'s renderer has its transport stopped (the end of a
 /// song without a loop), when it holds the engine. Right after a Play this
 /// still reads stopped until the renderer applies it.
 pub fn transport_stopped(owner: u64) -> Option<bool> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.state() == PlayState::Stopped)
@@ -3489,7 +3529,7 @@ pub fn transport_stopped(owner: u64) -> Option<bool> {
 /// The tick a device rebuild resumed `owner`'s host from, when it holds
 /// the engine and its host came from a rebuild.
 pub fn resumed_at(owner: u64) -> Option<Tick> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .and_then(|h| h.resumed_at)
@@ -3499,7 +3539,7 @@ pub fn resumed_at(owner: u64) -> Option<Tick> {
 /// renderer), when it holds the engine. A song that ended by itself is
 /// seen first, as `busy` sees it (final review m4).
 pub fn wants_play(owner: u64) -> Option<bool> {
-    lock(&HOST).as_mut().filter(|h| h.owner == owner).map(|h| {
+    lock_host().as_mut().filter(|h| h.owner == owner).map(|h| {
         h.collect_faults();
         h.want_play
     })
@@ -3507,13 +3547,13 @@ pub fn wants_play(owner: u64) -> Option<bool> {
 
 /// The session holding the engine, if any.
 pub fn holder() -> Option<u64> {
-    lock(&HOST).as_ref().map(|h| h.owner).filter(|o| *o != 0)
+    lock_host().as_ref().map(|h| h.owner).filter(|o| *o != 0)
 }
 
 /// The streamer's `(underruns, late starts)` so far in `owner`'s engine,
 /// when it holds it (pre-flight M11).
 pub fn stream_counters(owner: u64) -> Option<(u64, u64)> {
-    lock(&HOST).as_ref().filter(|h| h.owner == owner).map(|h| {
+    lock_host().as_ref().filter(|h| h.owner == owner).map(|h| {
         let c = h.engine.streamer().counters();
         (c.underruns, c.late)
     })
@@ -3521,7 +3561,7 @@ pub fn stream_counters(owner: u64) -> Option<(u64, u64)> {
 
 /// The sticky faults of `owner`'s host, when it holds the engine.
 pub fn faults(owner: u64) -> Vec<String> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.faults.clone())
@@ -3530,7 +3570,7 @@ pub fn faults(owner: u64) -> Vec<String> {
 
 /// Where `owner`'s transport is heard, when it holds the engine.
 pub fn position(owner: u64) -> Option<(SeqId, Tick)> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| (h.seq, h.engine.position_tick()))
@@ -3538,7 +3578,7 @@ pub fn position(owner: u64) -> Option<(SeqId, Tick)> {
 
 /// `owner`'s input, when it holds the engine.
 pub fn input_info(owner: u64) -> Option<(String, InputInfo)> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| (h.device.clone(), h.inputs.clone()))
@@ -3547,7 +3587,7 @@ pub fn input_info(owner: u64) -> Option<(String, InputInfo)> {
 /// `owner`'s device input channel peaks since the last read (plan 5d-1
 /// Ruling 27): empty unless it holds the engine with its input open.
 pub fn input_levels(owner: u64) -> Vec<f32> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner && h.input_open)
         .map(|h| {
@@ -3561,7 +3601,7 @@ pub fn input_levels(owner: u64) -> Vec<f32> {
 /// (test hook, Task 11 review I1).
 #[cfg(feature = "test-hooks")]
 pub fn debug_input_open(owner: u64) -> Option<bool> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.input_open)
@@ -3571,13 +3611,13 @@ pub fn debug_input_open(owner: u64) -> Option<bool> {
 /// whoever holds it (test hook, Task 9 re-review).
 #[cfg(feature = "test-hooks")]
 pub fn debug_host_input_open() -> Option<bool> {
-    lock(&HOST).as_ref().map(|h| h.input_open)
+    lock_host().as_ref().map(|h| h.input_open)
 }
 
 /// How many times `owner`'s host opened or closed its input (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn debug_input_changes(owner: u64) -> Option<u64> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.input_changes)
@@ -3585,7 +3625,7 @@ pub fn debug_input_changes(owner: u64) -> Option<u64> {
 
 /// The MIDI input of `owner`'s engine, when it holds it.
 pub fn midi_sender(owner: u64) -> Option<MidiSender> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.midi_sender())
@@ -3594,7 +3634,7 @@ pub fn midi_sender(owner: u64) -> Option<MidiSender> {
 /// Sends a gesture to `owner`'s engine (plan 5e-1 Ruling 6): false when
 /// another session holds the engine (or none is), or the queue is full.
 pub fn gesture(owner: u64, msg: core_engine::gesture::GestureMsg) -> bool {
-    let sender = lock(&HOST)
+    let sender = lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.gesture_sender());
@@ -3606,7 +3646,7 @@ pub fn gesture(owner: u64, msg: core_engine::gesture::GestureMsg) -> bool {
 /// `None` when another session holds the engine or its command queue is
 /// full.
 pub fn start_gestures(owner: u64) -> Option<core_engine::gesture::GestureHandles> {
-    lock(&HOST)
+    lock_host()
         .as_mut()
         .filter(|h| h.owner == owner)
         .and_then(|h| h.engine.start_gestures().ok())
@@ -3615,7 +3655,7 @@ pub fn start_gestures(owner: u64) -> Option<core_engine::gesture::GestureHandles
 /// Removes `owner`'s gesture tap. A full queue is ignored: the tap goes
 /// with the engine anyway.
 pub fn stop_gestures(owner: u64) {
-    if let Some(h) = lock(&HOST).as_mut().filter(|h| h.owner == owner) {
+    if let Some(h) = lock_host().as_mut().filter(|h| h.owner == owner) {
         let _ = h.engine.stop_gestures();
     }
 }
@@ -3625,7 +3665,7 @@ pub fn stop_gestures(owner: u64) {
 /// holds the engine and the snapshot has the control.
 pub fn heard(owner: u64, t: core_model::automation::AutomationTarget) -> Option<f64> {
     let dest = core_engine::schedule::AutoDest::of(t)?;
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)?
         .engine
@@ -3636,7 +3676,7 @@ pub fn heard(owner: u64, t: core_model::automation::AutomationTarget) -> Option<
 /// The gestures `owner`'s engine dropped so far (pre-flight M10), when it
 /// holds it.
 pub fn gestures_dropped(owner: u64) -> Option<u64> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.gestures_dropped())
@@ -3646,7 +3686,7 @@ pub fn gestures_dropped(owner: u64) -> Option<u64> {
 /// suspended (test hook, plan 5e-1 Task 2 review M5).
 #[cfg(feature = "test-hooks")]
 pub fn debug_automation_suspended() -> Option<bool> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .map(|h| h.engine.automation_suspended())
 }
@@ -3656,7 +3696,7 @@ pub fn debug_automation_suspended() -> Option<bool> {
 /// Task 12, re-review N2).
 #[cfg(feature = "test-hooks")]
 pub fn debug_engine_stopped() -> Option<bool> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .map(|h| h.engine.state() == PlayState::Stopped)
 }
@@ -3665,13 +3705,13 @@ pub fn debug_engine_stopped() -> Option<bool> {
 /// hook, Task 8 review I1).
 #[cfg(feature = "test-hooks")]
 pub fn debug_host_inputs() -> Option<InputSpec> {
-    lock(&HOST).as_ref().map(|h| h.engine.inputs().clone())
+    lock_host().as_ref().map(|h| h.engine.inputs().clone())
 }
 
 /// The input routes `owner`'s engine was last given (test hook).
 #[cfg(feature = "test-hooks")]
 pub fn debug_inputs(owner: u64) -> Option<InputSpec> {
-    lock(&HOST)
+    lock_host()
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| h.engine.inputs().clone())
