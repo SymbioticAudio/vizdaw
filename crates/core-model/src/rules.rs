@@ -405,5 +405,6 @@ pub fn validate(doc: &Document) -> Vec<String> {
         p.push(ModelError::Cycle { path }.to_string());
     }
     p.extend(crate::mixer_rules::mixer_problems(doc));
+    p.extend(crate::learn::problems(&doc.settings().learn));
     p
 }

@@ -2,9 +2,11 @@
 
 use super::Report;
 use super::media::{MediaSwap, swap_media};
+use crate::automation::AutomationTarget;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
 use crate::format::AudioFormat;
+use crate::learn::{self, LearnMap, LearnSource};
 use crate::modify::ModifyTemplate;
 use std::collections::BTreeSet;
 
@@ -38,6 +40,22 @@ pub enum SettingsCmd {
         /// One new file per media item.
         swaps: Vec<MediaSwap>,
     },
+    /// Add a MIDI-learn map, or replace the map with the same source
+    /// (plan 5f-1 Ruling 6). The target must exist and cannot be a
+    /// velocity scale; at most
+    /// [`MAX_LEARN_MAPS`](crate::learn::MAX_LEARN_MAPS) maps.
+    SetLearn {
+        /// The map.
+        map: LearnMap,
+    },
+    /// Remove the map with `source`, or every map to `target` (exactly
+    /// one of the two; refused when nothing matches).
+    RemoveLearn {
+        /// That map's source.
+        source: Option<LearnSource>,
+        /// Every map to this target.
+        target: Option<AutomationTarget>,
+    },
 }
 
 impl SettingsCmd {
@@ -48,6 +66,8 @@ impl SettingsCmd {
             SettingsCmd::SetHistoryDepth { .. } => "Set Undo Depth",
             SettingsCmd::SetAutosaveKeep { .. } => "Set Autosave Count",
             SettingsCmd::SetFormat { .. } => "Change Project Format",
+            SettingsCmd::SetLearn { .. } => "MIDI Learn",
+            SettingsCmd::RemoveLearn { .. } => "Remove MIDI Learn",
         }
     }
 }
@@ -77,6 +97,12 @@ pub(crate) fn apply(d: &mut Document, cmd: &SettingsCmd, _r: &mut Report) -> Res
     if let SettingsCmd::SetFormat { format, swaps } = cmd {
         return set_format(d, *format, swaps);
     }
+    if let SettingsCmd::SetLearn { map } = cmd {
+        return learn::set(d, map);
+    }
+    if let SettingsCmd::RemoveLearn { source, target } = cmd {
+        return learn::remove(d, source.as_ref(), *target);
+    }
     let s = d.settings_mut();
     match cmd {
         SettingsCmd::SetTemplate { name, template } => match template {
@@ -100,7 +126,9 @@ pub(crate) fn apply(d: &mut Document, cmd: &SettingsCmd, _r: &mut Report) -> Res
             s.autosave_keep = *keep;
         }
         // Handled above.
-        SettingsCmd::SetFormat { .. } => {}
+        SettingsCmd::SetFormat { .. }
+        | SettingsCmd::SetLearn { .. }
+        | SettingsCmd::RemoveLearn { .. } => {}
     }
     Ok(())
 }

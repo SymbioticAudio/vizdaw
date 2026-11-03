@@ -25,6 +25,7 @@ pub mod format;
 pub mod history;
 pub mod ids;
 pub mod lane;
+pub mod learn;
 pub mod meter;
 pub mod mixer;
 pub mod mixer_rules;
