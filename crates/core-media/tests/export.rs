@@ -2,8 +2,8 @@
 
 use core_media::caf::{CafReader, CafWriter, WriteMode};
 use core_media::export::{
-    Container, ExportFormat, PcmWriter, check_destination, check_folder, export, partial_path,
-    write_partial, write_span,
+    Container, ExportFormat, PcmWriter, check_destination, check_folder, edit_copy_name, export,
+    partial_path, write_partial, write_span,
 };
 use core_media::import::CafImporter;
 use core_model::format::BitDepth;
@@ -924,4 +924,121 @@ fn spans_take_the_first_free_number_and_clear_a_stale_partial() {
         );
         drop(held);
     }
+}
+
+/// Final review M3: full-scale integer samples, float samples past full
+/// scale and a span ending on the last frame are copied exactly.
+#[test]
+fn a_span_keeps_full_scale_and_over_range_samples_to_the_last_frame() {
+    let d = tempfile::tempdir().unwrap();
+    let loud: Vec<f32> = (0..64)
+        .flat_map(|f| match f % 4 {
+            0 => [1.0, -1.0],
+            1 => [1.5, -2.0],
+            2 => [-1.0, 1.0],
+            _ => [0.25, -0.25],
+        })
+        .collect();
+    for depth in [BitDepth::Int16, BitDepth::Int24, BitDepth::Float32] {
+        let src = d.path().join(format!("loud-{}.caf", depth.bits()));
+        let mut w = CafWriter::create(&src, 48_000, 2, depth, WriteMode::Normal).unwrap();
+        w.set_dither(false);
+        w.write(&loud).unwrap();
+        w.finish().unwrap();
+        let out = d.path().join(format!("loud-out-{}", depth.bits()));
+        std::fs::create_dir(&out).unwrap();
+        let f = fmt(Container::Wav, depth, false);
+        // The last 40 frames: the span ends on the file's last frame.
+        let e = write_span(&src, 24, 40, &out, "Loud", &f).unwrap();
+        let (.., frames, samples) = read_wav(&e.path);
+        assert_eq!(frames, 40, "{depth:?}");
+        let r = CafReader::open(&src).unwrap();
+        let mut want = vec![0f32; 80];
+        assert_eq!(r.read(24, &mut want, &mut Vec::new()).unwrap(), 40);
+        let want: Vec<i64> = want
+            .iter()
+            .map(|x| match depth {
+                BitDepth::Int16 => (x * 32_768.0).round().clamp(-32_768.0, 32_767.0) as i64,
+                BitDepth::Int24 => {
+                    (x * 8_388_608.0).round().clamp(-8_388_608.0, 8_388_607.0) as i64
+                }
+                BitDepth::Float32 => i64::from(x.to_bits()),
+            })
+            .collect();
+        assert_eq!(samples, want, "{depth:?}");
+        match depth {
+            BitDepth::Int16 => assert!(samples.contains(&32_767) && samples.contains(&-32_768)),
+            BitDepth::Int24 => {
+                assert!(samples.contains(&8_388_607) && samples.contains(&-8_388_608))
+            }
+            BitDepth::Float32 => assert!(
+                samples.contains(&i64::from(1.5f32.to_bits()))
+                    && samples.contains(&i64::from((-2.0f32).to_bits())),
+                "float keeps samples past full scale"
+            ),
+        }
+    }
+}
+
+/// Final review M1: a span a WAV cannot hold (over 4 GB) is refused before
+/// anything is written, with a message for an edit copy (not "choose
+/// CAF"). The source is sparse: its data runs to the end of the file.
+#[test]
+fn a_span_over_4_gb_is_refused_up_front() {
+    let d = tempfile::tempdir().unwrap();
+    let src = d.path().join("long.caf");
+    let mut w = CafWriter::create(&src, 48_000, 2, BitDepth::Int24, WriteMode::Recording).unwrap();
+    w.write(&signal(10)).unwrap();
+    drop(w);
+    let off = CafReader::open(&src).unwrap().info().data_offset;
+    // 800 M stereo 24-bit frames: 4.8 GB of sample data, sparse.
+    let frames = 800_000_000u64;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_len(off + frames * 6)
+        .unwrap();
+    assert_eq!(CafReader::open(&src).unwrap().info().frames, frames);
+    // A missing folder: were the size not checked first, this would be the
+    // refusal (and nothing could be written either way).
+    let out = d.path().join("missing");
+    let f = fmt(Container::Wav, BitDepth::Int24, false);
+    let e = write_span(&src, 0, frames, &out, "Long", &f).unwrap_err();
+    let msg = e.to_string();
+    assert!(
+        msg.contains("edit copy") && msg.contains("4 GB") && !msg.contains("CAF"),
+        "{msg}"
+    );
+    assert!(!out.exists());
+}
+
+/// Final review M2: a name that cannot be looked up (a folder VizDAW may
+/// not search) is an error naming the copy, not a name taken.
+#[cfg(unix)]
+#[test]
+fn a_span_into_a_folder_that_cannot_be_searched_says_why() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let src = media_caf(d.path(), BitDepth::Int24, 100);
+    let out = d.path().join("Edits");
+    std::fs::create_dir(&out).unwrap();
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let f = fmt(Container::Wav, BitDepth::Int24, false);
+    let r = write_span(&src, 0, 100, &out, "Kick", &f);
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let msg = r.unwrap_err().to_string();
+    assert!(msg.contains("Kick edit 1.wav"), "{msg}");
+    assert!(names(&out).is_empty());
+}
+
+/// Final review M11: the copy's name comes from one place.
+#[test]
+fn the_edit_copy_name_is_one_pattern() {
+    assert_eq!(edit_copy_name("Kick", 3), "Kick edit 3.wav");
+    let d = tempfile::tempdir().unwrap();
+    let src = media_caf(d.path(), BitDepth::Int24, 100);
+    let f = fmt(Container::Wav, BitDepth::Int24, false);
+    let e = write_span(&src, 0, 100, d.path(), "Kick", &f).unwrap();
+    assert_eq!(e.path, d.path().join(edit_copy_name("Kick", 1)));
 }

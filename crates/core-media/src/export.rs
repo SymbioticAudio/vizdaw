@@ -909,6 +909,13 @@ pub fn export(
     .commit()
 }
 
+/// An edit copy's file name for stem `stem` and number `n` (plan 5f-3
+/// Ruling 2): `<stem> edit <n>.wav`, the one place the pattern is spelled
+/// (final review M11).
+pub fn edit_copy_name(stem: &str, n: u32) -> String {
+    format!("{stem} edit {n}.wav")
+}
+
 /// Frames a span copy reads at a time.
 const SPAN_CHUNK: usize = 8192;
 
@@ -922,7 +929,11 @@ const SPAN_CHUNK: usize = 8192;
 /// is moved into place by `rename_excl`, never over a file, and removed on
 /// any error. Refuses before writing: `fmt` not WAV or with dither, a rate
 /// other than the source's, an empty span or one past the source's end,
-/// a folder that is missing or cannot be written, a name too long.
+/// a span over the 4 GB a WAV holds, a folder that is missing or cannot be
+/// written or searched, a name too long. A source in another depth than
+/// `fmt.depth` is re-quantized to it without dither; the session always
+/// asks for the project depth, which every online item is in (final
+/// review M4).
 pub fn write_span(
     source: &Path,
     start: u64,
@@ -953,11 +964,28 @@ pub fn write_span(
                 start.saturating_add(frames)
             ))
         })?;
+    // A WAV holds at most 4 GB: refused before anything is written, not
+    // after (final review M1).
+    let bytes = frames
+        .saturating_mul(u64::from(channels))
+        .saturating_mul(fmt.depth.bytes() as u64);
+    if max_data_bytes(fmt, channels).is_some_and(|m| bytes > m) {
+        return Err(MediaError::Unsupported(
+            "an edit copy is a WAV, which holds at most 4 GB; split the region and edit a part"
+                .into(),
+        ));
+    }
     let ch = usize::from(channels);
     for n in 1..=MAX_NUMBER {
-        let dest = dir.join(format!("{stem} edit {n}.wav"));
-        if std::fs::symlink_metadata(&dest).is_ok() {
-            continue;
+        let dest = dir.join(edit_copy_name(stem, n));
+        // Taken only when it is there; a name that cannot be looked up is
+        // an error, not a name taken (final review M2).
+        match std::fs::symlink_metadata(&dest) {
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(MediaError::Io(format!("{}: {e}", display_name(&dest))));
+            }
         }
         check_dest(&dest, fmt)?;
         let partial = partial_path(&dest);
