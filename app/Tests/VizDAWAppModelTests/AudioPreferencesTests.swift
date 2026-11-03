@@ -21,6 +21,7 @@ final class FakeAudioSink: AudioSink {
         calls.append("stream \(cacheMb) \(readAheadSeconds)")
     }
     func defaultMonitor(_ mode: MonitorModeRow) { calls.append("monitor \(mode)") }
+    func bounceTail(ms: UInt32) { calls.append("bounce tail \(ms)") }
 }
 
 /// The app's audio settings (plan 5d-2 Task 1, Ruling 2): kept in the
@@ -35,7 +36,8 @@ final class FakeAudioSink: AudioSink {
         p.applyAll()
         #expect(
             sink.calls == [
-                "monitoring true", "input same", "trim 0", "monitor auto", "buffer 128", "stream 512 3",
+                "monitoring true", "input same", "trim 0", "monitor auto", "bounce tail 10000", "buffer 128",
+                "stream 512 3",
             ])
         #expect(p.problem == nil)
     }

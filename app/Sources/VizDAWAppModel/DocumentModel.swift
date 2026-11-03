@@ -98,6 +98,7 @@ public final class DocumentModel {
     /// (plan 5b): views drawing `Pending` or `Coarse` waveforms redraw.
     public internal(set) var overviewVersion = 0
     @ObservationIgnored private var mediaModel: MediaModel?
+    @ObservationIgnored private var bounceModel: BounceModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
     @ObservationIgnored private var synthModel: SynthSheets?
@@ -125,6 +126,14 @@ public final class DocumentModel {
         if let m = recordModel { return m }
         let m = RecordModel(document: self)
         recordModel = m
+        return m
+    }
+
+    /// File › Bounce… (plan 5f-2), made once.
+    public var bounce: BounceModel {
+        if let m = bounceModel { return m }
+        let m = BounceModel(document: self)
+        bounceModel = m
         return m
     }
 

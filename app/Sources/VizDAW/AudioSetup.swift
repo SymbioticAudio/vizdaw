@@ -13,6 +13,7 @@ final class LiveAudioSink: AudioSink {
         try setStreamSettings(cacheMb: cacheMb, readAheadSeconds: readAheadSeconds)
     }
     func defaultMonitor(_ mode: MonitorModeRow) { setDefaultMonitorMode(mode: mode) }
+    func bounceTail(ms: UInt32) { setBounceSettings(settings: BounceSettingsRow(tailCapMs: ms)) }
 }
 
 /// The audio and recording settings (Settings › Audio and › Recording),

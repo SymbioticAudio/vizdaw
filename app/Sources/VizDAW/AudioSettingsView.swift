@@ -67,6 +67,16 @@ struct AudioSettingsView: View {
                 Button("Reset Trim") { prefs.setLatencyTrim(0) }
                     .disabled(prefs.settings.latencyTrim == 0)
             }
+            Section("Bounce") {
+                Stepper(
+                    "Bounce tail limit: \(prefs.settings.bounceTailSeconds) s",
+                    value: Binding(
+                        get: { prefs.settings.bounceTailSeconds }, set: { prefs.setBounceTail(seconds: $0) }),
+                    in: 0...30)
+                Text("A bounce renders on after the range until it is quiet, at most this long.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Streaming") {
                 Picker(
                     "RAM cache",

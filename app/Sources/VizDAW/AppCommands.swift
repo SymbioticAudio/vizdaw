@@ -80,6 +80,8 @@ struct AppCommands: Commands {
                 Divider()
                 Button("Project Settings…") { projectSettings() }
                     .disabled(doc == nil)
+                Button("Bounce…") { doc?.bounce.shown = true }
+                    .disabled(doc == nil)
                 Button("Relink Media…") { doc?.media.relinkShown = true }
                     .keyboardShortcut(KeyMenu.shortcut("media.relink"))
                     .disabled(doc?.media.relinkable.isEmpty ?? true)
