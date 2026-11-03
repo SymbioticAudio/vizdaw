@@ -173,6 +173,8 @@ pub enum SurfaceEventRow {
         /// Detents (negative: back).
         detents: i32,
     },
+    /// Toggle the document's record count-in (plan 5f-4 Ruling 16).
+    CountIn,
 }
 
 /// What was last sent to one unit.
@@ -2404,6 +2406,11 @@ pub(crate) struct SessionSurfaces {
     pub last_ns: BTreeMap<(TouchHolder, AutomationTarget), u64>,
     /// The plug-in page a Kontrol shows (plan 5f-4 Ruling 6).
     pub page: PageFocus,
+    /// The serial of the undo step the keyboard's tempo gesture lands in
+    /// (plan 5f-4 Ruling 15).
+    pub tempo_step: Option<u64>,
+    /// The document's record count-in is on, as the app said (Ruling 16).
+    pub count_in: bool,
     /// The focused slot's presets as last read, and when (plan 5f-4 Ruling 7).
     pub presets: Option<(
         core_model::ids::PluginInstanceId,

@@ -55,6 +55,8 @@ public final class DocumentModel {
         return r
     }
     @ObservationIgnored private var relayModel: SurfaceRelay?
+    /// The count-in the core was last told (plan 5f-4 Ruling 16).
+    @ObservationIgnored private var sentCountIn: Bool?
     /// MIDI learn (plan 5f-1 Task 11), made once, with `surfaceCore`.
     public var learn: LearnModel {
         if let l = learnModel { return l }
@@ -598,6 +600,13 @@ public final class DocumentModel {
         if !u.problems.isEmpty {
             pluginProblems.append(contentsOf: u.problems)
             if pluginProblems.count > 50 { pluginProblems.removeFirst(pluginProblems.count - 50) }
+        }
+        // The record count-in, for a Kontrol's Count-in light (plan 5f-4
+        // Ruling 16): said once per change.
+        let countIn = record.countInBars > 0
+        if countIn != sentCountIn {
+            sentCountIn = countIn
+            try? session.setSurfaceCountIn(on: countIn)
         }
         // What the surfaces asked for in this pass (plan 5f-1 Ruling 12).
         if let events = try? session.takeSurfaceEvents(), !events.isEmpty {

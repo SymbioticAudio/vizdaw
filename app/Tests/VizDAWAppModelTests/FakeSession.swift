@@ -869,6 +869,9 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var learnError: VizError?
     var unlearnTargets: [AutomationTargetRow] = []
     func setSurfaceSelection(strips: [UInt64]) throws { surfaceSelections.append(strips) }
+    /// What `setSurfaceCountIn` was called with (plan 5f-4 Task 7).
+    var surfaceCountIns: [Bool] = []
+    func setSurfaceCountIn(on: Bool) throws { surfaceCountIns.append(on) }
     func injectSurface(surface: UInt32, bytes: Data) throws { surfaceInjections.append((surface, bytes)) }
     func surfaceState() throws -> SurfaceStateRow {
         SurfaceStateRow(surfaces: [], feedback: [], learning: nil, problems: [])

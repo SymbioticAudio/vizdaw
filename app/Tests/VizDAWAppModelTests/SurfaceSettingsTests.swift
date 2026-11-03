@@ -214,6 +214,42 @@ import VizDAWCore
         #expect(f.surfaceEvents.isEmpty)
     }
 
+    /// Plan 5f-4 Ruling 16 (owner, 2026-11-03): the keyboard's Count-in
+    /// toggles the document's record count-in between off and its last bar
+    /// count.
+    @Test func aCountInPressTogglesTheRecordCountIn() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        let relay = SurfaceRelay()
+        m.record.countInBars = 3
+        m.record.countInBars = 0
+        relay.apply([.countIn], m, perform: { _ in }, quietly: { _ in })
+        #expect(m.record.countInBars == 3, "its last bar count")
+        relay.apply([.countIn], m, perform: { _ in }, quietly: { _ in })
+        #expect(m.record.countInBars == 0)
+        relay.apply([.countIn], m, perform: { _ in }, quietly: { _ in })
+        #expect(m.record.countInBars == 3)
+    }
+
+    /// Ruling 16: the document tells the core its count-in for the
+    /// keyboard's light, once per change.
+    @Test func idleTellsTheSurfacesTheCountIn() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        m.record.countInBars = 0
+        m.idle()
+        #expect(f.surfaceCountIns == [false], "the first idle says it")
+        m.idle()
+        #expect(f.surfaceCountIns == [false], "unchanged: not again")
+        m.record.countInBars = 2
+        m.idle()
+        m.record.countInBars = 1
+        m.idle()
+        m.record.countInBars = 0
+        m.idle()
+        #expect(f.surfaceCountIns == [false, true, false])
+    }
+
     /// Review M4: a refused add keeps the sheet open and says why in it.
     @Test func aRefusedAddKeepsTheSheet() {
         let c = FakeSurfaceCore()

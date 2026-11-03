@@ -40,6 +40,7 @@ use core_model::history::{History, Timestamp};
 use core_model::ids::{DestId, LaneId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{AuxSend, Output, ParamId, PluginRef, PluginSlot};
 use core_model::selection::ViewFilter;
+use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::Tick;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8835,6 +8836,16 @@ impl Session {
         })
     }
 
+    /// The document's record count-in is on (`RecordModel.countInBars >
+    /// 0`): a Kontrol lights its Count-in button by it (plan 5f-4 Ruling
+    /// 16).
+    pub fn set_surface_count_in(&self, on: bool) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).surfaces.count_in = on;
+            Ok(())
+        })
+    }
+
     /// Feeds `bytes` to surface `surface` as if from its input, focuses
     /// this session and services it at once (`surface.inject`; Ruling 11).
     /// Several refused messages in one call count once in the unit's
@@ -9225,8 +9236,11 @@ impl Session {
                 A::PluginSlot(i) => self.surface_plugin_slot(inner, i),
                 A::PluginPage(n) => self.surface_plugin_page(inner, n),
                 A::Preset(dir) => self.surface_preset(inner, dir, now),
-                // Task 7 applies the keyboard's tempo and count-in (plan 5f-4).
-                A::Tempo { .. } | A::CountIn => false,
+                A::Tempo { bpm, new_step } => self.surface_tempo(inner, bpm, new_step),
+                A::CountIn => {
+                    self.surface_event(inner, SurfaceEventRow::CountIn);
+                    true
+                }
             };
             if !ok && let Some(u) = a.unit {
                 refused.push((u, a.tag));
@@ -9301,6 +9315,75 @@ impl Session {
             inner.surfaces.wind = Some((now, tick));
         }
         ok
+    }
+
+    /// Where a surface's position, tempo and tempo edit are (plan 5f-4
+    /// Ruling 15; Task 4 review m2): the transport's sequence and tick,
+    /// else the sequence a play would start (the cursor sequence while it
+    /// still exists, else the first top-level one) at the cursor. One
+    /// helper, so the keyboard edits exactly the tempo it shows.
+    fn surface_where(&self, inner: &Inner) -> Option<(SeqId, Tick)> {
+        let doc = inner.doc();
+        host::position(self.id)
+            .filter(|(s, _)| doc.sequence(*s).is_ok())
+            .or_else(|| Some((inner.selected_seq()?, inner.cursor.unwrap_or(Tick::ZERO))))
+    }
+
+    /// `Tempo` (Ruling 15): the tempo point in effect at the playhead set to
+    /// `bpm` (clamped to 5–999), a gesture's values amended into its one
+    /// "Set Tempo" step. Refused while recording or finishing a pass,
+    /// inside an open transaction or group, for a non-finite `bpm`, and
+    /// with no sequence.
+    fn surface_tempo(&self, inner: &mut Inner, bpm: f64, new_step: bool) -> bool {
+        if inner.recording.is_some()
+            || inner.finishing
+            || inner.history.in_transaction()
+            || inner.history.in_group()
+            || !bpm.is_finite()
+        {
+            return false;
+        }
+        let Some((seq, tick)) = self.surface_where(inner) else {
+            return false;
+        };
+        let Ok(s) = inner.doc().sequence(seq) else {
+            return false;
+        };
+        let at = tick.max(Tick::ZERO);
+        let mut points: Vec<TempoPoint> = s.tempo.points().iter().copied().collect();
+        // The point in effect: the last at or before the playhead (the
+        // first governs negative ticks).
+        let k = points.iter().rposition(|p| p.tick <= at).unwrap_or(0);
+        let Some(p) = points.get_mut(k) else {
+            return false;
+        };
+        // In 5–999 after the clamp, so the conversion is exact.
+        p.bpm = Bpm((bpm.clamp(5.0, 999.0) * 1000.0).round() as u32);
+        let Ok(tempo) = TempoMap::new(points) else {
+            return false;
+        };
+        if tempo == s.tempo {
+            return true;
+        }
+        let cmd = Command::Sequence(SequenceCmd::SetTempo { seq, tempo });
+        let filter = ViewFilter::default();
+        let amended = match (new_step, inner.surfaces.tempo_step) {
+            (false, Some(serial)) => {
+                matches!(inner.history.amend(&cmd, &filter, serial), Ok(Some(_)))
+            }
+            _ => false,
+        };
+        if !amended {
+            if inner.history.execute(&cmd, &filter).is_err() {
+                return false;
+            }
+            inner.surfaces.tempo_step = Some(inner.history.present_serial());
+        }
+        inner.version += 1;
+        inner.news.doc_changed = true;
+        inner.reload_host(self.id);
+        self.mark(inner);
+        true
     }
 
     /// The value a surface or map shows for `t` (Ruling 13): a hand's
@@ -9422,10 +9505,9 @@ impl Session {
         } else {
             Vec::new()
         };
-        let (seq, tick) = host::position(self.id).map_or_else(
-            || (inner.cursor_seq, inner.cursor.unwrap_or(Tick::ZERO)),
-            |(s, t)| (Some(s), t),
-        );
+        let (seq, tick) = self
+            .surface_where(inner)
+            .map_or((None, Tick::ZERO), |(s, t)| (Some(s), t));
         core_surface::MixerView {
             strips,
             master,
@@ -9435,9 +9517,9 @@ impl Session {
             recording: inner.recording.is_some(),
             looping: inner.looped,
             // With no transport or cursor sequence yet, the sequence a
-            // play would start (the demo shows 120 before any play).
+            // play would start (the demo shows 120 before any play):
+            // `surface_where`, which the keyboard's tempo edit uses too.
             tempo: seq
-                .or_else(|| inner.selected_seq())
                 .and_then(|q| doc.sequence(q).ok())
                 .map_or(0.0, |q| q.tempo.bpm_at(tick)),
             soloing: m
@@ -9449,8 +9531,7 @@ impl Session {
             } else {
                 None
             },
-            // Task 7 reads the document's count-in (plan 5f-4 Ruling 16).
-            count_in: false,
+            count_in: inner.surfaces.count_in,
             automation_suspended: crate::automation::suspended(),
         }
     }

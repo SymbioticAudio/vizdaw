@@ -77,6 +77,9 @@ import VizDAWCore
             m.selectedStrips = [strip]
         case .arm(_, let path):
             acting(m) { arm(path, m) }
+        case .countIn:
+            // The keyboard's Count-in (plan 5f-4 Ruling 16).
+            m.record.toggleCountIn()
         case .jog(let detents):
             if jogSince == nil { jogSince = now() }
             jogDetents += Int64(detents)

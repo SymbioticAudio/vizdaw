@@ -694,3 +694,235 @@ fn a_plugin_without_presets_ignores_the_preset_buttons() {
     assert_eq!(row(id).ignored, before, "nothing to step is not a fault");
     s.stop().unwrap();
 }
+
+/// Ruling 15 (owner, 2026-11-03): the keyboard's tempo control and Tap
+/// change VizDAW's tempo at the playhead; a turn and a tap series are one
+/// "Set Tempo" step each, and the screen shows VizDAW's tempo after.
+#[test]
+fn the_keyboards_tempo_and_tap_change_vizdaws_one_step_per_gesture() {
+    use core_surface::kontrol::tempo_bytes;
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let id = kontrol(&s);
+    let seq = song(&s);
+    let bpm = |s: &vizdaw_ffi::Session| s.sequence_info(seq).unwrap().tempo[0].bpm;
+    let start = bpm(&s);
+    let label = s.snapshot().unwrap().undo_label;
+    let msg = |t: f64| sysex(0x19, 0, 0, &tempo_bytes(t).unwrap());
+    // One turn: three messages at the same moment of the surfaces clock.
+    for t in [start + 1.0, start + 2.0, 100.0] {
+        s.inject_surface(id, msg(t)).unwrap();
+    }
+    assert!(
+        (bpm(&s) - 100.0).abs() < 1e-3,
+        "VizDAW plays the keyboard's tempo"
+    );
+    let snap = s.snapshot().unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Set Tempo"));
+    assert!(snap.dirty);
+    debug_advance(30);
+    assert!(
+        s.idle().unwrap().snapshot.is_some(),
+        "the app hears of the edit"
+    );
+    has(&debug_sent(DAW), &msg(100.0));
+    s.undo().unwrap();
+    assert!((bpm(&s) - start).abs() < 1e-3, "one turn is one undo step");
+    assert_eq!(s.snapshot().unwrap().undo_label, label);
+    // A tap series 400 ms apart is 150 BPM, one more step. The clock's
+    // real-time part is stopped so the taps are exactly 400 ms apart
+    // (`serial` restarts it).
+    vizdaw_ffi::surfaces::debug_freeze_clock(true);
+    for _ in 0..3 {
+        s.inject_surface(id, vec![0xBF, 0x18, 0x01]).unwrap();
+        debug_advance(400);
+    }
+    assert!((bpm(&s) - 150.0).abs() < 1e-3, "{}", bpm(&s));
+    assert_eq!(
+        s.snapshot().unwrap().undo_label.as_deref(),
+        Some("Set Tempo")
+    );
+    s.undo().unwrap();
+    assert!((bpm(&s) - start).abs() < 1e-3, "the taps are one step");
+    assert_eq!(row(id).ignored, 0);
+    // Ruling 15's clamp (fold check M-3): the 35-bit length can carry about
+    // 0.17 BPM or 6e9 BPM.
+    debug_advance(600);
+    s.inject_surface(id, sysex(0x19, 0, 0, &[0x01, 0, 0, 0, 0]))
+        .unwrap();
+    assert!((bpm(&s) - 999.0).abs() < 1e-3, "clamped to 999");
+    s.inject_surface(id, sysex(0x19, 0, 0, &[0x7F; 5])).unwrap();
+    assert!((bpm(&s) - 5.0).abs() < 1e-3, "clamped to 5");
+    s.undo().unwrap();
+    assert!((bpm(&s) - start).abs() < 1e-3, "one more step");
+}
+
+/// Ruling 15: while recording, the keyboard's tempo is refused and counted,
+/// the pass keeps its tempo, and Tap is dark.
+#[test]
+fn the_keyboards_tempo_is_refused_while_recording() {
+    use core_surface::kontrol::tempo_bytes;
+    use vizdaw_ffi::{EditCommand, LaneEdit, LaneInputRow};
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    // Fold check M-5: retention's default is the platform Trash; this test
+    // keeps `trash` alive to its end. If `record` refuses for lack of an
+    // input, call `set_fake_input(Some(FakeInput::Signals))` before the
+    // session is made, as `record.rs` does.
+    let trash = tempfile::tempdir().unwrap();
+    s.debug_set_trash_dir(Some(trash.path().join("Trash").display().to_string()));
+    let id = kontrol(&s);
+    let seq = song(&s);
+    let chords = s
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Chords")
+        .unwrap()
+        .id;
+    let edit = |e: LaneEdit| s.edit(EditCommand::Lane { edit: e }, None).unwrap();
+    edit(LaneEdit::SetInput {
+        seq,
+        lane: chords,
+        input: Some(LaneInputRow::Midi {
+            port: None,
+            channel: None,
+        }),
+    });
+    edit(LaneEdit::SetFlags {
+        seq,
+        lane: chords,
+        mute: None,
+        solo: None,
+        arm: Some(true),
+    });
+    s.record(
+        seq,
+        vizdaw_ffi::record::RecordSpecRow {
+            replace: false,
+            punch: None,
+            looped: false,
+            count_in_bars: 0,
+            pre_roll_bars: 0,
+            passes_as_takes: false,
+        },
+    )
+    .unwrap();
+    wait_until("the pass", || s.record_state().unwrap().recording);
+    let tempo = s.sequence_info(seq).unwrap().tempo[0].bpm;
+    let before = row(id).ignored;
+    s.inject_surface(id, sysex(0x19, 0, 0, &tempo_bytes(100.0).unwrap()))
+        .unwrap();
+    assert_eq!(row(id).ignored, before + 1, "refused and counted");
+    assert_eq!(
+        s.sequence_info(seq).unwrap().tempo[0].bpm,
+        tempo,
+        "the pass keeps its tempo"
+    );
+    has(&feed(&s), &[0xBF, 0x18, 0x00]);
+    s.stop().unwrap();
+    drop(trash);
+}
+
+/// Ruling 16 (owner, 2026-11-03): Count-in reaches the app as an event,
+/// Automation as `automation.suspend`; their lights follow VizDAW's state.
+#[test]
+fn count_in_and_automation_reach_the_app_and_light_with_its_state() {
+    use vizdaw_ffi::surfaces::SurfaceEventRow as E;
+    let _g = serial();
+    vizdaw_ffi::automation::set_automation_suspended(false);
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let id = kontrol(&s);
+    let _ = s.take_surface_events().unwrap();
+    s.inject_surface(id, vec![0xBF, 0x13, 0x01, 0xBF, 0x23, 0x01])
+        .unwrap();
+    assert_eq!(
+        s.take_surface_events().unwrap(),
+        vec![
+            E::CountIn,
+            E::Command {
+                id: "automation.suspend".into(),
+                programmatic: true,
+            },
+        ]
+    );
+    let _ = feed(&s);
+    s.set_surface_count_in(true).unwrap();
+    vizdaw_ffi::automation::set_automation_suspended(true);
+    let sent = feed(&s);
+    has(&sent, &[0xBF, 0x13, 0x01]);
+    has(&sent, &[0xBF, 0x23, 0x01]);
+    s.set_surface_count_in(false).unwrap();
+    vizdaw_ffi::automation::set_automation_suspended(false);
+    let sent = feed(&s);
+    has(&sent, &[0xBF, 0x13, 0x00]);
+    has(&sent, &[0xBF, 0x23, 0x00]);
+    assert_eq!(row(id).ignored, 0);
+}
+
+/// Task 4 review m2 (controller ruling): on a fresh document, with no
+/// transport position and no cursor sequence, the keyboard shows the tempo
+/// of the sequence a play would start, and a turn edits that sequence
+/// rather than being refused.
+#[test]
+fn a_tempo_turn_on_a_fresh_document_edits_the_tempo_it_shows() {
+    use core_surface::kontrol::tempo_bytes;
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let id = kontrol(&s);
+    let seq = song(&s);
+    let bpm = |s: &vizdaw_ffi::Session| s.sequence_info(seq).unwrap().tempo[0].bpm;
+    assert!((bpm(&s) - 120.0).abs() < 1e-3);
+    let msg = |t: f64| sysex(0x19, 0, 0, &tempo_bytes(t).unwrap());
+    has(&debug_sent(DAW), &msg(120.0));
+    let before = row(id).ignored;
+    s.inject_surface(id, msg(90.0)).unwrap();
+    assert_eq!(row(id).ignored, before, "applied, not refused");
+    assert!((bpm(&s) - 90.0).abs() < 1e-3, "{}", bpm(&s));
+    has(&feed(&s), &msg(90.0));
+}
+
+/// Task 4 review m2: a cursor sequence that was deleted is passed over for
+/// the sequence a play would start, for the tempo shown and the one edited.
+#[test]
+fn a_deleted_cursor_sequence_falls_back_for_the_tempo() {
+    use core_surface::kontrol::tempo_bytes;
+    use vizdaw_ffi::{EditCommand, SequenceEdit};
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let id = kontrol(&s);
+    let seq = song(&s);
+    s.edit(
+        EditCommand::Sequence {
+            edit: SequenceEdit::New { name: "B".into() },
+        },
+        None,
+    )
+    .unwrap();
+    let b = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .iter()
+        .find(|r| r.name == "B")
+        .unwrap()
+        .id;
+    // Play B and stop: B is the cursor sequence.
+    s.play(b).unwrap();
+    s.stop().unwrap();
+    s.edit(
+        EditCommand::Sequence {
+            edit: SequenceEdit::Delete {
+                seq: b,
+                delete_references: true,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    let bpm = |s: &vizdaw_ffi::Session| s.sequence_info(seq).unwrap().tempo[0].bpm;
+    let msg = |t: f64| sysex(0x19, 0, 0, &tempo_bytes(t).unwrap());
+    s.inject_surface(id, msg(80.0)).unwrap();
+    assert!((bpm(&s) - 80.0).abs() < 1e-3, "{}", bpm(&s));
+    has(&feed(&s), &msg(80.0));
+}
