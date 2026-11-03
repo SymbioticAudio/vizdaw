@@ -3,7 +3,7 @@
 use crate::automation::{
     AutomationModeRow, AutomationStateRow, GesturePhaseRow, Holder, Move, PassStep,
     Path as TouchPath, PluginMove, PluginTouches, PreviewPointRow, Release, Sampler, Source,
-    StripModeRow, Touching, UnsentEnds, Writing,
+    StripModeRow, TouchHolder, TouchHolders, Touching, UnsentEnds, Writing,
 };
 use crate::autowrite::WriteMode;
 use crate::editor::{self, EditorSize};
@@ -47,7 +47,7 @@ pub const EXTENSION: &str = "vizdaw";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-struct Inner {
+pub(crate) struct Inner {
     history: History,
     path: Option<PathBuf>,
     /// The document as last opened or saved; `dirty` compares against it.
@@ -5311,36 +5311,36 @@ impl Session {
 /// Automation recording (plan 5e-1; sub-project 5 spec §7).
 #[uniffi::export]
 impl Session {
-    /// A gesture on `target` from the app or the channel (spec §7.1;
-    /// Rulings 14, 16, 20, 26). `Model` for a target that cannot be
-    /// gestured or a non-finite value; `Busy` for a static touch while an
-    /// edit the gesture path did not open is open.
+    /// A gesture on `target` from the app's mouse (spec §7.1; Rulings 14,
+    /// 16, 20, 26): [`Session::gesture_from`] with the mouse's hold.
     pub fn gesture(
         &self,
         target: AutomationTargetRow,
         phase: GesturePhaseRow,
     ) -> Result<(), VizError> {
+        self.gesture_from(target, phase, crate::automation::GestureHolderRow::Mouse)
+    }
+
+    /// A gesture on `target` from `holder` (spec §7.1; Rulings 14, 16, 20,
+    /// 26; plan 5f-1 Ruling 2): the target stays touched until each of
+    /// its holders released it. `Model` for a target that cannot be
+    /// gestured or a non-finite value; `Busy` for a static touch's first
+    /// value while an edit the gesture path did not open is open.
+    pub fn gesture_from(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+        holder: crate::automation::GestureHolderRow,
+    ) -> Result<(), VizError> {
         ffi_guard(|| {
             let t = automation_target_of(target);
+            let phase = match phase {
+                GesturePhaseRow::Touch { value } => core_surface::Phase::Touch(value),
+                GesturePhaseRow::Value { value } => core_surface::Phase::Value(value),
+                GesturePhaseRow::Release => core_surface::Phase::Release,
+            };
             let mut inner = lock(&self.inner);
-            // A release with no touch does nothing (Ruling 20), also for a
-            // target that went meanwhile.
-            if phase == GesturePhaseRow::Release {
-                self.release(&mut inner, t, None);
-                return Ok(());
-            }
-            self.check_gesture(&inner, t)?;
-            match phase {
-                GesturePhaseRow::Touch { value } => {
-                    let v = value.map(finite).transpose()?;
-                    self.touch(&mut inner, t, v, Source::Ui, None)
-                }
-                GesturePhaseRow::Value { value } => {
-                    let v = finite(value)?;
-                    self.move_to(&mut inner, t, v, Source::Ui, None)
-                }
-                GesturePhaseRow::Release => Ok(()),
-            }
+            self.gesture_held(&mut inner, t, phase, TouchHolder::from(holder), None)
         })
     }
 
@@ -5711,6 +5711,41 @@ impl Session {
         }
     }
 
+    /// A gesture phase on `t` from holder `h` (plan 5f-1 Ruling 2): the
+    /// one path of the mouse, the channel, the surfaces and learn, as
+    /// `Source::Ui`, stamped at `host_ns` (`None`: now). `Model` for a
+    /// target that cannot be gestured or a non-finite value; `Busy` for a
+    /// static touch's first value while another edit is open.
+    pub(crate) fn gesture_held(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        phase: core_surface::Phase,
+        h: TouchHolder,
+        host_ns: Option<u64>,
+    ) -> Result<(), VizError> {
+        use core_surface::Phase;
+        // A release with no touch does nothing (Ruling 20), also for a
+        // target that went meanwhile; nor does one from a hand that does
+        // not hold it.
+        if phase == Phase::Release {
+            self.release_from(inner, t, h, host_ns);
+            return Ok(());
+        }
+        self.check_gesture(inner, t)?;
+        match phase {
+            Phase::Touch(value) => {
+                let v = value.map(finite).transpose()?;
+                self.touch(inner, t, v, Source::Ui, h, host_ns)
+            }
+            Phase::Value(value) => {
+                let v = finite(value)?;
+                self.move_to(inner, t, v, Source::Ui, h, host_ns)
+            }
+            Phase::Release => Ok(()),
+        }
+    }
+
     /// A touch (Rulings 14, 20, 26): its value resolved, its path picked
     /// once, the engine told.
     fn touch(
@@ -5719,14 +5754,27 @@ impl Session {
         t: AutomationTarget,
         value: Option<f64>,
         source: Source,
+        holder: TouchHolder,
         host_ns: Option<u64>,
     ) -> Result<(), VizError> {
-        if inner.touches.contains_key(&t) {
-            // Touched already: a touch at a value moves it.
-            return match value {
-                Some(v) => self.move_to(inner, t, v, source, host_ns),
-                None => Ok(()),
+        if let Some(x) = inner.touches.get_mut(&t) {
+            // Touched already: the holder joins, and a touch at a value
+            // moves it (plan 5f-1 Ruling 2).
+            let joined = !x.holders.has(holder);
+            x.holders = x.holders.with(holder);
+            let Some(v) = value else {
+                return Ok(());
             };
+            let moved = self.move_to(inner, t, v, source, holder, host_ns);
+            // A refused touch (Busy at its first static value) does not
+            // join: its hand holds nothing it would have to release.
+            if moved.is_err()
+                && joined
+                && let Some(x) = inner.touches.get_mut(&t)
+            {
+                x.holders = x.holders.without(holder);
+            }
+            return moved;
         }
         let v = match value {
             Some(v) => core_model::automation::unit(v),
@@ -5739,20 +5787,12 @@ impl Session {
             None if source == Source::Plugin => TouchPath::Live,
             None => TouchPath::Static,
         };
-        if path == TouchPath::Static {
-            match inner.static_edit.as_mut() {
-                Some((_, n)) => *n += 1,
-                None => {
-                    if inner.history.in_transaction() {
-                        return Err(VizError::Busy {
-                            message: "Finish the open edit first.".into(),
-                        });
-                    }
-                    let label = crate::automation::static_label(t);
-                    inner.history.begin(label)?;
-                    inner.static_edit = Some((label.to_string(), 1));
-                }
-            }
+        // The static edit opens at the first value, never at the touch
+        // (plan 5f-1 Ruling 2, pre-flight C2): a hand resting on a
+        // touch-sensing fader holds no transaction open.
+        let shared = path == TouchPath::Static && value.is_some();
+        if shared {
+            self.open_static_share(inner, t)?;
         }
         if let Some(w) = inner.writing.as_mut() {
             w.moved.insert(t);
@@ -5764,6 +5804,8 @@ impl Session {
                 value: v,
                 base: v,
                 source,
+                holders: TouchHolders::of(holder),
+                shared,
             },
         );
         let ns = host_time(host_ns);
@@ -5798,11 +5840,18 @@ impl Session {
         t: AutomationTarget,
         v: f64,
         source: Source,
+        holder: TouchHolder,
         host_ns: Option<u64>,
     ) -> Result<(), VizError> {
         let v = core_model::automation::unit(v);
+        if !inner.touches.contains_key(&t) {
+            return self.touch(inner, t, Some(v), source, holder, host_ns);
+        }
+        // A resting static touch's first value opens (or joins) the
+        // static edit; refused, the value is not applied (pre-flight C2).
+        self.share_static(inner, t)?;
         let Some(touching) = inner.touches.get_mut(&t) else {
-            return self.touch(inner, t, Some(v), source, host_ns);
+            return Ok(());
         };
         touching.value = v;
         let ns = host_time(host_ns);
@@ -5818,7 +5867,9 @@ impl Session {
         let Some(touching) = inner.touches.get(&t).copied() else {
             return;
         };
-        if touching.path == TouchPath::Static {
+        // Only inside the static edit: a resting touch has no share, and
+        // a value outside it would be a step of its own (pre-flight C2).
+        if touching.path == TouchPath::Static && touching.shared {
             self.run_static(inner, t, v);
         }
         if touching.source == Source::Ui {
@@ -5872,7 +5923,7 @@ impl Session {
         {
             w.ended.insert(t);
         }
-        if touching.path == TouchPath::Static {
+        if touching.shared {
             self.keep_static_param(inner, t, touching);
             self.end_static_share(inner);
         }
@@ -5894,6 +5945,70 @@ impl Session {
                 self.reset_plugin_param(t);
             }
         }
+    }
+
+    /// `h`'s release of `t` (plan 5f-1 Ruling 2): nothing when `h` does
+    /// not hold it; the touch's [`Session::release`] when `h` was its last
+    /// holder; else the kept value goes out (the other hands' last move is
+    /// not lost), with no Glide or Hold: the touch goes on.
+    fn release_from(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        h: TouchHolder,
+        host_ns: Option<u64>,
+    ) {
+        let Some(x) = inner.touches.get_mut(&t) else {
+            return;
+        };
+        if !x.holders.has(h) {
+            return;
+        }
+        x.holders = x.holders.without(h);
+        if x.holders.is_empty() {
+            self.release(inner, t, host_ns);
+            return;
+        }
+        if let Some((v, ns)) = inner.sampler.flush(t) {
+            self.send_value(inner, t, v, ns);
+        }
+    }
+
+    /// A static touch's share of the static edit, from its first value
+    /// (plan 5f-1 Ruling 2, pre-flight C2): opened or joined once; `Busy`
+    /// while another edit is open. Nothing for a touch already sharing,
+    /// or not static.
+    fn share_static(&self, inner: &mut Inner, t: AutomationTarget) -> Result<(), VizError> {
+        let Some(x) = inner.touches.get(&t) else {
+            return Ok(());
+        };
+        if x.path != TouchPath::Static || x.shared {
+            return Ok(());
+        }
+        self.open_static_share(inner, t)?;
+        if let Some(x) = inner.touches.get_mut(&t) {
+            x.shared = true;
+        }
+        Ok(())
+    }
+
+    /// Opens the shared static edit, labelled by `t`, or joins it (Ruling
+    /// 14); `Busy` while an edit the gesture path did not open is open.
+    fn open_static_share(&self, inner: &mut Inner, t: AutomationTarget) -> Result<(), VizError> {
+        match inner.static_edit.as_mut() {
+            Some((_, n)) => *n += 1,
+            None => {
+                if inner.history.in_transaction() {
+                    return Err(VizError::Busy {
+                        message: "Finish the open edit first.".into(),
+                    });
+                }
+                let label = crate::automation::static_label(t);
+                inner.history.begin(label)?;
+                inner.static_edit = Some((label.to_string(), 1));
+            }
+        }
+        Ok(())
     }
 
     /// A static `Ui` touch of a plugin parameter keeps its value in the
@@ -6055,10 +6170,14 @@ impl Session {
                     // The plugin path never opens an edit, so it is never
                     // refused.
                     let _ = match mv {
-                        Move::Touch(v) => self.touch(inner, t, v, Source::Plugin, Some(ns)),
-                        Move::Value(v) => self.move_to(inner, t, v, Source::Plugin, Some(ns)),
+                        Move::Touch(v) => {
+                            self.touch(inner, t, v, Source::Plugin, TouchHolder::Plugin, Some(ns))
+                        }
+                        Move::Value(v) => {
+                            self.move_to(inner, t, v, Source::Plugin, TouchHolder::Plugin, Some(ns))
+                        }
                         Move::Release => {
-                            self.release(inner, t, Some(ns));
+                            self.release_from(inner, t, TouchHolder::Plugin, Some(ns));
                             Ok(())
                         }
                     };
@@ -6118,7 +6237,7 @@ impl Session {
                 .get(&t)
                 .is_some_and(|x| x.source == Source::Plugin)
             {
-                self.release(inner, t, ns);
+                self.release_from(inner, t, TouchHolder::Plugin, ns);
             }
         }
     }
@@ -6348,12 +6467,17 @@ impl Session {
         let mut left_static = 0usize;
         for (t, x) in held {
             let mut converted = false;
-            if x.path == TouchPath::Static && inner.static_edit.is_some() {
+            // By the touch's own path and share (plan 5f-1 Ruling 2): a
+            // resting static touch holds no share, yet stays static on a
+            // strip that does not write and converts on one that does.
+            if x.path == TouchPath::Static {
                 if self.write_mode_of(inner, t).is_none() {
                     continue;
                 }
-                self.keep_static_param(inner, t, x);
-                left_static += 1;
+                if x.shared {
+                    self.keep_static_param(inner, t, x);
+                    left_static += 1;
+                }
                 converted = true;
             }
             // A Trim offset stays an offset from its own grab (review I-1,
@@ -6388,6 +6512,10 @@ impl Session {
                 y.path = path;
                 if !is_offset || converted {
                     y.base = y.value;
+                }
+                // A converted touch leaves the static edit.
+                if converted {
+                    y.shared = false;
                 }
             }
         }

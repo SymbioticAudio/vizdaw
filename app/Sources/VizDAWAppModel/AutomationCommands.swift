@@ -15,8 +15,9 @@ import VizDAWCore
 /// open) is `busy`. Nothing here opens a dialog.
 ///
 /// Gestures outlive the call that began them (each `vizctl` call is its
-/// own connection): a touch lasts until a release of the same target from
-/// any client, or until its window closes (Ruling 20). A release is never
+/// own connection): a touch the channel holds lasts until a channel release
+/// of the same target (from any client), or until its window closes (Ruling
+/// 20); the mouse releases only its own hold (plan 5f-1 Ruling 2). A release is never
 /// refused for anything its touch passed; a release of a target that is
 /// not touched, or that no longer exists, does nothing and answers `ran`.
 /// `state.get automation` lists the touched targets, so a client that lost
@@ -165,7 +166,8 @@ public enum AutomationCommands {
         default: return invalid("automation.gesture: `phase` is touch, value or release")
         }
         do {
-            try m.session.gesture(target: target, phase: phase)
+            // The channel is its own holder (plan 5f-1 Ruling 2).
+            try m.session.gestureFrom(target: target, phase: phase, holder: .channel)
         } catch {
             return .failed(.thrown(error, "Automation Failed"))
         }

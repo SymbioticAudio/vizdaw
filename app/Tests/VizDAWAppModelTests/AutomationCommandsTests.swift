@@ -61,6 +61,15 @@ import VizDAWCore
         #expect(code(run(AutomationCommands.gesture, [arg("target", "fader:1"), arg("phase", "touch")])) == .busy)
     }
 
+    @Test func theChannelGesturesAsItsOwnHolder() throws {
+        let (id, m, f) = try doc()
+        let o = AutomationCommands.run(
+            AutomationCommands.gesture, args: [arg("target", "fader:1"), arg("phase", "touch")], doc: id, m)
+        #expect(code(o) == nil)
+        #expect(f.holders == [.channel])
+        #expect(f.gestures.last?.1 == .touch(value: nil), "recorded as `gesture` records it")
+    }
+
     /// 5e-1 Task 10 review M3: a mode change while an editor drag is open
     /// is unavailable, and the core is not called.
     @Test func setModeIsUnavailableDuringAnEditorDrag() throws {

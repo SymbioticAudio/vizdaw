@@ -343,6 +343,113 @@ pub(crate) fn pass_settings() -> (AutomationMode, u32, Thinning) {
     (s.after_write.into(), s.return_ms, s.thinning.into())
 }
 
+/// A surface's ID, below 16 by construction (plan 5f-1 Rulings 2, 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SurfaceId(u8);
+
+// Tasks 7 and 8 make surface IDs; until then only the tests do.
+#[allow(dead_code)]
+impl SurfaceId {
+    /// How many surfaces there can be.
+    pub const COUNT: u8 = 16;
+
+    /// `id` as a surface ID, if it is below [`SurfaceId::COUNT`].
+    pub fn new(id: u32) -> Option<SurfaceId> {
+        u8::try_from(id)
+            .ok()
+            .filter(|i| *i < Self::COUNT)
+            .map(SurfaceId)
+    }
+
+    /// The ID as a number.
+    pub fn get(self) -> u32 {
+        u32::from(self.0)
+    }
+}
+
+/// Who holds a touch (plan 5f-1 Ruling 2). Not `Holder`: [`Holder`]
+/// (`This`, `Other`, `Nobody`) is the engine's, and stays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum TouchHolder {
+    /// The mixer and the plugin window's generic sliders.
+    Mouse,
+    /// The control channel.
+    Channel,
+    /// A plugin's own editor.
+    Plugin,
+    /// A MIDI-learned control (Task 8).
+    #[allow(dead_code)]
+    Learn,
+    /// A control surface (Task 8).
+    #[allow(dead_code)]
+    Surface(SurfaceId),
+}
+
+impl TouchHolder {
+    /// The holder's bit in a [`TouchHolders`] set.
+    fn bit(self) -> u32 {
+        let n = match self {
+            TouchHolder::Mouse => 0,
+            TouchHolder::Channel => 1,
+            TouchHolder::Plugin => 2,
+            TouchHolder::Learn => 3,
+            // Below 16 by construction: bits 4–19.
+            TouchHolder::Surface(s) => 4 + s.get(),
+        };
+        1u32 << n
+    }
+}
+
+impl From<GestureHolderRow> for TouchHolder {
+    fn from(h: GestureHolderRow) -> TouchHolder {
+        match h {
+            GestureHolderRow::Mouse => TouchHolder::Mouse,
+            GestureHolderRow::Channel => TouchHolder::Channel,
+        }
+    }
+}
+
+/// A set of holders: bits 0–3 Mouse, Channel, Plugin, Learn; bits 4–19
+/// surfaces 0–15.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TouchHolders(u32);
+
+impl TouchHolders {
+    /// The set of `h` alone.
+    pub fn of(h: TouchHolder) -> TouchHolders {
+        TouchHolders(h.bit())
+    }
+
+    /// Whether `h` is in the set.
+    pub fn has(self, h: TouchHolder) -> bool {
+        self.0 & h.bit() != 0
+    }
+
+    /// The set with `h`.
+    pub fn with(self, h: TouchHolder) -> TouchHolders {
+        TouchHolders(self.0 | h.bit())
+    }
+
+    /// The set without `h`.
+    pub fn without(self, h: TouchHolder) -> TouchHolders {
+        TouchHolders(self.0 & !h.bit())
+    }
+
+    /// Whether nobody holds it.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// The app's holders (the channel is its own, plan 5f-1 Ruling 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum GestureHolderRow {
+    /// The mixer and the plugin window's sliders.
+    Mouse,
+    /// The control channel's `automation.gesture`.
+    Channel,
+}
+
 /// Where a gesture comes from (Ruling 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
@@ -385,6 +492,11 @@ pub(crate) struct Touching {
     pub base: f64,
     /// Who touches it.
     pub source: Source,
+    /// Who holds it (plan 5f-1 Ruling 2): it ends at the last release.
+    pub holders: TouchHolders,
+    /// Whether it holds a share of the static edit: a static touch shares
+    /// from its first value (pre-flight C2).
+    pub shared: bool,
 }
 
 /// A writing pass (Rulings 7, 9, 19, 23, 24).

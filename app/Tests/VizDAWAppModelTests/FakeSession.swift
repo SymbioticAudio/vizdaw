@@ -779,6 +779,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         gestures.append((target, phase))
     }
 
+    /// The holders of `gestureFrom` calls, in order (plan 5f-1 Ruling 2).
+    var holders: [GestureHolderRow] = []
+    func gestureFrom(target: AutomationTargetRow, phase: GesturePhaseRow, holder: GestureHolderRow) throws {
+        if let e = gestureError { throw e }
+        if case .value = phase, let e = valueError { throw e }
+        gestures.append((target, phase))
+        holders.append(holder)
+    }
+
     /// Thrown by `setAutomationMode` (before it is recorded).
     var modeError: VizError?
     func setAutomationMode(strips: [UInt64], mode: AutomationModeRow) throws -> DocSnapshot {
