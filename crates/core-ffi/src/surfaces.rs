@@ -491,6 +491,9 @@ struct Kept {
     raw: serde_json::Value,
     /// The line each load adds for it.
     problem: String,
+    /// A known entry kept for a shared port (M-6): its kind and position,
+    /// which still hold its group slot (review I1).
+    known: Option<(SurfaceKind, u8)>,
 }
 
 /// One learned command in `surfaces.json` (Ruling 9).
@@ -1679,7 +1682,12 @@ fn check_unit(
     if units.len().saturating_add(kept.len()) >= MAX_SURFACES {
         return Err(crate::events::bad("VizDAW drives at most 16 surfaces"));
     }
-    let count = |k: SurfaceKind| units.iter().filter(|u| u.kind == k).count();
+    let held = |k: SurfaceKind| {
+        kept.iter()
+            .filter(|x| x.known.is_some_and(|(kk, _)| kk == k))
+            .count()
+    };
+    let count = |k: SurfaceKind| units.iter().filter(|u| u.kind == k).count() + held(k);
     match kind {
         SurfaceKind::Mcu if count(SurfaceKind::Mcu) >= 1 => {
             return Err(crate::events::bad(GROUP_LIMIT));
@@ -1711,6 +1719,11 @@ fn check_unit(
                 units
                     .iter()
                     .any(|u| u.group() == Group::Mcu && u.position == p)
+                    || kept.iter().any(|x| {
+                        x.known.is_some_and(|(k, pos)| {
+                            matches!(k, SurfaceKind::Mcu | SurfaceKind::McuXt) && pos == p
+                        })
+                    })
             };
             match position {
                 Some(p) if p >= POSITIONS => {
@@ -1840,6 +1853,7 @@ fn parse_file(text: &str) -> Result<Parsed, String> {
                 ports,
                 raw,
                 problem,
+                known: None,
             });
         }
     }
@@ -1880,6 +1894,7 @@ fn parse_file(text: &str) -> Result<Parsed, String> {
                     ports: vec![u.input.clone(), u.output.clone()],
                     raw,
                     problem,
+                    known: Some((u.kind, u.position)),
                 });
             }
             _ => driven.push(u),
@@ -3089,5 +3104,29 @@ mod tests {
             "{}",
             second.problem
         );
+    }
+
+    /// Review I1: a known MCU or XT kept for a shared port (M-6) still holds
+    /// its group slot and position, so what this build saves loads again.
+    #[test]
+    fn a_kept_mcu_still_holds_its_group_slot_and_position() {
+        let text = r#"{"version": 1, "surfaces": [
+            {"id": 0, "kind": "mcu", "input": "X", "output": "M Out", "position": 0},
+            {"id": 3, "kind": "future_box", "input": "X", "output": "X"}]}"#;
+        let (units, kept, _) = parse_file(text).unwrap();
+        assert!(units.is_empty());
+        let mut r = registry();
+        r.kept = kept;
+        let add = |r: &mut Registry, k, p| r.add(k, "A".into(), "B".into(), p, now());
+        assert!(add(&mut r, SurfaceKind::Mcu, None).is_err(), "a second MCU");
+        assert!(
+            add(&mut r, SurfaceKind::McuXt, Some(0)).is_err(),
+            "its position"
+        );
+        let id = add(&mut r, SurfaceKind::McuXt, Some(1)).unwrap();
+        assert_eq!(id.get(), 1);
+        let saved = serde_json::to_string(&r.file()).unwrap();
+        let (units, kept, _) = parse_file(&saved).unwrap();
+        assert_eq!((units.len(), kept.len()), (1, 2), "every entry survives");
     }
 }
