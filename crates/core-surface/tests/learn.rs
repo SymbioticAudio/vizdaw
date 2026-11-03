@@ -426,7 +426,7 @@ fn the_maps_say_which_messages_they_take() {
 
 /// Ruling 17's re-read: `set` keeps the state of maps whose source and
 /// target are unchanged, and forgets the idle holds no map drives any more
-/// (the caller owes their releases from `held()`).
+/// (their releases come from the next `tick`, Ruling T5-1).
 #[test]
 fn set_keeps_unchanged_maps_and_drops_undriven_holds() {
     let f = T::StripFader(StripId(3));
@@ -457,7 +457,218 @@ fn set_keeps_unchanged_maps_and_drops_undriven_holds() {
     assert_eq!(m.held(), vec![f], "the pan's hold is dropped");
     assert_eq!(
         m.input("Knobs", &[0xB0, 7, 0], now, &half),
-        vec![A::Gesture(f, Phase::Value(0.0))],
-        "still engaged, still held"
+        vec![A::IdleRelease(p, now), A::Gesture(f, Phase::Value(0.0))],
+        "the pan's queued release, then the fader: still engaged, still held"
     );
+}
+
+/// Ruling T5-1 (review I1): `set` never drops a release. A hold no map
+/// drives any more is released by the next `tick`, at its last value's time.
+#[test]
+fn set_releases_the_holds_it_drops_at_the_next_tick() {
+    let p = T::StripPan(StripId(2));
+    let mut m = mapper(M::Absolute, K::Cc7 { channel: 0, cc: 8 }, p);
+    let t0 = Instant::now();
+    assert_eq!(
+        m.input("Knobs", &[0xB0, 8, 10], t0, &|_| Some(0.5)).len(),
+        1
+    );
+    m.set(vec![], vec![]);
+    let later = t0 + Duration::from_millis(50);
+    assert_eq!(
+        m.tick(later),
+        vec![A::IdleRelease(p, t0)],
+        "once, stamped at its last value"
+    );
+    assert!(m.tick(later + IDLE_RELEASE).is_empty(), "never twice");
+}
+
+/// Review M4: a focus change releases everything the learned gestures
+/// hold, at their last values' times, and forgets engagement.
+#[test]
+fn release_all_ends_every_hold_and_engagement() {
+    let f = T::StripFader(StripId(3));
+    let mut m = Mapper::default();
+    m.set(
+        vec![LearnMap {
+            source: src(K::Cc7 { channel: 0, cc: 7 }),
+            target: f,
+            mode: M::Absolute,
+            pickup: true,
+        }],
+        vec![],
+    );
+    let t0 = Instant::now();
+    let half = |_: T| Some(0.5);
+    assert_eq!(m.input("Knobs", &[0xB0, 7, 64], t0, &half).len(), 1);
+    assert_eq!(m.release_all(), vec![A::IdleRelease(f, t0)]);
+    assert!(m.held().is_empty() && m.tick(t0 + IDLE_RELEASE).is_empty());
+    assert!(
+        m.input("Knobs", &[0xB0, 7, 70], t0, &half).is_empty(),
+        "disengaged: 70/127 neither passes nor nears 0.5"
+    );
+}
+
+/// Review M1: a spring-loaded wheel rests at the centre, so a pitch-bend
+/// command fires only well above it, once per push.
+#[test]
+fn a_bend_command_fires_once_per_push_up_not_on_return() {
+    let mut c = Mapper::default();
+    c.set(
+        vec![],
+        vec![CommandMap {
+            source: src(K::PitchBend { channel: 0 }),
+            command: "edit.undo".into(),
+        }],
+    );
+    let now = Instant::now();
+    let fired = |c: &mut Mapper, lsb: u8, msb: u8| {
+        c.input("Knobs", &[0xE0, lsb, msb], now, &|_| None).len()
+    };
+    assert_eq!(fired(&mut c, 0, 0x40), 0, "centre");
+    assert_eq!(fired(&mut c, 0, 0x00), 0, "down");
+    assert_eq!(fired(&mut c, 0, 0x40), 0, "back to centre: nothing");
+    assert_eq!(fired(&mut c, 0x7F, 0x7F), 1, "up");
+    assert_eq!(fired(&mut c, 0, 0x40), 0, "centre");
+    assert_eq!(fired(&mut c, 0x7F, 0x7F), 1, "up again");
+}
+
+/// Review M2: `takes` answers for one message; a buffer of several is not
+/// taken, so in doubt nothing unlearned is lost.
+#[test]
+fn takes_answers_for_one_message_only() {
+    let m = mapper(
+        M::Absolute,
+        K::Cc7 { channel: 0, cc: 7 },
+        T::StripFader(StripId(1)),
+    );
+    assert!(m.takes("Knobs", &[0xB0, 7, 1]));
+    assert!(
+        !m.takes("Knobs", &[0xB0, 7, 1, 0x90, 60, 100]),
+        "a learned CC packed with a note"
+    );
+    assert!(!m.takes("Knobs", &[]));
+}
+
+/// Review M5: pick-up on 14-bit and pitch-bend maps.
+#[test]
+fn fourteen_bit_and_bend_maps_pick_up() {
+    let f = T::StripFader(StripId(3));
+    let map = |kind: K| LearnMap {
+        source: src(kind),
+        target: f,
+        mode: M::Absolute,
+        pickup: true,
+    };
+    let now = Instant::now();
+    let half = |_: T| Some(0.5);
+    let mut m = Mapper::default();
+    m.set(vec![map(K::Cc14 { channel: 0, cc: 1 })], vec![]);
+    assert!(
+        m.input("Knobs", &[0xB0, 1, 0x10], now, &half).is_empty(),
+        "held"
+    );
+    assert!(
+        m.tick(now).is_empty(),
+        "a lone MSB far from 0.5 does not jump"
+    );
+    assert!(
+        m.input("Knobs", &[0xB0, 33, 0x7F], now, &half).is_empty(),
+        "a fine update, still far"
+    );
+    match m
+        .input("Knobs", &[0xB0, 1, 0x40, 0xB0, 33, 0], now, &half)
+        .as_slice()
+    {
+        [A::Gesture(_, Phase::Touch(Some(x)))] => assert!((x - 8192.0 / 16383.0).abs() < 1e-9),
+        other => panic!("{other:?}"),
+    }
+    let mut b = Mapper::default();
+    b.set(vec![map(K::PitchBend { channel: 0 })], vec![]);
+    assert!(
+        b.input("Knobs", &[0xE0, 0, 0x10], now, &half).is_empty(),
+        "far below"
+    );
+    match b.input("Knobs", &[0xE0, 0, 0x50], now, &half).as_slice() {
+        [A::Gesture(_, Phase::Touch(Some(x)))] => {
+            assert!((x - f64::from(0x50 << 7) / 16383.0).abs() < 1e-9)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Review M5: hostile bytes are ignored, never a panic.
+#[test]
+fn hostile_bytes_are_ignored() {
+    let bad: [&[u8]; 8] = [
+        &[],
+        &[0xB0],
+        &[0xB0, 7],
+        &[0xB0, 0x87, 1],
+        &[0x07, 0x07, 0x07],
+        &[0xF0, 0x01, 0x02],
+        &[0xF0, 0xB0, 7, 1, 0xF7],
+        &[0xFF, 0xF8, 0xF4],
+    ];
+    let mut l = Learner::default();
+    let mut m = mapper(
+        M::Absolute,
+        K::Cc7 { channel: 0, cc: 7 },
+        T::StripFader(StripId(1)),
+    );
+    let now = Instant::now();
+    for b in bad {
+        l.feed("Knobs", b, now);
+        assert!(!m.takes("Knobs", b), "{b:02x?}");
+        let _ = m.input("Knobs", b, now, &|_| Some(0.5));
+    }
+    let _ = l.decide(now + LEARN_WINDOW);
+    let _ = m.tick(now + IDLE_RELEASE);
+}
+
+/// Review M5: `set` keeps a command map's rise state.
+#[test]
+fn set_keeps_a_command_maps_rise_state() {
+    let cmd = CommandMap {
+        source: src(K::Cc7 { channel: 0, cc: 64 }),
+        command: "transport.play_stop".into(),
+    };
+    let mut c = Mapper::default();
+    c.set(vec![], vec![cmd.clone()]);
+    let now = Instant::now();
+    assert_eq!(c.input("Knobs", &[0xB0, 64, 127], now, &|_| None).len(), 1);
+    c.set(vec![], vec![cmd]);
+    assert!(
+        c.input("Knobs", &[0xB0, 64, 120], now, &|_| None)
+            .is_empty(),
+        "still high"
+    );
+}
+
+/// A queued release goes out before any new gesture: a map learned again
+/// to the same target and moved before the `tick` touches after it.
+#[test]
+fn a_queued_release_comes_before_a_new_touch() {
+    let p = T::StripPan(StripId(2));
+    let map = LearnMap {
+        source: src(K::Cc7 { channel: 0, cc: 8 }),
+        target: p,
+        mode: M::Absolute,
+        pickup: false,
+    };
+    let mut m = Mapper::default();
+    m.set(vec![map.clone()], vec![]);
+    let t0 = Instant::now();
+    let _ = m.input("Knobs", &[0xB0, 8, 10], t0, &|_| Some(0.5));
+    m.set(vec![], vec![]);
+    m.set(vec![map], vec![]);
+    let t1 = t0 + Duration::from_millis(10);
+    assert_eq!(
+        m.input("Knobs", &[0xB0, 8, 0], t1, &|_| Some(0.5)),
+        vec![
+            A::IdleRelease(p, t0),
+            A::Gesture(p, Phase::Touch(Some(0.0)))
+        ]
+    );
+    assert!(m.tick(t1).is_empty());
 }

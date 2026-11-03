@@ -24,6 +24,13 @@ pub const PICKUP_TOLERANCE: f64 = 0.02;
 /// The most messages a learn collects before it decides (Ruling 7).
 const LEARN_MESSAGES: usize = 8;
 
+/// A pitch-bend command fires at or above this (three quarters up) and
+/// re-arms below [`BEND_REARM`]: a spring-loaded wheel rests at 8192.
+const BEND_FIRE: u16 = 12288;
+
+/// A pitch-bend command re-arms below this.
+const BEND_REARM: u16 = 10240;
+
 /// The largest 14-bit value.
 const MAX14: f64 = 16383.0;
 
@@ -263,13 +270,17 @@ pub struct Mapper {
     high: Vec<bool>,
     /// The idle touches the learned gestures hold.
     idle: IdleTouches,
+    /// Releases `set` closed, emitted first by the next `input` or `tick` (Ruling T5-1).
+    pending: Vec<SurfaceAction>,
 }
 
 impl Mapper {
     /// Sets the maps and command maps. A map whose source and target are
-    /// unchanged keeps its state (MSB hold, pick-up, feedback); idle touches
-    /// of targets no map drives any more are forgotten without a release
-    /// (the caller owes those, from `held()` before the change; Ruling 17).
+    /// unchanged keeps its state (MSB hold, pick-up, feedback). An idle
+    /// touch of a target no map drives any more is closed, and its
+    /// `IdleRelease` (stamped at its last value's time) comes out first from
+    /// the next `input` or `tick`: a release is never lost (Ruling T5-1),
+    /// and the caller owes nothing for it.
     pub fn set(&mut self, maps: Vec<LearnMap>, commands: Vec<CommandMap>) {
         let old_maps = std::mem::take(&mut self.maps);
         let mut old_slots = std::mem::take(&mut self.slots);
@@ -283,9 +294,12 @@ impl Mapper {
                     .unwrap_or_default()
             })
             .collect();
-        for t in self.idle.held() {
-            if !maps.iter().any(|m| m.target == t) {
+        for a in self.idle.releases() {
+            if let SurfaceAction::IdleRelease(t, _) = a
+                && !maps.iter().any(|m| m.target == t)
+            {
                 self.idle.forget(t);
+                self.pending.push(a);
             }
         }
         let old_cmds = std::mem::take(&mut self.commands);
@@ -311,7 +325,8 @@ impl Mapper {
     }
 
     /// Whether a map or command map takes `msg` from `port` (Ruling 17).
-    /// `msg` is one message; a buffer of several is taken when any is.
+    /// It answers for one message: a buffer that is not exactly one whole
+    /// message is not taken, so in doubt nothing unlearned is lost.
     pub fn takes(&self, port: &str, msg: &[u8]) -> bool {
         let sources = self
             .maps
@@ -323,7 +338,11 @@ impl Mapper {
         if sources.is_empty() {
             return false;
         }
-        messages(msg).any(|m| sources.iter().any(|s| part(s.kind, m).is_some()))
+        let parts = split(msg);
+        let [Ok(one)] = parts.as_slice() else {
+            return false;
+        };
+        parse(one).is_some_and(|m| sources.iter().any(|s| part(s.kind, m).is_some()))
     }
 
     /// Rulings 8 and 18; `current` gives a target's heard value now (None: unknown → the message is dropped for relative and picking-up maps).
@@ -334,7 +353,8 @@ impl Mapper {
         now: Instant,
         current: &dyn Fn(AutomationTarget) -> Option<f64>,
     ) -> Vec<SurfaceAction> {
-        let mut out = Vec::new();
+        // Releases `set` queued go first, before any new touch of their targets.
+        let mut out = std::mem::take(&mut self.pending);
         for m in messages(msg) {
             self.command(port, m, &mut out);
             for i in 0..self.maps.len() {
@@ -363,7 +383,7 @@ impl Mapper {
                     continue;
                 }
                 Some(Part::Cc(v) | Part::Msb(v)) => v >= 64,
-                Some(Part::Bend(v)) => v >= 8192,
+                Some(Part::Bend(v)) => v >= BEND_FIRE || (*high && v >= BEND_REARM),
                 Some(Part::Lsb(_) | Part::Off) | None => continue,
             };
             if level && !*high {
@@ -488,9 +508,10 @@ impl Mapper {
         out.push(self.idle.value(map.target, v, now));
     }
 
-    /// Held MSBs (Ruling 8), then idle releases (`IdleRelease`), which disengage picking-up maps.
+    /// The releases `set` queued (Ruling T5-1), held MSBs (Ruling 8), then
+    /// idle releases (`IdleRelease`), which disengage picking-up maps.
     pub fn tick(&mut self, now: Instant) -> Vec<SurfaceAction> {
-        let mut out = Vec::new();
+        let mut out = std::mem::take(&mut self.pending);
         for i in 0..self.slots.len() {
             let held = self.slots.get_mut(i).and_then(|s| s.msb.take());
             if let Some((msb, cur)) = held {
@@ -560,7 +581,22 @@ impl Mapper {
         out
     }
 
-    /// The targets the learned gestures hold now.
+    /// Every hold the learned gestures have, as `IdleRelease`s at their last
+    /// values' times (with the releases `set` queued), then forgets them,
+    /// held MSBs and engagement (a focus change; Ruling 11, T3-1 pattern).
+    pub fn release_all(&mut self) -> Vec<SurfaceAction> {
+        let mut out = std::mem::take(&mut self.pending);
+        out.extend(self.idle.releases());
+        let _ = self.idle.take_all();
+        for s in &mut self.slots {
+            s.msb = None;
+            s.engaged = false;
+        }
+        out
+    }
+
+    /// The targets the learned gestures hold now (not those whose release
+    /// `set` queued: the next `input` or `tick` releases them).
     pub fn held(&self) -> Vec<AutomationTarget> {
         self.idle.held()
     }
