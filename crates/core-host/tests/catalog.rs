@@ -137,7 +137,14 @@ fn statuses_browser_and_clearing_the_blocklist() {
 fn the_host_learns_paths_and_unavailable_plugins() {
     let bundle = test_plugins::bundle();
     let src = Source::clap_bundle(&bundle);
-    assert_eq!(src.version, "1.0.0");
+    // The version is the bundle's Info.plist (macOS); a Linux .clap is a
+    // single library file with none.
+    let version = if cfg!(target_os = "macos") {
+        "1.0.0"
+    } else {
+        ""
+    };
+    assert_eq!(src.version, version);
     assert!(src.mtime > 0);
     let mut c = Catalog::new();
     c.record(
