@@ -9,12 +9,13 @@ mod common;
 
 use core_engine::fixtures::{Builder, Q};
 use core_media::caf::{CafReader, CafWriter, WriteMode};
-use core_model::command::{Command, MixerCmd, SettingsCmd};
+use core_model::automation::AutomationTarget;
+use core_model::command::{Command, LaneCmd, MixerCmd, SettingsCmd};
 use core_model::document::Document;
-use core_model::event::Fade;
+use core_model::event::{EventBody, Fade};
 use core_model::format::{AudioFormat, BitDepth};
 use core_model::ids::{SeqId, StripId};
-use core_model::mixer::{AuxSend, Output, PluginFormat, PluginRef, StripKind};
+use core_model::mixer::{AuxSend, Output, ParamId, PluginFormat, PluginRef, StripKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -780,9 +781,10 @@ fn one_bounce_at_a_time() {
     p.s.abort_edit().unwrap();
     p.s.debug_hold_jobs(true).unwrap();
     let id = p.s.bounce(req.clone()).unwrap();
+    let e = p.s.bounce(req.clone()).unwrap_err();
     assert!(
-        matches!(p.s.bounce(req.clone()), Err(VizError::Busy { .. })),
-        "a second bounce waits"
+        matches!(&e, VizError::Busy { message } if message == "A bounce is running."),
+        "a second bounce waits: {e:?}"
     );
     assert!(matches!(
         p.s.save_as(p.dir.path().join("Q.vizdaw").display().to_string()),
@@ -974,6 +976,50 @@ fn clipped_samples_are_reported() {
         l.iter().any(|x| *x > 1.0) && r.iter().any(|x| *x < -1.0),
         "overs kept above 0 dBFS"
     );
+    // Final review I1: Add to project in a 24-bit project clips the hot
+    // heard stem at the import, and says so (singular and plural forms are
+    // the unit tests' in src/bounce.rs).
+    let p24 = project(|b, _, path| {
+        b.mixer(MixerCmd::RenameStrip {
+            strip: path,
+            name: "Hot".into(),
+        })
+        .unwrap();
+        b.mixer(MixerCmd::SetGain {
+            strip: path,
+            gain_db: 12.0,
+        })
+        .unwrap();
+    });
+    let f = p24
+        .s
+        .set_project_format(ProjectFormatRow {
+            sample_rate: 48_000,
+            depth: BitDepthRow::Int24,
+        })
+        .unwrap();
+    assert_eq!(wait_job(&p24.s, f).state, JobStateRow::Done);
+    let j = wait_job(
+        &p24.s,
+        p24.s
+            .bounce(BounceRequestRow {
+                source: BounceSourceRow::Stems {
+                    strips: vec![p24.path],
+                },
+                path: None,
+                add_to_project: true,
+                ..mix_to(&p24, p24.dir.path())
+            })
+            .unwrap(),
+    );
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    assert_eq!(j.created.len(), 1, "{j:?}");
+    assert!(
+        j.problems.iter().any(
+            |m| m.starts_with("Hot (added to the project): ") && m.ends_with("samples clipped")
+        ),
+        "{j:?}"
+    );
 }
 
 /// Ruling 3, pre-flight I4, M6, M7: each is `Model`, and nothing is written.
@@ -986,6 +1032,27 @@ fn hostile_bounce_requests_are_refused() {
     // A real folder, so the `..` case fails for its `..` alone (pre-check M-4).
     std::fs::create_dir(d.join("sub")).unwrap();
     std::fs::write(d.join("file.txt"), b"x").unwrap();
+    // Another project's package (final review T4-M10).
+    std::fs::create_dir_all(d.join("Other.vizdaw/Media")).unwrap();
+    // A folder this process cannot write (final review m3).
+    let ro = d.join("ro");
+    std::fs::create_dir(&ro).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    // A folder so deep that a file fits 1024 bytes and its partial does not.
+    let mut deep = d.to_path_buf();
+    while deep.as_os_str().len() < 1024 - 250 {
+        deep.push("d".repeat(200));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    let fill = 1020 - deep.as_os_str().len() - 1 - ".wav".len();
+    let deep_file = deep.join(format!("{}.wav", "f".repeat(fill)));
+    assert_eq!(deep_file.as_os_str().len(), 1020);
+    // ... and one where a stem's file does not fit.
+    let deeper = deep.join("e".repeat(1015 - deep.as_os_str().len() - 1));
+    std::fs::create_dir(&deeper).unwrap();
     let before = names(d);
     let ok = mix_to(&p, &d.join("x.wav"));
     let stems = |strips: Vec<u64>| BounceRequestRow {
@@ -1121,6 +1188,48 @@ fn hostile_bounce_requests_are_refused() {
             "a 4097-byte path",
             at(format!("{}/{}.wav", d.display(), "a".repeat(4097))),
         ),
+        // Final review m3: names that can never be written, refused before
+        // the render.
+        ("a NUL byte", at(format!("{}/a\u{0}b.wav", d.display()))),
+        (
+            "a name whose partial is over 255 bytes",
+            at(d.join(format!("{}.wav", "n".repeat(247)))
+                .display()
+                .to_string()),
+        ),
+        (
+            "a partial path over 1024 bytes",
+            at(deep_file.display().to_string()),
+        ),
+        (
+            "a stem path over 1024 bytes",
+            BounceRequestRow {
+                path: Some(deeper.display().to_string()),
+                ..stems(vec![p.path])
+            },
+        ),
+        (
+            "a folder that cannot be written",
+            at(ro.join("x.wav").display().to_string()),
+        ),
+        (
+            "a stems folder that cannot be written",
+            BounceRequestRow {
+                path: Some(ro.display().to_string()),
+                ..stems(vec![p.path])
+            },
+        ),
+        (
+            "inside another project",
+            at(d.join("Other.vizdaw/Media/x.wav").display().to_string()),
+        ),
+        (
+            "inside another project's package itself",
+            BounceRequestRow {
+                path: Some(d.join("Other.vizdaw").display().to_string()),
+                ..stems(vec![p.path])
+            },
+        ),
     ];
     for (what, req) in cases {
         let e = p.s.bounce(req.clone()).unwrap_err();
@@ -1133,7 +1242,14 @@ fn hostile_bounce_requests_are_refused() {
             assert!(e.to_string().contains("outside the project"), "{what}: {e}");
         }
     }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     assert_eq!(names(d), before, "nothing was written");
+    assert!(names(&ro).is_empty() && names(&deeper).is_empty());
+    assert_eq!(names(&deep).len(), 1, "only the deeper folder");
+    assert!(names(&d.join("Other.vizdaw/Media")).is_empty());
     assert!(!p.pkg.join("x.wav").exists() && !p.pkg.join("Media/x.wav").exists());
 }
 
@@ -1175,27 +1291,274 @@ fn a_bounce_at_another_rate_converts() {
     assert!(frames.abs_diff(want) <= 1, "{frames} vs {want}");
 }
 
+/// Final review m4: without the system converter a rate change is refused
+/// before the render (a `Model` error), not after it.
 #[cfg(not(target_os = "macos"))]
 #[test]
-fn a_rate_change_without_the_system_converter_fails_cleanly() {
+fn a_rate_change_without_the_system_converter_is_refused() {
     let _g = serial();
     let p = project(|_, _, _| {});
     let dest = p.dir.path().join("44k1.wav");
+    let req = BounceRequestRow {
+        rate: 44_100,
+        ..mix_to(&p, &dest)
+    };
+    for e in [
+        p.s.bounce(req.clone()).unwrap_err(),
+        p.s.bounce_check(req.clone()).unwrap_err(),
+    ] {
+        assert!(
+            matches!(&e, VizError::Model { message } if message.contains("system importer")),
+            "{e:?}"
+        );
+    }
+    // Add to project alone imports at the project rate: no conversion.
     let j = wait_job(
         &p.s,
         p.s.bounce(BounceRequestRow {
-            rate: 44_100,
-            ..mix_to(&p, &dest)
+            path: None,
+            add_to_project: true,
+            ..req
+        })
+        .unwrap(),
+    );
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    assert!(!dest.exists() && !p.dir.path().join(".44k1.wav.partial").exists());
+    assert!(incoming(&p).is_empty());
+}
+
+/// Final review T4-1 (Ruling 12): one "Add to project" import that fails
+/// aborts the whole bounce: nothing is added, nothing exported, the first
+/// import is removed, and the one problem names the stem.
+#[test]
+fn a_failed_import_aborts_the_bounce() {
+    let _g = serial();
+    let mut bus = StripId(0);
+    let p = project(|b, _, path| {
+        b.mixer(MixerCmd::RenameStrip {
+            strip: path,
+            name: "Track".into(),
+        })
+        .unwrap();
+        bus = b.bus("Bus").unwrap();
+    });
+    let items = p.s.media().unwrap().len();
+    let lanes = p.s.lanes(p.seq).unwrap().len();
+    let media_before = names(&p.pkg.join("Media"));
+    let folder = p.dir.path().join("stems");
+    std::fs::create_dir(&folder).unwrap();
+    p.s.debug_bounce_fail_import(Some(1)).unwrap();
+    let j = wait_job(
+        &p.s,
+        p.s.bounce(BounceRequestRow {
+            source: BounceSourceRow::Stems {
+                strips: vec![p.path, bus.0],
+            },
+            path: Some(folder.display().to_string()),
+            add_to_project: true,
+            ..mix_to(&p, &folder)
         })
         .unwrap(),
     );
     assert_eq!(j.state, JobStateRow::Failed, "{j:?}");
     assert!(
-        j.message
-            .as_deref()
-            .is_some_and(|m| m.contains("system importer")),
+        j.message.as_deref().is_some_and(|m| m.contains("Bus")),
+        "the message names the second stem: {j:?}"
+    );
+    assert!(names(&folder).is_empty(), "no export, no partial");
+    assert!(incoming(&p).is_empty(), "no temporary");
+    assert_eq!(p.s.media().unwrap().len(), items, "no media item");
+    assert_eq!(p.s.lanes(p.seq).unwrap().len(), lanes, "no lane");
+    // Hidden folders (`.incoming`, the overview cache) aside.
+    let files = |mut v: Vec<String>| {
+        v.retain(|n| !n.starts_with('.'));
+        v
+    };
+    assert_eq!(
+        files(names(&p.pkg.join("Media"))),
+        files(media_before),
+        "the first import was removed"
+    );
+    assert!(p.s.bounce_result(j.id).unwrap().unwrap().files.is_empty());
+    assert_eq!(vizdaw_ffi::plugins::bounce_hosts(), 0);
+    // The hook is one-shot: the next bounce imports both.
+    let j = wait_job(
+        &p.s,
+        p.s.bounce(BounceRequestRow {
+            source: BounceSourceRow::Stems {
+                strips: vec![p.path, bus.0],
+            },
+            path: None,
+            add_to_project: true,
+            ..mix_to(&p, &folder)
+        })
+        .unwrap(),
+    );
+    assert_eq!((j.state, j.created.len()), (JobStateRow::Done, 2), "{j:?}");
+}
+
+/// Final review T4-M8: a rename that fails after an earlier one landed
+/// fails the job; the file already in place stays and is named.
+#[test]
+fn a_failed_rename_keeps_the_files_already_in_place() {
+    let _g = serial();
+    let mut bus = StripId(0);
+    let p = project(|b, _, path| {
+        b.mixer(MixerCmd::RenameStrip {
+            strip: path,
+            name: "Track".into(),
+        })
+        .unwrap();
+        bus = b.bus("Bus").unwrap();
+    });
+    let folder = p.dir.path().join("stems");
+    std::fs::create_dir(&folder).unwrap();
+    p.s.debug_hold_jobs(true).unwrap();
+    let id =
+        p.s.bounce(BounceRequestRow {
+            source: BounceSourceRow::Stems {
+                strips: vec![p.path, bus.0],
+            },
+            path: Some(folder.display().to_string()),
+            ..mix_to(&p, &folder)
+        })
+        .unwrap();
+    // Every name the second stem could take is taken after the plan: its
+    // own by a file (so its partial is still written), the numbered ones
+    // by folders.
+    std::fs::write(folder.join("Bus.wav"), b"taken").unwrap();
+    for n in 2..=9999 {
+        std::fs::create_dir(folder.join(format!("Bus {n}.wav"))).unwrap();
+    }
+    p.s.debug_hold_jobs(false).unwrap();
+    let j = wait_job(&p.s, id);
+    assert_eq!(j.state, JobStateRow::Failed, "{j:?}");
+    assert!(
+        j.message.as_deref().is_some_and(|m| m.contains("Bus.wav")),
         "{j:?}"
     );
-    assert!(!dest.exists() && !p.dir.path().join(".44k1.wav.partial").exists());
+    let track = folder.join("Track.wav");
+    assert!(
+        read_wav(&track).4 >= BARS4_FRAMES,
+        "the first file stays whole"
+    );
+    let res = p.s.bounce_result(id).unwrap().unwrap();
+    assert_eq!(
+        res.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+        vec![track.display().to_string()]
+    );
+    assert_eq!(std::fs::read(folder.join("Bus.wav")).unwrap(), b"taken");
+    let partials: Vec<String> = names(&folder)
+        .into_iter()
+        .filter(|n| n.ends_with(".partial"))
+        .collect();
+    assert!(partials.is_empty(), "{partials:?}");
     assert!(incoming(&p).is_empty());
+}
+
+/// Final review T4-M2: a live value sent to an automated parameter (here
+/// on a muted automation lane) does not replace its kept static value in
+/// the bounce's copy, as Save keeps it (plan 5e-1 Ruling 15).
+#[test]
+fn a_ride_of_an_automated_parameter_keeps_its_static_value() {
+    let _g = serial();
+    let p = project(|b, seq, path| {
+        let slot = b
+            .insert(path, plugin("vizdaw.test.gain", "Test Gain"))
+            .unwrap();
+        let l = b.lane(seq, "Auto", None).unwrap();
+        b.event(
+            seq,
+            l,
+            0,
+            EventBody::Automation {
+                target: AutomationTarget::PluginParam(slot, ParamId(0)),
+                value: 0.0,
+            },
+        )
+        .unwrap();
+        b.run(Command::Lane(LaneCmd::SetFlags {
+            seq,
+            lane: l,
+            mute: Some(true),
+            solo: None,
+            arm: None,
+        }))
+        .unwrap();
+    });
+    idle_until(&p.s, |s| {
+        s.plugin_slots().unwrap()[0].status == SlotStatus::Live
+    });
+    let slot = p.s.plugin_slots().unwrap()[0].id;
+    p.s.set_param(slot, 0, 0.0).unwrap();
+    let dest = p.dir.path().join("kept.wav");
+    let j = wait_job(&p.s, p.s.bounce(mix_to(&p, &dest)).unwrap());
+    assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+    assert!(
+        sounds(&wav_channel(&dest, 0)),
+        "the static 1.0 is kept, not the live 0"
+    );
+}
+
+/// Final review T4-M4: a session dropped without `close` while a bounce
+/// with plugin copies is held ends the copies and leaves nothing behind.
+#[test]
+fn dropping_the_session_ends_a_held_bounce() {
+    let _g = serial();
+    let p = project(|b, _, path| {
+        b.insert(path, plugin("vizdaw.test.gain", "Test Gain"))
+            .unwrap();
+    });
+    idle_until(&p.s, |s| {
+        s.plugin_slots().unwrap()[0].status == SlotStatus::Live
+    });
+    let folder = p.dir.path().join("stems");
+    std::fs::create_dir(&folder).unwrap();
+    p.s.debug_hold_jobs(true).unwrap();
+    let req = BounceRequestRow {
+        source: BounceSourceRow::Stems {
+            strips: vec![p.path],
+        },
+        path: Some(folder.display().to_string()),
+        add_to_project: true,
+        ..mix_to(&p, &folder)
+    };
+    p.s.bounce(req).unwrap();
+    assert_eq!(vizdaw_ffi::plugins::bounce_hosts(), 1);
+    let Project { dir, pkg, s, .. } = p;
+    drop(s);
+    assert_eq!(vizdaw_ffi::plugins::bounce_hosts(), 0, "the copies ended");
+    let other = project(|_, _, _| {});
+    idle_until(&other.s, |_| vizdaw_ffi::host::closing_hosts_waiting() == 0);
+    assert!(names(&folder).is_empty(), "no file, no partial");
+    let incoming = pkg.join("Media/.incoming");
+    assert!(!incoming.is_dir() || names(&incoming).is_empty());
+    drop(dir);
+}
+
+/// Final review T4-M5: a session dropped without `close` while a bounce
+/// with no plugin copies runs stops that bounce too: it writes nothing
+/// after the drop.
+#[test]
+fn dropping_the_session_stops_a_bounce_without_copies() {
+    let _g = serial();
+    let p = project(|_, _, _| {});
+    let dest = p.dir.path().join("late.wav");
+    p.s.bounce(BounceRequestRow {
+        range: BounceRangeRow::Song,
+        ..mix_to(&p, &dest)
+    })
+    .unwrap();
+    let Project { dir, pkg, s, .. } = p;
+    drop(s);
+    // The drop joined the job: nothing may appear afterwards. A job left
+    // running would finish this 10-second render well within the wait.
+    let until = Instant::now() + std::time::Duration::from_secs(3);
+    while Instant::now() < until {
+        assert!(!dest.exists(), "a bounce wrote after its session went");
+        std::thread::yield_now();
+    }
+    assert!(!dir.path().join(".late.wav.partial").exists());
+    let incoming = pkg.join("Media/.incoming");
+    assert!(!incoming.is_dir() || names(&incoming).is_empty());
 }

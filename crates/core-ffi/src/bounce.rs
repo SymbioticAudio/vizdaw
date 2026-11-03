@@ -20,7 +20,7 @@ use core_engine::offline::{OfflineBackend, OfflineSinks};
 use core_engine::schedule::TempoTable;
 use core_media::MediaError;
 use core_media::caf::{CafWriter, WriteMode};
-use core_media::export::{Container, ExportFormat, PendingExport};
+use core_media::export::{Container, ExportFormat, PendingExport, display_name, partial_path};
 use core_media::import::{INCOMING_DIR, Imported};
 use core_media::stream::{DiskMode, MediaFile};
 use core_model::document::Document;
@@ -114,7 +114,9 @@ pub struct BounceCheckRow {
     pub external_lanes: u32,
     /// The range's frames (the files hold at least this many).
     pub frames: u64,
-    /// The files it would write, in order (stems numbered, Ruling 3).
+    /// The files it would write, in order (stems numbered, Ruling 3). For
+    /// the channel and the tests: the sheet shows the names only after the
+    /// bounce (ruling T6-1).
     pub files: Vec<String>,
     /// Ruling 8's sentences, or None.
     pub warning: Option<String>,
@@ -169,8 +171,8 @@ const MAX_PATH_BYTES: usize = 1024;
 const MAX_NAME_BYTES: usize = 255;
 /// The longest number suffix `commit_numbered` gives (" 9999").
 const NUMBER_BYTES: usize = 5;
-/// The highest number a stem name gets.
-const MAX_NUMBER: u32 = 9999;
+/// The highest number a stem name gets (the one `commit_numbered` tries).
+const MAX_NUMBER: u32 = core_media::export::MAX_NUMBER;
 
 static TAIL_CAP_MS: AtomicU32 = AtomicU32::new(DEFAULT_TAIL_CAP_MS);
 
@@ -254,15 +256,6 @@ fn stem_plan(folder: &Path, names: &[String], ext: &str) -> Vec<(PathBuf, PathBu
         out.push((base, pick));
     }
     out
-}
-
-/// The stem files for `names` in `folder` (Ruling 3): made safe, cut to fit,
-/// numbered against this bounce and the folder's files. Not exported.
-pub fn stem_paths(folder: &Path, names: &[String], ext: &str) -> Vec<PathBuf> {
-    stem_plan(folder, names, ext)
-        .into_iter()
-        .map(|(_, p)| p)
-        .collect()
 }
 
 fn model(message: impl Into<String>) -> VizError {
@@ -400,12 +393,15 @@ fn tail_frames(ms: u32, rate: u32) -> u64 {
 }
 
 /// Checks a destination path's text (Ruling 3): at most 1024 bytes,
-/// absolute, no `..`.
+/// no NUL byte (final review m3), absolute, no `..`.
 fn dest_path(s: &str) -> Result<PathBuf, VizError> {
     if s.len() > MAX_PATH_BYTES {
         return Err(model(format!(
             "the path is longer than {MAX_PATH_BYTES} bytes"
         )));
+    }
+    if s.contains('\0') {
+        return Err(model("a path with a NUL character is not accepted"));
     }
     let p = PathBuf::from(s);
     if !p.is_absolute() {
@@ -418,7 +414,8 @@ fn dest_path(s: &str) -> Result<PathBuf, VizError> {
 }
 
 /// Refuses a `folder` that does not exist or lies inside one of `roots`
-/// (the package and the scratch root), after canonicalising it.
+/// (the package and the scratch root) or inside any project package (a
+/// `*.vizdaw` folder; final review T4-M10), after canonicalising it.
 fn outside(folder: &Path, roots: &[PathBuf]) -> Result<(), VizError> {
     if !folder.is_dir() {
         return Err(model(format!("{}: no such folder", folder.display())));
@@ -434,6 +431,28 @@ fn outside(folder: &Path, roots: &[PathBuf]) -> Result<(), VizError> {
                 folder.display()
             )));
         }
+    }
+    let package = |p: &Path| {
+        p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("vizdaw"))
+    };
+    if real.ancestors().any(package) || folder.ancestors().any(package) {
+        return Err(model(format!(
+            "{} is inside a VizDAW project; choose a place outside the project",
+            folder.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses a file whose partial (`.<name>.partial`, written first) would
+/// be longer than [`MAX_PATH_BYTES`] (final review m3).
+fn partial_fits(file: &Path) -> Result<(), VizError> {
+    if partial_path(file).as_os_str().len() > MAX_PATH_BYTES {
+        return Err(model(format!(
+            "{}: the path is longer than {MAX_PATH_BYTES} bytes with its partial file; choose a shorter one",
+            display_name(file)
+        )));
     }
     Ok(())
 }
@@ -502,6 +521,16 @@ pub(crate) fn plan(
     if frames == 0 {
         return Err(model("the range holds no audio frames"));
     }
+    // The CAF importer converts depth only: without the system converter a
+    // file at another rate is refused now, not after the render (final
+    // review m4).
+    #[cfg(not(target_os = "macos"))]
+    if req.path.is_some() && fmt.rate != project.sample_rate {
+        return Err(model(format!(
+            "{} Hz to {} Hz: resampling needs the system importer; bounce at {} Hz",
+            project.sample_rate, fmt.rate, project.sample_rate
+        )));
+    }
     let ext = fmt.container.extension();
     let (mut mix_path, mut stem_files) = (None, Vec::new());
     if let Some(text) = &req.path {
@@ -511,6 +540,7 @@ pub(crate) fn plan(
                 .parent()
                 .ok_or_else(|| model(format!("{text}: choose a file")))?;
             outside(parent, roots)?;
+            partial_fits(&p)?;
             core_media::export::check_destination(&p, &fmt, req.replace)
                 .map_err(|e| model(media_words(&e)))?;
             mix_path = Some(p);
@@ -519,8 +549,12 @@ pub(crate) fn plan(
                 return Err(model(format!("{text} is not a folder")));
             }
             outside(&p, roots)?;
+            core_media::export::check_folder(&p).map_err(|e| model(media_words(&e)))?;
             let names: Vec<String> = strips.iter().map(|s| strip_name(doc, *s)).collect();
             stem_files = stem_plan(&p, &names, ext);
+            for (_, f) in &stem_files {
+                partial_fits(f)?;
+            }
         }
     } else if !req.add_to_project {
         return Err(model("choose a file or Add to project"));
@@ -618,6 +652,9 @@ pub(crate) struct Job {
     pub copies: Option<Copies>,
     /// The progress at which it cancels itself (test hook).
     pub cancel_at: Option<f32>,
+    /// The "Add to project" source whose import fails as a disk error
+    /// would (test hook; None outside tests).
+    pub fail_import_at: Option<usize>,
 }
 
 /// The job's progress cell, and the test hook's cancel point.
@@ -675,6 +712,30 @@ fn sinks() -> Box<dyn SinkFactory> {
         return Box::new(SilentMidi(platform_macos::sinks::MacSinks::new()));
     }
     Box::new(SilentMidi(OfflineSinks::new(1 << 16)))
+}
+
+/// "1 sample clipped", "<n> samples clipped" (final review T4-M7).
+fn clipped_words(n: u64) -> String {
+    match n {
+        1 => "1 sample clipped".into(),
+        n => format!("{n} samples clipped"),
+    }
+}
+
+/// The problem line for non-finite samples (final review T2-M4, T4-M7).
+fn nonfinite_line(n: u64) -> String {
+    match n {
+        1 => "1 non-finite sample was rendered and silenced".into(),
+        n => format!("{n} non-finite samples were rendered and silenced"),
+    }
+}
+
+/// The problem line for disk underruns (final review T4-M7).
+fn underrun_line(n: u64) -> String {
+    match n {
+        1 => "the disk fell behind once while bouncing".into(),
+        n => format!("the disk fell behind {n} times while bouncing"),
+    }
 }
 
 /// How the render ended.
@@ -806,16 +867,10 @@ fn render(
         }
     }
     if stats.nonfinite > 0 {
-        problems.push(format!(
-            "{} non-finite samples were silenced",
-            stats.nonfinite
-        ));
+        problems.push(nonfinite_line(stats.nonfinite));
     }
     if stats.underruns > 0 {
-        problems.push(format!(
-            "the disk fell behind {} times while bouncing",
-            stats.underruns
-        ));
+        problems.push(underrun_line(stats.underruns));
     }
     Rendered::Done(stats)
 }
@@ -884,23 +939,38 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
             let Some(temp) = temps.0.get(at) else {
                 return failed(problems, format!("{name}: no render"));
             };
-            let r = core_media::import::import_reserved(
-                importer.as_ref(),
-                temp,
-                &job.root,
-                job.format,
-                name,
-                &job.reserved,
-                &mut |f| prog.set(0.8 + 0.1 * (k as f32 + f.clamp(0.0, 1.0)) / n),
-                cancel,
-            );
+            let r = if job.fail_import_at == Some(k) {
+                Err(MediaError::Io("test".into()))
+            } else {
+                core_media::import::import_reserved(
+                    importer.as_ref(),
+                    temp,
+                    &job.root,
+                    job.format,
+                    name,
+                    &job.reserved,
+                    &mut |f| prog.set(0.8 + 0.1 * (k as f32 + f.clamp(0.0, 1.0)) / n),
+                    cancel,
+                )
+            };
             match r {
                 Err(MediaError::Cancelled) => return Work::Cancelled,
                 Ok(v) => {
                     imported.0.extend(v.iter().map(|i| job.root.join(&i.path)));
+                    // The project format clips what the float render kept
+                    // (final review I1; owner answer 1: clips are reported).
+                    for i in v.iter().filter(|i| i.clipped > 0) {
+                        problems.push(format!(
+                            "{name} (added to the project): {}",
+                            clipped_words(i.clipped)
+                        ));
+                    }
                     files.push((name.clone(), Ok(v)));
                 }
-                Err(e) => files.push((name.clone(), Err(e.to_string()))),
+                // One import that fails aborts the bounce (ruling T4-1,
+                // Ruling 12): `imported` removes the imports already made
+                // and `temps` the temporaries; no partial exists yet.
+                Err(e) => return failed(problems, format!("{name}: {}", media_words(&e))),
             }
             if prog.cancelled() {
                 return Work::Cancelled;
@@ -927,11 +997,16 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
     let mut pending: Vec<(PendingExport, Option<PathBuf>)> = Vec::new();
     for (k, (temp, base, dest)) in exports.iter().enumerate() {
         let replace = base.is_none() && plan.replace;
+        // Each file its own dither (final review m5): the source index.
+        let fmt = ExportFormat {
+            dither_stream: k as u64,
+            ..plan.fmt
+        };
         let r = core_media::export::write_partial(
             importer.as_ref(),
             temp,
             dest,
-            &plan.fmt,
+            &fmt,
             Some(stats.frames),
             replace,
             &mut |f| prog.set(0.9 + 0.1 * (k as f32 + f.clamp(0.0, 1.0)) / n),
@@ -941,10 +1016,7 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
             Ok(p) => pending.push((p, base.clone())),
             Err(MediaError::Cancelled) => return Work::Cancelled,
             Err(e) => {
-                let name = dest.file_name().map_or_else(
-                    || dest.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
+                let name = display_name(dest);
                 return failed(problems, format!("{name}: {}", media_words(&e)));
             }
         }
@@ -961,12 +1033,9 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
         };
         match done {
             Ok(e) => {
-                let name = e.path.file_name().map_or_else(
-                    || e.path.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
+                let name = display_name(&e.path);
                 if e.clipped > 0 {
-                    problems.push(format!("{name}: {} samples clipped", e.clipped));
+                    problems.push(format!("{name}: {}", clipped_words(e.clipped)));
                 }
                 exported.push(BouncedFileRow {
                     path: e.path.display().to_string(),
@@ -999,5 +1068,30 @@ pub(crate) fn run(mut job: Job, progress: &AtomicU32, cancel: &AtomicBool) -> Wo
         exported,
         problems,
         failed: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review T4-M7 and T2-M4: singular forms for one.
+    #[test]
+    fn counts_of_one_are_singular() {
+        assert_eq!(clipped_words(1), "1 sample clipped");
+        assert_eq!(clipped_words(2), "2 samples clipped");
+        assert_eq!(
+            nonfinite_line(1),
+            "1 non-finite sample was rendered and silenced"
+        );
+        assert_eq!(
+            nonfinite_line(3),
+            "3 non-finite samples were rendered and silenced"
+        );
+        assert_eq!(underrun_line(1), "the disk fell behind once while bouncing");
+        assert_eq!(
+            underrun_line(4),
+            "the disk fell behind 4 times while bouncing"
+        );
     }
 }

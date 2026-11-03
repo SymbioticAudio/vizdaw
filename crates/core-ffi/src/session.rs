@@ -202,6 +202,10 @@ pub(crate) struct Inner {
     /// (test hook).
     #[cfg(feature = "test-hooks")]
     bounce_cancel_at: Option<f32>,
+    /// The next bounce fails its "Add to project" import of this source
+    /// (test hook).
+    #[cfg(feature = "test-hooks")]
+    bounce_fail_import_at: Option<u32>,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -308,6 +312,8 @@ impl Inner {
             bounce_results: Default::default(),
             #[cfg(feature = "test-hooks")]
             bounce_cancel_at: None,
+            #[cfg(feature = "test-hooks")]
+            bounce_fail_import_at: None,
         }
     }
 
@@ -2608,6 +2614,15 @@ impl Session {
         })
     }
 
+    /// The next bounce fails the "Add to project" import of source `at`
+    /// (0-based, in import order) as a disk error would (None: never).
+    pub fn debug_bounce_fail_import(&self, at: Option<u32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).bounce_fail_import_at = at;
+            Ok(())
+        })
+    }
+
     /// Panics while holding the session lock (test hook): poisons it.
     pub fn debug_panic_locked(&self) -> Result<(), VizError> {
         ffi_guard(|| -> Result<(), VizError> {
@@ -3495,10 +3510,14 @@ impl Drop for Session {
             let _ = host::stop_recording(self.id);
         }
         // A bounce still running stops first (plan 5f-2 pre-flight I2):
-        // its engine holds its plugin copies' processors, which end below.
+        // its engine holds its plugin copies' processors, which end below;
+        // one without copies must not write after its session went (final
+        // review T4-M5).
         {
             let mut inner = lock(&self.inner);
-            if inner.bounce_copies.is_some() {
+            if inner.bounce_copies.is_some()
+                || inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce])
+            {
                 let root = inner.root(self.id);
                 let keep = inner.kept();
                 for w in inner.jobs.shutdown() {
@@ -7978,12 +7997,20 @@ impl Session {
             // The live states, as Save captures them (Ruling 6), with the
             // values the plugins were sent and the document does not have
             // yet (read first: a capture counts them as saved).
+            // An automated or riding parameter keeps its static value, as a
+            // capture keeps it (final review T4-M2; plan 5e-1 Ruling 15).
             let slots = mixer::slot_ids(inner.doc());
+            let mut kept = core_model::automation::automated_targets(inner.doc());
+            kept.extend(inner.riding_params());
             let sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)> = plugins::with(self.id, |p| {
                 p.map(|p| {
                     slots
                         .iter()
-                        .map(|id| (*id, p.uncommitted(*id)))
+                        .map(|id| {
+                            let mut v = p.uncommitted(*id);
+                            v.retain(|(param, _)| !kept.contains(&(*id, *param)));
+                            (*id, v)
+                        })
                         .filter(|(_, v)| !v.is_empty())
                         .collect()
                 })
@@ -8005,9 +8032,15 @@ impl Session {
             };
             let token = copies.as_ref().map(|c| c.token);
             #[cfg(feature = "test-hooks")]
-            let cancel_at = inner.bounce_cancel_at.take();
+            let (cancel_at, fail_import_at) = (
+                inner.bounce_cancel_at.take(),
+                inner
+                    .bounce_fail_import_at
+                    .take()
+                    .and_then(|k| usize::try_from(k).ok()),
+            );
             #[cfg(not(feature = "test-hooks"))]
-            let cancel_at = None;
+            let (cancel_at, fail_import_at) = (None, None);
             let job = crate::bounce::Job {
                 problems: plan.offline_sentence().into_iter().collect(),
                 plan,
@@ -8023,6 +8056,7 @@ impl Session {
                     problems: c.problems,
                 }),
                 cancel_at,
+                fail_import_at,
             };
             let spawned = inner
                 .jobs
