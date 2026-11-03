@@ -444,6 +444,14 @@ fn muted_regions_play_silence() {
     assert!(r.render(5, false).iter().any(|x| *x != 0.0));
 }
 
+/// Cases per property: `PROPTEST_CASES` (a soak run), else `n`.
+fn cases(n: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(n)
+}
+
 /// Plays both rigs through the same actions; returns their left channels.
 fn both(
     regions: &[(i64, u64, u64)],
@@ -495,7 +503,7 @@ fn a_locate_past_a_region_keeps_its_loop_seam() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 16, .. ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig::with_cases(cases(16)))]
 
     /// Streaming is invisible: a streamed render equals a fully cached one
     /// sample for sample, through loops and locates (late starts aside,

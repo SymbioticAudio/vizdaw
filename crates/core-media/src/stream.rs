@@ -1141,28 +1141,45 @@ fn pass(s: &Shared, d: &mut Disk) {
         }
         for (want, until) in wanted {
             let key = n.media.0.wrapping_add(1);
-            let found = d.stream.iter().find_map(|(&i, r)| {
-                let v = s.slot(i)?;
+            // The live voices of this need holding `want`. One whose floor
+            // is held below `want` (by a playhead or hint earlier in the
+            // need, or a voice filled from the region's start while the
+            // playhead is before it) can never grow to `until` while it
+            // is held there: the window gets its own voice rather than
+            // take that one and drop the one that could (a loop seam
+            // behind the voice playing the region). Of the others, the
+            // one furthest on (highest `hi`) is kept, so an older voice
+            // does not win back a window a newer one already holds.
+            let (mut best, mut held) = (None::<(usize, u64)>, None::<(usize, u64)>);
+            for (&i, r) in &d.stream {
+                let Some(v) = s.slot(i) else {
+                    continue;
+                };
                 let live = r.is_none()
                     && v.media.load(Ordering::Acquire) == key
                     && v.start.load(Ordering::Relaxed) == n.start
                     && v.origin.load(Ordering::Relaxed) == n.file_frame;
                 let (lo, hi) = v.range();
-                // A full voice whose floor is held below `want` (by a
-                // playhead before or elsewhere in the need) cannot grow
-                // to `until`; this window gets its own voice instead of
-                // dropping the one that could (a seam behind a voice
-                // filled from the region's start).
-                let stuck = || {
-                    let floor = floor(v, n, [Some(pos), hint, seam_at]);
-                    want > floor && hi >= floor + v.cap && hi < until
-                };
-                (live && lo <= want && want <= hi && !stuck()).then_some(i)
-            });
-            let slot = match found {
-                Some(i) => i,
+                if !(live && lo <= want && want <= hi) {
+                    continue;
+                }
+                let floor = floor(v, n, [Some(pos), hint, seam_at]);
+                let stuck = want > floor && floor + v.cap < until;
+                let pick = if stuck { &mut held } else { &mut best };
+                if pick.is_none_or(|(_, h)| hi > h) {
+                    *pick = Some((i, hi));
+                }
+            }
+            let slot = match best {
+                Some((i, _)) => i,
                 None => {
                     let Some(i) = free_stream_slot(s, d) else {
+                        // No slot free: a held voice still serves what it
+                        // holds rather than being retired.
+                        if let Some((i, _)) = held {
+                            let e = used.entry(i).or_insert((*n, until));
+                            e.1 = e.1.max(until);
+                        }
                         continue;
                     };
                     if let Some(v) = s.slot(i) {
@@ -1468,10 +1485,12 @@ mod tests {
             s.set_plan(Arc::from(vec![n]));
             let ls = n.start + into;
             s.set_loop(Some((ls, 26_000)));
-            // Stopped before the region: its start and its seam fill.
+            // Stopped before the region: its start and its seam fill, and
+            // the seam keeps its voice from the second pass on.
             r.begin_block(0);
             s.service();
             s.service();
+            assert_eq!(read(&r, &n, into, 2_400, true), Read::Done, "primed {into}");
             // A locate inside the loop, past the region.
             r.begin_block(25_000);
             s.service();
@@ -1483,6 +1502,72 @@ mod tests {
                 "loop start {into} frames in"
             );
         }
+    }
+
+    /// Review I1: with the playhead inside the region before the loop
+    /// start, the voice it plays from never reaches the seam's frames
+    /// (its floor is held at the playhead), so the seam keeps its own
+    /// voice: prefilled before any locate, and after a locate past the
+    /// region with no pass at the new playhead yet.
+    #[test]
+    fn a_seam_ahead_of_the_playhead_in_its_region_keeps_its_own_voice() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 30_000, 2);
+        let (s, r) = manual(small());
+        s.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: p,
+        }]);
+        let n = need(0, 1_000, 20_000, 0);
+        s.set_plan(Arc::from(vec![n]));
+        // The seam: file [4_800, 7_200), past one voice from the start.
+        s.set_loop(Some((5_800, 26_000)));
+        r.begin_block(0);
+        s.service();
+        s.service();
+        // Playing inside the region (file 600).
+        r.begin_block(1_600);
+        s.service();
+        assert_eq!(read(&r, &n, 600, 512, true), Read::Done);
+        assert_eq!(
+            read(&r, &n, 4_800, 2_400, true),
+            Read::Done,
+            "before a locate"
+        );
+        // A locate past the region, not applied yet.
+        s.hint(25_000);
+        s.service();
+        assert_eq!(
+            read(&r, &n, 4_800, 2_400, true),
+            Read::Done,
+            "after the hint"
+        );
+    }
+
+    /// Review M3: with no stream slot free, a voice that cannot reach the
+    /// seam's end still serves the part of the seam it holds instead of
+    /// being retired.
+    #[test]
+    fn with_no_slot_free_a_held_voice_keeps_serving_its_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 30_000, 2);
+        let (s, r) = manual(StreamConfig {
+            stream_voices: 1,
+            ..small()
+        });
+        s.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: p,
+        }]);
+        let n = need(0, 1_000, 20_000, 0);
+        s.set_plan(Arc::from(vec![n]));
+        // The seam: file [3_000, 5_400); the one voice holds [0, 4_800).
+        s.set_loop(Some((4_000, 26_000)));
+        r.begin_block(0);
+        s.service();
+        r.begin_block(25_000);
+        s.service();
+        assert_eq!(read(&r, &n, 3_000, 1_800, true), Read::Done);
     }
 
     #[test]
