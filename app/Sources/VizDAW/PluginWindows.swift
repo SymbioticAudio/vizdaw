@@ -265,7 +265,7 @@ struct PluginWindowContent: View {
                 Button("Learn") { model.learnLastTouched() }
                     .disabled(model.lastTouched == nil)
                     .help(learnHelp)
-                if let text = model.document.learn.banner {
+                if let text = model.document.learn.bannerText(project: learnProject(model.document)) {
                     // The banner, at the top of the window while a learn waits.
                     Text(text).lineLimit(1)
                     Button("Cancel") { model.document.learn.cancel() }
@@ -291,7 +291,8 @@ struct PluginWindowContent: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .learnAlert(model.document.learn)
+        // The open maps sheet shows the refusal (final review T11 m5).
+        .learnAlert(model.document.learn, shown: !model.document.learn.showsMaps)
     }
 
     private var learnHelp: String {

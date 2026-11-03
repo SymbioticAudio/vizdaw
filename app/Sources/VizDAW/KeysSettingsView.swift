@@ -12,11 +12,11 @@ struct KeysSettingsView: View {
     let store: DocumentStore
 
     /// The document "Learn MIDI" learns into (plan 5f-1 Ruling 11): the
-    /// one the surfaces drive (Settings is key, so no document window is),
-    /// else any open one; nil without a document.
+    /// command target, else the front-most document window still open
+    /// (Settings is key, so no document window is; final review R2); nil
+    /// without a document.
     private var document: DocumentModel? {
-        guard !store.documents.isEmpty else { return nil }
-        return store.noteTarget ?? PluginTicker.lastFocused ?? store.documents.values.first
+        store.noteTarget ?? store.frontDocument
     }
 
     private var groups: [(String, [BindingRow])] {
@@ -33,7 +33,7 @@ struct KeysSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle("Number keys always go to locators (step entry uses the keypad)", isOn: $keys.reserveNumberRow)
             if let learn = document?.learn {
-                LearnBanner(learn: learn)
+                LearnBanner(learn: learn, document: document)
             }
             if let m = keys.message {
                 HStack {

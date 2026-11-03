@@ -33,12 +33,33 @@ import VizDAWCore
     }
 
     @Test func cancelEndsTheLearn() throws {
-        let (l, _, c) = try model()
+        let (l, f, c) = try model()
         c.learnRow = LearnStateRow(waiting: "Undo", last: nil)
         l.learnCommand("edit.undo")
         #expect(c.learnCommands == ["edit.undo"] && l.banner != nil)
+        // Final review T11 m8: the learn's document took the surfaces' focus.
+        #expect(f.focusCalls == 1)
         l.cancel()
         #expect(c.cancels == 1 && l.banner == nil)
+    }
+
+    /// Final review R2 and T11 m9: the banner names what the learn waits
+    /// for and, with two or more projects open, the project.
+    @Test func theBannerNamesWhatItWaitsForAndTheProject() throws {
+        #expect(LearnModel.waiting(project: nil) == LearnModel.waitingText)
+        #expect(
+            LearnModel.waiting(project: "Song")
+                == "Waiting for MIDI in “Song”… move a control (Esc cancels)")
+        #expect(
+            LearnModel.waiting(project: "Song", for: "Undo")
+                == "Waiting for MIDI for Undo in “Song”… move a control (Esc cancels)")
+        let (l, _, c) = try model()
+        c.learnRow = LearnStateRow(waiting: "Fader 1", last: nil)
+        l.learn(.stripFader(strip: 1))
+        #expect(l.bannerText(project: nil) == "Waiting for MIDI for Fader 1… move a control (Esc cancels)")
+        #expect(
+            l.bannerText(project: "Song")
+                == "Waiting for MIDI for Fader 1 in “Song”… move a control (Esc cancels)")
     }
 
     @Test func modesAndRemovalReachTheSession() throws {
@@ -106,5 +127,25 @@ import VizDAWCore
         let s = SurfaceSettings(core: c)
         s.removeCommandMap("edit.undo")
         #expect(c.removedCommands == ["edit.undo"])
+        // Final review T11 m8: a refused removal is an alert.
+        c.removeError = .Model(message: "no MIDI control is learned for “edit.redo”")
+        s.removeCommandMap("edit.redo")
+        #expect(s.alert?.title == "Remove MIDI Learn Failed")
+    }
+
+    /// Final review T11 m8: the plugin window follows only its own slot's
+    /// touched parameters.
+    @Test func followTouchedTakesOnlyItsOwnSlot() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [
+            ParamRow(
+                id: 3, name: "Gain", module: "", min: 0, max: 1, default: 0.5, value: 0.5, stepped: false,
+                automatable: true, hidden: false)
+        ]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.followTouched([.pluginParam(slot: 11, param: 3), .stripFader(strip: 1)])
+        #expect(w.lastTouched == nil, "another slot's parameter and a fader")
+        w.followTouched([.pluginParam(slot: 11, param: 2), .pluginParam(slot: 10, param: 3)])
+        #expect(w.lastTouched?.slot == 10 && w.lastTouched?.param == 3)
     }
 }

@@ -11,7 +11,7 @@ struct StripChartEditor: View {
         VStack(spacing: 0) {
             // A row's "MIDI Learn" waits here (plan 5f-1 Task 11).
             if let learn = model.document?.learn {
-                LearnBanner(learn: learn)
+                LearnBanner(learn: learn, document: model.document)
             }
             StripChartBar(model: model, editor: model.editor)
             Divider()

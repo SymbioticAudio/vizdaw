@@ -47,10 +47,12 @@ struct MixerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            LearnBanner(learn: model.document.learn)
+            LearnBanner(learn: model.document.learn, document: model.document)
             strips
         }
         .sheet(isPresented: mapsShown) { LearnMapsSheet(learn: model.document.learn) }
+        // The maps sheet goes with the mixer (final review T11 m6).
+        .onDisappear { model.document.learn.showsMaps = false }
         .learnAlert(model.document.learn, shown: !model.document.learn.showsMaps)
     }
 

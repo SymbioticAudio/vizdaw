@@ -258,9 +258,6 @@ enum PluginTicker {
     /// Weak, not an `ObjectIdentifier`: a closed document's address can
     /// be reused by the next one, which must still be focused.
     private static weak var surfaceFocus: DocumentModel?
-    /// The document the surfaces were last focused on, kept while no
-    /// document window is key (Settings › Keys "Learn MIDI" learns into it).
-    static private(set) weak var lastFocused: DocumentModel?
 
     static func start(_ store: DocumentStore) {
         guard timer == nil else { return }
@@ -277,7 +274,6 @@ enum PluginTicker {
                     if let target {
                         if (try? target.session.focusSurfaces()) != nil {
                             surfaceFocus = target
-                            lastFocused = target
                         }
                     } else {
                         surfaceFocus = nil

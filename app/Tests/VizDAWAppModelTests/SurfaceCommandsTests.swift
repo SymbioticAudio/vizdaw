@@ -30,7 +30,11 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
     }
     func state() -> SurfaceStateRow { stateRow }
     func commandMaps() -> [CommandMapRow] { maps }
-    func removeCommandMap(_ command: String) throws { removedCommands.append(command) }
+    var removeError: VizError?
+    func removeCommandMap(_ command: String) throws {
+        if let e = removeError { throw e }
+        removedCommands.append(command)
+    }
     func learnCommand(_ id: String) throws {
         if let e = learnError { throw e }
         learnCommands.append(id)

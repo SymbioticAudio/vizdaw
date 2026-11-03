@@ -73,12 +73,16 @@ struct LearnMapsSheet: View {
 }
 
 /// "Waiting for MIDI… move a control (Esc cancels)" with a Cancel button,
-/// at the top of a window while a learn waits; nothing otherwise.
+/// at the top of a window while a learn waits; nothing otherwise. It names
+/// what the learn waits for and, with two or more projects open, the
+/// project (final review R2, T11 m9).
 struct LearnBanner: View {
     let learn: LearnModel
+    /// The learn's document, named when two or more are open.
+    let document: DocumentModel?
 
     var body: some View {
-        if let text = learn.banner {
+        if let text = learn.bannerText(project: learnProject(document)) {
             HStack {
                 Image(systemName: "pianokeys")
                 Text(text)
@@ -91,6 +95,13 @@ struct LearnBanner: View {
             .background(Color.accentColor.opacity(0.15))
         }
     }
+}
+
+/// The project a banner names: the document's title when two or more
+/// documents are open, else nil (final review R2).
+@MainActor func learnProject(_ document: DocumentModel?) -> String? {
+    guard let document, appStore.documents.count >= 2 else { return nil }
+    return document.windowTitle
 }
 
 extension View {

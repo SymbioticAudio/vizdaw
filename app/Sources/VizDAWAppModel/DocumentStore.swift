@@ -154,7 +154,20 @@ public final class DocumentStore {
     /// The document whose own window is key.
     public var keyDocument: UUID? { keyWindow?.doc }
 
-    public func focusDocument(_ doc: UUID, window: UUID) { keyWindow = (doc, window) }
+    public func focusDocument(_ doc: UUID, window: UUID) {
+        keyWindow = (doc, window)
+        recentKey.removeAll { $0 == doc }
+        recentKey.insert(doc, at: 0)
+    }
+
+    /// Documents whose window was key, the most recent first (final review
+    /// R2); a closed one is removed.
+    private var recentKey: [UUID] = []
+
+    /// The front-most document window still open: the one key last.
+    /// Settings › Keys "Learn MIDI" learns into it when no document window
+    /// is key (final review R2). Observable, deterministic.
+    public var frontDocument: DocumentModel? { recentKey.lazy.compactMap(model).first }
 
     /// Window `window` (of document `doc`) resigned key or closed; only the
     /// window that last took focus clears it.
@@ -302,6 +315,7 @@ public final class DocumentStore {
         if tornFocus?.doc == id { tornFocus = nil }
         if panelFocus == id { panelFocus = nil }
         if keyWindow?.doc == id { keyWindow = nil }
+        recentKey.removeAll { $0 == id }
         mixers.removeValue(forKey: id)?.endOpenDrag()
         // Plugin windows detach their editors before the session goes.
         willClose?(id)

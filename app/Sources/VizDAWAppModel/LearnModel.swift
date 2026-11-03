@@ -13,7 +13,25 @@ import VizDAWCore
 /// `SurfaceCore` (pre-flight M25).
 @MainActor @Observable public final class LearnModel {
     /// "Waiting for MIDI… move a control (Esc cancels)".
-    public static let waitingText = "Waiting for MIDI… move a control (Esc cancels)"
+    nonisolated public static let waitingText = "Waiting for MIDI… move a control (Esc cancels)"
+    /// The banner's text (final review R2, T11 m9): what the learn waits
+    /// for when known, and the project when given (two or more are open),
+    /// else `waitingText`.
+    nonisolated public static func waiting(project: String?, for what: String? = nil) -> String {
+        guard project != nil || what != nil else { return waitingText }
+        let forText = what.map { " for \($0)" } ?? ""
+        let inText = project.map { " in “\($0)”" } ?? ""
+        return "Waiting for MIDI\(forText)\(inText)… move a control (Esc cancels)"
+    }
+
+    /// The banner for a window, naming `project` (nil with one project
+    /// open) and what the core says the learn waits for; nil when not
+    /// learning.
+    public func bannerText(project: String?) -> String? {
+        guard banner != nil else { return nil }
+        return Self.waiting(project: project, for: core.learnState().waiting)
+    }
+
     /// The title of every refusal.
     public static let failedTitle = "MIDI Learn Failed"
 

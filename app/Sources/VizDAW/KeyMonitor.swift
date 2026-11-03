@@ -101,9 +101,11 @@ enum KeyMonitor {
             return true
         }
         // Esc cancels a waiting MIDI learn (plan 5f-1 Task 11), wherever
-        // it is pressed, except into the Keys settings' recorder.
+        // it is pressed, except into the Keys settings' recorder, a modal
+        // dialog or a text field, whose own Esc it is (final review T11 m7).
         if e.keyCode == 53, e.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
-            !(w.firstResponder is KeyCapturing),
+            !(w.firstResponder is KeyCapturing), NSApp.modalWindow == nil,
+            !(w.firstResponder is NSTextView),
             let learning = appStore.documents.values.first(where: \.isLearning)
         {
             learning.learn.cancel()

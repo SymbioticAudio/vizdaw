@@ -82,6 +82,29 @@ import VizDAWCore
         #expect(f.edits.last == .lane(edit: .setFlags(seq: 3, lane: 40, mute: nil, solo: nil, arm: true)))
     }
 
+    /// Final review R3 (Task 10 M6): a surface event that arrives while
+    /// an earlier one runs (a Save panel's modal run loop still ticks) waits
+    /// until the earlier one returns, and a command that can open a dialog
+    /// runs without the surface's keyboard bypass.
+    @Test func eventsDuringAnEventWaitAndDialogCommandsDoNotBypass() throws {
+        let m = try DocumentModel(session: mixerFake())
+        let relay = SurfaceRelay()
+        var log: [String] = []
+        var actingInSave: Bool?
+        func perform(_ id: String) {
+            log.append("begin \(id)")
+            if id == "file.save" {
+                actingInSave = m.surfaceActing
+                relay.apply([.command(id: "transport.stop", programmatic: false)], m, perform: perform, quietly: { _ in })
+            }
+            log.append("end \(id)")
+        }
+        relay.apply([.command(id: "file.save", programmatic: false)], m, perform: perform, quietly: { _ in })
+        #expect(log == ["begin file.save", "end file.save", "begin transport.stop", "end transport.stop"])
+        #expect(actingInSave == false, "a dialog command has no bypass")
+        #expect(!m.surfaceActing)
+    }
+
     /// Ruling T9-1: a surface button is not a keystroke, so it acts while
     /// a text field has the keyboard; the keys still wait.
     @Test func aSurfaceButtonActsWhileATextFieldHasTheKeyboard() throws {
