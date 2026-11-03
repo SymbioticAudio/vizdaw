@@ -29,6 +29,9 @@ jobs:
         run: cargo clippy -p core-ffi --lib -- -D warnings
       - name: Clippy (rt-check build)
         run: cargo clippy -p vizdaw-play --all-targets --features rt-check -- -D warnings
+      - name: Real-time allocation tests (rt-check)
+        if: runner.os == 'macOS'
+        run: cargo test -p core-engine --features rt-check --test rt_alloc --test rt_alloc_graph --test rt_alloc_record --test rt_alloc_gestures --test rt_alloc_bounce
       - name: Test
         run: cargo test --workspace
       - name: Big lane read speed (release, spec 4a §3.1)

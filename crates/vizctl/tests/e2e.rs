@@ -1630,3 +1630,132 @@ fn drives_a_fader_and_a_button_from_an_mcu() {
     run(&mut app, "surface.remove", json!({"surface": id}));
     app.quit();
 }
+
+/// `(rate, channels, bits, frames, 16-bit samples)` of a 16-bit PCM WAV.
+fn read_wav16(path: &std::path::Path) -> (u32, u16, u16, u64, Vec<i16>) {
+    let b = std::fs::read(path).unwrap();
+    assert_eq!((&b[0..4], &b[8..12]), (&b"RIFF"[..], &b"WAVE"[..]));
+    let mut at = 12;
+    let (mut rate, mut ch, mut bits, mut data) = (0, 0, 0, Vec::new());
+    while at + 8 <= b.len() {
+        let n = u32::from_le_bytes(b[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = &b[at + 8..at + 8 + n];
+        match &b[at..at + 4] {
+            b"fmt " => {
+                ch = u16::from_le_bytes(body[2..4].try_into().unwrap());
+                rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+                bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
+            }
+            b"data" => {
+                data = body
+                    .chunks(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+            }
+            _ => {}
+        }
+        at += 8 + n + (n & 1);
+    }
+    let frames = (data.len() / usize::from(ch.max(1))) as u64;
+    (rate, ch, bits, frames, data)
+}
+
+/// README steps 180–184 through the channel (plan 5f-2; spec §12.3 "bounce
+/// and check the file"): a bounce of four bars to a 16-bit WAV, refused
+/// over the same file without `replace`, then Add to project; hostile
+/// calls refused.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn bounces_the_demo_and_checks_the_file() {
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let src = home.join("tone.caf");
+    audio_file(&src, 96_000);
+    let demo = app.call("command.run", json!({"id": "file.create_demo_audio"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": src, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+
+    // Four bars from tick 0 at 120 BPM: 16 × 15 360 ticks, 16 × 24 000 frames.
+    let (end, range) = (16 * 15_360, 384_000u64);
+    let mix = home.join("mix.wav");
+    let params = json!({"path": mix, "bits": "16", "rate": 48_000, "range": "selection", "start": 0, "end": end});
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.bounce", "params": params.clone(), "window": w}),
+    );
+    let status = r["status"].as_str().unwrap_or("").to_string();
+    assert!(
+        status.starts_with("wrote ") && status.contains(&mix.display().to_string()),
+        "{r}"
+    );
+    let (rate, ch, bits, frames, samples) = read_wav16(&mix);
+    assert_eq!((rate, ch, bits), (48_000, 2, 16), "{status}");
+    assert!(
+        (range..=range + 480_000).contains(&frames),
+        "{frames} frames: the range plus at most the 10 s tail (pre-flight M11)"
+    );
+    assert!(
+        samples[..2 * 96_000].iter().any(|s| *s != 0),
+        "the imported 0.25 tone sounds in the first bar"
+    );
+    let before = std::fs::read(&mix).unwrap();
+
+    // The same path without `replace`: refused, the file unchanged.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": params, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Failed, "{e:?}");
+    assert!(e.message.contains("exists"), "{e:?}");
+    assert_eq!(std::fs::read(&mix).unwrap(), before);
+
+    // Add to project: one undo step, a lane "Mix", a Bounced item.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"add_to_project": true, "range": "selection", "start": 0, "end": end}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Bounce", "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(
+        doc["lanes"].as_array().unwrap().last().unwrap()["name"],
+        "Mix",
+        "{doc}"
+    );
+    let m = app.call("state.get", json!({"target": "media", "window": w}));
+    assert!(
+        m["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["origin"] == "bounced"),
+        "{m}"
+    );
+
+    // Hostile calls.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"format": "mp3", "path": mix}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::DialogRequired, "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"add_to_project": false}, "window": w}),
+    );
+    assert_eq!(
+        e.code,
+        core_control::ErrorCode::DialogRequired,
+        "the app's check (pre-flight M6): {e:?}"
+    );
+    app.quit();
+}

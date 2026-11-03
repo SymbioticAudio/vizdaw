@@ -1642,3 +1642,52 @@ By eye and by hand; the protocols are tested byte by byte
      moves by motor again. Remove a unit in Settings › Surfaces while
      holding a fader: it is released. Close the project the unit drives:
      its displays go blank and its faders go down.
+
+### Bounce and export (plan 5f-2)
+
+By ear and by eye; the renderer is tested (`core-engine/tests/bounce.rs`),
+the files (`core-media/tests/export.rs`), the job (`core-ffi/tests/bounce.rs`)
+and the e2e `bounces_the_demo_and_checks_the_file`.
+
+180. File › Bounce…: the sheet defaults to WAV at the project's rate and
+     depth (Dither on at 16 bits). Bounce the demo song (with an audio
+     file imported) to a file while it plays: playback goes on; the file
+     plays in Finder's preview and sounds like the mix, reverb tails
+     included. Push master hot and bounce at 32-bit float: the file holds
+     peaks above 0 dBFS (float bounces keep overs); at 16 or 24 bits the
+     samples clip and the Problems banner says how many ("mix.wav: <n>
+     samples clipped"). When the
+     bounce ends, the editor status lists every file written, each under
+     its final name. Press Escape while a bounce runs: it is cancelled.
+     A bounce the core refuses (a bad destination, a file that exists, a
+     place inside the project) shows its reason inside the sheet, which
+     stays open. A plugin that renders in real time only, or that has an
+     offline mode and is not in it, is named in the Problems banner;
+     other plugins say nothing.
+181. README 164's check: with a latent plugin on a bus, bounce Stems of
+     two tracks and the Mix to files; zoom in on them in another editor
+     (or import them back): every file starts at the same sample, a mute
+     written at a bar line cuts the Mix exactly there, and the muted
+     track's stem file plays on through it (files ignore mute and solo).
+182. Add to project: the bounce appears on a new lane "Mix" at the range
+     start, in the media pool as Bounced; one Undo removes it. With Add to
+     project on, the sheet shows "Also write the files": on (the default),
+     it asks for a destination and writes the files as well; off, it asks
+     for none and only adds to the project. Mute one track, solo nothing,
+     and bounce Stems with Add to project: the muted track's new lane is
+     silent and the others sound (bounce in place is as heard, while the
+     files written beside it ignore mute and solo); with a mute written
+     at a bar line, its lane cuts there, as the mix does. Route a track
+     into a bus and mute the bus: the track's bounced-in-place lane is
+     silent too, as heard.
+183. A project with a lane playing a hardware synth: the sheet says
+     "1 lane plays external MIDI and will be silent. Track it as audio
+     first: Track Synth…", and the synth is silent in the file.
+184. Cancel a long bounce: no file and no ".partial" is left next to
+     where it was going. Bounce the mix over an existing file: the save
+     panel asks to replace it, and the old file stays until the new one
+     is complete. Bounce Stems into a folder that already holds them:
+     nothing is asked, the old files are untouched, and the new files are
+     numbered ("Bass 2.wav"); the status lists them under those names.
+     A name ending in your own digits keeps them: a taken "Kick 808.wav"
+     becomes "Kick 808 2.wav".
