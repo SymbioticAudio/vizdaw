@@ -802,7 +802,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var learnModeCalls: [(LearnSourceRow, LearnModeRow)] = []
     var learnPickupCalls: [(LearnSourceRow, Bool)] = []
     var removedLearns: [LearnSourceRow] = []
-    var unlearnedTargets: [AutomationTargetRow] = []
+    var unlearnTargets: [AutomationTargetRow] = []
     func setSurfaceSelection(strips: [UInt64]) throws { surfaceSelections.append(strips) }
     func injectSurface(surface: UInt32, bytes: Data) throws { surfaceInjections.append((surface, bytes)) }
     func surfaceState() throws -> SurfaceStateRow {
@@ -827,7 +827,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
     func unlearnTarget(target: AutomationTargetRow) throws -> DocSnapshot {
-        unlearnedTargets.append(target)
+        unlearnTargets.append(target)
         return commandResult()
     }
 

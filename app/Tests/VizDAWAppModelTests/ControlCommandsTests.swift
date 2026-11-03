@@ -7,6 +7,7 @@ import VizDAWCore
 final class FakeControlHost: ControlHost {
     var calls: [String] = []
     var nudge = NudgeSettings()
+    var surfaces: any SurfaceCore = FakeSurfaceCore()
     let keys = KeyBindings(defaults: MemoryDefaults())
     /// Whether `focus` finds the fields.
     var fieldsShown = true

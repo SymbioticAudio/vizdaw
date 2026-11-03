@@ -65,6 +65,8 @@ pub enum StateTarget {
     /// Its strips' automation modes, the touched targets and suspend
     /// (plan 5e-1).
     Automation,
+    /// Control surfaces and MIDI learn (plan 5f-1).
+    Surfaces,
 }
 
 /// Where a click or drag lands.
@@ -242,9 +244,10 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 "record" => StateTarget::Record,
                 "input" => StateTarget::Input,
                 "automation" => StateTarget::Automation,
+                "surfaces" => StateTarget::Surfaces,
                 _ => {
                     return Err(p.error(
-                        "`target` must be transport, document, editor, selection, windows, media, project, record, input or automation",
+                        "`target` must be transport, document, editor, selection, windows, media, project, record, input, automation or surfaces",
                     ));
                 }
             };

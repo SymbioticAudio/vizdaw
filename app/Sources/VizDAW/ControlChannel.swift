@@ -221,6 +221,9 @@ enum ControlChannel {
                 let r = ControlStates.state(target, id, m)
             {
                 answer(server, token, .done(r))
+            } else if target == .surfaces {
+                // Surfaces are app-wide (plan 5f-1, pre-flight M29).
+                answer(server, token, .done(.surfaces(doc: nil, state: AppControlHost.shared.surfaces.state())))
             } else {
                 answer(server, token, .failed(.of(.noDocument, "No document is open in that window.")))
             }
@@ -509,6 +512,8 @@ struct WindowTag: NSViewRepresentable {
 @MainActor
 final class AppControlHost: ControlHost {
     static let shared = AppControlHost()
+    /// The live surfaces (plan 5f-1; tests pass a fake, pre-flight M25).
+    let surfaces: any SurfaceCore = LiveSurfaceCore()
 
     func showMixer(_ doc: UUID) { ControlWindows.openWindow?(id: "mixer", value: doc) }
     func showPluginManager() { ControlWindows.openWindow?(id: "plugins") }

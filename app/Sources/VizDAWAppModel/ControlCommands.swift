@@ -149,6 +149,9 @@ public protocol ControlHost: AnyObject {
     /// Applies `audio.set`'s change to the app's audio settings (plan
     /// 5d-1 Ruling 26); the core's refusal is thrown.
     func applyAudio(_ change: AudioChange) throws
+    /// The core's process-wide surfaces, command maps and learn state
+    /// (plan 5f-1; tests pass a fake, pre-flight M25).
+    var surfaces: any SurfaceCore { get }
 }
 
 /// Runs registered menu commands (control spec §6) on a document model
@@ -192,7 +195,7 @@ public enum ControlCommands {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
-            .union(AutomationCommands.ids)
+            .union(AutomationCommands.ids).union(SurfaceCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -233,6 +236,9 @@ public enum ControlCommands {
             return AudioCommands.runSet(args, host: host)
         case AutomationCommands.suspend:
             return AutomationCommands.runSuspend(args)
+        case _ where SurfaceCommands.ids.contains(id):
+            // Process-wide or per document (plan 5f-1 Task 9).
+            return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }
@@ -671,6 +677,9 @@ public enum ControlStates {
         case .automation:
             guard let s = try? m.session.automationState() else { return nil }
             return .automation(doc: doc, state: s)
+        case .surfaces:
+            guard let s = try? m.session.surfaceState() else { return nil }
+            return .surfaces(doc: doc, state: s)
         case .input:
             guard let info = try? m.session.inputInfo() else { return nil }
             return .inputState(doc: doc, info: info, levels: m.inputs.takeChannelLevels())

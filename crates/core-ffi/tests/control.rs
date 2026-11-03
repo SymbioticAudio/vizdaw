@@ -712,3 +712,66 @@ fn automation_state_answers_in_the_channels_spelling() {
         })
     );
 }
+
+/// Plan 5f-1 Task 9: `state.get surfaces` spells types as `surface.add`
+/// does; without a document `doc` is null and `feedback` empty (M29).
+#[test]
+fn surfaces_state_answers_in_the_channels_spelling() {
+    use vizdaw_ffi::surfaces::{SurfaceFeedbackRow, SurfaceKindRow, SurfaceRow, SurfaceStateRow};
+    let unit = |id, kind, position| SurfaceRow {
+        id,
+        kind,
+        input: "In".into(),
+        output: "Out".into(),
+        position,
+        connected: true,
+        online: id == 0,
+        ignored: 2,
+    };
+    let state = SurfaceStateRow {
+        surfaces: vec![
+            unit(0, SurfaceKindRow::Mcu, 0),
+            unit(1, SurfaceKindRow::McuXt, 1),
+            unit(2, SurfaceKindRow::Hui, 0),
+        ],
+        feedback: vec![SurfaceFeedbackRow {
+            surface: 0,
+            messages: vec!["90 5e 7f".into()],
+            meters_sent: 4,
+        }],
+        learning: Some("Fader 1".into()),
+        problems: vec!["1 MIDI messages from surfaces were dropped".into()],
+    };
+    let r = ControlResult::Surfaces {
+        doc: Some("d".into()),
+        state: state.clone(),
+    };
+    let row = |id: u32, kind: &str, position: u8| {
+        json!({
+            "id": id, "type": kind, "input": "In", "output": "Out", "position": position,
+            "connected": true, "online": id == 0, "ignored": 2,
+        })
+    };
+    assert_eq!(
+        result_json(&r),
+        json!({
+            "doc": "d",
+            "surfaces": [row(0, "mcu", 0), row(1, "mcu_xt", 1), row(2, "hui", 0)],
+            "feedback": [{"surface": 0, "messages": ["90 5e 7f"], "meters_sent": 4}],
+            "learning": "Fader 1",
+            "problems": ["1 MIDI messages from surfaces were dropped"],
+        })
+    );
+    let none = result_json(&ControlResult::Surfaces {
+        doc: None,
+        state: SurfaceStateRow {
+            feedback: vec![],
+            learning: None,
+            ..state
+        },
+    });
+    assert_eq!(none["doc"], Value::Null, "{none}");
+    assert_eq!(none["feedback"], json!([]), "{none}");
+    assert_eq!(none["learning"], Value::Null, "{none}");
+    assert_eq!(none["surfaces"].as_array().map(Vec::len), Some(3), "{none}");
+}

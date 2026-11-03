@@ -558,6 +558,76 @@ const AUTOMATION_GESTURE_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// A surface's ID (plan 5f-1 Ruling 4; `state.get surfaces` lists them).
+const SURFACE_ID: ParamSpec = ParamSpec {
+    name: "surface",
+    kind: ParamKind::Int {
+        min: 0,
+        max: u32::MAX as i64,
+    },
+    required: true,
+    help: "The surface's ID (see `state.get surfaces`).",
+};
+
+/// `surface.add` (plan 5f-1 Task 9).
+const SURFACE_ADD_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "type",
+        kind: ParamKind::Choice(&["mcu", "mcu_xt", "hui"]),
+        required: true,
+        help: "mcu, mcu_xt or hui.",
+    },
+    ParamSpec {
+        name: "input",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI source it is heard on (its CoreMIDI name).",
+    },
+    ParamSpec {
+        name: "output",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI destination it is sent to (its CoreMIDI name).",
+    },
+    ParamSpec {
+        name: "position",
+        kind: ParamKind::Int { min: 0, max: 3 },
+        required: false,
+        help: "Its place in the MCU bank group, 0 to 3 (default: the first free).",
+    },
+];
+
+/// `surface.remove` (plan 5f-1 Task 9).
+const SURFACE_ID_PARAMS: &[ParamSpec] = &[SURFACE_ID];
+
+/// `surface.inject` (plan 5f-1 Task 9).
+const SURFACE_INJECT_PARAMS: &[ParamSpec] = &[
+    SURFACE_ID,
+    ParamSpec {
+        name: "bytes",
+        kind: ParamKind::Text,
+        required: true,
+        help: "What the surface sends, as hex bytes, e.g. \"90 68 7f\" (at most 1024).",
+    },
+];
+
+/// `surface.learn` and `surface.unlearn` (plan 5f-1 Ruling 16): exactly
+/// one of `target` and `command` (the app checks it).
+const SURFACE_LEARN_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "target",
+        kind: ParamKind::Text,
+        required: false,
+        help: "An automatable control, spelt as `automation.gesture` spells it (`fader:<strip>`, `pan:<strip>`, …).",
+    },
+    ParamSpec {
+        name: "command",
+        kind: ParamKind::Text,
+        required: false,
+        help: "A key-bindable registry command ID.",
+    },
+];
+
 /// `destination.measure_return` (plan 5c-2 Ruling 11).
 const MEASURE_RETURN_PARAMS: &[ParamSpec] = &[id_param(
     "dest",
@@ -905,6 +975,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         true,
     ),
     cmd("transport.stop", "Transport", "Stop", Some("S"), true),
+    // A surface's Play: only starts (plan 5f-1 Ruling 5).
+    key_only(cmd("transport.play", "Transport", "Play", None, true)),
     cmd(
         "transport.play_selection",
         "Transport",
@@ -1140,6 +1212,44 @@ pub const COMMANDS: &[CommandSpec] = &[
             None,
             false,
         )
+    },
+    CommandSpec {
+        params: SURFACE_ADD_PARAMS,
+        ..key_only(cmd("surface.add", "Surfaces", "Add Surface", None, false))
+    },
+    CommandSpec {
+        params: SURFACE_ID_PARAMS,
+        ..key_only(cmd(
+            "surface.remove",
+            "Surfaces",
+            "Remove Surface",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        params: SURFACE_INJECT_PARAMS,
+        ..key_only(cmd(
+            "surface.inject",
+            "Surfaces",
+            "Inject Surface Bytes",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: SURFACE_LEARN_PARAMS,
+        ..key_only(cmd("surface.learn", "Surfaces", "MIDI Learn", None, true))
+    },
+    CommandSpec {
+        params: SURFACE_LEARN_PARAMS,
+        ..key_only(cmd(
+            "surface.unlearn",
+            "Surfaces",
+            "Remove MIDI Learn",
+            None,
+            true,
+        ))
     },
     CommandSpec {
         params: AUDIO_SET_PARAMS,

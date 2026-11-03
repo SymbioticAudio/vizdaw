@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        138,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands"
+        144,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1395,4 +1395,82 @@ fn automation_menu_commands_take_no_params() {
     }
     let s = registry::find("automation.suspend").unwrap();
     assert!(s.menu_item && s.menu == "Automation" && !s.document);
+}
+
+/// Plan 5f-1 Task 9: the surface commands take their parameters by type
+/// and range; hostile values never reach the app.
+#[test]
+fn surface_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("transport.play", json!({})),
+        (
+            "surface.add",
+            json!({ "type": "mcu", "input": "A", "output": "B" }),
+        ),
+        (
+            "surface.add",
+            json!({ "type": "mcu_xt", "input": "A", "output": "B", "position": 3 }),
+        ),
+        (
+            "surface.add",
+            json!({ "type": "hui", "input": "A", "output": "B" }),
+        ),
+        ("surface.remove", json!({ "surface": 1 })),
+        (
+            "surface.inject",
+            json!({ "surface": 1, "bytes": "90 68 7f" }),
+        ),
+        ("surface.inject", json!({ "surface": 1, "bytes": "90 68" })),
+        ("surface.learn", json!({ "target": "fader:3" })),
+        ("surface.learn", json!({ "command": "transport.play_stop" })),
+        ("surface.unlearn", json!({ "target": "fader:3" })),
+        (
+            "surface.unlearn",
+            json!({ "command": "transport.play_stop" }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        (
+            "surface.add",
+            json!({ "type": "mackie", "input": "A", "output": "B" }),
+        ),
+        ("surface.add", json!({ "type": "mcu", "input": "A" })),
+        (
+            "surface.add",
+            json!({ "type": "mcu", "input": "A", "output": "B", "position": 4 }),
+        ),
+        (
+            "surface.add",
+            json!({ "type": "mcu", "input": 7, "output": "B" }),
+        ),
+        ("surface.remove", json!({ "surface": -1 })),
+        ("surface.remove", json!({})),
+        ("surface.inject", json!({ "surface": 1 })),
+        (
+            "surface.inject",
+            json!({ "surface": 1, "bytes": "x".repeat(5000) }),
+        ),
+        ("surface.learn", json!({ "target": 3 })),
+    ] {
+        assert!(
+            err("command.run", run(id, params.clone())).0 == ErrorCode::InvalidParams,
+            "{id} {params}"
+        );
+    }
+    assert_eq!(
+        ok("state.get", json!({ "target": "surfaces" })),
+        Command::StateGet {
+            target: StateTarget::Surfaces,
+            window: None
+        }
+    );
 }
