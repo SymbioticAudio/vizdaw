@@ -673,6 +673,48 @@ fn save_as_leaves_the_copies_where_they_are() {
     );
 }
 
+/// Fix round 1 (review I2): Save As onto the same package spelled another
+/// way (a trailing `/`, a symlinked parent, on macOS another case) keeps the
+/// live copy: retention never trashes it, and it still applies there.
+#[test]
+fn save_as_onto_the_same_package_spelled_otherwise_keeps_the_copy() {
+    let _g = serial();
+    let p = build(BitDepthRow::Int24, true);
+    let row = p.s.open_external(p.second).unwrap();
+    let copy = PathBuf::from(&row.path);
+    let link = p.dir.path().join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(p.dir.path(), &link).unwrap();
+    let mut spellings = vec![
+        format!("{}/", p.pkg().display()),
+        link.join("P.vizdaw").display().to_string(),
+    ];
+    if cfg!(target_os = "macos") {
+        // APFS is case-insensitive by default.
+        spellings.push(p.dir.path().join("p.vizdaw").display().to_string());
+    }
+    for spelling in spellings {
+        p.s.save_as(spelling.clone()).unwrap();
+        p.s.save().unwrap();
+        assert!(copy.is_file(), "{spelling}: the live copy is kept");
+        assert!(
+            !p.trash().join("tone edit 1.wav").exists(),
+            "{spelling}: never trashed"
+        );
+        match p.s.external_edit(p.second).unwrap() {
+            ExternalEditStateRow::Copy { row: r } => {
+                assert!(Path::new(&r.path).is_file(), "{spelling}: {r:?}")
+            }
+            other => panic!("{spelling}: {other:?}"),
+        }
+    }
+    p.s.close().unwrap();
+    assert!(
+        p.trash().join("tone edit 1.wav").is_file(),
+        "closing lets it go"
+    );
+}
+
 /// Owner answer 2026-11-03 (pre-flight I2): an untitled project's copies
 /// go to the Trash at close and at Save As, never unlinked; after Save As
 /// the copy is gone.

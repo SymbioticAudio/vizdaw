@@ -158,10 +158,14 @@ pub(crate) fn write_copy(
 
 /// Moves every regular file in `dir` to the Trash (`trash`: the folder
 /// standing for it, as [`crate::retention::trash_dir`] resolved it, else
-/// the platform's); the count left behind (`dir` unreadable, or a file
-/// not moved), each named on stderr; dot-names are skipped. A missing `dir` leaves none. Never
+/// the platform's); the count left behind (`dir` unreadable, an entry not
+/// read, or a file not moved), each named on stderr. With `skip_partials`
+/// (`Media/Edits`) dot-names are skipped: only a copy being written or a
+/// crash's partial is dot-named there. `Media/Recorded` passes `false`: a
+/// take may be dot-named, and recordings are never unlinked (spec §6.5;
+/// plan 5f-3 fix round 1, ruling T3-1). A missing `dir` leaves none. Never
 /// unlinks (plan 5c Ruling 15; plan 5f-3 owner answer 2026-11-03).
-pub(crate) fn trash_files_in(dir: &Path, trash: Option<&Path>) -> usize {
+pub(crate) fn trash_files_in(dir: &Path, trash: Option<&Path>, skip_partials: bool) -> usize {
     let rd = match std::fs::read_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
         // Unreadable: files may be in it (5c review minor b).
@@ -172,10 +176,19 @@ pub(crate) fn trash_files_in(dir: &Path, trash: Option<&Path>) -> usize {
         Ok(rd) => rd,
     };
     let mut left = 0;
-    for e in rd.flatten() {
-        // A dot-name is a partial a copy is writing (or a crash left): not
-        // media; it goes with the folder (fold check M8).
-        if e.file_name().to_string_lossy().starts_with('.') {
+    for e in rd {
+        // An entry not read may be a file (review M3).
+        let e = match e {
+            Ok(e) => e,
+            Err(why) => {
+                eprintln!("VizDAW: {}: an entry was not read ({why})", dir.display());
+                left += 1;
+                continue;
+            }
+        };
+        // A dot-name in `Media/Edits` is a partial a copy is writing (or a
+        // crash left): not media; it goes with the folder (fold check M8).
+        if skip_partials && e.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
         if e.path().is_file() {

@@ -919,6 +919,48 @@ fn closing_an_untitled_recording_moves_it_to_the_trash() {
     assert!(names.iter().any(|n| n.starts_with("Mic ")), "{names:?}");
 }
 
+/// A take whose file name starts with a dot (lane ". .Vox" is made
+/// ".Vox": `file_safe` trims once) still goes to the Trash when an
+/// untitled project closes, never unlinked (spec §6.5; plan 5f-3 fix
+/// round 1, ruling T3-1).
+#[test]
+fn closing_an_untitled_recording_on_a_dot_lane_moves_it_to_the_trash() {
+    let g = serial(Some(FakeInput::Signals));
+    let dir = tempfile::tempdir().unwrap();
+    let d = doc(8, false, true);
+    let s: Arc<Session> = untitled(&g, d.doc.clone());
+    s.debug_set_trash_dir(Some(dir.path().join("Trash").display().to_string()));
+    s.edit(
+        vizdaw_ffi::EditCommand::Lane {
+            edit: vizdaw_ffi::LaneEdit::Rename {
+                seq: d.seq.0,
+                lane: d.mic.0,
+                name: ". .Vox".into(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.stop().unwrap();
+    let take = regions(&s, d.seq.0, d.mic.0)[0].media.unwrap();
+    let rel = s
+        .media()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == take)
+        .unwrap()
+        .path;
+    let name = Path::new(&rel).file_name().unwrap().to_owned();
+    assert!(name.to_string_lossy().starts_with(".Vox "), "{rel}");
+    s.close().unwrap();
+    assert!(
+        dir.path().join("Trash").join(&name).is_file(),
+        "the dot-named take is in the Trash"
+    );
+}
+
 /// Stop during a drag: the pass waits for the drag to end, then lands as
 /// the one "Record" step.
 #[test]

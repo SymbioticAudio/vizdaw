@@ -1464,6 +1464,13 @@ impl Session {
                     message: "Wait for the import or conversion to finish, then save.".into(),
                 });
             }
+            // A copy written without the lock lands under the old root
+            // (plan 5f-3 review M1).
+            if inner.edits_writing > 0 {
+                return Err(VizError::Busy {
+                    message: "Wait for the edit copy to be written, then save.".into(),
+                });
+            }
             // A closed window holds no package (re-review m-3).
             if inner.closed {
                 return Err(crate::events::bad("this project was closed"));
@@ -1473,6 +1480,20 @@ impl Session {
             // not know this session's files. Claimed before anything is
             // written (re-review m-2); a failed save releases it.
             let claim = claim_package(&p, self.id)?;
+            // The same package spelled another way (case, a symlinked
+            // parent, a trailing `/`): its edit copies are respelled under
+            // `p`, so the save's retention, which strips `p`, keeps them
+            // (plan 5f-3 review I2). Same files, so a failed save leaves
+            // them right.
+            if let Some(old) = inner.path.clone() {
+                if package_key(&old) == claim.key {
+                    for e in inner.edits.values_mut() {
+                        if let Ok(rel) = e.abs.strip_prefix(&old) {
+                            e.abs = p.join(rel);
+                        }
+                    }
+                }
+            }
             self.save_to(&mut inner, &p)?;
             if inner.path.as_deref() != Some(p.as_path()) {
                 // The marker follows the project to its new place (not
@@ -1512,6 +1533,7 @@ impl Session {
                 let left = crate::external::trash_files_in(
                     &scratch.join(crate::external::EDITS_DIR),
                     trash.as_deref(),
+                    true,
                 );
                 if left == 0 {
                     let _ = std::fs::remove_dir_all(&scratch);
@@ -2792,9 +2814,19 @@ impl Session {
                 // Edit copies too (plan 5f-3 Ruling 3, owner answer
                 // 2026-11-03): an editor may hold work VizDAW has not
                 // imported yet.
-                let mut left = 0usize;
-                for d in [crate::record::RECORDED_DIR, crate::external::EDITS_DIR] {
-                    left += crate::external::trash_files_in(&scratch.join(d), dir.as_deref());
+                // Every recording, dot-named or not; copies being written
+                // (dot-named partials) go with the package (ruling T3-1).
+                // A copy still being written keeps the package (review M1).
+                let mut left = inner.edits_writing as usize;
+                for (d, skip_partials) in [
+                    (crate::record::RECORDED_DIR, false),
+                    (crate::external::EDITS_DIR, true),
+                ] {
+                    left += crate::external::trash_files_in(
+                        &scratch.join(d),
+                        dir.as_deref(),
+                        skip_partials,
+                    );
                 }
                 if left == 0 {
                     let _ = std::fs::remove_dir_all(scratch);
@@ -8218,7 +8250,8 @@ impl Session {
                 }
             };
             match crate::external::region_span(inner.doc(), ev) {
-                Ok((m, ..)) if m == from && !inner.closed => {}
+                // The same media and span (review M4).
+                Ok(now) if now == (from, start, frames) && !inner.closed => {}
                 _ => {
                     return Err(crate::events::bad(
                         "The region changed while its copy was written; try again.",
@@ -8287,7 +8320,8 @@ impl Session {
     /// External Edit job (Ruling 6): the job ID; `job` reports it and
     /// applies it as one undo step "External Edit". `Model` for a path
     /// that is not the region's copy (relative, over
-    /// [`crate::external::MAX_PATH_BYTES`], another file or spelling), a
+    /// [`crate::external::MAX_PATH_BYTES`], or naming another file, e.g.
+    /// through `..`; `Path`'s `==` takes `//` or `/./` as the same), a
     /// region without a copy, a region that is gone (its copy is then
     /// forgotten), or a copy that is gone; `Busy` inside an open edit and
     /// while a Format, Convert, Relink, Bounce or External Edit job is
