@@ -16,6 +16,7 @@ fn serial() -> MutexGuard<'static, ()> {
     let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     vizdaw_ffi::host::force_offline();
     vizdaw_ffi::host::reset_host();
+    vizdaw_ffi::host::debug_fake_device(None);
     debug_reset();
     g
 }
@@ -414,4 +415,72 @@ fn hostile_learn_calls_are_refused() {
     cancel_learn();
     assert!(learn_state().waiting.is_none());
     let _ = common::wait_limit();
+}
+
+/// Final review T8 m6: a focus move during a learned ride owes the ride's
+/// idle hold to the old project, released at its last value's time, not
+/// when the old project next idles: Touch writes no extra hold.
+#[test]
+fn an_idle_hold_owed_by_a_focus_move_ends_at_its_last_value() {
+    let _g = serial();
+    // A live-like device: gestures carry its host clock, so a stamp can
+    // lie in the past.
+    vizdaw_ffi::host::debug_fake_device(Some((256, 0)));
+    let s = Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let t = learned_fader(&s);
+    let Target::StripFader { strip } = t else {
+        unreachable!()
+    };
+    let seq = song(&s);
+    s.set_automation_mode(
+        vec![strip],
+        vizdaw_ffi::automation::AutomationModeRow::Touch,
+    )
+    .unwrap();
+    s.play(seq).unwrap();
+    wait_until("beat 1", || s.transport().unwrap().tick > 15_360);
+    for v in [20u8, 40, 60] {
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        assert!(s.inject_midi("Knobs".into(), vec![0xB0, 7, v]).unwrap());
+        s.idle().unwrap();
+    }
+    let last = s.transport().unwrap().tick;
+    assert!(s.automation_state().unwrap().touched.contains(&t));
+    // Played on for a beat (500 ms at the demo's 120) before the focus
+    // moves: the clock hook does not move, so no idle release fires.
+    wait_until("a beat on", || s.transport().unwrap().tick > last + 15_360);
+    let other = Session::new_demo().unwrap();
+    other.focus_surfaces().unwrap();
+    s.idle().unwrap();
+    assert!(
+        s.automation_state().unwrap().touched.is_empty(),
+        "owed and released"
+    );
+    s.stop().unwrap();
+    wait_until("the stop", || !s.transport().unwrap().playing);
+    s.idle().unwrap();
+    let lane = s
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Built-in Synth Fader")
+        .expect("the fader's lane")
+        .id;
+    let held: Vec<i64> = s
+        .lane_events(seq, lane)
+        .unwrap()
+        .events
+        .iter()
+        .filter(|e| {
+            e.automation
+                .is_some_and(|a| (a.value - 60.0 / 127.0).abs() < 1e-9)
+        })
+        .map(|e| e.tick)
+        .collect();
+    let end = held.iter().max().copied().unwrap_or(i64::MAX);
+    assert!(
+        end < last + 15_360 / 2,
+        "the hold ends at the last value ({last}), not a beat later: {held:?}"
+    );
 }

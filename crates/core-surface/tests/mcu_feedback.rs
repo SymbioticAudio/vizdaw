@@ -450,7 +450,40 @@ fn release_all_resends_an_idle_held_fader() {
     let mut m = Mcu::new(false);
     let _ = m.feedback(&view(8), 0, now);
     let _ = m.input(&[0xE1, 0x00, 0x10], now);
-    assert_eq!(m.release_all(), vec![T::StripFader(StripId(2))]);
+    assert_eq!(m.release_all().all(), vec![T::StripFader(StripId(2))]);
     let fb = m.feedback(&view(8), 0, now + Duration::from_millis(20));
     assert!(has(&fb, &[0xE1, 0x00, 0x40]), "the motor goes back: {fb:?}");
+}
+
+/// Final review T8 m2 and N2: a focus move releases the unit's holds but
+/// keeps it online, and a hand still resting on a fader keeps the motor
+/// still (spec §8.1) until it lifts; the touch-up then does nothing (no
+/// hold in the new project) and the fader is sent once.
+#[test]
+fn release_holds_keeps_the_link_and_a_resting_hand_stops_the_motor() {
+    let now = Instant::now();
+    let ms = Duration::from_millis;
+    let mut m = Mcu::new(false);
+    let _ = m.feedback(&view(8), 0, now);
+    let _ = m.input(&[0x90, 0x68, 0x7F], now);
+    let _ = m.input(&[0xB0, 0x11, 0x01], now);
+    assert!(m.online(), "a valid message");
+    let held = m.release_holds();
+    assert_eq!(held.touched, vec![T::StripFader(StripId(1))]);
+    assert_eq!(held.idle, vec![T::StripPan(StripId(2))]);
+    assert!(m.online(), "still online after a focus move");
+    assert!(m.touched().is_empty(), "the new project holds nothing");
+    let mut other = view(8);
+    other.strips[0].fader = 1.0;
+    let fb = m.feedback(&other, 0, now + ms(20));
+    assert!(
+        !fb.iter().any(|x| x.first() == Some(&0xE0)),
+        "no motor under the resting hand: {fb:?}"
+    );
+    assert!(
+        m.input(&[0x90, 0x68, 0x00], now + ms(30)).is_empty(),
+        "its touch-up releases nothing"
+    );
+    let fb = m.feedback(&other, 0, now + ms(40));
+    assert!(has(&fb, &[0xE0, 0x7F, 0x7F]), "then sent once: {fb:?}");
 }

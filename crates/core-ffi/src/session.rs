@@ -8020,7 +8020,11 @@ impl Session {
     /// target (Ruling 11; the ticker calls it when the target changes).
     pub fn focus_surfaces(&self) -> Result<(), VizError> {
         ffi_guard(|| {
-            self.focus_here();
+            if self.focus_here() {
+                // The units show this project before any input is routed
+                // against the old one's strips (final review N1).
+                self.feed_surfaces(crate::surfaces::now(), &[]);
+            }
             Ok(())
         })
     }
@@ -8059,13 +8063,16 @@ impl Session {
                     "`bytes` must hold 1 to {max} bytes"
                 )));
             }
-            crate::surfaces::inject_unit(surface, &bytes)?;
-            self.focus_here();
+            let unfed = crate::surfaces::inject_unit(surface, &bytes)?;
+            let moved = self.focus_here();
             // A unit addresses strips only once feedback showed them
             // (Ruling 3): a window that just took the focus (none was key,
             // so the ticker focused nothing) or a unit never fed gets its
-            // refresh before the bytes are routed (plan 5f-1 Task 11).
-            self.feed_surfaces(crate::surfaces::now(), &[]);
+            // refresh before the bytes are routed (plan 5f-1 Task 11), and
+            // only then (final review T11 m1).
+            if moved || unfed {
+                self.feed_surfaces(crate::surfaces::now(), &[]);
+            }
             self.service_surfaces();
             Ok(())
         })
@@ -8222,10 +8229,11 @@ impl Session {
         Ok(())
     }
 
-    /// Makes this session the focused one, with its document's maps.
-    fn focus_here(&self) {
+    /// Makes this session the focused one, with its document's maps. True
+    /// when the focus moved here.
+    fn focus_here(&self) -> bool {
         let maps = lock(&self.inner).doc().settings().learn.clone();
-        crate::surfaces::focus(self.id, maps);
+        crate::surfaces::focus(self.id, maps)
     }
 
     /// The surfaces get this document's maps now (a learn edit; Ruling 17).
@@ -8291,9 +8299,11 @@ impl Session {
             let mut inner = lock(&self.inner);
             self.take_meters(&mut inner);
             let (owed, focused) = crate::surfaces::begin(self.id, now);
-            for (h, t) in owed {
-                inner.surfaces.last_ns.remove(&(h, t));
-                self.release_from(&mut inner, t, h, None);
+            for (h, t, idle) in owed {
+                // An idle hold ends at its last value's time; a touch now
+                // (final review T8 m6).
+                let last = inner.surfaces.last_ns.remove(&(h, t));
+                self.release_from(&mut inner, t, h, last.filter(|_| idle));
             }
             if focused {
                 crate::surfaces::sync_maps(self.id, &inner.doc().settings().learn);

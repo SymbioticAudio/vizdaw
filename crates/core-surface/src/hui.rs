@@ -9,7 +9,8 @@ use crate::mcu::{
 };
 use crate::shuttle::Shuttle;
 use crate::{
-    ECHO_WINDOW, Link, MixerView, Phase, StripView, Surface, SurfaceAction, SurfaceKind, Unit, midi,
+    DETENT, ECHO_WINDOW, Held, Link, MixerView, Phase, StripView, Surface, SurfaceAction,
+    SurfaceKind, Unit, midi,
 };
 use core_model::automation::{AutomationTarget, unit};
 use core_model::ids::StripId;
@@ -76,8 +77,6 @@ const DIGITS: usize = 8;
 const ZONE_LEN: usize = 10;
 const LINE: usize = 40;
 const _: () = assert!(LINE == 4 * ZONE_LEN);
-/// One V-pot detent, in normalised units (Ruling 5).
-const DETENT: f64 = 0.01;
 
 /// What this unit was last sent, per element (Ruling 13).
 #[derive(Debug, Default)]
@@ -107,6 +106,10 @@ pub struct Hui {
     shown: [Option<StripView>; 8],
     /// Touched faders, holding the strip touched (Ruling T1).
     touched: [Option<StripId>; 8],
+    /// Slots a hand still rests on since a focus move released their
+    /// touch (final review N2): no fader feedback until the touch-up,
+    /// which releases nothing and sends the fader once.
+    resting: [bool; 8],
     /// The last zone select, which the next port belongs to.
     zone: Option<u8>,
     /// A fader's hi byte waiting for its lo: (slot, hi).
@@ -180,6 +183,7 @@ impl Hui {
         Hui {
             shown: Default::default(),
             touched: [None; 8],
+            resting: [false; 8],
             zone: None,
             pending: None,
             last_hi: [None; 8],
@@ -214,6 +218,20 @@ impl Hui {
                 self.resend_fader(slot);
             }
         }
+    }
+
+    /// The releases a timeout still owes (Ruling T3-1), as holds: a touch's
+    /// `Release` is touched, an `IdleRelease` idle.
+    fn take_owed(&mut self) -> Held {
+        let mut held = Held::default();
+        for a in std::mem::take(&mut self.owed) {
+            match a {
+                SurfaceAction::Gesture(t, _) => held.add(t, true),
+                SurfaceAction::IdleRelease(t, _) => held.add(t, false),
+                _ => {}
+            }
+        }
+        held
     }
 
     /// No ping reply for OFFLINE_AFTER takes the unit offline.
@@ -345,6 +363,15 @@ impl Hui {
     }
 
     fn touch(&mut self, slot: usize, down: bool, out: &mut Vec<SurfaceAction>) -> Heard {
+        // A hand that rested over a focus move lifts: this project holds
+        // nothing for it; the fader is sent once (final review N2).
+        if let Some(r) = self.resting.get_mut(slot)
+            && std::mem::take(r)
+            && !down
+        {
+            self.resend_fader(slot);
+            return Heard::Known;
+        }
         // A touch-up releases the strip that was touched, whatever the slot
         // shows now (Ruling T1).
         if !down && let Some(was) = self.touched.get_mut(slot).and_then(Option::take) {
@@ -463,6 +490,7 @@ impl Hui {
         for k in 0..8u8 {
             let slot = usize::from(k);
             if self.touched.get(slot).is_some_and(Option::is_some)
+                || self.resting.get(slot).is_some_and(|r| *r)
                 || self
                     .strip(slot)
                     .is_some_and(|s| self.idle.holds(AutomationTarget::StripFader(s.id)))
@@ -713,19 +741,29 @@ impl Surface for Hui {
             .collect()
     }
 
-    fn release_all(&mut self) -> Vec<AutomationTarget> {
+    fn release_holds(&mut self) -> Held {
+        let resting = self.touched.map(|t| t.is_some());
+        let mut held = self.take_owed();
+        let rest = self.forget_all();
+        for t in rest.touched {
+            held.add(t, true);
+        }
+        for t in rest.idle {
+            held.add(t, false);
+        }
+        self.resting = resting;
+        held
+    }
+
+    fn release_all(&mut self) -> Held {
         // Releases still owed by a timeout go with the rest.
-        let mut held: Vec<AutomationTarget> = std::mem::take(&mut self.owed)
-            .into_iter()
-            .filter_map(|a| match a {
-                SurfaceAction::Gesture(t, _) | SurfaceAction::IdleRelease(t, _) => Some(t),
-                _ => None,
-            })
-            .collect();
-        for t in self.forget_all() {
-            if !held.contains(&t) {
-                held.push(t);
-            }
+        let mut held = self.take_owed();
+        let rest = self.forget_all();
+        for t in rest.touched {
+            held.add(t, true);
+        }
+        for t in rest.idle {
+            held.add(t, false);
         }
         // A reconnected unit is online once it answers a ping (review M5).
         self.link = Link::default();
@@ -743,12 +781,13 @@ impl Unit for Hui {
         &self.idle
     }
 
-    fn forget_all(&mut self) -> Vec<AutomationTarget> {
-        let mut held = self.touched();
+    fn forget_all(&mut self) -> Held {
+        let mut held = Held::default();
+        for t in self.touched() {
+            held.add(t, true);
+        }
         for t in self.idle.take_all() {
-            if !held.contains(&t) {
-                held.push(t);
-            }
+            held.add(t, false);
         }
         // Every fader it held gets feedback again.
         for slot in 0..8 {
@@ -756,12 +795,13 @@ impl Unit for Hui {
                 self.resend_fader(slot);
             }
         }
-        for t in &held {
-            if let AutomationTarget::StripFader(id) = *t {
+        for t in held.all() {
+            if let AutomationTarget::StripFader(id) = t {
                 self.resend_strip(id);
             }
         }
         self.touched = [None; 8];
+        self.resting = [false; 8];
         self.zone = None;
         self.pending = None;
         self.last_hi = [None; 8];

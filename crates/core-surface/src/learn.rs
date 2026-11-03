@@ -326,23 +326,21 @@ impl Mapper {
 
     /// Whether a map or command map takes `msg` from `port` (Ruling 17).
     /// It answers for one message: a buffer that is not exactly one whole
-    /// message is not taken, so in doubt nothing unlearned is lost.
+    /// message is not taken, so in doubt nothing unlearned is lost. It
+    /// runs on CoreMIDI's thread, so it never allocates (final review T8
+    /// m3).
     pub fn takes(&self, port: &str, msg: &[u8]) -> bool {
-        let sources = self
-            .maps
-            .iter()
-            .map(|m| &m.source)
-            .chain(self.commands.iter().map(|c| &c.source))
-            .filter(|s| s.port == port)
-            .collect::<Vec<_>>();
-        if sources.is_empty() {
+        if msg.len() != 3 {
             return false;
         }
-        let parts = split(msg);
-        let [Ok(one)] = parts.as_slice() else {
+        let Some(m) = parse(msg) else {
             return false;
         };
-        parse(one).is_some_and(|m| sources.iter().any(|s| part(s.kind, m).is_some()))
+        self.maps
+            .iter()
+            .map(|x| &x.source)
+            .chain(self.commands.iter().map(|c| &c.source))
+            .any(|s| s.port == port && part(s.kind, m).is_some())
     }
 
     /// Rulings 8 and 18; `current` gives a target's heard value now (None: unknown → the message is dropped for relative and picking-up maps).
@@ -596,7 +594,10 @@ impl Mapper {
     }
 
     /// The targets the learned gestures hold now (not those whose release
-    /// `set` queued: the next `input` or `tick` releases them).
+    /// `set` queued: the next `input` or `tick` releases them). Tests only:
+    /// releasing these as well as what `set` queued would release twice
+    /// (Ruling T5-1; final review N7).
+    #[doc(hidden)]
     pub fn held(&self) -> Vec<AutomationTarget> {
         self.idle.held()
     }

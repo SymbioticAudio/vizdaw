@@ -296,7 +296,7 @@ fn hui_release_all_drops_holds_touches_and_the_pending_hi() {
     let _ = h.input(&[0xB0, 0x40, 0x41], now);
     let _ = h.input(&sw(0x0E, 1, true), now);
     let _ = h.input(&[0xB0, 0x02, 0x10], now);
-    let mut held = h.release_all();
+    let mut held = h.release_all().all();
     held.sort();
     let mut want = vec![
         T::StripFader(StripId(1)),
@@ -556,4 +556,33 @@ fn hui_a_switch_release_on_an_empty_slot_is_not_counted() {
     assert_eq!(h.ignored(), n);
     let _ = h.input(&sw(5, 1, true), now);
     assert_eq!(h.ignored(), n + 1, "the press is");
+}
+
+/// Final review T8 m2 and N2, HUI: as the MCU's.
+#[test]
+fn hui_release_holds_keeps_the_link_and_a_resting_hand_stops_the_motor() {
+    let (mut h, now) = shown();
+    let ms = Duration::from_millis;
+    let _ = h.input(&REPLY, now);
+    let _ = h.input(&sw(0, 0, true), now);
+    let _ = h.input(&[0xB0, 0x41, 0x41], now);
+    assert!(h.online());
+    let held = h.release_holds();
+    assert_eq!(held.touched, vec![T::StripFader(StripId(1))]);
+    assert_eq!(held.idle, vec![T::StripPan(StripId(2))]);
+    assert!(h.online(), "still online after a focus move");
+    let mut other = view(8);
+    other.strips[0].fader = 1.0;
+    let fb = h.feedback(&other, 0, now + ms(20));
+    assert!(
+        !fb.iter()
+            .any(|x| x.len() == 3 && x[0] == 0xB0 && x[1] == 0x00),
+        "no motor under the resting hand: {fb:?}"
+    );
+    assert!(
+        h.input(&sw(0, 0, false), now + ms(30)).is_empty(),
+        "its touch-up releases nothing"
+    );
+    let fb = h.feedback(&other, 0, now + ms(40));
+    assert!(has(&fb, &[0xB0, 0x00, 0x7F]), "then sent once: {fb:?}");
 }

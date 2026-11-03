@@ -248,7 +248,7 @@ fn release_all_forgets_every_hold() {
     let _ = m.input(&[0xE7, 0x00, 0x20], now);
     let _ = m.input(&[0xB0, 0x11, 0x01], now);
     let _ = m.input(&[0x90, 0x5C, 0x7F], now);
-    let mut held = m.release_all();
+    let mut held = m.release_all().all();
     held.sort();
     let mut want = vec![
         T::StripFader(StripId(1)),
@@ -374,7 +374,7 @@ fn a_touch_takes_over_an_idle_hold_on_its_fader() {
         vec![A::Gesture(T::StripFader(StripId(1)), Phase::Release)]
     );
     assert_eq!(
-        m.release_all(),
+        m.release_all().all(),
         Vec::<T>::new(),
         "nothing held after the release"
     );

@@ -4,8 +4,8 @@
 use crate::idle::IdleTouches;
 use crate::shuttle::Shuttle;
 use crate::{
-    Assign, ECHO_WINDOW, Link, MixerView, ParamView, Phase, StripView, Surface, SurfaceAction,
-    SurfaceKind, Unit, midi, seg,
+    Assign, DETENT, ECHO_WINDOW, Held, Link, MixerView, ParamView, Phase, StripView, Surface,
+    SurfaceAction, SurfaceKind, Unit, midi, seg,
 };
 use core_model::automation::{AutomationMode, AutomationTarget, SendIndex, fader_db, pan_of, unit};
 use core_model::ids::StripId;
@@ -75,8 +75,6 @@ const ZONE: usize = 7;
 const CELL: usize = ZONE - 1;
 // Eight zones fill a row exactly.
 const _: () = assert!(ROW == 8 * ZONE);
-/// One V-pot detent, in normalised units (Ruling 5).
-const DETENT: f64 = 0.01;
 
 /// What became of one message.
 pub(crate) enum Heard {
@@ -118,6 +116,10 @@ pub struct Mcu {
     /// Touched faders (slots 0–7, 8 the master), holding the strip touched,
     /// so a bank change while touched releases the strip that was touched.
     touched: [Option<StripId>; 9],
+    /// Slots a hand still rests on since a focus move released their
+    /// touch (final review N2): no fader feedback until the touch-up,
+    /// which releases nothing and sends the fader once.
+    resting: [bool; 9],
     assign: Assign,
     idle: IdleTouches,
     shuttle: Shuttle,
@@ -264,6 +266,7 @@ impl Mcu {
             master: None,
             plugin: Vec::new(),
             touched: [None; 9],
+            resting: [false; 9],
             assign: Assign::default(),
             idle: IdleTouches::default(),
             shuttle: Shuttle::default(),
@@ -328,6 +331,7 @@ impl Mcu {
             // touch: a fader without touch sensing is touched by its first
             // value until its idle release (spec §8; review I1).
             if self.touched.get(slot).is_some_and(Option::is_some)
+                || self.resting.get(slot).is_some_and(|r| *r)
                 || self
                     .fader_strip(slot)
                     .is_some_and(|id| self.idle.holds(AutomationTarget::StripFader(id)))
@@ -658,6 +662,17 @@ impl Mcu {
     }
 
     fn touch(&mut self, slot: usize, down: bool, out: &mut Vec<SurfaceAction>) -> Heard {
+        // A hand that rested over a focus move lifts: this project holds
+        // nothing for it; the fader is sent once (final review N2).
+        if let Some(r) = self.resting.get_mut(slot)
+            && std::mem::take(r)
+            && !down
+        {
+            if let Some(cached) = self.cache.faders.get_mut(slot) {
+                *cached = None;
+            }
+            return Heard::Known;
+        }
         // A touch-up releases the strip that was touched, whatever the slot
         // shows now: a bank change or a deleted strip may have emptied it.
         if !down && let Some(was) = self.touched.get_mut(slot).and_then(Option::take) {
@@ -851,7 +866,14 @@ impl Surface for Mcu {
             .collect()
     }
 
-    fn release_all(&mut self) -> Vec<AutomationTarget> {
+    fn release_holds(&mut self) -> Held {
+        let resting = self.touched.map(|t| t.is_some());
+        let held = self.forget_all();
+        self.resting = resting;
+        held
+    }
+
+    fn release_all(&mut self) -> Held {
         let held = self.forget_all();
         // A reconnected unit is online once it says so.
         self.link = Link::default();
@@ -876,12 +898,13 @@ impl Unit for Mcu {
         &self.idle
     }
 
-    fn forget_all(&mut self) -> Vec<AutomationTarget> {
-        let mut held = self.touched();
+    fn forget_all(&mut self) -> Held {
+        let mut held = Held::default();
+        for t in self.touched() {
+            held.add(t, true);
+        }
         for t in self.idle.take_all() {
-            if !held.contains(&t) {
-                held.push(t);
-            }
+            held.add(t, false);
         }
         // Every fader it held gets feedback again: the touched slots, and
         // the slots showing an idle-held strip.
@@ -892,12 +915,13 @@ impl Unit for Mcu {
                 *cached = None;
             }
         }
-        for t in &held {
-            if let AutomationTarget::StripFader(id) = *t {
+        for t in held.all() {
+            if let AutomationTarget::StripFader(id) = t {
                 self.resend_strip(id);
             }
         }
         self.touched = [None; 9];
+        self.resting = [false; 9];
         self.shuttle.clear();
         held
     }

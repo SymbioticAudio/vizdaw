@@ -27,6 +27,9 @@ use core_model::ids::StripId;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+/// One V-pot detent, in normalised units (Ruling 5), for MCU and HUI.
+pub(crate) const DETENT: f64 = 0.01;
+
 /// How long a sent fader value is an echo (Ruling 13).
 pub const ECHO_WINDOW: Duration = Duration::from_millis(100);
 
@@ -208,6 +211,40 @@ pub struct MixerView {
     pub looping: bool,
 }
 
+/// What a unit let go of (final review T8 m6): touched faders, released
+/// now, and idle holds, released at their last value's time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Held {
+    /// Faders a touch held.
+    pub touched: Vec<AutomationTarget>,
+    /// Targets an idle hold held (none of them in `touched`).
+    pub idle: Vec<AutomationTarget>,
+}
+
+impl Held {
+    /// Every target: the touched ones, then the idle ones.
+    pub fn all(&self) -> Vec<AutomationTarget> {
+        self.touched.iter().chain(&self.idle).copied().collect()
+    }
+
+    /// Nothing was held.
+    pub fn is_empty(&self) -> bool {
+        self.touched.is_empty() && self.idle.is_empty()
+    }
+
+    /// Adds `t` as touched or idle, unless it is there already.
+    fn add(&mut self, t: AutomationTarget, touched: bool) {
+        if self.touched.contains(&t) || self.idle.contains(&t) {
+            return;
+        }
+        if touched {
+            self.touched.push(t);
+        } else {
+            self.idle.push(t);
+        }
+    }
+}
+
 /// A protocol state machine (spec §8.1; Ruling 3).
 pub trait Surface: Send {
     /// The unit type.
@@ -230,8 +267,13 @@ pub trait Surface: Send {
     fn touched(&self) -> Vec<AutomationTarget>;
     /// Every target it holds (touched faders and idle holds), then forgets
     /// them, its touch flags, pending hi bytes and the shuttle (Ruling 3:
-    /// a disconnect or a removal).
-    fn release_all(&mut self) -> Vec<AutomationTarget>;
+    /// a disconnect or a removal); a reconnected unit is online once it
+    /// says so.
+    fn release_all(&mut self) -> Held;
+    /// The holds `release_all` answers, forgotten the same way, but the
+    /// unit stays online: the focus moved to another project (final review
+    /// T8 m2).
+    fn release_holds(&mut self) -> Held;
     /// The V-pot assignment, for units that have one (MCU and MCU XT).
     fn assign(&self) -> Option<Assign> {
         None
@@ -291,7 +333,7 @@ pub(crate) trait Unit: Surface {
     fn idle(&self) -> &IdleTouches;
     /// `release_all` without the online reset: forgets every hold, touch
     /// flag, pending byte and the shuttle; held faders are resent.
-    fn forget_all(&mut self) -> Vec<AutomationTarget>;
+    fn forget_all(&mut self) -> Held;
 
     /// Sets the online state: going offline answers the releases of what
     /// the unit held (touched faders `Release`, idle holds `IdleRelease` at

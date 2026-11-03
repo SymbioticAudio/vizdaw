@@ -28,7 +28,7 @@ use core_model::automation::AutomationTarget;
 use core_model::ids::StripId;
 use core_model::learn::{LearnKind, LearnMap, LearnMode, LearnSource};
 use core_surface::learn::{CommandMap, Learner, Mapper};
-use core_surface::{Bank, MixerView, Surface, SurfaceAction, SurfaceKind, new_surface};
+use core_surface::{Bank, Held, MixerView, Surface, SurfaceAction, SurfaceKind, new_surface};
 use ports::Ports;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -373,6 +373,11 @@ pub(crate) enum Group {
     Hui(SurfaceId),
 }
 
+/// A release a session is owed (Ruling 11): whose hand, the target, and
+/// whether it was an idle hold, released at its last value's time, rather
+/// than a touch, released now (final review T8 m6).
+pub(crate) type Owed = (TouchHolder, AutomationTarget, bool);
+
 /// One configured unit.
 struct Unit {
     id: SurfaceId,
@@ -627,7 +632,7 @@ pub(crate) struct Registry {
     /// The session the surfaces drive (Ruling 11).
     focus: Option<u64>,
     /// Releases each session is owed (Ruling 11).
-    owed: BTreeMap<u64, Vec<(TouchHolder, AutomationTarget)>>,
+    owed: BTreeMap<u64, Vec<Owed>>,
     /// The transport, made on the first surface or learn (Ruling 10).
     ports: Option<Box<dyn Ports>>,
     /// When the ports were last refreshed.
@@ -770,17 +775,16 @@ impl Registry {
         self.owe(TouchHolder::Surface(id), held);
     }
 
-    /// Records the releases of `targets` held by `holder` for the focused
-    /// session (none focused: nobody holds them).
-    fn owe(&mut self, holder: TouchHolder, targets: Vec<AutomationTarget>) {
-        if targets.is_empty() {
+    /// Records the releases of what `holder` held for the focused session
+    /// (none focused: nobody holds them).
+    fn owe(&mut self, holder: TouchHolder, held: Held) {
+        if held.is_empty() {
             return;
         }
         if let Some(f) = self.focus {
-            self.owed
-                .entry(f)
-                .or_default()
-                .extend(targets.into_iter().map(|t| (holder, t)));
+            let touched = held.touched.into_iter().map(|t| (holder, t, false));
+            let idle = held.idle.into_iter().map(|t| (holder, t, true));
+            self.owed.entry(f).or_default().extend(touched.chain(idle));
         }
     }
 
@@ -1006,31 +1010,35 @@ impl Registry {
     }
 
     /// Focus moves to `id` with its document's `maps` (Ruling 11): the old
-    /// session is owed every unit's holds and the mapper's; the units get a
-    /// full refresh from the new one.
-    fn focus(&mut self, id: u64, maps: Vec<LearnMap>) {
+    /// session is owed every unit's holds and the mapper's (the units stay
+    /// online; final review T8 m2); the units get a full refresh from the
+    /// new one, due at once. True when the focus moved.
+    fn focus(&mut self, id: u64, maps: Vec<LearnMap>) -> bool {
         if self.focus == Some(id) {
             self.set_maps(maps);
-            return;
+            return false;
         }
         for i in 0..self.units.len() {
             let Some(u) = self.units.get_mut(i) else {
                 continue;
             };
-            let held = u.surface.release_all();
+            let held = u.surface.release_holds();
             u.surface.refresh();
+            // Due at once: the new project's strips replace the old ones
+            // before any input is routed (final review N1).
+            u.fed = None;
             let holder = TouchHolder::Surface(u.id);
             self.owe(holder, held);
         }
-        let learnt: Vec<AutomationTarget> = self
-            .mapper
-            .release_all()
-            .into_iter()
-            .filter_map(|a| match a {
-                SurfaceAction::IdleRelease(t, _) | SurfaceAction::Gesture(t, _) => Some(t),
-                _ => None,
-            })
-            .collect();
+        // The mapper holds only idle holds (a learned control has no touch).
+        let mut learnt = Held::default();
+        for a in self.mapper.release_all() {
+            match a {
+                SurfaceAction::IdleRelease(t, _) => learnt.idle.push(t),
+                SurfaceAction::Gesture(t, _) => learnt.touched.push(t),
+                _ => {}
+            }
+        }
         self.owe(TouchHolder::Learn, learnt);
         self.focus = Some(id);
         self.mapper = Mapper::default();
@@ -1038,6 +1046,7 @@ impl Registry {
         self.mapper.set(maps, self.command_maps());
         self.mapper_fed = None;
         self.publish();
+        true
     }
 
     /// The focused session's maps are `maps` now (a learn, undo, redo,
@@ -1728,14 +1737,15 @@ fn dropped() -> u64 {
 // The session's side (`Session::focus_surfaces`, `idle`, `close`).
 
 /// Makes session `id`, whose document has learn maps `maps`, the one the
-/// surfaces drive (Ruling 11).
-pub(crate) fn focus(id: u64, maps: Vec<LearnMap>) {
-    lock().focus(id, maps);
+/// surfaces drive (Ruling 11). True when the focus moved: the units are
+/// due their refresh from it (final review N1).
+pub(crate) fn focus(id: u64, maps: Vec<LearnMap>) -> bool {
+    lock().focus(id, maps)
 }
 
 /// Steps 0–1 for session `id`: when focused, the 2 s port check; then the
 /// releases it is owed. Answers them and whether it is focused.
-pub(crate) fn begin(id: u64, now: Instant) -> (Vec<(TouchHolder, AutomationTarget)>, bool) {
+pub(crate) fn begin(id: u64, now: Instant) -> (Vec<Owed>, bool) {
     let mut r = lock();
     let focused = r.focus == Some(id);
     if focused {
@@ -1827,20 +1837,21 @@ pub(crate) fn learn_target(id: u64, t: AutomationTarget, text: String) {
 }
 
 /// Feeds `bytes` to surface `surface` as if from its input (programmatic).
-/// `Model` for an unknown surface, `Busy` when the queue is full.
-pub(crate) fn inject_unit(surface: u32, bytes: &[u8]) -> Result<(), VizError> {
-    let port = lock()
+/// True when the unit was never fed (it shows no strips yet). `Model` for
+/// an unknown surface, `Busy` when the queue is full.
+pub(crate) fn inject_unit(surface: u32, bytes: &[u8]) -> Result<bool, VizError> {
+    let (port, unfed) = lock()
         .units
         .iter()
         .find(|u| u.id.get() == surface)
-        .map(|u| u.input.clone())
+        .map(|u| (u.input.clone(), u.fed.is_none()))
         .ok_or_else(|| crate::events::bad(&format!("there is no surface {surface}")))?;
     if !enqueue(&port, bytes, 0, true) {
         return Err(VizError::Busy {
             message: "the surfaces' input queue is full".into(),
         });
     }
-    Ok(())
+    Ok(unfed)
 }
 
 /// The state with feedback rows (a document asked).
@@ -2237,6 +2248,7 @@ mod tests {
         let fader = (
             TouchHolder::Surface(id),
             AutomationTarget::StripFader(StripId(1)),
+            false,
         );
         assert_eq!(r.owed.get(&7), Some(&vec![fader]));
         assert!(!r.units.first().unwrap().connected);

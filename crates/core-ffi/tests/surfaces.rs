@@ -1240,3 +1240,67 @@ fn input_while_nothing_is_focused_is_not_replayed() {
         "nothing replays into the next project: {events:?}"
     );
 }
+
+/// Final review T8 m2: a focus move releases the unit's holds in the old
+/// project but leaves the unit online (it said nothing about going away).
+#[test]
+fn a_focus_move_keeps_the_unit_online() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let (_, k) = synth(&s);
+    let id = mcu(&s);
+    s.inject_surface(id, vec![0x90, 0x68 + k as u8, 0x7F])
+        .unwrap();
+    assert!(surface_list()[0].online, "a valid message");
+    let other = vizdaw_ffi::Session::new_demo().unwrap();
+    other.focus_surfaces().unwrap();
+    other.idle().unwrap();
+    s.idle().unwrap();
+    assert!(s.automation_state().unwrap().touched.is_empty());
+    assert!(surface_list()[0].online, "still online");
+}
+
+/// Final review N1: a focus move shows the new project on the units at
+/// once, so the first input after it acts on the new project's strips as
+/// they are there, not as the old project showed them: a mute press
+/// toggles from the new project's mute state.
+#[test]
+fn input_after_a_focus_move_addresses_the_new_projects_strips() {
+    let _g = serial();
+    let a = vizdaw_ffi::Session::new_demo().unwrap();
+    let (_, k) = synth(&a);
+    let id = mcu(&a);
+    let mute = vec![0x90, 0x10 + k as u8, 0x7F];
+    a.inject_surface(id, mute.clone()).unwrap();
+    debug_advance(30);
+    a.idle().unwrap();
+    assert!(a.mixer().unwrap().strips[k].mute, "the unit shows it muted");
+    let b = vizdaw_ffi::Session::new_demo().unwrap();
+    assert!(!b.mixer().unwrap().strips[k].mute);
+    b.focus_surfaces().unwrap();
+    b.inject_midi("T In".into(), mute).unwrap();
+    b.idle().unwrap();
+    assert!(
+        b.mixer().unwrap().strips[k].mute,
+        "toggled from the new project's state"
+    );
+}
+
+/// Final review T11 m1: `surface.inject` into the focused window routes
+/// before it feeds, so a unit due its feedback shows what the bytes did
+/// in the same call.
+#[test]
+fn an_injection_shows_what_it_did_in_the_same_call() {
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let (_, k) = synth(&s);
+    let id = mcu(&s);
+    debug_advance(30);
+    s.inject_surface(id, vec![0x90, 0x10 + k as u8, 0x7F])
+        .unwrap();
+    let sent = debug_sent("T Out");
+    assert!(
+        sent.contains(&vec![0x90, 0x10 + k as u8, 0x7F]),
+        "the mute LED at once: {sent:?}"
+    );
+}
