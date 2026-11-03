@@ -215,6 +215,11 @@ static SOURCES: Mutex<Option<platform_macos::midi::SourceListener>> = Mutex::new
     allow(dead_code)
 )]
 fn midi_from_source(port: u32, host_ns: u64, bytes: &[u8]) {
+    // Surface ports and learned messages stay out of the lanes (plan
+    // 5f-1 Ruling 17).
+    if crate::surfaces::takes(port, bytes) {
+        return;
+    }
     let Some(msg) = core_engine::input::channel_message(bytes) else {
         return;
     };

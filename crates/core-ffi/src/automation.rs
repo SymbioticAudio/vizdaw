@@ -347,8 +347,6 @@ pub(crate) fn pass_settings() -> (AutomationMode, u32, Thinning) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SurfaceId(u8);
 
-// Tasks 7 and 8 make surface IDs; until then only the tests do.
-#[allow(dead_code)]
 impl SurfaceId {
     /// How many surfaces there can be.
     pub const COUNT: u8 = 16;
@@ -378,10 +376,8 @@ pub(crate) enum TouchHolder {
     /// A plugin's own editor.
     Plugin,
     /// A MIDI-learned control (Task 8).
-    #[allow(dead_code)]
     Learn,
     /// A control surface (Task 8).
-    #[allow(dead_code)]
     Surface(SurfaceId),
 }
 

@@ -793,6 +793,44 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var focusCalls = 0
     func focusSurfaces() throws { focusCalls += 1 }
 
+    /// What the surface and learn methods were called with (Task 8).
+    var surfaceSelections: [[UInt64]] = []
+    var surfaceInjections: [(UInt32, Data)] = []
+    var surfaceEvents: [SurfaceEventRow] = []
+    var learnTargets: [AutomationTargetRow] = []
+    var learnMapRows: [LearnMapRow] = []
+    var learnModeCalls: [(LearnSourceRow, LearnModeRow)] = []
+    var learnPickupCalls: [(LearnSourceRow, Bool)] = []
+    var removedLearns: [LearnSourceRow] = []
+    var unlearnedTargets: [AutomationTargetRow] = []
+    func setSurfaceSelection(strips: [UInt64]) throws { surfaceSelections.append(strips) }
+    func injectSurface(surface: UInt32, bytes: Data) throws { surfaceInjections.append((surface, bytes)) }
+    func surfaceState() throws -> SurfaceStateRow {
+        SurfaceStateRow(surfaces: [], feedback: [], learning: nil, problems: [])
+    }
+    func takeSurfaceEvents() throws -> [SurfaceEventRow] {
+        defer { surfaceEvents = [] }
+        return surfaceEvents
+    }
+    func learnTarget(target: AutomationTargetRow) throws { learnTargets.append(target) }
+    func learnMaps() throws -> [LearnMapRow] { learnMapRows }
+    func setLearnMode(source: LearnSourceRow, mode: LearnModeRow) throws -> DocSnapshot {
+        learnModeCalls.append((source, mode))
+        return commandResult()
+    }
+    func setLearnPickup(source: LearnSourceRow, on: Bool) throws -> DocSnapshot {
+        learnPickupCalls.append((source, on))
+        return commandResult()
+    }
+    func removeLearn(source: LearnSourceRow) throws -> DocSnapshot {
+        removedLearns.append(source)
+        return commandResult()
+    }
+    func unlearnTarget(target: AutomationTargetRow) throws -> DocSnapshot {
+        unlearnedTargets.append(target)
+        return commandResult()
+    }
+
     /// Thrown by `setAutomationMode` (before it is recorded).
     var modeError: VizError?
     func setAutomationMode(strips: [UInt64], mode: AutomationModeRow) throws -> DocSnapshot {

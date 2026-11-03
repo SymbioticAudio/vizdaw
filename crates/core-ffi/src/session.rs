@@ -19,6 +19,9 @@ use crate::snapshot::{
     seq_id, seq_rows, warnings,
 };
 use crate::snapshot::{ParamRow, ParamValue, PluginRefRow};
+use crate::surfaces::{
+    LearnMapRow, LearnModeRow, LearnSourceRow, SurfaceEventRow, SurfaceStateRow,
+};
 use core_engine::gesture::{GestureMsg, GesturePhase};
 use core_engine::schedule::AutoDest;
 use core_host::PluginHost;
@@ -26,6 +29,7 @@ use core_model::automation::{AutomationMode, AutomationTarget};
 use core_model::command::Command;
 use core_model::command::MixerCmd;
 use core_model::command::RoutingCmd;
+use core_model::command::SettingsCmd;
 use core_model::command::lane::LaneCmd;
 use core_model::command::sequence::SequenceCmd;
 use core_model::command::{AutomationWrite, RecordPass};
@@ -183,6 +187,12 @@ pub(crate) struct Inner {
     /// Loop passes of the recording landed into its group (Task 12): its
     /// step is "Write Automation" when it recorded nothing else.
     landed_in_group: bool,
+    /// Control surfaces: the app's events, selection, last wind, heard
+    /// values' cache (plan 5f-1 Task 8).
+    surfaces: crate::surfaces::SessionSurfaces,
+    /// The meter holds of the mixer window and the surfaces (plan 5f-1
+    /// Ruling 13, pre-flight I4).
+    meters: crate::surfaces::MeterHolds,
 }
 
 /// Slot `id`'s overlay in `doc` (what a capture into a copy of the
@@ -283,6 +293,8 @@ impl Inner {
             last_step: None,
             restart_step: None,
             landed_in_group: false,
+            surfaces: Default::default(),
+            meters: Default::default(),
         }
     }
 
@@ -1631,34 +1643,7 @@ impl Session {
 
     /// Moves the position to `tick`.
     pub fn locate(&self, tick: i64) -> Result<(), VizError> {
-        self.transport_call(|| {
-            let mut inner = lock(&self.inner);
-            if inner.recording.is_some() {
-                return Err(recording_busy());
-            }
-            // A Locate while a pass writes lands it; the new position is a
-            // new pass (plan 5e-1 Ruling 23).
-            let writing = inner
-                .writing
-                .as_ref()
-                .map(|w| (w.seq, w.handles.status.rolled()));
-            self.finish_writing(&mut inner);
-            self.apply_pending_automation(&mut inner);
-            if !host::locate(self.id, Tick(tick))? {
-                inner.cursor = Some(Tick(tick));
-                inner.cursor_seq = inner.selected_seq();
-            }
-            // Again from the new position: when it plays, or when the old
-            // pass had not rolled yet (check I-2: the Play is still on its
-            // way to the renderer).
-            let stopped = host::transport_stopped(self.id);
-            if let Some((seq, _)) = writing
-                .filter(|(_, rolled)| stopped == Some(false) || (!rolled && stopped.is_some()))
-            {
-                self.begin_writing(&mut inner, seq, Tick(tick));
-            }
-            Ok(())
-        })
+        self.transport_call(|| self.locate_in(&mut lock(&self.inner), tick))
     }
 
     /// Loops from bar 1 to the end of the sequence, or stops looping.
@@ -1992,7 +1977,13 @@ impl Session {
     /// Meters, DSP load, latency and fault-bypassed plugins (empty unless
     /// this session holds the engine). The mixer polls it at 30 Hz.
     pub fn levels(&self) -> Result<MixerLevels, VizError> {
-        ffi_guard(|| Ok(host::levels(self.id).unwrap_or_else(MixerLevels::empty)))
+        // The surfaces read the same peaks (plan 5f-1 Ruling 13): one take
+        // feeds both holds, each cleared only by its own reader.
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.take_meters(&mut inner);
+            Ok(inner.meters.take_mixer().unwrap_or_else(MixerLevels::empty))
+        })
     }
 
     /// Opens a continuous edit (a drag): commands until `end_edit` are one
@@ -2668,6 +2659,9 @@ impl Session {
             self.save_after_pass_now(&mut inner);
             // Touches end and a pass in progress lands (plan 5e-1 Ruling 20).
             self.release_touches(&mut inner);
+            // Its learn is cancelled; if it was focused, the surfaces go
+            // blank (plan 5f-1 Ruling 11).
+            crate::surfaces::session_closed(self.id);
             self.finish_writing(&mut inner);
             self.apply_pending_automation(&mut inner);
             for line in inner.news.problems.iter().skip(before) {
@@ -5650,6 +5644,19 @@ impl Session {
 
     /// The value heard now (Ruling 26).
     fn heard_value(&self, inner: &Inner, t: AutomationTarget) -> f64 {
+        self.heard_from(inner, t, None)
+    }
+
+    /// [`Session::heard_value`], reading the playing sequence's automation
+    /// from `cached` (its flattened existing automation) when it is that
+    /// sequence's (plan 5f-1 Ruling 13: the surfaces read many targets a
+    /// pass).
+    fn heard_from(
+        &self,
+        inner: &Inner,
+        t: AutomationTarget,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> f64 {
         let doc = inner.doc();
         if let AutomationTarget::PluginParam(..) = t {
             let info = crate::automation::param_info(self.id, t);
@@ -5663,8 +5670,15 @@ impl Session {
         }
         if host::transport_stopped(self.id) == Some(false) {
             if let Some((seq, tick)) = host::position(self.id) {
-                let points = crate::automation::existing(doc, seq, t);
-                if let Some(v) = crate::automation::value_at(&points, tick, t.is_stepped()) {
+                let owned;
+                let points: &[(Tick, f64)] = match cached {
+                    Some((s, all)) if *s == seq => all.get(&t).map_or(&[][..], Vec::as_slice),
+                    _ => {
+                        owned = crate::automation::existing(doc, seq, t);
+                        &owned
+                    }
+                };
+                if let Some(v) = crate::automation::value_at(points, tick, t.is_stepped()) {
                     return v;
                 }
             }
@@ -7309,10 +7323,21 @@ impl Session {
     pub fn inject_midi(&self, port: String, bytes: Vec<u8>) -> Result<bool, VizError> {
         ffi_guard(|| {
             let msgs = crate::live::parse_injection(&port, &bytes)?;
-            let Some(tx) = host::midi_sender(self.id) else {
-                return Ok(false);
-            };
+            // Surfaces, MIDI learn and learned maps hear injected bytes
+            // too (plan 5f-1 Ruling 16), serviced by the session's idle;
+            // what they take stays out of the lanes (Ruling 17).
+            let learnt = crate::surfaces::inject(&port, &bytes);
             let key = core_engine::input::port_key(&port);
+            let msgs: Vec<_> = msgs
+                .into_iter()
+                .filter(|m| !crate::surfaces::takes(key, m.as_slice()))
+                .collect();
+            if msgs.is_empty() {
+                return Ok(learnt);
+            }
+            let Some(tx) = host::midi_sender(self.id) else {
+                return Ok(learnt);
+            };
             for msg in msgs {
                 let sent = tx.send(core_engine::input::MidiIn {
                     port: key,
@@ -7988,25 +8013,655 @@ impl Session {
     }
 }
 
-/// Control surfaces (plan 5f-1 Ruling 11). Task 8 adds the service's
-/// input, actions and feedback, and the surface methods, to these blocks.
+/// Control surfaces and MIDI learn (plan 5f-1 Rulings 7, 8, 11–13, 17, 18).
 #[uniffi::export]
 impl Session {
     /// Makes this session the one the surfaces drive: the app's command
     /// target (Ruling 11; the ticker calls it when the target changes).
     pub fn focus_surfaces(&self) -> Result<(), VizError> {
         ffi_guard(|| {
-            crate::surfaces::focus(self.id);
+            self.focus_here();
             Ok(())
+        })
+    }
+
+    /// The app's selected strips (Ruling 12): the surfaces' select LEDs and
+    /// the strip whose plugin Plug-in mode shows. Unknown IDs are ignored;
+    /// more than 1024 strips is refused (`Model`).
+    pub fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            if strips.len() > MAX_SURFACE_SELECTION {
+                return Err(crate::events::bad(&format!(
+                    "at most {MAX_SURFACE_SELECTION} strips"
+                )));
+            }
+            let mut inner = lock(&self.inner);
+            let m = inner.doc().mixer();
+            let keep: Vec<StripId> = strips
+                .into_iter()
+                .map(StripId)
+                .filter(|s| m.strip(*s).is_ok())
+                .collect();
+            inner.surfaces.selection = keep;
+            Ok(())
+        })
+    }
+
+    /// Feeds `bytes` to surface `surface` as if from its input, focuses
+    /// this session and services it at once (`surface.inject`; Ruling 11).
+    /// `Model` for no bytes, more than `MAX_INJECT_BYTES` or an unknown
+    /// surface.
+    pub fn inject_surface(&self, surface: u32, bytes: Vec<u8>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let max = crate::live::MAX_INJECT_BYTES;
+            if bytes.is_empty() || bytes.len() > max {
+                return Err(crate::events::bad(&format!(
+                    "`bytes` must hold 1 to {max} bytes"
+                )));
+            }
+            crate::surfaces::inject_unit(surface, &bytes)?;
+            self.focus_here();
+            self.service_surfaces();
+            Ok(())
+        })
+    }
+
+    /// `state.get surfaces` for this window: with what feedback sent.
+    pub fn surface_state(&self) -> Result<SurfaceStateRow, VizError> {
+        ffi_guard(|| Ok(crate::surfaces::state_with_feedback()))
+    }
+
+    /// The surfaces' commands, selects, arms and jogs since the last call
+    /// (Ruling 12), oldest first.
+    pub fn take_surface_events(&self) -> Result<Vec<SurfaceEventRow>, VizError> {
+        ffi_guard(|| Ok(std::mem::take(&mut lock(&self.inner).surfaces.events)))
+    }
+
+    /// Learns the next control for `target` into this project (Rulings 7,
+    /// 11): this session decides it in its own `idle`. `Model` for a target
+    /// that does not exist or a velocity scale.
+    pub fn learn_target(&self, target: AutomationTargetRow) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let t = automation_target_of(target);
+            let text = {
+                let inner = lock(&self.inner);
+                if matches!(t, AutomationTarget::VelocityScale(_)) {
+                    return Err(crate::events::bad("a velocity scale cannot be learned"));
+                }
+                if !core_model::automation::target_exists(inner.doc(), t) {
+                    return Err(crate::events::bad("the learn target does not exist"));
+                }
+                crate::automation::lane_name(inner.doc(), t, None)
+            };
+            crate::surfaces::learn_target(self.id, t, text);
+            Ok(())
+        })
+    }
+
+    /// The project's learn maps.
+    pub fn learn_maps(&self) -> Result<Vec<LearnMapRow>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let doc = inner.doc();
+            Ok(doc
+                .settings()
+                .learn
+                .iter()
+                .map(|m| {
+                    let missing = !core_model::automation::target_exists(doc, m.target);
+                    LearnMapRow::from((m, missing))
+                })
+                .collect())
+        })
+    }
+
+    /// Sets the mode of the map from `source`: an undo step "MIDI Learn".
+    pub fn set_learn_mode(
+        &self,
+        source: LearnSourceRow,
+        mode: LearnModeRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.change_learn(&source, |m| m.mode = mode.into()))
+    }
+
+    /// Ruling 18: a `SetLearn` of the changed map ("MIDI Learn").
+    pub fn set_learn_pickup(
+        &self,
+        source: LearnSourceRow,
+        on: bool,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.change_learn(&source, |m| m.pickup = on))
+    }
+
+    /// Removes the map from `source` ("Remove MIDI Learn").
+    pub fn remove_learn(&self, source: LearnSourceRow) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let source = source.source()?;
+            self.learn_edit(SettingsCmd::RemoveLearn {
+                source: Some(source),
+                target: None,
+            })
+        })
+    }
+
+    /// Every map to `target`, as one step (`RemoveLearn { target }`).
+    pub fn unlearn_target(&self, target: AutomationTargetRow) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.learn_edit(SettingsCmd::RemoveLearn {
+                source: None,
+                target: Some(automation_target_of(target)),
+            })
         })
     }
 }
 
+/// The most strips `set_surface_selection` takes.
+const MAX_SURFACE_SELECTION: usize = 1024;
+
+/// The most surface events kept for the app (it drains them every tick).
+const MAX_SURFACE_EVENTS: usize = 1024;
+
+/// A skip or wind this recent winds on from where it went (Ruling 5).
+const WIND_RECENT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The mixer's strips in display order, master excluded (Ruling 4).
+fn display_order(doc: &Document) -> Vec<StripId> {
+    let m = doc.mixer();
+    m.order()
+        .iter()
+        .copied()
+        .filter(|id| *id != m.master() && m.strip(*id).is_ok())
+        .collect()
+}
+
+/// Whether AudioPath strip `kind` is armed (Ruling 12): any lane of any
+/// sequence playing through its path is.
+fn path_armed(doc: &Document, kind: core_model::mixer::StripKind) -> bool {
+    let core_model::mixer::StripKind::AudioPath(p) = kind else {
+        return false;
+    };
+    doc.sequences()
+        .values()
+        .any(|s| s.lanes.iter().any(|l| l.audio_out == Some(p) && l.arm))
+}
+
 impl Session {
-    /// `idle`'s surfaces step: when this session is focused, the 2 s port
-    /// check (Task 7). Takes the registry without `inner` (lock order).
+    /// Moves the position to `tick` (the body of [`Session::locate`], also
+    /// the surfaces' skips and winds; plan 5f-1 Ruling 5).
+    fn locate_in(&self, inner: &mut Inner, tick: i64) -> Result<(), VizError> {
+        if inner.recording.is_some() {
+            return Err(recording_busy());
+        }
+
+        // A Locate while a pass writes lands it; the new position is a
+        // new pass (plan 5e-1 Ruling 23).
+        let writing = inner
+            .writing
+            .as_ref()
+            .map(|w| (w.seq, w.handles.status.rolled()));
+        self.finish_writing(inner);
+        self.apply_pending_automation(inner);
+        if !host::locate(self.id, Tick(tick))? {
+            inner.cursor = Some(Tick(tick));
+            inner.cursor_seq = inner.selected_seq();
+        }
+        // Again from the new position: when it plays, or when the old
+        // pass had not rolled yet (check I-2: the Play is still on its
+        // way to the renderer).
+        let stopped = host::transport_stopped(self.id);
+        if let Some((seq, _)) =
+            writing.filter(|(_, rolled)| stopped == Some(false) || (!rolled && stopped.is_some()))
+        {
+            self.begin_writing(inner, seq, Tick(tick));
+        }
+        Ok(())
+    }
+
+    /// Makes this session the focused one, with its document's maps.
+    fn focus_here(&self) {
+        let maps = lock(&self.inner).doc().settings().learn.clone();
+        crate::surfaces::focus(self.id, maps);
+    }
+
+    /// The surfaces get this document's maps now (a learn edit; Ruling 17).
+    fn sync_learn(&self) {
+        let maps = lock(&self.inner).doc().settings().learn.clone();
+        crate::surfaces::sync_maps(self.id, &maps);
+    }
+
+    /// A learn edit: one undo step, then the surfaces' maps follow.
+    /// `Busy` while a static touch's step is open.
+    fn learn_edit(&self, cmd: SettingsCmd) -> Result<DocSnapshot, VizError> {
+        if lock(&self.inner).static_edit.is_some() {
+            return Err(VizError::Busy {
+                message: "Release the touched control first.".into(),
+            });
+        }
+        let snap = self.execute(Command::Settings(cmd))?;
+        self.sync_learn();
+        Ok(snap)
+    }
+
+    /// The map from `source`, changed by `f`, as a `SetLearn` ("MIDI
+    /// Learn"). `Model` for a bad source or one with no map.
+    fn change_learn(
+        &self,
+        source: &LearnSourceRow,
+        f: impl FnOnce(&mut core_model::learn::LearnMap),
+    ) -> Result<DocSnapshot, VizError> {
+        let source = source.source()?;
+        let mut map = lock(&self.inner)
+            .doc()
+            .settings()
+            .learn
+            .iter()
+            .find(|m| m.source == source)
+            .cloned()
+            .ok_or_else(|| {
+                crate::events::bad(&format!(
+                    "no MIDI control is learned from {}",
+                    source.describe()
+                ))
+            })?;
+        f(&mut map);
+        self.learn_edit(SettingsCmd::SetLearn { map })
+    }
+
+    /// Folds one take of the engine's read-and-clear peaks into both meter
+    /// holds (Ruling 13, pre-flight I4).
+    fn take_meters(&self, inner: &mut Inner) {
+        if let Some(l) = host::levels(self.id) {
+            inner.meters.fold(l);
+        }
+    }
+
+    /// `idle`'s surfaces step (plan 5f-1 Task 8): every session takes the
+    /// releases it is owed and decides a learn it asked for; the focused
+    /// one also routes input, applies the actions and ticks, then sends
+    /// feedback. Lock order: `inner`, then the registry in short calls.
     fn service_surfaces(&self) {
-        crate::surfaces::service(self.id);
+        let now = crate::surfaces::now();
+        let mut moved = Vec::new();
+        let focused = {
+            let mut inner = lock(&self.inner);
+            self.take_meters(&mut inner);
+            let (owed, focused) = crate::surfaces::begin(self.id, now);
+            for (h, t) in owed {
+                inner.surfaces.last_ns.remove(&(h, t));
+                self.release_from(&mut inner, t, h, None);
+            }
+            if focused {
+                crate::surfaces::sync_maps(self.id, &inner.doc().settings().learn);
+                let strips = display_order(inner.doc()).len();
+                let acts = {
+                    let shared: &Inner = &inner;
+                    let current = |t| Some(self.surface_heard(shared, t, None));
+                    crate::surfaces::route_and_tick(self.id, now, strips, &current)
+                };
+                self.apply_surface_acts(&mut inner, acts, now, &mut moved);
+            }
+            focused
+        };
+        self.decide_learn(now);
+        if focused {
+            self.feed_surfaces(now, &moved);
+        }
+    }
+
+    /// Step 6: a learn this session asked for decides and becomes a
+    /// `SetLearn` ("MIDI Learn", pick-up on; Rulings 7, 18). Not while an
+    /// edit is open: the step would join it.
+    fn decide_learn(&self, now: Instant) {
+        if !crate::surfaces::learning_for(self.id) || lock(&self.inner).history.in_transaction() {
+            return;
+        }
+        let Some(l) = crate::surfaces::decide(self.id, now) else {
+            return;
+        };
+        let map = core_model::learn::LearnMap {
+            source: l.source,
+            target: l.target,
+            mode: l.mode,
+            pickup: true,
+        };
+        match self.execute(Command::Settings(SettingsCmd::SetLearn { map })) {
+            Ok(_) => lock(&self.inner).news.doc_changed = true,
+            Err(e) => lock(&self.inner)
+                .news
+                .problems
+                .push(format!("MIDI Learn: {e}")),
+        }
+        self.sync_learn();
+    }
+
+    /// Step 4: applies the surfaces' and learn's actions; a refused one
+    /// counts once per message in its unit's `ignored`. What a hand moved
+    /// goes to `moved` (the partners' feedback).
+    fn apply_surface_acts(
+        &self,
+        inner: &mut Inner,
+        acts: Vec<crate::surfaces::Act>,
+        now: Instant,
+        moved: &mut Vec<crate::surfaces::Moved>,
+    ) {
+        use core_surface::{Phase, SurfaceAction as A};
+        let mut refused = Vec::new();
+        for a in acts {
+            let ok = match a.action {
+                A::Gesture(t, phase) => {
+                    let ok = self
+                        .gesture_held(inner, t, phase, a.holder, a.host_ns)
+                        .is_ok();
+                    let key = (a.holder, t);
+                    match phase {
+                        Phase::Release => {
+                            inner.surfaces.last_ns.remove(&key);
+                        }
+                        Phase::Touch(Some(_)) | Phase::Value(_) if ok => {
+                            let ns = host_time(a.host_ns);
+                            inner.surfaces.last_ns.insert(key, ns);
+                        }
+                        _ => {}
+                    }
+                    if ok && phase != Phase::Release {
+                        moved.push(crate::surfaces::Moved {
+                            holder: a.holder,
+                            target: t,
+                            strip: core_model::automation::strip_of(inner.doc(), t),
+                        });
+                    }
+                    ok
+                }
+                A::IdleRelease(t, at) => {
+                    // Stamped at its last value's time (Ruling 2): the host
+                    // time that value was applied at, else its age on the
+                    // surfaces clock.
+                    let ns = inner
+                        .surfaces
+                        .last_ns
+                        .remove(&(a.holder, t))
+                        .unwrap_or_else(|| {
+                            let ago = now.saturating_duration_since(at).as_nanos();
+                            host_time(None).saturating_sub(u64::try_from(ago).unwrap_or(u64::MAX))
+                        });
+                    self.release_from(inner, t, a.holder, Some(ns));
+                    true
+                }
+                A::Skip(dir) => self.surface_skip(inner, dir, now),
+                A::Wind(q) => self.surface_wind(inner, q, now),
+                A::Select(s) => {
+                    self.surface_event(inner, SurfaceEventRow::Select { strip: s.0 });
+                    true
+                }
+                A::Arm(s) => {
+                    let path = match inner.doc().mixer().strip(s).map(|x| x.kind) {
+                        Ok(core_model::mixer::StripKind::AudioPath(p)) => Some(p.0),
+                        _ => None,
+                    };
+                    self.surface_event(inner, SurfaceEventRow::Arm { strip: s.0, path });
+                    true
+                }
+                A::Jog(detents) => {
+                    self.surface_event(inner, SurfaceEventRow::Jog { detents });
+                    true
+                }
+                A::Command(id) => {
+                    let programmatic = a.programmatic;
+                    self.surface_event(inner, SurfaceEventRow::Command { id, programmatic });
+                    true
+                }
+                // The registry moved the bank already.
+                A::Bank(_) | A::Channel(_) => true,
+            };
+            if !ok && let Some(u) = a.unit {
+                refused.push((u, a.tag));
+            }
+        }
+        crate::surfaces::refused(&refused);
+    }
+
+    /// Queues `e` for `take_surface_events` (the oldest go past the bound).
+    fn surface_event(&self, inner: &mut Inner, e: SurfaceEventRow) {
+        let events = &mut inner.surfaces.events;
+        if events.len() >= MAX_SURFACE_EVENTS {
+            events.remove(0);
+        }
+        events.push(e);
+    }
+
+    /// Where a skip or wind starts (Ruling 5): the tick the last one went
+    /// to when it was less than 250 ms ago, else the transport's. `None`
+    /// while recording or with no sequence in the engine.
+    fn wind_base(&self, inner: &Inner, now: Instant) -> Option<(SeqId, i64)> {
+        if inner.recording.is_some() {
+            return None;
+        }
+        let (seq, tick) = host::position(self.id)?;
+        let tick = match inner.surfaces.wind {
+            Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
+            _ => tick.0,
+        };
+        Some((seq, tick))
+    }
+
+    /// `Skip(±1)`: the previous/next marker of the transport's sequence,
+    /// else the previous/next bar line of its meter map, never below 0.
+    fn surface_skip(&self, inner: &mut Inner, dir: i32, now: Instant) -> bool {
+        let Some((seq, tick)) = self.wind_base(inner, now) else {
+            return false;
+        };
+        let Ok(s) = inner.doc().sequence(seq) else {
+            return false;
+        };
+        let forward = dir > 0;
+        let to = core_editor::transport::marker_step(s, Tick(tick), forward).unwrap_or_else(|| {
+            if forward {
+                s.meter.barline_at_or_after(Tick(tick.saturating_add(1)))
+            } else if tick <= 0 {
+                Tick::ZERO
+            } else {
+                s.meter.barline_at_or_before(Tick(tick.saturating_sub(1)))
+            }
+        });
+        self.surface_locate(inner, to.0.max(0), now)
+    }
+
+    /// `Wind(q)`: `base + round(q × PPQ)`, never below 0.
+    fn surface_wind(&self, inner: &mut Inner, q: f64, now: Instant) -> bool {
+        let Some((_, base)) = self.wind_base(inner, now) else {
+            return false;
+        };
+        if !q.is_finite() {
+            return false;
+        }
+        // `as` saturates; a wind step is a fraction of a beat.
+        let by = (q * core_model::time::PPQ as f64).round() as i64;
+        self.surface_locate(inner, base.saturating_add(by).max(0), now)
+    }
+
+    /// A surface's locate, remembered as the next wind's base.
+    fn surface_locate(&self, inner: &mut Inner, tick: i64, now: Instant) -> bool {
+        let ok = self.locate_in(inner, tick).is_ok();
+        if ok {
+            inner.surfaces.wind = Some((now, tick));
+        }
+        ok
+    }
+
+    /// The value a surface or map shows for `t` (Ruling 13): a hand's
+    /// value while it holds a valued touch (what the engine plays a block
+    /// later, so a partner follows at once), else the heard value. A Trim
+    /// touch shows the heard value (its hand is an offset).
+    fn surface_heard(
+        &self,
+        inner: &Inner,
+        t: AutomationTarget,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> f64 {
+        if let Some(x) = inner.touches.get(&t)
+            && x.valued
+            && !matches!(x.path, TouchPath::Write(WriteMode::Trim, _))
+        {
+            return x.value;
+        }
+        self.heard_from(inner, t, cached)
+    }
+
+    /// The playing sequence's flattened automation, cached per (document
+    /// version, sequence) (Ruling 13); `None` while stopped.
+    fn surface_existing(
+        &self,
+        inner: &mut Inner,
+    ) -> Option<(SeqId, Arc<crate::automation::Existing>)> {
+        if host::transport_stopped(self.id) != Some(false) {
+            return None;
+        }
+        let (seq, _) = host::position(self.id)?;
+        let v = inner.version;
+        if let Some((ver, s, all)) = &inner.surfaces.existing
+            && *ver == v
+            && *s == seq
+        {
+            return Some((seq, Arc::clone(all)));
+        }
+        let all = Arc::new(crate::automation::existing_all(inner.doc(), seq));
+        inner.surfaces.existing = Some((v, seq, Arc::clone(&all)));
+        Some((seq, all))
+    }
+
+    /// Steps 7–8: when a unit or the maps are due, the MixerView of heard
+    /// values (only for the strips the due units show), then feedback.
+    fn feed_surfaces(&self, now: Instant, moved: &[crate::surfaces::Moved]) {
+        let mut inner = lock(&self.inner);
+        let order = display_order(inner.doc());
+        let Some(due) = crate::surfaces::due(self.id, now, &order, moved) else {
+            return;
+        };
+        let cached = self.surface_existing(&mut inner);
+        let meters = inner.meters.take_surfaces();
+        let shared: &Inner = &inner;
+        let view = self.surface_view(shared, &order, &due, cached.as_ref(), &meters);
+        let current = |t| Some(self.surface_heard(shared, t, cached.as_ref()));
+        crate::surfaces::feedback(self.id, now, &due, &view, &current);
+    }
+
+    /// The MixerView (Ruling 13): heard values of the strips `due` shows,
+    /// the selection, the plugin of the first selected strip's first
+    /// insert, the arm LEDs (Ruling 12), the meters and the transport.
+    fn surface_view(
+        &self,
+        inner: &Inner,
+        order: &[StripId],
+        due: &crate::surfaces::Due,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+        meters: &std::collections::BTreeMap<u64, (f32, f32)>,
+    ) -> core_surface::MixerView {
+        use core_model::automation::SendIndex;
+        let doc = inner.doc();
+        let m = doc.mixer();
+        let heard = |t| self.surface_heard(inner, t, cached);
+        let strip = |s: &core_model::mixer::Strip, shown: bool| {
+            let id = s.id;
+            let mut v = core_surface::StripView {
+                id,
+                name: s.name.clone(),
+                fader: 0.0,
+                pan: 0.5,
+                send: None,
+                mute: false,
+                solo: false,
+                arm: false,
+                select: inner.surfaces.selection.contains(&id),
+                mode: s.automation,
+                meter: (0.0, 0.0),
+            };
+            if shown {
+                v.fader = heard(AutomationTarget::StripFader(id));
+                v.pan = heard(AutomationTarget::StripPan(id));
+                v.send = (!s.sends.is_empty())
+                    .then(|| heard(AutomationTarget::SendLevel(id, SendIndex(0))));
+                v.mute = heard(AutomationTarget::StripMute(id)) >= 0.5;
+                v.solo = heard(AutomationTarget::StripSolo(id)) >= 0.5;
+                v.arm = path_armed(doc, s.kind);
+                v.meter = meters.get(&id.0).copied().unwrap_or((0.0, 0.0));
+            }
+            v
+        };
+        let strips = order
+            .iter()
+            .enumerate()
+            .filter_map(|(k, id)| {
+                m.strip(*id)
+                    .ok()
+                    .map(|s| strip(s, due.visible.contains(&k)))
+            })
+            .collect();
+        let master = m.strip(m.master()).ok().map(|s| strip(s, true));
+        let plugin = if due.plugin {
+            self.surface_params(inner, cached)
+        } else {
+            Vec::new()
+        };
+        let (seq, tick) = host::position(self.id).map_or_else(
+            || (inner.cursor_seq, inner.cursor.unwrap_or(Tick::ZERO)),
+            |(s, t)| (Some(s), t),
+        );
+        core_surface::MixerView {
+            strips,
+            master,
+            plugin,
+            position: seq.map_or_else(|| "1.1.0".to_string(), |s| position_bbu(doc, s, tick)),
+            playing: host::transport_stopped(self.id) == Some(false),
+            recording: inner.recording.is_some(),
+            looping: inner.looped,
+        }
+    }
+
+    /// The first selected strip's first insert's first 8 automatable
+    /// parameters, by the plugin's list order, with heard values (Ruling 5).
+    fn surface_params(
+        &self,
+        inner: &Inner,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> Vec<core_surface::ParamView> {
+        let m = inner.doc().mixer();
+        let Some(slot) = inner
+            .surfaces
+            .selection
+            .iter()
+            .find_map(|s| m.strip(*s).ok())
+            .and_then(|s| s.inserts.front().map(|i| i.id))
+        else {
+            return Vec::new();
+        };
+        let infos = plugins::with(self.id, |p| {
+            p.and_then(|p| p.instance(slot))
+                .map(|inst| {
+                    inst.info()
+                        .params
+                        .iter()
+                        .filter(|i| i.automatable && !i.hidden)
+                        .take(8)
+                        .map(|i| (i.id, i.name.clone(), i.min, i.max, i.stepped))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+        infos
+            .into_iter()
+            .map(|(id, name, min, max, stepped)| {
+                let target = AutomationTarget::PluginParam(slot, id);
+                let value = self.surface_heard(inner, target, cached);
+                let plain = core_model::automation::param_plain(value, min, max, stepped);
+                core_surface::ParamView {
+                    target,
+                    name,
+                    value,
+                    text: format!("{plain:.2}"),
+                }
+            })
+            .collect()
     }
 }
 

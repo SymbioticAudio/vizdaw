@@ -149,9 +149,10 @@ pub(crate) use live::CoreMidiPorts;
 mod live {
     use super::Ports;
     use core_engine::backend::{MidiBackend, MidiOut, MidiPortInfo};
-    use platform_macos::midi::{MidiSystem, SourceListener, list_destinations};
+    use platform_macos::midi::{MidiSystem, SourceListener, list_destination_refs};
     use std::collections::BTreeMap;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, RwLock};
 
     /// The client name of the surfaces' input and output.
@@ -166,10 +167,12 @@ mod live {
         system: Option<MidiSystem>,
         /// Source key → name, for the sink (`try_read`: it never waits).
         names: Arc<RwLock<BTreeMap<u32, String>>>,
-        /// The destinations the last refresh saw.
-        dests: Vec<MidiPortInfo>,
-        /// The outputs opened, by name, with the destination they opened.
-        outs: BTreeMap<String, (MidiPortInfo, Box<dyn MidiOut>)>,
+        /// The destinations the last refresh saw, with their endpoint refs.
+        dests: Vec<(u32, MidiPortInfo)>,
+        /// The outputs opened, by name, with the endpoint ref and the
+        /// destination they opened (review M1: keyed on the ref, which a
+        /// re-created endpoint changes).
+        outs: BTreeMap<String, (u32, MidiPortInfo, Box<dyn MidiOut>)>,
     }
 
     impl CoreMidiPorts {
@@ -187,14 +190,18 @@ mod live {
         }
 
         /// The sink: CoreMIDI's thread; looks up and pushes, never waits,
-        /// never unwinds into CoreMIDI.
+        /// never unwinds into CoreMIDI. A message lost to a name-map rewrite
+        /// is counted (review M3).
         fn sink(names: Arc<RwLock<BTreeMap<u32, String>>>) -> platform_macos::midi::SourceSink {
             Box::new(move |key, host_ns, bytes| {
-                let _ = catch_unwind(AssertUnwindSafe(|| {
-                    if let Ok(n) = names.try_read()
-                        && let Some(name) = n.get(&key)
-                    {
-                        super::super::input(name, bytes, host_ns);
+                let _ = catch_unwind(AssertUnwindSafe(|| match names.try_read() {
+                    Ok(n) => {
+                        if let Some(name) = n.get(&key) {
+                            super::super::input(name, bytes, host_ns);
+                        }
+                    }
+                    Err(_) => {
+                        super::super::INPUT_BUSY.fetch_add(1, Ordering::Relaxed);
                     }
                 }));
             })
@@ -204,7 +211,8 @@ mod live {
     impl Ports for CoreMidiPorts {
         fn send(&mut self, port: &str, bytes: &[u8]) -> bool {
             if !self.outs.contains_key(port) {
-                let Some(info) = self.dests.iter().find(|d| d.name == port).cloned() else {
+                let Some((r, info)) = self.dests.iter().find(|(_, d)| d.name == port).cloned()
+                else {
                     return false;
                 };
                 let Some(system) = self.system.as_mut() else {
@@ -213,11 +221,11 @@ mod live {
                 let Ok(out) = system.open_destination(&info) else {
                     return false;
                 };
-                self.outs.insert(port.to_string(), (info, out));
+                self.outs.insert(port.to_string(), (r, info, out));
             }
             self.outs
                 .get_mut(port)
-                .is_some_and(|(_, out)| out.send(0, bytes))
+                .is_some_and(|(_, _, out)| out.send(0, bytes))
         }
 
         fn sources(&self) -> Vec<String> {
@@ -228,7 +236,7 @@ mod live {
         }
 
         fn destinations(&self) -> Vec<String> {
-            self.dests.iter().map(|d| d.name.clone()).collect()
+            self.dests.iter().map(|(_, d)| d.name.clone()).collect()
         }
 
         fn refresh(&mut self) {
@@ -247,17 +255,21 @@ mod live {
                 .into_iter()
                 .map(|n| (core_engine::input::port_key(&n), n))
                 .collect();
-            if let Ok(mut w) = self.names.write() {
+            // Rewritten only when it changed, so the sink is not refused a
+            // read every 2 s (review M3).
+            let changed = self.names.read().map_or(true, |n| *n != names);
+            if changed && let Ok(mut w) = self.names.write() {
                 *w = names;
             }
             if self.system.is_none() {
                 self.system = MidiSystem::new(CLIENT).ok();
             }
-            self.dests = list_destinations();
-            // Reopen what vanished or changed: an output is kept only while
-            // the same destination is present.
+            self.dests = list_destination_refs();
+            // Reopen what vanished or was re-created: an output is kept
+            // only while the same endpoint is listed (review M1).
             let dests = &self.dests;
-            self.outs.retain(|_, (info, _)| dests.contains(info));
+            self.outs
+                .retain(|_, (r, info, _)| dests.iter().any(|(dr, d)| dr == r && d == info));
         }
     }
 }

@@ -73,7 +73,7 @@ fn push(q: &Queue, bytes: &[u8]) {
 pub struct NoteInput {
     queue: Queue,
     #[cfg(target_os = "macos")]
-    listener: Mutex<Option<platform_macos::midi::NoteListener>>,
+    listener: Mutex<Option<platform_macos::midi::SourceListener>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -81,11 +81,21 @@ fn listen(input: &NoteInput) -> Result<u32, VizError> {
     // Drop the old connection first: one client at a time.
     *lock(&input.listener) = None;
     let q = Arc::clone(&input.queue);
-    let l = platform_macos::midi::NoteListener::connect_all(
+    // Through `SourceListener`, which knows each message's port, so what
+    // surfaces and learned maps take stays out of note input and step
+    // entry (plan 5f-1 Ruling 17).
+    let l = platform_macos::midi::SourceListener::connect_all(
         "VizDAW Note Input",
-        Box::new(move |b: &[u8]| push(&q, b)),
+        Box::new(move |port: u32, _: u64, b: &[u8]| {
+            // A panic must not unwind into CoreMIDI.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if !crate::surfaces::takes(port, b) {
+                    push(&q, b);
+                }
+            }));
+        }),
     )?;
-    let n = l.sources();
+    let n = u32::try_from(l.sources().len()).unwrap_or(u32::MAX);
     *lock(&input.listener) = Some(l);
     Ok(n)
 }

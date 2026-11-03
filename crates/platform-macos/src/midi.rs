@@ -324,6 +324,14 @@ fn destination_endpoints() -> Vec<(MIDIEndpointRef, MidiPortInfo)> {
         .collect()
 }
 
+/// Destinations visible to the system with their endpoint references (no
+/// client needed): a cache of opened outputs keeps one only while the same
+/// endpoint is listed, since a re-created endpoint (same name and unique ID)
+/// gets a new reference (plan 5f-1 Task 7 review M1).
+pub fn list_destination_refs() -> Vec<(u32, MidiPortInfo)> {
+    destination_endpoints()
+}
+
 /// Destinations visible to the system (no client needed).
 pub fn list_destinations() -> Vec<MidiPortInfo> {
     destination_endpoints()
