@@ -3,7 +3,7 @@
 use core_media::caf::{CafReader, CafWriter, WriteMode};
 use core_media::export::{
     Container, ExportFormat, PcmWriter, check_destination, check_folder, export, partial_path,
-    write_partial,
+    write_partial, write_span,
 };
 use core_media::import::CafImporter;
 use core_model::format::BitDepth;
@@ -794,4 +794,134 @@ fn a_held_partial_refuses() {
             .is_symlink()
     );
     assert!(!other.exists());
+}
+
+/// A 48 kHz stereo CAF of `signal(frames)` in `depth`, without dither:
+/// the media a region plays (plan 5f-3).
+fn media_caf(dir: &Path, depth: BitDepth, frames: usize) -> PathBuf {
+    let p = dir.join(format!("media-{}.caf", depth.bits()));
+    let mut w = CafWriter::create(&p, 48_000, 2, depth, WriteMode::Normal).unwrap();
+    w.set_dither(false);
+    w.write(&signal(frames)).unwrap();
+    w.finish().unwrap();
+    p
+}
+
+/// Plan 5f-3 Task 2 (pre-flight I4, I5): an edit copy is the span's own
+/// samples, bit for bit, in every depth; refusals write nothing.
+#[test]
+fn a_span_is_written_exactly() {
+    let d = tempfile::tempdir().unwrap();
+    for depth in [BitDepth::Int16, BitDepth::Int24, BitDepth::Float32] {
+        let src = media_caf(d.path(), depth, 1000);
+        let out = d.path().join(format!("out-{}", depth.bits()));
+        std::fs::create_dir(&out).unwrap();
+        let f = fmt(Container::Wav, depth, false);
+        let e = write_span(&src, 300, 500, &out, "Kick", &f).unwrap();
+        assert_eq!(
+            (e.path.clone(), e.frames, e.channels),
+            (out.join("Kick edit 1.wav"), 500, 2)
+        );
+        let (rate, ch, bits, float, frames, samples) = read_wav(&e.path);
+        assert_eq!(
+            (rate, ch, bits, float, frames),
+            (
+                48_000,
+                2,
+                depth.bits() as u16,
+                depth == BitDepth::Float32,
+                500
+            ),
+            "{depth:?}"
+        );
+        let r = CafReader::open(&src).unwrap();
+        let mut want = vec![0f32; 1000];
+        assert_eq!(r.read(300, &mut want, &mut Vec::new()).unwrap(), 500);
+        let want: Vec<i64> = want
+            .iter()
+            .map(|x| match depth {
+                BitDepth::Int16 => (x * 32_768.0).round() as i64,
+                BitDepth::Int24 => (x * 8_388_608.0).round() as i64,
+                BitDepth::Float32 => i64::from(x.to_bits()),
+            })
+            .collect();
+        assert_eq!(samples, want, "{depth:?}: the media's own samples");
+        assert_eq!(names(&out), ["Kick edit 1.wav"], "no partial is left");
+    }
+    // Refused before anything is written.
+    let src = d.path().join("media-24.caf");
+    let out = d.path().join("refused");
+    std::fs::create_dir(&out).unwrap();
+    let f = fmt(Container::Wav, BitDepth::Int24, false);
+    for (start, frames) in [(0, 0), (900, 101), (u64::MAX, 2)] {
+        assert!(
+            write_span(&src, start, frames, &out, "Kick", &f).is_err(),
+            "{start} {frames}"
+        );
+    }
+    for bad in [
+        fmt(Container::Wav, BitDepth::Int24, true),
+        fmt(Container::Aiff, BitDepth::Int24, false),
+        ExportFormat { rate: 44_100, ..f },
+    ] {
+        assert!(
+            write_span(&src, 0, 10, &out, "Kick", &bad).is_err(),
+            "{bad:?}"
+        );
+    }
+    assert!(write_span(&src, 0, 10, &d.path().join("missing"), "Kick", &f).is_err());
+    assert!(write_span(&d.path().join("nope.caf"), 0, 10, &out, "Kick", &f).is_err());
+    assert!(names(&out).is_empty(), "nothing was written");
+}
+
+/// Plan 5f-3 Task 2 (pre-flight I5, M3): copies take the first free
+/// number and never write over a file; a crash's partial is cleared and
+/// its number used; a partial another writer holds keeps its number.
+#[test]
+fn spans_take_the_first_free_number_and_clear_a_stale_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let src = media_caf(d.path(), BitDepth::Int24, 100);
+    let out = d.path().join("Edits");
+    std::fs::create_dir(&out).unwrap();
+    let f = fmt(Container::Wav, BitDepth::Int24, false);
+    let span = || write_span(&src, 0, 100, &out, "Kick", &f).unwrap().path;
+    assert_eq!(span(), out.join("Kick edit 1.wav"));
+    // A copy from an earlier edit is never written over.
+    std::fs::write(out.join("Kick edit 2.wav"), b"the user's").unwrap();
+    // A partial a crash left (nobody holds its lock) is cleared and used.
+    std::fs::write(
+        partial_path(&out.join("Kick edit 3.wav")),
+        b"left by a crash",
+    )
+    .unwrap();
+    assert_eq!(span(), out.join("Kick edit 3.wav"));
+    assert_eq!(read_wav(&out.join("Kick edit 3.wav")).4, 100);
+    assert_eq!(
+        std::fs::read(out.join("Kick edit 2.wav")).unwrap(),
+        b"the user's"
+    );
+    assert_eq!(
+        names(&out),
+        ["Kick edit 1.wav", "Kick edit 2.wav", "Kick edit 3.wav"]
+    );
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let held = std::fs::File::create(partial_path(&out.join("Kick edit 4.wav"))).unwrap();
+        // SAFETY: `held` owns a valid open descriptor for the call.
+        assert_eq!(
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(
+            span(),
+            out.join("Kick edit 5.wav"),
+            "another writer's number is skipped"
+        );
+        assert!(
+            partial_path(&out.join("Kick edit 4.wav")).is_file(),
+            "and its file left"
+        );
+        drop(held);
+    }
 }

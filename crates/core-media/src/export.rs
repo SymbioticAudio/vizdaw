@@ -908,3 +908,147 @@ pub fn export(
     )?
     .commit()
 }
+
+/// Frames a span copy reads at a time.
+const SPAN_CHUNK: usize = 8192;
+
+/// Frames `[start, start + frames)` of the VizDAW CAF `source` as
+/// `<dir>/<stem> edit <n>.wav` for the first free `n` (1..=[`MAX_NUMBER`];
+/// plan 5f-3 Ruling 2, pre-flight I4, I5): no gain, no fades, no dither,
+/// no rate change, so a source at `fmt.depth` is copied bit for bit.
+/// Written through `.<stem> edit <n>.wav.partial`: a partial a crash left
+/// (its lock free) is removed and the number used; a name that exists, or
+/// a partial another writer holds, skips to the next number. The partial
+/// is moved into place by `rename_excl`, never over a file, and removed on
+/// any error. Refuses before writing: `fmt` not WAV or with dither, a rate
+/// other than the source's, an empty span or one past the source's end,
+/// a folder that is missing or cannot be written, a name too long.
+pub fn write_span(
+    source: &Path,
+    start: u64,
+    frames: u64,
+    dir: &Path,
+    stem: &str,
+    fmt: &ExportFormat,
+) -> Result<Exported, MediaError> {
+    if fmt.container != Container::Wav || fmt.dither {
+        return Err(MediaError::Unsupported(
+            "an edit copy is a WAV without dither".into(),
+        ));
+    }
+    let r = CafReader::open(source)?;
+    let (rate, channels, have) = (r.info().sample_rate, r.info().channels, r.info().frames);
+    if rate != fmt.rate {
+        return Err(MediaError::Unsupported(format!(
+            "{rate} Hz to {} Hz: an edit copy keeps the media's rate",
+            fmt.rate
+        )));
+    }
+    let end = start
+        .checked_add(frames)
+        .filter(|e| frames > 0 && *e <= have)
+        .ok_or_else(|| {
+            MediaError::Unsupported(format!(
+                "frames {start} to {} of a file of {have}",
+                start.saturating_add(frames)
+            ))
+        })?;
+    let ch = usize::from(channels);
+    for n in 1..=MAX_NUMBER {
+        let dest = dir.join(format!("{stem} edit {n}.wav"));
+        if std::fs::symlink_metadata(&dest).is_ok() {
+            continue;
+        }
+        check_dest(&dest, fmt)?;
+        let partial = partial_path(&dest);
+        match clear_stale_partial(&partial, &dest) {
+            Ok(()) => {}
+            // Another writer holds this number (or, without locks, a
+            // leftover blocks it): the next one.
+            Err(MediaError::Unsupported(_)) => continue,
+            Err(e) => return Err(e),
+        }
+        let mut w = match PcmWriter::create(&partial, fmt, channels) {
+            Ok(w) => w,
+            // Something took the partial's name meanwhile: the next number.
+            Err(_) if std::fs::symlink_metadata(&partial).is_ok() => continue,
+            Err(e) => return Err(e),
+        };
+        // From here on the partial is ours: any way out but the rename
+        // removes it, before its lock is released.
+        let mut guard = PartialGuard(Some(partial.clone()));
+        let lock = match lock_own_partial(&partial, &dest) {
+            Ok(l) => l,
+            Err(MediaError::Unsupported(_)) => {
+                // Another writer has the name now: leave its file.
+                guard.0 = None;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        // `Some`: in place; `None`: the name appeared meanwhile.
+        let done = copy_frames(&r, start, end, ch, &mut w, source)
+            .and_then(|()| w.finish())
+            .and_then(|e| match rename_excl(&partial, &dest) {
+                Ok(()) => Ok(Some(e)),
+                Err(x) if x.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+                Err(x) => Err(x.into()),
+            });
+        match done {
+            Ok(Some(mut exported)) => {
+                guard.0 = None;
+                drop(lock);
+                sync_parent(&dest);
+                exported.path = dest;
+                return Ok(exported);
+            }
+            // The partial goes first, then its lock (another writer must
+            // never take a live partial for a stale one).
+            Ok(None) => {
+                drop(guard);
+                drop(lock);
+            }
+            Err(e) => {
+                drop(guard);
+                drop(lock);
+                return Err(e);
+            }
+        }
+    }
+    Err(MediaError::Io(format!(
+        "no free name for {stem} edit <n>.wav"
+    )))
+}
+
+/// Copies frames `[start, end)` of `r` into `w` (`ch` channels).
+fn copy_frames(
+    r: &CafReader,
+    start: u64,
+    end: u64,
+    ch: usize,
+    w: &mut PcmWriter,
+    source: &Path,
+) -> Result<(), MediaError> {
+    let mut buf = vec![0f32; SPAN_CHUNK * ch];
+    let mut scratch = Vec::new();
+    let mut at = start;
+    while at < end {
+        let want = usize::try_from(end - at)
+            .unwrap_or(SPAN_CHUNK)
+            .min(SPAN_CHUNK);
+        let got = r.read(
+            at,
+            buf.get_mut(..want * ch).unwrap_or(&mut []),
+            &mut scratch,
+        )?;
+        if got == 0 {
+            return Err(MediaError::Io(format!(
+                "{} ended before frame {end}",
+                display_name(source)
+            )));
+        }
+        w.write(buf.get(..got * ch).unwrap_or(&[]))?;
+        at += got as u64;
+    }
+    Ok(())
+}
