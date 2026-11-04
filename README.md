@@ -33,13 +33,20 @@ after the first release).
   Loop, Record, the position and the transport fields.
 - Two main views: Arrange (⌃1) and Mix (⌃2). Switching keeps each view's
   panes as you left them.
-- Three panes: left (⌃⌘←), bottom (⌃⌘↓) and right (⌃⌘→). Each has a picker
-  for what it shows: a channel strip, sequences, an editor, the mixer,
-  markers and more. Drag the lines between panes to resize them.
+- Three panes, left (⌃⌘←), bottom (⌃⌘↓) and right (⌃⌘→), each with a
+  picker for what it shows. Drag the lines between them to resize them.
 - ⌘1 to ⌘4 open the piano roll, list, Strip Chart and drum grid in the
   bottom pane.
 - Window > Mixer opens the mixer in a window of its own.
 - Change any key in Settings › Keys.
+
+## Platforms
+
+VizDAW runs on macOS 14 or newer on Apple Silicon. Its core is
+platform-neutral Rust, and it builds and passes its tests on Linux in CI.
+A Linux app, with its own Rust interface and PipeWire audio, is planned
+after 1.0. A later 2.0 may bring one interface for every platform, and
+Windows.
 
 ## Building from source
 
@@ -52,6 +59,9 @@ scripts/swift.sh run VizDAW       # opens a window (add --demo to start with the
 scripts/swift.sh test             # Swift Testing suite (needs build-ffi.sh first)
 scripts/make-app.sh               # dist/VizDAW.app, ad-hoc signed
 ```
+
+Building on Linux: the core builds and tests with `cargo test --workspace`
+(there is no Linux app yet).
 
 See [app/README.md](app/README.md) for more.
 

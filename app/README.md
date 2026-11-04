@@ -124,6 +124,8 @@ window's main view (`arrange` or `mix`), each view's left, bottom and
 right panes (shown, view, size and the views on that pane's list) and
 what the left pane shows (`left_shows`: `strip`, `inspector`, `sequences`,
 `nothing` or `hidden`; `left_strip`: the strip the rule picks).
+`state.get editor`'s `detail` is the bottom pane's editor whether or not
+it shows; `state.get layout` says whether it does.
 `ui.view_arrange` and `ui.view_mix` switch the main view;
 `ui.toggle_left`, `ui.toggle_bottom` and `ui.toggle_right` show and hide
 a pane (absent `on` toggles); `ui.pane {"pane": "right", "view":
@@ -1896,7 +1898,7 @@ you should see; report anything else, and every value step 198 asks for.
 Checked by hand; the layout rules are tested (`WindowLayoutTests`,
 `PaneGeometryTests`, `LeftPaneTests`, `RightPaneTests`, `ViewCommandsTests`)
 and the e2e `window_views_and_panes_over_the_channel`. Where earlier steps
-say the sidebar, use Left Pane › Sequences; the toolbar is now the
+say the sidebar, use the left pane's picker, Sequences; the toolbar is now the
 transport bar; the mixer's toolbar is the bar along the top of the mixer;
 the detail pane is the bottom pane's editor.
 
@@ -1905,9 +1907,10 @@ the detail pane is the bottom pane's editor.
      buttons; when the window is too narrow for one row, the transport
      fields move to a second row, and the step-entry summary, shown only
      while step entry is on, sits in front of them or above them), the
-     channel strip on the left running the full height, the arrangement
-     in the centre and the "No Editor Open" pane below it. The right pane
-     is hidden.
+     left pane (Channel Strip) running the full height, which says
+     "Select a lane to see its channel strip." until a lane is selected
+     or armed, the arrangement in the centre and the "No Editor Open"
+     pane below it. The right pane is hidden.
 200. Scroll the arrangement to bar 9 and zoom in once. Press ⌃2: the
      mixer fills the window under the transport bar, with no arrangement.
      Press ⌃1: the arrangement comes back where you left it (bar 9, the
@@ -1920,19 +1923,19 @@ the detail pane is the bottom pane's editor.
      beside the arrangement for the full height. Press ⌃⌘↓: the bottom
      pane comes back. Press ⌃⌘← twice: the left pane hides and comes back
      with the same view and size. The View menu's Left, Bottom and Right
-     Pane items show the same check marks. Choose Left Pane › Sequences,
-     double-click Song, type `Verse` and press ⌃⌘←: the left pane hides
-     and the rename is kept, as Return would keep it (⌃⌘← again shows the
-     new name). Press Space: the transport plays, and the status line
+     Pane items show the same check marks. In the left pane's picker
+     choose Sequences, double-click Song, type `Verse` and press ⌃⌘←: the
+     left pane hides and the rename is kept, as Return would keep it (⌃⌘←
+     again shows the new name). Press Space: the transport plays, and the status line
      does not say "A text field has the keyboard.". Undo the rename.
      Double-click the Chords block and select a note, press ⌃⌘↓, press
      Delete, then ⌃⌘↓ again: the note is still there.
 202. Drag the line between the arrangement and the bottom pane up and down:
-     the pane follows the pointer, without running ahead of it, and stops
-     at its smallest and largest size. With the right pane shown, shrink
-     the window as far as it goes (700×450): the panes shrink to their
-     smallest and the arrangement keeps a usable area; nothing hides at
-     this size. Grow it again: the panes go back to their sizes.
+     the line follows the pointer, without running ahead of it, and stops
+     at the pane's smallest and largest size; the pane takes the new size
+     when you let go. With the right pane shown, shrink the window as far
+     as it goes (700×450): the panes shrink to their smallest and the
+     arrangement keeps a usable area; nothing hides at this size. Grow it again: the panes go back to their sizes.
 203. Click the Chords lane header and play Song: the left pane shows the
      Built-in Synth's strip. Move its fader: the mixer (⌥⌘M) and the Mix
      view (⌃2) show the same level, and the meters fall at the same speed
