@@ -143,8 +143,10 @@ public enum PaneGeometry {
         return min(max(start + signed, range.lowerBound), upper)
     }
 
-    /// A saved `[x, y, width, height]` if it is four finite numbers, at least 700×450 and
-    /// shows at least 100×100 on some screen; otherwise nil.
+    /// A saved `[x, y, width, height]` if it is four finite numbers, at least 700×450,
+    /// shows at least 100×100 on some screen and has the strip of its title bar
+    /// (the top 30 pt) on a screen, so it can be dragged (final review n1);
+    /// otherwise nil.
     public static func sanitizedFrame(_ f: [Double]?, screens: [CGRect]) -> CGRect? {
         guard let f, f.count == 4, f.allSatisfy(\.isFinite), f[2] >= 700, f[3] >= 450 else { return nil }
         let r = CGRect(x: f[0], y: f[1], width: f[2], height: f[3])
@@ -152,6 +154,11 @@ public enum PaneGeometry {
             let i = $0.intersection(r)
             return !i.isNull && i.width >= 100 && i.height >= 100
         }
-        return ok ? r : nil
+        let titleBar = CGRect(x: r.minX, y: r.maxY - 30, width: r.width, height: 30)
+        let reachable = screens.contains {
+            let i = $0.intersection(titleBar)
+            return !i.isNull && i.width >= 100 && i.height >= 30
+        }
+        return ok && reachable ? r : nil
     }
 }

@@ -101,6 +101,10 @@ fileprivate extension ControlOutcome {
         ] {
             #expect(run("ui.pane", args, doc, store).code == .invalidParams, "\(args)")
         }
+        // A key bound to Set Pane sends no arguments: it is unavailable, in
+        // the key's wording, and passes on (Task 6 review M2).
+        #expect(run("ui.pane", [], doc, store).code == .unavailable)
+        #expect(run("ui.pane", [], doc, store).message?.hasPrefix("Set Pane needs") == true)
         #expect(
             run("ui.pane", [.text("pane", "right"), .text("view", "piano_roll")], doc, store).message
                 == "piano_roll is not on the right pane's list in the arrange view.")
@@ -135,6 +139,17 @@ fileprivate extension ControlOutcome {
         _ = run("ui.toggle_left", [], doc, store)
         #expect(m.renamingSeq == nil && !m.editor.textEditing && mixer.renamingStrip == nil)
         #expect(!m.textFieldHasKeyboard)
+        // Task 6 review M4: Arrange chosen while Arrange shows changes
+        // nothing and keeps the rename; a refused `ui.pane` keeps it; an
+        // accepted one ends it.
+        let seq = try #require(m.selectedSeq)
+        m.beginRename(seq)
+        _ = run("ui.view_arrange", [], doc, store)
+        #expect(m.renamingSeq == seq)
+        _ = run("ui.pane", [.text("pane", "left"), .text("view", "markers")], doc, store)
+        #expect(m.renamingSeq == seq)
+        _ = run("ui.pane", [.text("pane", "left"), .text("view", "sequences")], doc, store)
+        #expect(m.renamingSeq == nil)
     }
     /// Task 6 review M1: the pane picker's `choose` refused by `setPane`
     /// (an editor kind in the right pane) opens no detail, shows no bottom

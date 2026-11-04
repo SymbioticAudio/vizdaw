@@ -83,4 +83,12 @@ import Testing
         #expect(PaneGeometry.sanitizedFrame([0, 0, 1200], screens: screens) == nil)
         #expect(PaneGeometry.sanitizedFrame(nil, screens: screens) == nil)
     }
+    /// Final review n1: saved on a display above the laptop, reopened
+    /// without it: the bottom 100 pt are on screen but the title bar is not.
+    @Test func aSavedFrameWithItsTitleBarOffScreenIsIgnored() {
+        let screens = [CGRect(x: 0, y: 0, width: 1512, height: 982)]
+        #expect(PaneGeometry.sanitizedFrame([100, 870, 1200, 800], screens: screens) == nil)
+        #expect(PaneGeometry.sanitizedFrame([100, 170, 1200, 800], screens: screens)
+            == CGRect(x: 100, y: 170, width: 1200, height: 800))
+    }
 }

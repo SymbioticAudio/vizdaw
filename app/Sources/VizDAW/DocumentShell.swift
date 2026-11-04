@@ -287,7 +287,16 @@ struct PaneDivider: View {
                         .onEnded { _ in ended() }
                 )
                 .position(x: r.midX + shift.width, y: r.midY + shift.height)
-                .accessibilityHidden(true)
+                // VoiceOver can size the pane, as it could the split views'
+                // splitters before 7a (final review n8).
+                .accessibilityElement()
+                .accessibilityLabel("\(side.title) Size")
+                .accessibilityValue("\(Int(setup[side].size)) points")
+                .accessibilityAdjustableAction { d in
+                    let step: Double = d == .increment ? 20 : d == .decrement ? -20 : 0
+                    guard step != 0 else { return }
+                    _ = model.editor.setPane(side, view: nil, shown: nil, size: setup[side].size + step, in: nil)
+                }
         }
     }
 

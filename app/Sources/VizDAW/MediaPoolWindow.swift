@@ -89,7 +89,8 @@ struct MediaPoolView: View {
             Table(media.poolRows, selection: $media.selection) {
                 TableColumn("Name", value: \.name)
                 TableColumn("Duration", value: \.duration).width(min: 60, ideal: 72)
-                TableColumn("Offline") { r in offlineCell(r.offline) }
+                // Wide enough for its header (Task 8 review M4).
+                TableColumn("Offline") { r in offlineCell(r.offline) }.width(min: 52, ideal: 64)
             }
         } else {
             Table(media.poolRows, selection: $media.selection) {
@@ -119,7 +120,8 @@ struct MediaPoolView: View {
         Button("Select Regions") { if let id = selected { media.selectUsers(id) } }
             .disabled(selected == nil)
         Button("Select Unused") { media.selectUnused() }
-        Button("Compact") { media.compact() }
+        // Menu items do not show `.help`: the title says it (Task 8 review M1).
+        Button("Compact (Remove Unused Items)") { media.compact() }
         Divider()
         Button("Rename…") { if let id = selected { rename(id) } }.disabled(selected == nil)
         Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil)

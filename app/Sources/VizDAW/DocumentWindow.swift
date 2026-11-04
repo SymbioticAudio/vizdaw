@@ -135,7 +135,10 @@ struct WindowFrameKeeper: NSViewRepresentable {
                     guard let w = view.window,
                         let r = PaneGeometry.sanitizedFrame(saved, screens: NSScreen.screens.map(\.frame))
                     else { return }
-                    w.setFrame(r, display: true)
+                    // `setFrame` does not keep the title bar on a screen;
+                    // the screen it is on does (final review n1).
+                    let screen = NSScreen.screens.first { $0.frame.intersects(r) }
+                    w.setFrame(w.constrainFrameRect(r, to: screen), display: true)
                 }
             }
         }

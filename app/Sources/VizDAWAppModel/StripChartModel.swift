@@ -130,10 +130,10 @@ public final class StripChartModel {
                     stripRowsLane: LaneKey(seq, lane.id))
             },
             write: { [weak document] d in
-                guard let document, let seq = document.selectedSeq, let lane = document.focusLanes().first,
-                    let rows = d.stripRows
-                else { return }
-                document.editor.updateLayout { $0.controllers[EditorLayout.controllersKey(seq, lane.id)] = rows }
+                // Keyed on the lane the state was read for, not the focus
+                // now (Task 4 review M4: a surface may arm a lane mid-stroke).
+                guard let document, case .lane(let seq, let lane) = d.target, let rows = d.stripRows else { return }
+                document.editor.updateLayout { $0.controllers[EditorLayout.controllersKey(seq, lane)] = rows }
             })
     }
 

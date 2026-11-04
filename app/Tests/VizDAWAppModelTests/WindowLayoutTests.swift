@@ -59,6 +59,25 @@ import VizDAWCore
         #expect(l.views.mix.bottom == PaneState(shown: true, view: .editor, size: 200))
         #expect(l.views.mix.left == ViewLayouts().mix.left && l.views.mix.right == ViewLayouts().mix.right)
         #expect(l.laneHeight == 60)
+        // A partial Mix patch keeps the Mix defaults for what it leaves out;
+        // unknown keys and a pane that is not an object change nothing
+        // (Task 1 review M1, M2).
+        let partial = EditorLayout.decode(#"{"views":{"mix":{"bottom":{"size":200,"colour":"red"},"left":5}}}"#)
+        #expect(partial.views.mix.bottom == PaneState(shown: false, view: .editor, size: 200))
+        #expect(partial.views.mix.left == ViewLayouts().mix.left)
+        #expect(partial.views.arrange == ViewLayouts().arrange)
+        let notAnObject = EditorLayout.decode(#"{"views":7,"laneHeight":70}"#)
+        #expect(notAnObject.views == ViewLayouts() && notAnObject.laneHeight == 70)
+    }
+    /// Final review n2: a window move that ends where it began writes nothing.
+    @Test func anUnchangedFrameWritesNothing() {
+        let e = editor()
+        e.setDocumentFrame([10, 20, 1200, 800])
+        let drawn = e.drawVersion
+        e.setDocumentFrame([10, 20, 1200, 800])
+        #expect(e.drawVersion == drawn)
+        e.setDocumentFrame([11, 20, 1200, 800])
+        #expect(e.drawVersion == drawn + 1 && e.layout.views.frame == [11, 20, 1200, 800])
     }
     @Test func anOlderLayoutWithoutViewsDecodes() {
         let l = EditorLayout.decode(#"{"version":1,"laneHeight":80}"#)

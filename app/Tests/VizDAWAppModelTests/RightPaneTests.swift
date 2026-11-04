@@ -84,4 +84,51 @@ private let delay = PluginRefRow(format: .clap, id: "x.Delay", name: "Delay", ve
             EditorLayout.decode(m.editor.layout.encoded()).controllers["\(m.selectedSeq!):\(m.lanes[0].id)"]
                 == [.velocity, .controller(1)])
     }
+    /// Task 4 review M4: a write keys on the lane its state was read for,
+    /// even when the focus moved on (a surface arming a lane mid-stroke).
+    @Test func theControllersWriteKeepsTheLaneItRead() {
+        let (m, _) = fakeDocumentAndSession()
+        selectFirstLane(m)
+        var d = m.controllersChart.state!
+        let seq = m.selectedSeq!
+        m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneKey(seq, m.lanes[1].id).ref], events: []))
+        d.stripRows = [.controller(7)]
+        m.controllersChart.write(d)
+        #expect(m.editor.layout.controllers[EditorLayout.controllersKey(seq, m.lanes[0].id)] == [.controller(7)])
+        #expect(m.editor.layout.controllers[EditorLayout.controllersKey(seq, m.lanes[1].id)] == nil)
+    }
+    /// Task 4 review M1 (Ruling 7): Arrange puts a plug-in on the lane's
+    /// strip first, Mix on the selected mixer strip first.
+    @Test func arrangePrefersTheLanesStripAndMixTheSelectedStrip() throws {
+        for (main, strip) in [(MainView.arrange, 10), (.mix, 11)] {
+            let (m, session) = fakeDocumentAndSession(laneAndSelectedStrips())
+            selectFirstLane(m)
+            m.selectedStrips = [11]
+            m.editor.showMainView(main)
+            let mixer = try MixerModel(document: m)
+            #expect(PaneContent.insertPlugin(delay, document: m, mixer: mixer) == nil)
+            #expect(session.calls.last == "addInsert \(strip) end \(delay.id)", "\(main)")
+        }
+    }
+    @Test func withNoSelectedStripMixFallsBackToTheLanesStrip() throws {
+        let (m, session) = fakeDocumentAndSession(laneAndSelectedStrips())
+        selectFirstLane(m)
+        m.editor.showMainView(.mix)
+        let mixer = try MixerModel(document: m)
+        #expect(PaneContent.insertPlugin(delay, document: m, mixer: mixer) == nil)
+        #expect(session.calls.last == "addInsert 10 end \(delay.id)")
+    }
+}
+
+/// `laneOnStrip10()` plus a second path strip, 11.
+private func laneAndSelectedStrips() -> FakeSession {
+    let f = laneOnStrip10()
+    f.mixerSnap = MixerSnapshot(
+        version: f.snap.version,
+        strips: [
+            stripRow(10, "Out 1", kind: .audioPath(path: 7)), stripRow(11, "Out 2", kind: .audioPath(path: 8)),
+            stripRow(0, "Master", kind: .master),
+        ],
+        buses: [])
+    return f
 }

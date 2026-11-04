@@ -36,8 +36,32 @@ private func deleteKey(_ w: NSWindow) -> NSEvent {
         keyCode: 51)!
 }
 
+/// A view that takes the keyboard.
+@MainActor
+private final class FocusView: NSView {
+    override var acceptsFirstResponder: Bool { true }
+}
+
 @MainActor
 @Suite struct LayerFocusTests {
+    /// Task 7 review M2: a responder the hidden layer collapsed to nothing
+    /// (its frame no longer inside the layer) still loses the keyboard.
+    @Test func aCollapsedResponderIsResignedToo() {
+        let content = NSView()
+        let (w, upper) = window(content)
+        defer { w.close() }
+        let collapsed = FocusView(frame: NSRect(x: 10, y: 100, width: 0, height: 0))
+        upper.addSubview(collapsed)
+        #expect(w.makeFirstResponder(collapsed))
+        #expect(LayerFocus.resign(w, inside: rect(content)))
+        #expect(w.firstResponder !== collapsed)
+        // The control: a visible responder outside the layer keeps it.
+        let shown = FocusView(frame: NSRect(x: 10, y: 100, width: 50, height: 20))
+        upper.addSubview(shown)
+        #expect(w.makeFirstResponder(shown))
+        #expect(!LayerFocus.resign(w, inside: rect(content)))
+        #expect(w.firstResponder === shown)
+    }
     @Test func hidingTheBottomPaneEndsAListCellEdit() throws {
         let f = rollFake()
         let m = try DocumentModel(session: f)

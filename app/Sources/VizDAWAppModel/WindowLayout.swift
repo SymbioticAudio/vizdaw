@@ -250,7 +250,9 @@ extension EditorModel {
 
     /// Remembers the document window's `[x, y, width, height]`.
     public func setDocumentFrame(_ f: [Double]) {
-        guard f.count == 4, f.allSatisfy(\.isFinite) else { return }
+        // A move that ends where it began writes nothing (Ruling 11; final
+        // review n2): no redraw of every editor for a click on the title bar.
+        guard f.count == 4, f.allSatisfy(\.isFinite), f != layout.views.frame else { return }
         updateLayout { $0.views.frame = f }
     }
 }

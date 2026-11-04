@@ -14,7 +14,9 @@ struct ArrangementPane: View {
             // In a narrow centre the bar scrolls rather than wrap its labels.
             ViewThatFits(in: .horizontal) {
                 ArrangementBar(model: model, editor: model.editor)
-                ScrollView(.horizontal, showsIndicators: false) {
+                // With indicators: in a narrow centre Zoom In and Out are
+                // off the right edge, and nothing else says so (Task 7 M6).
+                ScrollView(.horizontal, showsIndicators: true) {
                     ArrangementBar(model: model, editor: model.editor)
                 }
             }

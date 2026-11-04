@@ -427,6 +427,10 @@ public enum ControlCommands {
                 return .failed(.thrown(error, "MIDI Injection Failed"))
             }
         case ViewCommands.pane:
+            // A key bound to Set Pane sends no arguments: it is unavailable
+            // and passes on (Task 6 review M2); the channel always sends
+            // `pane`, which the core requires.
+            if args.isEmpty, let f = failure(ViewCommands.run(id, on: nil, m)) { return f }
             return ViewCommands.runPane(args, m, doc: docID)
         case _ where ViewCommands.ids.contains(id):
             if let f = failure(ViewCommands.run(id, on: args.flag("on"), m)) { return f }
