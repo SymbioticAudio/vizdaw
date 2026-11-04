@@ -31,3 +31,33 @@ extension NSView {
         }
     }
 }
+
+/// A window in a theme (Ruling 12): its appearance and its background.
+@MainActor
+public enum WindowTheming {
+    public static func style(_ w: NSWindow, _ t: Theme) {
+        w.appearance = NSAppearance(named: t.appearance.nsAppearanceName)
+        w.backgroundColor = t.surface.window.nsColor
+    }
+}
+
+/// An empty view in a themed root that styles the window it is in: when
+/// it arrives in a window and whenever its theme changes, so a window made
+/// after the last theme change is styled at once (B4 review I1).
+public final class WindowThemeMarker: NSView {
+    public var theme: Theme = .classicLight {
+        didSet { if theme != oldValue { styleWindow() } }
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        styleWindow()
+    }
+
+    public override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func styleWindow() {
+        guard let w = window else { return }
+        WindowTheming.style(w, theme)
+    }
+}

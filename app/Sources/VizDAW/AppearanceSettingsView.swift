@@ -47,7 +47,7 @@ struct AppearanceSettingsView: View {
                         Text(said).font(.caption).foregroundStyle(.secondary)
                     }
                     ForEach(lib.problems) { p in
-                        Text("\(p.file) \(p.message).")
+                        Text(p.file.isEmpty ? "\(p.message)." : "\(p.file) \(p.message).")
                             .font(.caption)
                             .foregroundStyle(current.state.warning.color)
                     }

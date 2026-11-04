@@ -142,9 +142,79 @@ import VizDAWCore
         ] {
             #expect(all.contains(needle), "\(needle) not listed in \(all)")
         }
-        // A huge string is not echoed back whole.
-        #expect(r.problems.allSatisfy { $0.count < 300 }, "\(r.problems.map(\.count))")
+        // A huge string is not echoed back whole (bytes, not graphemes).
+        #expect(r.problems.allSatisfy { $0.utf8.count < 300 }, "\(r.problems.map(\.utf8.count))")
     }
+
+    /// Review I2: one letter with 200 000 combining marks is one grapheme
+    /// but 400 001 bytes: too long for a name, and never echoed whole.
+    @Test func combiningMarksCountAgainstTheLimits() throws {
+        let heavy = "A" + String(repeating: "\u{0301}", count: 200_000)
+        #expect(heavy.count == 1)
+        let named = parse(#"{"name": "\#(heavy)", "base": "flat"}"#)
+        #expect(named.theme == nil)
+        #expect(named.problems.allSatisfy { $0.utf8.count < 300 }, "\(named.problems.map(\.utf8.count))")
+        let token = parse(#"{"name": "Heavy", "base": "flat", "values": {"surface": {"window": "\#(heavy)"}}}"#)
+        #expect(token.theme?.theme.surface == Theme.flat.surface)
+        #expect(token.problems.count == 1 && token.problems[0].contains("values.surface.window"))
+        #expect(token.problems.allSatisfy { $0.utf8.count < 300 }, "\(token.problems.map(\.utf8.count))")
+        // A name of 64 scalars is the longest.
+        let mark = "e" + String(repeating: "\u{0301}", count: 31)
+        #expect(parse(#"{"name": "\#(mark)\#(mark)", "base": "flat"}"#).theme != nil)
+        #expect(parse(#"{"name": "\#(mark)\#(mark)x", "base": "flat"}"#).theme == nil)
+    }
+
+    /// Review M7: JSON nested far deeper than the parser's limit is refused
+    /// as not JSON, without a crash.
+    @Test func deeplyNestedJSONIsRefused() {
+        let deep = String(repeating: "[", count: 500_000) + String(repeating: "]", count: 500_000)
+        let r = parse(deep)
+        #expect(r.theme == nil && r.problems == ["is not JSON"])
+        let inValues = #"{"name": "Deep", "base": "flat", "values": "#
+            + String(repeating: "{\"a\":", count: 100_000) + "1" + String(repeating: "}", count: 100_001)
+        #expect(parse(inValues).theme == nil)
+    }
+
+    /// Review I3: a folder of 300 files opens at most `maxFiles` + 1
+    /// watches (the folder and the files read), lists the rest as one
+    /// problem, and a reload never holds two sets.
+    @Test func aCrowdedFolderOpensBoundedWatches() throws {
+        let f = try Folder()
+        for i in 0..<300 {
+            try f.write(String(format: "T%03d.json", i), #"{"name": "T\#(i)", "base": "flat"}"#)
+        }
+        // Over 1 MB: listed, not read, not watched.
+        try f.write("A big.json", data: Data(repeating: 0x20, count: UserThemeFile.maxBytes + 1))
+        let watching = CountingWatching()
+        let lib = UserThemes(folder: f.url, watching: watching)
+        lib.start()
+        #expect(lib.themes.count == UserThemeFile.maxFiles)
+        #expect(watching.live <= UserThemeFile.maxFiles + 1, "\(watching.live)")
+        #expect(!watching.watched.contains(f.url.appendingPathComponent("A big.json").path))
+        #expect(watching.peak <= UserThemeFile.maxFiles + 1, "\(watching.peak)")
+        lib.reload()
+        #expect(watching.peak <= UserThemeFile.maxFiles + 1, "\(watching.peak)")
+        #expect(lib.problems.count == 2, "\(lib.problems.map(\.message))")
+        #expect(lib.problems.contains { $0.message.contains("236 more") })
+    }
+
+    /// Review M4: every ID a file name gives is one the channel accepts
+    /// (core-control's `is_slug` after `user.`).
+    @Test func everyFileIDIsInTheChannelsGrammar() throws {
+        let grammar = try NSRegularExpression(pattern: #"^user\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$"#)
+        let names = [
+            "Mine.json", "my dark.json", "--a--b--.json", "Café Noir.json", "ＦＵＬＬ ｗｉｄｔｈ x.json",
+            String(repeating: "ab-", count: 40) + ".json", String(repeating: "a", count: 63) + "-b.json",
+            "A" + String(repeating: "\u{0301}", count: 1000) + "b.json", "2026.json", "x.y.z.json",
+        ]
+        for n in names {
+            guard let id = UserThemeFile.id(forFile: n) else { continue }
+            let range = NSRange(id.startIndex..., in: id)
+            #expect(grammar.firstMatch(in: id, range: range) != nil, "\(n) gave \(id)")
+        }
+        #expect(UserThemeFile.id(forFile: "!!!.json") == nil)
+    }
+
 
     @Test func aFileOverTheSizeLimitIsNotRead() throws {
         let f = try Folder()
@@ -272,5 +342,29 @@ import VizDAWCore
         let r = AppearanceCommands.run([.init(name: "theme", value: .text(value: "user.mine"))], prefs: p)
         guard case .done(.ran(_, _, _, _, let status)) = r else { Issue.record("\(r)"); return }
         #expect(status == "theme user.mine" && p.theme.name == "Mine")
+    }
+}
+
+/// Counts live watches and the most held at once (review I3).
+@MainActor final class CountingWatching: FileWatching {
+    final class Token {
+        let owner: CountingWatching
+        init(owner: CountingWatching) { self.owner = owner }
+        deinit {
+            // A strong `let`, not a weak capture, into the main actor (Swift 6.1).
+            let owner = self.owner
+            MainActor.assumeIsolated { owner.live -= 1 }
+        }
+    }
+
+    fileprivate(set) var live = 0
+    private(set) var peak = 0
+    private(set) var watched: [String] = []
+
+    func watch(_ path: String, _ changed: @escaping @MainActor () -> Void) -> AnyObject? {
+        live += 1
+        peak = max(peak, live)
+        watched.append(path)
+        return Token(owner: self)
     }
 }

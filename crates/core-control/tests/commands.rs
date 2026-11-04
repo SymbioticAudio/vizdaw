@@ -1731,6 +1731,7 @@ fn ui_theme_checks_its_params() {
         "user.my-dark",
         "user.a",
         "user.2026-blue",
+        "user.a1",
     ] {
         assert_eq!(
             ok("command.run", run(json!({ "theme": id }))),
@@ -1742,6 +1743,15 @@ fn ui_theme_checks_its_params() {
             "{id}"
         );
     }
+    // The longest slug, 64 characters, is accepted.
+    let longest = format!("user.{}", "a".repeat(64));
+    assert!(
+        matches!(
+            ok("command.run", run(json!({ "theme": longest }))),
+            Command::CommandRun { .. }
+        ),
+        "{longest}"
+    );
     let long = format!("user.{}", "a".repeat(65));
     for bad in [
         json!({}),
@@ -1760,6 +1770,16 @@ fn ui_theme_checks_its_params() {
         json!({ "theme": "x".repeat(70_000) }),
         json!({ "theme": null }),
         json!({ "theme": ["flat"] }),
+        json!({ "theme": "user.a-" }),
+        json!({ "theme": "user.user.a" }),
+        json!({ "theme": "user.café" }),
+        json!({ "theme": "user.ａ" }),
+        json!({ "theme": "flat " }),
+        json!({ "theme": " flat" }),
+        json!({ "theme": "user" }),
+        json!({ "theme": "USER.a" }),
+        json!({ "theme": true }),
+        json!({ "theme": { "id": "flat" } }),
     ] {
         assert_eq!(
             err("command.run", run(bad.clone())).0,

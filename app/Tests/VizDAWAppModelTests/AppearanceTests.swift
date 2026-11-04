@@ -1,7 +1,9 @@
+import AppKit
 import Foundation
 import SymbioticTokens
 import Testing
 import VizDAWCore
+import VizDAWEditors
 @testable import VizDAWAppModel
 
 /// Settings › Appearance's preference and `ui.theme` (plan 7b Task B4,
@@ -100,5 +102,63 @@ import VizDAWCore
         for t in Theme.all {
             #expect(p.choose(t.id) && p.theme == t)
         }
+    }
+
+    // Fix round 1.
+
+    /// Review M2: a theme that is not text is refused, and nothing changes.
+    @Test func uiThemeRefusesANonTextTheme() {
+        let p = AppearancePreferences(defaults: MemoryDefaults())
+        for v: ControlValue in [.int(value: 7), .flag(value: true)] {
+            guard case .failed(let f) = AppearanceCommands.run([.init(name: "theme", value: v)], prefs: p) else {
+                Issue.record("ran \(v)")
+                continue
+            }
+            #expect(f.code == .invalidParams)
+        }
+        #expect(p.theme.id == "classic-light")
+    }
+
+    /// Review M4: the channel's built-in IDs (core-control's `THEME_IDS`)
+    /// are the design package's `Theme.all`, in order.
+    @Test func theChannelNamesTheSameThemesAsTheApp() throws {
+        let registry = SourceScan.sourcesRoot
+            .deletingLastPathComponent()  // app
+            .deletingLastPathComponent()  // the repo
+            .appendingPathComponent("crates/core-control/src/registry.rs")
+        let text = try String(contentsOf: registry, encoding: .utf8)
+        let start = try #require(text.range(of: "pub const THEME_IDS: &[&str] = &["))
+        let end = try #require(text.range(of: "];", range: start.upperBound..<text.endIndex))
+        let body = text[start.upperBound..<end.lowerBound]
+        let ids = body.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+        #expect(ids == Theme.all.map(\.id))
+    }
+
+    /// Review I1: a window takes the theme's styling as soon as a themed
+    /// root is in it, and again whenever the theme changes, however late it
+    /// was made.
+    @Test func aWindowTakesTheThemeWhenItsRootArrives() throws {
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered,
+            defer: true)
+        w.isReleasedWhenClosed = false
+        let marker = WindowThemeMarker()
+        marker.theme = .console
+        #expect(w.appearance == nil)
+        try #require(w.contentView).addSubview(marker)
+        func rgba(_ c: NSColor?) -> [CGFloat] {
+            guard let c = c?.usingColorSpace(.sRGB) else { return [] }
+            return [c.redComponent, c.greenComponent, c.blueComponent, c.alphaComponent]
+        }
+        #expect(w.appearance?.name == .darkAqua)
+        #expect(rgba(w.backgroundColor) == rgba(Theme.console.surface.window.nsColor))
+        marker.theme = .flat
+        #expect(w.appearance?.name == .aqua)
+        #expect(rgba(w.backgroundColor) == rgba(Theme.flat.surface.window.nsColor))
+        // The styling itself, as ThemeWindows uses it.
+        WindowTheming.style(w, .studioDark)
+        #expect(w.appearance?.name == .darkAqua)
+        #expect(rgba(w.backgroundColor) == rgba(Theme.studioDark.surface.window.nsColor))
     }
 }

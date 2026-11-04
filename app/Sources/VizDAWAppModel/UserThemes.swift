@@ -15,6 +15,7 @@ public struct UserTheme: Equatable, Sendable {
 
 /// Something wrong in a theme file, as Settings › Appearance lists it.
 public struct UserThemeProblem: Equatable, Sendable, Identifiable {
+    /// The file's name; empty for a problem of the folder as a whole.
     public let file: String
     public let message: String
     public var id: String { file + "\n" + message }
@@ -39,8 +40,10 @@ public enum UserThemeFile {
     public static let maxBytes = 1 << 20
     /// The most theme files read from the folder.
     public static let maxFiles = 64
-    /// The longest name.
+    /// The longest name, in Unicode scalars.
     public static let maxName = 64
+    /// The most problems listed for the whole folder.
+    static let maxListed = 200
     /// The most problems listed for one file.
     static let maxProblems = 40
     public static let idPrefix = "user."
@@ -79,7 +82,9 @@ public enum UserThemeFile {
         guard let top = any as? [String: Any] else { return (nil, ["is not a JSON object"]) }
         guard let rawName = top["name"] as? String,
             case let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines),
-            !name.isEmpty, name.count <= maxName,
+            // Scalars, not graphemes: one letter can carry any number of
+            // combining marks (B4 review I2).
+            !name.isEmpty, name.unicodeScalars.count <= maxName,
             name.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
         else {
             return (nil, ["needs a \"name\": text of 1 to \(maxName) characters"])
@@ -106,7 +111,7 @@ public enum UserThemeFile {
     /// order. Hidden files and files not ending in `.json` are skipped. A
     /// name a built-in theme has, or a name or ID an earlier file has, is a
     /// problem and that file is left out.
-    public static func load(folder: URL) -> (themes: [UserTheme], problems: [UserThemeProblem]) {
+    public static func load(folder: URL) -> (themes: [UserTheme], problems: [UserThemeProblem], read: [String]) {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
         let urls = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: []))
@@ -115,12 +120,23 @@ public enum UserThemeFile {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         var themes: [UserTheme] = []
         var problems: [UserThemeProblem] = []
+        var read: [String] = []
+        var unread = 0
+        var unlisted = 0
         let builtIn = Set(Theme.all.map { $0.name.lowercased() })
-        for (n, url) in files.enumerated() {
+        for url in files {
             let file = url.lastPathComponent
-            let say = { (m: String) in problems.append(UserThemeProblem(file: file, message: m)) }
-            guard n < maxFiles else {
-                say("was not read: the folder has more than \(maxFiles) theme files")
+            let say = { (m: String) in
+                if problems.count < maxListed {
+                    problems.append(UserThemeProblem(file: file, message: m))
+                } else {
+                    unlisted += 1
+                }
+            }
+            // At most `maxFiles` are read (and watched: B4 review I3); the
+            // rest are one problem.
+            guard read.count < maxFiles else {
+                unread += 1
                 continue
             }
             let v = try? url.resourceValues(forKeys: Set(keys))
@@ -133,6 +149,7 @@ public enum UserThemeFile {
                 say("could not be read")
                 continue
             }
+            read.append(file)
             let r = parse(data, file: file)
             r.problems.forEach(say)
             guard let u = r.theme else { continue }
@@ -147,15 +164,27 @@ public enum UserThemeFile {
                 themes.append(u)
             }
         }
-        return (themes, problems)
+        if unread > 0 {
+            problems.append(
+                UserThemeProblem(
+                    file: "",
+                    message: "\(unread) more theme files were not read: VizDAW reads at most \(maxFiles)"))
+        }
+        if unlisted > 0 {
+            problems.append(UserThemeProblem(file: "", message: "\(unlisted) more problems are not listed"))
+        }
+        return (themes, problems, read)
     }
 
-    /// `s` in quotes, cut to 40 characters (a hostile file's text is never
+    /// `s` in quotes, cut to 40 Unicode scalars (a hostile file's text is never
     /// echoed whole).
     static func quote(_ s: String) -> String {
-        let cut = s.count > 40 ? String(s.prefix(40)) + "…" : s
-        let clean = String(cut.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? "?" : Character($0) })
-        return "\"" + clean + "\""
+        // Cut by scalars (B4 review I2), each control character shown as "?".
+        var clean = String.UnicodeScalarView()
+        for u in s.unicodeScalars.prefix(40) {
+            clean.append(CharacterSet.controlCharacters.contains(u) ? "?" : u)
+        }
+        return "\"" + String(clean) + (s.unicodeScalars.count > 40 ? "…" : "") + "\""
     }
 
     /// Reads a file's tokens over its base, listing what does not read.
@@ -583,8 +612,10 @@ public final class UserThemes {
         if r.themes != themes { themes = r.themes }
         if r.problems != problems { problems = r.problems }
         if let watching {
-            let paths = [folder.path] + r.themes.map { folder.appendingPathComponent($0.file).path }
-                + Set(r.problems.map(\.file)).sorted().map { folder.appendingPathComponent($0).path }
+            // The folder and the files read, no more (B4 review I3); the
+            // old watches go before the new ones open.
+            tokens = []
+            let paths = [folder.path] + r.read.map { folder.appendingPathComponent($0).path }
             tokens = paths.compactMap { watching.watch($0) { [weak self] in self?.reload() } }
         }
         onReload?()
@@ -593,7 +624,7 @@ public final class UserThemes {
     /// Writes `t` as a new file, `‹name› Copy.json` (then ` 2`, ` 3` …),
     /// never over an existing file; the name in the file matches.
     public func duplicate(_ t: Theme, base: String) throws -> URL {
-        let stem = Self.fileSafe(String(t.name.prefix(UserThemeFile.maxName - 9))) + " Copy"
+        let stem = Self.fileSafe(String(String.UnicodeScalarView(t.name.unicodeScalars.prefix(UserThemeFile.maxName - 9)))) + " Copy"
         let taken = Set((themes.map(\.theme.name) + Theme.all.map(\.name)).map { $0.lowercased() })
         let ids = Set(themes.map(\.theme.id))
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
