@@ -99,7 +99,7 @@ public final class PianoKeyboardView: NSView, ThemedView {
             if let label = KeyboardLabels.label(p), pitchAxis.rowHeight >= 8 {
                 NSString(string: label).draw(
                     at: CGPoint(x: bounds.width - 26, y: y + (pitchAxis.rowHeight - 11) / 2),
-                    withAttributes: [.font: font, .foregroundColor: theme.secondaryLabel])
+                    withAttributes: [.font: font, .foregroundColor: theme.keyLabel])
             }
         }
         NSGraphicsContext.restoreGraphicsState()

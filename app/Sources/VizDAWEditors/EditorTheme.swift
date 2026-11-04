@@ -46,8 +46,12 @@ public extension Theme {
 
     // MARK: Piano keys
 
-    var whiteKey: NSColor { surface.raised.nsColor }
-    var blackKey: NSColor { text.primary.nsColor }
+    // White and black in every theme (owner decision 2026-11-03, overruling
+    // Ruling 13's surface.raised / text.primary): the `keys` group.
+    var whiteKey: NSColor { keys.white.nsColor }
+    var blackKey: NSColor { keys.black.nsColor }
+    /// The octave labels, drawn on the white keys.
+    var keyLabel: NSColor { keys.black.nsColor }
 
     /// Lane `index`'s colour: `swatch`, in order (`red` … `pink`), by
     /// `index % 8` (replaces `PianoRollPalette`'s system colours).

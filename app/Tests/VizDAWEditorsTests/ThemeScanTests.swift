@@ -162,10 +162,21 @@ enum SourceScan {
         #expect(same(t.canvas, t.surface.inset) && same(t.rulerBackground, t.surface.panel))
         #expect(same(t.label, t.text.primary) && same(t.secondaryLabel, t.text.secondary))
         #expect(same(t.regionFill, t.graph.fill) && same(t.playhead, t.state.record))
-        #expect(same(t.whiteKey, t.surface.raised) && same(t.blackKey, t.text.primary))
+        #expect(same(t.whiteKey, t.keys.white) && same(t.blackKey, t.keys.black))
         #expect(same(t.laneColour(0), t.swatch.red) && same(t.laneColour(7), t.swatch.pink))
         #expect(same(t.laneColour(9), t.swatch.orange) && same(t.laneColour(-1), t.swatch.pink))
     }
+    /// Owner decision (2026-11-03, overruling Ruling 13's key row): piano
+    /// keys are white and black in every theme, from the `keys` group; the
+    /// key labels, drawn on the white keys, are the black key colour.
+    @Test func pianoKeysAreWhiteAndBlackInEveryTheme() {
+        for t in [Theme.studioDark, .console] {
+            #expect(Theme.luminance(t.whiteKey) > 0.8, "\(t.id) white key")
+            #expect(Theme.luminance(t.blackKey) < 0.2, "\(t.id) black key")
+            #expect(Theme.luminance(t.keyLabel) < 0.2, "\(t.id) key label")
+        }
+    }
+
     /// The B4 run's findings, in pixels and colours: the ruler band takes
     /// the theme's ruler background (it stayed black in Classic Light),
     /// and a region's name is the theme's text, not white on a pale fill.
