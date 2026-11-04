@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use vizdaw_ffi::control::{request_of, result_json};
 use vizdaw_ffi::{
     AlertRow, ControlCall, ControlErrorCode, ControlFailure, ControlRequest, ControlResult,
-    ControlServer, CrashAnswerRow, DocFactsRow, Session, UiNodeRow, WaitConditionRow, WaitFactsRow,
-    control_command_ids, control_element_check, control_wait_met,
+    ControlServer, CrashAnswerRow, DocFactsRow, LayoutStateRow, PaneRow, Session, UiNodeRow,
+    ViewPanesRow, WaitConditionRow, WaitFactsRow, control_command_ids, control_element_check,
+    control_wait_met,
 };
 
 const LONG: Duration = Duration::from_secs(20);
@@ -774,4 +775,40 @@ fn surfaces_state_answers_in_the_channels_spelling() {
     assert_eq!(none["feedback"], json!([]), "{none}");
     assert_eq!(none["learning"], Value::Null, "{none}");
     assert_eq!(none["surfaces"].as_array().map(Vec::len), Some(3), "{none}");
+}
+
+#[test]
+fn layout_result_json() {
+    let pane = |p: &str, v: &str| PaneRow {
+        pane: p.into(),
+        shown: p != "right",
+        view: v.into(),
+        size: 220.0,
+        views: vec![v.into()],
+    };
+    let j = result_json(&ControlResult::Layout {
+        doc: "D".into(),
+        layout: LayoutStateRow {
+            main: "arrange".into(),
+            left_strip: Some(3),
+            left_shows: "strip".into(),
+            views: vec![ViewPanesRow {
+                main: "arrange".into(),
+                panes: vec![
+                    pane("left", "strip"),
+                    pane("bottom", "piano_roll"),
+                    pane("right", "markers"),
+                ],
+            }],
+        },
+    });
+    assert_eq!(j["doc"], "D");
+    assert_eq!(j["main"], "arrange");
+    assert_eq!(j["left_strip"], 3);
+    assert_eq!(j["left_shows"], "strip");
+    assert_eq!(
+        j["views"][0]["panes"][1],
+        json!({"pane": "bottom", "shown": true, "view": "piano_roll", "size": 220.0, "views": ["piano_roll"]})
+    );
+    assert_eq!(j["views"][0]["panes"][2]["shown"], false);
 }

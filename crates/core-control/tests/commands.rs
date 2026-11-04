@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        147,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external"
+        153,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1631,4 +1631,101 @@ fn kontrol_mk3_is_a_surface_type() {
     let spec = registry::find("surface.add").unwrap();
     let help = spec.params.iter().find(|p| p.name == "type").unwrap().help;
     assert!(help.contains("kontrol_mk3"), "{help}");
+}
+
+/// Plan 7a Task 5: the view and pane commands refuse hostile params by type and range.
+#[test]
+fn ui_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for good in [
+        json!({ "pane": "left" }),
+        json!({ "pane": "bottom", "view": "piano_roll", "shown": true, "size": 300, "main": "mix" }),
+        json!({ "pane": "right", "size": 0 }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run("ui.pane", good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    for bad in [
+        json!({}),
+        json!({ "pane": "top" }),
+        json!({ "pane": "left", "view": "Mixer" }),
+        json!({ "pane": "left", "view": 3 }),
+        json!({ "pane": "left", "shown": "yes" }),
+        json!({ "pane": "left", "size": 1e12 }),
+        json!({ "pane": "left", "size": -1 }),
+        json!({ "pane": "left", "size": "300" }),
+        json!({ "pane": "left", "main": "edit" }),
+        json!({ "pane": "left", "width": 300 }),
+        json!({ "pane": "x".repeat(70_000) }),
+    ] {
+        assert_eq!(
+            err("command.run", run("ui.pane", bad.clone())).0,
+            ErrorCode::InvalidParams,
+            "{bad}"
+        );
+    }
+    for id in ["ui.view_arrange", "ui.view_mix"] {
+        assert_eq!(
+            err("command.run", run(id, json!({ "on": true }))).0,
+            ErrorCode::InvalidParams,
+            "{id}"
+        );
+    }
+    for id in ["ui.toggle_left", "ui.toggle_bottom", "ui.toggle_right"] {
+        assert!(matches!(
+            ok("command.run", run(id, json!({ "on": false }))),
+            Command::CommandRun { .. }
+        ));
+        assert_eq!(
+            err("command.run", run(id, json!({ "on": "no" }))).0,
+            ErrorCode::InvalidParams,
+            "{id}"
+        );
+    }
+    let keys: Vec<_> = [
+        "ui.view_arrange",
+        "ui.view_mix",
+        "ui.toggle_left",
+        "ui.toggle_bottom",
+        "ui.toggle_right",
+    ]
+    .iter()
+    .map(|id| COMMANDS.iter().find(|c| c.id == *id).unwrap().shortcut)
+    .collect();
+    assert_eq!(
+        keys,
+        [
+            Some("⌃1"),
+            Some("⌃2"),
+            Some("⌃⌘←"),
+            Some("⌃⌘↓"),
+            Some("⌃⌘→")
+        ]
+    );
+    assert!(
+        !COMMANDS
+            .iter()
+            .find(|c| c.id == "ui.pane")
+            .unwrap()
+            .menu_item
+    );
+}
+
+#[test]
+fn state_get_reads_layout() {
+    assert_eq!(
+        ok("state.get", json!({ "target": "layout" })),
+        Command::StateGet {
+            target: StateTarget::Layout,
+            window: None
+        }
+    );
+    let (code, msg) = err("state.get", json!({ "target": "panes" }));
+    assert_eq!(code, ErrorCode::InvalidParams);
+    assert!(msg.contains("surfaces or layout"), "{msg}");
 }

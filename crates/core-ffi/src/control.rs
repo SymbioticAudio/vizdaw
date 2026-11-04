@@ -126,6 +126,45 @@ pub enum StateTargetRow {
     Automation,
     /// Control surfaces and MIDI learn (plan 5f-1).
     Surfaces,
+    /// Its window's main view and panes (plan 7a).
+    Layout,
+}
+
+/// One pane of a main view (plan 7a).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PaneRow {
+    /// `left`, `bottom` or `right`.
+    pub pane: String,
+    /// Whether it is shown.
+    pub shown: bool,
+    /// What it shows.
+    pub view: String,
+    /// Its width or height in points.
+    pub size: f64,
+    /// The views it can show.
+    pub views: Vec<String>,
+}
+
+/// The panes of one main view.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct ViewPanesRow {
+    /// `arrange` or `mix`.
+    pub main: String,
+    /// Its panes.
+    pub panes: Vec<PaneRow>,
+}
+
+/// `state.get layout`.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct LayoutStateRow {
+    /// The current main view.
+    pub main: String,
+    /// Each main view's panes.
+    pub views: Vec<ViewPanesRow>,
+    /// The strip the left pane shows, if any.
+    pub left_strip: Option<u64>,
+    /// What the left pane shows.
+    pub left_shows: String,
 }
 
 /// The after-crash answer.
@@ -561,6 +600,13 @@ pub enum ControlResult {
         /// The surfaces, their feedback, the learn and the problems.
         state: crate::surfaces::SurfaceStateRow,
     },
+    /// `state.get layout` (plan 7a).
+    Layout {
+        /// Document ID.
+        doc: String,
+        /// The main view and panes.
+        layout: LayoutStateRow,
+    },
     /// `destination.measure_return` (plan 5c-2).
     Measured {
         /// Document ID.
@@ -855,6 +901,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 StateTarget::Input => StateTargetRow::Input,
                 StateTarget::Automation => StateTargetRow::Automation,
                 StateTarget::Surfaces => StateTargetRow::Surfaces,
+                StateTarget::Layout => StateTargetRow::Layout,
             },
             window: window_row(window),
         },
@@ -1132,6 +1179,19 @@ pub fn result_json(r: &ControlResult) -> Value {
             "touched": state.touched.iter()
                 .map(|t| crate::automation::automation_target_text(*t))
                 .collect::<Vec<_>>(),
+        }),
+        ControlResult::Layout { doc, layout } => json!({
+            "doc": doc,
+            "main": layout.main,
+            "left_strip": layout.left_strip,
+            "left_shows": layout.left_shows,
+            "views": layout.views.iter().map(|v| json!({
+                "main": v.main,
+                "panes": v.panes.iter().map(|p| json!({
+                    "pane": p.pane, "shown": p.shown, "view": p.view,
+                    "size": p.size, "views": p.views,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
         }),
         ControlResult::Surfaces { doc, state } => json!({
             "doc": doc,

@@ -229,6 +229,56 @@ const ON: &[ParamSpec] = &[ParamSpec {
     help: "Set on or off; absent toggles.",
 }];
 
+/// `ui.pane`'s parameters (plan 7a Task 5).
+const UI_PANE_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "pane",
+        kind: ParamKind::Choice(&["left", "bottom", "right"]),
+        required: true,
+        help: "The pane to set.",
+    },
+    ParamSpec {
+        name: "view",
+        kind: ParamKind::Choice(&[
+            "strip",
+            "sequences",
+            "inspector",
+            "piano_roll",
+            "list",
+            "strip_chart",
+            "drum_grid",
+            "mixer",
+            "controllers",
+            "media_pool",
+            "plugins",
+            "markers",
+        ]),
+        required: false,
+        help: "What the pane shows.",
+    },
+    ParamSpec {
+        name: "shown",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Show or hide the pane.",
+    },
+    ParamSpec {
+        name: "size",
+        kind: ParamKind::Int {
+            min: 0,
+            max: 10_000,
+        },
+        required: false,
+        help: "The pane's width or height in points.",
+    },
+    ParamSpec {
+        name: "main",
+        kind: ParamKind::Choice(&["arrange", "mix"]),
+        required: false,
+        help: "The main view whose pane this is; absent is the current one.",
+    },
+];
+
 /// The project rates and depths as the channel spells them (5a Ruling 16).
 const RATES: &[&str] = &["44100", "48000", "88200", "96000", "176400", "192000"];
 const DEPTHS: &[&str] = &["16", "24", "32f"];
@@ -877,6 +927,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
     ),
     cmd("window.media_pool", "Window", "Media Pool", None, true),
+    cmd("ui.view_arrange", "View", "Arrange View", Some("⌃1"), true),
+    cmd("ui.view_mix", "View", "Mix View", Some("⌃2"), true),
+    CommandSpec {
+        params: ON,
+        ..cmd("ui.toggle_left", "View", "Left Pane", Some("⌃⌘←"), true)
+    },
+    CommandSpec {
+        params: ON,
+        ..cmd("ui.toggle_bottom", "View", "Bottom Pane", Some("⌃⌘↓"), true)
+    },
+    CommandSpec {
+        params: ON,
+        ..cmd("ui.toggle_right", "View", "Right Pane", Some("⌃⌘→"), true)
+    },
+    CommandSpec {
+        params: UI_PANE_PARAMS,
+        ..key_only(cmd("ui.pane", "View", "Set Pane", None, true))
+    },
     cmd(
         "editors.piano_roll",
         "Editors",
