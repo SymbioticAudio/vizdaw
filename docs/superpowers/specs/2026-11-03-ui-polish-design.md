@@ -92,7 +92,7 @@ Success: the owner can sit down with a project and record, arrange, edit and mix
 - **Bundling Dusk Audio Multi-Q** is part of SP6, not SP7 **(owner)**. Multi-Q is GPL-3.0 (github.com/dusk-audio/dusk-audio-plugins). It is built from source as CLAP everywhere and AU on macOS, signed, and loaded into every new channel's EQ slot. The fallback is ZL Equalizer 2 with a CLAP build added through clap-juce-extensions. SP7 only makes the EQ slot. Whatever SP6 bundles fills it later, and SP7's code must not assume any particular EQ.
 - A built-in VizDAW EQ is for after 1.0, and goes in the backlog.
 - No third "Edit" main view in SP7. **(controller's call)** The bottom pane can be made tall instead.
-- No change to the document format beyond the EQ slot (§2, item 5) and the per-view pane layout (§6, item 3).
+- No change to the document format beyond the EQ slot (§2, item 5) and the per-view pane layout (§6, item 3), and an optional per-strip colour for §2 item 7's colour bar, in the EQ slot's format bump (controller's call C-1, owner to confirm at G1).
 - No new recording, automation or editing features, apart from the audio editor (§6, item 2), which uses only operations the model already has. The existing editors move into panes unchanged.
 
 ## 4. Anti-goals: failure even if it works
