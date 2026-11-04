@@ -418,3 +418,42 @@ fn more_than_127_pages_stay_seven_bit() {
         assert!(m[1..].iter().all(|b| *b <= 0x7F), "{m:02x?}");
     }
 }
+
+/// Final review I1: every tempo sent in the last `TEMPO_RUN` is VizDAW's
+/// own; a late echo of an earlier one acts on nothing, is not counted, and
+/// VizDAW's current tempo goes again.
+#[test]
+fn a_late_echo_of_an_earlier_tempo_sends_vizdaws_again() {
+    let ms = Duration::from_millis;
+    let mut v = view(1);
+    v.tempo = 120.0;
+    let (mut k, now, _) = fed(&v, 0);
+    let a = sysex(0x19, 0, 0, &kontrol::tempo_bytes(120.0).unwrap());
+    let b = sysex(0x19, 0, 0, &kontrol::tempo_bytes(121.0).unwrap());
+    v.tempo = 121.0;
+    assert_eq!(k.feedback(&v, 0, now + ms(20)), vec![b.clone()]);
+    assert!(k.input(&a, now + ms(40)).is_empty(), "a stale echo");
+    assert_eq!(k.ignored(), 0, "not a fault");
+    assert_eq!(
+        k.feedback(&v, 0, now + ms(60)),
+        vec![b.clone()],
+        "VizDAW's tempo goes again"
+    );
+    assert!(k.input(&b, now + ms(80)).is_empty(), "a plain echo");
+    assert!(k.feedback(&v, 0, now + ms(100)).is_empty(), "not answered");
+    assert_eq!(k.ignored(), 0);
+}
+
+/// Final review T3 m2: one cache key, A → B → A: each change is sent.
+#[test]
+fn a_tempo_that_comes_back_is_sent_again() {
+    let mut v = view(1);
+    v.tempo = 120.0;
+    let (mut k, now, _) = fed(&v, 0);
+    let msg = |bpm: f64| sysex(0x19, 0, 0, &kontrol::tempo_bytes(bpm).unwrap());
+    v.tempo = 121.0;
+    assert_eq!(k.feedback(&v, 0, now), vec![msg(121.0)]);
+    v.tempo = 120.0;
+    assert_eq!(k.feedback(&v, 0, now), vec![msg(120.0)], "back to A");
+    assert!(k.feedback(&v, 0, now).is_empty());
+}

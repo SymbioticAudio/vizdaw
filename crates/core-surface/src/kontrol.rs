@@ -18,7 +18,7 @@ use crate::{
 };
 use core_model::automation::{AutomationTarget, fader_db, pan_of, unit};
 use core_model::ids::StripId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// NI's SysEx header for the DAW protocol.
@@ -83,6 +83,9 @@ const TAPS: usize = 5;
 const TEMPO_UNITS: f64 = 6e9;
 /// What five 7-bit bytes hold.
 const TEMPO_LIMIT: f64 = 34_359_738_368.0;
+/// Tempos remembered as sent (final review I1): one per 20 ms feedback
+/// over [`TEMPO_RUN`] is 25.
+const SENT_TEMPOS: usize = 32;
 
 /// `HEADER, cmd, value, index, info…, F7`; `value` and `index` above 0x7F
 /// are sent as 0x7F (pre-flight I3).
@@ -231,27 +234,31 @@ struct Sender<'a> {
 }
 
 impl Sender<'_> {
-    fn put(&mut self, key: Vec<u8>, msg: Vec<u8>) {
-        if self.cache.get(&key) != Some(&msg) {
-            self.cache.insert(key, msg.clone());
-            self.out.push(msg);
+    /// Whether `msg` was sent.
+    fn put(&mut self, key: Vec<u8>, msg: Vec<u8>) -> bool {
+        if self.cache.get(&key) == Some(&msg) {
+            return false;
         }
+        self.cache.insert(key, msg.clone());
+        self.out.push(msg);
+        true
     }
 
     fn cc(&mut self, cc: u8, v: u8) {
-        self.put(vec![CC, cc], vec![CC, cc, v.min(0x7F)]);
+        let _ = self.put(vec![CC, cc], vec![CC, cc, v.min(0x7F)]);
     }
 
     /// Keyed by the command and the index.
     fn sx(&mut self, cmd: u8, value: u8, index: u8, info: &[u8]) {
         let m = sysex(cmd, value, index, info);
-        self.put(vec![cmd, index.min(0x7F)], m);
+        let _ = self.put(vec![cmd, index.min(0x7F)], m);
     }
 
-    /// Keyed by the command alone (the index or value is the datum).
-    fn one(&mut self, cmd: u8, value: u8, index: u8, info: &[u8]) {
+    /// Keyed by the command alone (the index or value is the datum);
+    /// whether it was sent.
+    fn one(&mut self, cmd: u8, value: u8, index: u8, info: &[u8]) -> bool {
         let m = sysex(cmd, value, index, info);
-        self.put(vec![cmd, 0], m);
+        self.put(vec![cmd, 0], m)
     }
 }
 
@@ -322,8 +329,9 @@ pub struct Kontrol {
     last_tempo: Option<(Instant, bool)>,
     /// The taps of the current series (at most [`TAPS`]).
     taps: Vec<Instant>,
-    /// The five tempo bytes last sent.
-    sent_tempo: Option<[u8; 5]>,
+    /// The tempo bytes sent in the last [`TEMPO_RUN`], oldest first
+    /// (final review I1): the keyboard's echo of any of them is VizDAW's.
+    sent_tempos: VecDeque<([u8; 5], Instant)>,
     /// What was last sent, by key (Ruling 8).
     cache: BTreeMap<Vec<u8>, Vec<u8>>,
     /// `hello` was sent; the next feedback starts the repeat timer.
@@ -357,7 +365,7 @@ impl Kontrol {
             page: None,
             last_tempo: None,
             taps: Vec::new(),
-            sent_tempo: None,
+            sent_tempos: VecDeque::with_capacity(SENT_TEMPOS),
             cache: BTreeMap::new(),
             hello_sent: false,
             next_hello: None,
@@ -370,6 +378,13 @@ impl Kontrol {
     /// The keyboard's mode.
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Offline the keyboard is in no mode of VizDAW's: it comes back in
+    /// Mixer mode (final review T4 m4).
+    fn leave_mode(&mut self) {
+        self.mode = Mode::Mixer;
+        self.page = None;
     }
 
     fn ignore(&mut self) {
@@ -462,13 +477,19 @@ impl Kontrol {
             self.ignore();
             return;
         };
-        if self.sent_tempo == Some(bytes) {
-            // The keyboard's echo of what VizDAW sent.
+        let recent = |&(b, at): &([u8; 5], Instant)| {
+            b == bytes && now.saturating_duration_since(at) < TEMPO_RUN
+        };
+        if self.sent_tempos.back().is_some_and(recent) {
+            // The keyboard's echo of what VizDAW sent last.
             return;
         }
         // The next feedback sends VizDAW's tempo again.
-        self.sent_tempo = None;
         self.cache.remove(&vec![CMD_TEMPO, 0]);
+        if self.sent_tempos.iter().any(recent) {
+            // A late echo of an earlier one: VizDAW's own, not acted on.
+            return;
+        }
         let new_step = self.tempo_step(now, false);
         out.push(SurfaceAction::Tempo { bpm, new_step });
     }
@@ -510,10 +531,12 @@ impl Kontrol {
             return;
         }
         let bpm = (600.0 / mean).round() / 10.0;
+        // A tap after a turn starts a step of its own (final review T2 m1).
+        let after_tap = matches!(self.last_tempo, Some((_, true)));
         let _ = self.tempo_step(now, true);
         out.push(SurfaceAction::Tempo {
             bpm,
-            new_step: intervals == 1,
+            new_step: intervals == 1 || !after_tap,
         });
     }
 
@@ -682,6 +705,7 @@ impl Kontrol {
         } else {
             if self.link.get() {
                 out.extend(self.set_online(false));
+                self.leave_mode();
                 self.next_hello = Some(now + HELLO_EVERY);
             }
             self.identity_due = false;
@@ -691,7 +715,8 @@ impl Kontrol {
         }
     }
 
-    /// Everything the keyboard shows, into `tx` (Ruling 8).
+    /// Everything the keyboard shows, into `tx` (Ruling 8); the tempo
+    /// bytes, when they are sent.
     fn send_state(&self, view: &MixerView, tx: &mut Sender) -> Option<[u8; 5]> {
         // Per slot.
         for k in 0..SLOTS {
@@ -751,8 +776,9 @@ impl Kontrol {
         let mut tempo = None;
         if view.tempo > 0.0 {
             if let Some(b) = tempo_bytes(view.tempo) {
-                tx.one(CMD_TEMPO, 0, 0, &b);
-                tempo = Some(b);
+                if tx.one(CMD_TEMPO, 0, 0, &b) {
+                    tempo = Some(b);
+                }
             }
         }
         // Transport.
@@ -877,6 +903,7 @@ impl Kontrol {
             [CC, HANDSHAKE, v] => self.answer(v, now, out),
             [CC, GOODBYE, _] if self.link.get() => {
                 out.extend(self.set_online(false));
+                self.leave_mode();
                 self.identity_due = false;
                 self.hello_sent = false;
                 self.next_hello = Some(now + HELLO_EVERY);
@@ -954,9 +981,19 @@ impl Surface for Kontrol {
         let tempo = self.send_state(view, &mut tx);
         let out = tx.out;
         self.cache = cache;
-        // Remembered for the echo rule (Ruling 5).
-        if tempo.is_some() {
-            self.sent_tempo = tempo;
+        // Remembered for the echo rule (Ruling 5, final review I1).
+        while self
+            .sent_tempos
+            .front()
+            .is_some_and(|&(_, at)| now.saturating_duration_since(at) >= TEMPO_RUN)
+        {
+            self.sent_tempos.pop_front();
+        }
+        if let Some(b) = tempo {
+            if self.sent_tempos.len() >= SENT_TEMPOS {
+                self.sent_tempos.pop_front();
+            }
+            self.sent_tempos.push_back((b, now));
         }
         out
     }
@@ -990,6 +1027,7 @@ impl Surface for Kontrol {
         let held = self.release_holds();
         // A reconnected unit is online once it answers the hello.
         self.link = Link::default();
+        self.leave_mode();
         held
     }
 
@@ -1004,6 +1042,7 @@ impl Surface for Kontrol {
         // The registry has answered the holds already (I1): only the
         // offline mark here. The slots are emptied outside the cache.
         let _ = self.link.set(false);
+        self.leave_mode();
         self.cache.clear();
         let mut out: Vec<Vec<u8>> = (0..SLOTS).map(|i| sysex(CMD_TYPE, 0, b7(i), &[])).collect();
         out.push(vec![CC, GOODBYE, 0x00]);

@@ -631,3 +631,91 @@ fn hostile_kontrol_bytes_are_ignored_and_counted() {
     let _ = k.tick(now + IDLE_RELEASE);
     assert!(k.ignored() > 9);
 }
+
+/// Final review I1: the keyboard's own tempo, then its late echo of
+/// VizDAW's earlier tempo in the same batch: only the keyboard's own acts.
+#[test]
+fn a_late_echo_after_the_keyboards_own_tempo_acts_on_nothing() {
+    let mut v = view(2);
+    v.tempo = 120.0;
+    let (mut k, now) = online(&v, 0);
+    let msg = |bpm: f64| sysex(0x19, 0, 0, &tempo_bytes(bpm).unwrap());
+    let both = [msg(100.0), msg(120.0)].concat();
+    assert_eq!(
+        k.input(&both, now),
+        vec![A::Tempo {
+            bpm: 100.0,
+            new_step: true
+        }],
+        "the echo of 120 does not undo the turn"
+    );
+    assert_eq!(k.ignored(), 0);
+}
+
+/// Final review T2 m1 = T7 m1: a tap after a turn starts a step of its own.
+#[test]
+fn a_tap_after_a_turn_starts_a_new_step() {
+    let (mut k, now) = online(&view(2), 0);
+    let at = |ms: u64| now + Duration::from_millis(ms);
+    let tap = [0xBF, 0x18, 0x01];
+    let _ = k.input(&tap, at(0));
+    assert_eq!(
+        k.input(&tap, at(500)),
+        vec![A::Tempo {
+            bpm: 120.0,
+            new_step: true
+        }]
+    );
+    let turn = sysex(0x19, 0, 0, &tempo_bytes(130.0).unwrap());
+    assert_eq!(k.input(&turn, at(700)).len(), 1);
+    assert_eq!(
+        k.input(&tap, at(1000)),
+        vec![A::Tempo {
+            bpm: 120.0,
+            new_step: true
+        }],
+        "the tap does not amend the turn's step"
+    );
+}
+
+/// Task 4 review m1 (Ruling 9): the goodbye neither forgets nor answers a
+/// hold; the registry's `release_all` still gets it.
+#[test]
+fn goodbye_keeps_the_holds_for_the_registry() {
+    let (mut k, now) = online(&view(2), 0);
+    let _ = k.input(&[0xBF, 0x50, 0x05], now);
+    let _ = k.goodbye();
+    assert_eq!(
+        k.release_all(),
+        Held {
+            touched: vec![],
+            idle: vec![T::StripFader(StripId(1))]
+        },
+        "the goodbye neither forgets nor answers the hold"
+    );
+}
+
+/// Final review T4 m4: going offline leaves Plug-in mode, so a keyboard
+/// that comes back in Mixer mode is not shown a page.
+#[test]
+fn going_offline_leaves_plugin_mode() {
+    let mut v = view(2);
+    v.page = Some(page(2));
+    for bye in ["keyboard", "goodbye", "release_all", "old version"] {
+        let (mut k, now) = online(&v, 0);
+        let _ = k.input(&[0xBF, 0x05, 0x01], now);
+        assert!(k.shows_page(), "{bye}");
+        match bye {
+            "keyboard" => drop(k.input(&[0xBF, 0x02, 0x00], now)),
+            "goodbye" => drop(k.goodbye()),
+            "release_all" => drop(k.release_all()),
+            _ => drop(k.input(&[0xBF, 0x01, 0x03], now)),
+        }
+        assert!(!k.online(), "{bye}");
+        assert!(!k.shows_page(), "{bye}: no page while offline");
+        assert_eq!(k.mode(), Mode::Mixer, "{bye}");
+        let _ = k.input(&V4, now);
+        let sent = k.feedback(&v, 0, now);
+        assert!(sent.contains(&vec![0xBF, 0x05, 0x00]), "{bye}: {sent:02x?}");
+    }
+}
