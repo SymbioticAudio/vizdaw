@@ -71,7 +71,7 @@ Every "(owner)" and "(controller's call)" in the spec binds. 7b (themes, icons, 
   - the e2e's hostile calls (Task 9).
 - **FFI.** No new exported function. The new UniFFI types are the record `LayoutStateRow` (with `ViewPanesRow` and `PaneRow`), the enum case `StateTargetRow::Layout` and the enum case `ControlResult::Layout`. Should a task find it needs an export after all, it goes inside `ffi_guard` (which is `catch_unwind`) and returns `Result<_, VizError>`.
 - **Swift 6.1 (CI, macos-15) as well as the local 6.4.**
-  - Inside a `MainActor.assumeIsolated` closure, use a strong `let` captured before it, never a weak `self` box. This is the pattern of commit `8678649`, and applies to `WindowFrameKeeper`'s notification observers in Task 7.
+  - Inside a `MainActor.assumeIsolated` closure, use a strong `let` captured before it, never a weak `self` box. This is the pattern of commit `8678649`, and applies to `WindowFrameKeeper`'s notification observers in Task 7. A non-Sendable value (an event or a notification) goes in through a `nonisolated(unsafe) let`, as `KeyMonitor` does.
   - Use no API newer than macOS 14.
   - No `@State`, `@GestureState` or `@Entry` (the Command Line Tools cannot expand them): spell out `State(initialValue:)` as `MixerWindow` does, and declare environment values with an `EnvironmentKey` struct as `OpenPluginWindowKey` does.
   - `AppCommands.body` already has ten top-level items, the most an older SDK's builder takes. New menu items go inside its existing `Group { … }`, never as an eleventh item (Ruling 4).
@@ -163,9 +163,9 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
      - `mix: PaneSetup`;
      - `frame: [Double]?`, the document window's `[x, y, width, height]` (Ruling 11).
    - `PaneSetup` holds `left`, `bottom` and `right`, each a `PaneState { shown: Bool, view: PaneView, size: Double }`.
-   - Decoding is tolerant, field by field, using the existing `KeyedDecodingContainer.field`. A `PaneState` cannot know its side or main view, so it is not decoded on its own:
-     - its coding is a private `PanePatch { shown: Bool?; view: PaneView?; size: Double? }`, each field decoded through `field(…, nil)`. An unknown `view` raw value decodes as nil;
-     - `PaneSetup.init(from:)` and `ViewLayouts.init(from:)` merge each side's patch onto that side's default, `ViewLayouts().arrange[side]` or `ViewLayouts().mix[side]`. A missing or undecodable pane is that default whole.
+   - Decoding is tolerant, field by field, using the existing `KeyedDecodingContainer.field`. A `PaneState` or `PaneSetup` cannot know its side or main view, so neither is decoded on its own:
+     - `PaneState` and `PaneSetup` are `Encodable` only (plus `Equatable, Sendable`). `ViewLayouts.init(from:)` reads `arrange` and `mix` each as a private `SetupPatch { left, bottom, right: PanePatch? }` (each through `field(…, nil)`) and merges it onto `ViewLayouts().arrange` or `ViewLayouts().mix`. Then `sanitized()` runs;
+     - a pane's patch is a private `PanePatch { shown: Bool?; view: PaneView?; size: Double? }`, each field decoded through `field(…, nil)`. An unknown `view` raw value decodes as nil. A missing or undecodable pane is that side's default whole.
    - Then `ViewLayouts.sanitized()` repairs:
      - a view not on its side's list for that main view, which becomes that side's default;
      - a size that is not finite, which becomes the default, or is out of range, which is clamped (−5 becomes 160, not the default). `EditorLayout.sane` is not reused, because it turns an out-of-range value into the default.
@@ -194,11 +194,12 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
    - Cost if wrong: a reviewer who wants the right pane under the centre only can change one branch of `frames`.
 3. **Ruling (the bottom pane's list): its views are `.editor` and `.mixer`.**
    - `.editor` shows today's detail editor (`layout.detail`) in its kind. That kind is shared by both main views because `layout.detail` is.
-   - The picker (`PaneFrame` for `.bottom`) lists the four `DetailEditorKind.allCases` titles (Piano Roll, List, Strip Chart, Drum Grid), then Mixer (Arrange only). When the view is `.editor`, the selection is the kind (`layout.detail?.kind ?? layout.lastKind`). Choosing a kind sets the view to `.editor` and opens the detail in that kind (`openDetail`, or `showDetail` on the current target).
+   - The picker (`PaneFrame` for `.bottom`) lists the four `DetailEditorKind.allCases` titles (Piano Roll, List, Strip Chart, Drum Grid), then Mixer (Arrange only). When the view is `.editor`, the selection is the kind (`layout.detail?.kind ?? layout.lastKind`). Choosing a kind sets the view to `.editor` and opens the detail in that kind (`openDetail`, or `showDetail` on the current target), through `ViewCommands.choose` (Task 6), the one path `runPane` uses too.
    - `DetailPane` gains `showsKindPicker: Bool`: false in the bottom pane, true in torn windows. So the bottom pane shows one kind picker, not two.
    - The Mix view's bottom list leaves out Mixer: the Mix view is the mixer.
    - ⌘1–⌘4, a double-clicked block and every `openDetail` show the bottom pane with `.editor`: the current view's, or the view `openDetail(_:kind:in:)` names. `editors.close_detail` leaves the pane shown with today's "No Editor Open" placeholder.
    - The bottom pane's `DetailArea` stays mounted while the pane is hidden (zero size, hidden from accessibility), so the editor keeps its scroll and zoom (spec §2 item 2: "switching views and back restores").
+   - When the Mix view shows, or the bottom pane hides or changes view, `DocumentShell` ends editing in the hidden layer first. A small `ResignWhenHidden` `NSViewRepresentable` inside each always-mounted layer, on `hidden` turning true, calls `window.makeFirstResponder(nil)` if `window.firstResponder` is a view inside that layer. That also ends an open lane-name or cell edit through its own end-editing path.
    - **The audio editor is left out of the bottom list until 7c.** 7a adds no placeholder entry: an entry that does nothing would hide nothing and help no one.
    - Why: spec §2 item 3's bottom list ("automation (the Strip Chart)") and §3 ("the existing editors move into panes unchanged").
    - Cost if wrong: 7c adds one picker entry and one `PaneView` case.
@@ -247,7 +248,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
    - **Media pool:** today's `MediaPoolView` with a new `compact: Bool`. Compact shows the Name, Duration and Offline columns, and puts the action buttons in one "Actions" menu. `minWidth` 620 and `minHeight` 280 apply only when not compact: compact drops both, because beside the 260-point bottom pane a 280-point minimum overflows.
    - **Plug-ins:** today's `PluginBrowserView` with a new `width: CGFloat?` (nil fills the pane; the popover passes 320), listing effects.
      - `PluginsPane` keeps its own `PluginBrowserModel`, never `mixer.browserModel(.effect)`, whose cache is cleared each time `browser` becomes nil (`MixerModel.swift:100`), which `pick` does on every insert.
-     - A pick calls `PaneContent.insertPlugin(_:document:mixer:) -> String?`. Its strip is the single selected mixer strip when `document.selectedStrips.count == 1` and that strip is not master; else the left-pane rule's strip. The Mix view has no arrangement, so its lane selection cannot change there, but strips can be selected in its mixer. It adds the plug-in as that strip's last insert, through `mixer.browser = .insert(strip:)` and `mixer.pick(_:)`.
+     - A pick calls `PaneContent.insertPlugin(_:document:mixer:) -> String?`. Its strip is the single selected non-master strip first **in the Mix view**; in the Arrange view the lane rule first, falling back to the single selected strip. "The single selected strip" means `document.selectedStrips.count == 1` and that strip is not master. The Mix view has no arrangement, so its lane selection cannot change there, but strips can be selected in its mixer. It adds the plug-in as that strip's last insert, through `mixer.browser = .insert(strip:)` and `mixer.pick(_:)`.
      - With no strip it returns "Select a lane or one mixer strip first." (`PaneContent.noStripMessage`), which goes to the status line.
    - **Markers:** `MarkerList.rows(info:marks:) -> [MarkerListRow]`. It lists the shown sequence's markers (`SequenceInfo.markers`) and the set locators (`TransportMarks.locators`, named "Locator ‹n›"), merged by tick, each with its bar.beat position (`MeterMath`).
      - A click calls `DocumentModel.moveTo(_:)`. A failure goes to the status line, as `transport.next_marker`'s does.
@@ -266,6 +267,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
      - `MixerModel.placements: Set<MixerPlacement>` is tracked on appear and disappear (`appeared(_:)`, `disappeared(_:)`). `endOpenDrag()` runs only when the set becomes empty, so hiding the bottom pane during a Touch ride in the mixer window does not end the ride. `DocumentStore`'s close still ends every drag;
      - the faults popover is attached only to the transport bar with `showsViews` true (the document window), so `showsFaults` opens one popover.
    - `.learnAlert` is attached once in the document window, on `DocumentShell`. Views inside the shell (`MixerView` in the `.pane`, `.view` and `.strip` placements, and `StripChartEditor` in the bottom and right panes) skip their own, through the environment value `\.learnAlertHosted` (an `EnvironmentKey`, default false) that `DocumentShell` sets to true. The mixer window and torn windows keep theirs.
+     - Accepted side effect: the shell's alert is always present, so a learn refused in a plug-in window or Settings › Keys now also alerts in the document window. Today the document window shows it only while a pane mixer or Strip Chart is there; the mixer window and plug-in window already show duplicates today, so this is consistent but new.
    - `openPluginWindow` is set once, at `DocumentShell`'s root: `.environment(\.openPluginWindow, { slot in PluginWindows.show(appStore, doc: docID, slot: slot) })`. It covers the Mix view, the bottom pane's mixer and the left strip. `MixerWindow` keeps its own.
    - The left strip polls with `mixer.tick(now:)` only while its window is key or the document plays or records, as `DocumentWindow`'s `PollKey` does, so a background document does not poll `levels()` at 30 Hz.
    - Why: spec §2 item 2 ("the pane, the view and the window all show the same mixer state") and §2 item 4 (plug-in windows open from the selected track).
@@ -277,6 +279,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
      - with `showsViews`, the main-view tabs (a segmented picker "Arrange" | "Mix") and the three pane toggles.
    - The mixer window shows the bar with `showsViews: false`. Its tabs and toggles would act on another window, and it has no faults popover (Ruling 8).
    - The Arrange centre stays mounted while the Mix view shows: a `ZStack` keeps `ArrangementPane` with `.opacity(0)`, `.allowsHitTesting(false)` and `.accessibilityHidden(true)`. `ArrangementHost` remakes `ArrangementContainer` on every appearance (`ArrangementPane.swift:28`), and the scroll lives in the view (`TimeAxis.originTick`, `EditorCanvas.verticalOffset`), so ⌃2 then ⌃1 would otherwise lose the scroll and zoom.
+   - When the Mix view shows, or the bottom pane hides or changes view, `DocumentShell` ends editing in the hidden layer first. A small `ResignWhenHidden` `NSViewRepresentable` inside each always-mounted layer, on `hidden` turning true, calls `window.makeFirstResponder(nil)` if `window.firstResponder` is a view inside that layer. That also ends an open lane-name or cell edit through its own end-editing path. Without it, a hidden piano roll keeps the keyboard and Delete removes notes out of sight (`PianoRollView.keyDown`).
    - `StatusLine` moves from `ArrangementPane` to the bottom of `DocumentShell`, so the Mix view shows messages too. Torn windows keep their own.
    - `ProjectBanners` stays under the transport bar, full width.
    - Why: spec §2 items 1 and 2 ("the transport stays visible in all three").
@@ -296,7 +299,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
       - a view that is not on that pane's list for that main view, with the message "‹view› is not on the ‹pane› pane's list in the ‹main› view.", where ‹view› is the **channel name the caller sent** (`piano_roll`, not `editor`).
     - `runPane`'s order: parse → refuse a missing field → check `ViewLayouts.views(side, in: main).contains(mapped)` → apply `setPane` → only then, for an editor kind, `openDetail(target, kind:, in: main)`. A refused call therefore never touches `layout.detail`, `lastKind` or `bottom.shown`.
     - `size` is clamped to the pane's range. The answer's status names what was set: `"left strip 220 shown"`. `runPane` returns it as `.done(.ran(…, status: text))` itself and leaves `editor.status` nil, so a success does not show in the status line as if it were a failure.
-    - Before any change to what a pane or the centre shows, `ViewCommands.run` and `runPane` call `DocumentModel.endPaneEdits()`. It commits a sequence rename (`commitRename(renameDraft)`) if one is open, ends the editor's text edits (`editor.endTextEditing(prefix: "")`) and commits the store's mixer's strip rename (`MixerModel.commitRename()`) if that mixer exists. Otherwise a field that vanished mid-edit keeps `textFieldHasKeyboard` true, and Space and Return answer "A text field has the keyboard." until the next edit.
+    - Before any change to what a pane or the centre shows, `ViewCommands.run` and `runPane` call `DocumentModel.endPaneEdits()`. It commits a sequence rename (`commitRename(renameDraft)`) if one is open, ends the text edits of the views in the panes and centre only (`editor.endTextEditing("laneName")` and `editor.endTextEditing("drumRow")`; the owners of fields that stay open, such as `"synthSheet"`, `"destinationSheet"`, `"recordPopover"` and `"selectModify."`, are left alone) and commits the store's mixer's strip rename (`MixerModel.commitRename()`) if that mixer exists. Otherwise a field that vanished mid-edit keeps `textFieldHasKeyboard` true, and Space and Return answer "A text field has the keyboard." until the next edit.
     - `state.get layout` answers `ControlResult::Layout { doc, layout: LayoutStateRow }`, in this JSON shape:
       ```json
       {"doc": "…", "main": "arrange", "left_strip": 3,
@@ -312,7 +315,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
 11. **Ruling (the window size): the document window's frame is saved in `ViewLayouts.frame`.**
     - `WindowFrameKeeper` (an `NSViewRepresentable` in `DocumentWindow.swift`) applies the saved frame once, when the view joins its window, and only if `PaneGeometry.sanitizedFrame(_:screens:)` accepts it: four finite numbers, at least 700×450, intersecting a screen by at least 100×100.
     - It applies the frame on the next main-queue turn after `viewDidMoveToWindow`, so that SwiftUI's own window restoration does not overwrite it.
-    - It saves the frame on `NSWindow.didMoveNotification` and `didEndLiveResizeNotification` through `EditorModel.setDocumentFrame(_:)`, which does nothing when the frame is unchanged. The observer reads the window from `note.object as? NSWindow` and captures no `NSWindow`, which would pin the window until dismantle.
+    - It saves the frame on `NSWindow.didMoveNotification` and `didEndLiveResizeNotification` through `EditorModel.setDocumentFrame(_:)`, which does nothing when the frame is unchanged. The observer captures only `let editor = model.editor`. Inside, it first does `nonisolated(unsafe) let n = note` (as `KeyMonitor.start` does with its event), then reads the window from `n.object as? NSWindow` inside `MainActor.assumeIsolated`. It captures no `NSWindow`, which would pin the window until dismantle.
     - `DocumentShell` sets `.frame(minWidth: 700, minHeight: 450)`, so the window cannot be resized below the size `sanitizedFrame` accepts: a smaller frame would be saved and then ignored on reopen.
     - Why: spec §6.3.
     - Cost if wrong: SwiftUI's own restoration wins for an unsaved document, which is harmless.
@@ -342,7 +345,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
 | `app/Sources/VizDAWAppModel/ViewCommands.swift` (new), `ControlCommands.swift`, `TransportCommands.swift` (conformance line), `DocumentModel.swift` (`storeMixer`), `DocumentStore.swift` (sets it); `app/Tests/VizDAWAppModelTests/ViewCommandsTests.swift` (new) | 6 | `ui.*` handlers, `state.get layout`, `endPaneEdits` |
 | `app/Sources/VizDAW/DocumentShell.swift` (new), `DocumentView.swift`, `DocumentWindow.swift`, `DetailPane.swift`, `ArrangementPane.swift`, `MixerView.swift`, `AppCommands.swift`, `StripChartPane.swift` (`learnAlertHosted`) | 7 | shell, transport bar, Mix view, mixer window bar, View menu, frame keeper |
 | `app/Sources/VizDAW/PaneViews.swift` (new), `DocumentShell.swift`, `MediaPoolWindow.swift`, `PluginBrowserView.swift` | 8 | left, bottom and right pane contents |
-| `crates/vizctl/tests/e2e.rs`, `app/README.md`, `README.md`, `docs/feature-backlog.md` | 9 | e2e, by-eye steps and earlier steps corrected, root README, backlog row |
+| `crates/vizctl/tests/e2e.rs`, `app/README.md`, `README.md`, `docs/feature-backlog.md`, `app/Sources/VizDAW/AudioSettingsView.swift` | 9 | e2e, by-eye steps and earlier steps corrected, root README, backlog row, the Record defaults' caption |
 
 ---
 
@@ -354,7 +357,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
 
 **Interfaces:**
 - Consumes: `EditorLayout`, `KeyedDecodingContainer.field`, `EditorModel.updateLayout`, `DetailEditorKind`.
-- Produces (all `public`, `Codable, Equatable, Sendable` where they are data):
+- Produces (all `public`; the enums and `ViewLayouts` are `Codable, Equatable, Sendable`, while `PaneState` and `PaneSetup` are `Encodable, Equatable, Sendable` only, Ruling 1):
   - `enum MainView: String, CaseIterable { case arrange, mix }`, with `title` "Arrange" or "Mix";
   - `enum PaneSide: String, CaseIterable { case left, bottom, right }`, with `title` "Left Pane", "Bottom Pane" or "Right Pane";
   - `enum PaneView: String, CaseIterable`, whose cases with their raw (channel) names are `strip`, `sequences`, `inspector`, `editor`, `mixer`, `controllers`, `mediaPool = "media_pool"`, `plugins` and `markers`. Its `title` values are "Channel Strip", "Sequences", "Inspector", "Editor", "Mixer", "Controllers", "Media Pool", "Plug-ins" and "Markers";
@@ -362,7 +365,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
   - `struct PaneState { var shown: Bool; var view: PaneView; var size: Double }`;
   - `struct PaneSetup { var left, bottom, right: PaneState; subscript(side: PaneSide) -> PaneState { get set } }`;
   - `struct ViewLayouts { var main: MainView; var arrange: PaneSetup; var mix: PaneSetup; var frame: [Double]?; subscript(view: MainView) -> PaneSetup { get set }; var current: PaneSetup { get set }; static func views(_ side: PaneSide, in main: MainView) -> [PaneView]; static let sizeRange: [PaneSide: ClosedRange<Double>]; func sanitized() -> ViewLayouts }`, with the defaults of Ruling 1;
-  - private, in `WindowLayout.swift`: `struct PanePatch: Decodable { var shown: Bool?; var view: PaneView?; var size: Double? }` (Ruling 1). `PaneState` encodes its three fields as today's types do; it is decoded only through a patch;
+  - private, in `WindowLayout.swift`: `struct PanePatch: Decodable { var shown: Bool?; var view: PaneView?; var size: Double? }` and `struct SetupPatch: Decodable { var left, bottom, right: PanePatch? }` (Ruling 1). `PaneState` and `PaneSetup` encode their fields as today's types do and have no `init(from:)`: they are decoded only through `ViewLayouts.init(from:)`'s patches;
   - `EditorLayout.views: ViewLayouts` (coding key `views`);
   - on `EditorModel`, in `WindowLayout.swift`:
     - `func showMainView(_ v: MainView)`;
@@ -421,6 +424,7 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
     #expect(l.views.arrange.bottom == PaneState(shown: true, view: .editor, size: 900))
     #expect(l.views.arrange.right == ViewLayouts().arrange.right)
     #expect(l.views.mix.bottom == PaneState(shown: true, view: .editor, size: 200))
+    #expect(l.views.mix.left == ViewLayouts().mix.left && l.views.mix.right == ViewLayouts().mix.right)
     #expect(l.laneHeight == 60)
 }
 @Test func anOlderLayoutWithoutViewsDecodes() {
@@ -456,9 +460,9 @@ Each ruling decides something the spec leaves to the builder, in the format "wha
 - [ ] **Step 2: Run them and see them fail.** `scripts/build-ffi.sh && scripts/swift.sh test --filter WindowLayoutTests`. Expected: they do not compile, because `MainView` is not defined.
 
 - [ ] **Step 3: Implement `WindowLayout.swift` and the `EditorLayout.views` field.**
-  - Each struct decodes field by field through `field` (Ruling 1):
+  - Decoding is field by field through `field` (Ruling 1), and only `ViewLayouts` has an `init(from:)`:
     - a pane is read as a `PanePatch`, each field through `field(…, nil)`, so `"shown": "yes"` or `"view": "nope"` gives nil for that field alone;
-    - `PaneSetup.init(from:)` and `ViewLayouts.init(from:)` merge each patch onto `ViewLayouts().arrange[side]` or `ViewLayouts().mix[side]`. So arrange `right: {"view": "nope"}` comes back as the arrange right default, and arrange `bottom: {"shown": "yes", "view": "editor", "size": 1e9}` keeps the default `shown` (true) and its size (clamped to 900);
+    - `ViewLayouts.init(from:)` reads `arrange` and `mix` each as a `SetupPatch` (each through `field(…, nil)`) and merges it onto `ViewLayouts().arrange` or `ViewLayouts().mix`, side by side; then `sanitized()` runs. `PaneState` and `PaneSetup` are `Encodable` only, so no synthesized decoder exists to be used by mistake. A hand-edited `mix: {"bottom": …}` keeps Mix's hidden left and right defaults. So arrange `right: {"view": "nope"}` comes back as the arrange right default, and arrange `bottom: {"shown": "yes", "view": "editor", "size": 1e9}` keeps the default `shown` (true) and its size (clamped to 900);
     - do not reuse `EditorLayout.sane`, which turns −5 into the default where the test wants 160.
   - `EditorLayout.init(from:)` sets `views = c.field(.views, d.views).sanitized()`.
   - `sanitized()` applies Ruling 1:
@@ -735,7 +739,7 @@ git log -1 --oneline && git show --stat HEAD | tail -7
     - `static func rows(info: SequenceInfo?, marks: TransportMarks) -> [MarkerListRow]`, ordered by tick, markers before locators at equal ticks;
     - `@MainActor static func go(_ row: MarkerListRow, _ m: DocumentModel)`, which calls `moveTo` and puts a failure in `m.editor.status`;
   - `@MainActor public enum PaneContent`:
-    - `static func insertPlugin(_ p: PluginRefRow, document: DocumentModel, mixer: MixerModel) -> String?`, whose strip is the single selected non-master mixer strip, else the left-pane rule's (Ruling 7);
+    - `static func insertPlugin(_ p: PluginRefRow, document: DocumentModel, mixer: MixerModel) -> String?`, whose strip is the single selected non-master strip first in the Mix view; in the Arrange view the lane rule first, falling back to the single selected strip (Ruling 7);
     - `static let noStripMessage = "Select a lane or one mixer strip first."`;
   - `EditorLayout.controllers: [String: [StripLane]]` (coding key `controllers`, tolerant);
   - `StripChartModel.controllers(_ document: DocumentModel) -> StripChartModel`;
@@ -744,7 +748,7 @@ git log -1 --oneline && git show --stat HEAD | tail -7
     - `f.laneTable[3]?[0].audioOut = 7` (Song's first lane, Groove, ID 30);
     - `f.mixerSnap = MixerSnapshot(version: f.snap.version, strips: [stripRow(10, "Out 1", kind: .audioPath(path: 7)), stripRow(0, "Master", kind: .master)], buses: [])`.
 
-- [ ] **Step 1: Write the failing tests** in `RightPaneTests.swift`. `fakeDocumentAndSession(_ f: FakeSession = demoFake()) -> (DocumentModel, FakeSession)`, `selectFirstLane(_:)` (selects `m.lanes[0]`) and `let delay = PluginRefRow(format: .clap, id: "x.Delay", name: "Delay", vendor: "V", version: "1")` are file-private helpers.
+- [ ] **Step 1: Write the failing tests** in `RightPaneTests.swift`. `fakeDocumentAndSession(_ f: FakeSession = demoFake()) -> (DocumentModel, FakeSession)`, `selectFirstLane(_:)` (selects `m.lanes[0]`), `info(markers:)` (a `SequenceInfo` over `fourFour(3)` with those markers) and `let delay = PluginRefRow(format: .clap, id: "x.Delay", name: "Delay", vendor: "V", version: "1")` are file-private helpers.
 
 ```swift
 @Test func markersListTheSequencesMarkersAndSetLocators() {
@@ -800,7 +804,10 @@ git log -1 --oneline && git show --stat HEAD | tail -7
 
 - [ ] **Step 3: Implement** Ruling 7's model parts.
   - `controllers(_:)` reads through `leftStrip`'s lane gathering: the first considered lane, selection first and then armed. Its `write` stores only `stripRows`, under the `"seq:lane"` key.
-  - `insertPlugin` first takes the single selected mixer strip (`document.selectedStrips.count == 1`, not `mixer.master`'s ID). Else it uses `leftStrip(strips: mixer.snapshot.strips, destinations: mixer.destinations)`, where only `.strip(id)` proceeds. Then `mixer.browser = .insert(strip: id)` and `mixer.pick(p)`.
+  - `insertPlugin` picks its strip by `document.editor.layout.views.main` (Ruling 7). The single selected strip is `document.selectedStrips.count == 1` and not `mixer.master`'s ID; the lane rule is `leftStrip(strips: mixer.snapshot.strips, destinations: mixer.destinations)`, where only `.strip(id)` counts.
+    - Mix view: the single selected strip first, else the lane rule.
+    - Arrange view: the lane rule first, else the single selected strip. A stale strip selection from the mixer window therefore does not beat the selected lane.
+    - Then `mixer.browser = .insert(strip: id)` and `mixer.pick(p)`. The two tests stay valid: neither has a lane selected together with a selected strip.
   - `pruneLayout` drops `controllers` keys whose lane is gone, inside its existing single `updateLayout`. Its early `guard` gains a `controllersGone` term, so a layout whose only stale part is a `controllers` key is still pruned.
 
 - [ ] **Step 4: Run them and see them pass;** suite 1027 (1020 + 7).
@@ -940,13 +947,14 @@ fn layout_result_json() {
 - Modify: `app/Sources/VizDAWAppModel/ControlCommands.swift` (remove Task 5's six IDs from `other`; `handled` gains `ViewCommands.ids`; route them; `ControlStates.state` `.layout`), `app/Sources/VizDAWAppModel/TransportCommands.swift` (add `extension ViewCommands: MenuCommands {}` beside the other two), `app/Sources/VizDAWAppModel/DocumentModel.swift` (`storeMixer`), `app/Sources/VizDAWAppModel/DocumentStore.swift` (`mixer(_:)` sets it)
 
 **Interfaces:**
-- Consumes: Task 1's intents (`openDetail(_:kind:in:)` included), `EditorModel.detailTarget(shown:)`, `StripFocus` and `leftStrip` (Task 3), `laneOnStrip10()` (Task 4), the `[ControlArg]` readers (`args.text`, `args.flag`, `args.int`; use the tree's names), `ControlOutcome`, `ControlResult.ran`, `ControlFailure.of`, `KeyOutcome`, `MenuCommands`, `DocumentModel.commitRename(_:)` / `renameDraft` / `renamingSeq`, `EditorModel.endTextEditing(prefix:)`, `MixerModel.commitRename()`, `stripRow` (`FakeSession.swift`).
+- Consumes: Task 1's intents (`openDetail(_:kind:in:)` included), `EditorModel.detailTarget(shown:)`, `StripFocus` and `leftStrip` (Task 3), `laneOnStrip10()` (Task 4), the `[ControlArg]` readers (`args.text`, `args.flag`, `args.int`; use the tree's names), `ControlOutcome`, `ControlResult.ran`, `ControlFailure.of`, `KeyOutcome`, `MenuCommands`, `DocumentModel.commitRename(_:)` / `renameDraft` / `renamingSeq`, `EditorModel.endTextEditing(_:)` (the owners `"laneName"` and `"drumRow"`), `MixerModel.commitRename()`, `stripRow` (`FakeSession.swift`).
 - Produces:
   - `@MainActor public enum ViewCommands`:
     - `static let ids: Set<String>`, the six IDs;
     - `static func enabled(_ id: String, _ m: DocumentModel) -> Bool`, always true;
     - `static func isOn(_ id: String, _ m: DocumentModel) -> Bool`: the current main view for the two view IDs, the current setup's `shown` for the three toggles;
     - `static func run(_ id: String, on: Bool?, _ m: DocumentModel) -> KeyOutcome`. For `ui.view_*` it ignores `on` (Ruling 4);
+    - `static func choose(_ side: PaneSide, _ view: PaneView, kind: DetailEditorKind?, shown: Bool?, size: Double?, in main: MainView?, _ m: DocumentModel)`, the one path that changes a pane after its checks: `m.endPaneEdits()`, `setPane`, then for a non-nil `kind` `openDetail` (or `lastKind` alone with no target), then a given `shown` again. It is used by `runPane` after validation and by `PaneFrame` (Task 7);
     - `static func runPane(_ args: [ControlArg], _ m: DocumentModel, doc: UUID) -> ControlOutcome`, which answers `.done(.ran(command: "ui.pane", doc: doc.uuidString, window: nil, undoLabel: m.snapshot.undoLabel, status: text))` itself (Ruling 10);
     - `static func layoutRow(_ m: DocumentModel, strips: [StripRow], destinations: [DestRow]) -> LayoutStateRow`;
     - `static func viewName(_ side: PaneSide, _ state: PaneState, _ layout: EditorLayout) -> String`;
@@ -997,6 +1005,10 @@ fileprivate extension ControlArg {
     _ = run("ui.pane", [.text("pane", "right"), .text("view", "markers"), .flag("shown", true), .text("main", "mix")], doc, store)
     #expect(doc.model.editor.layout.views.main == .arrange)
     #expect(doc.model.editor.layout.views.mix.right == PaneState(shown: true, view: .markers, size: 260))
+    _ = run("ui.pane", [.text("pane", "bottom"), .text("view", "drum_grid"), .flag("shown", false)], doc, store)
+    #expect(!doc.model.editor.layout.views.arrange.bottom.shown && doc.model.editor.layout.lastKind == .drumGrid)
+    _ = run("ui.pane", [.text("pane", "bottom"), .text("view", "list"), .text("main", "mix")], doc, store)
+    #expect(doc.model.editor.layout.views.mix.bottom.shown && !doc.model.editor.layout.views.arrange.bottom.shown)
 }
 @Test func uiCommandsCheckTheirArguments() {
     let (doc, store) = storeDocument()
@@ -1036,7 +1048,7 @@ fileprivate extension ControlArg {
     let m = doc.model
     let mixer = try #require(store.mixer(doc.id))
     m.beginRename(try #require(m.selectedSeq))
-    m.editor.beginTextEditing("lane-name")
+    m.editor.beginTextEditing("laneName")
     mixer.beginRename(try #require(mixer.strips.first), in: .strip)
     #expect(m.textFieldHasKeyboard)
     _ = run("ui.toggle_left", [], doc, store)
@@ -1060,8 +1072,8 @@ fileprivate extension ControlArg {
     1. Parse `pane`, `view`, `shown`, `size` and `main`. Core-control has already checked types, so the app checks only that `pane` and `main` are known, and refuses unknown values as `invalid_params`.
     2. Refuse a call with none of `view`, `shown` and `size`.
     3. Map an editor kind name to `.editor`. Refuse a view with `!ViewLayouts.views(side, in: main).contains(mapped)` as `invalid_params`, with the message naming the channel name the caller sent.
-    4. Call `m.endPaneEdits()`, then `setPane`.
-    5. Only then, for an editor kind: `openDetail(t, kind:, in: main)` on `t = layout.detail?.target ?? editor.detailTarget(shown: m.selectedSeq)` (Ruling 3's fallback to the selection or sequence). With no target, set `lastKind` alone through `updateLayout`. If the call gave `shown`, that value wins over `openDetail`'s "show the bottom pane" (`setPaneShown(.bottom, shown, in: main)` again).
+    4. Call `choose(side, mapped ?? the side's current view in that main view, kind:, shown:, size:, in: main, m)`. `choose` does `m.endPaneEdits()`, then `setPane`.
+    5. Inside `choose`, only then, for an editor kind: `openDetail(t, kind:, in: main)` on `t = layout.detail?.target ?? editor.detailTarget(shown: m.selectedSeq)` (Ruling 3's fallback to the selection or sequence). With no target, set `lastKind` alone through `updateLayout`. If the call gave `shown`, that value wins over `openDetail`'s "show the bottom pane" (`setPaneShown(.bottom, shown, in: main)` again). `PaneFrame` (Task 7) calls the same `choose`, so the two paths cannot drift.
   - `ViewCommands.run` calls `m.endPaneEdits()` before it switches a view or toggles a pane.
   - The answer status is `"\(pane) \(viewName) \(Int(size)) \(shown ? "shown" : "hidden")"`, returned in `.ran`'s `status`; `editor.status` stays nil.
   - `layoutRow` follows Ruling 10's `left_shows` and `left_strip` rules.
@@ -1087,25 +1099,27 @@ fileprivate extension ControlArg {
   - `app/Sources/VizDAW/AppCommands.swift`: the View menu group.
 
 **Interfaces:**
-- Consumes: Tasks 1, 2, 3 and 6 (`ViewCommands.run` and `isOn` for the menu toggles and the bar's tabs and toggles; `PaneGeometry.frames`, `drag` and `sanitizedFrame`; `MixerModel.tick`; `MixerPlacement`).
+- Consumes: Tasks 1, 2, 3 and 6 (`ViewCommands.run` and `isOn` for the menu toggles and the bar's tabs and toggles; `ViewCommands.choose` for the pane pickers; `PaneGeometry.frames`, `drag` and `sanitizedFrame`; `MixerModel.tick`; `MixerPlacement`).
 - Produces (the `VizDAW` target, used by Task 8):
   - `struct DocumentShell: View { let model: DocumentModel; let docID: UUID }`, which lays out the transport bar, the banners, the regions and `StatusLine`;
-  - `struct PaneFrame<Content: View>: View { let side: PaneSide; let model: DocumentModel; @ViewBuilder let content: () -> Content }`. It shows the view picker (a menu-style `Picker` labelled with the pane's `title`) and the content. The left and right pickers list `ViewLayouts.views(side, in: main)`'s titles. The bottom picker lists `DetailEditorKind.allCases`' titles, then "Mixer" (Arrange only), with the kind selected when the view is `.editor` (Ruling 3). A choice calls `model.endPaneEdits()` first, then `setPane`, and for a kind `openDetail` (or sets `lastKind` with no target), as `runPane` does. Task 8 fills the content through `PaneHost(side:model:docID:)`;
+  - `struct PaneFrame<Content: View>: View { let side: PaneSide; let model: DocumentModel; @ViewBuilder let content: () -> Content }`. It shows the view picker (a menu-style `Picker` labelled with the pane's `title`) and the content. The left and right pickers list `ViewLayouts.views(side, in: main)`'s titles. The bottom picker lists `DetailEditorKind.allCases`' titles, then "Mixer" (Arrange only), with the kind selected when the view is `.editor` (Ruling 3). A choice calls `ViewCommands.choose(side, view, kind:, shown: nil, size: nil, in: nil, model)` (Task 6), the same path `runPane` uses, so it restates none of `runPane`'s steps. Task 8 fills the content through `PaneHost(side:model:docID:)`;
   - `struct PaneHost: View { let side: PaneSide; let model: DocumentModel; let docID: UUID }`. In Task 7 it shows `DetailArea` for the bottom pane's `.editor`, and a `ContentUnavailableView` with the view's title for every other view; Task 8 replaces those;
   - `struct DocumentTransportBar: View { @Bindable var model: DocumentModel; let docID: UUID; let showsViews: Bool }`;
   - `struct MixerBar: View { @Bindable var model: MixerModel; let placement: MixerPlacement }`;
   - `EnvironmentValues.mixerPlacement: MixerPlacement`, default `.window`, through `struct MixerPlacementKey: EnvironmentKey`;
   - `EnvironmentValues.learnAlertHosted: Bool`, default false, through `struct LearnAlertHostedKey: EnvironmentKey`;
   - `struct PaneDivider: View { let side: PaneSide; let model: DocumentModel; let size: CGSize }`, holding `dragStart` and the live size in spelled-out `State(initialValue:)`;
-  - `struct WindowFrameKeeper: NSViewRepresentable { let model: DocumentModel }`.
+  - `struct WindowFrameKeeper: NSViewRepresentable { let model: DocumentModel }`;
+  - `struct ResignWhenHidden: NSViewRepresentable { let hidden: Bool }`, in `DocumentShell.swift` (Rulings 3 and 9).
 
 - [ ] **Step 1: Build the shell.**
   - `DocumentShell` uses `GeometryReader`. It lays out `PaneGeometry.frames(in:setup: model.editor.layout.views.current)` with `.frame` and `.position` (or a `ZStack` with offsets), and puts a 1-point `PaneDivider` on each shown pane's inner edge.
   - A divider's `DragGesture` (Ruling 2): on the first change it stores `dragStart` (the side's saved size); each change sets the live size to `PaneGeometry.drag(setup with that side's size = dragStart, side:, by: translation, in:)`, with `-translation.height` for the bottom divider; `onEnded` calls `model.editor.setPane(side, view: nil, shown: nil, size: live, in: nil)` once and clears `dragStart`.
   - The centre, in a `ZStack` (Ruling 9):
     - Arrange: `ArrangementPane(model:)`, always mounted. While the Mix view shows, it has `.opacity(0)`, `.allowsHitTesting(false)` and `.accessibilityHidden(true)`;
-    - Mix: `if let mixer = appStore.mixer(docID) { MixerView(model: mixer, placement: .view) }`, as `MixerWindow` does, else a `ContentUnavailableView` (`appStore.mixer` has already put "Mixer Unavailable" in `doc.alert`).
+    - Mix: mounted only while `views.main == .mix`: `if main == .mix, let mixer = appStore.mixer(docID) { MixerView(model: mixer, placement: .view) }`, as `MixerWindow` does, else (in the Mix view) a `ContentUnavailableView` (`appStore.mixer` has already put "Mixer Unavailable" in `doc.alert`). So it neither polls at 30 Hz in the Arrange view nor joins `placements`.
   - Each shown pane is `PaneFrame(side:model:) { PaneHost(side:model:docID:) }`. The bottom pane's `DetailArea` stays mounted while the pane is hidden, with zero size and `.accessibilityHidden(true)` (Ruling 3).
+  - When the Mix view shows, or the bottom pane hides or changes view, `DocumentShell` ends editing in the hidden layer first (Rulings 3 and 9). A small `ResignWhenHidden` `NSViewRepresentable` inside each always-mounted layer (the Arrange centre and the bottom `DetailArea`), on `hidden` turning true, calls `window.makeFirstResponder(nil)` if `window.firstResponder` is a view inside that layer. That also ends an open lane-name or cell edit through its own end-editing path.
   - At its root, `DocumentShell` sets `.environment(\.openPluginWindow, { slot in PluginWindows.show(appStore, doc: docID, slot: slot) })` (Ruling 8: the Mix view, the bottom pane's mixer and the left strip), `.environment(\.learnAlertHosted, true)` with one `.learnAlert(model.learn, shown: !model.learn.showsMaps)`, and `.frame(minWidth: 700, minHeight: 450)` (Ruling 11).
 
 - [ ] **Step 2: Build the transport bar** (Ruling 9).
@@ -1139,7 +1153,7 @@ CommandGroup(before: .toolbar) {
 - [ ] **Step 5: Add `WindowFrameKeeper`** (Ruling 11), attached in `DocumentWindow` beside `WindowTag`.
   - It applies the frame once, on the next main-queue turn after `viewDidMoveToWindow` (`DispatchQueue.main.async`), so that SwiftUI's own restoration does not overwrite it, through `PaneGeometry.sanitizedFrame(model.editor.layout.views.frame, screens: NSScreen.screens.map(\.frame))`.
   - It observes `NSWindow.didMoveNotification` and `NSWindow.didEndLiveResizeNotification` for that window (`object: w`), with `queue: .main`, and saves through `model.editor.setDocumentFrame`.
-  - **Swift 6.1:** the observer closure captures only `let editor = model.editor`, a strong `let` made before `MainActor.assumeIsolated { … }`, and reads the window inside as `note.object as? NSWindow`. It captures no `NSWindow`, which would pin the window until dismantle, and never a weak `self`. The deferred apply follows the same pattern.
+  - **Swift 6.1:** the observer closure captures only `let editor = model.editor`, a strong `let` made before it is registered. Inside, it first does `nonisolated(unsafe) let n = note` (as `KeyMonitor.start` does with its event), then `MainActor.assumeIsolated { if let w = n.object as? NSWindow { editor.setDocumentFrame(…w.frame…) } }`. It captures no `NSWindow`, which would pin the window until dismantle, and never a weak `self`. The deferred apply follows the same pattern.
   - The observers are removed in `dismantleNSView`.
 
 - [ ] **Step 6: Run the gates.** `scripts/build-ffi.sh && scripts/swift.sh build && scripts/swift.sh test` (1034, no new warnings), then `scripts/make-app.sh`. Run the existing e2e now (`VIZDAW_E2E_APP=dist/VizDAW.app cargo test -p vizctl --test e2e -- --ignored --test-threads 1`). Expected: 14 passed. `click_play_and_press_space` finds Play in the transport bar. A failure here is a layout fault to fix in this task, not in the test.
@@ -1157,7 +1171,7 @@ CommandGroup(before: .toolbar) {
 **Interfaces:**
 - Consumes: Tasks 3, 4 and 7 (`MixerModel.appeared` / `disappeared`, `\.mixerPlacement`, `\.learnAlertHosted`, the root `openPluginWindow`), `SequenceSidebar(model:)`, `DetailArea(model:docID:)`, `StripView(model:strip:)`, `StripChartEditor(model:)`, `MediaPoolView(media:)`, `PluginBrowserView(model:pick:)`, `PluginBrowserModel(kind:_:)`, `appPlugins.browser(_:)`, `appStore.mixer(_:)`.
 - Produces:
-  - `struct LeftStripPane: View { let model: DocumentModel; let docID: UUID }`. It gets its mixer with `if let mixer = appStore.mixer(docID)` (else a `ContentUnavailableView`, as the Mix view does). It shows `StripView` for `.strip(id)`, `InspectorPane` for `.inspector`, and `StripFocus.nothingMessage` for `.nothing`. It sets `.environment(\.mixerPlacement, .strip)`, attaches the maps sheet for `.strip`, and calls `mixer.appeared(.strip)` / `disappeared(.strip)`. It polls with `mixer.tick(now:)` every 33 ms only while its window is key or the document plays or records: a `.task(id:)` over the window's `controlActiveState == .key` and `model.isPlaying || model.record.isRecording`, as `DocumentWindow`'s `PollKey` (Ruling 8);
+  - `struct LeftStripPane: View { let model: DocumentModel; let docID: UUID }`. It gets its mixer with `if let mixer = appStore.mixer(docID)` (else a `ContentUnavailableView`, as the Mix view does). It shows `StripView` for `.strip(id)`, `InspectorPane` for `.inspector`, and `StripFocus.nothingMessage` for `.nothing`. It sets `.environment(\.mixerPlacement, .strip)`, attaches the maps sheet for `.strip`, and calls `mixer.appeared(.strip)` / `disappeared(.strip)`. It polls with `mixer.tick(now:)` every 33 ms only while its window is key or the document plays or records: a `.task(id:)` over the window's `controlActiveState == .key` and `model.isPlaying || model.record.isRecording`, with a file-private copy of `PollKey` in `PaneViews.swift` (`DocumentWindow`'s is `private`, and `DocumentWindow.swift` is not in this task's files; Ruling 8);
   - `struct InspectorPane: View { let model: DocumentModel; let docID: UUID }`, a two-column `Grid` of `Inspector.rows(…)`, or `Inspector.emptyMessage`;
   - `struct MarkersPane: View { let model: DocumentModel }`, a `List` of `MarkerList.rows`. A row's click calls `MarkerList.go`. With no rows it says "No markers or locators.";
   - `struct ControllersPane: View { let model: DocumentModel }`, `StripChartEditor(model: model.controllersChart)`, or "Select a lane to see its controllers.";
@@ -1191,7 +1205,7 @@ CommandGroup(before: .toolbar) {
 ### Task 9: The e2e, the by-eye steps, the root README and the full gates
 
 **Files:**
-- Modify: `crates/vizctl/tests/e2e.rs`, `app/README.md`, `README.md`, `docs/feature-backlog.md`
+- Modify: `crates/vizctl/tests/e2e.rs`, `app/README.md`, `README.md`, `docs/feature-backlog.md`, `app/Sources/VizDAW/AudioSettingsView.swift` (one caption, step 3d)
 
 **Interfaces:**
 - Consumes: everything above. From the e2e at `38c231d`: `App::start`, `app.call`, `app.call_err`, `app.wait`, `play_button`, `WAIT_MS`, and the `ui.key` modifier list as `keys_drive_step_entry_locators_and_bindings` passes it.
@@ -1208,7 +1222,7 @@ CommandGroup(before: .toolbar) {
        - `{pane: "right", view: "piano_roll"}` → `invalid_params`, and the message names `piano_roll` (I3: a refused editor kind opens no detail);
        - `state.get {target: "panes"}` → `invalid_params`.
      - After them `state.get layout` is unchanged, `state.get windows` lists the same numbers and kinds, its `alerts` is empty, and `state.get document`'s `alert` is null: no dialog opened.
-  3. `ui.key` `"2"` with `["control"]`, then wait until `state.get layout`'s `main == "mix"`. `ui.key` `"1"` with `["control"]` brings back `"arrange"`. Then `command.run ui.toggle_right`, and arrange's right is shown.
+  3. `ui.key` `"2"` with `["control"]`, then wait until `state.get layout`'s `main == "mix"`. The document window's `ui.tree` then has no node labelled `Arrangement`. `ui.key` `"1"` with `["control"]` brings back `"arrange"`, and the tree has a node labelled `Arrangement` again. Then `command.run ui.toggle_right`, and arrange's right is shown.
   4. `ui.pane {pane: "right", view: "markers", size: 300, shown: true, main: "mix"}` answers `status == "right markers 300 shown"`. `main` is still `"arrange"`.
   5. `ui.pane {pane: "bottom", view: "mixer"}`: arrange's bottom view is `"mixer"`. `ui.tree` of the document window holds a node labelled like the mixer's "Add Bus" button.
   6. `command.run window.mixer`: a `kind == "mixer"` window appears. `play_button` finds Play in **its** tree. `ui.click` it, wait `playing` on the document window, then `transport.play_stop`, and wait `stopped`. The mixer window's own transport bar drives the same transport.
@@ -1251,21 +1265,25 @@ the detail pane is the bottom pane's editor.
      and the rename is kept, as Return would keep it (⌃⌘← again shows the
      new name). Press Space: the transport plays, and the status line
      does not say "A text field has the keyboard.". Undo the rename.
+     Double-click the Chords block and select a note, press ⌃⌘↓, press
+     Delete, then ⌃⌘↓ again: the note is still there.
 202. Drag the line between the arrangement and the bottom pane up and down:
      the pane follows the pointer, without running ahead of it, and stops
      at its smallest and largest size. With the right pane shown, shrink
      the window as far as it goes (700×450): the panes shrink to their
      smallest and the arrangement keeps a usable area; nothing hides at
      this size. Grow it again: the panes go back to their sizes.
-203. Click the Chords lane header: the left pane shows the Built-in Synth's
-     strip. Move its fader: the mixer (⌥⌘M) and the Mix view (⌃2) show the
-     same level, and the meters fall at the same speed in all three. With
-     the mixer window open, click the left strip's insert "+": the browser
-     opens on the left strip only, not in the mixer window. Right-click
-     the Chords lane, choose New MIDI Destination… (any port, such as the
-     IAC Driver) and Add, which points the lane at it (step 156): the
-     left pane shows the Inspector, naming that destination. Undo twice:
-     Chords plays Built-in Piano again and the strip comes back.
+203. Click the Chords lane header and play Song: the left pane shows the
+     Built-in Synth's strip. Move its fader: the mixer (⌥⌘M) and the Mix
+     view (⌃2) show the same level, and the meters fall at the same speed
+     in all three. Press ⌃1. With the mixer window open, click the left
+     strip's insert "+": the browser opens on the left strip only, not in
+     the mixer window. Right-click the Chords lane, choose New MIDI
+     Destination… (any port, such as the IAC Driver; with none listed,
+     turn on the IAC Driver in Audio MIDI Setup) and Add, which points the
+     lane at it (step 156): the left pane shows the Inspector, naming that
+     destination. Undo twice: Chords plays Built-in Piano again and the
+     strip comes back.
 204. Open each pane's picker: the left lists Channel Strip, Sequences and
      Inspector; the bottom lists Piano Roll, List, Strip Chart, Drum Grid
      and Mixer (the Mix view's bottom has no Mixer), and the bottom pane
@@ -1276,17 +1294,17 @@ the detail pane is the bottom pane's editor.
 205. In the right pane, Plug-ins: with the Chords lane selected, choose an
      effect: it appears as the last insert on the left strip and in the
      mixer; double-click its slot: its window opens floating. Markers:
-     click a row: the position moves there. Controllers: the Strip Chart shows the
-     selected lane's controller. Press ⌃2 and ⌃⌘→ (Plug-ins), click the
-     Built-in Synth strip's name to select it, choose an effect: it
-     appears as that strip's last insert.
+     click a row: the position moves there. Controllers: the Strip Chart
+     shows the selected lane's controller. Press ⌃2 and ⌃⌘→ (Plug-ins),
+     click the Built-in Synth strip's name to select it, choose an effect:
+     it appears as that strip's last insert.
 206. Window > Mixer opens the mixer in its own window with its own
      transport bar: Play there plays the document. Set the Mix view's
      right pane to Markers, save, close and reopen the project: both views
      come back as you left them, and the window at the same size and place.
 ```
 
-- [ ] **Step 3a: Correct the earlier steps that name the window's toolbar or the detail pane** (I12), in `app/README.md`. Each Find matches exactly once at `5da4996`; apply them in this order. The note above stays for the steps that say "the sidebar". Steps whose "toolbar" is an editor's own bar (the arrangement's, the piano roll's) are named after that bar, so that no step sends the owner to a toolbar that is gone.
+- [ ] **Step 3a: Correct the earlier steps that name the window's toolbar or the detail pane** (I12), in `app/README.md`. There are 19 pairs here and 1 in step 3b. Each Find matches exactly once at `5da4996`; apply them in this order. The note above stays for the steps that say "the sidebar". Steps whose "toolbar" is an editor's own bar (the arrangement's, the piano roll's) are named after that bar, so that no step sends the owner to a toolbar that is gone.
 
 - **Editors (plan 4a), the window bullet** (detail pane; M14: the panes saved). Find:
 
@@ -1429,6 +1447,20 @@ the detail pane is the bottom pane's editor.
     "by" 1.0 and "Apply
 ```
 
+- **step 68** (detail pane, wrapped across two lines). Find:
+
+```text
+68. Strip Chart: double-click the Chords block and press Cmd-3: the detail
+    pane shows "Strip Chart" with one row titled "Velocity ▾" and a bar
+```
+
+  Replace with:
+
+```text
+68. Strip Chart: double-click the Chords block and press Cmd-3: the bottom
+    pane shows "Strip Chart" with one row titled "Velocity ▾" and a bar
+```
+
 - **step 85** (the window's toolbar is now the transport bar). Find:
 
 ```text
@@ -1559,6 +1591,18 @@ changing nothing. None of them opens a dialog; `window.mixer` and
 | Keyboard slots on keys that plan 7a gives to View commands | Plan 7a pre-flight M11: commands win over keyboard slots (`KeyRouter`), so a saved project whose sequence has a ⌃1, ⌃2 or ⌃⌘←/↓/→ slot loses that slot silently. Warn when such a project opens, or list the shadowed slots in Settings › Keys. |
 ```
 
+- [ ] **Step 3d: Correct the Record defaults' caption** (controller's ruling) in `app/Sources/VizDAW/AudioSettingsView.swift` (line 191 at `dfb8a4d`), which still names the toolbar. Find:
+
+```text
+                Text("Open documents keep their own options: change those in the toolbar's record popover.")
+```
+
+  Replace with:
+
+```text
+                Text("Open documents keep their own options: change those in the transport bar's record popover.")
+```
+
 - [ ] **Step 4: Rewrite the root `README.md`** (spec §2 item 11, the 7a part). Keep it user-facing and in plain words, with no plan names. Keep the title paragraph, the License section and the Disclaimer section verbatim.
   - Replace the "**Status:** design phase …" line with a status paragraph: VizDAW is in development, not yet released. Today it records, edits and mixes MIDI and audio in one window. The interface's look (themes) and an audio editor are next.
   - Replace the bullet list with "What works today":
@@ -1599,7 +1643,7 @@ Expected:
 - registry 153;
 - `pgrep` and `ls` print nothing.
 
-- [ ] **Step 6: Commit** `crates/vizctl/tests/e2e.rs`, `app/README.md`, `README.md` and `docs/feature-backlog.md`. Message: "e2e: views and panes over the channel; README 199-206 and the earlier steps' toolbar and detail pane; the root README's status, features, getting around and building (plan 7a Task 9)", with the trailers. Counts: ignored +1 (19), e2e 15.
+- [ ] **Step 6: Commit** `crates/vizctl/tests/e2e.rs`, `app/README.md`, `README.md`, `docs/feature-backlog.md` and `app/Sources/VizDAW/AudioSettingsView.swift`. Message: "e2e: views and panes over the channel; README 199-206 and the earlier steps' toolbar and detail pane; the Record defaults' caption names the transport bar; the root README's status, features, getting around and building (plan 7a Task 9)", with the trailers. Counts: ignored +1 (19), e2e 15.
 
 ---
 
@@ -1618,7 +1662,7 @@ Expected:
    - §2 item 4, floating windows kept (`window.mixer`, `window.media_pool`, plug-in windows, sheets, torn editors): Tasks 7–8, and the e2e step 6. Plug-in windows open from every placement through `DocumentShell`'s root `openPluginWindow` (Ruling 8).
    - §2 item 8, for the left pane: Task 3.
    - §2 item 11, 7a's README part: Task 9.
-   - §4, nothing hidden: the sequence list stays reachable (Ruling 12), and every sheet stays on `DocumentView`. The earlier README steps that name the toolbar or the detail pane are corrected (Task 9 step 3a), and a field that vanishes mid-edit gives the keyboard back (`endPaneEdits`). The channel and the e2e work: Tasks 5, 6 and 9.
+   - §4, nothing hidden: the sequence list stays reachable (Ruling 12), and every sheet stays on `DocumentView`. The earlier README steps that name the toolbar or the detail pane are corrected (Task 9 step 3a), as is the Record defaults' caption in Settings (step 3d), and a field that vanishes mid-edit gives the keyboard back (`endPaneEdits`). The channel and the e2e work: Tasks 5, 6 and 9.
    - §5, the keys: Ruling 4.
    - §6.1 and §6.3: Rulings 1, 11 and 12.
    - Out of scope, as asked: themes, the strip redesign and icons (7b); the audio editor, left out of the list (Ruling 3; 7c); clean-up (7d).
@@ -1626,11 +1670,11 @@ Expected:
 3. **Type consistency.**
    - `PaneView`'s raw names are the channel's names, and `ViewCommands.viewName` adds the editor kind names (`ControlStates.kindName`). Task 5's `view` Choice lists exactly that union.
    - `MixerPlacement` (Task 1) is used by `LearnModel` and `MixerModel`'s browser, rename and `placements` (Task 3), `MixerView` and `MixerBar` (Task 7) and `LeftStripPane` (Task 8).
-   - `openDetail(_:kind:in:)` (Task 1) is used by `runPane` (Task 6) and the bottom `PaneFrame` (Task 7). `laneOnStrip10()` (Task 4) is used by `ViewCommandsTests` (Task 6). `endPaneEdits` and `storeMixer` (Task 6) are used by `PaneFrame` (Task 7).
-   - `StripFocus.Result` (Task 3) feeds `ControllersPane`, `insertPlugin` (Task 4, after the single selected mixer strip), `layoutRow`'s `left_strip` and `left_shows` (Task 6), and `LeftStripPane` (Task 8).
+   - `openDetail(_:kind:in:)` (Task 1) is used by `runPane` (Task 6) and the bottom `PaneFrame` (Task 7). `laneOnStrip10()` (Task 4) is used by `ViewCommandsTests` (Task 6). `endPaneEdits` and `storeMixer` (Task 6) are used by `PaneFrame` (Task 7) through `ViewCommands.choose` (Task 6), which `runPane` uses too.
+   - `StripFocus.Result` (Task 3) feeds `ControllersPane`, `insertPlugin` (Task 4: after the single selected strip in the Mix view, before it in the Arrange view), `layoutRow`'s `left_strip` and `left_shows` (Task 6), and `LeftStripPane` (Task 8).
    - `LayoutStateRow`'s field names match the JSON keys (Task 5) and Swift's generated `leftStrip` and `leftShows` (Task 6).
 4. **Review Focus.** Each of the five lines names its tests in their tasks.
-5. **Proportion.** About 1200 short lines, against a 137-line spec whose 7a row spans §2 items 1–4, 8 and 11. The code blocks are tests and the exact README text. Bodies are left to the signatures.
+5. **Proportion.** About 1680 short lines, against a 137-line spec whose 7a row spans §2 items 1–4, 8 and 11. The code blocks are tests and the exact README text. Bodies are left to the signatures.
 
 ## Execution handoff
 
