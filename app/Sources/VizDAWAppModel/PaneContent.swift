@@ -40,12 +40,38 @@ public enum StripFocus {
 extension DocumentModel {
     /// The selected lanes of the shown sequence, then its armed lanes: the
     /// first is the one the side panes follow.
-    func focusLanes() -> [LaneRow] {
+    public func focusLanes() -> [LaneRow] {
         let selected: [LaneRow] = editor.selection.lanes.compactMap { ref in
             guard ref.seq == selectedSeq else { return nil }
             return lanes.first { $0.id == ref.lane }
         }
         return selected.isEmpty ? lanes.filter(\.arm) : selected
+    }
+
+    /// The single selected event of the shown sequence when it is an
+    /// audio region (the followed lane is looked in first); nil for none,
+    /// several, a note or a reference.
+    public var inspectorRegion: EventRow? {
+        let events = editor.selection.events
+        guard events.count == 1, let id = events.first, let seq = selectedSeq else { return nil }
+        let first = focusLanes().first
+        let order = (first.map { [$0] } ?? []) + lanes.filter { $0.id != first?.id }
+        for lane in order {
+            if let e = editor.laneEvents(LaneKey(seq, lane.id))?.events.first(where: { $0.id == id }) {
+                return e.kind == .audioRegion ? e : nil
+            }
+        }
+        return nil
+    }
+
+    /// The left pane's inspector rows (Ruling 6): the followed lane, the
+    /// single selected audio region, with fades in ms at the project's rate.
+    public func inspectorRows(destinations: [DestRow], strips: [StripRow]) -> [InspectorRow] {
+        let region = inspectorRegion
+        return Inspector.rows(
+            lane: focusLanes().first, region: region, regionName: media.row(region?.media)?.name,
+            destinations: destinations, strips: strips,
+            sampleRate: Double(projectInfo?.format.sampleRate ?? 0))
     }
 
     /// What the left pane's strip view shows now.

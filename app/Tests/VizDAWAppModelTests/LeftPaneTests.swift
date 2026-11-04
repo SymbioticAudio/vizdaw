@@ -28,6 +28,23 @@ private func strip(_ id: UInt64, _ kind: StripKindRow) -> StripRow { stripRow(id
 
 @MainActor private func fakeDocument() -> DocumentModel { try! DocumentModel(session: mixerFake()) }
 
+/// Song (seq 3) with Groove (30) armed and followed, and `events31` on
+/// Chords (31); media 7 is "loop".
+@MainActor private func inspectorDocument(_ events31: [EventRow], rate: UInt32 = 48_000) -> DocumentModel {
+    let f = editorFake()
+    f.laneTable[3] = [lane(30, arm: true), lane(31)]
+    f.laneEventTable["3/31"] = LaneEvents(seq: 3, lane: 31, rev: 2, events: events31)
+    f.mediaRows = [mediaRow(7, "loop")]
+    f.info.format.sampleRate = rate
+    return try! DocumentModel(session: f)
+}
+
+@MainActor private func select(_ events: [UInt64], in m: DocumentModel) {
+    m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [], events: events))
+}
+
+private let regionLabels: Set<String> = ["Region", "Gain", "Fade In", "Fade Out"]
+
 @MainActor
 @Suite struct LeftPaneTests {
     @Test func anAudioLaneShowsItsPathsStrip() {
@@ -79,6 +96,43 @@ private func strip(_ id: UInt64, _ kind: StripKindRow) -> StripRow { stripRow(id
         #expect(rows.first == InspectorRow(label: "Name", value: "Lane 1"))
         #expect(rows.contains(InspectorRow(label: "Plays", value: "Ext Synth")))
         #expect(Inspector.rows(lane: nil, region: nil, regionName: nil, destinations: [], strips: []).isEmpty)
+    }
+    @Test func theInspectorFindsARegionOnALaneOtherThanTheFollowedOne() {
+        let m = inspectorDocument([regionRow(5, tick: 0, duration: 61_440, frames: 96_000)])
+        select([5], in: m)
+        let rows = m.inspectorRows(destinations: [], strips: [])
+        #expect(rows.first == InspectorRow(label: "Name", value: "Lane 30"))   // the followed (armed) lane
+        #expect(rows.contains(InspectorRow(label: "Region", value: "loop")))
+    }
+    @Test func aSelectedNoteOrReferenceGivesNoRegionRows() {
+        var reference = noteRow(6, tick: 0)
+        reference.kind = .reference
+        let m = inspectorDocument([noteRow(5, tick: 0), reference])
+        for id: UInt64 in [5, 6] {
+            select([id], in: m)
+            let rows = m.inspectorRows(destinations: [], strips: [])
+            #expect(!rows.isEmpty)
+            #expect(rows.allSatisfy { !regionLabels.contains($0.label) })
+        }
+    }
+    @Test func twoSelectedEventsGiveNoRegionRows() {
+        let m = inspectorDocument([
+            regionRow(5, tick: 0, duration: 61_440, frames: 96_000),
+            regionRow(6, tick: 61_440, duration: 61_440, frames: 96_000),
+        ])
+        select([5, 6], in: m)
+        let rows = m.inspectorRows(destinations: [], strips: [])
+        #expect(!rows.isEmpty)   // the followed lane's rows still show
+        #expect(rows.allSatisfy { !regionLabels.contains($0.label) })
+    }
+    @Test func theInspectorsFadesUseTheProjectRate() {
+        let m = inspectorDocument(
+            [regionRow(5, tick: 0, duration: 61_440, frames: 96_000, fadeIn: 4410)], rate: 44_100)
+        select([5], in: m)
+        #expect(m.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Fade In", value: "100 ms")))
+        m.projectInfo = nil
+        #expect(
+            m.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Fade In", value: "4410 frames")))
     }
     @Test func theInspectorNamesAnAudioPathAndARegion() {
         let ev = EventRow(

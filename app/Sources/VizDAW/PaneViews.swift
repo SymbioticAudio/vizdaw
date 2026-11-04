@@ -80,11 +80,8 @@ struct InspectorPane: View {
 
     var body: some View {
         let mixer = appStore.mixer(docID)
-        let region = model.paneRegion
-        let rows = Inspector.rows(
-            lane: model.paneFocusLane, region: region, regionName: model.media.row(region?.media)?.name,
-            destinations: mixer?.destinations ?? [], strips: mixer?.snapshot.strips ?? [],
-            sampleRate: Double(model.projectInfo?.format.sampleRate ?? 0))
+        let rows = model.inspectorRows(
+            destinations: mixer?.destinations ?? [], strips: mixer?.snapshot.strips ?? [])
         if rows.isEmpty {
             PaneNote(text: Inspector.emptyMessage)
         } else {
@@ -187,32 +184,5 @@ private struct PaneNote: View {
             .multilineTextAlignment(.center)
             .padding(12)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-extension DocumentModel {
-    /// The lane the side panes follow: the first selected lane of the shown
-    /// sequence, else its first armed lane. This mirrors the model's
-    /// internal `focusLanes()`, which `leftStrip` and the controllers chart use.
-    fileprivate var paneFocusLane: LaneRow? {
-        let selected = editor.selection.lanes.lazy.compactMap { ref in
-            ref.seq == self.selectedSeq ? self.lanes.first { $0.id == ref.lane } : nil
-        }
-        return selected.first ?? lanes.first(where: \.arm)
-    }
-
-    /// The single selected event, when it is an audio region of the shown
-    /// sequence (the followed lane is looked in first).
-    fileprivate var paneRegion: EventRow? {
-        let events = editor.selection.events
-        guard events.count == 1, let id = events.first, let seq = selectedSeq else { return nil }
-        let first = paneFocusLane
-        let order = (first.map { [$0] } ?? []) + lanes.filter { $0.id != first?.id }
-        for lane in order {
-            if let e = editor.laneEvents(LaneKey(seq, lane.id))?.events.first(where: { $0.id == id }) {
-                return e.kind == .audioRegion ? e : nil
-            }
-        }
-        return nil
     }
 }
