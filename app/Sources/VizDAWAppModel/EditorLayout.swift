@@ -28,12 +28,14 @@ public struct EditorLayout: Codable, Equatable, Sendable {
     public var drumGrid = DrumGridSettings()
     /// Locators, punch range, punch and overdub (plan 4f Ruling 7).
     public var transport = TransportMarks()
+    /// Per-view pane setups and the window frame (Plan 7a Ruling 1).
+    public var views = ViewLayouts()
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case version, detail, lastKind, windows, sequenceOrder, blockRule
-        case lightMode, snap, laneHeight, ticksPerPoint, follow, pianoRoll, stripChart, drumGrid, transport
+        case lightMode, snap, laneHeight, ticksPerPoint, follow, pianoRoll, stripChart, drumGrid, transport, views
     }
 
     public init(from decoder: Decoder) throws {
@@ -54,6 +56,7 @@ public struct EditorLayout: Codable, Equatable, Sendable {
         stripChart = c.field(.stripChart, d.stripChart)
         drumGrid = c.field(.drumGrid, d.drumGrid)
         transport = c.field(.transport, d.transport)
+        views = c.field(.views, d.views).sanitized()
     }
 
     /// Lane heights a hand-edited or corrupt `ui.json` is clamped to.
