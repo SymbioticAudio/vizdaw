@@ -97,17 +97,24 @@ extension EditorModel {
             c.lanes = kept.isEmpty ? nil : kept
             return c
         }
+        func controllersKeyGone(_ key: String) -> Bool {
+            let parts = key.split(separator: ":").compactMap { UInt64($0) }
+            guard parts.count == 2 else { return true }
+            return !lanes.contains(LaneKey(parts[0], parts[1]))
+        }
         let detailGone = layout.detail.map { gone($0.target) } ?? false
         let windowsGone = layout.windows.contains { gone($0.detail.target) }
         let lanesGone =
             (layout.detail.map { cleaned($0) != $0 } ?? false)
             || layout.windows.contains { cleaned($0.detail) != $0.detail }
-        guard detailGone || windowsGone || lanesGone else { return }
+        let controllersGone = layout.controllers.keys.contains { controllersKeyGone($0) }
+        guard detailGone || windowsGone || lanesGone || controllersGone else { return }
         updateLayout { l in
             if detailGone { l.detail = nil }
             l.windows.removeAll { gone($0.detail.target) }
             l.detail = l.detail.map(cleaned)
             for i in l.windows.indices { l.windows[i].detail = cleaned(l.windows[i].detail) }
+            l.controllers = l.controllers.filter { !controllersKeyGone($0.key) }
         }
     }
 

@@ -116,6 +116,27 @@ public final class StripChartModel {
             write: { [weak document] d in document?.editor.updateLayout { $0.detail = d } })
     }
 
+    /// The right pane's controllers chart (plan 7a Ruling 7): it follows the
+    /// selected lane (else the armed one) and keeps its rows per lane.
+    public static func controllers(_ document: DocumentModel) -> StripChartModel {
+        StripChartModel(
+            document: document,
+            read: { [weak document] in
+                guard let document, let seq = document.selectedSeq, let lane = document.focusLanes().first
+                else { return nil }
+                return DetailState(
+                    kind: .stripChart, target: .lane(seq: seq, lane: lane.id),
+                    stripRows: document.editor.layout.controllers[EditorLayout.controllersKey(seq, lane.id)],
+                    stripRowsLane: LaneKey(seq, lane.id))
+            },
+            write: { [weak document] d in
+                guard let document, let seq = document.selectedSeq, let lane = document.focusLanes().first,
+                    let rows = d.stripRows
+                else { return }
+                document.editor.updateLayout { $0.controllers[EditorLayout.controllersKey(seq, lane.id)] = rows }
+            })
+    }
+
     /// The Strip Chart of torn-off window `id`.
     public static func window(_ id: UUID, of document: DocumentModel) -> StripChartModel {
         StripChartModel(

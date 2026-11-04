@@ -205,6 +205,16 @@ public final class DocumentModel {
         return m
     }
 
+    @ObservationIgnored private var controllersModel: StripChartModel?
+
+    /// The right pane's controllers chart, made once (plan 7a Ruling 7).
+    public var controllersChart: StripChartModel {
+        if let m = controllersModel { return m }
+        let m = StripChartModel.controllers(self)
+        controllersModel = m
+        return m
+    }
+
     /// A torn-off window closed: its Strip Chart goes (and its stroke).
     public func dropStripChart(_ slot: DetailSlot) {
         stripCharts.removeValue(forKey: slot)?.strokeCancelled()

@@ -30,12 +30,15 @@ public struct EditorLayout: Codable, Equatable, Sendable {
     public var transport = TransportMarks()
     /// Per-view pane setups and the window frame (Plan 7a Ruling 1).
     public var views = ViewLayouts()
+    /// The right pane's controllers chart rows, per lane (`"seq:lane"`;
+    /// Plan 7a Ruling 7).
+    public var controllers: [String: [StripLane]] = [:]
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case version, detail, lastKind, windows, sequenceOrder, blockRule
-        case lightMode, snap, laneHeight, ticksPerPoint, follow, pianoRoll, stripChart, drumGrid, transport, views
+        case lightMode, snap, laneHeight, ticksPerPoint, follow, pianoRoll, stripChart, drumGrid, transport, views, controllers
     }
 
     public init(from decoder: Decoder) throws {
@@ -57,7 +60,11 @@ public struct EditorLayout: Codable, Equatable, Sendable {
         drumGrid = c.field(.drumGrid, d.drumGrid)
         transport = c.field(.transport, d.transport)
         views = c.field(.views, d.views).sanitized()
+        controllers = c.field(.controllers, d.controllers)
     }
+
+    /// The `controllers` key of a lane.
+    public static func controllersKey(_ seq: UInt64, _ lane: UInt64) -> String { "\(seq):\(lane)" }
 
     /// Lane heights a hand-edited or corrupt `ui.json` is clamped to.
     public static let laneHeightRange: ClosedRange<Double> = 16...400
