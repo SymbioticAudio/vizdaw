@@ -2089,3 +2089,82 @@ Checked by hand; the rules are tested (`AppearanceTests`, `AppIconTests`,
      `VIZDAW_NO_BRAND=1 scripts/make-app.sh` and open `dist/VizDAW.app`:
      every control that shows an icon still shows one. Rebuild without
      the variable afterwards (`rm -rf app/.build && scripts/make-app.sh`).
+
+### Audio editor (plan 7c)
+
+Checked by hand; the rules are tested (`AudioEditorEntryTests`,
+`FrameAxisTests`, `AudioEditorGeometryTests`, `AudioEditorModelTests`,
+`AudioEditorViewTests`, the core's envelope and trim tests) and the e2e
+`edits_a_region_in_the_audio_editor`.
+
+217. File > Create Demo Project, import a stereo audio file of a few
+     seconds (File > Import Audio…), click its region and press ⌘5: the
+     bottom pane's picker reads "Audio Editor" and shows the region's
+     waveform across the pane, each channel in its own band; the file's
+     audio outside the region is dimmed; a ruler along the top reads the
+     file's time (0:00.000 …); the level scale at the left reads 0 at the
+     top of each band and −∞ at its centre line. At the default bottom-pane
+     height the scale shows only 0 and −∞: drag the pane's top edge up to
+     make it taller, and the scale shows its other marks too. Click an
+     empty part of the arrangement: "Select one audio region to edit it.";
+     select two regions: the same; select the region again: it comes back.
+218. Click Zoom In, Zoom Out and Fit Region, then ⌘-scroll and pinch over
+     the waveform: it zooms around the pointer and stops at its limits;
+     scroll sideways: it stops when the file's start or end reaches the
+     middle of the pane. Click Taller Waveform: quiet parts grow and the
+     level marks relabel, and after the first click the "0" mark is gone;
+     Shorter Waveform undoes it. Select another region: the editor fits it;
+     select the first again: it fits again.
+219. Drag the band along the top of the region up: a readout follows
+     ("+3.0 dB") and the waveform grows; hold ⇧ for finer steps; release:
+     Edit shows "Undo Region Gain". ⌥-click the band: 0.0 dB. In the Gain
+     box type `-4.2` and press Return: "−4.2 dB", the waveform shrinks, and
+     Edit shows "Undo Set Region Gain". Type `abc`: the box is unchanged and
+     the status line says "Type a gain in dB, like −4.2 or +6.". Type `30`:
+     "+24.0 dB", and red clip marks appear along the band tops where the
+     audio now goes over 0 dBFS. Type `-inf`: "−∞ dB" and a flat line.
+     Type `-9` and click away without Return: nothing changes.
+220. Drag the square at the region's top-left corner right: a fade-in curve
+     is drawn over the waveform and the Fade In box follows in ms; the
+     square stops at the fade-out's square; release: "Undo Fade In". Choose
+     each Fade In Shape (Linear, Equal Power, Exponential, S-Curve): the
+     curve changes and its length stays. Right-click inside the fade: the
+     same four shapes, the current one checked. Type `250` in Fade In:
+     "250 ms"; `1.5 s`: "1500 ms"; a length longer than the region: it stops
+     where the fade out begins; `-5`: refused with "Type a fade like 250 ms
+     or 1.5 s.". Do the same with the fade out at the top-right corner.
+221. Drag the region's left edge right: the region starts later in the file
+     and in the arrangement by the same time, its audio stays where it was,
+     and the Start box follows; drag it left past the file's start: it
+     stops at 0:00.000, or where the region would begin before the
+     sequence's start, whichever is nearer (a region at bar 1 cannot be
+     extended earlier); release: "Undo Trim Start". Drag the right edge past
+     the file's end: it stops there; "Undo Trim End". Type `0.5` in Start:
+     the region's end stays put; type `1` in Length: its start stays put;
+     each is "Undo Trim Region". Type `10:00` in Length: it stops at the
+     file's end. Trim the region shorter than its fades: the fades shorten
+     to fit.
+222. Type `-1` in Peak and click Normalize: the gain becomes what brings the
+     loudest sample to −1 dBFS (a file peaking at −12 dBFS reads "+11.0 dB")
+     and Edit shows "Undo Normalize"; no dialog opens. Type `-inf` in Peak:
+     refused with "Type a peak from −96 to 0 dB, like −0.3."; `+3`: "0.0 dB".
+     Right after an import Normalize may say the waveform is still being
+     built: try again a moment later. Move the region's file away in Finder
+     so it goes offline: the region is hatched with "Offline" and its fades
+     and gain line still show; Normalize says to relink it, in the status
+     line, with no alert.
+223. Play while dragging a handle and while typing: each change is heard at
+     once. Undo and Redo step through the edits one at a time. Save, close
+     and reopen: the gain, fades, shapes and trim are as you left them, and
+     the bottom pane still shows the Audio Editor. Open the project in a
+     build from before plan 7c (`git worktree add /tmp/vz7b ba0224b && (cd
+     /tmp/vz7b && scripts/build-ffi.sh && scripts/make-app.sh)`, then open
+     `/tmp/vz7b/dist/VizDAW.app`): it opens with the same gain, fades and
+     trim, and its bottom pane shows its default editor. Quit it, then
+     `git worktree remove /tmp/vz7b`.
+224. Press ⌃2: the Mix view's bottom pane picker lists Audio Editor too, and
+     shows the same region. Choose each theme in Settings › Appearance: the
+     editor's waveform, scale, handles and boxes change with it. The editor
+     has no pan control and nothing that changes the audio file: after
+     every step above, the file in the project's Media folder has its
+     original modification date.

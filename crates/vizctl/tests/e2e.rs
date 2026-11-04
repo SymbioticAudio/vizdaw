@@ -2559,6 +2559,258 @@ fn themes_and_the_strip_over_the_channel() {
     app.quit();
 }
 
+/// Whether `label` holds the whole word `word` (split on non-letters, so
+/// "Pane" and "Panel" do not count; Ruling 11, no regex crate).
+fn has_word(label: &str, word: &str) -> bool {
+    label.split(|c: char| !c.is_alphabetic()).any(|w| w == word)
+}
+
+/// Every label and title in `nodes` and their subtrees holding `word`.
+fn labels_with_word(nodes: &Value, word: &str, out: &mut Vec<String>) {
+    for n in nodes.as_array().into_iter().flatten() {
+        for k in ["label", "title"] {
+            if let Some(l) = n[k].as_str().filter(|l| has_word(l, word)) {
+                out.push(l.to_string());
+            }
+        }
+        labels_with_word(&n["children"], word, out);
+    }
+}
+
+/// The node labelled `label` inside the "Audio Editor Pane" container
+/// (the arrangement has zoom buttons of its own).
+fn in_editor(app: &mut App, window: &Value, label: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(n) = find_node(&tree["nodes"], "Audio Editor Pane")
+            .and_then(|pane| find_node(&pane["children"], label))
+        {
+            return n;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {label:?} in the Audio Editor Pane within {WAIT_MS} ms: {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// README steps 217–224 through the channel (plan 7c): hostile calls that
+/// change nothing, ⌘5 on the selected region, no pan in the editor, the
+/// typed gain, fade, length and start, a gain drag, Normalize and its
+/// undo, a zoom, and the edits and the bottom view saved.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn edits_a_region_in_the_audio_editor() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    // 1. 2 s of stereo at 0.25 (−12.04 dBFS) at bar 1 of the demo, its
+    // region selected by its element.
+    let tone = home.join("tone.caf");
+    audio_file(&tone, 96_000);
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": tone, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let (region, label) = wait_for_label_like(&mut app, &w, "Region tone on ", "gain 0.0 dB");
+    app.call("ui.click", json!({"window": w, "element": region}));
+    let sel = app.call("state.get", json!({"target": "selection", "window": w}));
+    assert_eq!(sel["events"].as_array().unwrap().len(), 1, "{label}: {sel}");
+    let event = sel["events"][0].clone();
+
+    // 2. Hostile calls change nothing and open no dialog.
+    let layout =
+        |app: &mut App, w: &Value| app.call("state.get", json!({"target": "layout", "window": w}));
+    let l0 = layout(&mut app, &w);
+    let e = app.call_err("state.get", json!({"target": "audio-editor", "window": w}));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "left", "view": "audio_editor"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert_eq!(
+        e.message, "audio_editor is not on the left pane's list in the arrange view.",
+        "{e}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "bottom", "view": "audio"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert_eq!(layout(&mut app, &w), l0, "no layout change");
+    let ws = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(ws["alerts"].as_array().unwrap().len(), 0, "{ws}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert!(doc["alert"].is_null(), "no dialog: {doc}");
+
+    // 3. ⌘5: the bottom pane shows the editor on the region.
+    app.call(
+        "command.run",
+        json!({"id": "editors.audio_editor", "window": w}),
+    );
+    wait_for_layout(&mut app, &w, |l| {
+        let b = layout_pane(l, "arrange", "bottom");
+        b["view"] == "audio_editor" && b["shown"] == true
+    });
+    let s = wait_for_state(&mut app, &w, "audio_editor", |s| {
+        s["shown"] == true && s["region"]["event"] == event
+    });
+    assert_eq!(
+        (
+            s["boxes"]["gain"].clone(),
+            s["boxes"]["start"].clone(),
+            s["boxes"]["length"].clone()
+        ),
+        (json!("0.0 dB"), json!("0:00.000"), json!("0:02.000")),
+        "{s}"
+    );
+    // No pan anywhere in the editor (Ruling 11): "Bottom Pane" and the
+    // left strip's "Pan of …" lie outside its container.
+    in_editor(&mut app, &w, "Audio Editor");
+    let tree = app.call("ui.tree", json!({"window": w}));
+    let root = find_node(&tree["nodes"], "Audio Editor Pane").expect("the pane");
+    let mut pans = Vec::new();
+    labels_with_word(&json!([root]), "Pan", &mut pans);
+    assert!(pans.is_empty(), "pan in the audio editor: {pans:?}");
+
+    let region_of = |s: &Value| s["region"].clone();
+    let gain = |s: &Value| s["region"]["gain_db"].as_f64().unwrap_or(f64::NAN);
+    let state = |app: &mut App, w: &Value| {
+        app.call("state.get", json!({"target": "audio_editor", "window": w}))
+    };
+
+    // 4. The typed gain; a refused one changes nothing.
+    let id = in_editor(&mut app, &w, "Region Gain")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "-4.2\n"}),
+    );
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) + 4.2).abs() < 1e-6
+    });
+    wait_for_undo(&mut app, &w, "Set Region Gain");
+    let id = in_editor(&mut app, &w, "Region Gain")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "abc\n"}),
+    );
+    wait_for_state(&mut app, &w, "editor", |e| {
+        e["status"] == "Type a gain in dB, like \u{2212}4.2 or +6."
+    });
+    let s = state(&mut app, &w);
+    assert!((gain(&s) + 4.2).abs() < 1e-6, "{s}");
+
+    // 5. The fade in, in ms: 250 ms at 48 kHz.
+    let id = in_editor(&mut app, &w, "Fade In Length")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "250\n"}),
+    );
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        region_of(s)["fade_in"]["frames"] == 12_000
+    });
+
+    // 6. The length, then the start: the end stays.
+    let id = in_editor(&mut app, &w, "Region Length")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "1.5\n"}),
+    );
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        region_of(s)["length"] == 72_000
+    });
+    let id = in_editor(&mut app, &w, "Region Start")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "0.5\n"}),
+    );
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        region_of(s)["source_offset"] == 24_000 && region_of(s)["length"] == 48_000
+    });
+
+    // 7. Drag the gain band 20 points up: +5 dB at 0.25 dB a point.
+    let handle = in_editor(&mut app, &w, "Gain Handle");
+    let f = &handle["frame"];
+    let (cx, cy) = (
+        f["x"].as_f64().unwrap() + f["width"].as_f64().unwrap() / 2.0,
+        f["y"].as_f64().unwrap() + f["height"].as_f64().unwrap() / 2.0,
+    );
+    app.call(
+        "ui.drag",
+        json!({"window": w, "from": handle["id"], "to": {"x": cx, "y": cy - 20.0}, "steps": 8}),
+    );
+    let s = wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) - 0.8).abs() < 0.3
+    });
+    wait_for_undo(&mut app, &w, "Region Gain");
+    let dragged = gain(&s);
+
+    // 8. Normalize to −1 dBFS: −1 − (−12.04) = +11.04 dB; undo brings the
+    // dragged gain back.
+    let id = in_editor(&mut app, &w, "Normalize Peak")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "-1\n"}),
+    );
+    let id = in_editor(&mut app, &w, "Normalize")["id"].clone();
+    app.call("ui.click", json!({"window": w, "element": id}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) - 11.04).abs() < 0.05
+    });
+    wait_for_undo(&mut app, &w, "Normalize");
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) - dragged).abs() < 1e-6
+    });
+
+    // 9. Zoom In halves the frames per point.
+    let fpp = state(&mut app, &w)["frames_per_point"].as_f64().unwrap();
+    let id = in_editor(&mut app, &w, "Zoom In")["id"].clone();
+    app.call("ui.click", json!({"window": w, "element": id}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (s["frames_per_point"].as_f64().unwrap_or(f64::NAN) - fpp / 2.0).abs() <= 1.0
+    });
+
+    // 10. Saved and opened again: the edits and the bottom view.
+    let path = home.join("edited.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": path}, "window": w}),
+    );
+    app.call("command.run", json!({"id": "file.close", "window": w}));
+    let w3 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w3, json!({"condition": "documents_at_least", "count": 1}));
+    let (region, _) = wait_for_label_like(&mut app, &w3, "Region tone on ", "");
+    app.call("ui.click", json!({"window": w3, "element": region}));
+    let s = wait_for_state(&mut app, &w3, "audio_editor", |s| !s["region"].is_null());
+    let r = region_of(&s);
+    assert!((gain(&s) - dragged).abs() < 1e-6, "{s}");
+    assert_eq!(
+        (
+            r["fade_in"]["frames"].clone(),
+            r["source_offset"].clone(),
+            r["length"].clone()
+        ),
+        (json!(12_000), json!(24_000), json!(48_000)),
+        "{s}"
+    );
+    let l = layout(&mut app, &w3);
+    assert_eq!(
+        layout_pane(&l, "arrange", "bottom")["view"],
+        "audio_editor",
+        "{l}"
+    );
+    app.quit();
+}
+
 /// The first tree node whose label is exactly `label`.
 fn find_node(nodes: &Value, label: &str) -> Option<Value> {
     nodes.as_array().into_iter().flatten().find_map(|n| {

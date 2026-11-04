@@ -5,8 +5,7 @@ workstation for macOS, inspired by the classic integrated MIDI-and-audio
 sequencers of the 1990s.
 
 **Status:** VizDAW is in development and not yet released. Today it
-records, edits and mixes MIDI and audio in one window. An audio editor
-is next. The
+records, edits and mixes MIDI and audio in one window. The
 [design spec](docs/superpowers/specs/2026-10-15-vizdaw-design.md) describes
 where the project is going.
 
@@ -29,6 +28,9 @@ where the project is going.
 - Six themes, Classic Light by default, and a channel strip with typed
   levels, pan and sends, send knobs, an EQ slot and an optional colour per
   strip
+- An audio editor in the bottom pane: a region's waveform drawn large with
+  zoom and a level scale, and its gain, fades and fade shapes, trim and
+  normalize, each by dragging or by typing a value
 
 Planned: Standard MIDI File import, and OMF and AAF import (which may come
 after the first release).
@@ -43,6 +45,7 @@ after the first release).
   picker for what it shows. Drag the lines between them to resize them.
 - ⌘1 to ⌘4 open the piano roll, list, Strip Chart and drum grid in the
   bottom pane.
+- ⌘5 opens the audio editor for the selected audio region.
 - Window > Mixer opens the mixer in a window of its own.
 - Change any key in Settings › Keys.
 
