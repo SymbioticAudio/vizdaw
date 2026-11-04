@@ -244,10 +244,13 @@ fn click_play_and_press_space() {
     app.quit();
 }
 
-/// The ID of the first tree node labelled exactly `label`.
+/// The ID of the first tree node whose label, title or value is exactly `label`.
 fn labelled(nodes: &Value, label: &str) -> Option<Value> {
     nodes.as_array().into_iter().flatten().find_map(|n| {
-        if n["label"].as_str() == Some(label) {
+        if ["label", "title", "value"]
+            .iter()
+            .any(|k| n[*k].as_str() == Some(label))
+        {
             Some(n["id"].clone())
         } else {
             labelled(&n["children"], label)
@@ -2131,6 +2134,9 @@ fn window_views_and_panes_over_the_channel() {
         json!({"window": window, "key": "2", "modifiers": ["control"]}),
     );
     wait_for_layout(&mut app, &window, |l| l["main"] == "mix");
+    // Only the Mix view's mixer has the Instruments menu: once it is in the
+    // tree the view has switched, so the absent Arrangement means something.
+    wait_for_label(&mut app, &window, "Instruments");
     assert!(
         !tree_has(&mut app, "Arrangement"),
         "the Mix view has no arrangement"
@@ -2166,9 +2172,10 @@ fn window_views_and_panes_over_the_channel() {
     );
     let l = layout(&mut app);
     assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
-    // The mixer's "Add Bus" button is not in the accessibility tree (SwiftUI
-    // leaves it out of the bar); its Instruments menu is, and only a mixer
-    // has one.
+    // FINDING (task 9 fix round 1): the mixer bar's "Add Bus" button is in
+    // no node's label, title or value in this tree (checked in the bottom
+    // pane's mixer), so the brief's assertion cannot hold; the bar's
+    // Instruments menu is, and only a mixer has one.
     wait_for_label(&mut app, &window, "Instruments");
 
     // 6. The mixer window has its own transport bar.
