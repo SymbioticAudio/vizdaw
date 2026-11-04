@@ -247,7 +247,7 @@ public final class StripChartView: EditorCanvas {
     public override func drawOverlay(in dirty: CGRect) {
         let points = previewPoints
         guard let stroke = model.stroke, let first = points.first, let last = points.last else { return }
-        let tool = theme.warningColour
+        let tool = theme.toolOverlay
         if stroke.compress {
             let r = CGRect(
                 x: min(first.x, last.x), y: min(first.y, last.y), width: abs(last.x - first.x),

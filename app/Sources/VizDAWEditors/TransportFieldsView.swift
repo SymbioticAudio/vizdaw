@@ -318,7 +318,7 @@ public final class KeyRecorderView: NSView, KeyCapturing, ThemedView {
 
     public override func draw(_ dirtyRect: NSRect) {
         let r = bounds.insetBy(dx: 1, dy: 1)
-        (recording ? theme.selectionFill : theme.separatorLine).setStroke()
+        (recording ? theme.recordingRing : theme.separatorLine).setStroke()
         let p = NSBezierPath(roundedRect: r, xRadius: theme.radius.s, yRadius: theme.radius.s)
         p.stroke()
         let s = recording ? "Press a key…" : "Record"

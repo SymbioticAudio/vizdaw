@@ -112,7 +112,7 @@ struct MediaPoolView: View {
             Text("")
         } else {
             AppIcon.warning.label(offline)
-                .foregroundStyle(Color(nsColor: RegionPalette(theme).offline))
+                .foregroundStyle(Color(nsColor: theme.offlineText))
                 .accessibilityLabel("Offline: \(offline)")
         }
     }

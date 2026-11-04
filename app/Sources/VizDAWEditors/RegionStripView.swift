@@ -170,7 +170,10 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
         NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius).stroke()
         NSString(string: title).draw(
             at: CGPoint(x: r.minX + 5, y: r.minY + 1),
-            withAttributes: [.font: theme.font(theme.type.label, weight: .bold), .foregroundColor: theme.label])
+            withAttributes: [
+                .font: theme.font(theme.type.label, weight: .bold),
+                .foregroundColor: on ? theme.legend(on: color) : theme.label,
+            ])
     }
 
     // MARK: Events

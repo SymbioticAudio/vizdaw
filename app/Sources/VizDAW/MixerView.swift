@@ -123,6 +123,7 @@ struct MixerView: View {
 /// pane would land in the document window's): the load, Add Bus and the
 /// Instruments menu with its popover (Ruling 8).
 struct MixerBar: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: MixerModel
     let placement: MixerPlacement
 
@@ -130,7 +131,7 @@ struct MixerBar: View {
         HStack(spacing: 10) {
             Spacer(minLength: 0)
             // AppKit, so the channel's tree finds them (final review I1).
-            AppKitLabel(model.loadText, font: Self.loadFont, secondary: true)
+            AppKitLabel(model.loadText, font: theme.digitsFont(theme.type.caption), secondary: true)
                 .fixedSize()
             AppKitButton("Add Bus", help: "Add a bus") { model.addBus() }
                 .fixedSize()
@@ -151,12 +152,6 @@ struct MixerBar: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
     }
-
-    /// The caption font with even-width digits, as the load text had.
-    @MainActor static let loadFont: NSFont = {
-        let f = NSFont.preferredFont(forTextStyle: .caption1)
-        return NSFont.monospacedDigitSystemFont(ofSize: f.pointSize, weight: .regular)
-    }()
 
     /// The instrument browser, for a new instrument or a destination, in
     /// the placement that opened it.

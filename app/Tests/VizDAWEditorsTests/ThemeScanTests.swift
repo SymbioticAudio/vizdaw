@@ -70,21 +70,30 @@ enum SourceScan {
 /// Every colour, radius and font size from the theme (plan 7b Ruling 13).
 @MainActor
 @Suite struct ThemeScanTests {
-    static let dirs = ["VizDAW", "VizDAWEditors"]
+    static let dirs = ["VizDAW", "VizDAWEditors", "VizDAWAppModel"]
     /// The only files that may name a concrete colour.
     static let bridges: Set<String> = ["VizDAW/Theming.swift", "VizDAWEditors/EditorTheme.swift"]
 
     /// Ruling 13's colour forms. The bare-member list is the ruling's, plus
     /// five more system colours and SwiftUI's `.quaternary` the sweep found
     /// (`ThemedRoot` maps only `.primary`, `.secondary` and `.tertiary`).
+    /// B5 review I2 widened it: CoreGraphics colours, colour literals,
+    /// `Color(.sRGB, …)`, every `NSColor(<space>…:` initialiser, more system
+    /// colour names and bare `.accentColor`.
     static let colourPatterns = [
         #"\b(NS)?Color\.(?!clear\b)[A-Za-z_]"#,
         #"\bColor\(red:|\bNSColor\(red:|\bNSColor\(calibrated|\b(NS)?Color\((white|hue|srgbRed|deviceRed|deviceWhite):"#,
-        #"(?<![A-Za-z0-9_])\.(system(Red|Orange|Yellow|Green|Mint|Teal|Cyan|Blue|Indigo|Purple|Pink|Brown|Gray)|labelColor|secondaryLabelColor|tertiaryLabelColor|separatorColor|controlAccentColor|windowBackgroundColor|textColor|quaternaryLabelColor|textBackgroundColor|controlBackgroundColor|underPageBackgroundColor|selectedContentBackgroundColor|quaternary|black|white|red|orange|yellow|green|mint|teal|cyan|blue|indigo|purple|pink|brown|gray)\b"#,
+        #"(?<![A-Za-z0-9_])\.(system(Red|Orange|Yellow|Green|Mint|Teal|Cyan|Blue|Indigo|Purple|Pink|Brown|Gray)|labelColor|secondaryLabelColor|tertiaryLabelColor|separatorColor|controlAccentColor|windowBackgroundColor|textColor|quaternaryLabelColor|textBackgroundColor|controlBackgroundColor|underPageBackgroundColor|selectedContentBackgroundColor|quaternary|controlTextColor|disabledControlTextColor|selectedControlTextColor|alternateSelectedControlTextColor|selectedTextColor|selectedTextBackgroundColor|selectedControlColor|unemphasizedSelectedTextColor|unemphasizedSelectedTextBackgroundColor|unemphasizedSelectedContentBackgroundColor|controlColor|gridColor|headerTextColor|highlightColor|shadowColor|linkColor|placeholderTextColor|keyboardFocusIndicatorColor|findHighlightColor|scrubberTexturedBackground|systemFill|accentColor|black|white|red|orange|yellow|green|mint|teal|cyan|blue|indigo|purple|pink|brown|gray)\b"#,
+        #"\bCGColor(\.|\()"#,
+        #"#colorLiteral"#,
+        #"\bColor\(\."#,
+        #"\bNSColor\((displayP3|device|generic|srgb|calibrated)\w*:"#,
     ]
 
+    /// Radii and font sizes: SwiftUI's and AppKit's forms (B5 review I2).
     static let metricPatterns = [
-        #"cornerRadius:\s*[0-9]"#, #"\.system\(size:\s*[0-9]"#, #"systemFont\(ofSize:"#, #"SystemFontSize"#,
+        #"cornerRadius:\s*[0-9]"#, #"cornerRadius\s*=\s*[0-9]"#, #"[xy]Radius:\s*[0-9]"#,
+        #"\.system\(size:\s*[0-9]"#, #"(?i)systemFont\(ofSize:"#, #"SystemFontSize"#,
     ]
 
     @Test func noColourLiteralsOutsideTheThemeBridges() throws {
@@ -114,6 +123,28 @@ enum SourceScan {
         ]
         let all = Self.colourPatterns + Self.metricPatterns
         for line in bad {
+            #expect(try SourceScan.matches(line, patterns: all) >= 1, "\(line)")
+        }
+        // The forms B5 review I2 added, one planted line each.
+        let widened = [
+            "NSBezierPath(roundedRect: r, xRadius: 4, yRadius: 4)",
+            "layer.cornerRadius = 4",
+            "let f = NSFont.boldSystemFont(ofSize: 11)",
+            "let f = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)",
+            "layer.borderColor = CGColor.black",
+            "let c = CGColor(gray: 0, alpha: 1)",
+            "let c = CGColor(red: 1, green: 0, blue: 0, alpha: 1)",
+            "let c = #colorLiteral(red: 1, green: 0, blue: 0, alpha: 1)",
+            "let c = Color(.sRGB, red: 1, green: 0, blue: 0)",
+            "let c = NSColor(displayP3Red: 1, green: 0, blue: 0, alpha: 1)",
+            "field.textColor = .controlTextColor",
+            "ctx.setStrokeColor(NSColor.gridColor.cgColor)",
+            "let c: NSColor = .highlightColor",
+            "let c: NSColor = .linkColor",
+            "let c: NSColor = .placeholderTextColor",
+            "Text(x).foregroundStyle(.accentColor)",
+        ]
+        for line in widened {
             #expect(try SourceScan.matches(line, patterns: all) >= 1, "\(line)")
         }
         #expect(try SourceScan.matches(bad[7], patterns: all) == 2)
@@ -166,14 +197,59 @@ enum SourceScan {
         #expect(same(t.laneColour(0), t.swatch.red) && same(t.laneColour(7), t.swatch.pink))
         #expect(same(t.laneColour(9), t.swatch.orange) && same(t.laneColour(-1), t.swatch.pink))
     }
+    /// B5 review I1: a lit toggle's letter reads on its fill in every theme
+    /// (WCAG 4.5:1), the lane header's and the region strip's.
+    /// Lit fills on which neither `keys.black` nor `keys.white` reaches
+    /// 4.5:1 (the token owner's to fix): Classic Light's orange swatch
+    /// (white 4.42) and Symbiotic's (white 4.33).
+    static let shortFills: Set<String> = ["classic-light monitor input", "symbiotic monitor input"]
+
+    @Test func litLegendsReadOnTheirFills() {
+        for t in Theme.all {
+            let fills: [(String, ThemeColor)] = [
+                ("mute", t.state.mute), ("solo", t.state.solo), ("arm", t.state.record),
+                ("monitor input", t.swatch.orange), ("monitor auto", t.swatch.teal),
+            ]
+            for (name, fill) in fills {
+                let f = fill.nsColor
+                let ink = t.legend(on: f)
+                let ratio = Theme.contrast(ink, f)
+                let other = Theme.contrast(ink == t.keys.black.nsColor ? t.keys.white.nsColor : t.keys.black.nsColor, f)
+                #expect(ratio >= other, "\(t.id) \(name): the better ink")
+                if Self.shortFills.contains("\(t.id) \(name)") {
+                    // Neither ink reaches 4.5 on these tokens (reported,
+                    // tokens unchanged): the better one stays above 4.3.
+                    #expect(ratio < 4.5 && ratio >= 4.3, "\(t.id) \(name): \(ratio)")
+                } else {
+                    #expect(ratio >= 4.5, "\(t.id) \(name): \(ratio)")
+                }
+            }
+        }
+    }
+
+    /// B5 review M4 and M5: offline text and icons on the window (4.5:1),
+    /// the key recorder's ring on the window and a tool overlay on the
+    /// canvas (3:1, non-text), in every theme.
+    @Test func statusInksReadOnTheirBackgrounds() {
+        for t in Theme.all {
+            let window = t.surface.window.nsColor
+            let offline = Theme.contrast(t.offlineText, window)
+            #expect(offline >= 4.5, "\(t.id) offline text: \(offline)")
+            let ring = Theme.contrast(t.recordingRing, window)
+            #expect(ring >= 3, "\(t.id) recording ring: \(ring)")
+            let tool = Theme.contrast(t.toolOverlay, t.canvas)
+            #expect(tool >= 3, "\(t.id) tool overlay: \(tool)")
+        }
+    }
+
     /// Owner decision (2026-11-03, overruling Ruling 13's key row): piano
     /// keys are white and black in every theme, from the `keys` group; the
     /// key labels, drawn on the white keys, are the black key colour.
     @Test func pianoKeysAreWhiteAndBlackInEveryTheme() {
         for t in [Theme.studioDark, .console] {
-            #expect(Theme.luminance(t.whiteKey) > 0.8, "\(t.id) white key")
-            #expect(Theme.luminance(t.blackKey) < 0.2, "\(t.id) black key")
-            #expect(Theme.luminance(t.keyLabel) < 0.2, "\(t.id) key label")
+            #expect(Theme.relativeLuminance(t.whiteKey) > 0.8, "\(t.id) white key")
+            #expect(Theme.relativeLuminance(t.blackKey) < 0.2, "\(t.id) black key")
+            #expect(Theme.relativeLuminance(t.keyLabel) < 0.2, "\(t.id) key label")
         }
     }
 

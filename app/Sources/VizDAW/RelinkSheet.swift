@@ -21,7 +21,7 @@ struct RelinkSheet: View {
             List(media.relinkable, id: \.id) { r in
                 HStack(spacing: 8) {
                     AppIcon.warning.image
-                        .foregroundStyle(Color(nsColor: RegionPalette(theme).offline))
+                        .foregroundStyle(Color(nsColor: theme.offlineText))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(r.name)

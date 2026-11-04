@@ -3,6 +3,7 @@ import SwiftUI
 import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
+import VizDAWEditors
 
 #if canImport(SymbioticBrand)
 import SymbioticBrand
@@ -110,6 +111,8 @@ struct VizDAWApp: App {
         // The user themes are read before the first window draws (R-UT).
         userThemes.start()
         appearancePreferences.onChange = { ThemeWindows.apply($0) }
+        // Views made before launch finishes (state restoration) start in it.
+        ThemedViews.current = appearancePreferences.theme
         // The audio settings reach the core before any document opens
         // (plan 5d-2 Ruling 2; 5d-1 carry: before the first host opens).
         audioPreferences.applyAll()
