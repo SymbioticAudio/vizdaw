@@ -120,11 +120,16 @@ public final class MixerModel {
         case instrument
         /// An existing destination, which then plays the plugin.
         case destination(UInt64)
+        /// A strip's EQ slot (an effect, which processes before the inserts).
+        case eq(strip: UInt64)
 
-        /// The browser lists instruments for it (effects for an insert).
+        /// The browser lists instruments for it (effects for an insert or
+        /// the EQ).
         public var wantsInstrument: Bool {
-            if case .insert = self { return false }
-            return true
+            switch self {
+            case .insert, .eq: false
+            case .instrument, .destination: true
+            }
         }
     }
 
@@ -215,7 +220,7 @@ public final class MixerModel {
 
     /// The held slots of `strip` (its "Load All").
     public func heldSlots(of strip: StripRow) -> [UInt64] {
-        ([strip.instrument].compactMap { $0 } + strip.inserts).map(\.id).filter(held.contains)
+        strip.slots.map(\.id).filter(held.contains)
     }
 
     // MARK: Polling
@@ -362,9 +367,25 @@ public final class MixerModel {
             command("New Instrument Failed") { try $0.addPluginInstrument(name: plugin.name, plugin: plugin) }
         case .destination(let dest):
             command("Instrument Failed") { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }
+        case .eq(let strip):
+            // The plug-in already in the slot is no change, so no undo step.
+            if snapshot.strips.first(where: { $0.id == strip })?.eq?.plugin == plugin { return }
+            command("Load EQ Failed") { try $0.setEq(strip: strip, plugin: plugin) }
         case nil:
             break
         }
+    }
+
+    /// Empties the strip's EQ slot.
+    public func clearEq(_ s: StripRow) {
+        command("Clear EQ Failed") { try $0.setEq(strip: s.id, plugin: nil) }
+    }
+
+    /// Sets or clears the strip's own colour (one undo step); the colour it
+    /// already has is no change.
+    public func setColour(_ s: StripRow, _ c: SwatchRow?) {
+        guard c != s.colour else { return }
+        command("Strip Colour Failed") { try $0.setStripColour(strip: s.id, colour: c) }
     }
 
     public func removeInsert(_ slot: UInt64) {
@@ -517,6 +538,57 @@ public final class MixerModel {
         guard let a = try? session.automationState() else { return }
         let now = Set(a.touched)
         if now != coreTouched { coreTouched = now }
+    }
+
+    // MARK: Typed values (Ruling 15)
+
+    /// Applies a typed level as one click. False, with the status line set,
+    /// when the text is refused or `target` is touched.
+    private func type(_ target: AutomationTargetRow, _ norm: Double?, hint: String) -> Bool {
+        guard let norm else {
+            document.editor.status = hint
+            return false
+        }
+        guard !isTouched(target) else {
+            document.editor.status = StripEntry.touchedHint
+            return false
+        }
+        click(target, norm)
+        return true
+    }
+
+    public func typeLevel(_ s: StripRow, _ text: String) -> Bool {
+        type(.stripFader(strip: s.id), StripEntry.level(text).map(AutomationLaw.faderNorm), hint: StripEntry.levelHint)
+    }
+
+    public func typePan(_ s: StripRow, _ text: String) -> Bool {
+        type(.stripPan(strip: s.id), StripEntry.pan(text).map { ($0 + 1) / 2 }, hint: StripEntry.panHint)
+    }
+
+    public func typeSend(_ s: StripRow, _ index: Int, _ text: String) -> Bool {
+        guard index >= 0, index < s.sends.count else { return false }
+        return type(
+            .sendLevel(strip: s.id, send: Self.sendIndex(index)),
+            StripEntry.level(text).map(AutomationLaw.faderNorm), hint: StripEntry.levelHint)
+    }
+
+    // MARK: Record arm and monitor (audio-path strips only)
+
+    /// R and I work on a strip with an input lane (an audio path); the
+    /// instrument strips and master leave them disabled.
+    public func canArm(_ s: StripRow) -> Bool { inputLane(for: s) != nil }
+
+    /// Toggles the arm of the strip's input lane (one undo step), as the
+    /// lane header and the surfaces' rec buttons do.
+    public func toggleArm(_ s: StripRow) {
+        guard let lane = inputLane(for: s), let seq = document.selectedSeq else { return }
+        _ = document.editor.edit(.lane(edit: .setFlags(seq: seq, lane: lane.id, mute: nil, solo: nil, arm: !lane.arm)))
+    }
+
+    /// The monitor button: A, I, then off.
+    public func cycleMonitor(_ s: StripRow) {
+        guard let lane = inputLane(for: s) else { return }
+        document.inputs.cycleMonitor(lane)
     }
 
     // MARK: Modes and selection (Rulings 5, 6)

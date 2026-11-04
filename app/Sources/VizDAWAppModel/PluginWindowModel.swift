@@ -75,7 +75,7 @@ public final class PluginWindowModel {
             var found: SlotRow?
             var name = ""
             for s in mixer.strips {
-                if let r = ([s.instrument].compactMap { $0 } + s.inserts).first(where: { $0.id == slot }) {
+                if let r = s.slots.first(where: { $0.id == slot }) {
                     found = r
                     name = s.name
                 }

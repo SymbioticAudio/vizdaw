@@ -32,7 +32,7 @@ public enum AutomationTargets {
             lanes += [.automation(.mute(strip: s.id)), .automation(.solo(strip: s.id))]
             lanes += s.sends.indices.map { .automation(.send(strip: s.id, index: UInt16(clamping: $0))) }
             menus.append(StripMenu(title: s.name, lanes: lanes))
-            for slot in (s.instrument.map { [$0] } ?? []) + s.inserts {
+            for slot in s.slots {
                 n.slots[slot.id] = slot.plugin.name
                 let params = (try Self.read { try session.params(slot: slot.id) } ?? []).filter { $0.automatable && !$0.hidden }
                 n.params[slot.id] = params
