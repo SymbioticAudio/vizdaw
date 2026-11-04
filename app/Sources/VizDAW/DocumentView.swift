@@ -82,42 +82,46 @@ struct DocumentTransportBar: View {
     let showsViews: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                PlayStopButton(playing: model.isPlaying, enabled: model.canPlay) { model.playStop() }
-                    .fixedSize()
-                Toggle(
-                    isOn: Binding(get: { model.looping }, set: { _ in model.toggleLoop() })
-                ) {
-                    Label("Loop", systemImage: "repeat")
+        // One row when it fits, else the fields on a second row (Task 7
+        // review I1): never cut at the default window or the minimum.
+        TransportBarLayout(spacing: 10) {
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    PlayStopButton(playing: model.isPlaying, enabled: model.canPlay) { model.playStop() }
+                        .fixedSize()
+                    Toggle(
+                        isOn: Binding(get: { model.looping }, set: { _ in model.toggleLoop() })
+                    ) {
+                        Label("Loop", systemImage: "repeat")
+                    }
+                    .toggleStyle(.button)
+                    .labelStyle(.iconOnly)
+                    .help("Loop")
+                    RecordControls(model: model, record: model.record)
                 }
-                .toggleStyle(.button)
-                .labelStyle(.iconOnly)
-                .help("Loop")
-                RecordControls(model: model, record: model.record)
-            }
-            .fixedSize()
-            Text(Formatting.position(model.transport))
-                .font(.system(.title3, design: .monospaced))
-                .lineLimit(1)
                 .fixedSize()
-            // The fields take what is left, cut at the right in a narrow window.
-            TransportBar(model: model)
-                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                .clipped()
-                .layoutPriority(-1)
-            Text(Formatting.device(model.transport))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if showsViews {
-                faults
-                views
+                Text(Formatting.position(model.transport))
+                    .font(.system(.title3, design: .monospaced))
+                    .lineLimit(1)
                     .fixedSize()
+            }
+            // In a row narrower than they like, the fields narrow (to 72 pt).
+            TransportBar(model: model)
+                .clipped()
+            HStack(spacing: 10) {
+                Text(Formatting.device(model.transport))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if showsViews {
+                    faults
+                    views
+                        .fixedSize()
+                }
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, TransportBarRows.padding)
         .padding(.vertical, 4)
         .background(.bar)
     }
@@ -217,5 +221,72 @@ struct PlayStopButton: NSViewRepresentable {
         b.setAccessibilityLabel(title)
         b.toolTip = "\(title) (Space)"
         b.isEnabled = enabled
+    }
+}
+
+/// The transport bar's three parts (leading controls, the fields, trailing
+/// controls) on one row, or, when `TransportBarRows` says it does not fit,
+/// the leading and trailing on the first row and the fields on the second.
+/// One layout, so the fields view is never remade when the window resizes.
+struct TransportBarLayout: Layout {
+    var spacing: CGFloat
+    var rowSpacing: CGFloat = 4
+
+    private func ideal(_ subviews: Subviews) -> [CGSize] {
+        subviews.map { $0.sizeThatFits(.unspecified) }
+    }
+
+    private func rows(_ width: CGFloat, _ s: [CGSize]) -> Int {
+        guard s.count == 3 else { return 1 }
+        // The width here is inside the bar's padding: add it back for the rule.
+        return TransportBarRows.count(
+            width: width + 2 * TransportBarRows.padding, leading: s[0].width, fields: s[1].width,
+            trailing: s[2].width, spacing: spacing)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let s = ideal(subviews)
+        guard s.count == 3 else { return .zero }
+        let one = s[0].width + spacing + s[1].width + spacing + s[2].width
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? one
+        let top = max(s[0].height, s[2].height)
+        guard rows(width, s) == 2 else { return CGSize(width: width, height: max(top, s[1].height)) }
+        // On a row of its own the fields part may wrap (the summary above).
+        let fields = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return CGSize(width: width, height: top + rowSpacing + fields.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let s = ideal(subviews)
+        guard s.count == 3 else { return }
+        let w = bounds.width
+        if rows(w, s) == 1 {
+            let top = max(s[0].height, s[1].height, s[2].height)
+            subviews[0].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + top / 2), anchor: .leading,
+                proposal: ProposedViewSize(s[0]))
+            let fieldsW = max(w - s[0].width - s[2].width - 2 * spacing, 0)
+            subviews[1].place(
+                at: CGPoint(x: bounds.minX + s[0].width + spacing, y: bounds.minY + top / 2), anchor: .leading,
+                proposal: ProposedViewSize(width: fieldsW, height: s[1].height))
+            subviews[2].place(
+                at: CGPoint(x: bounds.maxX, y: bounds.minY + top / 2), anchor: .trailing,
+                proposal: ProposedViewSize(s[2]))
+        } else {
+            let top = max(s[0].height, s[2].height)
+            subviews[0].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + top / 2), anchor: .leading,
+                proposal: ProposedViewSize(s[0]))
+            // The trailing part gives way (the device text truncates) before
+            // it covers the leading part.
+            let trailingW = max(min(s[2].width, w - s[0].width - spacing), 0)
+            subviews[2].place(
+                at: CGPoint(x: bounds.maxX, y: bounds.minY + top / 2), anchor: .trailing,
+                proposal: ProposedViewSize(width: trailingW, height: s[2].height))
+            let fields = subviews[1].sizeThatFits(ProposedViewSize(width: w, height: nil))
+            subviews[1].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + top + rowSpacing), anchor: .topLeading,
+                proposal: ProposedViewSize(width: w, height: fields.height))
+        }
     }
 }

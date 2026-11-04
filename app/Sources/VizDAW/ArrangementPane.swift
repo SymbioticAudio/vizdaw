@@ -124,9 +124,10 @@ struct TransportBar: View {
     let model: DocumentModel
 
     var body: some View {
-        HStack(spacing: 12) {
-            TransportFieldsHost(document: model)
-                .frame(height: 22)
+        // Step entry's summary in front of the fields, or above them when
+        // both do not fit on one line, so a narrow bar never cuts either
+        // (Task 7 review I1).
+        SummaryAndFields(spacing: 12) {
             if let s = model.stepEntry.summary {
                 Text(s)
                     .font(.caption)
@@ -134,8 +135,51 @@ struct TransportBar: View {
                     .padding(.vertical, 2)
                     .background(Color.accentColor.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
                     .accessibilityLabel(s)
+                    .fixedSize()
             }
-            Spacer(minLength: 0)
+            TransportFieldsHost(document: model)
+                .frame(height: 22)
+        }
+    }
+}
+
+/// The summary (when there is one) then the fields on one line, or the
+/// summary above the fields when the line is narrower than both at their
+/// ideal widths. The last subview is the fields, which take what is left.
+struct SummaryAndFields: Layout {
+    var spacing: CGFloat
+    var lineSpacing: CGFloat = 2
+
+    private func oneLine(_ width: CGFloat, _ s: [CGSize]) -> Bool {
+        s.count < 2 || width >= s[0].width + spacing + s[1].width
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let s = subviews.map { $0.sizeThatFits(.unspecified) }
+        guard let fields = s.last else { return .zero }
+        let ideal = s.count < 2 ? fields.width : s[0].width + spacing + fields.width
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? ideal
+        let height = oneLine(width, s) ? (s.map(\.height).max() ?? 0) : s[0].height + lineSpacing + fields.height
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let s = subviews.map { $0.sizeThatFits(.unspecified) }
+        guard let fields = subviews.last, let fs = s.last else { return }
+        if s.count < 2 {
+            fields.place(
+                at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading,
+                proposal: ProposedViewSize(width: bounds.width, height: fs.height))
+        } else if oneLine(bounds.width, s) {
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(s[0]))
+            fields.place(
+                at: CGPoint(x: bounds.minX + s[0].width + spacing, y: bounds.midY), anchor: .leading,
+                proposal: ProposedViewSize(width: max(bounds.width - s[0].width - spacing, 0), height: fs.height))
+        } else {
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY), anchor: .topLeading, proposal: ProposedViewSize(s[0]))
+            fields.place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + s[0].height + lineSpacing), anchor: .topLeading,
+                proposal: ProposedViewSize(width: bounds.width, height: fs.height))
         }
     }
 }
@@ -146,6 +190,14 @@ struct TransportFieldsHost: NSViewRepresentable {
     func makeNSView(context: Context) -> TransportFieldsView { TransportFieldsView(document: document) }
 
     func updateNSView(_ view: TransportFieldsView, context: Context) {}
+
+    /// Its fitting width when asked for its ideal size, so the transport
+    /// bar can tell whether one row holds it; else what it is offered.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TransportFieldsView, context: Context) -> CGSize? {
+        let fit = nsView.fittingWidth
+        let w = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? fit
+        return CGSize(width: w, height: 22)
+    }
 }
 
 /// The last failure of an editor action (spec §5: non-modal).

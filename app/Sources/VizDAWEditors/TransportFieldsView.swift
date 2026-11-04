@@ -16,24 +16,33 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate {
     public private(set) var fields: [TransportField: NSTextField] = [:]
     /// The field being typed in.
     private(set) var editing: TransportField?
+    private let stack = NSStackView()
 
     public init(document: DocumentModel) {
         self.document = document
         super.init(frame: .zero)
-        let stack = NSStackView()
         stack.orientation = .horizontal
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
+        // Narrower than its fitting width, the fields give (not the edge).
+        stack.setClippingResistancePriority(.defaultLow, for: .horizontal)
         for f in TransportField.allCases {
             let label = NSTextField(labelWithString: f.title)
             label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            label.setContentCompressionResistancePriority(.required, for: .horizontal)
             let field = TransportTextField(string: "")
             field.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
             field.alignment = .right
             field.delegate = self
             field.title = f.title
             field.identifier = NSUserInterfaceItemIdentifier("transport.\(f.rawValue)")
-            field.widthAnchor.constraint(equalToConstant: 86).isActive = true
+            // 86 points, narrowing to 72 in a row too narrow for all five
+            // (Task 7 review I1); `fittingWidth` reports the 86.
+            let preferred = field.widthAnchor.constraint(equalToConstant: 86)
+            preferred.priority = .defaultLow
+            preferred.isActive = true
+            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             fields[f] = field
             stack.addArrangedSubview(label)
             stack.addArrangedSubview(field)
@@ -47,11 +56,17 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate {
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            // The last field stays inside: the fields narrow before it is cut.
+            (order.last ?? stack).trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         observe()
     }
+
+    /// The width the five fields and their labels need (the transport bar
+    /// puts them on a row of their own when its row cannot give it).
+    public var fittingWidth: CGFloat { stack.fittingSize.width }
 
     public required init?(coder: NSCoder) { nil }
 

@@ -17,6 +17,49 @@ private let beat: Int64 = 15_360
         return (f, try DocumentModel(session: f))
     }
 
+    /// Task 7 review I1: the transport bar puts the fields (with step
+    /// entry's summary in front) on a second row when one row cannot hold
+    /// them, so none is cut at the default 980-point window or at 700.
+    @Test func theTransportBarTakesTwoRowsWhenTheFieldsDoNotFit() throws {
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let fields = v.fittingWidth
+        #expect(fields > 5 * 86 && fields < 900, "five 86-point fields and their labels: \(fields)")
+        // The bar's other controls in the demo: Play to the position (325),
+        // the device to the right pane toggle (345).
+        func rows(_ width: CGFloat) -> Int {
+            TransportBarRows.count(width: width, leading: 325, fields: fields, trailing: 345, spacing: 10)
+        }
+        #expect(rows(1600) == 1, "a wide window keeps one row")
+        #expect(rows(980) == 2, "the default window")
+        #expect(rows(700) == 2, "the minimum window")
+        #expect(rows(325 + 10 + fields + 10 + 345 + 16) == 1, "exactly enough, with the bar's padding")
+        #expect(rows(325 + 10 + fields + 10 + 345 + 15) == 2)
+        #expect(rows(.nan) == 2 && rows(-1) == 2, "a bad width is never one row")
+        // The second row at the 700-point minimum (700 − 16): every field
+        // shows, narrowed from 86 towards 72, its label whole.
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 684, height: 22), styleMask: [.titled], backing: .buffered,
+            defer: true)
+        w.isReleasedWhenClosed = false
+        defer { w.close() }
+        // As SwiftUI sizes its host: a width the fields cannot push.
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 684, height: 22))
+        w.contentView = box
+        v.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(v)
+        NSLayoutConstraint.activate([
+            v.leadingAnchor.constraint(equalTo: box.leadingAnchor), v.topAnchor.constraint(equalTo: box.topAnchor),
+            v.widthAnchor.constraint(equalToConstant: 684), v.heightAnchor.constraint(equalToConstant: 22),
+        ])
+        box.layoutSubtreeIfNeeded()
+        for f in TransportField.allCases {
+            let r = try #require(v.fields[f]).convert(try #require(v.fields[f]).bounds, to: v)
+            #expect(r.maxX <= 684 && r.width >= 72, "\(f): \(r)")
+        }
+        #expect(v.fittingWidth == fields, "the row rule still sees the full width")
+    }
+
     @Test func fieldsShowAndTakeBarBeatUnit() throws {
         let (f, m) = try model()
         f.state.tick = bar + beat
