@@ -159,11 +159,11 @@ public final class StripChartView: EditorCanvas {
             let top = rowTop(i)
             let rect = CGRect(x: 0, y: top, width: content.bounds.width, height: rowHeight)
             guard rect.intersects(dirty) else { continue }
-            NSColor.separatorColor.setFill()
+            theme.separatorLine.setFill()
             CGRect(x: dirty.minX, y: rect.maxY - 1, width: dirty.width, height: 1).fill()
             let s = scale(i)
             if let c = lane.center {
-                NSColor.separatorColor.withAlphaComponent(0.6).setFill()
+                theme.separatorLine.withAlphaComponent(0.6).setFill()
                 CGRect(x: dirty.minX, y: s.y(c), width: dirty.width, height: 0.5).fill()
             }
             draw(model.values(lane), lane: lane, scale: s, dirty: dirty, selected: selected)
@@ -171,13 +171,14 @@ public final class StripChartView: EditorCanvas {
             NSString(string: lane.title(names) + " ▾").draw(
                 at: CGPoint(x: 6, y: top + 3),
                 withAttributes: [
-                    .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.secondaryLabelColor,
+                    .font: theme.type.label.nsFont, .foregroundColor: theme.secondaryLabel,
                 ])
         }
     }
 
     private func draw(_ values: [StripValue], lane: StripLane, scale s: StripScale, dirty: CGRect, selected: Set<UInt64>) {
-        let accent = NSColor.controlAccentColor
+        let accent = theme.valueBar
+        let picked = theme.regionSelected
         func isSelected(_ v: StripValue) -> Bool { v.id.map(selected.contains) ?? false }
         if lane.style == .bars {
             let bottom = s.y(s.range.lowerBound)
@@ -185,7 +186,7 @@ public final class StripChartView: EditorCanvas {
                 let x0 = axis.x(v.tick)
                 guard x0 + 6 >= dirty.minX, x0 <= dirty.maxX else { continue }
                 let y = s.y(v.value)
-                (isSelected(v) ? accent : accent.withAlphaComponent(0.45)).setFill()
+                (isSelected(v) ? picked : accent.withAlphaComponent(0.45)).setFill()
                 CGRect(x: x0, y: y, width: 5, height: max(bottom - y, 1)).fill()
             }
             return
@@ -215,7 +216,7 @@ public final class StripChartView: EditorCanvas {
             }
             started = true
             prev = v
-            (isSelected(v) ? accent : accent.withAlphaComponent(0.8)).setFill()
+            (isSelected(v) ? picked : accent.withAlphaComponent(0.8)).setFill()
             CGRect(x: p.x - 2, y: p.y - 2, width: 4, height: 4).fill()
             if p.x > hi {
                 pastRight = true
@@ -238,7 +239,7 @@ public final class StripChartView: EditorCanvas {
         let line = NSBezierPath()
         line.move(to: CGPoint(x: axis.x(first.tick), y: s.y(first.value)))
         for v in values.dropFirst() { line.line(to: CGPoint(x: axis.x(v.tick), y: s.y(v.value))) }
-        NSColor.systemRed.setStroke()
+        theme.armColour.setStroke()
         line.lineWidth = 1.5
         line.stroke()
     }
@@ -246,14 +247,14 @@ public final class StripChartView: EditorCanvas {
     public override func drawOverlay(in dirty: CGRect) {
         let points = previewPoints
         guard let stroke = model.stroke, let first = points.first, let last = points.last else { return }
-        let orange = NSColor.systemOrange
+        let tool = theme.warningColour
         if stroke.compress {
             let r = CGRect(
                 x: min(first.x, last.x), y: min(first.y, last.y), width: abs(last.x - first.x),
                 height: abs(last.y - first.y))
-            orange.withAlphaComponent(0.12).setFill()
+            tool.withAlphaComponent(0.12).setFill()
             r.fill()
-            orange.setStroke()
+            tool.setStroke()
             NSBezierPath(rect: r).stroke()
             return
         }
@@ -264,7 +265,7 @@ public final class StripChartView: EditorCanvas {
         } else {
             p.line(to: last)
         }
-        orange.setStroke()
+        tool.setStroke()
         p.lineWidth = 1
         p.stroke()
     }

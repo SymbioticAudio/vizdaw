@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SymbioticTokens
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -15,6 +16,22 @@ private let beat: Int64 = 15_360
     func model() throws -> (FakeSession, DocumentModel) {
         let f = demoFake()
         return (f, try DocumentModel(session: f))
+    }
+
+    /// The B4 run found the field labels and values faint in Classic
+    /// Light: both take the theme's text colour, from the start and on a
+    /// change (plan 7b Task B5).
+    @Test func theFieldsLabelsAndValuesAreInTheThemesText() throws {
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        for t in [v.theme, .classicLight, .studioDark] {
+            v.theme = t
+            for f in TransportField.allCases {
+                #expect(v.labels[f]?.textColor == t.label, "\(t.id) \(f) label")
+                #expect(v.fields[f]?.textColor == t.label, "\(t.id) \(f) value")
+                #expect(v.fields[f]?.backgroundColor == t.canvas, "\(t.id) \(f) background")
+            }
+        }
     }
 
     /// Task 7 review I1: the transport bar puts the fields (with step

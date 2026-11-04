@@ -126,6 +126,7 @@ struct ArrangementBar: View {
 /// The transport fields and step entry's line (plan 4f Rulings 11, 16), in
 /// the transport bar.
 struct TransportBar: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
 
     var body: some View {
@@ -138,7 +139,8 @@ struct TransportBar: View {
                     .font(.caption)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.accentColor.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
+                    .background(
+                        theme.accent.accent.color.opacity(0.18), in: RoundedRectangle(cornerRadius: theme.radius.s))
                     .accessibilityLabel(s)
                     .fixedSize()
             }
@@ -209,12 +211,13 @@ struct TransportFieldsHost: NSViewRepresentable {
 
 /// The last failure of an editor action (spec §5: non-modal).
 struct StatusLine: View {
+    @Environment(\.symbioticTheme) private var theme
     let editor: EditorModel
 
     var body: some View {
         if let s = editor.status {
             HStack {
-                AppIcon.warning.image.foregroundStyle(.orange)
+                AppIcon.warning.image.foregroundStyle(theme.state.warning.color)
                 Text(s).lineLimit(1)
                 Spacer()
                 Button("Dismiss") { editor.clearStatus() }.buttonStyle(.borderless)

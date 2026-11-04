@@ -9,7 +9,7 @@ import VizDAWCore
 public final class CanvasLayerView: NSView, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
+    public var theme: Theme = ThemedViews.current {
         didSet { themeDidChange(from: oldValue) }
     }
 
@@ -108,8 +108,11 @@ final class CanvasElement: NSAccessibilityElement {
 open class EditorCanvas: NSView, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
-        didSet { themeDidChange(from: oldValue) }
+    public var theme: Theme = ThemedViews.current {
+        didSet {
+            themeDidChange(from: oldValue)
+            applyLayerColours()
+        }
     }
 
     public static let rulerHeight: CGFloat = 22
@@ -182,16 +185,26 @@ open class EditorCanvas: NSView, ThemedView {
 
     private func setUp() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
         for v in [grid, content, overlay, ruler] { addSubview(v) }
         grid.paint = { [weak self] r in self?.drawGrid(r) }
         content.paint = { [weak self] r in self?.drawContent(in: r) }
         overlay.paint = { [weak self] r in self?.drawOverlayBase(r) }
         ruler.paint = { [weak self] r in self?.drawRuler(r) }
-        playheadLayer.backgroundColor = NSColor.systemRed.cgColor
         playheadLayer.isHidden = true
         overlay.layer?.addSublayer(playheadLayer)
+        applyLayerColours()
     }
+
+    /// The layer colours: at set-up and on every theme change, in the
+    /// theme's appearance, so a dynamic token resolves to it.
+    private func applyLayerColours() {
+        let t = theme
+        NSAppearance(named: t.appearance.nsAppearanceName)?.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = t.canvas.cgColor
+            playheadLayer.backgroundColor = t.playhead.cgColor
+        }
+    }
+
 
     // MARK: Subclass surface
 
@@ -245,14 +258,18 @@ open class EditorCanvas: NSView, ThemedView {
 
     private func drawGrid(_ dirty: CGRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        // The canvas background, drawn as well as set on the layer, so
+        // window snapshots (which redraw self-drawn views) show it too.
+        theme.canvas.setFill()
+        dirty.fill()
         let lines = Grid.lines(
             meter: meter, from: axis.tick(atX: dirty.minX - 1), to: axis.tick(atX: dirty.maxX + 1),
             ticksPerPoint: axis.ticksPerPoint)
         for line in lines {
             let x = axis.x(line.tick).rounded() + 0.5
             switch line.kind {
-            case .bar: ctx.setStrokeColor(NSColor.separatorColor.cgColor)
-            case .beat: ctx.setStrokeColor(NSColor.separatorColor.withAlphaComponent(0.35).cgColor)
+            case .bar: ctx.setStrokeColor(theme.barLine.cgColor)
+            case .beat: ctx.setStrokeColor(theme.beatLine.cgColor)
             }
             ctx.setLineWidth(1)
             ctx.move(to: CGPoint(x: x, y: dirty.minY))
@@ -265,7 +282,7 @@ open class EditorCanvas: NSView, ThemedView {
         guard let range else { return }
         let x0 = axis.x(range.start)
         let x1 = axis.x(range.end)
-        NSColor.controlAccentColor.withAlphaComponent(alpha).setFill()
+        theme.selectionFill.withAlphaComponent(alpha).setFill()
         CGRect(x: x0, y: rect.minY, width: max(x1 - x0, 1), height: rect.height).fill()
     }
 
@@ -276,7 +293,7 @@ open class EditorCanvas: NSView, ThemedView {
 
     private func drawRuler(_ dirty: CGRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        NSColor.windowBackgroundColor.setFill()
+        theme.rulerBackground.setFill()
         dirty.fill()
         shade(rulerPreview ?? selectedRange, in: ruler.bounds, alpha: 0.35)
         let first = meter.first ?? MeterEntryRow(tick: 0, num: 4, den: 4, sharps: 0, minor: false)
@@ -286,8 +303,8 @@ open class EditorCanvas: NSView, ThemedView {
             meter: meter, from: axis.tick(atX: dirty.minX - 60), to: axis.tick(atX: dirty.maxX),
             ticksPerPoint: axis.ticksPerPoint)
         let h = ruler.bounds.height
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        ctx.setStrokeColor(NSColor.secondaryLabelColor.cgColor)
+        let font = theme.digitsFont(theme.type.caption)
+        ctx.setStrokeColor(theme.secondaryLabel.cgColor)
         ctx.setLineWidth(1)
         for line in lines {
             let x = axis.x(line.tick).rounded() + 0.5
@@ -299,7 +316,7 @@ open class EditorCanvas: NSView, ThemedView {
                 if MeterMath.floorDiv(n - 1, every) * every == n - 1 {
                     NSString(string: "\(n)").draw(
                         at: CGPoint(x: x + 3, y: 2),
-                        withAttributes: [.font: font, .foregroundColor: NSColor.labelColor])
+                        withAttributes: [.font: font, .foregroundColor: theme.label])
                 }
             case .beat:
                 ctx.move(to: CGPoint(x: x, y: h * 0.7))
@@ -307,7 +324,7 @@ open class EditorCanvas: NSView, ThemedView {
                 ctx.strokePath()
             }
         }
-        NSColor.separatorColor.setFill()
+        theme.separatorLine.setFill()
         CGRect(x: dirty.minX, y: h - 1, width: dirty.width, height: 1).fill()
     }
 

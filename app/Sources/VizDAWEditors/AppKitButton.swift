@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 
 /// A bar button as an AppKit `NSButton` (plan 7a final review I1): an
@@ -57,16 +58,16 @@ struct BarButton: NSViewRepresentable {
         b.bezelStyle = .push
         b.refusesFirstResponder = true
         if isOn != nil { b.setButtonType(.pushOnPushOff) }
-        update(b, context.coordinator)
+        update(b, context.coordinator, context.environment.symbioticTheme)
         return b
     }
 
     func updateNSView(_ b: NSButton, context: Context) {
         context.coordinator.action = action
-        update(b, context.coordinator)
+        update(b, context.coordinator, context.environment.symbioticTheme)
     }
 
-    private func update(_ b: NSButton, _ c: Coordinator) {
+    private func update(_ b: NSButton, _ c: Coordinator, _ theme: Theme) {
         c.isOn = isOn
         if let icon {
             b.image = icon.nsImage(accessibilityDescription: title)
@@ -81,8 +82,9 @@ struct BarButton: NSViewRepresentable {
         b.toolTip = help
         b.isEnabled = enabled
         if let isOn { b.state = isOn ? .on : .off }
-        // Semantic colours only; an "on" toggle also takes the accent.
-        b.contentTintColor = tint ?? (isOn == true ? .controlAccentColor : nil)
+        // The theme's colours only (plan 7b Ruling 13); an "on" toggle
+        // takes its accent.
+        b.contentTintColor = tint ?? (isOn == true ? theme.accent.accent.nsColor : nil)
     }
 }
 
@@ -114,16 +116,17 @@ public struct AppKitLabel: NSViewRepresentable {
         f.maximumNumberOfLines = 1
         f.cell?.usesSingleLineMode = true
         f.refusesFirstResponder = true
-        update(f)
+        update(f, context.environment.symbioticTheme)
         return f
     }
 
-    public func updateNSView(_ f: NSTextField, context: Context) { update(f) }
+    public func updateNSView(_ f: NSTextField, context: Context) { update(f, context.environment.symbioticTheme) }
 
-    private func update(_ f: NSTextField) {
+    /// In the theme's text colours, never the window's (plan 7b Ruling 13).
+    private func update(_ f: NSTextField, _ theme: Theme) {
         if f.stringValue != text { f.stringValue = text }
         f.font = font
-        f.textColor = secondary ? .secondaryLabelColor : .labelColor
+        f.textColor = secondary ? theme.secondaryLabel : theme.label
         f.lineBreakMode = truncatesMiddle ? .byTruncatingMiddle : .byClipping
     }
 

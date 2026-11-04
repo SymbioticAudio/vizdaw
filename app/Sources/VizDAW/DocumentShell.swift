@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -248,6 +249,7 @@ struct PaneHost: View {
 /// (Ruling 2). While dragging only the line moves; the size is set once,
 /// when the drag ends, so editors do not redraw at pointer rate.
 struct PaneDivider: View {
+    @Environment(\.symbioticTheme) private var theme
     let side: PaneSide
     let model: DocumentModel
     /// The regions' area under the transport bar.
@@ -269,7 +271,7 @@ struct PaneDivider: View {
             let dragging = live.wrappedValue != nil
             let shift = offset()
             Rectangle()
-                .fill(dragging ? Color.accentColor : Color(nsColor: .separatorColor))
+                .fill(dragging ? theme.accent.accent.color : theme.surface.separator.color)
                 .frame(width: side == .bottom ? r.width : (dragging ? 2 : 1),
                        height: side == .bottom ? (dragging ? 2 : 1) : r.height)
                 .frame(width: side == .bottom ? r.width : Self.grip, height: side == .bottom ? Self.grip : r.height)

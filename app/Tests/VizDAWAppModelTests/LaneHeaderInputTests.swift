@@ -1,4 +1,5 @@
 import AppKit
+import SymbioticTokens
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -82,5 +83,26 @@ import VizDAWCore
         LaneInputs.softwareMonitoring = { false }
         let (m, _, _) = try header()
         #expect(!m.inputs.monitoringOn)
+    }
+
+    /// The B4 run found the lane header column dark in Classic Light: it
+    /// takes the theme's header background in every theme (plan 7b Task B5).
+    @Test func theHeaderColumnIsInTheTheme() throws {
+        let (m, _, h) = try header()
+        defer { withExtendedLifetime(m) {} }
+        h.frame = NSRect(x: 0, y: 0, width: 200, height: 400)
+        for t in [Theme.classicLight, .studioDark, .console] {
+            h.theme = t
+            let rep = try #require(h.bitmapImageRepForCachingDisplay(in: h.bounds))
+            h.cacheDisplay(in: h.bounds, to: rep)
+            let sx = rep.pixelsWide / 200
+            for (x, y) in [(100, 5), (150, 390)] {
+                let p = try #require(rep.colorAt(x: x * sx, y: y * sx)?.usingColorSpace(.sRGB))
+                let want = try #require(t.rulerBackground.usingColorSpace(.sRGB))
+                #expect(
+                    abs(p.redComponent - want.redComponent) < 0.04 && abs(p.greenComponent - want.greenComponent) < 0.04
+                        && abs(p.blueComponent - want.blueComponent) < 0.04, "\(t.id) at \(x),\(y): \(p)")
+            }
+        }
     }
 }

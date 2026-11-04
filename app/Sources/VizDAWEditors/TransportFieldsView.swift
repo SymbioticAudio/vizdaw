@@ -12,15 +12,21 @@ import VizDAWCore
 @MainActor
 public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
-    /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
-        didSet { themeDidChange(from: oldValue) }
+    /// view above it, sets it; a change redraws it, the themed views below
+    /// and its labels' and fields' colours and fonts.
+    public var theme: Theme = ThemedViews.current {
+        didSet {
+            themeDidChange(from: oldValue)
+            applyTheme()
+        }
     }
 
     /// The text-editing owner while a field has the keyboard.
     public static let textOwner = "transport"
     public let document: DocumentModel
     public private(set) var fields: [TransportField: NSTextField] = [:]
+    /// Each field's title label.
+    public private(set) var labels: [TransportField: NSTextField] = [:]
     /// The field being typed in.
     private(set) var editing: TransportField?
     private let stack = NSStackView()
@@ -35,10 +41,9 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         stack.setClippingResistancePriority(.defaultLow, for: .horizontal)
         for f in TransportField.allCases {
             let label = NSTextField(labelWithString: f.title)
-            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             label.setContentCompressionResistancePriority(.required, for: .horizontal)
+            labels[f] = label
             let field = TransportTextField(string: "")
-            field.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
             field.alignment = .right
             field.delegate = self
             field.title = f.title
@@ -68,7 +73,26 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+        applyTheme()
         observe()
+    }
+
+    /// The labels' and fields' text in the theme's own colours (never the
+    /// window's faint defaults: the B4 run found them faint in light),
+    /// on the theme's canvas, in its type sizes.
+    private func applyTheme() {
+        let t = theme
+        appearance = NSAppearance(named: t.appearance.nsAppearanceName)
+        for label in labels.values {
+            label.font = t.font(t.type.label, weight: .regular)
+            label.textColor = t.label
+        }
+        for field in fields.values {
+            field.font = t.digitsFont(t.type.body)
+            field.textColor = t.label
+            field.drawsBackground = true
+            field.backgroundColor = t.canvas
+        }
     }
 
     /// The width the five fields and their labels need (the transport bar
@@ -191,7 +215,7 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
 final class TransportTextField: NSTextField, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
+    public var theme: Theme = ThemedViews.current {
         didSet { themeDidChange(from: oldValue) }
     }
 
@@ -239,7 +263,7 @@ public protocol KeyCapturing: AnyObject {}
 public final class KeyRecorderView: NSView, KeyCapturing, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
+    public var theme: Theme = ThemedViews.current {
         didSet { themeDidChange(from: oldValue) }
     }
 
@@ -294,13 +318,13 @@ public final class KeyRecorderView: NSView, KeyCapturing, ThemedView {
 
     public override func draw(_ dirtyRect: NSRect) {
         let r = bounds.insetBy(dx: 1, dy: 1)
-        (recording ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
-        let p = NSBezierPath(roundedRect: r, xRadius: 4, yRadius: 4)
+        (recording ? theme.selectionFill : theme.separatorLine).setStroke()
+        let p = NSBezierPath(roundedRect: r, xRadius: theme.radius.s, yRadius: theme.radius.s)
         p.stroke()
         let s = recording ? "Press a key…" : "Record"
         let a: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
-            .foregroundColor: NSColor.labelColor,
+            .font: theme.font(theme.type.label, weight: .regular),
+            .foregroundColor: theme.label,
         ]
         let size = s.size(withAttributes: a)
         s.draw(at: CGPoint(x: r.midX - size.width / 2, y: r.midY - size.height / 2), withAttributes: a)

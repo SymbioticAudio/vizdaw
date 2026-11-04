@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -77,6 +78,7 @@ struct LearnMapsSheet: View {
 /// what the learn waits for and, with two or more projects open, the
 /// project (final review R2, T11 m9).
 struct LearnBanner: View {
+    @Environment(\.symbioticTheme) private var theme
     let learn: LearnModel
     /// The learn's document, named when two or more are open.
     let document: DocumentModel?
@@ -92,7 +94,7 @@ struct LearnBanner: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(Color.accentColor.opacity(0.15))
+            .background(theme.accent.accent.color.opacity(0.15))
         }
     }
 }

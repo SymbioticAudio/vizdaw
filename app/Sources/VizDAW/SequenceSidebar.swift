@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -67,6 +68,7 @@ struct TemplateItems: View {
 }
 
 struct SequenceRow: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
     let row: SeqRow
     @FocusState private var focused: Bool
@@ -105,7 +107,7 @@ struct SequenceRow: View {
                 Text("\(row.useCount)")
                     .font(.caption.monospacedDigit())
                     .padding(.horizontal, 6)
-                    .background(Capsule().fill(.quaternary))
+                    .background(Capsule().fill(theme.surface.raised.color))
                     .help("Used by \(row.useCount) reference(s)")
             }
         }
@@ -146,6 +148,7 @@ struct CommentSheet: View {
 }
 
 struct KeySlotSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
 
     private func flag(_ title: String, _ path: WritableKeyPath<KeySlotDraft, Bool>) -> some View {
@@ -169,7 +172,7 @@ struct KeySlotSheet: View {
                 flag("⌘", \.command)
             }
             if let problem = model.slotDraft?.problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
+                Text(problem).font(.caption).foregroundStyle(theme.state.error.color)
             }
             HStack {
                 Spacer()

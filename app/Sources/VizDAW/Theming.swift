@@ -56,6 +56,8 @@ enum ThemeWindows {
     /// The app and every window it has now. At launch (`AppDelegate`) and on
     /// every change (`AppearancePreferences.onChange`).
     static func apply(_ t: Theme) {
+        // Themed AppKit views made from now on start in it (B4 review M1).
+        ThemedViews.current = t
         NSApp.appearance = NSAppearance(named: t.appearance.nsAppearanceName)
         for w in NSApp.windows where ControlWindows.tagOf(w).kind != .other {
             WindowTheming.style(w, t)

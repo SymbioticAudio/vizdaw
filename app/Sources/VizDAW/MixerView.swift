@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -172,11 +173,19 @@ struct MixerBar: View {
 }
 
 extension View {
-    /// The touched ring (plan 5e-2 Ruling 3): shown while `touched`.
-    func touchRing(_ touched: Bool, radius: CGFloat = 4) -> some View {
-        overlay(
-            RoundedRectangle(cornerRadius: radius)
-                .stroke(Color.accentColor, lineWidth: 2)
+    /// The touched ring (plan 5e-2 Ruling 3): shown while `touched`, in the
+    /// theme's accent and small radius.
+    func touchRing(_ touched: Bool) -> some View { modifier(TouchRing(touched: touched)) }
+}
+
+private struct TouchRing: ViewModifier {
+    let touched: Bool
+    @Environment(\.symbioticTheme) private var theme
+
+    func body(content: Content) -> some View {
+        content.overlay(
+            RoundedRectangle(cornerRadius: theme.radius.s)
+                .stroke(theme.accent.accent.color, lineWidth: 2)
                 .opacity(touched ? 1 : 0))
     }
 }
@@ -197,21 +206,27 @@ struct UnhostedLearnAlert: ViewModifier {
     }
 }
 
-/// An automation mode's system colour (Ruling 4).
-func automationColor(_ m: AutomationModeRow) -> Color {
-    switch AutomationModes.colorName(m) {
-    case "green": .green
-    case "yellow": .yellow
-    case "orange": .orange
-    case "red": .red
-    case "purple": .purple
-    default: .gray
+extension Theme {
+    /// An automation mode's tint (Ruling 4), through `AutomationModes`'
+    /// colour names to the theme's states (plan 7b Ruling 13; B6's
+    /// `StripPalette.automation` replaces it). Trim has no state: it takes
+    /// the purple swatch.
+    func automationTint(_ m: AutomationModeRow) -> Color {
+        switch AutomationModes.colorName(m) {
+        case "green": state.play.color
+        case "yellow": state.solo.color
+        case "orange": state.mute.color
+        case "red": state.record.color
+        case "purple": swatch.purple.color
+        default: state.offline.color
+        }
     }
 }
 
 /// One strip: name, kind, slots, sends, output, pan, fader, mute/solo,
 /// meter.
 struct StripView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: MixerModel
     let strip: StripRow
     @FocusState private var renaming: Bool
@@ -239,13 +254,13 @@ struct StripView: View {
             HStack(spacing: 4) {
                 Toggle("M", isOn: Binding(get: { strip.mute }, set: { _ in model.toggleMute(strip) }))
                     .toggleStyle(.button)
-                    .tint(.orange)
+                    .tint(theme.state.mute.color)
                     .touchRing(model.isTouched(.stripMute(strip: strip.id)))
                     .contextMenu { LearnItem(model: model, target: .stripMute(strip: strip.id)) }
                 if strip.kind != .master {
                     Toggle("S", isOn: Binding(get: { strip.solo }, set: { _ in model.toggleSolo(strip) }))
                         .toggleStyle(.button)
-                        .tint(.yellow)
+                        .tint(theme.state.solo.color)
                         .touchRing(model.isTouched(.stripSolo(strip: strip.id)))
                         .contextMenu { LearnItem(model: model, target: .stripSolo(strip: strip.id)) }
                 }
@@ -254,10 +269,12 @@ struct StripView: View {
         }
         .padding(6)
         .frame(width: 120)
-        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(strip.soloMuted ? 0.3 : 0.6)))
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.accentColor.opacity(model.isSelected(strip.id) ? 0.25 : 0)))
+            RoundedRectangle(cornerRadius: theme.radius.m)
+                .fill(theme.surface.raised.color.opacity(strip.soloMuted ? 0.5 : 1)))
+        .background(
+            RoundedRectangle(cornerRadius: theme.radius.m)
+                .fill(theme.accent.accent.color.opacity(model.isSelected(strip.id) ? 0.25 : 0)))
     }
 
     @ViewBuilder private var header: some View {
@@ -321,7 +338,7 @@ struct StripView: View {
                 }
             }
         }
-        .tint(automationColor(strip.automation))
+        .tint(theme.automationTint(strip.automation))
         .controlSize(.small)
         .help("Automation: \(AutomationModes.title(strip.automation))")
     }
@@ -422,6 +439,7 @@ struct StripView: View {
 /// One plugin slot: name (dimmed with its reason when a placeholder),
 /// actions in its menu, drag to reorder.
 struct SlotView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: MixerModel
     let strip: StripRow
     let slot: SlotRow
@@ -453,19 +471,20 @@ struct SlotView: View {
         }
         .padding(.horizontal, 4)
         .frame(maxWidth: .infinity, minHeight: 18)
-        .background(RoundedRectangle(cornerRadius: 3).fill(.background))
+        .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.surface.inset.color))
         .help(reason ?? "\(slot.plugin.name) (\(slot.plugin.vendor))")
         .onTapGesture(count: 2) { openWindow(slot.id) }
         .contextMenu { menu }
         .modifier(Reorder(model: model, strip: strip, slot: slot, index: index))
     }
 
+    /// The slot dot (plan 7b Ruling 13).
     private var color: Color {
-        if model.faulted.contains(slot.id) { return .red }
+        if model.faulted.contains(slot.id) { return theme.state.error.color }
         switch slot.status {
-        case .live: return slot.bypass ? .gray : .green
-        case .loading: return .yellow
-        case .placeholder: return .orange
+        case .live: return slot.bypass ? theme.text.disabled.color : theme.state.play.color
+        case .loading: return theme.state.offline.color
+        case .placeholder: return theme.state.warning.color
         }
     }
 
@@ -598,6 +617,7 @@ struct LearnItem: View {
 
 /// Peak meter, left and right.
 struct MeterView: View {
+    @Environment(\.symbioticTheme) private var theme
     let level: MeterLevel
 
     var body: some View {
@@ -612,9 +632,9 @@ struct MeterView: View {
         GeometryReader { g in
             let fill = MixerMath.meterFill(peak)
             ZStack(alignment: .bottom) {
-                Rectangle().fill(.black.opacity(0.6))
+                Rectangle().fill(theme.meter.background.color)
                 Rectangle()
-                    .fill(peak >= 1 ? .red : .green)
+                    .fill(peak >= 1 ? theme.meter.clip.color : theme.meter.low.color)
                     .frame(height: g.size.height * fill)
             }
         }

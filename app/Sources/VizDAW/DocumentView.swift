@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -78,6 +79,7 @@ struct DocumentView: View {
 /// button, the main-view tabs and the pane toggles. The mixer window
 /// shows it with `showsViews` false.
 struct DocumentTransportBar: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
     let docID: UUID
     let showsViews: Bool
@@ -136,7 +138,7 @@ struct DocumentTransportBar: View {
         if model.hasFaults || model.hasReport {
             AppKitButton(
                 "Faults", icon: .faultIndicator, help: "Faults and compile messages",
-                tint: model.hasFaults ? .systemRed : .systemOrange
+                tint: model.hasFaults ? theme.state.error.nsColor : theme.state.warning.nsColor
             ) { model.showsFaults.toggle() }
             .fixedSize()
             .popover(isPresented: $model.showsFaults) {

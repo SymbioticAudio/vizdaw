@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -6,6 +7,7 @@ import VizDAWCore
 /// core's warning and the files it would write; progress and Cancel while
 /// it runs. All state lives in `BounceModel`.
 struct BounceSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var bounce: BounceModel
 
     var body: some View {
@@ -77,7 +79,7 @@ struct BounceSheet: View {
             if let e = bounce.error {
                 AppIcon.fault.label(e)
                     .font(.callout)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(theme.state.error.color)
             }
             if let p = bounce.progress {
                 ProgressView(value: Double(p))

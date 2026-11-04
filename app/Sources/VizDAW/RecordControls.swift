@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -7,6 +8,7 @@ import VizDAWEditors
 /// (the R key's `transport.record`, red while recording), the options
 /// popover, and the readouts: count-in, the loop pass and the time left.
 struct RecordControls: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
     @Bindable var record: RecordModel
     /// The window this bar is in: the popover shows under this chevron
@@ -21,7 +23,7 @@ struct RecordControls: View {
                 icon: record.isRecording ? .recording : .record,
                 enabled: TransportCommands.enabled("transport.record", model),
                 help: record.isRecording ? "Stop recording (R)" : "Record the armed lanes (R)",
-                tint: record.isRecording ? .systemRed : nil
+                tint: record.isRecording ? theme.state.record.nsColor : nil
             ) { record.pressRecord() }
             .fixedSize()
             AppKitButton(
@@ -35,7 +37,7 @@ struct RecordControls: View {
             if record.countingIn {
                 Text("Count-in")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(theme.state.record.color)
             }
             if let p = record.passText {
                 Text(p).font(.caption.monospacedDigit())

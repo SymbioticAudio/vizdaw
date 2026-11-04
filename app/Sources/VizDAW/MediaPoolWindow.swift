@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -38,6 +39,7 @@ struct MediaPoolWindow: View {
 /// Compact (a pane, plan 7a Ruling 7) shows Name, Duration and Offline,
 /// puts the actions in one "Actions" menu and sets no minimum size.
 struct MediaPoolView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var media: MediaModel
     var compact = false
 
@@ -110,7 +112,7 @@ struct MediaPoolView: View {
             Text("")
         } else {
             AppIcon.warning.label(offline)
-                .foregroundStyle(Color(nsColor: RegionPalette.offline))
+                .foregroundStyle(Color(nsColor: RegionPalette(theme).offline))
                 .accessibilityLabel("Offline: \(offline)")
         }
     }

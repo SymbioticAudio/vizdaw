@@ -14,7 +14,7 @@ import VizDAWCore
 public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
+    public var theme: Theme = ThemedViews.current {
         didSet { themeDidChange(from: oldValue) }
     }
 
@@ -73,8 +73,9 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
     }
 
     public override func draw(_ dirty: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
+        theme.rulerBackground.setFill()
         dirty.fill()
+        let small = theme.font(theme.type.label, weight: .regular)
         let lanes = model.lanes
         for b in model.layout.bands {
             let r = rect(b)
@@ -86,12 +87,12 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
                 NSString(string: "\(l.name) · \(l.destination ?? "No Destination")").draw(
                     in: r.insetBy(dx: 6, dy: 3),
                     withAttributes: [
-                        .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor,
+                        .font: theme.font(theme.type.body, weight: .semibold), .foregroundColor: theme.label,
                     ])
             case let .row(lane, row):
                 guard let d = model.row(Int(lane), Int(row)) else { continue }
                 if model.selectedRow == DrumRowKey(lane: lanes[Int(lane)].lane, row: d.id) {
-                    NSColor.controlAccentColor.withAlphaComponent(0.2).setFill()
+                    theme.selectionFill.withAlphaComponent(0.2).setFill()
                     r.fill()
                 }
                 // Every row names its destination; an inherited one (the
@@ -99,37 +100,37 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
                 let cap = Self.caption(d)
                 let text = NSMutableAttributedString(
                     string: cap.name,
-                    attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor])
+                    attributes: [.font: small, .foregroundColor: theme.label])
                 if let dest = cap.destination {
                     text.append(
                         NSAttributedString(
                             string: " · \(dest)",
                             attributes: [
-                                .font: NSFont.systemFont(ofSize: 11),
+                                .font: small,
                                 .foregroundColor: cap.inherited
-                                    ? NSColor.tertiaryLabelColor : NSColor.secondaryLabelColor,
+                                    ? theme.text.disabled.nsColor : theme.secondaryLabel,
                             ]))
                 }
                 text.draw(in: CGRect(x: 10, y: r.minY + 3, width: r.width - 50, height: 16))
                 NSString(string: PitchName.name(d.note)).draw(
                     in: CGRect(x: r.width - 38, y: r.minY + 3, width: 34, height: 16),
                     withAttributes: [
-                        .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
-                        .foregroundColor: NSColor.secondaryLabelColor,
+                        .font: theme.digitsFont(theme.type.caption),
+                        .foregroundColor: theme.secondaryLabel,
                     ])
             case .newLane:
                 continue
             }
-            NSColor.separatorColor.setFill()
+            theme.separatorLine.setFill()
             CGRect(x: 0, y: r.maxY - 0.5, width: bounds.width, height: 1).fill()
         }
         if let d = dragging, d.moved {
-            NSColor.controlAccentColor.setFill()
+            theme.regionSelected.setFill()
             CGRect(x: 0, y: d.y - 1, width: bounds.width, height: 2).fill()
         }
-        NSColor.windowBackgroundColor.setFill()
+        theme.rulerBackground.setFill()
         NSRect(x: 0, y: 0, width: bounds.width, height: EditorCanvas.rulerHeight).fill()
-        NSColor.separatorColor.setFill()
+        theme.separatorLine.setFill()
         NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill()
     }
 
@@ -326,7 +327,7 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
 public final class DrumGridContainer: NSView, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
+    public var theme: Theme = ThemedViews.current {
         didSet { themeDidChange(from: oldValue) }
     }
 

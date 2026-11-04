@@ -1,19 +1,14 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
-/// Lane colours (Plan 4b Ruling 9).
+/// Lane colours (Plan 4b Ruling 9): the theme's swatches, in order
+/// (plan 7b Ruling 13).
 @MainActor
 public enum PianoRollPalette {
-    static let colors: [NSColor] = [
-        .systemBlue, .systemOrange, .systemGreen, .systemPink, .systemPurple, .systemTeal, .systemYellow,
-        .systemBrown,
-    ]
-
-    public static func color(_ index: Int) -> NSColor {
-        colors[((index % colors.count) + colors.count) % colors.count]
-    }
+    public static func color(_ index: Int, in theme: Theme) -> NSColor { theme.laneColour(index) }
 }
 
 /// The piano roll's note area (spec §4b, parent §9): notes of the shown
@@ -171,28 +166,29 @@ public final class PianoRollView: EditorCanvas {
         for p in pitchAxis.visible(height: content.bounds.height) {
             let y = pitchAxis.top(p)
             if PitchName.isBlack(p) {
-                NSColor.labelColor.withAlphaComponent(0.05).setFill()
+                theme.label.withAlphaComponent(0.05).setFill()
                 CGRect(x: dirty.minX, y: y, width: dirty.width, height: pitchAxis.rowHeight).fill()
             }
             if p % 12 == 0 {
-                NSColor.separatorColor.setFill()
+                theme.separatorLine.setFill()
                 CGRect(x: dirty.minX, y: y + pitchAxis.rowHeight - 0.5, width: dirty.width, height: 1).fill()
             }
         }
     }
 
     private func draw(_ l: LaneNotes, active: Bool, _ dirty: CGRect) {
-        let color = PianoRollPalette.color(model.colorIndex(l.lane))
+        let color = PianoRollPalette.color(model.colorIndex(l.lane), in: theme)
         let from = axis.tick(atX: dirty.minX - PianoRollGeometry.minNoteWidth)
         let to = axis.tick(atX: dirty.maxX)
         for n in l.notes where n.tick <= to && n.tick + n.duration >= from {
             let r = PianoRollGeometry.rect(n, time: axis, pitch: pitchAxis)
             guard r.intersects(dirty) else { continue }
-            let path = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 2, yRadius: 2)
+            let path = NSBezierPath(
+                roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: theme.radius.s, yRadius: theme.radius.s)
             color.withAlphaComponent((active ? 0.85 : 0.4) * (n.mute ? 0.4 : 1)).setFill()
             path.fill()
             let selected = editor.isSelected(event: n.id)
-            (selected ? NSColor.controlAccentColor : (color.shadow(withLevel: 0.4) ?? color)).setStroke()
+            (selected ? theme.regionSelected : theme.regionLine).setStroke()
             path.lineWidth = selected ? 2 : 1
             path.stroke()
         }
@@ -200,9 +196,9 @@ public final class PianoRollView: EditorCanvas {
 
     public override func drawOverlay(in dirty: CGRect) {
         guard let band else { return }
-        NSColor.controlAccentColor.withAlphaComponent(0.12).setFill()
+        theme.selectionFill.withAlphaComponent(0.12).setFill()
         band.fill()
-        NSColor.controlAccentColor.setStroke()
+        theme.selectionFill.setStroke()
         NSBezierPath(rect: band.insetBy(dx: 0.5, dy: 0.5)).stroke()
     }
 

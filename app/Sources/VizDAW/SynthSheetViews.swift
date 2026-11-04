@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -79,6 +80,7 @@ extension TrackSynthDraft {
 /// a name, one of the system's MIDI destinations and a channel; the lane
 /// then plays to it.
 struct NewMidiDestinationSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var sheets: SynthSheets
     let editor: EditorModel
 
@@ -101,7 +103,7 @@ struct NewMidiDestinationSheet: View {
                         value: Binding(get: { d.channel }, set: { sheets.newDestination?.channel = $0 }), in: 1...16)
                 }
                 if let msg = sheets.destinationMessage {
-                    Text(msg).font(.callout).foregroundStyle(.red)
+                    Text(msg).font(.callout).foregroundStyle(theme.state.error.color)
                 }
                 HStack {
                     Spacer()

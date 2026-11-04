@@ -8,7 +8,7 @@ import VizDAWAppModel
 public final class ArrangementContainer: NSView, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
+    public var theme: Theme = ThemedViews.current {
         didSet { themeDidChange(from: oldValue) }
     }
 

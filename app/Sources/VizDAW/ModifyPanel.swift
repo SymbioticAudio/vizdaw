@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -61,6 +62,7 @@ final class ModifyPanelController: NSWindowController, NSWindowDelegate {
 }
 
 struct SelectModifyPanelView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: SelectModifyModel
     let editor: EditorModel
 
@@ -105,7 +107,7 @@ struct SelectModifyPanelView: View {
                 Spacer()
                 Text(model.applyTarget)
                     .font(.caption)
-                    .foregroundStyle(model.actsOnDraggedEvents ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(model.actsOnDraggedEvents ? theme.accent.accent.color : theme.text.secondary.color)
                 Button("Modify Again") { model.modifyAgain() }
                     .disabled(!model.canModifyAgain)
                     .help(SelectModifyModel.modifyAgainHelp)
@@ -150,6 +152,7 @@ struct SelectHalfView: View {
 }
 
 struct ConditionRowView: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: SelectModifyModel
     let index: Int
 
@@ -181,7 +184,9 @@ struct ConditionRowView: View {
                         )
                         .panelTextOwner(model, "c\(index).\(j)")
                         .frame(width: 84)
-                        .foregroundStyle(model.invalid.contains("c\(index).\(j)") ? Color.red : Color.primary)
+                        .foregroundStyle(
+                            model.invalid.contains("c\(index).\(j)")
+                                ? theme.state.error.color : theme.text.primary.color)
                         .accessibilityLabel("\(ConditionKind(c.test).title) \(f.label)")
                     }
                 }
@@ -268,6 +273,7 @@ enum SubstituteChoice: String, CaseIterable {
 }
 
 struct ModifyHalfView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: SelectModifyModel
 
     private var op: ModifyRow { model.config.modify.op }
@@ -292,7 +298,8 @@ struct ModifyHalfView: View {
                     TextField(f.label, text: Binding(get: { model.modifyText(j) }, set: { model.setModifyText($0, j) }))
                         .panelTextOwner(model, "m\(j)")
                         .frame(width: 84)
-                        .foregroundStyle(model.invalid.contains("m\(j)") ? Color.red : Color.primary)
+                        .foregroundStyle(
+                            model.invalid.contains("m\(j)") ? theme.state.error.color : theme.text.primary.color)
                         .accessibilityLabel(f.label)
                 }
                 Spacer()
@@ -315,13 +322,13 @@ struct ModifyHalfView: View {
             TextField("C2>D2, E2>F#2", text: Binding(get: { model.noteMapText }, set: { model.setNoteMapText($0) }))
                 .panelTextOwner(model, "map")
                 .frame(width: 260)
-                .foregroundStyle(model.invalid.contains("map") ? Color.red : Color.primary)
+                .foregroundStyle(model.invalid.contains("map") ? theme.state.error.color : theme.text.primary.color)
                 .accessibilityLabel("Note Map")
         case .quantize:
             TextField("Groove offsets", text: Binding(get: { model.offsetsText }, set: { model.setOffsetsText($0) }))
                 .panelTextOwner(model, "offsets")
                 .frame(width: 140)
-                .foregroundStyle(model.invalid.contains("offsets") ? Color.red : Color.primary)
+                .foregroundStyle(model.invalid.contains("offsets") ? theme.state.error.color : theme.text.primary.color)
                 .help("Groove offsets in ticks, one per grid line; empty for a plain grid")
         case let .change(target, changeOp, amount):
             Picker("", selection: Binding(get: { target }, set: { model.setTarget($0) })) {

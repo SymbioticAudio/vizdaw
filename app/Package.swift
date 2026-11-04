@@ -70,7 +70,7 @@ let package = Package(
         ),
         .testTarget(
             name: "VizDAWEditorsTests",
-            dependencies: ["VizDAWEditors", "VizDAWAppModel", "VizDAWCore"],
+            dependencies: ["VizDAWEditors", "VizDAWAppModel", "VizDAWCore", tokens],
             path: "Tests/VizDAWEditorsTests"
         ),
     ]

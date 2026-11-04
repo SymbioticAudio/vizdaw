@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -8,6 +9,7 @@ import VizDAWEditors
 /// keys; record a new key, reset one or all, save and load a bindings
 /// file, and keep the number row for locators.
 struct KeysSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var keys: KeyBindings
     let store: DocumentStore
 
@@ -56,7 +58,8 @@ struct KeysSettingsView: View {
                                 Spacer()
                                 Text(row.keys.joined(separator: "  "))
                                     .font(.system(.body, design: .monospaced))
-                                    .foregroundStyle(row.keys == row.defaults ? .primary : Color.accentColor)
+                                    .foregroundStyle(
+                                        row.keys == row.defaults ? theme.text.primary.color : theme.accent.accent.color)
                                 KeyRecorder(title: row.title) { keys.record(row.id, key: $0) }
                                     .frame(width: 96, height: 20)
                                 learnButton(row)
@@ -136,11 +139,14 @@ struct KeyRecorder: NSViewRepresentable {
         let v = KeyRecorderView()
         v.title = title
         v.onKey = onKey
+        v.theme = context.environment.symbioticTheme
         return v
     }
 
+    /// In the theme of its root (B4 review M1: it was never themed).
     func updateNSView(_ v: KeyRecorderView, context: Context) {
         v.title = title
         v.onKey = onKey
+        v.theme = context.environment.symbioticTheme
     }
 }

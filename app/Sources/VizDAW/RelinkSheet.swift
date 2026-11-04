@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -7,6 +8,7 @@ import VizDAWEditors
 /// that are missing or changed, each with Locate…, plus Search Folder…
 /// and Leave Offline. Relinks run as jobs; the window's banners show them.
 struct RelinkSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var media: MediaModel
 
     var body: some View {
@@ -19,7 +21,7 @@ struct RelinkSheet: View {
             List(media.relinkable, id: \.id) { r in
                 HStack(spacing: 8) {
                     AppIcon.warning.image
-                        .foregroundStyle(Color(nsColor: RegionPalette.offline))
+                        .foregroundStyle(Color(nsColor: RegionPalette(theme).offline))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(r.name)

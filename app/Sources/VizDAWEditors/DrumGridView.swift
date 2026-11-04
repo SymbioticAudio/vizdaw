@@ -155,12 +155,12 @@ public final class DrumGridView: EditorCanvas {
             let y = top(b)
             switch b.kind {
             case .header:
-                NSColor.windowBackgroundColor.setFill()
+                theme.rulerBackground.setFill()
                 CGRect(x: dirty.minX, y: y, width: dirty.width, height: CGFloat(b.height)).fill()
             case let .row(lane, row):
                 guard let r = model.row(Int(lane), Int(row)) else { continue }
                 if model.selectedRow == DrumRowKey(lane: model.lanes[Int(lane)].lane, row: r.id) {
-                    NSColor.controlAccentColor.withAlphaComponent(0.08).setFill()
+                    theme.selectionFill.withAlphaComponent(0.08).setFill()
                     CGRect(x: dirty.minX, y: y, width: dirty.width, height: CGFloat(b.height)).fill()
                 }
                 if matrix {
@@ -173,10 +173,11 @@ public final class DrumGridView: EditorCanvas {
                 NSString(string: "Drop a row here to give it a lane of its own").draw(
                     at: CGPoint(x: max(dirty.minX, 0) + 8, y: y + 7),
                     withAttributes: [
-                        .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor,
+                        .font: theme.font(theme.type.label, weight: .regular),
+                        .foregroundColor: theme.text.disabled.nsColor,
                     ])
             }
-            NSColor.separatorColor.setFill()
+            theme.separatorLine.setFill()
             CGRect(x: dirty.minX, y: y + CGFloat(b.height) - 0.5, width: dirty.width, height: 1).fill()
         }
     }
@@ -184,19 +185,15 @@ public final class DrumGridView: EditorCanvas {
     private func drawCells(_ r: DrumRowRow, _ b: DrumBandRow, _ dirty: CGRect) {
         for c in cells(r, dirty) {
             let rect = cellRect(c.tick, b).insetBy(dx: 1, dy: 2)
-            let path = NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2)
+            let path = NSBezierPath(roundedRect: rect, xRadius: theme.radius.s, yRadius: theme.radius.s)
             if c.hits.isEmpty {
-                NSColor.quaternaryLabelColor.withAlphaComponent(0.15).setFill()
+                theme.separatorLine.withAlphaComponent(0.15).setFill()
                 path.fill()
             } else {
                 let strength = 0.35 + 0.65 * CGFloat(c.velocity) / 65_535
-                NSColor.systemOrange.withAlphaComponent(strength).setFill()
+                theme.regionFill.withAlphaComponent(strength).setFill()
                 path.fill()
-                if c.hits.contains(where: editor.isSelected(event:)) {
-                    NSColor.controlAccentColor.setStroke()
-                    path.lineWidth = 2
-                    path.stroke()
-                }
+                outline(path, selected: c.hits.contains(where: editor.isSelected(event:)))
             }
         }
     }
@@ -205,23 +202,26 @@ public final class DrumGridView: EditorCanvas {
         for h in r.hits {
             let rect = hitRect(h, b).insetBy(dx: 0, dy: 2)
             guard rect.maxX >= dirty.minX, rect.minX <= dirty.maxX else { continue }
-            let path = NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2)
-            NSColor.systemOrange.withAlphaComponent(h.mute ? 0.3 : 0.85).setFill()
+            let path = NSBezierPath(roundedRect: rect, xRadius: theme.radius.s, yRadius: theme.radius.s)
+            theme.regionFill.withAlphaComponent(h.mute ? 0.3 : 0.85).setFill()
             path.fill()
-            if editor.isSelected(event: h.id) {
-                NSColor.controlAccentColor.setStroke()
-                path.lineWidth = 2
-                path.stroke()
-            }
+            outline(path, selected: editor.isSelected(event: h.id))
         }
+    }
+
+    /// A hit's outline: the region line, or the selected outline.
+    private func outline(_ path: NSBezierPath, selected: Bool) {
+        (selected ? theme.regionSelected : theme.regionLine).setStroke()
+        path.lineWidth = selected ? 2 : 1
+        path.stroke()
     }
 
     private func drawVelocities(_ r: DrumRowRow, _ b: DrumBandRow, _ dirty: CGRect) {
         let laneTop = top(b) + CGFloat(b.cells)
         let h = CGFloat(b.height - b.cells) - 4
-        NSColor.labelColor.withAlphaComponent(0.04).setFill()
+        theme.label.withAlphaComponent(0.04).setFill()
         CGRect(x: dirty.minX, y: laneTop, width: dirty.width, height: h + 4).fill()
-        NSColor.systemOrange.setFill()
+        theme.valueBar.setFill()
         for hit in r.hits {
             let x = axis.x(hit.tick)
             guard x >= dirty.minX - 4, x <= dirty.maxX else { continue }

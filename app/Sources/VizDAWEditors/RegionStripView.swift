@@ -10,7 +10,7 @@ import VizDAWCore
 public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
     /// view above it, sets it; a change redraws it and the themed views below.
-    public var theme: Theme = .classicLight {
+    public var theme: Theme = ThemedViews.current {
         didSet { themeDidChange(from: oldValue) }
     }
 
@@ -103,17 +103,17 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
     // MARK: Drawing
 
     public override func draw(_ dirty: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
+        theme.rulerBackground.setFill()
         dirty.fill()
-        NSColor.separatorColor.setFill()
+        theme.separatorLine.setFill()
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
         let strips = model.outputStrips()
-        let small = NSFont.systemFont(ofSize: 10)
+        let small = theme.type.caption.nsFont
         for (i, line) in lines().enumerated() {
             if let o = line.output {
                 let s = strips[o]
-                button("M", RegionStripLayout.muteRect(line: i), on: s?.mute ?? false, color: .systemOrange)
-                button("S", RegionStripLayout.soloRect(line: i), on: s?.solo ?? false, color: .systemYellow)
+                button("M", RegionStripLayout.muteRect(line: i), on: s?.mute ?? false, color: theme.muteColour)
+                button("S", RegionStripLayout.soloRect(line: i), on: s?.solo ?? false, color: theme.soloColour)
             }
             NSGraphicsContext.saveGraphicsState()
             NSBezierPath(rect: NSRect(x: side, y: 0, width: max(bounds.width - side, 0), height: bounds.height))
@@ -140,15 +140,15 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
                 RegionDrawing.draw(
                     item.row, in: r, rows: rows, waveRect: wave, offline: offline,
                     selected: editor.isSelected(event: item.row.id), handles: editor.tool == .arrow,
-                    offlineLabel: false)
+                    offlineLabel: false, theme: theme)
                 RegionDrawing.drawStripLabel(
                     RegionDrawing.stripLabel(model.row(item.lane)?.name ?? "", offline: offline), in: r,
-                    offline: offline, font: small)
+                    offline: offline, font: small, theme: theme)
             }
             // The line's title, unless a region sits where it would go
             // (final review V1).
             let titleAttrs: [NSAttributedString.Key: Any] = [
-                .font: small, .foregroundColor: NSColor.secondaryLabelColor,
+                .font: small, .foregroundColor: theme.secondaryLabel,
             ]
             let title = NSString(string: line.title)
             let titleRect = CGRect(
@@ -159,17 +159,18 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
             }
             NSGraphicsContext.restoreGraphicsState()
         }
-        if let r = readout { RegionDrawing.readout(r.text, at: r.at) }
+        if let r = readout { RegionDrawing.readout(r.text, at: r.at, theme: theme) }
     }
 
     private func button(_ title: String, _ r: CGRect, on: Bool, color: NSColor) {
-        (on ? color : NSColor.controlBackgroundColor).setFill()
-        NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3).fill()
-        NSColor.separatorColor.setStroke()
-        NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3).stroke()
+        let radius = theme.radius.s
+        (on ? color : theme.surface.raised.nsColor).setFill()
+        NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+        theme.separatorLine.setStroke()
+        NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius).stroke()
         NSString(string: title).draw(
             at: CGPoint(x: r.minX + 5, y: r.minY + 1),
-            withAttributes: [.font: NSFont.boldSystemFont(ofSize: 11), .foregroundColor: NSColor.labelColor])
+            withAttributes: [.font: theme.font(theme.type.label, weight: .bold), .foregroundColor: theme.label])
     }
 
     // MARK: Events

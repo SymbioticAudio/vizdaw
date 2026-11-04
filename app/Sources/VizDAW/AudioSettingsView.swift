@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -6,6 +7,7 @@ import VizDAWCore
 /// Software Monitoring, the I/O buffer size with the round trip, the
 /// latency trim, and the streamer's RAM cache and read-ahead.
 struct AudioSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var prefs: AudioPreferences
     let store: DocumentStore
 
@@ -99,7 +101,7 @@ struct AudioSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             if let p = prefs.problem {
-                Text(p).foregroundStyle(.red)
+                Text(p).foregroundStyle(theme.state.error.color)
             }
         }
         .formStyle(.grouped)

@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -6,6 +7,7 @@ import VizDAWCore
 /// their connection state, Add and Remove, and the commands learned to
 /// MIDI controls. All state lives in `SurfaceSettings`.
 struct SurfacesSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var settings: SurfaceSettings
     @Bindable var keys: KeyBindings
 
@@ -29,12 +31,13 @@ struct SurfacesSettingsView: View {
                         Spacer()
                         VStack(alignment: .trailing) {
                             Text(SurfaceSettings.status(row))
-                                .foregroundStyle(row.connected && row.online ? Color.primary : Color.secondary)
+                                .foregroundStyle(
+                                    row.connected && row.online ? theme.text.primary.color : theme.text.secondary.color)
                             // Why it is not answering (pre-flight I4).
                             if let why = settings.problem(for: row.id) {
                                 Text(why)
                                     .font(.caption)
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(theme.state.warning.color)
                                     .multilineTextAlignment(.trailing)
                             }
                         }
@@ -42,7 +45,7 @@ struct SurfacesSettingsView: View {
                     }
                 }
                 ForEach(settings.otherProblems, id: \.self) { line in
-                    Text(line).font(.caption).foregroundStyle(.orange)
+                    Text(line).font(.caption).foregroundStyle(theme.state.warning.color)
                 }
                 if settings.showsKontrolNotice {
                     Text(SurfaceSettings.kontrolNotice)
@@ -125,7 +128,7 @@ struct SurfacesSettingsView: View {
                 if settings.draft?.kind == .kontrolMk3 {
                     VStack(alignment: .leading, spacing: 4) {
                         if let note = settings.draftNote {
-                            Text(note).foregroundStyle(.orange)
+                            Text(note).foregroundStyle(theme.state.warning.color)
                         }
                         Text(SurfaceSettings.kontrolHelp)
                         Text(SurfaceSettings.kontrolNotice)
@@ -142,7 +145,7 @@ struct SurfacesSettingsView: View {
                 }
             }
             if let problem = settings.draftProblem {
-                Text(problem).foregroundStyle(.red)
+                Text(problem).foregroundStyle(theme.state.error.color)
             }
             HStack {
                 Spacer()

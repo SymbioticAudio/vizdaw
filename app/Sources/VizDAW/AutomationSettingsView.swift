@@ -1,10 +1,12 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
 /// Settings › Automation (spec §7.5; plan 5e-2 Task 1): the mode a Write
 /// strip takes after its pass, the return time, and the thinning.
 struct AutomationSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var prefs: AutomationPreferences
 
     /// The After Write choices (the preference's spelling) with the mixer's titles.
@@ -53,7 +55,7 @@ struct AutomationSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let problem = prefs.problem {
-                Text(problem).foregroundStyle(.red)
+                Text(problem).foregroundStyle(theme.state.error.color)
             }
         }
         .formStyle(.grouped)

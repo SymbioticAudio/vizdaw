@@ -1,10 +1,12 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
 /// The Plugin Manager window (spec §9).
 struct PluginManagerView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: PluginManagerModel
 
     var body: some View {
@@ -23,7 +25,10 @@ struct PluginManagerView: View {
             TableColumn("Type", value: \.kindText).width(80)
             TableColumn("Status") { r in
                 Text(r.statusText)
-                    .foregroundStyle(r.isBlocklisted ? Color.red : (r.row.status == .ok ? Color.primary : Color.orange))
+                    .foregroundStyle(
+                        r.isBlocklisted
+                            ? theme.state.error.color
+                            : (r.row.status == .ok ? theme.text.primary.color : theme.state.warning.color))
                     .help(r.row.path)
             }
         }
