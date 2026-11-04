@@ -306,21 +306,47 @@ public enum ControlUI {
         return window.makeFirstResponder(field) && field.currentEditor() != nil
     }
 
-    /// Whether a click at `p` (window points, top-left origin) is on what
-    /// may start editing (final review m3): the smallest node of `nodes`
-    /// under it is a text field, or a button with a value (a number box:
-    /// SwiftUI's knobs and faders are sliders, its plain buttons have no
-    /// value). Other clicks need not wait for a field.
-    static func mayEdit(_ nodes: [UiNodeRow], at p: CGPoint) -> Bool {
-        guard p.x.isFinite, p.y.isFinite else { return false }
-        let under = nodes.filter { CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height).contains(p) }
-        guard let hit = under.min(by: { $0.width * $0.height < $1.width * $1.height }) else { return false }
-        return hit.role == "AXTextField" || (hit.role == "AXButton" && !(hit.value ?? "").isEmpty)
+    /// The accessibility identifier VizDAW gives its number boxes, so the
+    /// channel tells them from toggles and slots, which are buttons with a
+    /// value too (final review m3). It changes no label.
+    public static let numberBoxID = "vizdaw.number-box"
+
+    /// One element under a click, as `mayEdit` reads it.
+    struct EditTarget {
+        var frame: CGRect
+        var role: String
+        var identifier: String?
     }
 
-    /// `mayEdit` on `window`'s tree as it is now (before the click).
+    /// Whether a click at `p` (window points, top-left origin) is on what
+    /// may start editing (final review m3): the smallest of `targets`
+    /// under it is a text field or a number box. Other clicks (a fader, a
+    /// knob, a toggle, a pane) need not wait for a field.
+    static func mayEdit(_ targets: [EditTarget], at p: CGPoint) -> Bool {
+        guard p.x.isFinite, p.y.isFinite else { return false }
+        let under = targets.filter { $0.frame.contains(p) }
+        guard let hit = under.min(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+        else { return false }
+        return hit.role == "AXTextField" || hit.identifier == numberBoxID
+    }
+
+    /// `mayEdit` on `window`'s elements as they are now (before the click).
     public static func mayEdit(at p: CGPoint, in window: NSWindow) -> Bool {
-        mayEdit(tree(of: window, maxDepth: 64).nodes, at: p)
+        enableAccessibility()
+        var targets: [EditTarget] = []
+        var seen: Set<ObjectIdentifier> = [ObjectIdentifier(window)]
+        func walk(_ e: AXElement, depth: Int) {
+            guard depth < 64 else { return }
+            for child in e.children {
+                guard targets.count < maxNodes else { return }
+                guard let c = AXElement(child), seen.insert(ObjectIdentifier(c.object)).inserted else { continue }
+                targets.append(
+                    EditTarget(frame: windowRect(c.frame, in: window), role: c.role ?? "AXUnknown", identifier: c.identifier))
+                walk(c, depth: depth + 1)
+            }
+        }
+        walk(AXElement(window), depth: 0)
+        return mayEdit(targets, at: p)
     }
 
     /// The line logged when a focusing click found no editable field (B8
@@ -411,6 +437,11 @@ struct AXElement {
     var role: String? {
         if let f = formal { return f.accessibilityRole()?.rawValue }
         return string("accessibilityRole", "AXRole")
+    }
+
+    var identifier: String? {
+        if let f = formal { return f.accessibilityIdentifier() }
+        return string("accessibilityIdentifier", "AXIdentifier")
     }
 
     var subrole: String? {

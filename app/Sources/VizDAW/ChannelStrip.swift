@@ -619,6 +619,7 @@ private struct SendKnob: View {
                         width: ControlMetrics.hitSize(.numberBox).width,
                         height: ControlMetrics.hitSize(.numberBox).height)
                     .readoutEdge(theme)
+                    .accessibilityIdentifier(ControlUI.numberBoxID)
             }
         }
         .contextMenu {
@@ -683,6 +684,7 @@ private struct StripPan: View {
                     width: ControlMetrics.hitSize(.numberBox).width,
                     height: ControlMetrics.hitSize(.numberBox).height)
                 .readoutEdge(theme)
+                .accessibilityIdentifier(ControlUI.numberBoxID)
             Spacer(minLength: 0)
         }
     }
@@ -773,6 +775,7 @@ private struct StripLevelBox: View {
                     width: ControlMetrics.hitSize(.numberBox).width,
                     height: ControlMetrics.hitSize(.numberBox).height)
                 .readoutEdge(theme)
+                .accessibilityIdentifier(ControlUI.numberBoxID)
                 .help("Type a level in dB")
             Spacer(minLength: 0)
         }

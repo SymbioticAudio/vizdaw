@@ -241,30 +241,47 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         #expect(ControlUI.focusTextField(at: atField, in: w), "it keeps it")
     }
 
-    /// Final review m3: only a click on a number box (a button with a
-    /// value) or a text field waits for a field to show; a fader, a knob,
-    /// a plain button or a pane background answers at once.
+    /// Final review m3: only a click on a number box (marked with
+    /// `ControlUI.numberBoxID`) or a text field waits for a field to show;
+    /// a fader, a knob, a toggle or a pane background answers at once.
     @Test func onlyANumberBoxOrTextFieldClickMayStartEditing() {
-        func node(_ role: String, _ value: String?, _ r: CGRect) -> UiNodeRow {
-            UiNodeRow(
-                path: [0], role: role, subrole: nil, label: "x", title: nil, value: value, x: r.minX, y: r.minY,
-                width: r.width, height: r.height, enabled: true, selected: false, focused: false, actions: [])
-        }
-        let nodes = [
-            node("AXGroup", nil, CGRect(x: 0, y: 0, width: 400, height: 300)),
-            node("AXButton", "\u{2212}4.2 dB", CGRect(x: 10, y: 10, width: 56, height: 24)),
-            node("AXSlider", "\u{2212}4.2 dB", CGRect(x: 100, y: 10, width: 36, height: 200)),
-            node("AXButton", nil, CGRect(x: 200, y: 10, width: 24, height: 24)),
-            node("AXTextField", "", CGRect(x: 300, y: 10, width: 56, height: 24)),
-            node("AXButton", "", CGRect(x: 10, y: 100, width: 24, height: 24)),
+        typealias T = ControlUI.EditTarget
+        let box = ControlUI.numberBoxID
+        let targets = [
+            T(frame: CGRect(x: 0, y: 0, width: 400, height: 300), role: "AXGroup", identifier: nil),
+            T(frame: CGRect(x: 10, y: 10, width: 56, height: 24), role: "AXButton", identifier: box),
+            T(frame: CGRect(x: 100, y: 10, width: 36, height: 200), role: "AXUnknown", identifier: nil),
+            T(frame: CGRect(x: 200, y: 10, width: 24, height: 24), role: "AXButton", identifier: nil),
+            T(frame: CGRect(x: 300, y: 10, width: 56, height: 24), role: "AXTextField", identifier: nil),
         ]
-        #expect(ControlUI.mayEdit(nodes, at: CGPoint(x: 30, y: 20)), "the number box")
-        #expect(ControlUI.mayEdit(nodes, at: CGPoint(x: 320, y: 20)), "a text field")
-        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: 110, y: 100)), "a fader")
-        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: 210, y: 20)), "a plain button")
-        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: 20, y: 110)), "a button with an empty value")
-        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: 380, y: 280)), "the background")
-        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: CGFloat.nan, y: 20)))
+        #expect(ControlUI.mayEdit(targets, at: CGPoint(x: 30, y: 20)), "the number box")
+        #expect(ControlUI.mayEdit(targets, at: CGPoint(x: 320, y: 20)), "a text field")
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: 110, y: 100)), "a fader")
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: 210, y: 20)), "a toggle (a button with a value)")
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: 380, y: 280)), "the background")
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: CGFloat.nan, y: 20)))
+    }
+
+    /// The marker reaches the channel's walk on a real SwiftUI element.
+    @Test func aMarkedSwiftUIViewIsANumberBoxToTheChannel() {
+        let w = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 200, height: 100), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        let host = NSHostingView(
+            rootView: HStack(spacing: 0) {
+                Text("0.0 dB").frame(width: 100, height: 100)
+                    .accessibilityElement(children: .ignore).accessibilityLabel("Level")
+                    .accessibilityAddTraits(.isButton).accessibilityIdentifier(ControlUI.numberBoxID)
+                Text("M").frame(width: 100, height: 100)
+                    .accessibilityElement(children: .ignore).accessibilityLabel("Mute")
+                    .accessibilityAddTraits(.isButton)
+            })
+        w.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let titleBar = w.frame.height - w.contentLayoutRect.height
+        #expect(ControlUI.mayEdit(at: CGPoint(x: 50, y: titleBar + 50), in: w), "the marked box")
+        #expect(!ControlUI.mayEdit(at: CGPoint(x: 150, y: titleBar + 50), in: w), "the unmarked toggle")
     }
 
     /// B8 review m1: a focusing click that found no editable field says

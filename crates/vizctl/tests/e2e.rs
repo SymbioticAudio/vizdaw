@@ -2349,8 +2349,17 @@ fn themes_and_the_strip_over_the_channel() {
     // 4. The mixer state: kind colours, no strip colours, no EQ.
     let m = app.call("state.get", json!({"target": "mixer", "window": window}));
     for s in m["strips"].as_array().unwrap() {
-        assert!(s.get("kind_colour").is_some(), "{s}");
-        assert!(s["colour"].is_null(), "no strip colour yet: {s}");
+        // B8 review m4: a kind colour that is a name, and a colour key that
+        // is there and null (not missing).
+        assert!(
+            s["kind_colour"].as_str().is_some_and(|k| !k.is_empty()),
+            "{s}"
+        );
+        assert_eq!(
+            s.get("colour"),
+            Some(&Value::Null),
+            "no strip colour yet: {s}"
+        );
         assert!(s["eq"].is_null(), "no EQ yet: {s}");
     }
     assert_eq!(strip_named(&m, SYNTH)["kind_colour"], "instrument", "{m}");
@@ -2387,7 +2396,21 @@ fn themes_and_the_strip_over_the_channel() {
         "ui.key",
         json!({"window": window, "element": level, "text": "-9"}),
     );
+    // B8 review m2: the box is editing the typed draft before Esc (its
+    // field has the keyboard; the node's value stays the committed level
+    // until Return), so the Esc below is not tested vacuously.
+    let box_node = |app: &mut App| {
+        find_node(
+            &app.call("ui.tree", json!({"window": window}))["nodes"],
+            &format!("Level of {SYNTH}"),
+        )
+        .unwrap()
+    };
+    let editing = box_node(&mut app);
+    assert_eq!(editing["focused"], true, "the box is editing -9: {editing}");
     app.call("ui.key", json!({"window": window, "key": "escape"}));
+    let after = box_node(&mut app);
+    assert!(after["focused"].is_null(), "Esc ended the edit: {after}");
     // Had Esc not ended the edit, this Return would commit −9.
     app.call("ui.key", json!({"window": window, "key": "return"}));
     let m = app.call("state.get", json!({"target": "mixer", "window": window}));
@@ -2436,7 +2459,8 @@ fn themes_and_the_strip_over_the_channel() {
     wait_for_state(&mut app, &window, "mixer", |m| {
         (strip_named(m, SYNTH)["pan"].as_f64().unwrap() + 0.24).abs() < 1e-6
     });
-    // Leaving the level box committed no draft: Esc had cancelled it.
+    // Leaving the level box committed no draft: Esc had cancelled it (and
+    // since symbiotic-design 0.2.1 a blur cancels too).
     let m = app.call("state.get", json!({"target": "mixer", "window": window}));
     assert!(
         (strip_named(&m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6,
