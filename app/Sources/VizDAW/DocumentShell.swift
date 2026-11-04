@@ -242,9 +242,7 @@ struct PaneHost: View {
         case .mediaPool: MediaPoolView(media: model.media, compact: true)
         case .plugins: PluginsPane(model: model, docID: docID)
         case .markers: MarkersPane(model: model)
-        case .audioEditor:
-            ContentUnavailableView(
-                "Audio Editor", icon: .audio, description: Text(AudioEditorModel.emptyMessage))
+        case .audioEditor: AudioEditorPane(model: model)
         }
     }
 }

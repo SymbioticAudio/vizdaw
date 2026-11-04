@@ -106,8 +106,10 @@ public final class AudioEditorModel {
 
     public func zoomOut() { zoom(by: 0.5, aroundX: width / 2) }
 
+    /// While the width is 0 or less nothing is fitted or recorded, as in
+    /// `sync(width:)` (Task 5 review M4).
     public func fit() {
-        guard let r = document.editedRegion else { return }
+        guard width > 0, let r = document.editedRegion else { return }
         set(
             FrameAxis.fit(
                 offset: r.row.sourceOffset, length: r.row.frames, width: width, mediaFrames: Self.mediaFrames(r)))

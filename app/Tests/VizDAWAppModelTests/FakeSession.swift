@@ -395,14 +395,20 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var waveformRows: OverviewRows?
     /// `regionWaveform` calls: event, from, to, columns.
     var waveformCalls: [(event: UInt64, from: Int64, to: Int64, columns: UInt32)] = []
+    /// `overview` calls: media, from, to, columns (plan 7c Task 6).
+    var overviewCalls: [(media: UInt64, from: UInt64, to: UInt64, columns: UInt32)] = []
     func overview(media: UInt64, fromFrame: UInt64, toFrame: UInt64, columns: UInt32) throws -> OverviewRows {
+        overviewCalls.append((media, fromFrame, toFrame, columns))
+        return rows(columns: columns)
+    }
+    private func rows(columns: UInt32) -> OverviewRows {
         waveformRows ?? OverviewRows(
             state: .pending, channels: 1, columns: columns, min: Array(repeating: 0, count: Int(columns)),
             max: Array(repeating: 0, count: Int(columns)))
     }
     func regionWaveform(event: UInt64, fromTick: Int64, toTick: Int64, columns: UInt32) throws -> OverviewRows {
         waveformCalls.append((event, fromTick, toTick, columns))
-        return try overview(media: 0, fromFrame: 0, toFrame: 1, columns: columns)
+        return rows(columns: columns)
     }
     /// What `regionEnvelope` answers (nil: `columns` ones).
     var envelope: [Float]?

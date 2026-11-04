@@ -102,7 +102,7 @@ enum SourceScan {
     /// other than 0 is refused in these files.
     static let spacingFiles = [
         "VizDAW/ChannelStrip.swift", "VizDAW/MixerView.swift", "VizDAW/DocumentShell.swift",
-        "VizDAW/AppearanceSettingsView.swift",
+        "VizDAW/AppearanceSettingsView.swift", "VizDAW/AudioEditorPane.swift",
     ]
     static let spacingPatterns = [
         #"\.padding\((?:[^()]*,\s*)?-?(?!0\b)[0-9]"#, #"\bspacing:\s*-?(?!0\b)[0-9]"#,
