@@ -91,11 +91,11 @@ struct DocumentTransportBar: View {
                 // elements and sees no SwiftUI button or text (final review I1).
                 HStack(spacing: 6) {
                     AppKitButton(
-                        model.isPlaying ? "Stop" : "Play", symbol: model.isPlaying ? "stop.fill" : "play.fill",
+                        model.isPlaying ? "Stop" : "Play", icon: model.isPlaying ? .stop : .play,
                         enabled: model.canPlay, help: model.isPlaying ? "Stop (Space)" : "Play (Space)"
                     ) { model.playStop() }
                     .fixedSize()
-                    AppKitButton("Loop", symbol: "repeat", isOn: model.looping, help: "Loop") { model.toggleLoop() }
+                    AppKitButton("Loop", icon: .loop, isOn: model.looping, help: "Loop") { model.toggleLoop() }
                         .fixedSize()
                     RecordControls(model: model, record: model.record, host: showsViews ? .document : .mixerWindow)
                 }
@@ -135,7 +135,7 @@ struct DocumentTransportBar: View {
     @ViewBuilder private var faults: some View {
         if model.hasFaults || model.hasReport {
             AppKitButton(
-                "Faults", symbol: "circle.fill", help: "Faults and compile messages",
+                "Faults", icon: .fault, help: "Faults and compile messages",
                 tint: model.hasFaults ? .systemRed : .systemOrange
             ) { model.showsFaults.toggle() }
             .fixedSize()
@@ -166,14 +166,14 @@ struct DocumentTransportBar: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            paneToggle("ui.toggle_left", .left, symbol: "sidebar.left", key: "⌃⌘←")
-            paneToggle("ui.toggle_bottom", .bottom, symbol: "rectangle.bottomthird.inset.filled", key: "⌃⌘↓")
-            paneToggle("ui.toggle_right", .right, symbol: "sidebar.right", key: "⌃⌘→")
+            paneToggle("ui.toggle_left", .left, icon: .leftPane, key: "⌃⌘←")
+            paneToggle("ui.toggle_bottom", .bottom, icon: .bottomPane, key: "⌃⌘↓")
+            paneToggle("ui.toggle_right", .right, icon: .rightPane, key: "⌃⌘→")
         }
     }
 
-    private func paneToggle(_ id: String, _ side: PaneSide, symbol: String, key: String) -> some View {
-        AppKitButton(side.title, symbol: symbol, isOn: ViewCommands.isOn(id, model), help: "\(side.title) (\(key))") {
+    private func paneToggle(_ id: String, _ side: PaneSide, icon: AppIcon, key: String) -> some View {
+        AppKitButton(side.title, icon: icon, isOn: ViewCommands.isOn(id, model), help: "\(side.title) (\(key))") {
             ViewCommands.run(id, on: nil, model)
         }
         .fixedSize()

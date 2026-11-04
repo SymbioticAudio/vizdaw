@@ -1,7 +1,13 @@
 import AppKit
 import SwiftUI
+import SymbioticIcons
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
+
+#if canImport(SymbioticBrand)
+import SymbioticBrand
+#endif
 
 /// The one store of open documents (main actor).
 @MainActor let appStore = DocumentStore.live()
@@ -31,6 +37,11 @@ struct VizDAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
+        // The branded glyphs first, before any icon draws (plan 7b Ruling 6;
+        // a VIZDAW_NO_BRAND=1 build has the standard icons only).
+        #if canImport(SymbioticBrand)
+        Icons.register(SymbioticBrand.provider)
+        #endif
         appStore.keyBindings = keyBindings
         // The external sample editor (plan 5f-3 Ruling 5): the stub launches
         // nothing (CI, the e2e).
@@ -119,18 +130,28 @@ struct VizDAWApp: App {
         Settings {
             TabView {
                 EditingSettingsView(prefs: editingPreferences)
-                    .tabItem { Label("Editing", systemImage: "pencil") }
+                    .tabItem { Self.tab("Editing", .settingsEditing) }
                 KeysSettingsView(keys: keyBindings, store: appStore)
-                    .tabItem { Label("Keys", systemImage: "keyboard") }
+                    .tabItem { Self.tab("Keys", .settingsKeys) }
                 AudioSettingsView(prefs: audioPreferences, store: appStore)
-                    .tabItem { Label("Audio", systemImage: "hifispeaker") }
+                    .tabItem { Self.tab("Audio", .settingsAudio) }
                 RecordingSettingsView(prefs: audioPreferences, store: appStore)
-                    .tabItem { Label("Recording", systemImage: "record.circle") }
+                    .tabItem { Self.tab("Recording", .settingsRecording) }
                 AutomationSettingsView(prefs: automationPreferences)
-                    .tabItem { Label("Automation", systemImage: "slider.vertical.3") }
+                    .tabItem { Self.tab("Automation", .settingsAutomation) }
                 SurfacesSettingsView(settings: surfaceSettings, keys: keyBindings)
-                    .tabItem { Label("Surfaces", systemImage: "dial.medium") }
+                    .tabItem { Self.tab("Surfaces", .settingsSurfaces) }
             }
+        }
+    }
+
+    /// A Settings tab's label. The tab bar draws images only, so the icon is
+    /// an `NSImage`, in the default theme.
+    @MainActor private static func tab(_ title: String, _ icon: AppIcon) -> some View {
+        Label {
+            Text(title)
+        } icon: {
+            Image(nsImage: icon.image(size: 16, theme: .classicLight))
         }
     }
 }

@@ -672,3 +672,11 @@ may consider it more useful to permit linking proprietary applications with
 the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
+
+--------------------------------------------------------------------------
+
+Copyright (C) 2025–2026 Westlee Latta
+
+Additional permission under GNU GPL version 3 section 7: if you modify this Program, or any covered work, by linking or combining it with SymbioticAudio's SymbioticBrand library, containing parts covered by the terms of its ASSETS-LICENSE, the licensors of this Program grant you additional permission to convey the resulting work. This permission does not license the SymbioticBrand artwork itself.
+
+The SymbioticBrand library is not part of this Program and is not licensed under the GNU GPL; it remains under its ASSETS-LICENSE, which alone decides whether it may be copied or conveyed. Corresponding Source for such a combination need not include it.

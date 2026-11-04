@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -18,7 +19,7 @@ struct RelinkSheet: View {
                 .foregroundStyle(.secondary)
             List(media.relinkable, id: \.id) { r in
                 HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle")
+                    Icon(AppIcon.warning.role, size: 16)
                         .foregroundStyle(Color(nsColor: RegionPalette.offline))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {

@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 
@@ -84,7 +85,7 @@ struct LearnBanner: View {
     var body: some View {
         if let text = learn.bannerText(project: learnProject(document)) {
             HStack {
-                Image(systemName: "pianokeys")
+                Icon(AppIcon.midiLearn.role, size: 16)
                 Text(text)
                 Spacer()
                 Button("Cancel") { learn.cancel() }

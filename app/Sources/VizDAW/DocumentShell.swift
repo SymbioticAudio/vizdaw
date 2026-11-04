@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -97,9 +98,11 @@ struct DocumentShell: View {
                 if let mixer = appStore.mixer(docID) {
                     MixerView(model: mixer, placement: .view)
                 } else {
-                    ContentUnavailableView(
-                        "Mixer Unavailable", systemImage: "slider.vertical.3",
-                        description: Text("The mixer of this document could not be read."))
+                    ContentUnavailableView {
+                        Label { Text("Mixer Unavailable") } icon: { Icon(AppIcon.mixer.role, size: 32) }
+                    } description: {
+                        Text("The mixer of this document could not be read.")
+                    }
                 }
             }
         }
@@ -232,9 +235,11 @@ struct PaneHost: View {
             if let mixer = appStore.mixer(docID) {
                 MixerView(model: mixer, placement: .pane)
             } else {
-                ContentUnavailableView(
-                    "Mixer Unavailable", systemImage: "slider.vertical.3",
-                    description: Text("The mixer of this document could not be read."))
+                ContentUnavailableView {
+                    Label { Text("Mixer Unavailable") } icon: { Icon(AppIcon.mixer.role, size: 32) }
+                } description: {
+                    Text("The mixer of this document could not be read.")
+                }
             }
         case .controllers: ControllersPane(model: model)
         case .mediaPool: MediaPoolView(media: model.media, compact: true)

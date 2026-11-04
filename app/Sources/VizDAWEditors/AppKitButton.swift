@@ -1,21 +1,25 @@
 import AppKit
 import SwiftUI
+import SymbioticIcons
+import SymbioticTokens
+import VizDAWAppModel
 
 /// A bar button as an AppKit `NSButton` (plan 7a final review I1): an
 /// `AXButton` (or, with `isOn`, a toggle) named `title` in the window's
 /// accessibility tree, which the control channel walks. SwiftUI's own
-/// `Button` and `Toggle` are not in that tree. With `symbol` it shows the
-/// symbol only; without, the title. It never takes the keyboard (Full
-/// Keyboard Access stays on the editors; Task 7 review M4).
+/// `Button` and `Toggle` are not in that tree. With `icon` it shows the
+/// icon only (from SymbioticIcons, plan 7b Task B3); without, the title. It
+/// never takes the keyboard (Full Keyboard Access stays on the editors;
+/// Task 7 review M4).
 public struct AppKitButton: View {
     let button: BarButton
 
     public init(
-        _ title: String, symbol: String? = nil, isOn: Bool? = nil, enabled: Bool = true, help: String,
+        _ title: String, icon: AppIcon? = nil, isOn: Bool? = nil, enabled: Bool = true, help: String,
         tint: NSColor? = nil, action: @escaping @MainActor () -> Void
     ) {
         button = BarButton(
-            title: title, symbol: symbol, isOn: isOn, enabled: enabled, help: help, tint: tint, action: action)
+            title: title, icon: icon, isOn: isOn, enabled: enabled, help: help, tint: tint, action: action)
     }
 
     // SwiftUI sets a hosted control's `isEnabled` from the environment, so
@@ -26,7 +30,7 @@ public struct AppKitButton: View {
 /// `AppKitButton`'s `NSButton`.
 struct BarButton: NSViewRepresentable {
     let title: String
-    let symbol: String?
+    let icon: AppIcon?
     let isOn: Bool?
     let enabled: Bool
     let help: String
@@ -55,19 +59,21 @@ struct BarButton: NSViewRepresentable {
         b.bezelStyle = .push
         b.refusesFirstResponder = true
         if isOn != nil { b.setButtonType(.pushOnPushOff) }
-        update(b, context.coordinator)
+        update(b, context.coordinator, theme: context.environment.symbioticTheme)
         return b
     }
 
     func updateNSView(_ b: NSButton, context: Context) {
         context.coordinator.action = action
-        update(b, context.coordinator)
+        update(b, context.coordinator, theme: context.environment.symbioticTheme)
     }
 
-    private func update(_ b: NSButton, _ c: Coordinator) {
+    private func update(_ b: NSButton, _ c: Coordinator, theme: Theme) {
         c.isOn = isOn
-        if let symbol {
-            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        if let icon {
+            let image = icon.image(size: 16, theme: theme)
+            image.accessibilityDescription = title
+            b.image = image
             b.imagePosition = .imageOnly
             b.title = ""
         } else {

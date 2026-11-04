@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 
@@ -39,9 +40,11 @@ struct LeftStripPane: View {
                     }
                 }
         } else {
-            ContentUnavailableView(
-                "Mixer Unavailable", systemImage: "slider.vertical.3",
-                description: Text("The mixer of this document could not be read."))
+            ContentUnavailableView {
+                Label { Text("Mixer Unavailable") } icon: { Icon(AppIcon.mixer.role, size: 32) }
+            } description: {
+                Text("The mixer of this document could not be read.")
+            }
         }
     }
 

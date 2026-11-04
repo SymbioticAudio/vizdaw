@@ -18,14 +18,14 @@ struct RecordControls: View {
             // AppKit buttons, so the channel's tree finds them (final review I1).
             AppKitButton(
                 record.isRecording ? "Stop Recording" : "Record",
-                symbol: record.isRecording ? "record.circle.fill" : "record.circle",
+                icon: .record,
                 enabled: TransportCommands.enabled("transport.record", model),
                 help: record.isRecording ? "Stop recording (R)" : "Record the armed lanes (R)",
                 tint: record.isRecording ? .systemRed : nil
             ) { record.pressRecord() }
             .fixedSize()
             AppKitButton(
-                "Record Options", symbol: "chevron.down",
+                "Record Options", icon: .menuDown,
                 help: "Replace or overdub, punch, loop, count-in, pre-roll and takes"
             ) { [host] in record.togglePopover(in: host) }
             .fixedSize()

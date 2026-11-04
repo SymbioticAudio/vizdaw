@@ -1,0 +1,15 @@
+{
+  "originHash" : "da0fb625f66205f65979bde86a8219bd22d4c7390b95d54358d99190530d3c9f",
+  "pins" : [
+    {
+      "identity" : "symbiotic-design",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SymbioticAudio/symbiotic-design",
+      "state" : {
+        "revision" : "3da9224bfbeb43a7da0a760580491fb3ed9a3398",
+        "version" : "0.2.0"
+      }
+    }
+  ],
+  "version" : 3
+}

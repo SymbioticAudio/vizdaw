@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 
@@ -26,7 +27,7 @@ struct SequenceSidebar: View {
                     Button("New Sequence") { model.newSequence(.empty) }
                     TemplateItems(model: model)
                 } label: {
-                    Image(systemName: "plus")
+                    Icon(AppIcon.add.role, size: 16)
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 32)

@@ -26,10 +26,10 @@ import Testing
     @Test func barButtonsAreInTheTreeWithTheirLabelsAndState() throws {
         let w = hosted(
             HStack {
-                AppKitButton("Loop", symbol: "repeat", isOn: true, help: "Loop") {}
-                AppKitButton("Left Pane", symbol: "sidebar.left", isOn: false, help: "Left Pane") {}
+                AppKitButton("Loop", icon: .loop, isOn: true, help: "Loop") {}
+                AppKitButton("Left Pane", icon: .leftPane, isOn: false, help: "Left Pane") {}
                 AppKitButton("Add Bus", help: "Add a bus") {}
-                AppKitButton("Record", symbol: "record.circle", enabled: false, help: "Record") {}
+                AppKitButton("Record", icon: .record, enabled: false, help: "Record") {}
             })
         defer { w.close() }
         let nodes = ControlUI.tree(of: w, maxDepth: 64).nodes
@@ -49,7 +49,7 @@ import Testing
 
     @Test func aPressRunsTheActionAndAToggleShowsTheModel() throws {
         var pressed = 0
-        let w = hosted(AppKitButton("Loop", symbol: "repeat", isOn: false, help: "Loop") { pressed += 1 })
+        let w = hosted(AppKitButton("Loop", icon: .loop, isOn: false, help: "Loop") { pressed += 1 })
         defer { w.close() }
         let b = try #require(buttons(in: w.contentView).first)
         b.performClick(nil)

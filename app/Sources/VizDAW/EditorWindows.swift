@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticIcons
 import VizDAWAppModel
 
 /// Torn-off editor windows (spec §3.7), by document and window ID.
@@ -141,7 +142,9 @@ struct TornEditorView: View {
                 StatusLine(editor: model.editor)
             }
         } else {
-            ContentUnavailableView("Editor Closed", systemImage: "xmark.rectangle")
+            ContentUnavailableView {
+                Label { Text("Editor Closed") } icon: { Icon(AppIcon.empty.role, size: 32) }
+            }
                 .onAppear(perform: onGone)
         }
     }

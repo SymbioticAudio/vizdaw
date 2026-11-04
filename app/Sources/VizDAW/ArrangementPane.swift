@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -22,9 +23,11 @@ struct ArrangementPane: View {
             }
             Divider()
             if model.selectedSeq == nil {
-                ContentUnavailableView(
-                    "No Sequence", systemImage: "music.note.list",
-                    description: Text("Choose File > Create Demo Project to try VizDAW."))
+                ContentUnavailableView {
+                    Label { Text("No Sequence") } icon: { Icon(AppIcon.list.role, size: 32) }
+                } description: {
+                    Text("Choose File > Create Demo Project to try VizDAW.")
+                }
             } else {
                 ArrangementHost(document: model)
             }
@@ -105,13 +108,13 @@ struct ArrangementBar: View {
             Button {
                 editor.updateLayout { $0.ticksPerPoint = min($0.ticksPerPoint * 1.5, 61_440) }
             } label: {
-                Image(systemName: "minus.magnifyingglass")
+                Icon(AppIcon.zoomOut.role, size: 16)
             }
             .help("Zoom Out")
             Button {
                 editor.updateLayout { $0.ticksPerPoint = max($0.ticksPerPoint / 1.5, 2) }
             } label: {
-                Image(systemName: "plus.magnifyingglass")
+                Icon(AppIcon.zoomIn.role, size: 16)
             }
             .help("Zoom In")
         }
@@ -209,7 +212,7 @@ struct StatusLine: View {
     var body: some View {
         if let s = editor.status {
             HStack {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                Icon(AppIcon.warning.role, size: 16).foregroundStyle(.orange)
                 Text(s).lineLimit(1)
                 Spacer()
                 Button("Dismiss") { editor.clearStatus() }.buttonStyle(.borderless)

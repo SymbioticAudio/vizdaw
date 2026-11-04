@@ -60,6 +60,8 @@ scripts/swift.sh test             # Swift Testing suite (needs build-ffi.sh firs
 scripts/make-app.sh               # dist/VizDAW.app, ad-hoc signed
 ```
 
+The first build fetches symbiotic-design 0.2.0 from GitHub; `VIZDAW_NO_BRAND=1` builds without SymbioticAudio's branded icons.
+
 Building on Linux: the core builds and tests with `cargo test --workspace`
 (there is no Linux app yet).
 
@@ -68,6 +70,8 @@ See [app/README.md](app/README.md) for more.
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE).
+
+VizDAW's own build links SymbioticAudio's branded icons under a GPL section 7 additional permission (see LICENSE). The artwork stays all rights reserved and is not covered by the GPL; forks build without it with `VIZDAW_NO_BRAND=1`.
 
 ## Disclaimer
 
