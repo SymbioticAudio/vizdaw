@@ -77,7 +77,7 @@ struct DetailArea: View {
                 onClose: { model.editor.closeDetail() }, showsKindPicker: false)
         } else {
             ContentUnavailableView(
-                "No Editor Open", systemImage: AppIcon.split.symbol,
+                "No Editor Open", icon: .split,
                 description: Text("Double-click a block, or press ⌘1 to ⌘4.")
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)

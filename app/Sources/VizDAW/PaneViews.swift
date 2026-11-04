@@ -2,6 +2,29 @@ import SwiftUI
 import VizDAWAppModel
 import VizDAWCore
 
+/// A placeholder's icon size: about what an SF Symbol drew there before.
+private let placeholderIcon: CGFloat = 40
+
+/// A placeholder with an AppIcon (final fix wave B): every icon is a
+/// SymbioticAudio one, never an SF Symbol.
+extension ContentUnavailableView where Label == SwiftUI.Label<Text, Image>, Actions == EmptyView {
+    @MainActor init(_ title: String, icon: AppIcon, description: Description) where Description == Text {
+        let label = icon.label(title, size: placeholderIcon)
+        self.init {
+            label
+        } description: {
+            description
+        }
+    }
+
+    @MainActor init(_ title: String, icon: AppIcon) where Description == EmptyView {
+        let label = icon.label(title, size: placeholderIcon)
+        self.init {
+            label
+        }
+    }
+}
+
 /// What re-runs a 30 Hz poll (the document window's, the left strip's, the
 /// Mix view's and the bottom pane's mixer): its window turning key, or the
 /// document starting or stopping play or record (plan 7a Ruling 8, Task 8
@@ -40,7 +63,7 @@ struct LeftStripPane: View {
                 }
         } else {
             ContentUnavailableView(
-                "Mixer Unavailable", systemImage: AppIcon.mixer.symbol,
+                "Mixer Unavailable", icon: .mixer,
                 description: Text("The mixer of this document could not be read."))
         }
     }

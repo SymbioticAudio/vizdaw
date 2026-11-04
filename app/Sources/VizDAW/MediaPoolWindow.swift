@@ -29,7 +29,7 @@ struct MediaPoolWindow: View {
                 .navigationTitle("Media Pool — \(doc.snapshot.title)")
         } else {
             ContentUnavailableView(
-                "No Document", systemImage: AppIcon.audio.symbol,
+                "No Document", icon: .audio,
                 description: Text("The document of this media pool is closed."))
         }
     }

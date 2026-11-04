@@ -24,7 +24,7 @@ struct ArrangementPane: View {
             Divider()
             if model.selectedSeq == nil {
                 ContentUnavailableView(
-                    "No Sequence", systemImage: AppIcon.list.symbol,
+                    "No Sequence", icon: .list,
                     description: Text("Choose File > Create Demo Project to try VizDAW."))
             } else {
                 ArrangementHost(document: model)

@@ -99,7 +99,7 @@ struct DocumentShell: View {
                     MixerView(model: mixer, placement: .view)
                 } else {
                     ContentUnavailableView(
-                        "Mixer Unavailable", systemImage: AppIcon.mixer.symbol,
+                        "Mixer Unavailable", icon: .mixer,
                         description: Text("The mixer of this document could not be read."))
                 }
             }
@@ -234,7 +234,7 @@ struct PaneHost: View {
                 MixerView(model: mixer, placement: .pane)
             } else {
                 ContentUnavailableView(
-                    "Mixer Unavailable", systemImage: AppIcon.mixer.symbol,
+                    "Mixer Unavailable", icon: .mixer,
                     description: Text("The mixer of this document could not be read."))
             }
         case .controllers: ControllersPane(model: model)

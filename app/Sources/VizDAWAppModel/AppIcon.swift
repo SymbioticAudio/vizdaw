@@ -1,12 +1,28 @@
 import AppKit
 import SwiftUI
 import SymbioticIcons
+import SymbioticTokens
+
+/// Which SymbioticAudio set an AppIcon case draws from (final fix wave B).
+public enum IconSource: Sendable, Hashable {
+    /// The default set: the registered brand glyph where it maps the role,
+    /// else the standard icon (a `VIZDAW_NO_BRAND=1` build).
+    case glyph
+    /// The angular set (symbiotic-design 0.2.1), brand or not.
+    case angular
+
+    /// The SymbioticIcons set this source draws.
+    public var set: IconSet {
+        switch self {
+        case .glyph: .standard
+        case .angular: .angular
+        }
+    }
+}
 
 /// The icons VizDAW shows, by meaning: the one place an icon is chosen
-/// (plan 7b Task B3). Each draws its SF Symbol, `symbol`, the one the app
-/// showed before 7b (owner decision, B3 fix round 2). `role` is the
-/// SymbioticIcons role it would become, kept for a later swap; nothing
-/// draws it yet.
+/// (plan 7b Task B3). Every case draws a SymbioticAudio icon, its `role`
+/// from its `source` (owner, 2026-11-04); none draws an SF Symbol.
 public enum AppIcon: CaseIterable, Sendable {
     // Status.
     case warning, problem, fault, info
@@ -37,7 +53,7 @@ public enum AppIcon: CaseIterable, Sendable {
         case .warning: .statusWarning
         case .problem: .statusProblem
         case .fault: .statusFault
-        case .faultIndicator: .statusFault
+        case .faultIndicator: .statusFaultIndicator
         case .info: .statusInfo
         case .mixer: .viewMixer
         case .add: .editAdd
@@ -55,7 +71,7 @@ public enum AppIcon: CaseIterable, Sendable {
         case .split: .viewSplit
         case .empty: .viewEmpty
         case .record: .transportRecord
-        case .recording: .transportRecord
+        case .recording: .transportRecording
         case .armed: .recordArm
         case .pencil: .toolPencil
         case .diskSlow: .statusDiskSlow
@@ -79,9 +95,26 @@ public enum AppIcon: CaseIterable, Sendable {
         }
     }
 
-    /// The SF Symbol the app draws: what it showed before 7b. pianoRoll,
-    /// armed, pencil, settingsAppearance and eq had no icon then and show
-    /// nowhere yet; theirs are placeholders.
+    /// The set the case draws from (owner, 2026-11-04): the owner's 26
+    /// glyph picks and the 15 angular icons. Switching one icon back is a
+    /// one-line change here. settingsAppearance, in neither list, draws the
+    /// default set.
+    public var source: IconSource {
+        switch self {
+        case .fault, .faultIndicator, .remove, .zoomIn, .zoomOut, .audio, .pianoRoll, .record, .armed, .recording,
+            .settingsKeys, .settingsAudio, .settingsRecording, .play, .stop:
+            .angular
+        case .warning, .problem, .info, .mixer, .add, .confirm, .close, .drumGrid, .list, .muted, .loop, .split,
+            .empty, .pencil, .diskSlow, .expand, .collapse, .menuDown, .leftPane, .bottomPane, .rightPane,
+            .settingsEditing, .settingsAutomation, .settingsSurfaces, .settingsAppearance, .eq, .midiLearn:
+            .glyph
+        }
+    }
+
+    /// The SF Symbol the app showed before 7b, kept as data for reverting a
+    /// case. Unused while every case has a Symbiotic source: nothing draws
+    /// it. pianoRoll, armed, pencil, settingsAppearance and eq had no icon
+    /// then; theirs are placeholders.
     public var symbol: String {
         switch self {
         case .warning: "exclamationmark.triangle"
@@ -129,14 +162,32 @@ public enum AppIcon: CaseIterable, Sendable {
         }
     }
 
-    /// `Image(systemName: symbol)`.
-    public var image: Image { Image(systemName: symbol) }
+    /// A template image of the case at `size` points in `theme`, drawn by
+    /// SymbioticIcons from its `source` (`resolver`: tests and previews).
+    @MainActor
+    public func nsImage(
+        accessibilityDescription: String?, size: CGFloat = 16, theme: Theme = ThemedViews.current,
+        resolver: IconResolver = Icons.resolver
+    ) -> NSImage {
+        let image = NSImage.icon(role, size: size, theme: theme, set: source.set, resolver: resolver)
+        image.isTemplate = true
+        image.accessibilityDescription = accessibilityDescription
+        return image
+    }
 
-    /// `Label(title, systemImage: symbol)`.
-    public func label(_ title: String) -> Label<Text, Image> { Label(title, systemImage: symbol) }
+    /// The case as a SwiftUI template image at `size` points, labelled with
+    /// its role's name, in the current theme.
+    @MainActor
+    public func image(size: CGFloat) -> Image {
+        Image(nsImage: nsImage(accessibilityDescription: role.label, size: size)).renderingMode(.template)
+    }
 
-    /// `NSImage(systemSymbolName: symbol, accessibilityDescription:)`.
-    public func nsImage(accessibilityDescription: String?) -> NSImage? {
-        NSImage(systemSymbolName: symbol, accessibilityDescription: accessibilityDescription)
+    /// The case as a 16-point SwiftUI template image.
+    @MainActor public var image: Image { image(size: 16) }
+
+    /// `Label(title)` with the case's 16-point image (or `size`).
+    @MainActor
+    public func label(_ title: String, size: CGFloat = 16) -> Label<Text, Image> {
+        Label { Text(title) } icon: { image(size: size) }
     }
 }

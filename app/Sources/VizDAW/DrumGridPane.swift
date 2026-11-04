@@ -17,7 +17,7 @@ struct DrumGridEditor: View {
             Divider()
             if model.lanes.isEmpty {
                 ContentUnavailableView(
-                    "No Drum Lanes", systemImage: AppIcon.drumGrid.symbol,
+                    "No Drum Lanes", icon: .drumGrid,
                     description: Text(
                         "Make a lane a drum lane with Drum > Drum Lane or its header's menu, or add a Drum Kit sequence."))
             } else {

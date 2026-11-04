@@ -143,7 +143,7 @@ struct TornEditorView: View {
                 StatusLine(editor: model.editor)
             }
         } else {
-            ContentUnavailableView("Editor Closed", systemImage: AppIcon.empty.symbol)
+            ContentUnavailableView("Editor Closed", icon: .empty)
                 .onAppear(perform: onGone)
         }
     }

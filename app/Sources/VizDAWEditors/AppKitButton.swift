@@ -7,7 +7,8 @@ import VizDAWAppModel
 /// `AXButton` (or, with `isOn`, a toggle) named `title` in the window's
 /// accessibility tree, which the control channel walks. SwiftUI's own
 /// `Button` and `Toggle` are not in that tree. With `icon` it shows the
-/// icon only (its SF Symbol, chosen in AppIcon: plan 7b Task B3); without,
+/// icon only (its SymbioticAudio icon, chosen in AppIcon: plan 7b Task B3
+/// and the final fix wave, as a template image); without,
 /// the title. It never takes the keyboard (Full Keyboard Access stays on the editors;
 /// Task 7 review M4).
 public struct AppKitButton: View {
@@ -70,7 +71,7 @@ struct BarButton: NSViewRepresentable {
     private func update(_ b: NSButton, _ c: Coordinator, _ theme: Theme) {
         c.isOn = isOn
         if let icon {
-            b.image = icon.nsImage(accessibilityDescription: title)
+            b.image = icon.nsImage(accessibilityDescription: title, theme: ThemedViews.current)
             b.imagePosition = .imageOnly
             b.title = ""
         } else {

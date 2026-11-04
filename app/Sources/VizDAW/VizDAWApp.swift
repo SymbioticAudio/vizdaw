@@ -49,8 +49,8 @@ struct VizDAWApp: App {
 
     init() {
         // The branded glyphs first, before any icon draws (plan 7b Ruling 6;
-        // a VIZDAW_NO_BRAND=1 build has the standard icons only). The app
-        // draws SF Symbols for now (B3 fix round 2), so nothing uses it yet.
+        // a VIZDAW_NO_BRAND=1 build has the standard icons only). AppIcon's
+        // glyph cases draw them; its angular cases do not (final fix wave B).
         #if canImport(SymbioticBrand)
         Icons.register(SymbioticBrand.provider)
         #endif

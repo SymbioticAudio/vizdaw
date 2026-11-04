@@ -42,7 +42,7 @@ struct MixerWindow: View {
             .navigationTitle("Mixer — \(mixer.document.snapshot.title)")
         } else {
             ContentUnavailableView(
-                "No Document", systemImage: AppIcon.mixer.symbol,
+                "No Document", icon: .mixer,
                 description: Text("The document of this mixer is closed."))
         }
     }

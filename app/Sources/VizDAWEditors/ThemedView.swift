@@ -1,5 +1,6 @@
 import AppKit
 import SymbioticTokens
+import VizDAWAppModel
 
 /// An editor view that draws in a theme (plan 7b Ruling 12): each host's
 /// `updateNSView` sets its root view's `theme` from `\.symbioticTheme`, and

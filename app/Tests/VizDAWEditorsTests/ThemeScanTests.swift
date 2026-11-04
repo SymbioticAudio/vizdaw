@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import SymbioticTokens
 import Testing
+import VizDAWAppModel
 @testable import VizDAWEditors
 
 /// Scans the app's own sources (`app/Sources/<dir>/**/*.swift`, found from
