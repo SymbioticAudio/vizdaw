@@ -233,6 +233,17 @@ enum SourceScan {
         #expect(same(t.whiteKey, t.keys.white) && same(t.blackKey, t.keys.black))
         #expect(same(t.laneColour(0), t.swatch.red) && same(t.laneColour(7), t.swatch.pink))
         #expect(same(t.laneColour(9), t.swatch.orange) && same(t.laneColour(-1), t.swatch.pink))
+        // Plan 7c Ruling 12: the audio editor's roles, in every theme.
+        for t in Theme.all {
+            let roles: [(NSColor, ThemeColor)] = [
+                (t.audioWave, t.graph.line), (t.audioWaveTrimmed, t.text.disabled),
+                (t.audioEnvelope, t.graph.handle), (t.audioHandle, t.graph.handle),
+                (t.audioHandleSelected, t.graph.handleSelected), (t.audioClip, t.meter.clip),
+                (t.audioScaleText, t.text.secondary), (t.audioScaleLine, t.graph.grid),
+                (t.audioOutside, t.surface.panel),
+            ]
+            for (i, (role, token)) in roles.enumerated() { #expect(same(role, token), "\(t.id) role \(i)") }
+        }
     }
     /// B5 review I1: a lit toggle's letter reads on its fill in every theme
     /// (WCAG 4.5:1), the lane header's and the region strip's.

@@ -118,6 +118,21 @@ public extension Theme {
         firstReadable([accent.accent, graph.handleSelected, text.primary], on: canvas, ratio: 3)
     }
 
+    // MARK: Audio editor (plan 7c Ruling 12)
+
+    var audioWave: NSColor { graph.line.nsColor }
+    /// The file's audio outside the region.
+    var audioWaveTrimmed: NSColor { text.disabled.nsColor }
+    var audioEnvelope: NSColor { graph.handle.nsColor }
+    var audioHandle: NSColor { graph.handle.nsColor }
+    var audioHandleSelected: NSColor { graph.handleSelected.nsColor }
+    /// Over 0 dBFS after the gain.
+    var audioClip: NSColor { meter.clip.nsColor }
+    var audioScaleText: NSColor { text.secondary.nsColor }
+    var audioScaleLine: NSColor { graph.grid.nsColor }
+    /// Beyond the file.
+    var audioOutside: NSColor { surface.panel.nsColor }
+
     // MARK: Fonts
 
     /// `style`'s size in another weight.
