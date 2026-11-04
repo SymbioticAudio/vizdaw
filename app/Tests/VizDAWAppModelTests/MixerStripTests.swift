@@ -110,6 +110,18 @@ import VizDAWCore
         #expect(m.document.alert?.title == "Load EQ Failed")
     }
 
+    /// B6 review: the core refuses to clear an empty slot, so an empty EQ
+    /// is no call and no "Clear EQ Failed" alert.
+    @Test func clearingAnEmptyEqSlotSendsNothing() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        #expect(m.strips[0].eq == nil)
+        f.mixerError = .Model(message: "empty slot")
+        m.clearEq(m.strips[0])
+        #expect(f.calls.isEmpty)
+        #expect(m.document.alert == nil)
+    }
+
     @Test func aStripColourIsOneStep() throws {
         let f = mixerFake()
         let m = try model(f)

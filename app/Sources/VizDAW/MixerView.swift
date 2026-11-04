@@ -102,21 +102,31 @@ struct MixerView: View {
         return Binding(get: { learn.showsMaps(in: p) }, set: { if !$0 { learn.closeMaps(from: p) } })
     }
 
+    /// The strips, each given the row's height (Ruling 14): the fader takes
+    /// what the rest leaves. When a strip needs more than the row has
+    /// (`StripLayout.split`'s `scrolls`) it is taller than the row, and the
+    /// row scrolls on both axes; otherwise only across.
     private var strips: some View {
-        ScrollView(.horizontal) {
-            HStack(alignment: .top, spacing: 6) {
-                ForEach(model.strips, id: \.id) { s in
-                    StripView(model: model, strip: s)
+        GeometryReader { g in
+            let height = max(g.size.height - 2 * Self.rowPadding, 0)
+            ScrollView([.horizontal, .vertical]) {
+                HStack(alignment: .top, spacing: 6) {
+                    ForEach(model.strips, id: \.id) { s in
+                        ChannelStrip(model: model, strip: s, height: height)
+                    }
+                    if let master = model.master {
+                        Divider()
+                        ChannelStrip(model: model, strip: master, height: height)
+                    }
                 }
-                if let master = model.master {
-                    Divider()
-                    StripView(model: model, strip: master)
-                }
+                .padding(Self.rowPadding)
+                .frame(minWidth: g.size.width, minHeight: g.size.height, alignment: .topLeading)
             }
-            .padding(8)
         }
         .environment(\.mixerPlacement, placement)
     }
+
+    private static let rowPadding: CGFloat = 8
 }
 
 /// The mixer's own bar (it was the window's toolbar; a toolbar item in a
@@ -169,7 +179,7 @@ struct MixerBar: View {
 
 extension View {
     /// The touched ring (plan 5e-2 Ruling 3): shown while `touched`, in the
-    /// theme's accent and small radius.
+    /// theme's focus ring colour and small radius.
     func touchRing(_ touched: Bool) -> some View { modifier(TouchRing(touched: touched)) }
 }
 
@@ -180,7 +190,7 @@ private struct TouchRing: ViewModifier {
     func body(content: Content) -> some View {
         content.overlay(
             RoundedRectangle(cornerRadius: theme.radius.s)
-                .stroke(theme.accent.accent.color, lineWidth: 2)
+                .stroke(theme.surface.focusRing.color, lineWidth: 2)
                 .opacity(touched ? 1 : 0))
     }
 }
@@ -197,236 +207,6 @@ struct UnhostedLearnAlert: ViewModifier {
             content.learnAlert(learn, shown: !learn.showsMaps)
         } else {
             content
-        }
-    }
-}
-
-extension Theme {
-    /// An automation mode's tint (Ruling 4), through `AutomationModes`'
-    /// colour names to the theme's states (plan 7b Ruling 13; B6's
-    /// `StripPalette.automation` replaces it). Trim has no state: it takes
-    /// the purple swatch.
-    func automationTint(_ m: AutomationModeRow) -> Color {
-        switch AutomationModes.colorName(m) {
-        case "green": state.play.color
-        case "yellow": state.solo.color
-        case "orange": state.mute.color
-        case "red": state.record.color
-        case "purple": swatch.purple.color
-        default: state.offline.color
-        }
-    }
-}
-
-/// One strip: name, kind, slots, sends, output, pan, fader, mute/solo,
-/// meter.
-struct StripView: View {
-    @Environment(\.symbioticTheme) private var theme
-    @Bindable var model: MixerModel
-    let strip: StripRow
-    @FocusState private var renaming: Bool
-    /// The placement this strip shows in: what it opens shows there.
-    @Environment(\.mixerPlacement) var placement
-
-    var body: some View {
-        VStack(spacing: 4) {
-            header
-            modeMenu
-            if let inst = strip.instrument {
-                SlotView(model: model, strip: strip, slot: inst, index: nil)
-            }
-            if let lane = model.inputLane(for: strip) {
-                StripInputView(inputs: model.document.inputs, lane: lane)
-            }
-            inserts
-            sends
-            output
-            panControl
-            HStack(alignment: .bottom, spacing: 4) {
-                FaderView(model: model, strip: strip)
-                MeterView(level: model.meters[strip.id] ?? .silent)
-            }
-            HStack(spacing: 4) {
-                Toggle("M", isOn: Binding(get: { strip.mute }, set: { _ in model.toggleMute(strip) }))
-                    .toggleStyle(.button)
-                    .tint(theme.state.mute.color)
-                    .touchRing(model.isTouched(.stripMute(strip: strip.id)))
-                    .contextMenu { LearnItem(model: model, target: .stripMute(strip: strip.id)) }
-                if strip.kind != .master {
-                    Toggle("S", isOn: Binding(get: { strip.solo }, set: { _ in model.toggleSolo(strip) }))
-                        .toggleStyle(.button)
-                        .tint(theme.state.solo.color)
-                        .touchRing(model.isTouched(.stripSolo(strip: strip.id)))
-                        .contextMenu { LearnItem(model: model, target: .stripSolo(strip: strip.id)) }
-                }
-            }
-            .help(strip.soloMuted ? "Silent: other strips are soloed" : "Mute / Solo")
-        }
-        .padding(6)
-        .frame(width: 120)
-        .background(
-            RoundedRectangle(cornerRadius: theme.radius.m)
-                .fill(theme.surface.raised.color.opacity(strip.soloMuted ? 0.5 : 1)))
-        .background(
-            RoundedRectangle(cornerRadius: theme.radius.m)
-                .fill(theme.accent.accent.color.opacity(model.isSelected(strip.id) ? 0.25 : 0)))
-    }
-
-    @ViewBuilder private var header: some View {
-        if model.isRenaming(strip.id, in: placement) {
-            TextField("Name", text: $model.renameDraft)
-                .focused($renaming)
-                .onSubmit { model.commitRename() }
-                .onExitCommand { model.cancelRename() }
-                .onAppear { renaming = true }
-        } else {
-            Text(strip.name)
-                .font(.headline)
-                .lineLimit(1)
-                .onTapGesture(count: 2) { model.beginRename(strip, in: placement) }
-                .onTapGesture { model.select(strip.id, adding: NSEvent.modifierFlags.contains(.command)) }
-                .contextMenu {
-                    Button("Rename…") { model.beginRename(strip, in: placement) }
-                    Menu("Set All Strips to") {
-                        ForEach(AutomationModes.all, id: \.self) { m in
-                            Button(AutomationModes.title(m)) { model.setAllModes(m) }
-                        }
-                    }
-                    if strip.kind == .bus {
-                        Button("Remove Bus") { model.removeBus(strip.id) }
-                    }
-                    Divider()
-                    Button("MIDI Learn Maps…") { model.document.learn.showMaps(in: placement) }
-                    if !strip.freeOutputs.isEmpty {
-                        Menu("Add Outputs") {
-                            ForEach(strip.freeOutputs, id: \.self) { i in
-                                Button("Output \(Int(i) + 1)") { model.addOutput(strip, i) }
-                            }
-                        }
-                    }
-                }
-        }
-        Text(strip.kindLabel)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        let held = model.heldSlots(of: strip)
-        if !held.isEmpty {
-            Button("Load All") { model.load(held) }
-                .controlSize(.small)
-                .help("Safe mode kept these plugins off")
-        }
-    }
-
-    /// The automation mode popup, tinted by the mode.
-    private var modeMenu: some View {
-        Menu(AutomationModes.title(strip.automation)) {
-            ForEach(AutomationModes.all, id: \.self) { m in
-                Button {
-                    model.setMode(strip.id, m)
-                } label: {
-                    if m == strip.automation {
-                        AppIcon.confirm.label(AutomationModes.title(m))
-                    } else {
-                        Text(AutomationModes.title(m))
-                    }
-                }
-            }
-        }
-        .tint(theme.automationTint(strip.automation))
-        .controlSize(.small)
-        .help("Automation: \(AutomationModes.title(strip.automation))")
-    }
-
-    private var inserts: some View {
-        VStack(spacing: 2) {
-            ForEach(Array(strip.inserts.enumerated()), id: \.element.id) { i, slot in
-                SlotView(model: model, strip: strip, slot: slot, index: i)
-            }
-            Button {
-                model.openBrowser(.insert(strip: strip.id), in: placement)
-            } label: {
-                AppIcon.add.image
-                    .frame(maxWidth: .infinity)
-            }
-            .controlSize(.small)
-            .help("Add an effect")
-            .popover(
-                isPresented: Binding(
-                    get: { model.showsBrowser(in: placement) && model.browser == .insert(strip: strip.id) },
-                    set: { if !$0 { model.browser = nil } })
-            ) {
-                PluginBrowserView(
-                    model: model.browserModel(.effect) {
-                        PluginBrowserModel(kind: .effect) { appPlugins.browser(.effect) }
-                    }
-                ) {
-                    model.pick($0)
-                }
-            }
-            .dropDestination(for: String.self) { items, _ in
-                drop(items, at: strip.inserts.count)
-            }
-        }
-    }
-
-    private func drop(_ items: [String], at index: Int) -> Bool {
-        guard let id = items.first.flatMap(SlotView.slotID) else { return false }
-        model.moveInsert(id, to: strip.id, at: index)
-        return true
-    }
-
-    @ViewBuilder private var sends: some View {
-        if strip.kind != .master {
-            ForEach(Array(strip.sends.enumerated()), id: \.offset) { i, send in
-                SendView(model: model, strip: strip, index: i, send: send)
-            }
-            let targets = model.targets(for: strip)
-            if !targets.isEmpty {
-                Menu("Send") {
-                    ForEach(targets, id: \.id) { b in
-                        Button(b.name) { model.addSend(strip.id, to: b.id) }
-                    }
-                }
-                .controlSize(.small)
-            }
-        }
-    }
-
-    @ViewBuilder private var output: some View {
-        if strip.kind != .master {
-            Menu("→ \(model.outputName(strip))") {
-                Button("Master") { model.setOutput(strip.id, bus: nil) }
-                ForEach(model.targets(for: strip), id: \.id) { b in
-                    Button(b.name) { model.setOutput(strip.id, bus: b.id) }
-                }
-            }
-            .controlSize(.small)
-        }
-    }
-
-    @ViewBuilder private var panControl: some View {
-        if strip.kind != .master {
-            HStack(spacing: 2) {
-                Slider(
-                    value: Binding(
-                        get: { model.pan(strip) },
-                        set: { model.move(.stripPan(strip: strip.id), to: ($0 + 1) / 2) }),
-                    in: -1...1
-                ) { editing in
-                    if editing {
-                        model.touch(.stripPan(strip: strip.id))
-                    } else {
-                        model.release(.stripPan(strip: strip.id))
-                    }
-                }
-                .controlSize(.mini)
-                .touchRing(model.isTouched(.stripPan(strip: strip.id)))
-                .contextMenu { LearnItem(model: model, target: .stripPan(strip: strip.id)) }
-                Text(MixerMath.panLabel(model.pan(strip)))
-                    .font(.caption2.monospacedDigit())
-                    .frame(width: 28)
-            }
         }
     }
 }
@@ -458,15 +238,17 @@ struct SlotView: View {
                 .fill(color)
                 .frame(width: 6, height: 6)
             Text(slot.plugin.name)
-                .font(.caption)
+                .font(theme.type.caption.font)
                 .lineLimit(1)
                 .strikethrough(slot.bypass)
-                .foregroundStyle(reason == nil ? .primary : .secondary)
+                .foregroundStyle(reason == nil ? theme.text.primary.color : theme.text.secondary.color)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 4)
-        .frame(maxWidth: .infinity, minHeight: 18)
+        .frame(maxWidth: .infinity, minHeight: 20)
         .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.surface.inset.color))
+        .overlay(RoundedRectangle(cornerRadius: theme.radius.s).strokeBorder(theme.surface.separator.color))
+        .contentShape(Rectangle())
         .help(reason ?? "\(slot.plugin.name) (\(slot.plugin.vendor))")
         .onTapGesture(count: 2) { openWindow(slot.id) }
         .contextMenu { menu }
@@ -474,7 +256,11 @@ struct SlotView: View {
     }
 
     /// The slot dot (plan 7b Ruling 13).
-    private var color: Color {
+    private var color: Color { Self.dot(slot, model: model, theme: theme) }
+
+    /// A slot's dot: faulted, live, bypassed, loading or a placeholder (the
+    /// EQ slot's too).
+    static func dot(_ slot: SlotRow, model: MixerModel, theme: Theme) -> Color {
         if model.faulted.contains(slot.id) { return theme.state.error.color }
         switch slot.status {
         case .live: return slot.bypass ? theme.text.disabled.color : theme.state.play.color
@@ -527,78 +313,6 @@ struct SlotView: View {
     }
 }
 
-/// One send: target, level (a drag is one undo step), pre/post, on/off.
-struct SendView: View {
-    let model: MixerModel
-    let strip: StripRow
-    let index: Int
-    let send: SendRow
-
-    var body: some View {
-        VStack(spacing: 1) {
-            HStack(spacing: 2) {
-                Text(model.stripName(send.target))
-                    .font(.caption2)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Toggle("Pre", isOn: Binding(get: { send.preFader }, set: { v in model.editSend(strip.id, index) { $0.preFader = v } }))
-                    .toggleStyle(.button)
-                    .controlSize(.mini)
-                Toggle("On", isOn: Binding(get: { send.enabled }, set: { v in model.editSend(strip.id, index) { $0.enabled = v } }))
-                    .toggleStyle(.button)
-                    .controlSize(.mini)
-            }
-            Slider(
-                value: Binding(
-                    get: { MixerMath.faderPosition(model.sendLevelDb(strip, index)) },
-                    set: { p in model.move(target, to: AutomationLaw.faderNorm(MixerMath.faderDb(p))) }),
-                in: 0...1
-            ) { editing in
-                if editing { model.touch(target) } else { model.release(target) }
-            }
-            .controlSize(.mini)
-            .touchRing(model.isTouched(target))
-        }
-        .contextMenu {
-            LearnItem(model: model, target: target)
-            Button("Remove Send") { model.removeSend(strip.id, index) }
-        }
-        .help("Send to \(model.stripName(send.target)): \(MixerMath.dbLabel(model.sendLevelDb(strip, index))) dB")
-    }
-
-    private var target: AutomationTargetRow { .sendLevel(strip: strip.id, send: MixerModel.sendIndex(index)) }
-}
-
-/// A vertical fader (a horizontal slider turned); a drag is one undo step.
-struct FaderView: View {
-    let model: MixerModel
-    let strip: StripRow
-
-    var body: some View {
-        VStack(spacing: 2) {
-            Slider(
-                value: Binding(
-                    get: { MixerMath.faderPosition(model.gainDb(strip)) },
-                    set: { model.move(target, to: AutomationLaw.faderNorm(MixerMath.faderDb($0))) }),
-                in: 0...1
-            ) { editing in
-                if editing { model.touch(target) } else { model.release(target) }
-            }
-            .frame(width: 140)
-            .rotationEffect(.degrees(-90))
-            .frame(width: 30, height: 140)
-            .touchRing(model.isTouched(target))
-            .contextMenu { LearnItem(model: model, target: target) }
-            Text(MixerMath.dbLabel(model.gainDb(strip)))
-                .font(.caption2.monospacedDigit())
-                .onTapGesture(count: 2) { model.click(target, AutomationLaw.faderNorm(0)) }
-                .help("Double-click: 0 dB")
-        }
-    }
-
-    private var target: AutomationTargetRow { .stripFader(strip: strip.id) }
-}
-
 /// "MIDI Learn" in a control's menu (plan 5f-1 Task 11): the next MIDI
 /// control moved drives `target`.
 struct LearnItem: View {
@@ -607,31 +321,5 @@ struct LearnItem: View {
 
     var body: some View {
         Button("MIDI Learn") { model.document.learn.learn(target) }
-    }
-}
-
-/// Peak meter, left and right.
-struct MeterView: View {
-    @Environment(\.symbioticTheme) private var theme
-    let level: MeterLevel
-
-    var body: some View {
-        HStack(spacing: 2) {
-            bar(level.left)
-            bar(level.right)
-        }
-        .frame(width: 14, height: 140)
-    }
-
-    private func bar(_ peak: Float) -> some View {
-        GeometryReader { g in
-            let fill = MixerMath.meterFill(peak)
-            ZStack(alignment: .bottom) {
-                Rectangle().fill(theme.meter.background.color)
-                Rectangle()
-                    .fill(peak >= 1 ? theme.meter.clip.color : theme.meter.low.color)
-                    .frame(height: g.size.height * fill)
-            }
-        }
     }
 }

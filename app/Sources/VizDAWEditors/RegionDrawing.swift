@@ -7,10 +7,15 @@ import VizDAWCore
 /// from a theme's editor roles (plan 7b Ruling 13).
 public struct RegionPalette {
     public let theme: Theme
+    /// The lane's strip colour (owner G1 Q2), when it has one.
+    public let tint: NSColor?
 
-    public init(_ theme: Theme) { self.theme = theme }
+    public init(_ theme: Theme, tint: NSColor? = nil) {
+        self.theme = theme
+        self.tint = tint
+    }
 
-    public var body: NSColor { theme.regionFill }
+    public var body: NSColor { theme.regionFill(tint: tint) }
     public var outline: NSColor { theme.regionLine }
     public var selectedOutline: NSColor { theme.regionSelected }
     public var waveform: NSColor { theme.regionLine.withAlphaComponent(0.65) }
@@ -67,9 +72,9 @@ public enum RegionDrawing {
     /// final review V1).
     public static func draw(
         _ r: EventRow, in rect: CGRect, rows: OverviewRows?, waveRect: CGRect, offline: Bool, selected: Bool,
-        handles: Bool, offlineLabel: Bool = true, theme: Theme
+        handles: Bool, offlineLabel: Bool = true, theme: Theme, tint: NSColor? = nil
     ) {
-        let palette = RegionPalette(theme)
+        let palette = RegionPalette(theme, tint: tint)
         let body = NSBezierPath(
             roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: theme.radius.s, yRadius: theme.radius.s)
         palette.body.withAlphaComponent(palette.body.alphaComponent * (r.mute ? 0.4 : 1)).setFill()

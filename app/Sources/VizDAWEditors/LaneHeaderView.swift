@@ -109,6 +109,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         withObservationTracking {
             _ = document.lanes
             _ = editor.layout
+            // The strip colours the bars take (owner G1 Q2).
+            _ = document.storeMixer?.snapshot
+            _ = document.storeMixer?.destinations
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.needsDisplay = true
@@ -172,6 +175,10 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                     NSString(string: "▾ " + badge + LaneInputs.title(lane.input)).draw(
                         in: r, withAttributes: oneLine(small, .byTruncatingMiddle))
                 }
+            }
+            if let bar = document.laneColour(lane, theme) {
+                bar.nsColor.setFill()
+                LaneHeaderLayout.colourBar(rowTop: top, laneHeight: laneHeight).fill()
             }
             if LaneHeaderLayout.showsMeter(laneHeight: laneHeight), inputs.showsMeter(lane) {
                 meter(lane.id, rowTop: top, inputs: inputs)
@@ -282,7 +289,35 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         menu.addItem(trackItem)
         let add = MenuAction(title: "New MIDI Destination…") { sheets.beginNewDestination(seq: seq, lane: lane) }
         menu.addItem(add.item(checked: false))
+        menu.addItem(.separator())
+        menu.addItem(colourItem(lane))
         return menu
+    }
+
+    /// "Colour ▸": None and the eight swatches, each in its colour, for the
+    /// strip the lane plays through (the strip name's menu, the same call);
+    /// disabled for a lane with no strip (owner G1 Q2).
+    func colourItem(_ lane: LaneRow) -> NSMenuItem {
+        let item = NSMenuItem(title: "Colour", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        sub.autoenablesItems = false
+        item.submenu = sub
+        guard let mixer = document.storeMixer,
+            let strip = StripPalette.laneStrip(lane, destinations: mixer.destinations, strips: mixer.snapshot.strips)
+        else {
+            item.isEnabled = false
+            return item
+        }
+        let none = MenuAction(title: StripPalette.noColourTitle) { mixer.setColour(strip, nil) }
+        sub.addItem(none.item(checked: strip.colour == nil))
+        sub.addItem(.separator())
+        for c in StripPalette.swatches {
+            let a = MenuAction(title: StripPalette.title(c)) { mixer.setColour(strip, c) }
+            let i = a.item(checked: strip.colour == c)
+            i.image = SwatchImage.make(StripPalette.swatch(c, theme).nsColor)
+            sub.addItem(i)
+        }
+        return item
     }
 
     private func flags(_ seq: UInt64, _ lane: UInt64, mute: Bool? = nil, solo: Bool? = nil, arm: Bool? = nil) {
@@ -455,4 +490,18 @@ final class MenuAction: NSObject {
     }
 
     @objc func fire() { run() }
+}
+
+/// A menu item's colour dot (the Colour menus): not a template, so the menu
+/// draws it in its colour.
+public enum SwatchImage {
+    @MainActor public static func make(_ colour: NSColor, side: CGFloat = 12) -> NSImage {
+        let image = NSImage(size: CGSize(width: side, height: side), flipped: false) { r in
+            colour.setFill()
+            NSBezierPath(ovalIn: r.insetBy(dx: 1, dy: 1)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
 }

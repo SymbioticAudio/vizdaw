@@ -51,8 +51,10 @@ struct LeftStripPane: View {
         switch model.leftStrip(strips: strips, destinations: mixer.destinations) {
         case .strip(let id):
             if let strip = strips.first(where: { $0.id == id }) {
-                ScrollView(.vertical) {
-                    StripView(model: mixer, strip: strip)
+                // The strip scrolls itself when the pane is too short
+                // (Ruling 14): it needs the pane's height for its throw.
+                GeometryReader { g in
+                    ChannelStrip(model: mixer, strip: strip, height: max(g.size.height - 16, 0))
                         .padding(8)
                         .frame(maxWidth: .infinity)
                 }

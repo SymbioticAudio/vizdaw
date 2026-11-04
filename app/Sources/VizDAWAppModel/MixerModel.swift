@@ -376,8 +376,10 @@ public final class MixerModel {
         }
     }
 
-    /// Empties the strip's EQ slot.
+    /// Empties the strip's EQ slot. An empty slot is no call: the core
+    /// refuses it, which would show a spurious alert (B6 review).
     public func clearEq(_ s: StripRow) {
+        guard s.eq != nil else { return }
         command("Clear EQ Failed") { try $0.setEq(strip: s.id, plugin: nil) }
     }
 

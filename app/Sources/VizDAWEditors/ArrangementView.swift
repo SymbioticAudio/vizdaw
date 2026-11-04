@@ -84,6 +84,9 @@ public final class ArrangementView: EditorCanvas {
             // Not `transport`: it changes on every poll; the playhead moves
             // without redrawing.
             _ = document.playKey
+            // The strip colours the lanes and regions take (owner G1 Q2).
+            _ = document.storeMixer?.snapshot
+            _ = document.storeMixer?.destinations
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.refresh()
@@ -197,7 +200,7 @@ public final class ArrangementView: EditorCanvas {
         let selected = editor.isSelected(b)
         // Events blocks are regions; a reference takes a swatch of its own.
         let reference = b.kind == .reference
-        let fill = reference ? theme.swatch.purple.nsColor.withAlphaComponent(0.30) : theme.regionFill
+        let fill = reference ? theme.swatch.purple.nsColor.withAlphaComponent(0.30) : theme.regionFill(tint: tint(row))
         let line = reference ? theme.swatch.purple.nsColor : theme.regionLine
         let shape = NSBezierPath(
             roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: theme.radius.s, yRadius: theme.radius.s)
@@ -222,6 +225,13 @@ public final class ArrangementView: EditorCanvas {
         } else {
             sketch(b, in: r, key: key)
         }
+    }
+
+    /// Row `row`'s strip colour (owner G1 Q2): its regions take it, as its
+    /// header's colour bar does.
+    func tint(_ row: Int) -> NSColor? {
+        guard document.lanes.indices.contains(row) else { return nil }
+        return document.laneColour(document.lanes[row], theme)?.nsColor
     }
 
     /// Mini notes inside an events block (normal drawing only).
@@ -267,7 +277,7 @@ public final class ArrangementView: EditorCanvas {
                 height: max(rect.height - RegionHandles.band - 2, 1))
             RegionDrawing.draw(
                 r, in: rect, rows: rows, waveRect: wave, offline: offline, selected: editor.isSelected(event: r.id),
-                handles: editor.tool == .arrow, theme: theme)
+                handles: editor.tool == .arrow, theme: theme, tint: tint(row))
         }
     }
 

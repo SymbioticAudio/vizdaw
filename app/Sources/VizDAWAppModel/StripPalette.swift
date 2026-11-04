@@ -34,6 +34,46 @@ public enum StripPalette {
         }
     }
 
+    /// The eight strip colours, in the Colour menu's order.
+    public static let swatches: [SwatchRow] = [
+        SwatchRow.red, SwatchRow.orange, SwatchRow.yellow, SwatchRow.green,
+        SwatchRow.teal, SwatchRow.blue, SwatchRow.purple, SwatchRow.pink,
+    ]
+
+    /// The Colour menu's first item: no colour of its own (the kind's).
+    public static let noColourTitle = "None"
+
+    /// A swatch's name in the Colour menu.
+    public static func title(_ c: SwatchRow) -> String {
+        switch c {
+        case SwatchRow.red: "Red"
+        case SwatchRow.orange: "Orange"
+        case SwatchRow.yellow: "Yellow"
+        case SwatchRow.green: "Green"
+        case SwatchRow.teal: "Teal"
+        case SwatchRow.blue: "Blue"
+        case SwatchRow.purple: "Purple"
+        case SwatchRow.pink: "Pink"
+        }
+    }
+
+    /// The strip `lane` plays through (`StripFocus`'s rule); nil for an
+    /// external destination or none.
+    public static func laneStrip(_ lane: LaneRow, destinations: [DestRow], strips: [StripRow]) -> StripRow? {
+        guard let id = StripFocus.strip(of: lane, destinations: destinations, strips: strips) else { return nil }
+        return strips.first { $0.id == id }
+    }
+
+    /// A lane's colour in Arrange (owner G1 Q2): its strip's colour bar, so
+    /// the lanes on one path share it; an external MIDI lane, which has no
+    /// strip, its destination kind's (an instrument's); nil for a lane that
+    /// plays nowhere (the theme's region colour).
+    public static func lane(_ lane: LaneRow, destinations: [DestRow], strips: [StripRow], _ t: Theme) -> ThemeColor? {
+        if let s = laneStrip(lane, destinations: destinations, strips: strips) { return bar(s, t) }
+        if lane.midiDest != nil { return cap(.instrument, t) }
+        return nil
+    }
+
     /// The colour bar: the strip's own colour, else its kind's.
     public static func bar(_ s: StripRow, _ t: Theme) -> ThemeColor {
         s.colour.map { swatch($0, t) } ?? cap(s.kindColour, t)

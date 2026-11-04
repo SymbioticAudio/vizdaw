@@ -27,6 +27,13 @@ public extension Theme {
 
     /// Region and note fill.
     var regionFill: NSColor { graph.fill.nsColor }
+    /// A region's fill on a lane whose strip has colour `tint` (owner G1
+    /// Q2): the tint, as translucent as the theme's region fill and at most
+    /// 0.45, so the outline, waveform and text keep reading over it.
+    func regionFill(tint: NSColor?) -> NSColor {
+        guard let tint else { return regionFill }
+        return tint.withAlphaComponent(min(regionFill.alphaComponent, 0.45))
+    }
     /// Region and note outline.
     var regionLine: NSColor { graph.line.nsColor }
     /// A selected region's or note's outline.

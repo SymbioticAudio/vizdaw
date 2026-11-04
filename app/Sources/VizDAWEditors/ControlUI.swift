@@ -35,22 +35,20 @@ public enum ControlUI {
         var nodes: [UiNodeRow] = []
         var truncated = false
         var seen: Set<ObjectIdentifier> = [ObjectIdentifier(window)]
-        func walk(_ e: any NSAccessibilityProtocol, _ path: [UInt32]) {
+        func walk(_ e: AXElement, _ path: [UInt32]) {
             guard path.count < maxDepth else { return }
-            for (i, child) in (e.accessibilityChildren() ?? []).enumerated() {
+            for (i, child) in e.children.enumerated() {
                 guard nodes.count < maxNodes else {
                     truncated = true
                     return
                 }
-                guard let c = child as? (any NSAccessibilityProtocol & NSObjectProtocol),
-                    seen.insert(ObjectIdentifier(c)).inserted
-                else { continue }
+                guard let c = AXElement(child), seen.insert(ObjectIdentifier(c.object)).inserted else { continue }
                 let p = path + [UInt32(i)]
                 nodes.append(row(c, path: p, in: window))
                 walk(c, p)
             }
         }
-        walk(window, [])
+        walk(AXElement(window), [])
         return (nodes, truncated)
     }
 
@@ -68,15 +66,15 @@ public enum ControlUI {
         "AXDisclosureTriangle", "AXCell", "AXRow", "AXLink",
     ]
 
-    static func row(_ e: any NSAccessibilityProtocol, path: [UInt32], in window: NSWindow) -> UiNodeRow {
-        let role = e.accessibilityRole()?.rawValue ?? "AXUnknown"
-        let f = windowRect(e.accessibilityFrame(), in: window)
+    static func row(_ e: AXElement, path: [UInt32], in window: NSWindow) -> UiNodeRow {
+        let role = e.role ?? "AXUnknown"
+        let f = windowRect(e.frame, in: window)
         return UiNodeRow(
-            path: path, role: role, subrole: e.accessibilitySubrole()?.rawValue,
-            label: e.accessibilityLabel(), title: e.accessibilityTitle(), value: text(e.accessibilityValue()),
+            path: path, role: role, subrole: e.subrole,
+            label: e.label, title: e.title, value: text(e.value),
             x: f.minX, y: f.minY, width: f.width, height: f.height,
-            enabled: e.isAccessibilityEnabled(), selected: e.isAccessibilitySelected(),
-            focused: e.isAccessibilityFocused(), actions: pressable.contains(role) ? ["press"] : [])
+            enabled: e.enabled, selected: e.selected,
+            focused: e.focused, actions: pressable.contains(role) ? ["press"] : [])
     }
 
     /// A screen rect (AppKit, bottom-left origin) in window points with a
@@ -88,16 +86,19 @@ public enum ControlUI {
 
     /// The element `ref` names, if it is still there with the same role
     /// and label.
-    public static func element(_ ref: ElementRefRow, in window: NSWindow) -> (any NSAccessibilityProtocol)? {
+    public static func element(_ ref: ElementRefRow, in window: NSWindow) -> Any? {
+        found(ref, in: window)?.object
+    }
+
+    static func found(_ ref: ElementRefRow, in window: NSWindow) -> AXElement? {
         enableAccessibility()
-        var e: any NSAccessibilityProtocol = window
+        var e = AXElement(window)
         for i in ref.path {
-            let kids = e.accessibilityChildren() ?? []
-            guard Int(i) < kids.count, let next = kids[Int(i)] as? any NSAccessibilityProtocol else { return nil }
+            let kids = e.children
+            guard Int(i) < kids.count, let next = AXElement(kids[Int(i)]) else { return nil }
             e = next
         }
-        let role = e.accessibilityRole()?.rawValue ?? "AXUnknown"
-        let check = controlElementCheck(role: role, label: e.accessibilityLabel(), title: e.accessibilityTitle())
+        let check = controlElementCheck(role: e.role ?? "AXUnknown", label: e.label, title: e.title)
         return check == ref.check ? e : nil
     }
 
@@ -115,8 +116,8 @@ public enum ControlUI {
         case .point(let x, let y):
             return x.isFinite && y.isFinite ? CGPoint(x: x, y: y) : nil
         case .element(let ref):
-            guard let e = element(ref, in: window) else { return nil }
-            let f = windowRect(e.accessibilityFrame(), in: window)
+            guard let e = found(ref, in: window) else { return nil }
+            let f = windowRect(e.frame, in: window)
             guard f.minX.isFinite, f.minY.isFinite, f.width.isFinite, f.height.isFinite,
                 f.width > 0, f.height > 0
             else { return nil }
@@ -250,5 +251,100 @@ public enum ControlUI {
             .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .keyDown, .keyUp,
         ]
         return NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: false) != nil
+    }
+}
+
+/// An accessibility element, whether it declares `NSAccessibilityProtocol`
+/// (AppKit's views and elements) or only answers its selectors or the
+/// older attribute API (SwiftUI's nodes, such as the channel strip's knobs,
+/// fader and number boxes; plan 7b Task B7), so the channel's tree lists
+/// both.
+@MainActor
+struct AXElement {
+    let object: NSObject
+
+    init(_ formal: NSObject) { object = formal }
+
+    init?(_ any: Any) {
+        guard let o = any as? NSObject else { return nil }
+        object = o
+    }
+
+    private var formal: (any NSAccessibilityProtocol)? { object as? any NSAccessibilityProtocol }
+
+    /// The getter `name`'s answer, when the object has it.
+    private func get(_ name: String, key: String? = nil) -> Any? {
+        guard object.responds(to: NSSelectorFromString(name)) else { return nil }
+        return object.value(forKey: key ?? name)
+    }
+
+    /// The attribute API's answer for `name`.
+    private func attribute(_ name: String) -> Any? {
+        let sel = NSSelectorFromString("accessibilityAttributeValue:")
+        guard object.responds(to: sel) else { return nil }
+        return object.perform(sel, with: name)?.takeUnretainedValue()
+    }
+
+    private func string(_ getter: String, _ attr: String) -> String? {
+        (get(getter) as? String) ?? (attribute(attr) as? String)
+    }
+
+    private func flag(_ getter: String, key: String, _ attr: String, default d: Bool) -> Bool {
+        (get(getter, key: key) as? Bool) ?? (attribute(attr) as? Bool) ?? d
+    }
+
+    var children: [Any] {
+        if let f = formal { return f.accessibilityChildren() ?? [] }
+        return (get("accessibilityChildren") as? [Any]) ?? (attribute("AXChildren") as? [Any]) ?? []
+    }
+
+    var role: String? {
+        if let f = formal { return f.accessibilityRole()?.rawValue }
+        return string("accessibilityRole", "AXRole")
+    }
+
+    var subrole: String? {
+        if let f = formal { return f.accessibilitySubrole()?.rawValue }
+        return string("accessibilitySubrole", "AXSubrole")
+    }
+
+    var label: String? {
+        if let f = formal { return f.accessibilityLabel() }
+        return string("accessibilityLabel", "AXDescription")
+    }
+
+    var title: String? {
+        if let f = formal { return f.accessibilityTitle() }
+        return string("accessibilityTitle", "AXTitle")
+    }
+
+    var value: Any? {
+        if let f = formal { return f.accessibilityValue() }
+        return get("accessibilityValue") ?? attribute("AXValue")
+    }
+
+    /// In screen coordinates (bottom-left origin).
+    var frame: NSRect {
+        if let f = formal { return f.accessibilityFrame() }
+        if let v = get("accessibilityFrame") as? NSValue { return v.rectValue }
+        if let p = attribute("AXPosition") as? NSValue, let s = attribute("AXSize") as? NSValue {
+            return NSRect(origin: p.pointValue, size: s.sizeValue)
+        }
+        return .zero
+    }
+
+    var enabled: Bool {
+        if let f = formal { return f.isAccessibilityEnabled() }
+        return flag("isAccessibilityEnabled", key: "accessibilityEnabled", "AXEnabled", default: true)
+    }
+
+    var selected: Bool {
+        if let f = formal { return f.isAccessibilitySelected() }
+        return flag("isAccessibilitySelected", key: "accessibilitySelected", "AXSelected", default: false)
+    }
+
+    var focused: Bool {
+        if let f = formal { return f.isAccessibilityFocused() }
+        return flag("isAccessibilityFocused", key: "accessibilityFocused", "AXFocused", default: false)
     }
 }

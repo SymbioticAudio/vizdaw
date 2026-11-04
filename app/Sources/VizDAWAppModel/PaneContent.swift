@@ -1,4 +1,5 @@
 import Foundation
+import SymbioticTokens
 import VizDAWCore
 
 /// The left pane's "Channel Strip" rule (plan 7a Ruling 5): which strip the
@@ -72,6 +73,13 @@ extension DocumentModel {
             lane: focusLanes().first, region: region, regionName: media.row(region?.media)?.name,
             destinations: destinations, strips: strips,
             sampleRate: Double(projectInfo?.format.sampleRate ?? 0))
+    }
+
+    /// `lane`'s colour in Arrange, through the document's mixer
+    /// (`StripPalette.lane`); nil before the mixer is made.
+    public func laneColour(_ lane: LaneRow, _ t: Theme) -> ThemeColor? {
+        guard let m = storeMixer else { return nil }
+        return StripPalette.lane(lane, destinations: m.destinations, strips: m.snapshot.strips, t)
     }
 
     /// What the left pane's strip view shows now.

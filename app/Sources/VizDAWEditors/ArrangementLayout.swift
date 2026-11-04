@@ -215,6 +215,12 @@ public enum LaneHeaderLayout {
         CGRect(x: 189, y: y + 43, width: 5, height: 3)
     }
 
+    /// The strip colour bar down the row's left edge (owner G1 Q2), clear
+    /// of the controls.
+    public static func colourBar(rowTop y: CGFloat, laneHeight: CGFloat) -> CGRect {
+        CGRect(x: 1, y: y + 2, width: 4, height: max(laneHeight - 4, 0))
+    }
+
     public static func control(at p: CGPoint, rowTop: CGFloat) -> HeaderControl? {
         controls(rowTop: rowTop).first { $0.1.contains(p) }?.0
     }

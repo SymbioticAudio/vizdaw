@@ -201,3 +201,68 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         #expect(at(NSRect(x: original.minX, y: original.minY - 5000, width: 20, height: 20)) == nil, "above")
     }
 }
+
+/// An element that answers the accessibility selectors without declaring
+/// `NSAccessibilityProtocol`, as SwiftUI's `AccessibilityNode` does (plan
+/// 7b Task B7: the strip's knobs, fader and number boxes are such nodes).
+@MainActor
+final class InformalNode: NSObject {
+    let label: String
+    let frame: NSRect
+    init(label: String, frame: NSRect) {
+        self.label = label
+        self.frame = frame
+    }
+    @objc func accessibilityRole() -> String { "AXGroup" }
+    @objc func accessibilityLabel() -> String { label }
+    @objc func accessibilityValue() -> Any { "0.0 dB" }
+    @objc func accessibilityFrame() -> NSRect { frame }
+    @objc func accessibilityChildren() -> [Any] { [] }
+    @objc func isAccessibilityEnabled() -> Bool { true }
+}
+
+/// The same through the attribute API only.
+@MainActor
+final class AttributeNode: NSObject {
+    let label: String
+    init(label: String) { self.label = label }
+    @objc override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
+        switch attribute.rawValue {
+        case "AXRole": return "AXButton"
+        case "AXDescription": return label
+        default: return nil
+        }
+    }
+}
+
+/// A view whose children are informal nodes.
+@MainActor
+final class InformalHost: NSView {
+    var nodes: [Any] = []
+    override func accessibilityChildren() -> [Any]? { nodes }
+}
+
+@MainActor
+@Suite struct ControlUIInformalTests {
+    @Test func theTreeReadsElementsThatDoNotDeclareTheProtocol() throws {
+        let w = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 400, height: 300), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        let host = InformalHost(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        w.contentView?.addSubview(host)
+        let screen = w.convertToScreen(NSRect(x: 10, y: 20, width: 56, height: 24))
+        host.nodes = [InformalNode(label: "Level of Synth", frame: screen), AttributeNode(label: "Old")]
+        let nodes = ControlUI.tree(of: w, maxDepth: 64).nodes
+        let level = try #require(nodes.first { $0.label == "Level of Synth" })
+        #expect(level.role == "AXGroup" && level.value == "0.0 dB" && level.enabled)
+        #expect(abs(level.width - 56) < 0.5 && abs(level.height - 24) < 0.5)
+        let old = try #require(nodes.first { $0.label == "Old" })
+        #expect(old.role == "AXButton" && old.actions == ["press"])
+        let check = controlElementCheck(role: level.role, label: level.label, title: level.title)
+        let ref = ElementRefRow(id: "", path: level.path, check: check)
+        let p = try #require(ControlUI.point(.element(element: ref), in: w))
+        let titleBar = w.frame.height - w.contentLayoutRect.height
+        #expect(abs(p.x - 38) < 0.5 && abs(p.y - (titleBar + 300 - 32)) < 0.5, "\(p)")
+    }
+}
