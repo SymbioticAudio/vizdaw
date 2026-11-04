@@ -15,44 +15,136 @@ import VizDAWEditors
 /// what the rest leaves (`StripLayout.split`), from 160 to 480, and when
 /// even 160 does not fit the strip is taller than `height` and scrolls
 /// (the left pane's strip itself, the mixer's row in its two-axis scroll
-/// view).
+/// view). A mixer shows its strips through `ChannelStrips`, which lines
+/// their rows up.
 struct ChannelStrip: View {
     @Bindable var model: MixerModel
     let strip: StripRow
     let height: CGFloat
-    @Environment(\.symbioticTheme) private var theme
     @Environment(\.mixerPlacement) private var placement
 
     var body: some View {
+        let one = ChannelStrips(model: model, strips: [strip], dividerBefore: nil, height: height)
         if placement == .strip {
             // The left pane's own scrolling (Ruling 14): it scrolls only when
             // the content is taller than the pane, which `split` decides.
-            ScrollView(.vertical) { column }
+            ScrollView(.vertical) { one }
         } else {
-            column
+            one
         }
     }
+}
 
-    private var column: some View {
-        StripColumn(height: height) {
-            StripUpper(model: model, strip: strip)
-            StripFaderSection(model: model, strip: strip)
-            StripLevelBox(model: model, strip: strip)
-            StripButtons(model: model, strip: strip)
-            StripModeMenu(model: model, strip: strip)
+/// A mixer's strips side by side, sharing their rows (fix round 1): each
+/// row above the fader is as tall as the tallest strip's, and a strip
+/// without it (no input, no sends) keeps the space empty, so every fader,
+/// level box and button row lines up (`StripGrid`). `dividerBefore` puts a
+/// divider before that strip (master).
+struct ChannelStrips: View {
+    @Bindable var model: MixerModel
+    let strips: [StripRow]
+    let dividerBefore: Int?
+    let height: CGFloat
+
+    var body: some View {
+        StripGridLayout(height: height, columns: strips.count, dividerBefore: dividerBefore) {
+            ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
+                StripPanel(model: model, strip: s)
+                    .layoutValue(key: StripCellKey.self, value: StripCell(column: i, part: .panel))
+            }
+            if dividerBefore != nil {
+                StripDivider().layoutValue(key: StripCellKey.self, value: StripCell(column: 0, part: .divider))
+            }
+            ForEach(Array(strips.enumerated()), id: \.element.id) { i, s in
+                StripCells(model: model, strip: s, column: i)
+            }
         }
-        .background(background)
-        .overlay(
-            RoundedRectangle(cornerRadius: theme.radius.m)
-                .strokeBorder(
-                    model.isSelected(strip.id) ? theme.accent.accent.color : theme.surface.separator.color,
-                    lineWidth: model.isSelected(strip.id) ? 2 : 1))
+    }
+}
+
+/// The line before master (a `Divider` outside a stack draws across).
+private struct StripDivider: View {
+    @Environment(\.symbioticTheme) private var theme
+
+    var body: some View {
+        Rectangle().fill(theme.surface.separator.color).accessibilityHidden(true)
+    }
+}
+
+/// What a grid child is: a strip's panel, the divider, a row above the
+/// fader, or one of the parts below it.
+struct StripCell: Equatable {
+    enum Part: Equatable {
+        case panel, divider, fader, level, buttons, mode
+        case row(StripRowKind)
     }
 
-    /// The strip's panel: raised, dimmed while other strips solo, with the
-    /// theme's relief gradient over it when the theme has one (Console).
-    @ViewBuilder private var background: some View {
+    var column: Int
+    var part: Part
+}
+
+private struct StripCellKey: LayoutValueKey {
+    static let defaultValue = StripCell(column: 0, part: .panel)
+}
+
+/// A strip's cells, each tagged with its column and row.
+private struct StripCells: View {
+    @Bindable var model: MixerModel
+    let strip: StripRow
+    let column: Int
+
+    var body: some View {
+        row(.header) { StripHeader(model: model, strip: strip) }
+        if let inst = strip.instrument {
+            row(.instrument) { SlotView(model: model, strip: strip, slot: inst, index: nil) }
+        }
+        if let lane = model.inputLane(for: strip) {
+            row(.input) { StripInputView(inputs: model.document.inputs, lane: lane) }
+        }
+        row(.eq, band: .dark) { EqSlotView(model: model, strip: strip) }
+        row(.inserts, band: .dark) { StripInserts(model: model, strip: strip) }
+        if strip.kind != .master {
+            if !strip.sends.isEmpty || !model.targets(for: strip).isEmpty {
+                row(.sends, band: .light) { SendKnobRow(model: model, strip: strip) }
+            }
+            row(.output) { StripOutputMenu(model: model, strip: strip) }
+            row(.pan, band: .dark) { StripPan(model: model, strip: strip) }
+        }
+        StripFaderSection(model: model, strip: strip).cell(column, .fader)
+        StripLevelBox(model: model, strip: strip).cell(column, .level)
+        StripButtons(model: model, strip: strip).cell(column, .buttons)
+        StripModeMenu(model: model, strip: strip).cell(column, .mode)
+    }
+
+    /// A row above the fader: it fills the row's shared height, its band
+    /// (in a banded theme) with it.
+    private func row(_ kind: StripRowKind, band: StripBandShade? = nil, @ViewBuilder _ content: () -> some View)
+        -> some View
+    {
+        content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .stripBand(band)
+            .cell(column, .row(kind))
+    }
+}
+
+extension View {
+    fileprivate func cell(_ column: Int, _ part: StripCell.Part) -> some View {
+        layoutValue(key: StripCellKey.self, value: StripCell(column: column, part: part))
+    }
+}
+
+/// A strip's panel: raised, dimmed while other strips solo, with the
+/// theme's relief gradient over it when the theme has one (Console), and
+/// its edge (the accent when selected).
+private struct StripPanel: View {
+    let model: MixerModel
+    let strip: StripRow
+    @Environment(\.symbioticTheme) private var theme
+
+    var body: some View {
         let shape = RoundedRectangle(cornerRadius: theme.radius.m)
+        let selected = model.isSelected(strip.id)
         ZStack {
             shape.fill(theme.surface.raised.color.opacity(strip.soloMuted ? 0.5 : 1))
             if theme.relief.panelTop.fallbackComponents.alpha > 0 || theme.relief.panelBottom.fallbackComponents.alpha > 0 {
@@ -61,48 +153,94 @@ struct ChannelStrip: View {
                         colors: [theme.relief.panelTop.color, theme.relief.panelBottom.color],
                         startPoint: .top, endPoint: .bottom))
             }
+            shape.strokeBorder(
+                selected ? theme.accent.accent.color : theme.surface.separator.color, lineWidth: selected ? 2 : 1)
         }
+        .accessibilityHidden(true)
     }
 }
 
-/// The strip's column (Ruling 14): the part above the fader at its own
-/// height, then the fader section given the throw `StripLayout.split`
-/// leaves, then the level box, M S R I and the mode menu at their fixed
-/// heights, so the strip is `StripLayout.contentHeight` tall: `height`
-/// when it fits, taller (scrolling) when it does not.
-private struct StripColumn: Layout {
+/// The strips' grid (Ruling 14, fix round 1): the rows above the fader at
+/// their shared heights (`StripGrid`), then each fader section given the
+/// throw `StripLayout.split` leaves, then the level box, M S R I and the
+/// mode menu at their fixed heights. Every strip is
+/// `StripLayout.contentHeight` tall: `height` when it fits, taller
+/// (scrolling) when it does not.
+private struct StripGridLayout: Layout {
     let height: CGFloat
+    let columns: Int
+    let dividerBefore: Int?
 
+    static let spacing: CGFloat = 6
     private var inner: CGFloat { StripLayout.width - 2 * StripPadding.horizontal }
 
-    private func upperHeight(_ subviews: Subviews) -> CGFloat {
-        guard let first = subviews.first else { return 0 }
-        return first.sizeThatFits(ProposedViewSize(width: inner, height: nil)).height
+    private func x(_ column: Int) -> CGFloat {
+        let divider: CGFloat = dividerBefore.map { column >= $0 ? 1 + Self.spacing : 0 } ?? 0
+        return CGFloat(column) * (StripLayout.width + Self.spacing) + divider
     }
 
-    private func heights(_ subviews: Subviews) -> [CGFloat] {
-        let upper = upperHeight(subviews)
+    private var width: CGFloat { columns > 0 ? x(columns - 1) + StripLayout.width : 0 }
+
+    private struct Geometry {
+        var rows: [StripRowKind: CGFloat]
+        var tops: [StripRowKind: CGFloat]
+        var upper: CGFloat
+        var throwLength: CGFloat
+        var height: CGFloat
+    }
+
+    private func geometry(_ subviews: Subviews) -> Geometry {
+        var measured: [Int: [StripRowKind: CGFloat]] = [:]
+        for v in subviews {
+            let c = v[StripCellKey.self]
+            if case .row(let k) = c.part {
+                measured[c.column, default: [:]][k] = v.sizeThatFits(ProposedViewSize(width: inner, height: nil)).height
+            }
+        }
+        let rows = StripGrid.rowHeights(Array(measured.values))
+        let upper = StripGrid.upper(rows)
         let split = StripLayout.split(height: height, upper: upper)
-        return [
-            upper, split.throwLength + StripLayout.faderCap, StripLayout.levelBoxHeight,
-            StripLayout.toggleRowHeight, StripLayout.modeMenuHeight,
-        ]
+        return Geometry(
+            rows: rows, tops: StripGrid.tops(rows), upper: upper, throwLength: split.throwLength,
+            height: StripLayout.contentHeight(upper: upper, throwLength: split.throwLength))
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let h = heights(subviews)
-        let throwLength = h[1] - StripLayout.faderCap
-        return CGSize(width: StripLayout.width, height: StripLayout.contentHeight(upper: h[0], throwLength: throwLength))
+        CGSize(width: width, height: geometry(subviews).height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let h = heights(subviews)
-        var y = bounds.minY + StripLayout.padding
-        for (i, view) in subviews.enumerated() where i < h.count {
-            view.place(
-                at: CGPoint(x: bounds.minX + StripPadding.horizontal, y: y), anchor: .topLeading,
-                proposal: ProposedViewSize(width: inner, height: h[i]))
-            y += h[i] + StripLayout.gap
+        let g = geometry(subviews)
+        let faderTop = bounds.minY + StripGrid.faderTop(g.rows)
+        let fader = g.throwLength + StripLayout.faderCap
+        let level = faderTop + fader + StripLayout.gap
+        let buttons = level + StripLayout.levelBoxHeight + StripLayout.gap
+        let mode = buttons + StripLayout.toggleRowHeight + StripLayout.gap
+        for v in subviews {
+            let c = v[StripCellKey.self]
+            let left = bounds.minX + x(c.column)
+            let cellX = left + StripPadding.horizontal
+            func put(_ y: CGFloat, _ h: CGFloat) {
+                v.place(
+                    at: CGPoint(x: cellX, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: inner, height: h))
+            }
+            switch c.part {
+            case .panel:
+                v.place(
+                    at: CGPoint(x: left, y: bounds.minY), anchor: .topLeading,
+                    proposal: ProposedViewSize(width: StripLayout.width, height: g.height))
+            case .divider:
+                let dx = bounds.minX + x(dividerBefore ?? 0) - Self.spacing / 2 - 0.5
+                v.place(
+                    at: CGPoint(x: dx, y: bounds.minY), anchor: .topLeading,
+                    proposal: ProposedViewSize(width: 1, height: g.height))
+            case .row(let k):
+                put(bounds.minY + StripLayout.padding + (g.tops[k] ?? 0), g.rows[k] ?? 0)
+            case .fader: put(faderTop, fader)
+            case .level: put(level, StripLayout.levelBoxHeight)
+            case .buttons: put(buttons, StripLayout.toggleRowHeight)
+            case .mode: put(mode, StripLayout.modeMenuHeight)
+            }
         }
     }
 }
@@ -112,41 +250,6 @@ private enum StripPadding {
 }
 
 // MARK: - Above the fader
-
-/// The colour bar, name and kind, the instrument slot and input, the EQ
-/// slot, the inserts, the sends, the output and the pan.
-private struct StripUpper: View {
-    @Bindable var model: MixerModel
-    let strip: StripRow
-    @Environment(\.symbioticTheme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            StripHeader(model: model, strip: strip)
-            if let inst = strip.instrument {
-                SlotView(model: model, strip: strip, slot: inst, index: nil)
-            }
-            if let lane = model.inputLane(for: strip) {
-                StripInputView(inputs: model.document.inputs, lane: lane)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                EqSlotView(model: model, strip: strip)
-                StripInserts(model: model, strip: strip)
-            }
-            .stripBand()
-            if strip.kind != .master {
-                if !strip.sends.isEmpty || !model.targets(for: strip).isEmpty {
-                    SendKnobRow(model: model, strip: strip)
-                        .stripBand(light: true)
-                }
-                StripOutputMenu(model: model, strip: strip)
-                StripPan(model: model, strip: strip)
-                    .stripBand()
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-}
 
 /// A section's small heading ("INSERTS", "SENDS").
 private struct StripHeading: View {
@@ -561,12 +664,13 @@ private struct SendKnob: View {
                     .touchRing(model.isTouched(target))
                 NumberBox(
                     text: StripEntry.levelText(db), accessibilityLabel: "Send \(index + 1) of \(strip.name)",
-                    palette: NumberBoxPalette(theme: theme),
+                    palette: theme.readoutBox,
                     commit: { model.typeSend(strip, index, $0) },
                     onRefuse: { model.document.editor.status = StripEntry.levelHint })
                     .frame(
                         width: ControlMetrics.hitSize(.numberBox).width,
                         height: ControlMetrics.hitSize(.numberBox).height)
+                    .readoutEdge(theme)
             }
         }
         .contextMenu {
@@ -624,12 +728,13 @@ private struct StripPan: View {
                 .help("Pan: double-click for the centre")
             NumberBox(
                 text: StripEntry.panText(pan), accessibilityLabel: "Pan of \(strip.name)",
-                palette: NumberBoxPalette(theme: theme),
+                palette: theme.readoutBox,
                 commit: { model.typePan(strip, $0) },
                 onRefuse: { model.document.editor.status = StripEntry.panHint })
                 .frame(
                     width: ControlMetrics.hitSize(.numberBox).width,
                     height: ControlMetrics.hitSize(.numberBox).height)
+                .readoutEdge(theme)
             Spacer(minLength: 0)
         }
     }
@@ -711,12 +816,13 @@ private struct StripLevelBox: View {
             Spacer(minLength: 0)
             NumberBox(
                 text: StripEntry.levelText(model.gainDb(strip)), accessibilityLabel: "Level of \(strip.name)",
-                palette: NumberBoxPalette(theme: theme),
+                palette: theme.readoutBox,
                 commit: { model.typeLevel(strip, $0) },
                 onRefuse: { model.document.editor.status = StripEntry.levelHint })
                 .frame(
                     width: ControlMetrics.hitSize(.numberBox).width,
                     height: ControlMetrics.hitSize(.numberBox).height)
+                .readoutEdge(theme)
                 .help("Type a level in dB")
             Spacer(minLength: 0)
         }
@@ -845,24 +951,37 @@ extension Theme {
         }
     }
 
+    /// The number boxes' palette: the readout look (fill, digits) from
+    /// `StripPalette.numberBox`, the rest as `NumberBoxPalette(theme:)`.
+    var readoutBox: NumberBoxPalette {
+        let base = NumberBoxPalette(theme: self)
+        let r = StripPalette.numberBox(self)
+        return NumberBoxPalette(
+            background: r.fill.color, editingBackground: r.fill.color, text: r.digits.color,
+            refused: base.refused, focus: base.focus, cornerRadius: base.cornerRadius, font: base.font)
+    }
+
     /// A section heading: capitals, except in a lower-case theme.
     func stripHeading(_ text: String) -> String {
         style.labels == .lowercase ? text.lowercased() : text.uppercased()
     }
 }
 
+/// A band's shade.
+enum StripBandShade { case dark, light }
+
 /// A section's band behind it, the strip's full width, in a banded theme
 /// (Console's dark and light panels); nothing elsewhere.
 private struct StripBand: ViewModifier {
-    let light: Bool
+    let shade: StripBandShade?
     @Environment(\.symbioticTheme) private var theme
 
     func body(content: Content) -> some View {
-        if theme.style.panelBands == .banded {
+        if let shade, theme.style.panelBands == .banded {
             content
                 .padding(.horizontal, StripPadding.horizontal)
                 .padding(.vertical, 3)
-                .background((light ? theme.band.light : theme.band.dark).color)
+                .background((shade == .light ? theme.band.light : theme.band.dark).color)
                 .padding(.horizontal, -StripPadding.horizontal)
         } else {
             content
@@ -871,5 +990,14 @@ private struct StripBand: ViewModifier {
 }
 
 extension View {
-    fileprivate func stripBand(light: Bool = false) -> some View { modifier(StripBand(light: light)) }
+    /// The readout's edge around a number box (`StripPalette.numberBox`).
+    fileprivate func readoutEdge(_ t: Theme) -> some View {
+        overlay(
+            RoundedRectangle(cornerRadius: t.radius.s)
+                .strokeBorder(StripPalette.numberBox(t).edge.color.opacity(0.35))
+                .frame(width: ControlMetrics.numberBox.width, height: ControlMetrics.numberBox.height)
+                .allowsHitTesting(false))
+    }
+
+    fileprivate func stripBand(_ shade: StripBandShade?) -> some View { modifier(StripBand(shade: shade)) }
 }

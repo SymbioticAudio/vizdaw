@@ -105,3 +105,16 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
         #expect(other.items.first { $0.title == "Colour" }?.isEnabled != true)
     }
 }
+
+/// Fix round 1 (controller): the number boxes are readouts in every theme.
+@Suite struct StripReadoutTests {
+    @Test func theNumberBoxesTakeTheReadoutTokens() {
+        for t in Theme.all {
+            let r = StripPalette.numberBox(t)
+            #expect(r.fill == t.readout.background, "\(t.id)")
+            #expect(r.digits == t.readout.text, "\(t.id)")
+            #expect(r.edge == t.readout.text, "\(t.id)")
+        }
+        #expect(StripPalette.numberBox(.eg13).digits != StripPalette.numberBox(.console).digits)
+    }
+}

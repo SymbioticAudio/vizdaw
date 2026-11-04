@@ -59,3 +59,34 @@ import Testing
         #expect(StripLayout.split(height: minimum - 1, upper: upper).scrolls)
     }
 }
+
+/// Fix round 1 (controller): every strip of one mixer shares its rows, so
+/// faders, level boxes and buttons line up whatever each strip holds.
+@Suite struct StripGridTests {
+    @Test func stripsWithAndWithoutInputAndSendsShareTheirRows() {
+        // An instrument strip with sends, an audio path with an input and
+        // two inserts, a bus with neither, and master with no sends or pan.
+        let synth: [StripRowKind: CGFloat] = [.header: 40, .eq: 20, .inserts: 36, .sends: 80, .output: 20, .pan: 38]
+        let audio: [StripRowKind: CGFloat] = [.header: 40, .input: 22, .eq: 20, .inserts: 58, .sends: 20, .output: 20, .pan: 38]
+        let bus: [StripRowKind: CGFloat] = [.header: 40, .eq: 20, .inserts: 36, .output: 20, .pan: 38]
+        let master: [StripRowKind: CGFloat] = [.header: 44, .eq: 20, .inserts: 36]
+        let rows = StripGrid.rowHeights([synth, audio, bus, master])
+        #expect(rows[.header] == 44 && rows[.input] == 22 && rows[.inserts] == 58 && rows[.sends] == 80)
+        #expect(rows[.instrument] == nil, "no strip has the row: it takes no space")
+        let tops = StripGrid.tops(rows)
+        // The same table for every strip: each row starts at one y.
+        #expect(tops[.header] == 0)
+        #expect(tops[.input] == 44 + StripGrid.rowGap)
+        #expect(tops[.eq] == 44 + 22 + 2 * StripGrid.rowGap)
+        let upper = StripGrid.upper(rows)
+        #expect(upper == 44 + 22 + 20 + 58 + 80 + 20 + 38 + 6 * StripGrid.rowGap)
+        let faderTop = StripGrid.faderTop(rows)
+        #expect(faderTop == StripLayout.padding + upper + StripLayout.gap)
+        // A strip's own rows alone would put its fader elsewhere; the grid does not.
+        #expect(StripGrid.faderTop(StripGrid.rowHeights([bus])) < faderTop)
+        for one in [synth, audio, bus, master] {
+            #expect(StripGrid.faderTop(StripGrid.rowHeights([synth, audio, bus, master, one])) == faderTop)
+        }
+        #expect(StripGrid.upper([:]) == 0)
+    }
+}

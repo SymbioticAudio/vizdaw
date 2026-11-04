@@ -110,15 +110,10 @@ struct MixerView: View {
         GeometryReader { g in
             let height = max(g.size.height - 2 * Self.rowPadding, 0)
             ScrollView([.horizontal, .vertical]) {
-                HStack(alignment: .top, spacing: 6) {
-                    ForEach(model.strips, id: \.id) { s in
-                        ChannelStrip(model: model, strip: s, height: height)
-                    }
-                    if let master = model.master {
-                        Divider()
-                        ChannelStrip(model: model, strip: master, height: height)
-                    }
-                }
+                // One grid, so the strips share their rows (fix round 1).
+                ChannelStrips(
+                    model: model, strips: model.strips + (model.master.map { [$0] } ?? []),
+                    dividerBefore: model.master == nil ? nil : model.strips.count, height: height)
                 .padding(Self.rowPadding)
                 .frame(minWidth: g.size.width, minHeight: g.size.height, alignment: .topLeading)
             }

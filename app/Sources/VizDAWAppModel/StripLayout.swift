@@ -78,3 +78,50 @@ public enum StripLayout {
             + [ScaleMark(position: 0, label: "\u{2212}\u{221E}")]
     }()
 }
+
+/// The rows of a strip's part above the fader, top to bottom.
+public enum StripRowKind: Int, CaseIterable, Sendable {
+    case header, instrument, input, eq, inserts, sends, output, pan
+}
+
+/// One mixer's shared rows (fix round 1): each row is as tall as the
+/// tallest strip's, and a strip without it keeps the space empty, so the
+/// faders, level boxes and buttons line up across the strips.
+public enum StripGrid {
+    /// The gap between two rows above the fader.
+    public static let rowGap: CGFloat = 5
+
+    /// Each row's height: the most any strip measured; a row no strip has
+    /// is left out (it takes no space).
+    public static func rowHeights(_ strips: [[StripRowKind: CGFloat]]) -> [StripRowKind: CGFloat] {
+        var rows: [StripRowKind: CGFloat] = [:]
+        for s in strips {
+            for (k, h) in s where h > 0 { rows[k] = max(rows[k] ?? 0, h) }
+        }
+        return rows
+    }
+
+    /// Where each row starts, down from the top of the part above the fader.
+    public static func tops(_ rows: [StripRowKind: CGFloat]) -> [StripRowKind: CGFloat] {
+        var y: CGFloat = 0
+        var tops: [StripRowKind: CGFloat] = [:]
+        for k in StripRowKind.allCases {
+            guard let h = rows[k] else { continue }
+            tops[k] = y
+            y += h + rowGap
+        }
+        return tops
+    }
+
+    /// The part above the fader: the rows and the gaps between them.
+    public static func upper(_ rows: [StripRowKind: CGFloat]) -> CGFloat {
+        let present = StripRowKind.allCases.compactMap { rows[$0] }
+        guard !present.isEmpty else { return 0 }
+        return present.reduce(0, +) + CGFloat(present.count - 1) * rowGap
+    }
+
+    /// The fader section's top, down from the strip's top.
+    public static func faderTop(_ rows: [StripRowKind: CGFloat]) -> CGFloat {
+        StripLayout.padding + upper(rows) + StripLayout.gap
+    }
+}

@@ -74,6 +74,12 @@ public enum StripPalette {
         return nil
     }
 
+    /// The number boxes' readout look in every theme (fix round 1): the
+    /// fill, the digits and the edge from the `readout` group.
+    public static func numberBox(_ t: Theme) -> (fill: ThemeColor, digits: ThemeColor, edge: ThemeColor) {
+        (t.readout.background, t.readout.text, t.readout.text)
+    }
+
     /// The colour bar: the strip's own colour, else its kind's.
     public static func bar(_ s: StripRow, _ t: Theme) -> ThemeColor {
         s.colour.map { swatch($0, t) } ?? cap(s.kindColour, t)
