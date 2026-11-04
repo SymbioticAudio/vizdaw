@@ -345,6 +345,150 @@ fn a_same_length_replacement_goes_offline_changed_and_back() {
     s.close().unwrap();
 }
 
+/// A mono ramp of `frames` frames, rising from -0.5 to 0.5.
+fn mono_ramp(frames: usize) -> Vec<f32> {
+    (0..frames)
+        .map(|f| f as f32 / frames as f32 - 0.5)
+        .collect()
+}
+
+/// The demo with a 48 000-frame mono ramp imported into a new lane, then
+/// trimmed to offset 1000 and length 10 000, gain -6 dB, a linear fade in
+/// of 2000 frames and an S-curve fade out of 2000 frames (plan 7c Task 1):
+/// `(session, event, a note's id, tempdir)`.
+fn trimmed_region() -> (Arc<Session>, u64, u64, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(
+        &dir.path().join("m.caf"),
+        1,
+        BitDepth::Float32,
+        &mono_ramp(48_000),
+    );
+    let s = Session::new_demo().unwrap();
+    let seq = s.snapshot().unwrap().sequences[0].id;
+    import(
+        &s,
+        &src,
+        Some(ImportTargetRow {
+            seq,
+            lane: None,
+            tick: 0,
+        }),
+    );
+    let (seq, ev, _, _) = last_region(&s);
+    let lane0 = s.lanes(seq).unwrap()[0].id;
+    let note = s
+        .lane_events(seq, lane0)
+        .unwrap()
+        .events
+        .iter()
+        .find(|e| e.kind == EventKindRow::Note)
+        .unwrap()
+        .id;
+    let edit = |e: AudioEdit| {
+        s.edit(EditCommand::Audio { edit: e }, None).unwrap();
+    };
+    edit(AudioEdit::Trim {
+        event: ev,
+        front_frames: 1000,
+        back_frames: 37_000,
+    });
+    edit(AudioEdit::SetGain {
+        event: ev,
+        gain_db: -6.0,
+    });
+    edit(AudioEdit::SetFades {
+        event: ev,
+        fade_in: FadeRow {
+            length: 2000,
+            shape: FadeShapeRow::Linear,
+        },
+        fade_out: FadeRow {
+            length: 2000,
+            shape: FadeShapeRow::SCurve,
+        },
+    });
+    (s, ev, note, dir)
+}
+
+fn assert_envelope(v: &[f32]) {
+    use core_engine::schedule::fade_curve;
+    use core_model::event::FadeShape;
+    let g = core_model::mixer::db_to_gain(-6.0) as f32;
+    let want = [
+        0.0,
+        g * fade_curve(FadeShape::Linear, 0.25),
+        g * fade_curve(FadeShape::Linear, 0.75),
+        g,
+        g,
+        g,
+        g,
+        g,
+        g,
+        g * fade_curve(FadeShape::SCurve, 0.75),
+        g * fade_curve(FadeShape::SCurve, 0.25),
+        0.0,
+    ];
+    assert_eq!(v.len(), 12);
+    for (i, (a, b)) in v.iter().zip(want).enumerate() {
+        assert!((a - b).abs() < 1e-6, "column {i}: {a} vs {b}");
+    }
+}
+
+#[test]
+fn region_envelope_matches_the_heard_gain_and_fades() {
+    let (s, ev, _note, _dir) = trimmed_region();
+    let v = s.region_envelope(ev, 0, 12_000, 12).unwrap();
+    assert_envelope(&v);
+    s.close().unwrap();
+}
+
+#[test]
+fn region_envelope_is_zero_outside_and_answers_offline() {
+    let (s, ev, _note, dir) = trimmed_region();
+    let before = s.region_envelope(ev, 0, 12_000, 12).unwrap();
+    assert_eq!(
+        s.region_envelope(ev, 20_000, 30_000, 4).unwrap(),
+        vec![0.0; 4]
+    );
+    let pkg = dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    settle(&s);
+    let m = s.media().unwrap()[0].clone();
+    std::fs::remove_file(pkg.join(&m.path)).unwrap();
+    s.recheck_media().unwrap();
+    settle(&s);
+    assert!(s.media().unwrap()[0].offline.is_some(), "now offline");
+    assert_eq!(s.region_envelope(ev, 0, 12_000, 12).unwrap(), before);
+    let rows = s.region_waveform(ev, 0, 1000, 4).unwrap();
+    assert_eq!(rows.state, OverviewStateRow::Offline);
+    s.close().unwrap();
+}
+
+#[test]
+fn hostile_region_envelope_calls_are_refused() {
+    let (s, ev, note, _dir) = trimmed_region();
+    let msg = |r: Result<Vec<f32>, VizError>| match r {
+        Err(e) => {
+            let m = e.to_string();
+            assert!(!m.is_empty());
+            m
+        }
+        Ok(v) => panic!("expected an error, got {} values", v.len()),
+    };
+    msg(s.region_envelope(u64::MAX, 0, 100, 4));
+    assert!(msg(s.region_envelope(note, 0, 100, 4)).contains("is not an audio region"));
+    for (a, b) in [(50, 50), (60, 50)] {
+        assert!(msg(s.region_envelope(ev, a, b, 4)).contains("from_frame must be before to_frame"));
+    }
+    msg(s.region_envelope(ev, 0, 100, 0));
+    msg(s.region_envelope(ev, 0, 100, 8193));
+    let v = s.region_envelope(ev, 0, u64::MAX, 8192).unwrap();
+    assert_eq!(v.len(), 8192);
+    assert!(v.iter().all(|x| x.is_finite() && (0.0..=16.0).contains(x)));
+    s.close().unwrap();
+}
+
 /// Review Focus 5.
 #[test]
 fn waveform_requests_survive_hostile_ranges() {

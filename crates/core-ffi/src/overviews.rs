@@ -683,6 +683,52 @@ pub fn fade_gain(r: u64, length: u64, fade_in: Fade, fade_out: Fade) -> f32 {
     g
 }
 
+/// What the envelope of one audio region needs (plan 7c Ruling 4).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegionShape {
+    /// First media frame the region plays.
+    pub source_offset: u64,
+    /// Region length in frames.
+    pub length: u64,
+    /// Region gain in dB.
+    pub gain_db: f32,
+    /// Fade in.
+    pub fade_in: Fade,
+    /// Fade out.
+    pub fade_out: Fade,
+}
+
+/// The gain the engine plays at `columns` media-frame positions between
+/// `from` and `to`: the region gain (the engine's own dB conversion) times
+/// the fades, and 0 outside the region. Column `i` is read at
+/// `from + floor((i + 0.5) * (to - from) / columns)` (saturating). Needs
+/// no file. The caller has checked `from < to` and `check_columns`.
+pub fn envelope(region: &RegionShape, from: u64, to: u64, columns: u32) -> Vec<f32> {
+    let gain = if region.gain_db.is_finite() {
+        core_model::mixer::db_to_gain(f64::from(region.gain_db)) as f32
+    } else {
+        0.0
+    };
+    let span = to.saturating_sub(from) as f64;
+    let end = region.source_offset.saturating_add(region.length);
+    (0..columns)
+        .map(|i| {
+            let c = from.saturating_add(((f64::from(i) + 0.5) * span / f64::from(columns)) as u64);
+            if c < region.source_offset || c >= end {
+                return 0.0;
+            }
+            let g = gain
+                * fade_gain(
+                    c - region.source_offset,
+                    region.length,
+                    region.fade_in,
+                    region.fade_out,
+                );
+            if g.is_finite() { g } else { 0.0 }
+        })
+        .collect()
+}
+
 /// Copies the overview of every hash in `media` (path → hash, the
 /// history's `referenced_media_anywhere`) from package `from` to `to`
 /// when `to` lacks it (Save As, Ruling 17). Best effort: a missing one is

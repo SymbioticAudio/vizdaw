@@ -404,6 +404,14 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         waveformCalls.append((event, fromTick, toTick, columns))
         return try overview(media: 0, fromFrame: 0, toFrame: 1, columns: columns)
     }
+    /// What `regionEnvelope` answers (nil: `columns` ones).
+    var envelope: [Float]?
+    /// `regionEnvelope` calls: event, from, to, columns.
+    var envelopeCalls: [(event: UInt64, from: UInt64, to: UInt64, columns: UInt32)] = []
+    func regionEnvelope(event: UInt64, fromFrame: UInt64, toFrame: UInt64, columns: UInt32) throws -> [Float] {
+        envelopeCalls.append((event, fromFrame, toFrame, columns))
+        return envelope ?? Array(repeating: 1, count: Int(columns))
+    }
     // MARK: Live input (plan 5c Task 8)
 
     var injected: [(port: String, bytes: Data)] = []

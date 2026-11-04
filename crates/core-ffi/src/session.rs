@@ -7808,6 +7808,58 @@ impl Session {
             ))
         })
     }
+
+    /// The gain the engine plays across a region, one value per column
+    /// (plan 7c Ruling 4): the region gain times its fades at the centre
+    /// of each of `columns` equal slices of media frames `[from_frame,
+    /// to_frame)`, and 0 outside the region. Read-only; needs no file, so
+    /// an offline region answers too.
+    pub fn region_envelope(
+        &self,
+        event: u64,
+        from_frame: u64,
+        to_frame: u64,
+        columns: u32,
+    ) -> Result<Vec<f32>, VizError> {
+        ffi_guard(|| {
+            use core_model::event::EventBody;
+            crate::overviews::check_columns(columns)?;
+            if from_frame >= to_frame {
+                return Err(crate::events::bad("from_frame must be before to_frame"));
+            }
+            let shape = {
+                let inner = lock(&self.inner);
+                let doc = inner.doc();
+                let (ev, _) = doc.event(core_model::ids::EventId(event))?;
+                let EventBody::AudioRegion {
+                    media,
+                    source_offset,
+                    length,
+                    gain_db,
+                    fade_in,
+                    fade_out,
+                } = ev.body
+                else {
+                    return Err(crate::events::bad(&format!(
+                        "{event} is not an audio region"
+                    )));
+                };
+                if !doc.media().contains_key(&media) {
+                    return Err(crate::events::bad(&format!("unknown media {media}")));
+                }
+                crate::overviews::RegionShape {
+                    source_offset,
+                    length,
+                    gain_db,
+                    fade_in,
+                    fade_out,
+                }
+            };
+            Ok(crate::overviews::envelope(
+                &shape, from_frame, to_frame, columns,
+            ))
+        })
+    }
 }
 
 /// Media and jobs (plan 5a Task 10).
