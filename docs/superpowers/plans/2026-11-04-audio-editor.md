@@ -157,7 +157,7 @@ These are the five failure modes a user is most likely to hit that the spec impl
 
    Pinned by Task 2's `hostileGainsAreRefused`, `hostileTimesAreRefused` and `peaksClampAndRefuseMinusInfinity`; Task 4's `typedGainIsOneUndoStepAndARefusalSendsNothing`, `typedFadesClampToWhatTheOtherLeaves` and `typedStartAndLengthClamp`; and the e2e's `abc` (Task 7).
 2. **Trims at the file's edges.** The cases:
-   - the start handle dragged past the file's start;
+   - the start handle dragged past the file's start, or past the sequence's start (a region at bar 1);
    - the end handle dragged past the file's end;
    - the start dragged past the end;
    - a drag of `.infinity` or `.nan` points;
@@ -165,11 +165,11 @@ These are the five failure modes a user is most likely to hit that the spec impl
    - extreme frame counts over the FFI.
 
    Expected:
-   - drags clamp at the file's edges and at one frame of length;
+   - drags clamp at the file's edges or the sequence start, whichever is nearer, and at one frame of length;
    - nothing alerts;
    - the core refuses anything outside the file and changes nothing.
 
-   Pinned by `trimDragsClampToTheFileAndTheRegion` (Task 3), `aTrimDragPastTheFileStartClamps` (Task 6) and `hostile_trims_are_refused_and_change_nothing` (Task 1).
+   Pinned by `trimDragsClampToTheFileAndTheRegion` (Task 3), `typedStartAndLengthClamp` (Task 4, its bar-1 case), `aTrimDragPastTheFileStartClamps` (Task 6) and `hostile_trims_are_refused_and_change_nothing` (Task 1).
 3. **The region changes under the editor.** The cases:
    - another region selected;
    - a note, or two regions, selected;
@@ -284,7 +284,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
    - **Gain:** a band `gainBand` = 6 points high along the top of the region's rect, between the trim edges, with 4 points of vertical slack below it (`gainSlack`); it comes after the corners and edges in hit order. A vertical drag uses `RegionHandles.gain` (0.25 dB per point, ⇧ 0.05, clamped −144…+24, in tenths). The drag readout shows `AudioEditorEntry.gainText` (U+2212 minus, as the boxes), drawn with `RegionDrawing.readout`. ⌥-click gives `RegionHandles.resetGain`.
    - **Fades:** corner squares `cornerSize` = 10 at the fade-in end and the fade-out start, along the top, with 4 points of slack. A horizontal drag uses `RegionHandles.fades(_:_:dx:in:)` on the region's rect. They are hidden below `RegionHandles.minWidth` (24 points), as in the arrangement; the typed boxes still set them. A right-click in a fade's area opens `RegionDrawing.fadeShapeMenu`.
    - **Trim edges:** the region's left (`.start`) and right (`.end`) edges, the full wave height. The hit is `min(edgeWidth, width / 2)` inside (`edgeWidth` = 8) plus `slack` = 4 outside. Targets:
-     - start: `front = round(dx × fpp)` clamped to `[−source_offset, frames − 1]`;
+     - start: `front = round(dx × fpp)` clamped to `[−min(source_offset, startRoom), frames − 1]`. `front` is also capped so the region's start stays at or after tick 0 (Ruling 13.8): `front ≥ −startRoom`, where `startRoom = floor(secondsAt(seq, [tick]) × rate)` frames, floored at 0 (the core moves the tick by `front / rate` seconds, `command/audio.rs`). The model is unchanged: it still allows a negative tick;
      - end: `back = −round(dx × fpp)` clamped to `[min(0, −(mediaFrames − source_offset − frames)), frames − 1]`.
 
      A non-finite `dx` or a zero change gives nil.
@@ -300,7 +300,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
    | `gain` | "Region Gain" | `gainText`: "−4.2 dB", "+6.0 dB", "0.0 dB", "−∞ dB" | dB | −144…+24 (`-inf` gives −144) |
    | `fade_in` | "Fade In Length" | `fadeText`: whole ms, "250 ms", "1500 ms" | ms | 0…`frames − fadeOut` |
    | `fade_out` | "Fade Out Length" | as above | ms | 0…`frames − fadeIn` |
-   | `start` | "Region Start" | `Formatting.time(offset / rate)` | s | 0…`offset + frames − 1` |
+   | `start` | "Region Start" | `Formatting.time(offset / rate)` | s | `max(0, offset − startRoom)`…`offset + frames − 1` (Ruling 13.8) |
    | `length` | "Region Length" | `Formatting.time(frames / rate)` | s | 1…`mediaFrames − offset` |
    | `peak` | "Normalize Peak" | `peakText`: "−0.3 dB", "0.0 dB" | dB | −96…0 (`-inf` refused) |
 
@@ -398,7 +398,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - Why: 7b Ruling 13 and spec §4 ("hard-coded colours").
     - Cost if wrong: one table.
 
-13. **Ruling (controller, provisional; owner may override): the owner questions the first draft raised.** Each is binding for the implementers until the owner says otherwise.
+13. **Ruling (controller, provisional; owner may override): the owner questions the first draft and the pre-flight raised.** Each is binding for the implementers until the owner says otherwise.
     1. **(controller, provisional; owner may override)** No playhead, audition or scrub in 7c. A backlog row records them (Task 7).
     2. **(controller, provisional; owner may override)** The editor's zoom is kept in memory only and is not saved with the project (Ruling 3). A backlog row records it.
     3. **(controller, provisional; owner may override)** The audio editor is on the Mix view's bottom list too (Ruling 1).
@@ -406,11 +406,12 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     5. **(controller, provisional; owner may override)** The shortcut is ⌘5 (`editors.audio_editor`), with no ⌥⌘5 (Ruling 1).
     6. **(controller, provisional; owner may override)** The gain handle is a band along the top of the region, as in the arrangement, not a line on the waveform (Ruling 6).
     7. **(controller, provisional; owner may override)** A typed fade that is too long clamps to what the other fade leaves; the other fade is never changed silently (Ruling 7). Only a trim shorter than both fades shortens them, as the model's `clamp_fades` already does.
+    8. **(controller, provisional; owner may override)** The editor's Start extension (drag or typed) clamps at the sequence start: the region's start stays at or after tick 0. The room is `floor(secondsAt(seq, [tick]) × rate)` frames (`AudioEditorModel.startRoom`, Rulings 6 and 7). The model is unchanged and still allows a negative tick from other callers; the arrangement is unchanged.
 
 ## Spec checks (for the owner, no plan change needed)
 
 - §3 says the audio editor "uses only operations the model already has". Ruling 4's export adds no operation; it reads what the engine already computes.
-- Open owner question (pre-flight M17): extending the start of a region that sits at bar 1 and has a source offset gives it a negative tick (before the sequence start). The model allows this (±`MAX_TICKS`) and the arrangement stops nothing, and it matches "its audio stays where it was". The plan does not clamp. Should the extension stop at the sequence start?
+- Pre-flight M17 (extending a bar-1 region's start would give it a negative tick, which the model allows) is ruled in Ruling 13.8: the editor clamps at the sequence start.
 - §6 item 2 says "no format change". The project format is unchanged, and `ui.json`'s schema is too. A saved bottom pane may now name `"audio_editor"`, which a 7b build reads as its default view (README step 223 checks it).
 
 ## File map
@@ -581,8 +582,8 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `static func handles(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> [(AudioEditorHandle, CGRect)]`, in hit order;
     - `static func hit(_ p: CGPoint, row: EventRow, axis: FrameAxis, in wave: CGRect) -> AudioEditorHandle?`;
     - `static func label(_ h: AudioEditorHandle) -> String`;
-    - `static func trimCommand(_ r: EventRow, _ h: AudioEditorHandle, dx: CGFloat, framesPerPoint: Double, mediaFrames: UInt64) -> EditCommand?`;
-    - `static func target(_ r: EventRow, _ h: AudioEditorHandle, dx: CGFloat, dy: CGFloat, fine: Bool, axis: FrameAxis, mediaFrames: UInt64, in wave: CGRect) -> EditCommand?`;
+    - `static func trimCommand(_ r: EventRow, _ h: AudioEditorHandle, dx: CGFloat, framesPerPoint: Double, mediaFrames: UInt64, startRoom: UInt64) -> EditCommand?`;
+    - `static func target(_ r: EventRow, _ h: AudioEditorHandle, dx: CGFloat, dy: CGFloat, fine: Bool, axis: FrameAxis, mediaFrames: UInt64, startRoom: UInt64, in wave: CGRect) -> EditCommand?`;
     - `static func scaleMarks(amplitude: Int, channels: Int, in wave: CGRect) -> [LevelMark]`;
     - `static func rulerMarks(axis: FrameAxis, width: CGFloat, sampleRate: UInt32) -> [RulerMark]`, with steps `[0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]` s, the smallest at least 80 points apart, labelled with `Formatting.time`;
     - `static func columns(width: CGFloat) -> UInt32`;
@@ -604,8 +605,9 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `zoomKeepsTheFrameUnderThePointer`: from `fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000)`, `frame(atX: 200)` is equal (±1e-9) before and after `zoomed(by: 2, aroundX: 200, width: 600, mediaFrames: 96_000)`, and the result's `framesPerPoint == 44`.
     - `scrollStopsAtTheFileEdges`: from the fit above, `scrolled(byPoints: -1e9, …)` has origin `−300 × 88`, and `scrolled(byPoints: 1e9, …)` has origin `96_000 − 300 × 88`.
   - `AudioEditorGeometryTests.swift`, with an `EventRow` at offset 24 000, 48 000 frames and media 96 000:
-    - `trimDragsClampToTheFileAndTheRegion`, at `framesPerPoint: 100`:
+    - `trimDragsClampToTheFileAndTheRegion`, at `framesPerPoint: 100` and `startRoom: 100_000` unless a case says otherwise:
       - start dx −1000 gives `.trim(frontFrames: -24_000, backFrames: 0)`; start dx +1000 gives front 47 999;
+      - the sequence start (Ruling 13.8): start dx −1000 with `startRoom: 10_000` gives front −10 000; with `startRoom: 0`, start dx −1000 gives nil and start dx +10 still gives front 1000;
       - end dx +1000 gives back −24 000; end dx −1000 gives back 47 999;
       - start dx 0.004, dx `.nan` and dx `.infinity` give nil;
       - with `mediaFrames: 50_000` (shorter than the region's end at 72 000), end dx +10 gives nil and end dx −10 gives back 1000;
@@ -680,7 +682,8 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `init(document: DocumentModel)`, keeping it `unowned`;
     - `static let emptyMessage = "Select one audio region to edit it."`;
     - `private(set) var axis: FrameAxis`, `amplitude: Int` (1), `shownRegion: UInt64?`, `width: CGFloat` and `peakDb: Double` (−0.3);
-    - `func sync(width: CGFloat)`, where `width` is always the **wave rect's** width (`AudioEditorGeometry.waveRect(in: bounds).width`). It stores `width`, reads `document.editedRegion`, and fits the axis when the region's ID differs from `shownRegion`;
+    - `var startRoom: UInt64`: the shown region's room before tick 0, `floor(secondsAt(seq, [row.tick]) × rate)` frames through `document.editor.session.secondsAt(seq:ticks:)`, floored at 0, and 0 when the call throws or there is no media row (Ruling 13.8). The canvas passes it to `AudioEditorGeometry.target`, and `type(.start, …)` clamps with it;
+    - `func sync(width: CGFloat)` (assigning each property only when its value changed), where `width` is always the **wave rect's** width (`AudioEditorGeometry.waveRect(in: bounds).width`). It stores `width`, reads `document.editedRegion`, and fits the axis when the region's ID differs from `shownRegion`;
     - `func zoomIn()`, `zoomOut()` (factor 2 about the centre), `fit()`, `zoom(by: Double, aroundX: CGFloat)`, `scroll(byPoints: CGFloat)`, `taller()` and `shorter()`;
     - `func text(_ box: AudioEditorBox) -> String`;
     - `@discardableResult func type(_ box: AudioEditorBox, _ text: String) -> Bool`;
@@ -688,7 +691,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `@discardableResult func normalize() -> KeyOutcome`.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `AudioEditorModelTests.swift` uses a `FakeSession` with audio region 71 on lane `(3, 30)`: media 5 ("tone", 48 kHz, 96 000 frames, stereo), offset 24 000, 48 000 frames, gain 0 and fades 0 linear; and a second region 72 on the same lane at offset 0, 24 000 frames. The IDs avoid `editorFake()`'s reference block 7 on lane `(3, 30)`; build the fake without that block or keep these IDs. `FakeSession.regionRow` has no `sourceOffset` parameter: set it after.
+  - `AudioEditorModelTests.swift` uses a `FakeSession` with audio region 71 on lane `(3, 30)`: media 5 ("tone", 48 kHz, 96 000 frames, stereo), offset 24 000, 48 000 frames, gain 0 and fades 0 linear, at tick 48 000 (the fake's `secondsAt` is tick / 30 720, so 1.5625 s and a `startRoom` of 75 000 frames, more than its offset); a second region 72 on the same lane at tick 0, offset 0, 24 000 frames; and a third region 73 at tick 0 (bar 1), offset 24 000, 24 000 frames. The IDs avoid `editorFake()`'s reference block 7 on lane `(3, 30)`; build the fake without that block or keep these IDs. `FakeSession.regionRow` has no `sourceOffset` parameter: set it after.
     - `theEditorFollowsTheSelectedRegion`:
       - with event 71 selected: `editedRegion?.row.id == 71`, `.lane == LaneKey(3, 30)` and `.media?.id == 5`;
       - `sync(width: 600)` sets `axis == FrameAxis.fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000)` and `shownRegion == 71`;
@@ -712,7 +715,8 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
       - `type(.length, "1.25")` records back −12 000;
       - `"10"` records back −24 000;
       - `"0"` records back 47 999;
-      - with `media` nil, `type(.start, "1")` is false with `noMediaHint`, and `text(.start) == "–"`.
+      - with `media` nil, `type(.start, "1")` is false with `noMediaHint`, and `text(.start) == "–"`;
+      - the sequence start (Ruling 13.8): with region 73 (tick 0) selected, `startRoom == 0`, and `type(.start, "0")` and `type(.start, "0.25")` each record nothing (both clamp to its own offset); region 71's `startRoom == 75_000`.
     - `shapesKeepTheirLength`, with the fade in at 12 000 linear:
       - `setShape(.fadeIn, .sCurve)` records `.setFades(event: 71, fadeIn: FadeRow(length: 12_000, shape: .sCurve), fadeOut: <unchanged>)`;
       - `setShape(.fadeIn, .linear)` records nothing.
@@ -826,11 +830,13 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `public func cancelKey()` (Escape);
   - `struct AudioEditorPane: View { let model: DocumentModel }`, whose root is an accessibility container labelled and identified "Audio Editor Pane" (Ruling 10).
 
-- [ ] **Step 1: Write the failing tests** in `AudioEditorViewTests.swift`. They use Task 4's fake (regions 71 and 72) and a canvas framed 644 × 218, so the wave rect is 600 × 200, with `sync(width: 600)` applied. Drive it through the seams above, as `RegionHandleViewTests` drives `ArrangementView` through `contentMouseDown(_:clicks:modifiers:)`. The fake's records are its `calls` strings ("begin …", "gesture", "end", "abort") and `gestureEdits`: use the tree's names.
+- [ ] **Step 1: Write the failing tests** in `AudioEditorViewTests.swift`. They use Task 4's fake (regions 71 and 72; region 71 at tick 48 000 has 75 000 frames of room before the sequence start, more than its 24 000-frame offset) and a canvas framed 644 × 218, so the wave rect is 600 × 200, with `sync(width: 600)` applied. Drive it through the seams above, as `RegionHandleViewTests` drives `ArrangementView` through `contentMouseDown(_:clicks:modifiers:)`. The fake's records are its `calls` strings ("begin …", "gesture", "end", "abort") and `gestureEdits`: use the tree's names.
   - `theCanvasExposesItsHandles`:
     - the canvas's accessibility label is "Audio Editor";
     - its children's labels are exactly `["Fade In Handle", "Fade Out Handle", "Start Handle", "End Handle", "Gain Handle"]`, each frame inside the bounds;
-    - with nothing selected the children are `[]`.
+    - with nothing selected the children are `[]`;
+    - the same span: after a draw (`display()` in an unshown window, as the theme test does), the fake's last `overview` call and last `envelopeCalls` entry have equal `fromFrame`, `toFrame` and `columns` (give `FakeSession` an `overviewCalls` record beside `envelopeCalls` if it has none);
+    - refit with no layout: select region 72 and let the observation refresh run (one main-queue turn), with no `layout()` call: `audioEditor.shownRegion == 72`.
   - `aHandleDragIsOneGesture`:
     - a press on the Gain Handle, a drag 20 points up in four steps, then release;
     - the fake records one begin with label "Region Gain", a last gesture edit of `.audio(edit: .setGain(event: 71, gainDb: 5.0))`, and one end.
@@ -840,7 +846,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 - [ ] **Step 2: Run them and see them fail:** `scripts/swift.sh test --filter AudioEditorViewTests`.
 - [ ] **Step 3a: Accessibility, hits and the gesture** (Ruling 6).
   - Accessibility items per handle from `AudioEditorGeometry.handles`, as `CanvasElement`s.
-  - `press` hits through `AudioEditorGeometry.hit`, keeps the row at the press, and calls `window?.makeFirstResponder(self)` so Escape reaches the canvas. Past the 3-point dead zone `drag` opens `beginGesture(label, lanes: [lane], origin: .other)` and sends `updateGesture(target(pressRow, …))`. `release` calls `endGesture`, and `cancelKey` calls `cancelGesture`.
+  - `press` hits through `AudioEditorGeometry.hit`, keeps the row at the press, and calls `window?.makeFirstResponder(self)` so Escape reaches the canvas. Past the 3-point dead zone `drag` opens `beginGesture(label, lanes: [lane], origin: .other)` and sends `updateGesture(target(pressRow, …, startRoom: audioEditor.startRoom, …))`. `release` calls `endGesture`, and `cancelKey` calls `cancelGesture`.
   - Run `scripts/swift.sh test --filter AudioEditorViewTests`: tests 1–4 pass.
 - [ ] **Step 3b: The theme and the drawing** (Rulings 3, 8, 12).
   - **Drawing order:**
@@ -861,12 +867,12 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
   - ⌘-scroll and pinch call `zoom(by:aroundX:)`; plain scroll calls `scroll(byPoints:)`.
   - ⌥-click on the gain band resets the gain.
   - A right-click in a fade area (`RegionHandles.fadeArea` through `regionHandle`) opens `fadeShapeMenu`.
-  - Run the filter again: all five pass.
+  - These four inputs have no unit test: they are checked by eye (README 218–220). Run the filter again: all five still pass.
 - [ ] **Step 3d: Observation and sync** (pre-flight I4).
   - The canvas observes `ArrangementView`'s set, copied: the document's snapshot and `lanes`, `editor.selection` and `drawVersion`, `mediaVersion` (offline hatching), `mixerVersion` and `storeMixer?.snapshot` (the lane tint), and `overviewVersion` (Pending and Coarse redraw). It also observes `audioEditor`'s `axis`, `amplitude` and `shownRegion`.
   - Observation uses `ArrangementView`'s `withObservationTracking` plus `Task { @MainActor [weak self] }` pattern, not `MainActor.assumeIsolated`.
-  - Each observation refresh, and `layout()`, call `audioEditor.sync(width: AudioEditorGeometry.waveRect(in: bounds).width)`, so selecting another region refits it with no frame change.
-  - Run the filter again: all five pass.
+  - Each observation refresh, and `layout()`, call `audioEditor.sync(width: AudioEditorGeometry.waveRect(in: bounds).width)`, so selecting another region refits it with no frame change. `sync` assigns each property only when its value changed, so a refresh that observes `axis`, `amplitude` and `shownRegion` cannot retrigger itself.
+  - Run the filter again: all five pass (test 1's refit and same-span checks pin this sub-step).
 - [ ] **Step 4: Build the pane.**
   - The root is `.accessibilityElement(children: .contain)` with label and identifier "Audio Editor Pane".
   - Without a region, it shows `ContentUnavailableView("Audio Editor", icon: .audio, description: Text(AudioEditorModel.emptyMessage))`.
@@ -928,7 +934,7 @@ vizctl launch --env VIZDAW_AUDIO=offline --home /tmp/vze7c-shot --demo
   3. `command.run editors.audio_editor`. Then:
      - `wait_for_layout` until the Arrange bottom pane's `view == "audio_editor"` and it is shown;
      - `state.get audio_editor` has `shown == true`, `region.event` equal to the region, `boxes.gain == "0.0 dB"`, `boxes.start == "0:00.000"` and `boxes.length == "0:02.000"`;
-     - in the window's `ui.tree`, find the node labelled "Audio Editor Pane" and walk only its subtree: no node there has a label matching the whole word `\bPan\b` (a `regex`-free check: split each label on non-letters and look for the word "Pan"). "Bottom Pane" and the left strip's "Pan of …" lie outside it.
+     - in the window's `ui.tree`, find the node labelled "Audio Editor Pane" and walk only its subtree: no node there has a label containing the whole word `\bPan\b` (implemented without a regex crate: split each label on non-letters and look for the word "Pan"). "Bottom Pane" and the left strip's "Pan of …" lie outside it.
   4. `ui.key` on "Region Gain" with `"-4.2\n"`: wait until `(region.gain_db + 4.2).abs() < 1e-6`, then `wait_for_undo(…, "Set Region Gain")`. Then `"abc\n"`: `state.get editor`'s `status == "Type a gain in dB, like −4.2 or +6."` and the gain is still −4.2.
   5. `ui.key` on "Fade In Length" with `"250\n"`: wait until `region.fade_in.frames == 12_000`.
   6. `ui.key` on "Region Length" with `"1.5\n"`: `length == 72_000`. Then on "Region Start" with `"0.5\n"`: `source_offset == 24_000` and `length == 48_000` (the end stayed).
@@ -985,7 +991,9 @@ Checked by hand; the rules are tested (`AudioEditorEntryTests`,
 221. Drag the region's left edge right: the region starts later in the file
      and in the arrangement by the same time, its audio stays where it was,
      and the Start box follows; drag it left past the file's start: it
-     stops at 0:00.000; release: "Undo Trim Start". Drag the right edge past
+     stops at 0:00.000, or where the region would begin before the
+     sequence's start, whichever is nearer (a region at bar 1 cannot be
+     extended earlier); release: "Undo Trim Start". Drag the right edge past
      the file's end: it stops there; "Undo Trim End". Type `0.5` in Start:
      the region's end stays put; type `1` in Length: its start stays put;
      each is "Undo Trim Region". Type `10:00` in Length: it stops at the
@@ -1022,7 +1030,7 @@ Checked by hand; the rules are tested (`AudioEditorEntryTests`,
   - "What works today" gains a bullet after the themes bullet: "An audio editor in the bottom pane: a region's waveform drawn large with zoom and a level scale, and its gain, fades and fade shapes, trim and normalize, each by dragging or by typing a value".
   - "Getting around": after the "⌘1 to ⌘4 open the piano roll…" bullet, add "⌘5 opens the audio editor for the selected audio region."
 - [ ] **Step 5: Add backlog rows** to `docs/feature-backlog.md`:
-  - "Audio editor: playhead, audition and scrub" (Ruling 11);
+  - "Audio editor: playhead, audition and scrub" (Rulings 11 and 13.1);
   - "Audio editor in a window of its own" (Ruling 1);
   - "Audio editor zoom saved with the project" (Ruling 3);
   - "Audio editor handles moved with the keyboard" (the handles are reachable by VoiceOver but not movable from the keyboard).
