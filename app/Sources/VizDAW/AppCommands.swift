@@ -126,6 +126,9 @@ struct AppCommands: Commands {
                 .keyboardShortcut(KeyMenu.shortcut("editors.\(ControlStates.kindName(kind))"))
                 .disabled(doc == nil)
             }
+            Button("Audio Editor") { if let doc { ViewCommands.run(ViewCommands.audioEditor, on: nil, doc) } }
+                .keyboardShortcut(KeyMenu.shortcut("editors.audio_editor"))
+                .disabled(doc == nil)
             Divider()
             ForEach(DetailEditorKind.allCases, id: \.self) { kind in
                 Button("Open \(kind.title) in Window") {

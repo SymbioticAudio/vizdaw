@@ -78,12 +78,15 @@ public final class AudioEditorModel {
     }
 
     /// `width` is the wave rect's width. A newly shown region is fitted;
-    /// the same region keeps its zoom and scroll.
+    /// the same region keeps its zoom and scroll. While the width is 0 or
+    /// less nothing is fitted or recorded as shown, so the first real width
+    /// fits (Task 4 review M1).
     public func sync(width: CGFloat) {
         if self.width != width { self.width = width }
         let region = document.editedRegion
         let id = region?.row.id
         guard id != shownRegion else { return }
+        guard width > 0 else { return }
         if let region {
             let fitted = FrameAxis.fit(
                 offset: region.row.sourceOffset, length: region.row.frames, width: width,
@@ -136,15 +139,41 @@ public final class AudioEditorModel {
         if a != axis { axis = a }
     }
 
+    // MARK: The control channel
+
+    /// `state.get audio_editor` (Ruling 10). The last width given to
+    /// `sync(width:)` is synced again first, so after a selection change the
+    /// state names the new region and its fit even before the canvas
+    /// redraws (a width of 0 keeps the default axis).
+    public func stateRow() -> AudioEditorStateRow {
+        sync(width: width)
+        let bottom = document.editor.layout.views.current.bottom
+        let shown = bottom.shown && bottom.view == .audioEditor
+        var region: AudioEditorRegionRow?
+        var boxes: [AudioEditorBoxRow] = []
+        if let r = document.editedRegion {
+            region = AudioEditorRegionRow(
+                event: r.row.id, media: r.row.media ?? 0, name: r.media?.name ?? "", gainDb: r.row.gainDb,
+                fadeIn: r.row.fadeIn, fadeOut: r.row.fadeOut, sourceOffset: r.row.sourceOffset,
+                length: r.row.frames, mediaFrames: r.media?.frames ?? 0, sampleRate: r.media?.sampleRate ?? 0,
+                offline: r.media == nil || r.media?.offline != nil)
+            boxes = AudioEditorBox.allCases.map { AudioEditorBoxRow(name: $0.rawValue, text: text($0)) }
+        }
+        return AudioEditorStateRow(
+            shown: shown, region: region, message: region == nil ? Self.emptyMessage : nil,
+            framesPerPoint: axis.framesPerPoint, originFrame: axis.originFrame, amplitude: UInt32(amplitude),
+            boxes: boxes)
+    }
+
     // MARK: Typed values
 
     private static let none = "\u{2013}"
 
-    /// What `box` shows now: "–" for a time box without a media row, or
-    /// with no region.
+    /// What `box` shows now: "–" for every box with no region, and for a
+    /// time box without a media row.
     public func text(_ box: AudioEditorBox) -> String {
-        if box == .peak { return AudioEditorEntry.peakText(peakDb) }
         guard let r = document.editedRegion else { return Self.none }
+        if box == .peak { return AudioEditorEntry.peakText(peakDb) }
         let row = r.row
         if box == .gain { return AudioEditorEntry.gainText(Double(row.gainDb)) }
         guard let rate = r.media?.sampleRate, rate > 0 else { return Self.none }

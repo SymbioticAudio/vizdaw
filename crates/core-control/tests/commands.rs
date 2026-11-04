@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        154,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme"
+        155,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1833,5 +1833,51 @@ fn mixer_state_target_parses() {
         assert!(!msg.is_empty());
     }
     let (_, msg) = err("state.get", json!({ "target": "mixers" }));
-    assert!(msg.contains("layout or mixer"), "{msg}");
+    assert!(msg.contains("mixer or audio_editor"), "{msg}");
+}
+
+#[test]
+fn audio_editor_state_target_parses() {
+    assert_eq!(
+        ok("state.get", json!({ "target": "audio_editor" })),
+        Command::StateGet {
+            target: StateTarget::AudioEditor,
+            window: None
+        }
+    );
+    for bad in [
+        json!("audio-editor"),
+        json!("audioEditor"),
+        json!("AUDIO_EDITOR"),
+        json!("audio_editor "),
+        json!(""),
+        json!(7),
+    ] {
+        let (code, msg) = err("state.get", json!({ "target": bad }));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    let (_, msg) = err("state.get", json!({ "target": "audio-editor" }));
+    assert!(msg.contains("mixer or audio_editor"), "{msg}");
+}
+
+#[test]
+fn ui_pane_names_the_audio_editor() {
+    let c = ok(
+        "command.run",
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": "audio_editor" } }),
+    );
+    assert!(matches!(c, Command::CommandRun { .. }), "{c:?}");
+    for bad in ["audio", "Audio_Editor"] {
+        let (code, msg) = err(
+            "command.run",
+            json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": bad } }),
+        );
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    let c = registry::find("editors.audio_editor").unwrap();
+    assert_eq!(c.shortcut, Some("⌘5"));
+    assert_eq!(c.menu, "Editors");
+    assert!(c.document);
 }

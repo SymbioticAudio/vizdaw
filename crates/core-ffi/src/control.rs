@@ -130,6 +130,8 @@ pub enum StateTargetRow {
     Layout,
     /// Its mixer's strips (plan 7b Ruling 11).
     Mixer,
+    /// The audio editor (plan 7c Ruling 10).
+    AudioEditor,
 }
 
 /// One pane of a main view (plan 7a).
@@ -167,6 +169,63 @@ pub struct LayoutStateRow {
     pub left_strip: Option<u64>,
     /// What the left pane shows.
     pub left_shows: String,
+}
+
+/// One typed box of the audio editor, as the editor shows it (plan 7c
+/// Ruling 10).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AudioEditorBoxRow {
+    /// The box's name: `gain`, `fade_in`, `fade_out`, `start`, `length` or
+    /// `peak`.
+    pub name: String,
+    /// Its text.
+    pub text: String,
+}
+
+/// The audio region the editor shows (plan 7c Ruling 10).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AudioEditorRegionRow {
+    /// The region's event ID.
+    pub event: u64,
+    /// Its media ID (0 when unknown).
+    pub media: u64,
+    /// The media's name (empty when unknown).
+    pub name: String,
+    /// Gain in dB.
+    pub gain_db: f32,
+    /// Fade in.
+    pub fade_in: crate::events::FadeRow,
+    /// Fade out.
+    pub fade_out: crate::events::FadeRow,
+    /// First media frame played.
+    pub source_offset: u64,
+    /// Frames played.
+    pub length: u64,
+    /// The media's frames (0 when unknown).
+    pub media_frames: u64,
+    /// The media's sample rate (0 when unknown).
+    pub sample_rate: u32,
+    /// Whether the media is offline or unknown.
+    pub offline: bool,
+}
+
+/// `state.get audio_editor` (plan 7c Ruling 10).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AudioEditorStateRow {
+    /// Whether the current view's bottom pane is shown on the audio editor.
+    pub shown: bool,
+    /// The region it edits, if exactly one audio region is selected.
+    pub region: Option<AudioEditorRegionRow>,
+    /// What it says instead of a region.
+    pub message: Option<String>,
+    /// Media frames per point.
+    pub frames_per_point: f64,
+    /// The media frame at the wave rect's left edge.
+    pub origin_frame: f64,
+    /// The waveform height factor (1, 2, 4, 8 or 16).
+    pub amplitude: u32,
+    /// The typed boxes; empty without a region.
+    pub boxes: Vec<AudioEditorBoxRow>,
 }
 
 /// The after-crash answer.
@@ -616,6 +675,13 @@ pub enum ControlResult {
         /// Its strips, master last.
         mixer: crate::mixer::MixerSnapshot,
     },
+    /// `state.get audio_editor` (plan 7c Ruling 10).
+    AudioEditor {
+        /// Document ID.
+        doc: String,
+        /// The editor's region, zoom and boxes.
+        editor: AudioEditorStateRow,
+    },
     /// `destination.measure_return` (plan 5c-2).
     Measured {
         /// Document ID.
@@ -914,6 +980,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 StateTarget::Surfaces => StateTargetRow::Surfaces,
                 StateTarget::Layout => StateTargetRow::Layout,
                 StateTarget::Mixer => StateTargetRow::Mixer,
+                StateTarget::AudioEditor => StateTargetRow::AudioEditor,
             },
             window: window_row(window),
         },
@@ -1109,6 +1176,43 @@ fn transport_json(doc: &str, t: &TransportState) -> Value {
     })
 }
 
+/// A fade shape as `state.get audio_editor` spells it.
+fn fade_shape_text(s: crate::events::FadeShapeRow) -> &'static str {
+    use crate::events::FadeShapeRow as S;
+    match s {
+        S::Linear => "linear",
+        S::EqualPower => "equal_power",
+        S::Exponential => "exponential",
+        S::SCurve => "s_curve",
+    }
+}
+
+/// `state.get audio_editor` in Ruling 10's shape: `boxes` is an object
+/// keyed by box name, and `gain_db` is rounded to thousandths.
+fn audio_editor_json(doc: &str, e: &AudioEditorStateRow) -> Value {
+    let fade = |f: &crate::events::FadeRow| json!({ "frames": f.length, "shape": fade_shape_text(f.shape) });
+    let region = e.region.as_ref().map(|r| {
+        json!({
+            "event": r.event, "media": r.media, "name": r.name,
+            "gain_db": (f64::from(r.gain_db) * 1000.0).round() / 1000.0,
+            "fade_in": fade(&r.fade_in), "fade_out": fade(&r.fade_out),
+            "source_offset": r.source_offset, "length": r.length,
+            "media_frames": r.media_frames, "sample_rate": r.sample_rate,
+            "offline": r.offline,
+        })
+    });
+    let boxes: serde_json::Map<String, Value> = e
+        .boxes
+        .iter()
+        .map(|b| (b.name.clone(), Value::from(b.text.clone())))
+        .collect();
+    json!({
+        "doc": doc, "shown": e.shown, "message": e.message,
+        "frames_per_point": e.frames_per_point, "origin_frame": e.origin_frame,
+        "amplitude": e.amplitude, "boxes": boxes, "region": region,
+    })
+}
+
 /// A slot as `state.get mixer` spells it.
 fn slot_json(s: &crate::snapshot::SlotRow) -> Value {
     json!({ "slot": s.id, "name": s.plugin.name, "bypass": s.bypass })
@@ -1248,6 +1352,7 @@ pub fn result_json(r: &ControlResult) -> Value {
             "doc": doc,
             "strips": mixer.strips.iter().map(strip_json).collect::<Vec<_>>(),
         }),
+        ControlResult::AudioEditor { doc, editor } => audio_editor_json(doc, editor),
         ControlResult::Surfaces { doc, state } => json!({
             "doc": doc,
             "surfaces": state.surfaces.iter().map(|u| json!({

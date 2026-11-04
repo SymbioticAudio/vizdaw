@@ -13,7 +13,10 @@ public enum ViewCommands {
         "ui.toggle_left": .left, "ui.toggle_bottom": .bottom, "ui.toggle_right": .right,
     ]
 
-    public static let ids: Set<String> = Set(mainViews.keys).union(toggles.keys).union([pane])
+    /// ⌘5: shows the current view's bottom pane on the audio editor.
+    public static let audioEditor = "editors.audio_editor"
+
+    public static let ids: Set<String> = Set(mainViews.keys).union(toggles.keys).union([pane, audioEditor])
 
     /// Always: the views and panes can change at any time.
     public static func enabled(_ id: String, _ m: DocumentModel) -> Bool { true }
@@ -44,6 +47,11 @@ public enum ViewCommands {
             guard shown != v.current[side].shown else { return .done }
             m.endPaneEdits()
             m.editor.setPaneShown(side, shown)
+            return .done
+        }
+        if id == audioEditor {
+            m.endPaneEdits()
+            choose(.bottom, .audioEditor, kind: nil, shown: true, size: nil, in: nil, m)
             return .done
         }
         if id == pane { return .unavailable("Set Pane needs `pane` and a `view`, `shown` or `size`.") }

@@ -88,6 +88,33 @@ fileprivate extension ControlOutcome {
         _ = run("ui.pane", [.text("pane", "bottom"), .text("view", "list"), .text("main", "mix")], doc, store)
         #expect(doc.model.editor.layout.views.mix.bottom.shown && !doc.model.editor.layout.views.arrange.bottom.shown)
     }
+    @Test func uiPaneTakesTheAudioEditorOnlyAtTheBottom() {
+        let (doc, store) = storeDocument()
+        let r = run("ui.pane", [.text("pane", "bottom"), .text("view", "audio_editor")], doc, store)
+        #expect(doc.model.editor.layout.views.arrange.bottom.view == .audioEditor)
+        #expect(r.status == "bottom audio_editor 260 shown")
+        let before = doc.model.editor.layout
+        let bad = run("ui.pane", [.text("pane", "left"), .text("view", "audio_editor")], doc, store)
+        #expect(bad.code == .invalidParams)
+        #expect(bad.message == "audio_editor is not on the left pane's list in the arrange view.")
+        #expect(doc.model.editor.layout == before)
+    }
+    @Test func theAudioEditorKeyShowsTheBottomPane() {
+        let (doc, store) = storeDocument()
+        let m = doc.model
+        _ = ViewCommands.choose(.bottom, .mixer, kind: nil, shown: false, size: nil, in: nil, m)
+        let detail = m.editor.layout.detail
+        #expect(run("editors.audio_editor", [], doc, store).isDone)
+        #expect(m.editor.layout.views.arrange.bottom.shown)
+        #expect(m.editor.layout.views.arrange.bottom.view == .audioEditor)
+        _ = run("ui.view_mix", [], doc, store)
+        #expect(!m.editor.layout.views.mix.bottom.shown || m.editor.layout.views.mix.bottom.view != .audioEditor)
+        #expect(run("editors.audio_editor", [], doc, store).isDone)
+        #expect(m.editor.layout.views.mix.bottom.shown)
+        #expect(m.editor.layout.views.mix.bottom.view == .audioEditor)
+        #expect(m.alert == nil)
+        #expect(m.editor.layout.detail == detail)
+    }
     @Test func uiCommandsCheckTheirArguments() {
         let (doc, store) = storeDocument()
         let before = doc.model.editor.layout

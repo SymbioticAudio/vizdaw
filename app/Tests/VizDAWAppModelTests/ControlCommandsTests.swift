@@ -519,4 +519,59 @@ final class FakeControlHost: ControlHost {
         let some = job(.convert, .done, created: [5], problems: ["a.caf: unreadable"])
         #expect(ControlJobs.answer(some) == .ok(status: "warnings: a.caf: unreadable"))
     }
+
+    @Test func audioEditorStateNamesTheRegionAndItsBoxes() {
+        let (_, m) = audioEditorDocument(gainDb: -4.2, fadeIn: 12_000)
+        let id = UUID()
+        func editor() -> AudioEditorStateRow? {
+            guard case .audioEditor(_, let e)? = ControlStates.state(.audioEditor, id, m) else { return nil }
+            return e
+        }
+        // Nothing selected.
+        let empty = editor()
+        #expect(empty?.region == nil)
+        #expect(empty?.message == AudioEditorModel.emptyMessage)
+        #expect(empty?.boxes == [])
+        #expect(empty?.shown == false)
+        // Region 71 on the bottom pane.
+        selectEvents([71], in: m)
+        ViewCommands.choose(.bottom, .audioEditor, kind: nil, shown: true, size: nil, in: nil, m)
+        let e = editor()
+        #expect(e?.shown == true)
+        #expect(e?.region?.event == 71)
+        #expect(e?.region?.media == 5)
+        #expect(e?.region?.name == "tone")
+        #expect(e?.region?.gainDb == -4.2)
+        #expect(e?.region?.mediaFrames == 96_000)
+        #expect(e?.region?.sampleRate == 48_000)
+        #expect(e?.region?.offline == false)
+        #expect(e?.message == nil)
+        #expect(
+            e?.boxes == [
+                AudioEditorBoxRow(name: "gain", text: "\u{2212}4.2 dB"),
+                AudioEditorBoxRow(name: "fade_in", text: "250 ms"),
+                AudioEditorBoxRow(name: "fade_out", text: "0 ms"),
+                AudioEditorBoxRow(name: "start", text: "0:00.500"),
+                AudioEditorBoxRow(name: "length", text: "0:01.000"),
+                AudioEditorBoxRow(name: "peak", text: "\u{2212}0.3 dB"),
+            ])
+        // A new selection names the new region and its fit before any redraw.
+        m.audioEditor.sync(width: 600)
+        selectEvents([72], in: m)
+        let next = editor()
+        #expect(next?.region?.event == 72)
+        let axis = FrameAxis.fit(offset: 0, length: 24_000, width: 600, mediaFrames: 96_000)
+        #expect(next?.framesPerPoint == axis.framesPerPoint)
+        #expect(next?.originFrame == axis.originFrame)
+        // Unknown media: no frames, no rate, offline.
+        let (_, n) = audioEditorDocument(media: false)
+        selectEvents([71], in: n)
+        guard case .audioEditor(_, let u)? = ControlStates.state(.audioEditor, id, n) else {
+            Issue.record("no audio editor state")
+            return
+        }
+        #expect(u.region?.mediaFrames == 0)
+        #expect(u.region?.sampleRate == 0)
+        #expect(u.region?.offline == true)
+    }
 }

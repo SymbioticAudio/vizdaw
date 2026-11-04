@@ -295,6 +295,7 @@ const UI_PANE_PARAMS: &[ParamSpec] = &[
             "list",
             "strip_chart",
             "drum_grid",
+            "audio_editor",
             "mixer",
             "controllers",
             "media_pool",
@@ -1017,6 +1018,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Editors",
         "Drum Grid",
         Some("⌘4"),
+        true,
+    ),
+    cmd(
+        "editors.audio_editor",
+        "Editors",
+        "Audio Editor",
+        Some("⌘5"),
         true,
     ),
     cmd(

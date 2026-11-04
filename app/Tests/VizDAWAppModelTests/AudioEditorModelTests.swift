@@ -10,7 +10,7 @@ private let toneLane = LaneKey(3, 30)
 /// fake, so 75 000 frames of room before tick 0). Region 72 is at tick 0,
 /// offset 0, 24 000 frames; region 73 at tick 0, offset 24 000, 24 000
 /// frames. The IDs avoid `editorFake()`'s reference block 7.
-@MainActor private func audioEditorDocument(
+@MainActor func audioEditorDocument(
     gainDb: Float = 0, fadeIn: Int64 = 0, fadeOut: Int64 = 0, media: Bool = true
 ) -> (FakeSession, DocumentModel) {
     let f = editorFake()
@@ -27,7 +27,7 @@ private let toneLane = LaneKey(3, 30)
     return (f, try! DocumentModel(session: f))
 }
 
-@MainActor private func select(_ events: [UInt64], in m: DocumentModel) {
+@MainActor func selectEvents(_ events: [UInt64], in m: DocumentModel) {
     m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [], events: events))
 }
 
@@ -35,7 +35,12 @@ private let toneLane = LaneKey(3, 30)
 @Suite struct AudioEditorModelTests {
     @Test func theEditorFollowsTheSelectedRegion() {
         let (_, m) = audioEditorDocument()
-        select([71], in: m)
+        selectEvents([71], in: m)
+        // A first sync before the pane has a width must not leave a sliver
+        // (Task 4 review M1).
+        m.audioEditor.sync(width: 0)
+        m.audioEditor.sync(width: 600)
+        #expect(m.audioEditor.axis == FrameAxis.fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000))
         #expect(m.editedRegion?.row.id == 71)
         #expect(m.editedRegion?.lane == toneLane)
         #expect(m.editedRegion?.media?.id == 5)
@@ -48,15 +53,15 @@ private let toneLane = LaneKey(3, 30)
         a.sync(width: 600)
         #expect(a.axis == zoomed)
         #expect(a.axis != FrameAxis.fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000))
-        select([1], in: m)
+        selectEvents([1], in: m)
         #expect(m.editedRegion == nil)
         a.sync(width: 600)
         #expect(a.shownRegion == nil)
-        select([71, 72], in: m)
+        selectEvents([71, 72], in: m)
         #expect(m.editedRegion == nil)
         a.sync(width: 600)
         #expect(a.shownRegion == nil)
-        select([71], in: m)
+        selectEvents([71], in: m)
         a.sync(width: 600)
         #expect(a.axis == FrameAxis.fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000))
         #expect(a.shownRegion == 71)
@@ -65,7 +70,7 @@ private let toneLane = LaneKey(3, 30)
 
     @Test func aVanishedRegionShowsTheMessage() {
         let (f, m) = audioEditorDocument()
-        select([71], in: m)
+        selectEvents([71], in: m)
         m.audioEditor.sync(width: 600)
         f.laneEventTable["3/30"] = LaneEvents(seq: 3, lane: 30, rev: 9, events: [])
         nextSnapshot(f) { $0.laneRevs[0].rev = 9 }
@@ -77,11 +82,13 @@ private let toneLane = LaneKey(3, 30)
         #expect(m.editor.status == AudioEditorModel.emptyMessage)
         m.audioEditor.sync(width: 600)
         #expect(m.audioEditor.shownRegion == nil)
+        // No region: every box shows the dash, the Peak box too (Task 4 review M2).
+        for box in AudioEditorBox.allCases { #expect(m.audioEditor.text(box) == "\u{2013}", "\(box)") }
     }
 
     @Test func typedGainIsOneUndoStepAndARefusalSendsNothing() {
         let (f, m) = audioEditorDocument()
-        select([71], in: m)
+        selectEvents([71], in: m)
         let a = m.audioEditor
         #expect(a.type(.gain, "-4.2"))
         #expect(f.edits == [.audio(edit: .setGain(event: 71, gainDb: -4.2))])
@@ -94,7 +101,7 @@ private let toneLane = LaneKey(3, 30)
 
     @Test func typedFadesClampToWhatTheOtherLeaves() {
         let (f, m) = audioEditorDocument(fadeOut: 12_000)
-        select([71], in: m)
+        selectEvents([71], in: m)
         let a = m.audioEditor
         #expect(a.type(.fadeIn, "10 s"))
         #expect(
@@ -112,7 +119,7 @@ private let toneLane = LaneKey(3, 30)
         // A fade that is not a whole ms shows rounded; committing the
         // unchanged text moves nothing (Task 2 review M1).
         let (g, n) = audioEditorDocument(fadeIn: 100)
-        select([71], in: n)
+        selectEvents([71], in: n)
         #expect(n.audioEditor.text(.fadeIn) == "2 ms")
         #expect(n.audioEditor.type(.fadeIn, "2 ms"))
         #expect(g.edits.isEmpty)
@@ -120,7 +127,7 @@ private let toneLane = LaneKey(3, 30)
 
     @Test func typedStartAndLengthClamp() {
         let (f, m) = audioEditorDocument()
-        select([71], in: m)
+        selectEvents([71], in: m)
         let a = m.audioEditor
         func trims(_ box: AudioEditorBox, _ text: String) -> EditCommand? {
             let before = f.edits.count
@@ -136,13 +143,13 @@ private let toneLane = LaneKey(3, 30)
         #expect(a.startRoom == 75_000)
 
         // The sequence start (Ruling 13.8): region 73 is at tick 0.
-        select([73], in: m)
+        selectEvents([73], in: m)
         #expect(a.startRoom == 0)
         #expect(trims(.start, "0") == nil)
         #expect(trims(.start, "0.25") == nil)
 
         let (g, n) = audioEditorDocument(media: false)
-        select([71], in: n)
+        selectEvents([71], in: n)
         #expect(n.audioEditor.type(.start, "1") == false)
         #expect(n.editor.status == AudioEditorEntry.noMediaHint)
         #expect(n.audioEditor.text(.start) == "\u{2013}")
@@ -152,7 +159,7 @@ private let toneLane = LaneKey(3, 30)
 
     @Test func shapesKeepTheirLength() {
         let (f, m) = audioEditorDocument(fadeIn: 12_000)
-        select([71], in: m)
+        selectEvents([71], in: m)
         let a = m.audioEditor
         a.setShape(.fadeIn, .sCurve)
         #expect(
@@ -168,7 +175,7 @@ private let toneLane = LaneKey(3, 30)
 
     @Test func normalizeUsesTheTypedPeakAndNeverADialog() {
         let (f, m) = audioEditorDocument()
-        select([71], in: m)
+        selectEvents([71], in: m)
         let a = m.audioEditor
         #expect(a.type(.peak, "-1"))
         #expect(f.edits.isEmpty)
@@ -186,7 +193,7 @@ private let toneLane = LaneKey(3, 30)
 
     @Test func theZoomButtonsStayInRange() {
         let (_, m) = audioEditorDocument()
-        select([71], in: m)
+        selectEvents([71], in: m)
         let a = m.audioEditor
         a.sync(width: 600)
         for _ in 0..<20 { a.zoomIn() }

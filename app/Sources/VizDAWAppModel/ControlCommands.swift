@@ -736,6 +736,8 @@ public enum ControlStates {
         case .mixer:
             guard let s = try? m.session.mixer() else { return nil }
             return .mixer(doc: doc, mixer: s)
+        case .audioEditor:
+            return .audioEditor(doc: doc, editor: m.audioEditor.stateRow())
         case .surfaces:
             guard let s = try? m.session.surfaceState() else { return nil }
             return .surfaces(doc: doc, state: s)
