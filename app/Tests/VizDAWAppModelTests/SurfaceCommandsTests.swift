@@ -17,7 +17,13 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
     var cancels = 0
     var learnRow = LearnStateRow(waiting: nil, last: nil)
     func list() -> [SurfaceRow] { rows }
-    func ports() -> SurfacePortsRow { SurfacePortsRow(sources: ["In A"], destinations: ["Out A"]) }
+    var portList = SurfacePortsRow(sources: ["In A"], destinations: ["Out A"])
+    /// How often `ports()` was read (each read refreshes the live transport).
+    var portReads = 0
+    func ports() -> SurfacePortsRow {
+        portReads += 1
+        return portList
+    }
     var kontrol = SurfacePortsRow(sources: [], destinations: [])
     func kontrolPorts() -> SurfacePortsRow { kontrol }
     func add(_ k: SurfaceKindRow, _ i: String, _ o: String, _ p: UInt8?) throws -> UInt32 {

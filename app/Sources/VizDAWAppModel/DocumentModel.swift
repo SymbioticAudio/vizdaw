@@ -602,11 +602,11 @@ public final class DocumentModel {
             if pluginProblems.count > 50 { pluginProblems.removeFirst(pluginProblems.count - 50) }
         }
         // The record count-in, for a Kontrol's Count-in light (plan 5f-4
-        // Ruling 16): said once per change.
+        // Ruling 16): said once per change, and again after a refusal
+        // (final review T7 m3).
         let countIn = record.countInBars > 0
-        if countIn != sentCountIn {
+        if countIn != sentCountIn, (try? session.setSurfaceCountIn(on: countIn)) != nil {
             sentCountIn = countIn
-            try? session.setSurfaceCountIn(on: countIn)
         }
         // What the surfaces asked for in this pass (plan 5f-1 Ruling 12).
         if let events = try? session.takeSurfaceEvents(), !events.isEmpty {

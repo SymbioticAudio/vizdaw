@@ -250,6 +250,22 @@ import VizDAWCore
         #expect(f.surfaceCountIns == [false, true, false])
     }
 
+    /// Final review T7 m3: a count-in the core refused is said again at the
+    /// next idle.
+    @Test func aRefusedCountInIsSaidAgain() throws {
+        let f = mixerFake()
+        let m = try DocumentModel(session: f)
+        m.record.countInBars = 2
+        f.surfaceCountInError = .Model(message: "busy")
+        m.idle()
+        #expect(f.surfaceCountIns == [true])
+        f.surfaceCountInError = nil
+        m.idle()
+        #expect(f.surfaceCountIns == [true, true], "said again")
+        m.idle()
+        #expect(f.surfaceCountIns == [true, true], "then once only")
+    }
+
     /// Review M4: a refused add keeps the sheet open and says why in it.
     @Test func aRefusedAddKeepsTheSheet() {
         let c = FakeSurfaceCore()
@@ -315,6 +331,66 @@ import VizDAWCore
         #expect(s.problem(for: 1) == nil)
         #expect(s.otherProblems == [kept])
         #expect(s.showsKontrolNotice)
+    }
+
+    /// Final review I2: a row that answers shows no problem line (the core
+    /// drops them too; a line left from before is not shown).
+    @Test func anAnsweringRowShowsNoProblemLine() {
+        let c = FakeSurfaceCore()
+        let s = SurfaceSettings(core: c)
+        s.add(.kontrolMk3, input: "KONTROL S88 MK3 DAW", output: "KONTROL S88 MK3 DAW", position: nil)
+        c.stateRow = SurfaceStateRow(
+            surfaces: [], feedback: [], learning: nil,
+            problems: ["surface 0: the keyboard answered protocol version 3"])
+        s.refresh()
+        #expect(s.problem(for: 0) != nil, "not answering: the line says why")
+        c.rows[0].online = true
+        s.refresh()
+        #expect(s.problem(for: 0) == nil, "answering: no line under Connected")
+    }
+
+    /// Final review T6 m1: a half-found keyboard fills the side that was
+    /// found, and the sheet says nothing.
+    @Test func aHalfFoundKontrolFillsTheSideFound() {
+        let c = FakeSurfaceCore()
+        c.kontrol = SurfacePortsRow(sources: ["KONTROL S88 MK3 DAW"], destinations: [])
+        let s = SurfaceSettings(core: c)
+        s.beginAdd()
+        s.setDraftKind(.kontrolMk3)
+        #expect(s.draft?.input == "KONTROL S88 MK3 DAW" && s.draft?.output == "Out A")
+        #expect(s.draftNote == nil)
+        c.kontrol = SurfacePortsRow(sources: [], destinations: ["KONTROL S49 MK3 DAW"])
+        s.beginAdd()
+        s.setDraftKind(.kontrolMk3)
+        #expect(s.draft?.input == "In A" && s.draft?.output == "KONTROL S49 MK3 DAW")
+        #expect(s.draftNote == nil)
+    }
+
+    /// Final review T6 m2: choosing the Kontrol reads the ports again first,
+    /// so a DAW port that appeared since the sheet opened is in the pickers.
+    @Test func choosingTheKontrolRefreshesThePorts() {
+        let c = FakeSurfaceCore()
+        let s = SurfaceSettings(core: c)
+        s.beginAdd()
+        let reads = c.portReads
+        c.portList = SurfacePortsRow(sources: ["In A", "KONTROL S88 MK3 DAW"], destinations: ["Out A", "KONTROL S88 MK3 DAW"])
+        c.kontrol = SurfacePortsRow(sources: ["KONTROL S88 MK3 DAW"], destinations: ["KONTROL S88 MK3 DAW"])
+        s.setDraftKind(.kontrolMk3)
+        #expect(c.portReads > reads)
+        #expect(s.ports.sources.contains("KONTROL S88 MK3 DAW"))
+        #expect(s.draft?.input == "KONTROL S88 MK3 DAW")
+    }
+
+    /// Final review T6 m3: no ports at all and the Kontrol chosen: the note,
+    /// and the pickers stay empty.
+    @Test func noPortsAtAllAndTheKontrolGiveTheNote() {
+        let c = FakeSurfaceCore()
+        c.portList = SurfacePortsRow(sources: [], destinations: [])
+        let s = SurfaceSettings(core: c)
+        s.beginAdd()
+        s.setDraftKind(.kontrolMk3)
+        #expect(s.draftNote == SurfaceSettings.noKontrol)
+        #expect(s.draft?.input == "" && s.draft?.output == "")
     }
 
     /// Ruling 11: descriptive wording only.

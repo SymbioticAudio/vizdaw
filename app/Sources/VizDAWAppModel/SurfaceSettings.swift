@@ -61,8 +61,11 @@ public struct SurfaceDraft: Equatable, Sendable {
         if q != problems { problems = q }
     }
 
-    /// The last line about surface `id`, without "surface {id}: " (Ruling 10).
+    /// The last line about surface `id`, without "surface {id}: " (Ruling 10);
+    /// nil while it answers (final review I2: the core drops its lines when
+    /// it comes online, and a line left over must not sit under "Connected").
     public func problem(for id: UInt32) -> String? {
+        if rows.contains(where: { $0.id == id && $0.connected && $0.online }) { return nil }
         let prefix = "surface \(id): "
         return problems.last { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
     }
@@ -76,17 +79,21 @@ public struct SurfaceDraft: Equatable, Sendable {
     /// A Kontrol is configured: the list shows the notice (M11).
     public var showsKontrolNotice: Bool { rows.contains { $0.kind == .kontrolMk3 } }
 
-    /// Sets the sheet's type; a Kontrol takes its DAW port when one is found (Ruling 10).
+    /// Sets the sheet's type; a Kontrol takes its DAW port when one is found
+    /// (Ruling 10), each side on its own (final review T6 m1). The ports are
+    /// read again first, so one that appeared since the sheet opened is in
+    /// the pickers (T6 m2).
     public func setDraftKind(_ k: SurfaceKindRow) {
+        guard draft != nil else { return }
+        refresh()
         guard var d = draft else { return }
         d.kind = k
         draftNote = nil
         if k == .kontrolMk3 {
             let found = core.kontrolPorts()
-            if let i = found.sources.first, let o = found.destinations.first {
-                d.input = i
-                d.output = o
-            } else {
+            if let i = found.sources.first { d.input = i }
+            if let o = found.destinations.first { d.output = o }
+            if found.sources.isEmpty && found.destinations.isEmpty {
                 draftNote = Self.noKontrol
             }
         }
@@ -160,7 +167,8 @@ public struct SurfaceDraft: Equatable, Sendable {
         draft = nil
     }
 
-    /// "MCU-compatible", "MCU XT-compatible", "HUI-compatible".
+    /// "MCU-compatible", "MCU XT-compatible", "HUI-compatible", "Kontrol
+    /// S-Series MK3 (DAW mode)".
     nonisolated public static func title(_ k: SurfaceKindRow) -> String {
         switch k {
         case .mcu: "MCU-compatible"
