@@ -15,13 +15,14 @@ pub enum EdgeKind {
     Output,
     /// Send number `n` of the source strip.
     Send(usize),
-    /// The source feeds this insert's sidechain input.
+    /// The source feeds this slot's (an insert's or the EQ's) sidechain
+    /// input.
     Sidechain(PluginInstanceId),
 }
 
 /// Every routing edge `(from, to, kind)`: each non-master strip's output
 /// (to master or a bus) and sends, in strip order, then every sidechain
-/// feed (source → strip owning the insert).
+/// feed (source → strip owning the insert or EQ).
 pub fn routing_edges(m: &Mixer) -> Vec<(StripId, StripId, EdgeKind)> {
     let mut e = Vec::new();
     for s in m.strips().values() {
@@ -37,7 +38,7 @@ pub fn routing_edges(m: &Mixer) -> Vec<(StripId, StripId, EdgeKind)> {
         }
     }
     for s in m.strips().values() {
-        for slot in s.inserts.iter() {
+        for slot in s.chain() {
             if let Some(src) = slot.sidechain {
                 e.push((src, s.id, EdgeKind::Sidechain(slot.id)));
             }
@@ -148,7 +149,7 @@ pub fn check_routing(m: &Mixer) -> Result<()> {
         for x in s.sends.iter() {
             check_bus(m, s.id, x.target, "send")?;
         }
-        for slot in s.inserts.iter() {
+        for slot in s.chain() {
             if let Some(src) = slot.sidechain {
                 m.strip(src)?;
             }
@@ -177,7 +178,7 @@ pub fn check_strip_values(s: &Strip) -> Result<()> {
     for x in s.sends.iter() {
         level("send.level_db", x.level_db)?;
     }
-    for slot in s.inserts.iter() {
+    for slot in s.chain() {
         if slot.params.values().any(|v| !v.is_finite()) {
             return Err(ModelError::range("params", "non-finite value"));
         }
@@ -260,7 +261,7 @@ pub fn mixer_problems(doc: &Document) -> Vec<String> {
                 );
             }
         }
-        for slot in s.inserts.iter() {
+        for slot in s.chain() {
             if !instances.insert(slot.id) || slot.id.0 >= c.plugin {
                 push(&ctx, ModelError::range("plugin.id", slot.id));
             }

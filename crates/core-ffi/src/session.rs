@@ -2611,6 +2611,13 @@ fn slot_name(doc: &Document, id: core_model::ids::PluginInstanceId) -> String {
     let place = match doc.find_slot(id) {
         Some(SlotOwner::Insert(strip, _)) => doc.mixer().strip(strip).ok().map(|s| s.name.clone()),
         Some(SlotOwner::Instrument(d)) => doc.instruments().get(&d).map(|d| d.name.clone()),
+        // "‹strip› — EQ ‹plugin›" (plan 7b Ruling 7).
+        Some(SlotOwner::Eq(strip)) => {
+            return match doc.mixer().strip(strip) {
+                Ok(s) => format!("{} — EQ {plugin}", s.name),
+                Err(_) => format!("EQ {plugin}"),
+            };
+        }
         None => None,
     };
     match place {
@@ -9817,8 +9824,31 @@ type PageChain = Vec<(PluginInstanceId, String)>;
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_warning;
+    use super::{normalize_warning, slot_name};
     use core_model::ids::EventId;
+
+    /// Plan 7b Ruling 7: a message about an EQ names its strip and "EQ".
+    #[test]
+    fn an_eq_slot_is_named_after_its_strip() {
+        use core_model::command::{Command, MixerCmd, apply};
+        use core_model::document::Document;
+        use core_model::ids::PluginInstanceId;
+        use core_model::mixer::PluginRef;
+        let d = Document::new();
+        let m = d.mixer().master();
+        let mut p = PluginRef::from_legacy("clap:eq");
+        p.name = "Tone".into();
+        let d = apply(
+            &d,
+            &Command::Mixer(MixerCmd::SetEq {
+                strip: m,
+                plugin: Some(p),
+            }),
+        )
+        .unwrap()
+        .doc;
+        assert_eq!(slot_name(&d, PluginInstanceId(0)), "Master — EQ Tone");
+    }
 
     /// 5b final review m1: a note about `ev12` is never named after
     /// `ev1`'s media, whichever comes first.

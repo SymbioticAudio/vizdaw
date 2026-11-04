@@ -452,3 +452,32 @@ fn a_removed_slots_editor_is_closed_even_while_its_processor_is_out() {
     );
     assert!(rig.host.instance(ids[0]).is_none());
 }
+
+/// Plan 7b Ruling 7: the EQ slot is one of the slots the host loads, as an
+/// effect (not an instrument).
+#[test]
+fn an_eq_slot_is_loaded_as_an_effect() {
+    use core_engine::graph::InsertFactory;
+    let (mut rig, _) = Rig::new(&[]);
+    assert!(rig.host.loads_needed(rig.hist.doc()).is_empty());
+    let synth = rig.synth;
+    rig.edit(MixerCmd::SetEq {
+        strip: synth,
+        plugin: Some(r("eq")),
+    });
+    assert_eq!(rig.host.loads_needed(rig.hist.doc()), vec![r("eq")]);
+    rig.host.sync(rig.hist.doc());
+    rig.host.wait_ready(WAIT);
+    assert!(rig.host.loads_needed(rig.hist.doc()).is_empty());
+    let slot = rig
+        .hist
+        .doc()
+        .mixer()
+        .strip(synth)
+        .unwrap()
+        .eq
+        .clone()
+        .unwrap();
+    let made = rig.host.factory().make(&slot, SR, 4096);
+    assert!(made.is_ok(), "{:?}", made.err());
+}

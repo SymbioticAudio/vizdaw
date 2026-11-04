@@ -184,6 +184,30 @@ impl AuxSend {
     }
 }
 
+/// A strip's own colour (controller ruling C-1, plan 7b Ruling 12): one
+/// of eight swatches the theme draws. A strip without one shows its kind's
+/// colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Swatch {
+    /// Red.
+    Red,
+    /// Orange.
+    Orange,
+    /// Yellow.
+    Yellow,
+    /// Green.
+    Green,
+    /// Teal.
+    Teal,
+    /// Blue.
+    Blue,
+    /// Purple.
+    Purple,
+    /// Pink.
+    Pink,
+}
+
 /// A mixer channel strip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -194,7 +218,16 @@ pub struct Strip {
     pub name: String,
     /// What feeds it.
     pub kind: StripKind,
-    /// Insert chain, processed in order.
+    /// The user's colour for it, if any (plan 7b Ruling 12); not written
+    /// when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<Swatch>,
+    /// The EQ slot (plan 7b Ruling 7): a saved part of the strip that
+    /// processes before the inserts and is not one of them; not written
+    /// when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eq: Option<PluginSlot>,
+    /// Insert chain, processed in order after the EQ.
     pub inserts: Vector<PluginSlot>,
     /// Fader in dB (`GAIN_FLOOR_DB` = −∞ … `GAIN_MAX_DB`).
     pub gain_db: f64,
@@ -222,6 +255,8 @@ impl Strip {
             id,
             name: name.into(),
             kind,
+            colour: None,
+            eq: None,
             inserts: Vector::new(),
             gain_db: 0.0,
             pan: 0.0,
@@ -231,6 +266,16 @@ impl Strip {
             output: Output::Master,
             automation: AutomationMode::Read,
         }
+    }
+
+    /// Its processing chain: the EQ (when loaded), then the inserts.
+    pub fn chain(&self) -> impl Iterator<Item = &PluginSlot> + '_ {
+        self.eq.iter().chain(self.inserts.iter())
+    }
+
+    /// [`chain`](Self::chain), mutably.
+    pub(crate) fn chain_mut(&mut self) -> impl Iterator<Item = &mut PluginSlot> + '_ {
+        self.eq.iter_mut().chain(self.inserts.iter_mut())
     }
 }
 
@@ -334,6 +379,14 @@ impl Mixer {
             .flat_map(|s| s.inserts.iter().enumerate().map(move |(i, p)| (s.id, i, p)))
     }
 
+    /// Every plugin slot of every strip's chain (its EQ, then its
+    /// inserts) as `(strip, slot)`, by strip ID.
+    pub fn slots(&self) -> impl Iterator<Item = (StripId, &PluginSlot)> + '_ {
+        self.strips
+            .values()
+            .flat_map(|s| s.chain().map(move |p| (s.id, p)))
+    }
+
     /// Adds `strip` at display position `index` (default: the end).
     pub(crate) fn add(&mut self, strip: Strip, index: Option<usize>) {
         let id = strip.id;
@@ -364,7 +417,7 @@ impl Mixer {
                     st.output = Output::Master;
                 }
                 st.sends.retain(|x| x.target != id);
-                for slot in st.inserts.iter_mut() {
+                for slot in st.chain_mut() {
                     if slot.sidechain == Some(id) {
                         slot.sidechain = None;
                     }
