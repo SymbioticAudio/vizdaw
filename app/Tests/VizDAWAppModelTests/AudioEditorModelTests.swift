@@ -39,6 +39,9 @@ private let toneLane = LaneKey(3, 30)
         // A first sync before the pane has a width must not leave a sliver
         // (Task 4 review M1).
         m.audioEditor.sync(width: 0)
+        // Nor does Fit Region at width 0 (Task 6 review M6).
+        m.audioEditor.fit()
+        #expect(m.audioEditor.axis == FrameAxis() && m.audioEditor.shownRegion == nil)
         m.audioEditor.sync(width: 600)
         #expect(m.audioEditor.axis == FrameAxis.fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000))
         #expect(m.editedRegion?.row.id == 71)

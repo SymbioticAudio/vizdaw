@@ -298,15 +298,17 @@ public enum AudioEditorGeometry {
         return out
     }
 
-    /// The columns where `|sample| × envelope` goes over 0 dBFS in any channel.
-    public static func clipColumns(_ rows: OverviewRows, envelope: [Float]) -> [Int] {
+    /// The columns where `|sample| × envelope` goes over 0 dBFS in any
+    /// channel, or with `channel`, in that one only (none past the last).
+    public static func clipColumns(_ rows: OverviewRows, envelope: [Float], channel: Int? = nil) -> [Int] {
         let n = Int(rows.columns)
         let ch = Int(rows.channels)
         guard n > 0, ch > 0, envelope.count == n, rows.min.count >= n * ch, rows.max.count >= n * ch else { return [] }
+        let channels = channel.map { (0..<ch).contains($0) ? $0..<($0 + 1) : 0..<0 } ?? 0..<ch
         return (0..<n).filter { c in
             let e = envelope[c]
             guard e.isFinite else { return false }
-            return (0..<ch).contains { k in
+            return channels.contains { k in
                 let lo = rows.min[k * n + c]
                 let hi = rows.max[k * n + c]
                 return (lo.isFinite && abs(lo) * e > 1) || (hi.isFinite && abs(hi) * e > 1)

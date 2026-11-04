@@ -55,7 +55,7 @@ struct AudioEditorBar: View {
     private func title(_ text: String) -> some View {
         Text(text)
             .font(theme.type.label.font)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(theme.text.secondary.color)
             .fixedSize()
             .accessibilityHidden(true)
     }
@@ -103,7 +103,8 @@ struct AudioEditorBar: View {
             .help(label)
     }
 
-    private var row: some View {
+    /// The typed values.
+    private var values: some View {
         HStack(spacing: theme.spacing.m) {
             field("Gain", .gain)
             HStack(spacing: theme.spacing.xs) {
@@ -116,12 +117,21 @@ struct AudioEditorBar: View {
             }
             field("Start", .start)
             field("Length", .length)
-            Spacer(minLength: theme.spacing.l)
-            HStack(spacing: theme.spacing.xs) {
-                field("Peak", .peak)
-                Button("Normalize") { editor.normalize() }
-                    .help("Normalize the region's gain to the peak")
-            }
+        }
+    }
+
+    /// The Peak box and Normalize.
+    private var normalize: some View {
+        HStack(spacing: theme.spacing.xs) {
+            field("Peak", .peak)
+            Button("Normalize") { editor.normalize() }
+                .help("Normalize the region's gain to the peak")
+        }
+    }
+
+    /// The zoom and the waveform height.
+    private var viewControls: some View {
+        HStack(spacing: theme.spacing.m) {
             HStack(spacing: theme.spacing.xs) {
                 icon(.zoomOut, "Zoom Out") { editor.zoomOut() }
                 icon(.zoomIn, "Zoom In") { editor.zoomIn() }
@@ -133,16 +143,36 @@ struct AudioEditorBar: View {
                 icon(.expand, "Taller Waveform") { editor.taller() }
             }
         }
-        .controlSize(.small)
-        .padding(.horizontal, theme.spacing.s)
     }
 
+    /// One row when the pane is wide enough; otherwise two (Task 6 review
+    /// I1), as the transport bar wraps: the values on the first, scrolling
+    /// with a visible indicator only if the pane is narrower still, and
+    /// Peak, Normalize and the view controls on the second, never
+    /// scrolled, the view controls at its trailing end.
     var body: some View {
-        GeometryReader { g in
-            ScrollView(.horizontal, showsIndicators: false) {
-                row.frame(minWidth: g.size.width, minHeight: g.size.height)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: theme.spacing.m) {
+                values
+                Spacer(minLength: theme.spacing.l)
+                normalize
+                viewControls
+            }
+            .padding(theme.spacing.s)
+            VStack(spacing: 0) {
+                ScrollView(.horizontal) {
+                    values.padding(theme.spacing.s)
+                }
+                .scrollIndicators(.visible)
+                HStack(spacing: theme.spacing.m) {
+                    normalize
+                    Spacer(minLength: theme.spacing.l)
+                    viewControls
+                }
+                .padding([.horizontal, .bottom], theme.spacing.s)
             }
         }
-        .frame(height: boxSize.height + 2 * theme.spacing.s)
+        .controlSize(.small)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }

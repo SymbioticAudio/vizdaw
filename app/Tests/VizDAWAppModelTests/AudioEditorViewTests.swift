@@ -88,15 +88,23 @@ private func centre(_ h: AudioEditorHandle, _ m: DocumentModel) throws -> CGPoin
     @Test func anEscapeCancelsTheDrag() throws {
         let (f, m, c, w) = audioCanvas()
         defer { w.close() }
+        // With nothing to cancel, Escape goes on up the chain (review M4).
+        let after = KeyRecorder()
+        c.nextResponder = after
+        c.keyDown(with: try escape(in: w))
+        #expect(after.keys == [53])
+        let before = try #require(m.editedRegion).row.fadeIn
         let p = try centre(.fadeIn, m)
         c.press(p, clicks: 1, modifiers: [])
         c.drag(CGPoint(x: p.x + 40, y: p.y), modifiers: [])
         #expect(f.calls.first == "begin Fade In")
-        c.cancelKey()
+        c.keyDown(with: try escape(in: w))
+        #expect(after.keys == [53], "a drag's Escape is the canvas's own")
         c.release(CGPoint(x: p.x + 40, y: p.y), modifiers: [])
         #expect(f.calls.filter { $0 == "abort" }.count == 1)
         #expect(!f.calls.contains("end"))
         #expect(m.editor.gesture == nil)
+        #expect(m.editedRegion?.row.fadeIn == before, "the start state is back (review M7)")
     }
 
     @Test func theCanvasRedrawsWhenItsThemeChanges() {
@@ -113,4 +121,19 @@ private func centre(_ h: AudioEditorHandle, _ m: DocumentModel) throws -> CGPoin
         c.theme = same
         #expect(c.displayRequests == after, "the same theme redraws nothing")
     }
+}
+
+/// Records the key codes that reach it.
+private final class KeyRecorder: NSResponder {
+    var keys: [UInt16] = []
+    override func keyDown(with event: NSEvent) { keys.append(event.keyCode) }
+}
+
+@MainActor
+private func escape(in w: NSWindow) throws -> NSEvent {
+    try #require(
+        NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: w.windowNumber,
+            context: nil, characters: "\u{1B}", charactersIgnoringModifiers: "\u{1B}", isARepeat: false,
+            keyCode: 53))
 }

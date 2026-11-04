@@ -132,15 +132,21 @@ public final class AudioEditorCanvas: NSView, ThemedView {
         release(convert(e.locationInWindow, from: nil), modifiers: e.modifierFlags)
     }
 
+    /// Something an Escape would cancel: a press, or an open gesture.
+    private var cancellable: Bool { pressed != nil || editor.gesture != nil }
+
+    /// Escape cancels; with nothing to cancel it goes on up the chain.
     public override func keyDown(with e: NSEvent) {
-        if e.keyCode == 53 {  // Escape
+        if e.keyCode == 53, cancellable {  // Escape
             cancelKey()
         } else {
             super.keyDown(with: e)
         }
     }
 
-    public override func cancelOperation(_ sender: Any?) { cancelKey() }
+    public override func cancelOperation(_ sender: Any?) {
+        if cancellable { cancelKey() } else { super.cancelOperation(sender) }
+    }
 
     /// A press grabs the handle under `p`, if any. The canvas becomes the
     /// first responder, so Escape reaches it.
@@ -317,22 +323,33 @@ public final class AudioEditorCanvas: NSView, ThemedView {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    /// 3. The level scale: labels in the gutter, lines across the wave. A
-    /// label held inside the wave (the top mark's) can reach the next one:
-    /// that next label is left out, its line kept.
+    /// 3. The level scale: labels in the gutter, lines across the wave.
+    /// Each band's labels are held inside the band, and a label that would
+    /// reach the one above it in its band is left out (its line kept), so
+    /// every band is labelled alike.
     private func drawScale(amplitude: Int, channels: Int, gutter: CGRect, wave: CGRect) {
         let attrs = captionAttributes
+        let band = wave.height / CGFloat(max(channels, 1))
+        var k = 0
         var last: CGRect?
         for mark in AudioEditorGeometry.scaleMarks(amplitude: amplitude, channels: channels, in: wave) {
             theme.audioScaleLine.setFill()
             CGRect(x: wave.minX, y: mark.y - 0.5, width: wave.width, height: 1).fill()
             let s = NSString(string: mark.label)
             let size = s.size(withAttributes: attrs)
-            let y = min(max(mark.y - size.height / 2, wave.minY), wave.maxY - size.height)
+            let top = wave.minY + band * CGFloat(k)
+            let y = min(max(mark.y - size.height / 2, top), top + band - size.height)
             let box = CGRect(x: gutter.maxX - theme.spacing.xs - size.width, y: y, width: size.width, height: size.height)
-            if let last, box.minY < last.maxY { continue }
-            last = box
-            s.draw(at: box.origin, withAttributes: attrs)
+            // "−∞", at the centre, closes a band.
+            let closes = mark.label.hasSuffix("\u{221E}")
+            if last.map({ box.minY >= $0.maxY }) ?? true {
+                s.draw(at: box.origin, withAttributes: attrs)
+                last = box
+            }
+            if closes {
+                k += 1
+                last = nil
+            }
         }
     }
 
@@ -410,8 +427,8 @@ public final class AudioEditorCanvas: NSView, ThemedView {
             let w = spanRect.width / CGFloat(span.columns)
             let band = wave.height / CGFloat(channels)
             theme.audioClip.setFill()
-            for c in AudioEditorGeometry.clipColumns(rows, envelope: envelope) {
-                for k in 0..<channels {
+            for k in 0..<channels {
+                for c in AudioEditorGeometry.clipColumns(rows, envelope: envelope, channel: k) {
                     CGRect(
                         x: spanRect.minX + CGFloat(c) * w, y: wave.minY + band * CGFloat(k), width: max(w, 1),
                         height: theme.spacing.xxs
@@ -480,8 +497,8 @@ public final class AudioEditorCanvas: NSView, ThemedView {
     }
 
     /// One element per handle, at its hit area (inside the wave rect).
+    /// Read-only: the fit comes from `refresh()` and `layout()`.
     public override func accessibilityChildren() -> [Any]? {
-        model.sync(width: wave.width)
         guard let r = document.editedRegion else {
             a11yElements = []
             return []

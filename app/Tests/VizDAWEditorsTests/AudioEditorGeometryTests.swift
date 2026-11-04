@@ -201,6 +201,14 @@ private let media: UInt64 = 96_000
         let st = AudioEditorGeometry.shaped(stereo, envelope: [2, 0.5], amplitude: 1)
         #expect(st.max == [2, 0.5, 1, 0.25] && st.min == [-2, -0.5, -1, -0.25])
         #expect(AudioEditorGeometry.clipColumns(stereo, envelope: [2, 0.5]) == [0])
+        // Per band (Task 6 review M3): only the channel that clips.
+        #expect(AudioEditorGeometry.clipColumns(stereo, envelope: [2, 0.5], channel: 0) == [0])
+        #expect(AudioEditorGeometry.clipColumns(stereo, envelope: [2, 0.5], channel: 1) == [])
+        let right = OverviewRows(
+            state: .ready, channels: 2, columns: 2, min: [-0.5, -0.5, -1, -1], max: [0.5, 0.5, 1, 1])
+        #expect(AudioEditorGeometry.clipColumns(right, envelope: [2, 0.5], channel: 0) == [])
+        #expect(AudioEditorGeometry.clipColumns(right, envelope: [2, 0.5], channel: 1) == [0])
+        #expect(AudioEditorGeometry.clipColumns(right, envelope: [2, 0.5], channel: 2) == [])
         let line = AudioEditorGeometry.envelopeLine(
             [0, 1], amplitude: 1, channel: 0, channels: 1, in: CGRect(x: 0, y: 0, width: 10, height: 100))
         #expect(line == [CGPoint(x: 2.5, y: 50), CGPoint(x: 7.5, y: 0)])

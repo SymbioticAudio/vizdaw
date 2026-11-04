@@ -623,6 +623,59 @@ fn audio_import_plays_and_reports_media() {
     );
     app.wait(&w2, json!({"condition": "stopped"}));
 
+    // Plan 7c Task 6 review I1: at the default window, with the left pane
+    // shown, every control the channel drives in the audio editor (Ruling
+    // 10's and the boxes Task 7 types into) lies inside its pane and the
+    // window.
+    let (region, _) = wait_for_label_like(&mut app, &w2, "Region tone", "");
+    app.call("ui.click", json!({"window": w2, "element": region}));
+    app.call(
+        "command.run",
+        json!({"id": "editors.audio_editor", "window": w2}),
+    );
+    wait_for_label(&mut app, &w2, "Audio Editor Pane");
+    let windows = app.call("state.get", json!({"target": "windows"}));
+    let win = windows["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["number"] == w2)
+        .unwrap()
+        .clone();
+    let width = win["frame"]["width"].as_f64().unwrap();
+    let tree = app.call("ui.tree", json!({"window": w2}));
+    let pane = find_node(&tree["nodes"], "Audio Editor Pane").expect("the pane");
+    let (px, pw) = (
+        pane["frame"]["x"].as_f64().unwrap(),
+        pane["frame"]["width"].as_f64().unwrap(),
+    );
+    assert!(px > 0.0, "the left pane is shown: {pane}");
+    for label in [
+        "Audio Editor",
+        "Region Gain",
+        "Fade In Length",
+        "Fade Out Length",
+        "Region Start",
+        "Region Length",
+        "Normalize Peak",
+        "Normalize",
+        "Zoom Out",
+        "Zoom In",
+        "Fit Region",
+        "Shorter Waveform",
+        "Taller Waveform",
+    ] {
+        let n = find_node(&tree["nodes"], label).unwrap_or_else(|| panic!("no {label:?}"));
+        let (x, w) = (
+            n["frame"]["x"].as_f64().unwrap(),
+            n["frame"]["width"].as_f64().unwrap(),
+        );
+        assert!(
+            x >= px - 0.5 && x + w <= px + pw + 0.5 && x + w <= width + 0.5,
+            "{label:?} at {x}+{w} is outside the pane {px}+{pw} or the window {width}"
+        );
+    }
+
     // Project Settings: 24-bit to float, every file converted.
     let r = app.call(
         "command.run",
