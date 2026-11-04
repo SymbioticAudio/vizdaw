@@ -40,6 +40,7 @@ public struct FrameAxis: Equatable, Sendable {
     /// `x`; a factor that is not finite or ≤ 0 gives `self`.
     public func zoomed(by factor: Double, aroundX x: CGFloat, width: CGFloat, mediaFrames: UInt64) -> FrameAxis {
         guard factor.isFinite, factor > 0 else { return self }
+        let x = x.isFinite ? x : 0
         let fpp = min(
             max(framesPerPoint / factor, Self.minFramesPerPoint),
             Self.maxFramesPerPoint(mediaFrames: mediaFrames, width: width))
@@ -51,14 +52,18 @@ public struct FrameAxis: Equatable, Sendable {
     /// Moves the view `dx` points right, the origin held within
     /// `−w·fpp/2 … mediaFrames − w·fpp/2`.
     public func scrolled(byPoints dx: CGFloat, width: CGFloat, mediaFrames: UInt64) -> FrameAxis {
-        FrameAxis(framesPerPoint: framesPerPoint, originFrame: originFrame + Double(dx) * framesPerPoint)
+        FrameAxis(
+            framesPerPoint: framesPerPoint, originFrame: originFrame + (dx.isFinite ? Double(dx) * framesPerPoint : 0))
             .clamped(width: width, mediaFrames: mediaFrames)
     }
 
     private func clamped(width: CGFloat, mediaFrames: UInt64) -> FrameAxis {
-        let half = Double(max(width, 1)) * framesPerPoint / 2
+        // A non-finite axis (from `init`) is repaired here, never kept.
         var out = self
-        out.originFrame = min(max(originFrame, -half), Double(mediaFrames) - half)
+        if !(framesPerPoint.isFinite && framesPerPoint > 0) { out.framesPerPoint = 512 }
+        if !originFrame.isFinite { out.originFrame = 0 }
+        let half = Double(max(width, 1)) * out.framesPerPoint / 2
+        out.originFrame = min(max(out.originFrame, -half), Double(mediaFrames) - half)
         return out
     }
 }

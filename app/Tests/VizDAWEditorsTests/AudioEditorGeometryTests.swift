@@ -71,6 +71,11 @@ private let media: UInt64 = 96_000
         #expect(target(r, .fadeIn, dx: -1000) == fades(0, 12_000))
         #expect(target(r, .fadeIn, dx: .nan) == nil)
         #expect(target(r, .fadeIn, dx: 1e300) == fades(36_000, 12_000))
+        // M4: the arrangement's own helper no longer traps either.
+        let box = CGRect(x: 0, y: 0, width: 480, height: 40)
+        #expect(RegionHandles.fades(r, .fadeIn, dx: 1e300, in: box).fadeIn == 36_000)
+        #expect(RegionHandles.fades(r, .fadeOut, dx: -.infinity, in: box).fadeOut == 36_000)
+        #expect(RegionHandles.fades(r, .fadeIn, dx: .nan, in: box).fadeIn == 12_000)
     }
 
     @Test func gainDragFollowsTheArrangementsRate() {
@@ -86,7 +91,7 @@ private let media: UInt64 = 96_000
     @Test func handlesOfATinyRegionStayReachable() {
         // 6 points wide: 600 frames at 100 per point.
         let tiny = region(offset: 24_000, frames: 600)
-        let w = CGRect(x: 0, y: 0, width: 600, height: 100)
+        let w = CGRect(x: 0, y: 0, width: 800, height: 100)
         let ax = FrameAxis(framesPerPoint: 100, originFrame: 0)
         func hit(_ r: EventRow, _ x: CGFloat, _ y: CGFloat) -> AudioEditorHandle? {
             AudioEditorGeometry.hit(CGPoint(x: x, y: y), row: r, axis: ax, in: w)
@@ -105,6 +110,31 @@ private let media: UInt64 = 96_000
         #expect(hit(wide, l, 50) == .start)
         #expect(hit(wide, l + 400, 50) == .end)
         #expect(hit(wide, l + 200, 70) == nil)
+        // The gain band: 6 drawn plus 4 slack.
+        #expect(hit(wide, l + 200, 9.5) == .gain && hit(wide, l + 200, 10.5) == nil)
+        // The right side: the fade-out corner and the end edge's slack.
+        #expect(hit(wide, l + 399, 2) == .fadeOut)
+        #expect(hit(wide, l + 403, 50) == .end && hit(wide, l + 405, 50) == nil)
+        // 16 < width < 24: no fades, and the gain band keeps its width.
+        let mid = region(offset: 24_000, frames: 2000)
+        #expect(hit(mid, l + 10, 2) == .gain)
+        #expect(!AudioEditorGeometry.handles(mid, axis: ax, in: w).contains { $0.0 == .fadeIn })
+        // Fades that meet: both corners stay reachable.
+        let met = region(fadeIn: 20_000, fadeOut: 20_000, frames: 40_000)
+        #expect(hit(met, l + 199, 2) == .fadeIn && hit(met, l + 201, 2) == .fadeOut)
+        // Each drawn rect lies inside its hit area.
+        for r in [tiny, wide, mid, met] {
+            let hits = AudioEditorGeometry.handles(r, axis: ax, in: w)
+            for (h, d) in AudioEditorGeometry.drawn(r, axis: ax, in: w) {
+                guard let area = hits.first(where: { $0.0 == h })?.1 else { continue }
+                #expect(area.contains(CGPoint(x: d.midX, y: d.midY)) && area.intersection(d) == d.intersection(w))
+            }
+        }
+        // I2: nothing reaches into the gutter or the ruler.
+        let shifted = FrameAxis(framesPerPoint: 100, originFrame: 30_000)
+        #expect(AudioEditorGeometry.hit(CGPoint(x: 30, y: 20), row: region(), axis: shifted, in: self.wave) == nil)
+        #expect(AudioEditorGeometry.hit(CGPoint(x: 60, y: 20), row: region(), axis: shifted, in: self.wave) == .gain)
+        #expect(AudioEditorGeometry.hit(CGPoint(x: 284, y: 16), row: region(), axis: axis, in: self.wave) == nil)
     }
 
     @Test func scaleMarksNeverOverlap() {
@@ -145,6 +175,13 @@ private let media: UInt64 = 96_000
         #expect(marks[1].label == "0:00.200")
         #expect(marks.last?.label == "0:01.200")
         #expect(AudioEditorGeometry.rulerMarks(axis: ax, width: 600, sampleRate: 0).isEmpty)
+        // Before the file's start there are no marks.
+        let early = AudioEditorGeometry.rulerMarks(
+            axis: FrameAxis(framesPerPoint: 100, originFrame: -9600), width: 600, sampleRate: 48_000)
+        #expect(early.first?.label == "0:00.000" && abs((early.first?.x ?? 0) - 96) < 1e-6)
+        // Far zoom-out stays bounded.
+        let far = AudioEditorGeometry.rulerMarks(axis: FrameAxis(framesPerPoint: 1e12), width: 600, sampleRate: 48_000)
+        #expect(far.count <= 1000)
     }
 
     @Test func waveformScalesByEnvelopeAndAmplitude() {
@@ -167,6 +204,10 @@ private let media: UInt64 = 96_000
         let line = AudioEditorGeometry.envelopeLine(
             [0, 1], amplitude: 1, channel: 0, channels: 1, in: CGRect(x: 0, y: 0, width: 10, height: 100))
         #expect(line == [CGPoint(x: 2.5, y: 50), CGPoint(x: 7.5, y: 0)])
+        let second = AudioEditorGeometry.envelopeLine(
+            [0.5, .nan, 4], amplitude: 1, channel: 1, channels: 2, in: CGRect(x: 0, y: 0, width: 9, height: 100))
+        #expect(second == [CGPoint(x: 1.5, y: 62.5), CGPoint(x: 4.5, y: 75), CGPoint(x: 7.5, y: 50)])
+        #expect(AudioEditorGeometry.envelopeLine([1], amplitude: 1, channel: 2, channels: 2, in: CGRect(x: 0, y: 0, width: 9, height: 9)).isEmpty)
     }
 
     @Test func columnsNeverExceedTheCoreLimit() {
@@ -192,8 +233,15 @@ private let media: UInt64 = 96_000
         #expect(span(0, fpp: .nan) == nil)
         #expect(span(-1e300) == nil)
         #expect(span(1e300) == nil)
-        let scrolled = FrameAxis().scrolled(byPoints: .nan, width: 600, mediaFrames: 96_000)
-        #expect(AudioEditorGeometry.span(axis: scrolled, width: 600, mediaFrames: 96_000) == nil)
+        // M3: scrolling or zooming a NaN-origin axis leaves a finite one (it no longer stays NaN).
+        let nan = FrameAxis(framesPerPoint: 88, originFrame: .nan)
+        for repaired in [
+            nan.scrolled(byPoints: .nan, width: 600, mediaFrames: 96_000),
+            nan.zoomed(by: 2, aroundX: .nan, width: 600, mediaFrames: 96_000),
+        ] {
+            #expect(repaired.originFrame.isFinite && repaired.framesPerPoint.isFinite)
+            #expect(AudioEditorGeometry.span(axis: repaired, width: 600, mediaFrames: 96_000) != nil)
+        }
         #expect(AudioEditorGeometry.span(axis: FrameAxis(), width: .infinity, mediaFrames: 96_000) == nil)
     }
 }

@@ -92,7 +92,9 @@ public enum RegionHandles {
         fadeIn: Int64, fadeOut: Int64
     ) {
         let len = Int64(clamping: r.frames)
-        let delta = Int64((Double(dx) * framesPerPoint(r, rect)).rounded())
+        let product = Double(dx) * framesPerPoint(r, rect)
+        // NaN counts as no move; a huge product is held before `Int64` (which traps).
+        let delta = product.isNaN ? 0 : Int64(min(max(product.rounded(), -1e15), 1e15))
         let fi = max(r.fadeIn.length, 0)
         let fo = max(r.fadeOut.length, 0)
         switch handle {

@@ -62,30 +62,56 @@ public enum AudioEditorGeometry {
         return CGRect(x: x0, y: wave.minY, width: max(x1 - x0, 0), height: wave.height)
     }
 
-    /// The hit areas (slack included), in hit order: fade corners, trim
-    /// edges, then the gain band.
-    public static func handles(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> [(AudioEditorHandle, CGRect)] {
+    /// The drawn handles, in hit order: the fade corners (only when the
+    /// region is at least `RegionHandles.minWidth` wide), the trim edges
+    /// (`min(edgeWidth, width / 2)` wide, the wave's full height) and the
+    /// gain band along the top. Not clipped to the wave.
+    public static func drawn(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> [(AudioEditorHandle, CGRect)] {
         let rect = regionRect(r, axis: axis, in: wave)
         guard rect.width.isFinite, rect.minX.isFinite, rect.width > 0 else { return [] }
         var out: [(AudioEditorHandle, CGRect)] = []
         if rect.width >= RegionHandles.minWidth {
-            let side = cornerSize + 2 * slack
             for (h, cx) in [(AudioEditorHandle.fadeIn, RegionHandles.fadeInX(r, in: rect)),
                             (.fadeOut, RegionHandles.fadeOutX(r, in: rect))] {
-                out.append((h, CGRect(x: cx - side / 2, y: rect.minY - slack, width: side, height: side)))
+                out.append((h, CGRect(x: cx - cornerSize / 2, y: rect.minY, width: cornerSize, height: cornerSize)))
             }
         }
         let edge = min(edgeWidth, rect.width / 2)
-        out.append((.start, CGRect(x: rect.minX - slack, y: rect.minY, width: edge + slack, height: rect.height)))
-        out.append((.end, CGRect(x: rect.maxX - edge, y: rect.minY, width: edge + slack, height: rect.height)))
-        if rect.width - 2 * edge > 0 {
-            out.append((.gain, CGRect(x: rect.minX + edge, y: rect.minY, width: rect.width - 2 * edge, height: gainBand + gainSlack)))
-        }
+        out.append((.start, CGRect(x: rect.minX, y: rect.minY, width: edge, height: rect.height)))
+        out.append((.end, CGRect(x: rect.maxX - edge, y: rect.minY, width: edge, height: rect.height)))
+        out.append((.gain, CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: gainBand)))
         return out
     }
 
+    /// The hit areas, in hit order: each drawn rect plus its slack (corners
+    /// all round, edges outward, the band below), clipped to `wave`.
+    public static func handles(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> [(AudioEditorHandle, CGRect)] {
+        drawn(r, axis: axis, in: wave).compactMap { h, d in
+            var area = d
+            switch h {
+            case .fadeIn, .fadeOut: area = d.insetBy(dx: -slack, dy: -slack)
+            case .start: area = CGRect(x: d.minX - slack, y: d.minY, width: d.width + slack, height: d.height)
+            case .end: area = CGRect(x: d.minX, y: d.minY, width: d.width + slack, height: d.height)
+            case .gain: area = CGRect(x: d.minX, y: d.minY, width: d.width, height: d.height + gainSlack)
+            }
+            let clipped = area.intersection(wave)
+            return clipped.isNull || clipped.isEmpty ? nil : (h, clipped)
+        }
+    }
+
+    /// What a press grabs. When both fade corners reach `p` (the fades
+    /// meet), the nearer corner wins, and at a tie the side of the press.
     public static func hit(_ p: CGPoint, row: EventRow, axis: FrameAxis, in wave: CGRect) -> AudioEditorHandle? {
-        handles(row, axis: axis, in: wave).first { $0.1.contains(p) }?.0
+        guard let first = handles(row, axis: axis, in: wave).first(where: { $0.1.contains(p) })?.0 else { return nil }
+        guard first == .fadeIn else { return first }
+        let d = drawn(row, axis: axis, in: wave)
+        guard let fi = d.first(where: { $0.0 == .fadeIn })?.1, let fo = d.first(where: { $0.0 == .fadeOut })?.1,
+            handles(row, axis: axis, in: wave).contains(where: { $0.0 == .fadeOut && $0.1.contains(p) })
+        else { return first }
+        let dIn = abs(p.x - fi.midX)
+        let dOut = abs(p.x - fo.midX)
+        if dIn != dOut { return dIn < dOut ? .fadeIn : .fadeOut }
+        return p.x < fi.midX ? .fadeIn : .fadeOut
     }
 
     /// The gesture's (and undo step's) name.
