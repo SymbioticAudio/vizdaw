@@ -178,6 +178,30 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
         #expect(asks == 1, "drawing does not retry a mixer that could not be made")
     }
 
+    /// Final review m5: a failed ask (the core busy on the first draw) is
+    /// tried again once the document moves on: its next snapshot, or the
+    /// mixer's version; still once per state, not on every draw.
+    @Test func aFailedMixerIsAskedForAgainWhenTheDocumentMoves() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        var asks = 0
+        m.mixerProvider = {
+            asks += 1
+            return nil
+        }
+        _ = m.laneColour(m.lanes[0], .classicLight)
+        #expect(asks == 1)
+        f.snap.version += 1
+        m.refreshAfterJob()
+        _ = m.laneColour(m.lanes[0], .classicLight)
+        _ = m.laneColour(m.lanes[1], .classicLight)
+        #expect(asks == 2, "asked again after the snapshot moved, once")
+        m.mixerArrived()
+        _ = m.laneColour(m.lanes[0], .classicLight)
+        _ = m.laneColour(m.lanes[1], .classicLight)
+        #expect(asks == 3, "and after the mixer's version moved, once")
+    }
+
     @Test func colourBarsFollowThePreferenceAndRegionTintsDoNot() throws {
         let (_, m, provider) = try onDemand()
         let keep = provider()
@@ -219,5 +243,28 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
         #expect(doc.mixerVersion > version, "its arrival is observable")
         #expect(s.mixer(id) === mixer)
         #expect(doc.mixer === mixer)
+    }
+
+    /// Final review m5: a first draw that finds the core busy alerts once;
+    /// the retries after the document moves are quiet, and the mixer
+    /// arrives once the core answers.
+    @Test func aBusyFirstAskIsRetriedQuietlyUntilTheMixerArrives() throws {
+        let f = mixerFake()
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in f })
+        let id = try #require(s.newDemo())
+        let doc = try #require(s.model(id))
+        f.mixerFetchError = .Busy(message: "busy")
+        #expect(doc.mixer == nil)
+        #expect(doc.alert?.title == "Mixer Unavailable")
+        doc.alert = nil
+        f.snap.version += 1
+        doc.refreshAfterJob()
+        #expect(doc.mixer == nil, "still busy")
+        #expect(doc.alert == nil, "the retry does not alert again")
+        f.mixerFetchError = nil
+        f.snap.version += 1
+        doc.refreshAfterJob()
+        let mixer = try #require(doc.mixer, "the retry makes it")
+        #expect(s.mixer(id) === mixer)
     }
 }

@@ -289,6 +289,23 @@ import VizDAWCore
         #expect(p.theme.name == "Back")
     }
 
+    /// B4 rereview N4: a save that lands after the folder is read but before
+    /// its watch opens is not missed (the read is repeated once armed).
+    @Test func aSaveBetweenTheReadAndTheWatchIsNotMissed() throws {
+        let f = try Folder()
+        try f.write("Mine.json", #"{"name": "Mine", "base": "console"}"#)
+        // Saves on the first arming of the folder: after the read, before
+        // any event could be delivered.
+        let watching = SavingWatching(folder: f.url.path) {
+            try? f.write("Late.json", #"{"name": "Late", "base": "flat"}"#)
+        }
+        let lib = UserThemes(folder: f.url, watching: watching)
+        lib.start()
+        #expect(lib.themes.map(\.theme.name).sorted() == ["Late", "Mine"])
+        #expect(watching.saved == 1)
+        #expect(watching.watched.contains(f.url.appendingPathComponent("Late.json").path), "the late file is watched")
+    }
+
     @Test func aSavedUserThemeIsChosenAtLaunch() throws {
         let f = try Folder()
         try f.write("Mine.json", #"{"name": "Mine", "base": "symbiotic"}"#)
@@ -366,5 +383,28 @@ import VizDAWCore
         peak = max(peak, live)
         watched.append(path)
         return Token(owner: self)
+    }
+}
+
+/// Runs `save` once, the first time the folder is armed: a save racing
+/// the read (B4 rereview N4). It never fires an event itself.
+@MainActor final class SavingWatching: FileWatching {
+    let folder: String
+    let save: () -> Void
+    private(set) var saved = 0
+    private(set) var watched: [String] = []
+
+    init(folder: String, save: @escaping () -> Void) {
+        self.folder = folder
+        self.save = save
+    }
+
+    func watch(_ path: String, _ changed: @escaping @MainActor () -> Void) -> AnyObject? {
+        watched.append(path)
+        if path == folder && saved == 0 {
+            saved += 1
+            save()
+        }
+        return NSObject()
     }
 }

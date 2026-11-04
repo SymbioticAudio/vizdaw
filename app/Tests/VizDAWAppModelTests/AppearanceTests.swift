@@ -133,6 +133,10 @@ import VizDAWEditors
         let ids = body.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
         #expect(ids == Theme.all.map(\.id))
+        // Final review m2: the list is `ui.theme`'s choices, not a copy.
+        let param = try #require(text.range(of: "const UI_THEME_PARAMS"))
+        let spec = text[param.lowerBound...].prefix(400)
+        #expect(spec.contains("values: THEME_IDS"), "ui.theme chooses from THEME_IDS")
     }
 
     /// Review I1: a window takes the theme's styling as soon as a themed

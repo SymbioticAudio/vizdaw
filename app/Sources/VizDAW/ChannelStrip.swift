@@ -811,7 +811,7 @@ struct StripButtons: View {
             .help(armable ? "Record arm" : "Arm an audio lane in its header")
             StripToggle(
                 letter: "I", on: (lane?.monitor ?? .off) != .off,
-                colour: lane?.monitor == .input ? theme.swatch.orange : theme.swatch.teal,
+                colour: StripPalette.monitor(lane?.monitor ?? .off, theme),
                 label: "Input monitor \(strip.name)"
             ) {
                 model.cycleMonitor(strip)

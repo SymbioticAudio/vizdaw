@@ -19,6 +19,12 @@ public enum StripPalette {
         }
     }
 
+    /// The input monitor's I toggle (final review m4): input in the warning
+    /// state, auto (and off, unlit) in the play state; never a strip colour.
+    public static func monitor(_ m: MonitorModeRow, _ t: Theme) -> ThemeColor {
+        m == .input ? t.state.warning : t.state.play
+    }
+
     // The cases are written with the type name: the theme scan reads a bare
     // member such as the red case as a system colour.
     public static func swatch(_ c: SwatchRow, _ t: Theme) -> ThemeColor {

@@ -608,16 +608,27 @@ public final class UserThemes {
     /// Reads the folder again, and watches it and each theme file (an edit
     /// in place changes the file, not the folder).
     public func reload() {
-        let r = UserThemeFile.load(folder: folder)
+        var r = UserThemeFile.load(folder: folder)
+        if let watching {
+            // Arm, then read once more (B4 rereview N4): a save that landed
+            // between the read and the arm is seen now, and any later one
+            // fires a watch. When that read finds other files, they are
+            // armed in turn (at most twice: a folder still churning fires
+            // its folder watch).
+            for _ in 0..<2 {
+                // The folder and the files read, no more (B4 review I3); the
+                // old watches go before the new ones open.
+                tokens = []
+                let paths = [folder.path] + r.read.map { folder.appendingPathComponent($0).path }
+                tokens = paths.compactMap { watching.watch($0) { [weak self] in self?.reload() } }
+                let again = UserThemeFile.load(folder: folder)
+                let same = again.read == r.read
+                r = again
+                if same { break }
+            }
+        }
         if r.themes != themes { themes = r.themes }
         if r.problems != problems { problems = r.problems }
-        if let watching {
-            // The folder and the files read, no more (B4 review I3); the
-            // old watches go before the new ones open.
-            tokens = []
-            let paths = [folder.path] + r.read.map { folder.appendingPathComponent($0).path }
-            tokens = paths.compactMap { watching.watch($0) { [weak self] in self?.reload() } }
-        }
         onReload?()
     }
 

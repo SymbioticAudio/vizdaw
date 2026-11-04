@@ -180,20 +180,26 @@ public final class DocumentStore {
     public var noteTarget: DocumentModel? { commandTarget(focused: keyDocument).flatMap(model) }
 
     /// Document `id`'s mixer (one per document), or nil once it is closed.
+    /// A failure alerts once until the mixer is made: the on-demand ask is
+    /// retried as the document moves (final review m5), quietly.
     public func mixer(_ id: UUID) -> MixerModel? {
         if let m = mixers[id] { return m }
         guard let doc = documents[id] else { return nil }
         do {
             let m = try MixerModel(document: doc)
             mixers[id] = m
+            mixerAlerted.remove(id)
             doc.storeMixer = m
             doc.mixerArrived()
             return m
         } catch {
-            doc.alert = AlertItem(error, title: "Mixer Unavailable")
+            if mixerAlerted.insert(id).inserted { doc.alert = AlertItem(error, title: "Mixer Unavailable") }
             return nil
         }
     }
+
+    /// Documents whose mixer failed and has alerted (`mixer`).
+    @ObservationIgnored private var mixerAlerted: Set<UUID> = []
 
     public func newEmpty() -> UUID? { add("New Document Failed", makeEmpty) }
 
@@ -322,6 +328,7 @@ public final class DocumentStore {
         if keyWindow?.doc == id { keyWindow = nil }
         recentKey.removeAll { $0 == id }
         mixers.removeValue(forKey: id)?.endOpenDrag()
+        mixerAlerted.remove(id)
         // Plugin windows detach their editors before the session goes.
         willClose?(id)
         if let doc = documents.removeValue(forKey: id) {

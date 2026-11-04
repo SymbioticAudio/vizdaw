@@ -170,10 +170,16 @@ public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
         NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius).stroke()
         NSString(string: title).draw(
             at: CGPoint(x: r.minX + 5, y: r.minY + 1),
-            withAttributes: [
-                .font: theme.font(theme.type.label, weight: .bold),
-                .foregroundColor: on ? theme.legend(on: color) : theme.label,
-            ])
+            withAttributes: Self.buttonAttributes(on: on, color: color, theme: theme))
+    }
+
+    /// A button's legend: lit, the ink that reads on its fill (B5 review
+    /// I1); unlit, the label colour.
+    static func buttonAttributes(on: Bool, color: NSColor, theme: Theme) -> [NSAttributedString.Key: Any] {
+        [
+            .font: theme.font(theme.type.label, weight: .bold),
+            .foregroundColor: on ? theme.legend(on: color) : theme.label,
+        ]
     }
 
     // MARK: Events

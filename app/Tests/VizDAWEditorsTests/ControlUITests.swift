@@ -241,6 +241,42 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         #expect(ControlUI.focusTextField(at: atField, in: w), "it keeps it")
     }
 
+    /// Final review m3: only a click on a number box (a button with a
+    /// value) or a text field waits for a field to show; a fader, a knob,
+    /// a plain button or a pane background answers at once.
+    @Test func onlyANumberBoxOrTextFieldClickMayStartEditing() {
+        func node(_ role: String, _ value: String?, _ r: CGRect) -> UiNodeRow {
+            UiNodeRow(
+                path: [0], role: role, subrole: nil, label: "x", title: nil, value: value, x: r.minX, y: r.minY,
+                width: r.width, height: r.height, enabled: true, selected: false, focused: false, actions: [])
+        }
+        let nodes = [
+            node("AXGroup", nil, CGRect(x: 0, y: 0, width: 400, height: 300)),
+            node("AXButton", "\u{2212}4.2 dB", CGRect(x: 10, y: 10, width: 56, height: 24)),
+            node("AXSlider", "\u{2212}4.2 dB", CGRect(x: 100, y: 10, width: 36, height: 200)),
+            node("AXButton", nil, CGRect(x: 200, y: 10, width: 24, height: 24)),
+            node("AXTextField", "", CGRect(x: 300, y: 10, width: 56, height: 24)),
+            node("AXButton", "", CGRect(x: 10, y: 100, width: 24, height: 24)),
+        ]
+        #expect(ControlUI.mayEdit(nodes, at: CGPoint(x: 30, y: 20)), "the number box")
+        #expect(ControlUI.mayEdit(nodes, at: CGPoint(x: 320, y: 20)), "a text field")
+        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: 110, y: 100)), "a fader")
+        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: 210, y: 20)), "a plain button")
+        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: 20, y: 110)), "a button with an empty value")
+        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: 380, y: 280)), "the background")
+        #expect(!ControlUI.mayEdit(nodes, at: CGPoint(x: CGFloat.nan, y: 20)))
+    }
+
+    /// B8 review m1: a focusing click that found no editable field says
+    /// which view it hit.
+    @Test func aClickWithNoFieldNamesTheViewItHit() {
+        let (w, _, _) = window()
+        let titleBar = w.frame.height - w.contentLayoutRect.height
+        let note = ControlUI.noFieldNote(at: CGPoint(x: 50, y: titleBar + 250), in: w)
+        #expect(note == "channel: no editable field under the click (hit: VizDAWEditorsTests.RecordingView)", "\(note)")
+        #expect(ControlUI.noFieldNote(at: CGPoint(x: -50, y: -50), in: w).hasSuffix("(hit: none)"))
+    }
+
     @Test func aClickPointNeedsAVisibleFiniteElement() throws {
         let (w, _, _) = window()
         #expect(ControlUI.point(.point(x: .nan, y: 3), in: w) == nil)

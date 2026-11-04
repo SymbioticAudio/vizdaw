@@ -169,7 +169,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                 case .monitor:
                     toggle(
                         LaneInputs.label(lane.monitor), on: lane.monitor != .off,
-                        color: lane.monitor == .input ? theme.swatch.orange.nsColor : theme.swatch.teal.nsColor, in: r)
+                        color: StripPalette.monitor(lane.monitor, theme).nsColor, in: r)
                 case .mute: toggle("M", on: lane.mute, color: theme.muteColour, in: r)
                 case .solo: toggle("S", on: lane.solo, color: theme.soloColour, in: r)
                 case .arm: toggle("R", on: lane.arm, color: theme.armColour, in: r)

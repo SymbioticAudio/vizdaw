@@ -25,6 +25,17 @@ import VizDAWCore
         }
     }
 
+    /// Final review m4: the I toggle (strip and lane header) lights in the
+    /// state tokens, not the user's strip colours: input in state.warning,
+    /// auto in state.play.
+    @Test func theInputMonitorLightsInStateTokens() {
+        for t in Theme.all {
+            #expect(StripPalette.monitor(.input, t) == t.state.warning, "\(t.id)")
+            #expect(StripPalette.monitor(.auto, t) == t.state.play, "\(t.id)")
+            #expect(StripPalette.monitor(.off, t) == t.state.play, "\(t.id): unlit, the auto colour")
+        }
+    }
+
     @Test func knobsAndAutomationUseTheirTokens() {
         for t in Theme.all {
             #expect(StripPalette.knob(.pan, t) == t.control.pan)

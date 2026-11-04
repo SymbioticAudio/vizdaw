@@ -306,6 +306,35 @@ public enum ControlUI {
         return window.makeFirstResponder(field) && field.currentEditor() != nil
     }
 
+    /// Whether a click at `p` (window points, top-left origin) is on what
+    /// may start editing (final review m3): the smallest node of `nodes`
+    /// under it is a text field, or a button with a value (a number box:
+    /// SwiftUI's knobs and faders are sliders, its plain buttons have no
+    /// value). Other clicks need not wait for a field.
+    static func mayEdit(_ nodes: [UiNodeRow], at p: CGPoint) -> Bool {
+        guard p.x.isFinite, p.y.isFinite else { return false }
+        let under = nodes.filter { CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height).contains(p) }
+        guard let hit = under.min(by: { $0.width * $0.height < $1.width * $1.height }) else { return false }
+        return hit.role == "AXTextField" || (hit.role == "AXButton" && !(hit.value ?? "").isEmpty)
+    }
+
+    /// `mayEdit` on `window`'s tree as it is now (before the click).
+    public static func mayEdit(at p: CGPoint, in window: NSWindow) -> Bool {
+        mayEdit(tree(of: window, maxDepth: 64).nodes, at: p)
+    }
+
+    /// The line logged when a focusing click found no editable field (B8
+    /// review m1): the class of the view under `p`, so a SwiftUI change
+    /// that breaks the first-mouse hook is named, not a bare timeout.
+    public static func noFieldNote(at p: CGPoint, in window: NSWindow) -> String {
+        var hit: NSView?
+        if p.x.isFinite, p.y.isFinite, let frame = window.contentView?.superview ?? window.contentView {
+            hit = frame.hitTest(NSPoint(x: p.x, y: window.frame.height - p.y))
+        }
+        let name = hit.map { NSStringFromClass(type(of: $0)) } ?? "none"
+        return "channel: no editable field under the click (hit: \(name))"
+    }
+
     /// Whether `cls` is one of SwiftUI's own views (its `NSHostingView`,
     /// in any generic specialisation, or the containers it builds inside,
     /// such as a scroll view's), or a subclass of one: its name or an

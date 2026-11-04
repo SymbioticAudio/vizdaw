@@ -330,7 +330,10 @@ enum ControlChannel {
         _ server: ControlServer, _ token: UInt64, _ events: [NSEvent], _ w: NSWindow, _ p: CGPoint,
         focusing: Bool = false, then: (@MainActor () -> Void)? = nil
     ) {
-        let mayEdit = ControlUI.post(events, to: w) && focusing
+        // Only a click on a number box or a text field waits for a field
+        // (final review m3), read before the click changes the tree.
+        let editable = focusing && !events.isEmpty && ControlUI.mayEdit(at: p, in: w)
+        let mayEdit = ControlUI.post(events, to: w) && editable
         var handled: ContinuousClock.Instant?
         later(token, seconds: 5) { expired in
             guard expired || !ControlUI.eventsPending else { return false }
@@ -338,7 +341,11 @@ enum ControlChannel {
                 let now = clock.now
                 let since = handled ?? now
                 handled = since
-                if !ControlUI.focusTextField(at: p, in: w), now - since < fieldWait { return false }
+                if !ControlUI.focusTextField(at: p, in: w) {
+                    if now - since < fieldWait { return false }
+                    // B8 review m1: say what the click hit.
+                    FileHandle.standardError.write(Data((ControlUI.noFieldNote(at: p, in: w) + "\n").utf8))
+                }
             }
             if let then {
                 then()

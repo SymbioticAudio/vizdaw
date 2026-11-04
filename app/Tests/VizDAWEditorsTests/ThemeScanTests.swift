@@ -237,15 +237,17 @@ enum SourceScan {
     /// B5 review I1: a lit toggle's letter reads on its fill in every theme
     /// (WCAG 4.5:1), the lane header's and the region strip's.
     /// Lit fills on which neither `keys.black` nor `keys.white` reaches
-    /// 4.5:1 (the token owner's to fix): Classic Light's orange swatch
-    /// (white 4.42) and Symbiotic's (white 4.33).
-    static let shortFills: Set<String> = ["classic-light monitor input", "symbiotic monitor input"]
+    /// 4.5:1 (the token owner's to fix). Since the I toggle took the state
+    /// tokens (final review m4): Flat's and EG13's state.play, the auto
+    /// fill (4.40 and 4.33). The orange swatches B5 listed are no longer a
+    /// fill.
+    static let shortFills: Set<String> = ["flat monitor auto", "eg13 monitor auto"]
 
     @Test func litLegendsReadOnTheirFills() {
         for t in Theme.all {
             let fills: [(String, ThemeColor)] = [
                 ("mute", t.state.mute), ("solo", t.state.solo), ("arm", t.state.record),
-                ("monitor input", t.swatch.orange), ("monitor auto", t.swatch.teal),
+                ("monitor input", StripPalette.monitor(.input, t)), ("monitor auto", StripPalette.monitor(.auto, t)),
             ]
             for (name, fill) in fills {
                 let f = fill.nsColor
@@ -260,6 +262,19 @@ enum SourceScan {
                 } else {
                     #expect(ratio >= 4.5, "\(t.id) \(name): \(ratio)")
                 }
+            }
+        }
+    }
+
+    /// B5 rereview N1: the region strip's M and S buttons, lit, take the
+    /// legend for their fill, not the plain label colour; unlit, the label.
+    @Test func theRegionStripsLitLegendsUseTheLegendInk() {
+        for t in Theme.all {
+            for fill in [t.state.mute.nsColor, t.state.solo.nsColor] {
+                let lit = RegionStripView.buttonAttributes(on: true, color: fill, theme: t)
+                #expect(lit[.foregroundColor] as? NSColor == t.legend(on: fill), "\(t.id) lit")
+                let unlit = RegionStripView.buttonAttributes(on: false, color: fill, theme: t)
+                #expect(unlit[.foregroundColor] as? NSColor == t.label, "\(t.id) unlit")
             }
         }
     }

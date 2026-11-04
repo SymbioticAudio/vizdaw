@@ -252,7 +252,8 @@ const ON: &[ParamSpec] = &[ParamSpec {
     help: "Set on or off; absent toggles.",
 }];
 
-/// The built-in themes' IDs (symbiotic-design 0.2.0 `Theme.all`).
+/// The built-in themes' IDs (symbiotic-design 0.2.1 `Theme.all`; a Swift
+/// test pins the two lists together).
 pub const THEME_IDS: &[&str] = &[
     "classic-light",
     "studio-dark",
