@@ -57,7 +57,7 @@ It builds on 7a and 7b. Read `docs/superpowers/plans/2026-11-03-window-views-pan
   - Never use GUI, computer-use, browser-automation or accessibility-automation tools. The owner checks the editor by eye (README steps 217–224, Task 7).
   - Tests never open real audio or MIDI and never trigger the microphone prompt:
     - Swift tests use `FakeSession`;
-    - every `core-ffi` test uses its `serial()` helper;
+    - `core-ffi` tests that start the transport use their file's `serial()`; the files this plan writes to (`overviews.rs`, `regions.rs`, `control.rs`) open no device and keep their convention of none;
     - the e2e runs with `VIZDAW_AUDIO=offline`, as `App::start` sets it.
   - Afterwards `pgrep -lf MacOS/VizDAW` prints nothing and `ls -d /tmp/vze*` prints nothing new.
   - **Never touch the real `~/Library/Application Support/VizDAW`, the real preferences or the real Trash.** Swift tests use `scripts/swift.sh test`'s own `VIZDAW_TRASH_DIR` and `VIZDAW_SCRATCH_DIR`, and preferences go through `MemoryDefaults`. The e2e's homes are under `/tmp/vze*`.
@@ -100,7 +100,7 @@ It builds on 7a and 7b. Read `docs/superpowers/plans/2026-11-03-window-views-pan
   - The editor's zoom is not saved (Ruling 3).
   - `fixtures/demo.vizdaw` is unchanged.
 - **Lints**, in Rust as in every plan: `#![deny(missing_docs)]`, and no unwrap, expect, indexing or panic outside tests.
-- **TDD.** Every new test is run and seen to fail (RED) before the code that makes it pass.
+- **TDD.** Every new test is run and seen to fail (RED) before the code that makes it pass, except characterisation tests named as such (Task 1's trim test).
 - **Each task ends green.**
   - Always: `cargo fmt --all -- --check`.
   - Rust tasks (1, 5, 7):
@@ -116,18 +116,18 @@ It builds on 7a and 7b. Read `docs/superpowers/plans/2026-11-03-window-views-pan
   - registry 154;
   - app README last step 216.
 
-  Re-measure at `5224ca1` before Task 1 and write the numbers into this plan's `progress.md` (`.superpowers/sdd/2026-11-04-audio-editor/progress.md`). The deltas below are what binds.
+  Tasks 1, 2 and 3 run in that order (Task 1 regenerates the FFI, which every later Swift build needs), so the running Swift totals are +6 (2), +19 (3), +28 (4), +31 (5) and +36 (6). Re-measure at `5224ca1` before Task 1 and write the numbers into this plan's `progress.md` (`.superpowers/sdd/2026-11-04-audio-editor/progress.md`). The deltas below are what binds.
 
   | Task | Rust (macOS and Linux) | Swift | Other |
   |---|---|---|---|
   | 1 envelope export, trim hostility | +4 | +0 (compiles) | |
   | 2 typed grammar | — | +6 | |
-  | 3 axis, geometry, theme roles | — | +12 | |
+  | 3 axis, geometry, span, theme roles | — | +13 | |
   | 4 editor model, pane view | — | +9 | |
   | 5 control channel, ⌘5 | +3 | +3 | registry 155 |
   | 6 canvas and pane | — | +5 | |
   | 7 e2e, READMEs | ignored +1 | — | e2e 17; README 217–224 |
-  | **After** | **+7 / ignored +1** | **+35** | |
+  | **After** | **+7 / ignored +1** | **+36** | |
 
   Report the measured counts at every task's end. A difference is explained, never hidden.
 - **How code is given.** Signatures, test names and assertions, not bodies. Where the tree differs from a name here, use the tree's name and say so in the report.
@@ -202,16 +202,17 @@ These are the five failure modes a user is most likely to hit that the spec impl
    - waveform height ×16;
    - gain +24 dB on a loud file;
    - a stereo file;
-   - a pane wider than the core's column limit.
+   - a pane wider than the core's column limit;
+   - the file's start scrolled to mid-pane, or its end short of the pane's right edge.
 
    Expected:
    - every handle of a tiny region stays reachable;
    - the zoom stops at its limits;
    - level marks never overlap;
    - samples pushed over 0 dBFS by the gain show clip marks;
-   - no request exceeds 8192 columns.
+   - no request exceeds 8192 columns, and the waveform and envelope requests cover the same in-file span, so their columns line up; nothing traps on a negative or non-finite frame.
 
-   Pinned by `handlesOfATinyRegionStayReachable`, `scaleMarksNeverOverlap`, `waveformScalesByEnvelopeAndAmplitude` and `columnsNeverExceedTheCoreLimit` (Task 3), and `zoomStaysInRange` (Task 3).
+   Pinned by `handlesOfATinyRegionStayReachable`, `scaleMarksNeverOverlap`, `waveformScalesByEnvelopeAndAmplitude`, `columnsNeverExceedTheCoreLimit`, `spanStaysInsideTheFile` and `zoomStaysInRange` (Task 3).
 
 ## Plan Rulings
 
@@ -252,14 +253,16 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
      pub fn region_envelope(&self, event: u64, from_frame: u64, to_frame: u64, columns: u32) -> Result<Vec<f32>, VizError>
      ```
      - It is read-only: no document, file or format change.
-     - The frames are media frames, as `overview`'s are. Column `i`'s centre is `from + floor((i + 0.5) × (to − from) / columns)`, computed in f64.
-     - Each value is `10^(gain_db / 20) × overviews::fade_gain(c − source_offset, length, fade_in, fade_out)` when `source_offset ≤ c < source_offset + length`, and 0 elsewhere.
+     - The frames are media frames, as `overview`'s are. Column `i`'s centre is `from.saturating_add(floor((i + 0.5) × (to − from) / columns) as u64)`, computed in f64 with the saturating `as` cast.
+     - Each value is `core_model::mixer::db_to_gain(f64::from(gain_db)) as f32 × overviews::fade_gain(c − source_offset, length, fade_in, fade_out)` when `source_offset ≤ c < source_offset + length`, and 0 elsewhere. That is the engine's own gain conversion (0 at −144), so the envelope matches playback. A non-finite `gain_db` (which `store` already refuses) gives 0, so every value is finite by construction.
      - The envelope needs no file, so an offline region answers too.
    - **Errors:**
      - `check_columns` (1…8192);
      - `from_frame >= to_frame` gives "from_frame must be before to_frame";
      - an unknown event, a non-region ("‹id› is not an audio region") and unknown media are refused, as in `region_waveform`.
-   - The pure part is `pub fn envelope(source_offset: u64, length: u64, gain_db: f32, fade_in: Fade, fade_out: Fade, from: u64, to: u64, columns: u32) -> Vec<f32>` in `crates/core-ffi/src/overviews.rs`, next to `fade_gain`.
+   - The pure part lives in `crates/core-ffi/src/overviews.rs`, next to `fade_gain`. To stay under clippy's seven-argument limit it takes a small struct:
+     - `pub struct RegionShape { pub source_offset: u64, pub length: u64, pub gain_db: f32, pub fade_in: Fade, pub fade_out: Fade }`;
+     - `pub fn envelope(region: &RegionShape, from: u64, to: u64, columns: u32) -> Vec<f32>`.
    - Why: spec §6 item 2 ("fade-in and fade-out (with shapes)") drawn truthfully, using "only operations the model already has" (spec §3): this export adds no operation.
    - Cost if wrong: the canvas would draw a straight-line approximation instead.
 5. **Ruling (model check: every editing operation already exists).** No new model command and no `core-model` change.
@@ -278,13 +281,14 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
    - Why: spec §3 ("uses only operations the model already has") and §6 item 2 ("using the existing model, commands and undo").
    - Cost if wrong: none expected.
 6. **Ruling (handles).** All of them are in `AudioEditorGeometry`, in the waveform rect `wave` (the canvas minus the ruler and the level-scale gutter).
-   - **Gain:** a band `gainBand` = 6 points high along the top of the region's rect, between the trim edges. A vertical drag uses `RegionHandles.gain` (0.25 dB per point, ⇧ 0.05, clamped −144…+24, in tenths) with the arrangement's readout. ⌥-click gives `RegionHandles.resetGain`.
+   - **Gain:** a band `gainBand` = 6 points high along the top of the region's rect, between the trim edges, with 4 points of vertical slack below it (`gainSlack`); it comes after the corners and edges in hit order. A vertical drag uses `RegionHandles.gain` (0.25 dB per point, ⇧ 0.05, clamped −144…+24, in tenths). The drag readout shows `AudioEditorEntry.gainText` (U+2212 minus, as the boxes), drawn with `RegionDrawing.readout`. ⌥-click gives `RegionHandles.resetGain`.
    - **Fades:** corner squares `cornerSize` = 10 at the fade-in end and the fade-out start, along the top, with 4 points of slack. A horizontal drag uses `RegionHandles.fades(_:_:dx:in:)` on the region's rect. They are hidden below `RegionHandles.minWidth` (24 points), as in the arrangement; the typed boxes still set them. A right-click in a fade's area opens `RegionDrawing.fadeShapeMenu`.
    - **Trim edges:** the region's left (`.start`) and right (`.end`) edges, the full wave height. The hit is `min(edgeWidth, width / 2)` inside (`edgeWidth` = 8) plus `slack` = 4 outside. Targets:
      - start: `front = round(dx × fpp)` clamped to `[−source_offset, frames − 1]`;
      - end: `back = −round(dx × fpp)` clamped to `[min(0, −(mediaFrames − source_offset − frames)), frames − 1]`.
 
      A non-finite `dx` or a zero change gives nil.
+   - **Mapping to the arrangement's handle type:** `AudioEditorHandle.regionHandle: RegionHandle?` gives `.gain → .gain`, `.fadeIn → .fadeIn`, `.fadeOut → .fadeOut`, and nil for `.start` and `.end`. `RegionHandles.fadeCommand`, `fadeArea` and `RegionDrawing.fadeShapeMenu` are called through it.
    - **Hit order:** fade corners, then trim edges, then the gain band. The region's body grabs nothing: moving a region stays in the arrangement.
    - Every drag is one gesture (`beginGesture(label, lanes: [lane], origin: .other)` after a 3-point dead zone, `updateGesture` with the full target computed from the row **at the press**, then `endGesture`). Escape cancels it (`cancelGesture`). Labels come from `AudioEditorGeometry.label(_:)`: "Region Gain", "Fade In", "Fade Out", "Trim Start", "Trim End".
    - Why: spec §6 item 2 ("each with handles"), the arrangement's handle conventions so users learn them once, and §4's "controls too small to use".
@@ -294,7 +298,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
    | Box (`rawValue`) | Accessibility label | Shows | Bare number | Clamp |
    |---|---|---|---|---|
    | `gain` | "Region Gain" | `gainText`: "−4.2 dB", "+6.0 dB", "0.0 dB", "−∞ dB" | dB | −144…+24 (`-inf` gives −144) |
-   | `fade_in` | "Fade In Length" | `fadeText`: "250 ms" below 1 s, else "1.500 s" | ms | 0…`frames − fadeOut` |
+   | `fade_in` | "Fade In Length" | `fadeText`: whole ms, "250 ms", "1500 ms" | ms | 0…`frames − fadeOut` |
    | `fade_out` | "Fade Out Length" | as above | ms | 0…`frames − fadeIn` |
    | `start` | "Region Start" | `Formatting.time(offset / rate)` | s | 0…`offset + frames − 1` |
    | `length` | "Region Length" | `Formatting.time(frames / rate)` | s | 1…`mediaFrames − offset` |
@@ -305,12 +309,13 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
      - forms: `N`, `N ms`, `N s` and `M:SS` or `M:SS.fff`;
      - `N` is 7b's strict ASCII number (digits, optional `.digits`), with no sign, exponent, `nan` or `inf`;
      - the units are case-insensitive, with at most one space before them;
-     - `SS` is exactly two digits below 60, and `M` is 1–4 digits;
+     - `SS` is exactly two digits below 60, optionally followed by `.` and 1–3 digits, and `M` is 1–4 digits;
      - at most 32 Unicode scalars, and no control character.
    - Seconds become frames by `(seconds × rate).rounded()`, at the **media's** sample rate.
    - The fade shape is a menu `Picker` beside each fade box ("Fade In Shape", "Fade Out Shape") listing `RegionHandles.shapes`. A shape change keeps the length.
    - A commit is one `editor.edit(cmd)`, so one undo step. A result equal to the current value sends nothing. A refusal returns false, sets the box's hint as `editor.status` and sends nothing.
-   - Without a media row (`editedRegion.media == nil`) the three time boxes show "–" and refuse with `AudioEditorEntry.noMediaHint`.
+   - Without a media row (`editedRegion.media == nil`) the four time boxes (fade in, fade out, start, length) need a rate they do not have: they show "–" and refuse with `AudioEditorEntry.noMediaHint`.
+   - With no region shown, every box refuses and sets `editor.status = AudioEditorModel.emptyMessage`.
    - Hints, exact (U+2212 minus):
      - gain: "Type a gain in dB, like −4.2 or +6."
      - fade: "Type a fade like 250 ms or 1.5 s."
@@ -346,26 +351,34 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
        "frames_per_point": 88.0, "origin_frame": 21600.0, "amplitude": 1,
        "boxes": {"gain": "−4.2 dB", "fade_in": "250 ms", "fade_out": "0 ms",
                  "start": "0:00.500", "length": "0:01.000", "peak": "−0.3 dB"},
-       "region": {"event": 7, "media": 5, "name": "tone", "gain_db": -4.2,
+       "region": {"event": 71, "media": 5, "name": "tone", "gain_db": -4.2,
                   "fade_in": {"frames": 12000, "shape": "linear"},
                   "fade_out": {"frames": 0, "shape": "linear"},
                   "source_offset": 24000, "length": 48000,
                   "media_frames": 96000, "sample_rate": 48000, "offline": false}}
       ```
+      - The example is Task 4's fixture with a 600-point **wave rect** (the canvas less `scaleWidth`), which is the width `sync(width:)` always takes.
+      - `gain_db` is rounded to thousandths, `(f64::from(g) * 1000.0).round() / 1000.0`, as `control.rs` already rounds its f32 fields, so it reads `-4.2`, not `-4.199999809265137`.
+      - `boxes` is a JSON object whose keys are the `AudioEditorBox` raw values. Key order is not part of the contract: `serde_json` here sorts keys, and the tests compare `Value`s.
       - `shown` means the current main view's bottom pane is shown on `.audioEditor`.
       - With no region, `region` is null, `message` is `AudioEditorModel.emptyMessage` and `boxes` is `{}`.
+      - With a region whose media row is unknown, `media` is the event's media ID (or 0), `media_frames` and `sample_rate` are 0, and `offline` is true.
       - Shape names are `linear`, `equal_power`, `exponential` and `s_curve`.
     - `ui.pane`'s `view` Choice gains `"audio_editor"`. `ViewCommands.runPane` already refuses it on the left or right pane, with "audio_editor is not on the left pane's list in the arrange view.".
     - The registry gains `editors.audio_editor` (⌘5), so the count goes 154 → 155.
-    - There is no other new `ui.*` command. The zoom and height buttons and the boxes are driven through `ui.click`, `ui.key` and `ui.drag` by their accessibility labels (Ruling 7). The canvas's handles are accessibility items "Start Handle", "End Handle", "Gain Handle", "Fade In Handle" and "Fade Out Handle".
+    - There is no other new `ui.*` command. The zoom and height buttons and the boxes are driven through `ui.click`, `ui.key` and `ui.drag` by their accessibility labels (Ruling 7). The labels the channel finds:
+      - the pane's root, an accessibility container labelled and identified "Audio Editor Pane";
+      - the canvas, "Audio Editor";
+      - the canvas's handle items "Start Handle", "End Handle", "Gain Handle", "Fade In Handle" and "Fade Out Handle";
+      - the bar's buttons "Normalize", "Zoom In", "Zoom Out", "Fit Region", "Taller Waveform" and "Shorter Waveform".
     - Why: spec §4 ("Window and pane state the channel can read or set … is updated with the layout") and §7's row 7c ("control-channel state").
     - Cost if wrong: names in one table.
 11. **Ruling (what the editor does not have).** Owner rules restated, so a reviewer can reject a task that adds them:
     - no pan control or pan state anywhere in the editor;
     - no command that writes a media file: no reverse, silence, cut, gain baked in, or sample-rate or format conversion;
-    - no playhead, audition or scrub in 7c (a backlog row and owner question Q1).
+    - no playhead, audition or scrub in 7c (Ruling 13.1, with a backlog row).
 
-    The e2e asserts that the editor's tree has no node whose label contains "Pan".
+    The e2e finds the "Audio Editor Pane" container and asserts that no node in its subtree has a label matching the whole word `\bPan\b` (so "Bottom Pane" outside it, and "Pane" inside it, do not count).
 12. **Ruling (theme roles).** New `EditorTheme` roles in `EditorTheme.swift`, the bridge file:
 
     | Role | Token |
@@ -385,9 +398,19 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - Why: 7b Ruling 13 and spec §4 ("hard-coded colours").
     - Cost if wrong: one table.
 
+13. **Ruling (controller, provisional; owner may override): the owner questions the first draft raised.** Each is binding for the implementers until the owner says otherwise.
+    1. **(controller, provisional; owner may override)** No playhead, audition or scrub in 7c. A backlog row records them (Task 7).
+    2. **(controller, provisional; owner may override)** The editor's zoom is kept in memory only and is not saved with the project (Ruling 3). A backlog row records it.
+    3. **(controller, provisional; owner may override)** The audio editor is on the Mix view's bottom list too (Ruling 1).
+    4. **(controller, provisional; owner may override)** Fades are typed and shown in ms ("250 ms", "1500 ms"); start and length in the file's time, `m:ss.fff` (Ruling 7).
+    5. **(controller, provisional; owner may override)** The shortcut is ⌘5 (`editors.audio_editor`), with no ⌥⌘5 (Ruling 1).
+    6. **(controller, provisional; owner may override)** The gain handle is a band along the top of the region, as in the arrangement, not a line on the waveform (Ruling 6).
+    7. **(controller, provisional; owner may override)** A typed fade that is too long clamps to what the other fade leaves; the other fade is never changed silently (Ruling 7). Only a trim shorter than both fades shortens them, as the model's `clamp_fades` already does.
+
 ## Spec checks (for the owner, no plan change needed)
 
 - §3 says the audio editor "uses only operations the model already has". Ruling 4's export adds no operation; it reads what the engine already computes.
+- Open owner question (pre-flight M17): extending the start of a region that sits at bar 1 and has a source offset gives it a negative tick (before the sequence start). The model allows this (±`MAX_TICKS`) and the arrangement stops nothing, and it matches "its audio stays where it was". The plan does not clamp. Should the extension stop at the sequence start?
 - §6 item 2 says "no format change". The project format is unchanged, and `ui.json`'s schema is too. A saved bottom pane may now name `"audio_editor"`, which a 7b build reads as its default view (README step 223 checks it).
 
 ## File map
@@ -416,24 +439,25 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 - Test: `crates/core-ffi/tests/overviews.rs`, `crates/core-ffi/tests/regions.rs`
 
 **Interfaces:**
-- Consumes: `overviews::fade_gain`, `overviews::check_columns`, `core_engine::schedule::fade_curve` (tests), and the overview tests' `import`, `settle` and `last_region` helpers (`regions.rs`'s `demo_with` and `region`).
+- Consumes: `overviews::fade_gain`, `overviews::check_columns`, `core_model::mixer::db_to_gain`, `core_engine::schedule::fade_curve` (tests), and the overview tests' `import`, `settle` and `last_region` helpers (`regions.rs`'s `demo_with` and `region`).
 - Produces:
-  - `pub fn envelope(source_offset: u64, length: u64, gain_db: f32, fade_in: Fade, fade_out: Fade, from: u64, to: u64, columns: u32) -> Vec<f32>` (Ruling 4);
+  - `pub struct RegionShape` and `pub fn envelope(region: &RegionShape, from: u64, to: u64, columns: u32) -> Vec<f32>` (Ruling 4);
   - `Session::region_envelope(&self, event: u64, from_frame: u64, to_frame: u64, columns: u32) -> Result<Vec<f32>, VizError>`;
   - Swift `SessionProtocol.regionEnvelope(event:fromFrame:toFrame:columns:) throws -> [Float]`;
   - `FakeSession.envelope: [Float]?` (nil answers `columns` ones) and `FakeSession.envelopeCalls`.
 
-- [ ] **Step 1: Write the failing tests** (each under `serial()`).
+- [ ] **Step 1: Write the failing tests.** Follow each file's convention: `overviews.rs` and `regions.rs` sessions open no device and use no `serial()` (copy `transport.rs:19–27` only if one is wanted).
   - `overviews.rs`, `region_envelope_matches_the_heard_gain_and_fades`:
-    - import a mono ramp of 48 000 frames;
+    - import a mono ramp of 48 000 frames (its own samples through `caf(…, 1, …)`: the file's `ramp()` is stereo), into a session made by `Session::new_demo` so a note exists for the hostile test (or use `regions.rs`'s `a_note`);
     - through `Session::edit`, trim the region to `source_offset` 1000 and length 10 000, set its gain to −6.0 dB, its fade in to linear 2000 frames and its fade out to S-curve 2000 frames;
-    - call `region_envelope(event, 0, 12_000, 12)`. With `g = 10f32.powf(-6.0 / 20.0)`, within 1e-6:
+    - call `region_envelope(event, 0, 12_000, 12)`. With `g = core_model::mixer::db_to_gain(-6.0) as f32`, within 1e-6:
       - `v.len() == 12`;
       - `v[0] == 0` and `v[11] == 0` (centres 500 and 11 500 lie outside);
       - `v[1] == g × fade_curve(Linear, 0.25)` (centre 1500, r = 500);
       - `v[2] == g × fade_curve(Linear, 0.75)`;
-      - `v[3] == g` through `v[9] == g`;
-      - `v[10] == g × fade_curve(SCurve, 0.25)` (r = 9500, 500 frames left).
+      - `v[3]` through `v[8] == g`;
+      - `v[9] == g × fade_curve(SCurve, 0.75)` (centre 9500, r = 8500, 1500 frames left);
+      - `v[10] == g × fade_curve(SCurve, 0.25)` (centre 10 500, r = 9500, 500 frames left).
   - `region_envelope_is_zero_outside_and_answers_offline`:
     - with the region from above, `region_envelope(event, 20_000, 30_000, 4)` is four zeros;
     - make the media offline, as `a_same_length_replacement_goes_offline_changed_and_back` does: `region_envelope(event, 0, 12_000, 12)` gives the same values as before (no file is read);
@@ -453,7 +477,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
       - front `i64::MIN`, front `i64::MAX`, back `i64::MIN`, back `i64::MAX`;
       - `event: u64::MAX`, and a note's ID;
     - then front −1000 is `Ok`: offset 0, frames 11 000, the region's tick lower than before, and undo label "Trim Region".
-- [ ] **Step 2: Run them and see them fail:** `cargo test -p core-ffi --test overviews region_envelope` and `cargo test -p core-ffi --test regions hostile_trims`. The envelope tests fail to compile (no `region_envelope`). Record whether the trim test already passes: it pins today's behaviour, so a pass is acceptable and is reported.
+- [ ] **Step 2: Run them and see them fail:** `cargo test -p core-ffi --test overviews region_envelope` and `cargo test -p core-ffi --test regions hostile_trims`. The envelope tests fail to compile (no `region_envelope`). The trim test is a **characterisation test**, named as such in its doc comment: it pins today's behaviour, so a pass at RED is acceptable and is reported (the Global TDD exception).
 - [ ] **Step 3: Implement** `envelope` and `region_envelope` per Ruling 4. Read the region under the lock as `region_waveform` does, and compute the vector after the lock is released. Add `regionEnvelope` to `FakeSession`.
 - [ ] **Step 4: Run the gates:** the Rust gates, the rt-check gates, `scripts/build-ffi.sh`, `scripts/swift.sh build`, `scripts/swift.sh test` and the no-brand build. Rust is baseline + 4 (macOS and Linux clippy clean); Swift is unchanged.
 - [ ] **Step 5: Commit** `crates/core-ffi/src/overviews.rs`, `crates/core-ffi/src/session.rs`, `crates/core-ffi/tests/overviews.rs`, `crates/core-ffi/tests/regions.rs` and `app/Tests/VizDAWAppModelTests/FakeSession.swift`. Message: "core-ffi: region_envelope, the heard gain and fades for the audio editor; trim hostile test (plan 7c Task 1)", with the trailers.
@@ -464,12 +488,12 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 
 **Files:**
 - Create: `app/Sources/VizDAWAppModel/AudioEditorEntry.swift`, `app/Tests/VizDAWAppModelTests/AudioEditorEntryTests.swift`
-- Modify: `app/Sources/VizDAWAppModel/StripEntry.swift` (`level(_:max:)`)
+- Modify: `app/Sources/VizDAWAppModel/StripEntry.swift` (`level(_:max:)`, `levelText(_:max:)`)
 
 **Interfaces:**
 - Consumes: `StripEntry`'s private `clean` and `number` (made `static` internal for this module), `MixerMath.floorDb` (−144), and `Formatting.time`.
 - Produces (all `public`):
-  - `StripEntry.level(_ text: String, max: Double) -> Double?`, where `level(_:)` equals `level(_:max: MixerMath.maxDb)`;
+  - `StripEntry.level(_ text: String, max: Double) -> Double?`, where `level(_:)` equals `level(_:max: MixerMath.maxDb)`, and `StripEntry.levelText(_ db: Double, max: Double) -> String` beside it (today's `levelText(_:)` clamps at `MixerMath.maxDb` = 12, so `gainText` uses `levelText(db, max: 24)`);
   - `enum AudioEditorEntry` with:
     - `enum Unit { case ms, s }`;
     - `static func gain(_ text: String) -> Double?` (`level(text, max: 24)`);
@@ -516,7 +540,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `"-inf"`, `"−∞"`, `"abc"` and `""` give nil;
     - `peakText(-0.3) == "−0.3 dB"` and `peakText(0) == "0.0 dB"`.
   - `theTextsReadBack`:
-    - `fadeText(frames: 12_000, rate: 48_000) == "250 ms"`, `fadeText(frames: 72_000, rate: 48_000) == "1.500 s"`, `fadeText(frames: 0, rate: 48_000) == "0 ms"` and `fadeText(frames: 5, rate: 0) == "–"`;
+    - `fadeText(frames: 12_000, rate: 48_000) == "250 ms"`, `fadeText(frames: 72_000, rate: 48_000) == "1500 ms"`, `fadeText(frames: 0, rate: 48_000) == "0 ms"` and `fadeText(frames: 5, rate: 0) == "–"`;
     - `frames(duration(fadeText(frames: 12_000, rate: 48_000), bare: .ms)!, rate: 48_000) == 12_000`;
     - `duration(Formatting.time(1.25), bare: .s) == 1.25`;
     - `gain(gainText(-4.2)) == -4.2`.
@@ -524,7 +548,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 - [ ] **Step 2: Run them and see them fail:** `scripts/swift.sh test --filter AudioEditorEntryTests`.
 - [ ] **Step 3: Implement** per Ruling 7.
   - `peak` refuses any text whose number part is `inf` or `∞` before clamping.
-  - `fadeText` rounds to whole ms below 1000 ms (`.toNearestOrAwayFromZero`), else seconds with 3 decimals.
+  - `fadeText` always shows whole ms (`.toNearestOrAwayFromZero`), as Ruling 13's "fades in ms" says: "250 ms", "1500 ms".
   - `frames` returns 0 for a non-finite product or `rate == 0`, and otherwise clamps to `0…Int64.max / 2`.
 - [ ] **Step 4: Run the gates.** Swift is baseline + 6, and the no-brand build is clean.
 - [ ] **Step 5: Commit** `AudioEditorEntry.swift`, `StripEntry.swift` and `AudioEditorEntryTests.swift`. Message: "app model: the audio editor's typed gain, fade, time and peak grammar (plan 7c Task 2)", with the trailers.
@@ -535,7 +559,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 
 **Files:**
 - Create: `app/Sources/VizDAWAppModel/FrameAxis.swift`, `app/Sources/VizDAWEditors/AudioEditorGeometry.swift`, `app/Tests/VizDAWAppModelTests/FrameAxisTests.swift`, `app/Tests/VizDAWEditorsTests/AudioEditorGeometryTests.swift`
-- Modify: `app/Sources/VizDAWEditors/EditorTheme.swift` (Ruling 12's roles), `app/Tests/VizDAWEditorsTests/ThemeScanTests.swift` (`theEditorRolesAreTheTablesTokens` checks the nine roles)
+- Modify: `app/Sources/VizDAWEditors/EditorTheme.swift` (Ruling 12's roles), `app/Tests/VizDAWEditorsTests/ThemeScanTests.swift` (`theEditorRolesAreTheTablesTokens` loops `Theme.all` for the nine roles)
 
 **Interfaces:**
 - Consumes: `RegionHandles.fades`, `gain`, `gainCommand`, `size`, `minWidth`, `label`; `WaveformGeometry`; `OverviewRows`; `EventRow`; `Formatting.time`.
@@ -546,12 +570,12 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `func x(_ frame: Double) -> CGFloat` and `func frame(atX x: CGFloat) -> Double`;
     - `static func maxFramesPerPoint(mediaFrames: UInt64, width: CGFloat) -> Double`, which is `max(1, 2 × max(mediaFrames, 1) / max(width, 1))`;
     - `static func fit(offset: UInt64, length: UInt64, width: CGFloat, mediaFrames: UInt64) -> FrameAxis`, with margin `max(length / 20, 1)`;
-    - `func zoomed(by factor: Double, aroundX x: CGFloat, width: CGFloat, mediaFrames: UInt64) -> FrameAxis`, where a factor that is not finite or ≤ 0 gives `self`;
+    - `func zoomed(by factor: Double, aroundX x: CGFloat, width: CGFloat, mediaFrames: UInt64) -> FrameAxis`: `framesPerPoint / factor` (a factor above 1 zooms in), clamped to `1…maxFramesPerPoint`, with the origin then clamped as `scrolled` clamps it; a factor that is not finite or ≤ 0 gives `self`;
     - `func scrolled(byPoints dx: CGFloat, width: CGFloat, mediaFrames: UInt64) -> FrameAxis`, with the origin clamped to `−w·fpp/2 … mediaFrames − w·fpp/2`.
-  - `enum AudioEditorHandle: Equatable, Sendable { case gain, fadeIn, fadeOut, start, end }`.
+  - `enum AudioEditorHandle: Equatable, Sendable { case gain, fadeIn, fadeOut, start, end }`, with `var regionHandle: RegionHandle?` (Ruling 6's mapping).
   - `struct LevelMark: Equatable { y: CGFloat; label: String }` and `struct RulerMark: Equatable { x: CGFloat; label: String }`.
   - `enum AudioEditorGeometry` with:
-    - `static let scaleWidth: CGFloat = 44`, `rulerHeight: CGFloat = 18`, `gainBand: CGFloat = 6`, `cornerSize: CGFloat = 10`, `edgeWidth: CGFloat = 8`, `slack: CGFloat = 4`, `minMarkGap: CGFloat = 12`, `amplitudes: [Int] = [1, 2, 4, 8, 16]` and `maxColumns: UInt32 = 8192`;
+    - `static let scaleWidth: CGFloat = 44`, `rulerHeight: CGFloat = 18`, `gainBand: CGFloat = 6`, `gainSlack: CGFloat = 4`, `cornerSize: CGFloat = 10`, `edgeWidth: CGFloat = 8`, `slack: CGFloat = 4`, `minMarkGap: CGFloat = 12`, `amplitudes: [Int] = [1, 2, 4, 8, 16]` and `maxColumns: UInt32 = 8192`;
     - `static func waveRect(in bounds: CGRect) -> CGRect` (minus the ruler at the top and the gutter at the left);
     - `static func regionRect(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> CGRect`;
     - `static func handles(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> [(AudioEditorHandle, CGRect)]`, in hit order;
@@ -562,6 +586,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `static func scaleMarks(amplitude: Int, channels: Int, in wave: CGRect) -> [LevelMark]`;
     - `static func rulerMarks(axis: FrameAxis, width: CGFloat, sampleRate: UInt32) -> [RulerMark]`, with steps `[0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]` s, the smallest at least 80 points apart, labelled with `Formatting.time`;
     - `static func columns(width: CGFloat) -> UInt32`;
+    - `struct FrameSpan: Equatable { from: UInt64; to: UInt64; x: CGFloat; width: CGFloat; columns: UInt32 }` and `static func span(axis: FrameAxis, width: CGFloat, mediaFrames: UInt64) -> FrameSpan?`: the in-file part of the visible frames, clamped to `[0, mediaFrames]`, with its x offset and width in the wave rect and `columns(width:)` of that width. Nil when the part is empty or any input is not finite. It never converts a negative, NaN or huge `Double` to `UInt64` (Swift traps on those). The canvas asks **both** `overview` and `regionEnvelope` for exactly this span and column count, so their columns line up (`overview` spreads its columns over the range cut to the file);
     - `static func shaped(_ rows: OverviewRows, envelope: [Float]?, amplitude: Int) -> OverviewRows`, where a nil envelope scales by `amplitude` only, and an envelope whose count is not `rows.columns` gives silent rows of the same shape;
     - `static func clipColumns(_ rows: OverviewRows, envelope: [Float]) -> [Int]`;
     - `static func envelopeLine(_ envelope: [Float], amplitude: Int, channel: Int, channels: Int, in wave: CGRect) -> [CGPoint]`.
@@ -576,7 +601,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `fitShowsTheRegionWithMargins`:
       - `fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000)` has `framesPerPoint == 88` and `originFrame == 21_600`, with `x(24_000) ≈ 27.27` and `x(72_000) ≈ 572.73` (±0.01);
       - `fit(offset: 10, length: 1, …)` has `framesPerPoint == 1` and `originFrame == 9`.
-    - `zoomKeepsTheFrameUnderThePointer`: `frame(atX: 200)` is equal (±1e-9) before and after `zoomed(by: 2, aroundX: 200, …)`.
+    - `zoomKeepsTheFrameUnderThePointer`: from `fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000)`, `frame(atX: 200)` is equal (±1e-9) before and after `zoomed(by: 2, aroundX: 200, width: 600, mediaFrames: 96_000)`, and the result's `framesPerPoint == 44`.
     - `scrollStopsAtTheFileEdges`: from the fit above, `scrolled(byPoints: -1e9, …)` has origin `−300 × 88`, and `scrolled(byPoints: 1e9, …)` has origin `96_000 − 300 × 88`.
   - `AudioEditorGeometryTests.swift`, with an `EventRow` at offset 24 000, 48 000 frames and media 96 000:
     - `trimDragsClampToTheFileAndTheRegion`, at `framesPerPoint: 100`:
@@ -610,14 +635,20 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
       - an envelope of three values gives all-zero rows of four columns;
       - stereo rows are scaled per column in both channels.
     - `columnsNeverExceedTheCoreLimit`: `columns(width:)` of 0, −5 and `.nan` is 1; of 600.2 is 601; of 1e9 is 8192.
-  - `theEditorRolesAreTheTablesTokens` additionally checks Ruling 12's nine roles against their tokens in every `Theme.all`.
-- [ ] **Step 2: Run them and see them fail:** `scripts/swift.sh test --filter 'FrameAxisTests|AudioEditorGeometryTests|ThemeScanTests'`.
+    - `spanStaysInsideTheFile`, media 96 000, width 600:
+      - (axes built with `FrameAxis(framesPerPoint:originFrame:)`, whose `init` stores its values as given; only the operations clamp) origin −26 400 at `framesPerPoint` 88: `from == 0`, `x == 300`, `width == 300`, `to == 26_400`;
+      - origin 90 000 at 88: `from == 90_000`, `to == 96_000`, `x == 0`, `width ≈ 68.18`;
+      - origin 100 000 (wholly past the end): nil;
+      - `mediaFrames: 0`: nil;
+      - an axis whose origin is not finite (built through `scrolled(byPoints: .nan, …)` or `FrameAxis(framesPerPoint: .nan)`): nil, never a trap.
+  - `theEditorRolesAreTheTablesTokens` checks only `Theme.studioDark` today: extend it to loop `Theme.all` for Ruling 12's nine new roles (the existing roles keep their check).
+- [ ] **Step 2: Run them and see them fail:** `scripts/swift.sh test --filter 'FrameAxisTests|AudioEditorGeometryTests|ThemeScanTests'` (`spanStaysInsideTheFile` among them).
 - [ ] **Step 3: Implement** per Rulings 3, 6, 8 and 12.
   - The trim clamp is Ruling 6's.
   - A tiny region's edge hit is `min(edgeWidth, width / 2)`.
   - Fade corners appear only when the region's rect is at least `RegionHandles.minWidth` wide.
   - `target` dispatches by handle: gain to `RegionHandles.gainCommand`; the fades to `RegionHandles.fadeCommand` on `regionRect`; start and end to `trimCommand` with `axis.framesPerPoint`.
-- [ ] **Step 4: Run the gates.** Swift is baseline + 18, and the no-brand build is clean.
+- [ ] **Step 4: Run the gates.** Swift is baseline + 19, and the no-brand build is clean.
 - [ ] **Step 5: Commit** the four new files, `EditorTheme.swift` and `ThemeScanTests.swift`. Message: "editors: the audio editor's frame axis, handles, level scale, ruler and theme roles (plan 7c Task 3)", with the trailers.
 
 ---
@@ -649,7 +680,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `init(document: DocumentModel)`, keeping it `unowned`;
     - `static let emptyMessage = "Select one audio region to edit it."`;
     - `private(set) var axis: FrameAxis`, `amplitude: Int` (1), `shownRegion: UInt64?`, `width: CGFloat` and `peakDb: Double` (−0.3);
-    - `func sync(width: CGFloat)`, which reads `document.editedRegion` and fits the axis when the region's ID differs from `shownRegion`;
+    - `func sync(width: CGFloat)`, where `width` is always the **wave rect's** width (`AudioEditorGeometry.waveRect(in: bounds).width`). It stores `width`, reads `document.editedRegion`, and fits the axis when the region's ID differs from `shownRegion`;
     - `func zoomIn()`, `zoomOut()` (factor 2 about the centre), `fit()`, `zoom(by: Double, aroundX: CGFloat)`, `scroll(byPoints: CGFloat)`, `taller()` and `shorter()`;
     - `func text(_ box: AudioEditorBox) -> String`;
     - `@discardableResult func type(_ box: AudioEditorBox, _ text: String) -> Bool`;
@@ -657,25 +688,25 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `@discardableResult func normalize() -> KeyOutcome`.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `AudioEditorModelTests.swift` uses a `FakeSession` with audio region 7 on lane `(3, 30)`: media 5 ("tone", 48 kHz, 96 000 frames, stereo), offset 24 000, 48 000 frames, gain 0 and fades 0 linear.
+  - `AudioEditorModelTests.swift` uses a `FakeSession` with audio region 71 on lane `(3, 30)`: media 5 ("tone", 48 kHz, 96 000 frames, stereo), offset 24 000, 48 000 frames, gain 0 and fades 0 linear; and a second region 72 on the same lane at offset 0, 24 000 frames. The IDs avoid `editorFake()`'s reference block 7 on lane `(3, 30)`; build the fake without that block or keep these IDs. `FakeSession.regionRow` has no `sourceOffset` parameter: set it after.
     - `theEditorFollowsTheSelectedRegion`:
-      - with event 7 selected: `editedRegion?.row.id == 7`, `.lane == LaneKey(3, 30)` and `.media?.id == 5`;
-      - `sync(width: 600)` sets `axis == FrameAxis.fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000)` and `shownRegion == 7`;
+      - with event 71 selected: `editedRegion?.row.id == 71`, `.lane == LaneKey(3, 30)` and `.media?.id == 5`;
+      - `sync(width: 600)` sets `axis == FrameAxis.fit(offset: 24_000, length: 48_000, width: 600, mediaFrames: 96_000)` and `shownRegion == 71`;
       - `zoomIn()` then `sync(width: 600)` keeps the zoomed axis;
       - selecting a note, or two regions, gives `editedRegion == nil`, and `sync` sets `shownRegion = nil`;
-      - selecting region 7 again fits again;
-      - `document.inspectorRegion?.id == 7` still holds.
-    - `aVanishedRegionShowsTheMessage`: after the fake's snapshot drops event 7 and the model refreshes, `editedRegion == nil`, and `type(.gain, "-3")` is false, records no edit and leaves `editor.status == AudioEditorModel.emptyMessage`.
+      - selecting region 71 again fits again;
+      - `document.inspectorRegion?.id == 71` still holds.
+    - `aVanishedRegionShowsTheMessage`: after the fake's snapshot drops event 71 and the model refreshes, `editedRegion == nil`, and `type(.gain, "-3")` is false, records no edit and leaves `editor.status == AudioEditorModel.emptyMessage`.
     - `typedGainIsOneUndoStepAndARefusalSendsNothing`:
-      - `type(.gain, "-4.2")` is true and records exactly one edit, `.audio(edit: .setGain(event: 7, gainDb: -4.2))`;
+      - `type(.gain, "-4.2")` is true and records exactly one edit, `.audio(edit: .setGain(event: 71, gainDb: -4.2))`;
       - `type(.gain, "abc")` is false, records nothing new, and sets `editor.status == AudioEditorEntry.gainHint`;
       - `type(.gain, "0")` while the row's gain is 0 records nothing.
     - `typedFadesClampToWhatTheOtherLeaves`, with the row's fade out at 12 000:
-      - `type(.fadeIn, "10 s")` records `.setFades(event: 7, fadeIn: FadeRow(length: 36_000, shape: .linear), fadeOut: FadeRow(length: 12_000, shape: .linear))`;
+      - `type(.fadeIn, "10 s")` records `.setFades(event: 71, fadeIn: FadeRow(length: 36_000, shape: .linear), fadeOut: FadeRow(length: 12_000, shape: .linear))`;
       - `type(.fadeOut, "250")` records the fade out at 12 000, so nothing (an equal value);
       - `type(.fadeIn, "-5")` is false with `fadeHint`.
     - `typedStartAndLengthClamp`, from offset 24 000 and 48 000 frames:
-      - `type(.start, "0.25")` records `.trim(event: 7, frontFrames: -12_000, backFrames: 0)`;
+      - `type(.start, "0.25")` records `.trim(event: 71, frontFrames: -12_000, backFrames: 0)`;
       - `"0"` records front −24 000;
       - `"10"` records front 47 999;
       - `type(.length, "1.25")` records back −12 000;
@@ -683,11 +714,11 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
       - `"0"` records back 47 999;
       - with `media` nil, `type(.start, "1")` is false with `noMediaHint`, and `text(.start) == "–"`.
     - `shapesKeepTheirLength`, with the fade in at 12 000 linear:
-      - `setShape(.fadeIn, .sCurve)` records `.setFades(event: 7, fadeIn: FadeRow(length: 12_000, shape: .sCurve), fadeOut: <unchanged>)`;
+      - `setShape(.fadeIn, .sCurve)` records `.setFades(event: 71, fadeIn: FadeRow(length: 12_000, shape: .sCurve), fadeOut: <unchanged>)`;
       - `setShape(.fadeIn, .linear)` records nothing.
     - `normalizeUsesTheTypedPeakAndNeverADialog`:
       - `type(.peak, "-1")` is true, records no edit, and `text(.peak) == "−1.0 dB"`;
-      - `normalize()` calls the fake's `normalizeRegions(events: [7], peakDb: -1)`;
+      - `normalize()` calls the fake's `normalizeRegions(events: [71], peakDb: -1)`;
       - with the fake throwing `.Busy("The waveform of tone is still being built; try again in a moment.")`, the status is that message and `document.alert == nil`.
     - `theZoomButtonsStayInRange`, after `sync(width: 600)`:
       - 20 × `zoomIn()` gives `axis.framesPerPoint == 1`;
@@ -699,11 +730,11 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - decoding `{"arrange":{"bottom":{"view":"audio_editor"}}}` gives `.audioEditor`, and `{"arrange":{"left":{"view":"audio_editor"}}}` gives the left default `.strip`.
 - [ ] **Step 2: Run them and see them fail:** `scripts/swift.sh test --filter 'AudioEditorModelTests|WindowLayoutTests'`.
 - [ ] **Step 3: Implement** per Rulings 1, 2, 3, 5, 7 and 9.
-  - `type` parses, clamps, builds the command from the current row and sends it through `document.editor.edit`. A refusal sets `editor.status = box.hint` and returns false.
+  - `type` parses, clamps, builds the command from the current row and sends it through `document.editor.edit`. A refusal sets `editor.status = box.hint` and returns false. With no region it sets `editor.status = AudioEditorModel.emptyMessage` and returns false.
   - `.peak` only stores `peakDb`.
   - `normalize` calls `RegionCommands.normalize(peakDb: peakDb, document)`.
   - `PaneFrame`'s choices and `layoutRow`'s lists follow `ViewLayouts.views` with no other change.
-- [ ] **Step 4: Run the gates.** Swift is baseline + 27, with the edited list tests passing and the no-brand build clean.
+- [ ] **Step 4: Run the gates.** Swift is baseline + 28, with the edited list tests passing and the no-brand build clean.
 - [ ] **Step 5: Commit** `AudioEditorModel.swift`, `WindowLayout.swift`, `PaneContent.swift`, `DocumentModel.swift`, `DocumentShell.swift`, `AudioEditorModelTests.swift`, `WindowLayoutTests.swift` and each edited test file, by path. Message: "app model: the audio editor's region, zoom, typed edits and normalize; Audio Editor on the bottom pane's lists (plan 7c Task 4)", with the trailers.
 
 ---
@@ -729,7 +760,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `pub struct AudioEditorBoxRow { pub name: String, pub text: String }`;
     - `pub struct AudioEditorRegionRow { pub event: u64, pub media: u64, pub name: String, pub gain_db: f32, pub fade_in: FadeRow, pub fade_out: FadeRow, pub source_offset: u64, pub length: u64, pub media_frames: u64, pub sample_rate: u32, pub offline: bool }`;
     - `pub struct AudioEditorStateRow { pub shown: bool, pub region: Option<AudioEditorRegionRow>, pub message: Option<String>, pub frames_per_point: f64, pub origin_frame: f64, pub amplitude: u32, pub boxes: Vec<AudioEditorBoxRow> }`;
-    - `ControlResult::AudioEditor { doc: String, editor: AudioEditorStateRow }`, serialised in Ruling 10's shape (`boxes` as a JSON object in box order).
+    - `ControlResult::AudioEditor { doc: String, editor: AudioEditorStateRow }`, serialised in Ruling 10's shape: `boxes` is a JSON object keyed by the `AudioEditorBox` raw values, and `gain_db` is rounded to thousandths.
   - Swift: `AudioEditorModel.stateRow() -> AudioEditorStateRow`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -742,15 +773,17 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - `view: "audio"` and `view: "Audio_Editor"` give `InvalidParams`;
     - `registry::find("editors.audio_editor")` has shortcut `"⌘5"`, menu "Editors" and `document: true`.
 
-    The existing `the_registrys_defaults_parse_and_never_collide` and `shortcuts_name_their_menu_commands` cover ⌘5.
+    The existing `the_registrys_defaults_parse_and_never_collide` (`crates/core-control/tests/bindings.rs`) and `shortcuts_name_their_menu_commands` (`commands.rs`) cover ⌘5.
   - `crates/core-ffi/tests/control.rs`, `audio_editor_result_json`:
-    - the row in Ruling 10's example serialises to exactly that JSON;
+    - the row in Ruling 10's example (with `gain_db: -4.2_f32`) serialises to a `Value` equal to that JSON, so `gain_db` reads `-4.2`;
     - a row with `region: None`, `message: Some("Select one audio region to edit it.")` and no boxes serialises with `"region": null` and `"boxes": {}`;
     - `FadeShapeRow::SCurve` gives `"s_curve"` and `EqualPower` gives `"equal_power"`.
   - `ControlCommandsTests.swift`, `audioEditorStateNamesTheRegionAndItsBoxes`. Use Task 4's fake region with its gain set to −4.2 and its fade in to 12 000 linear (offset 24 000, 48 000 frames), and the bottom pane shown on the audio editor:
-    - `ControlStates.state(.audioEditor, id, m)` is `.audioEditor`, with `shown == true` and `region?.event == 7`;
+    - `ControlStates.state(.audioEditor, id, m)` is `.audioEditor`, with `shown == true` and `region?.event == 71`;
     - its boxes are `[gain "−4.2 dB", fade_in "250 ms", fade_out "0 ms", start "0:00.500", length "0:01.000", peak "−0.3 dB"]`;
-    - with nothing selected, `region == nil`, `message == AudioEditorModel.emptyMessage` and `boxes == []`.
+    - with nothing selected, `region == nil`, `message == AudioEditorModel.emptyMessage` and `boxes == []`;
+    - after `sync(width: 600)` on region 71, selecting region 72 and calling `stateRow()` (with no canvas) gives `region?.event == 72` and the axis of `FrameAxis.fit(offset: 0, length: 24_000, width: 600, mediaFrames: 96_000)` (the pre-flight asked for this in Task 4; it lives here because `stateRow` is Task 5's);
+    - with region 71's media row removed from the fake, `region?.mediaFrames == 0`, `sampleRate == 0` and `offline == true`.
   - `ViewCommandsTests.swift`, `uiPaneTakesTheAudioEditorOnlyAtTheBottom`:
     - `ui.pane {pane: bottom, view: audio_editor}` sets the current bottom view to `.audioEditor` and answers status `"bottom audio_editor 260 shown"`;
     - `ui.pane {pane: left, view: audio_editor}` fails `invalid_params` with "audio_editor is not on the left pane's list in the arrange view.", and the layout is unchanged.
@@ -760,9 +793,9 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - no alert, and `layout.detail` is unchanged.
 - [ ] **Step 2: Run them and see them fail:** `cargo test -p core-control --test commands audio_editor`, `cargo test -p core-ffi --test control audio_editor` and `scripts/swift.sh test --filter 'audioEditorState|uiPaneTakesTheAudioEditor|theAudioEditorKey'`.
 - [ ] **Step 3: Implement** per Ruling 10.
-  - `stateRow()` calls `sync` only if the canvas never has (width 0 keeps the default axis).
+  - `stateRow()` always calls `sync(width:)` with the last width it was given (0 keeps the default axis), so after a selection change the state names the new region and its fit even before the canvas redraws.
   - `everyRegisteredMenuCommandHasAHandler` stays green through `ViewCommands.ids`.
-- [ ] **Step 4: Run the gates:** the Rust gates, then the Swift ones. Rust is baseline + 7 and registry 155. Swift is baseline + 30. The no-brand build is clean.
+- [ ] **Step 4: Run the gates:** the Rust gates, then the Swift ones. Rust is baseline + 7 and registry 155. Swift is baseline + 31. The no-brand build is clean.
 - [ ] **Step 5: Commit** the listed Rust and Swift files and tests, by path. Message: "control: state.get audio_editor, ui.pane audio_editor and Editors > Audio Editor on ⌘5 (plan 7c Task 5)", with the trailers.
 
 ---
@@ -775,53 +808,67 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 
 **Interfaces:**
 - Consumes:
-  - Tasks 1–5;
+  - Tasks 1–5, including `AudioEditorGeometry.span` and `waveRect`;
   - `ThemedView` and `ThemedViews.current`;
   - `CanvasAccessibilityItem` and `CanvasElement`;
-  - `RegionDrawing.fadeShapeMenu`, `readout`, `hatch` and `pill`;
+  - `RegionDrawing.fadeShapeMenu`, `readout`, `hatch` and `pill` (through `AudioEditorHandle.regionHandle`);
   - `WaveformGeometry.bars`;
   - `EditorModel.beginGesture`, `updateGesture`, `endGesture` and `cancelGesture`;
   - `WheelScroll`;
   - `SymbioticControls.NumberBox` and the palette helper `ChannelStrip` uses;
   - `AppIcon`;
-  - `DocumentModel.overviewVersion`.
+  - `ArrangementView`'s observation set (`ArrangementView.swift:73–89`).
 - Produces:
-  - `public final class AudioEditorCanvas: NSView, ThemedView`, with `init(document: DocumentModel)` and `public var theme: Theme`;
-  - `struct AudioEditorPane: View { let model: DocumentModel }`.
+  - `public final class AudioEditorCanvas: NSView, ThemedView`, with `init(document: DocumentModel)`, `public var theme: Theme`, `acceptsFirstResponder == true`, and these test seams, which `mouseDown`/`mouseDragged`/`mouseUp`/`keyDown` call:
+    - `public func press(_ p: CGPoint, clicks: Int, modifiers: NSEvent.ModifierFlags)`;
+    - `public func drag(_ p: CGPoint, modifiers: NSEvent.ModifierFlags)`;
+    - `public func release(_ p: CGPoint, modifiers: NSEvent.ModifierFlags)`;
+    - `public func cancelKey()` (Escape);
+  - `struct AudioEditorPane: View { let model: DocumentModel }`, whose root is an accessibility container labelled and identified "Audio Editor Pane" (Ruling 10).
 
-- [ ] **Step 1: Write the failing tests** in `AudioEditorViewTests.swift`. They use Task 4's fake region and a canvas framed 600 × 200 with `sync(width:)` applied. Drive the mouse as `RegionHandleViewTests` drives the region strip.
+- [ ] **Step 1: Write the failing tests** in `AudioEditorViewTests.swift`. They use Task 4's fake (regions 71 and 72) and a canvas framed 644 × 218, so the wave rect is 600 × 200, with `sync(width: 600)` applied. Drive it through the seams above, as `RegionHandleViewTests` drives `ArrangementView` through `contentMouseDown(_:clicks:modifiers:)`. The fake's records are its `calls` strings ("begin …", "gesture", "end", "abort") and `gestureEdits`: use the tree's names.
   - `theCanvasExposesItsHandles`:
     - the canvas's accessibility label is "Audio Editor";
     - its children's labels are exactly `["Fade In Handle", "Fade Out Handle", "Start Handle", "End Handle", "Gain Handle"]`, each frame inside the bounds;
     - with nothing selected the children are `[]`.
   - `aHandleDragIsOneGesture`:
     - a press on the Gain Handle, a drag 20 points up in four steps, then release;
-    - the fake records `beginEdit(label: "Region Gain")` once, a last `editGesture` of `.audio(edit: .setGain(event: 7, gainDb: 5.0))`, and `endEdit` once.
-  - `aTrimDragPastTheFileStartClamps`: a press on the Start Handle and a drag 10 000 points left give the label "Trim Start" and a last target `.trim(event: 7, frontFrames: -24_000, backFrames: 0)`.
-  - `anEscapeCancelsTheDrag`: during a fade-in drag, `keyDown` Escape calls `abortEdit` once and `endEdit` never, and `editor.gesture == nil`.
+    - the fake records one begin with label "Region Gain", a last gesture edit of `.audio(edit: .setGain(event: 71, gainDb: 5.0))`, and one end.
+  - `aTrimDragPastTheFileStartClamps`: a press on the Start Handle and a drag 10 000 points left give the label "Trim Start" and a last target `.trim(event: 71, frontFrames: -24_000, backFrames: 0)`.
+  - `anEscapeCancelsTheDrag`: during a fade-in drag, `cancelKey()` records one abort and no end, and `editor.gesture == nil`.
   - `theCanvasRedrawsWhenItsThemeChanges`: as `anEditorRedrawsWhenItsThemeChanges` does, setting `theme` marks the canvas for display.
 - [ ] **Step 2: Run them and see them fail:** `scripts/swift.sh test --filter AudioEditorViewTests`.
-- [ ] **Step 3: Build the canvas** per Rulings 3, 6, 8 and 12.
+- [ ] **Step 3a: Accessibility, hits and the gesture** (Ruling 6).
+  - Accessibility items per handle from `AudioEditorGeometry.handles`, as `CanvasElement`s.
+  - `press` hits through `AudioEditorGeometry.hit`, keeps the row at the press, and calls `window?.makeFirstResponder(self)` so Escape reaches the canvas. Past the 3-point dead zone `drag` opens `beginGesture(label, lanes: [lane], origin: .other)` and sends `updateGesture(target(pressRow, …))`. `release` calls `endGesture`, and `cancelKey` calls `cancelGesture`.
+  - Run `scripts/swift.sh test --filter AudioEditorViewTests`: tests 1–4 pass.
+- [ ] **Step 3b: The theme and the drawing** (Rulings 3, 8, 12).
   - **Drawing order:**
     1. the background (`canvas`), with `audioOutside` beyond the file;
     2. the ruler;
     3. the scale gutter, its marks and lines;
-    4. the whole visible span's waveform from `session.overview(media:fromFrame:toFrame:columns:)`, `shaped(…, envelope: nil, amplitude:)`, in `audioWaveTrimmed`;
-    5. the region's fill;
-    6. the same span shaped with `session.regionEnvelope(…)`, in `audioWave`, clipped to the region's rect;
+    4. the waveform over `AudioEditorGeometry.span(axis:width:mediaFrames:)` from `session.overview(media:fromFrame:toFrame:columns:)` with the span's `from`, `to` and `columns`, `shaped(…, envelope: nil, amplitude:)`, drawn at the span's `x` in `audioWaveTrimmed`;
+    5. the region's fill, `regionFill(tint:)` with the lane's strip colour (`document.laneColour`);
+    6. the same span and columns shaped with `session.regionEnvelope(event:fromFrame:toFrame:columns:)`, in `audioWave`, clipped to the region's rect;
     7. the envelope line;
     8. clip marks;
-    9. the handles (`audioHandle`; the dragged one `audioHandleSelected`);
-    10. the gain readout while dragging.
+    9. the handles (`audioHandle`, the dragged one `audioHandleSelected`; corners use `theme.radius`);
+    10. the gain readout while dragging (`AudioEditorEntry.gainText`).
+  - When `span` is nil, steps 4–8 draw nothing.
   - Offline media is hatched with the "Offline" pill, with the envelope still drawn.
-  - `columns(width:)` columns at most. Pending or coarse overviews redraw on `overviewVersion`.
-  - **Input:**
-    - ⌘-scroll and pinch call `zoom(by:aroundX:)`; plain scroll calls `scroll(byPoints:)`;
-    - ⌥-click on the gain band resets the gain;
-    - a right-click in a fade area opens `fadeShapeMenu`;
-    - Escape calls `cancelGesture`.
-  - It observes the document, its `audioEditor` and `overviewVersion`, as `ArrangementView` observes its document. It calls `audioEditor.sync(width:)` on layout.
+  - Run the filter again: test 5 passes.
+- [ ] **Step 3c: Wheel, pinch, ⌥-click and the shape menu.**
+  - ⌘-scroll and pinch call `zoom(by:aroundX:)`; plain scroll calls `scroll(byPoints:)`.
+  - ⌥-click on the gain band resets the gain.
+  - A right-click in a fade area (`RegionHandles.fadeArea` through `regionHandle`) opens `fadeShapeMenu`.
+  - Run the filter again: all five pass.
+- [ ] **Step 3d: Observation and sync** (pre-flight I4).
+  - The canvas observes `ArrangementView`'s set, copied: the document's snapshot and `lanes`, `editor.selection` and `drawVersion`, `mediaVersion` (offline hatching), `mixerVersion` and `storeMixer?.snapshot` (the lane tint), and `overviewVersion` (Pending and Coarse redraw). It also observes `audioEditor`'s `axis`, `amplitude` and `shownRegion`.
+  - Observation uses `ArrangementView`'s `withObservationTracking` plus `Task { @MainActor [weak self] }` pattern, not `MainActor.assumeIsolated`.
+  - Each observation refresh, and `layout()`, call `audioEditor.sync(width: AudioEditorGeometry.waveRect(in: bounds).width)`, so selecting another region refits it with no frame change.
+  - Run the filter again: all five pass.
 - [ ] **Step 4: Build the pane.**
+  - The root is `.accessibilityElement(children: .contain)` with label and identifier "Audio Editor Pane".
   - Without a region, it shows `ContentUnavailableView("Audio Editor", icon: .audio, description: Text(AudioEditorModel.emptyMessage))`.
   - With one, a bar over the canvas (an `NSViewRepresentable` host). In a horizontal `ScrollView`, so a narrow pane scrolls rather than squashes, the bar holds:
     - "Gain" with its NumberBox;
@@ -833,10 +880,32 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
     - Zoom Out and Zoom In (`.zoomOut`, `.zoomIn`) and a "Fit Region" text button;
     - Shorter Waveform and Taller Waveform (`.collapse`, `.expand`).
   - The boxes' accessibility labels are Ruling 7's. Each box's `commit` is `audioEditor.type(box, text)`; `onRefuse` sets the box's hint as the status.
+  - The pickers use `Binding(get:set:)`, with no `@State`.
   - Gaps and padding come from `theme.spacing`.
   - There is no pan control (Ruling 11).
-- [ ] **Step 5: Run the gates.** Swift is baseline + 35, the spacing scan includes the new file, and the no-brand build is clean. Then `scripts/make-app.sh`, launch with `vizctl launch` and take one `ui.screenshot` of the bottom pane on a demo with an imported tone, so the controller can compare it with the mockup direction before Task 7. Per the owner's rule, only finished UI is shown to the owner.
-- [ ] **Step 6: Commit** `AudioEditorCanvas.swift`, `AudioEditorPane.swift`, `DocumentShell.swift`, `ThemeScanTests.swift` and `AudioEditorViewTests.swift`. Message: "app: the audio editor's canvas and pane (plan 7c Task 6)", with the trailers.
+- [ ] **Step 5: Run the gates.** Swift is baseline + 36, the spacing scan includes the new file, and the no-brand build is clean.
+- [ ] **Step 6: Take one screenshot for the controller**, offline, in a throwaway home, then quit and clean up. Only finished UI is shown to the owner.
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Library/Developer/CommandLineTools
+cd /Users/lattawb/workspace/vizdaw
+scripts/make-app.sh
+rm -rf /tmp/vze7c-shot && mkdir -p /tmp/vze7c-shot
+# 2 s of stereo 16-bit at 0.25 (−12.04 dBFS), 48 kHz, stdlib only.
+python3 -I -c 'import wave,struct,sys; w=wave.open(sys.argv[1],"wb"); w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000); s=struct.pack("<hh",8192,8192); w.writeframes(s*96000); w.close()' /tmp/vze7c-shot/tone.wav
+vizctl launch --env VIZDAW_AUDIO=offline --home /tmp/vze7c-shot --demo
+```
+
+  Then, through `vizctl call` (see `vizctl help`):
+  1. `state.get document` for `selected_seq`;
+  2. `command.run media.import {path: "/tmp/vze7c-shot/tone.wav", seq, tick: 0}`;
+  3. `ui.click` the region by its element (the "Region tone on …" label);
+  4. `command.run editors.audio_editor`;
+  5. `ui.screenshot {path: "/Users/lattawb/workspace/vizdaw/.superpowers/sdd/2026-11-04-audio-editor/t6.png"}`;
+  6. `app.quit`.
+
+  Afterwards `rm -rf /tmp/vze7c-shot`. `pgrep -lf MacOS/VizDAW` prints nothing. The screenshot is not committed (`.superpowers/` never is). Report its path.
+- [ ] **Step 7: Commit** `AudioEditorCanvas.swift`, `AudioEditorPane.swift`, `DocumentShell.swift`, `ThemeScanTests.swift` and `AudioEditorViewTests.swift`. Message: "app: the audio editor's canvas and pane (plan 7c Task 6)", with the trailers.
 
 ---
 
@@ -859,7 +928,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
   3. `command.run editors.audio_editor`. Then:
      - `wait_for_layout` until the Arrange bottom pane's `view == "audio_editor"` and it is shown;
      - `state.get audio_editor` has `shown == true`, `region.event` equal to the region, `boxes.gain == "0.0 dB"`, `boxes.start == "0:00.000"` and `boxes.length == "0:02.000"`;
-     - the window's `ui.tree` has no node whose label contains "Pan".
+     - in the window's `ui.tree`, find the node labelled "Audio Editor Pane" and walk only its subtree: no node there has a label matching the whole word `\bPan\b` (a `regex`-free check: split each label on non-letters and look for the word "Pan"). "Bottom Pane" and the left strip's "Pan of …" lie outside it.
   4. `ui.key` on "Region Gain" with `"-4.2\n"`: wait until `(region.gain_db + 4.2).abs() < 1e-6`, then `wait_for_undo(…, "Set Region Gain")`. Then `"abc\n"`: `state.get editor`'s `status == "Type a gain in dB, like −4.2 or +6."` and the gain is still −4.2.
   5. `ui.key` on "Fade In Length" with `"250\n"`: wait until `region.fade_in.frames == 12_000`.
   6. `ui.key` on "Region Length" with `"1.5\n"`: `length == 72_000`. Then on "Region Start" with `"0.5\n"`: `source_offset == 24_000` and `length == 48_000` (the end stayed).
@@ -892,7 +961,7 @@ Checked by hand; the rules are tested (`AudioEditorEntryTests`,
      the waveform: it zooms around the pointer and stops at its limits;
      scroll sideways: it stops when the file's start or end reaches the
      middle of the pane. Click Taller Waveform: quiet parts grow and the
-     level marks relabel, and at the second step the "0" mark is gone;
+     level marks relabel, and after the first click the "0" mark is gone;
      Shorter Waveform undoes it. Select another region: the editor fits it;
      select the first again: it fits again.
 219. Drag the band along the top of the region up: a readout follows
@@ -910,7 +979,7 @@ Checked by hand; the rules are tested (`AudioEditorEntryTests`,
      each Fade In Shape (Linear, Equal Power, Exponential, S-Curve): the
      curve changes and its length stays. Right-click inside the fade: the
      same four shapes, the current one checked. Type `250` in Fade In:
-     "250 ms"; `1.5 s`: "1.500 s"; a length longer than the region: it stops
+     "250 ms"; `1.5 s`: "1500 ms"; a length longer than the region: it stops
      where the fade out begins; `-5`: refused with "Type a fade like 250 ms
      or 1.5 s.". Do the same with the fade out at the top-right corner.
 221. Drag the region's left edge right: the region starts later in the file
@@ -951,7 +1020,7 @@ Checked by hand; the rules are tested (`AudioEditorEntryTests`,
 - [ ] **Step 4: Update the root `README.md`** (spec §2 item 11, 7c's part). Keep 7a's and 7b's sections and the disclaimer.
   - Status: delete the sentence "An audio editor is next." (wrapped as "An audio editor\nis next."), so the paragraph reads "…records, edits and mixes MIDI and audio in one window. The design spec describes where the project is going."
   - "What works today" gains a bullet after the themes bullet: "An audio editor in the bottom pane: a region's waveform drawn large with zoom and a level scale, and its gain, fades and fade shapes, trim and normalize, each by dragging or by typing a value".
-  - "Getting around": after the ⌘1–⌘4 bullet, add "⌘5 opens the audio editor for the selected audio region."
+  - "Getting around": after the "⌘1 to ⌘4 open the piano roll…" bullet, add "⌘5 opens the audio editor for the selected audio region."
 - [ ] **Step 5: Add backlog rows** to `docs/feature-backlog.md`:
   - "Audio editor: playhead, audition and scrub" (Ruling 11);
   - "Audio editor in a window of its own" (Ruling 1);
@@ -978,7 +1047,7 @@ pgrep -lf MacOS/VizDAW; ls -d /tmp/vze* 2>/dev/null
 
 Expected:
 - Rust: baseline + 7 passed and baseline + 1 ignored (macOS); Linux clippy clean; the rt-check gates pass;
-- Swift: baseline + 35;
+- Swift: baseline + 36;
 - the `find` prints nothing;
 - e2e 17 passed;
 - registry 155;
@@ -1007,20 +1076,23 @@ Expected:
    - §2 item 3's bottom list: Task 4. §2 item 11, 7c's README part: Task 7.
    - §4: themes (Ruling 12, the scans), controls big enough (Ruling 6's hit sizes), agents keep working (Task 5, e2e). §5: hostile input; no dialogs (Ruling 9).
    - Model gaps: one, ruled in Ruling 4 (`region_envelope`). Ruling 5 checks the rest.
+   - The pre-flight (`.superpowers/sdd/2026-11-04-audio-editor/preflight.md`) is folded: C1, C2, I1–I6 and the Minors, as `fold-log.md` lists. The controller's provisional calls are Ruling 13.
 2. **Step scan.** Every test step names its tests and assertions with exact values. Every code step names files, signatures and the ruled values. The view task (6) is pinned by its five tests, the scans, the e2e and README 217–224. No step says "handle edge cases" without naming them.
 3. **Type consistency.**
    - `region_envelope` (1) → `SessionProtocol.regionEnvelope` → `AudioEditorGeometry.shaped`/`clipColumns`/`envelopeLine` (3) → the canvas (6).
    - `FrameAxis` (3) → `AudioEditorModel.axis` (4) → `stateRow`'s `frames_per_point`/`origin_frame` (5) → the canvas (6).
+   - `AudioEditorGeometry.span` (3) → both of the canvas's requests, `overview` and `regionEnvelope` (6).
+   - `sync(width:)` always takes the wave rect's width (4, 5, 6).
    - `AudioEditorBox` raw values (4) are the JSON `boxes` keys (5), and its labels are the e2e's element labels (7).
    - `AudioEditorEntry` hints (2) are the status texts in Tasks 4, 7 and the README.
    - `AudioEditorGeometry.label` (3) gives the undo labels in Tasks 6, 7 and the README; the core's command names give the typed ones.
    - `PaneView.audioEditor` (4) has the raw value `"audio_editor"` used by `ui.pane`'s Choice (5) and `layoutRow`.
 4. **Review Focus.** Five items, each with its pinning tests in the owning task.
-5. **Proportion.** About 1030 short lines (7b's is 1490, 7a's 1680) for seven tasks against §6 item 2 and §7's row. Most of the length is exact test values, Ruling 7's table and the README copy; bodies are left to the signatures.
+5. **Proportion.** About 1100 short lines after the pre-flight fold (7b's is 1490, 7a's 1680) for seven tasks against §6 item 2 and §7's row. Most of the length is exact test values, Ruling 7's table and the README copy; bodies are left to the signatures.
 
 ## Execution handoff
 
 Plan complete and saved to `docs/superpowers/plans/2026-11-04-audio-editor.md`. The controller runs it subagent-driven, with one reviewer per task, as in 7a and 7b.
 
-- Tasks 1, 2 and 3 do not depend on each other. Tasks 4–7 run in order after them.
+- Run the tasks in order, 1 to 7. Tasks 2 and 3 do not use each other's code, but they share the tree with Task 1's FFI regeneration, and the counts above assume that order.
 - Task 6 is view work that only its five tests, the scans, the e2e and the owner's by-eye steps check. Its review should read the drawing order and the input list against Rulings 6, 8, 11 and 12 line by line, and the controller compares Task 6's screenshot with the mockup direction before Task 7.
