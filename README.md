@@ -4,8 +4,8 @@ VizDAW (pronounced "Vista") is a MIDI-first, open-source digital audio
 workstation for macOS, inspired by Opcode Studio Vision.
 
 **Status:** VizDAW is in development and not yet released. Today it
-records, edits and mixes MIDI and audio in one window. The look of the
-interface (themes) and an audio editor are next. The
+records, edits and mixes MIDI and audio in one window. An audio editor
+is next. The
 [design spec](docs/superpowers/specs/2026-10-15-vizdaw-design.md) describes
 where the project is going.
 
@@ -23,6 +23,9 @@ where the project is going.
 - Bounce to WAV, AIFF or CAF
 - Round trips to an external sample editor
 - MIDI 2.0 throughout, on Apple Silicon with macOS 14 or newer
+- Six themes, Classic Light by default, and a channel strip with typed
+  levels, pan and sends, send knobs, an EQ slot and an optional colour per
+  strip
 
 Planned: Standard MIDI File import, and OMF and AAF import (which may come
 after the first release).
@@ -39,6 +42,25 @@ after the first release).
   bottom pane.
 - Window > Mixer opens the mixer in a window of its own.
 - Change any key in Settings › Keys.
+
+## Themes
+
+VizDAW has six themes: Classic Light (the default), Studio Dark, Flat,
+Console, Symbiotic and EG13. Choose one in Settings › Appearance; it
+changes every window at once, the mixer included, and it stays chosen on
+this Mac rather than in your projects. In every theme the mixer colours its
+fader caps by strip type (channel, instrument, aux return, bus, master) and
+its knobs by what they do, like a mixing console. Only Console draws a
+hardware look, in code, with no photographs.
+
+You can make your own themes as JSON files in
+`~/Library/Application Support/VizDAW/Themes`. Settings › Appearance ›
+Duplicate as File… writes the current theme there as a starting point, and
+Show Themes Folder opens the folder. A file needs a "name" no built-in
+theme has and a "base", one of classic-light, studio-dark, flat, console,
+symbiotic or eg13; any token it leaves out or gets wrong comes from the
+base, and Settings › Appearance lists each problem. VizDAW reads the files
+again as soon as they change.
 
 ## Platforms
 

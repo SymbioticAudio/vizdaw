@@ -2260,3 +2260,235 @@ fn window_views_and_panes_over_the_channel() {
     assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
     app.quit();
 }
+
+/// The strip named `name` in a `state.get mixer` answer.
+fn strip_named(mixer: &Value, name: &str) -> Value {
+    mixer["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == name)
+        .unwrap_or_else(|| panic!("no strip {name:?} in {mixer}"))
+        .clone()
+}
+
+/// README steps 207–216 through the channel (plan 7b): hostile `ui.theme`
+/// and `state.get` calls that change nothing and open no dialog, a theme
+/// chosen live, the mixer state's colours and EQ slot, the typed level
+/// and pan on the real number boxes (Return commits, a refusal and Esc
+/// change nothing, a 300-digit entry is refused, not cut), the mixer
+/// window's strips, and the values saved with the project while the
+/// theme stays a preference.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn themes_and_the_strip_over_the_channel() {
+    use core_control::ErrorCode;
+    const SYNTH: &str = "Built-in Synth";
+    let mut app = App::start();
+    // 1. The default theme; the windows as they are.
+    let window = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    let numbers = |w: &Value| -> Vec<(Value, Value)> {
+        w["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["number"].clone(), x["kind"].clone()))
+            .collect()
+    };
+    let w0 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w0["theme"], "classic-light", "{w0}");
+
+    // 2. Hostile calls change nothing and open no dialog.
+    for params in [
+        json!({}),
+        json!({"theme": "svp-light"}),
+        json!({"theme": "console", "extra": 1}),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "ui.theme", "params": params, "window": window}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {e}");
+    }
+    let e = app.call_err("state.get", json!({"target": "mixers", "window": window}));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    let w1 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w1["theme"], "classic-light", "{w1}");
+    assert_eq!(numbers(&w1), numbers(&w0), "no window opened or closed");
+    assert_eq!(w1["alerts"].as_array().unwrap().len(), 0, "{w1}");
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    assert!(doc["alert"].is_null(), "no dialog: {doc}");
+
+    // 3. Console, live; no window opens or closes.
+    let r = app.call(
+        "command.run",
+        json!({"id": "ui.theme", "params": {"theme": "console"}, "window": window}),
+    );
+    assert_eq!(r["status"], "theme console", "{r}");
+    let w2 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w2["theme"], "console", "{w2}");
+    assert_eq!(numbers(&w2), numbers(&w0), "no window opened or closed");
+
+    // 3b. Nothing is selected: the left pane says so and shows no strip.
+    wait_for_label(&mut app, &window, "Select a lane to see its channel strip.");
+    let tree = app.call("ui.tree", json!({"window": window}));
+    assert!(
+        labelled_like(&tree["nodes"], "Level of ", "").is_none(),
+        "no strip in the left pane: {tree}"
+    );
+    app.call(
+        "command.run",
+        json!({"id": "ui.view_mix", "window": window}),
+    );
+    wait_for_state(&mut app, &window, "layout", |l| l["main"] == "mix");
+
+    // 4. The mixer state: kind colours, no strip colours, no EQ.
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    for s in m["strips"].as_array().unwrap() {
+        assert!(s.get("kind_colour").is_some(), "{s}");
+        assert!(s["colour"].is_null(), "no strip colour yet: {s}");
+        assert!(s["eq"].is_null(), "no EQ yet: {s}");
+    }
+    assert_eq!(strip_named(&m, SYNTH)["kind_colour"], "instrument", "{m}");
+    assert_eq!(strip_named(&m, "Master")["kind_colour"], "master", "{m}");
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(eq) = find_node(&tree["nodes"], &format!("EQ of {SYNTH}")) {
+            assert_eq!(eq["value"], "empty", "{eq}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no EQ of {SYNTH} in {tree}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // 5. The level box: one call clicks it and types.
+    let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
+    app.call(
+        "ui.key",
+        json!({"window": window, "element": level, "text": "-4.2\n"}),
+    );
+    wait_for_state(&mut app, &window, "mixer", |m| {
+        (strip_named(m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6
+    });
+    wait_for_undo(&mut app, &window, "Set Fader");
+    let version = |app: &mut App| {
+        app.call("state.get", json!({"target": "document", "window": window}))["version"].clone()
+    };
+    let v0 = version(&mut app);
+
+    // 5b. Esc while typing changes nothing (A4 review M4).
+    let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
+    app.call(
+        "ui.key",
+        json!({"window": window, "element": level, "text": "-9"}),
+    );
+    app.call("ui.key", json!({"window": window, "key": "escape"}));
+    // Had Esc not ended the edit, this Return would commit −9.
+    app.call("ui.key", json!({"window": window, "key": "return"}));
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert!(
+        (strip_named(&m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6,
+        "Esc cancelled the typed -9: {m}"
+    );
+    assert_eq!(version(&mut app), v0, "Esc added no undo step");
+    // 5c. A 300-digit entry (the channel's paste) is refused, not cut. A
+    // `ui.key` holds at most 256 characters: two calls into the one field.
+    let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
+    let half = "9".repeat(150);
+    app.call(
+        "ui.key",
+        json!({"window": window, "element": level, "text": half}),
+    );
+    app.call(
+        "ui.key",
+        json!({"window": window, "text": format!("{half}\n")}),
+    );
+    wait_for_state(&mut app, &window, "editor", |e| {
+        e["status"] == "Type a level in dB, like \u{2212}4.2 or \u{2212}inf."
+    });
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert!(
+        (strip_named(&m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6,
+        "Esc and the refusal changed nothing: {m}"
+    );
+    assert_eq!(version(&mut app), v0, "no undo step was added");
+    wait_for_undo(&mut app, &window, "Set Fader");
+
+    // 6. The pan box: a refused pan, then L 24.
+    let pan = wait_for_label(&mut app, &window, &format!("Pan of {SYNTH}"));
+    app.call("ui.click", json!({"window": window, "element": pan}));
+    app.call("ui.key", json!({"window": window, "text": "LR\n"}));
+    wait_for_state(&mut app, &window, "editor", |e| {
+        e["status"] == "Type a pan like L 24, C or R 10."
+    });
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert_eq!(strip_named(&m, SYNTH)["pan"].as_f64(), Some(0.0), "{m}");
+    let pan = wait_for_label(&mut app, &window, &format!("Pan of {SYNTH}"));
+    app.call(
+        "ui.key",
+        json!({"window": window, "element": pan, "text": "L 24\n"}),
+    );
+    wait_for_state(&mut app, &window, "mixer", |m| {
+        (strip_named(m, SYNTH)["pan"].as_f64().unwrap() + 0.24).abs() < 1e-6
+    });
+    // Leaving the level box committed no draft: Esc had cancelled it.
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert!(
+        (strip_named(&m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6,
+        "{m}"
+    );
+
+    // 7. The mixer window shows the same strips.
+    app.call(
+        "command.run",
+        json!({"id": "window.mixer", "window": window}),
+    );
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let mixer = loop {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        if let Some(m) = ws["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "mixer")
+        {
+            break m["number"].clone();
+        }
+        assert!(Instant::now() < deadline, "no mixer window in {ws}");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    wait_for_label(&mut app, &mixer, &format!("Fader of {SYNTH}"));
+
+    // 8. The values are saved; the theme is a preference.
+    let path = app.launched.home.join("strip.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": path}, "window": window}),
+    );
+    app.call("command.run", json!({"id": "file.close", "window": window}));
+    let w3 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w3, json!({"condition": "documents_at_least", "count": 1}));
+    let m = app.call("state.get", json!({"target": "mixer", "window": w3}));
+    let s = strip_named(&m, SYNTH);
+    assert!((s["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6, "{m}");
+    assert!((s["pan"].as_f64().unwrap() + 0.24).abs() < 1e-6, "{m}");
+    let w4 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w4["theme"], "console", "{w4}");
+    app.quit();
+}
+
+/// The first tree node whose label is exactly `label`.
+fn find_node(nodes: &Value, label: &str) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        if n["label"].as_str() == Some(label) {
+            Some(n.clone())
+        } else {
+            find_node(&n["children"], label)
+        }
+    })
+}

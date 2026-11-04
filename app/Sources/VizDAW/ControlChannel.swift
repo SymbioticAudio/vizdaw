@@ -235,7 +235,7 @@ enum ControlChannel {
             guard let w = ControlWindows.window(window) else { return answer(server, token, noWindow) }
             guard let p = ControlUI.point(at, in: w) else { return answer(server, token, noElement) }
             let events = ControlUI.clickEvents(w, at: p, button: button, count: Int(count), modifiers: modifiers)
-            send(server, token, events, w, p)
+            send(server, token, events, w, p, focusing: true)
         case .drag(let window, let from, let to, let steps, let modifiers):
             guard let w = ControlWindows.window(window) else { return answer(server, token, noWindow) }
             guard let a = ControlUI.point(from, in: w), let b = ControlUI.point(to, in: w) else {
@@ -245,16 +245,19 @@ enum ControlChannel {
         case .key(let window, let focus, let strokes):
             guard let w = ControlWindows.window(window) else { return answer(server, token, noWindow) }
             var click: [NSEvent] = []
+            var at = CGPoint.zero
             if let focus {
                 guard let p = ControlUI.point(.element(element: focus), in: w) else {
                     return answer(server, token, noElement)
                 }
+                at = p
                 click = ControlUI.clickEvents(
                     w, at: p, button: .left, count: 1,
                     modifiers: ModifiersRow(shift: false, control: false, option: false, command: false))
             }
-            // The focusing click first; the keys once it was handled.
-            send(server, token, click, w, .zero) { keys(server, token, strokes, w) }
+            // The focusing click first; the keys once it was handled (and a
+            // number box it started editing has the keyboard).
+            send(server, token, click, w, at, focusing: true) { keys(server, token, strokes, w) }
         case .screenshot(let window, let path, let scale):
             guard let w = ControlWindows.window(window) else { return answer(server, token, noWindow) }
             guard let png = WindowSnapshot.png(of: w, scale: scale.map { CGFloat($0) }) else {
@@ -312,15 +315,31 @@ enum ControlChannel {
     static let noElement = ControlOutcome.failed(
         .of(.noElement, "The element is gone or changed (read ui.tree again)."))
 
+    /// How long a click on a SwiftUI gesture view waits for a number box's
+    /// field to show, to give it the keyboard (`focusing`).
+    static let fieldWait: Duration = .milliseconds(500)
+
     /// Posts `events` and, once the app has handled them, answers (or runs
-    /// `then`, which answers).
+    /// `then`, which answers). `focusing`: a click (VizDAW is not the
+    /// active app, so its windows are not key) that lands on a SwiftUI
+    /// view taking no first click of its own may start a number box
+    /// editing; its field gets the keyboard once it shows, at most
+    /// `fieldWait` later, so the keys typed next reach it (plan 7b Task
+    /// B8). Other clicks answer as before.
     static func send(
         _ server: ControlServer, _ token: UInt64, _ events: [NSEvent], _ w: NSWindow, _ p: CGPoint,
-        then: (@MainActor () -> Void)? = nil
+        focusing: Bool = false, then: (@MainActor () -> Void)? = nil
     ) {
-        ControlUI.post(events, to: w)
+        let mayEdit = ControlUI.post(events, to: w) && focusing
+        var handled: ContinuousClock.Instant?
         later(token, seconds: 5) { expired in
             guard expired || !ControlUI.eventsPending else { return false }
+            if mayEdit, !expired {
+                let now = clock.now
+                let since = handled ?? now
+                handled = since
+                if !ControlUI.focusTextField(at: p, in: w), now - since < fieldWait { return false }
+            }
             if let then {
                 then()
             } else {

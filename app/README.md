@@ -1965,3 +1965,124 @@ the detail pane is the bottom pane's editor.
      transport bar: Play there plays the document. Set the Mix view's
      right pane to Markers, save, close and reopen the project: both views
      come back as you left them, and the window at the same size and place.
+
+### Themes and the channel strip (plan 7b)
+
+Checked by hand; the rules are tested (`AppearanceTests`, `AppIconTests`,
+`ThemeScanTests`, `UserThemeTests`, `StripEntryTests`, `StripLayoutTests`,
+`MixerStripTests`, the core's EQ slot and strip colour tests) and the e2e
+`themes_and_the_strip_over_the_channel`.
+
+207. Open Settings › Appearance, choose Classic Light if another theme is
+     chosen, then File > Create Demo Project: light grey panels, white
+     editing areas, dark text and one blue selection colour. Settings ›
+     Appearance lists Classic Light, Studio Dark, Flat, Console, Symbiotic
+     and EG13, with Classic Light chosen.
+208. With the demo window, the mixer window (⌥⌘M), a torn-off piano roll
+     (⌥⌘1), Modify › Transpose and Settings open, choose each theme in
+     turn: every window changes at once, the arrangement and piano roll
+     canvases included, and no window keeps the old colours. Open Window >
+     Mixer and File > New: both come up in the chosen theme, and a strip's
+     context menu and the File menu follow it too. In every theme the
+     piano roll's keys stay white and black. Turn macOS Dark Mode on:
+     Classic Light stays light and Studio Dark stays dark. Quit and start
+     VizDAW again: the last theme is still chosen.
+209. Press ⌃2: each strip shows, from the top, a colour bar and its name;
+     the input (audio strips); "EQ ＋"; the inserts and "+"; its sends,
+     each a name over a knob and its level; "→ Master"; a pan knob
+     reading "C"; a large fader cap beside a dB scale and a meter;
+     "0.0 dB"; M S R I; the automation mode. The Built-in Synth's cap, an
+     audio strip's cap and master's cap have three different colours. Add
+     a bus and give the synth a send to it: the bus's cap takes the
+     aux-return colour. Route an audio strip's output to the bus: the
+     bus's cap changes to the bus colour.
+210. Right-click the Built-in Synth's name and open Colour ▸: it lists
+     None and eight swatches, and each swatch's dot shows its own colour,
+     not one grey. Choose Blue: its colour bar turns blue in the Mix view,
+     the bottom pane's mixer, the mixer window and (select a lane that
+     plays through the Built-in Synth) the left strip; the lanes that play
+     through it and their regions turn blue too, and its fader cap keeps
+     the instrument colour. Undo: the bar shows the instrument colour
+     again. Redo, save, close and reopen: the bar is still blue.
+211. Right-click a lane header in the arrangement and open Colour ▸: None
+     and the same eight swatches, each dot in its own colour. Choose
+     Green: that lane's header bar and regions, every other lane on the
+     same strip, and the strip's bar in the mixer turn green; the fader
+     cap keeps its kind's colour (channel, instrument, aux return, bus or
+     master). Choose None: they show the kind's colour again. Then
+     Settings › Appearance › Show channel colour bars off: the strips'
+     and lane headers' colour bars go, in all four places, and the
+     regions keep their colour. Turn it back on: the bars return.
+212. Click the Built-in Synth's level box, type `-4.2` and press Return:
+     the fader moves down and the box reads "−4.2 dB"; Edit shows "Undo
+     Set Fader", and one Undo puts it back to "0.0 dB". Type `abc` and
+     press Return: the box still reads "0.0 dB" and the status line says
+     "Type a level in dB, like −4.2 or −inf.". Type `-inf`: "−∞ dB" and
+     the cap at the bottom. Type `40`: "+12.0 dB". Type `-0.04`: "0.0 dB".
+     Paste a long line of 9s and press Return: refused, the box unchanged.
+     Press Escape while typing: nothing changes. In its pan box type
+     `L 24`: the knob turns left and the box reads "L 24"; then `r10`:
+     "R 10"; then `c`: "C"; then `LR`: refused, with "Type a pan like
+     L 24, C or R 10." in the status line.
+213. Drag the pan knob up and down on the trackpad: it follows without
+     jumping; press ⌥ half-way through a drag: the knob does not jump,
+     then moves a tenth as far. Click the knob once without moving:
+     nothing changes. Double-click it: it returns to C. Focus it and
+     press the arrow keys: it steps. Do the same on a send knob and its
+     level box. Drag the fader cap from the bottom to the top: the cap is
+     easy to grab, the throw is long, and the "0" mark lines up with
+     0.0 dB; the scale reads +12 down to −48, then "−∞" at the bottom.
+     Drag the bottom pane's divider down to its smallest size with the
+     bottom pane on Mixer: the strips scroll, the fader keeps a usable
+     throw, and M S R I stay reachable. Show the left strip on a 700×450
+     window: it scrolls the same way.
+214. On an audio strip click "EQ ＋" and choose any effect plug-in: the
+     slot shows its name. Click it: the plug-in's window opens. Turn its
+     bypass on and off from the slot: the slot shows each state. Add two
+     inserts and drag the second above the first: the EQ stays at the
+     top. Try to drag the EQ among the inserts: it does not move. Save,
+     close and reopen: the EQ is still there. Remove EQ from its menu:
+     "EQ ＋" again; Undo brings it back with its settings. Open the
+     project in a VizDAW build from before plan 7b (`git worktree add
+     /tmp/vz7a 9375170 && (cd /tmp/vz7a && scripts/build-ffi.sh &&
+     scripts/make-app.sh)`, then open `/tmp/vz7a/dist/VizDAW.app`): it
+     refuses with "project format version 4 is newer than this build
+     supports". Quit it, then `git worktree remove /tmp/vz7a`.
+215. Choose Console: fader caps, knobs and panels look shaded and
+     bevelled, like hardware, drawn with no photographs or textures and no
+     brand names. Choose each of the other five: their knobs and caps are
+     flat. In every theme the pan knob's ring and the send knobs' rings
+     have their own colours, and the fader caps keep their kinds' colours.
+216. In Settings › Appearance click Duplicate as File…: a new JSON file
+     appears in the Themes folder (`~/Library/Application
+     Support/VizDAW/Themes`; Show Themes Folder opens it), "‹theme› Copy.json"
+     (then " 2", " 3" …), never over an existing file. Its "name" and
+     "base" are required: the name must not be a built-in theme's, and the
+     base is one of classic-light, studio-dark, flat, console, symbiotic or
+     eg13. Edit it: under "values" change `accent.accent` and
+     `strip.master`. Save the file:
+     Settings lists the theme at once, and choosing it shows the new
+     accent and master cap. Give a token a bad value (`"accent": "blue"`)
+     and an unknown group: those tokens fall back to the base theme, and
+     Settings › Appearance lists each problem. Set both "style" →
+     "corners" and a "radius" value: the radius wins. A file may set
+     "appearance", "knobFinish", "style" (labels, legendFamily,
+     numberFamily, corners, panelBands, knobSkirt, capStyle, tile) and,
+     under "values", these groups and items: surface (window, panel,
+     raised, inset, separator, selection, focusRing), text (primary,
+     secondary, disabled, inverse), accent (accent, onAccent), state
+     (record, play, solo, mute, warning, error, offline), meter
+     (background, low, mid, high, clip), graph (line, fill, grid, handle,
+     handleSelected), control (gain, eqLow, eqLowMid, eqHighMid, eqHigh,
+     send, pan, dynamics, filter), strip (channel, instrument, auxReturn,
+     bus, master), spacing (xxs, xs, s, m, l, xl), radius (none, s, m, l),
+     iconStroke (s16, s24, s32), type (caption, body, label, title,
+     display), knob (skirt, cap, track, indicator), fader (well, scale,
+     capLine), relief (highlight, shadow, capTop, capBottom, panelTop,
+     panelBottom), swatch (red, orange, yellow, green, teal, blue, purple,
+     pink), keys (white, black), readout (background, text) and band
+     (light, dark); "brand" is not theirs to change. Delete the file: the
+     theme leaves the list. Finally, `rm -rf app/.build`, build with
+     `VIZDAW_NO_BRAND=1 scripts/make-app.sh` and open `dist/VizDAW.app`:
+     every control that shows an icon still shows one. Rebuild without
+     the variable afterwards (`rm -rf app/.build && scripts/make-app.sh`).

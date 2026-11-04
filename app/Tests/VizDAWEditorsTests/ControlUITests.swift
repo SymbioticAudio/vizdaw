@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Testing
 import VizDAWCore
 @testable import VizDAWEditors
@@ -177,6 +178,67 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
             w, from: CGPoint(x: 5, y: 5), to: CGPoint(x: 50, y: 50), steps: 100_000, modifiers: none)
         #expect(huge.count == ControlUI.postedLimit)
         #expect(huge.first?.type == .leftMouseDown && huge.last?.type == .leftMouseUp)
+    }
+
+    /// SwiftUI's hosting view takes no first click, and VizDAW under the
+    /// channel is not the active app, so its windows are never key: a
+    /// channel click on a strip's number box was spent on the window
+    /// (plan 7b Task B8). Once the channel has aimed at it, the hosting
+    /// view takes the channel's clicks as first clicks; a user's are as
+    /// before.
+    @Test func aHostingViewTakesTheChannelsFirstClick() throws {
+        let w = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 200, height: 100), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: Color.clear.frame(width: 200, height: 100))
+        w.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let click = ControlUI.clickEvents(w, at: CGPoint(x: 100, y: 60), button: .left, count: 1, modifiers: none)
+        let user = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: NSPoint(x: 100, y: 40), modifierFlags: [],
+                timestamp: click[0].timestamp + 0.5, windowNumber: w.windowNumber, context: nil, eventNumber: 2,
+                clickCount: 1, pressure: 1))
+        let before = host.acceptsFirstMouse(for: user)
+        #expect(!host.acceptsFirstMouse(for: click[0]), "SwiftUI's own answer")
+        ControlUI.remember(click)
+        #expect(ControlUI.allowFirstMouse(click, in: w), "SwiftUI took no first click there: it may start editing")
+        #expect(host.acceptsFirstMouse(for: click[0]))
+        #expect(host.acceptsFirstMouse(for: user) == before, "a user's click is unchanged")
+        #expect(ControlUI.allowFirstMouse(click, in: w), "taught once, answered alike")
+        // A plain AppKit view keeps its own answer.
+        let plain = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        w.contentView = plain
+        #expect(!ControlUI.allowFirstMouse(click, in: w))
+        #expect(!plain.acceptsFirstMouse(for: click[0]))
+    }
+
+    /// A channel click that starts a number box editing in a window that
+    /// is not key leaves SwiftUI's field without the keyboard (plan 7b
+    /// Task B8): the channel gives it the keyboard, as a click into a key
+    /// window would.
+    @Test func aClickedTextFieldGetsTheKeyboard() {
+        let w = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 200, height: 100), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        let field = NSTextField(frame: NSRect(x: 10, y: 10, width: 80, height: 22))
+        let label = NSTextField(labelWithString: "read only")
+        label.frame = NSRect(x: 100, y: 10, width: 80, height: 22)
+        let plain = NSView(frame: NSRect(x: 0, y: 50, width: 200, height: 50))
+        for v in [field, label, plain] { w.contentView?.addSubview(v) }
+        let titleBar = w.frame.height - w.contentLayoutRect.height
+        // Window points, top-left origin: the field's centre.
+        let atField = CGPoint(x: 50, y: titleBar + 100 - 21)
+        let atLabel = CGPoint(x: 140, y: titleBar + 100 - 21)
+        let atPlain = CGPoint(x: 50, y: titleBar + 20)
+        #expect(!ControlUI.focusTextField(at: atPlain, in: w), "no field there")
+        #expect(!ControlUI.focusTextField(at: atLabel, in: w), "a label takes no typing")
+        #expect(field.currentEditor() == nil)
+        #expect(ControlUI.focusTextField(at: atField, in: w))
+        #expect(field.currentEditor() != nil && w.firstResponder === field.currentEditor())
+        #expect(ControlUI.focusTextField(at: atField, in: w), "it keeps it")
     }
 
     @Test func aClickPointNeedsAVisibleFiniteElement() throws {

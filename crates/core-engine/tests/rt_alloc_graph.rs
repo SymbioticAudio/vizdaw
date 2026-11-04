@@ -26,7 +26,7 @@ fn armed_block(b: &mut OfflineBackend, frames: u32) {
     rt_check::disarm();
 }
 
-/// The demo with: a gain/latency insert and a NaN insert (it faults after
+/// The demo with: an EQ (gain and latency), a gain/latency insert and a NaN insert (it faults after
 /// 16 blocks) on the synth, a post send to "Verb" (noise, latency 200) whose
 /// second insert adds the synth's sidechain, and a pre-fader send to "Dry".
 /// `master_db` and `param` (an insert parameter overlay) change values only;
@@ -42,6 +42,13 @@ fn mixed(master_db: f64, param: f64, extra_bus: bool) -> (Document, SeqId) {
         .insert(synth, TestInserts::plugin("gain=0.7,latency=33"))
         .unwrap();
     b.insert(synth, TestInserts::plugin("nan")).unwrap();
+    // The EQ slot renders first in the synth's chain (plan 7b Ruling 9):
+    // its path is the inserts', proven allocation-free here too (B1 M2).
+    b.mixer(MixerCmd::SetEq {
+        strip: synth,
+        plugin: Some(TestInserts::plugin("gain=0.9,latency=17")),
+    })
+    .unwrap();
     b.insert(verb, TestInserts::plugin("noise=3,latency=200"))
         .unwrap();
     let sc = b.insert(verb, TestInserts::plugin("sc")).unwrap();
@@ -75,7 +82,12 @@ fn mixed(master_db: f64, param: f64, extra_bus: bool) -> (Document, SeqId) {
     if extra_bus {
         b.bus("Extra").unwrap();
     }
-    (b.finish(), song)
+    let doc = b.finish();
+    assert!(
+        doc.mixer().strip(synth).is_ok_and(|s| s.eq.is_some()),
+        "the synth has its EQ"
+    );
+    (doc, song)
 }
 
 /// Plays `blocks` blocks of the full graph on `workers` workers, swapping

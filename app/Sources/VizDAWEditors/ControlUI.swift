@@ -233,10 +233,91 @@ public enum ControlUI {
     /// on activating the window. A user's own clicks are not affected.
     /// Orders `window` to the front (without stealing focus from the
     /// active app) and queues `events` behind anything already queued.
-    public static func post(_ events: [NSEvent], to window: NSWindow) {
+    /// SwiftUI's views take the press too (`allowFirstMouse`); whether it
+    /// lands on one that may start editing (then `focusTextField`).
+    @discardableResult
+    public static func post(_ events: [NSEvent], to window: NSWindow) -> Bool {
         remember(events)
+        let mayEdit = allowFirstMouse(events, in: window)
         window.orderFront(nil)
         for e in events { NSApp.postEvent(e, atStart: false) }
+        return mayEdit
+    }
+
+    typealias FirstMouse = @convention(c) (NSView, Selector, NSEvent?) -> Bool
+
+    /// Each taught view class's own `acceptsFirstMouse(for:)`.
+    private static var firstMouseOriginals: [ObjectIdentifier: IMP] = [:]
+
+    /// Lets the SwiftUI view under `events`' first press take the
+    /// channel's clicks as first clicks, as the editors' AppKit views do
+    /// (plan 7b Task B8). VizDAW under the channel is not the active app,
+    /// so its windows are never key, and SwiftUI takes no first click on a
+    /// gesture view (a strip's number box, knob or fader): the click only
+    /// tried to activate the window. That view's class (in the mixer, a
+    /// SwiftUI scroll view's container) gets an `acceptsFirstMouse(for:)`
+    /// that answers yes for a channel event (`isChannel`) and as before
+    /// for any other, so a user's own clicks are not affected. Other views
+    /// keep their own answer.
+    ///
+    /// Whether the press lands on a SwiftUI view that takes no first click
+    /// of its own there (SwiftUI's buttons do take one): such a click may
+    /// start a number box editing (see `focusTextField`).
+    @discardableResult
+    static func allowFirstMouse(_ events: [NSEvent], in window: NSWindow) -> Bool {
+        guard
+            let down = events.first(where: { $0.type == .leftMouseDown || $0.type == .rightMouseDown }),
+            let frame = window.contentView?.superview ?? window.contentView,
+            let hit = frame.hitTest(down.locationInWindow),
+            let cls = object_getClass(hit), isSwiftUIView(cls)
+        else { return false }
+        let sel = #selector(NSView.acceptsFirstMouse(for:))
+        let key = ObjectIdentifier(cls)
+        if firstMouseOriginals[key] == nil {
+            guard let method = class_getInstanceMethod(cls, sel) else { return false }
+            let imp = method_getImplementation(method)
+            firstMouseOriginals[key] = imp
+            let original = unsafeBitCast(imp, to: FirstMouse.self)
+            let answer: @convention(block) (NSView, NSEvent?) -> Bool = { view, event in
+                nonisolated(unsafe) let e = event
+                let channel = MainActor.assumeIsolated { ControlUI.isChannel(e) }
+                return channel || original(view, sel, event)
+            }
+            class_replaceMethod(cls, sel, imp_implementationWithBlock(answer), method_getTypeEncoding(method))
+        }
+        guard let imp = firstMouseOriginals[key] else { return false }
+        return !unsafeBitCast(imp, to: FirstMouse.self)(hit, sel, down)
+    }
+
+    /// Gives the keyboard to the editable text field at `p` (window
+    /// points, top-left origin) when it does not have it; whether such a
+    /// field has it now. A channel click that starts a number box editing
+    /// in a window that is not key leaves SwiftUI's field without the
+    /// keyboard (plan 7b Task B8), so typed keys would go to the key
+    /// bindings: this does what the click does in a key window.
+    public static func focusTextField(at p: CGPoint, in window: NSWindow) -> Bool {
+        guard p.x.isFinite, p.y.isFinite, let frame = window.contentView?.superview ?? window.contentView else {
+            return false
+        }
+        var v = frame.hitTest(NSPoint(x: p.x, y: window.frame.height - p.y))
+        while let view = v, !(view is NSTextField) { v = view.superview }
+        guard let field = v as? NSTextField, field.isEditable, field.isEnabled else { return false }
+        if let editor = field.currentEditor(), window.firstResponder === editor { return true }
+        return window.makeFirstResponder(field) && field.currentEditor() != nil
+    }
+
+    /// Whether `cls` is one of SwiftUI's own views (its `NSHostingView`,
+    /// in any generic specialisation, or the containers it builds inside,
+    /// such as a scroll view's), or a subclass of one: its name or an
+    /// ancestor's is in SwiftUI's module.
+    static func isSwiftUIView(_ cls: AnyClass) -> Bool {
+        var c: AnyClass? = cls
+        while let k = c {
+            let name = NSStringFromClass(k)
+            if name.hasPrefix("SwiftUI.") || name.contains("7SwiftUI") { return true }
+            c = class_getSuperclass(k)
+        }
+        return false
     }
 
     /// Sends key `events` straight to `window` (its first responder), which
