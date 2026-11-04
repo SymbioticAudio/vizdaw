@@ -19,8 +19,9 @@ where the project is going.
 - Audio import, regions, fades and normalize
 - The mixer, with inserts, buses, sends and automation
 - AU (v2/v3) and CLAP plug-ins (no VST3)
-- Control surfaces (Mackie Control with its XT extenders, HUI, and keyboard
-  controllers with a host-integration mode: plug-in pages, transport) and
+- Control surfaces (Mackie Control with its XT extenders, HUI, and one
+  family of keyboard controllers in its host-integration mode: plug-in pages,
+  transport) and
   MIDI learn
 - Bounce to WAV, AIFF or CAF
 - Round trips to an external sample editor
