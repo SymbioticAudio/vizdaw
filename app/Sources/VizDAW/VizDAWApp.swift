@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 import SymbioticIcons
-import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -38,7 +37,8 @@ struct VizDAWApp: App {
 
     init() {
         // The branded glyphs first, before any icon draws (plan 7b Ruling 6;
-        // a VIZDAW_NO_BRAND=1 build has the standard icons only).
+        // a VIZDAW_NO_BRAND=1 build has the standard icons only). The app
+        // draws SF Symbols for now (B3 fix round 2), so nothing uses it yet.
         #if canImport(SymbioticBrand)
         Icons.register(SymbioticBrand.provider)
         #endif
@@ -130,28 +130,18 @@ struct VizDAWApp: App {
         Settings {
             TabView {
                 EditingSettingsView(prefs: editingPreferences)
-                    .tabItem { Self.tab("Editing", .settingsEditing) }
+                    .tabItem { AppIcon.settingsEditing.label("Editing") }
                 KeysSettingsView(keys: keyBindings, store: appStore)
-                    .tabItem { Self.tab("Keys", .settingsKeys) }
+                    .tabItem { AppIcon.settingsKeys.label("Keys") }
                 AudioSettingsView(prefs: audioPreferences, store: appStore)
-                    .tabItem { Self.tab("Audio", .settingsAudio) }
+                    .tabItem { AppIcon.settingsAudio.label("Audio") }
                 RecordingSettingsView(prefs: audioPreferences, store: appStore)
-                    .tabItem { Self.tab("Recording", .settingsRecording) }
+                    .tabItem { AppIcon.settingsRecording.label("Recording") }
                 AutomationSettingsView(prefs: automationPreferences)
-                    .tabItem { Self.tab("Automation", .settingsAutomation) }
+                    .tabItem { AppIcon.settingsAutomation.label("Automation") }
                 SurfacesSettingsView(settings: surfaceSettings, keys: keyBindings)
-                    .tabItem { Self.tab("Surfaces", .settingsSurfaces) }
+                    .tabItem { AppIcon.settingsSurfaces.label("Surfaces") }
             }
-        }
-    }
-
-    /// A Settings tab's label. The tab bar draws images only, so the icon is
-    /// an `NSImage`, in the default theme.
-    @MainActor private static func tab(_ title: String, _ icon: AppIcon) -> some View {
-        Label {
-            Text(title)
-        } icon: {
-            Image(nsImage: icon.image(size: 16, theme: .classicLight))
         }
     }
 }

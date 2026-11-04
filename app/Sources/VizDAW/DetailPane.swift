@@ -1,5 +1,4 @@
 import SwiftUI
-import SymbioticIcons
 import VizDAWAppModel
 
 /// A detail editor's frame: the editor picker, its target, Open in Window,
@@ -40,7 +39,7 @@ struct DetailPane: View {
                         .help("⌥⌘\(state.kind.key)")
                 }
                 if let onClose {
-                    Button(action: onClose) { Icon(AppIcon.close.role, size: 16) }
+                    Button(action: onClose) { AppIcon.close.image }
                         .buttonStyle(.borderless)
                         .help("Close Detail Editor")
                 }
@@ -77,11 +76,10 @@ struct DetailArea: View {
                 },
                 onClose: { model.editor.closeDetail() }, showsKindPicker: false)
         } else {
-            ContentUnavailableView {
-                Label { Text("No Editor Open") } icon: { Icon(AppIcon.split.role, size: 32) }
-            } description: {
-                Text("Double-click a block, or press ⌘1 to ⌘4.")
-            }
+            ContentUnavailableView(
+                "No Editor Open", systemImage: AppIcon.split.symbol,
+                description: Text("Double-click a block, or press ⌘1 to ⌘4.")
+            )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }

@@ -1,5 +1,4 @@
 import SwiftUI
-import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 
@@ -69,14 +68,14 @@ struct BounceSheet: View {
                 Toggle("Also write the files", isOn: $bounce.writeFiles)
             }
             if let w = bounce.warning {
-                Label { Text(w) } icon: { Icon(AppIcon.warning.role, size: 16) }
+                AppIcon.warning.label(w)
                     .font(.callout)
             }
             if !bounce.length.isEmpty {
                 Text("Length \(bounce.length)").font(.caption).foregroundStyle(.secondary)
             }
             if let e = bounce.error {
-                Label { Text(e) } icon: { Icon(AppIcon.fault.role, size: 16) }
+                AppIcon.fault.label(e)
                     .font(.callout)
                     .foregroundStyle(.red)
             }

@@ -1,5 +1,4 @@
 import SwiftUI
-import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 
@@ -28,22 +27,22 @@ struct ProjectBanners: View {
                 Spacer()
                 Button("Cancel") { model.cancelJob(id) }
             case .mismatched(let count, let label):
-                Icon(AppIcon.warning.role, size: 16)
+                AppIcon.warning.image
                 Text("\(count) media file\(count == 1 ? " is" : "s are") not in the project format (\(label)) and stay silent.")
                 Spacer()
                 Button("Convert \(count) File\(count == 1 ? "" : "s")") { model.convertMedia() }
             case .rateMismatch(let device, let project):
-                Icon(AppIcon.muted.role, size: 16)
+                AppIcon.muted.image
                 Text("The audio device runs at \(Self.khz(device)); this project is \(Self.khz(Double(project))). Audio regions are muted.")
                 Spacer()
                 Button("Change Project Rate to \(Self.khz(device))") { model.changeRateToDevice() }
             case .diskTooSlow:
-                Icon(AppIcon.diskSlow.role, size: 16)
+                AppIcon.diskSlow.image
                 Text("Disk too slow: some audio played as silence.")
                 Spacer()
                 Button("Dismiss") { model.dismissDiskWarning() }
             case .problems(let lines):
-                Icon(AppIcon.problem.role, size: 16)
+                AppIcon.problem.image
                 Text(lines.joined(separator: "\n")).lineLimit(3)
                 Spacer()
                 Button("Dismiss") { model.dismissProblems() }

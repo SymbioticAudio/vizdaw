@@ -1,6 +1,4 @@
 import SwiftUI
-import SymbioticIcons
-import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -10,8 +8,6 @@ import VizDAWCore
 struct StripInputView: View {
     let inputs: LaneInputs
     let lane: LaneRow
-    /// The icons' stroke follows the theme.
-    @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
         HStack(spacing: 4) {
@@ -23,12 +19,7 @@ struct StripInputView: View {
                                 inputs.choose(choice, lane: lane)
                             } label: {
                                 if choice.input == lane.input {
-                                    Label {
-                                        Text(choice.title)
-                                    } icon: {
-                                        // A menu item draws images only.
-                                        Image(nsImage: AppIcon.confirm.image(size: 16, theme: theme))
-                                    }
+                                    AppIcon.confirm.label(choice.title)
                                 } else {
                                     Text(choice.title)
                                 }

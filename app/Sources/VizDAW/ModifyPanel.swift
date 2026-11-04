@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 
@@ -93,7 +92,7 @@ struct SelectModifyPanelView: View {
             if model.config.modify.enabled { ModifyHalfView(model: model) }
             Divider()
             if let notice = model.notice {
-                Label { Text(notice) } icon: { Icon(AppIcon.info.role, size: 16) }
+                AppIcon.info.label(notice)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -189,7 +188,7 @@ struct ConditionRowView: View {
                 Button {
                     model.removeCondition(at: index)
                 } label: {
-                    Icon(AppIcon.remove.role, size: 16)
+                    AppIcon.remove.image
                 }
                 .buttonStyle(.borderless)
                 .help("Remove Condition")

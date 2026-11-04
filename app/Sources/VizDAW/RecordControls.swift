@@ -18,7 +18,7 @@ struct RecordControls: View {
             // AppKit buttons, so the channel's tree finds them (final review I1).
             AppKitButton(
                 record.isRecording ? "Stop Recording" : "Record",
-                icon: .record,
+                icon: record.isRecording ? .recording : .record,
                 enabled: TransportCommands.enabled("transport.record", model),
                 help: record.isRecording ? "Stop recording (R)" : "Record the armed lanes (R)",
                 tint: record.isRecording ? .systemRed : nil

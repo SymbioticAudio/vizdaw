@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -28,11 +27,9 @@ struct MediaPoolWindow: View {
                 .focusedSceneValue(\.documentID, id)
                 .navigationTitle("Media Pool — \(doc.snapshot.title)")
         } else {
-            ContentUnavailableView {
-                Label { Text("No Document") } icon: { Icon(AppIcon.audio.role, size: 32) }
-            } description: {
-                Text("The document of this media pool is closed.")
-            }
+            ContentUnavailableView(
+                "No Document", systemImage: AppIcon.audio.symbol,
+                description: Text("The document of this media pool is closed."))
         }
     }
 }
@@ -112,7 +109,7 @@ struct MediaPoolView: View {
         if offline.isEmpty {
             Text("")
         } else {
-            Label { Text(offline) } icon: { Icon(AppIcon.warning.role, size: 16) }
+            AppIcon.warning.label(offline)
                 .foregroundStyle(Color(nsColor: RegionPalette.offline))
                 .accessibilityLabel("Offline: \(offline)")
         }

@@ -53,8 +53,7 @@ let package = Package(
         // Editors (plan 4a): pure geometry plus the AppKit canvas views.
         .target(
             name: "VizDAWEditors",
-            // SymbioticIcons: AppKitButton's icons (plan 7b Task B3).
-            dependencies: ["VizDAWAppModel", "VizDAWCore", tokens, icons],
+            dependencies: ["VizDAWAppModel", "VizDAWCore", tokens],
             path: "Sources/VizDAWEditors"
         ),
         .executableTarget(

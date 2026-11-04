@@ -135,7 +135,7 @@ struct DocumentTransportBar: View {
     @ViewBuilder private var faults: some View {
         if model.hasFaults || model.hasReport {
             AppKitButton(
-                "Faults", icon: .fault, help: "Faults and compile messages",
+                "Faults", icon: .faultIndicator, help: "Faults and compile messages",
                 tint: model.hasFaults ? .systemRed : .systemOrange
             ) { model.showsFaults.toggle() }
             .fixedSize()

@@ -1,5 +1,4 @@
 import SwiftUI
-import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -70,25 +69,25 @@ struct PianoRollBar: View {
             Button {
                 editor.updateLayout { $0.pianoRoll.rowHeight = max($0.pianoRoll.rowHeight - 2, 4) }
             } label: {
-                Icon(AppIcon.collapse.role, size: 16)
+                AppIcon.collapse.image
             }
             .help("Shorter Rows")
             Button {
                 editor.updateLayout { $0.pianoRoll.rowHeight = min($0.pianoRoll.rowHeight + 2, 40) }
             } label: {
-                Icon(AppIcon.expand.role, size: 16)
+                AppIcon.expand.image
             }
             .help("Taller Rows")
             Button {
                 editor.updateLayout { $0.pianoRoll.ticksPerPoint = min($0.pianoRoll.ticksPerPoint * 1.5, 61_440) }
             } label: {
-                Icon(AppIcon.zoomOut.role, size: 16)
+                AppIcon.zoomOut.image
             }
             .help("Zoom Out")
             Button {
                 editor.updateLayout { $0.pianoRoll.ticksPerPoint = max($0.pianoRoll.ticksPerPoint / 1.5, 2) }
             } label: {
-                Icon(AppIcon.zoomIn.role, size: 16)
+                AppIcon.zoomIn.image
             }
             .help("Zoom In")
         }

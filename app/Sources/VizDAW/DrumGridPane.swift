@@ -1,5 +1,4 @@
 import SwiftUI
-import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -16,12 +15,10 @@ struct DrumGridEditor: View {
             DrumGridBar(model: model, editor: model.editor)
             Divider()
             if model.lanes.isEmpty {
-                ContentUnavailableView {
-                    Label { Text("No Drum Lanes") } icon: { Icon(AppIcon.drumGrid.role, size: 32) }
-                } description: {
-                    Text(
-                        "Make a lane a drum lane with Drum > Drum Lane or its header's menu, or add a Drum Kit sequence.")
-                }
+                ContentUnavailableView(
+                    "No Drum Lanes", systemImage: AppIcon.drumGrid.symbol,
+                    description: Text(
+                        "Make a lane a drum lane with Drum > Drum Lane or its header's menu, or add a Drum Kit sequence."))
             } else {
                 DrumGridHost(model: model)
             }
@@ -96,7 +93,7 @@ struct DrumGridBar: View {
             Button {
                 model.addRow()
             } label: {
-                Icon(AppIcon.add.role, size: 16)
+                AppIcon.add.image
             }
             .help("Add Drum Row")
             .accessibilityLabel("Add Row")

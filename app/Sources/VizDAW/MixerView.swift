@@ -1,6 +1,4 @@
 import SwiftUI
-import SymbioticIcons
-import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -42,11 +40,9 @@ struct MixerWindow: View {
             .focusedSceneValue(\.documentID, id)
             .navigationTitle("Mixer — \(mixer.document.snapshot.title)")
         } else {
-            ContentUnavailableView {
-                Label { Text("No Document") } icon: { Icon(AppIcon.mixer.role, size: 32) }
-            } description: {
-                Text("The document of this mixer is closed.")
-            }
+            ContentUnavailableView(
+                "No Document", systemImage: AppIcon.mixer.symbol,
+                description: Text("The document of this mixer is closed."))
         }
     }
 }
@@ -221,8 +217,6 @@ struct StripView: View {
     @FocusState private var renaming: Bool
     /// The placement this strip shows in: what it opens shows there.
     @Environment(\.mixerPlacement) var placement
-    /// The icons' stroke follows the theme.
-    @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
         VStack(spacing: 4) {
@@ -320,12 +314,7 @@ struct StripView: View {
                     model.setMode(strip.id, m)
                 } label: {
                     if m == strip.automation {
-                        Label {
-                            Text(AutomationModes.title(m))
-                        } icon: {
-                            // A menu item draws images only.
-                            Image(nsImage: AppIcon.confirm.image(size: 16, theme: theme))
-                        }
+                        AppIcon.confirm.label(AutomationModes.title(m))
                     } else {
                         Text(AutomationModes.title(m))
                     }
@@ -345,7 +334,7 @@ struct StripView: View {
             Button {
                 model.openBrowser(.insert(strip: strip.id), in: placement)
             } label: {
-                Icon(AppIcon.add.role, size: 16)
+                AppIcon.add.image
                     .frame(maxWidth: .infinity)
             }
             .controlSize(.small)
