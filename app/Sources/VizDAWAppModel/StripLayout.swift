@@ -39,19 +39,21 @@ public enum StripLayout {
     public static let levelBoxHeight: CGFloat = 24
     /// The M S R I row: 24-point toggles (`ControlMetrics.hitSize(.toggle)`).
     public static let toggleRowHeight: CGFloat = 24
-    /// The automation mode menu.
-    public static let modeMenuHeight: CGFloat = 22
+    /// The automation mode menu, at the 24-point hit minimum (review M2).
+    public static let modeMenuHeight: CGFloat = 24
     /// The gap between the strip's sections.
     public static let gap: CGFloat = 6
     /// The strip's padding above and below.
     public static let padding: CGFloat = 10
+    /// The strip's padding left and right.
+    public static let sidePadding: CGFloat = 6
 
     /// Everything but the part above the fader and the throw, measured
     /// once: the fader cap (52), the level box (24), the M S R I row (24)
-    /// and the automation menu (22), four gaps (24) and the padding above
+    /// and the automation menu (24), four gaps (24) and the padding above
     /// and below (20). B6 review: the cap and the level box's 24-point hit
     /// frame count, so a short pane scrolls rather than overflows.
-    public static let lowerFixed: CGFloat = 166
+    public static let lowerFixed: CGFloat = 168
 
     /// The strip's whole height for an `upper` part and a throw.
     public static func contentHeight(upper: CGFloat, throwLength: CGFloat) -> CGFloat {
@@ -123,5 +125,76 @@ public enum StripGrid {
     /// The fader section's top, down from the strip's top.
     public static func faderTop(_ rows: [StripRowKind: CGFloat]) -> CGFloat {
         StripLayout.padding + upper(rows) + StripLayout.gap
+    }
+
+    /// What a grid child is: a strip's panel, the divider, a row above the
+    /// fader, or one of the parts below it.
+    public enum Part: Equatable, Sendable {
+        case panel, divider, fader, level, buttons, mode
+        case row(StripRowKind)
+    }
+
+    /// One grid child: its column, its part and, for a row, its measured
+    /// height.
+    public struct Cell: Equatable, Sendable {
+        public var column: Int
+        public var part: Part
+        public var measured: CGFloat
+
+        public init(column: Int, part: Part, measured: CGFloat = 0) {
+            self.column = column
+            self.part = part
+            self.measured = measured
+        }
+    }
+
+    /// The gap between two strips.
+    public static let spacing: CGFloat = 6
+
+    /// Column `column`'s left edge: one strip and gap per column, and the
+    /// divider's own slot (a point and a gap) from `dividerBefore` on.
+    public static func x(_ column: Int, dividerBefore: Int?) -> CGFloat {
+        let divider: CGFloat = dividerBefore.map { column >= $0 ? 1 + spacing : 0 } ?? 0
+        return CGFloat(column) * (StripLayout.width + spacing) + divider
+    }
+
+    /// Every cell's frame (from the grid's top left) and the grid's size,
+    /// for strips sharing their rows in a placement `height` tall: what the
+    /// mixer's layout places (review M1).
+    public static func place(_ cells: [Cell], height: CGFloat, dividerBefore: Int?) -> (frames: [CGRect], size: CGSize) {
+        var measured: [Int: [StripRowKind: CGFloat]] = [:]
+        var columns = 0
+        for c in cells {
+            columns = max(columns, c.column + 1)
+            if case .row(let k) = c.part { measured[c.column, default: [:]][k] = c.measured }
+        }
+        let rows = rowHeights(Array(measured.values))
+        let top = tops(rows)
+        let up = upper(rows)
+        let throwLength = StripLayout.split(height: height, upper: up).throwLength
+        let total = StripLayout.contentHeight(upper: up, throwLength: throwLength)
+        let inner = StripLayout.width - 2 * StripLayout.sidePadding
+        let fader = faderTop(rows)
+        let faderHeight = throwLength + StripLayout.faderCap
+        let level = fader + faderHeight + StripLayout.gap
+        let buttons = level + StripLayout.levelBoxHeight + StripLayout.gap
+        let mode = buttons + StripLayout.toggleRowHeight + StripLayout.gap
+        let frames = cells.map { c -> CGRect in
+            let left = x(c.column, dividerBefore: dividerBefore)
+            let cx = left + StripLayout.sidePadding
+            switch c.part {
+            case .panel: return CGRect(x: left, y: 0, width: StripLayout.width, height: total)
+            case .divider:
+                // The middle of the gap before `dividerBefore`.
+                return CGRect(x: x(dividerBefore ?? 0, dividerBefore: dividerBefore) - spacing - 1, y: 0, width: 1, height: total)
+            case .row(let k): return CGRect(x: cx, y: StripLayout.padding + (top[k] ?? 0), width: inner, height: rows[k] ?? 0)
+            case .fader: return CGRect(x: cx, y: fader, width: inner, height: faderHeight)
+            case .level: return CGRect(x: cx, y: level, width: inner, height: StripLayout.levelBoxHeight)
+            case .buttons: return CGRect(x: cx, y: buttons, width: inner, height: StripLayout.toggleRowHeight)
+            case .mode: return CGRect(x: cx, y: mode, width: inner, height: StripLayout.modeMenuHeight)
+            }
+        }
+        let width = columns > 0 ? x(columns - 1, dividerBefore: dividerBefore) + StripLayout.width : 0
+        return (frames, CGSize(width: width, height: total))
     }
 }

@@ -118,3 +118,89 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
         #expect(StripPalette.numberBox(.eg13).digits != StripPalette.numberBox(.console).digits)
     }
 }
+
+/// Fix round 2 (review I1, M3, M6).
+@MainActor
+@Suite struct StripColourRound2Tests {
+    /// Song's Chords lane (31) plays through path 7 (Vocal, teal); the
+    /// document's mixer is made only when asked for, as when no pane shows a
+    /// strip or the mixer.
+    func onDemand() throws -> (FakeSession, DocumentModel, () -> MixerModel?, Int) {
+        let f = editorFake()
+        f.laneTable[3]?[1].audioOut = 7
+        f.mixerSnap = MixerSnapshot(
+            version: f.snap.version,
+            strips: [stripRow(4, "Vocal", kind: .audioPath(path: 7)), stripRow(0, "Master", kind: .master)],
+            buses: [])
+        f.mixerSnap.strips[0].colour = SwatchRow.teal
+        let m = try DocumentModel(session: f)
+        var made = 0
+        var mixer: MixerModel?
+        let provider: () -> MixerModel? = {
+            if mixer == nil {
+                mixer = try? MixerModel(document: m)
+                made += 1
+                m.storeMixer = mixer
+                m.mixerArrived()
+            }
+            return mixer
+        }
+        m.mixerProvider = provider
+        return (f, m, provider, made)
+    }
+
+    @Test func aDocumentWithNoMixerPaneStillColoursItsLanesAndOffersColour() throws {
+        let (_, m, provider, _) = try onDemand()
+        #expect(m.storeMixer == nil, "no pane made the mixer")
+        let version = m.mixerVersion
+        let t = Theme.studioDark
+        #expect(m.laneColour(m.lanes[1], t) == t.swatch.teal)
+        #expect(m.mixerVersion > version, "the mixer's arrival is observable")
+        let keep = provider()
+        let h = LaneHeaderView(document: m)
+        let colour = try #require(h.laneMenu(seq: 3, lane: m.lanes[1]).items.first { $0.title == "Colour" })
+        #expect(colour.isEnabled)
+        let v = ArrangementView(document: m)
+        #expect(v.tint(1) == v.theme.swatch.teal.nsColor)
+        withExtendedLifetime(keep) {}
+    }
+
+    @Test func aFailedMixerIsAskedForOnce() throws {
+        let f = editorFake()
+        let m = try DocumentModel(session: f)
+        var asks = 0
+        m.mixerProvider = {
+            asks += 1
+            return nil
+        }
+        _ = m.laneColour(m.lanes[0], .classicLight)
+        _ = m.laneColour(m.lanes[1], .classicLight)
+        #expect(asks == 1, "drawing does not retry a mixer that could not be made")
+    }
+
+    @Test func colourBarsFollowThePreferenceAndRegionTintsDoNot() throws {
+        let (_, m, provider, _) = try onDemand()
+        let keep = provider()
+        let prefs = AppearancePreferences(defaults: MemoryDefaults())
+        let h = LaneHeaderView(document: m)
+        h.appearancePrefs = prefs
+        #expect(h.colourBar(m.lanes[1]) != nil)
+        prefs.setColourBars(false)
+        #expect(h.colourBar(m.lanes[1]) == nil, "the bar hides with the preference")
+        let v = ArrangementView(document: m)
+        #expect(v.tint(1) != nil, "regions keep the strip's colour")
+        withExtendedLifetime(keep) {}
+    }
+
+    @Test func pickingTheCurrentColourInTheLaneMenuSendsNothing() throws {
+        let (f, m, provider, _) = try onDemand()
+        let keep = provider()
+        let h = LaneHeaderView(document: m)
+        let colour = try #require(h.laneMenu(seq: 3, lane: m.lanes[1]).items.first { $0.title == "Colour" }?.submenu)
+        let teal = try #require(colour.items.first { $0.title == "Teal" })
+        #expect(teal.state == .on)
+        _ = teal.target?.perform(teal.action)
+        #expect(f.calls.isEmpty, "the strip is teal already")
+        withExtendedLifetime(keep) {}
+    }
+}

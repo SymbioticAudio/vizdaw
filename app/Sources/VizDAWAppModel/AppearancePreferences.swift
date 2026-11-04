@@ -48,6 +48,9 @@ public final class AppearancePreferences {
     /// `@MainActor`-typed, so a test closure may mutate a captured `var`
     /// (as `KeyRecorderView.onKey`).
     @ObservationIgnored public var onChange: ((Theme) -> Void)?
+    /// The app's preferences, for views outside the app target (the lane
+    /// headers' colour bars); the app sets it at launch.
+    @ObservationIgnored public static weak var current: AppearancePreferences?
 
     public init(defaults: UserDefaults, userThemes: UserThemes? = nil) {
         self.defaults = defaults

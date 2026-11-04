@@ -21,6 +21,25 @@ public final class DocumentModel {
     /// The document's mixer, set by `DocumentStore.mixer(_:)` when it makes
     /// it, so the View commands can commit its strip rename (plan 7a Ruling 10).
     @ObservationIgnored public weak var storeMixer: MixerModel?
+    /// Makes the document's mixer on demand (`DocumentStore.mixer(_:)`), so
+    /// Arrange's lane colours and Colour menu need no pane to have made it
+    /// (B7 review I1).
+    @ObservationIgnored public var mixerProvider: (() -> MixerModel?)?
+    /// Asked once: a mixer that cannot be made is not retried on every draw.
+    @ObservationIgnored private var mixerAsked = false
+    /// Bumped when the mixer arrives, so views drawn before it redraw.
+    public private(set) var mixerVersion = 0
+
+    /// The mixer has been made (`DocumentStore` calls it).
+    public func mixerArrived() { mixerVersion += 1 }
+
+    /// The document's mixer, made on first use when none is yet.
+    public var mixer: MixerModel? {
+        if let m = storeMixer { return m }
+        guard !mixerAsked, let provider = mixerProvider else { return nil }
+        mixerAsked = true
+        return provider()
+    }
     public private(set) var selectedSeq: UInt64?
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState

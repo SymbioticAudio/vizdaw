@@ -76,9 +76,9 @@ extension DocumentModel {
     }
 
     /// `lane`'s colour in Arrange, through the document's mixer
-    /// (`StripPalette.lane`); nil before the mixer is made.
+    /// (`StripPalette.lane`), made on demand; nil when it cannot be made.
     public func laneColour(_ lane: LaneRow, _ t: Theme) -> ThemeColor? {
-        guard let m = storeMixer else { return nil }
+        guard let m = mixer else { return nil }
         return StripPalette.lane(lane, destinations: m.destinations, strips: m.snapshot.strips, t)
     }
 

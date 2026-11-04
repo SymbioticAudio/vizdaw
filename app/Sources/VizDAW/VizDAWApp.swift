@@ -111,6 +111,7 @@ struct VizDAWApp: App {
         // The user themes are read before the first window draws (R-UT).
         userThemes.start()
         appearancePreferences.onChange = { ThemeWindows.apply($0) }
+        AppearancePreferences.current = appearancePreferences
         // Views made before launch finishes (state restoration) start in it.
         ThemedViews.current = appearancePreferences.theme
         // The audio settings reach the core before any document opens

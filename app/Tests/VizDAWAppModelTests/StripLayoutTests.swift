@@ -35,7 +35,7 @@ import Testing
         #expect(StripLayout.faderCap == 52)
         #expect(StripLayout.levelBoxHeight == 24)
         #expect(StripLayout.toggleRowHeight == 24)
-        #expect(StripLayout.modeMenuHeight == 22)
+        #expect(StripLayout.modeMenuHeight == 24, "the 24-pt hit minimum (review M2)")
         let parts = StripLayout.faderCap + StripLayout.levelBoxHeight + StripLayout.toggleRowHeight
             + StripLayout.modeMenuHeight + 4 * StripLayout.gap + 2 * StripLayout.padding
         #expect(StripLayout.lowerFixed == parts)
@@ -85,8 +85,56 @@ import Testing
         // A strip's own rows alone would put its fader elsewhere; the grid does not.
         #expect(StripGrid.faderTop(StripGrid.rowHeights([bus])) < faderTop)
         for one in [synth, audio, bus, master] {
-            #expect(StripGrid.faderTop(StripGrid.rowHeights([synth, audio, bus, master, one])) == faderTop)
+            #expect(StripGrid.faderTop(StripGrid.rowHeights([one])) <= faderTop)
         }
         #expect(StripGrid.upper([:]) == 0)
+    }
+}
+
+/// Review M1: the grid's own placement (what the mixer view uses) puts
+/// every strip's fader, level box and buttons at one y.
+@Suite struct StripGridPlacementTests {
+    func cells() -> [StripGrid.Cell] {
+        // Column 0: synth with sends; 1: audio with an input; 2: bus with
+        // neither; 3: master (no sends, output or pan), after a divider.
+        var c: [StripGrid.Cell] = []
+        let rows: [[(StripRowKind, CGFloat)]] = [
+            [(.header, 40), (.eq, 20), (.inserts, 36), (.sends, 80), (.output, 24), (.pan, 38)],
+            [(.header, 40), (.input, 22), (.eq, 20), (.inserts, 58), (.output, 24), (.pan, 38)],
+            [(.header, 40), (.eq, 20), (.inserts, 36), (.output, 24), (.pan, 38)],
+            [(.header, 44), (.eq, 20), (.inserts, 36)],
+        ]
+        for (i, r) in rows.enumerated() {
+            c.append(StripGrid.Cell(column: i, part: .panel))
+            for (k, h) in r { c.append(StripGrid.Cell(column: i, part: .row(k), measured: h)) }
+            for p in [StripGrid.Part.fader, .level, .buttons, .mode] { c.append(StripGrid.Cell(column: i, part: p)) }
+        }
+        c.append(StripGrid.Cell(column: 0, part: .divider))
+        return c
+    }
+
+    @Test func everyStripsFaderLevelAndButtonsShareOneY() {
+        let cells = cells()
+        let p = StripGrid.place(cells, height: 700, dividerBefore: 3)
+        for part in [StripGrid.Part.fader, .level, .buttons, .mode] {
+            let ys = Set(zip(cells, p.frames).filter { $0.0.part == part }.map { $0.1.minY })
+            #expect(ys.count == 1, "\(part): \(ys)")
+        }
+        for k in StripRowKind.allCases {
+            let ys = Set(zip(cells, p.frames).filter { $0.0.part == .row(k) }.map { $0.1.minY })
+            #expect(ys.count <= 1, "\(k): \(ys)")
+        }
+        let fader = zip(cells, p.frames).first { $0.0.part == .fader }!.1
+        #expect(fader.minY == StripGrid.faderTop(StripGrid.rowHeights([
+            [.header: 44, .input: 22, .eq: 20, .inserts: 58, .sends: 80, .output: 24, .pan: 38]
+        ])))
+        // The divider sits in the middle of the gap before master (review M5).
+        let divider = zip(cells, p.frames).first { $0.0.part == .divider }!.1
+        let busRight = zip(cells, p.frames).first { $0.0.part == .panel && $0.0.column == 2 }!.1.maxX
+        let masterLeft = zip(cells, p.frames).first { $0.0.part == .panel && $0.0.column == 3 }!.1.minX
+        #expect(abs(divider.midX - (busRight + masterLeft) / 2) < 0.01)
+        #expect(p.size.height == StripLayout.contentHeight(upper: StripGrid.upper(StripGrid.rowHeights([
+            [.header: 44, .input: 22, .eq: 20, .inserts: 58, .sends: 80, .output: 24, .pan: 38]
+        ])), throwLength: fader.height - StripLayout.faderCap))
     }
 }

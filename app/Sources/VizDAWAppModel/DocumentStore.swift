@@ -187,6 +187,7 @@ public final class DocumentStore {
             let m = try MixerModel(document: doc)
             mixers[id] = m
             doc.storeMixer = m
+            doc.mixerArrived()
             return m
         } catch {
             doc.alert = AlertItem(error, title: "Mixer Unavailable")
@@ -349,6 +350,7 @@ public final class DocumentStore {
             let id = UUID()
             didMake?(id, model)
             documents[id] = model
+            model.mixerProvider = { [weak self] in self?.mixer(id) }
             return id
         } catch {
             postAlert(AlertItem(error, title: title))

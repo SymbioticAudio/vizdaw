@@ -16,6 +16,11 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     }
 
     public let document: DocumentModel
+    /// The preferences whose "Show channel colour bars" shows the lane's
+    /// bar (controller ruling on review M3; region tints always show).
+    public var appearancePrefs: AppearancePreferences? = AppearancePreferences.current {
+        didSet { needsDisplay = true }
+    }
     var editor: EditorModel { document.editor }
     public var verticalOffset: CGFloat = 0 {
         didSet {
@@ -109,9 +114,12 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         withObservationTracking {
             _ = document.lanes
             _ = editor.layout
-            // The strip colours the bars take (owner G1 Q2).
+            // The strip colours the bars take (owner G1 Q2), the mixer's
+            // arrival, and the colour bars' preference.
+            _ = document.mixerVersion
             _ = document.storeMixer?.snapshot
             _ = document.storeMixer?.destinations
+            _ = appearancePrefs?.colourBars
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.needsDisplay = true
@@ -176,8 +184,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                         in: r, withAttributes: oneLine(small, .byTruncatingMiddle))
                 }
             }
-            if let bar = document.laneColour(lane, theme) {
-                bar.nsColor.setFill()
+            if let bar = colourBar(lane) {
+                bar.setFill()
                 LaneHeaderLayout.colourBar(rowTop: top, laneHeight: laneHeight).fill()
             }
             if LaneHeaderLayout.showsMeter(laneHeight: laneHeight), inputs.showsMeter(lane) {
@@ -294,6 +302,12 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         return menu
     }
 
+    /// The lane's colour bar: its strip colour, unless colour bars are off.
+    func colourBar(_ lane: LaneRow) -> NSColor? {
+        guard appearancePrefs?.colourBars ?? true else { return nil }
+        return document.laneColour(lane, theme)?.nsColor
+    }
+
     /// "Colour ▸": None and the eight swatches, each in its colour, for the
     /// strip the lane plays through (the strip name's menu, the same call);
     /// disabled for a lane with no strip (owner G1 Q2).
@@ -302,7 +316,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         let sub = NSMenu()
         sub.autoenablesItems = false
         item.submenu = sub
-        guard let mixer = document.storeMixer,
+        guard let mixer = document.mixer,
             let strip = StripPalette.laneStrip(lane, destinations: mixer.destinations, strips: mixer.snapshot.strips)
         else {
             item.isEnabled = false

@@ -71,17 +71,9 @@ private struct StripDivider: View {
     }
 }
 
-/// What a grid child is: a strip's panel, the divider, a row above the
-/// fader, or one of the parts below it.
-struct StripCell: Equatable {
-    enum Part: Equatable {
-        case panel, divider, fader, level, buttons, mode
-        case row(StripRowKind)
-    }
-
-    var column: Int
-    var part: Part
-}
+/// A grid child's place in the strips' grid (`StripGrid.Cell`, without
+/// its height: the layout measures it).
+typealias StripCell = StripGrid.Cell
 
 private struct StripCellKey: LayoutValueKey {
     static let defaultValue = StripCell(column: 0, part: .panel)
@@ -129,7 +121,7 @@ private struct StripCells: View {
 }
 
 extension View {
-    fileprivate func cell(_ column: Int, _ part: StripCell.Part) -> some View {
+    fileprivate func cell(_ column: Int, _ part: StripGrid.Part) -> some View {
         layoutValue(key: StripCellKey.self, value: StripCell(column: column, part: part))
     }
 }
@@ -160,93 +152,43 @@ private struct StripPanel: View {
     }
 }
 
-/// The strips' grid (Ruling 14, fix round 1): the rows above the fader at
-/// their shared heights (`StripGrid`), then each fader section given the
-/// throw `StripLayout.split` leaves, then the level box, M S R I and the
-/// mode menu at their fixed heights. Every strip is
-/// `StripLayout.contentHeight` tall: `height` when it fits, taller
-/// (scrolling) when it does not.
+/// The strips' grid (Ruling 14, fix round 1): it measures the rows above
+/// the fader and places every child where `StripGrid.place` puts it, so
+/// the strips share their rows and every fader, level box and button row
+/// lines up. Every strip is `StripLayout.contentHeight` tall: `height`
+/// when it fits, taller (scrolling) when it does not.
 private struct StripGridLayout: Layout {
     let height: CGFloat
     let columns: Int
     let dividerBefore: Int?
 
-    static let spacing: CGFloat = 6
-    private var inner: CGFloat { StripLayout.width - 2 * StripPadding.horizontal }
-
-    private func x(_ column: Int) -> CGFloat {
-        let divider: CGFloat = dividerBefore.map { column >= $0 ? 1 + Self.spacing : 0 } ?? 0
-        return CGFloat(column) * (StripLayout.width + Self.spacing) + divider
-    }
-
-    private var width: CGFloat { columns > 0 ? x(columns - 1) + StripLayout.width : 0 }
-
-    private struct Geometry {
-        var rows: [StripRowKind: CGFloat]
-        var tops: [StripRowKind: CGFloat]
-        var upper: CGFloat
-        var throwLength: CGFloat
-        var height: CGFloat
-    }
-
-    private func geometry(_ subviews: Subviews) -> Geometry {
-        var measured: [Int: [StripRowKind: CGFloat]] = [:]
-        for v in subviews {
-            let c = v[StripCellKey.self]
-            if case .row(let k) = c.part {
-                measured[c.column, default: [:]][k] = v.sizeThatFits(ProposedViewSize(width: inner, height: nil)).height
+    private func cells(_ subviews: Subviews) -> [StripCell] {
+        let inner = StripLayout.width - 2 * StripLayout.sidePadding
+        return subviews.map { v in
+            var c = v[StripCellKey.self]
+            if case .row = c.part {
+                c.measured = v.sizeThatFits(ProposedViewSize(width: inner, height: nil)).height
             }
+            return c
         }
-        let rows = StripGrid.rowHeights(Array(measured.values))
-        let upper = StripGrid.upper(rows)
-        let split = StripLayout.split(height: height, upper: upper)
-        return Geometry(
-            rows: rows, tops: StripGrid.tops(rows), upper: upper, throwLength: split.throwLength,
-            height: StripLayout.contentHeight(upper: upper, throwLength: split.throwLength))
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        CGSize(width: width, height: geometry(subviews).height)
+        StripGrid.place(cells(subviews), height: height, dividerBefore: dividerBefore).size
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let g = geometry(subviews)
-        let faderTop = bounds.minY + StripGrid.faderTop(g.rows)
-        let fader = g.throwLength + StripLayout.faderCap
-        let level = faderTop + fader + StripLayout.gap
-        let buttons = level + StripLayout.levelBoxHeight + StripLayout.gap
-        let mode = buttons + StripLayout.toggleRowHeight + StripLayout.gap
-        for v in subviews {
-            let c = v[StripCellKey.self]
-            let left = bounds.minX + x(c.column)
-            let cellX = left + StripPadding.horizontal
-            func put(_ y: CGFloat, _ h: CGFloat) {
-                v.place(
-                    at: CGPoint(x: cellX, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: inner, height: h))
-            }
-            switch c.part {
-            case .panel:
-                v.place(
-                    at: CGPoint(x: left, y: bounds.minY), anchor: .topLeading,
-                    proposal: ProposedViewSize(width: StripLayout.width, height: g.height))
-            case .divider:
-                let dx = bounds.minX + x(dividerBefore ?? 0) - Self.spacing / 2 - 0.5
-                v.place(
-                    at: CGPoint(x: dx, y: bounds.minY), anchor: .topLeading,
-                    proposal: ProposedViewSize(width: 1, height: g.height))
-            case .row(let k):
-                put(bounds.minY + StripLayout.padding + (g.tops[k] ?? 0), g.rows[k] ?? 0)
-            case .fader: put(faderTop, fader)
-            case .level: put(level, StripLayout.levelBoxHeight)
-            case .buttons: put(buttons, StripLayout.toggleRowHeight)
-            case .mode: put(mode, StripLayout.modeMenuHeight)
-            }
+        let frames = StripGrid.place(cells(subviews), height: height, dividerBefore: dividerBefore).frames
+        for (v, f) in zip(subviews, frames) {
+            v.place(
+                at: CGPoint(x: bounds.minX + f.minX, y: bounds.minY + f.minY), anchor: .topLeading,
+                proposal: ProposedViewSize(width: f.width, height: f.height))
         }
     }
 }
 
 private enum StripPadding {
-    static let horizontal: CGFloat = 6
+    static let horizontal = StripLayout.sidePadding
 }
 
 // MARK: - Above the fader
@@ -361,7 +303,9 @@ private struct StripColourMenu: View {
                 Label {
                     Text(StripPalette.title(c))
                 } icon: {
+                    // Its own colours, never a template (review M7).
                     Image(nsImage: SwatchImage.make(StripPalette.swatch(c, theme).nsColor))
+                        .renderingMode(.original)
                 }
                 .tag(SwatchRow?.some(c))
             }
@@ -395,7 +339,8 @@ private struct StripMenuFace: View {
                 .foregroundStyle(theme.text.secondary.color)
         }
         .padding(.horizontal, 5)
-        .frame(maxWidth: .infinity, minHeight: 20, maxHeight: 20)
+        // The 24-point hit minimum (Ruling 4, review M2).
+        .frame(maxWidth: .infinity, minHeight: ControlMetrics.minimumHit, maxHeight: ControlMetrics.minimumHit)
         .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.surface.inset.color))
         .overlay(RoundedRectangle(cornerRadius: theme.radius.s).strokeBorder(theme.surface.separator.color))
         .contentShape(Rectangle())
@@ -432,7 +377,7 @@ private struct StripAddFace: View {
             .font(theme.type.caption.font.weight(.semibold))
             .foregroundStyle(theme.text.secondary.color)
             .lineLimit(1)
-            .frame(maxWidth: .infinity, minHeight: 20)
+            .frame(maxWidth: .infinity, minHeight: ControlMetrics.minimumHit)
             .background(
                 RoundedRectangle(cornerRadius: theme.radius.s)
                     .strokeBorder(theme.surface.separator.color, style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
@@ -502,7 +447,9 @@ struct EqSlotView: View {
                 AppIcon.eq.image
                     .font(theme.type.caption.font)
                     .foregroundStyle(eq.bypass ? theme.text.disabled.color : theme.state.play.color)
-                    .frame(width: 18, height: 18)
+                    .frame(
+                        width: ControlMetrics.hitSize(.toggle).width,
+                        height: ControlMetrics.hitSize(.toggle).height)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

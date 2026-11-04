@@ -85,6 +85,7 @@ public final class ArrangementView: EditorCanvas {
             // without redrawing.
             _ = document.playKey
             // The strip colours the lanes and regions take (owner G1 Q2).
+            _ = document.mixerVersion
             _ = document.storeMixer?.snapshot
             _ = document.storeMixer?.destinations
         } onChange: { [weak self] in
