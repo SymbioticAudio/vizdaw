@@ -125,7 +125,7 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
     /// Song's Chords lane (31) plays through path 7 (Vocal, teal); the
     /// document's mixer is made only when asked for, as when no pane shows a
     /// strip or the mixer.
-    func onDemand() throws -> (FakeSession, DocumentModel, () -> MixerModel?, Int) {
+    func onDemand() throws -> (FakeSession, DocumentModel, () -> MixerModel?) {
         let f = editorFake()
         f.laneTable[3]?[1].audioOut = 7
         f.mixerSnap = MixerSnapshot(
@@ -134,23 +134,23 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
             buses: [])
         f.mixerSnap.strips[0].colour = SwatchRow.teal
         let m = try DocumentModel(session: f)
-        var made = 0
-        var mixer: MixerModel?
-        let provider: () -> MixerModel? = {
-            if mixer == nil {
-                mixer = try? MixerModel(document: m)
-                made += 1
-                m.storeMixer = mixer
-                m.mixerArrived()
-            }
-            return mixer
+        // The store's stand-in. It captures the document weakly and keeps
+        // no mixer (`storeMixer` is weak): each test holds what it is given,
+        // so nothing forms a cycle (re-review N2).
+        let provider: () -> MixerModel? = { [weak m] in
+            guard let m else { return nil }
+            if let made = m.storeMixer { return made }
+            let made = try? MixerModel(document: m)
+            m.storeMixer = made
+            m.mixerArrived()
+            return made
         }
         m.mixerProvider = provider
-        return (f, m, provider, made)
+        return (f, m, provider)
     }
 
     @Test func aDocumentWithNoMixerPaneStillColoursItsLanesAndOffersColour() throws {
-        let (_, m, provider, _) = try onDemand()
+        let (_, m, provider) = try onDemand()
         #expect(m.storeMixer == nil, "no pane made the mixer")
         let version = m.mixerVersion
         let t = Theme.studioDark
@@ -179,7 +179,7 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
     }
 
     @Test func colourBarsFollowThePreferenceAndRegionTintsDoNot() throws {
-        let (_, m, provider, _) = try onDemand()
+        let (_, m, provider) = try onDemand()
         let keep = provider()
         let prefs = AppearancePreferences(defaults: MemoryDefaults())
         let h = LaneHeaderView(document: m)
@@ -193,7 +193,7 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
     }
 
     @Test func pickingTheCurrentColourInTheLaneMenuSendsNothing() throws {
-        let (f, m, provider, _) = try onDemand()
+        let (f, m, provider) = try onDemand()
         let keep = provider()
         let h = LaneHeaderView(document: m)
         let colour = try #require(h.laneMenu(seq: 3, lane: m.lanes[1]).items.first { $0.title == "Colour" }?.submenu)
@@ -202,5 +202,22 @@ private func dest(_ id: UInt64, plugin: Bool = false, external: Bool = false) ->
         _ = teal.target?.perform(teal.action)
         #expect(f.calls.isEmpty, "the strip is teal already")
         withExtendedLifetime(keep) {}
+    }
+}
+
+/// Fix round 3 (re-review N1): the store wires the document's mixer on
+/// demand and announces its arrival.
+@MainActor
+@Suite struct DocumentMixerOnDemandTests {
+    @Test func aDocumentMakesItsMixerThroughTheStoreWhenFirstAsked() throws {
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { mixerFake() }, open: { _ in mixerFake() })
+        let id = try #require(s.newDemo())
+        let doc = try #require(s.model(id))
+        #expect(doc.storeMixer == nil, "no pane has asked for the mixer")
+        let version = doc.mixerVersion
+        let mixer = try #require(doc.mixer, "the store's provider makes it")
+        #expect(doc.mixerVersion > version, "its arrival is observable")
+        #expect(s.mixer(id) === mixer)
+        #expect(doc.mixer === mixer)
     }
 }
