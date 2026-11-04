@@ -516,7 +516,7 @@ Rules common to all modes:
 ### 8.3 Devices and persistence
 - **Settings › Surfaces** lists surfaces: type (MCU, MCU XT, HUI, Kontrol S-Series MK3), input port, output port, the unit's position in the bank, and the unit's problem line when it has one (for example a keyboard's too old firmware).
 - They are stored in app preferences (`~/Library/Application Support/VizDAW/surfaces.json`, beside the 4f key bindings), because hardware belongs to the machine.
-- *Kinds this build does not know* (from plan 5f-4 on): an entry whose kind a newer VizDAW wrote is kept as it is, with its ID and ports reserved, written back on every save, not driven, and named in a problem line; the rest of the file loads. A file that is damaged in any other way is still kept aside as `surfaces.json.bad`. Builds before 5f-4 set a file aside when it lists a Kontrol (a release note).
+- *Kinds this build does not know* (from plan 5f-4 on): an entry whose kind a newer VizDAW wrote is kept as it is, with its ID and ports reserved, written back on every save, not driven, and named in a problem line; the rest of the file loads. Only unknown kinds are kept: a learned command this build does not know, or an unknown field, still sets the file aside, as does a file that is damaged in any other way (`surfaces.json.bad`). Builds before 5f-4 set a file aside when it lists a Kontrol (a release note).
 - Command learn maps go in the same file. Target learn maps are in the project (§4.8).
 - A missing port leaves the surface listed as "disconnected", and it reconnects when the port appears (CoreMIDI notifications).
 

@@ -1681,8 +1681,9 @@ fn drives_the_mixer_from_a_kontrol_mk3() {
         "surface.inject",
         json!({"surface": id, "bytes": "bf 50 05"}),
     );
-    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
-    assert_eq!(auto["touched"][0], format!("fader:{synth}"), "{auto}");
+    wait_for_state(&mut app, &w, "automation", |a| {
+        a["touched"][0] == format!("fader:{synth}")
+    });
     wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Fader");
     // The ride ends 500 ms after the last turn; the tempo is refused while
     // its edit is open.
@@ -1709,6 +1710,19 @@ fn drives_the_mixer_from_a_kontrol_mk3() {
         json!({"surface": id, "bytes": "f0 00 21 09 00 00 44 43 01 00 19 00 00 00 0e 4e 1c 00 f7"}),
     );
     wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Tempo");
+    // VizDAW plays 100 BPM: no state target carries the tempo, but the
+    // keyboard is sent VizDAW's own tempo after its turn (final review T8
+    // M1), so the last tempo in its log is 100's.
+    let tempo = format!("{ni} 19 ");
+    wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"].as_array().is_some_and(|m| {
+            m.iter()
+                .rev()
+                .filter_map(|x| x.as_str())
+                .find(|t| t.starts_with(&tempo))
+                == Some("f0 00 21 09 00 00 44 43 01 00 19 00 00 00 0e 4e 1c 00 f7")
+        })
+    });
     let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
     let ignored = st["surfaces"][0]["ignored"].as_u64().unwrap();
     run(
