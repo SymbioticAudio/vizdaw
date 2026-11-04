@@ -122,7 +122,9 @@ fileprivate extension ControlOutcome {
         #expect(row.views.map(\.main) == ["arrange", "mix"])
         #expect(row.views[0].panes.map(\.pane) == ["left", "bottom", "right"])
         #expect(row.views[0].panes[1].view == "piano_roll")
-        #expect(row.views[1].panes[1].views == ["piano_roll", "list", "strip_chart", "drum_grid"])
+        #expect(row.views[1].panes[1].views == ["piano_roll", "list", "strip_chart", "drum_grid", "audio_editor"])
+        #expect(
+            row.views[0].panes[1].views == ["piano_roll", "list", "strip_chart", "drum_grid", "audio_editor", "mixer"])
         #expect(row.leftStrip == 10 && row.leftShows == "strip")
         _ = run("ui.toggle_left", [.flag("on", false)], doc, store)
         let hidden = ViewCommands.layoutRow(doc.model, strips: strips, destinations: [])

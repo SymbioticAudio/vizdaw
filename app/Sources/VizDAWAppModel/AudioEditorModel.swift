@@ -1,0 +1,253 @@
+import CoreGraphics
+import Foundation
+import Observation
+import VizDAWCore
+
+/// The audio editor's typed boxes (plan 7c Ruling 7). The raw values are
+/// the control channel's names.
+public enum AudioEditorBox: String, CaseIterable, Sendable {
+    case gain
+    case fadeIn = "fade_in"
+    case fadeOut = "fade_out"
+    case start, length, peak
+
+    /// The box's accessibility label.
+    public var label: String {
+        switch self {
+        case .gain: "Region Gain"
+        case .fadeIn: "Fade In Length"
+        case .fadeOut: "Fade Out Length"
+        case .start: "Region Start"
+        case .length: "Region Length"
+        case .peak: "Normalize Peak"
+        }
+    }
+
+    /// What the status line says when the box refuses its text.
+    public var hint: String {
+        switch self {
+        case .gain: AudioEditorEntry.gainHint
+        case .fadeIn, .fadeOut: AudioEditorEntry.fadeHint
+        case .start, .length: AudioEditorEntry.timeHint
+        case .peak: AudioEditorEntry.peakHint
+        }
+    }
+
+    /// Fades, start and length need the media's rate.
+    var isTime: Bool { self == .fadeIn || self == .fadeOut || self == .start || self == .length }
+}
+
+/// The bottom pane's audio editor (plan 7c Rulings 1–3, 5, 7 and 9): the
+/// selected audio region, the zoom (in memory only), typed commits and
+/// normalize from the Peak box. Every commit is one `editor.edit`, so one
+/// undo step; a value equal to the current one sends nothing.
+@MainActor
+@Observable
+public final class AudioEditorModel {
+    public static let emptyMessage = "Select one audio region to edit it."
+
+    /// The waveform heights the Taller and Shorter buttons step through.
+    static let amplitudeRange = 1...16
+
+    @ObservationIgnored private unowned let document: DocumentModel
+
+    public private(set) var axis = FrameAxis()
+    public private(set) var amplitude = 1
+    public private(set) var shownRegion: UInt64?
+    /// The wave rect's width, as `sync(width:)` last gave it.
+    public private(set) var width: CGFloat = 0
+    /// The Normalize target (Ruling 9).
+    public private(set) var peakDb = RegionCommands.defaultPeakDb
+
+    public init(document: DocumentModel) {
+        self.document = document
+    }
+
+    // MARK: The region and its axis
+
+    /// The shown region's room before tick 0, in media frames (Ruling
+    /// 13.8): 0 at the sequence start, when the time cannot be read or
+    /// without a media row.
+    public var startRoom: UInt64 {
+        guard let r = document.editedRegion, let rate = r.media?.sampleRate, rate > 0,
+            let s = try? document.editor.session.secondsAt(seq: r.lane.seq, ticks: [r.row.tick]).first,
+            s.isFinite, s > 0
+        else { return 0 }
+        let f = (s * Double(rate)).rounded(.down)
+        return f >= Double(UInt64.max) ? UInt64.max : UInt64(f)
+    }
+
+    /// `width` is the wave rect's width. A newly shown region is fitted;
+    /// the same region keeps its zoom and scroll.
+    public func sync(width: CGFloat) {
+        if self.width != width { self.width = width }
+        let region = document.editedRegion
+        let id = region?.row.id
+        guard id != shownRegion else { return }
+        if let region {
+            let fitted = FrameAxis.fit(
+                offset: region.row.sourceOffset, length: region.row.frames, width: width,
+                mediaFrames: Self.mediaFrames(region))
+            if axis != fitted { axis = fitted }
+        }
+        shownRegion = id
+    }
+
+    private static func mediaFrames(_ r: EditedRegion) -> UInt64 {
+        r.media?.frames ?? r.row.sourceOffset.addingReportingOverflow(r.row.frames).partialValue
+    }
+
+    // MARK: Zoom
+
+    public func zoomIn() { zoom(by: 2, aroundX: width / 2) }
+
+    public func zoomOut() { zoom(by: 0.5, aroundX: width / 2) }
+
+    public func fit() {
+        guard let r = document.editedRegion else { return }
+        set(
+            FrameAxis.fit(
+                offset: r.row.sourceOffset, length: r.row.frames, width: width, mediaFrames: Self.mediaFrames(r)))
+        if shownRegion != r.row.id { shownRegion = r.row.id }
+    }
+
+    /// `factor` above 1 zooms in, keeping the frame under `x`.
+    public func zoom(by factor: Double, aroundX x: CGFloat) {
+        guard let r = document.editedRegion else { return }
+        set(axis.zoomed(by: factor, aroundX: x, width: width, mediaFrames: Self.mediaFrames(r)))
+    }
+
+    public func scroll(byPoints dx: CGFloat) {
+        guard let r = document.editedRegion else { return }
+        set(axis.scrolled(byPoints: dx, width: width, mediaFrames: Self.mediaFrames(r)))
+    }
+
+    public func taller() {
+        let a = min(amplitude * 2, Self.amplitudeRange.upperBound)
+        if a != amplitude { amplitude = a }
+    }
+
+    public func shorter() {
+        let a = max(amplitude / 2, Self.amplitudeRange.lowerBound)
+        if a != amplitude { amplitude = a }
+    }
+
+    private func set(_ a: FrameAxis) {
+        if a != axis { axis = a }
+    }
+
+    // MARK: Typed values
+
+    private static let none = "\u{2013}"
+
+    /// What `box` shows now: "–" for a time box without a media row, or
+    /// with no region.
+    public func text(_ box: AudioEditorBox) -> String {
+        if box == .peak { return AudioEditorEntry.peakText(peakDb) }
+        guard let r = document.editedRegion else { return Self.none }
+        let row = r.row
+        if box == .gain { return AudioEditorEntry.gainText(Double(row.gainDb)) }
+        guard let rate = r.media?.sampleRate, rate > 0 else { return Self.none }
+        switch box {
+        case .fadeIn: return AudioEditorEntry.fadeText(frames: row.fadeIn.length, rate: rate)
+        case .fadeOut: return AudioEditorEntry.fadeText(frames: row.fadeOut.length, rate: rate)
+        case .start: return Formatting.time(Double(row.sourceOffset) / Double(rate))
+        case .length: return Formatting.time(Double(row.frames) / Double(rate))
+        case .gain, .peak: return Self.none
+        }
+    }
+
+    /// Commits `text` to `box`: parsed, clamped and sent as one edit. Text
+    /// equal to what the box shows, or a value equal to the current one,
+    /// sends nothing and answers true. A refusal sets the box's hint as
+    /// the status, sends nothing and answers false.
+    @discardableResult
+    public func type(_ box: AudioEditorBox, _ text: String) -> Bool {
+        let editor = document.editor
+        guard let r = document.editedRegion else {
+            editor.status = Self.emptyMessage
+            return false
+        }
+        if box.isTime, (r.media?.sampleRate ?? 0) == 0 {
+            editor.status = AudioEditorEntry.noMediaHint
+            return false
+        }
+        // The box shows a rounded value (fades in whole ms): its own text
+        // back moves nothing (Task 2 review M1).
+        if text.trimmingCharacters(in: .whitespaces) == self.text(box) { return true }
+        guard let parsed = command(box, text, r) else {
+            editor.status = box.hint
+            return false
+        }
+        guard let cmd = parsed else { return true }
+        return editor.edit(cmd)
+    }
+
+    /// nil when refused; `.some(nil)` when the value is the current one.
+    private func command(_ box: AudioEditorBox, _ text: String, _ r: EditedRegion) -> EditCommand?? {
+        let row = r.row
+        let rate = r.media?.sampleRate ?? 0
+        let frames = Int64(clamping: row.frames)
+        let offset = Int64(clamping: row.sourceOffset)
+        switch box {
+        case .gain:
+            guard let db = AudioEditorEntry.gain(text) else { return nil }
+            let g = Float(db)
+            return .some(g == row.gainDb ? nil : .audio(edit: .setGain(event: row.id, gainDb: g)))
+        case .peak:
+            guard let db = AudioEditorEntry.peak(text) else { return nil }
+            if peakDb != db { peakDb = db }
+            return .some(nil)
+        case .fadeIn, .fadeOut:
+            guard let s = AudioEditorEntry.duration(text, bare: .ms) else { return nil }
+            let other = box == .fadeIn ? row.fadeOut.length : row.fadeIn.length
+            let room = max(frames - max(other, 0), 0)
+            let length = min(AudioEditorEntry.frames(s, rate: rate), room)
+            var fadeIn = row.fadeIn
+            var fadeOut = row.fadeOut
+            if box == .fadeIn { fadeIn.length = length } else { fadeOut.length = length }
+            guard fadeIn != row.fadeIn || fadeOut != row.fadeOut else { return .some(nil) }
+            return .some(.audio(edit: .setFades(event: row.id, fadeIn: fadeIn, fadeOut: fadeOut)))
+        case .start:
+            guard let s = AudioEditorEntry.duration(text, bare: .s) else { return nil }
+            let low = max(0, offset - Int64(clamping: startRoom))
+            let high = max(low, offset + frames - 1)
+            let start = min(max(AudioEditorEntry.frames(s, rate: rate), low), high)
+            let front = start - offset
+            return .some(front == 0 ? nil : .audio(edit: .trim(event: row.id, frontFrames: front, backFrames: 0)))
+        case .length:
+            guard let s = AudioEditorEntry.duration(text, bare: .s) else { return nil }
+            let media = Int64(clamping: r.media?.frames ?? 0)
+            let high = max(1, media - offset)
+            let length = min(max(AudioEditorEntry.frames(s, rate: rate), 1), high)
+            let back = frames - length
+            return .some(back == 0 ? nil : .audio(edit: .trim(event: row.id, frontFrames: 0, backFrames: back)))
+        }
+    }
+
+    /// A new shape for `.fadeIn` or `.fadeOut`, keeping its length; other
+    /// boxes, or the same shape, send nothing.
+    public func setShape(_ box: AudioEditorBox, _ shape: FadeShapeRow) {
+        guard box == .fadeIn || box == .fadeOut else { return }
+        guard let row = document.editedRegion?.row else {
+            document.editor.status = Self.emptyMessage
+            return
+        }
+        var fadeIn = row.fadeIn
+        var fadeOut = row.fadeOut
+        if box == .fadeIn { fadeIn.shape = shape } else { fadeOut.shape = shape }
+        guard fadeIn != row.fadeIn || fadeOut != row.fadeOut else { return }
+        document.editor.edit(.audio(edit: .setFades(event: row.id, fadeIn: fadeIn, fadeOut: fadeOut)))
+    }
+
+    /// Normalizes the shown region to the Peak box's level: no panel, ever.
+    /// Busy and offline refusals go to the status line.
+    @discardableResult
+    public func normalize() -> KeyOutcome {
+        guard document.editedRegion != nil else {
+            document.editor.status = Self.emptyMessage
+            return .unavailable(Self.emptyMessage)
+        }
+        return RegionCommands.normalize(peakDb: peakDb, document)
+    }
+}

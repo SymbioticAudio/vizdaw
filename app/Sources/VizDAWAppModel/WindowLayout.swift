@@ -30,6 +30,7 @@ public enum PaneView: String, CaseIterable, Codable, Equatable, Sendable {
     case strip, sequences, inspector, editor, mixer, controllers
     case mediaPool = "media_pool"
     case plugins, markers
+    case audioEditor = "audio_editor"
 
     public var title: String {
         switch self {
@@ -42,6 +43,7 @@ public enum PaneView: String, CaseIterable, Codable, Equatable, Sendable {
         case .mediaPool: "Media Pool"
         case .plugins: "Plug-ins"
         case .markers: "Markers"
+        case .audioEditor: "Audio Editor"
         }
     }
 }
@@ -184,7 +186,7 @@ public struct ViewLayouts: Codable, Equatable, Sendable {
     public static func views(_ side: PaneSide, in main: MainView) -> [PaneView] {
         switch side {
         case .left: [.strip, .sequences, .inspector]
-        case .bottom: main == .arrange ? [.editor, .mixer] : [.editor]
+        case .bottom: main == .arrange ? [.editor, .audioEditor, .mixer] : [.editor, .audioEditor]
         case .right: [.controllers, .mediaPool, .plugins, .markers]
         }
     }

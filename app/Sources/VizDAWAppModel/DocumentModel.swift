@@ -240,6 +240,16 @@ public final class DocumentModel {
         return m
     }
 
+    @ObservationIgnored private var audioEditorModel: AudioEditorModel?
+
+    /// The bottom pane's audio editor, made once (plan 7c Task 4).
+    public var audioEditor: AudioEditorModel {
+        if let m = audioEditorModel { return m }
+        let m = AudioEditorModel(document: self)
+        audioEditorModel = m
+        return m
+    }
+
     /// A torn-off window closed: its Strip Chart goes (and its stroke).
     public func dropStripChart(_ slot: DetailSlot) {
         stripCharts.removeValue(forKey: slot)?.strokeCancelled()

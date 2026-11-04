@@ -21,15 +21,27 @@ import VizDAWCore
     }
     @Test func eachPaneOffersOnlyItsOwnList() {
         #expect(ViewLayouts.views(.left, in: .arrange) == [.strip, .sequences, .inspector])
-        #expect(ViewLayouts.views(.bottom, in: .arrange) == [.editor, .mixer])
+        #expect(ViewLayouts.views(.bottom, in: .arrange) == [.editor, .audioEditor, .mixer])
         #expect(ViewLayouts.views(.right, in: .arrange) == [.controllers, .mediaPool, .plugins, .markers])
     }
     @Test func theMixViewOffersNoMixerBelow() {
-        #expect(ViewLayouts.views(.bottom, in: .mix) == [.editor])
+        #expect(ViewLayouts.views(.bottom, in: .mix) == [.editor, .audioEditor])
         let e = editor()
         #expect(e.setPane(.bottom, view: .mixer, shown: nil, size: nil, in: .mix)
             == "mixer is not on the bottom pane's list in the mix view.")
         #expect(e.layout.views.mix.bottom.view == .editor)
+    }
+    @Test func theBottomPaneListsTheAudioEditorInBothViews() {
+        #expect(ViewLayouts.views(.bottom, in: .arrange) == [.editor, .audioEditor, .mixer])
+        #expect(ViewLayouts.views(.bottom, in: .mix) == [.editor, .audioEditor])
+        #expect(PaneView.audioEditor.rawValue == "audio_editor")
+        #expect(PaneView.audioEditor.title == "Audio Editor")
+        let bottom = try? JSONDecoder().decode(
+            ViewLayouts.self, from: Data(#"{"arrange":{"bottom":{"view":"audio_editor"}}}"#.utf8))
+        #expect(bottom?.arrange.bottom.view == .audioEditor)
+        let left = try? JSONDecoder().decode(
+            ViewLayouts.self, from: Data(#"{"arrange":{"left":{"view":"audio_editor"}}}"#.utf8))
+        #expect(left?.arrange.left.view == .strip)
     }
     @Test func switchingViewsRestoresEachSetup() {
         let e = editor()

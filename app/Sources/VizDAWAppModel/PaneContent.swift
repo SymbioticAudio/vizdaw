@@ -50,20 +50,26 @@ extension DocumentModel {
     }
 
     /// The single selected event of the shown sequence when it is an
-    /// audio region (the followed lane is looked in first); nil for none,
-    /// several, a note or a reference.
-    public var inspectorRegion: EventRow? {
+    /// audio region (the followed lane is looked in first), with its lane
+    /// and media row; nil for none, several, a note or a reference (plan
+    /// 7c Ruling 2). The inspector and the audio editor share it.
+    public var editedRegion: EditedRegion? {
         let events = editor.selection.events
         guard events.count == 1, let id = events.first, let seq = selectedSeq else { return nil }
         let first = focusLanes().first
         let order = (first.map { [$0] } ?? []) + lanes.filter { $0.id != first?.id }
         for lane in order {
-            if let e = editor.laneEvents(LaneKey(seq, lane.id))?.events.first(where: { $0.id == id }) {
-                return e.kind == .audioRegion ? e : nil
+            let key = LaneKey(seq, lane.id)
+            if let e = editor.laneEvents(key)?.events.first(where: { $0.id == id }) {
+                guard e.kind == .audioRegion else { return nil }
+                return EditedRegion(row: e, lane: key, media: media.row(e.media))
             }
         }
         return nil
     }
+
+    /// The inspector's region: `editedRegion`'s event.
+    public var inspectorRegion: EventRow? { editedRegion?.row }
 
     /// The left pane's inspector rows (Ruling 6): the followed lane, the
     /// single selected audio region, with fades in ms at the project's rate.
@@ -85,6 +91,19 @@ extension DocumentModel {
     /// What the left pane's strip view shows now.
     public func leftStrip(strips: [StripRow], destinations: [DestRow]) -> StripFocus.Result {
         StripFocus.strip(selected: focusLanes(), armed: [], destinations: destinations, strips: strips)
+    }
+}
+
+/// The one audio region the inspector and the audio editor show.
+public struct EditedRegion: Equatable, Sendable {
+    public let row: EventRow
+    public let lane: LaneKey
+    public let media: MediaRow?
+
+    public init(row: EventRow, lane: LaneKey, media: MediaRow?) {
+        self.row = row
+        self.lane = lane
+        self.media = media
     }
 }
 
