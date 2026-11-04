@@ -14,7 +14,7 @@ struct AppearanceSettingsView: View {
         Form {
             Picker("Theme", selection: Binding(get: { prefs.theme.id }, set: { _ = prefs.choose($0) })) {
                 ForEach(prefs.themes) { t in
-                    HStack(spacing: 8) {
+                    HStack(spacing: current.spacing.s) {
                         Text(t.name)
                         Spacer(minLength: 12)
                         ThemeSwatches(theme: t)
@@ -81,7 +81,7 @@ struct ThemeSwatches: View {
             theme.surface.window, theme.surface.panel, theme.accent.accent,
             s.channel, s.instrument, s.auxReturn, s.bus, s.master,
         ]
-        HStack(spacing: 2) {
+        HStack(spacing: theme.spacing.xxs) {
             ForEach(colours.indices, id: \.self) { i in
                 Rectangle()
                     .fill(colours[i].color)

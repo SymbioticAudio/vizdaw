@@ -137,10 +137,11 @@ struct PaneFrame<Content: View>: View {
     let side: PaneSide
     let model: DocumentModel
     @ViewBuilder let content: () -> Content
+    @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
+            HStack(spacing: theme.spacing.s) {
                 Picker(side.title, selection: selection) {
                     ForEach(choices, id: \.self) { Text($0.title).tag($0) }
                 }
@@ -150,8 +151,8 @@ struct PaneFrame<Content: View>: View {
                 .help(side.title)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
+            .padding(.horizontal, theme.spacing.s)
+            .padding(.vertical, theme.spacing.xs)
             Divider()
             // What does not fit goes off the right and bottom, never above
             // the picker.

@@ -55,6 +55,7 @@ struct MixerView: View {
     @Bindable var model: MixerModel
     let placement: MixerPlacement
     @Environment(\.controlActiveState) private var activeState
+    @Environment(\.symbioticTheme) private var theme
 
     /// The mixer window always polls; the Mix view and the bottom pane only
     /// while their window is key or the document plays or records, as the
@@ -108,20 +109,18 @@ struct MixerView: View {
     /// row scrolls on both axes; otherwise only across.
     private var strips: some View {
         GeometryReader { g in
-            let height = max(g.size.height - 2 * Self.rowPadding, 0)
+            let height = max(g.size.height - 2 * theme.spacing.s, 0)
             ScrollView([.horizontal, .vertical]) {
                 // One grid, so the strips share their rows (fix round 1).
                 ChannelStrips(
                     model: model, strips: model.strips + (model.master.map { [$0] } ?? []),
                     dividerBefore: model.master == nil ? nil : model.strips.count, height: height)
-                .padding(Self.rowPadding)
+                .padding(theme.spacing.s)
                 .frame(minWidth: g.size.width, minHeight: g.size.height, alignment: .topLeading)
             }
         }
         .environment(\.mixerPlacement, placement)
     }
-
-    private static let rowPadding: CGFloat = 8
 }
 
 /// The mixer's own bar (it was the window's toolbar; a toolbar item in a
@@ -133,7 +132,7 @@ struct MixerBar: View {
     let placement: MixerPlacement
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: theme.spacing.m) {
             Spacer(minLength: 0)
             // AppKit, so the channel's tree finds them (final review I1).
             AppKitLabel(model.loadText, font: theme.digitsFont(theme.type.caption), secondary: true)
@@ -154,8 +153,8 @@ struct MixerBar: View {
                 PluginBrowserView(model: browserModel(.instrument)) { model.pick($0) }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 
     /// The instrument browser, for a new instrument or a destination, in
@@ -228,7 +227,7 @@ struct SlotView: View {
     }
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: theme.spacing.xs) {
             Circle()
                 .fill(color)
                 .frame(width: 6, height: 6)
@@ -239,7 +238,7 @@ struct SlotView: View {
                 .foregroundStyle(reason == nil ? theme.text.primary.color : theme.text.secondary.color)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, theme.spacing.xs)
         .frame(maxWidth: .infinity, minHeight: 20)
         .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.surface.inset.color))
         .overlay(RoundedRectangle(cornerRadius: theme.radius.s).strokeBorder(theme.surface.separator.color))

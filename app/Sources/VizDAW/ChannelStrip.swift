@@ -217,7 +217,7 @@ private struct StripHeader: View {
     @FocusState private var renaming: Bool
 
     var body: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: theme.spacing.xxs) {
             if appearancePreferences.colourBars {
                 RoundedRectangle(cornerRadius: theme.radius.s)
                     .fill(StripPalette.bar(strip, theme).color)
@@ -323,7 +323,7 @@ private struct StripMenuFace: View {
     @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: theme.spacing.xs) {
             if let dot {
                 Circle().fill(dot).frame(width: 7, height: 7)
             }
@@ -338,7 +338,7 @@ private struct StripMenuFace: View {
                 .font(theme.type.caption.font)
                 .foregroundStyle(theme.text.secondary.color)
         }
-        .padding(.horizontal, 5)
+        .padding(.horizontal, theme.spacing.xs)
         // The 24-point hit minimum (Ruling 4, review M2).
         .frame(maxWidth: .infinity, minHeight: ControlMetrics.minimumHit, maxHeight: ControlMetrics.minimumHit)
         .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.surface.inset.color))
@@ -431,7 +431,7 @@ struct EqSlotView: View {
     }
 
     private func loaded(_ eq: SlotRow) -> some View {
-        HStack(spacing: 3) {
+        HStack(spacing: theme.spacing.xs) {
             Circle()
                 .fill(SlotView.dot(eq, model: model, theme: theme))
                 .frame(width: 6, height: 6)
@@ -456,7 +456,7 @@ struct EqSlotView: View {
             .help(eq.bypass ? "Turn the EQ on" : "Bypass the EQ")
             .accessibilityLabel(eq.bypass ? "Turn On EQ of \(strip.name)" : "Bypass EQ of \(strip.name)")
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, theme.spacing.xs)
         .frame(maxWidth: .infinity, minHeight: 20)
         .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.surface.inset.color))
         .contentShape(Rectangle())
@@ -496,9 +496,10 @@ private struct StripInserts: View {
     @Bindable var model: MixerModel
     let strip: StripRow
     @Environment(\.mixerPlacement) private var placement
+    @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: theme.spacing.xxs) {
             StripHeading(text: "Inserts")
             ForEach(Array(strip.inserts.enumerated()), id: \.element.id) { i, slot in
                 SlotView(model: model, strip: strip, slot: slot, index: i)
@@ -543,7 +544,7 @@ struct SendKnobRow: View {
 
     var body: some View {
         let targets = model.targets(for: strip)
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: theme.spacing.xs) {
             StripHeading(text: "Sends")
             ForEach(Array(strip.sends.enumerated()), id: \.offset) { i, send in
                 SendKnob(model: model, strip: strip, index: i, send: send)
@@ -576,8 +577,8 @@ private struct SendKnob: View {
 
     var body: some View {
         let name = model.stripName(send.target)
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 3) {
+        VStack(alignment: .leading, spacing: theme.spacing.xxs) {
+            HStack(spacing: theme.spacing.xs) {
                 Text(name)
                     .font(theme.type.caption.font)
                     .foregroundStyle(send.enabled ? theme.text.primary.color : theme.text.disabled.color)
@@ -588,12 +589,12 @@ private struct SendKnob: View {
                     Text("PRE")
                         .font(theme.type.caption.font.weight(.bold))
                         .foregroundStyle(Color(nsColor: theme.legend(on: theme.control.send.nsColor)))
-                        .padding(.horizontal, 3)
+                        .padding(.horizontal, theme.spacing.xs)
                         .background(RoundedRectangle(cornerRadius: theme.radius.s).fill(theme.control.send.color))
                         .help("Pre-fader")
                 }
             }
-            HStack(spacing: 4) {
+            HStack(spacing: theme.spacing.xs) {
                 Knob(
                     value: MixerMath.faderPosition(db), origin: 0,
                     arcColour: StripPalette.knob(.send, theme).color,
@@ -658,7 +659,7 @@ private struct StripPan: View {
 
     var body: some View {
         let pan = model.pan(strip)
-        HStack(spacing: 6) {
+        HStack(spacing: theme.spacing.s) {
             Knob(
                 value: (pan + 1) / 2, origin: 0.5, arcColour: StripPalette.knob(.pan, theme).color,
                 style: theme.stripKnob(.medium), palette: KnobPalette(theme: theme), relief: Relief(theme: theme),
@@ -703,7 +704,7 @@ struct StripFaderSection: View {
         GeometryReader { g in
             let throwLength = max(g.size.height - StripLayout.faderCap, 0)
             let db = model.gainDb(strip)
-            HStack(alignment: .top, spacing: 4) {
+            HStack(alignment: .top, spacing: theme.spacing.xs) {
                 Spacer(minLength: 0)
                 Fader(
                     value: MixerMath.faderPosition(db), throwLength: throwLength,
@@ -735,7 +736,7 @@ private struct StripMeter: View {
     @Environment(\.symbioticTheme) private var theme
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: theme.spacing.xxs) {
             bar(level.left)
             bar(level.right)
         }
@@ -788,7 +789,7 @@ struct StripButtons: View {
     var body: some View {
         let lane = model.inputLane(for: strip)
         let armable = model.canArm(strip)
-        HStack(spacing: 4) {
+        HStack(spacing: theme.spacing.xs) {
             StripToggle(letter: "M", on: strip.mute, colour: theme.state.mute, label: "Mute \(strip.name)") {
                 model.toggleMute(strip)
             }
@@ -929,7 +930,7 @@ private struct StripBand: ViewModifier {
         if let shade, theme.style.panelBands == .banded {
             content
                 .padding(.horizontal, StripPadding.horizontal)
-                .padding(.vertical, 3)
+                .padding(.vertical, theme.spacing.xs)
                 .background((shade == .light ? theme.band.light : theme.band.dark).color)
                 .padding(.horizontal, -StripPadding.horizontal)
         } else {
