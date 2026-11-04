@@ -35,13 +35,63 @@ struct MediaPoolWindow: View {
 }
 
 /// The pool's table and actions (rows and actions are `MediaModel`'s).
+/// Compact (a pane, plan 7a Ruling 7) shows Name, Duration and Offline,
+/// puts the actions in one "Actions" menu and sets no minimum size.
 struct MediaPoolView: View {
     @Bindable var media: MediaModel
+    var compact = false
 
     private var selected: UInt64? { media.selection.count == 1 ? media.selection.first : nil }
 
     var body: some View {
         VStack(spacing: 0) {
+            table
+                .contextMenu(forSelectionType: UInt64.self) { ids in
+                    if let id = ids.first, ids.count == 1 { rowMenu(id) }
+                } primaryAction: { ids in
+                    if let id = ids.first { media.selectUsers(id) }
+                }
+                // The Delete key (and Edit > Delete) deletes the selected item,
+                // asking first as the button does (Task 12 review M3).
+                .onDeleteCommand { if let id = selected { delete(id) } }
+                .accessibilityLabel("Media items")
+            Divider()
+            if compact {
+                HStack(spacing: 8) {
+                    Menu("Actions") { actions }
+                        .fixedSize()
+                    Spacer(minLength: 0)
+                }
+                .padding(6)
+            } else {
+                HStack(spacing: 8) {
+                    Button("Select Regions") { if let id = selected { media.selectUsers(id) } }
+                        .disabled(selected == nil)
+                    Button("Select Unused") { media.selectUnused() }
+                    Button("Compact") { media.compact() }
+                        .help("Remove every item no region uses (one undo step). Their files go to the Trash on save.")
+                    Spacer()
+                    Button("Rename…") { if let id = selected { rename(id) } }.disabled(selected == nil)
+                    Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil)
+                    Button("Reveal in Finder") { if let id = selected { reveal(id) } }.disabled(selected == nil)
+                    Button("Import…") { media.importIntoPool(Panels.chooseAudio()) }
+                    Button("Delete", role: .destructive) { if let id = selected { delete(id) } }
+                        .disabled(selected == nil)
+                }
+                .padding(8)
+            }
+        }
+        .frame(minWidth: compact ? nil : 620, minHeight: compact ? nil : 280)
+    }
+
+    @ViewBuilder private var table: some View {
+        if compact {
+            Table(media.poolRows, selection: $media.selection) {
+                TableColumn("Name", value: \.name)
+                TableColumn("Duration", value: \.duration).width(min: 60, ideal: 72)
+                TableColumn("Offline") { r in offlineCell(r.offline) }
+            }
+        } else {
             Table(media.poolRows, selection: $media.selection) {
                 TableColumn("Name", value: \.name)
                 TableColumn("Duration", value: \.duration).width(min: 60, ideal: 72)
@@ -49,43 +99,35 @@ struct MediaPoolView: View {
                 TableColumn("Origin", value: \.origin).width(min: 64, ideal: 88)
                 TableColumn("Uses") { r in Text("\(r.uses)").monospacedDigit() }.width(min: 36, ideal: 44)
                 TableColumn("Used", value: \.used).width(min: 44, ideal: 52)
-                TableColumn("Offline") { r in
-                    if r.offline.isEmpty {
-                        Text("")
-                    } else {
-                        Label(r.offline, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(Color(nsColor: RegionPalette.offline))
-                            .accessibilityLabel("Offline: \(r.offline)")
-                    }
-                }
+                TableColumn("Offline") { r in offlineCell(r.offline) }
             }
-            .contextMenu(forSelectionType: UInt64.self) { ids in
-                if let id = ids.first, ids.count == 1 { rowMenu(id) }
-            } primaryAction: { ids in
-                if let id = ids.first { media.selectUsers(id) }
-            }
-            // The Delete key (and Edit > Delete) deletes the selected item,
-            // asking first as the button does (Task 12 review M3).
-            .onDeleteCommand { if let id = selected { delete(id) } }
-            .accessibilityLabel("Media items")
-            Divider()
-            HStack(spacing: 8) {
-                Button("Select Regions") { if let id = selected { media.selectUsers(id) } }
-                    .disabled(selected == nil)
-                Button("Select Unused") { media.selectUnused() }
-                Button("Compact") { media.compact() }
-                    .help("Remove every item no region uses (one undo step). Their files go to the Trash on save.")
-                Spacer()
-                Button("Rename…") { if let id = selected { rename(id) } }.disabled(selected == nil)
-                Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil)
-                Button("Reveal in Finder") { if let id = selected { reveal(id) } }.disabled(selected == nil)
-                Button("Import…") { media.importIntoPool(Panels.chooseAudio()) }
-                Button("Delete", role: .destructive) { if let id = selected { delete(id) } }
-                    .disabled(selected == nil)
-            }
-            .padding(8)
         }
-        .frame(minWidth: 620, minHeight: 280)
+    }
+
+    @ViewBuilder private func offlineCell(_ offline: String) -> some View {
+        if offline.isEmpty {
+            Text("")
+        } else {
+            Label(offline, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(Color(nsColor: RegionPalette.offline))
+                .accessibilityLabel("Offline: \(offline)")
+        }
+    }
+
+    /// The compact pool's "Actions" menu: the full pool's buttons.
+    @ViewBuilder private var actions: some View {
+        Button("Select Regions") { if let id = selected { media.selectUsers(id) } }
+            .disabled(selected == nil)
+        Button("Select Unused") { media.selectUnused() }
+        Button("Compact") { media.compact() }
+        Divider()
+        Button("Rename…") { if let id = selected { rename(id) } }.disabled(selected == nil)
+        Button("Relink…") { if let id = selected { relink(id) } }.disabled(selected == nil)
+        Button("Reveal in Finder") { if let id = selected { reveal(id) } }.disabled(selected == nil)
+        Button("Import…") { media.importIntoPool(Panels.chooseAudio()) }
+        Divider()
+        Button("Delete", role: .destructive) { if let id = selected { delete(id) } }
+            .disabled(selected == nil)
     }
 
     @ViewBuilder private func rowMenu(_ id: UInt64) -> some View {

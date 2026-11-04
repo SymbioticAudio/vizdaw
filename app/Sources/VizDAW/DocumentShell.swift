@@ -189,8 +189,8 @@ struct PaneFrame<Content: View>: View {
     }
 }
 
-/// What a pane shows. In Task 7: the bottom pane's editor (`DetailArea`),
-/// and a placeholder named by the view for every other view.
+/// What a pane shows (plan 7a Task 8): one host per `PaneView`. The bottom
+/// pane's editor stays mounted under its other views (Ruling 3).
 struct PaneHost: View {
     let side: PaneSide
     let model: DocumentModel
@@ -212,17 +212,35 @@ struct PaneHost: View {
                     .allowsHitTesting(view == .editor)
                     .accessibilityHidden(editorHidden)
                 if view != .editor, !hidden {
-                    placeholder(view)
+                    content(view)
                 }
             }
         } else {
-            placeholder(view)
+            content(view)
         }
     }
 
-    private func placeholder(_ view: PaneView) -> some View {
-        ContentUnavailableView(view.title, systemImage: "rectangle.dashed")
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    /// `.editor` is only ever the bottom pane's always-mounted `DetailArea`.
+    @ViewBuilder
+    private func content(_ view: PaneView) -> some View {
+        switch view {
+        case .strip: LeftStripPane(model: model, docID: docID)
+        case .sequences: SequenceSidebar(model: model)
+        case .inspector: InspectorPane(model: model, docID: docID)
+        case .editor: DetailArea(model: model, docID: docID)
+        case .mixer:
+            if let mixer = appStore.mixer(docID) {
+                MixerView(model: mixer, placement: .pane)
+            } else {
+                ContentUnavailableView(
+                    "Mixer Unavailable", systemImage: "slider.vertical.3",
+                    description: Text("The mixer of this document could not be read."))
+            }
+        case .controllers: ControllersPane(model: model)
+        case .mediaPool: MediaPoolView(media: model.media, compact: true)
+        case .plugins: PluginsPane(model: model, docID: docID)
+        case .markers: MarkersPane(model: model)
+        }
     }
 }
 

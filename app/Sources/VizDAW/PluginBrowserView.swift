@@ -3,9 +3,11 @@ import VizDAWAppModel
 import VizDAWCore
 
 /// The plugin browser popover (spec §9): search, plugins grouped by
-/// vendor; choosing one calls `pick`.
+/// vendor; choosing one calls `pick`. The right pane shows it too.
 struct PluginBrowserView: View {
     @Bindable var model: PluginBrowserModel
+    /// The popover's width; nil fills the pane (plan 7a Ruling 7).
+    var width: CGFloat? = 320
     let pick: (PluginRefRow) -> Void
 
     var body: some View {
@@ -42,6 +44,7 @@ struct PluginBrowserView: View {
             }
         }
         .padding(10)
-        .frame(width: 320)
+        .frame(width: width)
+        .frame(maxWidth: width == nil ? .infinity : nil, maxHeight: width == nil ? .infinity : nil, alignment: .top)
     }
 }
