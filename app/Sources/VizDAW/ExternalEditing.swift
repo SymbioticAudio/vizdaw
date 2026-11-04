@@ -40,8 +40,12 @@ private final class FileWatch: @unchecked Sendable {
         guard fd >= 0 else { return false }
         let s = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+        // A strong `let` of this Sendable class, not the weak capture box,
+        // goes into the main-actor closure: Swift 6.1 rejects sending the
+        // weak `self` (CI's macos-15 toolchain).
         s.setEventHandler { [weak self] in
-            MainActor.assumeIsolated { self?.event() }
+            guard let watch = self else { return }
+            MainActor.assumeIsolated { watch.event() }
         }
         s.setCancelHandler { close(fd) }
         source = s
@@ -62,9 +66,9 @@ private final class FileWatch: @unchecked Sendable {
 
     @MainActor private func reopen() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let watch = self else { return }
             MainActor.assumeIsolated {
-                guard let self else { return }
-                if self.arm() { self.changed() } else { self.reopen() }
+                if watch.arm() { watch.changed() } else { watch.reopen() }
             }
         }
     }
