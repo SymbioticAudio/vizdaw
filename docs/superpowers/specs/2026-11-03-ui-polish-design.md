@@ -42,12 +42,13 @@ Success: the owner can sit down with a project and record, arrange, edit and mix
    - the automation mode.
 
    Every number box can be clicked and typed into. Typed values are hostile-input tested, like every other entry.
-6. **Themes. (owner, decided 2026-10-19/20 and confirmed now)** VizDAW adopts the shared `symbiotic-design` package (`SymbioticTokens`, `SymbioticIcons`; `SymbioticBrand` optional) at its released version, with its five themes:
+6. **Themes. (owner, decided 2026-10-19/20 and confirmed now)** VizDAW adopts the shared `symbiotic-design` package (`SymbioticTokens`, `SymbioticIcons`; `SymbioticBrand` optional) at its released version, with its six themes (five, plus EG13 added at G1):
    - **Classic Light (`classic-light`), the default theme (owner, 2026-11-03).** The owner calls it "SVP Light"; that is its design reference, not its name. **(controller's call)** The UI says "Classic Light", because the clean-room rules keep "SVP" and other Opcode names out of the app;
    - Studio Dark (`studio-dark`);
    - Flat (`flat`, Metro-inspired);
    - Console (`console`, realistic, Soundcraft-inspired);
    - SymbioticAudio blue/gold (`symbiotic`).
+   - EG13 (`eg13`), from the owner's EG13 synth app: light grey panels, black ring knobs, teal and pink accents, lime readouts. **(owner, G1 2026-11-03: a sixth theme)**
 
    The theme is chosen in Settings, applies to the whole app including the mixer, and switches live.
 
@@ -140,6 +141,6 @@ Plans run one after another by subagent-driven development, as SP5's did.
 | Plan | Deliverable |
 |---|---|
 | **7a — Window, main views and panes** | The single-window layout. The transport bar. Arrange and Mix main views (the Mix view is the full mixer; the mixer also sits in the bottom pane and opens as its own window). The left, bottom and right panes with their lists and pickers, and the toggles and keys. Per-view layouts. The selected-track strip in the left pane. The existing editors, the mixer, the media pool and the plug-in browser moved into panes. The control channel updated. README by-eye steps. |
-| **7b — Themes, icons and the channel strip** | `symbiotic-design` adopted. The five themes, with SVP Light the default. Settings › Appearance, with live switching. Icons from `SymbioticIcons` with a fallback. The channel strip redesigned as in §2, item 5: EQ slot, send knobs, typed pan, level and sends, the big fader. Console colouring in every theme. |
+| **7b — Themes, icons and the channel strip** | `symbiotic-design` adopted. The six themes, with Classic Light the default. Settings › Appearance, with live switching. Icons from `SymbioticIcons` with a fallback. The channel strip redesigned as in §2, item 5: EQ slot, send knobs, typed pan, level and sends, the big fader. Console colouring in every theme. |
 | **7c — Audio editor** | The bottom pane's audio editor (§6, item 2): the selected region's waveform large, with zoom and a level scale. Gain, fades with shapes, trim and normalize, with handles and typed values, through the existing commands. Control-channel state, hostile-input tests, README steps. |
 | **7d — Clean-up** | The SP7 backlog rows (§2, item 10) and the drawing and wording faults that 7a and 7b's own by-eye checks turn up. |
