@@ -78,6 +78,14 @@ Success: the owner can sit down with a project and record, arrange, edit and mix
    - the strip's lane picker names its lane;
    - a growing take's waveform follows a tempo change.
 
+11. **The project README keeps up with SP7 (owner, 2026-11-03).** The root `README.md` still says "design phase". Each SP7 plan updates it as part of its last task:
+   - **7a** rewrites the status: what works today after SP5. It also corrects the feature list (OMF and AAF import may move after launch; the hosted formats are AU and CLAP; there is no VST3). It adds a short "Getting around" section on the window, the main views, the panes and their keys, and building and running from source.
+   - **7b** adds the themes and the default.
+   - **7c** adds the audio editor.
+   - **7d** gives it a final read for accuracy.
+
+   It stays short: user-facing, plain words, no plan jargon. The disclaimer stays.
+
 ## 3. Non-goals
 
 - **No new audio processing.** SP7 is UI. The EQ slot hosts the user's EQ plug-in.
