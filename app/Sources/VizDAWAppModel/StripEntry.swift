@@ -17,7 +17,7 @@ public enum StripEntry {
 
     /// The text trimmed, U+2212 read as "-"; nil when too long or holding a
     /// control character.
-    private static func clean(_ s: String) -> String? {
+    static func clean(_ s: String) -> String? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: String(minus), with: "-")
         guard t.unicodeScalars.count <= maxLength else { return nil }
@@ -28,7 +28,7 @@ public enum StripEntry {
     }
 
     /// `digits`, `digits.digits` or `.digits`, ASCII only.
-    private static func number(_ s: Substring) -> Double? {
+    static func number(_ s: Substring) -> Double? {
         let parts = s.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count <= 2, !parts.isEmpty else { return nil }
         func digits(_ p: Substring) -> Bool {
@@ -45,6 +45,11 @@ public enum StripEntry {
     /// dB from `text`, rounded to 0.1 and clamped to −144…+12 (−144 is −∞);
     /// nil when refused.
     public static func level(_ text: String) -> Double? {
+        level(text, max: MixerMath.maxDb)
+    }
+
+    /// As `level(_:)`, clamped to −144…`max` instead of +12.
+    public static func level(_ text: String, max top: Double) -> Double? {
         guard var t = clean(text)?.lowercased() else { return nil }
         if t.hasSuffix("db") {
             t.removeLast(2)
@@ -65,7 +70,7 @@ public enum StripEntry {
         let v = (sign * n * 10).rounded(.toNearestOrAwayFromZero) / 10
         if v <= MixerMath.floorDb { return MixerMath.floorDb }
         if v == 0 { return 0 }
-        return min(v, MixerMath.maxDb)
+        return min(v, top)
     }
 
     /// −1…1 from `text` (L negative, whole percent); nil when refused.
@@ -92,8 +97,13 @@ public enum StripEntry {
 
     /// "−4.2 dB", "+3.0 dB", "0.0 dB", "−∞ dB".
     public static func levelText(_ db: Double) -> String {
+        levelText(db, max: MixerMath.maxDb)
+    }
+
+    /// As `levelText(_:)`, clamped at `max` instead of +12.
+    public static func levelText(_ db: Double, max top: Double) -> String {
         if db.isNaN || db <= MixerMath.floorDb { return "\u{2212}\u{221E} dB" }
-        let v = (min(db, MixerMath.maxDb) * 10).rounded(.toNearestOrAwayFromZero) / 10
+        let v = (min(db, top) * 10).rounded(.toNearestOrAwayFromZero) / 10
         if v == 0 { return "0.0 dB" }
         let body = String(format: "%.1f", abs(v))
         return (v < 0 ? String(minus) : "+") + body + " dB"
