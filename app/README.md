@@ -43,12 +43,14 @@ temporary support folder and never scans.
 ## Editors (plan 4a)
 
 - The document window shows the arrangement (the selected sequence's
-  lanes and their blocks) over a detail pane. The piano roll (plan 4b)
+  lanes and their blocks) over the bottom pane's editor (plan 7a: Left,
+  Bottom and Right Pane, see steps 199-206). The piano roll (plan 4b)
   is built; the other detail editors arrive in plans 4c-4e and until
   then the pane names its target and event count.
   Cmd-1 to Cmd-4 choose piano roll, list, Strip Chart or drum grid;
   Option-Cmd-1 to Option-Cmd-4 open one in its own window.
-- Blocks follow the toolbar's rule (silence gap, fixed bars, whole lane);
+- Blocks follow the arrangement bar's rule (silence gap, fixed bars,
+  whole lane);
   a reference is always its own purple block named after its sequence.
   Drag moves, Option-drag copies, dragging onto another lane merges; G
   toggles snap; Escape cancels a drag; a drag in the ruler selects a time
@@ -68,9 +70,11 @@ temporary support folder and never scans.
   (the single-key transport shortcuts do not work while a plugin window
   is in front; Command keys do). While an input method is composing,
   keys go to the text.
-- The editor layout (detail pane, editor windows and their frames, the
-  sidebar order, block rule, light mode, snap, zoom) is saved in the
-  project's `ui.json` when you save; it is not an undo step.
+- The editor layout (the bottom pane's editor, editor windows and their
+  frames, the sequence list's order, block rule, light mode, snap, zoom,
+  and from plan 7a each main view's panes and the document window's
+  frame) is saved in the project's `ui.json` when you save; it is not an
+  undo step.
 
 `VIZDAW_AUDIO=offline` renders through the offline backend in real time
 (no sound, device label "Offline"). Never set it for normal use.
@@ -114,6 +118,19 @@ whether automation is suspended or being written. `state.get input`'s
 `levels` are each channel's peak since the last read (held, so a quiet
 read can still show a recent peak) and its list is as long as the channel
 count at the last poll (one poll stale after a device change).
+
+Windows and panes (plan 7a): `state.get layout` answers the document
+window's main view (`arrange` or `mix`), each view's left, bottom and
+right panes (shown, view, size and the views on that pane's list) and
+what the left pane shows (`left_shows`: `strip`, `inspector`, `sequences`,
+`nothing` or `hidden`; `left_strip`: the strip the rule picks).
+`ui.view_arrange` and `ui.view_mix` switch the main view;
+`ui.toggle_left`, `ui.toggle_bottom` and `ui.toggle_right` show and hide
+a pane (absent `on` toggles); `ui.pane {"pane": "right", "view":
+"markers", "size": 300, "shown": true, "main": "mix"}` sets one pane of
+one view, refusing a view off that pane's list with `invalid_params` and
+changing nothing. None of them opens a dialog; `window.mixer` and
+`window.media_pool` still open their own windows.
 
 `vizctl` drives it from a shell:
 
@@ -194,8 +211,9 @@ multi-output drum instrument).
    and the AU/CLAP filter narrow the table.
 10. Open the demo, then Window > Mixer: strips "Built-in Synth" and
     "Master", each with a fader, pan, M/S, an output menu and a meter that
-    moves while playing. The toolbar shows the DSP load.
-11. Mixer toolbar > Instruments > "Built-in Piano: MIDI → Plugin…": the
+    moves while playing. The bar along the top of the mixer shows the
+    DSP load.
+11. The mixer's bar > Instruments > "Built-in Piano: MIDI → Plugin…": the
     browser lists instruments grouped by vendor; pick Diva. A "Built-in
     Piano" instrument strip appears; its slot turns green once loaded.
     Play Song: the chords sound through Diva. (Instruments > New Plugin
@@ -295,7 +313,7 @@ Use the demo project (File > Create Demo Project; its window is titled
     status line and changes nothing; Parameters... (the repeats sheet) with
     Repeats 2 doubles the block, Transpose +5 is audible. Each is one Undo
     step.
-32. Detail pane: double-click the Chords block: the pane below shows the
+32. Bottom pane: double-click the Chords block: the pane below shows the
     piano roll (see plan 4b); Cmd-2 switches to List; Option-Cmd-1 opens a
     "Piano Roll — Untitled" window. Option-Cmd-2 also opens a List window.
     Select Beat in the sidebar, open a window on it, then Delete... Beat:
@@ -320,7 +338,8 @@ Use the demo project (File > Create Demo Project; its window is titled
     through it reads blocks such as "Block on Chords, bars 1 to 12, 40
     events" and "Reference to Groove on Groove, bars 1 to 4"; VO-Space on a
     block selects it. The lane headers read "Chords, Built-in Piano"; the
-    toolbar controls (tool, Snap, Blocks, Light, Follow, zoom) are labelled.
+    arrangement bar's controls (tool, Snap, Blocks, Light, Follow, zoom)
+    are labelled.
 
 ### Piano roll (plan 4b)
 
@@ -329,8 +348,8 @@ otherwise. The audio engine starts on the first Play: until then pressing a
 note shows "Notes sound once the audio engine runs: press Play once." once,
 so press Space twice (play, stop) before the sound steps.
 
-36. Double-click the Chords block: the detail pane shows the piano roll with
-    a toolbar (Arrow/Pencil/Eraser, Keyboard, Lanes, Insert Into, Audio,
+36. Double-click the Chords block: the bottom pane shows the piano roll with
+    its bar (Arrow/Pencil/Eraser, Keyboard, Lanes, Insert Into, Audio,
     Expression, row-height and zoom buttons), a keyboard on the left with
     its C keys labelled (C4, C5), the ruler, and one three-note chord per
     bar in orange (Chords is Song's second lane, after Groove; lane colours
@@ -442,7 +461,7 @@ bar 12 (the block has 40 events); Song's tempo map is 120 BPM at 1.1.0, a
 120 ramp at 11.1.0 and 90 at 13.1.0. The status line is the strip under the
 editors (and at the bottom of the panel).
 
-51. List: double-click the Chords block and press Cmd-2: the detail pane
+51. List: double-click the Chords block and press Cmd-2: the bottom pane
     shows an "Event List" table with the columns Position, Length, Kind,
     Destination, Data 1, Data 2 and Mute (a Lane column appears only when
     the list covers more than one lane) and "40 rows" in its bar. The first
@@ -594,9 +613,10 @@ editors (and at the bottom of the panel).
     Modify menu is greyed again. Saving a template with no name says "Name
     the template first."
 66. Exact mode: open the piano roll (Cmd-1) on Chords and choose Modify >
-    Exact Mode (Ctrl-Cmd-E; the toolbar's Exact toggle shows it too). Drag a
-    chord note's left edge one beat right: it follows the pointer and, on
-    release, goes back while the panel opens on Move with "by" 1.0 and "Apply
+    Exact Mode (Ctrl-Cmd-E; the piano roll bar's Exact toggle shows it
+    too). Drag a chord note's left edge one beat right: it follows the
+    pointer and, on release, goes back while the panel opens on Move with
+    "by" 1.0 and "Apply
     acts on the dragged events."; Apply moves it as one undo step. A
     middle-zone drag straight up three rows opens Transpose with semitones
     3; a diagonal middle drag opens whichever axis is stronger with a
@@ -636,7 +656,7 @@ otherwise. Its built-in synth plays through the "Built-in Synth" strip; Song
 holds Groove and Chords. Turn snap on (the default, quarters) unless a step
 says otherwise. "The level" means what you hear and the master meter.
 
-68. Strip Chart: double-click the Chords block and press Cmd-3: the detail
+68. Strip Chart: double-click the Chords block and press Cmd-3: the bottom
     pane shows "Strip Chart" with one row titled "Velocity ▾" and a bar
     (Mode: Draw, Modify, Erase; Shape; Step; Rows: 1). The chords' 36
     velocities show as bars at their starts; selected notes are accented.
@@ -751,8 +771,9 @@ Run these from a shell in the repository, with `V=target/debug/vizctl`.
     "Save" and no panel appears; `$V run file.save '{"path":
     "/tmp/Demo.vizdaw"}'` saves (the window title becomes "Demo").
     `$V open /tmp/Demo.vizdaw` opens a second window.
-85. Input: `$V find Play` gives the toolbar button's ID; `$V click <ID>`
-    plays without the pointer moving or VizDAW coming to the front;
+85. Input: `$V find Play` gives the transport bar's Play button ID;
+    `$V click <ID>` plays without the pointer moving or VizDAW coming to
+    the front;
     `$V key space` stops; `$V drag 600,168 800,168` (points in the
     arrangement's ruler, from `$V find Arrangement`) selects a range
     (`$V state selection` shows `time_range`); with VoiceOver on, its
@@ -769,7 +790,7 @@ rows Kick, Snare and Closed Hat. Groove's own Drums lane is a plain lane
 that references Beat, not a drum lane. Snap stays on (quarters) unless a
 step says otherwise.
 
-87. Open: click Beat's block and press Cmd-4. The detail pane shows
+87. Open: click Beat's block and press Cmd-4. The bottom pane shows
     "Drum Grid" with a bar (Paint/Erase, Step Matrix, 1/16, 1/16, 1/32,
     Vel 100, +, "Drums: Off") and row headers Kick C2, Snare D2 and
     Closed Hat F#2 under a "Drums" header. Kick lights the cells at beats
@@ -1093,7 +1114,7 @@ These steps use real hardware, so they are by eye: an audio interface
 with a microphone or a line source, a MIDI keyboard, and a loopback
 cable (an output wired back to an input). Use a throwaway home
 (`vizctl launch`) for the channel steps. The lane headers' input
-pickers, monitor buttons and meters, the toolbar's Record button and
+pickers, monitor buttons and meters, the transport bar's Record button and
 Settings › Audio (steps 144–159) do what the channel commands below do;
 the channel steps stay as they are.
 
@@ -1283,7 +1304,7 @@ checks the same behaviour through the channel. Steps that record
 (144, 145, 149, 153, 154) record over lanes: use a throwaway project or
 a copy, not one you care about.
 
-144. Record button and popover: the toolbar shows a Record button (a
+144. Record button and popover: the transport bar shows a Record button (a
      circle) and a chevron after Loop. R and the button both record; the
      button turns red while recording and stops on the next press. A
      refusal (no lane armed with an input, step entry on) shows in the
@@ -1296,17 +1317,17 @@ a copy, not one you care about.
      "Audio overdub replaces what it overlaps: record into another lane or
      take to layer." While recording the popover's controls are dimmed.
 145. Count-in: set Count-in to 1 bar and press Record: four clicks (the
-     first higher) play while the toolbar shows "Count-in" and the
+     first higher) play while the transport bar shows "Count-in" and the
      playhead waits, then the transport rolls on the downbeat. 2 bars at
      3/4 is six clicks. The click is never recorded. If the audio device
      restarts during the count-in (another device chosen, a sample-rate
      change), the rest of the count-in is skipped and recording starts at
      once (known; backlog).
 146. Time left and loop counters: with one stereo audio lane armed, the
-     toolbar shows the recording time left (for 48 kHz / 24-bit stereo,
+     transport bar shows the recording time left (for 48 kHz / 24-bit stereo,
      about one hour per 1 GB free beyond the last 100 MB); arming a second
      stereo lane halves it; with only MIDI lanes armed it is gone. Loop
-     record: the toolbar counts "Pass 2", then "Pass 3 · 1 kept" after
+     record: the transport bar counts "Pass 2", then "Pass 3 · 1 kept" after
      Keep Pass.
 147. Lane header: each lane has a monitor button (A, I or –) left of M:
      clicking cycles Auto → Input → Off, one undo step "Set Lane Monitor"
@@ -1414,7 +1435,7 @@ a copy, not one you care about.
      measurement while other calls (`$V state transport`) keep answering
      meanwhile.
 158. VoiceOver: a lane header reads like "Vocal, no destination, armed,
-     input In 1+2, monitoring input"; the toolbar's buttons read "Record"
+     input In 1+2, monitoring input"; the transport bar's buttons read "Record"
      (or "Stop Recording") and "Record Options"; a mixer strip's monitor
      button reads its mode.
 159. Microphone prompt left up (plan 5d-1 final review m1): on a Mac where
@@ -1869,3 +1890,75 @@ you should see; report anything else, and every value step 198 asks for.
      back, and how the tempo control steps (half a second between turns
      makes a new Undo step); and whether the Count-in, Tap and Automation
      lights light.
+
+### Window, main views and panes (plan 7a)
+
+Checked by hand; the layout rules are tested (`WindowLayoutTests`,
+`PaneGeometryTests`, `LeftPaneTests`, `RightPaneTests`, `ViewCommandsTests`)
+and the e2e `window_views_and_panes_over_the_channel`. Where earlier steps
+say the sidebar, use Left Pane › Sequences; the toolbar is now the
+transport bar; the mixer's toolbar is the bar along the top of the mixer;
+the detail pane is the bottom pane's editor.
+
+199. File > Create Demo Project. The window shows the transport bar along
+     the top (Play, Loop, Record, the position, Arrange | Mix, three pane
+     buttons; when the window is too narrow for one row, the transport
+     fields move to a second row, and the step-entry summary, shown only
+     while step entry is on, sits in front of them or above them), the
+     channel strip on the left running the full height, the arrangement
+     in the centre and the "No Editor Open" pane below it. The right pane
+     is hidden.
+200. Scroll the arrangement to bar 9 and zoom in once. Press ⌃2: the
+     mixer fills the window under the transport bar, with no arrangement.
+     Press ⌃1: the arrangement comes back where you left it (bar 9, the
+     same zoom), with the panes as they were. (If macOS switches desktops
+     instead, Mission Control owns ⌃1/⌃2: rebind Arrange View and Mix View
+     in Settings › Keys › View.) A sequence's keyboard slot on ⌃1, ⌃2 or
+     ⌃⌘←/↓/→ no longer fires: the View command wins (backlog).
+201. Press ⌃⌘→: the right pane opens beside the bottom pane, under the
+     arrangement. Press ⌃⌘↓: the bottom pane hides and the right pane runs
+     beside the arrangement for the full height. Press ⌃⌘↓: the bottom
+     pane comes back. Press ⌃⌘← twice: the left pane hides and comes back
+     with the same view and size. The View menu's Left, Bottom and Right
+     Pane items show the same check marks. Choose Left Pane › Sequences,
+     double-click Song, type `Verse` and press ⌃⌘←: the left pane hides
+     and the rename is kept, as Return would keep it (⌃⌘← again shows the
+     new name). Press Space: the transport plays, and the status line
+     does not say "A text field has the keyboard.". Undo the rename.
+     Double-click the Chords block and select a note, press ⌃⌘↓, press
+     Delete, then ⌃⌘↓ again: the note is still there.
+202. Drag the line between the arrangement and the bottom pane up and down:
+     the pane follows the pointer, without running ahead of it, and stops
+     at its smallest and largest size. With the right pane shown, shrink
+     the window as far as it goes (700×450): the panes shrink to their
+     smallest and the arrangement keeps a usable area; nothing hides at
+     this size. Grow it again: the panes go back to their sizes.
+203. Click the Chords lane header and play Song: the left pane shows the
+     Built-in Synth's strip. Move its fader: the mixer (⌥⌘M) and the Mix
+     view (⌃2) show the same level, and the meters fall at the same speed
+     in all three. Press ⌃1. With the mixer window open, click the left
+     strip's insert "+": the browser opens on the left strip only, not in
+     the mixer window. Right-click the Chords lane, choose New MIDI
+     Destination… (any port, such as the IAC Driver; with none listed,
+     turn on the IAC Driver in Audio MIDI Setup) and Add, which points the
+     lane at it (step 156): the left pane shows the Inspector, naming that
+     destination. Undo twice: Chords plays Built-in Piano again and the
+     strip comes back.
+204. Open each pane's picker: the left lists Channel Strip, Sequences and
+     Inspector; the bottom lists Piano Roll, List, Strip Chart, Drum Grid
+     and Mixer (the Mix view's bottom has no Mixer), and the bottom pane
+     shows no second row of editor buttons; the right lists Controllers,
+     Media Pool, Plug-ins and Markers. Choose each one: each shows its
+     view, and nothing opens a dialog. Press ⌘1: the bottom pane
+     shows the piano roll on the selection; ⌥⌘1 still opens it in a window.
+205. In the right pane, Plug-ins: with the Chords lane selected, choose an
+     effect: it appears as the last insert on the left strip and in the
+     mixer; double-click its slot: its window opens floating. Markers:
+     click a row: the position moves there. Controllers: the Strip Chart
+     shows the selected lane's controller. Press ⌃2 and ⌃⌘→ (Plug-ins),
+     click the Built-in Synth strip's name to select it, choose an effect:
+     it appears as that strip's last insert.
+206. Window > Mixer opens the mixer in its own window with its own
+     transport bar: Play there plays the document. Set the Mix view's
+     right pane to Markers, save, close and reopen the project: both views
+     come back as you left them, and the window at the same size and place.

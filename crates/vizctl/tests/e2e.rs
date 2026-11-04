@@ -2008,3 +2008,227 @@ fn edits_a_region_through_the_stub_editor() {
     assert_eq!(e.code, core_control::ErrorCode::Failed, "{e}");
     app.quit();
 }
+
+/// One pane of one main view in a `state.get layout` answer.
+fn layout_pane(layout: &Value, main: &str, pane: &str) -> Value {
+    layout["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["main"] == main)
+        .and_then(|v| {
+            v["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["pane"] == pane)
+        })
+        .unwrap_or_else(|| panic!("no {main} {pane} in {layout}"))
+        .clone()
+}
+
+/// Polls `state.get layout` until `ok` holds; returns that answer.
+fn wait_for_layout(app: &mut App, window: &Value, ok: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let l = app.call("state.get", json!({"target": "layout", "window": window}));
+        if ok(&l) {
+            return l;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the layout did not settle within {WAIT_MS} ms: {l}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// README steps 199–206 through the channel (plan 7a): the defaults,
+/// hostile `ui.pane` calls that change nothing and open no dialog, the
+/// main-view keys, a pane set for the other view, the mixer in the bottom
+/// pane and in its own window (with its own transport bar), and the
+/// layout saved per document.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn window_views_and_panes_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    // 1. The defaults.
+    let window = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    let layout =
+        |app: &mut App| app.call("state.get", json!({"target": "layout", "window": window}));
+    let l0 = layout(&mut app);
+    assert_eq!(l0["main"], "arrange", "{l0}");
+    let left = layout_pane(&l0, "arrange", "left");
+    assert_eq!(
+        (left["shown"].clone(), left["view"].clone()),
+        (json!(true), json!("strip")),
+        "{l0}"
+    );
+    assert_eq!(layout_pane(&l0, "arrange", "bottom")["shown"], true, "{l0}");
+    assert_eq!(layout_pane(&l0, "arrange", "right")["shown"], false, "{l0}");
+    for side in ["left", "bottom", "right"] {
+        assert_eq!(
+            layout_pane(&l0, "mix", side)["shown"],
+            false,
+            "mix {side}: {l0}"
+        );
+    }
+
+    // 2. Hostile calls change nothing and open no dialog.
+    let w0 = app.call("state.get", json!({"target": "windows"}));
+    let numbers = |w: &Value| -> Vec<(Value, Value)> {
+        w["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["number"].clone(), x["kind"].clone()))
+            .collect()
+    };
+    for (params, mentions) in [
+        (json!({}), None),
+        (json!({"pane": "left", "view": "mixer"}), None),
+        (
+            json!({"pane": "bottom", "view": "mixer", "main": "mix"}),
+            None,
+        ),
+        (json!({"pane": "left", "size": "wide"}), None),
+        (json!({"pane": "left"}), None),
+        (
+            json!({"pane": "right", "view": "piano_roll"}),
+            Some("piano_roll"),
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "ui.pane", "params": params, "window": window}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {e}");
+        if let Some(word) = mentions {
+            assert!(e.to_string().contains(word), "{params}: {e}");
+        }
+    }
+    let e = app.call_err("state.get", json!({"target": "panes", "window": window}));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert_eq!(layout(&mut app), l0, "no layout change");
+    let w1 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(numbers(&w1), numbers(&w0), "no window opened");
+    assert_eq!(w1["alerts"].as_array().unwrap().len(), 0, "{w1}");
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    assert!(doc["alert"].is_null(), "no dialog: {doc}");
+
+    // 3. ⌃2 and ⌃1.
+    let tree_has = |app: &mut App, label: &str| {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        labelled(&tree["nodes"], label).is_some()
+    };
+    app.call(
+        "ui.key",
+        json!({"window": window, "key": "2", "modifiers": ["control"]}),
+    );
+    wait_for_layout(&mut app, &window, |l| l["main"] == "mix");
+    assert!(
+        !tree_has(&mut app, "Arrangement"),
+        "the Mix view has no arrangement"
+    );
+    app.call(
+        "ui.key",
+        json!({"window": window, "key": "1", "modifiers": ["control"]}),
+    );
+    wait_for_layout(&mut app, &window, |l| l["main"] == "arrange");
+    wait_for_label(&mut app, &window, "Arrangement");
+    app.call(
+        "command.run",
+        json!({"id": "ui.toggle_right", "window": window}),
+    );
+    let l = wait_for_layout(&mut app, &window, |l| {
+        layout_pane(l, "arrange", "right")["shown"] == true
+    });
+    assert_eq!(l["main"], "arrange", "{l}");
+
+    // 4. A pane of the other view; the main view stays.
+    let r = app.call(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "right", "view": "markers", "size": 300, "shown": true, "main": "mix"}, "window": window}),
+    );
+    assert_eq!(r["status"], "right markers 300 shown", "{r}");
+    let l = layout(&mut app);
+    assert_eq!(l["main"], "arrange", "{l}");
+
+    // 5. The mixer in arrange's bottom pane.
+    app.call(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "bottom", "view": "mixer"}, "window": window}),
+    );
+    let l = layout(&mut app);
+    assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
+    // The mixer's "Add Bus" button is not in the accessibility tree (SwiftUI
+    // leaves it out of the bar); its Instruments menu is, and only a mixer
+    // has one.
+    wait_for_label(&mut app, &window, "Instruments");
+
+    // 6. The mixer window has its own transport bar.
+    app.call(
+        "command.run",
+        json!({"id": "window.mixer", "window": window}),
+    );
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let mixer = loop {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        if let Some(m) = ws["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "mixer")
+        {
+            break m["number"].clone();
+        }
+        assert!(Instant::now() < deadline, "no mixer window in {ws}");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let id = loop {
+        let tree = app.call("ui.tree", json!({"window": mixer}));
+        if let Some(id) = play_button(&tree["nodes"]) {
+            break id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no Play in the mixer window's tree: {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    app.call("ui.click", json!({"window": mixer, "element": id}));
+    app.wait(&window, json!({"condition": "playing"}));
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": window}),
+    );
+    app.wait(&window, json!({"condition": "stopped"}));
+
+    // 7. Saved per document.
+    let path = app.launched.home.join("views.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": path}, "window": window}),
+    );
+    app.call("command.run", json!({"id": "file.close", "window": window}));
+    let w2 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w2, json!({"condition": "documents_at_least", "count": 1}));
+    let l = app.call("state.get", json!({"target": "layout", "window": w2}));
+    let right = layout_pane(&l, "mix", "right");
+    assert_eq!(
+        (
+            right["shown"].clone(),
+            right["view"].clone(),
+            right["size"].clone()
+        ),
+        (json!(true), json!("markers"), json!(300.0)),
+        "{l}"
+    );
+    assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
+    app.quit();
+}

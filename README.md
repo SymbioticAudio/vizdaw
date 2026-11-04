@@ -3,14 +3,57 @@
 VizDAW (pronounced "Vista") is a MIDI-first, open-source digital audio
 workstation for macOS, inspired by Opcode Studio Vision.
 
-**Status:** design phase — see [the design spec](docs/superpowers/specs/2026-10-15-vizdaw-design.md).
+**Status:** VizDAW is in development and not yet released. Today it
+records, edits and mixes MIDI and audio in one window. The look of the
+interface (themes) and an audio editor are next. The
+[design spec](docs/superpowers/specs/2026-10-15-vizdaw-design.md) describes
+where the project is going.
 
-- Sequences and subsequences as the arrangement model, with alternate takes
-- List, piano-roll, Strip Chart and arrangement editors over one shared model
-- MIDI 2.0 throughout; low-latency CoreAudio and CoreMIDI
-- AU (v2/v3) and CLAP plugin hosting
-- SMF, OMF and AAF import
-- Rust core with a native SwiftUI/AppKit interface (Apple Silicon, macOS 14+)
+## What works today
+
+- Sequences, subsequences and alternate takes
+- The arrangement, piano roll, list, Strip Chart and drum grid editors,
+  with step entry and changeable key bindings
+- Audio and MIDI recording, with monitoring and count-in
+- Audio import, regions, fades and normalize
+- The mixer, with inserts, buses, sends and automation
+- AU (v2/v3) and CLAP plug-ins (no VST3)
+- Control surfaces (Mackie Control with its XT extenders, HUI, and Kontrol
+  S-Series MK3 keyboards) and MIDI learn
+- Bounce to WAV, AIFF or CAF
+- Round trips to an external sample editor
+- MIDI 2.0 throughout, on Apple Silicon with macOS 14 or newer
+
+Planned: Standard MIDI File import, and OMF and AAF import (which may come
+after the first release).
+
+## Getting around
+
+- Each project has one window. The transport bar along its top has Play,
+  Loop, Record, the position and the transport fields.
+- Two main views: Arrange (⌃1) and Mix (⌃2). Switching keeps each view's
+  panes as you left them.
+- Three panes: left (⌃⌘←), bottom (⌃⌘↓) and right (⌃⌘→). Each has a picker
+  for what it shows: a channel strip, sequences, an editor, the mixer,
+  markers and more. Drag the lines between panes to resize them.
+- ⌘1 to ⌘4 open the piano roll, list, Strip Chart and drum grid in the
+  bottom pane.
+- Window > Mixer opens the mixer in a window of its own.
+- Change any key in Settings › Keys.
+
+## Building from source
+
+You need macOS 14 or newer, Rust 1.85 or newer, and the Xcode Command Line
+Tools. Then, from the project folder:
+
+```bash
+scripts/build-ffi.sh              # Rust static library + generated Swift bindings
+scripts/swift.sh run VizDAW       # opens a window (add --demo to start with the demo)
+scripts/swift.sh test             # Swift Testing suite (needs build-ffi.sh first)
+scripts/make-app.sh               # dist/VizDAW.app, ad-hoc signed
+```
+
+See [app/README.md](app/README.md) for more.
 
 ## License
 

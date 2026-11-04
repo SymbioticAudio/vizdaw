@@ -188,7 +188,7 @@ struct RecordingSettingsView: View {
                     Text("Input").tag("input")
                     Text("Off").tag("off")
                 }
-                Text("Open documents keep their own options: change those in the toolbar's record popover.")
+                Text("Open documents keep their own options: change those in the transport bar's record popover.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
