@@ -186,6 +186,7 @@ public final class DocumentStore {
         do {
             let m = try MixerModel(document: doc)
             mixers[id] = m
+            doc.storeMixer = m
             return m
         } catch {
             doc.alert = AlertItem(error, title: "Mixer Unavailable")

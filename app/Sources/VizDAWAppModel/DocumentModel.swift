@@ -18,6 +18,9 @@ public final class DocumentModel {
     /// The app's key bindings (set by `DocumentStore`; keyboard slots are
     /// checked against them, plan 4f Ruling 15).
     @ObservationIgnored public var keys: KeyBindings?
+    /// The document's mixer, set by `DocumentStore.mixer(_:)` when it makes
+    /// it, so the View commands can commit its strip rename (plan 7a Ruling 10).
+    @ObservationIgnored public weak var storeMixer: MixerModel?
     public private(set) var selectedSeq: UInt64?
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState

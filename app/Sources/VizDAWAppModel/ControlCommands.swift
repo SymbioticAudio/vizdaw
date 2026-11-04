@@ -198,7 +198,6 @@ public enum ControlCommands {
         "file.project_settings", "media.import", "media.convert",
         "media.relink", "media.compact", "media.rename", "window.media_pool",
         "record.set", "record.recover", "lane.set_input", "lane.set_monitor", "midi.inject",
-        "ui.view_arrange", "ui.view_mix", "ui.toggle_left", "ui.toggle_bottom", "ui.toggle_right", "ui.pane",
     ]
     /// The keys that focus a transport field.
     public static let fieldKeys: [String: TransportField] = [
@@ -211,6 +210,7 @@ public enum ControlCommands {
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
+            .union(ViewCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -332,8 +332,6 @@ public enum ControlCommands {
             }
         case "window.mixer":
             host.showMixer(docID)
-        case "ui.view_arrange", "ui.view_mix", "ui.toggle_left", "ui.toggle_bottom", "ui.toggle_right", "ui.pane":
-            return unavailable("Not yet.")  // Task 6 fills these.
         case "window.media_pool":
             host.showMediaPool(docID)
         case "media.relink":
@@ -428,6 +426,10 @@ public enum ControlCommands {
             } catch {
                 return .failed(.thrown(error, "MIDI Injection Failed"))
             }
+        case ViewCommands.pane:
+            return ViewCommands.runPane(args, m, doc: docID)
+        case _ where ViewCommands.ids.contains(id):
+            if let f = failure(ViewCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where SynthCommands.ids.contains(id):
             return SynthCommands.run(id, args: args, doc: docID, m)
         case _ where AutomationCommands.ids.contains(id):
@@ -716,7 +718,12 @@ public enum ControlStates {
         case .automation:
             guard let s = try? m.session.automationState() else { return nil }
             return .automation(doc: doc, state: s)
-        case .layout: return nil  // Task 6 fills this.
+        case .layout:
+            return .layout(
+                doc: doc,
+                layout: ViewCommands.layoutRow(
+                    m, strips: (try? m.session.mixer().strips) ?? [],
+                    destinations: (try? m.session.destinations()) ?? []))
         case .surfaces:
             guard let s = try? m.session.surfaceState() else { return nil }
             return .surfaces(doc: doc, state: s)

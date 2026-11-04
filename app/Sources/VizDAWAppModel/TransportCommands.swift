@@ -16,6 +16,7 @@ public protocol MenuCommands {
 
 extension TransportCommands: MenuCommands {}
 extension DrumCommands: MenuCommands {}
+extension ViewCommands: MenuCommands {}
 
 /// The transport keys, modes and locators (editors spec §4f, plan 4f
 /// Rulings 7–10): one implementation for the menu items, the keys and
