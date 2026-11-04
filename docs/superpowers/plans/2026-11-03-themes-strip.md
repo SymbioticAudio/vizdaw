@@ -175,12 +175,12 @@ Also read, in `~/workspace/symbiotic-design`:
   | B3 package, icons | | | — | +3 | no-brand build |
   | B4 themes, Settings, `ui.theme` | | | +2 | +7 | registry 154 |
   | B5 colour sweep | | | — | +4 | |
-  | B6 strip models | | | — | +16 | |
+  | B6 strip models | | | — | +17 | |
   | B7 strip view | | | — | +0 | |
   | B8 e2e, READMEs | | | ignored +1 | — | e2e 16; README 207–216 |
-  | **After** | **185** | **66** | **7a end + 20 / ignored + 1** | **7a end + 30** | |
+  | **After** | **185** | **66** | **7a end + 20 / ignored + 1** | **7a end + 31** | |
 
-  Running totals: Python 177 (A1), 183 (A2), 185 (A3); design Swift 50 (A2), 51 (A3), 66 (A4); Rust 7a end + 11 (B1), + 18 (B2), + 20 (B4); VizDAW Swift 7a end + 3 (B3), + 10 (B4), + 14 (B5), + 30 (B6, B7, B8).
+  Running totals: Python 177 (A1), 183 (A2), 185 (A3); design Swift 50 (A2), 51 (A3), 66 (A4); Rust 7a end + 11 (B1), + 18 (B2), + 20 (B4); VizDAW Swift 7a end + 3 (B3), + 10 (B4), + 14 (B5), + 31 (B6, B7, B8).
 
   Report the measured counts at every task's end. A difference is explained, never hidden.
 - **How code is given.** Signatures, test names and assertions, not bodies.
@@ -226,7 +226,7 @@ These are the five failure modes a user is most likely to hit that the spec impl
    - the sidechain is cleared;
    - the EQ takes a sidechain, and its parameters follow the strip's automation mode.
 
-   Pinned by `the_eq_slot_stays_first_when_inserts_move`, `the_eq_slot_is_not_an_insert` (with `strip_of` and `SetSidechain`), `removing_a_bus_clears_an_eq_sidechain_from_it` and `version_3_projects_migrate_to_version_4` (B1); `replacing_the_eq_keeps_the_old_state_for_undo` and `hostile_eq_calls_are_refused` (B2).
+   Pinned by `the_eq_slot_stays_first_when_inserts_move`, `the_eq_slot_is_not_an_insert` (with `strip_of` and `SetSidechain`), `removing_a_bus_clears_an_eq_sidechain_from_it` and `version_3_projects_migrate_to_version_4` (B1); `replacing_the_eq_keeps_the_old_state_for_undo` and `hostile_eq_calls_are_refused` (B2); and `theEqSlotIsSeenByEveryStripSlotReader` (B6: the EQ's plug-in window opens, Load All loads it, and its parameters can be automated).
 3. **A theme switched while things are open**: the mixer window, a torn editor, a plug-in window, the Modify panel, Settings, a popover, and macOS Dark Mode on; then a window, menu or alert opened after the switch.
 
    Expected:
@@ -255,15 +255,15 @@ The controller stops at each gate and asks the owner. Neither gate is a task. Th
 
 - **Gate G1, "owner approves palettes"**, after Task A1. The controller gives the owner the absolute path of `docs/mockups/0.2.0/themes.html` (in the design repo) and the commit. The owner opens it in a browser and approves each theme by eye, or asks for changes. The controller also shows the owner this item and records the answer:
   - **Q2 (C-1).** Controller ruling C-1 adds an optional per-strip colour (`Strip.colour`, in the same v3→v4 format bump). This overrides spec §3's "no change to the document format beyond the EQ slot". Confirm C-1, and approve the eight `swatch` colours in each theme (the page shows one strip with a user colour bar and the piano roll's lane colours).
-  - **Knob finish (owner, 2026-11-03: Q4 answered, binding; not a question).** The page shows each theme's knob with its `knobFinish` (Ruling 3): Console `shaded`, the other four `flat`. The owner may change any theme's finish in the G1 fix rounds.
+  - **Knob finish (owner, 2026-11-03: Q4 answered, binding; not a question).** The page shows each theme's knob with its `knobFinish` (Ruling 3): by default Console `shaded`, the other four `flat`. The owner may change any theme's finish in the G1 fix rounds; a theme the owner makes `shaded` at G1 also gets non-clear `relief` values (it then shades its fader caps too), and Console stays the only theme with panel gradients unless the owner says otherwise.
   - Changes go back to A1's implementer as a fix round, editing `palettes.json` only and regenerating. Repeat until all five are approved.
   - At G1 the owner may change the strip width and the fader cap only. Knob sizes and cap ratios are family geometry (HANDOFF "M7" request 1) and change only through the HANDOFF.
   - Record `G1: approved <date>, palettes.json at <sha>; Q2 <answer>; knob finishes <list>`, with any strip width or fader cap the owner changed, which then binds Rulings 4 and 14. If the owner overturns C-1, the controller rules on removing it from B1, B2, B6, B7 and B8 before they run.
   - Tasks B1 and B2 consume no tokens, so they may run while G1 is open (the eight swatch names are fixed now; G1 tunes only their values). Tasks A2–A4 and B3–B8 wait.
 - **Gate G2, "owner approves the 0.2.0 push"**, after Task A4.
-  1. The controller asks the owner: may `sp7-0.2.0` be fast-forwarded into `main`, and may `main` and the annotated tag `0.2.0` be pushed? With the question it notes that `HANDOFF.md` stops being tracked in A4 (owner ruling, 2026-11-03) but is still in pushed history on `main` and on `eg13-requests`. Removing it from history would need a force-push rewrite, which only the owner can decide; this plan does not plan or do that rewrite.
+  1. The controller asks the owner: may `sp7-0.2.0` be fast-forwarded into `main`, and may `main` and the annotated tag `0.2.0` be pushed? With the question it notes that `HANDOFF.md` stops being tracked in A4 (owner ruling, 2026-11-03) but is still in pushed history on `main` and on `eg13-requests`. Removing it from history would need a force-push rewrite, which only the owner can decide; this plan does not plan or do that rewrite. Once `main` drops `HANDOFF.md`, any other clone that pulls it deletes its working copy, so back up any other clone's `HANDOFF.md` before pulling `main`.
   2. With the yes, the controller pushes `main` only.
-  3. The controller checks with `gh run list --branch main --limit 1` and `gh run view <id>` that both CI jobs (the existing one and A4's `swift61`) are green. It does not ask the owner to check.
+  3. The controller checks with `gh run list --branch main --json headSha,conclusion` that the run's `headSha` is the pushed SHA, and with `gh run view <id>` that both CI jobs (the existing one and A4's `swift61`) are green. It does not ask the owner to check.
   4. Only then does it push the tag `0.2.0`.
 
   If `swift61` fails, the fix is made on `sp7-0.2.0`, the local tag (not yet pushed) is moved to the fixed commit, and steps 2–4 repeat. The controller records the pushed SHA and the CI run. Tasks B3–B8 need `0.2.0` on GitHub (Ruling 6) and wait for G2.
@@ -280,7 +280,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
    - Why: spec §2 item 6 ("releases a new tag (0.2.0) that VizDAW pins"; "pushing the design repo needs the owner's say-so"). The EG13 knob requests live only on `eg13-requests`.
    - Cost if wrong: one rebase of a branch nobody else uses.
 2. **Ruling (the mockups): palettes as named tokens, rendered by a script.**
-   - `docs/mockups/0.2.0/palettes.json` has `tokens.json`'s `themes` shape, with two additions: a `name` per theme, and values for the four new groups (Ruling 3). Each value in a group of kind `color` is `#RRGGBB` or `#RRGGBBAA`, with no system colours. The metric groups (`spacing`, `radius`, `iconStroke`, `type`) take `tokens.json`'s kinds and today's values, and `brand` (kind `constant`) equals today's values in every theme.
+   - `docs/mockups/0.2.0/palettes.json` has `tokens.json`'s `themes` shape, with three additions: a `name` and a `knobFinish` per theme, and values for the four new groups (Ruling 3). Each value in a group of kind `color` is `#RRGGBB` or `#RRGGBBAA`, with no system colours. The metric groups (`spacing`, `radius`, `iconStroke`, `type`) take `tokens.json`'s kinds and today's values, and `brand` (kind `color`, `constant: true`) equals today's values in every theme.
    - `tools/mockup.py palettes.json out.html` (stdlib) writes `themes.html`. Each theme is a CSS block of custom properties named `--<group>-<token>` in kebab case (`--surface-window`, `--strip-aux-return`, `--relief-cap-top`). The page uses only those variables for colour, so the approved file moves into `tokens.json` by copy, not retyping.
    - `themes.html` holds, at 1440×900, under five theme tabs:
      1. the 7a window: the transport bar with Arrange | Mix and the pane toggles; the left channel strip running the full height; the arrangement with five lanes and regions and a playhead; the bottom piano roll; the right pane's markers;
@@ -300,7 +300,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
      - **Classic Light (default):** a late-1990s desktop look: light neutral-grey chrome (around `#DDDDDD`), white editing canvases, crisp one-point dark outlines, small dense type, saturated primary state colours (red record, green play, yellow solo), and a single blue selection. Square-ish corners (`radius.s` 2). Fader caps by strip kind on a light panel.
      - **Studio Dark:** a modern dark studio look. Charcoal panels (around `#2A2C30`), slightly lighter raised controls, a cool blue accent, soft separators, and muted, distinct kind colours.
      - **Flat:** typography-led and flat. Pure white or near-black surfaces, no gradients, no borders except one-point rules, and bold flat accent blocks; fader caps are flat tiles. `radius` all 0.
-     - **Console:** a realistic console look, drawn in code. Dark blue-grey metal panels with a vertical gradient (`relief.panelTop`/`panelBottom`), cream legends, fader caps shaded from `capTop` to `capBottom` with a one-point `highlight` bevel and a `shadow`, knob caps likewise (`knobFinish: shaded`), and LED-style meters. This is the only theme with any non-clear `relief` value and the only `shaded` knob finish.
+     - **Console:** a realistic console look, drawn in code. Dark blue-grey metal panels with a vertical gradient (`relief.panelTop`/`panelBottom`), cream legends, fader caps shaded from `capTop` to `capBottom` with a one-point `highlight` bevel and a `shadow`, knob caps likewise (`knobFinish: shaded`), and LED-style meters. By default it is the only theme with non-clear `relief` values and the only `shaded` knob finish. A theme the owner makes `shaded` at G1 also gets non-clear `relief` values (it then shades its fader caps too); Console stays the only theme with panel gradients unless the owner says otherwise.
      - **Symbiotic:** today's `symbiotic` values (cyan, gold, ink, paper, black rules), extended to the new groups.
    - Every theme, Console included, colours fader caps by `strip.*` and knob arcs by `control.*` (spec §2 item 7).
    - Why: spec §2 item 6 ("approves each theme by eye from browser mockups before it is coded") and the brief's "palettes as named tokens".
@@ -310,9 +310,9 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
    - **New groups**, each with `"since": "0.2.0"` in its group spec:
      - `knob`: `skirt`, `cap`, `track`, `indicator`;
      - `fader`: `well`, `scale`, `capLine`;
-     - `relief`: `highlight`, `shadow`, `capTop`, `capBottom`, `panelTop`, `panelBottom`. In every theme but Console these are all `#00000000`, and drawing code skips a fully clear layer;
+     - `relief`: `highlight`, `shadow`, `capTop`, `capBottom`, `panelTop`, `panelBottom`. Console's are real. A theme the owner makes `shaded` at G1 also gets non-clear `relief` values (it then shades its fader caps too); Console stays the only theme with panel gradients unless the owner says otherwise. In every other theme these are all `#00000000`, and drawing code skips a fully clear layer;
      - `swatch`: `red`, `orange`, `yellow`, `green`, `teal`, `blue`, `purple`, `pink` (controller ruling C-1). These are the user strip colours and the piano roll's lane colours. The eight names are fixed now; G1 tunes the values, which are distinct within each theme.
-   - **Knob finish (owner, 2026-11-03, binding):** each theme carries `knobFinish`, `"flat"` or `"shaded"`, beside `appearance` (`"since": "0.2.0"`). Console is `shaded`; Classic Light, Studio Dark, Flat and Symbiotic are `flat`. Swift gets `public enum KnobFinish: String, Sendable { case flat, shaded }` and `Theme.knobFinish`, whose `init` parameter defaults to `.flat`. The finish is a drawing layer only: knob geometry stays the family's (HANDOFF "M7" request 1), and a shaded finish is drawn in code from `relief` tokens, with no textures.
+   - **Knob finish (owner, 2026-11-03, binding):** each theme carries `knobFinish`, `"flat"` or `"shaded"`, beside `appearance` (`"since": "0.2.0"`). `knobFinish` is `flat` or `shaded`, as recorded at G1 (default: Console `shaded`; Classic Light, Studio Dark, Flat and Symbiotic `flat`). Swift gets `public enum KnobFinish: String, Sendable { case flat, shaded }` and `Theme.knobFinish`, whose `init` parameter defaults to `.flat`. The finish is a drawing layer only: knob geometry stays the family's (HANDOFF "M7" request 1), and a shaded finish is drawn in code from `relief` tokens, with no textures.
      - Swift uses the generator's nesting: `Theme.KnobColors`, `Theme.FaderColors`, `Theme.ReliefColors` and `Theme.SwatchColors` (as `Theme.StripColors` is today).
      - The knob's arc and the fader's cap take `control.*` and `strip.*`, which already exist.
    - **Values:** all five themes take the approved `palettes.json` values, hex only. `placeholder` is false for all five. Increase Contrast therefore no longer re-pins `classic-light` or `studio-dark`: the README's "Checking by eye" bullet is replaced by `contrast.md`'s body-text rule (A2's test).
@@ -344,7 +344,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
      - no scroll wheel in 0.2.0: macOS 14 SwiftUI has no scroll-wheel gesture, and an `NSEvent` path is not worth its Swift 6.1 risk here (backlog row, B8);
      - VoiceOver's increment and decrement go through `accessibilityAdjustableAction` by the caller's step.
      - Callbacks are `onBegin` (first movement), `onChange(Double)` and `onEnd` (mouse-up after a begin), so VizDAW maps them to `touch`, `move` and `release` (plan 5e-2's gestures).
-   - **Relief:** a `Relief` value (`highlight`, `shadow`, `capTop`, `capBottom`); `Relief.none` draws nothing extra. Console passes its tokens, and every other theme passes clear ones.
+   - **Relief:** a `Relief` value (`highlight`, `shadow`, `capTop`, `capBottom`); `Relief.none` draws nothing extra. Console and any theme G1 made `shaded` pass their tokens; every other theme passes clear ones.
    - **Knob finish:** `KnobPalette(theme:)` carries `finish: KnobFinish` from `theme.knobFinish`, and `Knob` draws its shading layer (from `Relief`) only when `finish == .shaded`. The geometry is the same in both finishes. EG13 stays flat simply by using a flat theme. HANDOFF's 0.2.0 section records: "finish is a theme token; geometry is family".
    - **Chip label:** `Knob` takes `chipFill: Color? = nil` (HANDOFF's `accentInk`) for the `chip` label style.
    - Why: spec §2 item 6 ("VizDAW's knob, fader and number box as a shared `SymbioticControls` product … geometry is agreed with EG13's knob through the HANDOFF") and HANDOFF (k). The 2026-10-28 owner note "SymbioticControls later, when VizDAW gets closer to building its UI (SP7)" is now.
@@ -358,7 +358,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
      - `status.info` (the existing `info` icon, which `app.about` uses);
      - `mixer.eq`.
    - `view.split` gets a new `split-stacked.svg` (two stacked rectangles), because `split.svg` already exists (two side-by-side rectangles, for `part.split`).
-   - That is eleven new standard SVGs in the house style (24 grid, 1.2 monoline, `currentColor`): `left-pane`, `bottom-pane`, `right-pane`, `mixer`, `split-stacked`, `empty`, `keys`, `audio`, `surfaces`, `appearance` and `eq`. `info.svg` and `split.svg` stay byte-identical to `b209d2c`. No brand glyph is assigned: the owner assigns glyphs later.
+   - That is eleven new standard SVGs in the house style (24 grid, 1.2 monoline, `currentColor`): `left-pane`, `bottom-pane`, `right-pane`, `mixer`, `split-stacked`, `empty`, `keys`, `audio`, `surfaces`, `appearance` and `eq`. `info.svg` and `split.svg` stay byte-identical to `b209d2c` (A3 checks their SHA-256 digests). No brand glyph is assigned: the owner assigns glyphs later.
    - Why: spec §2 item 9. Today's SF Symbols (about 45 uses, plus 7a's three pane toggles) have no role for these.
    - Cost if wrong: an icon redrawn later; the roles stay.
 6. **Ruling (the pin and the fallback build).**
@@ -368,15 +368,21 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
      - `VizDAWEditors` takes `SymbioticTokens`;
      - `VizDAW` takes `SymbioticTokens`, `SymbioticIcons` and `SymbioticControls`, and `SymbioticBrand` unless `Context.environment["VIZDAW_NO_BRAND"] == "1"`.
      - No test target links `SymbioticBrand`, so every Swift test runs on the fallback set.
-   - `VizDAWApp.init` registers the brand first thing, as `#if canImport(SymbioticBrand) Icons.register(SymbioticBrand.provider) #endif`.
+   - `VizDAWApp.init` registers the brand first thing, as `#if canImport(SymbioticBrand) Icons.register(SymbioticBrand.provider) #endif`, and the import is guarded the same way: `#if canImport(SymbioticBrand) import SymbioticBrand #endif`.
    - `.github/workflows/ci.yml`'s `app` job gains a step, "App builds without the branded glyphs". It runs `VIZDAW_NO_BRAND=1 scripts/swift.sh build --scratch-path "$RUNNER_TEMP/nobrand"`, then fails if `find "$RUNNER_TEMP/nobrand" \( -name 'SymbioticBrand*.o' -o -name 'SymbioticBrand*.swiftmodule' \)` prints anything (the design repo's CI pattern).
    - `.gitignore` gains `.build-nobrand/` (it has only `.build/`).
    - **Licence (owner, 2026-11-03: Q1 answered, binding).** VizDAW's official build links the all-rights-reserved `SymbioticBrand`, so B3 appends this GPL-3.0 §7 additional permission to the end of `LICENSE`, after the GPL text and not inside it:
+     > Copyright (C) 2025–2026 Westlee Latta
+     >
      > Additional permission under GNU GPL version 3 section 7: if you modify this Program, or any covered work, by linking or combining it with SymbioticAudio's SymbioticBrand library, containing parts covered by the terms of its ASSETS-LICENSE, the licensors of this Program grant you additional permission to convey the resulting work. This permission does not license the SymbioticBrand artwork itself.
+     >
+     > The SymbioticBrand library is not part of this Program and is not licensed under the GNU GPL; it remains under its ASSETS-LICENSE, which alone decides whether it may be copied or conveyed. Corresponding Source for such a combination need not include it.
 
      The root README's "License" section gains one line: "VizDAW's own build links SymbioticAudio's branded icons under a GPL section 7 additional permission (see LICENSE). The artwork stays all rights reserved and is not covered by the GPL; forks build without it with `VIZDAW_NO_BRAND=1`."
+
+     The copyright line comes first so that "the licensors of this Program" names someone: the repo has no copyright notice today. `scripts/make-app.sh` copies `LICENSE` into `dist/VizDAW.app/Contents/Resources/`, so the conveyed binary carries the permission. After G2, once this `LICENSE` is on GitHub, the controller checks that GitHub still detects GPL-3.0; if it does not, the text stays and "Other" is accepted.
    - Why: spec §2 item 9 ("still builds with the fallback icon set when the branded assets are absent"), the design spec's fork rule, and `ASSETS-LICENSE` (the artwork is not licensed under any application's open-source licence).
-   - Cost if wrong: one manifest line; one licence paragraph.
+   - Cost if wrong: one manifest line; one licence text.
 7. **Ruling (the EQ slot in the model): `Strip.eq: Option<PluginSlot>`, beside the inserts, not in them.**
    - `Strip` gains `eq`, with `#[serde(default, skip_serializing_if = "Option::is_none")]`.
    - `Strip::chain() -> impl Iterator<Item = &PluginSlot>` yields the EQ, then the inserts, and `chain_mut` likewise.
@@ -388,6 +394,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
      - `core-host` `loads_needed` and its sync;
      - `mixer_rules`' four insert loops;
      - `core-ffi`'s `slot_ids`, `plugins.rs` (two), `host.rs`' `has inserts`, `surfaces.rs`' `chain`, and the Kontrol page's first plug-in.
+     - Swift readers: `StripRow.slots` (B6).
    - The `SlotOwner` matches gain an `Eq` arm:
      - `core_model::automation::strip_of`: `SlotOwner::Eq(s) => Some(s)`, so EQ automation follows the strip's mode;
      - `core-ffi`'s `slot_name` (`session.rs`): `SlotOwner::Eq(s)` → "‹strip› — EQ ‹plugin›".
@@ -405,7 +412,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
    - `VERSION` 3 → 4. `MIGRATIONS` gains `migrate_v3_to_v4`, which returns the document unchanged: a strip without `eq` has an empty slot.
    - An older VizDAW then refuses a version-4 project with its clear `NewerFormat` message, instead of `deny_unknown_fields`' "unknown field `eq`" on only the projects that use an EQ.
    - The five tests that pin 3 move to `VERSION`: `golden` (`tests/file.rs:243`), `v1_plugin_instruments_migrate_to_slots_and_strips` (`tests/file.rs:417`), `version_2_projects_migrate_to_version_3` (`tests/file.rs:469`, `text.contains("\"version\": 3")`), `mixer_document.rs:126`, and `learn.rs:207`, which becomes `assert_eq!(VERSION, 4)` with its comment.
-   - The doc comments that say version 3 follow: `file.rs`'s module comment (line 3) and `document.rs:169`.
+   - The doc comment that says version 3 follows: `file.rs`'s module comment (line 3) moves to 4. `document.rs:169` ("`None` in projects older than version 3 (5a Ruling 4)") is about `content_hash`, which arrived in v3, so it stays.
    - `fixtures/demo.vizdaw/project.json` is regenerated at version 4 (Global Constraints, File compatibility).
    - The same bump carries C-1's `Strip.colour` (Ruling 12), so neither field needs a second bump.
    - Why: spec §2 item 5 ("a small Rust core, FFI and document-format change").
@@ -451,7 +458,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
       - `.tint(accent.accent)`;
       - `.background(surface.window)`.
     - **AppKit windows:** `ThemeWindows.apply(_:)` first sets `NSApp.appearance = NSAppearance(named: t.appearance.nsAppearanceName)`, so windows, menus, `NSAlert`s and open panels made later follow the theme. It then sets every VizDAW `NSWindow`'s `appearance` to the same and its `backgroundColor` to `surface.window`.
-      - `VizDAWApp.init` calls `ThemeWindows.apply(appearancePreferences.theme)` once at launch, and `AppearancePreferences.onChange` calls it on each change.
+      - `AppDelegate.applicationDidFinishLaunching` calls `ThemeWindows.apply(appearancePreferences.theme)` first thing, once at launch (`NSApp` may still be nil in a SwiftUI `App.init`), and `AppearancePreferences.onChange`, set in `VizDAWApp.init`, calls it on each change.
       - `ThemeWindows.style(_ window:)` styles each window as it is made, through the paths that make them: `PluginWindows.show`, `EditorWindows` and `ModifyPanels`.
     - **Canvases:** `EditorCanvas` and every other `NSView` in `VizDAWEditors` gain `var theme: Theme` (redraw on set). Each host's `updateNSView` sets it from `context.environment.symbioticTheme`.
     - **Colour bars (controller ruling C-1: a real optional per-strip colour).** §3's "no change to the document format beyond the EQ slot" is overridden by controller ruling C-1 (owner to confirm at G1, Q2).
@@ -472,9 +479,9 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
       - `Color.accentColor`;
       - a bare member colour anywhere, context-typed or not (`return .red`, `case "green": .green`, `[.systemBlue, …]`), by this pattern: `(?<![A-Za-z0-9_])\.(system(Red|Orange|Yellow|Green|Mint|Teal|Cyan|Blue|Indigo|Purple|Pink|Brown|Gray)|labelColor|secondaryLabelColor|tertiaryLabelColor|separatorColor|controlAccentColor|windowBackgroundColor|textColor|black|white|red|orange|yellow|green|mint|teal|cyan|blue|indigo|purple|pink|brown|gray)\b`.
     - `noCornerRadiusOrFontSizeLiterals` (B5) fails on `cornerRadius: <number>`, `.system(size: <number>`, `systemFont(ofSize:` and `SystemFontSize` in those two directories: radii come from `theme.radius` and sizes from `theme.type`.
-    - `theScanSeesEachForbiddenForm` (B5) runs both patterns over a fixed list of 12 known-bad lines, one per form, and expects 12 hits, so the scan cannot pass vacuously.
+    - `theScanSeesEachForbiddenForm` (B5) runs both patterns over a fixed list of 12 known-bad lines, one per form: each of the 12 lines matches at least one pattern, and a clean line (`theme.state.error.color`) matches none, so the scan cannot pass vacuously.
     - Spacing comes from `theme.spacing` in the views 7b redraws: the strip, `MixerView`, `MixerBar`, `DocumentTransportBar`, `PaneFrame` and Settings › Appearance. Review checks this; the scan does not. The other views' padding literals go to 7d's list (backlog row, B8).
-    - The editor colour roles, all in `EditorTheme.swift`:
+    - The colour roles: the editor roles, all in `EditorTheme.swift`, then the mixer's context-typed sites (`MixerView.swift`, swept in B5):
 
       | Role | Token |
       |---|---|
@@ -492,13 +499,23 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
       | piano white keys / black keys | `surface.raised` / `text.primary` |
       | lane meters | `meter.*`, by `StripPalette.meter` |
       | lane colours (piano roll, `PianoRollPalette`) | `swatch.*`, in order (`red` … `pink`) |
+      | slot dot: faulted | `state.error` |
+      | slot dot: placeholder | `state.warning` |
+      | slot dot: loading | `state.offline` |
+      | slot dot: live | `state.play` |
+      | slot dot: live and bypassed | `text.disabled` |
+      | mixer meter well | `meter.background` |
+      | mixer meter peak | `meter.clip` at or above 1.0, else `meter.low` (until B6's `StripPalette.meter`) |
+      | M tint | `state.mute` |
+      | S tint | `state.solo` |
+      | automation "off" | `state.offline` |
 
     - Why: spec §4 ("Every colour and metric comes from theme tokens, so switching the theme changes everything").
     - Cost if wrong: one table.
 14. **Ruling (the strip's layout and controls).** One `ChannelStrip` view, 120 points wide (`StripLayout.width`), in every placement. Top to bottom:
     1. **Colour bar:** 4 points, `StripPalette.bar(strip, theme)` (the strip's swatch when set, else the kind's `strip.*`; C-1), hidden when `colourBars` is off. Then the name: double-click renames; the context menu is today's (Rename…, Set All Strips to, Remove Bus, MIDI Learn Maps…, Add Outputs) plus "Colour ▸ None, Red … Pink" (Ruling 12); the kind label is below it.
     2. **Input:** today's `StripInputView`, for an audio path's input lane. The instrument's own slot stays above it, as today.
-    3. **EQ slot:** empty, it reads exactly `EQ ＋` (U+FF0B) and a click opens the effect browser for `.eq(strip:)`. Loaded, it shows the plug-in's name and a bypass toggle; a click opens its plug-in window. Its menu has Open, Replace…, Bypass/Turn On, Sidechain, and Remove EQ.
+    3. **EQ slot:** empty, it reads exactly `EQ ＋` (U+FF0B) and a click opens the effect browser for `.eq(strip:)`. Loaded, it shows the plug-in's name and a bypass toggle; a click opens its plug-in window. Its menu has Open, Load (when held), Replace…, Bypass/Turn On, Sidechain, and Remove EQ.
     4. **Inserts:** today's `SlotView` rows (reorder, drop, sidechain, Load, Remove) restyled, with "+" below.
     5. **Sends:** one row per send.
        - The target's name on its own line, then below it a small knob (28), arc `control.send`, unipolar over `MixerMath.faderPosition`, beside a number box with the level (`StripEntry.levelText`). A knob's 28 plus a box's 56 and the spacing already fill 120 less the padding, so the name cannot share their row.
@@ -554,7 +571,7 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 7. **Hardware colours.** The Kontrol MK3's colours per track kind (`core_surface::kontrol::color`) are hardware LED values, not UI. They stay, and keep showing the kind even when a strip has a user colour.
 8. **R and I on instrument strips.** R/I follow 5d-2 Ruling 4, audio paths only; MIDI arm stays on the lane headers. They are disabled on instrument strips (controller's ruling on Q3).
 9. **`HANDOFF.md` is local only (owner, 2026-11-03).** A4 stops tracking it. It stays in the pushed history of `main` and `eg13-requests`; removing it from there needs a force-push rewrite, which is the owner's decision and is not in this plan.
-10. **Knob finish (owner, 2026-11-03).** HANDOFF (j)'s "flat, no shading" stays the family default: `knobFinish` is a theme token, flat in four themes and shaded in Console. Geometry is family.
+10. **Knob finish (owner, 2026-11-03).** HANDOFF (j)'s "flat, no shading" stays the family default: `knobFinish` is a theme token, by default flat in four themes and shaded in Console; the owner may change any theme's finish at G1, and a theme made `shaded` also gets non-clear `relief` values. Geometry is family.
 
 ## File map
 
@@ -566,10 +583,10 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 | `Package.swift`, `Sources/SymbioticControls/*` (new), `Tests/SymbioticControlsTests/*` (new), `.github/workflows/ci.yml` (fork step, `swift61` job), `.gitignore` (`HANDOFF.md`), `README.md`, `docs/superpowers/specs/2026-10-20-design-system-design.md` (§7 addendum, HANDOFF wording); `HANDOFF.md` untracked (`git rm --cached`) and edited locally only | A4 | controls, release |
 | **vizdaw:** `crates/core-model/src/{mixer.rs,document.rs,mixer_rules.rs,file.rs,automation.rs,command/mixer.rs}`, `crates/core-engine/src/graph/mixer.rs`, `crates/core-host/src/host.rs`; tests `core-model/tests/{mixer_commands.rs,file.rs,mixer_document.rs,learn.rs}`, `core-engine/tests/graph_mixer.rs`, `core-host/tests/host_loads.rs`; `fixtures/demo.vizdaw/project.json` (regenerated) | B1 | EQ slot and strip colour core |
 | `crates/core-ffi/src/{mixer.rs,session.rs,plugins.rs,host.rs,surfaces.rs,control.rs}`, `crates/core-control/src/request.rs`, tests `core-ffi/tests/{mixer.rs,control.rs}`, `core-control/tests/commands.rs`; `app/Tests/VizDAWAppModelTests/FakeSession.swift`, `app/Sources/VizDAWAppModel/ControlCommands.swift` | B2 | EQ and colour FFI, kind colours, `state.get mixer` |
-| `app/Package.swift`, `app/Package.resolved` (new), `.github/workflows/ci.yml`, `.gitignore`, `LICENSE` (§7 permission), `README.md` (licence line), `app/Sources/VizDAWAppModel/AppIcon.swift` (new), `app/Sources/VizDAW/*` (icon sites incl. `PaneViews.swift`, `VizDAWApp.swift`), `app/Tests/VizDAWAppModelTests/{AppIconTests.swift,SourceScan.swift}` (new) | B3 | pin, icons, licence |
+| `app/Package.swift`, `app/Package.resolved` (new), `.github/workflows/ci.yml`, `.gitignore`, `LICENSE` (copyright line, §7 permission), `scripts/make-app.sh` (`LICENSE` into the bundle), `README.md` (licence line, build sentence), `app/Sources/VizDAWAppModel/AppIcon.swift` (new), `app/Sources/VizDAW/*` (icon sites incl. `PaneViews.swift`, `VizDAWApp.swift`), `app/Tests/VizDAWAppModelTests/{AppIconTests.swift,SourceScan.swift}` (new) | B3 | pin, icons, licence |
 | `crates/core-control/src/registry.rs`, `crates/core-ffi/src/control.rs`, `core-control/tests/commands.rs`; `app/Sources/VizDAWAppModel/{AppearancePreferences.swift,AppearanceCommands.swift}` (new), `ControlCommands.swift`; `app/Sources/VizDAW/{Theming.swift,AppearanceSettingsView.swift}` (new), `VizDAWApp.swift`, `ControlChannel.swift`, `PluginWindows.swift`, `EditorWindows.swift`, `ModifyPanel.swift`, `{ArrangementPane,PianoRollPane,ListEditorPane,DrumGridPane,StripChartPane}.swift`; `app/Tests/VizDAWAppModelTests/{AppearanceTests.swift (new),ControlCommandsTests.swift}` | B4 | themes, Settings, `ui.theme` |
 | `app/Sources/VizDAWEditors/EditorTheme.swift` (new) and every file the scan names (`PianoRollView.swift`'s `PianoRollPalette` → `swatch.*`); `app/Sources/VizDAW/*` colour sites; `app/Tests/VizDAWEditorsTests/ThemeScanTests.swift` (new) | B5 | colour sweep |
-| `app/Sources/VizDAWAppModel/{StripEntry.swift,StripLayout.swift,StripPalette.swift}` (new), `MixerModel.swift` (EQ, `setColour`, typed values, arm); `app/Tests/VizDAWAppModelTests/{StripEntryTests.swift,StripLayoutTests.swift,MixerStripTests.swift}` (new) | B6 | strip models |
+| `app/Sources/VizDAWAppModel/{StripEntry.swift,StripLayout.swift,StripPalette.swift}` (new), `MixerModel.swift` (EQ, `setColour`, typed values, arm, `heldSlots` → `slots`), `PluginWindowModel.swift` and `StripChartModel.swift` (→ `StripRow.slots`); `app/Tests/VizDAWAppModelTests/{StripEntryTests.swift,StripLayoutTests.swift,MixerStripTests.swift}` (new) | B6 | strip models |
 | `app/Sources/VizDAW/ChannelStrip.swift` (new), `MixerView.swift`, `PaneViews.swift` (7a's `LeftStripPane`) | B7 | strip view |
 | `crates/vizctl/tests/e2e.rs`, `app/README.md`, `README.md`, `docs/feature-backlog.md` | B8 | e2e, READMEs, backlog |
 
@@ -585,20 +602,20 @@ Each ruling decides something the spec leaves to the builder, as "what — why �
 **Interfaces:**
 - Consumes: `tools/tokenlib.py`'s `load` and `flat_values`; `tokens/tokens.json`'s groups.
 - Produces (for A2 and Gate G1):
-  - `palettes.json`: `{"themes": [ {id, name, appearance, knobFinish, values: {<every 0.1.0 group>, knob, fader, relief, swatch}} ×5 ]}`, in the id order `classic-light`, `studio-dark`, `flat`, `console`, `symbiotic`; `knobFinish` is `"flat"` or `"shaded"` (Console `shaded`, the rest `flat`);
+  - `palettes.json`: `{"themes": [ {id, name, appearance, knobFinish, values: {<every 0.1.0 group>, knob, fader, relief, swatch}} ×5 ]}`, in the id order `classic-light`, `studio-dark`, `flat`, `console`, `symbiotic`; `knobFinish` is `"flat"` or `"shaded"`, as recorded at G1 (default: Console `shaded`, the rest `flat`);
   - `tools/mockup.py`: `def css_name(group: str, token: str) -> str` (`("strip", "auxReturn")` → `"--strip-aux-return"`); `def render(palettes: dict) -> str`; and `main(argv)`, as `mockup.py IN OUT`;
   - `NEW_GROUPS = {"knob": [...], "fader": [...], "relief": [...], "swatch": ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"]}`, the token names of Ruling 3, which A2's schema must match.
 
 - [ ] **Step 1: Make the branch.** `git switch -c sp7-0.2.0 b209d2c`, then check `git log -1 --oneline` reads `b209d2c`.
 - [ ] **Step 2: Write the failing tests** in `tools/tests/test_mockup.py` (`unittest`):
-  - `test_every_theme_has_every_token`: for each of the five themes in `palettes.json`, the set of `group.token` keys equals `tokens.json`'s groups plus `NEW_GROUPS`. In groups of kind `color` (the new groups included) every value is `#RRGGBB` or `#RRGGBBAA` (no `system`). The metric groups (`spacing`, `radius`, `iconStroke`, `type`) match `tokens.json`'s kinds, and `brand` (kind `constant`) equals today's values in every theme. `name` is one of the five exact names, and `knobFinish` is `flat` or `shaded`, `shaded` only for `console`.
+  - `test_every_theme_has_every_token`: for each of the five themes in `palettes.json`, the set of `group.token` keys equals `tokens.json`'s groups plus `NEW_GROUPS`. In groups of kind `color` (the new groups included) every value is `#RRGGBB` or `#RRGGBBAA` (no `system`). The metric groups (`spacing`, `radius`, `iconStroke`, `type`) match `tokens.json`'s kinds, and `brand` (kind `color`, `constant: true`) equals today's values in every theme. `name` is one of the five exact names, and `knobFinish` is `flat` or `shaded`, as recorded at G1 (default: Console shaded); every `shaded` theme has non-clear `relief.capTop`/`capBottom`.
   - `test_css_names_are_kebab_case_and_unique`: `css_name("strip", "auxReturn") == "--strip-aux-return"`, `css_name("relief", "capTop") == "--relief-cap-top"`, and no two tokens map to one name.
   - `test_the_page_uses_only_theme_variables`: `render(palettes)` contains one `[data-theme="<id>"]` block per theme. Outside those blocks the page has no `#hex`, `rgb(`, `hsl(`, `url(` or `<img`, and its only `font-family` is the system stack. Every `var(--…)` it uses is defined in each block. Each block also sets `data-knob-finish` to its theme's finish, and the page's swatch row uses all eight `--swatch-*` variables.
 - [ ] **Step 3: Run them and see them fail.** `python3 -m unittest tools.tests.test_mockup -v`. Expected: an import error, because `tools/mockup.py` does not exist.
 - [ ] **Step 4: Write `tools/mockup.py`, `palettes.json` and the page.**
   - Follow Ruling 2's content and per-theme direction.
   - `symbiotic` copies today's values and adds the new groups.
-  - Every theme but Console has all six `relief` tokens `#00000000`. Console's are real and drawn with CSS `linear-gradient` and `box-shadow`, and nothing else. A knob is shaded on the page only where its theme's `knobFinish` is `shaded`.
+  - Every `flat` theme but Console has all six `relief` tokens `#00000000`. Console's are real, as are a `shaded` theme's (Ruling 3), drawn with CSS `linear-gradient` and `box-shadow`, and nothing else. A knob is shaded on the page only where its theme's `knobFinish` is `shaded`.
   - The eight `swatch` values are distinct within each theme, and readable as a 4-point bar on `surface.panel`.
   - Theme `note`s name no banned brand (Ruling 3).
   - Text on every surface meets 4.5:1 (A2 will test it).
@@ -643,12 +660,15 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
   - `test_tokenlib.py`:
     - `test_a_theme_needs_one_unique_name`: missing, empty, 33 characters, a newline, or two themes with the same name are each one problem.
     - `test_since_marks_a_group`: `"since": "0.2.0"` is accepted, `"since": 2` is a problem, and an unknown group key is still refused.
-    - `test_no_theme_ships_as_a_placeholder`: in the real `tokens.json` every theme has `placeholder` false and no `system` value, and no theme's `name` or `note` contains a banned name (the list of `themeNamesKeepTheCleanRoom`, B4).
-    - `test_knob_finish_is_flat_or_shaded`: a missing `knobFinish`, or `"matte"`, is one problem; in the real `tokens.json` only `console` is `shaded`.
+    - `test_no_theme_ships_as_a_placeholder`: in the real `tokens.json` every theme has `placeholder` false and no `system` value, and no theme's `name` or `note` contains, case-insensitively, any of these 12 banned names: svp, studio vision, opcode, logic, apple, midas, soundcraft, steinberg, cubase, metro, zune, microsoft.
+    - `test_knob_finish_is_flat_or_shaded`: a missing `knobFinish`, or `"matte"`, is one problem; in the real `tokens.json` only the themes G1 recorded as shaded are `shaded` (default: `console` only).
     - `test_body_text_reads_on_every_surface`: in each theme, `text.primary` on `surface.window`, `panel`, `raised` and `inset` has `contrast_ratio ≥ 4.5`.
   - `test_swiftgen_tokens.py`:
     - `test_since_groups_and_the_name_have_defaults`: the generated `init` reads `name: String? = nil`, `knobFinish: KnobFinish = .flat`, `knob: KnobColors = .classicLight`, `fader: FaderColors = .classicLight`, `relief: ReliefColors = .classicLight` and `swatch: SwatchColors = .classicLight`, and `Theme.name` falls back to `id`.
-  - Rewrite (do not delete) the existing test that the 0.2.0 values break: `test_tokenlib.test_tokens_json_is_valid_and_has_the_five_themes` (it expects placeholders and system colours).
+  - Rewrite (do not delete) the existing tests that the 0.2.0 values break:
+    - `test_tokenlib.test_tokens_json_is_valid_and_has_the_five_themes` (it expects placeholders and system colours);
+    - `test_tokenlib.test_spec_groups_are_present` (it asserts the exact sorted list of 13 groups): the group list gains `knob`, `fader`, `relief` and `swatch`;
+    - `test_tokenlib.test_symbiotic_theme_is_the_site_look` (it asserts `"symbioticaudio.org"` in the symbiotic theme's `note`): the symbiotic note keeps "from the symbioticaudio.org site palette".
 - [ ] **Step 2: Write the failing Swift tests** in `ThemeTests.swift`:
 
 ```swift
@@ -666,13 +686,15 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
     }
 }
 @Test func flatThemesHaveClearRelief() {
-    for t in Theme.all where t.id != "console" {
+    // Keyed on the finish G1 recorded, not on the id (Ruling 3).
+    for t in Theme.all where t.knobFinish == .flat && t.id != "console" {
         let r = t.relief
         #expect([r.highlight, r.shadow, r.capTop, r.capBottom, r.panelTop, r.panelBottom]
-            .allSatisfy { $0.fallbackComponents.alpha == 0 })
-        #expect(t.knobFinish == .flat, "\(t.id)")
+            .allSatisfy { $0.fallbackComponents.alpha == 0 }, "\(t.id)")
     }
-    #expect(Theme.console.knobFinish == .shaded)
+    for t in Theme.all where t.knobFinish == .shaded {
+        #expect(t.relief.capTop != t.relief.capBottom, "\(t.id)")
+    }
 }
 @Test func aZeroOneThemeStillBuilds() {
     // EG13's call shape at 0.1.0: no name, knob, fader or relief.
@@ -692,7 +714,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 - [ ] **Step 3: Run them and see them fail.** Run `python3 -m unittest discover -s tools/tests` (the six new tests fail) and `scripts/swift.sh test` (the new tests fail to compile, because `Theme.name` is not defined).
 - [ ] **Step 4: Implement.**
   - Add `name` and `knobFinish` to each theme. Add the four groups (`knob`, `fader`, `relief`, `swatch`) to `tokens` with `"since": "0.2.0"` and their one-line descriptions (Ruling 3).
-  - Copy the five approved themes' `values` and `knobFinish` from `palettes.json` into `themes`, set `placeholder: false`, and replace each `note` with one line naming its direction (no banned names: "light neutral-grey chrome", not a vendor's appearance name).
+  - Copy the five approved themes' `values` and `knobFinish` from `palettes.json` into `themes`, set `placeholder: false`, and replace each `note` with one line naming its direction (no banned names: "light neutral-grey chrome", not a vendor's appearance name; the symbiotic note keeps its symbioticaudio.org reference).
   - `tokenlib.validate` checks `name` and accepts `since`. `swiftgen_tokens` emits the defaults and the statics.
   - In `README.md`, the Themes section names the five themes by name with their ids. The "Checking by eye" bullet on Increase Contrast becomes: "Read `tokens/contrast.md`: body text passes AA on every surface in every theme (tested)."
   - Then run `python3 tools/generate.py`.
@@ -712,7 +734,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 - Produces: the `IconRole` cases `.viewLeftPane`, `.viewBottomPane`, `.viewRightPane`, `.viewMixer`, `.viewSplit`, `.viewEmpty`, `.viewExpand`, `.viewCollapse`, `.settingsKeys`, `.settingsAudio`, `.settingsSurfaces`, `.settingsAppearance`, `.statusInfo` and `.mixerEq`. Use the generator's own spelling of each case and report it if it differs.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `test_rolelib.py`'s `test_vizdaw_sp7_roles_exist`: the fourteen ids of Ruling 5 are in `roles.json`, each with its `standard` icon present in `standard.json`, a one-line `label`, and no `brand`. `status.info` names `info` and `view.split` names `split-stacked`. `icons/standard/split.svg` and `info.svg` are byte-identical to `git show b209d2c:<path>`.
+  - `test_rolelib.py`'s `test_vizdaw_sp7_roles_exist`: the fourteen ids of Ruling 5 are in `roles.json`, each with its `standard` icon present in `standard.json`, a one-line `label`, and no `brand`. `status.info` names `info` and `view.split` names `split-stacked`. `icons/standard/split.svg` and `info.svg` are unchanged, checked against fixed SHA-256 digests with `hashlib.sha256(path.read_bytes())` (not `git show b209d2c:…`, which CI's shallow `actions/checkout@v4` clone cannot read): `split.svg` `ff981d5dccfb96a96736a4ee20b34713339b75d9345d050ca5e962a6f828d070`, `info.svg` `6cd55d98958a237fe54889b38a13bebaa0972a7884659061b71bc9b0dedec676`.
   - `test_rolelib.py`'s `test_coverage_briefs_the_new_roles`: the generated `coverage.md` lists all fourteen under "Brief for the designer" (roles with no brand glyph).
   - `RoleTests.swift`'s `sp7RolesDrawTheirStandardIcons`: for each of the fourteen roles, `NSImage.icon(role, size: 16, theme: .classicLight)` is a template image of size 16×16 that is not blank (some pixel's alpha is above 0).
 - [ ] **Step 2: Run them and see them fail.**
@@ -756,7 +778,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
   - **Gestures:** `internal struct ControlGestureModel` (what the views use, `internal` for tests), with `changed(translation:fine:)`, `ended()` and `doubleTapped()`. It calls `onBegin` on the first change, `onEnd` only after a begin, and `onReset` on a double tap only when no drag began.
   - **Entry:** `enum NumberEntry` with `static let maxLength = 32` and `static func clean(_ s: String) -> String?`. `clean` trims whitespace, maps U+2212 to `-`, and gives nil for more than `maxLength` characters or any control character. Nothing ever cuts text to `maxLength`.
   - **Palettes:**
-    - `struct KnobPalette { skirt, plainCap, darkCap, track, tick, indicator, indicatorOnDark, label, chipText, focus: Color; finish: KnobFinish; init(theme: Theme) }` (`finish` from `theme.knobFinish`);
+    - `struct KnobPalette { skirt, plainCap, darkCap, track, tick, indicator, indicatorOnDark, label, chipText, focus: Color; finish: KnobFinish; init(theme: Theme) }` (`finish` from `theme.knobFinish`). The slots map: `skirt` = `knob.skirt`, `plainCap` = `knob.cap`, `darkCap` = `surface.inset`, `track` = `knob.track`, `tick` = `knob.track`, `indicator` = `knob.indicator`, `indicatorOnDark` = `text.inverse`, `label` = `text.secondary`, `chipText` = `accent.onAccent`, `focus` = `surface.focusRing`;
     - `struct FaderPalette { well, scale, capLine: Color; init(theme: Theme) }`;
     - `struct NumberBoxPalette { background, editingBackground, text, refused, focus: Color; init(theme: Theme) }`;
     - `struct Relief: Equatable { highlight, shadow, capTop, capBottom: Color; static let none; init(theme: Theme); var isNone: Bool }`.
@@ -781,7 +803,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
   - `EntryAndPaletteTests.swift`:
     - `numberEntryCleansAndRefuses`: `clean("  −4.2 dB ") == "-4.2 dB"`; `clean(String(repeating: "1", count: 33)) == nil`; `clean("4\u{0}2") == nil`; `clean("") == ""`.
     - `palettesComeFromTheTheme`: `KnobPalette(theme: .console).skirt == Theme.console.knob.skirt.color` and `FaderPalette(theme: .flat).well == Theme.flat.fader.well.color`.
-    - `reliefIsNoneOutsideConsole`: `Relief(theme: t).isNone` for every theme but Console, and false for Console.
+    - `reliefIsNoneOutsideConsole`: for every theme, `Relief(theme: t).isNone == (t.knobFinish == .flat && t.id != "console")`.
     - `aNumberBoxRefusalKeepsTheOldText`: through `NumberBoxModel`, the view's internal editing state, exposed `internal` for tests. Begin, type "abc", commit with a `commit` returning false: `shown == "0.0 dB"` and `editing == false`. A commit returning true shows the caller's next `text`.
     - `escapeCancelsEditing`: `NumberBoxModel` begin, type "1", cancel: `shown` is unchanged and `commit` was not called.
     - `aLongPasteIsRefusedNotCut`: `NumberBoxModel` begin, paste 300 × "9", commit: `commit` was not called, `onRefuse` was called once, and `shown` is the old text.
@@ -790,9 +812,9 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 - [ ] **Step 3: Implement** the files above to Ruling 4.
   - Drawing uses SwiftUI `Canvas` or shapes only, with no images. The relief gradients and bevels are drawn only when `!relief.isNone`.
   - Interaction stays separate from drawing (HANDOFF (k)): `DragGesture(minimumDistance: 2)` feeding `ControlGestureModel` and `ControlDrag.Tracker`, with `NSEvent.modifierFlags` read for ⌥ on each change; `.simultaneousGesture(TapGesture(count: 2))` for reset; `.focusable()` and `.onKeyPress` for the arrow keys; `accessibilityAdjustableAction`. No scroll wheel (Ruling 4) and no `NSEvent` monitor.
-  - Add CI job `swift61` to `.github/workflows/ci.yml`: `runs-on: macos-15`, the runner's default Xcode (no `xcode-select`), steps `swift --version` and `swift build --package-path .` (all products).
+  - Add CI job `swift61` to `.github/workflows/ci.yml`: `runs-on: macos-15`, the runner's default Xcode (no `xcode-select`), steps `actions/checkout@v4` first, then `swift --version` and `swift build --package-path .` (all products).
   - No `@State`: spell out `State(initialValue:)` (Global Constraints).
-- [ ] **Step 4: Run everything and see it pass.** Swift 66 (51 + 15), Python 185. Also build the fork targets locally: `swift build --package-path . --scratch-path "$(mktemp -d)/b" --target SymbioticControls`, which is what CI runs, with `DEVELOPER_DIR` set. Expected: built, and no `SymbioticBrand` objects.
+- [ ] **Step 4: Run everything and see it pass.** Swift 66 (51 + 15), Python 185. Also build the fork target locally through the script (Part A allows Swift only through `scripts/swift.sh`): `scripts/swift.sh build --scratch-path "$(mktemp -d)/b" --target SymbioticControls`, the target CI's fork step builds, with `DEVELOPER_DIR` set. Expected: built, and no `SymbioticBrand` objects.
 - [ ] **Step 5: Update the docs.**
   - `README.md`: the products table gains `SymbioticControls` (MIT: knob, fader, number box, geometry and interaction; colours injected through palettes), with a four-line usage example. The "Themes" text is A2's.
   - **`HANDOFF.md` becomes local only (owner ruling, 2026-11-03).** Run `git rm --cached HANDOFF.md` (the file stays on disk), add `HANDOFF.md` to `.gitignore`, and check `git ls-files HANDOFF.md` prints nothing. In `README.md`, the Contents line "`HANDOFF.md` — status and requests between the app projects." becomes "Requests between the app projects are kept in a local, unpublished HANDOFF file." The design spec's mention of "EG13's request list in `HANDOFF.md`" becomes "EG13's request list (kept locally)". Older plans under `docs/superpowers/plans/` are history and stay as written.
@@ -802,7 +824,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
     - `relief`: an optional layer, off by default, drawn only where a theme's tokens are not clear (VizDAW's Console);
     - the fourteen roles;
     - `SymbioticControls`, with EG13's request 1 geometry adopted, and its palette slots matched to EG13's names (`skirt`, `plainCap`, `darkCap`, `track`, `tick`, `indicator`, `indicatorOnDark`, `label`, `chipText`, `focus`; the accent passed per knob as `arcColour`);
-    - what is not in 0.2.0: EG13 requests 2–5 (the mod wave mark, the LCD readout, the mini trace, the card columns) and the category and `goldInk` tokens, which (f) dropped;
+    - what is not in 0.2.0: EG13 requests 2–5 (the mod wave mark, the LCD readout, the mini trace, the card columns), the category and `goldInk` tokens, which (f) dropped, and scroll-wheel control (macOS 14 SwiftUI has none; a later SymbioticControls may add an `NSViewRepresentable` overlay);
     - an invitation to EG13 to adopt `SymbioticControls` at 0.2.0 or later.
   - The design spec's §7 addendum (one paragraph): the 0.2.0 schema additions and the product.
 - [ ] **Step 6: Commit** by path: `Package.swift`, `Sources/SymbioticControls/`, `Tests/SymbioticControlsTests/`, `.github/workflows/ci.yml`, `.gitignore`, `README.md`, the design spec, and the `HANDOFF.md` removal from the index (staged by `git rm --cached`). Message: "SymbioticControls 0.2.0: knob, fader and number box shared by the family; README for 0.2.0; HANDOFF kept local", with the trailers. Check `git show --stat HEAD` lists `HANDOFF.md` as deleted and that the file is still on disk.
@@ -816,7 +838,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 
 **Files:**
 - Modify:
-  - `crates/core-model/src/mixer.rs` (`Strip.eq`, `Strip.colour`, `Swatch`, `chain`, `chain_mut`, `Mixer::slots`, `Mixer::remove`), `document.rs` (`SlotOwner::Eq`, `find_slot`, `plugin_slot`, `slot_mut`, `referenced_states`, the version-3 doc comment), `mixer_rules.rs` (four loops → `chain()`), `automation.rs` (`strip_of`: `SlotOwner::Eq`), `command/mixer.rs` (`SetEq`, `SetColour`, titles, refusals, `chain_owner` for `SetSidechain`, `insert_owner`'s EQ refusal), `file.rs` (`VERSION`, `migrate_v3_to_v4`, the module comment);
+  - `crates/core-model/src/mixer.rs` (`Strip.eq`, `Strip.colour`, `Swatch`, `chain`, `chain_mut`, `Mixer::slots`, `Mixer::remove`), `document.rs` (`SlotOwner::Eq`, `find_slot`, `plugin_slot`, `slot_mut`, `referenced_states`), `mixer_rules.rs` (four loops → `chain()`), `automation.rs` (`strip_of`: `SlotOwner::Eq`), `command/mixer.rs` (`SetEq`, `SetColour`, titles, refusals, `chain_owner` for `SetSidechain`, `insert_owner`'s EQ refusal), `file.rs` (`VERSION`, `migrate_v3_to_v4`, the module comment);
   - `crates/core-engine/src/graph/mixer.rs` (`mixer_spec`);
   - `crates/core-host/src/host.rs` (`loads_needed` and the sync's `wanted` → `slots()`).
 - Regenerate: `fixtures/demo.vizdaw/project.json` (`cargo run -p vizdaw-play -- --write-demo fixtures/demo.vizdaw`), now version 4.
@@ -835,8 +857,8 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 - [ ] **Step 1: Write the failing tests.**
   - `mixer_commands.rs`:
     - `the_eq_slot_loads_replaces_and_empties_as_undo_steps`:
-      - on the demo's Built-in Synth strip, `SetEq { plugin: Some(r("eq-a")) }` makes `strip.eq` hold "eq-a", with `report.created == [Plugin(id1)]` and title "Load EQ";
-      - `Some(r("eq-b"))` gives a new `id2 != id1`, with `removed == [Plugin(id1)]`;
+      - on `base()`'s Built-in Synth strip (`StripId(1)`), `SetEq { plugin: Some(plug("eq-a")) }` makes `strip.eq` hold "eq-a", with `report.created == [Plugin(id1)]` and title "Load EQ";
+      - `Some(plug("eq-b"))` gives a new `id2 != id1`, with `removed == [Plugin(id1)]`;
       - `None` gives `eq == None`, with title "Remove EQ";
       - `None` again is `Err(ModelError::Invalid(_))`, and the document is unchanged;
       - master takes an EQ too.
@@ -845,6 +867,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
     - `every_slot_lookup_sees_the_eq`: `find_slot(eq) == Some(SlotOwner::Eq(strip))`, `plugin_slot(eq)` is the EQ, `mixer.slots()` yields it before that strip's inserts, and `referenced_states()` holds its state once `state` is set.
     - `removing_a_bus_clears_an_eq_sidechain_from_it`.
     - `a_strip_colour_is_set_saved_and_undone`: `SetColour { colour: Some(Swatch::Red) }` sets it, with title "Set Strip Colour"; undo gives `None`; `SetColour { colour: None }` clears it; an unknown strip is `Err(UnknownId)` and the document is unchanged.
+    - `arb_cmd` gains `SetEq` and `SetColour`, so the existing `mixer_commands_undo_to_the_original` checks undo and `validate` with an EQ (no count change).
   - `file.rs`:
     - `an_eq_slot_round_trips_and_an_empty_one_is_not_written`: save and load equal; the JSON of a strip without an EQ has no `"eq"` key; with one it has.
     - `version_3_projects_migrate_to_version_4`: `small_doc()`'s JSON with `"version": 3` loads, every strip's `eq` and `colour` are `None`, and `to_json` says `"version": 4`.
@@ -854,7 +877,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
   - `graph_mixer.rs`: `the_eq_slot_runs_before_the_inserts`. A strip with an EQ (latency 64 via the latency closure) and two inserts: `spec.inserts`' instances are `[eq, i1, i2]`, and the PDC total includes 64.
   - `host_loads.rs`: `an_eq_slot_is_loaded_as_an_effect`. `loads_needed` on a document whose only plug-in is an EQ lists its ref once, as an effect (not an instrument).
 - [ ] **Step 2: Run them and see them fail.** `cargo test -p core-model -p core-engine -p core-host`. Expected: compile errors (`eq`, `colour`, `Swatch`, `SetEq`, `SetColour` and `slots` are not defined).
-- [ ] **Step 3: Implement** Rulings 7–9 and Ruling 12's model part. Check that `mixer_rules::check_strip_values` checks the EQ's values (it walks `chain()`). Fix the doc comments that say version 3 (`file.rs` line 3, `document.rs:169`).
+- [ ] **Step 3: Implement** Rulings 7–9 and Ruling 12's model part. Check that `mixer_rules::check_strip_values` checks the EQ's values (it walks `chain()`). Move `file.rs`'s module comment (line 3) to version 4; leave `document.rs:169`, which is about `content_hash` (Ruling 8).
 - [ ] **Step 4: Regenerate the demo fixture.** `cargo run -p vizdaw-play -- --write-demo fixtures/demo.vizdaw`; `git diff --stat fixtures/` shows only `project.json` (its `"version": 4`). Then `cargo test -p vizdaw-play` passes (`checked_in_demo_matches_a_fresh_build`), and `diff fixtures/demo.offline.txt` in CI's offline render step is unchanged.
 - [ ] **Step 5: Run them and see them pass,** then the workspace, both clippies, fmt, and the rt-check gates (Global Constraints). Expected: Rust +11 (7a end + 11), all five rt_alloc tests pass, and the rt-check clippy is clean.
 - [ ] **Step 6: Commit** the files above and `fixtures/demo.vizdaw/project.json`, by path. Message: "core: the EQ slot, a saved part of each strip that processes first, and an optional strip colour; format version 4 (plan 7b Task B1)", with the trailers.
@@ -916,7 +939,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 ### Task B3: Pin `symbiotic-design` 0.2.0, the icons, the no-brand build and the licence permission
 
 **Files:**
-- Modify: `app/Package.swift` (Ruling 6), `.github/workflows/ci.yml` (the no-brand step), `.gitignore` (`.build-nobrand/`), `LICENSE` (the §7 additional permission, appended), `README.md` (one line in "License"), `app/Sources/VizDAW/VizDAWApp.swift` (the brand registration, the Settings tab icons), and every `VizDAW` file with `systemImage:`, `Image(systemName:)` or `NSImage(systemSymbolName:)` (`DetailPane`, `StripInputView`, `SequenceSidebar`, `ArrangementPane`, `DrumGridPane`, `RelinkSheet`, `MediaPoolWindow`, `DocumentView`, `ProjectBanners`, `ModifyPanel`, `MixerView`, `LearnMapsSheet`, `RecordControls`, `BounceSheet`, `PianoRollPane`, `DocumentShell` (7a's pane toggles), `PaneViews` (7a Task 8's `ContentUnavailableView`), `EditorWindows`, and any other the scan names)
+- Modify: `app/Package.swift` (Ruling 6), `.github/workflows/ci.yml` (the no-brand step), `.gitignore` (`.build-nobrand/`), `LICENSE` (the copyright line and the §7 additional permission, appended), `scripts/make-app.sh` (copies `LICENSE` into `Contents/Resources/`), `README.md` (one line in "License", one sentence in "Building from source"), `app/Sources/VizDAW/VizDAWApp.swift` (the brand registration, the Settings tab icons), and every `VizDAW` file with `systemImage:`, `Image(systemName:)` or `NSImage(systemSymbolName:)` (`DetailPane`, `StripInputView`, `SequenceSidebar`, `ArrangementPane`, `DrumGridPane`, `RelinkSheet`, `MediaPoolWindow`, `DocumentView` (7a's pane toggles: `paneToggle(_:_:symbol:key:)` takes an `AppIcon` parameter in place of `symbol`), `ProjectBanners`, `ModifyPanel`, `MixerView`, `LearnMapsSheet`, `RecordControls`, `BounceSheet`, `PianoRollPane`, `DocumentShell` (its two "Mixer Unavailable" views), `PaneViews` (7a Task 8's `ContentUnavailableView`), `EditorWindows`, and any other the scan names)
 - Create: `app/Package.resolved`, `app/Sources/VizDAWAppModel/AppIcon.swift`, `app/Tests/VizDAWAppModelTests/AppIconTests.swift`, `app/Tests/VizDAWAppModelTests/SourceScan.swift`
 
 **Interfaces:**
@@ -967,11 +990,14 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
   - `NSImage(systemSymbolName:)` becomes `NSImage.icon(…, size:, theme:)`.
   - Register the brand in `VizDAWApp.init`, first. Add the CI step. Add `.build-nobrand/` to `.gitignore`.
 - [ ] **Step 4b: The licence permission** (owner, 2026-11-03, binding; Ruling 6).
-  - Append to the end of `LICENSE`, after the GPL text and separated from it by a blank line and a rule, the permission paragraph in Ruling 6, exactly.
+  - Append to the end of `LICENSE`, after the GPL text and separated from it by a blank line and a rule, Ruling 6's copyright line and its two permission paragraphs, exactly.
+  - In `scripts/make-app.sh`, copy `LICENSE` to `$app/Contents/Resources/LICENSE` (the script already makes `Contents/Resources`). Check after `scripts/make-app.sh` that `dist/VizDAW.app/Contents/Resources/LICENSE` equals `LICENSE`.
   - In `README.md`'s "License" section, after "GPL-3.0 — see [LICENSE](LICENSE).", add Ruling 6's one line: the artwork stays all rights reserved and is not covered by the GPL, and forks build without it (`VIZDAW_NO_BRAND=1`).
+  - In `README.md`'s "Building from source", after the code block, add (M-10): "The first build fetches symbiotic-design 0.2.0 from GitHub; `VIZDAW_NO_BRAND=1` builds without SymbioticAudio's branded icons."
   - Check: `git diff LICENSE` adds lines only at the end and changes no GPL line.
+  - After G2, once this `LICENSE` is on GitHub (the owner pushes VizDAW), the controller checks that GitHub still detects GPL-3.0. If not, keep the text and accept "Other".
 - [ ] **Step 5: Run the gates:** Swift 7a end + 3; then `VIZDAW_NO_BRAND=1 scripts/swift.sh build --scratch-path .build-nobrand`, after which `find .build-nobrand -name 'SymbioticBrand*.o'` prints nothing; then `scripts/make-app.sh`; then the e2e, all passing. `git status` does not show `.build-nobrand`.
-- [ ] **Step 6: Commit** `app/Package.swift`, `app/Package.resolved`, `.github/workflows/ci.yml`, `.gitignore`, `LICENSE`, `README.md`, `AppIcon.swift`, `AppIconTests.swift`, `SourceScan.swift`, and the `VizDAW` files changed, by path. Message: "app: adopt symbiotic-design 0.2.0: icons from SymbioticIcons, the brand registered under a GPL section 7 permission, a build without it (plan 7b Task B3)", with the trailers.
+- [ ] **Step 6: Commit** `app/Package.swift`, `app/Package.resolved`, `.github/workflows/ci.yml`, `.gitignore`, `LICENSE`, `scripts/make-app.sh`, `README.md`, `AppIcon.swift`, `AppIconTests.swift`, `SourceScan.swift`, and the `VizDAW` files changed, by path. Message: "app: adopt symbiotic-design 0.2.0: icons from SymbioticIcons, the brand registered under a GPL section 7 permission, a build without it (plan 7b Task B3)", with the trailers.
 
 ---
 
@@ -996,7 +1022,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
     - `public private(set) var theme: Theme` and `public private(set) var colourBars: Bool`;
     - `public func choose(_ id: String) -> Bool` (false for an unknown id, with nothing changed);
     - `public func setColourBars(_ on: Bool)`;
-    - `public var onChange: (@MainActor (Theme) -> Void)?`;
+    - `public var onChange: ((Theme) -> Void)?`, typed as `KeyRecorderView.onKey` is, so a test closure may mutate a captured `var` under Swift 6 (a `@MainActor` closure type may be inferred `@Sendable`, which rejects that);
     - `public static let defaultID = "classic-light"` and `public static let key = "appearance"`;
   - `public enum AppearanceCommands` with `public static let ids: Set<String> = ["ui.theme"]` and `public static func run(_ args: [ControlArg], prefs: AppearancePreferences) -> ControlOutcome`. Its status is `"theme ‹id›"`; an unknown theme is `invalid_params` "‹id› is not a theme.";
   - `ControlHost.appearance: AppearancePreferences`;
@@ -1079,7 +1105,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 - [ ] **Step 4: Implement** Rulings 11 and 12.
   - `AppearanceSettingsView` is a radio `Picker("Theme", …)` over `Theme.all` by `name`. Each row has a swatch strip: `surface.window`, `surface.panel`, `accent.accent` and the five `strip.*` colours, drawn from tokens. Below it are `Toggle("Show channel colour bars", …)` and the caption "The theme applies to every window. It is a preference of this Mac, not saved in projects."
   - The tab is "Appearance", with `AppIcon.settingsAppearance`, placed first.
-  - `ThemedRoot` goes on `DocumentWindow`, `MixerWindow`, `MediaPoolWindow`, `PluginManagerView`, the Settings `TabView` and each `NSHostingView` root. In `VizDAWApp.init`, call `ThemeWindows.apply(appearancePreferences.theme)` once, then set `appearancePreferences.onChange = { ThemeWindows.apply($0) }`. `apply` sets `NSApp.appearance` first (Ruling 12), so windows, menus, alerts and panels made later follow the theme.
+  - `ThemedRoot` goes on `DocumentWindow`, `MixerWindow`, `MediaPoolWindow`, `PluginManagerView`, the Settings `TabView` and each `NSHostingView` root. Call `ThemeWindows.apply(appearancePreferences.theme)` first thing in `AppDelegate.applicationDidFinishLaunching` (`NSApp` may still be nil in `VizDAWApp.init`; today's code touches it only in closures and the `AppDelegate`). In `VizDAWApp.init`, set `appearancePreferences.onChange = { ThemeWindows.apply($0) }`. `apply` sets `NSApp.appearance` first (Ruling 12), so windows, menus, alerts and panels made later follow the theme.
   - `VizDAWEditors`' views gain `public var theme: Theme = .classicLight { didSet { needsDisplay = true } }`, used by B5.
 - [ ] **Step 5: Run the gates:** Rust both clippies and the workspace (7a end + 20, registry 154); Swift 7a end + 10; the no-brand build; `scripts/make-app.sh`; the e2e (all pass, since `state.get windows` has only gained a key).
 - [ ] **Step 6: Commit** the files above. Message: "app: themes: Settings › Appearance, Classic Light by default, live in every window; ui.theme and state.get windows' theme (plan 7b Task B4)", with the trailers.
@@ -1105,12 +1131,17 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 - [ ] **Step 1: Write the failing tests** in `ThemeScanTests.swift`:
   - `noColourLiteralsOutsideTheThemeBridges`: Ruling 13's pattern over `VizDAW` and `VizDAWEditors`, minus the two bridge files. Expected: no hits. The message lists `file:line`.
   - `noCornerRadiusOrFontSizeLiterals`: `cornerRadius:\s*[0-9]`, `\.system\(size:\s*[0-9]`, `systemFont\(ofSize:` and `SystemFontSize`. Expected: no hits.
-  - `theScanSeesEachForbiddenForm`: both patterns over a fixed list of 12 known-bad lines, one per form (`NSColor.red`, `Color.blue`, `Color(red:`, `NSColor(calibrated`, `Color.accentColor`, `return .red`, `case "green": .green`, `[.systemBlue, .systemOrange]`, `.labelColor`, `cornerRadius: 4`, `.system(size: 11`, `.systemFont(ofSize: NSFont.smallSystemFontSize)`). Expected: 12 hits, one per line.
+  - `theScanSeesEachForbiddenForm`: both patterns over a fixed list of 12 known-bad lines, one per form (`NSColor.red`, `Color.blue`, `Color(red:`, `NSColor(calibrated`, `Color.accentColor`, `return .red`, `case "green": .green`, `[.systemBlue, .systemOrange]`, `.labelColor`, `cornerRadius: 4`, `.system(size: 11`, `.systemFont(ofSize: NSFont.smallSystemFontSize)`). Expected: each of the 12 lines matches at least one pattern (two lines match twice), and a clean line (`theme.state.error.color`) matches none.
   - `anEditorRedrawsWhenItsThemeChanges`: an `EditorCanvas` 100×100 (`wantsLayer = true`) with `needsDisplay = false`, then `theme = .console`. Then `needsDisplay` is true, and `NSColor(cgColor: canvas.layer!.backgroundColor!)!.usingColorSpace(.sRGB) == Theme.console.canvas.usingColorSpace(.sRGB)` (compared in sRGB, because bridged colour spaces make a raw `CGColor` comparison fragile).
 - [ ] **Step 2: Run them and see them fail.** The scan lists today's sites: about 250, which is this task's worklist.
 - [ ] **Step 3: Sweep.**
   - Each AppKit site uses `theme.<role>`; each layer colour is set in `theme`'s `didSet` as well as at set-up. `EditorCanvas` sets `wantsLayer = true`.
-  - Context-typed colours are swept too: `SlotView`'s fault and load colours (`MixerView.swift`'s `return .red` / `.yellow` / `.orange`) take `state.error` / `state.warning` / `state.offline`, and the lane colours take `laneColour(_:)`.
+  - Context-typed colours are swept too, by Ruling 13's table:
+    - `SlotView.color` (`MixerView.swift`), all five cases: faulted `state.error`, placeholder `state.warning`, loading `state.offline`, live `state.play`, live and bypassed `text.disabled`;
+    - `MeterView`'s well (`.black.opacity`) `meter.background`, and its peak (`.red`/`.green`) `meter.clip` at or above 1.0, else `meter.low`, until B6's `StripPalette.meter`;
+    - the M and S toggles' tints (`.orange`, `.yellow`) `state.mute` and `state.solo`;
+    - `automationColor`'s `default: .gray` `state.offline`;
+    - the lane colours take `laneColour(_:)`.
   - Each SwiftUI site uses `@Environment(\.symbioticTheme)` and a token's `.color`, or a hierarchical `.primary`/`.secondary`/`.tertiary`, which `ThemedRoot` maps.
   - `automationColor(_:)` (in `MixerView.swift`) is deleted; B6's `StripPalette.automation` replaces it, and B7 uses that. Until then it reads `theme.state.*` through the same mapping.
   - `cornerRadius` uses `theme.radius.s`/`.m`/`.l`, and fonts use `theme.type.*.font`.
@@ -1123,11 +1154,14 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
 
 **Files:**
 - Create: `app/Sources/VizDAWAppModel/{StripEntry.swift,StripLayout.swift,StripPalette.swift}`, `app/Tests/VizDAWAppModelTests/{StripEntryTests.swift,StripLayoutTests.swift,MixerStripTests.swift}`
-- Modify: `app/Sources/VizDAWAppModel/MixerModel.swift` (`BrowserTarget.eq`, `pick`, `clearEq`, `setColour`, `typeLevel`, `typePan`, `typeSend`, `canArm`, `toggleArm`, `cycleMonitor`)
+- Modify:
+  - `app/Sources/VizDAWAppModel/MixerModel.swift` (`BrowserTarget.eq`, `pick`, `clearEq`, `setColour`, `typeLevel`, `typePan`, `typeSend`, `canArm`, `toggleArm`, `cycleMonitor`; `heldSlots(of:)` reads `strip.slots`);
+  - `PluginWindowModel.swift` (`refresh` finds its slot in `s.slots`, line 78 today) and `StripChartModel.swift` (the slot loop, line 35 today, walks `s.slots`). Today all three read `[instrument] + inserts`, so they would not see the EQ.
 
 **Interfaces:**
 - Consumes: B2 (`StripRow.eq`, `.kindColour`, `.colour`, `SwatchRow`, `SessionProtocol.setEq` and `setStripColour`), B4 (`Theme` in `VizDAWAppModel`), and `MixerModel.click`, `inputLane(for:)`, `LaneInputs.cycleMonitor` and `EditorModel.edit(.lane(edit: .setFlags(…)))` (as `SurfaceRelay.arm` uses it).
 - Produces (all `public`):
+  - `extension StripRow { public var slots: [SlotRow] }`: the instrument (when there is one), then `eq` (when set), then the inserts, in that order. Every Swift reader of a strip's slots uses it;
   - `enum StripEntry` with:
     - `static func level(_ text: String) -> Double?` (dB, where −144 is −∞) and `static func pan(_ text: String) -> Double?` (−1…1), per Ruling 15;
     - `static func levelText(_ db: Double) -> String` (`"−4.2 dB"`, `"+3.0 dB"`, `"0.0 dB"`, `"−∞ dB"`, using U+2212) and `static func panText(_ pan: Double) -> String` (`"L 24"`, `"C"`, `"R 10"`);
@@ -1182,11 +1216,15 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
     - `typingPanAndSendLevelsUsesTheirTargets`: `typePan(s, "L 24")` sends `.stripPan` at `(−0.24 + 1) / 2`. `typeSend(s, 0, "-6")` sends `.sendLevel(strip:send: 0)` at `faderNorm(-6)`. `typeSend(s, 5, "-6")` on a strip with one send is false and sends nothing.
     - `theEqSlotLoadsBypassesAndEmpties`: `openBrowser(.eq(strip: s.id), in: .window)` then `pick(ref)` calls `setEq(strip: s.id, plugin: ref)` once; `toggleBypass(eqSlot)` calls `setBypass`; `clearEq(s)` calls `setEq(…, plugin: nil)`. A thrown `setEq` raises the "Load EQ Failed" alert.
     - `aStripColourIsOneStep`: `setColour(synth, .red)` calls `setStripColour(strip: synth.id, colour: .red)` once; `setColour(synth, nil)` calls it with nil; a thrown call raises the "Strip Colour Failed" alert.
+    - `theEqSlotIsSeenByEveryStripSlotReader`: on a strip with an EQ (and an instrument and one insert), `slots` is `[instrument, eq, insert]`;
+      - `PluginWindowModel(document: d, slot: eq.id).refresh()` gives a non-nil `row` and the strip's name as `stripName`;
+      - with the EQ held, `heldSlots(of:)` includes it;
+      - the Strip Chart's menus list the EQ's automatable parameters.
     - `recordArmAndMonitorNeedAnInputLane`: an audio-path strip with an input lane can arm (`toggleArm` sends `setFlags(arm: true)`), and its monitor cycles. An instrument strip and master give `canArm == false`, and `toggleArm` sends nothing (Q3, ruled: R/I stay disabled on instrument strips).
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement** to Rulings 14 and 15, using the signatures above. `StripEntry` uses `NumberEntry`'s rules for length and control characters, but has its own copy here, because `VizDAWAppModel` does not import `SymbioticControls`.
-- [ ] **Step 4: Run the gates:** Swift 7a end + 30, plus the no-brand build.
-- [ ] **Step 5: Commit** the six files and `MixerModel.swift`. Message: "app model: the strip's typed values, layout and colours; the EQ slot, strip colour and arm actions (plan 7b Task B6)", with the trailers.
+- [ ] **Step 4: Run the gates:** Swift 7a end + 31, plus the no-brand build.
+- [ ] **Step 5: Commit** the six files, `MixerModel.swift`, `PluginWindowModel.swift` and `StripChartModel.swift`. Message: "app model: the strip's typed values, layout and colours; the EQ slot, strip colour and arm actions (plan 7b Task B6)", with the trailers.
 
 ---
 
@@ -1227,7 +1265,7 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
   - the new Colour ▸ menu (C-1).
 
   List them in the report, each with where it now lives.
-- [ ] **Step 3: Run the gates:** Swift build and test (7a end + 30, no new warnings), the no-brand build, `scripts/make-app.sh`, and the existing e2e. `touch_writes_a_fader_over_the_channel`, `drives_a_fader_and_a_button_from_an_mcu` and `drives_the_mixer_from_a_kontrol_mk3` still pass: they drive the mixer through the channel, not the old sliders. A failure is a strip fault to fix here.
+- [ ] **Step 3: Run the gates:** Swift build and test (7a end + 31, no new warnings), the no-brand build, `scripts/make-app.sh`, and the existing e2e. `touch_writes_a_fader_over_the_channel`, `drives_a_fader_and_a_button_from_an_mcu` and `drives_the_mixer_from_a_kontrol_mk3` still pass: they drive the mixer through the channel, not the old sliders. A failure is a strip fault to fix here.
 - [ ] **Step 4: Commit** the three files. Message: "app: the channel strip: EQ slot, send knobs, typed pan, level and sends, the long-throw fader, M S R I, console colouring (plan 7b Task B7)", with the trailers.
 
 ---
@@ -1255,13 +1293,13 @@ git log -1 --format='%h %an <%ae> %s' && git show --stat HEAD | tail -6
      - every strip has `kind_colour` and `colour`; the Built-in Synth's `kind_colour` is `"instrument"`, master's is `"master"`, and every `colour` is null;
      - every `eq` is null;
      - the document window's `ui.tree` has a node labelled "EQ of Built-in Synth" whose value is "empty".
-  5. `ui.click` the node labelled "Level of Built-in Synth" (the box takes keyboard focus as it starts editing). Then `ui.key {window, text: "-4.2\n"}`. Wait until `state.get mixer` shows that strip's `(gain_db - (-4.2)).abs() < 1e-6`, then `wait_for_undo(…, "Set Fader")`.
+  5. Send one `ui.key {window, element: <the "Level of Built-in Synth" node's element>, text: "-4.2\n"}`, as step 6 does: the app clicks the element first, so the box starts editing and takes keyboard focus before the keys arrive (a separate `ui.click` then `ui.key` can race the focus, and unfocused digits go to the key bindings). Wait until `state.get mixer` shows that strip's `(gain_db - (-4.2)).abs() < 1e-6`, then `wait_for_undo(…, "Set Fader")`.
   6. `ui.click` "Pan of Built-in Synth" and `ui.key {window, text: "LR\n"}`. Then `state.get editor`'s `status == "Type a pan like L 24, C or R 10."` and the pan is still 0.0. The refusal ended editing, so refocus: `ui.key {window, element: <the "Pan of Built-in Synth" node's element>, text: "L 24\n"}` (the tree's `ui.key` takes `element`, not `focus`). Wait until `(pan - (-0.24)).abs() < 1e-6`.
   7. `command.run window.mixer`: a `kind == "mixer"` window appears, and its `ui.tree` has "Fader of Built-in Synth".
   8. `file.save_as` to `<home>/strip.vizdaw`, `file.close`, then `app.open` it. `state.get mixer` shows `(gain_db + 4.2).abs() < 1e-6` and `(pan + 0.24).abs() < 1e-6`, and `state.get windows`' theme is still `"console"` (a preference, not project state).
   9. `app.quit()`.
 - [ ] **Step 2: Run it and see it pass** (it was RED until B7; record the run against B7's build in the report), then all 16 e2e tests.
-- [ ] **Step 3: Write README steps 207–216** in `app/README.md`, under a new section after 7a's "Window, main views and panes (plan 7a)". Each step is an action, then a colon, then the expected result, as the README's earlier steps are.
+- [ ] **Step 3: Write README steps 207–216** in `app/README.md`, under a new section after 7a's "Window, main views and panes (plan 7a)". In step 214, `<7a-end-sha>` is the SHA recorded in `progress.md` at 7a's end. Each step is an action, then a colon, then the expected result, as the README's earlier steps are.
 
 ```markdown
 ### Themes and the channel strip (plan 7b)
@@ -1295,7 +1333,8 @@ the core's EQ slot and strip colour tests) and the e2e
      bus's cap changes to the bus colour.
 210. Right-click the Built-in Synth's name and choose Colour ▸ Blue: its
      colour bar turns blue in the Mix view, the bottom pane's mixer, the
-     left strip and the mixer window, and its fader cap keeps the
+     mixer window and (select a lane that plays through the Built-in
+     Synth) the left strip, and its fader cap keeps the
      instrument colour. Undo: the bar shows the instrument colour again.
      Redo, save, close and reopen: the bar is still blue. Then Settings ›
      Appearance › Show channel colour bars off: every bar goes, in all
@@ -1332,12 +1371,13 @@ the core's EQ slot and strip colour tests) and the e2e
      "EQ ＋" again; Undo brings it back with its settings. Open the
      project in a VizDAW build from before plan 7b (`git worktree add
      /tmp/vz7a <7a-end-sha> && (cd /tmp/vz7a && scripts/build-ffi.sh &&
-     scripts/make-app.sh)`): it refuses with "project format version 4 is
-     newer than this build supports".
+     scripts/make-app.sh)`, then open `/tmp/vz7a/dist/VizDAW.app`): it
+     refuses with "project format version 4 is newer than this build
+     supports". Quit it, then `git worktree remove /tmp/vz7a`.
 215. Choose Console: fader caps, knobs and panels look shaded and
      bevelled, like hardware, with no photographs or textures and no
      brand names. Choose each of the other four: their knobs and caps are
-     flat. In every theme the pan knob's ring and the send knobs' rings
+     flat (unless G1 made a theme shaded). In every theme the pan knob's ring and the send knobs' rings
      have their own colours.
 216. Look at the transport bar, the pane buttons, the editors' bars and
      the Settings tabs: they show SymbioticAudio's icons, with no system
@@ -1349,9 +1389,9 @@ the core's EQ slot and strip colour tests) and the e2e
 ```
 
 - [ ] **Step 4: Update the root `README.md`** (spec §2 item 11, 7b's part). Keep 7a's sections.
-  - In the status paragraph, the sentence that names the themes and an audio editor as next becomes "An audio editor is next." Anchor on that sentence, not its exact words: 7a Task 9 is still writing it (in the working tree it reads "The look of the interface (themes) and an audio editor are next.", wrapped over two lines).
+  - In the status paragraph, the sentence that names the themes and an audio editor as next becomes "An audio editor is next." The sentence reads "The look of the interface (themes) and an audio editor are next." (7a end, ff5b97b; wrapped over two lines).
   - "What works today" gains a bullet: "five themes, Classic Light by default, and a channel strip with typed levels, pan and sends, send knobs, an EQ slot and an optional colour per strip".
-  - The "License" line is B3's; leave it.
+  - The "License" line and the "Building from source" sentence are B3's; leave them.
   - Add this section after "Getting around":
 
 ```markdown
@@ -1396,7 +1436,7 @@ pgrep -lf MacOS/VizDAW; ls -d /tmp/vze* 2>/dev/null
 
 Expected:
 - Rust: 7a end + 20 passed, 7a end + 1 ignored (macOS); Linux clippy clean; the rt-check gates pass;
-- Swift: 7a end + 30;
+- Swift: 7a end + 31;
 - the `find` prints nothing;
 - e2e 16 passed;
 - registry 154;
@@ -1434,13 +1474,14 @@ Expected:
    - `Swatch` (B1) → `SwatchRow` and `Session::set_strip_colour` (B2) → `MixerModel.setColour` and `StripPalette.bar` (B6) → the Colour ▸ menu and the bar (B7); `Theme.swatch` (A2) supplies the colours.
    - `Theme.knobFinish` (A2) → `KnobPalette.finish` (A4) → `Knob`'s shading (A4, B7).
    - `SetEq` (B1) → `Session::set_eq` (B2) → `SessionProtocol.setEq` → `MixerModel.pick(.eq)` and `clearEq` (B6).
+   - `StripRow.eq` (B2) → `StripRow.slots` (B6) → `PluginWindowModel.refresh`, `MixerModel.heldSlots(of:)` and `StripChartModel` (B6), and the EQ slot's Open and Load (B7).
    - `AppearancePreferences` (B4) is used by `ThemedRoot` and `ChannelStrip`'s colour bars (B7).
    - `KnobPalette`, `FaderPalette`, `NumberBoxPalette` and `Relief` (A4) take `Theme`'s `knob`, `fader`, `relief` and `knobFinish` (A2).
    - `AppIcon` (B3) uses A3's roles.
    - `StripEntry.levelHint`, `panHint` and `touchedHint` are the e2e's and README's exact strings.
    - `ScaleMark` (B6) maps to `FaderMark` (A4) in B7.
 4. **Review Focus.** Five items, each with its pinning tests in the owning task (B1, B2, B4, B5, B6 and B8).
-5. **Proportion.** About 1450 short lines after the pre-flight revision (7a's plan is 1680), against a 145-line spec whose 7b row covers §2 items 5–9 and 11, across two repos and twelve tasks. The code blocks are tests and the exact README text; bodies are left to the signatures.
+5. **Proportion.** About 1490 short lines after the second revision (7a's plan is 1680), against a 145-line spec whose 7b row covers §2 items 5–9 and 11, across two repos and twelve tasks. The code blocks are tests and the exact README text; bodies are left to the signatures.
 
 ## Execution handoff
 
