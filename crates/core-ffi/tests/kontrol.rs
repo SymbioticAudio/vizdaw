@@ -77,8 +77,10 @@ fn a_kontrol_is_added_greeted_and_identified() {
 #[test]
 fn a_kontrol_takes_position_0_only() {
     let _g = serial();
-    let e = surface_add(Kind::KontrolMk3, DAW.into(), DAW.into(), Some(1)).unwrap_err();
-    assert!(e.to_string().contains("bank of its own"), "{e}");
+    for position in [1, 2] {
+        let e = surface_add(Kind::KontrolMk3, DAW.into(), DAW.into(), Some(position)).unwrap_err();
+        assert!(e.to_string().contains("bank of its own"), "{position}: {e}");
+    }
     let k = surface_add(Kind::KontrolMk3, DAW.into(), DAW.into(), Some(0)).unwrap();
     let s49 = "KONTROL S49 MK3 DAW";
     let k2 = surface_add(Kind::KontrolMk3, s49.into(), s49.into(), None).unwrap();
@@ -643,8 +645,14 @@ fn preset_buttons_step_the_focused_plugins_presets() {
         "from none, Next loads the first"
     );
     has(&feed(&s), &sysex(0x76, 0, 0, b"Init"));
+    let before = row(id).ignored;
     s.inject_surface(id, [0xBF, 0x36, 0x01].repeat(3)).unwrap();
     assert_eq!(debug_current_preset(slot), Some(2), "no wrap past the last");
+    assert_eq!(
+        row(id).ignored,
+        before,
+        "Next at the last preset is a no-op, not a fault"
+    );
     s.inject_surface(id, vec![0xBF, 0x36, 0x7F]).unwrap();
     assert_eq!(debug_current_preset(slot), Some(1));
     let sent = feed(&s);
@@ -925,4 +933,152 @@ fn a_deleted_cursor_sequence_falls_back_for_the_tempo() {
     s.inject_surface(id, msg(80.0)).unwrap();
     assert!((bpm(&s) - 80.0).abs() < 1e-3, "{}", bpm(&s));
     has(&feed(&s), &msg(80.0));
+}
+
+/// Final review I2: a unit's problem lines go when it comes online (the
+/// firmware was updated and the keyboard answers 4).
+#[test]
+fn a_kontrol_that_comes_online_drops_its_problem_lines() {
+    let _g = serial();
+    let id = surface_add(Kind::KontrolMk3, DAW.into(), DAW.into(), None).unwrap();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    let mine = |p: &String| p.starts_with(&format!("surface {id}: "));
+    s.inject_surface(id, vec![0xBF, 0x01, 0x03]).unwrap();
+    assert!(surfaces_state().problems.iter().any(mine));
+    s.inject_surface(id, V4.to_vec()).unwrap();
+    assert!(row(id).online);
+    let problems = surfaces_state().problems;
+    assert!(!problems.iter().any(mine), "{problems:?}");
+}
+
+/// Final review I2: a removed unit's problem lines go with it, so a new
+/// unit that reuses its ID does not show them.
+#[test]
+fn a_removed_kontrols_problem_lines_go_with_it() {
+    let _g = serial();
+    let id = surface_add(Kind::KontrolMk3, DAW.into(), DAW.into(), None).unwrap();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    s.focus_surfaces().unwrap();
+    s.inject_surface(id, vec![0xBF, 0x01, 0x03]).unwrap();
+    surface_remove(id).unwrap();
+    let mcu = surface_add(Kind::Mcu, "M In".into(), "M Out".into(), None).unwrap();
+    assert_eq!(mcu, id, "the MCU reuses the ID");
+    let problems = surfaces_state().problems;
+    assert!(
+        !problems
+            .iter()
+            .any(|p| p.starts_with(&format!("surface {id}: "))),
+        "{problems:?}"
+    );
+}
+
+/// Final review T4 m3 (Ruling 6): a page move past either end is a no-op
+/// that is not counted; a chain button past the chain is counted.
+#[test]
+fn plugin_page_ends_are_no_ops_and_a_slot_past_the_chain_is_counted() {
+    let _g = serial();
+    let (s, id, _, _) = plugin_mode(&[("vizdaw.test.bank", "Test Bank")]);
+    has(&debug_sent(DAW), &sysex(0x74, 3, 0, &[]));
+    let before = row(id).ignored;
+    // Test Bank has three pages.
+    for _ in 0..3 {
+        s.inject_surface(id, vec![0xBF, 0x31, 0x01]).unwrap();
+    }
+    has(&feed(&s), &sysex(0x74, 3, 2, &[]));
+    assert_eq!(row(id).ignored, before, "page +1 past the end: uncounted");
+    for _ in 0..4 {
+        s.inject_surface(id, vec![0xBF, 0x31, 0x7F]).unwrap();
+    }
+    has(&feed(&s), &sysex(0x74, 3, 0, &[]));
+    assert_eq!(row(id).ignored, before, "page -1 before 0: uncounted");
+    s.inject_surface(id, sysex(0x70, 0, 5, &[])).unwrap();
+    assert_eq!(row(id).ignored, before + 1, "a slot past the chain");
+    let sent = feed(&s);
+    assert!(
+        !sent.iter().any(|m| m == &sysex(0x70, 0, 5, &[])),
+        "the slot stays: {sent:02x?}"
+    );
+    s.stop().unwrap();
+}
+
+/// Final review T7 m2 (Ruling 15): an edit between two turns splits the
+/// gesture; a tempo turn during a Kontrol fader ride is refused and
+/// counted.
+#[test]
+fn an_edit_splits_a_tempo_gesture_and_a_ride_refuses_the_tempo() {
+    use core_surface::kontrol::tempo_bytes;
+    use vizdaw_ffi::{EditCommand, LaneEdit};
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let id = kontrol(&s);
+    let seq = song(&s);
+    let bpm = |s: &vizdaw_ffi::Session| s.sequence_info(seq).unwrap().tempo[0].bpm;
+    let start = bpm(&s);
+    let msg = |t: f64| sysex(0x19, 0, 0, &tempo_bytes(t).unwrap());
+    let chords = s
+        .lanes(seq)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.name == "Chords")
+        .unwrap()
+        .id;
+    s.inject_surface(id, msg(100.0)).unwrap();
+    s.edit(
+        EditCommand::Lane {
+            edit: LaneEdit::SetFlags {
+                seq,
+                lane: chords,
+                mute: Some(true),
+                solo: None,
+                arm: None,
+            },
+        },
+        None,
+    )
+    .unwrap();
+    s.inject_surface(id, msg(110.0)).unwrap();
+    assert!((bpm(&s) - 110.0).abs() < 1e-3);
+    s.undo().unwrap();
+    assert!(
+        (bpm(&s) - 100.0).abs() < 1e-3,
+        "the second turn is a step of its own: {}",
+        bpm(&s)
+    );
+    s.undo().unwrap();
+    s.undo().unwrap();
+    assert!((bpm(&s) - start).abs() < 1e-3, "{}", bpm(&s));
+    // A fader ride holds a transaction: the tempo waits for its end.
+    debug_advance(600);
+    s.inject_surface(id, vec![0xBF, 0x50, 0x01]).unwrap();
+    let before = row(id).ignored;
+    s.inject_surface(id, msg(90.0)).unwrap();
+    assert_eq!(row(id).ignored, before + 1, "refused and counted");
+    assert!((bpm(&s) - start).abs() < 1e-3, "unchanged");
+}
+
+/// Final review T7 m5: two keyboards turning at once each get their own
+/// step; one never amends into the other's.
+#[test]
+fn two_kontrols_turning_the_tempo_make_steps_of_their_own() {
+    use core_surface::kontrol::tempo_bytes;
+    let _g = serial();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let a = kontrol(&s);
+    let s49 = "KONTROL S49 MK3 DAW";
+    let b = surface_add(Kind::KontrolMk3, s49.into(), s49.into(), None).unwrap();
+    s.inject_surface(b, V4.to_vec()).unwrap();
+    let seq = song(&s);
+    let bpm = |s: &vizdaw_ffi::Session| s.sequence_info(seq).unwrap().tempo[0].bpm;
+    let msg = |t: f64| sysex(0x19, 0, 0, &tempo_bytes(t).unwrap());
+    s.inject_surface(a, msg(100.0)).unwrap();
+    s.inject_surface(b, msg(130.0)).unwrap();
+    s.inject_surface(a, msg(101.0)).unwrap();
+    assert!((bpm(&s) - 101.0).abs() < 1e-3);
+    s.undo().unwrap();
+    assert!(
+        (bpm(&s) - 130.0).abs() < 1e-3,
+        "A's second turn did not amend B's step: {}",
+        bpm(&s)
+    );
 }

@@ -1622,6 +1622,12 @@ fn kontrol_mk3_is_a_surface_type() {
         ),
         Command::CommandRun { .. }
     ));
+    // Final review T1 m3: the Choice is exact; another casing is refused.
+    let (code, _) = err(
+        "command.run",
+        run(json!({ "type": "Kontrol_MK3", "input": "A", "output": "A" })),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
     let spec = registry::find("surface.add").unwrap();
     let help = spec.params.iter().find(|p| p.name == "type").unwrap().help;
     assert!(help.contains("kontrol_mk3"), "{help}");

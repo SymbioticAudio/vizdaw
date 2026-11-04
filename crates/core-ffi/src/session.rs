@@ -9236,7 +9236,7 @@ impl Session {
                 A::PluginSlot(i) => self.surface_plugin_slot(inner, i),
                 A::PluginPage(n) => self.surface_plugin_page(inner, n),
                 A::Preset(dir) => self.surface_preset(inner, dir, now),
-                A::Tempo { bpm, new_step } => self.surface_tempo(inner, bpm, new_step),
+                A::Tempo { bpm, new_step } => self.surface_tempo(inner, a.unit, bpm, new_step),
                 A::CountIn => {
                     self.surface_event(inner, SurfaceEventRow::CountIn);
                     true
@@ -9334,7 +9334,13 @@ impl Session {
     /// "Set Tempo" step. Refused while recording or finishing a pass,
     /// inside an open transaction or group, for a non-finite `bpm`, and
     /// with no sequence.
-    fn surface_tempo(&self, inner: &mut Inner, bpm: f64, new_step: bool) -> bool {
+    fn surface_tempo(
+        &self,
+        inner: &mut Inner,
+        unit: Option<crate::automation::SurfaceId>,
+        bpm: f64,
+        new_step: bool,
+    ) -> bool {
         if inner.recording.is_some()
             || inner.finishing
             || inner.history.in_transaction()
@@ -9357,8 +9363,11 @@ impl Session {
         let Some(p) = points.get_mut(k) else {
             return false;
         };
-        // In 5–999 after the clamp, so the conversion is exact.
-        p.bpm = Bpm((bpm.clamp(5.0, 999.0) * 1000.0).round() as u32);
+        // In Bpm::MIN..=Bpm::MAX after the clamp, so the conversion is exact.
+        let milli = (bpm * 1000.0)
+            .round()
+            .clamp(f64::from(Bpm::MIN.0), f64::from(Bpm::MAX.0));
+        p.bpm = Bpm(milli as u32);
         let Ok(tempo) = TempoMap::new(points) else {
             return false;
         };
@@ -9367,8 +9376,9 @@ impl Session {
         }
         let cmd = Command::Sequence(SequenceCmd::SetTempo { seq, tempo });
         let filter = ViewFilter::default();
-        let amended = match (new_step, inner.surfaces.tempo_step) {
-            (false, Some(serial)) => {
+        // Only the same keyboard's gesture is amended (final review T7 m5).
+        let amended = match (new_step, unit, inner.surfaces.tempo_step) {
+            (false, Some(u), Some((from, serial))) if from == u => {
                 matches!(inner.history.amend(&cmd, &filter, serial), Ok(Some(_)))
             }
             _ => false,
@@ -9377,7 +9387,7 @@ impl Session {
             if inner.history.execute(&cmd, &filter).is_err() {
                 return false;
             }
-            inner.surfaces.tempo_step = Some(inner.history.present_serial());
+            inner.surfaces.tempo_step = unit.map(|u| (u, inner.history.present_serial()));
         }
         inner.version += 1;
         inner.news.doc_changed = true;

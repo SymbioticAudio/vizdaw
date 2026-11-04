@@ -811,6 +811,13 @@ impl Registry {
         }
     }
 
+    /// Drops unit `id`'s problem lines (final review I2): it was removed, or
+    /// it came online, so they no longer say anything true.
+    fn forget_problems(&mut self, id: u32) {
+        let prefix = format!("surface {id}: ");
+        self.problems.retain(|l| !l.starts_with(&prefix));
+    }
+
     /// Refreshes the transport, stamps the 2 s timer, then checks every unit.
     fn refresh_and_check(&mut self, now: Instant) {
         if self.quit {
@@ -1050,6 +1057,7 @@ impl Registry {
         }
         self.send(i, &bye);
         self.units.remove(i);
+        self.forget_problems(id);
         self.rebank();
         Ok(())
     }
@@ -1328,10 +1336,12 @@ impl Registry {
             // Injected bytes and an unknown host time are stamped now.
             let host_ns = (item.host_ns != 0).then_some(item.host_ns);
             if let Some(i) = self.units.iter().position(|u| u.input == item.port) {
-                let (acts, problem) = match self.units.get_mut(i) {
+                let (acts, problem, came_online) = match self.units.get_mut(i) {
                     Some(u) => {
                         let page = u.surface.shows_page();
+                        let was_online = u.surface.online();
                         let acts = u.surface.input(&item.bytes, item.at);
+                        let came_online = !was_online && u.surface.online();
                         if u.surface.shows_page() != page {
                             // A mode change shows at once (plan 5f-4 M15).
                             u.fed = None;
@@ -1340,10 +1350,13 @@ impl Registry {
                             .surface
                             .take_problem()
                             .map(|p| format!("surface {}: {p}", u.id.get()));
-                        (acts, problem)
+                        (acts, problem, came_online.then_some(u.id.get()))
                     }
                     None => continue,
                 };
+                if let Some(id) = came_online {
+                    self.forget_problems(id);
+                }
                 if let Some(p) = problem {
                     self.problem(p);
                 }
@@ -1615,7 +1628,11 @@ impl Registry {
     /// A learn for `what`, asked by `session`: the transport is made if
     /// there is none (Ruling 10), and every other learn is replaced.
     fn start_learn(&mut self, session: u64, what: LearnFor, text: String) {
-        let _ = self.ports();
+        // After quit the transport is not made again: the learn hears
+        // nothing (final review T1 m1).
+        if !self.quit {
+            let _ = self.ports();
+        }
         self.learn = Some(Learning {
             session,
             what,
@@ -2406,9 +2423,9 @@ pub(crate) struct SessionSurfaces {
     pub last_ns: BTreeMap<(TouchHolder, AutomationTarget), u64>,
     /// The plug-in page a Kontrol shows (plan 5f-4 Ruling 6).
     pub page: PageFocus,
-    /// The serial of the undo step the keyboard's tempo gesture lands in
-    /// (plan 5f-4 Ruling 15).
-    pub tempo_step: Option<u64>,
+    /// The keyboard and the serial of the undo step its tempo gesture
+    /// lands in (plan 5f-4 Ruling 15; final review T7 m5: per keyboard).
+    pub tempo_step: Option<(SurfaceId, u64)>,
     /// The document's record count-in is on, as the app said (Ruling 16).
     pub count_in: bool,
     /// The focused slot's presets as last read, and when (plan 5f-4 Ruling 7).
