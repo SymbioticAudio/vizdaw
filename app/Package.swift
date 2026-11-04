@@ -18,7 +18,7 @@ let package = Package(
         .executable(name: "VizDAW", targets: ["VizDAW"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SymbioticAudio/symbiotic-design", exact: "0.2.0")
+        .package(url: "https://github.com/SymbioticAudio/symbiotic-design", exact: "0.2.1")
     ],
     targets: [
         // Generated header + module map (scripts/build-ffi.sh).
@@ -65,7 +65,8 @@ let package = Package(
             name: "VizDAWAppModelTests",
             // VizDAWEditors: arrangement view tests reuse this target's FakeSession.
             // No test target links SymbioticBrand: tests run on the standard icons.
-            dependencies: ["VizDAWAppModel", "VizDAWCore", "VizDAWEditors", tokens, icons],
+            // SymbioticControls: the strip's measurements are pinned to ControlMetrics.
+            dependencies: ["VizDAWAppModel", "VizDAWCore", "VizDAWEditors", tokens, icons, controls],
             path: "Tests/VizDAWAppModelTests"
         ),
         .testTarget(

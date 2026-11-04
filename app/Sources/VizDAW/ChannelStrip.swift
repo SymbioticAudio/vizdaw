@@ -718,9 +718,11 @@ struct StripFaderSection: View {
                     .touchRing(model.isTouched(target))
                     .contextMenu { LearnItem(model: model, target: target) }
                     .help("Double-click: 0 dB")
+                // Level with the fader's well, which spans the cap's travel:
+                // from half the drawn cap (less 2) for `throw + 4` points.
                 StripMeter(level: model.meters[strip.id] ?? .silent)
                     .frame(width: 14, height: throwLength + 4)
-                    .padding(.top, StripLayout.faderCap / 2 - 2)
+                    .padding(.top, ControlMetrics.faderCap.height / 2 - 2)
                 Spacer(minLength: 0)
             }
         }

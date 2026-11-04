@@ -1,4 +1,5 @@
 import CoreGraphics
+import SymbioticControls
 import Testing
 @testable import VizDAWAppModel
 
@@ -32,9 +33,14 @@ import Testing
 /// scrolls rather than overflows.
 @Suite struct StripHeightTests {
     @Test func theFixedLowerPartHoldsTheFaderCapAndTheLevelBoxHitFrame() {
-        #expect(StripLayout.faderCap == 52)
-        #expect(StripLayout.levelBoxHeight == 24)
-        #expect(StripLayout.toggleRowHeight == 24)
+        // Final review m1 (0.2.1): the slot reserves the cap's drawn height;
+        // the 6-pt gap absorbs the hit frame's overhang at the ends of travel.
+        #expect(StripLayout.faderCap == ControlMetrics.faderCap.height)
+        #expect(StripLayout.faderCap == 42)
+        #expect((ControlMetrics.hitSize(.faderCap).height - StripLayout.faderCap) / 2 <= StripLayout.gap)
+        #expect(StripLayout.levelBoxHeight == ControlMetrics.hitSize(.numberBox).height)
+        #expect(StripLayout.toggleRowHeight == ControlMetrics.hitSize(.toggle).height)
+        #expect(StripLayout.lowerFixed == 158)
         #expect(StripLayout.modeMenuHeight == 24, "the 24-pt hit minimum (review M2)")
         let parts = StripLayout.faderCap + StripLayout.levelBoxHeight + StripLayout.toggleRowHeight
             + StripLayout.modeMenuHeight + 4 * StripLayout.gap + 2 * StripLayout.padding

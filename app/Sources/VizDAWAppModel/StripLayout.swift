@@ -31,10 +31,13 @@ public enum StripLayout {
     public static let minimumThrow: CGFloat = 160
     public static let maximumThrow: CGFloat = 480
 
-    /// The fader cap's height: the fader draws `throwLength + faderCap`
-    /// tall (`ControlMetrics.faderCap`; this module does not import
-    /// `SymbioticControls`).
-    public static let faderCap: CGFloat = 52
+    /// The fader cap's drawn height: the fader draws `throwLength + faderCap`
+    /// tall (`ControlMetrics.faderCap.height`, 42 since symbiotic-design
+    /// 0.2.1; this module does not import `SymbioticControls`, so a test
+    /// pins the two together). The slot reserves the drawn height; the cap's
+    /// 52-point hit frame overhangs it by 5 points at the ends of travel,
+    /// which the 6-point `gap` absorbs (final review m1).
+    public static let faderCap: CGFloat = 42
     /// The level box's hit frame (`ControlMetrics.hitSize(.numberBox)`).
     public static let levelBoxHeight: CGFloat = 24
     /// The M S R I row: 24-point toggles (`ControlMetrics.hitSize(.toggle)`).
@@ -49,11 +52,11 @@ public enum StripLayout {
     public static let sidePadding: CGFloat = 6
 
     /// Everything but the part above the fader and the throw, measured
-    /// once: the fader cap (52), the level box (24), the M S R I row (24)
+    /// once: the fader cap (42), the level box (24), the M S R I row (24)
     /// and the automation menu (24), four gaps (24) and the padding above
     /// and below (20). B6 review: the cap and the level box's 24-point hit
     /// frame count, so a short pane scrolls rather than overflows.
-    public static let lowerFixed: CGFloat = 168
+    public static let lowerFixed: CGFloat = 158
 
     /// The strip's whole height for an `upper` part and a throw.
     public static func contentHeight(upper: CGFloat, throwLength: CGFloat) -> CGFloat {
