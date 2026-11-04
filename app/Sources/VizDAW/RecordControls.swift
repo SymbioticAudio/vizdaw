@@ -1,6 +1,7 @@
 import SwiftUI
 import VizDAWAppModel
 import VizDAWCore
+import VizDAWEditors
 
 /// The toolbar's record controls (spec §6.9; plan 5d-2 Task 3): Record
 /// (the R key's `transport.record`, red while recording), the options
@@ -8,26 +9,27 @@ import VizDAWCore
 struct RecordControls: View {
     let model: DocumentModel
     @Bindable var record: RecordModel
+    /// The window this bar is in: the popover shows under this chevron
+    /// only (plan 7a final review I2).
+    let host: RecordPopoverHost
 
     var body: some View {
         HStack(spacing: 6) {
-            Button {
-                record.pressRecord()
-            } label: {
-                Image(systemName: record.isRecording ? "record.circle.fill" : "record.circle")
-                    .foregroundStyle(record.isRecording ? Color.red : Color.primary)
-            }
-            .accessibilityLabel(record.isRecording ? "Stop Recording" : "Record")
-            .help(record.isRecording ? "Stop recording (R)" : "Record the armed lanes (R)")
-            .disabled(!TransportCommands.enabled("transport.record", model))
-            Button {
-                record.showsPopover.toggle()
-            } label: {
-                Image(systemName: "chevron.down")
-            }
-            .accessibilityLabel("Record Options")
-            .help("Replace or overdub, punch, loop, count-in, pre-roll and takes")
-            .popover(isPresented: $record.showsPopover, arrowEdge: .bottom) {
+            // AppKit buttons, so the channel's tree finds them (final review I1).
+            AppKitButton(
+                record.isRecording ? "Stop Recording" : "Record",
+                symbol: record.isRecording ? "record.circle.fill" : "record.circle",
+                enabled: TransportCommands.enabled("transport.record", model),
+                help: record.isRecording ? "Stop recording (R)" : "Record the armed lanes (R)",
+                tint: record.isRecording ? .systemRed : nil
+            ) { record.pressRecord() }
+            .fixedSize()
+            AppKitButton(
+                "Record Options", symbol: "chevron.down",
+                help: "Replace or overdub, punch, loop, count-in, pre-roll and takes"
+            ) { [host] in record.togglePopover(in: host) }
+            .fixedSize()
+            .popover(isPresented: popoverShown, arrowEdge: .bottom) {
                 RecordPopover(model: model, record: record)
             }
             if record.countingIn {
@@ -45,6 +47,14 @@ struct RecordControls: View {
                     .help("Recording time left on the project's disk for the armed audio lanes")
             }
         }
+    }
+
+    private var popoverShown: Binding<Bool> {
+        let r = record
+        let h = host
+        // Only this window's dismissal closes it: one that moved to the
+        // other window stays open there.
+        return Binding(get: { r.showsPopover(in: h) }, set: { if !$0, r.showsPopover(in: h) { r.showsPopover = false } })
     }
 }
 

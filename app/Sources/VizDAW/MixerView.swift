@@ -1,6 +1,7 @@
 import SwiftUI
 import VizDAWAppModel
 import VizDAWCore
+import VizDAWEditors
 
 /// The mixer window of document `id` (spec §11; functional, not polished).
 struct MixerWindow: View {
@@ -52,6 +53,19 @@ struct MixerWindow: View {
 struct MixerView: View {
     @Bindable var model: MixerModel
     let placement: MixerPlacement
+    @Environment(\.controlActiveState) private var activeState
+
+    /// The mixer window always polls; the Mix view and the bottom pane only
+    /// while their window is key or the document plays or records, as the
+    /// left strip (Task 8 review M2): a background project left in Mix does
+    /// not read levels at 30 Hz.
+    private var polls: Bool { pollKey.key || pollKey.playing }
+
+    private var pollKey: PollKey {
+        PollKey(
+            key: placement == .window || activeState == .key,
+            playing: model.document.isPlaying || model.document.record.isRecording)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -69,9 +83,10 @@ struct MixerView: View {
             model.disappeared(placement)
         }
         .modifier(UnhostedLearnAlert(learn: model.document.learn))
-        .task {
+        .task(id: pollKey) {
             // Meters at 30 Hz (spec §7): one poll per frame, however many
             // placements show (`tick`); the strips follow the document.
+            guard polls else { return }
             while !Task.isCancelled {
                 model.tick(now: ProcessInfo.processInfo.systemUptime)
                 try? await Task.sleep(for: .milliseconds(33))
@@ -113,11 +128,11 @@ struct MixerBar: View {
     var body: some View {
         HStack(spacing: 10) {
             Spacer(minLength: 0)
-            Text(model.loadText)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Button("Add Bus") { model.addBus() }
+            // AppKit, so the channel's tree finds them (final review I1).
+            AppKitLabel(model.loadText, font: Self.loadFont, secondary: true)
+                .fixedSize()
+            AppKitButton("Add Bus", help: "Add a bus") { model.addBus() }
+                .fixedSize()
             Menu("Instruments") {
                 Button("New Plugin Instrument…") { model.openBrowser(.instrument, in: placement) }
                 Divider()
@@ -135,6 +150,12 @@ struct MixerBar: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
     }
+
+    /// The caption font with even-width digits, as the load text had.
+    @MainActor static let loadFont: NSFont = {
+        let f = NSFont.preferredFont(forTextStyle: .caption1)
+        return NSFont.monospacedDigitSystemFont(ofSize: f.pointSize, weight: .regular)
+    }()
 
     /// The instrument browser, for a new instrument or a destination, in
     /// the placement that opened it.

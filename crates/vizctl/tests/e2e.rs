@@ -2081,6 +2081,18 @@ fn window_views_and_panes_over_the_channel() {
             "mix {side}: {l0}"
         );
     }
+    // The transport bar's controls are in the tree (final review I1): an
+    // agent finds Loop, Record and the pane buttons, not only Play.
+    for label in [
+        "Loop",
+        "Record",
+        "Record Options",
+        "Left Pane",
+        "Bottom Pane",
+        "Right Pane",
+    ] {
+        wait_for_label(&mut app, &window, label);
+    }
 
     // 2. Hostile calls change nothing and open no dialog.
     let w0 = app.call("state.get", json!({"target": "windows"}));
@@ -2164,6 +2176,17 @@ fn window_views_and_panes_over_the_channel() {
     assert_eq!(r["status"], "right markers 300 shown", "{r}");
     let l = layout(&mut app);
     assert_eq!(l["main"], "arrange", "{l}");
+    // The Mix view's right pane took it at once (Task 9 review M1).
+    let right = layout_pane(&l, "mix", "right");
+    assert_eq!(
+        (
+            right["shown"].clone(),
+            right["view"].clone(),
+            right["size"].clone()
+        ),
+        (json!(true), json!("markers"), json!(300.0)),
+        "{l}"
+    );
 
     // 5. The mixer in arrange's bottom pane.
     app.call(
@@ -2172,11 +2195,9 @@ fn window_views_and_panes_over_the_channel() {
     );
     let l = layout(&mut app);
     assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
-    // FINDING (task 9 fix round 1): the mixer bar's "Add Bus" button is in
-    // no node's label, title or value in this tree (checked in the bottom
-    // pane's mixer), so the brief's assertion cannot hold; the bar's
-    // Instruments menu is, and only a mixer has one.
-    wait_for_label(&mut app, &window, "Instruments");
+    // The mixer bar's Add Bus is an AppKit button, in the tree (Task 9
+    // fix round 1 finding, final review I1).
+    wait_for_label(&mut app, &window, "Add Bus");
 
     // 6. The mixer window has its own transport bar.
     app.call(

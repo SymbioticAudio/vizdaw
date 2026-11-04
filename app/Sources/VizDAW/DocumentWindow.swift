@@ -93,11 +93,6 @@ struct KeyDoc: Equatable {
     }
 }
 
-private struct PollKey: Equatable {
-    let key: Bool
-    let playing: Bool
-}
-
 /// Restores the document window's saved frame once and saves it after each
 /// move or resize (plan 7a Ruling 11), in `ui.json` with the panes.
 struct WindowFrameKeeper: NSViewRepresentable {

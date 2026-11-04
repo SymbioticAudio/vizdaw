@@ -59,6 +59,19 @@ import VizDAWCore
         #expect(r.punchText(.position) == m.fieldText(.position))
     }
 
+    /// Plan 7a final review I2: the mixer window's transport bar has its own
+    /// chevron; the popover opens under the one that was clicked.
+    @Test func openingInTheMixerWindowDoesNotShowInTheDocumentWindow() throws {
+        let (m, _) = try demo()
+        let r = m.record
+        r.togglePopover(in: .mixerWindow)
+        #expect(r.showsPopover(in: .mixerWindow) && !r.showsPopover(in: .document))
+        // The other window's chevron moves it there; its own closes it.
+        r.togglePopover(in: .document)
+        #expect(r.showsPopover(in: .document) && !r.showsPopover(in: .mixerWindow))
+        r.togglePopover(in: .document)
+        #expect(!r.showsPopover && !r.showsPopover(in: .document))
+    }
     /// 5d-2 final review I3: In typed, Tab, Out typed, then the popover
     /// closes without Return: both are committed, never shown but stale.
     @Test func closingThePopoverCommitsEveryPunchDraft() throws {

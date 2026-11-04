@@ -2,6 +2,10 @@ import Foundation
 import Observation
 import VizDAWCore
 
+/// Where the record popover shows (plan 7a final review I2): the document
+/// window's transport bar or the mixer window's.
+public enum RecordPopoverHost: Equatable, Sendable { case document, mixerWindow }
+
 /// Recording in a document (plan 5c Task 13; sub-project 5 spec §6.4,
 /// §6.5): what Record asks the core for, what the core reports while it
 /// records, and the crash-recovery offer. Replace, punch and loop come
@@ -36,6 +40,25 @@ public final class RecordModel {
             }
         }
     }
+    /// The window whose chevron opened the popover (plan 7a final review
+    /// I2): the mixer window has a transport bar too, and the popover shows
+    /// under one chevron only.
+    public private(set) var popoverHost: RecordPopoverHost = .document
+
+    /// The chevron in `host`: closes the popover open there, else opens it
+    /// there (closing it elsewhere first, which commits the drafts).
+    public func togglePopover(in host: RecordPopoverHost) {
+        if showsPopover(in: host) {
+            showsPopover = false
+            return
+        }
+        if showsPopover { showsPopover = false }
+        popoverHost = host
+        showsPopover = true
+    }
+
+    /// The popover is open in `host`.
+    public func showsPopover(in host: RecordPopoverHost) -> Bool { showsPopover && popoverHost == host }
     /// Text typed in the popover's punch fields, until Return, the field
     /// losing focus, the popover closing or Record.
     var punchDrafts: [TransportField: String] = [:]

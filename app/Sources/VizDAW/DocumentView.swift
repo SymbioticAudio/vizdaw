@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import VizDAWAppModel
 import VizDAWCore
+import VizDAWEditors
 
 /// One document's window: the shell (transport bar, layout A's panes,
 /// status line) with the document's sheets and alerts (plan 7a Task 7).
@@ -86,34 +87,32 @@ struct DocumentTransportBar: View {
         // review I1): never cut at the default window or the minimum.
         TransportBarLayout(spacing: 10) {
             HStack(spacing: 10) {
+                // AppKit controls and text: the channel's tree walks AppKit's
+                // elements and sees no SwiftUI button or text (final review I1).
                 HStack(spacing: 6) {
-                    PlayStopButton(playing: model.isPlaying, enabled: model.canPlay) { model.playStop() }
+                    AppKitButton(
+                        model.isPlaying ? "Stop" : "Play", symbol: model.isPlaying ? "stop.fill" : "play.fill",
+                        enabled: model.canPlay, help: model.isPlaying ? "Stop (Space)" : "Play (Space)"
+                    ) { model.playStop() }
+                    .fixedSize()
+                    AppKitButton("Loop", symbol: "repeat", isOn: model.looping, help: "Loop") { model.toggleLoop() }
                         .fixedSize()
-                    Toggle(
-                        isOn: Binding(get: { model.looping }, set: { _ in model.toggleLoop() })
-                    ) {
-                        Label("Loop", systemImage: "repeat")
-                    }
-                    .toggleStyle(.button)
-                    .labelStyle(.iconOnly)
-                    .help("Loop")
-                    RecordControls(model: model, record: model.record)
+                    RecordControls(model: model, record: model.record, host: showsViews ? .document : .mixerWindow)
                 }
                 .fixedSize()
-                Text(Formatting.position(model.transport))
-                    .font(.system(.title3, design: .monospaced))
-                    .lineLimit(1)
+                // A steady width, so the bar does not jitter as the digits
+                // change (Task 7 review M5).
+                AppKitLabel(Formatting.position(model.transport), font: Self.positionFont)
                     .fixedSize()
+                    .frame(minWidth: Self.positionWidth, alignment: .leading)
             }
             // In a row narrower than they like, the fields narrow (to 72 pt).
             TransportBar(model: model)
                 .clipped()
             HStack(spacing: 10) {
-                Text(Formatting.device(model.transport))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                AppKitLabel(
+                    Formatting.device(model.transport), font: .preferredFont(forTextStyle: .caption1), secondary: true,
+                    truncatesMiddle: true)
                 if showsViews {
                     faults
                     views
@@ -126,18 +125,20 @@ struct DocumentTransportBar: View {
         .background(.bar)
     }
 
+    /// The position's font, and the width of its widest usual text.
+    @MainActor static let positionFont = NSFont.monospacedSystemFont(
+        ofSize: NSFont.preferredFont(forTextStyle: .title3).pointSize, weight: .regular)
+    @MainActor static let positionWidth = AppKitLabel.width(of: "999.4.960  00:00.000", font: positionFont)
+
     /// Attached only in the document window, so `showsFaults` opens one
     /// popover (Ruling 8).
     @ViewBuilder private var faults: some View {
         if model.hasFaults || model.hasReport {
-            Button {
-                model.showsFaults.toggle()
-            } label: {
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(model.hasFaults ? .red : .orange)
-            }
-            .help("Faults and compile messages")
-            .accessibilityLabel("Faults")
+            AppKitButton(
+                "Faults", symbol: "circle.fill", help: "Faults and compile messages",
+                tint: model.hasFaults ? .systemRed : .systemOrange
+            ) { model.showsFaults.toggle() }
+            .fixedSize()
             .popover(isPresented: $model.showsFaults) {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(model.messages.enumerated()), id: \.offset) {
@@ -172,55 +173,10 @@ struct DocumentTransportBar: View {
     }
 
     private func paneToggle(_ id: String, _ side: PaneSide, symbol: String, key: String) -> some View {
-        Toggle(
-            isOn: Binding(get: { ViewCommands.isOn(id, model) }, set: { ViewCommands.run(id, on: $0, model) })
-        ) {
-            Image(systemName: symbol)
+        AppKitButton(side.title, symbol: symbol, isOn: ViewCommands.isOn(id, model), help: "\(side.title) (\(key))") {
+            ViewCommands.run(id, on: nil, model)
         }
-        .toggleStyle(.button)
-        .help("\(side.title) (\(key))")
-        .accessibilityLabel(side.title)
-    }
-}
-
-/// Play/Stop as an AppKit button: an `AXButton` named "Play" or "Stop" in
-/// the window's accessibility tree, as the toolbar item was, so the control
-/// channel's tree (which walks AppKit's elements) finds it.
-struct PlayStopButton: NSViewRepresentable {
-    let playing: Bool
-    let enabled: Bool
-    let action: @MainActor () -> Void
-
-    @MainActor
-    final class Coordinator: NSObject {
-        var action: @MainActor () -> Void
-
-        init(action: @escaping @MainActor () -> Void) { self.action = action }
-
-        @objc func press() { action() }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
-
-    func makeNSView(context: Context) -> NSButton {
-        let b = NSButton(title: "", target: context.coordinator, action: #selector(Coordinator.press))
-        b.bezelStyle = .push
-        b.imagePosition = .imageOnly
-        update(b)
-        return b
-    }
-
-    func updateNSView(_ b: NSButton, context: Context) {
-        context.coordinator.action = action
-        update(b)
-    }
-
-    private func update(_ b: NSButton) {
-        let title = playing ? "Stop" : "Play"
-        b.image = NSImage(systemSymbolName: playing ? "stop.fill" : "play.fill", accessibilityDescription: title)
-        b.setAccessibilityLabel(title)
-        b.toolTip = "\(title) (Space)"
-        b.isEnabled = enabled
+        .fixedSize()
     }
 }
 

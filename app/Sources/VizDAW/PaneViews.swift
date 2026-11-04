@@ -2,10 +2,11 @@ import SwiftUI
 import VizDAWAppModel
 import VizDAWCore
 
-/// What re-runs the left strip's poll: its window turning key, or the
-/// document starting or stopping play or record (as `DocumentWindow`'s
-/// own, which is private to that file; plan 7a Ruling 8).
-private struct PollKey: Equatable {
+/// What re-runs a 30 Hz poll (the document window's, the left strip's, the
+/// Mix view's and the bottom pane's mixer): its window turning key, or the
+/// document starting or stopping play or record (plan 7a Ruling 8, Task 8
+/// review M2: one type for all of them).
+struct PollKey: Equatable {
     let key: Bool
     let playing: Bool
 }
