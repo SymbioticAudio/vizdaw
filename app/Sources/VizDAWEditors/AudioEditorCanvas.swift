@@ -357,16 +357,26 @@ public final class AudioEditorCanvas: NSView, ThemedView {
         }
         let envelope = try? session.regionEnvelope(
             event: r.row.id, fromFrame: span.from, toFrame: span.to, columns: span.columns)
-        // 4. The whole file, dimmed.
+        // 4. The file's audio outside the region, dimmed (Ruling 3): not
+        // under the region's translucent fill, where it would show the
+        // unshaped level around the heard one.
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: wave).addClip()
+        let outside = NSBezierPath(rect: wave)
+        if !regionVis.isNull, regionVis.width > 0 { outside.appendRect(regionVis) }
+        outside.windingRule = .evenOdd
+        outside.addClip()
         if let rows {
             theme.audioWaveTrimmed.setFill()
             let file = AudioEditorGeometry.shaped(rows, envelope: nil, amplitude: amplitude)
             for b in WaveformGeometry.bars(file, in: spanRect) { b.fill() }
         }
-        if offline { RegionDrawing.hatch(spanRect.intersection(wave), RegionPalette(theme)) }
         NSGraphicsContext.restoreGraphicsState()
+        if offline {
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: wave).addClip()
+            RegionDrawing.hatch(spanRect.intersection(wave), RegionPalette(theme))
+            NSGraphicsContext.restoreGraphicsState()
+        }
         guard !regionVis.isNull, regionVis.width > 0 else { return }
         // 5. The region's fill, in the lane's strip colour.
         let lane = document.lanes.first { $0.id == r.lane.lane }
