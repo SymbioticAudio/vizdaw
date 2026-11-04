@@ -29,11 +29,15 @@ struct MixerWindow: View {
 
     @ViewBuilder private var content: some View {
         if let id, let mixer = store.mixer(id) {
-            MixerView(model: mixer)
-                .environment(\.openPluginWindow, { slot in PluginWindows.show(store, doc: id, slot: slot) })
-                .focusedSceneValue(\.documentModel, mixer.document)
-                .focusedSceneValue(\.documentID, id)
-                .navigationTitle("Mixer — \(mixer.document.snapshot.title)")
+            VStack(spacing: 0) {
+                DocumentTransportBar(model: mixer.document, docID: id, showsViews: false)
+                Divider()
+                MixerView(model: mixer, placement: .window)
+            }
+            .environment(\.openPluginWindow, { slot in PluginWindows.show(store, doc: id, slot: slot) })
+            .focusedSceneValue(\.documentModel, mixer.document)
+            .focusedSceneValue(\.documentID, id)
+            .navigationTitle("Mixer — \(mixer.document.snapshot.title)")
         } else {
             ContentUnavailableView(
                 "No Document", systemImage: "slider.vertical.3",
@@ -42,24 +46,44 @@ struct MixerWindow: View {
     }
 }
 
+/// The mixer in one of its placements (plan 7a Ruling 8): its window, the
+/// bottom pane, the Mix view. Its bar, popovers, rename field and maps
+/// sheet show only in the placement that opened them.
 struct MixerView: View {
     @Bindable var model: MixerModel
+    let placement: MixerPlacement
 
     var body: some View {
         VStack(spacing: 0) {
+            MixerBar(model: model, placement: placement)
+            Divider()
             LearnBanner(learn: model.document.learn, document: model.document)
             strips
         }
         .sheet(isPresented: mapsShown) { LearnMapsSheet(learn: model.document.learn) }
-        // The maps sheet goes with the mixer (final review T11 m6).
-        .onDisappear { model.document.learn.showsMaps = false }
-        .learnAlert(model.document.learn, shown: !model.document.learn.showsMaps)
+        .onAppear { model.appeared(placement) }
+        .onDisappear {
+            // The maps sheet goes with its placement (final review T11 m6);
+            // open drags end when the last placement goes.
+            model.document.learn.closeMaps(from: placement)
+            model.disappeared(placement)
+        }
+        .modifier(UnhostedLearnAlert(learn: model.document.learn))
+        .task {
+            // Meters at 30 Hz (spec §7): one poll per frame, however many
+            // placements show (`tick`); the strips follow the document.
+            while !Task.isCancelled {
+                model.tick(now: ProcessInfo.processInfo.systemUptime)
+                try? await Task.sleep(for: .milliseconds(33))
+            }
+        }
     }
 
-    /// The MIDI Learn Maps sheet (plan 5f-1 Task 11).
+    /// The MIDI Learn Maps sheet (plan 5f-1 Task 11), in this placement only.
     private var mapsShown: Binding<Bool> {
         let learn = model.document.learn
-        return Binding(get: { learn.showsMaps }, set: { learn.showsMaps = $0 })
+        let p = placement
+        return Binding(get: { learn.showsMaps(in: p) }, set: { if !$0 { learn.closeMaps(from: p) } })
     }
 
     private var strips: some View {
@@ -75,42 +99,49 @@ struct MixerView: View {
             }
             .padding(8)
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Text(model.loadText)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Button("Add Bus") { model.addBus() }
-                Menu("Instruments") {
-                    Button("New Plugin Instrument…") { model.browser = .instrument }
-                    Divider()
-                    ForEach(model.destinations, id: \.id) { d in
-                        Button("\(d.name): \(d.plugin?.name ?? "MIDI") → Plugin…") {
-                            model.browser = .destination(d.id)
-                        }
+        .environment(\.mixerPlacement, placement)
+    }
+}
+
+/// The mixer's own bar (it was the window's toolbar; a toolbar item in a
+/// pane would land in the document window's): the load, Add Bus and the
+/// Instruments menu with its popover (Ruling 8).
+struct MixerBar: View {
+    @Bindable var model: MixerModel
+    let placement: MixerPlacement
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Spacer(minLength: 0)
+            Text(model.loadText)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Button("Add Bus") { model.addBus() }
+            Menu("Instruments") {
+                Button("New Plugin Instrument…") { model.openBrowser(.instrument, in: placement) }
+                Divider()
+                ForEach(model.destinations, id: \.id) { d in
+                    Button("\(d.name): \(d.plugin?.name ?? "MIDI") → Plugin…") {
+                        model.openBrowser(.destination(d.id), in: placement)
                     }
                 }
-                .popover(isPresented: instrumentBrowserShown) {
-                    PluginBrowserView(model: browserModel(.instrument)) { model.pick($0) }
-                }
+            }
+            .fixedSize()
+            .popover(isPresented: instrumentBrowserShown) {
+                PluginBrowserView(model: browserModel(.instrument)) { model.pick($0) }
             }
         }
-        .onDisappear { model.endOpenDrag() }
-        .task {
-            // Meters at 30 Hz (spec §7); the strips follow the document.
-            while !Task.isCancelled {
-                model.refreshIfNeeded()
-                model.pollLevels()
-                model.pollAutomation()
-                try? await Task.sleep(for: .milliseconds(33))
-            }
-        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
     }
 
-    /// The instrument browser: for a new instrument or a destination.
+    /// The instrument browser, for a new instrument or a destination, in
+    /// the placement that opened it.
     private var instrumentBrowserShown: Binding<Bool> {
-        Binding(
-            get: { model.browser?.wantsInstrument == true },
+        let p = placement
+        return Binding(
+            get: { model.showsBrowser(in: p) && model.browser?.wantsInstrument == true },
             set: { if !$0 { model.browser = nil } })
     }
 
@@ -126,6 +157,22 @@ extension View {
             RoundedRectangle(cornerRadius: radius)
                 .stroke(Color.accentColor, lineWidth: 2)
                 .opacity(touched ? 1 : 0))
+    }
+}
+
+/// A refused learn's alert, unless the document window's shell hosts the
+/// one alert (`\.learnAlertHosted`, Ruling 8): the mixer window and torn
+/// windows keep theirs.
+struct UnhostedLearnAlert: ViewModifier {
+    let learn: LearnModel?
+    @Environment(\.learnAlertHosted) var hosted
+
+    func body(content: Content) -> some View {
+        if let learn, !hosted {
+            content.learnAlert(learn, shown: !learn.showsMaps)
+        } else {
+            content
+        }
     }
 }
 
@@ -147,6 +194,8 @@ struct StripView: View {
     @Bindable var model: MixerModel
     let strip: StripRow
     @FocusState private var renaming: Bool
+    /// The placement this strip shows in: what it opens shows there.
+    @Environment(\.mixerPlacement) var placement
 
     var body: some View {
         VStack(spacing: 4) {
@@ -191,7 +240,7 @@ struct StripView: View {
     }
 
     @ViewBuilder private var header: some View {
-        if model.renamingStrip == strip.id {
+        if model.isRenaming(strip.id, in: placement) {
             TextField("Name", text: $model.renameDraft)
                 .focused($renaming)
                 .onSubmit { model.commitRename() }
@@ -201,10 +250,10 @@ struct StripView: View {
             Text(strip.name)
                 .font(.headline)
                 .lineLimit(1)
-                .onTapGesture(count: 2) { model.beginRename(strip) }
+                .onTapGesture(count: 2) { model.beginRename(strip, in: placement) }
                 .onTapGesture { model.select(strip.id, adding: NSEvent.modifierFlags.contains(.command)) }
                 .contextMenu {
-                    Button("Rename…") { model.beginRename(strip) }
+                    Button("Rename…") { model.beginRename(strip, in: placement) }
                     Menu("Set All Strips to") {
                         ForEach(AutomationModes.all, id: \.self) { m in
                             Button(AutomationModes.title(m)) { model.setAllModes(m) }
@@ -214,7 +263,7 @@ struct StripView: View {
                         Button("Remove Bus") { model.removeBus(strip.id) }
                     }
                     Divider()
-                    Button("MIDI Learn Maps…") { model.document.learn.showsMaps = true }
+                    Button("MIDI Learn Maps…") { model.document.learn.showMaps(in: placement) }
                     if !strip.freeOutputs.isEmpty {
                         Menu("Add Outputs") {
                             ForEach(strip.freeOutputs, id: \.self) { i in
@@ -262,7 +311,7 @@ struct StripView: View {
                 SlotView(model: model, strip: strip, slot: slot, index: i)
             }
             Button {
-                model.browser = .insert(strip: strip.id)
+                model.openBrowser(.insert(strip: strip.id), in: placement)
             } label: {
                 Image(systemName: "plus")
                     .frame(maxWidth: .infinity)
@@ -271,7 +320,7 @@ struct StripView: View {
             .help("Add an effect")
             .popover(
                 isPresented: Binding(
-                    get: { model.browser == .insert(strip: strip.id) },
+                    get: { model.showsBrowser(in: placement) && model.browser == .insert(strip: strip.id) },
                     set: { if !$0 { model.browser = nil } })
             ) {
                 PluginBrowserView(

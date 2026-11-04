@@ -15,16 +15,21 @@ struct DetailPane: View {
     let onKind: (DetailEditorKind) -> Void
     let onTearOff: (() -> Void)?
     let onClose: (() -> Void)?
+    /// The kind picker: torn windows show it; the bottom pane leaves it to
+    /// its pane picker (plan 7a Ruling 3).
+    var showsKindPicker = true
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Picker("Editor", selection: Binding(get: { state.kind }, set: { onKind($0) })) {
-                    ForEach(DetailEditorKind.allCases, id: \.self) { Text($0.title).tag($0) }
+                if showsKindPicker {
+                    Picker("Editor", selection: Binding(get: { state.kind }, set: { onKind($0) })) {
+                        ForEach(DetailEditorKind.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 380)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 380)
                 Text(model.editor.title(state.target, sequences: model.snapshot.sequences))
                     .font(.headline)
                     .lineLimit(1)
@@ -55,7 +60,7 @@ struct DetailPane: View {
     }
 }
 
-/// The lower half of the document window (spec §3.7).
+/// The bottom pane's editor (spec §3.7; plan 7a Ruling 3).
 struct DetailArea: View {
     let model: DocumentModel
     let docID: UUID
@@ -69,26 +74,13 @@ struct DetailArea: View {
                     EditorWindows.tearOff(appStore, doc: docID, kind: d.kind)
                     model.editor.closeDetail()
                 },
-                onClose: { model.editor.closeDetail() })
+                onClose: { model.editor.closeDetail() }, showsKindPicker: false)
         } else {
             ContentUnavailableView(
                 "No Editor Open", systemImage: "rectangle.split.1x2",
-                description: Text("Double-click a block, or press ⌘1 to ⌘4."))
-        }
-    }
-}
-
-/// Arrangement over the split detail pane.
-struct EditorSplit: View {
-    let model: DocumentModel
-    let docID: UUID
-
-    var body: some View {
-        VSplitView {
-            ArrangementPane(model: model)
-                .frame(minHeight: 160, idealHeight: 380)
-            DetailArea(model: model, docID: docID)
-                .frame(minHeight: 120, idealHeight: 220)
+                description: Text("Double-click a block, or press ⌘1 to ⌘4.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

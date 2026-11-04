@@ -54,21 +54,28 @@ public enum ViewCommands {
     /// (`runPane` and the pane's picker): text edits end, the pane is set,
     /// then an editor kind opens the detail (or is remembered with no
     /// target), and a given `shown` wins over the detail's showing the
-    /// bottom pane.
+    /// bottom pane. A view off the pane's list is refused before anything
+    /// changes (Task 6 review M1): the refusal is returned, else nil.
+    @discardableResult
     public static func choose(
         _ side: PaneSide, _ view: PaneView, kind: DetailEditorKind?, shown: Bool?, size: Double?,
         in main: MainView?, _ m: DocumentModel
-    ) {
-        m.endPaneEdits()
+    ) -> String? {
         let e = m.editor
-        _ = e.setPane(side, view: view, shown: shown, size: size, in: main)
-        guard let kind else { return }
+        let setup = main ?? e.layout.views.main
+        guard ViewLayouts.views(side, in: setup).contains(view) else {
+            return "\(view.rawValue) is not on the \(side.rawValue) pane's list in the \(setup.rawValue) view."
+        }
+        m.endPaneEdits()
+        if let refused = e.setPane(side, view: view, shown: shown, size: size, in: main) { return refused }
+        guard let kind else { return nil }
         if let t = e.layout.detail?.target ?? e.detailTarget(shown: m.selectedSeq) {
             e.openDetail(t, kind: kind, in: main)
         } else {
             e.updateLayout { $0.lastKind = kind }
         }
         if let shown { e.setPaneShown(.bottom, shown, in: main) }
+        return nil
     }
 
     /// `ui.pane`: every argument is checked before anything changes

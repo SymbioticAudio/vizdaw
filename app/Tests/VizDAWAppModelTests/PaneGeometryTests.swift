@@ -51,6 +51,28 @@ import Testing
         #expect(PaneGeometry.drag(s, side: .bottom, by: .nan, in: size) == 260)
     }
 
+    /// Task 2 review M3: a divider's drag starts from the size the pane
+    /// shows (shrunk in a small window), so its first change does not jump.
+    @Test func aDividerDragStartsFromTheDisplayedSize() {
+        var s = ViewLayouts().arrange
+        s.left.size = 480; s.bottom.size = 900; s.right.shown = true; s.right.size = 520
+        let size = CGSize(width: 700, height: 450)
+        let f = PaneGeometry.frames(in: size, setup: s)
+        #expect(f.size(.left) == 278 && f.size(.right) == 180 && f.size(.bottom) == 289)
+        let shown = f.displayed(s)
+        #expect(shown.left.size == 278 && shown.right.size == 180 && shown.bottom.size == 289)
+        for side in PaneSide.allCases {
+            #expect(PaneGeometry.drag(shown, side: side, by: 0, in: size) == f.size(side), "\(side): no jump")
+        }
+        #expect(PaneGeometry.drag(shown, side: .left, by: -20, in: size) == 258)
+        #expect(PaneGeometry.drag(s, side: .left, by: 0, in: size) == 160, "seeded from the saved sizes it jumps")
+        // A pane dropped for this frame counts as hidden; a hidden pane has no size.
+        let narrow = PaneGeometry.frames(in: CGSize(width: 560, height: 450), setup: s)
+        #expect(!narrow.displayed(s).right.shown && narrow.size(.right) == nil)
+        let none = PaneGeometry.frames(in: CGSize(width: 1000, height: 700), setup: ViewLayouts().mix)
+        #expect(none.size(.left) == nil && none.size(.bottom) == nil && none.size(.right) == nil)
+    }
+
     @Test func aSavedFrameOffEveryScreenIsIgnored() {
         let screens = [CGRect(x: 0, y: 0, width: 1512, height: 982)]
         #expect(PaneGeometry.sanitizedFrame([100, 100, 1200, 800], screens: screens)

@@ -136,6 +136,23 @@ fileprivate extension ControlOutcome {
         #expect(m.renamingSeq == nil && !m.editor.textEditing && mixer.renamingStrip == nil)
         #expect(!m.textFieldHasKeyboard)
     }
+    /// Task 6 review M1: the pane picker's `choose` refused by `setPane`
+    /// (an editor kind in the right pane) opens no detail, shows no bottom
+    /// pane, keeps `lastKind` and leaves an open rename alone.
+    @Test func aRefusedChooseLeavesTheLayoutUntouched() throws {
+        let (doc, _) = storeDocument()
+        let m = doc.model
+        _ = m.editor.setPane(.bottom, view: nil, shown: false, size: nil)
+        m.beginRename(try #require(m.selectedSeq))
+        let kept = m.editor.layout
+        let refusal = ViewCommands.choose(.right, .editor, kind: .pianoRoll, shown: nil, size: nil, in: nil, m)
+        #expect(refusal == "editor is not on the right pane's list in the arrange view.")
+        #expect(m.editor.layout == kept)
+        #expect(m.editor.layout.detail == nil && !m.editor.layout.views.arrange.bottom.shown)
+        #expect(m.renamingSeq != nil, "a refused choice ends no edit")
+        #expect(ViewCommands.choose(.bottom, .editor, kind: .list, shown: nil, size: nil, in: nil, m) == nil)
+        #expect(m.editor.layout.views.arrange.bottom.shown && m.editor.layout.lastKind == .list)
+    }
     @Test func mainViewKeysDoNotCollideWithTheEditorKeys() {
         let keys = KeyBindings(defaults: MemoryDefaults())
         #expect(

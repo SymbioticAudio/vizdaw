@@ -18,6 +18,30 @@ public struct PaneFrames: Equatable {
     }
 }
 
+extension PaneFrames {
+    /// The size `side` shows at in these frames (its width, the bottom
+    /// pane's height), or nil when it is not shown.
+    public func size(_ side: PaneSide) -> Double? {
+        switch side {
+        case .left: left.map { Double($0.width) }
+        case .bottom: bottom.map { Double($0.height) }
+        case .right: right.map { Double($0.width) }
+        }
+    }
+
+    /// `setup` as these frames show it: each shown pane at its displayed
+    /// (perhaps shrunk) size, a pane dropped for this frame hidden. A
+    /// divider drag starts from it, so its first change does not jump
+    /// (Task 2 review M3).
+    public func displayed(_ setup: PaneSetup) -> PaneSetup {
+        var s = setup
+        for side in PaneSide.allCases {
+            if let v = size(side) { s[side].size = v } else { s[side].shown = false }
+        }
+        return s
+    }
+}
+
 public enum PaneGeometry {
     public static let centreMinimum = CGSize(width: 240, height: 160)
     public static let bottomMinimumWidth: CGFloat = 240

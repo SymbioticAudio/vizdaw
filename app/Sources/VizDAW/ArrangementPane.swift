@@ -4,14 +4,20 @@ import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
 
-/// The arrangement with its tool bar and status line.
+/// The arrangement with its tool bar (the transport bar and the status
+/// line are the shell's, plan 7a Ruling 9).
 struct ArrangementPane: View {
     let model: DocumentModel
 
     var body: some View {
         VStack(spacing: 0) {
-            ArrangementBar(model: model, editor: model.editor)
-            TransportBar(model: model)
+            // In a narrow centre the bar scrolls rather than wrap its labels.
+            ViewThatFits(in: .horizontal) {
+                ArrangementBar(model: model, editor: model.editor)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    ArrangementBar(model: model, editor: model.editor)
+                }
+            }
             Divider()
             if model.selectedSeq == nil {
                 ContentUnavailableView(
@@ -20,7 +26,6 @@ struct ArrangementPane: View {
             } else {
                 ArrangementHost(document: model)
             }
-            StatusLine(editor: model.editor)
         }
     }
 }
@@ -113,7 +118,8 @@ struct ArrangementBar: View {
     }
 }
 
-/// The transport fields and step entry's line (plan 4f Rulings 11, 16).
+/// The transport fields and step entry's line (plan 4f Rulings 11, 16), in
+/// the transport bar.
 struct TransportBar: View {
     let model: DocumentModel
 
@@ -129,10 +135,8 @@ struct TransportBar: View {
                     .background(Color.accentColor.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
                     .accessibilityLabel(s)
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 4)
     }
 }
 

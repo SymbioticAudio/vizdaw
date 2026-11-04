@@ -105,6 +105,14 @@ struct AppCommands: Commands {
                     .disabled(docID == nil)
                 Divider()
             }
+            CommandGroup(before: .toolbar) {
+                ForEach(["ui.view_arrange", "ui.view_mix"], id: \.self) { commandToggle($0, ViewCommands.self) }
+                Divider()
+                ForEach(["ui.toggle_left", "ui.toggle_bottom", "ui.toggle_right"], id: \.self) {
+                    commandToggle($0, ViewCommands.self)
+                }
+                Divider()
+            }
         }
         CommandMenu("Editors") {
             ForEach(DetailEditorKind.allCases, id: \.self) { kind in

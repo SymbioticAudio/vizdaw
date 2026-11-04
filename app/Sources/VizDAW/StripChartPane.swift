@@ -21,12 +21,14 @@ struct StripChartEditor: View {
     }
 }
 
-/// A refused row "MIDI Learn" ("MIDI Learn Failed").
+/// A refused row "MIDI Learn" ("MIDI Learn Failed"), unless the document
+/// window's shell hosts the alert (plan 7a Ruling 8).
 private struct StripChartLearnAlert: ViewModifier {
     let document: DocumentModel?
+    @Environment(\.learnAlertHosted) var hosted
 
     func body(content: Content) -> some View {
-        if let learn = document?.learn {
+        if let learn = document?.learn, !hosted {
             content.learnAlert(learn, shown: !learn.showsMaps)
         } else {
             content
