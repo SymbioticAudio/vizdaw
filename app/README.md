@@ -19,7 +19,7 @@ it runs plain `swift`.
 Launch arguments: `--demo` opens the demo project; a path ending in
 `.vizdaw` opens that project; `--no-scan` skips the plugin scan at launch;
 `--control PATH` turns on the agent control channel (below); `--smoke`
-plays the demo for 3 s with the mixer open, puts Apple's AUDelay
+plays the demo for 3 s with the mixer open, puts the system's AUDelay
 on the first strip and opens its window, prints the transport, the mixer
 and the editor size, and exits 0 when all of them worked. `--smoke` uses a
 temporary support folder and never scans.
@@ -711,7 +711,7 @@ says otherwise. "The level" means what you hear and the master meter.
     bar 3 (the mute row shows a held block) and pans across; with a bus and
     a send (mixer), Send 1 automation changes the bus level; Solo on a bus
     silences what does not feed it.
-76. Plugin parameters: add Apple's AUDelay (or the CLAP test gain if
+76. Plugin parameters: add the system's AUDelay (or the CLAP test gain if
     installed) as an insert on Built-in Synth; Automation lists it with its
     automatable parameters; draw Dry/Wet Mix (or Gain) from 0 to full over
     bars 1–4 and play: the effect follows; the plugin's own window moves its
@@ -1757,12 +1757,12 @@ By hand; the watcher is tested (`ExternalEditWatcherTests`), the core
      copies: they stay in the old package, still watched, until that
      package is next saved or closed.
 
-### Kontrol S-Series MK3 keyboards (plan 5f-4)
+### Host-integration keyboards (plan 5f-4)
 
-By hand, on the owner's S88 MK3 (newest firmware, MIDI 1.0 mode). The
-protocol is tested byte by byte (`core-surface` `kontrol_*` tests), the
+By hand, on the owner's 88-key host-integration keyboard (newest
+firmware, MIDI 1.0 mode). The protocol is tested byte by byte (`core-surface` `kontrol_*` tests), the
 core through the fake ports (`core-ffi/tests/kontrol.rs`), presets on
-Apple's AUDistortion (`platform-macos/tests/au.rs`) and the e2e
+the system's AUDistortion (`platform-macos/tests/au.rs`) and the e2e
 `drives_the_mixer_from_a_kontrol_mk3`. Each step is an action, then what
 you should see; report anything else, and every value step 198 asks for.
 
@@ -1838,7 +1838,7 @@ you should see; report anything else, and every value step 198 asks for.
      does not change, the screen goes back to it within 2 s, and Tap
      Tempo's light is dark until you stop.
 195. Plug-in mode: select a track with a plug-in instrument and an insert
-     (for example an Apple AU instrument plus AUDelay) and press the
+     (for example a system AU instrument plus AUDelay) and press the
      keyboard's Plug-in button: at once the soft buttons name the chain
      (the instrument first), the screen shows eight parameter names and
      values, "Page 1" and the page count. Turn knob 1: that parameter
@@ -1872,7 +1872,7 @@ you should see; report anything else, and every value step 198 asks for.
 198. Hardware checks to report (the research could not settle them):
      the firmware version the keyboard shows; the macOS port names (step
      189), including in MIDI 2.0 mode, and whether the DAW port works with
-     NI's Hardware Connection Service quit; where the page name (SysEx
+     the keyboard maker's hardware connection service quit; where the page name (SysEx
      0x75) appears; how many characters of a long track name, parameter
      name, value and volume text fit; whether the "Generic" background is
      readable (else try "VizDAW", Ruling 4), and how readable it is in
@@ -2020,7 +2020,10 @@ Checked by hand; the rules are tested (`AppearanceTests`, `AppIconTests`,
      "Type a level in dB, like −4.2 or −inf.". Type `-inf`: "−∞ dB" and
      the cap at the bottom. Type `40`: "+12.0 dB". Type `-0.04`: "0.0 dB".
      Paste a long line of 9s and press Return: refused, the box unchanged.
-     Press Escape while typing: nothing changes. In its pan box type
+     Press Escape while typing: nothing changes. Type `-9` and click
+     the fader (or anywhere outside the box) without pressing Return: the
+     box goes back to its value and nothing changes, because a number
+     box cancels when you click away and only Return commits. In its pan box type
      `L 24`: the knob turns left and the box reads "L 24"; then `r10`:
      "R 10"; then `c`: "C"; then `LR`: refused, with "Type a pan like
      L 24, C or R 10." in the status line.

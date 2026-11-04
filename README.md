@@ -1,7 +1,8 @@
 # VizDAW
 
 VizDAW (pronounced "Vista") is a MIDI-first, open-source digital audio
-workstation for macOS, inspired by Opcode Studio Vision.
+workstation for macOS, inspired by the classic integrated MIDI-and-audio
+sequencers of the 1990s.
 
 **Status:** VizDAW is in development and not yet released. Today it
 records, edits and mixes MIDI and audio in one window. An audio editor
@@ -18,11 +19,12 @@ where the project is going.
 - Audio import, regions, fades and normalize
 - The mixer, with inserts, buses, sends and automation
 - AU (v2/v3) and CLAP plug-ins (no VST3)
-- Control surfaces (Mackie Control with its XT extenders, HUI, and Kontrol
-  S-Series MK3 keyboards) and MIDI learn
+- Control surfaces (Mackie Control with its XT extenders, HUI, and keyboard
+  controllers with a host-integration mode: plug-in pages, transport) and
+  MIDI learn
 - Bounce to WAV, AIFF or CAF
 - Round trips to an external sample editor
-- MIDI 2.0 throughout, on Apple Silicon with macOS 14 or newer
+- MIDI 2.0 throughout, on Arm-based Macs with macOS 14 or newer
 - Six themes, Classic Light by default, and a channel strip with typed
   levels, pan and sends, send knobs, an EQ slot and an optional colour per
   strip
@@ -64,7 +66,7 @@ again as soon as they change.
 
 ## Platforms
 
-VizDAW runs on macOS 14 or newer on Apple Silicon. Its core is
+VizDAW runs on macOS 14 or newer on Arm-based Macs. Its core is
 platform-neutral Rust, and it builds and passes its tests on Linux in CI.
 A Linux app, with its own Rust interface and PipeWire audio, is planned
 after 1.0. A later 2.0 may bring one interface for every platform, and
@@ -82,7 +84,7 @@ scripts/swift.sh test             # Swift Testing suite (needs build-ffi.sh firs
 scripts/make-app.sh               # dist/VizDAW.app, ad-hoc signed
 ```
 
-The first build fetches symbiotic-design 0.2.0 from GitHub; `VIZDAW_NO_BRAND=1` builds without SymbioticAudio's branded icons.
+The first build fetches symbiotic-design 0.2.1 from GitHub; `VIZDAW_NO_BRAND=1` builds without SymbioticAudio's branded icons.
 
 Building on Linux: the core builds and tests with `cargo test --workspace`
 (there is no Linux app yet).
@@ -98,5 +100,5 @@ VizDAW's own build links SymbioticAudio's branded icons under a GPL section 7 ad
 ## Disclaimer
 
 VizDAW is an independent project. It is not affiliated with or endorsed by
-Opcode Systems, Gibson, or Apple. Studio Vision is a trademark of its
-respective owner and is mentioned only to describe the project's inspiration.
+any other software or hardware company. Any product names it mentions are
+trademarks of their respective owners.
