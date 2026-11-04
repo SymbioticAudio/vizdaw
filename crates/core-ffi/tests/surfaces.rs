@@ -970,6 +970,64 @@ fn a_vpot_in_plugin_mode_moves_the_plugin() {
     );
 }
 
+/// Plan 7b B2 review M1: the plug-in page shows the EQ first (Ruling 7):
+/// with an EQ and an insert, V-pot 1 moves the EQ's first parameter and
+/// leaves the insert's alone.
+#[test]
+fn a_vpot_in_plugin_mode_moves_the_eq_before_the_inserts() {
+    use vizdaw_ffi::{PluginFormatTag, PluginRefRow, SlotStatus};
+    let _g = serial();
+    vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
+    let s = vizdaw_ffi::Session::new_demo().unwrap();
+    let synth = s.mixer().unwrap().strips[0].id;
+    let gain_ref = || PluginRefRow {
+        format: PluginFormatTag::Clap,
+        id: "vizdaw.test.gain".into(),
+        name: "Test Gain".into(),
+        vendor: "VizDAW".into(),
+        version: "1.0.0".into(),
+    };
+    s.add_insert(synth, None, gain_ref()).unwrap();
+    s.set_eq(synth, Some(gain_ref())).unwrap();
+    let row = s
+        .mixer()
+        .unwrap()
+        .strips
+        .into_iter()
+        .find(|x| x.id == synth)
+        .unwrap();
+    let (eq, insert) = (row.eq.unwrap().id, row.inserts[0].id);
+    s.play(song(&s)).unwrap();
+    wait_until("the plugins to run", || {
+        s.idle().unwrap();
+        s.plugin_slots()
+            .unwrap()
+            .iter()
+            .all(|x| x.status == SlotStatus::Live)
+    });
+    let gain = |slot: u64| {
+        s.params(slot)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == 0)
+            .unwrap()
+            .value
+    };
+    let (eq_before, insert_before) = (gain(eq), gain(insert));
+    let id = mcu(&s);
+    s.set_surface_selection(vec![synth]).unwrap();
+    s.inject_surface(id, vec![0x90, 0x2B, 0x7F]).unwrap();
+    debug_advance(30);
+    s.idle().unwrap();
+    s.inject_surface(id, vec![0xB0, 0x10, 0x05]).unwrap();
+    s.stop().unwrap();
+    assert!(
+        gain(eq) > eq_before,
+        "V-pot 1 moved the EQ's first parameter"
+    );
+    assert_eq!(gain(insert), insert_before, "and not the first insert's");
+}
+
 /// Owner answer 2026-11-02 (Ruling 5): a tap skips to the next marker,
 /// else bar; a hold winds.
 #[test]
