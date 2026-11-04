@@ -122,6 +122,10 @@ pub enum StateTargetRow {
     Record,
     /// Audio input (plan 5c).
     Input,
+    /// Automation modes, touches and suspend (plan 5e-1).
+    Automation,
+    /// Control surfaces and MIDI learn (plan 5f-1).
+    Surfaces,
 }
 
 /// The after-crash answer.
@@ -542,6 +546,21 @@ pub enum ControlResult {
         /// Each input channel's peak since the last read.
         levels: Vec<f32>,
     },
+    /// `state.get automation` (plan 5e-1).
+    Automation {
+        /// Document ID.
+        doc: String,
+        /// Its strips' modes, the touched targets, suspend and writing.
+        state: crate::automation::AutomationStateRow,
+    },
+    /// `state.get surfaces` (plan 5f-1): `doc` is None (and `feedback`
+    /// empty) without a document (pre-flight M29).
+    Surfaces {
+        /// Document ID, if one is open.
+        doc: Option<String>,
+        /// The surfaces, their feedback, the learn and the problems.
+        state: crate::surfaces::SurfaceStateRow,
+    },
     /// `destination.measure_return` (plan 5c-2).
     Measured {
         /// Document ID.
@@ -834,6 +853,8 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 StateTarget::Project => StateTargetRow::Project,
                 StateTarget::Record => StateTargetRow::Record,
                 StateTarget::Input => StateTargetRow::Input,
+                StateTarget::Automation => StateTargetRow::Automation,
+                StateTarget::Surfaces => StateTargetRow::Surfaces,
             },
             window: window_row(window),
         },
@@ -1102,6 +1123,34 @@ pub fn result_json(r: &ControlResult) -> Value {
             // Thousandths: an f32 printed as f64 would show its rounding.
             "return_latency_ms": (f64::from(*return_latency_ms) * 1000.0).round() / 1000.0,
             "onsets": onsets,
+        }),
+        ControlResult::Automation { doc, state } => json!({
+            "doc": doc, "suspended": state.suspended, "writing": state.writing,
+            "modes": state.modes.iter().map(|m| json!({
+                "strip": m.strip, "mode": crate::automation::mode_text(m.mode),
+            })).collect::<Vec<_>>(),
+            "touched": state.touched.iter()
+                .map(|t| crate::automation::automation_target_text(*t))
+                .collect::<Vec<_>>(),
+        }),
+        ControlResult::Surfaces { doc, state } => json!({
+            "doc": doc,
+            "surfaces": state.surfaces.iter().map(|u| json!({
+                "id": u.id,
+                "type": match u.kind {
+                    crate::surfaces::SurfaceKindRow::Mcu => "mcu",
+                    crate::surfaces::SurfaceKindRow::McuXt => "mcu_xt",
+                    crate::surfaces::SurfaceKindRow::Hui => "hui",
+                    crate::surfaces::SurfaceKindRow::KontrolMk3 => "kontrol_mk3",
+                },
+                "input": u.input, "output": u.output, "position": u.position,
+                "connected": u.connected, "online": u.online, "ignored": u.ignored,
+            })).collect::<Vec<_>>(),
+            "feedback": state.feedback.iter().map(|f| json!({
+                "surface": f.surface, "messages": f.messages, "meters_sent": f.meters_sent,
+            })).collect::<Vec<_>>(),
+            "learning": state.learning,
+            "problems": state.problems,
         }),
         ControlResult::InputState { doc, info, levels } => {
             let a = crate::audio::audio_settings();

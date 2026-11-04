@@ -154,7 +154,20 @@ public final class DocumentStore {
     /// The document whose own window is key.
     public var keyDocument: UUID? { keyWindow?.doc }
 
-    public func focusDocument(_ doc: UUID, window: UUID) { keyWindow = (doc, window) }
+    public func focusDocument(_ doc: UUID, window: UUID) {
+        keyWindow = (doc, window)
+        recentKey.removeAll { $0 == doc }
+        recentKey.insert(doc, at: 0)
+    }
+
+    /// Documents whose window was key, the most recent first (final review
+    /// R2); a closed one is removed.
+    private var recentKey: [UUID] = []
+
+    /// The front-most document window still open: the one key last.
+    /// Settings › Keys "Learn MIDI" learns into it when no document window
+    /// is key (final review R2). Observable, deterministic.
+    public var frontDocument: DocumentModel? { recentKey.lazy.compactMap(model).first }
 
     /// Window `window` (of document `doc`) resigned key or closed; only the
     /// window that last took focus clears it.
@@ -197,6 +210,9 @@ public final class DocumentStore {
     public var listPreferences = ListPreferences()
     /// The app's key bindings, handed to every document (plan 4f).
     public var keyBindings: KeyBindings?
+    /// The external sample editor's opener and watching, handed to every
+    /// document (plan 5f-3; the app sets the live ones, nil: fakes).
+    @ObservationIgnored public var externalTools: ExternalTools?
 
     public func newDemoAudio() -> UUID? {
         guard let make = makeDemoAudio else { return nil }
@@ -226,6 +242,9 @@ public final class DocumentStore {
 
     /// Brings a document's window to the front (set by the app).
     public var activate: ((UUID) -> Void)?
+    /// Every new model, before any window shows it (set by the app: the
+    /// surfaces' core and command sinks, plan 5f-1 Task 10).
+    public var didMake: ((UUID, DocumentModel) -> Void)?
 
     /// The open document saved at `path` (same file, ignoring case and
     /// symbolic links), if any.
@@ -299,6 +318,7 @@ public final class DocumentStore {
         if tornFocus?.doc == id { tornFocus = nil }
         if panelFocus == id { panelFocus = nil }
         if keyWindow?.doc == id { keyWindow = nil }
+        recentKey.removeAll { $0 == id }
         mixers.removeValue(forKey: id)?.endOpenDrag()
         // Plugin windows detach their editors before the session goes.
         willClose?(id)
@@ -308,6 +328,8 @@ public final class DocumentStore {
             // No list outlives its document (none keeps MIDI input running).
             doc.dropLists()
             if doc.isPlaying { try? doc.session.stop() }
+            // Watching lasts until the project closes (spec §11).
+            doc.stopExternalEdits()
             try? doc.session.close()
         }
     }
@@ -322,7 +344,9 @@ public final class DocumentStore {
             let model = try DocumentModel(session: make())
             model.listPreferences = listPreferences
             model.keys = keyBindings
+            model.externalTools = externalTools
             let id = UUID()
+            didMake?(id, model)
             documents[id] = model
             return id
         } catch {

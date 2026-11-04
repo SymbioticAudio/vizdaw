@@ -4,11 +4,12 @@
 //! UI gestures.
 
 use block2::RcBlock;
+use core_host::OfflineRender;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{MainThreadMarker, msg_send};
 use objc2_audio_toolbox::{
-    AUListenerDispose, AUParameterListenerRef, AUParameterSet, AURenderCallbackStruct,
+    AUListenerDispose, AUParameterListenerRef, AUParameterSet, AUPreset, AURenderCallbackStruct,
     AudioComponent, AudioComponentCopyName, AudioComponentDescription, AudioComponentFindNext,
     AudioComponentFlags, AudioComponentGetDescription, AudioComponentGetVersion,
     AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioComponentInstantiate,
@@ -18,10 +19,12 @@ use objc2_audio_toolbox::{
     AudioUnitParameterOptions, AudioUnitParameterUnit, AudioUnitPropertyID, AudioUnitRender,
     AudioUnitRenderActionFlags, AudioUnitReset, AudioUnitScope, AudioUnitSetParameter,
     AudioUnitSetProperty, AudioUnitUninitialize, HostCallbackInfo, MusicDeviceMIDIEvent,
-    kAudioUnitProperty_ClassInfo, kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount,
+    kAudioUnitErr_InvalidProperty, kAudioUnitErr_PropertyNotWritable, kAudioUnitProperty_ClassInfo,
+    kAudioUnitProperty_CocoaUI, kAudioUnitProperty_ElementCount, kAudioUnitProperty_FactoryPresets,
     kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
-    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_ParameterInfo,
-    kAudioUnitProperty_ParameterList, kAudioUnitProperty_RequestViewController,
+    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_OfflineRender,
+    kAudioUnitProperty_ParameterInfo, kAudioUnitProperty_ParameterList,
+    kAudioUnitProperty_PresentPreset, kAudioUnitProperty_RequestViewController,
     kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat,
     kAudioUnitProperty_TailTime, kAudioUnitScope_Global,
 };
@@ -31,9 +34,9 @@ use objc2_core_audio_types::{
     kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 use objc2_core_foundation::{
-    CFBundle, CFData, CFPropertyList, CFPropertyListCreateData, CFPropertyListCreateWithData,
-    CFPropertyListFormat, CFRetained, CFRunLoop, CFString, CFURL, CGPoint, CGRect, CGSize,
-    kCFRunLoopDefaultMode,
+    CFArray, CFBundle, CFData, CFPropertyList, CFPropertyListCreateData,
+    CFPropertyListCreateWithData, CFPropertyListFormat, CFRetained, CFRunLoop, CFString, CFURL,
+    CGPoint, CGRect, CGSize, kCFRunLoopDefaultMode,
 };
 use std::ffi::CString;
 use std::ffi::c_void;
@@ -293,9 +296,20 @@ impl Unit {
         element: u32,
         v: &T,
     ) -> Result<(), String> {
+        os(call, self.set_status(id, scope, element, v))
+    }
+
+    /// [`Unit::set`] with the unit's own `OSStatus` (0 on success).
+    fn set_status<T>(
+        &self,
+        id: AudioUnitPropertyID,
+        scope: AudioUnitScope,
+        element: u32,
+        v: &T,
+    ) -> i32 {
         // SAFETY: `v` outlives the call and its size matches the property's
         // type (named by the caller).
-        os(call, unsafe {
+        unsafe {
             AudioUnitSetProperty(
                 self.unit,
                 id,
@@ -304,7 +318,7 @@ impl Unit {
                 (v as *const T).cast::<c_void>(),
                 size_of::<T>() as u32,
             )
-        })
+        }
     }
 
     /// Buses in `scope` (input or output).
@@ -361,6 +375,100 @@ impl Unit {
             kAudioUnitScope_Global,
             0,
             &frames,
+        )
+    }
+
+    /// Asks the unit to render offline (`on`) or in real time
+    /// (`kAudioUnitProperty_OfflineRender`, global scope; plan 5f-2
+    /// Ruling 7).
+    pub(crate) fn set_offline_render(&self, on: bool) -> OfflineRender {
+        offline_answer(self.set_status(
+            kAudioUnitProperty_OfflineRender,
+            kAudioUnitScope_Global,
+            0,
+            &u32::from(on),
+        ))
+    }
+
+    /// (presetNumber, name) of the factory presets; empty when the unit has none.
+    pub(crate) fn factory_presets(&self) -> Vec<(i32, String)> {
+        let mut array: *const CFArray = ptr::null();
+        let mut size = size_of::<*const CFArray>() as u32;
+        // SAFETY: `array` receives a +1 CFArrayRef of `*const AUPreset`.
+        let st = unsafe {
+            AudioUnitGetProperty(
+                self.unit,
+                kAudioUnitProperty_FactoryPresets,
+                kAudioUnitScope_Global,
+                0,
+                NonNull::from(&mut array).cast::<c_void>(),
+                NonNull::from(&mut size),
+            )
+        };
+        if st != 0 {
+            return Vec::new();
+        }
+        let Some(array) = NonNull::new(array.cast_mut()) else {
+            return Vec::new();
+        };
+        // SAFETY: only the array is ours (+1); its entries and their names
+        // belong to it and are read while it is alive (never released here).
+        let array = unsafe { CFRetained::from_raw(array) };
+        let n = array.count().max(0);
+        let mut out = Vec::new();
+        for i in 0..n {
+            // SAFETY: `i` is in range; the values are `*const AUPreset`.
+            let entry = unsafe { array.value_at_index(i) }.cast::<AUPreset>();
+            if entry.is_null() {
+                continue;
+            }
+            // SAFETY: a non-null entry of a live array points at an AUPreset.
+            let AUPreset {
+                presetNumber,
+                presetName,
+            } = unsafe { *entry };
+            let name = if presetName.is_null() {
+                String::new()
+            } else {
+                // SAFETY: a borrowed CFString, valid while the array lives.
+                unsafe { &*presetName }.to_string()
+            };
+            out.push((presetNumber, name));
+        }
+        out
+    }
+
+    /// The present preset's number.
+    pub(crate) fn present_preset(&self) -> Option<i32> {
+        let zero = AUPreset {
+            presetNumber: 0,
+            presetName: ptr::null(),
+        };
+        let p = self.get(
+            kAudioUnitProperty_PresentPreset,
+            kAudioUnitScope_Global,
+            0,
+            zero,
+        )?;
+        // The name came back +1: released here.
+        drop(cfstring(p.presetName));
+        Some(p.presetNumber)
+    }
+
+    /// Makes `number`/`name` the present preset.
+    pub(crate) fn set_present_preset(&self, number: i32, name: &str) -> Result<(), String> {
+        let name = CFString::from_str(name);
+        let preset = AUPreset {
+            presetNumber: number,
+            presetName: CFRetained::as_ptr(&name).as_ptr().cast_const(),
+        };
+        // The name is borrowed for the call; the unit copies what it keeps.
+        self.set(
+            "AudioUnitSetProperty(PresentPreset)",
+            kAudioUnitProperty_PresentPreset,
+            kAudioUnitScope_Global,
+            0,
+            &preset,
         )
     }
 
@@ -1550,5 +1658,47 @@ impl Drop for View {
                 let _: () = msg_send![&*self.view, removeFromSuperview];
             }
         }
+    }
+}
+
+/// What a `kAudioUnitProperty_OfflineRender` set's status means (plan 5f-2
+/// Rulings T3-1, T3-2).
+fn offline_answer(status: i32) -> OfflineRender {
+    match status {
+        0 => OfflineRender::Taken,
+        // The unit has no such property, or has it read-only: it renders
+        // the same either way (Rulings T3-1, T3-2; Apple's effects on
+        // macOS 26).
+        s if s == kAudioUnitErr_InvalidProperty || s == kAudioUnitErr_PropertyNotWritable => {
+            OfflineRender::NoOfflineMode
+        }
+        // Anything else (a bad value, initialized when it wanted not to
+        // be): it has the mode and did not take it, so the bounce reports
+        // it.
+        _ => OfflineRender::Refused,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ruling T3-2: a read-only OfflineRender property is no offline mode,
+    /// not a refusal.
+    #[test]
+    fn offline_render_statuses_map_to_answers() {
+        assert_eq!(offline_answer(0), OfflineRender::Taken);
+        assert_eq!(
+            offline_answer(kAudioUnitErr_InvalidProperty),
+            OfflineRender::NoOfflineMode
+        );
+        assert_eq!(
+            offline_answer(kAudioUnitErr_PropertyNotWritable),
+            OfflineRender::NoOfflineMode
+        );
+        assert_eq!(
+            offline_answer(objc2_audio_toolbox::kAudioUnitErr_InvalidPropertyValue),
+            OfflineRender::Refused
+        );
     }
 }

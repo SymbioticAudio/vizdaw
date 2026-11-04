@@ -136,16 +136,21 @@ public struct DetailState: Codable, Hashable, Sendable {
     /// Strip Chart: its rows (nil: one velocity row). Optional, so earlier
     /// layouts decode (Plan 4d Ruling 21).
     public var stripRows: [StripLane]?
+    /// Strip Chart: the lane `stripRows` were saved for (plan 5e-2 Task 6,
+    /// ruling T6-2: another lane holding one target's automation opens on
+    /// that target first). Optional, so earlier layouts decode.
+    public var stripRowsLane: LaneKey?
 
     public init(
         kind: DetailEditorKind, target: EditorTarget, lanes: [UInt64]? = nil, listFilter: ListFilter? = nil,
-        stripRows: [StripLane]? = nil
+        stripRows: [StripLane]? = nil, stripRowsLane: LaneKey? = nil
     ) {
         self.kind = kind
         self.target = target
         self.lanes = lanes
         self.listFilter = listFilter
         self.stripRows = stripRows
+        self.stripRowsLane = stripRowsLane
     }
 }
 

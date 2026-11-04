@@ -1,7 +1,14 @@
 //! `Session`: one open document (one window).
 
+use crate::automation::{
+    AutomationModeRow, AutomationStateRow, GesturePhaseRow, Holder, Move, PassStep,
+    Path as TouchPath, PluginMove, PluginTouches, PreviewPointRow, Release, Sampler, Source,
+    StripModeRow, TouchHolder, TouchHolders, Touching, UnsentEnds, Writing,
+};
+use crate::autowrite::WriteMode;
 use crate::editor::{self, EditorSize};
 use crate::error::VizError;
+use crate::events::{AutomationTargetRow, automation_target_of, automation_target_row};
 use crate::guard::{ffi_guard, lock};
 use crate::host;
 use crate::mixer::{self, DestRow, MixerLevels, MixerSnapshot};
@@ -12,12 +19,20 @@ use crate::snapshot::{
     seq_id, seq_rows, warnings,
 };
 use crate::snapshot::{ParamRow, ParamValue, PluginRefRow};
+use crate::surfaces::{
+    LearnMapRow, LearnModeRow, LearnSourceRow, SurfaceEventRow, SurfaceStateRow,
+};
+use core_engine::gesture::{GestureMsg, GesturePhase};
+use core_engine::schedule::AutoDest;
 use core_host::PluginHost;
+use core_model::automation::{AutomationMode, AutomationTarget};
 use core_model::command::Command;
 use core_model::command::MixerCmd;
 use core_model::command::RoutingCmd;
+use core_model::command::SettingsCmd;
 use core_model::command::lane::LaneCmd;
 use core_model::command::sequence::SequenceCmd;
+use core_model::command::{AutomationWrite, RecordPass};
 use core_model::document::DestKind;
 use core_model::document::Document;
 use core_model::file;
@@ -25,6 +40,7 @@ use core_model::history::{History, Timestamp};
 use core_model::ids::{DestId, LaneId, PluginInstanceId, SeqId, StripId};
 use core_model::mixer::{AuxSend, Output, ParamId, PluginRef, PluginSlot};
 use core_model::selection::ViewFilter;
+use core_model::tempo::{Bpm, TempoMap, TempoPoint};
 use core_model::time::Tick;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,7 +52,7 @@ pub const EXTENSION: &str = "vizdaw";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-struct Inner {
+pub(crate) struct Inner {
     history: History,
     path: Option<PathBuf>,
     /// The document as last opened or saved; `dirty` compares against it.
@@ -133,6 +149,79 @@ struct Inner {
     /// A Save came while recording: the pass is saved when it lands (plan
     /// 5d-1 Ruling 19).
     save_after_pass: bool,
+    /// The targets touched now, with their paths (plan 5e-1 Rulings 14,
+    /// 20).
+    touches: std::collections::BTreeMap<AutomationTarget, Touching>,
+    /// The shared static edit's label and its open static touches
+    /// (Ruling 14).
+    static_edit: Option<(String, usize)>,
+    /// The 10 ms sampler (Ruling 8).
+    sampler: Sampler,
+    /// The plugin windows' touches (Ruling 15): a value-only plugin's are
+    /// released 500 ms after its last value.
+    plugin_touches: PluginTouches,
+    /// The document whose plugin-parameter automation `plugin_auto`
+    /// holds (Task 9 review I-1): its sequences are compared by pointer.
+    plugin_auto_doc: Document,
+    /// Every plugin parameter's automation in `plugin_auto_doc`.
+    plugin_auto: std::collections::BTreeMap<AutomationTarget, Vec<(SeqId, Tick, u64)>>,
+    /// Gesture ends the engine's queue refused (Ruling 10).
+    unsent_ends: UnsentEnds,
+    /// The pass writing while playing (Rulings 7, 23, 24).
+    writing: Option<Writing>,
+    /// A finished pass's writes, the Write strips that still exist and
+    /// the After Write mode, waiting for an open edit to end.
+    /// A pass a device rebuild ended, to start again in this sequence once
+    /// the rebuilt engine plays (controller ruling 3 on Task 8).
+    restart_writing: Option<SeqId>,
+    /// One entry per pass, landed as one step each (review m2), or into
+    /// the step its loop passes landed in (plan 5e-1 Task 12).
+    pending_automation: Vec<crate::automation::Landing>,
+    /// The Write strips (and the After Write mode) whose mode changes
+    /// when a recording's pass with automation lands (Ruling 9).
+    after_write_pending: Option<(Vec<StripId>, AutomationMode)>,
+    /// The undo step the last landing outside a recording made or went
+    /// into (Task 12: a looped pass a rebuild restarts keeps its step).
+    last_step: Option<u64>,
+    /// The step a pass a rebuild ended had, for the pass that restarts.
+    restart_step: Option<u64>,
+    /// Loop passes of the recording landed into its group (Task 12): its
+    /// step is "Write Automation" when it recorded nothing else.
+    landed_in_group: bool,
+    /// Control surfaces: the app's events, selection, last wind, heard
+    /// values' cache (plan 5f-1 Task 8).
+    surfaces: crate::surfaces::SessionSurfaces,
+    /// The meter holds of the mixer window and the surfaces (plan 5f-1
+    /// Ruling 13, pre-flight I4).
+    meters: crate::surfaces::MeterHolds,
+    /// The running bounce's job and its plugin copies' token (plan 5f-2
+    /// Ruling 6): ended once the job is no longer pending, or at close.
+    bounce_copies: Option<(u64, u64)>,
+    /// Finished bounces' files and media, by job (Ruling 10).
+    bounce_results: std::collections::BTreeMap<u64, crate::bounce::BounceResultRow>,
+    /// Each region's external-edit copy while the project is open (plan
+    /// 5f-3 Ruling 3; runtime only): retention keeps them, close lets them go.
+    edits: std::collections::BTreeMap<core_model::ids::EventId, crate::external::EditCopy>,
+    /// Copies being written without the lock (pre-flight M4): retention
+    /// waits for them.
+    edits_writing: u32,
+    /// The next bounce cancels itself once its progress reaches this
+    /// (test hook).
+    #[cfg(feature = "test-hooks")]
+    bounce_cancel_at: Option<f32>,
+    /// The next bounce fails its "Add to project" import of this source
+    /// (test hook).
+    #[cfg(feature = "test-hooks")]
+    bounce_fail_import_at: Option<u32>,
+}
+
+/// Slot `id`'s overlay in `doc` (what a capture into a copy of the
+/// history kept, plan 5e-1 Task 9b), to store with the same blob in the
+/// real history.
+fn kept_overlay(doc: &Document, id: PluginInstanceId) -> std::collections::BTreeMap<ParamId, f64> {
+    doc.plugin_slot(id)
+        .map(|s| s.params.iter().map(|(k, v)| (*k, *v)).collect())
+        .unwrap_or_default()
 }
 
 /// The plugins the crash marker names: those loading now, and with
@@ -169,6 +258,8 @@ struct News {
 impl Inner {
     fn new(doc: Document, path: Option<PathBuf>) -> Inner {
         let key = path.as_deref().map(recovery::key);
+        let plugin_auto = crate::automation::plugin_automation(&doc);
+        let plugin_auto_doc = doc.clone();
         Inner {
             key,
             revs: crate::revs::Revisions::new(&doc),
@@ -208,6 +299,30 @@ impl Inner {
             synth_mutes: Default::default(),
             settings_seen: crate::audio::epoch(),
             save_after_pass: false,
+            touches: Default::default(),
+            static_edit: None,
+            sampler: Sampler::default(),
+            plugin_touches: PluginTouches::default(),
+            plugin_auto_doc,
+            plugin_auto,
+            unsent_ends: UnsentEnds::default(),
+            writing: None,
+            pending_automation: Vec::new(),
+            restart_writing: None,
+            after_write_pending: None,
+            last_step: None,
+            restart_step: None,
+            landed_in_group: false,
+            surfaces: Default::default(),
+            meters: Default::default(),
+            bounce_copies: None,
+            bounce_results: Default::default(),
+            edits: Default::default(),
+            edits_writing: 0,
+            #[cfg(feature = "test-hooks")]
+            bounce_cancel_at: None,
+            #[cfg(feature = "test-hooks")]
+            bounce_fail_import_at: None,
         }
     }
 
@@ -234,13 +349,21 @@ impl Inner {
     /// Failures become problems for the next `idle`; at `close` no `idle`
     /// follows, so `close` also writes them to stderr (preflight M5).
     fn tidy(&mut self, package: &Path, jobs_done: bool) {
-        if !jobs_done && self.jobs.busy() {
+        if !jobs_done && (self.jobs.busy() || self.edits_writing > 0) {
             return;
         }
         let dir = crate::retention::trash_dir(self.trash_dir.as_deref());
         let mut refs = self.history.referenced_media_anywhere();
         for p in self.recorded_keep() {
             refs.entry(p).or_insert(None);
+        }
+        // Edit copies while the project is open (plan 5f-3 Ruling 3):
+        // `abs` is absolute, retention's paths package-relative; a copy in
+        // another package (after Save As) is not this package's.
+        for e in self.edits.values() {
+            if let Some(rel) = crate::external::package_relative(&e.abs, package) {
+                refs.entry(rel).or_insert(None);
+            }
         }
         let out = crate::retention::run(&refs, package, &|p| {
             crate::retention::trash(dir.as_deref(), p)
@@ -284,16 +407,22 @@ impl Inner {
             .collect()
     }
 
-    /// `Busy` while a Format, Convert or Relink job has not been applied:
-    /// each captures the project format and the items' files when it
-    /// starts, so another such job may not start meanwhile (5a Task 11
-    /// review Minor 4; preflight M3). An import does not block them.
+    /// `Busy` while a Format, Convert, Relink, Bounce or External Edit job
+    /// has not been applied: each captures the project format and the
+    /// items' files when it starts, so another such job may not start
+    /// meanwhile (5a Task 11 review Minor 4; preflight M3; a bounce's
+    /// streamer reads the media, plan 5f-2 Ruling 9; an external edit
+    /// imports in the format it started with and relinks a region, plan
+    /// 5f-3 Ruling 6). An import does not block them.
     fn media_jobs_idle(&self) -> Result<(), VizError> {
         use crate::jobs::JobKindRow;
-        if self
-            .jobs
-            .pending(&[JobKindRow::Format, JobKindRow::Convert, JobKindRow::Relink])
-        {
+        if self.jobs.pending(&[
+            JobKindRow::Format,
+            JobKindRow::Convert,
+            JobKindRow::Relink,
+            JobKindRow::Bounce,
+            JobKindRow::ExternalEdit,
+        ]) {
             return Err(VizError::Busy {
                 message: "Wait for the media job to finish.".into(),
             });
@@ -365,6 +494,38 @@ impl Inner {
         self.offline = offline;
         self.media_seen = Some((doc.clone(), root));
         changed
+    }
+
+    /// The plugin parameters touched or written in an open pass, or
+    /// written by a pass not landed yet (plan 5e-1 Task 9b): a capture
+    /// keeps their static values like an automated parameter's, since
+    /// their lane may not exist yet (a mid-pass autosave).
+    fn riding_params(&self) -> std::collections::BTreeSet<(PluginInstanceId, ParamId)> {
+        let mut targets: Vec<AutomationTarget> = self
+            .touches
+            .iter()
+            .filter(|(_, x)| matches!(x.path, crate::automation::Path::Write(..)))
+            .map(|(t, _)| *t)
+            .collect();
+        if let Some(w) = &self.writing {
+            targets.extend(w.stamps.keys().copied());
+            targets.extend(w.moved.iter().copied());
+            targets.extend(w.ended.iter().copied());
+            targets.extend(w.holds.iter().map(|(t, _)| *t));
+        }
+        for p in &self.pending_automation {
+            targets.extend(p.writes.iter().map(|w| w.target));
+        }
+        if let Some((Some(pass), _)) = &self.pending_pass {
+            targets.extend(pass.automation.iter().map(|w| w.target));
+        }
+        targets
+            .into_iter()
+            .filter_map(|t| match t {
+                AutomationTarget::PluginParam(slot, p) => Some((slot, p)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The sequence a position set without the engine belongs to: the one
@@ -608,9 +769,11 @@ impl Session {
     /// plugin call is on the stack: nothing is captured, and the caller
     /// must not write a half-captured file.
     fn capture_all(&self, inner: &mut Inner) -> Result<bool, VizError> {
+        let riding = inner.riding_params();
         let history = &mut inner.history;
         let failed = plugins::with(self.id, |p| {
-            p.map(|p| p.capture_all(history)).unwrap_or_default()
+            p.map(|p| p.capture_all(history, &riding))
+                .unwrap_or_default()
         })?;
         let all = failed.is_empty();
         for (id, e) in failed {
@@ -715,7 +878,18 @@ impl Session {
             // The title shows Edited.
             inner.news.doc_changed = true;
         }
-        inner.held.extend(r.gestures);
+        self.sync_loaded_plugins(inner, &r.loaded);
+        // A plugin window's moves are gestures too (spec §7.1); the
+        // parameters they write as automation are not parameter steps
+        // (plan 5e-1 Ruling 15, pre-flight M13).
+        let written = self.plugin_events(inner, &r.param_events);
+        inner
+            .held
+            .extend(r.gestures.into_iter().filter_map(|mut g| {
+                let slot = g.slot;
+                g.values.retain(|(p, _)| !written.contains(&(slot, *p)));
+                (!g.values.is_empty()).then_some(g)
+            }));
         let changed = self.commit_held(inner);
         self.mark(inner);
         self.maybe_autosave(inner);
@@ -820,6 +994,7 @@ impl Session {
         if crate::edit::retries_input_cmd(&cmd) {
             records_busy(&inner)?;
         }
+        let before = inner.doc().clone();
         inner.history.execute(&cmd, filter)?;
         inner.version += 1;
         // An arm or input change that went through lets a failed input
@@ -830,6 +1005,9 @@ impl Session {
         }
         inner.reload_host(self.id);
         self.mark(&mut inner);
+        // Touches of what the edit removed end (plan 5e-1 M9).
+        self.release_vanished(&mut inner);
+        self.resync_plugin_automation(&mut inner, Some(&before));
         inner.snapshot()
     }
 
@@ -844,7 +1022,7 @@ impl Session {
     /// plugin call is on the stack: the removal is refused rather than
     /// losing the state.
     fn capture_removed(&self, next: &Document) -> Result<(), VizError> {
-        let (mut scratch, gone) = {
+        let (mut scratch, gone, riding) = {
             let inner = lock(&self.inner);
             let before = mixer::slot_ids(inner.doc());
             let after = mixer::slot_ids(next);
@@ -852,20 +1030,28 @@ impl Session {
             if gone.is_empty() {
                 return Ok(());
             }
-            (inner.history.clone(), gone)
+            (inner.history.clone(), gone, inner.riding_params())
         };
         let captured = plugins::with(self.id, |p| {
             let Some(p) = p else { return Vec::new() };
             gone.into_iter()
                 // A placeholder has nothing to capture; its saved state
                 // stays in the document.
-                .filter_map(|id| p.capture(&mut scratch, id).ok().map(|blob| (id, blob)))
+                .filter_map(|id| {
+                    let mine = core_model::automation::slot_params(&riding, id);
+                    p.capture_with(&mut scratch, id, &mine)
+                        .ok()
+                        .map(|blob| (id, blob))
+                })
                 .collect::<Vec<_>>()
         })?;
         let mut inner = lock(&self.inner);
         for (id, blob) in captured {
             if let Some(bytes) = scratch.doc().state_blob(blob) {
-                inner.history.capture_state(id, bytes)?;
+                // The overlay the capture kept (Task 9b), as in `scratch`.
+                inner
+                    .history
+                    .capture_state_keeping(id, bytes, &kept_overlay(scratch.doc(), id))?;
             }
         }
         Ok(())
@@ -886,15 +1072,15 @@ impl Session {
         if due != Ok(true) {
             return false;
         }
-        let mut scratch = {
+        let (mut scratch, riding) = {
             let inner = lock(&self.inner);
             if inner.history.in_transaction() {
                 return false;
             }
-            inner.history.clone()
+            (inner.history.clone(), inner.riding_params())
         };
         let Ok(unloaded) = plugins::with(self.id, |p| {
-            p.map(|p| p.unload_unavailable(&mut scratch))
+            p.map(|p| p.unload_unavailable(&mut scratch, &riding))
                 .unwrap_or_default()
         }) else {
             return false;
@@ -908,7 +1094,7 @@ impl Session {
                     .ok_or_else(|| "captured state missing".to_string())?;
                 inner
                     .history
-                    .capture_state(id, bytes)
+                    .capture_state_keeping(id, bytes, &kept_overlay(scratch.doc(), id))
                     .map_err(|e| e.to_string())
             });
             // Reported like a save's capture failure; the document keeps
@@ -962,6 +1148,8 @@ impl Session {
         inner.version += 1;
         inner.reload_host(self.id);
         self.mark(&mut inner);
+        self.release_vanished(&mut inner);
+        self.resync_plugin_automation(&mut inner, Some(&before));
         let snapshot = inner.snapshot()?;
         // An undone or redone arm, monitor or input edit claims as the
         // edit did (Task 8 review m6).
@@ -986,6 +1174,10 @@ impl Session {
         if inner.recording.is_some() || inner.finishing {
             return Err(recording_busy());
         }
+        // A Play while a pass writes lands it first (plan 5e-1 Ruling 23):
+        // the new position is a new pass.
+        self.finish_writing(&mut inner);
+        self.apply_pending_automation(&mut inner);
         let id = seq_id(inner.doc(), seq)?;
         let start = start.or(match (inner.cursor, inner.cursor_seq) {
             (Some(t), None) => Some(t),
@@ -1010,10 +1202,25 @@ impl Session {
         inner.reload_fault = None;
         inner.cursor = None;
         inner.cursor_seq = Some(id);
+        // The gesture tap goes in before the Play, so the roll is its
+        // first mark (plan 5e-1 Ruling 7); Write strips' controls are held
+        // from the roll (Ruling 9), at the tick the Play starts from.
+        let at = pending
+            .located()
+            .or_else(|| host::position(self.id).map(|p| p.1))
+            .unwrap_or(Tick::ZERO);
+        self.begin_writing(&mut inner, id, at);
         // The disk wait (up to 250 ms) holds no lock: this session's
         // transport poll and every other session go on meanwhile.
         drop(inner);
-        host::finish_play(pending)
+        let played = host::finish_play(pending);
+        if played.is_err() {
+            // A Play that did not start writes nothing (Ruling 24).
+            let mut inner = lock(&self.inner);
+            self.finish_writing(&mut inner);
+            self.apply_pending_automation(&mut inner);
+        }
+        played
     }
 
     /// After an edit of a lane's arm, monitor or input in `seq` (plan 5d-1
@@ -1258,6 +1465,13 @@ impl Session {
                     message: "Wait for the import or conversion to finish, then save.".into(),
                 });
             }
+            // A copy written without the lock lands under the old root
+            // (plan 5f-3 review M1).
+            if inner.edits_writing > 0 {
+                return Err(VizError::Busy {
+                    message: "Wait for the edit copy to be written, then save.".into(),
+                });
+            }
             // A closed window holds no package (re-review m-3).
             if inner.closed {
                 return Err(crate::events::bad("this project was closed"));
@@ -1267,6 +1481,20 @@ impl Session {
             // not know this session's files. Claimed before anything is
             // written (re-review m-2); a failed save releases it.
             let claim = claim_package(&p, self.id)?;
+            // The same package spelled another way (case, a symlinked
+            // parent, a trailing `/`): its edit copies are respelled under
+            // `p`, so the save's retention, which strips `p`, keeps them
+            // (plan 5f-3 review I2). Same files, so a failed save leaves
+            // them right.
+            if let Some(old) = inner.path.clone() {
+                if package_key(&old) == claim.key {
+                    for e in inner.edits.values_mut() {
+                        if let Ok(rel) = e.abs.strip_prefix(&old) {
+                            e.abs = p.join(rel);
+                        }
+                    }
+                }
+            }
             self.save_to(&mut inner, &p)?;
             if inner.path.as_deref() != Some(p.as_path()) {
                 // The marker follows the project to its new place (not
@@ -1297,7 +1525,39 @@ impl Session {
                 // writes nothing more into the scratch package (review m3).
                 inner.refresh_media(self.id, true);
                 // The scratch package of an untitled session is done with.
-                let _ = std::fs::remove_dir_all(crate::media::scratch_root(self.id));
+                // Its edit copies go to the Trash first, never unlinked
+                // (plan 5f-3 Ruling 3, owner answer 2026-11-03): Save As
+                // does not carry them, so their next apply says they are
+                // gone. So do its recordings the project did not carry
+                // (ruling F-1; spec §6.5): those it carried were copied
+                // into the new package. A titled session has no scratch
+                // package.
+                let scratch = crate::media::scratch_root(self.id);
+                let trash = crate::retention::trash_dir(inner.trash_dir.as_deref());
+                let mut carried: std::collections::BTreeSet<String> = inner
+                    .history
+                    .referenced_media_anywhere()
+                    .into_keys()
+                    .collect();
+                carried.extend(inner.recorded_keep());
+                let recorded = crate::record::RECORDED_DIR;
+                let left = crate::external::trash_files_in(
+                    &scratch.join(crate::external::EDITS_DIR),
+                    trash.as_deref(),
+                    &crate::external::partial,
+                ) + crate::external::trash_files_in(
+                    &scratch.join(recorded),
+                    trash.as_deref(),
+                    &|name| carried.contains(&format!("{recorded}/{name}")),
+                );
+                if left == 0 {
+                    let _ = std::fs::remove_dir_all(&scratch);
+                } else {
+                    inner.news.problems.push(format!(
+                        "{left} recordings or edit copies were left in {}.",
+                        scratch.display()
+                    ));
+                }
                 inner.reload_host(self.id);
                 self.mark(&mut inner);
             }
@@ -1466,24 +1726,19 @@ impl Session {
             // Behind a rebuild this session's poll is running (its drain
             // has taken the host out of the slot): the Stop must not be
             // lost to an empty slot.
-            let _inner = lock(&self.inner);
-            host::stop(self.id)
+            let mut inner = lock(&self.inner);
+            inner.restart_writing = None;
+            let stopped = host::stop(self.id);
+            // What was written lands now (spec §7.4).
+            self.finish_writing(&mut inner);
+            self.apply_pending_automation(&mut inner);
+            stopped
         })
     }
 
     /// Moves the position to `tick`.
     pub fn locate(&self, tick: i64) -> Result<(), VizError> {
-        self.transport_call(|| {
-            let mut inner = lock(&self.inner);
-            if inner.recording.is_some() {
-                return Err(recording_busy());
-            }
-            if !host::locate(self.id, Tick(tick))? {
-                inner.cursor = Some(Tick(tick));
-                inner.cursor_seq = inner.selected_seq();
-            }
-            Ok(())
-        })
+        self.transport_call(|| self.locate_in(&mut lock(&self.inner), tick))
     }
 
     /// Loops from bar 1 to the end of the sequence, or stops looping.
@@ -1596,8 +1851,13 @@ impl Session {
                 return Ok(nothing());
             }
             plugins::tick_closing();
+            // A bounce's plugin copies load here (plan 5f-2 Ruling 6).
+            plugins::tick_bounces();
             self.unload_disabled();
             self.service_recording()?;
+            self.service_writing();
+            // Control surfaces and MIDI learn (plan 5f-1 Ruling 11).
+            self.service_surfaces();
             // An arm's claim another window's opening input put off (Task
             // 8 parked n2); the sources were reconnected at the arm.
             let owed = lock(&self.inner).claim_owed;
@@ -1606,6 +1866,7 @@ impl Session {
             }
             let mut inner = lock(&self.inner);
             self.apply_pending_pass(&mut inner);
+            self.apply_pending_automation(&mut inner);
             // A save at Stop the busy registry put off (Task 9 review M4).
             self.save_after_pass_now(&mut inner);
             // A setting a load publishes changed (plan 5d-1 Ruling 12).
@@ -1618,6 +1879,9 @@ impl Session {
                 inner.reload_host(self.id);
             }
             let changed = self.pump(&mut inner);
+            // Every other path that changes a plugin parameter's
+            // automation (Task 9 review I-1).
+            self.resync_plugin_automation(&mut inner, None);
             // Jobs applied when an edit closed (outside `idle`) count too.
             let owed = std::mem::take(&mut inner.news.media_changed);
             let jobs_changed = self.apply_jobs(&mut inner);
@@ -1742,8 +2006,10 @@ impl Session {
         })
     }
 
-    /// Sends a value to the running plugin now, without an undo step (a
-    /// control being dragged); `commit_params` records the final value.
+    /// Sends a value to the running plugin now, without an undo step: a
+    /// non-gesture edit (a typed value; tests). Kept for those (spec §7.1);
+    /// the app's sliders go through `gesture` instead. `commit_params`
+    /// records the final value.
     pub fn set_param(&self, slot: u64, param: u64, value: f64) -> Result<(), VizError> {
         ffi_guard(|| {
             if !value.is_finite() {
@@ -1760,7 +2026,8 @@ impl Session {
     }
 
     /// Records parameter values in the slot's overlay as one undo step
-    /// (`SetPluginParams`, spec §4).
+    /// (`SetPluginParams`, spec §4): the step of a non-gesture edit made
+    /// with `set_param` (spec §7.1; gestures land their own step).
     pub fn commit_params(
         &self,
         slot: u64,
@@ -1807,7 +2074,16 @@ impl Session {
     /// Meters, DSP load, latency and fault-bypassed plugins (empty unless
     /// this session holds the engine). The mixer polls it at 30 Hz.
     pub fn levels(&self) -> Result<MixerLevels, VizError> {
-        ffi_guard(|| Ok(host::levels(self.id).unwrap_or_else(MixerLevels::empty)))
+        // The surfaces read the same peaks (plan 5f-1 Ruling 13): one take
+        // feeds both holds, each cleared only by its own reader.
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.take_meters(&mut inner);
+            Ok(inner
+                .meters
+                .take_mixer(Instant::now())
+                .unwrap_or_else(MixerLevels::empty))
+        })
     }
 
     /// Opens a continuous edit (a drag): commands until `end_edit` are one
@@ -1826,12 +2102,15 @@ impl Session {
     pub fn end_edit(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
-            if inner.history.in_transaction() {
+            // The static gestures' shared edit is theirs to close (plan
+            // 5e-1 Ruling 14).
+            if inner.history.in_transaction() && inner.static_edit.is_none() {
                 inner.history.commit()?;
                 inner.version += 1;
             }
             inner.edit_label = None;
             self.commit_held(&mut inner);
+            self.apply_pending_automation(&mut inner);
             self.apply_jobs_after_edit(&mut inner);
             inner.snapshot()
         })
@@ -2365,6 +2644,19 @@ impl Session {
         })
     }
 
+    /// Slot `slot`'s own editor reports `value` (plain) for `param` with
+    /// no gesture events, as a knob that sends values only (test hook):
+    /// the plugin path's value-only touch, released 500 ms after its last
+    /// value.
+    pub fn debug_plugin_value(&self, slot: u64, param: u64, value: f64) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            let e = core_host::ParamEvent::Value(core_model::mixer::ParamId(param), value);
+            let _ = self.plugin_events(&mut inner, &[(PluginInstanceId(slot), e)]);
+            Ok(())
+        })
+    }
+
     /// Slot `slot`'s state blob in the document, if it has one (test
     /// hook).
     pub fn debug_slot_state(&self, slot: u64) -> Result<Option<u64>, VizError> {
@@ -2383,6 +2675,23 @@ impl Session {
     pub fn debug_hold_jobs(&self, on: bool) -> Result<(), VizError> {
         ffi_guard(|| {
             lock(&self.inner).jobs.set_held(on);
+            Ok(())
+        })
+    }
+
+    /// The next bounce cancels itself once its progress reaches `at` (None: never).
+    pub fn debug_bounce_cancel_at(&self, at: Option<f32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).bounce_cancel_at = at;
+            Ok(())
+        })
+    }
+
+    /// The next bounce fails the "Add to project" import of source `at`
+    /// (0-based, in import order) as a disk error would (None: never).
+    pub fn debug_bounce_fail_import(&self, at: Option<u32>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).bounce_fail_import_at = at;
             Ok(())
         })
     }
@@ -2465,6 +2774,13 @@ impl Session {
             // `idle` follows a close, and the take was promised saved
             // (Task 9 parked m3; a failure is printed below).
             self.save_after_pass_now(&mut inner);
+            // Touches end and a pass in progress lands (plan 5e-1 Ruling 20).
+            self.release_touches(&mut inner);
+            // Its learn is cancelled; if it was focused, the surfaces go
+            // blank (plan 5f-1 Ruling 11).
+            crate::surfaces::session_closed(self.id);
+            self.finish_writing(&mut inner);
+            self.apply_pending_automation(&mut inner);
             for line in inner.news.problems.iter().skip(before) {
                 eprintln!("VizDAW: {line}");
             }
@@ -2478,6 +2794,10 @@ impl Session {
             for w in inner.jobs.shutdown() {
                 discard(&root, w, &keep);
             }
+            // The bounce's plugin copies go with it (pre-flight I2).
+            if let Some((_, token)) = inner.bounce_copies.take() {
+                plugins::end_bounce(token);
+            }
             inner.overviews.shutdown();
             if let Some(p) = inner.path.clone() {
                 // The jobs were shut down and their files removed above,
@@ -2489,6 +2809,9 @@ impl Session {
                 // 10), saved or not.
                 inner.write_kept(&p);
                 before_close_tidy();
+                // Watching ends with the project: its copies may go (plan
+                // 5f-3 Ruling 3).
+                inner.edits.clear();
                 inner.tidy(&p, true);
                 // No `idle` follows a close: the problems would be lost
                 // (preflight M5).
@@ -2503,36 +2826,26 @@ impl Session {
                 // to the Trash before its scratch package is removed
                 // (plan 5c Ruling 15).
                 let dir = crate::retention::trash_dir(inner.trash_dir.as_deref());
-                let mut left = 0usize;
-                let recorded = scratch.join(crate::record::RECORDED_DIR);
-                match std::fs::read_dir(&recorded) {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    // Unreadable: recordings may be in it (review minor b).
-                    Err(e) => {
-                        eprintln!("VizDAW: {}: not read ({e})", recorded.display());
-                        left += 1;
-                    }
-                    Ok(rd) => {
-                        for e in rd.flatten() {
-                            if e.path().is_file() {
-                                if let Err(why) = crate::retention::trash(dir.as_deref(), &e.path())
-                                {
-                                    eprintln!(
-                                        "VizDAW: {}: not moved to the Trash ({why})",
-                                        e.path().display()
-                                    );
-                                    left += 1;
-                                }
-                            }
-                        }
-                    }
+                // Edit copies too (plan 5f-3 Ruling 3, owner answer
+                // 2026-11-03): an editor may hold work VizDAW has not
+                // imported yet.
+                // Every recording, dot-named or not; copies being written
+                // (dot-named partials) go with the package (ruling T3-1).
+                // A copy still being written keeps the package (review M1).
+                let mut left = inner.edits_writing as usize;
+                let none = |_: &str| false;
+                for (d, skip) in [
+                    (crate::record::RECORDED_DIR, &none as &dyn Fn(&str) -> bool),
+                    (crate::external::EDITS_DIR, &crate::external::partial),
+                ] {
+                    left += crate::external::trash_files_in(&scratch.join(d), dir.as_deref(), skip);
                 }
                 if left == 0 {
                     let _ = std::fs::remove_dir_all(scratch);
                 } else {
                     // Never unlinked (pre-flight I2): the package stays.
                     eprintln!(
-                        "VizDAW: {left} recording(s) were left in {}",
+                        "VizDAW: {left} recording(s) or edit copies were left in {}",
                         scratch.display()
                     );
                 }
@@ -2645,6 +2958,12 @@ impl Session {
     /// path)` of every file reloads play (test hook, preflight M2).
     pub fn debug_engine_media(&self) -> Vec<(u64, String)> {
         host::debug_media(self.id)
+    }
+
+    /// How many loop passes of the pass being written have landed (plan
+    /// 5e-1 Task 12), or `None` when none is being written (test hook).
+    pub fn debug_loop_passes_landed(&self) -> Option<usize> {
+        lock(&self.inner).writing.as_ref().map(|w| w.landed)
     }
 
     /// The input routes the engine was last given for this session (test
@@ -2958,7 +3277,7 @@ impl Session {
     pub fn abort_edit(&self) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let mut inner = lock(&self.inner);
-            if inner.history.in_transaction() {
+            if inner.history.in_transaction() && inner.static_edit.is_none() {
                 inner.history.abort()?;
                 inner.version += 1;
                 inner.reload_host(self.id);
@@ -3256,6 +3575,22 @@ impl Drop for Session {
         if recording {
             let _ = host::stop_recording(self.id);
         }
+        // A bounce still running stops first (plan 5f-2 pre-flight I2):
+        // its engine holds its plugin copies' processors, which end below;
+        // one without copies must not write after its session went (final
+        // review T4-M5).
+        {
+            let mut inner = lock(&self.inner);
+            if inner.bounce_copies.is_some()
+                || inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce])
+            {
+                let root = inner.root(self.id);
+                let keep = inner.kept();
+                for w in inner.jobs.shutdown() {
+                    discard(&root, w, &keep);
+                }
+            }
+        }
         release_packages(self.id);
         if let Some(k) = key {
             recovery::closed(&k, self.id);
@@ -3303,6 +3638,15 @@ pub(crate) fn discard(
             .filter(|r| r.made)
             .map(|r| r.file.path)
             .collect(),
+        // Only the media it imported; the files it exported stay.
+        Work::Bounce { files, .. } => files
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .map(|i| i.path)
+            .collect(),
+        // What an external edit imported; its copy stays (plan 5f-3).
+        Work::ExternalEdit { file, .. } => file.into_iter().flatten().map(|i| i.path).collect(),
         Work::Cancelled => Vec::new(),
     };
     for f in files {
@@ -3331,20 +3675,77 @@ impl Session {
             let root = inner.root(self.id);
             let row = match work {
                 Work::Cancelled => row(id, kind, JobStateRow::Cancelled, None, vec![], vec![]),
-                Work::Import { files, target } => match apply_import(inner, &root, files, target) {
-                    Ok((created, problems)) => {
-                        changed |= !created.is_empty();
-                        row(id, kind, JobStateRow::Done, None, problems, created)
+                Work::Bounce {
+                    files,
+                    target,
+                    exported,
+                    problems,
+                    failed,
+                } => {
+                    // Exported files are already in place (Ruling 12): kept
+                    // whatever the import's apply does, and named even when
+                    // a later rename failed.
+                    let applied = if let Some(why) = failed {
+                        Err((VizError::Io { message: why }, Vec::new()))
+                    } else if files.is_empty() {
+                        Ok((Vec::new(), Vec::new()))
+                    } else {
+                        apply_import_as(inner, &root, files, target, &ImportAs::BOUNCE)
+                    };
+                    match applied {
+                        Ok((created, more)) => {
+                            changed |= !created.is_empty();
+                            inner.bounce_results.insert(
+                                id,
+                                crate::bounce::BounceResultRow {
+                                    files: exported,
+                                    media: created.clone(),
+                                },
+                            );
+                            let all = problems.into_iter().chain(more).collect();
+                            row(id, kind, JobStateRow::Done, None, all, created)
+                        }
+                        Err((e, more)) => {
+                            inner.bounce_results.insert(
+                                id,
+                                crate::bounce::BounceResultRow {
+                                    files: exported,
+                                    media: Vec::new(),
+                                },
+                            );
+                            let all = problems.into_iter().chain(more).collect();
+                            row(
+                                id,
+                                kind,
+                                JobStateRow::Failed,
+                                Some(e.to_string()),
+                                all,
+                                vec![],
+                            )
+                        }
                     }
-                    Err((e, problems)) => row(
-                        id,
-                        kind,
-                        JobStateRow::Failed,
-                        Some(e.to_string()),
-                        problems,
-                        vec![],
-                    ),
-                },
+                }
+                Work::ExternalEdit { event, from, file } => {
+                    let r = apply_external_edit_work(inner, &root, id, event, from, file);
+                    changed |= r.state == JobStateRow::Done;
+                    r
+                }
+                Work::Import { files, target } => {
+                    match apply_import_as(inner, &root, files, target, &ImportAs::IMPORT) {
+                        Ok((created, problems)) => {
+                            changed |= !created.is_empty();
+                            row(id, kind, JobStateRow::Done, None, problems, created)
+                        }
+                        Err((e, problems)) => row(
+                            id,
+                            kind,
+                            JobStateRow::Failed,
+                            Some(e.to_string()),
+                            problems,
+                            vec![],
+                        ),
+                    }
+                }
                 Work::Relink { files } => {
                     let (done, problems) = apply_relink(inner, &root, files);
                     changed |= !done.is_empty();
@@ -3369,6 +3770,15 @@ impl Session {
                 }
             };
             inner.jobs.finish(id, row);
+        }
+        // A bounce's plugin copies end with its job, however it ended:
+        // applied, failed, cancelled or panicked (plan 5f-2 Ruling 6,
+        // pre-flight I2).
+        if inner.bounce_copies.is_some() && !inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce])
+        {
+            if let Some((_, token)) = inner.bounce_copies.take() {
+                plugins::end_bounce(token);
+            }
         }
         if changed {
             inner.version += 1;
@@ -3398,18 +3808,56 @@ type ImportFiles = Vec<(String, Result<Vec<core_media::import::Imported>, String
 /// nothing was applied (with the per-file problems).
 type ImportApplied = Result<(Vec<u64>, Vec<String>), (VizError, Vec<String>)>;
 
+/// How an import job's result is applied: Import Audio, or a bounce's
+/// "Add to project" (plan 5f-2 Ruling 9).
+struct ImportAs {
+    /// The undo step's label.
+    label: &'static str,
+    /// The items' origin.
+    origin: fn(&core_media::import::Imported) -> core_model::document::MediaOrigin,
+    /// New lanes are named after their item (else "Audio <n>").
+    named_lanes: bool,
+}
+
+impl ImportAs {
+    /// Import Audio: `Imported` items on "Audio <n>" lanes.
+    const IMPORT: ImportAs = ImportAs {
+        label: "Import Audio",
+        origin: |item| core_model::document::MediaOrigin::Imported {
+            original_name: item.original_name.clone(),
+        },
+        named_lanes: false,
+    };
+
+    /// A bounce's "Add to project": `Bounced` items on lanes named after them.
+    const BOUNCE: ImportAs = ImportAs {
+        label: "Bounce",
+        origin: |_| core_model::document::MediaOrigin::Bounced,
+        named_lanes: true,
+    };
+
+    /// The name of the new lane for `item`, the sequence's `n`th.
+    fn lane_name(&self, item: &core_media::import::Imported, n: usize) -> String {
+        if self.named_lanes {
+            item.name.clone()
+        } else {
+            format!("Audio {n}")
+        }
+    }
+}
+
 /// One finished import (Ruling 19): the media items and, with a target,
 /// their regions (into the given lane for a single mono/stereo file, else
-/// one new "Audio n" lane per item), as one undo step "Import Audio".
+/// one new lane per item), as one undo step labelled as `how` says.
 /// On an error nothing is applied and the written files are removed.
-fn apply_import(
+fn apply_import_as(
     inner: &mut Inner,
     root: &Path,
     files: ImportFiles,
     target: Option<crate::jobs::ImportTargetRow>,
+    how: &ImportAs,
 ) -> ImportApplied {
     use core_model::command::{AudioCmd, MediaCmd};
-    use core_model::document::MediaOrigin;
     use core_model::event::Fade;
     let mut problems = Vec::new();
     let mut items = Vec::new();
@@ -3433,7 +3881,7 @@ fn apply_import(
         }
         (e, problems)
     };
-    if let Err(e) = h.begin("Import Audio") {
+    if let Err(e) = h.begin(how.label) {
         return Err(fail(e.into(), problems));
     }
     let run = (|| -> Result<Vec<u64>, VizError> {
@@ -3447,9 +3895,7 @@ fn apply_import(
                     length_frames: item.length_frames,
                     content_hash: Some(item.content_hash.clone()),
                     name: Some(item.name.clone()),
-                    origin: Some(MediaOrigin::Imported {
-                        original_name: item.original_name.clone(),
-                    }),
+                    origin: Some((how.origin)(item)),
                 }),
                 &filter,
             )?;
@@ -3473,7 +3919,7 @@ fn apply_import(
                     let r = h.execute(
                         &Command::Lane(LaneCmd::Add {
                             seq,
-                            name: format!("Audio {n}"),
+                            name: how.lane_name(item, n),
                             index: None,
                         }),
                         &filter,
@@ -4447,6 +4893,10 @@ impl Session {
                 message: "Finish the open edit first.".into(),
             });
         }
+        // A Record while a pass writes lands it first (plan 5e-1 Ruling
+        // 23), before the recording is planned on the document.
+        self.finish_writing(&mut inner);
+        self.apply_pending_automation(&mut inner);
         // Review I-1: the take would be planned at the old rate and land
         // in a project at the new one.
         if inner.jobs.pending(&[crate::jobs::JobKindRow::Format]) {
@@ -4691,6 +5141,7 @@ impl Session {
         if let Err(e) = inner.history.begin_group() {
             return fail(e.into());
         }
+        inner.landed_in_group = false;
         inner.recording = Some(recording);
         inner.record_faults.clear();
         inner.looped = spec.looped;
@@ -4698,6 +5149,11 @@ impl Session {
         inner.reload_fault = None;
         inner.cursor = None;
         inner.cursor_seq = Some(id);
+        let at = pending
+            .located()
+            .or_else(|| host::position(self.id).map(|p| p.1))
+            .unwrap_or(Tick::ZERO);
+        self.begin_writing(&mut inner, id, at);
         drop(inner);
         // A Play that cannot be sent ends the recording it started
         // (pre-flight M4): nothing would ever roll or end it.
@@ -4773,6 +5229,8 @@ impl Session {
                 None
             }
         };
+        // Automation written while it recorded joins the pass (spec §7.4).
+        let pass = self.writes_into_pass(&mut inner, pass);
         inner.pending_pass = Some((pass, files));
         inner.finishing_files.clear();
         self.apply_pending_pass(&mut inner);
@@ -4788,14 +5246,23 @@ impl Session {
         let Some((pass, files)) = inner.pending_pass.take() else {
             return;
         };
-        let label = pass
-            .as_ref()
-            .map_or("Record", core_model::command::RecordPass::name);
+        // A recording that recorded nothing but whose loop passes landed
+        // automation into its group (Task 12) is "Write Automation".
+        let label = match &pass {
+            Some(p) => p.name(),
+            None if inner.landed_in_group => "Write Automation",
+            None => "Record",
+        };
+        inner.landed_in_group = false;
+        let mut created: Vec<core_model::ids::AnyId> = Vec::new();
+        // The automation that landed, if any (plan 5e-1 Ruling 25).
+        let mut landed: Vec<AutomationWrite> = Vec::new();
         if let Some(p) = pass {
             // Track Synth's "Mute the MIDI lane after recording" (spec
             // §6.7): inside the group, so the mute is part of "Record"
             // (plan 5c-2 Ruling 6).
             let mutes = crate::synth::mutes_after(&p, &inner.synth_mutes);
+            let automation = p.automation.clone();
             match inner
                 .history
                 .execute(&Command::Record(p), &ViewFilter::default())
@@ -4805,8 +5272,16 @@ impl Session {
                         "The recording could not be added ({e}). Its files are kept."
                     ));
                     inner.keep_recordings.extend(files);
+                    // Its automation still lands, inside the group (plan
+                    // 5e-1 Ruling 25).
+                    if let Some(r) = self.land_automation_alone(inner, automation.clone()) {
+                        created = r.created;
+                        landed = automation;
+                    }
                 }
-                Ok(_) => {
+                Ok(r) => {
+                    created = r.created;
+                    landed = automation;
                     for (key, seq, lane) in mutes {
                         inner.synth_mutes.remove(&key);
                         let mute = Command::Lane(LaneCmd::SetFlags {
@@ -4825,12 +5300,22 @@ impl Session {
                 }
             }
         }
+        // Write strips become the After Write mode in the same step (plan
+        // 5e-1 Ruling 9).
+        self.after_write_in_group(inner, !landed.is_empty());
         let _ = inner.history.end_group(label);
+        let silent = crate::automation::silent_new_lanes(inner.doc(), &created, &landed);
+        inner.news.problems.extend(silent);
         inner.version += 1;
         inner.news.doc_changed = true;
         inner.news.media_changed = true;
         inner.reload_host(self.id);
         self.mark(inner);
+        if !landed.is_empty() {
+            self.sync_written_plugins(inner, &landed);
+            self.resync_plugin_automation(inner, None);
+        }
+        self.release_vanished(inner);
         self.save_after_pass_now(inner);
     }
 
@@ -4868,7 +5353,8 @@ impl Session {
     fn service_recording(&self) -> Result<(), VizError> {
         let ending = {
             let mut inner = lock(&self.inner);
-            let stopped = host::transport_stopped(self.id).unwrap_or(false);
+            let id = self.id;
+            let stopped = || host::transport_stopped(id).unwrap_or(false);
             let (mut problems, mut faults) = (Vec::new(), Vec::new());
             let e = inner
                 .recording
@@ -5072,6 +5558,1962 @@ impl Session {
     }
 }
 
+/// Automation recording (plan 5e-1; sub-project 5 spec §7).
+#[uniffi::export]
+impl Session {
+    /// A gesture on `target` from the app's mouse (spec §7.1; Rulings 14,
+    /// 16, 20, 26): [`Session::gesture_from`] with the mouse's hold.
+    pub fn gesture(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+    ) -> Result<(), VizError> {
+        self.gesture_from(target, phase, crate::automation::GestureHolderRow::Mouse)
+    }
+
+    /// A gesture on `target` from `holder` (spec §7.1; Rulings 14, 16, 20,
+    /// 26; plan 5f-1 Ruling 2): the target stays touched until each of
+    /// its holders released it. A Touch, or a value, from a hand that does
+    /// not hold the target joins it; a release from one does nothing.
+    /// `Model` for a target that cannot be
+    /// gestured or a non-finite value; `Busy` for a static touch's first
+    /// value while an edit the gesture path did not open is open.
+    pub fn gesture_from(
+        &self,
+        target: AutomationTargetRow,
+        phase: GesturePhaseRow,
+        holder: crate::automation::GestureHolderRow,
+    ) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let t = automation_target_of(target);
+            let phase = match phase {
+                GesturePhaseRow::Touch { value } => core_surface::Phase::Touch(value),
+                GesturePhaseRow::Value { value } => core_surface::Phase::Value(value),
+                GesturePhaseRow::Release => core_surface::Phase::Release,
+            };
+            let mut inner = lock(&self.inner);
+            self.gesture_held(&mut inner, t, phase, TouchHolder::from(holder), None)
+        })
+    }
+
+    /// Sets the mode of `strips` (spec §4.6) as one undo step "Set
+    /// Automation Mode"; `Busy` while a static touch's step is open.
+    pub fn set_automation_mode(
+        &self,
+        strips: Vec<u64>,
+        mode: AutomationModeRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            // Not inside an open static touch's step (Task 10 review M2).
+            if lock(&self.inner).static_edit.is_some() {
+                return Err(VizError::Busy {
+                    message: "Release the touched control first.".into(),
+                });
+            }
+            let snap = self.execute(Command::Mixer(MixerCmd::SetAutomationMode {
+                strips: strips.into_iter().map(StripId).collect(),
+                mode: mode.into(),
+            }))?;
+            // Resting touches take the new mode (Ruling T6-1).
+            self.repick_resting(&mut lock(&self.inner), None);
+            Ok(snap)
+        })
+    }
+
+    /// Every strip's mode, the targets touched now, suspend, and whether
+    /// this session writes.
+    pub fn automation_state(&self) -> Result<AutomationStateRow, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let m = inner.doc().mixer();
+            let modes = m
+                .order()
+                .iter()
+                .copied()
+                .chain(std::iter::once(m.master()))
+                .filter_map(|id| m.strip(id).ok())
+                .map(|s| StripModeRow {
+                    strip: s.id.0,
+                    mode: s.automation.into(),
+                })
+                .collect();
+            Ok(AutomationStateRow {
+                modes,
+                touched: inner
+                    .touches
+                    .keys()
+                    .map(|t| automation_target_row(*t))
+                    .collect(),
+                suspended: crate::automation::suspended(),
+                writing: inner.writing.is_some(),
+            })
+        })
+    }
+
+    /// The write in progress for `target` in the current pass, as it
+    /// would land now, as `(tick, value)` in the playing sequence (Ruling
+    /// 18); empty when it is not being written.
+    pub fn automation_preview(
+        &self,
+        target: AutomationTargetRow,
+    ) -> Result<Vec<PreviewPointRow>, VizError> {
+        ffi_guard(|| {
+            let t = automation_target_of(target);
+            let mut inner = lock(&self.inner);
+            let Some(w) = inner.writing.as_mut() else {
+                return Ok(Vec::new());
+            };
+            drain_tap(w);
+            let end_run = w.handles.status.run();
+            let stamps = w.stamps.get(&t).cloned().unwrap_or_default();
+            let holds: Vec<(AutomationTarget, f64)> =
+                w.holds.iter().filter(|h| h.0 == t).copied().collect();
+            let Some(w) = inner.writing.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let doc = inner.doc();
+            // The pass's cached reading of the existing automation (plan
+            // 5e-2 ruling P4): the Strip Chart polls this per row.
+            let pd = crate::automation::PassDoc::read_with(
+                self.id,
+                doc,
+                w.seq,
+                w.rate,
+                std::iter::once(t),
+                w.existing.get(doc, w.seq),
+            );
+            // The loop passes landed at their wraps are in the document
+            // already (Task 12).
+            let made: Vec<_> = pd
+                .writes(
+                    doc,
+                    &w.marks,
+                    end_run,
+                    &stamps,
+                    &holds,
+                    w.thinning,
+                    w.after_write,
+                )
+                .into_iter()
+                .filter(|x| x.pass >= w.landed)
+                .collect();
+            let Some(last) = made.iter().map(|x| x.pass).max() else {
+                return Ok(Vec::new());
+            };
+            // The earlier passes' writes go first, as at landing (their
+            // edges inform the last pass's).
+            let before: Vec<_> = made.iter().filter(|x| x.pass < last).cloned().collect();
+            let skip = pd.to_model(doc, &before).len();
+            Ok(pd
+                .to_model(doc, &made)
+                .into_iter()
+                .skip(skip)
+                .flat_map(|w| w.points)
+                .map(|(tick, value)| PreviewPointRow {
+                    tick: tick.0,
+                    value,
+                })
+                .collect())
+        })
+    }
+}
+
+/// A gesture value, finite (Ruling 16), clamped to 0–1.
+fn finite(v: f64) -> Result<f64, VizError> {
+    if v.is_finite() {
+        Ok(core_model::automation::unit(v))
+    } else {
+        Err(crate::events::bad("gesture values must be finite"))
+    }
+}
+
+/// The host time of a gesture: the given one, else now on a live device
+/// and 0 offline (Ruling 7).
+fn host_time(host_ns: Option<u64>) -> u64 {
+    host_ns.unwrap_or_else(|| {
+        if host::offline_mode() {
+            // A live-like offline device (test hook) has a clock.
+            host::offline_clock_ns().unwrap_or(0)
+        } else {
+            crate::clock::now_ns()
+        }
+    })
+}
+
+/// The stamp tag of a path (its write mode; 0 off a writing path).
+fn tag_of(path: TouchPath) -> u8 {
+    match path {
+        TouchPath::Write(m, _) => m.tag(),
+        TouchPath::Static | TouchPath::Live => 0,
+    }
+}
+
+/// Moves the tap's marks and stamps into the pass (stamps by target); a
+/// wrap mark sets `wrapped`.
+fn drain_tap(w: &mut Writing) {
+    while let Ok(m) = w.handles.marks.pop() {
+        if m.wrap {
+            w.wrapped = true;
+        }
+        w.marks.push(m);
+    }
+    let run = w.handles.status.run();
+    while let Ok(s) = w.handles.stamps.pop() {
+        // A writing stamp for a pass already landed (Task 12 review I1).
+        if w.landed > 0
+            && s.tag != 0
+            && crate::autowrite::pass_of(&w.marks, run, s.run).is_some_and(|p| p < w.landed)
+        {
+            w.late = w.late.saturating_add(1);
+        }
+        w.stamps.entry(s.dest.target()).or_default().push(s);
+    }
+}
+
+/// The controls a Write strip holds from the roll (Ruling 9): fader, pan
+/// (not master), mute and send levels.
+fn held_controls(doc: &Document, strip: StripId) -> Vec<AutomationTarget> {
+    let Ok(s) = doc.mixer().strip(strip) else {
+        return Vec::new();
+    };
+    let mut out = vec![AutomationTarget::StripFader(strip)];
+    if strip != doc.mixer().master() {
+        out.push(AutomationTarget::StripPan(strip));
+    }
+    out.push(AutomationTarget::StripMute(strip));
+    for i in 0..s.sends.len() {
+        if let Ok(i) = u16::try_from(i) {
+            out.push(AutomationTarget::SendLevel(
+                strip,
+                core_model::automation::SendIndex(i),
+            ));
+        }
+    }
+    out
+}
+
+/// The gesture path and the writing lifecycle (plan 5e-1 Task 8).
+impl Session {
+    /// Ruling 16: what cannot be gestured is refused.
+    fn check_gesture(&self, inner: &Inner, t: AutomationTarget) -> Result<(), VizError> {
+        if matches!(t, AutomationTarget::VelocityScale(_)) {
+            return Err(crate::events::bad("velocity scale cannot be gestured"));
+        }
+        if !core_model::automation::target_exists(inner.doc(), t) {
+            return Err(crate::events::bad(&format!(
+                "{} does not exist",
+                t.describe()
+            )));
+        }
+        if matches!(t, AutomationTarget::PluginParam(..))
+            && crate::automation::param_info(self.id, t).is_none()
+        {
+            return Err(crate::events::bad(&format!(
+                "{} is not a parameter of the running plugin",
+                t.describe()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether `t` is stepped (mute, solo, a stepped plugin parameter).
+    fn stepped(&self, t: AutomationTarget) -> bool {
+        t.is_stepped() || crate::automation::param_info(self.id, t).is_some_and(|p| p.stepped)
+    }
+
+    /// The write mode a touch of `t` takes now (Rulings 3, 9, 14): when
+    /// this session writes a pass and plays (or is about to roll), the
+    /// target's strip writes, and automation is not suspended.
+    /// Whether pass `w` plays now (or its Play is meant before the roll).
+    fn pass_plays(&self, w: &Writing) -> bool {
+        // The roll first, then the state (the renderer publishes the
+        // state before it sets `rolled`).
+        let rolled = w.handles.status.rolled();
+        match host::transport_stopped(self.id) {
+            Some(false) => true,
+            // Before the roll the transport still reads stopped, while the
+            // Play is meant (a Play that ended at once is not; final
+            // review m4).
+            Some(true) => !rolled && host::wants_play(self.id) == Some(true),
+            None => false,
+        }
+    }
+
+    fn write_mode_of(&self, inner: &Inner, t: AutomationTarget) -> Option<WriteMode> {
+        let w = inner.writing.as_ref()?;
+        if crate::automation::suspended() || !self.pass_plays(w) {
+            return None;
+        }
+        let doc = inner.doc();
+        let strip = core_model::automation::strip_of(doc, t)?;
+        let mode = doc.mixer().strip(strip).ok()?.automation;
+        match mode {
+            // From the first wrap on, the After Write mode (Ruling 9).
+            AutomationMode::Write if w.write_strips.contains(&strip) && w.wrapped => {
+                WriteMode::of(w.after_write)
+            }
+            AutomationMode::Write if w.write_strips.contains(&strip) => Some(WriteMode::Write),
+            // Switched to Write while playing: Latch until the next Play.
+            AutomationMode::Write => Some(WriteMode::Latch),
+            m => WriteMode::of(m),
+        }
+    }
+
+    /// How a writing touch of `t` in `mode` ends (Rulings 10, 11).
+    fn release_of(&self, inner: &Inner, t: AutomationTarget, mode: WriteMode) -> Release {
+        let stepped = self.stepped(t);
+        match mode {
+            WriteMode::Latch | WriteMode::Write => Release::Hold,
+            _ if stepped => Release::Hold,
+            WriteMode::Touch => Release::Glide,
+            WriteMode::Trim => {
+                // The pass's cached reading (plan 5e-2 ruling P4).
+                let automated = inner.writing.as_ref().is_some_and(|w| {
+                    w.existing
+                        .get(inner.doc(), w.seq)
+                        .get(&t)
+                        .is_some_and(|p| !p.is_empty())
+                });
+                if automated {
+                    Release::Offsets
+                } else {
+                    Release::Glide
+                }
+            }
+        }
+    }
+
+    /// The value heard now (Ruling 26).
+    fn heard_value(&self, inner: &Inner, t: AutomationTarget) -> f64 {
+        self.heard_from(inner, t, None)
+    }
+
+    /// [`Session::heard_value`], reading the playing sequence's automation
+    /// from `cached` (its flattened existing automation) when it is that
+    /// sequence's (plan 5f-1 Ruling 13: the surfaces read many targets a
+    /// pass).
+    fn heard_from(
+        &self,
+        inner: &Inner,
+        t: AutomationTarget,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> f64 {
+        let doc = inner.doc();
+        if let AutomationTarget::PluginParam(..) = t {
+            let info = crate::automation::param_info(self.id, t);
+            return match info.as_ref().and_then(|p| p.value.map(|v| p.norm(v))) {
+                Some(v) => v,
+                None => crate::automation::fixed_value(doc, t, info.as_ref()),
+            };
+        }
+        if let Some(v) = host::heard(self.id, t) {
+            return v;
+        }
+        if host::transport_stopped(self.id) == Some(false) {
+            if let Some((seq, tick)) = host::position(self.id) {
+                let owned;
+                let points: &[(Tick, f64)] = match cached {
+                    Some((s, all)) if *s == seq => all.get(&t).map_or(&[][..], Vec::as_slice),
+                    _ => {
+                        owned = crate::automation::existing(doc, seq, t);
+                        &owned
+                    }
+                };
+                if let Some(v) = crate::automation::value_at(points, tick, t.is_stepped()) {
+                    return v;
+                }
+            }
+        }
+        crate::automation::fixed_value(doc, t, None)
+    }
+
+    /// Sends one gesture message for `t`; an end the queue refused while
+    /// this session holds the engine is kept for `idle` (pre-flight I3).
+    fn send_gesture(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        phase: GesturePhase,
+        tag: u8,
+        host_ns: u64,
+    ) {
+        let Some(dest) = AutoDest::of(t) else {
+            return;
+        };
+        let msg = GestureMsg {
+            dest,
+            phase,
+            host_ns,
+            tag,
+        };
+        if host::gesture(self.id, msg) {
+            inner.unsent_ends.clear(t);
+        } else if matches!(
+            phase,
+            GesturePhase::Release | GesturePhase::Glide(_) | GesturePhase::Hold
+        ) && host::holder() == Some(self.id)
+        {
+            inner.unsent_ends.put(t, msg);
+        }
+    }
+
+    /// A `Ui` value of a plugin parameter goes to the plugin (plain;
+    /// Ruling 15).
+    fn set_plugin(&self, t: AutomationTarget, v: f64) {
+        let AutomationTarget::PluginParam(slot, param) = t else {
+            return;
+        };
+        let Some(info) = crate::automation::param_info(self.id, t) else {
+            return;
+        };
+        let plain = core_model::automation::param_plain(v, info.min, info.max, info.stepped);
+        let _ = plugins::with(self.id, |p| {
+            if let Some(p) = p {
+                p.set_param(slot, param, plain);
+            }
+        });
+    }
+
+    /// Sets `t`'s static value to `v` inside the shared static edit.
+    fn run_static(&self, inner: &mut Inner, t: AutomationTarget, v: f64) {
+        let Some(cmd) = crate::automation::static_command(inner.doc(), t, v) else {
+            return;
+        };
+        if inner.history.execute(&cmd, &ViewFilter::default()).is_ok() {
+            inner.version += 1;
+            inner.news.doc_changed = true;
+            inner.reload_host(self.id);
+            self.mark(inner);
+        }
+    }
+
+    /// A gesture phase on `t` from holder `h` (plan 5f-1 Ruling 2): the
+    /// one path of the mouse, the channel, the surfaces and learn, as
+    /// `Source::Ui`, stamped at `host_ns` (`None`: now). `Model` for a
+    /// target that cannot be gestured or a non-finite value; `Busy` for a
+    /// static touch's first value while another edit is open.
+    pub(crate) fn gesture_held(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        phase: core_surface::Phase,
+        h: TouchHolder,
+        host_ns: Option<u64>,
+    ) -> Result<(), VizError> {
+        use core_surface::Phase;
+        // A release with no touch does nothing (Ruling 20), also for a
+        // target that went meanwhile; nor does one from a hand that does
+        // not hold it.
+        if phase == Phase::Release {
+            self.release_from(inner, t, h, host_ns);
+            return Ok(());
+        }
+        self.check_gesture(inner, t)?;
+        match phase {
+            Phase::Touch(value) => {
+                let v = value.map(finite).transpose()?;
+                self.touch(inner, t, v, Source::Ui, h, host_ns)
+            }
+            Phase::Value(value) => {
+                let v = finite(value)?;
+                self.move_to(inner, t, v, Source::Ui, h, host_ns)
+            }
+            Phase::Release => Ok(()),
+        }
+    }
+
+    /// A touch (Rulings 14, 20, 26): its value resolved, its path picked
+    /// once, the engine told.
+    fn touch(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        value: Option<f64>,
+        source: Source,
+        holder: TouchHolder,
+        host_ns: Option<u64>,
+    ) -> Result<(), VizError> {
+        if inner.touches.contains_key(&t) {
+            // Touched already: the holder joins, and a touch at a value
+            // moves it (plan 5f-1 Ruling 2; `move_to` joins it too).
+            return match value {
+                Some(v) => self.move_to(inner, t, v, source, holder, host_ns),
+                None => {
+                    self.join(inner, t, holder);
+                    Ok(())
+                }
+            };
+        }
+        let v = match value {
+            Some(v) => core_model::automation::unit(v),
+            None => self.heard_value(inner, t),
+        };
+        let path = self.path_for(inner, t, source);
+        // The static edit opens at the first value, never at the touch
+        // (plan 5f-1 Ruling 2, pre-flight C2): a hand resting on a
+        // touch-sensing fader holds no transaction open.
+        let shared = path == TouchPath::Static && value.is_some();
+        if shared {
+            self.open_static_share(inner, t)?;
+        }
+        if let Some(w) = inner.writing.as_mut() {
+            w.moved.insert(t);
+        }
+        inner.touches.insert(
+            t,
+            Touching {
+                path,
+                value: v,
+                base: v,
+                source,
+                holders: TouchHolders::of(holder),
+                shared,
+                valued: value.is_some(),
+            },
+        );
+        let ns = host_time(host_ns);
+        // The touch is a sample (Ruling 8).
+        inner.sampler.flush(t);
+        let _ = inner.sampler.value(t, v, crate::automation::now(), ns);
+        // Only a touch that carries a value sets it (review I-3): a click
+        // on an automated fader (`Touch{None}`) changes nothing until it
+        // moves.
+        if value.is_some() {
+            if path == TouchPath::Static {
+                self.run_static(inner, t, v);
+            }
+            if source == Source::Ui {
+                self.set_plugin(t, v);
+            }
+        }
+        // Trim on automation grabs at an offset of 0 (pre-flight I12).
+        let phase = match path {
+            TouchPath::Write(_, Release::Offsets) => GesturePhase::Offset(0.0),
+            _ => GesturePhase::Touch(v),
+        };
+        self.send_gesture(inner, t, phase, tag_of(path), ns);
+        Ok(())
+    }
+
+    /// A move (a value with no touch is a touch first; Ruling 20), through
+    /// the sampler (Ruling 8).
+    fn move_to(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        v: f64,
+        source: Source,
+        holder: TouchHolder,
+        host_ns: Option<u64>,
+    ) -> Result<(), VizError> {
+        let v = core_model::automation::unit(v);
+        if !inner.touches.contains_key(&t) {
+            return self.touch(inner, t, Some(v), source, holder, host_ns);
+        }
+        // A value from any hand moves the target, and a hand that did not
+        // hold it joins, as on an untouched target (review M5).
+        let joined = self.join(inner, t, holder);
+        // A resting touch takes the path its strip gives now (Ruling
+        // T6-1), before its first value.
+        self.repick_resting(inner, Some(t));
+        // A resting static touch's first value opens (or joins) the
+        // static edit; refused, the value is not applied (pre-flight C2),
+        // and a hand that joined with it holds nothing it would have to
+        // release.
+        if let Err(e) = self.share_static(inner, t) {
+            if joined && let Some(x) = inner.touches.get_mut(&t) {
+                x.holders = x.holders.without(holder);
+                if x.holders.is_empty() {
+                    self.release(inner, t, host_ns);
+                }
+            }
+            return Err(e);
+        }
+        let Some(touching) = inner.touches.get_mut(&t) else {
+            return Ok(());
+        };
+        touching.value = v;
+        touching.valued = true;
+        let ns = host_time(host_ns);
+        if let Some(v) = inner.sampler.value(t, v, crate::automation::now(), ns) {
+            self.send_value(inner, t, v, ns);
+        }
+        Ok(())
+    }
+
+    /// The path a touch of `t` from `source` takes now (Ruling 14): the
+    /// strip's write while a pass plays, else the plugin's heard-only path
+    /// (the host's grouped gesture is the plugin's static step, Ruling 15)
+    /// or the static edit.
+    fn path_for(&self, inner: &Inner, t: AutomationTarget, source: Source) -> TouchPath {
+        match self.write_mode_of(inner, t) {
+            Some(m) => TouchPath::Write(m, self.release_of(inner, t, m)),
+            None if source == Source::Plugin => TouchPath::Live,
+            None => TouchPath::Static,
+        }
+    }
+
+    /// `holder` joins touched `t` (plan 5f-1 Ruling 2); whether it is new.
+    /// A touch's source follows its holders (review I1): a hand that is
+    /// not the plugin takes a plugin's touch over. The touch becomes
+    /// `Source::Ui` (its values reach the plugin), the plugin's hold and
+    /// its 500 ms release go ("a target the app touches is the app's",
+    /// 5e-1 Ruling 15), and a heard-only touch takes the app's path: the
+    /// static edit, from its next value.
+    fn join(&self, inner: &mut Inner, t: AutomationTarget, holder: TouchHolder) -> bool {
+        let Some(x) = inner.touches.get(&t).copied() else {
+            return false;
+        };
+        let joined = !x.holders.has(holder);
+        let mut y = x;
+        y.holders = y.holders.with(holder);
+        if holder != TouchHolder::Plugin && x.source == Source::Plugin {
+            y.source = Source::Ui;
+            y.holders = y.holders.without(TouchHolder::Plugin);
+            if y.path == TouchPath::Live {
+                y.path = self.path_for(inner, t, Source::Ui);
+                y.shared = false;
+                if y.path != TouchPath::Live {
+                    y.base = y.value;
+                    self.send_gesture(
+                        inner,
+                        t,
+                        GesturePhase::Touch(y.value),
+                        tag_of(y.path),
+                        host_time(None),
+                    );
+                }
+            }
+            inner.plugin_touches.forget(t);
+        }
+        inner.touches.insert(t, y);
+        joined
+    }
+
+    /// Rulings T6-1 and T6-2 (review M1, re-review m1): while a pass
+    /// plays, a touch that rests with no value and no share, on a path
+    /// that writes nothing (static or heard only), takes the path its
+    /// strip gives now, as if touched now, after a mode change, a suspend
+    /// toggle or an Undo of either. A touch that has a value or a share
+    /// keeps its path (Ruling 14), and so does a resting touch on a write
+    /// path: it has written its held value since its touch, and ends as
+    /// its mode's release says, so nothing it wrote is cut. A touch
+    /// resting on a Write strip at the first wrap therefore keeps its
+    /// Write path; it does not take the After Write path (re-review m3).
+    /// The value is the one heard now (as at the pass start, re-review
+    /// N1). `only`: just that target.
+    fn repick_resting(&self, inner: &mut Inner, only: Option<AutomationTarget>) {
+        let Some(w) = inner.writing.as_ref() else {
+            return;
+        };
+        if !self.pass_plays(w) {
+            return;
+        }
+        let resting: Vec<(AutomationTarget, Touching)> = inner
+            .touches
+            .iter()
+            .filter(|(t, x)| {
+                !x.valued
+                    && !x.shared
+                    && matches!(x.path, TouchPath::Static | TouchPath::Live)
+                    && only.is_none_or(|o| o == **t)
+            })
+            .map(|(t, x)| (*t, *x))
+            .collect();
+        let ns = host_time(None);
+        for (t, x) in resting {
+            let path = self.path_for(inner, t, x.source);
+            // The same mode keeps its release as the pass start picked it
+            // (an absolute touch stays absolute, 5e-1 review I-1).
+            let same = match (path, x.path) {
+                (TouchPath::Write(a, _), TouchPath::Write(b, _)) => a == b,
+                (a, b) => a == b,
+            };
+            if same {
+                continue;
+            }
+            let v = host::heard(self.id, t).unwrap_or(x.value);
+            if let Some(y) = inner.touches.get_mut(&t) {
+                y.path = path;
+                y.value = v;
+                y.base = v;
+            }
+            if let Some(w) = inner.writing.as_mut() {
+                w.moved.insert(t);
+            }
+            // The engine's entry takes the new path's tag; Trim on
+            // automation grabs at an offset of 0 (pre-flight I12).
+            self.send_gesture(inner, t, GesturePhase::Touch(v), tag_of(path), ns);
+            if let TouchPath::Write(_, Release::Offsets) = path {
+                self.send_gesture(inner, t, GesturePhase::Offset(0.0), tag_of(path), ns);
+            }
+        }
+    }
+
+    /// A sampled value of touched `t`: the static command on the static
+    /// path, the plugin for a `Ui` plugin parameter, and the engine.
+    fn send_value(&self, inner: &mut Inner, t: AutomationTarget, v: f64, host_ns: u64) {
+        let Some(touching) = inner.touches.get(&t).copied() else {
+            return;
+        };
+        // Only inside the static edit: a resting touch has no share, and
+        // a value outside it would be a step of its own (pre-flight C2).
+        if touching.path == TouchPath::Static && touching.shared {
+            self.run_static(inner, t, v);
+        }
+        if touching.source == Source::Ui {
+            self.set_plugin(t, v);
+        }
+        let phase = match touching.path {
+            TouchPath::Write(_, Release::Offsets) => {
+                let d = match AutoDest::of(t) {
+                    Some(dest) if dest.is_db() => {
+                        core_model::automation::fader_db(v)
+                            - core_model::automation::fader_db(touching.base)
+                    }
+                    _ => v - touching.base,
+                };
+                GesturePhase::Offset(d)
+            }
+            _ => GesturePhase::Value(v),
+        };
+        self.send_gesture(inner, t, phase, tag_of(touching.path), host_ns);
+    }
+
+    /// A release (Rulings 10, 14, 15): the kept value first, then the
+    /// path's end; a static release ends its share of the static edit.
+    fn release(&self, inner: &mut Inner, t: AutomationTarget, host_ns: Option<u64>) {
+        let Some(touching) = inner.touches.get(&t).copied() else {
+            return;
+        };
+        if let Some((v, ns)) = inner.sampler.flush(t) {
+            self.send_value(inner, t, v, ns);
+        }
+        inner.touches.remove(&t);
+        if touching.source == Source::Plugin {
+            inner.plugin_touches.forget(t);
+        }
+        let return_frames = inner
+            .writing
+            .as_ref()
+            .map_or(0, |w| u32::try_from(w.return_frames).unwrap_or(u32::MAX));
+        // Stopped, or the pass landed: a Hold or Glide would play on
+        // through the next Play (pre-flight I2).
+        let phase = match (inner.writing.is_some(), touching.path) {
+            (false, _) | (true, TouchPath::Static | TouchPath::Live) => GesturePhase::Release,
+            (true, TouchPath::Write(_, Release::Hold)) => GesturePhase::Hold,
+            (true, TouchPath::Write(_, Release::Glide | Release::Offsets)) => {
+                GesturePhase::Glide(return_frames)
+            }
+        };
+        self.send_gesture(inner, t, phase, tag_of(touching.path), host_time(host_ns));
+        if let (Some(w), GesturePhase::Glide(_) | GesturePhase::Hold) =
+            (inner.writing.as_mut(), phase)
+        {
+            w.ended.insert(t);
+        }
+        if touching.shared {
+            self.keep_static_param(inner, t, touching);
+            self.end_static_share(inner);
+        }
+        // A Touch or Trim plugin parameter no lane drives plays its static
+        // value again (pre-flight M14).
+        if let (
+            TouchPath::Write(WriteMode::Touch | WriteMode::Trim, _),
+            AutomationTarget::PluginParam(..),
+        ) = (touching.path, t)
+        {
+            let seq = inner
+                .writing
+                .as_ref()
+                .map(|w| w.seq)
+                .or_else(|| host::position(self.id).map(|p| p.0));
+            let driven =
+                seq.is_some_and(|s| !crate::automation::existing(inner.doc(), s, t).is_empty());
+            if !driven {
+                self.reset_plugin_param(t);
+            }
+        }
+    }
+
+    /// `h`'s release of `t` (plan 5f-1 Ruling 2): nothing when `h` does
+    /// not hold it; the touch's [`Session::release`] when `h` was its last
+    /// holder; else the kept value goes out (the other hands' last move is
+    /// not lost), with no Glide or Hold: the touch goes on.
+    fn release_from(
+        &self,
+        inner: &mut Inner,
+        t: AutomationTarget,
+        h: TouchHolder,
+        host_ns: Option<u64>,
+    ) {
+        let Some(x) = inner.touches.get_mut(&t) else {
+            return;
+        };
+        if !x.holders.has(h) {
+            return;
+        }
+        x.holders = x.holders.without(h);
+        if x.holders.is_empty() {
+            self.release(inner, t, host_ns);
+            return;
+        }
+        if let Some((v, ns)) = inner.sampler.flush(t) {
+            self.send_value(inner, t, v, ns);
+        }
+    }
+
+    /// A static touch's share of the static edit, from its first value
+    /// (plan 5f-1 Ruling 2, pre-flight C2): opened or joined once; `Busy`
+    /// while another edit is open. Nothing for a touch already sharing,
+    /// or not static.
+    fn share_static(&self, inner: &mut Inner, t: AutomationTarget) -> Result<(), VizError> {
+        let Some(x) = inner.touches.get(&t) else {
+            return Ok(());
+        };
+        if x.path != TouchPath::Static || x.shared {
+            return Ok(());
+        }
+        self.open_static_share(inner, t)?;
+        if let Some(x) = inner.touches.get_mut(&t) {
+            x.shared = true;
+        }
+        Ok(())
+    }
+
+    /// Opens the shared static edit, labelled by `t`, or joins it (Ruling
+    /// 14); `Busy` while an edit the gesture path did not open is open.
+    fn open_static_share(&self, inner: &mut Inner, t: AutomationTarget) -> Result<(), VizError> {
+        match inner.static_edit.as_mut() {
+            Some((_, n)) => *n += 1,
+            None => {
+                if inner.history.in_transaction() {
+                    return Err(VizError::Busy {
+                        message: "Finish the open edit first.".into(),
+                    });
+                }
+                let label = crate::automation::static_label(t);
+                inner.history.begin(label)?;
+                inner.static_edit = Some((label.to_string(), 1));
+            }
+        }
+        Ok(())
+    }
+
+    /// A static `Ui` touch of a plugin parameter keeps its value in the
+    /// document as it leaves the static edit.
+    fn keep_static_param(&self, inner: &mut Inner, t: AutomationTarget, touching: Touching) {
+        let (Source::Ui, AutomationTarget::PluginParam(slot, param)) = (touching.source, t) else {
+            return;
+        };
+        let Some(info) = crate::automation::param_info(self.id, t) else {
+            return;
+        };
+        let plain =
+            core_model::automation::param_plain(touching.value, info.min, info.max, info.stepped);
+        let cmd = Command::Mixer(MixerCmd::SetPluginParams {
+            slot,
+            params: vec![(param, plain)],
+        });
+        if inner.history.execute(&cmd, &ViewFilter::default()).is_ok() {
+            inner.version += 1;
+            inner.reload_host(self.id);
+        }
+    }
+
+    /// One static touch ended: the last closes the shared edit (Ruling
+    /// 14), and what waited for it lands.
+    fn end_static_share(&self, inner: &mut Inner) {
+        let Some((_, n)) = inner.static_edit.as_mut() else {
+            return;
+        };
+        *n = n.saturating_sub(1);
+        if *n > 0 {
+            return;
+        }
+        inner.static_edit = None;
+        if inner.history.in_transaction() && inner.history.commit().is_ok() {
+            inner.version += 1;
+            // `idle` sends the snapshot (review m3).
+            inner.news.doc_changed = true;
+        }
+        self.commit_held(inner);
+        self.apply_pending_pass(inner);
+        self.apply_pending_automation(inner);
+        self.apply_jobs_after_edit(inner);
+    }
+
+    /// Releases every touch (close).
+    fn release_touches(&self, inner: &mut Inner) {
+        let all: Vec<AutomationTarget> = inner.touches.keys().copied().collect();
+        for t in all {
+            self.release(inner, t, None);
+        }
+    }
+
+    /// Releases the touches whose target no longer exists (pre-flight
+    /// M9), after a document change.
+    fn release_vanished(&self, inner: &mut Inner) {
+        let gone: Vec<AutomationTarget> = inner
+            .touches
+            .keys()
+            .filter(|t| !core_model::automation::target_exists(inner.doc(), **t))
+            .copied()
+            .collect();
+        for t in gone {
+            self.release(inner, t, None);
+        }
+    }
+
+    /// A plugin window's parameter events (spec §7.1; Rulings 15, 27;
+    /// pre-flight I8, I9, M12): each, its value normalised by the
+    /// parameter's range (one the instance does not list is skipped), goes
+    /// through [`PluginTouches`] onto the gesture path as `Source::Plugin`,
+    /// stamped at the drain time. A target the app touches (plan 5e-2's
+    /// sliders) is the app's: the plugin's report of it is skipped (so a
+    /// knob the plugin grabbed while the app held it is, once the app lets
+    /// go, a value-only touch, released 500 ms after its last move; review
+    /// m4). Answers
+    /// the parameters on a writing path (touched as a write in these
+    /// events, or still touched as one), whose grouped gestures are not
+    /// parameter steps (pre-flight M13).
+    fn plugin_events(
+        &self,
+        inner: &mut Inner,
+        events: &[(PluginInstanceId, core_host::ParamEvent)],
+    ) -> std::collections::BTreeSet<(PluginInstanceId, ParamId)> {
+        use core_host::ParamEvent;
+        let mut written = std::collections::BTreeSet::new();
+        if !events.is_empty() {
+            let slots: std::collections::BTreeSet<PluginInstanceId> =
+                events.iter().map(|(s, _)| *s).collect();
+            // `pump` has just borrowed the registry, so this does not fail
+            // today; if it did, Begin and Value wait for nothing (they are
+            // dropped) but an End still releases (review m3).
+            let ranges = plugins::with(self.id, |p| {
+                let mut out = std::collections::BTreeMap::new();
+                let Some(p) = p else {
+                    return out;
+                };
+                for slot in slots {
+                    if let Some(inst) = p.instance(slot) {
+                        for i in &inst.info().params {
+                            out.insert((slot, i.id), (i.min, i.max));
+                        }
+                    }
+                }
+                out
+            });
+            let busy = ranges.is_err();
+            let ranges = ranges.unwrap_or_default();
+            // Up to one timer tick late (pre-flight M12).
+            let ns = host_time(None);
+            let now = crate::automation::now();
+            // Ruling 27: what the playing schedule automates.
+            let seq = (host::holder() == Some(self.id))
+                .then(|| {
+                    inner
+                        .writing
+                        .as_ref()
+                        .map(|w| w.seq)
+                        .or_else(|| host::position(self.id).map(|p| p.0))
+                })
+                .flatten();
+            let mut automated: std::collections::BTreeMap<AutomationTarget, bool> =
+                Default::default();
+            for (slot, e) in events {
+                let (param, m) = match *e {
+                    ParamEvent::Begin(p) => (p, PluginMove::Begin),
+                    ParamEvent::Value(p, v) => (p, PluginMove::Value(v)),
+                    ParamEvent::End(p) => (p, PluginMove::End),
+                };
+                let m = match (ranges.get(&(*slot, param)), m) {
+                    (Some(&(min, max)), PluginMove::Value(v)) => {
+                        PluginMove::Value(crate::automation::norm(v, min, max))
+                    }
+                    (Some(_), m) => m,
+                    (None, PluginMove::End) if busy => PluginMove::End,
+                    // A parameter the instance does not list.
+                    (None, _) => continue,
+                };
+                let t = AutomationTarget::PluginParam(*slot, param);
+                if inner
+                    .touches
+                    .get(&t)
+                    .is_some_and(|x| x.source == Source::Ui)
+                {
+                    continue;
+                }
+                let doc = inner.doc();
+                let auto = *automated.entry(t).or_insert_with(|| {
+                    seq.is_some_and(|s| !crate::automation::existing(doc, s, t).is_empty())
+                });
+                let writes = |inner: &Inner| {
+                    inner
+                        .touches
+                        .get(&t)
+                        .is_some_and(|x| matches!(x.path, TouchPath::Write(..)))
+                };
+                let was = writes(inner);
+                for mv in inner.plugin_touches.event(t, m, now, auto) {
+                    // The plugin path never opens an edit, so it is never
+                    // refused.
+                    let _ = match mv {
+                        Move::Touch(v) => {
+                            self.touch(inner, t, v, Source::Plugin, TouchHolder::Plugin, Some(ns))
+                        }
+                        Move::Value(v) => {
+                            self.move_to(inner, t, v, Source::Plugin, TouchHolder::Plugin, Some(ns))
+                        }
+                        Move::Release => {
+                            self.release_from(inner, t, TouchHolder::Plugin, Some(ns));
+                            Ok(())
+                        }
+                    };
+                }
+                if was || writes(inner) {
+                    written.insert((*slot, param));
+                }
+            }
+        }
+        for (t, x) in &inner.touches {
+            if let (AutomationTarget::PluginParam(slot, param), TouchPath::Write(..)) = (t, x.path)
+            {
+                written.insert((*slot, *param));
+            }
+        }
+        written
+    }
+
+    /// Releases the plugin windows' touches that ended by themselves
+    /// (spec §7.1, pre-flight I7): value-only touches 500 ms after their
+    /// last value (stamped then on a live device), and the touches of
+    /// slots that no longer run.
+    fn release_plugin_touches(&self, inner: &mut Inner) {
+        let now = crate::automation::now();
+        let mut ended: Vec<(AutomationTarget, Option<u64>)> = Vec::new();
+        for (t, at) in inner.plugin_touches.idle(now) {
+            let ns = if host::offline_mode() {
+                0
+            } else {
+                let ago = u64::try_from(now.saturating_sub(at).as_nanos()).unwrap_or(u64::MAX);
+                crate::clock::now_ns().saturating_sub(ago)
+            };
+            ended.push((t, Some(ns)));
+        }
+        let slots = inner.plugin_touches.slots();
+        if !slots.is_empty() {
+            let live = plugins::with(self.id, |p| {
+                slots
+                    .iter()
+                    .filter(|s| {
+                        p.as_ref()
+                            .is_some_and(|p| p.state(**s) == Some(core_host::SlotState::Live))
+                    })
+                    .copied()
+                    .collect::<std::collections::BTreeSet<PluginInstanceId>>()
+            });
+            // A busy registry says nothing: they wait for the next idle.
+            if let Ok(live) = live {
+                for t in inner.plugin_touches.release_slots(|s| live.contains(&s)) {
+                    ended.push((t, None));
+                }
+            }
+        }
+        for (t, ns) in ended {
+            if inner
+                .touches
+                .get(&t)
+                .is_some_and(|x| x.source == Source::Plugin)
+            {
+                self.release_from(inner, t, TouchHolder::Plugin, ns);
+            }
+        }
+    }
+
+    /// Task 9 review I-1 (Ruling 15, "the static value stays"): after a
+    /// change that added, removed or changed a plugin parameter's
+    /// automation (an undo or redo of a pass, a lane deleted, a landing),
+    /// the plugin is sent what now plays there: the automation's value at
+    /// the position where the playing (or last) sequence automates it,
+    /// else its static value. A target touched now is left to the hand.
+    ///
+    /// `before` is the document the change started from, when the caller
+    /// has it; else the one last seen here (every edit, undo, redo and
+    /// landing calls this, and `idle` catches the rest).
+    fn resync_plugin_automation(&self, inner: &mut Inner, before: Option<&Document>) {
+        let doc = inner.doc().clone();
+        let seen = inner.plugin_auto_doc.sequences().ptr_eq(doc.sequences());
+        // The change from `before` (an undo can come back to the very
+        // document last seen here, so that alone says nothing).
+        let from_before = before
+            .filter(|b| !b.sequences().ptr_eq(doc.sequences()))
+            .map(crate::automation::plugin_automation);
+        if seen && from_before.is_none() {
+            return;
+        }
+        let now = crate::automation::plugin_automation(&doc);
+        let cached = std::mem::take(&mut inner.plugin_auto);
+        let mut changed: std::collections::BTreeSet<AutomationTarget> = Default::default();
+        for old in std::iter::once(&cached).chain(from_before.as_ref()) {
+            changed.extend(
+                old.keys()
+                    .chain(now.keys())
+                    .filter(|t| old.get(t) != now.get(t))
+                    .copied(),
+            );
+        }
+        inner.plugin_auto = now;
+        inner.plugin_auto_doc = doc;
+        self.sync_plugin_targets(inner, changed);
+    }
+
+    /// Plan 5e-1 Task 9b, item 4: a plugin that finished loading (at open,
+    /// or loaded again) got its state, then its overlay (the static
+    /// values); its automated parameters are put where their automation
+    /// plays at the position, once, through the same path as
+    /// [`Session::resync_plugin_automation`].
+    fn sync_loaded_plugins(&self, inner: &mut Inner, loaded: &[PluginInstanceId]) {
+        if loaded.is_empty() {
+            return;
+        }
+        // One scan of the document for every loaded slot (review m4).
+        let all = core_model::automation::automated_targets(inner.doc());
+        let targets: std::collections::BTreeSet<AutomationTarget> = all
+            .into_iter()
+            .filter(|(slot, _)| loaded.contains(slot))
+            .map(|(slot, p)| AutomationTarget::PluginParam(slot, p))
+            .collect();
+        self.sync_plugin_targets(inner, targets);
+    }
+
+    /// Sends each plugin parameter in `targets` the value its automation
+    /// plays at the position (the playing sequence's, else the cursor's),
+    /// else its static value. A target touched now is left to the hand.
+    fn sync_plugin_targets(
+        &self,
+        inner: &mut Inner,
+        changed: std::collections::BTreeSet<AutomationTarget>,
+    ) {
+        if changed.is_empty() {
+            return;
+        }
+        let (seq, tick) = match host::position(self.id) {
+            Some((s, t)) => (Some(s), Some(t)),
+            None => (inner.cursor_seq, inner.cursor),
+        };
+        let tick = tick.unwrap_or(Tick::ZERO);
+        for t in changed {
+            if inner.touches.contains_key(&t) {
+                continue;
+            }
+            let AutomationTarget::PluginParam(slot, param) = t else {
+                continue;
+            };
+            let points =
+                seq.map_or_else(Vec::new, |s| crate::automation::existing(inner.doc(), s, t));
+            if points.is_empty() {
+                self.reset_plugin_param(t);
+                continue;
+            }
+            let Some(info) = crate::automation::param_info(self.id, t) else {
+                continue;
+            };
+            let Some(v) = crate::automation::value_at(&points, tick, self.stepped(t)) else {
+                continue;
+            };
+            let plain = core_model::automation::param_plain(v, info.min, info.max, info.stepped);
+            let _ = plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    p.set_param(slot, param, plain);
+                }
+            });
+        }
+    }
+
+    /// Puts plugin parameter `t` back at its static value: the document's
+    /// overlay, else the plugin's own value before it (no commit).
+    fn reset_plugin_param(&self, t: AutomationTarget) {
+        let AutomationTarget::PluginParam(slot, param) = t else {
+            return;
+        };
+        let _ = plugins::with(self.id, |p| {
+            if let Some(p) = p {
+                p.reset_param(slot, param);
+            }
+        });
+    }
+
+    /// Ends kept gesture messages the queue refused, while it refuses them
+    /// (pre-flight I3).
+    fn resend_ends(&self, inner: &mut Inner) {
+        let id = self.id;
+        inner.unsent_ends.resend(|m| host::gesture(id, m));
+    }
+
+    /// Starts writing a pass of `seq` once Play went out (Rulings 7, 9,
+    /// 19, 20): the tap, the settings, Write strips' holds, and every held
+    /// touch's path picked again.
+    fn begin_writing(&self, inner: &mut Inner, seq: SeqId, at: Tick) {
+        inner.restart_writing = None;
+        if inner.writing.is_some() {
+            return;
+        }
+        let Some(handles) = host::start_gestures(self.id) else {
+            inner
+                .news
+                .problems
+                .push("Automation is not being written this pass: the engine was busy.".into());
+            return;
+        };
+        let (after_write, return_ms, thinning) = crate::automation::pass_settings();
+        let rate = host::device(self.id)
+            .map(|(_, r)| r)
+            .filter(|r| *r > 0.0)
+            .unwrap_or_else(|| f64::from(inner.doc().settings().format.sample_rate));
+        let return_frames = (f64::from(return_ms) * rate / 1000.0).round() as u64;
+        let doc = inner.doc();
+        let m = doc.mixer();
+        let write_strips: std::collections::BTreeSet<StripId> = m
+            .order()
+            .iter()
+            .copied()
+            .chain(std::iter::once(m.master()))
+            .filter(|s| {
+                m.strip(*s)
+                    .is_ok_and(|x| x.automation == AutomationMode::Write)
+            })
+            .collect();
+        // Every Write strip's controls, at their values at the play-start
+        // tick (Ruling 9; the punch and record range play no part, Ruling
+        // 28). None while suspended (Ruling 3).
+        let mut holds: Vec<(AutomationTarget, f64)> = Vec::new();
+        let existing = crate::automation::ExistingCache::default();
+        if !crate::automation::suspended() {
+            // The pass's own start: the engine's published position still
+            // shows where it stood before a queued Locate (review I-2).
+            let tick = at;
+            let all = existing.get(doc, seq);
+            for s in &write_strips {
+                for t in held_controls(doc, *s) {
+                    // A control the hand holds over the pass's start is held
+                    // at the hand's value (re-review 2 N4).
+                    let v = match inner.touches.get(&t) {
+                        Some(x) => x.value,
+                        None => all
+                            .get(&t)
+                            .and_then(|p| crate::automation::value_at(p, tick, t.is_stepped()))
+                            .unwrap_or_else(|| crate::automation::fixed_value(doc, t, None)),
+                    };
+                    holds.push((t, v));
+                }
+            }
+        }
+        inner.writing = Some(Writing {
+            seq,
+            handles,
+            marks: Vec::new(),
+            stamps: Default::default(),
+            holds: holds.clone(),
+            write_strips,
+            wrapped: false,
+            return_frames,
+            after_write,
+            thinning,
+            dropped_at_start: host::gestures_dropped(self.id).unwrap_or(0),
+            rate,
+            ended: holds.iter().map(|h| h.0).collect(),
+            holds_resent: false,
+            // Touches held over the pass's start count as moved: the holds
+            // re-sent at the roll spare them (re-review 2 N4).
+            moved: inner.touches.keys().copied().collect(),
+            landed: 0,
+            step: None,
+            after_done: false,
+            late: 0,
+            late_said: 0,
+            existing,
+        });
+        let tag = WriteMode::Write.tag();
+        let ns = host_time(None);
+        for (t, v) in holds {
+            self.send_gesture(inner, t, GesturePhase::Touch(v), tag, ns);
+            // A touched control stays touched; its release holds it.
+            if !inner.touches.contains_key(&t) {
+                self.send_gesture(inner, t, GesturePhase::Hold, tag, ns);
+            }
+        }
+        // Touches held over the pass's start (Ruling 20 as amended, M2):
+        // each writes when its strip writes now, else is heard only. A
+        // static touch (held over Play from while stopped) writes too when
+        // its strip writes now (re-review 3 n1, fix round 4): a fader held
+        // on a Write strip while Play is pressed writes its ride, and its
+        // release follows the strip's mode. It leaves the static edit (its
+        // share ends below); on a strip that does not write it keeps the
+        // static path.
+        let held: Vec<(AutomationTarget, Touching)> =
+            inner.touches.iter().map(|(t, x)| (*t, *x)).collect();
+        let mut left_static = 0usize;
+        for (t, x) in held {
+            let mut converted = false;
+            // By the touch's own path and share (plan 5f-1 Ruling 2): a
+            // resting static touch holds no share, yet stays static on a
+            // strip that does not write and converts on one that does.
+            if x.path == TouchPath::Static {
+                if self.write_mode_of(inner, t).is_none() {
+                    continue;
+                }
+                if x.shared {
+                    self.keep_static_param(inner, t, x);
+                    left_static += 1;
+                }
+                converted = true;
+            }
+            // A Trim offset stays an offset from its own grab (review I-1,
+            // Ruling 11: the engine keeps `Offset` entries over a Stop or a
+            // Locate); an absolute touch stays absolute. A converted static
+            // touch on an automated Trim lane grabs at an offset of 0 from
+            // the hand's value now, as a Trim grab does (re-review 4 N1,
+            // pre-flight I12): its stopped moves were static edits, so it
+            // carries no offset.
+            let was_offset = matches!(x.path, TouchPath::Write(_, Release::Offsets));
+            let path = match self.write_mode_of(inner, t) {
+                Some(m) => TouchPath::Write(
+                    m,
+                    match self.release_of(inner, t, m) {
+                        Release::Offsets if !was_offset && !converted => Release::Glide,
+                        r => r,
+                    },
+                ),
+                None => TouchPath::Live,
+            };
+            let is_offset = matches!(path, TouchPath::Write(_, Release::Offsets));
+            if was_offset && !is_offset {
+                // The engine's entry becomes absolute at the value heard,
+                // so the next value does not jump from an offset.
+                let v = host::heard(self.id, t).unwrap_or(x.value);
+                self.send_gesture(inner, t, GesturePhase::Touch(v), tag_of(path), ns);
+            }
+            if converted && is_offset {
+                self.send_gesture(inner, t, GesturePhase::Offset(0.0), tag_of(path), ns);
+            }
+            if let Some(y) = inner.touches.get_mut(&t) {
+                y.path = path;
+                if !is_offset || converted {
+                    y.base = y.value;
+                }
+                // A converted touch leaves the static edit.
+                if converted {
+                    y.shared = false;
+                }
+            }
+        }
+        // The static touches that now write end their share of the static
+        // edit as their release would: the last closes it as its own step
+        // (what was set while stopped), and what waited for it lands.
+        for _ in 0..left_static {
+            self.end_static_share(inner);
+        }
+    }
+
+    /// `idle`'s writing step: the kept ends, the sampler's due values, the
+    /// tap's marks and stamps, and the pass's end (Ruling 24).
+    fn service_writing(&self) {
+        let mut inner = lock(&self.inner);
+        self.resend_ends(&mut inner);
+        self.release_plugin_touches(&mut inner);
+        // A suspend toggle or an undone mode change (Ruling T6-1).
+        self.repick_resting(&mut inner, None);
+        for (t, v, ns) in inner.sampler.due(crate::automation::now()) {
+            self.send_value(&mut inner, t, v, ns);
+        }
+        let holder = match host::holder() {
+            Some(h) if h == self.id => Holder::This,
+            Some(_) => Holder::Other,
+            None => Holder::Nobody,
+        };
+        // The roll is read before the state (see `write_mode_of`).
+        let rolled = inner
+            .writing
+            .as_ref()
+            .is_some_and(|w| w.handles.status.rolled());
+        let stopped = host::transport_stopped(self.id);
+        // The intent, not the renderer's state: a rebuilt engine's Play
+        // reads stopped until it applies it.
+        let wants_play = host::wants_play(self.id) == Some(true);
+        let Some(w) = inner.writing.as_mut() else {
+            // A pass a rebuild ended starts again once the rebuilt engine
+            // plays; a Stop or another session's engine ends the wait.
+            if let Some(seq) = inner.restart_writing {
+                match (holder, wants_play) {
+                    (Holder::This, true) => {
+                        // The old pass lands first (re-review N1).
+                        inner.last_step = None;
+                        self.apply_pending_automation(&mut inner);
+                        let step = inner.last_step.take().or(inner.restart_step.take());
+                        let at = self.resume_tick();
+                        self.begin_writing(&mut inner, seq, at);
+                        self.keep_loop_step(&mut inner, step);
+                    }
+                    (Holder::Nobody, _) => {}
+                    _ => {
+                        inner.restart_writing = None;
+                        inner.restart_step = None;
+                    }
+                }
+            }
+            return;
+        };
+        // The run before the stamps: every stamp of a block up to it is
+        // in the ring by then (Task 12's landing at a wrap).
+        let run = w.handles.status.run();
+        drain_tap(w);
+        // A stamp for a pass already landed is lost: said once per batch
+        // (Task 12 review I1).
+        if w.late > w.late_said {
+            w.late_said = w.late;
+            inner.news.problems.push(
+                "Some automation moves came after their loop pass had landed and were lost.".into(),
+            );
+        }
+        let Some(w) = inner.writing.as_mut() else {
+            return;
+        };
+        let (closed, seq) = (w.handles.status.closed(), w.seq);
+        // Re-review m4: the holds went out right after the Play's (or the
+        // Locate's) command; a command swap the renderer put off could
+        // apply that Locate, whose `end_holds` ends them, after them. The
+        // tap is installed by a command queued after the Locate, so once it
+        // rolled the Locate applied: the holds go again, at the same
+        // values (a flat stretch gains no point), sparing targets touched
+        // now or earlier in the pass.
+        let resend: Vec<(AutomationTarget, f64)> = if rolled && !w.holds_resent && !closed {
+            w.holds_resent = true;
+            // Not one a touch already moved this pass.
+            w.holds
+                .iter()
+                .filter(|(t, _)| !w.moved.contains(t))
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !resend.is_empty() {
+            let (tag, ns) = (WriteMode::Write.tag(), host_time(None));
+            for (t, v) in resend {
+                if inner.touches.contains_key(&t) {
+                    continue;
+                }
+                self.send_gesture(&mut inner, t, GesturePhase::Touch(v), tag, ns);
+                self.send_gesture(&mut inner, t, GesturePhase::Hold, tag, ns);
+            }
+        }
+        // A recording ends its own pass and takes the writes with it; its
+        // loop passes land into its group as they end (Task 12).
+        if inner.finishing {
+            return;
+        }
+        if inner.recording.is_some() {
+            if !closed {
+                self.land_wraps(&mut inner, run);
+            }
+            return;
+        }
+        match crate::automation::pass_step(closed, rolled, stopped, wants_play, holder) {
+            PassStep::Go => self.land_wraps(&mut inner, run),
+            PassStep::Land => self.finish_writing(&mut inner),
+            PassStep::Restart => {
+                // The rebuilt engine plays on (Ruling 21; controller
+                // ruling 3): what was written lands as Stop lands it (After
+                // Write included, so the new pass holds the strips' new
+                // modes), then writing goes on from where it resumed
+                // (re-review N1). A looped pass keeps its one step (Task
+                // 12).
+                let old = inner.writing.as_ref().and_then(|w| w.step);
+                inner.last_step = None;
+                self.finish_writing(&mut inner);
+                self.apply_pending_automation(&mut inner);
+                let step = inner.last_step.take().or(old);
+                let at = self.resume_tick();
+                self.begin_writing(&mut inner, seq, at);
+                self.keep_loop_step(&mut inner, step);
+            }
+            PassStep::RestartLater => {
+                let old = inner.writing.as_ref().and_then(|w| w.step);
+                inner.last_step = None;
+                self.finish_writing(&mut inner);
+                inner.restart_writing = Some(seq);
+                inner.restart_step = old;
+            }
+        }
+    }
+
+    /// A looped pass a rebuild restarted goes on landing into the step its
+    /// part before the rebuild landed in (plan 5e-1 Task 12: one undo step
+    /// per looped pass).
+    fn keep_loop_step(&self, inner: &mut Inner, step: Option<u64>) {
+        let looped = inner.looped;
+        if let Some(w) = inner.writing.as_mut().filter(|_| looped) {
+            w.step = step;
+        }
+    }
+
+    /// Plan 5e-1 Task 12 (owner 2026-10-29; spec §7.4): while looping, the
+    /// loop passes that are over as of tap run `run` (the next pass heard
+    /// for [`crate::automation::WRAP_MARGIN_MS`]) land now, so the next
+    /// cycle plays what was just written: into the pass's one undo step,
+    /// or into the recording's group. Put off while an edit is open (the
+    /// next `idle` lands them). A pass that wrote nothing makes no step.
+    fn land_wraps(&self, inner: &mut Inner, run: u64) {
+        let Some(w) = inner.writing.as_ref() else {
+            return;
+        };
+        // Heard, not rendered (Task 12 review I1): a device with a clock
+        // renders two buffers and its output latency ahead of what is
+        // heard; the graph latency is in the pass's marks.
+        let forced = *crate::automation::WRAP_LAG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let lag = if let Some(l) = forced {
+            l
+        } else if !host::offline_mode() || host::offline_clock_ns().is_some() {
+            host::input_info(self.id).map_or(0, |(_, i)| {
+                u64::from(i.output_latency_frames)
+                    .saturating_add(u64::from(i.buffer_frames).saturating_mul(2))
+            })
+        } else {
+            0
+        };
+        let margin = ((crate::automation::WRAP_MARGIN_MS * w.rate / 1000.0).round() as u64)
+            .saturating_add(lag);
+        let over = crate::autowrite::passes_over(&w.marks, run, margin);
+        if over <= w.landed {
+            return;
+        }
+        let recording = inner.recording.is_some();
+        if inner.history.in_transaction()
+            || inner.static_edit.is_some()
+            || inner.history.in_group() != recording
+        {
+            return;
+        }
+        let writes = w.model_writes(self.id, inner.doc(), run, Some(over));
+        let (step, after, after_done) = (w.step, w.after_write, w.after_done);
+        let strips: Vec<StripId> = w.write_strips.iter().copied().collect();
+        if let Some(w) = inner.writing.as_mut() {
+            w.landed = over;
+            // The landed passes' stamps are done with: a later pass's
+            // writes never read them (a wrap reopens nothing), so each
+            // landing costs only its own passes (Task 12 review m5).
+            let pieces =
+                crate::passes::writing_pieces(&w.marks, i64::try_from(run).unwrap_or(i64::MAX));
+            for list in w.stamps.values_mut() {
+                list.retain(|s| {
+                    crate::passes::piece_of(&pieces, s.run).is_none_or(|p| p.pass >= over)
+                });
+            }
+            w.stamps.retain(|_, list| !list.is_empty());
+        }
+        let landing = crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            step,
+            after_done,
+        };
+        inner.last_step = None;
+        let landed = self.land(inner, landing);
+        // The landed cycle is existing automation now: the next read of
+        // the pass's cache flattens the document that holds it (plan 5e-2
+        // ruling P4; its sequences changed, so the cache would see that
+        // anyway).
+        if let Some(w) = inner.writing.as_ref() {
+            w.existing.clear();
+        }
+        if landed {
+            let step = inner.last_step.take();
+            if let Some(w) = inner.writing.as_mut() {
+                w.after_done = true;
+                if !recording {
+                    w.step = step;
+                }
+            }
+        }
+    }
+
+    /// Where a rebuilt engine resumed: the rebuild's tick (its renderer
+    /// may not have published a position yet), else the position.
+    fn resume_tick(&self) -> Tick {
+        host::resumed_at(self.id)
+            .or_else(|| host::position(self.id).map(|p| p.1))
+            .unwrap_or(Tick::ZERO)
+    }
+
+    /// Ends the pass and answers its landing: the writes of the passes
+    /// not landed yet, the Write strips that still exist (none once After
+    /// Write went), the After Write mode and the pass's step (nothing
+    /// without a pass).
+    fn take_writes(&self, inner: &mut Inner) -> crate::automation::Landing {
+        let Some(mut w) = inner.writing.take() else {
+            return crate::automation::Landing {
+                writes: Vec::new(),
+                strips: Vec::new(),
+                after: AutomationMode::Latch,
+                step: None,
+                after_done: false,
+            };
+        };
+        if host::holder() == Some(self.id) {
+            host::stop_gestures(self.id);
+            // The renderer marks the Stop first (M1).
+            let until = Instant::now() + std::time::Duration::from_millis(250);
+            while !w.handles.status.closed() && Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        drain_tap(&mut w);
+        let end_run = w.handles.status.run();
+        // A glide or hold the renderer took after the Stop (or that a Play
+        // while playing, which ends no hold, would carry on) ends now; a
+        // Release with no live entry does nothing. Touched targets keep
+        // their touch (Ruling 20).
+        let ns = host_time(None);
+        for t in std::mem::take(&mut w.ended) {
+            if !inner.touches.contains_key(&t) {
+                self.send_gesture(inner, t, GesturePhase::Release, 0, ns);
+            }
+        }
+        let dropped = host::gestures_dropped(self.id).is_some_and(|d| d > w.dropped_at_start);
+        if w.handles.status.lost_stamps() > 0
+            || w.handles.status.lost_marks() > 0
+            || dropped
+            || w.late > w.late_said
+        {
+            inner
+                .news
+                .problems
+                .push("Some automation moves were lost while writing.".into());
+        }
+        // The loop passes landed at their wraps are in the document
+        // (Task 12): only the rest lands now.
+        let writes = w.model_writes(self.id, inner.doc(), end_run, None);
+        let writes = self.drop_gone(inner, writes);
+        let strips = if writes.is_empty() {
+            Vec::new()
+        } else {
+            let m = inner.doc().mixer();
+            w.write_strips
+                .iter()
+                .copied()
+                .filter(|s| m.strip(*s).is_ok())
+                .collect()
+        };
+        crate::automation::Landing {
+            writes,
+            strips,
+            after: w.after_write,
+            step: w.step,
+            after_done: w.after_done,
+        }
+    }
+
+    /// Ruling 25: writes whose target or sequence went are dropped, one
+    /// problem line per target.
+    fn drop_gone(&self, inner: &mut Inner, writes: Vec<AutomationWrite>) -> Vec<AutomationWrite> {
+        let mut said: std::collections::BTreeSet<AutomationTarget> = Default::default();
+        let mut kept = Vec::with_capacity(writes.len());
+        for w in writes {
+            let doc = inner.doc();
+            if core_model::automation::target_exists(doc, w.target) && doc.sequence(w.seq).is_ok() {
+                kept.push(w);
+            } else if said.insert(w.target) {
+                inner.news.problems.push(format!(
+                    "Automation of {} was not written: it no longer exists.",
+                    w.target.describe()
+                ));
+            }
+        }
+        kept
+    }
+
+    /// Ends the pass; its writes wait to land as "Write Automation"
+    /// (Stop, the jumps of Ruling 23, a failed Play, close).
+    fn finish_writing(&self, inner: &mut Inner) {
+        let landing = self.take_writes(inner);
+        if landing.writes.is_empty() {
+            return;
+        }
+        inner.pending_automation.push(landing);
+    }
+
+    /// Ends the pass into a recording's pass (spec §7.4): its writes join
+    /// `pass`, or make one when the recording recorded nothing (Ruling
+    /// 25).
+    fn writes_into_pass(&self, inner: &mut Inner, pass: Option<RecordPass>) -> Option<RecordPass> {
+        let crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            after_done,
+            ..
+        } = self.take_writes(inner);
+        if writes.is_empty() {
+            return pass;
+        }
+        // After Write went with a loop pass's landing: only strips still
+        // in Write get it now (Task 12 review m6).
+        let strips = if after_done {
+            let m = inner.doc().mixer();
+            strips
+                .into_iter()
+                .filter(|s| {
+                    m.strip(*s)
+                        .is_ok_and(|x| x.automation == AutomationMode::Write)
+                })
+                .collect()
+        } else {
+            strips
+        };
+        inner.after_write_pending = Some((strips, after));
+        Some(match pass {
+            Some(mut p) => {
+                p.automation.extend(writes);
+                p
+            }
+            None => RecordPass {
+                automation: writes,
+                ..Default::default()
+            },
+        })
+    }
+
+    /// Inside a recording's group: the Write strips become the After
+    /// Write mode when automation landed (Ruling 9).
+    fn after_write_in_group(&self, inner: &mut Inner, landed: bool) {
+        let Some((strips, mode)) = inner.after_write_pending.take() else {
+            return;
+        };
+        let m = inner.doc().mixer();
+        let strips: Vec<StripId> = strips.into_iter().filter(|s| m.strip(*s).is_ok()).collect();
+        if !landed || strips.is_empty() {
+            return;
+        }
+        let cmd = Command::Mixer(MixerCmd::SetAutomationMode { strips, mode });
+        if let Err(e) = inner.history.execute(&cmd, &ViewFilter::default()) {
+            inner
+                .news
+                .problems
+                .push(format!("The automation mode could not be set ({e})."));
+        }
+    }
+
+    /// A recording's pass the model refused: its automation alone, inside
+    /// the group (Ruling 25). Its report when it landed.
+    fn land_automation_alone(
+        &self,
+        inner: &mut Inner,
+        automation: Vec<AutomationWrite>,
+    ) -> Option<core_model::command::Report> {
+        let automation = self.drop_gone(inner, automation);
+        if automation.is_empty() {
+            return None;
+        }
+        let pass = RecordPass {
+            automation,
+            ..Default::default()
+        };
+        match inner
+            .history
+            .execute(&Command::Record(pass), &ViewFilter::default())
+        {
+            Ok(r) => Some(r),
+            Err(e) => {
+                inner
+                    .news
+                    .problems
+                    .push(format!("The automation could not be written ({e})."));
+                None
+            }
+        }
+    }
+
+    /// Lands a finished pass's writes as one undo step "Write Automation"
+    /// (with After Write in the same step), or into the step its loop
+    /// passes landed in (Task 12), once no edit is open.
+    fn apply_pending_automation(&self, inner: &mut Inner) {
+        if inner.history.in_transaction() || inner.history.in_group() || inner.static_edit.is_some()
+        {
+            return;
+        }
+        // Oldest first, each pass its own step (Ruling 23, review m2).
+        for landing in std::mem::take(&mut inner.pending_automation) {
+            self.land(inner, landing);
+        }
+    }
+
+    /// Lands one pass's writes (see [`Session::apply_pending_automation`];
+    /// plan 5e-1 Task 12): inside a recording's group as part of its step;
+    /// else into `step` while that step is still the present (one Undo
+    /// takes back the whole looped pass), else as a new step "Write
+    /// Automation"; After Write for `strips` with it. True when it landed;
+    /// outside a recording `last_step` is then its step.
+    fn land(&self, inner: &mut Inner, landing: crate::automation::Landing) -> bool {
+        let crate::automation::Landing {
+            writes,
+            strips,
+            after,
+            step,
+            after_done,
+        } = landing;
+        let writes = self.drop_gone(inner, writes);
+        if writes.is_empty() {
+            return false;
+        }
+        let m = inner.doc().mixer();
+        let strips: Vec<StripId> = strips.into_iter().filter(|s| m.strip(*s).is_ok()).collect();
+        // After Write went with an earlier landing; if that step was undone
+        // (or another step covers it) the strips still in Write get it
+        // again with this one (Task 12 review m6).
+        let still_write: Vec<StripId> = strips
+            .iter()
+            .copied()
+            .filter(|s| {
+                m.strip(*s)
+                    .is_ok_and(|x| x.automation == AutomationMode::Write)
+            })
+            .collect();
+        let mode_of = |strips: Vec<StripId>| {
+            (!strips.is_empty()).then(|| {
+                Command::Mixer(MixerCmd::SetAutomationMode {
+                    strips,
+                    mode: after,
+                })
+            })
+        };
+        let pass = Command::Record(RecordPass {
+            automation: writes.clone(),
+            ..Default::default()
+        });
+        let f = ViewFilter::default();
+        let in_group = inner.history.in_group();
+        let amended = match step {
+            Some(serial) if !in_group => inner.history.amend(&pass, &f, serial),
+            _ => Ok(None),
+        };
+        let mode_failed = |inner: &mut Inner, e: core_model::error::ModelError| {
+            inner
+                .news
+                .problems
+                .push(format!("The automation mode could not be set ({e})."));
+        };
+        let landed: Result<core_model::command::Report, core_model::error::ModelError> =
+            match amended {
+                Err(e) => Err(e),
+                Ok(Some(report)) => {
+                    let mode = if after_done { None } else { mode_of(strips) };
+                    if let Some(cmd) = &mode
+                        && let Some(serial) = step
+                        && let Err(e) = inner.history.amend(cmd, &f, serial)
+                    {
+                        mode_failed(inner, e);
+                    }
+                    Ok(report)
+                }
+                Ok(None) => {
+                    let mode = if after_done {
+                        mode_of(still_write)
+                    } else {
+                        mode_of(strips)
+                    };
+                    if in_group {
+                        let r = inner.history.execute(&pass, &f);
+                        if r.is_ok() {
+                            inner.landed_in_group = true;
+                            if let Some(cmd) = &mode
+                                && let Err(e) = inner.history.execute(cmd, &f)
+                            {
+                                mode_failed(inner, e);
+                            }
+                        }
+                        r
+                    } else {
+                        match &mode {
+                            None => inner.history.execute(&pass, &f),
+                            Some(cmd) => match inner.history.begin_group() {
+                                Err(e) => Err(e),
+                                Ok(()) => {
+                                    let r = inner.history.execute(&pass, &f);
+                                    if r.is_ok()
+                                        && let Err(e) = inner.history.execute(cmd, &f)
+                                    {
+                                        mode_failed(inner, e);
+                                    }
+                                    let _ = inner.history.end_group("Write Automation");
+                                    r
+                                }
+                            },
+                        }
+                    }
+                }
+            };
+        let report = match landed {
+            Ok(r) => r,
+            Err(e) => {
+                inner
+                    .news
+                    .problems
+                    .push(format!("The automation could not be written ({e})."));
+                return false;
+            }
+        };
+        if !in_group {
+            inner.last_step = Some(inner.history.present_serial());
+        }
+        let silent = crate::automation::silent_new_lanes(inner.doc(), &report.created, &writes);
+        inner.news.problems.extend(silent);
+        inner.version += 1;
+        inner.news.doc_changed = true;
+        inner.reload_host(self.id);
+        self.mark(inner);
+        self.sync_written_plugins(inner, &writes);
+        self.resync_plugin_automation(inner, None);
+        self.release_vanished(inner);
+        true
+    }
+
+    /// After a landing, each written plugin parameter is sent the landed
+    /// automation's value at the transport tick (Ruling 15, M13).
+    fn sync_written_plugins(&self, inner: &mut Inner, writes: &[AutomationWrite]) {
+        let tick = host::position(self.id)
+            .map(|p| p.1)
+            .or(inner.cursor)
+            .unwrap_or(Tick::ZERO);
+        let mut done: std::collections::BTreeSet<AutomationTarget> = Default::default();
+        for w in writes {
+            let t = w.target;
+            let AutomationTarget::PluginParam(slot, param) = t else {
+                continue;
+            };
+            if !done.insert(t) {
+                continue;
+            }
+            let Some(info) = crate::automation::param_info(self.id, t) else {
+                continue;
+            };
+            let points = crate::automation::existing(inner.doc(), w.seq, t);
+            let Some(v) = crate::automation::value_at(&points, tick, self.stepped(t)) else {
+                continue;
+            };
+            let plain = core_model::automation::param_plain(v, info.min, info.max, info.stepped);
+            let _ = plugins::with(self.id, |p| {
+                if let Some(p) = p {
+                    p.set_param(slot, param, plain);
+                }
+            });
+        }
+    }
+}
+
 /// Live input (plan 5c Task 8; spec §6.1, §6.6, §12.1).
 #[uniffi::export]
 impl Session {
@@ -5116,16 +7558,42 @@ impl Session {
     /// Feeds `bytes` (channel messages, one after another) to the engine
     /// as if source `port` sent them now (`midi.inject`): lanes listening
     /// to that source play them thru and, armed and recording, record
-    /// them. False when this document does not hold the engine (nothing
-    /// is sent). `Model` for bytes that are not channel messages or a bad
-    /// port name; `Busy` when the input queue is full.
+    /// them. True when something took them: a surface, a learn or a
+    /// learned map (which then act in this window: it takes the surfaces'
+    /// focus, as `surface.inject` does; final review N6), or the engine.
+    /// False when nothing did, e.g. this document does not hold the engine
+    /// and no surface or map takes them (final review T8 m7). `Model` for
+    /// bytes that are not channel messages or a bad port name; `Busy` when
+    /// the input queue is full.
     pub fn inject_midi(&self, port: String, bytes: Vec<u8>) -> Result<bool, VizError> {
         ffi_guard(|| {
-            let msgs = crate::live::parse_injection(&port, &bytes)?;
-            let Some(tx) = host::midi_sender(self.id) else {
-                return Ok(false);
-            };
+            let parsed = crate::live::parse_injection(&port, &bytes)?;
+            // Surfaces, MIDI learn and learned maps hear injected bytes
+            // too (plan 5f-1 Ruling 16), serviced by the session's idle;
+            // what they take stays out of the lanes (Ruling 17).
+            // This window's own document decides (final re-review): when
+            // a surface, a learn, a command map or one of its maps hears the
+            // port, it takes the focus first, so the bytes act here.
+            if crate::surfaces::would_listen(self.id, &port) && self.focus_here() {
+                // The units show this window before the bytes are routed
+                // (final review N1).
+                self.feed_surfaces(crate::surfaces::now(), &[]);
+            }
+            let queued = crate::surfaces::inject(&port, &bytes);
             let key = core_engine::input::port_key(&port);
+            let count = parsed.len();
+            let msgs: Vec<_> = parsed
+                .into_iter()
+                .filter(|m| !crate::surfaces::takes(key, m.as_slice()))
+                .collect();
+            // Taken: a surface port's every message, a learn's or a map's.
+            let learnt = queued && msgs.len() < count;
+            if msgs.is_empty() {
+                return Ok(learnt);
+            }
+            let Some(tx) = host::midi_sender(self.id) else {
+                return Ok(learnt);
+            };
             for msg in msgs {
                 let sent = tx.send(core_engine::input::MidiIn {
                     port: key,
@@ -5573,6 +8041,535 @@ impl Session {
             Ok(())
         })
     }
+
+    /// Starts a bounce (plan 5f-2; spec §9): the job ID; `job` reports it
+    /// and `bounce_result` names what it wrote. Every refusal of the
+    /// request is `Model`, with nothing written (Ruling 3); `Busy` inside
+    /// an open edit, while another bounce of this session is unapplied,
+    /// and with "Add to project" while a Format, Convert or Relink job is
+    /// (Ruling 9).
+    pub fn bounce(&self, req: crate::bounce::BounceRequestRow) -> Result<u64, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let plan = self.bounce_plan(&inner, &req)?;
+            if inner.history.in_transaction() {
+                return Err(VizError::Busy {
+                    message: "Finish the open edit first.".into(),
+                });
+            }
+            self.apply_jobs_after_edit(&mut inner);
+            if inner.jobs.pending(&[crate::jobs::JobKindRow::Bounce]) {
+                return Err(VizError::Busy {
+                    message: "A bounce is running.".into(),
+                });
+            }
+            if req.add_to_project {
+                inner.media_jobs_idle()?;
+            }
+            // The live states, as Save captures them (Ruling 6), with the
+            // values the plugins were sent and the document does not have
+            // yet (read first: a capture counts them as saved).
+            // An automated or riding parameter keeps its static value, as a
+            // capture keeps it (final review T4-M2; plan 5e-1 Ruling 15).
+            let slots = mixer::slot_ids(inner.doc());
+            let mut kept = core_model::automation::automated_targets(inner.doc());
+            kept.extend(inner.riding_params());
+            let sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)> = plugins::with(self.id, |p| {
+                p.map(|p| {
+                    slots
+                        .iter()
+                        .map(|id| {
+                            let mut v = p.uncommitted(*id);
+                            v.retain(|(param, _)| !kept.contains(&(*id, *param)));
+                            (*id, v)
+                        })
+                        .filter(|(_, v)| !v.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+            })?;
+            self.capture_all(&mut inner)?;
+            let doc = with_params(inner.doc().clone(), sent);
+            let root = inner.root(self.id);
+            let format = doc.settings().format;
+            let copies = if mixer::slot_ids(&doc).is_empty() {
+                None
+            } else {
+                Some(plugins::start_bounce(
+                    self.id,
+                    &doc,
+                    f64::from(format.sample_rate),
+                    crate::bounce::BLOCK,
+                )?)
+            };
+            let token = copies.as_ref().map(|c| c.token);
+            #[cfg(feature = "test-hooks")]
+            let (cancel_at, fail_import_at) = (
+                inner.bounce_cancel_at.take(),
+                inner
+                    .bounce_fail_import_at
+                    .take()
+                    .and_then(|k| usize::try_from(k).ok()),
+            );
+            #[cfg(not(feature = "test-hooks"))]
+            let (cancel_at, fail_import_at) = (None, None);
+            let job = crate::bounce::Job {
+                problems: plan.offline_sentence().into_iter().collect(),
+                plan,
+                media: crate::media::files(&doc, &root, &inner.offline),
+                doc,
+                root,
+                reserved: inner.reserved_names(),
+                format,
+                tail_cap_ms: crate::bounce::bounce_settings().tail_cap_ms,
+                copies: copies.map(|c| crate::bounce::Copies {
+                    factory: c.factory,
+                    ready: c.ready,
+                    problems: c.problems,
+                }),
+                cancel_at,
+                fail_import_at,
+            };
+            let spawned = inner
+                .jobs
+                .spawn(crate::jobs::JobKindRow::Bounce, move |progress, cancel| {
+                    crate::bounce::run(job, progress, cancel)
+                });
+            match spawned {
+                Ok(id) => {
+                    if let Some(t) = token {
+                        inner.bounce_copies = Some((id, t));
+                    }
+                    Ok(id)
+                }
+                Err(e) => {
+                    if let Some(t) = token {
+                        plugins::end_bounce(t);
+                    }
+                    Err(e)
+                }
+            }
+        })
+    }
+
+    /// What `bounce` would do with `req`, checked as `bounce` checks it
+    /// (nothing starts): the range's frames, the files in order (stems
+    /// numbered), the lanes on external MIDI and Ruling 8's sentences.
+    pub fn bounce_check(
+        &self,
+        req: crate::bounce::BounceRequestRow,
+    ) -> Result<crate::bounce::BounceCheckRow, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            inner.refresh_media(self.id, false);
+            let plan = self.bounce_plan(&inner, &req)?;
+            let root = inner.root(self.id);
+            Ok(plan.check_row(
+                crate::bounce::bounce_settings().tail_cap_ms,
+                core_media::record::free_bytes(&root),
+            ))
+        })
+    }
+
+    /// The files and media bounce job `job` wrote (Ruling 10), applying it
+    /// first when it just finished; `None` until it finished, or when it
+    /// was cancelled or is no bounce.
+    pub fn bounce_result(
+        &self,
+        job: u64,
+    ) -> Result<Option<crate::bounce::BounceResultRow>, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            self.apply_jobs(&mut inner);
+            Ok(inner.bounce_results.get(&job).cloned())
+        })
+    }
+}
+
+/// The external sample editor (plan 5f-3; spec §11).
+#[uniffi::export]
+impl Session {
+    /// Open in External Editor (Ruling 2): writes region `event`'s span
+    /// (no gain, no fades, no dither) as a WAV in the project's rate and
+    /// depth to `Media/Edits/<name> edit <n>.wav` and keeps it as the
+    /// region's copy while the project is open (Ruling 3). `Model` for an
+    /// unknown event, a non-region or an offline region; `Busy` while a
+    /// Format, Convert or Relink job is unapplied; `Io` when `Media/Edits`
+    /// is a file or the copy cannot be written. The copy is written
+    /// without the session lock (pre-flight M4); a region that changed
+    /// meanwhile is refused and the file left to retention.
+    pub fn open_external(&self, event: u64) -> Result<crate::external::ExternalEditRow, VizError> {
+        use crate::jobs::JobKindRow;
+        ffi_guard(|| {
+            let ev = core_model::ids::EventId(event);
+            let (source, start, frames, dir, stem, fmt, from) = {
+                let mut inner = lock(&self.inner);
+                if inner.closed {
+                    return Err(crate::events::bad("this project was closed"));
+                }
+                if inner.jobs.pending(&[
+                    JobKindRow::Format,
+                    JobKindRow::Convert,
+                    JobKindRow::Relink,
+                ]) {
+                    return Err(VizError::Busy {
+                        message: "Wait for the media job to finish.".into(),
+                    });
+                }
+                inner.refresh_media(self.id, false);
+                let (media, start, frames) = crate::external::region_span(inner.doc(), ev)?;
+                if inner.offline.contains_key(&media) {
+                    return Err(crate::events::bad(crate::external::OFFLINE));
+                }
+                let format = inner.doc().settings().format;
+                let root = inner.root(self.id);
+                let item = inner
+                    .doc()
+                    .media()
+                    .get(&media)
+                    .ok_or_else(|| crate::events::bad(crate::external::OFFLINE))?;
+                let name = crate::external::root_name(inner.doc(), media)
+                    .unwrap_or_else(|| item.name.clone());
+                let out = (
+                    root.join(&item.path),
+                    start,
+                    frames,
+                    root.join(crate::external::EDITS_DIR),
+                    crate::external::safe_stem(&name),
+                    core_media::export::ExportFormat {
+                        container: core_media::export::Container::Wav,
+                        depth: format.depth,
+                        rate: format.sample_rate,
+                        dither: false,
+                        dither_stream: 0,
+                    },
+                    media,
+                );
+                inner.edits_writing += 1;
+                out
+            };
+            let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::external::write_copy(&source, start, frames, &dir, &stem, &fmt)
+            }));
+            let mut inner = lock(&self.inner);
+            inner.edits_writing = inner.edits_writing.saturating_sub(1);
+            let written = match written {
+                Ok(w) => w?,
+                // Counted down first, so retention runs again; `ffi_guard`
+                // turns the panic into `Internal` (fold check M9).
+                Err(p) => {
+                    drop(inner);
+                    std::panic::resume_unwind(p)
+                }
+            };
+            match crate::external::region_span(inner.doc(), ev) {
+                // The same media and span (review M4).
+                Ok(now) if now == (from, start, frames) && !inner.closed => {}
+                _ => {
+                    return Err(crate::events::bad(
+                        "The region changed while its copy was written; try again.",
+                    ));
+                }
+            }
+            inner.edits.insert(
+                ev,
+                crate::external::EditCopy {
+                    abs: written.clone(),
+                    from,
+                },
+            );
+            Ok(crate::external::ExternalEditRow {
+                event,
+                path: written.display().to_string(),
+                from: from.0,
+            })
+        })
+    }
+
+    /// What Reload finds for region `event` (Ruling 7; pre-flight I10):
+    /// its copy in this session; `Gone` when that copy is not on disk, or
+    /// when there is none in this session and the region's media came from
+    /// an external edit (the project was reopened) that no live copy here
+    /// shares; `NoEdit` otherwise (final review M12).
+    /// `Model` for an unknown event or a non-region.
+    pub fn external_edit(
+        &self,
+        event: u64,
+    ) -> Result<crate::external::ExternalEditStateRow, VizError> {
+        use crate::external::{ExternalEditRow, ExternalEditStateRow};
+        ffi_guard(|| {
+            let ev = core_model::ids::EventId(event);
+            let inner = lock(&self.inner);
+            let (media, ..) = crate::external::region_span(inner.doc(), ev)?;
+            if let Some(c) = inner.edits.get(&ev) {
+                return Ok(
+                    if std::fs::symlink_metadata(&c.abs).is_ok_and(|m| m.is_file()) {
+                        ExternalEditStateRow::Copy {
+                            row: ExternalEditRow {
+                                event,
+                                path: c.abs.display().to_string(),
+                                from: c.from.0,
+                            },
+                        }
+                    } else {
+                        ExternalEditStateRow::Gone
+                    },
+                );
+            }
+            let origin = inner
+                .doc()
+                .media()
+                .get(&media)
+                .and_then(|m| match m.origin {
+                    core_model::document::MediaOrigin::ExternalEdit { from } => Some(from),
+                    _ => None,
+                });
+            // A region sharing an edit whose copy is live here (a split
+            // part, a pasted duplicate) has no edit of its own (final
+            // review M12).
+            let sibling = inner.edits.iter().any(|(e, c)| {
+                Some(c.from) == origin
+                    || crate::external::region_span(inner.doc(), *e).is_ok_and(|(m, ..)| m == media)
+            });
+            Ok(if origin.is_some() && !sibling {
+                ExternalEditStateRow::Gone
+            } else {
+                ExternalEditStateRow::NoEdit
+            })
+        })
+    }
+
+    /// Imports `path` — region `event`'s copy, nothing else — as an
+    /// External Edit job (Ruling 6): the job ID; `job` reports it and
+    /// applies it as one undo step "External Edit". `Model` for a path
+    /// that is not the region's copy (relative, over
+    /// [`crate::external::MAX_PATH_BYTES`], holding `..`, or naming another
+    /// file; the same file under another spelling of its package, as after
+    /// Save As, is the copy: final review I1), a
+    /// region without a copy, a region that is gone (its copy is then
+    /// forgotten), or a copy that is gone; `Busy` inside an open edit and
+    /// while a Format, Convert, Relink, Bounce or External Edit job is
+    /// unapplied (pre-flight I11).
+    pub fn apply_external_edit(&self, event: u64, path: String) -> Result<u64, VizError> {
+        use crate::external::{GONE, MAX_PATH_BYTES, NO_EDIT, REGION_DELETED};
+        ffi_guard(|| {
+            if path.len() > MAX_PATH_BYTES {
+                return Err(crate::events::bad("the path is too long"));
+            }
+            let p = PathBuf::from(&path);
+            if !p.is_absolute() {
+                return Err(VizError::Model {
+                    message: format!("{path} is not an absolute path"),
+                });
+            }
+            let ev = core_model::ids::EventId(event);
+            let mut inner = lock(&self.inner);
+            if inner.history.in_transaction() {
+                return Err(VizError::Busy {
+                    message: "Finish the open edit first.".into(),
+                });
+            }
+            self.apply_jobs_after_edit(&mut inner);
+            let Some(copy) = inner.edits.get(&ev).cloned() else {
+                return Err(crate::events::bad(NO_EDIT));
+            };
+            let on_disk = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+            // The copy under any spelling of its package (final review I1);
+            // a copy that is gone says so below, whatever `path` was.
+            if !crate::external::names_copy(&copy.abs, &p) && on_disk(&copy.abs) {
+                return Err(VizError::Model {
+                    message: format!("{path} is not this region's edit copy"),
+                });
+            }
+            if crate::external::region_span(inner.doc(), ev).is_err() {
+                inner.edits.remove(&ev);
+                return Err(crate::events::bad(REGION_DELETED));
+            }
+            if !on_disk(&copy.abs) {
+                return Err(crate::events::bad(GONE));
+            }
+            // Imported under the core's spelling.
+            let p = copy.abs.clone();
+            inner.media_jobs_idle()?;
+            let root = inner.root(self.id);
+            let format = inner.doc().settings().format;
+            let reserved = inner.reserved_names();
+            let stem = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let from = copy.from;
+            inner.jobs.spawn(
+                crate::jobs::JobKindRow::ExternalEdit,
+                move |progress, cancel| {
+                    let importer = crate::media::importer();
+                    let file = crate::relink::regular_file(&p).and_then(|()| {
+                        core_media::import::import_reserved(
+                            importer.as_ref(),
+                            &p,
+                            &root,
+                            format,
+                            &stem,
+                            &reserved,
+                            &mut |f| {
+                                progress.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed)
+                            },
+                            cancel,
+                        )
+                    });
+                    match file {
+                        Err(core_media::MediaError::Cancelled) => crate::jobs::Work::Cancelled,
+                        file => crate::jobs::Work::ExternalEdit {
+                            event: ev,
+                            from,
+                            file: file.map_err(|e| e.to_string()),
+                        },
+                    }
+                },
+            )
+        })
+    }
+}
+
+/// Applies a finished external edit (Ruling 6; pre-flight I3): one undo
+/// step "External Edit" adding the new item (origin `ExternalEdit { from }`)
+/// and pointing that region alone at it (offset 0, its length, fades
+/// clamped). Failed — with what it imported removed — when the import
+/// failed, when it made more than one item (a file wider than stereo),
+/// when the region is gone (its copy is then forgotten, so the app stops
+/// watching it; pre-flight M10), or when the model refuses.
+fn apply_external_edit_work(
+    inner: &mut Inner,
+    root: &Path,
+    id: u64,
+    event: core_model::ids::EventId,
+    from: core_model::ids::MediaId,
+    file: Result<Vec<core_media::import::Imported>, String>,
+) -> crate::jobs::JobRow {
+    use crate::jobs::{JobKindRow, JobStateRow, row};
+    use core_model::command::{AudioCmd, MediaCmd};
+    let failed = |m: String| {
+        row(
+            id,
+            JobKindRow::ExternalEdit,
+            JobStateRow::Failed,
+            Some(m),
+            vec![],
+            vec![],
+        )
+    };
+    let items = match file {
+        Ok(v) => v,
+        Err(why) => return failed(why),
+    };
+    let keep = inner.kept();
+    let remove = |items: &[core_media::import::Imported]| {
+        for i in items {
+            remove_unkept(root, &i.path, &keep);
+        }
+    };
+    let item = match items.as_slice() {
+        [one] => one.clone(),
+        _ => {
+            remove(&items);
+            return failed(format!(
+                "The edit has {} channels; regions hold one or two.",
+                items.len()
+            ));
+        }
+    };
+    if crate::external::region_span(inner.doc(), event).is_err() {
+        remove(&items);
+        inner.edits.remove(&event);
+        return failed(crate::external::REGION_DELETED.into());
+    }
+    let filter = ViewFilter::default();
+    let h = &mut inner.history;
+    if let Err(e) = h.begin("External Edit") {
+        remove(&items);
+        return failed(VizError::from(e).to_string());
+    }
+    let run = (|| -> Result<u64, VizError> {
+        let r = h.execute(
+            &Command::Media(MediaCmd::Add {
+                path: item.path.clone(),
+                sample_rate: item.sample_rate,
+                channels: item.channels,
+                length_frames: item.length_frames,
+                content_hash: Some(item.content_hash.clone()),
+                name: Some(item.name.clone()),
+                origin: Some(core_model::document::MediaOrigin::ExternalEdit { from }),
+            }),
+            &filter,
+        )?;
+        let media = r
+            .created
+            .iter()
+            .find_map(|id| match id {
+                core_model::ids::AnyId::Media(m) => Some(*m),
+                _ => None,
+            })
+            .ok_or_else(|| VizError::Internal {
+                message: "no media created".into(),
+            })?;
+        h.execute(
+            &Command::Audio(AudioCmd::SetSource {
+                event,
+                media,
+                source_offset: 0,
+                length: item.length_frames,
+            }),
+            &filter,
+        )?;
+        Ok(media.0)
+    })();
+    let done = run.and_then(|media| h.commit().map(|()| media).map_err(VizError::from));
+    match done {
+        Ok(media) => row(
+            id,
+            JobKindRow::ExternalEdit,
+            JobStateRow::Done,
+            None,
+            vec![],
+            vec![media],
+        ),
+        Err(e) => {
+            if h.in_transaction() {
+                let _ = h.abort();
+            }
+            remove(&items);
+            failed(e.to_string())
+        }
+    }
+}
+
+/// `doc` with `sent` in its slots' overlays (a bounce's copy of the live
+/// state; plan 5f-2 Ruling 6). A value the model refuses is left out.
+fn with_params(doc: Document, sent: Vec<(PluginInstanceId, Vec<(ParamId, f64)>)>) -> Document {
+    if sent.is_empty() {
+        return doc;
+    }
+    let mut h = History::new(doc);
+    for (slot, params) in sent {
+        let _ = h.execute(
+            &Command::Mixer(MixerCmd::SetPluginParams { slot, params }),
+            &ViewFilter::default(),
+        );
+    }
+    h.doc().clone()
+}
+
+impl Session {
+    /// `req` checked against the document and this session's media roots.
+    fn bounce_plan(
+        &self,
+        inner: &Inner,
+        req: &crate::bounce::BounceRequestRow,
+    ) -> Result<crate::bounce::Plan, VizError> {
+        let roots = [inner.root(self.id), crate::media::scratch_root(self.id)];
+        crate::bounce::plan(inner.doc(), req, &roots, &inner.offline)
+    }
 }
 
 impl Session {
@@ -5800,6 +8797,1023 @@ impl Session {
         })
     }
 }
+
+/// Control surfaces and MIDI learn (plan 5f-1 Rulings 7, 8, 11–13, 17, 18).
+#[uniffi::export]
+impl Session {
+    /// Makes this session the one the surfaces drive: the app's command
+    /// target (Ruling 11; the ticker calls it when the target changes).
+    pub fn focus_surfaces(&self) -> Result<(), VizError> {
+        ffi_guard(|| {
+            if self.focus_here() {
+                // The units show this project before any input is routed
+                // against the old one's strips (final review N1).
+                self.feed_surfaces(crate::surfaces::now(), &[]);
+            }
+            Ok(())
+        })
+    }
+
+    /// The app's selected strips (Ruling 12): the surfaces' select LEDs and
+    /// the strip whose plugin Plug-in mode shows. Unknown IDs are ignored;
+    /// more than 1024 strips is refused (`Model`).
+    pub fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            if strips.len() > MAX_SURFACE_SELECTION {
+                return Err(crate::events::bad(&format!(
+                    "at most {MAX_SURFACE_SELECTION} strips"
+                )));
+            }
+            let mut inner = lock(&self.inner);
+            let m = inner.doc().mixer();
+            let keep: Vec<StripId> = strips
+                .into_iter()
+                .map(StripId)
+                .filter(|s| m.strip(*s).is_ok())
+                .collect();
+            inner.surfaces.selection = keep;
+            Ok(())
+        })
+    }
+
+    /// The document's record count-in is on (`RecordModel.countInBars >
+    /// 0`): a Kontrol lights its Count-in button by it (plan 5f-4 Ruling
+    /// 16).
+    pub fn set_surface_count_in(&self, on: bool) -> Result<(), VizError> {
+        ffi_guard(|| {
+            lock(&self.inner).surfaces.count_in = on;
+            Ok(())
+        })
+    }
+
+    /// Feeds `bytes` to surface `surface` as if from its input, focuses
+    /// this session and services it at once (`surface.inject`; Ruling 11).
+    /// Several refused messages in one call count once in the unit's
+    /// `ignored` (final review T8 m9).
+    /// `Model` for no bytes, more than `MAX_INJECT_BYTES` or an unknown
+    /// surface.
+    pub fn inject_surface(&self, surface: u32, bytes: Vec<u8>) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let max = crate::live::MAX_INJECT_BYTES;
+            if bytes.is_empty() || bytes.len() > max {
+                return Err(crate::events::bad(&format!(
+                    "`bytes` must hold 1 to {max} bytes"
+                )));
+            }
+            let unfed = crate::surfaces::inject_unit(surface, &bytes)?;
+            let moved = self.focus_here();
+            // A unit addresses strips only once feedback showed them
+            // (Ruling 3): a window that just took the focus (none was key,
+            // so the ticker focused nothing) or a unit never fed gets its
+            // refresh before the bytes are routed (plan 5f-1 Task 11), and
+            // only then (final review T11 m1).
+            if moved || unfed {
+                self.feed_surfaces(crate::surfaces::now(), &[]);
+            }
+            self.service_surfaces();
+            Ok(())
+        })
+    }
+
+    /// `state.get surfaces` for this window: with what feedback sent.
+    pub fn surface_state(&self) -> Result<SurfaceStateRow, VizError> {
+        ffi_guard(|| Ok(crate::surfaces::state_with_feedback()))
+    }
+
+    /// The surfaces' commands, selects, arms and jogs since the last call
+    /// (Ruling 12), oldest first.
+    pub fn take_surface_events(&self) -> Result<Vec<SurfaceEventRow>, VizError> {
+        ffi_guard(|| Ok(std::mem::take(&mut lock(&self.inner).surfaces.events)))
+    }
+
+    /// Learns the next control for `target` into this project (Rulings 7,
+    /// 11): this session decides it in its own `idle`. `Model` for a target
+    /// that does not exist or a velocity scale.
+    pub fn learn_target(&self, target: AutomationTargetRow) -> Result<(), VizError> {
+        ffi_guard(|| {
+            let t = automation_target_of(target);
+            let text = {
+                let inner = lock(&self.inner);
+                if matches!(t, AutomationTarget::VelocityScale(_)) {
+                    return Err(crate::events::bad("a velocity scale cannot be learned"));
+                }
+                if !core_model::automation::target_exists(inner.doc(), t) {
+                    return Err(crate::events::bad("the learn target does not exist"));
+                }
+                crate::automation::lane_name(inner.doc(), t, None)
+            };
+            crate::surfaces::learn_target(self.id, t, text);
+            Ok(())
+        })
+    }
+
+    /// The project's learn maps.
+    pub fn learn_maps(&self) -> Result<Vec<LearnMapRow>, VizError> {
+        ffi_guard(|| {
+            let inner = lock(&self.inner);
+            let doc = inner.doc();
+            Ok(doc
+                .settings()
+                .learn
+                .iter()
+                .map(|m| {
+                    let missing = !core_model::automation::target_exists(doc, m.target);
+                    LearnMapRow::from((m, missing))
+                })
+                .collect())
+        })
+    }
+
+    /// Sets the mode of the map from `source`: an undo step "MIDI Learn".
+    pub fn set_learn_mode(
+        &self,
+        source: LearnSourceRow,
+        mode: LearnModeRow,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.change_learn(&source, |m| m.mode = mode.into()))
+    }
+
+    /// Ruling 18: a `SetLearn` of the changed map ("MIDI Learn").
+    pub fn set_learn_pickup(
+        &self,
+        source: LearnSourceRow,
+        on: bool,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| self.change_learn(&source, |m| m.pickup = on))
+    }
+
+    /// Removes the map from `source` ("Remove MIDI Learn").
+    pub fn remove_learn(&self, source: LearnSourceRow) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let source = source.source()?;
+            self.learn_edit(SettingsCmd::RemoveLearn {
+                source: Some(source),
+                target: None,
+            })
+        })
+    }
+
+    /// Every map to `target`, as one step (`RemoveLearn { target }`).
+    pub fn unlearn_target(&self, target: AutomationTargetRow) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.learn_edit(SettingsCmd::RemoveLearn {
+                source: None,
+                target: Some(automation_target_of(target)),
+            })
+        })
+    }
+}
+
+/// The most strips `set_surface_selection` takes.
+const MAX_SURFACE_SELECTION: usize = 1024;
+
+/// The most surface events kept for the app (it drains them every tick).
+const MAX_SURFACE_EVENTS: usize = 1024;
+
+/// A skip or wind this recent winds on from where it went (Ruling 5).
+const WIND_RECENT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long the focused slot's presets are read once (plan 5f-4 Ruling 7).
+const PRESETS_FRESH: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The mixer's strips in display order, master excluded (Ruling 4).
+fn display_order(doc: &Document) -> Vec<StripId> {
+    let m = doc.mixer();
+    m.order()
+        .iter()
+        .copied()
+        .filter(|id| *id != m.master() && m.strip(*id).is_ok())
+        .collect()
+}
+
+/// Whether AudioPath strip `kind` is armed (Ruling 12): any lane of any
+/// sequence playing through its path is.
+fn path_armed(doc: &Document, kind: core_model::mixer::StripKind) -> bool {
+    let core_model::mixer::StripKind::AudioPath(p) = kind else {
+        return false;
+    };
+    doc.sequences()
+        .values()
+        .any(|s| s.lanes.iter().any(|l| l.audio_out == Some(p) && l.arm))
+}
+
+impl Session {
+    /// Moves the position to `tick` (the body of [`Session::locate`], also
+    /// the surfaces' skips and winds; plan 5f-1 Ruling 5).
+    fn locate_in(&self, inner: &mut Inner, tick: i64) -> Result<(), VizError> {
+        if inner.recording.is_some() {
+            return Err(recording_busy());
+        }
+
+        // A Locate while a pass writes lands it; the new position is a
+        // new pass (plan 5e-1 Ruling 23).
+        let writing = inner
+            .writing
+            .as_ref()
+            .map(|w| (w.seq, w.handles.status.rolled()));
+        self.finish_writing(inner);
+        self.apply_pending_automation(inner);
+        if !host::locate(self.id, Tick(tick))? {
+            inner.cursor = Some(Tick(tick));
+            inner.cursor_seq = inner.selected_seq();
+        }
+        // Again from the new position: when it plays, or when the old
+        // pass had not rolled yet (check I-2: the Play is still on its
+        // way to the renderer).
+        let stopped = host::transport_stopped(self.id);
+        if let Some((seq, _)) =
+            writing.filter(|(_, rolled)| stopped == Some(false) || (!rolled && stopped.is_some()))
+        {
+            self.begin_writing(inner, seq, Tick(tick));
+        }
+        Ok(())
+    }
+
+    /// Makes this session the focused one, with its document's maps. True
+    /// when the focus moved here.
+    fn focus_here(&self) -> bool {
+        let maps = lock(&self.inner).doc().settings().learn.clone();
+        crate::surfaces::focus(self.id, maps)
+    }
+
+    /// The surfaces get this document's maps now (a learn edit; Ruling 17).
+    fn sync_learn(&self) {
+        let maps = lock(&self.inner).doc().settings().learn.clone();
+        crate::surfaces::sync_maps(self.id, &maps);
+    }
+
+    /// A learn edit: one undo step, then the surfaces' maps follow.
+    /// `Busy` while a static touch's step is open.
+    fn learn_edit(&self, cmd: SettingsCmd) -> Result<DocSnapshot, VizError> {
+        if lock(&self.inner).static_edit.is_some() {
+            return Err(VizError::Busy {
+                message: "Release the touched control first.".into(),
+            });
+        }
+        let snap = self.execute(Command::Settings(cmd))?;
+        self.sync_learn();
+        Ok(snap)
+    }
+
+    /// The map from `source`, changed by `f`, as a `SetLearn` ("MIDI
+    /// Learn"). `Model` for a bad source or one with no map.
+    fn change_learn(
+        &self,
+        source: &LearnSourceRow,
+        f: impl FnOnce(&mut core_model::learn::LearnMap),
+    ) -> Result<DocSnapshot, VizError> {
+        let source = source.source()?;
+        let mut map = lock(&self.inner)
+            .doc()
+            .settings()
+            .learn
+            .iter()
+            .find(|m| m.source == source)
+            .cloned()
+            .ok_or_else(|| {
+                crate::events::bad(&format!(
+                    "no MIDI control is learned from {}",
+                    source.describe()
+                ))
+            })?;
+        f(&mut map);
+        self.learn_edit(SettingsCmd::SetLearn { map })
+    }
+
+    /// Folds one take of the engine's read-and-clear peaks into both meter
+    /// holds (Ruling 13, pre-flight I4).
+    fn take_meters(&self, inner: &mut Inner) {
+        if let Some(l) = host::levels(self.id) {
+            inner.meters.fold(l, Instant::now());
+        }
+    }
+
+    /// `idle`'s surfaces step (plan 5f-1 Task 8): every session takes the
+    /// releases it is owed and decides a learn it asked for; the focused
+    /// one also routes input, applies the actions and ticks, then sends
+    /// feedback. Lock order: `inner`, then the registry in short calls.
+    fn service_surfaces(&self) {
+        let now = crate::surfaces::now();
+        let mut moved = Vec::new();
+        let focused = {
+            let mut inner = lock(&self.inner);
+            self.take_meters(&mut inner);
+            let (owed, focused) = crate::surfaces::begin(self.id, now);
+            for (h, t, idle) in owed {
+                // An idle hold ends at its last value's time; a touch now
+                // (final review T8 m6).
+                let last = inner.surfaces.last_ns.remove(&(h, t));
+                self.release_from(&mut inner, t, h, last.filter(|_| idle));
+            }
+            // Every session's maps are kept: the engine holder's stay out of
+            // its lanes while it is not focused (ruling F-1).
+            crate::surfaces::sync_maps(self.id, &inner.doc().settings().learn);
+            if focused {
+                let strips = display_order(inner.doc()).len();
+                let acts = {
+                    let shared: &Inner = &inner;
+                    let current = |t| Some(self.surface_heard(shared, t, None));
+                    crate::surfaces::route_and_tick(self.id, now, strips, &current)
+                };
+                self.apply_surface_acts(&mut inner, acts, now, &mut moved);
+            }
+            focused
+        };
+        self.decide_learn(now);
+        if focused {
+            self.feed_surfaces(now, &moved);
+        }
+    }
+
+    /// Step 6: a learn this session asked for decides and becomes a
+    /// `SetLearn` ("MIDI Learn", pick-up on; Rulings 7, 18). Not while an
+    /// edit is open: the step would join it.
+    fn decide_learn(&self, now: Instant) {
+        if !crate::surfaces::learning_for(self.id) || lock(&self.inner).history.in_transaction() {
+            return;
+        }
+        let Some(l) = crate::surfaces::decide(self.id, now) else {
+            return;
+        };
+        let map = core_model::learn::LearnMap {
+            source: l.source,
+            target: l.target,
+            mode: l.mode,
+            pickup: true,
+        };
+        match self.execute(Command::Settings(SettingsCmd::SetLearn { map })) {
+            Ok(_) => lock(&self.inner).news.doc_changed = true,
+            Err(e) => {
+                // Its control is no longer claimed (final review N4).
+                crate::surfaces::learn_failed(self.id);
+                lock(&self.inner)
+                    .news
+                    .problems
+                    .push(format!("MIDI Learn: {e}"));
+            }
+        }
+        self.sync_learn();
+    }
+
+    /// Step 4: applies the surfaces' and learn's actions; a refused one
+    /// counts once per message in its unit's `ignored`. What a hand moved
+    /// goes to `moved` (the partners' feedback).
+    fn apply_surface_acts(
+        &self,
+        inner: &mut Inner,
+        acts: Vec<crate::surfaces::Act>,
+        now: Instant,
+        moved: &mut Vec<crate::surfaces::Moved>,
+    ) {
+        use core_surface::{Phase, SurfaceAction as A};
+        let mut refused = Vec::new();
+        for a in acts {
+            let ok = match a.action {
+                A::Gesture(t, phase) => {
+                    let ok = self
+                        .gesture_held(inner, t, phase, a.holder, a.host_ns)
+                        .is_ok();
+                    let key = (a.holder, t);
+                    match phase {
+                        Phase::Release => {
+                            inner.surfaces.last_ns.remove(&key);
+                        }
+                        Phase::Touch(Some(_)) | Phase::Value(_) if ok => {
+                            let ns = host_time(a.host_ns);
+                            inner.surfaces.last_ns.insert(key, ns);
+                        }
+                        _ => {}
+                    }
+                    if ok && phase != Phase::Release {
+                        moved.push(crate::surfaces::Moved {
+                            holder: a.holder,
+                            target: t,
+                            strip: core_model::automation::strip_of(inner.doc(), t),
+                        });
+                    }
+                    ok
+                }
+                A::IdleRelease(t, at) => {
+                    // Stamped at its last value's time (Ruling 2): the host
+                    // time that value was applied at, else its age on the
+                    // surfaces clock.
+                    let ns = inner
+                        .surfaces
+                        .last_ns
+                        .remove(&(a.holder, t))
+                        .unwrap_or_else(|| {
+                            let ago = now.saturating_duration_since(at).as_nanos();
+                            host_time(None).saturating_sub(u64::try_from(ago).unwrap_or(u64::MAX))
+                        });
+                    self.release_from(inner, t, a.holder, Some(ns));
+                    true
+                }
+                A::Skip(dir) => self.surface_skip(inner, dir, now),
+                A::Wind(q) => self.surface_wind(inner, q, now),
+                A::Select(s) => {
+                    self.surface_event(inner, SurfaceEventRow::Select { strip: s.0 });
+                    true
+                }
+                A::Arm(s) => {
+                    let path = match inner.doc().mixer().strip(s).map(|x| x.kind) {
+                        Ok(core_model::mixer::StripKind::AudioPath(p)) => Some(p.0),
+                        _ => None,
+                    };
+                    self.surface_event(inner, SurfaceEventRow::Arm { strip: s.0, path });
+                    true
+                }
+                A::Jog(detents) => {
+                    self.surface_event(inner, SurfaceEventRow::Jog { detents });
+                    true
+                }
+                A::Command(id) => {
+                    let programmatic = a.programmatic;
+                    self.surface_event(inner, SurfaceEventRow::Command { id, programmatic });
+                    true
+                }
+                // The registry moved the bank already.
+                A::Bank(_) | A::Channel(_) => true,
+                A::PluginSlot(i) => self.surface_plugin_slot(inner, i),
+                A::PluginPage(n) => self.surface_plugin_page(inner, n),
+                A::Preset(dir) => self.surface_preset(inner, dir, now),
+                A::Tempo { bpm, new_step } => self.surface_tempo(inner, a.unit, bpm, new_step),
+                A::CountIn => {
+                    self.surface_event(inner, SurfaceEventRow::CountIn);
+                    true
+                }
+            };
+            if !ok && let Some(u) = a.unit {
+                refused.push((u, a.tag));
+            }
+        }
+        crate::surfaces::refused(&refused);
+    }
+
+    /// Queues `e` for `take_surface_events` (the oldest go past the bound).
+    fn surface_event(&self, inner: &mut Inner, e: SurfaceEventRow) {
+        let events = &mut inner.surfaces.events;
+        if events.len() >= MAX_SURFACE_EVENTS {
+            events.remove(0);
+        }
+        events.push(e);
+    }
+
+    /// Where a skip or wind starts (Ruling 5): the tick the last one went
+    /// to when it was less than 250 ms ago, else the transport's. `None`
+    /// while recording or with no sequence in the engine.
+    fn wind_base(&self, inner: &Inner, now: Instant) -> Option<(SeqId, i64)> {
+        if inner.recording.is_some() {
+            return None;
+        }
+        let (seq, tick) = host::position(self.id)?;
+        let tick = match inner.surfaces.wind {
+            Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
+            _ => tick.0,
+        };
+        Some((seq, tick))
+    }
+
+    /// `Skip(±1)`: the previous/next marker of the transport's sequence,
+    /// else the previous/next bar line of its meter map, never below 0.
+    fn surface_skip(&self, inner: &mut Inner, dir: i32, now: Instant) -> bool {
+        let Some((seq, tick)) = self.wind_base(inner, now) else {
+            return false;
+        };
+        let Ok(s) = inner.doc().sequence(seq) else {
+            return false;
+        };
+        let forward = dir > 0;
+        let to = core_editor::transport::marker_step(s, Tick(tick), forward).unwrap_or_else(|| {
+            if forward {
+                s.meter.barline_at_or_after(Tick(tick.saturating_add(1)))
+            } else if tick <= 0 {
+                Tick::ZERO
+            } else {
+                s.meter.barline_at_or_before(Tick(tick.saturating_sub(1)))
+            }
+        });
+        self.surface_locate(inner, to.0.max(0), now)
+    }
+
+    /// `Wind(q)`: `base + round(q × PPQ)`, never below 0.
+    fn surface_wind(&self, inner: &mut Inner, q: f64, now: Instant) -> bool {
+        let Some((_, base)) = self.wind_base(inner, now) else {
+            return false;
+        };
+        if !q.is_finite() {
+            return false;
+        }
+        // `as` saturates; a wind step is a fraction of a beat.
+        let by = (q * core_model::time::PPQ as f64).round() as i64;
+        self.surface_locate(inner, base.saturating_add(by).max(0), now)
+    }
+
+    /// A surface's locate, remembered as the next wind's base.
+    fn surface_locate(&self, inner: &mut Inner, tick: i64, now: Instant) -> bool {
+        let ok = self.locate_in(inner, tick).is_ok();
+        if ok {
+            inner.surfaces.wind = Some((now, tick));
+        }
+        ok
+    }
+
+    /// Where a surface's position, tempo and tempo edit are (plan 5f-4
+    /// Ruling 15; Task 4 review m2): the transport's sequence and tick,
+    /// else the sequence a play would start (the cursor sequence while it
+    /// still exists, else the first top-level one) at the cursor. One
+    /// helper, so the keyboard edits exactly the tempo it shows.
+    fn surface_where(&self, inner: &Inner) -> Option<(SeqId, Tick)> {
+        let doc = inner.doc();
+        host::position(self.id)
+            .filter(|(s, _)| doc.sequence(*s).is_ok())
+            .or_else(|| Some((inner.selected_seq()?, inner.cursor.unwrap_or(Tick::ZERO))))
+    }
+
+    /// `Tempo` (Ruling 15): the tempo point in effect at the playhead set to
+    /// `bpm` (clamped to 5–999), a gesture's values amended into its one
+    /// "Set Tempo" step. Refused while recording or finishing a pass,
+    /// inside an open transaction or group, for a non-finite `bpm`, and
+    /// with no sequence.
+    fn surface_tempo(
+        &self,
+        inner: &mut Inner,
+        unit: Option<crate::automation::SurfaceId>,
+        bpm: f64,
+        new_step: bool,
+    ) -> bool {
+        if inner.recording.is_some()
+            || inner.finishing
+            || inner.history.in_transaction()
+            || inner.history.in_group()
+            || !bpm.is_finite()
+        {
+            return false;
+        }
+        let Some((seq, tick)) = self.surface_where(inner) else {
+            return false;
+        };
+        let Ok(s) = inner.doc().sequence(seq) else {
+            return false;
+        };
+        let at = tick.max(Tick::ZERO);
+        let mut points: Vec<TempoPoint> = s.tempo.points().iter().copied().collect();
+        // The point in effect: the last at or before the playhead (the
+        // first governs negative ticks).
+        let k = points.iter().rposition(|p| p.tick <= at).unwrap_or(0);
+        let Some(p) = points.get_mut(k) else {
+            return false;
+        };
+        // In Bpm::MIN..=Bpm::MAX after the clamp, so the conversion is exact.
+        let milli = (bpm * 1000.0)
+            .round()
+            .clamp(f64::from(Bpm::MIN.0), f64::from(Bpm::MAX.0));
+        p.bpm = Bpm(milli as u32);
+        let Ok(tempo) = TempoMap::new(points) else {
+            return false;
+        };
+        if tempo == s.tempo {
+            return true;
+        }
+        let cmd = Command::Sequence(SequenceCmd::SetTempo { seq, tempo });
+        let filter = ViewFilter::default();
+        // Only the same keyboard's gesture is amended (final review T7 m5).
+        let amended = match (new_step, unit, inner.surfaces.tempo_step) {
+            (false, Some(u), Some((from, serial))) if from == u => {
+                matches!(inner.history.amend(&cmd, &filter, serial), Ok(Some(_)))
+            }
+            _ => false,
+        };
+        if !amended {
+            if inner.history.execute(&cmd, &filter).is_err() {
+                return false;
+            }
+            inner.surfaces.tempo_step = unit.map(|u| (u, inner.history.present_serial()));
+        }
+        inner.version += 1;
+        inner.news.doc_changed = true;
+        inner.reload_host(self.id);
+        self.mark(inner);
+        true
+    }
+
+    /// The value a surface or map shows for `t` (Ruling 13): a hand's
+    /// value while it holds a valued touch (what the engine plays a block
+    /// later, so a partner follows at once), else the heard value. A Trim
+    /// touch shows the heard value (its hand is an offset).
+    fn surface_heard(
+        &self,
+        inner: &Inner,
+        t: AutomationTarget,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> f64 {
+        if let Some(x) = inner.touches.get(&t)
+            && x.valued
+            && !matches!(x.path, TouchPath::Write(WriteMode::Trim, _))
+        {
+            return x.value;
+        }
+        self.heard_from(inner, t, cached)
+    }
+
+    /// The playing sequence's flattened automation, cached per (document
+    /// version, sequence) (Ruling 13); `None` while stopped.
+    fn surface_existing(
+        &self,
+        inner: &mut Inner,
+    ) -> Option<(SeqId, Arc<crate::automation::Existing>)> {
+        if host::transport_stopped(self.id) != Some(false) {
+            return None;
+        }
+        let (seq, _) = host::position(self.id)?;
+        let v = inner.version;
+        if let Some((ver, s, all)) = &inner.surfaces.existing
+            && *ver == v
+            && *s == seq
+        {
+            return Some((seq, Arc::clone(all)));
+        }
+        let all = Arc::new(crate::automation::existing_all(inner.doc(), seq));
+        inner.surfaces.existing = Some((v, seq, Arc::clone(&all)));
+        Some((seq, all))
+    }
+
+    /// Steps 7–8: when a unit or the maps are due, the MixerView of heard
+    /// values (only for the strips the due units show), then feedback.
+    fn feed_surfaces(&self, now: Instant, moved: &[crate::surfaces::Moved]) {
+        let mut inner = lock(&self.inner);
+        let order = display_order(inner.doc());
+        let Some(due) = crate::surfaces::due(self.id, now, &order, moved) else {
+            return;
+        };
+        let cached = self.surface_existing(&mut inner);
+        let meters = inner.meters.take_surfaces();
+        Self::sync_page_focus(&mut inner);
+        if due.page {
+            self.sync_presets(&mut inner, now);
+        }
+        let shared: &Inner = &inner;
+        let view = self.surface_view(shared, &order, &due, cached.as_ref(), &meters);
+        let current = |t| Some(self.surface_heard(shared, t, cached.as_ref()));
+        crate::surfaces::feedback(self.id, now, &due, &view, &current);
+    }
+
+    /// The MixerView (Ruling 13): heard values of the strips `due` shows,
+    /// the selection, the plugin of the first selected strip's first
+    /// insert, the arm LEDs (Ruling 12), the meters and the transport.
+    fn surface_view(
+        &self,
+        inner: &Inner,
+        order: &[StripId],
+        due: &crate::surfaces::Due,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+        meters: &std::collections::BTreeMap<u64, (f32, f32)>,
+    ) -> core_surface::MixerView {
+        use core_model::automation::SendIndex;
+        let doc = inner.doc();
+        let m = doc.mixer();
+        let heard = |t| self.surface_heard(inner, t, cached);
+        let strip = |s: &core_model::mixer::Strip, shown: bool| {
+            let id = s.id;
+            let mut v = core_surface::StripView {
+                id,
+                name: s.name.clone(),
+                fader: 0.0,
+                pan: 0.5,
+                send: None,
+                mute: false,
+                solo: false,
+                arm: false,
+                select: inner.surfaces.selection.contains(&id),
+                mode: s.automation,
+                meter: (0.0, 0.0),
+                kind: crate::surfaces::track_kind(s.kind),
+            };
+            if shown {
+                v.fader = heard(AutomationTarget::StripFader(id));
+                v.pan = heard(AutomationTarget::StripPan(id));
+                v.send = (!s.sends.is_empty())
+                    .then(|| heard(AutomationTarget::SendLevel(id, SendIndex(0))));
+                v.mute = heard(AutomationTarget::StripMute(id)) >= 0.5;
+                v.solo = heard(AutomationTarget::StripSolo(id)) >= 0.5;
+                v.arm = path_armed(doc, s.kind);
+                v.meter = meters.get(&id.0).copied().unwrap_or((0.0, 0.0));
+            }
+            v
+        };
+        let strips = order
+            .iter()
+            .enumerate()
+            .filter_map(|(k, id)| {
+                m.strip(*id)
+                    .ok()
+                    .map(|s| strip(s, due.visible.contains(&k)))
+            })
+            .collect();
+        let master = m.strip(m.master()).ok().map(|s| strip(s, true));
+        let plugin = if due.plugin {
+            self.surface_params(inner, cached)
+        } else {
+            Vec::new()
+        };
+        let (seq, tick) = self
+            .surface_where(inner)
+            .map_or((None, Tick::ZERO), |(s, t)| (Some(s), t));
+        core_surface::MixerView {
+            strips,
+            master,
+            plugin,
+            position: seq.map_or_else(|| "1.1.0".to_string(), |s| position_bbu(doc, s, tick)),
+            playing: host::transport_stopped(self.id) == Some(false),
+            recording: inner.recording.is_some(),
+            looping: inner.looped,
+            // With no transport or cursor sequence yet, the sequence a
+            // play would start (the demo shows 120 before any play):
+            // `surface_where`, which the keyboard's tempo edit uses too.
+            tempo: seq
+                .and_then(|q| doc.sequence(q).ok())
+                .map_or(0.0, |q| q.tempo.bpm_at(tick)),
+            soloing: m
+                .strips()
+                .keys()
+                .any(|id| heard(AutomationTarget::StripSolo(*id)) >= 0.5),
+            page: if due.page {
+                self.surface_page(inner, cached)
+            } else {
+                None
+            },
+            count_in: inner.surfaces.count_in,
+            automation_suspended: crate::automation::suspended(),
+        }
+    }
+
+    /// The first selected strip's first insert's first 8 automatable
+    /// parameters, by the plugin's list order, with heard values (Ruling 5).
+    fn surface_params(
+        &self,
+        inner: &Inner,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> Vec<core_surface::ParamView> {
+        let m = inner.doc().mixer();
+        let Some(slot) = inner
+            .surfaces
+            .selection
+            .iter()
+            .find_map(|s| m.strip(*s).ok())
+            .and_then(|s| s.inserts.front().map(|i| i.id))
+        else {
+            return Vec::new();
+        };
+        self.slot_param_views(inner, slot, 0, cached).0
+    }
+
+    /// How many automatable, non-hidden parameters `slot` has (the MCU's
+    /// filter); `None` when it is not running (plan 5f-4 Ruling 6).
+    fn slot_param_count(&self, slot: PluginInstanceId) -> Option<usize> {
+        plugins::with(self.id, |p| {
+            p.and_then(|p| p.instance(slot)).map(|inst| {
+                inst.info()
+                    .params
+                    .iter()
+                    .filter(|i| i.automatable && !i.hidden)
+                    .count()
+            })
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// Parameters `skip..skip+8` of `slot` as the surfaces show them, and
+    /// how many there are: the automatable, non-hidden ones in the plugin's
+    /// list order, with heard values and their plain text (Rulings 5, 6).
+    fn slot_param_views(
+        &self,
+        inner: &Inner,
+        slot: PluginInstanceId,
+        skip: usize,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> (Vec<core_surface::ParamView>, usize) {
+        let (infos, n) = plugins::with(self.id, |p| {
+            p.and_then(|p| p.instance(slot))
+                .map(|inst| {
+                    let all = inst
+                        .info()
+                        .params
+                        .iter()
+                        .filter(|i| i.automatable && !i.hidden);
+                    let n = all.clone().count();
+                    let infos = all
+                        .skip(skip)
+                        .take(8)
+                        .map(|i| (i.id, i.name.clone(), i.min, i.max, i.stepped))
+                        .collect::<Vec<_>>();
+                    (infos, n)
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+        let views = infos
+            .into_iter()
+            .map(|(id, name, min, max, stepped)| {
+                let target = AutomationTarget::PluginParam(slot, id);
+                let value = self.surface_heard(inner, target, cached);
+                let plain = core_model::automation::param_plain(value, min, max, stepped);
+                core_surface::ParamView {
+                    target,
+                    name,
+                    value,
+                    text: format!("{plain:.2}"),
+                }
+            })
+            .collect();
+        (views, n)
+    }
+
+    /// Resets the focus when the first selected strip changed (Ruling 6):
+    /// that strip, slot 0, page 0.
+    fn sync_page_focus(inner: &mut Inner) {
+        let first = {
+            let m = inner.doc().mixer();
+            inner
+                .surfaces
+                .selection
+                .iter()
+                .copied()
+                .find(|s| m.strip(*s).is_ok())
+        };
+        if inner.surfaces.page.strip != first {
+            inner.surfaces.page = crate::surfaces::PageFocus {
+                strip: first,
+                slot: 0,
+                page: 0,
+            };
+        }
+    }
+
+    /// The focused chain and its slot (clamped to the chain), or `None`
+    /// with no focused strip or an empty chain (Ruling 6).
+    fn page_chain(inner: &Inner) -> Option<(PageChain, usize, PluginInstanceId)> {
+        let f = inner.surfaces.page;
+        let chain = crate::surfaces::chain(inner.doc(), f.strip?);
+        let slot = f.slot.min(chain.len().checked_sub(1)?);
+        let id = chain.get(slot)?.0;
+        Some((chain, slot, id))
+    }
+
+    /// Ruling 6's page count: `min(127, max(1, ceil(n / 8)))`.
+    fn page_count(n: usize) -> usize {
+        n.div_ceil(8).clamp(1, 127)
+    }
+
+    /// The plug-in page a Kontrol in Plug-in mode shows (Ruling 6): the
+    /// focused strip's chain, its slot's page of parameters; `None` with
+    /// no selected strip, an empty chain or a plug-in that is not running.
+    fn surface_page(
+        &self,
+        inner: &Inner,
+        cached: Option<&(SeqId, Arc<crate::automation::Existing>)>,
+    ) -> Option<core_surface::PluginPageView> {
+        let (chain, slot, id) = Self::page_chain(inner)?;
+        let pages = Self::page_count(self.slot_param_count(id)?);
+        let page = inner.surfaces.page.page.min(pages.saturating_sub(1));
+        let (params, _) = self.slot_param_views(inner, id, page.saturating_mul(8), cached);
+        // From the cache `feed_surfaces` keeps (Ruling 7: no call per feedback).
+        let shown = inner
+            .surfaces
+            .presets
+            .as_ref()
+            .filter(|(s, _, _)| *s == id)
+            .map(|(_, p, _)| p);
+        let preset = shown.and_then(|p| p.current);
+        let presets = shown.map_or(0, |p| p.names.len());
+        let preset_name = shown
+            .and_then(|p| p.current.and_then(|c| p.names.get(c)))
+            .cloned()
+            .unwrap_or_default();
+        Some(core_surface::PluginPageView {
+            chain: chain.into_iter().map(|(_, name)| name).collect(),
+            slot,
+            params,
+            page,
+            pages,
+            page_name: format!("Page {}", page.saturating_add(1)),
+            preset,
+            presets,
+            preset_name,
+        })
+    }
+
+    /// Keeps `inner.surfaces.presets` for the focused slot: read again when
+    /// it is for another slot, older than [`PRESETS_FRESH`], or a parameter
+    /// notice named the slot (Ruling 7: no preset call per feedback).
+    fn sync_presets(&self, inner: &mut Inner, now: Instant) {
+        let Some((_, _, id)) = Self::page_chain(inner) else {
+            inner.surfaces.presets = None;
+            return;
+        };
+        let fresh = matches!(
+            &inner.surfaces.presets,
+            Some((s, _, at)) if *s == id
+                && now.saturating_duration_since(*at) < PRESETS_FRESH
+                && !inner.news.params_changed.contains(&id.0)
+        );
+        if !fresh {
+            inner.surfaces.presets = plugins::presets(self.id, id).map(|p| (id, p, now));
+        }
+    }
+
+    /// `Preset(dir)`: steps the focused plug-in's presets without wrapping;
+    /// from none, Next loads the first and Previous the last. Nothing to
+    /// step, or a step to the one loaded, is an uncounted no-op; a plug-in
+    /// not running or a failed load is refused (Ruling 7). A load is no
+    /// undo step: a change made in the plug-in.
+    fn surface_preset(&self, inner: &mut Inner, dir: i32, now: Instant) -> bool {
+        Self::sync_page_focus(inner);
+        let Some((_, _, id)) = Self::page_chain(inner) else {
+            return false;
+        };
+        let Some(p) = plugins::presets(self.id, id) else {
+            return false;
+        };
+        let Some(last) = p.names.len().checked_sub(1) else {
+            return true;
+        };
+        let to = match (p.current, dir) {
+            (_, 0) => return true,
+            (None, d) if d > 0 => 0,
+            (None, _) => last,
+            (Some(c), d) => {
+                let to = i64::try_from(c)
+                    .unwrap_or(i64::MAX)
+                    .saturating_add(i64::from(d))
+                    .clamp(0, i64::try_from(last).unwrap_or(i64::MAX));
+                usize::try_from(to).unwrap_or(last)
+            }
+        };
+        if p.current == Some(to) {
+            return true;
+        }
+        match plugins::load_preset(self.id, id, to) {
+            Ok(()) => {
+                inner.plugin_dirty = true;
+                inner.news.doc_changed = true;
+                inner.news.params_changed.insert(id.0);
+                inner.surfaces.presets = plugins::presets(self.id, id).map(|p| (id, p, now));
+                true
+            }
+            Err(e) => {
+                inner.news.problems.push(format!("Preset: {e}"));
+                false
+            }
+        }
+    }
+
+    /// `PluginSlot(i)`: slot `i` of the focused chain, page 0; refused
+    /// past the chain, with no focused strip or a plug-in not running.
+    fn surface_plugin_slot(&self, inner: &mut Inner, i: usize) -> bool {
+        Self::sync_page_focus(inner);
+        let Some(f) = inner.surfaces.page.strip else {
+            return false;
+        };
+        let Some(id) = crate::surfaces::chain(inner.doc(), f).get(i).map(|x| x.0) else {
+            return false;
+        };
+        if self.slot_param_count(id).is_none() {
+            return false;
+        }
+        inner.surfaces.page.slot = i;
+        inner.surfaces.page.page = 0;
+        true
+    }
+
+    /// `PluginPage(n)`: the page moves by `n`; past either end nothing
+    /// happens (uncounted). Refused with no focused strip, an empty chain
+    /// or a plug-in not running.
+    fn surface_plugin_page(&self, inner: &mut Inner, n: i32) -> bool {
+        Self::sync_page_focus(inner);
+        let Some((_, slot, id)) = Self::page_chain(inner) else {
+            return false;
+        };
+        let Some(count) = self.slot_param_count(id) else {
+            return false;
+        };
+        let pages = Self::page_count(count);
+        let shown = inner.surfaces.page.page.min(pages.saturating_sub(1));
+        let to = i64::try_from(shown)
+            .unwrap_or(i64::MAX)
+            .saturating_add(i64::from(n));
+        inner.surfaces.page.slot = slot;
+        inner.surfaces.page.page = shown;
+        if let Ok(to) = usize::try_from(to)
+            && to < pages
+        {
+            inner.surfaces.page.page = to;
+        }
+        true
+    }
+}
+
+/// A chain's slots and names (plan 5f-4 Ruling 6).
+type PageChain = Vec<(PluginInstanceId, String)>;
 
 #[cfg(test)]
 mod tests {

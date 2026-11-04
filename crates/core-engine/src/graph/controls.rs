@@ -5,7 +5,7 @@
 
 use crate::graph::dsp::strip_gains;
 use crate::schedule::automation::{AutoDest, StripParam};
-use core_model::automation::{fader_db, pan_of, switch_on};
+use core_model::automation::{fader_db, fader_norm, pan_norm, pan_of, switch_on};
 use core_model::ids::StripId;
 use core_model::mixer::db_to_gain;
 use std::collections::BTreeMap;
@@ -169,6 +169,32 @@ impl OverrideSnapshot {
             .and_then(|s| unslot(&s.over[0]))
     }
 
+    /// The override `dest` held at the last commit, normalised as
+    /// automation is (plan 5e-1 Ruling 26). Not RT.
+    pub fn value(&self, dest: AutoDest) -> Option<f64> {
+        let (strip, slot) = match dest {
+            AutoDest::Strip(s, p) => (s, Some(p)),
+            AutoDest::Send(s, _) => (s, None),
+            AutoDest::Plugin(..) => return None,
+        };
+        let s = self.strips.iter().find(|s| s.strip == strip)?;
+        let over = |i: usize| s.over.get(i).and_then(unslot);
+        match (slot, dest) {
+            (Some(StripParam::Fader), _) => over(0).map(fader_norm),
+            (Some(StripParam::Pan), _) => over(1).map(pan_norm),
+            (Some(StripParam::Mute), _) => over(2),
+            (Some(StripParam::Solo), _) => over(3),
+            (None, AutoDest::Send(_, index)) => self
+                .feeds
+                .get(s.feeds.clone())?
+                .iter()
+                .find(|f| f.send.is_some_and(|x| x.index == index))
+                .and_then(|f| unslot(&f.over_db))
+                .map(fader_norm),
+            (None, _) => None,
+        }
+    }
+
     /// Controls holding these overrides, for [`Controls::adopt`]. Not RT.
     fn controls(&self) -> Controls {
         let strips = self
@@ -302,7 +328,7 @@ impl Controls {
     }
 
     /// Mirrors the overrides for the control thread. // RT
-    fn publish(&self) {
+    pub(crate) fn publish(&self) {
         for (s, m) in self.strips.iter().zip(self.mirror.strips.iter()) {
             let o = s.over;
             let b = |v: Option<bool>| v.map(|v| if v { 1.0 } else { 0.0 });
@@ -317,6 +343,54 @@ impl Controls {
 
     fn find(&self, strip: StripId) -> Option<usize> {
         self.strips.binary_search_by_key(&strip, |s| s.strip).ok()
+    }
+
+    /// The static value (normalised, as automation's) of a strip control
+    /// or a send; `None` for plugins and unknown controls. // RT
+    pub(crate) fn base_of(&self, dest: AutoDest) -> Option<f64> {
+        let strip = match dest {
+            AutoDest::Strip(s, _) | AutoDest::Send(s, _) => s,
+            AutoDest::Plugin(..) => return None,
+        };
+        let s = self.find(strip).and_then(|i| self.strips.get(i))?;
+        let on = |b: bool| if b { 1.0 } else { 0.0 };
+        match dest {
+            AutoDest::Strip(_, StripParam::Fader) => Some(fader_norm(s.base.db)),
+            AutoDest::Strip(_, StripParam::Pan) => Some(pan_norm(s.base.pan)),
+            AutoDest::Strip(_, StripParam::Mute) => Some(on(s.base.mute)),
+            AutoDest::Strip(_, StripParam::Solo) => Some(on(s.base.solo)),
+            AutoDest::Send(_, index) => self
+                .feeds
+                .get(s.feeds.clone())?
+                .iter()
+                .find_map(|f| f.send.filter(|x| x.index == index))
+                .map(|x| fader_norm(x.level_db)),
+            AutoDest::Plugin(..) => None,
+        }
+    }
+
+    /// The value (normalised, as automation's) a strip control or a send
+    /// plays now: its override, else its static value; `None` for plugins
+    /// and unknown controls (Task 5 review I1). // RT
+    pub(crate) fn heard_of(&self, dest: AutoDest) -> Option<f64> {
+        let strip = match dest {
+            AutoDest::Strip(s, _) | AutoDest::Send(s, _) => s,
+            AutoDest::Plugin(..) => return None,
+        };
+        let s = self.find(strip).and_then(|i| self.strips.get(i))?;
+        let on = |b: bool| if b { 1.0 } else { 0.0 };
+        let (o, b) = (s.over, s.base);
+        match dest {
+            AutoDest::Strip(_, StripParam::Fader) => Some(fader_norm(o.db.unwrap_or(b.db))),
+            AutoDest::Strip(_, StripParam::Pan) => Some(pan_norm(o.pan.unwrap_or(b.pan))),
+            AutoDest::Strip(_, StripParam::Mute) => Some(on(o.mute.unwrap_or(b.mute))),
+            AutoDest::Strip(_, StripParam::Solo) => Some(on(o.solo.unwrap_or(b.solo))),
+            AutoDest::Send(_, index) => self.feeds.get(s.feeds.clone())?.iter().find_map(|f| {
+                let send = f.send.filter(|x| x.index == index)?;
+                Some(fader_norm(f.over_db.unwrap_or(send.level_db)))
+            }),
+            AutoDest::Plugin(..) => None,
+        }
     }
 
     /// Automation's value (normalised) for `strip`'s `p`. // RT

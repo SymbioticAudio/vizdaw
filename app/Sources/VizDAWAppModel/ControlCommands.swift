@@ -34,16 +34,26 @@ public enum ControlJobs {
 
     /// The answer for `j`: an import or conversion that created nothing and had problems
     /// failed; a partial success carries its problems as warnings.
-    public static func answer(_ j: JobRow) -> JobAnswer {
+    public static func answer(_ j: JobRow, bounce: BounceResultRow? = nil) -> JobAnswer {
         switch j.state {
         case .running: return .wait
         case .done:
+            // A bounce wrote its files even when it has problems (clipped
+            // samples, a bypassed plugin): ok, with warnings (plan 5f-2
+            // Ruling 10).
+            if j.kind == .bounce {
+                return .ok(status: BounceCommands.status(bounce ?? BounceResultRow(files: [], media: []), problems: j.problems))
+            }
             if j.kind != .format, j.created.isEmpty, !j.problems.isEmpty {
                 return .failed(j.problems.joined(separator: "; "))
             }
             return .ok(status: j.problems.isEmpty ? nil : "warnings: " + j.problems.joined(separator: "; "))
         case .failed, .cancelled:
-            return .failed(([j.message ?? "the job was cancelled"] + j.problems).joined(separator: "; "))
+            // A bounce that failed after some renames names what is on disk
+            // (plan 5f-2 Ruling 12: renamed files stay).
+            let written = j.kind == .bounce ? (bounce?.files ?? []).map(\.path) : []
+            let tail = written.isEmpty ? [] : ["already written: " + written.joined(separator: ", ")]
+            return .failed(([j.message ?? "the job was cancelled"] + j.problems + tail).joined(separator: "; "))
         }
     }
 
@@ -149,6 +159,13 @@ public protocol ControlHost: AnyObject {
     /// Applies `audio.set`'s change to the app's audio settings (plan
     /// 5d-1 Ruling 26); the core's refusal is thrown.
     func applyAudio(_ change: AudioChange) throws
+    /// The core's process-wide surfaces, command maps and learn state
+    /// (plan 5f-1; tests pass a fake, pre-flight M25).
+    var surfaces: any SurfaceCore { get }
+    /// The editor `region.open_external` uses without `app` (plan 5f-3
+    /// Ruling 5): the stub when `VIZDAW_EXTERNAL_EDITOR=stub`, else Settings
+    /// › Editing's choice (pre-flight I7(c)).
+    var externalEditor: ExternalEditorChoice { get }
 }
 
 /// Runs registered menu commands (control spec §6) on a document model
@@ -192,6 +209,7 @@ public enum ControlCommands {
         other.union(detail.keys).union(torn.keys).union(nudges.keys).union(panels.keys).union(DrumCommands.ids)
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
+            .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -230,6 +248,11 @@ public enum ControlCommands {
             return .done(ran(id, nil))
         case AudioCommands.set:
             return AudioCommands.runSet(args, host: host)
+        case AutomationCommands.suspend:
+            return AutomationCommands.runSuspend(args)
+        case _ where SurfaceCommands.ids.contains(id):
+            // Process-wide or per document (plan 5f-1 Task 9).
+            return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
         default: break
         }
         guard let (docID, m) = doc else { return .failed(.of(.noDocument, "No document is open.")) }
@@ -294,6 +317,17 @@ public enum ControlCommands {
                 return .job(command: id, doc: docID, job: try m.session.convertMedia())
             } catch {
                 return .failed(.thrown(error, "Convert Failed"))
+            }
+        case BounceCommands.id:
+            switch BounceCommands.request(args, m) {
+            case .failure(let f):
+                return .failed(f)
+            case .success(let req):
+                do {
+                    return .job(command: id, doc: docID, job: try m.session.bounce(req: req))
+                } catch {
+                    return .failed(.thrown(error, "Bounce Failed"))
+                }
             }
         case "window.mixer":
             host.showMixer(docID)
@@ -393,8 +427,12 @@ public enum ControlCommands {
             }
         case _ where SynthCommands.ids.contains(id):
             return SynthCommands.run(id, args: args, doc: docID, m)
+        case _ where AutomationCommands.ids.contains(id):
+            return AutomationCommands.run(id, args: args, doc: docID, m)
         case AudioCommands.addMidi:
             return AudioCommands.runAddMidi(args, doc: docID, m)
+        case RegionCommands.openExternal, RegionCommands.reloadExternal:
+            return RegionCommands.runExternal(id, args: args, doc: docID, m, editor: host.externalEditor)
         case RegionCommands.normalize:
             guard let text = args.text("peak_db") else { return .failed(.dialog("Normalize", "peak_db")) }
             guard let peak = RegionCommands.parsePeak(text) else {
@@ -475,8 +513,9 @@ public enum ControlCommands {
             if let f = failure(DrumCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where fieldKeys[id] != nil:
             // A bare key: it waits while a text field has the keyboard
-            // (final review M-5), as the other bare-key commands do.
-            guard m.transportKeysEnabled else { return unavailable(TransportCommands.textFieldHasKeyboard) }
+            // (final review M-5), as the other bare-key commands do, and
+            // from a surface too: it moves the focus (plan 5f-1 Task 10 M1).
+            guard !m.textFieldHasKeyboard else { return unavailable(TransportCommands.textFieldHasKeyboard) }
             guard host.focus(fieldKeys[id] ?? .position, docID) else {
                 return unavailable("The window shows no transport fields.")
             }
@@ -630,6 +669,14 @@ public enum ControlStates {
         }
     }
 
+    /// Whether `state.get target` without a document answers app-wide
+    /// state: only the surfaces, and only for a call that names no window
+    /// (pre-flight M29; Task 9 review M3). A named window without a
+    /// document is `no_document`.
+    public nonisolated static func answersAppWide(_ target: StateTargetRow, window: WindowRefRow?) -> Bool {
+        target == .surfaces && window == nil
+    }
+
     /// `target` of document `id`; the transport is read fresh.
     public static func state(_ target: StateTargetRow, _ id: UUID, _ m: DocumentModel) -> ControlResult? {
         let doc = id.uuidString
@@ -663,6 +710,12 @@ public enum ControlStates {
         case .record:
             guard let s = try? m.session.recordState() else { return nil }
             return .record(doc: doc, state: s)
+        case .automation:
+            guard let s = try? m.session.automationState() else { return nil }
+            return .automation(doc: doc, state: s)
+        case .surfaces:
+            guard let s = try? m.session.surfaceState() else { return nil }
+            return .surfaces(doc: doc, state: s)
         case .input:
             guard let info = try? m.session.inputInfo() else { return nil }
             return .inputState(doc: doc, info: info, levels: m.inputs.takeChannelLevels())

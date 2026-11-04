@@ -177,7 +177,10 @@ public enum KeyRouter {
     ) -> KeyRoute {
         if typing && plain(m) { return .typing }
         if let id = keys.command(keyCode: keyCode, modifiers: m, stepEntry: stepEntry) {
-            if menus, !plain(m), let row = keys.row(id), row.menuItem,
+            // Open in External Editor runs here, never through its menu
+            // item: with no editor chosen a key says so and the menu item
+            // alone opens the chooser (plan 5f-3, owner answer 2026-11-03).
+            if menus, !plain(m), id != RegionCommands.openExternal, let row = keys.row(id), row.menuItem,
                 let first = row.keys.first, chord(first, is: keyCode, m)
             {
                 return .pass
@@ -225,12 +228,36 @@ public enum KeyDispatch {
         case .job, .measure: return .handled
         case .failed(let f):
             switch f.code {
+            // No editor chosen (plan 5f-3, owner answer 2026-11-03): the
+            // key or surface button says so; passed on, it would reach the
+            // menu item, which opens the chooser.
+            case .unavailable where f.message == RegionCommands.noEditor:
+                doc?.editor.status = f.message
+                return .handled
             case .unavailable, .dialogRequired, .unknownId, .noDocument: return .pass
             default:
                 doc?.editor.status = f.message
                 return .handled
             }
         }
+    }
+}
+
+extension KeyDispatch {
+    /// Runs command `id` for a key or a surface button in `doc`; the key's
+    /// fate. Reload External Edit on one region goes the menu item's way
+    /// (`RegionCommands.runMenu`, which opens no dialog), so its import
+    /// shows its banner and a failure its alert (final review M9); every
+    /// other command, and a Reload the menu item would not take, runs as
+    /// the channel's (`ControlCommands.run`, then `after`).
+    public static func command(
+        _ id: String, doc: (id: UUID, model: DocumentModel)?, store: DocumentStore, host: any ControlHost
+    ) -> KeyAfter {
+        if id == RegionCommands.reloadExternal, let m = doc?.model, RegionCommands.enabled(id, m) {
+            RegionCommands.runMenu(id, m, editor: host.externalEditor)
+            return .handled
+        }
+        return after(ControlCommands.run(id, args: [], doc: doc, store: store, host: host), doc: doc?.model)
     }
 }
 

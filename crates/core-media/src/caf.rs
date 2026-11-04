@@ -21,8 +21,14 @@ const FLAG_LITTLE_ENDIAN: u32 = 2;
 const TAG_MONO: u32 = (100 << 16) | 1;
 const TAG_STEREO: u32 = (101 << 16) | 2;
 const RECORDING_KEY: &[u8] = b"vizdaw-recording";
-const INT16_SCALE: f32 = 32_768.0;
-const INT24_SCALE: f32 = 8_388_608.0;
+/// Full scale of a 16-bit sample.
+pub(crate) const INT16_SCALE: f32 = 32_768.0;
+/// Full scale of a 24-bit sample.
+pub(crate) const INT24_SCALE: f32 = 8_388_608.0;
+/// The dither generator's seed: every writer of one stream starts from
+/// it, so two files of one signal in one depth and stream hold the same
+/// integers.
+const DITHER_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// How a file is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,9 +78,22 @@ pub struct Written {
 }
 
 /// Triangular (TPDF) dither of ±1 LSB from a deterministic xorshift64*.
-struct Tpdf(u64);
+pub(crate) struct Tpdf(u64);
 
 impl Tpdf {
+    /// A generator at the shared seed.
+    pub(crate) fn new() -> Tpdf {
+        Tpdf::stream(0)
+    }
+
+    /// The generator of dither stream `stream` (0: the shared seed): the
+    /// seed mixed with the scrambled stream number, never the zero state
+    /// xorshift cannot leave (final review m5).
+    pub(crate) fn stream(stream: u64) -> Tpdf {
+        let s = DITHER_SEED ^ stream.wrapping_mul(0xD1B5_4A32_D192_ED03);
+        Tpdf(if s == 0 { DITHER_SEED } else { s })
+    }
+
     fn unit(&mut self) -> f32 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
@@ -84,9 +103,24 @@ impl Tpdf {
         (x >> 40) as f32 / 16_777_216.0
     }
 
-    fn next(&mut self) -> f32 {
+    /// The next dither value, in [−1, 1) LSB.
+    pub(crate) fn next(&mut self) -> f32 {
         self.unit() + self.unit() - 1.0
     }
+}
+
+/// `x × scale + dither`, rounded and clamped to the integer range of
+/// `scale` (32768 or 8388608), and whether the undithered `x × scale`,
+/// rounded, lay outside that range (clipped, either sign: a value within
+/// half a step of full scale rounds to it and is not counted; final review
+/// m6). `x` must be finite.
+pub(crate) fn quantize(x: f32, scale: f32, dither: f32) -> (i32, bool) {
+    let v = x * scale;
+    let clipped = !(-scale..=scale - 1.0).contains(&v.round());
+    (
+        (v + dither).round().clamp(-scale, scale - 1.0) as i32,
+        clipped,
+    )
 }
 
 fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], size: i64) {
@@ -108,6 +142,8 @@ pub struct CafWriter {
     #[cfg(test)]
     fail_writes: bool,
     dither: Tpdf,
+    /// Integer depths add TPDF dither (default: at 16 bits only).
+    dither_on: bool,
     bytes: Vec<u8>,
 }
 
@@ -188,9 +224,21 @@ impl CafWriter {
             poisoned: false,
             #[cfg(test)]
             fail_writes: false,
-            dither: Tpdf(0x9E37_79B9_7F4A_7C15),
+            dither: Tpdf::new(),
+            dither_on: depth == BitDepth::Int16,
             bytes: Vec::new(),
         })
+    }
+
+    /// Dither on or off (default: on at 16 bits only). Float ignores it.
+    pub fn set_dither(&mut self, on: bool) {
+        self.dither_on = on;
+    }
+
+    /// The dither sequence (default 0, the shared one; see
+    /// `ExportFormat::dither_stream`). Before the first write.
+    pub fn set_dither_stream(&mut self, stream: u64) {
+        self.dither = Tpdf::stream(stream);
     }
 
     /// Appends interleaved float frames (a length that is a whole number
@@ -211,29 +259,24 @@ impl CafWriter {
         self.bytes.reserve(interleaved.len() * self.depth.bytes());
         for &x in interleaved {
             let x = if x.is_finite() { x } else { 0.0 };
-            match self.depth {
-                BitDepth::Float32 => self.bytes.extend_from_slice(&x.to_le_bytes()),
-                BitDepth::Int16 => {
-                    let v = x * INT16_SCALE;
-                    if !(-INT16_SCALE..=INT16_SCALE - 1.0).contains(&v) {
-                        clipped += 1;
-                    }
-                    let s = (v + self.dither.next())
-                        .round()
-                        .clamp(-INT16_SCALE, INT16_SCALE - 1.0) as i16;
-                    self.bytes.extend_from_slice(&s.to_le_bytes());
+            let scale = match self.depth {
+                BitDepth::Float32 => {
+                    self.bytes.extend_from_slice(&x.to_le_bytes());
+                    continue;
                 }
-                BitDepth::Int24 => {
-                    let v = (x * INT24_SCALE).round();
-                    if !(-INT24_SCALE..=INT24_SCALE - 1.0).contains(&v) {
-                        clipped += 1;
-                    }
-                    let s = v.clamp(-INT24_SCALE, INT24_SCALE - 1.0) as i32;
-                    let b = s.to_le_bytes();
-                    self.bytes
-                        .extend_from_slice(b.get(..3).unwrap_or(&[0, 0, 0]));
-                }
-            }
+                BitDepth::Int16 => INT16_SCALE,
+                BitDepth::Int24 => INT24_SCALE,
+            };
+            let d = if self.dither_on {
+                self.dither.next()
+            } else {
+                0.0
+            };
+            let (s, over) = quantize(x, scale, d);
+            clipped += u64::from(over);
+            let b = s.to_le_bytes();
+            let n = if self.depth == BitDepth::Int16 { 2 } else { 3 };
+            self.bytes.extend_from_slice(b.get(..n).unwrap_or(&[]));
         }
         // Hash and count only what reached the file.
         #[cfg(test)]

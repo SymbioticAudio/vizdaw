@@ -22,6 +22,8 @@ extension ProjectBanner {
         case .import: "Importing audio…"
         case .relink: "Relinking media…"
         case .convert, .format: "Converting media…"
+        case .bounce: "Bouncing…"
+        case .externalEdit: "Importing the external edit…"
         }
     }
 
@@ -31,6 +33,8 @@ extension ProjectBanner {
         case .import: "Import Failed"
         case .relink: "Relink Failed"
         case .convert, .format: "Conversion Failed"
+        case .bounce: "Bounce Failed"
+        case .externalEdit: "External Edit Failed"
         }
     }
 }
@@ -83,14 +87,30 @@ extension DocumentModel {
     }
 
     /// Starts a job and lists it; a refusal is an alert titled `title`.
-    func startJob(_ kind: JobKindRow, _ title: String, _ body: (any SessionProtocol) throws -> UInt64) {
+    /// With `failure` the refusal goes there instead (a sheet that shows
+    /// it itself). Answers the new job's ID.
+    @discardableResult
+    func startJob(
+        _ kind: JobKindRow, _ title: String, failure: ((Error) -> Void)? = nil,
+        _ body: (any SessionProtocol) throws -> UInt64
+    ) -> UInt64? {
         do {
             let id = try body(session)
             jobs.append(JobRow(id: id, kind: kind, progress: 0, state: .running, message: nil, problems: [], created: []))
             pollJobs()
+            return id
         } catch {
-            alert = AlertItem(error, title: title)
+            if let failure { failure(error) } else { alert = AlertItem(error, title: title) }
+            return nil
         }
+    }
+
+    /// `ControlJobs.answer` for `r`, with the bounce's files when `r` is a
+    /// bounce (plan 5f-2 Ruling 10); the app's polling and the control
+    /// channel both answer through here.
+    public func jobAnswer(_ r: JobRow) -> JobAnswer {
+        let bounced = r.kind == .bounce ? (try? session.bounceResult(job: r.id)) ?? nil : nil
+        return ControlJobs.answer(r, bounce: bounced)
     }
 
     /// Reads every running job (the plugin timer calls this through
@@ -110,7 +130,7 @@ extension DocumentModel {
                 if case .Busy = error as? VizError { still.append(j) }
                 continue
             }
-            switch ControlJobs.answer(r) {
+            switch jobAnswer(r) {
             case .wait:
                 still.append(r)
             case .ok:

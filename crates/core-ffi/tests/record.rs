@@ -669,6 +669,8 @@ fn bad_requests_are_refused_and_recording_holds_the_transport() {
 /// state: the real permission is never read), Record refuses with why, not
 /// with a channel count, every time: the reason outlives the faults Play
 /// clears.
+// Microphone permission (TCC) and its fake denial exist on macOS only.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_refused_microphone_is_why_record_refuses() {
     let g = serial(None);
@@ -915,6 +917,93 @@ fn closing_an_untitled_recording_moves_it_to_the_trash() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert!(names.iter().any(|n| n.starts_with("Mic ")), "{names:?}");
+}
+
+/// The scratch package holding `rel` (a take of an untitled session).
+fn scratch_of(rel: &str) -> std::path::PathBuf {
+    let dir = vizdaw_ffi::media::scratch_parent().join(vizdaw_ffi::media::UNTITLED_DIR);
+    std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.join(rel).is_file())
+        .unwrap_or_else(|| panic!("no scratch package in {} holds {rel}", dir.display()))
+}
+
+/// One take of lane "Mic" in untitled `s`: its package-relative path.
+fn one_take(s: &Session, d: &Doc) -> String {
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(s) >= 4800);
+    s.stop().unwrap();
+    let take = regions(s, d.seq.0, d.mic.0)[0].media.unwrap();
+    s.media()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == take)
+        .unwrap()
+        .path
+}
+
+/// A file whose name starts with a dot in `Media/Recorded` (placed there
+/// directly: `file_safe` no longer makes one, final review M5) still goes
+/// to the Trash when an untitled project closes, never unlinked (spec
+/// §6.5; plan 5f-3 fix round 1, ruling T3-1).
+#[test]
+fn closing_an_untitled_project_trashes_a_dot_named_recording() {
+    let g = serial(Some(FakeInput::Signals));
+    let dir = tempfile::tempdir().unwrap();
+    let d = doc(8, false, true);
+    let s: Arc<Session> = untitled(&g, d.doc.clone());
+    s.debug_set_trash_dir(Some(dir.path().join("Trash").display().to_string()));
+    let rel = one_take(&s, &d);
+    let scratch = scratch_of(&rel);
+    let dotted = scratch.join("Media/Recorded/.Vox 1971-01-01 000000.caf");
+    std::fs::copy(scratch.join(&rel), &dotted).unwrap();
+    s.close().unwrap();
+    let trash = dir.path().join("Trash");
+    assert!(
+        trash.join(".Vox 1971-01-01 000000.caf").is_file(),
+        "the dot-named take is in the Trash"
+    );
+    assert!(trash.join(Path::new(&rel).file_name().unwrap()).is_file());
+    assert!(!scratch.exists());
+}
+
+/// Ruling F-1 (final review; spec §6.5, owner answer 2026-11-03): an
+/// untitled project's Save As sends the scratch package's recordings the
+/// project does not use to the Trash, never unlinked; the take it uses
+/// goes with the project, so its scratch original is not trashed.
+#[test]
+fn save_as_of_an_untitled_project_trashes_its_unused_recordings() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s: Arc<Session> = untitled(&g, d.doc.clone());
+    let rel = one_take(&s, &d);
+    let scratch = scratch_of(&rel);
+    // A discarded take no undo step holds, and a dot-named one.
+    for name in ["Mic 1971-01-01 000000.caf", ".Vox 1971-01-01 000000.caf"] {
+        std::fs::copy(
+            scratch.join(&rel),
+            scratch.join("Media/Recorded").join(name),
+        )
+        .unwrap();
+    }
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    let trash = g.dir.path().join("Trash");
+    for name in ["Mic 1971-01-01 000000.caf", ".Vox 1971-01-01 000000.caf"] {
+        assert!(trash.join(name).is_file(), "{name} is in the Trash");
+    }
+    assert!(
+        pkg.join(&rel).is_file(),
+        "the take the project uses is saved"
+    );
+    assert!(
+        !trash.join(Path::new(&rel).file_name().unwrap()).exists(),
+        "and not trashed"
+    );
+    assert!(!scratch.exists(), "the scratch package is removed");
+    s.close().unwrap();
 }
 
 /// Stop during a drag: the pass waits for the drag to end, then lands as

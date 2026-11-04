@@ -603,10 +603,12 @@ impl Recording {
     /// by itself. Pushes a warning once below [`LOW_DISK_WARN`], and the
     /// transport fault names (pre-flight M11) of what happened to
     /// `faults`: `record-overflow` when input was lost, `input-lost`
-    /// when the input went away.
+    /// when the input went away. `transport_stopped` is asked only after
+    /// the run was read (Task 9b review m5: progress first, then the
+    /// state, so a state from before the roll never pairs with its run).
     pub fn check(
         &mut self,
-        transport_stopped: bool,
+        transport_stopped: impl FnOnce() -> bool,
         problems: &mut Vec<String>,
         faults: &mut Vec<String>,
     ) -> Option<Ending> {
@@ -649,7 +651,7 @@ impl Recording {
                 }
             }
         }
-        if transport_stopped && self.status.run() > 0 {
+        if self.status.run() > 0 && transport_stopped() {
             return Some(Ending::Ended);
         }
         None
@@ -905,7 +907,13 @@ pub fn file_safe(name: &str) -> String {
         })
         .take(100)
         .collect();
-    let s = s.trim().trim_start_matches('.').trim().to_string();
+    // Dots and spaces go from the start until neither is left (". .Vox"
+    // is "Vox"; final review M5): a dot-name is hidden, and the recovery
+    // offer and retention skip it.
+    let s = s
+        .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
+        .trim_end()
+        .to_string();
     if s.is_empty() { "Lane".into() } else { s }
 }
 
@@ -1456,5 +1464,10 @@ mod tests {
         );
         assert_eq!(file_safe("../a/b:c"), "-a-b-c");
         assert_eq!(file_safe(" .. "), "Lane");
+        // Final review M5: no leading dot is left, however they are mixed
+        // with spaces.
+        assert_eq!(file_safe(". .Vox"), "Vox");
+        assert_eq!(file_safe(" . . .x. "), "x.");
+        assert_eq!(file_safe(". . "), "Lane");
     }
 }

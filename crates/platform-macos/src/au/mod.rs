@@ -11,9 +11,9 @@ use core_engine::backend::BlockInfo;
 use core_engine::graph::ProcessStatus;
 use core_host::catalog::Source;
 use core_host::{
-    AudioPortInfo, AudioProcessor, HostError, InstanceEvents, LoadRequest, ParamEvent, ParamInfo,
-    ParentView, PluginEditor, PluginFormat, PluginInfo, PluginInstance, PluginKind, PortRole,
-    PrepareJob, Prepared, ProcessCtx, Tail,
+    AudioPortInfo, AudioProcessor, HostError, InstanceEvents, LoadRequest, OfflineRender,
+    ParamEvent, ParamInfo, ParentView, PluginEditor, PluginFormat, PluginInfo, PluginInstance,
+    PluginKind, PortRole, PrepareJob, Prepared, Presets, ProcessCtx, Tail,
 };
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
 use ffi::{ComponentInfo, Feed, GestureListener, HostTransport, Unit};
@@ -366,9 +366,40 @@ impl HostWrites {
     }
 }
 
+/// The values of `after` that differ from `before` by more than
+/// [`HostWrites::take_echo`]'s tolerance, or that `before` lacks (final
+/// review T5 m1): a preset load notes only these, so no stale echo is left
+/// for a parameter it did not move.
+fn changed(before: &[(u32, f32)], after: &[(u32, f32)]) -> Vec<(u32, f32)> {
+    after
+        .iter()
+        .filter(|&&(id, v)| {
+            let tol = 1e-4 * v.abs().max(1.0);
+            !before
+                .iter()
+                .any(|&(b, old)| b == id && (old - v).abs() <= tol)
+        })
+        .copied()
+        .collect()
+}
+
 #[cfg(test)]
 mod echo_tests {
-    use super::HostWrites;
+    use super::{HostWrites, changed};
+
+    /// Final review T5 m1: a preset load notes only the values it changed,
+    /// beyond `take_echo`'s tolerance.
+    #[test]
+    fn a_load_notes_only_the_values_it_changed() {
+        let before = [(1, 0.5), (2, 100.0), (3, 0.25), (4, 0.0)];
+        let after = [(1, 0.5), (2, 100.005), (3, 0.75), (5, 0.1)];
+        assert_eq!(
+            changed(&before, &after),
+            vec![(3, 0.75), (5, 0.1)],
+            "within tolerance is unchanged; a value read only after is new"
+        );
+        assert_eq!(changed(&before, &before), vec![]);
+    }
 
     #[test]
     fn late_and_out_of_order_echoes_are_recognised() {
@@ -704,6 +735,57 @@ impl PluginInstance for AuInstance {
             latency_changed,
             ..InstanceEvents::default()
         }
+    }
+
+    fn presets(&mut self) -> Presets {
+        let list = self.unit.factory_presets();
+        let current = self
+            .unit
+            .present_preset()
+            .and_then(|n| list.iter().position(|(number, _)| *number == n));
+        Presets {
+            names: list.into_iter().map(|(_, name)| name).collect(),
+            current,
+        }
+    }
+
+    fn load_preset(&mut self, index: usize) -> Result<(), HostError> {
+        let list = self.unit.factory_presets();
+        let Some((number, name)) = list.get(index) else {
+            return Err(HostError::StateRejected(format!(
+                "no preset {index} (the plug-in has {})",
+                list.len()
+            )));
+        };
+        let read = || -> Vec<(u32, f32)> {
+            self.writes
+                .ids
+                .iter()
+                .filter_map(|&id| self.unit.get_param(id).map(|v| (id, v)))
+                .collect()
+        };
+        let before = read();
+        self.unit
+            .set_present_preset(*number, name)
+            .map_err(HostError::StateRejected)?;
+        // The notices the load causes are the host's own (pre-flight I2):
+        // note each watched value the load changed as written, so they are
+        // echoes; an unchanged value posts no notice, so it is not noted.
+        for (id, v) in changed(&before, &read()) {
+            self.writes.note(id, v);
+        }
+        Ok(())
+    }
+
+    fn set_offline(&mut self, on: bool) -> OfflineRender {
+        // Set on the unit the loader already initialized: the AU SDK's
+        // AUBase takes the property in either state, and Apple's units
+        // answer the same initialized or not (probed for plan 5f-2 Task 3:
+        // the DLS synth takes it, the effects answer InvalidProperty both
+        // ways). A unit that wants it set uninitialized answers
+        // kAudioUnitErr_Initialized, which counts as `Refused` and is
+        // reported, never taken silently for "no offline mode".
+        self.unit.set_offline_render(on)
     }
 
     fn gestures(&mut self) -> Vec<ParamEvent> {

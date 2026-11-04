@@ -474,3 +474,44 @@ fn marks_carry_the_graph_latency_and_a_change_is_marked() {
         ]
     );
 }
+
+/// Task 9b re-review m5: the roll block's run reaches the control side
+/// only once that block has published its transport state (the renderer
+/// calls `published` right after `publish`), so a run seen implies the
+/// Playing state is visible; later blocks store their run at their end.
+#[test]
+fn the_roll_blocks_run_waits_for_its_publish() {
+    let (mut t, h) = core_engine::record::tap(&request(vec![0], 4800), 0);
+    let ch = [0.0f32; 256];
+    let input: [&[f32]; 1] = [&ch];
+    t.begin_block(100, 0);
+    t.end_block(&input, 256, true);
+    assert_eq!(h.status.run(), 0, "not before the roll block publishes");
+    t.published();
+    assert_eq!(h.status.run(), 256);
+    t.published();
+    t.begin_block(356, 0);
+    t.end_block(&input, 256, true);
+    assert_eq!(h.status.run(), 512, "a later block as before");
+}
+
+/// Task 9b re-review 2 n3: the renderer calls `published` after the roll
+/// block publishes, so the run is seen after that block, and a take whose
+/// sequence ends inside the roll block ends at the frames it played
+/// rather than at 0.
+#[test]
+fn the_renderer_publishes_the_roll_blocks_run() {
+    let (mut engine, mut b) = setup(FakeInput::Signals, 256, OfflineSinks::new(10_000));
+    let h = engine.start_recording(&request(vec![0], 48_000)).unwrap();
+    engine.play().unwrap();
+    b.run_frames(256);
+    assert_eq!(h.status.run(), 256, "seen after the roll block");
+    engine.stop().unwrap();
+    let length = engine.length_frames();
+    let (mut engine, mut b) = setup(FakeInput::Signals, 256, OfflineSinks::new(10_000));
+    let h = engine.start_recording(&request(vec![0], 48_000)).unwrap();
+    engine.locate_frame(length - 100).unwrap();
+    engine.play().unwrap();
+    b.run_frames(256 * 3);
+    assert_eq!(h.status.run(), 100, "rolled and ended in one block");
+}

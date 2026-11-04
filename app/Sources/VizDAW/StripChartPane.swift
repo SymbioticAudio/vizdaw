@@ -9,9 +9,27 @@ struct StripChartEditor: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // A row's "MIDI Learn" waits here (plan 5f-1 Task 11).
+            if let learn = model.document?.learn {
+                LearnBanner(learn: learn, document: model.document)
+            }
             StripChartBar(model: model, editor: model.editor)
             Divider()
             StripChartHost(model: model)
+        }
+        .modifier(StripChartLearnAlert(document: model.document))
+    }
+}
+
+/// A refused row "MIDI Learn" ("MIDI Learn Failed").
+private struct StripChartLearnAlert: ViewModifier {
+    let document: DocumentModel?
+
+    func body(content: Content) -> some View {
+        if let learn = document?.learn {
+            content.learnAlert(learn, shown: !learn.showsMaps)
+        } else {
+            content
         }
     }
 }

@@ -9,6 +9,15 @@ import VizDAWEditors
 /// file, and keep the number row for locators.
 struct KeysSettingsView: View {
     @Bindable var keys: KeyBindings
+    let store: DocumentStore
+
+    /// The document "Learn MIDI" learns into (plan 5f-1 Ruling 11): the
+    /// command target, else the front-most document window still open
+    /// (Settings is key, so no document window is; final review R2); nil
+    /// without a document.
+    private var document: DocumentModel? {
+        store.noteTarget ?? store.frontDocument
+    }
 
     private var groups: [(String, [BindingRow])] {
         var order: [String] = []
@@ -23,6 +32,9 @@ struct KeysSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle("Number keys always go to locators (step entry uses the keypad)", isOn: $keys.reserveNumberRow)
+            if let learn = document?.learn {
+                LearnBanner(learn: learn, document: document)
+            }
             if let m = keys.message {
                 HStack {
                     Text(m).font(.caption).foregroundStyle(.secondary).lineLimit(3)
@@ -47,6 +59,7 @@ struct KeysSettingsView: View {
                                     .foregroundStyle(row.keys == row.defaults ? .primary : Color.accentColor)
                                 KeyRecorder(title: row.title) { keys.record(row.id, key: $0) }
                                     .frame(width: 96, height: 20)
+                                learnButton(row)
                                 Button("Reset") { keys.reset(row.id) }
                                     .disabled(row.keys == row.defaults)
                             }
@@ -62,7 +75,23 @@ struct KeysSettingsView: View {
             }
         }
         .padding()
-        .frame(width: 620, height: 520)
+        .frame(width: 720, height: 520)
+        .modifier(KeysLearnAlert(document: document))
+    }
+
+    /// "Learn MIDI": the next MIDI control moved runs this command
+    /// (Ruling 8: only commands a key can run; Ruling 11: only with a
+    /// document open).
+    private func learnButton(_ row: BindingRow) -> some View {
+        let doc = document
+        return Button("Learn MIDI") { doc?.learn.learnCommand(row.id) }
+            .disabled(doc == nil || !row.learnable)
+            .help(
+                doc == nil
+                    ? "Open a project to learn MIDI"
+                    : row.learnable
+                        ? "Learn a MIDI control (a pad or button) for \(row.title)"
+                        : "Only commands a key can run can be learned")
     }
 
     private func save() {
@@ -82,6 +111,19 @@ struct KeysSettingsView: View {
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let path = panel.url?.path else { return }
         try? keys.load(from: path)
+    }
+}
+
+/// A refused "Learn MIDI" ("MIDI Learn Failed").
+private struct KeysLearnAlert: ViewModifier {
+    let document: DocumentModel?
+
+    func body(content: Content) -> some View {
+        if let learn = document?.learn {
+            content.learnAlert(learn, shown: !learn.showsMaps)
+        } else {
+            content
+        }
     }
 }
 

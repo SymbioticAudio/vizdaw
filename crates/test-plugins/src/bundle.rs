@@ -122,6 +122,25 @@ impl Drop for Lock {
     }
 }
 
+/// Copies the test bundle to `to` (test helper; panics on I/O errors).
+/// On macOS a `.clap` is a bundle directory; on Linux and Windows it is a
+/// single library file, so a copy that only walks directories fails there.
+pub fn copy_bundle(to: &Path) {
+    copy_tree(&bundle(), to);
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    if from.is_file() {
+        std::fs::copy(from, to).unwrap();
+        return;
+    }
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        copy_tree(&e.path(), &to.join(e.file_name()));
+    }
+}
+
 /// The path of `VizDAW Test.clap`, built once per test process. Panics
 /// (test helper) when the build fails.
 pub fn bundle() -> PathBuf {

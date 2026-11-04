@@ -68,13 +68,12 @@ fn crashes_hangs_and_errors_have_reasons() {
 
 #[test]
 fn a_full_scan_fills_the_catalog_and_the_cache_follows_the_mtime() {
-    let bundle = test_plugins::bundle();
     // Work on a copy so touching it never disturbs other tests.
     let dir = std::env::temp_dir().join(format!("vizdaw-scan-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let copy = dir.join("Copy.clap");
-    copy_dir(&bundle, &copy);
+    test_plugins::copy_bundle(&copy);
     let src = Source::clap_bundle(&copy);
     let mut cat = Catalog::new();
     let todo = cat.mark_found(std::slice::from_ref(&src));
@@ -121,18 +120,6 @@ fn a_full_scan_fills_the_catalog_and_the_cache_follows_the_mtime() {
         cat.get(PluginFormat::Clap, "vizdaw.test.gain").is_none(),
         "the old scan is dropped"
     );
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    if from.is_file() {
-        std::fs::copy(from, to).unwrap();
-        return;
-    }
-    std::fs::create_dir_all(to).unwrap();
-    for e in std::fs::read_dir(from).unwrap() {
-        let e = e.unwrap();
-        copy_dir(&e.path(), &to.join(e.file_name()));
-    }
 }
 
 #[cfg(target_os = "macos")]

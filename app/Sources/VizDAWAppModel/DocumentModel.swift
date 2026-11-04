@@ -40,6 +40,45 @@ public final class DocumentModel {
     public var slotDraft: KeySlotDraft?
     public var pendingDelete: UInt64?
     public var alert: AlertItem?
+    /// The mixer's selected strips (plan 5e-2 Ruling 5), for `automation.mode.<mode>`.
+    /// The surfaces show it (plan 5f-1 Ruling 12).
+    public var selectedStrips: Set<UInt64> = [] {
+        didSet {
+            if selectedStrips != oldValue { try? session.setSurfaceSelection(strips: selectedStrips.sorted()) }
+        }
+    }
+    /// What the app does with surface events (plan 5f-1 Ruling 12).
+    public var surfaceRelay: SurfaceRelay {
+        if let r = relayModel { return r }
+        let r = SurfaceRelay()
+        relayModel = r
+        return r
+    }
+    @ObservationIgnored private var relayModel: SurfaceRelay?
+    /// The count-in the core was last told (plan 5f-4 Ruling 16).
+    @ObservationIgnored private var sentCountIn: Bool?
+    /// MIDI learn (plan 5f-1 Task 11), made once, with `surfaceCore`.
+    public var learn: LearnModel {
+        if let l = learnModel { return l }
+        let l = LearnModel(document: self, core: surfaceCore)
+        learnModel = l
+        return l
+    }
+    @ObservationIgnored private var learnModel: LearnModel?
+    /// A learn of this document waits (Esc cancels it); false before
+    /// anything learned.
+    public var isLearning: Bool { learnModel?.banner != nil }
+    /// A real device's command (`KeyMonitor.perform`) and a programmatic
+    /// one (`ControlCommands.run`, no dialog), set by the app where models
+    /// are made.
+    @ObservationIgnored public var surfaceCommandSink: ((String) -> Void)?
+    @ObservationIgnored public var quietCommandSink: ((String) -> Void)?
+    /// NoSurfaceCore until the app passes LiveSurfaceCore (pre-flight M25).
+    @ObservationIgnored public var surfaceCore: any SurfaceCore = NoSurfaceCore()
+    /// A surface's events are applying (ruling T9-1): a surface button is
+    /// not a keystroke, so a text field having the keyboard does not hold
+    /// it back.
+    @ObservationIgnored var surfaceActing = false
     /// Version and selection the current `lanes` were fetched for.
     private var lanesKey: LanesKey?
     /// How often `lanes` were fetched (tests check refetch rules).
@@ -61,9 +100,15 @@ public final class DocumentModel {
     /// (plan 5b): views drawing `Pending` or `Coarse` waveforms redraw.
     public internal(set) var overviewVersion = 0
     @ObservationIgnored private var mediaModel: MediaModel?
+    @ObservationIgnored private var bounceModel: BounceModel?
     @ObservationIgnored private var recordModel: RecordModel?
     @ObservationIgnored private var inputsModel: LaneInputs?
     @ObservationIgnored private var synthModel: SynthSheets?
+    @ObservationIgnored private var externalModel: ExternalEditModel?
+    /// How this document opens and watches edit copies (plan 5f-3): the
+    /// store hands on the app's; nil gives fakes, which launch and watch
+    /// nothing.
+    @ObservationIgnored public var externalTools: ExternalTools?
 
     /// The Track Synth and New MIDI Destination sheets (plan 5d-2), made
     /// once.
@@ -90,6 +135,28 @@ public final class DocumentModel {
         recordModel = m
         return m
     }
+
+    /// File › Bounce… (plan 5f-2), made once.
+    public var bounce: BounceModel {
+        if let m = bounceModel { return m }
+        let m = BounceModel(document: self)
+        bounceModel = m
+        return m
+    }
+
+    /// The external sample editor (plan 5f-3), made once from
+    /// `externalTools`.
+    public var external: ExternalEditModel {
+        if let m = externalModel { return m }
+        let t = externalTools ?? ExternalTools()
+        let m = ExternalEditModel(document: self, opener: t.opener, watching: t.watching, probe: t.probe, now: t.now)
+        externalModel = m
+        return m
+    }
+
+    /// The document closes: every external-edit watch stops
+    /// (`DocumentStore.close`; pre-flight I7(b)).
+    public func stopExternalEdits() { externalModel?.stopAll() }
 
     /// The media pool (plan 5b), made once.
     public var media: MediaModel {
@@ -321,14 +388,19 @@ public final class DocumentModel {
     public var canRedo: Bool { snapshot.redoLabel != nil }
     public var isPlaying: Bool { transport.playing }
     /// Transport keys (Space, Return) are off while any name, comment, slot
-    /// or reference field is edited, so typing a space types a space.
-    public var transportKeysEnabled: Bool {
-        renamingSeq == nil && commentDraft == nil && slotDraft == nil
-            && editor.referenceDraft == nil && !editor.textEditing && !editor.panelKey
+    /// or reference field is edited, so typing a space types a space. A
+    /// surface's button is no key (ruling T9-1): it acts regardless.
+    public var transportKeysEnabled: Bool { surfaceActing || !textFieldHasKeyboard }
+    /// A name, comment, slot, reference or panel field is edited. Commands
+    /// that move the keyboard focus wait for it even from a surface
+    /// (review M1): taking the focus would cut the edit short.
+    public var textFieldHasKeyboard: Bool {
+        renamingSeq != nil || commentDraft != nil || slotDraft != nil
+            || editor.referenceDraft != nil || editor.textEditing || editor.panelKey
     }
     /// Return (Return to Start) is also off while a list editor has the
     /// keyboard: there it edits the cursor row (Plan 4c Ruling 20).
-    public var returnKeyEnabled: Bool { transportKeysEnabled && !editor.listFocused }
+    public var returnKeyEnabled: Bool { surfaceActing || (transportKeysEnabled && !editor.listFocused) }
     public var canPlay: Bool { selectedSeq != nil || isPlaying }
     /// 33 ms while playing, 250 ms when stopped (to catch the end).
     public var pollInterval: Duration { .seconds(pollSeconds) }
@@ -521,12 +593,37 @@ public final class DocumentModel {
         }
         if u.overviewsChanged { overviewVersion += 1 }
         if !jobs.isEmpty { pollJobs() }
+        // Edit copies that are due start their import (plan 5f-3 Ruling 4).
+        externalModel?.tick()
         if u.slotsChanged { slotsVersion += 1 }
         if !u.paramsChanged.isEmpty { paramsChanged.formUnion(u.paramsChanged) }
         if !u.problems.isEmpty {
             pluginProblems.append(contentsOf: u.problems)
             if pluginProblems.count > 50 { pluginProblems.removeFirst(pluginProblems.count - 50) }
         }
+        // The record count-in, for a Kontrol's Count-in light (plan 5f-4
+        // Ruling 16): said once per change, and again after a refusal
+        // (final review T7 m3).
+        let countIn = record.countInBars > 0
+        if countIn != sentCountIn, (try? session.setSurfaceCountIn(on: countIn)) != nil {
+            sentCountIn = countIn
+        }
+        // What the surfaces asked for in this pass (plan 5f-1 Ruling 12).
+        if let events = try? session.takeSurfaceEvents(), !events.isEmpty {
+            surfaceRelay.apply(
+                events, self, perform: surfaceCommandSink ?? { _ in }, quietly: quietCommandSink ?? { _ in })
+        }
+        surfaceRelay.flush(self)
+        // The banner and the maps sheet follow the core (plan 5f-1 Task 11).
+        if let l = learnModel, l.isActive { l.poll() }
+    }
+
+    /// Of the shown sequence's lanes that play through `path`, the first
+    /// armed one, else the first (5d-2 Ruling 4): the mixer's input lane
+    /// and the surfaces' rec buttons (plan 5f-1 Ruling 12).
+    public func inputLane(path: UInt64) -> LaneRow? {
+        let through = lanes.filter { $0.audioOut == path }
+        return through.first(where: \.arm) ?? through.first
     }
 
     /// True when Save needs a path first (untitled).
@@ -540,21 +637,28 @@ public final class DocumentModel {
         if alert == nil, (try? session.savesAfterPass()) == true { editor.status = RecordModel.savedDuringPass }
     }
 
-    /// Whether File › Save (or Save As, `forceAs`) asks for a location.
-    /// While recording it never does: Save As waits for Stop (the status
-    /// line says so) and an untitled project's Save does too.
-    public func wantsSavePanel(forceAs: Bool) -> Bool {
-        guard forceAs || needsSaveAs else { return false }
+    /// What File › Save (or Save As, `forceAs`) does. While recording it
+    /// never asks for a location: Save As and an untitled project's Save
+    /// wait for Stop. Reads the path once and the recording now; sets no
+    /// status (the caller shows a refusal).
+    public func saveAction(forceAs: Bool) -> SaveAction {
+        record.refresh(quiet: true)
+        let untitled = needsSaveAs
         if record.isRecording {
-            editor.status = RecordModel.saveAsWhileRecording
-            return false
+            if forceAs { return .refused(RecordModel.saveAsWhileRecording) }
+            if untitled { return .refused(RecordModel.saveUntitledWhileRecording) }
+            return .save
         }
-        return true
+        return forceAs || untitled ? .panel : .save
     }
 
     public func saveAs(path: String) {
         editor.storeLayout()
+        let untitled = needsSaveAs
         perform("Save Failed") { try $0.saveAs(path: path) }
+        // An untitled project's copies went to the Trash (plan 5f-3 Ruling
+        // 3, owner answer 2026-11-03): their watches stop (fold check M7).
+        if untitled, !needsSaveAs { externalModel?.forgetGone() }
     }
 
     // MARK: Plumbing
@@ -605,7 +709,11 @@ public final class DocumentModel {
     /// Takes a new snapshot: keeps the selection if the sequence still
     /// exists (else the first top-level one), refetches lanes if needed.
     func apply(_ s: DocSnapshot) {
+        let moved = s.version != snapshot.version
         snapshot = s
+        // A strip can go with the mixer closed (an Undo of Add Bus): no
+        // mixer refetch prunes the selection then (final review I1).
+        if moved && !selectedStrips.isEmpty { _ = try? selectedStripsThatExist() }
         editor.sync(s)
         if selectedSeq.map({ id in !s.sequences.contains { $0.id == id } }) ?? true {
             selectedSeq = s.sequences.first(where: \.topLevel)?.id ?? s.sequences.first?.id
@@ -615,6 +723,16 @@ public final class DocumentModel {
         }
         refreshLanes()
         stepEntry.checkTarget()
+    }
+
+    /// The selected strips the mixer has now, in ID order; the selection
+    /// keeps only those (strips can go while the mixer window is closed,
+    /// and only the open mixer's refetch prunes it otherwise).
+    func selectedStripsThatExist() throws -> [UInt64] {
+        let ids = Set(try session.mixer().strips.map(\.id))
+        let kept = selectedStrips.intersection(ids)
+        if kept != selectedStrips { selectedStrips = kept }
+        return kept.sorted()
     }
 
     private func refreshLanes() {
@@ -654,3 +772,6 @@ public struct PlayKey: Equatable, Sendable {
         self.init(playing: t.playing, seq: t.seq, stoppedTick: t.playing ? nil : t.tick)
     }
 }
+
+/// What a Save command does (`DocumentModel.saveAction`).
+public enum SaveAction: Equatable, Sendable { case panel, save, refused(String) }

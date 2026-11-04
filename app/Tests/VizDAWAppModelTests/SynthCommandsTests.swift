@@ -277,7 +277,7 @@ import VizDAWCore
     @Test func trackSynthWithAFaderDragOpenIsBusy() async throws {
         let (s, id, m, f) = try demo()
         let mixer = try MixerModel(document: m)
-        mixer.dragStarted("Set Fader")
+        mixer.touch(.stripFader(strip: 1))
         #expect(m.editor.gesture == nil)
         let busy = "Finish the open edit first."
         for (command, args) in [
@@ -288,7 +288,7 @@ import VizDAWCore
             let e = failure(await settled(run(command, args, m, s, id), m))
             #expect(e?.code == .busy && e?.message == busy, "\(command)")
         }
-        mixer.dragEnded()
+        mixer.release(.stripFader(strip: 1))
         #expect(f.trackSynthCalls.isEmpty && f.measures.isEmpty)
     }
 

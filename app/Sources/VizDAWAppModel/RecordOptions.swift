@@ -11,6 +11,10 @@ extension RecordModel {
     public static let overdubNote = "Audio overdub replaces what it overlaps: record into another lane or take to layer."
     /// File › Save while recording (plan 5d-1 Ruling 19).
     public static let savedDuringPass = "Saved. The take is saved when recording stops."
+    /// Save of a new, untitled project while recording: it has no package
+    /// to save into until the take is stopped.
+    public static let saveUntitledWhileRecording =
+        "Stop recording to save this new project: its take is being written into it."
     /// Save As while recording: the take is being written inside this
     /// project's package, which the core refuses to move.
     public static let saveAsWhileRecording = "Stop recording to use Save As: the take is being written into this project."
@@ -38,18 +42,35 @@ extension RecordModel {
         punchDrafts[f] = text
     }
 
+    /// The popover's punch focus moved (Ruling 12): the old field's draft
+    /// is committed; text editing is held while a field has focus.
+    public func punchFocusChanged(from old: TransportField?, to new: TransportField?) {
+        if let old { commitPunch(old) }
+        if new != nil {
+            document?.editor.beginTextEditing("recordPopover")
+        } else {
+            document?.editor.endTextEditing("recordPopover")
+        }
+    }
+
     /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
-    /// the status line and keeps the old value).
-    public func commitPunch(_ f: TransportField) {
-        guard let text = punchDrafts.removeValue(forKey: f) else { return }
-        _ = document?.commitField(f, text)
+    /// the status line and keeps the old value). A refused draft is dropped: the
+    /// field shows the old value again. Returns whether every draft was taken.
+    @discardableResult public func commitPunch(_ f: TransportField) -> Bool {
+        guard let text = punchDrafts.removeValue(forKey: f) else { return true }
+        return document?.commitField(f, text) == true
     }
 
     /// Commits every punch draft, In first (5d-2 final review I3: the
     /// popover closing or Record pressed never leaves a typed time shown
-    /// but unused). A refusal says why in the status line.
-    public func commitPunchDrafts() {
-        for f in [TransportField.punchIn, .punchOut] { commitPunch(f) }
+    /// but unused). A refusal says why in the status line. Returns whether
+    /// every draft was taken.
+    @discardableResult public func commitPunchDrafts() -> Bool {
+        // Both are committed even when In is refused, so each refusal is
+        // said once and the last stays in the status line.
+        let punchIn = commitPunch(.punchIn)
+        let punchOut = commitPunch(.punchOut)
+        return punchIn && punchOut
     }
 
     /// The count-in is playing (the timeline waits).

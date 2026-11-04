@@ -139,7 +139,7 @@ enum ControlChannel {
                 _ = try? server.fail(token: token, failure: .of(.failed, "the job is unknown"))
                 return true
             }
-            switch ControlJobs.answer(j) {
+            switch m.jobAnswer(j) {
             case .wait:
                 if expired {
                     _ = try? server.fail(
@@ -221,6 +221,9 @@ enum ControlChannel {
                 let r = ControlStates.state(target, id, m)
             {
                 answer(server, token, .done(r))
+            } else if ControlStates.answersAppWide(target, window: window) {
+                // Surfaces are app-wide (plan 5f-1, pre-flight M29).
+                answer(server, token, .done(.surfaces(doc: nil, state: AppControlHost.shared.surfaces.state())))
             } else {
                 answer(server, token, .failed(.of(.noDocument, "No document is open in that window.")))
             }
@@ -509,6 +512,8 @@ struct WindowTag: NSViewRepresentable {
 @MainActor
 final class AppControlHost: ControlHost {
     static let shared = AppControlHost()
+    /// The live surfaces (plan 5f-1; tests pass a fake, pre-flight M25).
+    let surfaces: any SurfaceCore = LiveSurfaceCore()
 
     func showMixer(_ doc: UUID) { ControlWindows.openWindow?(id: "mixer", value: doc) }
     func showPluginManager() { ControlWindows.openWindow?(id: "plugins") }
@@ -525,6 +530,10 @@ final class AppControlHost: ControlHost {
 
     var nudge: NudgeSettings { editingPreferences.nudge }
     var keys: KeyBindings { keyBindings }
+    var externalEditor: ExternalEditorChoice {
+        if ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub" { return .stub }
+        return editingPreferences.externalEditor.map { .app($0) } ?? .none
+    }
 
     /// `audio.set` (plan 5d-1 Ruling 26): through the app's audio
     /// preferences, which keep it (plan 5d-2 Ruling 2).

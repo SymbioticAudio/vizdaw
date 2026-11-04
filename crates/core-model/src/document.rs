@@ -31,6 +31,10 @@ pub struct Settings {
     /// The project's audio format: every media file is stored in it
     /// (sub-project 5 spec §4.1).
     pub format: AudioFormat,
+    /// MIDI-learn maps whose targets are project objects (sub-project 5
+    /// spec §4.8; plan 5f-1 Ruling 6). Absent in files when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub learn: Vec<crate::learn::LearnMap>,
 }
 
 impl Default for Settings {
@@ -40,6 +44,7 @@ impl Default for Settings {
             autosave_keep: 10,
             templates: OrdMap::new(),
             format: AudioFormat::DEFAULT,
+            learn: Vec::new(),
         }
     }
 }

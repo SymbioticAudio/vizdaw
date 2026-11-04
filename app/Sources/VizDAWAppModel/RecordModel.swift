@@ -16,7 +16,12 @@ public final class RecordModel {
     /// 5d-2 Ruling 3).
     public static var defaults = RecordDefaults()
     /// Bars of count-in (0–4).
-    public var countInBars: UInt8 = 0
+    public var countInBars: UInt8 = 0 {
+        didSet { if countInBars > 0 { lastCountIn = countInBars } }
+    }
+    /// The last non-zero count-in, for the keyboard's Count-in toggle
+    /// (plan 5f-4 Ruling 16).
+    public private(set) var lastCountIn: UInt8 = 1
     /// Bars of pre-roll (0–8).
     public var preRollBars: UInt8 = 0
     /// Kept loop passes become takes.
@@ -24,7 +29,12 @@ public final class RecordModel {
     /// The toolbar's record popover is open; closing it commits the punch
     /// drafts (5d-2 final review I3).
     public var showsPopover = false {
-        didSet { if !showsPopover { commitPunchDrafts() } }
+        didSet {
+            if !showsPopover {
+                commitPunchDrafts()
+                document?.editor.endTextEditing("recordPopover")
+            }
+        }
     }
     /// Text typed in the popover's punch fields, until Return, the field
     /// losing focus, the popover closing or Record.
@@ -46,8 +56,15 @@ public final class RecordModel {
         self.document = document
         let d = Self.defaults
         countInBars = d.countInBars
+        lastCountIn = max(d.countInBars, 1)
         preRollBars = d.preRollBars
         passesAsTakes = d.passesAsTakes
+    }
+
+    /// Count-in off ↔ its last bar count: the keyboard's Count-in button
+    /// (plan 5f-4 Ruling 16). It only changes the next Record.
+    public func toggleCountIn() {
+        countInBars = countInBars > 0 ? 0 : lastCountIn
     }
 
     /// A pass is recording.
@@ -87,7 +104,11 @@ public final class RecordModel {
         guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
         // A punch time typed in the popover is what this pass punches at
         // (5d-2 final review I3).
-        commitPunchDrafts()
+        // A draft that is not a position refuses the pass (5d-2 final
+        // re-review N1): it must not punch at the old range.
+        guard commitPunchDrafts() else {
+            return .refused(m.editor.status ?? "The punch time is not a position.")
+        }
         do {
             try m.session.record(seq: seq, spec: spec())
         } catch {

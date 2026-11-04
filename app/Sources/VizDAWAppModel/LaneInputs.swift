@@ -43,6 +43,9 @@ public final class LaneInputs {
 
     /// The MIDI sources the picker offers (tests replace it).
     public static var midiPorts: () -> [String] = { midiSourcePorts() }
+    /// The surfaces' input ports, which reach no lane (plan 5f-1 Ruling
+    /// 17); the app sets it, tests replace it.
+    public static var claimedPorts: () -> Set<String> = { [] }
     /// The chosen input device's channels read without the engine (tests
     /// replace it; 5d-2 final review I4).
     public static var deviceChannels: () -> InputChannelsRow? = { audioInputChannels() }
@@ -112,8 +115,12 @@ public final class LaneInputs {
                 port = p
                 channel = c
             }
+            let claimed = Self.claimedPorts()
             let ports = [InputChoice("All MIDI Inputs", .midi(port: nil, channel: channel))]
-                + Self.midiPorts().map { InputChoice($0, .midi(port: $0, channel: channel)) }
+                + Self.midiPorts().map { p in
+                    InputChoice(
+                        claimed.contains(p) ? "\(p) (used by a surface)" : p, .midi(port: p, channel: channel))
+                }
             out.append(InputGroup(title: "MIDI Input", choices: ports))
             let channels = [InputChoice("Any Channel", .midi(port: port, channel: nil))]
                 + (0..<16).map { InputChoice("Channel \($0 + 1)", .midi(port: port, channel: UInt8($0))) }
@@ -278,14 +285,19 @@ public final class LaneInputs {
         }
     }
 
+    /// Reads the Software Monitoring setting now (the meters follow it).
+    public func refreshMonitoring() {
+        let on = Self.softwareMonitoring()
+        if on != monitoringOn { monitoringOn = on }
+    }
+
     /// Reads the input's peaks since the last read (the poll calls this
     /// while metering): each metered lane takes the louder of its channels;
     /// a peak at full scale, or a recording's new clipped samples, lights
     /// the clip mark for two seconds. While metering it also notes an
     /// input that is still opening.
     public func pollMeters() {
-        let on = Self.softwareMonitoring()
-        if on != monitoringOn { monitoringOn = on }
+        refreshMonitoring()
         guard let m = document else { return }
         // Clip counts are per recording (pre-flight M6).
         if !m.record.isRecording { clippedCounts = [:] }

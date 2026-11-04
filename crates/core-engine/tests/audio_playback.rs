@@ -444,6 +444,14 @@ fn muted_regions_play_silence() {
     assert!(r.render(5, false).iter().any(|x| *x != 0.0));
 }
 
+/// Cases per property: `PROPTEST_CASES` (a soak run), else `n`.
+fn cases(n: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(n)
+}
+
 /// Plays both rigs through the same actions; returns their left channels.
 fn both(
     regions: &[(i64, u64, u64)],
@@ -470,8 +478,32 @@ fn both(
     (la, lb, b.engine.faults())
 }
 
+/// The proptest case 2a949a7a (`streamed_render_equals_cached_render`):
+/// a region crossing the loop start by one frame, primed from frame 0
+/// (before it), then a locate inside the loop past it. The disk took the
+/// voice filled from the region's start for the seam, retired the seam's
+/// own, and could never fill it: the wrap played silence where the
+/// cached render played the region.
+#[test]
+fn a_locate_past_a_region_keeps_its_loop_seam() {
+    // A locate, then ten more steps of 4 blocks (only action 0 locates).
+    let mut actions = vec![(0u8, 579_064u64)];
+    actions.extend([(1, 0); 10]);
+    let (a, b, faults) = both(&[(1, 0, 96_001)], Some((5 * QF, 9 * QF)), &actions);
+    // 579_064 wraps to 195_064; the loop end 216_000 is 20_936 frames on,
+    // where the region's last frame (120_000) plays.
+    let wrap = (9 * QF - 579_064 % (16 * QF)) as usize;
+    assert!(a[wrap] != 0.0, "the cached render plays the region there");
+    assert_eq!(a, b);
+    assert!(
+        !faults.contains(Faults::STREAM_UNDERRUN),
+        "{:?}",
+        faults.names()
+    );
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 16, .. ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig::with_cases(cases(16)))]
 
     /// Streaming is invisible: a streamed render equals a fully cached one
     /// sample for sample, through loops and locates (late starts aside,

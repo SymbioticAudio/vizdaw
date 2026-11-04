@@ -253,3 +253,131 @@ fn decode_stops_when_cancelled() {
     let r = ExtAudioImporter.decode(&src, 48_000, &mut |_| Ok(()), &cancel);
     assert_eq!(r, Err(MediaError::Cancelled));
 }
+
+/// A 48 kHz stereo float CAF of a ramp, `frames` frames, in `dir`.
+fn render_caf(dir: &Path, frames: usize) -> std::path::PathBuf {
+    let p = dir.join("render.caf");
+    let mut w = core_media::caf::CafWriter::create(
+        &p,
+        48_000,
+        2,
+        BitDepth::Float32,
+        core_media::caf::WriteMode::Normal,
+    )
+    .unwrap();
+    let data: Vec<f32> = (0..frames)
+        .flat_map(|f| {
+            let x = ((f % 97) as f32 / 97.0) - 0.5;
+            [x * 0.9, -x * 0.5]
+        })
+        .collect();
+    w.write(&data).unwrap();
+    w.finish().unwrap();
+    p
+}
+
+/// Every frame of `path` decoded at 48 kHz by the system reader.
+fn decode_all(path: &Path) -> Vec<f32> {
+    let mut out = Vec::new();
+    ExtAudioImporter
+        .decode(
+            path,
+            48_000,
+            &mut |c| {
+                out.extend_from_slice(c);
+                Ok(())
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    out
+}
+
+/// Plan 5f-2 Task 1: the system reader reads every WAV and AIFF VizDAW
+/// writes, with its channels, rate, bits and frames, and the samples
+/// within one step of the source (exact for float).
+#[test]
+fn the_system_reader_reads_every_export() {
+    use core_media::export::{Container, ExportFormat, export};
+    let d = tempfile::tempdir().unwrap();
+    let src = render_caf(d.path(), 4800);
+    let want = decode_all(&src);
+    for (c, depth) in [
+        (Container::Wav, BitDepth::Int16),
+        (Container::Wav, BitDepth::Int24),
+        (Container::Wav, BitDepth::Float32),
+        (Container::Aiff, BitDepth::Int16),
+        (Container::Aiff, BitDepth::Int24),
+        (Container::Aiff, BitDepth::Float32),
+    ] {
+        let dest = d.path().join(format!("out {depth:?}.{}", c.extension()));
+        let f = ExportFormat {
+            container: c,
+            depth,
+            rate: 48_000,
+            dither: false,
+            dither_stream: 0,
+        };
+        export(
+            &ExtAudioImporter,
+            &src,
+            &dest,
+            &f,
+            None,
+            false,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let info = ExtAudioImporter.probe(&dest).unwrap();
+        assert_eq!(
+            (info.channels, info.sample_rate, info.bits, info.frames),
+            (2, 48_000.0, depth.bits(), 4800),
+            "{c:?} {depth:?}"
+        );
+        let got = decode_all(&dest);
+        let step = match depth {
+            BitDepth::Int16 => 1.0 / 32_768.0,
+            BitDepth::Int24 => 1.0 / 8_388_608.0,
+            BitDepth::Float32 => 0.0,
+        };
+        assert_eq!(got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= step * 1.01,
+                "{c:?} {depth:?} sample {i}: {g} vs {w}"
+            );
+        }
+    }
+}
+
+/// Plan 5f-2 Task 1: a rate change goes through ExtAudioFile.
+#[test]
+fn export_resamples_48k_to_44k1() {
+    use core_media::export::{Container, ExportFormat, export};
+    let d = tempfile::tempdir().unwrap();
+    let src = render_caf(d.path(), 48_000);
+    let dest = d.path().join("44k1.wav");
+    let f = ExportFormat {
+        container: Container::Wav,
+        depth: BitDepth::Int24,
+        rate: 44_100,
+        dither: false,
+        dither_stream: 0,
+    };
+    let e = export(
+        &ExtAudioImporter,
+        &src,
+        &dest,
+        &f,
+        None,
+        false,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(e.frames.abs_diff(44_100) <= 1, "{}", e.frames);
+    let info = ExtAudioImporter.probe(&dest).unwrap();
+    assert_eq!(info.sample_rate, 44_100.0);
+    assert!(info.frames.abs_diff(44_100) <= 1);
+}

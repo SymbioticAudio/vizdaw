@@ -3,15 +3,18 @@
 
 mod common;
 
-use core_media::caf::{CafReader, CafWriter, WriteMode, hash_file};
+#[cfg(target_os = "macos")]
+use core_media::caf::CafReader;
+use core_media::caf::{CafWriter, WriteMode, hash_file};
 use core_model::format::BitDepth;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vizdaw_ffi::{
-    AudioEdit, BitDepthRow, EditCommand, EventKindRow, EventRow, ImportTargetRow, JobStateRow,
-    ProjectFormatRow, Session, VizError,
+    AudioEdit, EditCommand, EventKindRow, EventRow, ImportTargetRow, JobStateRow, Session, VizError,
 };
+#[cfg(target_os = "macos")]
+use vizdaw_ffi::{BitDepthRow, ProjectFormatRow};
 
 fn caf(path: &Path, ch: u16, samples: &[f32]) -> PathBuf {
     let mut w = CafWriter::create(path, 48_000, ch, BitDepth::Float32, WriteMode::Normal).unwrap();
@@ -257,6 +260,9 @@ fn normalize_is_busy_while_no_overview_can_be_loaded() {
 /// Preflight I1: after the item gets a new file (a rate change, so the
 /// region's span is rescaled too), Normalize never measures the old
 /// file's overview: it measures the new file, or it is `Busy`.
+// The 96 kHz conversion resamples: that needs the system importer
+// (ExtAudioFile); elsewhere the CAF importer converts depth only.
+#[cfg(target_os = "macos")]
 #[test]
 fn normalize_never_measures_the_previous_file() {
     let dir = tempfile::tempdir().unwrap();

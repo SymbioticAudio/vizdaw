@@ -7,6 +7,9 @@ import VizDAWCore
 final class FakeControlHost: ControlHost {
     var calls: [String] = []
     var nudge = NudgeSettings()
+    var surfaces: any SurfaceCore = FakeSurfaceCore()
+    /// The editor `region.open_external` uses without `app` (plan 5f-3).
+    var externalEditor: ExternalEditorChoice = .none
     let keys = KeyBindings(defaults: MemoryDefaults())
     /// Whether `focus` finds the fields.
     var fieldsShown = true

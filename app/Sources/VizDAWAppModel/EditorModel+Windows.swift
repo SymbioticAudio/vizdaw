@@ -37,7 +37,8 @@ extension EditorModel {
         let w = TornWindow(
             id: UUID(),
             detail: DetailState(
-                kind: kind, target: target, lanes: layout.detail?.lanes, stripRows: layout.detail?.stripRows),
+                kind: kind, target: target, lanes: layout.detail?.lanes, stripRows: layout.detail?.stripRows,
+                stripRowsLane: layout.detail?.stripRowsLane),
             frame: nil)
         updateLayout {
             $0.windows.append(w)

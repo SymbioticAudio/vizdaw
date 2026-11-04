@@ -82,6 +82,10 @@ public final class StripChartView: EditorCanvas {
             _ = document?.playKey
             _ = model.chosenLane
             _ = model.stroke
+            // The write in progress moves with the transport poll while
+            // the chart's sequence plays (plan 5e-2 Ruling 9); the clock
+            // reads the transport only then (Task 6 review I1).
+            _ = model.previewClock
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.refresh()
@@ -163,6 +167,7 @@ public final class StripChartView: EditorCanvas {
                 CGRect(x: dirty.minX, y: s.y(c), width: dirty.width, height: 0.5).fill()
             }
             draw(model.values(lane), lane: lane, scale: s, dirty: dirty, selected: selected)
+            drawPreview(model.preview(lane), scale: s)
             NSString(string: lane.title(names) + " ▾").draw(
                 at: CGPoint(x: 6, y: top + 3),
                 withAttributes: [
@@ -223,6 +228,17 @@ public final class StripChartView: EditorCanvas {
             line.line(to: CGPoint(x: max(dirty.maxX, axis.x(q.tick)), y: y))
         }
         accent.withAlphaComponent(0.8).setStroke()
+        line.lineWidth = 1.5
+        line.stroke()
+    }
+
+    /// The write in progress (Ruling 9): a red line through its points.
+    private func drawPreview(_ values: [StripValue], scale s: StripScale) {
+        guard let first = values.first else { return }
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: axis.x(first.tick), y: s.y(first.value)))
+        for v in values.dropFirst() { line.line(to: CGPoint(x: axis.x(v.tick), y: s.y(v.value))) }
+        NSColor.systemRed.setStroke()
         line.lineWidth = 1.5
         line.stroke()
     }
@@ -354,6 +370,15 @@ public final class StripChartView: EditorCanvas {
             automation.toolTip = "The mixer's targets could not be read just now (busy); open the menu again."
         }
         menu.addItem(automation)
+        // The row's automation target learned to a MIDI control (plan 5f-1
+        // Task 11); a velocity scale cannot be learned (Ruling 6).
+        if case .automation(let t) = current, Self.learnable(t) {
+            let learn = MenuAction(title: "MIDI Learn") { [weak self] in
+                self?.document?.learn.learn(t.row)
+            }.item(checked: false)
+            learn.isEnabled = document != nil
+            menu.addItem(learn)
+        }
         menu.addItem(.separator())
         let add = MenuAction(title: "Add Row") { [weak self] in self?.model.addRow() }.item(checked: false)
         add.isEnabled = model.rows.count < StripChartModel.maxRows
@@ -364,6 +389,12 @@ public final class StripChartView: EditorCanvas {
         menuTarget.lanes = lanes
         menu.autoenablesItems = false
         return menu
+    }
+
+    /// Every automation target but a velocity scale can be MIDI-learned.
+    static func learnable(_ t: AutoTarget) -> Bool {
+        if case .velocityScale = t { return false }
+        return true
     }
 
     // MARK: Accessibility

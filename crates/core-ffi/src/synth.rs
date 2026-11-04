@@ -340,6 +340,7 @@ mod tests {
                 takes,
             };
         let pass = RecordPass {
+            automation: Vec::new(),
             with_gaps: false,
             media: Vec::new(),
             lanes: vec![

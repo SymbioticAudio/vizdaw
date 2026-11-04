@@ -256,6 +256,20 @@ import VizDAWCore
         #expect(s.model(a) == nil)
     }
 
+    /// Final review R2 (Task 11 m2): the front-most document window still
+    /// open, in the order windows were last key; a closed one drops out.
+    @Test func theFrontDocumentIsTheLastKeyOneStillOpen() throws {
+        let s = store()
+        let a = try #require(s.newDemo())
+        let b = try #require(s.newDemo())
+        #expect(s.frontDocument == nil, "no window was key yet")
+        s.focusDocument(a, window: UUID())
+        s.focusDocument(b, window: UUID())
+        #expect(s.frontDocument === s.model(b))
+        s.close(b)
+        #expect(s.frontDocument === s.model(a))
+    }
+
     @Test func openRefusesFoldersWithoutTheExtension() {
         let s = store()
         #expect(s.open(path: "/Users/me/Music") == nil)

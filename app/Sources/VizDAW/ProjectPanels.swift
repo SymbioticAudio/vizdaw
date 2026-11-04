@@ -85,6 +85,29 @@ extension Panels {
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
+    /// Where to write a bounced mix; the panel itself confirms a replace
+    /// (plan 5f-2: the old file stays until the new one is complete).
+    static func chooseBounceFile(name: String, ext: String) -> String? {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(name).\(ext)"
+        if let t = UTType(filenameExtension: ext) { panel.allowedContentTypes = [t] }
+        panel.canCreateDirectories = true
+        panel.prompt = "Bounce"
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    /// The folder for stems (owner answer 2: files already there are kept).
+    static func chooseBounceFolder() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Bounce"
+        panel.message = "Choose a folder for the stems."
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
     /// A folder to search for missing media (Search Folder…).
     static func chooseFolder() -> String? {
         let panel = NSOpenPanel()

@@ -1039,6 +1039,21 @@ fn start_over(s: &Shared, d: &mut Disk, media: MediaId) {
     }
 }
 
+/// The lowest file frame of voice `v` (streaming need `n`) the real-time
+/// side may read: under the published playhead, or under the hint should
+/// the locate land first, or under the led seam (never past the playhead);
+/// with none of them in the voice, its `base`.
+fn floor(v: &Voice, n: &Need, at: [Option<u64>; 3]) -> u64 {
+    let (base, hi) = (v.base.load(Ordering::Relaxed), v.hi.load(Ordering::Acquire));
+    at.into_iter()
+        .flatten()
+        .filter(|&p| p >= n.start && p < n.end())
+        .map(|p| n.file_frame + (p - n.start))
+        .filter(|&f| f >= base && f <= hi)
+        .min()
+        .unwrap_or(base)
+}
+
 /// One disk pass (see the module docs).
 fn pass(s: &Shared, d: &mut Disk) {
     if s.stalled.load(Ordering::Relaxed) {
@@ -1126,19 +1141,45 @@ fn pass(s: &Shared, d: &mut Disk) {
         }
         for (want, until) in wanted {
             let key = n.media.0.wrapping_add(1);
-            let found = d.stream.iter().find_map(|(&i, r)| {
-                let v = s.slot(i)?;
+            // The live voices of this need holding `want`. One whose floor
+            // is held below `want` (by a playhead or hint earlier in the
+            // need, or a voice filled from the region's start while the
+            // playhead is before it) can never grow to `until` while it
+            // is held there: the window gets its own voice rather than
+            // take that one and drop the one that could (a loop seam
+            // behind the voice playing the region). Of the others, the
+            // one furthest on (highest `hi`) is kept, so an older voice
+            // does not win back a window a newer one already holds.
+            let (mut best, mut held) = (None::<(usize, u64)>, None::<(usize, u64)>);
+            for (&i, r) in &d.stream {
+                let Some(v) = s.slot(i) else {
+                    continue;
+                };
                 let live = r.is_none()
                     && v.media.load(Ordering::Acquire) == key
                     && v.start.load(Ordering::Relaxed) == n.start
                     && v.origin.load(Ordering::Relaxed) == n.file_frame;
                 let (lo, hi) = v.range();
-                (live && lo <= want && want <= hi).then_some(i)
-            });
-            let slot = match found {
-                Some(i) => i,
+                if !(live && lo <= want && want <= hi) {
+                    continue;
+                }
+                let floor = floor(v, n, [Some(pos), hint, seam_at]);
+                let stuck = want > floor && floor + v.cap < until;
+                let pick = if stuck { &mut held } else { &mut best };
+                if pick.is_none_or(|(_, h)| hi > h) {
+                    *pick = Some((i, hi));
+                }
+            }
+            let slot = match best {
+                Some((i, _)) => i,
                 None => {
                     let Some(i) = free_stream_slot(s, d) else {
+                        // No slot free: a held voice still serves what it
+                        // holds rather than being retired.
+                        if let Some((i, _)) = held {
+                            let e = used.entry(i).or_insert((*n, until));
+                            e.1 = e.1.max(until);
+                        }
                         continue;
                     };
                     if let Some(v) = s.slot(i) {
@@ -1184,18 +1225,8 @@ fn pass(s: &Shared, d: &mut Disk) {
         let Some(path) = media.get(&n.media).cloned() else {
             continue;
         };
-        let (base, hi) = (v.base.load(Ordering::Relaxed), v.hi.load(Ordering::Acquire));
-        // The floor is the lowest frame of this voice the real-time side
-        // may read: under the published playhead, or under the hint
-        // should the locate land first (never past the playhead).
-        let floor = [Some(pos), hint, seam_at]
-            .into_iter()
-            .flatten()
-            .filter(|&p| p >= n.start && p < n.end())
-            .map(|p| n.file_frame + (p - n.start))
-            .filter(|&f| f >= base && f <= hi)
-            .min()
-            .unwrap_or(base);
+        let hi = v.hi.load(Ordering::Acquire);
+        let floor = floor(v, &n, [Some(pos), hint, seam_at]);
         let space = (floor + v.cap).saturating_sub(hi);
         let count = space.min(until.saturating_sub(hi));
         let fb = 4 * v.stride as u64;
@@ -1431,6 +1462,112 @@ mod tests {
             assert_eq!(read(&r, &n, pos, 512, false), Read::Done, "at {pos}");
             pos += 512;
         }
+    }
+
+    /// A region's loop seam keeps its own voice: the full voice filled
+    /// from the region's start (its floor held there by a playhead before
+    /// the region) is not taken for the seam, so the seam's voice is not
+    /// retired and the whole seam is prefilled, also after a locate past
+    /// the region (the proptest case 2a949a7a of
+    /// `streamed_render_equals_cached_render`).
+    #[test]
+    fn a_seam_past_a_full_voice_keeps_its_own_voice() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 30_000, 2);
+        // Voices hold 4_800 frames; the seam is 2_400.
+        for into in [4_800u64, 3_000] {
+            let (s, r) = manual(small());
+            s.set_media(vec![MediaFile {
+                id: MediaId(0),
+                path: p.clone(),
+            }]);
+            let n = need(0, 1_000, 20_000, 0);
+            s.set_plan(Arc::from(vec![n]));
+            let ls = n.start + into;
+            s.set_loop(Some((ls, 26_000)));
+            // Stopped before the region: its start and its seam fill, and
+            // the seam keeps its voice from the second pass on.
+            r.begin_block(0);
+            s.service();
+            s.service();
+            assert_eq!(read(&r, &n, into, 2_400, true), Read::Done, "primed {into}");
+            // A locate inside the loop, past the region.
+            r.begin_block(25_000);
+            s.service();
+            s.service();
+            // The wrap plays the region's whole seam.
+            assert_eq!(
+                read(&r, &n, into, 2_400, true),
+                Read::Done,
+                "loop start {into} frames in"
+            );
+        }
+    }
+
+    /// Review I1: with the playhead inside the region before the loop
+    /// start, the voice it plays from never reaches the seam's frames
+    /// (its floor is held at the playhead), so the seam keeps its own
+    /// voice: prefilled before any locate, and after a locate past the
+    /// region with no pass at the new playhead yet.
+    #[test]
+    fn a_seam_ahead_of_the_playhead_in_its_region_keeps_its_own_voice() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 30_000, 2);
+        let (s, r) = manual(small());
+        s.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: p,
+        }]);
+        let n = need(0, 1_000, 20_000, 0);
+        s.set_plan(Arc::from(vec![n]));
+        // The seam: file [4_800, 7_200), past one voice from the start.
+        s.set_loop(Some((5_800, 26_000)));
+        r.begin_block(0);
+        s.service();
+        s.service();
+        // Playing inside the region (file 600).
+        r.begin_block(1_600);
+        s.service();
+        assert_eq!(read(&r, &n, 600, 512, true), Read::Done);
+        assert_eq!(
+            read(&r, &n, 4_800, 2_400, true),
+            Read::Done,
+            "before a locate"
+        );
+        // A locate past the region, not applied yet.
+        s.hint(25_000);
+        s.service();
+        assert_eq!(
+            read(&r, &n, 4_800, 2_400, true),
+            Read::Done,
+            "after the hint"
+        );
+    }
+
+    /// Review M3: with no stream slot free, a voice that cannot reach the
+    /// seam's end still serves the part of the seam it holds instead of
+    /// being retired.
+    #[test]
+    fn with_no_slot_free_a_held_voice_keeps_serving_its_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = file(dir.path(), "a.caf", 30_000, 2);
+        let (s, r) = manual(StreamConfig {
+            stream_voices: 1,
+            ..small()
+        });
+        s.set_media(vec![MediaFile {
+            id: MediaId(0),
+            path: p,
+        }]);
+        let n = need(0, 1_000, 20_000, 0);
+        s.set_plan(Arc::from(vec![n]));
+        // The seam: file [3_000, 5_400); the one voice holds [0, 4_800).
+        s.set_loop(Some((4_000, 26_000)));
+        r.begin_block(0);
+        s.service();
+        r.begin_block(25_000);
+        s.service();
+        assert_eq!(read(&r, &n, 3_000, 1_800, true), Read::Done);
     }
 
     #[test]

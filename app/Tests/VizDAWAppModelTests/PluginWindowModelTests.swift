@@ -26,11 +26,227 @@ import VizDAWCore
         let f = mixerFake()
         f.paramTable[10] = [param(0, "Gain")]
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(0)
         w.setParam(0, 0.7)
         w.setParam(0, 0.2)
         w.commitParam(0)
-        #expect(f.liveSets.map(\.2) == [0.7, 0.2])
-        #expect(f.calls == ["commitParams 10 0=0.2"])
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.7), .value(value: 0.2), .release])
+        #expect(f.gestures.allSatisfy { $0.0 == .pluginParam(slot: 10, param: 0) })
+        #expect(f.calls.isEmpty, "the core commits the step at the release")
+        #expect(w.params.first?.value == 0.2)
+    }
+
+    /// Ruling 8: values are normalised by the parameter's range.
+    @Test func sliderValuesAreNormalisedByTheRange() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [
+            ParamRow(
+                id: 3, name: "Cutoff", module: "", min: 20, max: 20_020, default: 1000, value: 1000,
+                stepped: false, automatable: true, hidden: false)
+        ]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(3)
+        w.setParam(3, 10_020)
+        w.setParam(3, 99_999)
+        w.commitParam(3)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.5), .value(value: 1), .release])
+    }
+
+    /// A range with `max <= min` is 0; a NaN never reaches the core.
+    @Test func anEmptyRangeIsZeroAndNaNIsClamped() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [
+            ParamRow(
+                id: 1, name: "Fixed", module: "", min: 5, max: 5, default: 5, value: 5,
+                stepped: false, automatable: true, hidden: false),
+            param(2, "Gain"),
+        ]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(1)
+        w.setParam(1, 7)
+        w.commitParam(1)
+        w.beginParam(2)
+        w.setParam(2, .nan)
+        w.setParam(2, .infinity)
+        w.setParam(2, -.infinity)
+        w.commitParam(2)
+        #expect(
+            f.gestures.map(\.1) == [
+                .touch(value: 0), .release, .touch(value: 0), .value(value: 1), .value(value: 0), .release,
+            ])
+        #expect(w.params.allSatisfy { !$0.value.isNaN }, "the shown value is never NaN")
+    }
+
+    /// The release lands the step: the document shows it at once.
+    @Test func theReleaseAppliesTheSnapshot() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let doc = try DocumentModel(session: f)
+        let w = PluginWindowModel(document: doc, slot: 10)
+        w.beginParam(0)
+        w.setParam(0, 0.7)
+        f.snap.version += 1
+        w.commitParam(0)
+        #expect(doc.snapshot.version == f.snap.version)
+        #expect(w.params.first?.value == 0.7)
+    }
+
+    /// A refused touch is not kept: the drag's later moves send nothing and
+    /// its end sends no release; the next drag touches again.
+    @Test func aRefusedTouchIsNotKept() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let doc = try DocumentModel(session: f)
+        let w = PluginWindowModel(document: doc, slot: 10)
+        f.gestureError = .Busy(message: "Finish the open edit first.")
+        w.beginParam(0)
+        w.setParam(0, 0.7)
+        #expect(doc.alert?.title == "Parameter Failed")
+        f.gestureError = nil
+        w.setParam(0, 0.8)
+        w.commitParam(0)
+        #expect(f.gestures.isEmpty)
+        #expect(w.params.first?.value == 0.5, "not heard, not shown")
+        w.endOpenDrags()
+        #expect(f.gestures.isEmpty)
+        w.beginParam(0)
+        w.setParam(0, 0.3)
+        w.commitParam(0)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.3), .release])
+    }
+
+    /// A refused mark lives only for its drag: it goes with the parameter,
+    /// so the parameter's next drag touches again.
+    @Test func aRefusedMarkGoesWithItsDragOrItsParameter() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        // Refused, then let go: the next drag is heard.
+        f.gestureError = .Busy(message: "busy")
+        w.beginParam(0)
+        w.setParam(0, 0.7)
+        f.gestureError = nil
+        w.commitParam(0)
+        w.beginParam(0)
+        w.setParam(0, 0.4)
+        w.commitParam(0)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.4), .release])
+        // Refused, then the parameter goes and comes back before the drag
+        // ends: the next drag touches.
+        f.gestureError = .Busy(message: "busy")
+        w.beginParam(0)
+        w.setParam(0, 0.7)
+        f.gestureError = nil
+        f.paramTable[10] = []
+        w.refresh()
+        f.paramTable[10] = [param(0, "Gain")]
+        w.refresh()
+        w.beginParam(0)
+        w.setParam(0, 0.6)
+        w.commitParam(0)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.4), .release, .touch(value: 0.6), .release])
+        // The same when the slot goes and comes back.
+        f.gestureError = .Busy(message: "busy")
+        w.beginParam(0)
+        w.setParam(0, 0.7)
+        f.gestureError = nil
+        let inserts = f.mixerSnap.strips[0].inserts
+        f.mixerSnap.strips[0].inserts = []
+        w.refresh()
+        f.mixerSnap.strips[0].inserts = inserts
+        w.refresh()
+        w.beginParam(0)
+        w.setParam(0, 0.3)
+        w.commitParam(0)
+        #expect(f.gestures.suffix(2).map(\.1) == [.touch(value: 0.3), .release])
+        #expect(f.gestures.count == 6)
+    }
+
+    /// A move the core refuses keeps the taken touch: the release follows.
+    @Test func aFailingMoveStillReleasesTheTakenTouch() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let doc = try DocumentModel(session: f)
+        let w = PluginWindowModel(document: doc, slot: 10)
+        w.beginParam(0)
+        w.setParam(0, 0.7)
+        f.valueError = .Model(message: "refused")
+        w.setParam(0, 0.2)
+        #expect(doc.alert?.title == "Parameter Failed")
+        f.valueError = nil
+        w.commitParam(0)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.7), .release])
+    }
+
+    /// The parameter or the slot going mid-drag releases its touch once.
+    @Test func aParameterOrSlotGoingMidDragReleasesOnce() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain"), param(1, "Pan")]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(0)
+        w.setParam(0, 0.7)
+        w.beginParam(1)
+        w.setParam(1, 0.1)
+        f.paramTable[10] = [param(1, "Pan")]
+        w.refresh()
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.7), .touch(value: 0.1), .release])
+        #expect(f.gestures.last?.0 == .pluginParam(slot: 10, param: 0))
+        w.commitParam(0)
+        #expect(f.gestures.count == 3, "released once")
+        f.mixerSnap.strips[0].inserts = []
+        f.paramTable[10] = nil
+        w.refresh()
+        #expect(w.isGone)
+        #expect(f.gestures.count == 4)
+        #expect(f.gestures.last?.0 == .pluginParam(slot: 10, param: 1))
+        #expect(f.gestures.last?.1 == .release)
+        w.endOpenDrags()
+        #expect(f.gestures.count == 4, "released once")
+    }
+
+    /// A Busy refresh mid-drag releases nothing and keeps the dragged value.
+    @Test func aBusyRefreshMidDragKeepsTheTouch() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(0)
+        w.setParam(0, 0.7)
+        f.readBusy = true
+        f.mixerFetchError = VizError.Busy(message: "busy")
+        w.refresh()
+        f.readBusy = false
+        f.mixerFetchError = nil
+        w.refresh()
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.7)])
+        #expect(w.params.first?.value == 0.7, "the dragged value stays shown")
+        w.commitParam(0)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.7), .release])
+    }
+
+    /// Final review m6: a value with no editing span open (a keyboard or
+    /// accessibility increment) is a click: touch, value and release at
+    /// once, so no touch is left open to hold the document's edit.
+    @Test func aValueWithNoEditingSpanIsAClick() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [param(0, "Gain")]
+        let doc = try DocumentModel(session: f)
+        let w = PluginWindowModel(document: doc, slot: 10)
+        f.snap.version += 1
+        w.setParam(0, 0.3)
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.3), .value(value: 0.3), .release])
+        #expect(f.gestures.allSatisfy { $0.0 == .pluginParam(slot: 10, param: 0) })
+        #expect(w.params.first?.value == 0.3, "shown at once")
+        #expect(doc.snapshot.version == f.snap.version, "its step lands")
+        w.commitParam(0)
+        w.endOpenDrags()
+        #expect(f.gestures.count == 3, "nothing left to release")
+        // A refused click sends nothing more and keeps nothing.
+        f.gestureError = .Busy(message: "busy")
+        w.setParam(0, 0.6)
+        f.gestureError = nil
+        #expect(f.gestures.count == 3 && doc.alert?.title == "Parameter Failed")
+        w.setParam(0, 0.6)
+        #expect(f.gestures.count == 6, "the next value clicks again")
     }
 
     @Test func theEditorOpensWhenThePluginHasOneElseParametersShow() throws {
@@ -110,11 +326,12 @@ import VizDAWCore
         let f = mixerFake()
         f.paramTable[10] = [param(0, "Gain")]
         let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        w.beginParam(0)
         w.setParam(0, 0.9)
         #expect(w.closed())
-        #expect(f.calls == ["commitParams 10 0=0.9"])
+        #expect(f.gestures.map(\.1) == [.touch(value: 0.9), .release])
         w.endOpenDrags()
-        #expect(f.calls == ["commitParams 10 0=0.9"], "committed once")
+        #expect(f.gestures.filter { $0.1 == .release }.count == 1, "released once")
     }
 
     @Test func aBusyRefreshKeepsTheWindowAndItsParameters() throws {

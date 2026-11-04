@@ -67,7 +67,7 @@ enum KeyMonitor {
     /// Runs the route's command (a window without a document runs only
     /// commands that need none); whether the key was used up.
     static func perform(_ r: KeyRoute, _ doc: (id: UUID, model: DocumentModel)?) -> Bool {
-        let outcome: ControlOutcome
+        let after: KeyAfter
         switch r {
         case .typing, .pass: return false
         case .slot(let seq):
@@ -80,9 +80,10 @@ enum KeyMonitor {
                 return true
             }
         case .command(let id):
-            outcome = ControlCommands.run(id, args: [], doc: doc, store: appStore, host: AppControlHost.shared)
+            // Reload External Edit as its menu item (final review M9).
+            after = KeyDispatch.command(id, doc: doc, store: appStore, host: AppControlHost.shared)
         }
-        switch KeyDispatch.after(outcome, doc: doc?.model) {
+        switch after {
         case .handled: return true
         case .pass: return false
         case .opened(let d):
@@ -98,6 +99,17 @@ enum KeyMonitor {
         // the text, not a sheet's default button; fix round 1 I3).
         if let input = w.firstResponder as? NSTextInputClient, input.hasMarkedText() {
             w.sendEvent(e)
+            return true
+        }
+        // Esc cancels a waiting MIDI learn (plan 5f-1 Task 11), wherever
+        // it is pressed, except into the Keys settings' recorder, a modal
+        // dialog or a text field, whose own Esc it is (final review T11 m7).
+        if e.keyCode == 53, e.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
+            !(w.firstResponder is KeyCapturing), NSApp.modalWindow == nil,
+            !(w.firstResponder is NSTextView),
+            let learning = appStore.documents.values.first(where: \.isLearning)
+        {
+            learning.learn.cancel()
             return true
         }
         let (r, doc) = route(e, in: w, menus: true)

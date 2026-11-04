@@ -207,6 +207,9 @@ public enum LaneHeaderLayout {
         CGRect(x: 8, y: y + 43, width: 178, height: 3)
     }
 
+    /// Whether a lane this tall has room for the meter under its controls.
+    public static func showsMeter(laneHeight: CGFloat) -> Bool { laneHeight >= 46 }
+
     /// The clip mark at the meter's end.
     public static func clipRect(rowTop y: CGFloat) -> CGRect {
         CGRect(x: 189, y: y + 43, width: 5, height: 3)

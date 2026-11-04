@@ -50,7 +50,12 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return rows
     }
 
-    func locate(tick: Int64) throws { state.tick = tick }
+    /// `locate` calls (plan 5f-1 Task 10).
+    var locates: [Int64] = []
+    func locate(tick: Int64) throws {
+        locates.append(tick)
+        state.tick = tick
+    }
     func path() throws -> String? { savedPath }
 
     func play(seq: UInt64) throws {
@@ -544,6 +549,64 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return j
     }
     var cancelled: [UInt64] = []
+    var bounces: [BounceRequestRow] = []
+    var bounceError: VizError?
+    var checkRow = BounceCheckRow(externalLanes: 0, frames: 96_000, files: [], warning: nil)
+    var checkRequests: [BounceRequestRow] = []
+    var resultRow: BounceResultRow?
+    func bounce(req: BounceRequestRow) throws -> UInt64 {
+        if let e = bounceError { throw e }
+        bounces.append(req)
+        let id = UInt64(3000 + bounces.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .bounce, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
+            message: nil, problems: [], created: [])
+        return id
+    }
+    var checkError: VizError?
+    func bounceCheck(req: BounceRequestRow) throws -> BounceCheckRow {
+        if let e = checkError { throw e }
+        checkRequests.append(req)
+        return checkRow
+    }
+    func bounceResult(job: UInt64) throws -> BounceResultRow? { resultRow }
+
+    // MARK: External sample editor (plan 5f-3)
+
+    /// One `applyExternalEdit` call.
+    struct ExternalApply: Equatable {
+        let event: UInt64
+        let path: String
+    }
+    /// What `openExternal` answers (nil: a row for the event under
+    /// /tmp/p.vizdaw), and its refusal.
+    var externalRow: ExternalEditRow?
+    var externalError: VizError?
+    /// The regions `openExternal` was called for (refused calls too).
+    var externalOpened: [UInt64] = []
+    /// What `externalEdit` answers per region: the copy `openExternal`
+    /// made, else `.noEdit`.
+    var externalStates: [UInt64: ExternalEditStateRow] = [:]
+    /// `applyExternalEdit` calls, and its refusal.
+    var externalApplies: [ExternalApply] = []
+    var applyError: VizError?
+    func openExternal(event: UInt64) throws -> ExternalEditRow {
+        externalOpened.append(event)
+        if let e = externalError { throw e }
+        let row = externalRow ?? ExternalEditRow(event: event, path: "/tmp/p.vizdaw/Media/Edits/Kick edit 1.wav", from: 1)
+        externalStates[event] = .copy(row: row)
+        return row
+    }
+    func externalEdit(event: UInt64) throws -> ExternalEditStateRow { externalStates[event] ?? .noEdit }
+    func applyExternalEdit(event: UInt64, path: String) throws -> UInt64 {
+        if let e = applyError { throw e }
+        externalApplies.append(ExternalApply(event: event, path: path))
+        let id = UInt64(5000 + externalApplies.count)
+        jobRows[id] = JobRow(
+            id: id, kind: .externalEdit, progress: jobStartState == .running ? 0.4 : 1, state: jobStartState,
+            message: nil, problems: [], created: [])
+        return id
+    }
     var jobStartState: JobStateRow = .done
     func cancelJob(id: UInt64) throws { cancelled.append(id) }
     var info = ProjectInfoRow(
@@ -759,6 +822,105 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         measures.append(dest)
         return MeasureRow(returnLatencyMs: measured, onsets: 5, snapshot: commandResult())
     }
+
+    // MARK: Automation (plan 5e-1)
+
+    var gestures: [(AutomationTargetRow, GesturePhaseRow)] = []
+    /// Thrown by `gesture` while set.
+    var gestureError: VizError?
+    /// Thrown by `gesture` for value phases only, while set.
+    var valueError: VizError?
+    /// Thrown by `automationState` while set.
+    var automationError: VizError?
+    var automationRow = AutomationStateRow(modes: [], touched: [], suspended: false, writing: false)
+    var modeCalls: [([UInt64], AutomationModeRow)] = []
+    var previewRows: [PreviewPointRow] = []
+
+    func gesture(target: AutomationTargetRow, phase: GesturePhaseRow) throws {
+        if let e = gestureError { throw e }
+        if case .value = phase, let e = valueError { throw e }
+        gestures.append((target, phase))
+    }
+
+    /// The holders of `gestureFrom` calls, in order (plan 5f-1 Ruling 2).
+    var holders: [GestureHolderRow] = []
+    func gestureFrom(target: AutomationTargetRow, phase: GesturePhaseRow, holder: GestureHolderRow) throws {
+        if let e = gestureError { throw e }
+        if case .value = phase, let e = valueError { throw e }
+        gestures.append((target, phase))
+        holders.append(holder)
+    }
+
+    // MARK: Surfaces (plan 5f-1)
+
+    var focusCalls = 0
+    func focusSurfaces() throws { focusCalls += 1 }
+
+    /// What the surface and learn methods were called with (Task 8).
+    var surfaceSelections: [[UInt64]] = []
+    var surfaceInjections: [(UInt32, Data)] = []
+    var surfaceEvents: [SurfaceEventRow] = []
+    var learnTargets: [AutomationTargetRow] = []
+    var learnMapRows: [LearnMapRow] = []
+    var learnModes: [(LearnSourceRow, LearnModeRow)] = []
+    var learnPickups: [(LearnSourceRow, Bool)] = []
+    var removedLearns: [LearnSourceRow] = []
+    /// Thrown by `setLearnMode`, `setLearnPickup` and `removeLearn` (Task 11).
+    var learnError: VizError?
+    var unlearnTargets: [AutomationTargetRow] = []
+    func setSurfaceSelection(strips: [UInt64]) throws { surfaceSelections.append(strips) }
+    /// What `setSurfaceCountIn` was called with (plan 5f-4 Task 7).
+    var surfaceCountIns: [Bool] = []
+    /// Thrown by `setSurfaceCountIn` (after it is recorded) when set.
+    var surfaceCountInError: VizError?
+    func setSurfaceCountIn(on: Bool) throws {
+        surfaceCountIns.append(on)
+        if let e = surfaceCountInError { throw e }
+    }
+    func injectSurface(surface: UInt32, bytes: Data) throws { surfaceInjections.append((surface, bytes)) }
+    func surfaceState() throws -> SurfaceStateRow {
+        SurfaceStateRow(surfaces: [], feedback: [], learning: nil, problems: [])
+    }
+    func takeSurfaceEvents() throws -> [SurfaceEventRow] {
+        defer { surfaceEvents = [] }
+        return surfaceEvents
+    }
+    func learnTarget(target: AutomationTargetRow) throws { learnTargets.append(target) }
+    func learnMaps() throws -> [LearnMapRow] { learnMapRows }
+    func setLearnMode(source: LearnSourceRow, mode: LearnModeRow) throws -> DocSnapshot {
+        if let e = learnError { throw e }
+        learnModes.append((source, mode))
+        return commandResult()
+    }
+    func setLearnPickup(source: LearnSourceRow, on: Bool) throws -> DocSnapshot {
+        if let e = learnError { throw e }
+        learnPickups.append((source, on))
+        return commandResult()
+    }
+    func removeLearn(source: LearnSourceRow) throws -> DocSnapshot {
+        if let e = learnError { throw e }
+        removedLearns.append(source)
+        return commandResult()
+    }
+    func unlearnTarget(target: AutomationTargetRow) throws -> DocSnapshot {
+        unlearnTargets.append(target)
+        return commandResult()
+    }
+
+    /// Thrown by `setAutomationMode` (before it is recorded).
+    var modeError: VizError?
+    func setAutomationMode(strips: [UInt64], mode: AutomationModeRow) throws -> DocSnapshot {
+        if let e = modeError { throw e }
+        modeCalls.append((strips, mode))
+        return commandResult()
+    }
+
+    func automationState() throws -> AutomationStateRow {
+        if let e = automationError { throw e }
+        return automationRow
+    }
+
+    func automationPreview(target: AutomationTargetRow) throws -> [PreviewPointRow] { previewRows }
 }
 
 func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqRow {
@@ -801,7 +963,7 @@ func stripRow(
     StripRow(
         id: id, name: name, kind: kind, kindLabel: "\(kind)", instrument: nil, inserts: inserts,
         gainDb: 0, pan: 0, mute: false, solo: false, soloMuted: false, sends: sends,
-        output: output, freeOutputs: [])
+        output: output, freeOutputs: [], automation: .read)
 }
 
 /// A mixer: Synth (built-in, one insert) and Bus 1, then Master.

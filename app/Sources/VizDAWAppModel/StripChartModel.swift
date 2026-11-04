@@ -145,9 +145,20 @@ public final class StripChartModel {
     }
 
     /// The rows, without automation rows whose strip, slot or destination
-    /// was deleted since they were saved (parked T12).
+    /// was deleted since they were saved (parked T12). A lane holding one
+    /// target's automation and nothing else opens on that target's row
+    /// (plan 5e-2 Ruling 10) unless the rows were saved for this very lane,
+    /// where they are used as saved (ruling T6-2; Task 6 reviews I2, N1).
     public var rows: [StripLane] {
-        let saved = state?.stripRows ?? [.velocity]
+        let saved = state?.stripRows
+        let kept = saved.map(known) ?? [.velocity]
+        guard saved == nil || state?.stripRowsLane != lane, let t = Self.onlyTarget(events()) else { return kept }
+        return Self.opening(t, on: kept)
+    }
+
+    /// `saved` without automation rows the mixer no longer has; Velocity
+    /// when nothing is left.
+    private func known(_ saved: [StripLane]) -> [StripLane] {
         guard saved.contains(where: { if case .automation = $0 { true } else { false } }) else { return saved }
         let n = names
         let kept = saved.filter { lane in
@@ -180,6 +191,7 @@ public final class StripChartModel {
         var r = rows
         change(&r)
         s.stripRows = r
+        s.stripRowsLane = lane
         write(s)
     }
 
@@ -195,6 +207,50 @@ public final class StripChartModel {
 
     public func values(_ row: StripLane) -> [StripValue] {
         row.values(events(), tempo: seq.flatMap { editor.info($0)?.tempo } ?? [])
+    }
+
+    /// The one target `events` automate, when they are all automation
+    /// points of it (Ruling 10); nil for an empty lane, notes or more
+    /// than one target.
+    nonisolated static func onlyTarget(_ events: [EventRow]) -> AutoTarget? {
+        guard let first = events.first?.automation?.target else { return nil }
+        for e in events where e.kind != .automation || e.automation?.target != first { return nil }
+        return AutoTarget(first)
+    }
+
+    /// The rows a lane automating only `t` opens on (ruling T6-2): `t`'s
+    /// row first, then `kept` without it. The row cap does not drop any of
+    /// `kept`: with four saved rows the chart shows five, and Add Row stays
+    /// off until one goes.
+    nonisolated static func opening(_ t: AutoTarget, on kept: [StripLane]) -> [StripLane] {
+        let own = StripLane.automation(t)
+        return [own] + kept.filter { $0 != own }
+    }
+
+    /// The write in progress on `row` (plan 5e-2 Ruling 9): the session's
+    /// preview of its target while the document plays the chart's
+    /// sequence; empty for other rows, when stopped, or while another
+    /// sequence plays.
+    public func preview(_ row: StripLane) -> [StripValue] {
+        guard case .automation(let t) = row, let doc = document, doc.transport.playing,
+            let s = seq, doc.transport.seq == s
+        else { return [] }
+        let points = (try? doc.session.automationPreview(target: t.row)) ?? []
+        return points.map {
+            StripValue(id: nil, tick: $0.tick, length: 0, value: AutomationLaw.v32($0.value), ramp: true)
+        }
+    }
+
+    /// What the view observes for the moving preview (Ruling 9, Task 6
+    /// review I1): the transport's tick while the chart's sequence plays,
+    /// else nil. It reads `transport` only behind the play key, so a
+    /// stopped chart, or one whose sequence is not the playing one, is
+    /// not redrawn by every poll.
+    public var previewClock: Int64? {
+        guard let doc = document else { return nil }
+        let key = doc.playKey
+        guard key.playing, let s = seq, key.seq == s else { return nil }
+        return doc.transport.tick
     }
 
     public var names: StripNames { targets().names }

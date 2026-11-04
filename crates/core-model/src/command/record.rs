@@ -4,11 +4,12 @@
 //! and applied in one step, so it applies whole or not at all.
 
 use super::Report;
+use crate::automation::{AutomationTarget, check_value, target_exists};
 use crate::document::{Document, MediaItem, MediaOrigin};
 use crate::error::{ModelError, Result};
 use crate::event::{EventBody, EventSpec, Fade};
 use crate::ids::{AnyId, LaneId, MediaId, SeqId, TakeId};
-use crate::lane::Take;
+use crate::lane::{Lane, Take};
 use crate::rules::{check_event, check_media_path, check_ticks};
 use crate::time::Tick;
 
@@ -78,6 +79,28 @@ pub struct LaneRecord {
     pub takes: Vec<(String, RecordedContent)>,
 }
 
+/// One target's automation a pass wrote (spec §7.3, §7.4; plan 5e-1
+/// Ruling 4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutomationWrite {
+    /// The top-level sequence that played.
+    pub seq: SeqId,
+    /// What it drives.
+    pub target: AutomationTarget,
+    /// First tick of the replaced range (included).
+    pub start: Tick,
+    /// Last tick of the replaced range (included).
+    pub end: Tick,
+    /// The new points, inside `[start, end]`, by tick.
+    pub points: Vec<(Tick, f64)>,
+    /// The name of the lane made when no playing lane of `seq` holds the
+    /// target's automation.
+    pub lane_name: String,
+}
+
+/// The most points one [`AutomationWrite`] may hold.
+pub const MAX_WRITE_POINTS: usize = 100_000;
+
 /// A finished recording pass (spec §4.7).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RecordPass {
@@ -88,12 +111,18 @@ pub struct RecordPass {
     pub media: Vec<RecordedMedia>,
     /// Each lane's part.
     pub lanes: Vec<LaneRecord>,
+    /// Automation written while it played (spec §7.4), applied after the
+    /// lanes, in order (plan 5e-1 Ruling 4).
+    pub automation: Vec<AutomationWrite>,
 }
 
 impl RecordPass {
-    /// The undo label: "Record", or "Record (with gaps)".
+    /// The undo label: "Record", "Record (with gaps)", or "Write
+    /// Automation" for a pass that wrote only automation (spec §7.4).
     pub fn name(&self) -> &'static str {
-        if self.with_gaps {
+        if self.media.is_empty() && self.lanes.is_empty() && !self.automation.is_empty() {
+            "Write Automation"
+        } else if self.with_gaps {
             "Record (with gaps)"
         } else {
             "Record"
@@ -249,6 +278,140 @@ pub(crate) fn apply(d: &mut Document, pass: &RecordPass, r: &mut Report) -> Resu
             r.created.push(AnyId::Take(take));
             insert_content(d, l.seq, l.lane, Some(take), content, &files, r)?;
         }
+    }
+    for w in &pass.automation {
+        write_automation(d, w, r)?;
+    }
+    Ok(())
+}
+
+/// Checks `w` against the document before anything changes.
+fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
+    d.sequence(w.seq)?;
+    if w.lane_name.trim().is_empty() {
+        return Err(ModelError::invalid("an automation write needs a lane name"));
+    }
+    check_ticks("automation.start", w.start.0)?;
+    check_ticks("automation.end", w.end.0)?;
+    if w.start > w.end {
+        return Err(ModelError::range("automation.end", w.end.0));
+    }
+    if w.points.len() > MAX_WRITE_POINTS {
+        return Err(ModelError::range("automation.points", w.points.len()));
+    }
+    for (t, v) in &w.points {
+        if !check_value(*v) {
+            return Err(ModelError::range("automation.value", v));
+        }
+        if *t < w.start || *t > w.end {
+            return Err(ModelError::range("automation.tick", t.0));
+        }
+    }
+    if !target_exists(d, w.target) {
+        return Err(ModelError::invalid(format!(
+            "automation target {:?} does not exist",
+            w.target
+        )));
+    }
+    Ok(())
+}
+
+/// Places one write (plan 5e-1 Ruling 4; final review I1): the target's
+/// points in `[start, end]` leave the active take of every lane of `seq`
+/// that plays and holds the target's automation, and the new points go
+/// into the first such lane, else into a new lane at the end named
+/// `lane_name` (none for a write with no points). Of points at one tick
+/// the last is kept. A lane plays as `query::flatten` plays it, which is what
+/// the writer read: not muted, and soloed when any lane is; a muted or
+/// solo-silenced lane keeps its points. A lane whose events are
+/// transformed (a play shift, its own length or its own loop) does not play
+/// them at their ticks, so it neither takes the write nor loses points to
+/// it (re-review O1). When no playing lane holds the target, the write goes
+/// into the first unmuted, untransformed lane holding it that only a solo
+/// silences (its points in the range go), so under a solo every write for
+/// the target goes into one lane (Task 12 review I2, controller ruling).
+/// A new lane is not soloed (owner ruling 2026-10-29): under another
+/// lane's solo it is silent until the solo clears.
+/// Automation inside referenced sequences is left: their lanes cannot
+/// record (spec Ruling 15).
+fn write_automation(d: &mut Document, w: &AutomationWrite, r: &mut Report) -> Result<()> {
+    check_write(d, w)?;
+    let is_target =
+        |b: &EventBody| matches!(b, EventBody::Automation { target, .. } if *target == w.target);
+    let mut first: Option<LaneId> = None;
+    let mut gone = Vec::new();
+    let seq = d.sequence(w.seq)?;
+    let any_solo = seq.lanes.iter().any(|l| l.solo);
+    // The first unmuted, untransformed lane holding the target that only
+    // a solo silences, with its points in the range (review I2).
+    let mut silenced: Option<(LaneId, Vec<crate::ids::EventId>)> = None;
+    let in_range = |take: &crate::lane::Take| -> Vec<crate::ids::EventId> {
+        take.events
+            .values()
+            .filter(|e| is_target(&e.body) && e.tick >= w.start && e.tick <= w.end)
+            .map(|e| e.id)
+            .collect()
+    };
+    for lane in &seq.lanes {
+        // Its events play at other ticks than their own (re-review O1).
+        if lane.mute || lane.play_shift != Tick::ZERO || lane.length.is_some() || lane.looped {
+            continue;
+        }
+        let Some(take) = lane.active() else { continue };
+        if !take.events.values().any(|e| is_target(&e.body)) {
+            continue;
+        }
+        if any_solo && !lane.solo {
+            if silenced.is_none() {
+                silenced = Some((lane.id, in_range(take)));
+            }
+            continue;
+        }
+        first.get_or_insert(lane.id);
+        gone.extend(in_range(take));
+    }
+    if first.is_none()
+        && let Some((lane, ids)) = silenced
+    {
+        first = Some(lane);
+        gone = ids;
+    }
+    for id in gone {
+        d.remove_event(id)?;
+        r.removed.push(AnyId::Event(id));
+    }
+    let lane = match first {
+        Some(l) => l,
+        // Nothing to put in a new lane (Task 3 review minor 2).
+        None if w.points.is_empty() => return Ok(()),
+        None => {
+            let c = d.counters_mut();
+            let (lane, take) = (c.alloc_lane(), c.alloc_take());
+            let new = Lane::new(lane, take, w.lane_name.clone());
+            d.seq_mut(w.seq)?.lanes.push_back(new);
+            r.created.extend([AnyId::Lane(lane), AnyId::Take(take)]);
+            lane
+        }
+    };
+    let mut points = w.points.clone();
+    points.sort_by_key(|p| p.0);
+    // Of equal ticks the last given wins (the sort is stable), so what
+    // plays does not depend on event IDs (Task 3 review minor 3).
+    points.reverse();
+    points.dedup_by_key(|p| p.0);
+    points.reverse();
+    for (tick, value) in points {
+        let spec = EventSpec::new(
+            tick,
+            EventBody::Automation {
+                target: w.target,
+                value,
+            },
+        );
+        check_event(d, w.seq, &spec)?;
+        let id = d.counters_mut().alloc_event();
+        d.insert_event(w.seq, lane, None, spec.with_id(id))?;
+        r.created.push(AnyId::Event(id));
     }
     Ok(())
 }

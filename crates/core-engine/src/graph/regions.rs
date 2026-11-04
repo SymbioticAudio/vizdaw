@@ -285,6 +285,26 @@ impl RegionRun {
             .0
     }
 
+    /// The frame a node with lead `lead` reads `k` frames into the run, or
+    /// `None` when it reads silence there. // RT
+    pub fn read_frame_at(&self, lead: u64, k: u32) -> Option<u64> {
+        self.map(
+            i128::from(self.frame) + i128::from(k) - i128::from(lead),
+            lead,
+            k,
+            1,
+        )
+        .0
+    }
+
+    /// The frame a node with lead `lead` reads at the run's first frame
+    /// (`None`: silence) and for how many of the next `left` (≥ 1) frames
+    /// its read goes on continuously from there (to the loop's seam, the
+    /// roll's floor or the ceiling). Never 0 frames. // RT
+    pub fn read_span(&self, lead: u64, left: u64) -> (Option<u64>, u64) {
+        self.map(i128::from(self.frame) - i128::from(lead), lead, 0, left)
+    }
+
     /// The earliest frame a node with lead `lead` will read from the run's
     /// first frame on: the frame it reads, else the roll's start while it
     /// is silent before it; `None` once it reads nothing more (the

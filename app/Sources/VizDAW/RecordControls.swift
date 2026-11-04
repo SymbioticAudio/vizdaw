@@ -88,10 +88,9 @@ struct RecordPopover: View {
         .disabled(record.isRecording)
         .frame(width: 340)
         // The punch fields take letters and digits, not transport keys.
-        .onChange(of: focusedPunch) { old, _ in
-            if let old { record.commitPunch(old) }
+        .onChange(of: focusedPunch) { old, new in
+            record.punchFocusChanged(from: old, to: new)
         }
-        .onAppear { model.editor.beginTextEditing("recordPopover") }
         .onDisappear { model.editor.endTextEditing("recordPopover") }
     }
 

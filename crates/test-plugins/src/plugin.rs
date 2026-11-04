@@ -1,7 +1,10 @@
 //! The one plugin type behind every [`Kind`]: its behaviour is chosen at
 //! creation from the plugin id.
 
-use crate::{BANK_PARAMS, Kind, PARAM_BANK_FIRST, PARAM_GAIN, PARAM_LATENCY, PARAM_WIGGLE};
+use crate::{
+    BANK_PARAMS, Kind, PARAM_BANK_FIRST, PARAM_GAIN, PARAM_HARD_REALTIME, PARAM_LATENCY,
+    PARAM_RENDER_OFFLINE, PARAM_WIGGLE,
+};
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
     PluginAudioPortsImpl,
@@ -15,6 +18,7 @@ use clack_extensions::params::{
     ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
     PluginMainThreadParams, PluginParams,
 };
+use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_plugin::events::event_types::{
     ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent,
@@ -44,7 +48,8 @@ impl Plugin for TestPlugin {
             builder
                 .register::<PluginParams>()
                 .register::<PluginState>()
-                .register::<PluginLatency>();
+                .register::<PluginLatency>()
+                .register::<PluginRender>();
         }
         if kind.is_none_or(|k| k == Kind::Synth4) {
             builder.register::<PluginNotePorts>();
@@ -69,6 +74,10 @@ pub struct Shared<'a> {
     wiggle_pending: AtomicBool,
     /// The bank plugin's parameter values (f64 bits).
     bank: [AtomicU64; BANK_PARAMS as usize],
+    /// The host has it rendering offline (CLAP `render`, gain kind).
+    offline: AtomicBool,
+    /// It declares a hard real-time requirement ([`PARAM_HARD_REALTIME`]).
+    hard_realtime: AtomicBool,
 }
 
 /// The bank slot of parameter `id`.
@@ -89,6 +98,8 @@ impl<'a> Shared<'a> {
             wiggle: AtomicU64::new(0),
             wiggle_pending: AtomicBool::new(false),
             bank: std::array::from_fn(|_| AtomicU64::new(0)),
+            offline: AtomicBool::new(false),
+            hard_realtime: AtomicBool::new(false),
         }
     }
 
@@ -119,6 +130,7 @@ impl<'a> Shared<'a> {
                 self.wiggle.store(value.to_bits(), Ordering::Relaxed);
                 self.wiggle_pending.store(true, Ordering::Release);
             }
+            PARAM_HARD_REALTIME => self.hard_realtime.store(value >= 0.5, Ordering::Relaxed),
             id => {
                 if let Some(slot) = bank_index(id).and_then(|i| self.bank.get(i)) {
                     slot.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
@@ -132,6 +144,10 @@ impl<'a> Shared<'a> {
             PARAM_GAIN => Some(self.gain()),
             PARAM_LATENCY => Some(f64::from(self.want_latency.load(Ordering::Relaxed))),
             PARAM_WIGGLE => Some(f64::from_bits(self.wiggle.load(Ordering::Relaxed))),
+            PARAM_RENDER_OFFLINE => Some(f64::from(u8::from(self.offline.load(Ordering::Relaxed)))),
+            PARAM_HARD_REALTIME => Some(f64::from(u8::from(
+                self.hard_realtime.load(Ordering::Relaxed),
+            ))),
             id => bank_index(id)
                 .and_then(|i| self.bank.get(i))
                 .map(|v| f64::from_bits(v.load(Ordering::Relaxed))),
@@ -341,6 +357,19 @@ impl PluginStateImpl for MainThread<'_> {
         self.shared.set_gain(f64::from_le_bytes(g));
         self.shared
             .set_param(PARAM_LATENCY, f64::from(u32::from_le_bytes(l)), false);
+        Ok(())
+    }
+}
+
+impl PluginRenderImpl for MainThread<'_> {
+    fn has_hard_realtime_requirement(&self) -> bool {
+        self.shared.hard_realtime.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, mode: RenderMode) -> Result<(), PluginError> {
+        self.shared
+            .offline
+            .store(mode == RenderMode::Offline, Ordering::Relaxed);
         Ok(())
     }
 }

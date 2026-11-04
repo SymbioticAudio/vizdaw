@@ -80,6 +80,8 @@ struct AppCommands: Commands {
                 Divider()
                 Button("Project Settings…") { projectSettings() }
                     .disabled(doc == nil)
+                Button("Bounce…") { doc?.bounce.shown = true }
+                    .disabled(doc == nil)
                 Button("Relink Media…") { doc?.media.relinkShown = true }
                     .keyboardShortcut(KeyMenu.shortcut("media.relink"))
                     .disabled(doc?.media.relinkable.isEmpty ?? true)
@@ -182,6 +184,20 @@ struct AppCommands: Commands {
             commandItem(RegionCommands.fadeIn, RegionCommands.self)
             commandItem(RegionCommands.fadeOut, RegionCommands.self)
             commandItem(RegionCommands.removeFades, RegionCommands.self)
+            Divider()
+            Button(keyBindings.row(RegionCommands.openExternal)?.title ?? "Open in External Editor") {
+                if let doc { openExternal(doc) }
+            }
+            .keyboardShortcut(KeyMenu.shortcut(RegionCommands.openExternal))
+            .disabled(doc.map { !RegionCommands.enabled(RegionCommands.openExternal, $0) } ?? true)
+            Button(keyBindings.row(RegionCommands.reloadExternal)?.title ?? "Reload External Edit") {
+                if let doc {
+                    RegionCommands.runMenu(
+                        RegionCommands.reloadExternal, doc, editor: AppControlHost.shared.externalEditor)
+                }
+            }
+            .keyboardShortcut(KeyMenu.shortcut(RegionCommands.reloadExternal))
+            .disabled(doc.map { !RegionCommands.enabled(RegionCommands.reloadExternal, $0) } ?? true)
         }
         CommandMenu("Drum") {
             drumToggle("Drum Lane", DrumCommands.markLane)
@@ -233,6 +249,14 @@ struct AppCommands: Commands {
             commandItem("step.tie", StepCommands.self)
             commandItem("step.rest", StepCommands.self)
             commandItem("step.delete_last", StepCommands.self)
+        }
+        CommandMenu("Automation") {
+            Text("Selected Strips")
+            ForEach(["off", "read", "touch", "latch", "write", "trim"], id: \.self) {
+                commandItem("automation.mode.\($0)", AutomationCommands.self)
+            }
+            Divider()
+            commandToggle(AutomationCommands.suspend, AutomationCommands.self)
         }
     }
 
@@ -309,6 +333,17 @@ struct AppCommands: Commands {
 
     /// Region › Normalize…: asks for the peak level, then normalizes the
     /// selected regions (Ruling 18's default level).
+    /// Region › Open in External Editor (plan 5f-3 Ruling 5): with no
+    /// editor chosen, the panel asks first — the menu item alone (owner
+    /// answer 2026-11-03); then the copy opens.
+    private func openExternal(_ doc: DocumentModel) {
+        if case .none = AppControlHost.shared.externalEditor {
+            guard let app = ExternalEditorPanel.choose() else { return }
+            editingPreferences.externalEditor = app
+        }
+        RegionCommands.runMenu(RegionCommands.openExternal, doc, editor: AppControlHost.shared.externalEditor)
+    }
+
     private func normalize(_ doc: DocumentModel) {
         guard
             let text = TextPanel.run(
@@ -347,12 +382,15 @@ struct AppCommands: Commands {
 
     private func save(as forceAs: Bool) {
         guard let doc else { return }
-        if doc.wantsSavePanel(forceAs: forceAs) {
+        switch doc.saveAction(forceAs: forceAs) {
+        case .panel:
             if let path = Panels.chooseSaveLocation(title: doc.snapshot.title) {
                 doc.saveAs(path: path)
             }
-        } else if !(forceAs || doc.needsSaveAs) {
+        case .save:
             doc.save()
+        case .refused(let why):
+            doc.editor.status = why
         }
     }
 }

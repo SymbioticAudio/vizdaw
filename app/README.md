@@ -96,6 +96,25 @@ Undo and redo answer `busy` while a plugin call is on the main thread, and
 `modify.template` answers `unavailable` when there are no templates. Model
 edits and loads refuse tick positions or lengths beyond +-2^40.
 
+Automation (plan 5e-1): `automation.set_mode {"strips": "all" | "1,2",
+"mode": "touch"}`, `automation.gesture {"target": "fader:3", "phase":
+"touch" | "value" | "release", "value": "0.5"}` (targets `fader:`, `pan:`,
+`mute:`, `solo:` with a strip ID, `send:<strip>:<n>` with n from 1,
+`param:<slot>:<param>`; values are text, 0 to 1) and `automation.suspend`
+(absent `on` toggles; it is app-wide). A `touch` without `value` starts at
+the value heard now. A touch from the channel lasts until its release, a
+Stop's landing keeps it, closing the window ends it; a Locate or a Play
+while writing lands what was written so far.
+Each call is its own connection, so a touch outlives the call that made
+it: a client that lost track of its touches releases the ones `state.get
+automation` lists. A release takes no `value`, and a release of a target
+that is not touched (or no longer exists) does nothing and answers `ran`.
+`state.get automation` lists each strip's mode, the touched targets and
+whether automation is suspended or being written. `state.get input`'s
+`levels` are each channel's peak since the last read (held, so a quiet
+read can still show a recent peak) and its list is as long as the channel
+count at the last poll (one poll stale after a device change).
+
 `vizctl` drives it from a shell:
 
 ```bash
@@ -1405,3 +1424,448 @@ a copy, not one you care about.
      NOT open (the meter stays yellow, then empty), and the fault popover
      says "audio input could not open: waiting for microphone permission;
      arm the lane again". Answer Allow, arm again: it opens.
+
+### Automation recording, the engine (plan 5e-1)
+
+Through the control channel (`vizctl launch … --env VIZDAW_AUDIO=offline`
+for steps 160–162; plan 5e-2 adds the mixer's mode popups, rings and
+Settings › Automation, steps 166 on). `$V` is `target/debug/vizctl`.
+The e2e `touch_writes_a_fader_over_the_channel` runs step 160.
+
+160. Touch: `$V state automation` lists each strip's mode (all `read`).
+     `$V run automation.set_mode '{"strips": "<synth>", "mode": "touch"}'`,
+     play, `$V run automation.gesture '{"target": "fader:<synth>", "phase":
+     "touch", "value": "0.4"}'`, a few `"phase": "value"` calls, then
+     `"release"`; the fader is heard at 0.4 at once and glides back over a
+     quarter of a second after the release. Stop: Edit > Undo reads "Undo
+     Write Automation"; a lane "Built-in Synth Fader" was added at the end
+     of Song; the Strip Chart on it shows the move and a ramp back. One
+     Undo removes the lane. A Locate (or Play) while writing lands what
+     was written so far as its own Write Automation step.
+161. Write and Latch: set the strip to `write` and play a few bars without
+     touching anything, Stop: lanes for its fader, pan and mute hold their
+     values from the play point to Stop, and `$V state automation` shows
+     the strip on `latch` (Settings › Automation's After Write, plan 5e-2);
+     one Undo puts both back. On `latch`, touch and release the pan: it
+     holds until Stop, and with Loop on it holds until the loop wraps.
+     Automation inside a referenced sequence is not replaced by a write.
+162. Off and suspend: set the strip to `off`: its automation is not
+     heard (the fader stays where the mixer has it). `$V run
+     automation.suspend`: it is heard again (every strip behaves as Read);
+     run it again to resume.
+163. Plugin windows (manual checklist "plugin-window automation"; a real
+     AU and a real CLAP plugin): put a plugin on the Built-in Synth strip,
+     set the strip to Touch, play, and move a knob in the plugin's own
+     window: the move is written into a lane named "Built-in Synth
+     <parameter>", and there is no "Change Plugin Parameter" step under
+     it. A plugin that reports no gesture start or end (some older AUs)
+     writes from its first value to half a second after its last. In
+     Read, a move in its window is one "Change Plugin Parameter" step, as
+     before. Moves in a plugin's window are placed when VizDAW reads them,
+     up to a sixtieth of a second late.
+164. Latency (5d-1 ruling C2): put a plugin with latency (a linear-phase
+     EQ or a look-ahead limiter) on a bus, so audio tracks are read ahead;
+     write a mute on an audio track at a bar line: it cuts exactly at the
+     bar as heard, with and without the plugin. Zoom in on a bounce
+     (plan 5f) to check to the sample.
+165. Hardware checks for automation recording (owner checklist, plan
+     5e-1): by ear, with a real AU and a real CLAP plugin. In 5e-1 a
+     fader is ridden through the control channel; riding it with the
+     mouse comes with plan 5e-2 (the mixer's gestures) and with a control
+     surface with plan 5f, which complete step a for those.
+     a. Write, Touch, Latch and Trim: for each mode, set the strip with
+        `automation.set_mode`, play and ride its fader with `$V run
+        automation.gesture` (`touch`, a few `value` calls a moment apart,
+        `release`). Write replaces from the play point; Touch writes only
+        while held and glides back on release; Latch holds the last value
+        until Stop; Trim moves the existing automation by the offset you
+        ride, relative, without a jump when you grab. Stop each pass: one
+        "Write Automation" step. With the strip's automation lane muted
+        (or another lane soloed), the pass writes into a lane that plays
+        (a new one when none plays) and the muted lane keeps its points.
+     b. Plugin-window rides: in an AU's own window and in a CLAP's own
+        window, ride a parameter in Touch while playing; it is written to
+        a lane named for the strip and the parameter, with no "Change
+        Plugin Parameter" step.
+     c. Undo of a pass: after each pass, Edit > Undo removes the whole
+        pass in one step (lanes and points), Redo puts it back.
+     d. Save and reopen: save a project with a plugin parameter that has a
+        static value (set in Read) and a written lane; reopen it: the
+        static value is kept, and the lane plays back as written.
+
+### Automation recording, the UI (plan 5e-2)
+
+By eye; the models are tested (`MixerGestureTests`,
+`AutomationPreferencesTests`, `AutomationCommandsTests`,
+`StripChartModelTests`, `RecordUiCarryTests`) and the e2e
+`touch_writes_a_fader_over_the_channel` drives the same core through the
+channel.
+
+166. Mixer: each strip shows its automation mode above the fader ("Read",
+     green); the popup lists Off, Read, Touch, Latch, Write, Trim, each in
+     its colour (gray, green, yellow, orange, red, purple). Choose Touch:
+     one undo step "Set Automation Mode". Click a strip's name: it is
+     selected (tinted); ⌘-click adds another; double-clicking the name
+     still renames it. The name's menu has "Set All Strips to ▸ …": every
+     strip changes in one undo step. While you drag a fader, pan or send
+     level, a ring shows around it; the fader's ring should sit around the
+     visible fader track (the slider is rotated). A mute or solo click
+     shows no ring (its touch and release are sent at once); a mute or
+     solo pressed in the piano roll's output writes like the mixer's but
+     shows no ring either. A touch held from `vizctl` rings: `$V run
+     automation.gesture '{"target": "mute:<synth>", "phase": "touch"}'`
+     rings the synth's mute until the same call with `"phase":
+     "release"`; a fader or pan touched that way rings too.
+     Stopped, a fader drag is one "Set Fader" step, a mute click one
+     "Mute" step, as before. With Full Keyboard Access on, Tab to a fader
+     and press the arrow keys: each press is heard and is one "Set Fader"
+     step stopped, and afterwards other edits work (no touch left open;
+     the same for a plugin window's slider). Stopped, click a fader's
+     track away from its knob and drag: one Edit > Undo puts the fader back
+     where it was (not two steps); opening the mixer or a plugin window
+     adds no undo step (note it if either fails: the slider's event order,
+     final re-review N1).
+167. Record popover keys (5d-2 T3 M1): open the record popover without
+     clicking a field: R records and Space plays (if the popover passes
+     keys on; note it if it does not). Click Punch In: typing R or Space
+     types into the field; Tab to Punch Out, then click outside the field:
+     the keys work again.
+168. Writing from the mixer: riding a fader with the mouse now completes
+     165a's mouse half. On Touch, play and move the Built-in Synth
+     fader: you hear it at once; let go: it glides back over a quarter of
+     a second. Drag a fader slowly while playing: no zipper noise (note it
+     if there is). Stop: "Undo Write Automation"; the lane "Built-in Synth
+     Fader" appears at the end of the sequence and the Strip Chart opens on
+     its fader row, even if you edited the Strip Chart's rows before.
+     While playing, the Strip Chart on that lane draws the move in red as
+     you make it. While looping, the next cycle plays what was just
+     written, and one Undo removes the whole looped pass. A new lane made
+     while another lane is soloed is not soloed (the status line says so).
+     Play again and grab the fader while its new automation moves it: the
+     sound does not jump (the write starts at the heard value); the
+     fader's knob shows the static value until you move it (showing the
+     heard value is a backlog row). Latch: the fader holds where you let
+     go until Stop. Write: play without touching: at Stop the strip's
+     fader, pan and mute lanes hold their values from the play point, and
+     the strip's popup reads Latch (Settings › Automation's After Write).
+     Trim on a strip with a fader ramp: moving the fader up 3 dB raises the
+     whole ramp under it by 3 dB, keeping its shape.
+169. Automation menu: with two strips selected, Automation › Selected
+     Strips › Write sets both (one step); with none selected it is dimmed.
+     Suspend Automation (checked) makes every strip play as Read: Off
+     strips play their automation again and nothing is written; uncheck it.
+170. Settings › Automation: After Write (Off, Read, Touch, Latch, Trim),
+     Return time (0–2000 ms; at 0 the fader jumps back), Thinning (High
+     writes fewer points: compare a lane's points in the List editor), and
+     "Write plugin parameters only when touched", on and dimmed, and the
+     line "Changes apply from the next Play.": change After Write during a
+     Write pass, and the strip takes the old setting at that Stop. Quit
+     and relaunch: kept.
+171. Plugin windows: a plugin without its own editor shows sliders; on
+     Touch, playing, dragging one writes a lane "Built-in Synth <parameter>"
+     (no "Change Plugin Parameter" step); stopped, a drag is one "Change
+     Plugin Parameter" step.
+172. Settings › Audio: with Settings open, arm an audio lane: within a
+     second the round-trip readout shows the device's latencies (5d-2 T7
+     Minor 2). Turn Software Monitoring off: an Input-monitored lane's
+     meter goes at once. Hover the lane header's monitor button (A, I or
+     –): its tooltip explains the mode. ⌘S in an untitled project while
+     recording says "Stop recording to save this new project: its take is
+     being written into it."
+
+### Control surfaces and MIDI learn (plan 5f-1)
+
+By eye and by hand; the protocols are tested byte by byte
+(`core-surface` tests), the core through the fake ports
+(`core-ffi/tests/surfaces.rs`, `learn.rs`, `holders.rs`) and the e2e
+`drives_a_fader_and_a_button_from_an_mcu`.
+
+173. Settings › Surfaces: Add Surface lists MCU-compatible, MCU
+     XT-compatible and HUI-compatible; the port pickers list your MIDI
+     ports. A unit with no ports plugged in shows "Disconnected"; plug
+     it in: within 2 s it shows "Connected" and its display fills. A
+     lane's input picker now shows the unit's port as "(used by a
+     surface)". Record-arm a MIDI lane on All MIDI Inputs and touch a
+     fader or press Play on the unit: nothing is recorded, played thru or
+     step-entered. Surface buttons keep working while you type in a text
+     field, except Go to Position, Edit In and Punch, which wait.
+174. MIDI learn: in the mixer, right-click a fader › MIDI Learn: the
+     banner says "Waiting for MIDI…". Turn a knob on a controller: the
+     banner goes, Edit shows "Undo MIDI Learn". Turn the knob from far
+     below the fader's position: nothing moves until the knob passes the
+     fader (pick-up, kept per map), then the fader follows; let go: half
+     a second later the move is one "Set Fader" step. Mixer strip menu >
+     MIDI Learn Maps… lists the map; untick Pick-up and the fader jumps
+     to the knob at once. A 14-bit fader learns as "CC n/n+32" and moves
+     smoothly; an endless encoder learns as Relative (no Pick-up box);
+     the mode picker changes one. With a MIDI lane armed on that
+     keyboard, the learned knob is not recorded, played thru or
+     step-entered; the keys and other knobs are. Learned messages stay
+     out of the lanes, and only the learned target's automation is
+     written.
+175. A real MCU-compatible unit, if one is available (manual checklist
+     "a real MCU or HUI unit"): faders move by motor to the mixer's
+     values and do not fight your hand; with fader automation in Read,
+     play: the motor faders follow it; names and pan values show on the
+     scribble strips; bank and channel buttons move eight and one strip;
+     mute, solo and select light up; Play only starts the transport
+     (pressing it while playing does nothing), Stop stops (its LED is lit
+     at rest), Record records; tap Rewind or Fast Forward: the position
+     jumps to the previous or next marker (or bar line, without markers);
+     hold one: the position winds, faster the longer you hold; the jog
+     wheel moves by sixteenths; the position display counts bars and
+     beats; meters move, and the mixer window's meters keep moving too.
+     Power-cycle check: unplug the unit and plug it back at once (and, for
+     a virtual or network port, delete and recreate it within 2 s): the
+     faders and displays come back each time.
+176. A real HUI-compatible unit, if one is available: the same checks
+     (its V-pots move pan only); the unit stays online (the ping), and
+     the 40-character display shows the position and the selected strip.
+     Check the timecode digits (leading zeros show), that a ring value of
+     0 is dark, and that a fader moves to the right place after a lone
+     low byte (it combines with the last high byte).
+177. README 165a, the surface half: on Touch, Latch, Write and Trim,
+     play and ride the Built-in Synth fader from the unit (or a learnt
+     knob): you hear it at once, the strip's ring shows the touch, and
+     Stop lands one "Write Automation" step. Hold the same fader with the
+     mouse and with the unit: it stays touched until you let go of both,
+     and letting go of the mouse first neither glides back nor holds; a
+     mouse release never ends a hold the unit or a `vizctl` script has.
+     Rest a hand on a stopped unit's fader and edit notes, add a bus and
+     change an automation mode: each works and is its own undo step.
+178. Settings › Keys › Learn MIDI next to a command, then press a pad:
+     the pad runs the command (with a project open). Settings › Surfaces
+     lists the command maps; Remove takes one away.
+179. Pull a unit's cable while holding a fader: within 2 s the unit
+     shows "Disconnected", the fader is released (the ride lands as
+     written); plug it back: the unit refreshes completely and that fader
+     moves by motor again. Remove a unit in Settings › Surfaces while
+     holding a fader: it is released. Close the project the unit drives:
+     its displays go blank and its faders go down.
+
+### Bounce and export (plan 5f-2)
+
+By ear and by eye; the renderer is tested (`core-engine/tests/bounce.rs`),
+the files (`core-media/tests/export.rs`), the job (`core-ffi/tests/bounce.rs`)
+and the e2e `bounces_the_demo_and_checks_the_file`.
+
+180. File › Bounce…: the sheet defaults to WAV at the project's rate and
+     depth (Dither on at 16 bits). Bounce the demo song (with an audio
+     file imported) to a file while it plays: playback goes on; the file
+     plays in Finder's preview and sounds like the mix, reverb tails
+     included. Push master hot and bounce at 32-bit float: the file holds
+     peaks above 0 dBFS (float bounces keep overs); at 16 or 24 bits the
+     samples clip and the Problems banner says how many ("mix.wav: <n>
+     samples clipped"). When the
+     bounce ends, the editor status lists every file written, each under
+     its final name. Press Escape while a bounce runs: it is cancelled.
+     A bounce the core refuses (a bad destination, a file that exists, a
+     place inside the project) shows its reason inside the sheet, which
+     stays open. A plugin that renders in real time only, or that has an
+     offline mode and is not in it, is named in the Problems banner;
+     other plugins say nothing.
+181. README 164's check: with a latent plugin on a bus, bounce Stems of
+     two tracks and the Mix to files; zoom in on them in another editor
+     (or import them back): every file starts at the same sample, a mute
+     written at a bar line cuts the Mix exactly there, and the muted
+     track's stem file plays on through it (files ignore mute and solo).
+182. Add to project: the bounce appears on a new lane "Mix" at the range
+     start, in the media pool as Bounced; one Undo removes it. With Add to
+     project on, the sheet shows "Also write the files": on (the default),
+     it asks for a destination and writes the files as well; off, it asks
+     for none and only adds to the project. Mute one track, solo nothing,
+     and bounce Stems with Add to project: the muted track's new lane is
+     silent and the others sound (bounce in place is as heard, while the
+     files written beside it ignore mute and solo); with a mute written
+     at a bar line, its lane cuts there, as the mix does. Route a track
+     into a bus and mute the bus: the track's bounced-in-place lane is
+     silent too, as heard. In a 16- or 24-bit project, push a track hot
+     and bounce its stem with Add to project: the Problems banner names
+     it ("<track> (added to the project): <n> samples clipped"). With the
+     real audio device (not the offline mode the tests use), put the
+     built-in synth on a lane and bounce the Mix with Add to project:
+     the new lane sounds like the synth did, by ear (the bounce renders
+     it through the system synth, a path no test exercises).
+183. A project with a lane playing a hardware synth: the sheet says
+     "1 lane plays external MIDI and will be silent. Track it as audio
+     first: Track Synth…", and the synth is silent in the file.
+184. Cancel a long bounce: no file and no ".partial" is left next to
+     where it was going. Bounce the mix over an existing file: the save
+     panel asks to replace it, and the old file stays until the new one
+     is complete. Bounce Stems into a folder that already holds them:
+     nothing is asked, the old files are untouched, and the new files are
+     numbered ("Bass 2.wav"); the status lists them under those names.
+     A name ending in your own digits keeps them: a taken "Kick 808.wav"
+     becomes "Kick 808 2.wav".
+
+### External sample editor (plan 5f-3)
+
+By hand; the watcher is tested (`ExternalEditWatcherTests`), the core
+(`core-ffi/tests/external.rs`) and the e2e
+`edits_a_region_through_the_stub_editor`.
+
+185. Settings › Editing › External Sample Editor › Choose… lists your
+     applications; choose a sample editor. Clear forgets it. With none
+     chosen, only Region › Open in External Editor asks for one first; a
+     key bound to it (or a control-surface button) says "Choose an
+     external editor in Settings › Editing." in the status line and
+     opens nothing.
+186. The manual checklist's "external editor round trip": select one
+     audio region, Region › Open in External Editor: the editor opens
+     "<name> edit 1.wav". Trim it shorter and save: about a second later
+     the region plays the edit, Edit shows "Undo External Edit", and the
+     media pool lists the edit as External Edit. Other regions using the
+     original sound as before. Undo puts the original back.
+187. Save again in the editor, twice quickly: one more "External Edit"
+     step, not two. Region › Reload External Edit with nothing changed
+     says the edit is unchanged and imports nothing. Start a long media
+     job (File › Bounce… of a long song) and save in the editor
+     meanwhile: the status line says "The external edit waits for the
+     media job to finish." once, and the edit lands when the job ends;
+     Reload External Edit pressed during the job is retried the same way. Delete the
+     region and save in the editor: the alert says the region was
+     deleted, and later saves say nothing.
+188. Edit copies exist only while the project is open. Move the copy to
+     the Trash in Finder, then put it back: it imports. Close the
+     project: the edit copies go to the Trash (with the other unused
+     files); reopen it: Reload External Edit says the copy is gone. An
+     untitled project's copies go to the Trash too, when it closes or is
+     first saved (Save As). Save As of a saved project does not move the
+     copies: they stay in the old package, still watched, until that
+     package is next saved or closed.
+
+### Kontrol S-Series MK3 keyboards (plan 5f-4)
+
+By hand, on the owner's S88 MK3 (newest firmware, MIDI 1.0 mode). The
+protocol is tested byte by byte (`core-surface` `kontrol_*` tests), the
+core through the fake ports (`core-ffi/tests/kontrol.rs`), presets on
+Apple's AUDistortion (`platform-macos/tests/au.rs`) and the e2e
+`drives_the_mixer_from_a_kontrol_mk3`. Each step is an action, then what
+you should see; report anything else, and every value step 198 asks for.
+
+189. Adding the keyboard, in three cases:
+     a. Plug the keyboard in by USB and open Settings › Surfaces › Add
+        Surface…. Choose Type "Kontrol S-Series MK3 (DAW mode)": Input
+        and Output both switch to the keyboard's DAW port (named like
+        "KONTROL S88 MK3 DAW"), and the sheet shows the help line and
+        "Kontrol and Native Instruments are trademarks of Native
+        Instruments GmbH. VizDAW is not affiliated with or endorsed by
+        Native Instruments." Write down the exact names the Input and
+        Output pickers list for every port of the keyboard. Click Add:
+        the row says "Connected", the same notice shows under the
+        surface list, and within 2 s the keyboard's screen leaves its
+        own view and shows the mixer with the project's first eight
+        tracks' names.
+     b. With the keyboard unplugged, choose the type: the sheet says "No
+        Kontrol S-Series MK3 “DAW” port is connected: pick its ports by
+        hand." and leaves the pickers as they were.
+     c. With firmware older than 2.0, add it: the row says "Connected ·
+        not answering" and, under it in orange, "the keyboard answered
+        protocol version …; VizDAW needs version 4 (keyboard firmware
+        2.0 or later)". After updating the firmware and plugging it back
+        in, the row says "Connected" and the orange line is gone.
+190. Arm a MIDI lane on All MIDI Inputs and play the keys: the notes
+     record and play thru. Turn a knob and press Play on the keyboard:
+     the knob moves a fader and the transport starts, and neither the
+     knob nor the button is recorded or played thru. The lane's input
+     picker shows the DAW port as "(used by a surface)" and the Main port
+     as a normal input.
+191. Transport: Play starts (pressing it again while playing does
+     nothing); Stop stops; Record records; Loop turns the loop on and
+     off; Shift+Play (Restart) jumps to the start and plays; Undo and Redo
+     undo and redo the last edit. Play, Stop, Record and Loop light with
+     VizDAW's state, including when you use VizDAW's own buttons;
+     Restart, Undo and Redo stay lit. Press Count-in: the record
+     popover's Count-in reads 1 bar (or the bars it had before), and the
+     button lights; press it again: Count-in reads off and the light goes
+     dark. Set Count-in to 2 bars in the record popover: the button lights
+     within 2 s. Press Automation: Automation › Suspend Automation is
+     checked and the button lights; press again: unchecked, dark; choose
+     the menu item: the light follows. Metro and Quantize stay dark and do
+     nothing. Turning the 4-D encoder in its transport function moves the
+     position by sixteenths.
+192. Mixer: turn knob 1: the first track's fader moves in VizDAW's mixer
+     and the screen shows its level ("-6.1 dB" style; "-inf dB" all the
+     way down). While you turn, and after you let go, Edit shows "Undo
+     Set Fader". Wait 1 s after letting go, then choose Undo once: the
+     fader returns to where it was before the turn (the whole turn is one
+     step). Pan knobs (push the encoder up or down to switch volume/pan)
+     move pan and show "C", "L23", "R50". Mute and solo buttons light and
+     mute or solo the track in VizDAW; one press toggles exactly once (if
+     it toggles twice, the keyboard sends a release: report that as a
+     bug); with one track soloed, the others show muted-by-solo. Play:
+     the meters move with the mixer's. Look at the strips on the screen:
+     instrument tracks blue, audio tracks green, bus tracks orange.
+193. Navigation: the track left/right buttons select the next/previous
+     track, and VizDAW's mixer selection follows; past the eighth track
+     the screen moves along with it. The bank buttons move by eight. At
+     the first and last track and bank the matching light is dark. An
+     MCU-compatible unit, if added, keeps its own bank throughout.
+194. Tempo: wait 1 s after any knob turn before each tempo check (a
+     tempo turn within half a second of a fader ride is refused). The
+     screen shows VizDAW's tempo (120 in the demo). Change the tempo in
+     VizDAW: the screen follows within 2 s. Stopped at bar 1, turn the
+     keyboard's tempo control from 120 to 125 and let go: VizDAW's tempo
+     at bar 1 reads 125, and Edit shows "Undo Set Tempo"; one Undo puts
+     it back to 120 (the whole turn is one step). Tap Tap Tempo four
+     times about half a second apart: the tempo reads within 4 BPM of 120
+     and the taps are one more "Set Tempo" step. Do the same while
+     playing: the tempo changes at the playhead and the song keeps
+     playing. Start recording and turn the tempo control: VizDAW's tempo
+     does not change, the screen goes back to it within 2 s, and Tap
+     Tempo's light is dark until you stop.
+195. Plug-in mode: select a track with a plug-in instrument and an insert
+     (for example an Apple AU instrument plus AUDelay) and press the
+     keyboard's Plug-in button: at once the soft buttons name the chain
+     (the instrument first), the screen shows eight parameter names and
+     values, "Page 1" and the page count. Turn knob 1: that parameter
+     moves in the plug-in's window. The page buttons move through the
+     pages; the soft buttons pick another plug-in of the chain, starting
+     at its page 1. Select another track: the view starts over at its
+     first plug-in.
+196. Presets: with AUDistortion focused, the preset buttons step through
+     its factory presets and the screen names each one; the window title
+     shows Edited, and Edit's Undo is unchanged. At the first and last
+     preset the button does nothing more. Put the track in Write and play
+     while stepping presets: no automation lane appears for the plug-in's
+     parameters. Repeat with a JUCE-built AU you own: Undo is unchanged
+     and no automation lane appears, even while writing; report any
+     flicker of the Undo label or a lane while stepping. Save, close and
+     reopen the project: the last preset's sound and parameter values are
+     back; an automated parameter keeps its own static value, as it does
+     after picking a preset in the plug-in's own window. A CLAP plug-in's
+     preset buttons stay dark.
+197. Pull the USB cable while turning a knob: within 2 s the row says
+     "Disconnected" and the fader is released (the ride lands as one
+     step). Plug it back: it says "Connected", the screen fills again, and
+     the knobs work. Switch the keyboard out of DAW mode (to MIDI mode, or
+     its own browser view) and wait 5 s: VizDAW pulls it back into DAW
+     mode (owner, 2026-11-03), the screen shows the whole mixer again, and
+     the knobs work; write down how long it took and whether the row read
+     "Connected · not answering" meanwhile. Turn a knob and, while it is
+     still moving, remove the surface: the keyboard leaves DAW mode at
+     once, and Edit shows "Undo Set Fader" (the ride ended). Add it again
+     and quit VizDAW: the keyboard leaves DAW mode.
+198. Hardware checks to report (the research could not settle them):
+     the firmware version the keyboard shows; the macOS port names (step
+     189), including in MIDI 2.0 mode, and whether the DAW port works with
+     NI's Hardware Connection Service quit; where the page name (SysEx
+     0x75) appears; how many characters of a long track name, parameter
+     name, value and volume text fit; whether the "Generic" background is
+     readable (else try "VizDAW", Ruling 4), and how readable it is in
+     Plug-in mode (step 195); whether mute and solo work on instrument
+     (MIDI-type) tracks; how the knob step feels (200 steps for the whole
+     travel, Ruling 5); whether the meters' scale and the colours look
+     right; whether the Plug-in button ever toggles twice per press and
+     whether the keyboard echoes the mode; whether the track buttons
+     (select, mute, solo, arm) send a press and a release; how the
+     parameter names look with the 0x72 type at 0 (unipolar); whether the
+     navigation lights' bits are the right way round (left = previous);
+     whether switching out of DAW mode makes the keyboard say goodbye
+     (`BF 02`) and whether a hello brings it back, and that after
+     VizDAW's own goodbye the keyboard also gets CC 123, all notes off;
+     how an empty track instance (0x41) shows; whether the keyboard ever
+     sends a page number (0x74); whether it echoes VizDAW's tempo (0x19)
+     back, and how the tempo control steps (half a second between turns
+     makes a new Undo step); and whether the Count-in, Tap and Automation
+     lights light.

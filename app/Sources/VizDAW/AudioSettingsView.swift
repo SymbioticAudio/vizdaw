@@ -27,7 +27,11 @@ struct AudioSettingsView: View {
                 Toggle(
                     "Software Monitoring",
                     isOn: Binding(
-                        get: { prefs.settings.softwareMonitoring }, set: { prefs.setSoftwareMonitoring($0) }))
+                        get: { prefs.settings.softwareMonitoring },
+                        set: {
+                            prefs.setSoftwareMonitoring($0)
+                            for d in store.documents.values { d.inputs.refreshMonitoring() }
+                        }))
                 Text(
                     "Off: VizDAW never plays an input back; listen through your interface's direct monitoring. "
                         + "Recording and MIDI thru are unaffected."
@@ -63,6 +67,16 @@ struct AudioSettingsView: View {
                 Button("Reset Trim") { prefs.setLatencyTrim(0) }
                     .disabled(prefs.settings.latencyTrim == 0)
             }
+            Section("Bounce") {
+                Stepper(
+                    "Bounce tail limit: \(prefs.settings.bounceTailSeconds) s",
+                    value: Binding(
+                        get: { prefs.settings.bounceTailSeconds }, set: { prefs.setBounceTail(seconds: $0) }),
+                    in: 0...30)
+                Text("A bounce renders on after the range until it is quiet, at most this long.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Streaming") {
                 Picker(
                     "RAM cache",
@@ -91,13 +105,17 @@ struct AudioSettingsView: View {
         .formStyle(.grouped)
         .frame(width: 500)
         .padding()
-        .onAppear { readDevice() }
+        .task {
+            while !Task.isCancelled {
+                readDevice()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 
     /// Any open document reads the one device.
     private func readDevice() {
-        let holder = store.documents.values.first { ((try? $0.session.inputInfo())?.device ?? "") != "" }
-        prefs.readDevice(holder?.session)
+        prefs.readDevice(AudioPreferences.inputHolder(store.documents.values.map(\.session)))
     }
 }
 

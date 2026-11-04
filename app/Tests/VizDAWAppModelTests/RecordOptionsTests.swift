@@ -89,6 +89,29 @@ import VizDAWCore
         #expect(r.punchText(.punchIn) == m.fieldText(.punchIn))
     }
 
+    /// 5d-2 final re-review N1: a punch draft that is not a position (or
+    /// is past the song limit) refuses Record, so the pass never punches
+    /// at the old range; the status line says why. Once the field is
+    /// right, Record records at the typed time.
+    @Test func aRefusedPunchDraftRefusesRecord() throws {
+        let (m, f) = try armed()
+        let r = m.record
+        r.setPunch(true)
+        r.showsPopover = true
+        let before = m.fieldText(.punchIn)
+        r.setPunchText(.punchIn, "x")
+        r.pressRecord()
+        #expect(!r.isRecording && f.recordCalls.isEmpty)
+        #expect(m.editor.status?.contains("is not a position") == true)
+        // 5e-1 Task 1 review m3: the old punch range is kept.
+        #expect(m.fieldText(.punchIn) == before && r.punchText(.punchIn) == before)
+        r.setPunchText(.punchIn, "2")
+        m.editor.clearStatus()
+        r.pressRecord()
+        #expect(r.isRecording)
+        #expect(f.recordCalls.count == 1 && f.recordCalls.last?.spec.punch?.start == 61_440)
+    }
+
     @Test func theTimeLeftCountsTheArmedAudioChannels() throws {
         let (m, f) = try armed()
         let r = m.record
@@ -141,18 +164,53 @@ import VizDAWCore
         f.savedPath = "/tmp/P.vizdaw"
         _ = m.record.toggle()
         f.savesAfterPassRow = true
-        #expect(!m.wantsSavePanel(forceAs: false))
+        #expect(m.saveAction(forceAs: false) == .save)
         m.save()
         #expect(m.editor.status == RecordModel.savedDuringPass)
         #expect(m.alert == nil)
         // Save As cannot move a recording project: it waits for Stop.
-        #expect(!m.wantsSavePanel(forceAs: true))
-        #expect(m.editor.status == RecordModel.saveAsWhileRecording)
+        m.editor.clearStatus()
+        #expect(m.saveAction(forceAs: true) == .refused(RecordModel.saveAsWhileRecording))
+        #expect(m.editor.status == nil, "no side effect (T2 M2)")
+        // Untitled: its own words (T2 M1).
+        f.savedPath = nil
+        #expect(m.saveAction(forceAs: false) == .refused(RecordModel.saveUntitledWhileRecording))
         _ = m.record.toggle()
         f.savesAfterPassRow = false
-        #expect(m.wantsSavePanel(forceAs: true))
-        f.savedPath = nil
-        #expect(m.wantsSavePanel(forceAs: false))
+        #expect(m.saveAction(forceAs: false) == .panel)
+        f.savedPath = "/tmp/P.vizdaw"
+        #expect(m.saveAction(forceAs: true) == .panel)
+        #expect(m.saveAction(forceAs: false) == .save)
+    }
+
+    /// 5d-2 T2 M2: a pass that ended by itself since the last poll does
+    /// not refuse a Save As.
+    @Test func saveActionReadsTheRecordingNow() throws {
+        let (m, f) = try armed()
+        f.savedPath = "/tmp/P.vizdaw"
+        _ = m.record.toggle()
+        f.recordRow.recording = false  // it ended at the song's end; no poll since
+        #expect(m.saveAction(forceAs: true) == .panel)
+    }
+
+    /// 5d-2 T3 M1 (Ruling 12): text editing is held only while a punch
+    /// field has focus, so R, Space and Return reach the window otherwise.
+    @Test func textEditingIsHeldOnlyWhileAPunchFieldHasFocus() throws {
+        let (m, _) = try demo()
+        m.select(3)
+        let r = m.record
+        r.showsPopover = true
+        #expect(!m.editor.textEditing)
+        r.punchFocusChanged(from: nil, to: .punchIn)
+        #expect(m.editor.textEditing)
+        r.setPunchText(.punchIn, "3")
+        r.punchFocusChanged(from: .punchIn, to: .punchOut)
+        #expect(m.editor.textEditing && m.editor.layout.transport.punchIn == 122_880, "the old field's draft is in")
+        r.punchFocusChanged(from: .punchOut, to: nil)
+        #expect(!m.editor.textEditing)
+        r.punchFocusChanged(from: nil, to: .punchOut)
+        r.showsPopover = false
+        #expect(!m.editor.textEditing, "closing ends it")
     }
 
     @Test func theRecordButtonShowsWhyItWasRefused() throws {
@@ -166,5 +224,39 @@ import VizDAWCore
         #expect(m.record.isRecording && m.editor.status == nil)
         m.record.pressRecord()
         #expect(!m.record.isRecording)
+    }
+
+    /// 5d-2 T2 M4: the time left counts the depth and mono lanes, and
+    /// says nothing without a reading.
+    @Test func theTimeLeftCountsEveryDepthAndMonoLanes() throws {
+        let (m, f) = try armed()
+        let r = m.record
+        defer { RecordModel.freeSpace = RecordModel.volumeFreeSpace }
+        f.laneTable[3]?[0].input = .audio(first: 0, stereo: false, returnOf: nil)
+        f.snap.version += 1
+        m.refreshAfterJob()
+        f.info.format = ProjectFormatRow(sampleRate: 44_100, depth: .int16)
+        m.refreshProjectInfo()
+        // 44.1 kHz, 16-bit, one channel: 88 200 bytes a second.
+        RecordModel.freeSpace = { _ in 88_200 * 600 + RecordModel.stopBytes }
+        #expect(r.remainingText == "10 min left")
+        f.info.format = ProjectFormatRow(sampleRate: 48_000, depth: .float32)
+        m.refreshProjectInfo()
+        RecordModel.freeSpace = { _ in 192_000 * 3_600 + RecordModel.stopBytes }
+        #expect(r.remainingText == "1 h left")
+        RecordModel.freeSpace = { _ in nil }
+        #expect(r.remainingText == nil, "no reading, no readout")
+        RecordModel.freeSpace = { _ in 0 }
+        #expect(r.remainingText == "Less than a minute left")
+    }
+
+    /// 5d-2 T2 M3: a titled Save while recording reaches the session.
+    @Test func saveWhileRecordingReachesTheSession() throws {
+        let (m, f) = try armed()
+        f.savedPath = "/tmp/P.vizdaw"
+        f.snap.dirty = true
+        _ = m.record.toggle()
+        m.save()
+        #expect(!f.snap.dirty, "the session saved")
     }
 }

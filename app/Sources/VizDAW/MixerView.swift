@@ -46,6 +46,23 @@ struct MixerView: View {
     @Bindable var model: MixerModel
 
     var body: some View {
+        VStack(spacing: 0) {
+            LearnBanner(learn: model.document.learn, document: model.document)
+            strips
+        }
+        .sheet(isPresented: mapsShown) { LearnMapsSheet(learn: model.document.learn) }
+        // The maps sheet goes with the mixer (final review T11 m6).
+        .onDisappear { model.document.learn.showsMaps = false }
+        .learnAlert(model.document.learn, shown: !model.document.learn.showsMaps)
+    }
+
+    /// The MIDI Learn Maps sheet (plan 5f-1 Task 11).
+    private var mapsShown: Binding<Bool> {
+        let learn = model.document.learn
+        return Binding(get: { learn.showsMaps }, set: { learn.showsMaps = $0 })
+    }
+
+    private var strips: some View {
         ScrollView(.horizontal) {
             HStack(alignment: .top, spacing: 6) {
                 ForEach(model.strips, id: \.id) { s in
@@ -84,6 +101,7 @@ struct MixerView: View {
             while !Task.isCancelled {
                 model.refreshIfNeeded()
                 model.pollLevels()
+                model.pollAutomation()
                 try? await Task.sleep(for: .milliseconds(33))
             }
         }
@@ -101,6 +119,28 @@ struct MixerView: View {
     }
 }
 
+extension View {
+    /// The touched ring (plan 5e-2 Ruling 3): shown while `touched`.
+    func touchRing(_ touched: Bool, radius: CGFloat = 4) -> some View {
+        overlay(
+            RoundedRectangle(cornerRadius: radius)
+                .stroke(Color.accentColor, lineWidth: 2)
+                .opacity(touched ? 1 : 0))
+    }
+}
+
+/// An automation mode's system colour (Ruling 4).
+func automationColor(_ m: AutomationModeRow) -> Color {
+    switch AutomationModes.colorName(m) {
+    case "green": .green
+    case "yellow": .yellow
+    case "orange": .orange
+    case "red": .red
+    case "purple": .purple
+    default: .gray
+    }
+}
+
 /// One strip: name, kind, slots, sends, output, pan, fader, mute/solo,
 /// meter.
 struct StripView: View {
@@ -111,6 +151,7 @@ struct StripView: View {
     var body: some View {
         VStack(spacing: 4) {
             header
+            modeMenu
             if let inst = strip.instrument {
                 SlotView(model: model, strip: strip, slot: inst, index: nil)
             }
@@ -129,10 +170,14 @@ struct StripView: View {
                 Toggle("M", isOn: Binding(get: { strip.mute }, set: { _ in model.toggleMute(strip) }))
                     .toggleStyle(.button)
                     .tint(.orange)
+                    .touchRing(model.isTouched(.stripMute(strip: strip.id)))
+                    .contextMenu { LearnItem(model: model, target: .stripMute(strip: strip.id)) }
                 if strip.kind != .master {
                     Toggle("S", isOn: Binding(get: { strip.solo }, set: { _ in model.toggleSolo(strip) }))
                         .toggleStyle(.button)
                         .tint(.yellow)
+                        .touchRing(model.isTouched(.stripSolo(strip: strip.id)))
+                        .contextMenu { LearnItem(model: model, target: .stripSolo(strip: strip.id)) }
                 }
             }
             .help(strip.soloMuted ? "Silent: other strips are soloed" : "Mute / Solo")
@@ -140,6 +185,9 @@ struct StripView: View {
         .padding(6)
         .frame(width: 120)
         .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(strip.soloMuted ? 0.3 : 0.6)))
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.accentColor.opacity(model.isSelected(strip.id) ? 0.25 : 0)))
     }
 
     @ViewBuilder private var header: some View {
@@ -154,11 +202,19 @@ struct StripView: View {
                 .font(.headline)
                 .lineLimit(1)
                 .onTapGesture(count: 2) { model.beginRename(strip) }
+                .onTapGesture { model.select(strip.id, adding: NSEvent.modifierFlags.contains(.command)) }
                 .contextMenu {
                     Button("Rename…") { model.beginRename(strip) }
+                    Menu("Set All Strips to") {
+                        ForEach(AutomationModes.all, id: \.self) { m in
+                            Button(AutomationModes.title(m)) { model.setAllModes(m) }
+                        }
+                    }
                     if strip.kind == .bus {
                         Button("Remove Bus") { model.removeBus(strip.id) }
                     }
+                    Divider()
+                    Button("MIDI Learn Maps…") { model.document.learn.showsMaps = true }
                     if !strip.freeOutputs.isEmpty {
                         Menu("Add Outputs") {
                             ForEach(strip.freeOutputs, id: \.self) { i in
@@ -178,6 +234,26 @@ struct StripView: View {
                 .controlSize(.small)
                 .help("Safe mode kept these plugins off")
         }
+    }
+
+    /// The automation mode popup, tinted by the mode.
+    private var modeMenu: some View {
+        Menu(AutomationModes.title(strip.automation)) {
+            ForEach(AutomationModes.all, id: \.self) { m in
+                Button {
+                    model.setMode(strip.id, m)
+                } label: {
+                    if m == strip.automation {
+                        Label(AutomationModes.title(m), systemImage: "checkmark")
+                    } else {
+                        Text(AutomationModes.title(m))
+                    }
+                }
+            }
+        }
+        .tint(automationColor(strip.automation))
+        .controlSize(.small)
+        .help("Automation: \(AutomationModes.title(strip.automation))")
     }
 
     private var inserts: some View {
@@ -251,13 +327,21 @@ struct StripView: View {
         if strip.kind != .master {
             HStack(spacing: 2) {
                 Slider(
-                    value: Binding(get: { strip.pan }, set: { model.setPan(strip.id, $0) }),
+                    value: Binding(
+                        get: { model.pan(strip) },
+                        set: { model.move(.stripPan(strip: strip.id), to: ($0 + 1) / 2) }),
                     in: -1...1
                 ) { editing in
-                    if editing { model.dragStarted("Set Pan", strip: strip.id) } else { model.dragEnded() }
+                    if editing {
+                        model.touch(.stripPan(strip: strip.id))
+                    } else {
+                        model.release(.stripPan(strip: strip.id))
+                    }
                 }
                 .controlSize(.mini)
-                Text(MixerMath.panLabel(strip.pan))
+                .touchRing(model.isTouched(.stripPan(strip: strip.id)))
+                .contextMenu { LearnItem(model: model, target: .stripPan(strip: strip.id)) }
+                Text(MixerMath.panLabel(model.pan(strip)))
                     .font(.caption2.monospacedDigit())
                     .frame(width: 28)
             }
@@ -382,17 +466,23 @@ struct SendView: View {
             }
             Slider(
                 value: Binding(
-                    get: { MixerMath.faderPosition(send.levelDb) },
-                    set: { p in model.editSend(strip.id, index) { $0.levelDb = MixerMath.faderDb(p) } }),
+                    get: { MixerMath.faderPosition(model.sendLevelDb(strip, index)) },
+                    set: { p in model.move(target, to: AutomationLaw.faderNorm(MixerMath.faderDb(p))) }),
                 in: 0...1
             ) { editing in
-                if editing { model.dragStarted("Set Send Level", strip: strip.id) } else { model.dragEnded() }
+                if editing { model.touch(target) } else { model.release(target) }
             }
             .controlSize(.mini)
+            .touchRing(model.isTouched(target))
         }
-        .contextMenu { Button("Remove Send") { model.removeSend(strip.id, index) } }
-        .help("Send to \(model.stripName(send.target)): \(MixerMath.dbLabel(send.levelDb)) dB")
+        .contextMenu {
+            LearnItem(model: model, target: target)
+            Button("Remove Send") { model.removeSend(strip.id, index) }
+        }
+        .help("Send to \(model.stripName(send.target)): \(MixerMath.dbLabel(model.sendLevelDb(strip, index))) dB")
     }
+
+    private var target: AutomationTargetRow { .sendLevel(strip: strip.id, send: MixerModel.sendIndex(index)) }
 }
 
 /// A vertical fader (a horizontal slider turned); a drag is one undo step.
@@ -404,20 +494,35 @@ struct FaderView: View {
         VStack(spacing: 2) {
             Slider(
                 value: Binding(
-                    get: { MixerMath.faderPosition(strip.gainDb) },
-                    set: { model.setGain(strip.id, db: MixerMath.faderDb($0)) }),
+                    get: { MixerMath.faderPosition(model.gainDb(strip)) },
+                    set: { model.move(target, to: AutomationLaw.faderNorm(MixerMath.faderDb($0))) }),
                 in: 0...1
             ) { editing in
-                if editing { model.dragStarted("Set Fader", strip: strip.id) } else { model.dragEnded() }
+                if editing { model.touch(target) } else { model.release(target) }
             }
             .frame(width: 140)
             .rotationEffect(.degrees(-90))
             .frame(width: 30, height: 140)
-            Text(MixerMath.dbLabel(strip.gainDb))
+            .touchRing(model.isTouched(target))
+            .contextMenu { LearnItem(model: model, target: target) }
+            Text(MixerMath.dbLabel(model.gainDb(strip)))
                 .font(.caption2.monospacedDigit())
-                .onTapGesture(count: 2) { model.setGain(strip.id, db: 0) }
+                .onTapGesture(count: 2) { model.click(target, AutomationLaw.faderNorm(0)) }
                 .help("Double-click: 0 dB")
         }
+    }
+
+    private var target: AutomationTargetRow { .stripFader(strip: strip.id) }
+}
+
+/// "MIDI Learn" in a control's menu (plan 5f-1 Task 11): the next MIDI
+/// control moved drives `target`.
+struct LearnItem: View {
+    let model: MixerModel
+    let target: AutomationTargetRow
+
+    var body: some View {
+        Button("MIDI Learn") { model.document.learn.learn(target) }
     }
 }
 

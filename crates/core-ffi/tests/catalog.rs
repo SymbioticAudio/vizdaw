@@ -27,21 +27,8 @@ fn plugins_dir() -> (tempfile::TempDir, PathBuf) {
     let d = tempfile::tempdir().unwrap();
     let clap = d.path().join("CLAP");
     std::fs::create_dir_all(&clap).unwrap();
-    let bundle = test_plugins::bundle();
-    copy_dir(&bundle, &clap.join(bundle.file_name().unwrap()));
+    test_plugins::copy_bundle(&clap.join(test_plugins::bundle().file_name().unwrap()));
     (d, clap)
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for e in std::fs::read_dir(from).unwrap().flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            copy_dir(&p, &to.join(e.file_name()));
-        } else {
-            std::fs::copy(&p, to.join(e.file_name())).unwrap();
-        }
-    }
 }
 
 fn config(dir: &Path, clap: &Path) -> CatalogConfig {

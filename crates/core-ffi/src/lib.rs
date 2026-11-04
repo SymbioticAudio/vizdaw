@@ -17,7 +17,10 @@
 uniffi::setup_scaffolding!();
 
 pub mod audio;
+pub mod automation;
+pub mod autowrite;
 pub mod blocks;
+pub mod bounce;
 pub mod catalog;
 pub mod clock;
 pub mod control;
@@ -26,6 +29,7 @@ pub mod edit;
 pub mod editor;
 pub mod error;
 pub mod events;
+pub mod external;
 pub mod format;
 pub mod guard;
 pub mod host;
@@ -49,11 +53,20 @@ pub mod session;
 pub mod snapshot;
 pub mod step;
 pub mod strip;
+pub mod surfaces;
 pub mod synth;
 pub mod templates;
 
 pub use audio::AudioSettingsRow;
+pub use automation::{
+    AutomationModeRow, AutomationSettingsRow, AutomationStateRow, GesturePhaseRow, PreviewPointRow,
+    StripModeRow, ThinningRow,
+};
 pub use blocks::{BlockKind, BlockRow, BlockRule};
+pub use bounce::{
+    BounceCheckRow, BounceRangeRow, BounceRequestRow, BounceResultRow, BounceSettingsRow,
+    BounceSourceRow, BouncedFileRow, ContainerRow, bounce_settings, set_bounce_settings,
+};
 pub use catalog::{
     CatalogConfig, CatalogRowFfi, PluginCatalog, PluginKey, PluginKindTag, PluginStatusRow,
     ScanProgress,
@@ -82,6 +95,7 @@ pub use events::{
     GroupChannel, LaneEvents, MarkerRow, MeterEntryRow, NoteAttributeRow, PerNoteKindRow,
     PerNotePoint, PerNoteValueRow, SequenceInfo, TempoPointRow, TextKindRow,
 };
+pub use external::{ExternalEditRow, ExternalEditStateRow};
 pub use format::{BitDepthRow, ProjectFormatRow, ProjectInfoRow, format_label, project_rates};
 pub use guard::ffi_guard;
 pub use input::{NoteInRow, NoteInput};
@@ -123,6 +137,8 @@ pub use templates::SequenceTemplate;
 #[uniffi::export]
 pub fn shutdown() -> Result<(), VizError> {
     ffi_guard(|| {
+        // Surfaces that say goodbye hear it before the app goes (plan 5f-4 Ruling 4).
+        surfaces::goodbye_all();
         host::reset();
         Ok(())
     })

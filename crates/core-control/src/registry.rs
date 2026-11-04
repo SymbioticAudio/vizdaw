@@ -284,6 +284,91 @@ const IMPORT_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `file.bounce` (plan 5f-2 Ruling 2): the Bounce dialog's answers.
+const BOUNCE_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "source",
+        kind: ParamKind::Choice(&["mix", "stems", "selection"]),
+        required: false,
+        help: "mix (default), stems (one file per strip in `strips`) or selection (the mix over the time selection).",
+    },
+    ParamSpec {
+        name: "strips",
+        kind: ParamKind::Text,
+        required: false,
+        help: "For stems: strip IDs, comma-separated (see state.get mixer).",
+    },
+    ParamSpec {
+        name: "range",
+        kind: ParamKind::Choice(&["song", "selection"]),
+        required: false,
+        help: "song (default) or selection (`start` and `end`, else the editor's time selection).",
+    },
+    ParamSpec {
+        name: "start",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The selection's first tick (with `range: selection`).",
+    },
+    ParamSpec {
+        name: "end",
+        kind: ParamKind::Int {
+            min: 0,
+            max: i64::MAX / 2,
+        },
+        required: false,
+        help: "The selection's end tick, exclusive (with `range: selection`).",
+    },
+    ParamSpec {
+        name: "format",
+        kind: ParamKind::Choice(&["wav", "aiff", "caf"]),
+        required: false,
+        help: "wav (default), aiff or caf.",
+    },
+    ParamSpec {
+        name: "bits",
+        kind: ParamKind::Choice(DEPTHS),
+        required: false,
+        help: "16, 24 or 32f (float); default the project's depth.",
+    },
+    ParamSpec {
+        name: "rate",
+        kind: ParamKind::Int {
+            min: 8_000,
+            max: 384_000,
+        },
+        required: false,
+        help: "8000–384000; the project's rate by default.",
+    },
+    ParamSpec {
+        name: "dither",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "TPDF dither at 16 and 24 bits; default on for 16 bits; float ignores it.",
+    },
+    ParamSpec {
+        name: "path",
+        kind: ParamKind::File,
+        required: false,
+        help: "The mix file, or an existing folder for stems (answers the Bounce dialog); stems never replace: taken names are numbered.",
+    },
+    ParamSpec {
+        name: "add_to_project",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Also place the bounce on new lanes (default false; answers the Bounce dialog). It bounces as heard: a muted or solo-silenced strip, or one routed into a muted bus, is silent; files ignore mute and solo.",
+    },
+    ParamSpec {
+        name: "replace",
+        kind: ParamKind::Flag,
+        required: false,
+        help: "Replace an existing mix file (default false); the old file stays until the new one is complete.",
+    },
+];
+
 /// A media item by ID (plan 5b).
 const MEDIA_ID: ParamSpec = ParamSpec {
     name: "media",
@@ -320,6 +405,14 @@ const NORMALIZE_PARAMS: &[ParamSpec] = &[ParamSpec {
     kind: ParamKind::Text,
     required: false,
     help: "The peak level in dBFS, -96 to 0, as text (\"-0.3\"); answers the Normalize dialog.",
+}];
+
+/// `region.open_external` (plan 5f-3 Ruling 5).
+const EXTERNAL_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "app",
+    kind: ParamKind::Path("app"),
+    required: false,
+    help: "The editor application (an absolute path to a .app); default: Settings > Editing (answers the Choose External Editor dialog).",
 }];
 
 /// An ID parameter (a sequence, a lane), required.
@@ -520,6 +613,114 @@ const ADD_MIDI_PARAMS: &[ParamSpec] = &[
     },
 ];
 
+/// `automation.set_mode` (plan 5e-1 Ruling 17).
+const AUTOMATION_MODE_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "strips",
+        kind: ParamKind::Text,
+        required: true,
+        help: "`all`, or strip IDs separated by commas (see `state.get automation`).",
+    },
+    ParamSpec {
+        name: "mode",
+        kind: ParamKind::Choice(&["off", "read", "touch", "latch", "write", "trim"]),
+        required: true,
+        help: "off, read, touch, latch, write or trim.",
+    },
+];
+
+/// `automation.gesture` (plan 5e-1 Rulings 17, 20, 26).
+const AUTOMATION_GESTURE_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "target",
+        kind: ParamKind::Text,
+        required: true,
+        help: "`fader:<strip>`, `pan:<strip>`, `mute:<strip>`, `solo:<strip>`, `send:<strip>:<n>` (n from 1) or `param:<slot>:<param>`.",
+    },
+    ParamSpec {
+        name: "phase",
+        kind: ParamKind::Choice(&["touch", "value", "release"]),
+        required: true,
+        help: "touch, value or release.",
+    },
+    ParamSpec {
+        name: "value",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The normalised value 0–1 as text (\"0.5\"); needed for value, optional for touch.",
+    },
+];
+
+/// A surface's ID (plan 5f-1 Ruling 4; `state.get surfaces` lists them).
+const SURFACE_ID: ParamSpec = ParamSpec {
+    name: "surface",
+    kind: ParamKind::Int {
+        min: 0,
+        max: u32::MAX as i64,
+    },
+    required: true,
+    help: "The surface's ID (see `state.get surfaces`).",
+};
+
+/// `surface.add` (plan 5f-1 Task 9).
+const SURFACE_ADD_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "type",
+        kind: ParamKind::Choice(&["mcu", "mcu_xt", "hui", "kontrol_mk3"]),
+        required: true,
+        help: "mcu, mcu_xt, hui or kontrol_mk3 (a Kontrol S-Series MK3 keyboard's DAW port).",
+    },
+    ParamSpec {
+        name: "input",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI source it is heard on (its CoreMIDI name).",
+    },
+    ParamSpec {
+        name: "output",
+        kind: ParamKind::Text,
+        required: true,
+        help: "The MIDI destination it is sent to (its CoreMIDI name).",
+    },
+    ParamSpec {
+        name: "position",
+        kind: ParamKind::Int { min: 0, max: 3 },
+        required: false,
+        help: "Its place in the MCU bank group, 0 to 3 (default: the first free).",
+    },
+];
+
+/// `surface.remove` (plan 5f-1 Task 9).
+const SURFACE_ID_PARAMS: &[ParamSpec] = &[SURFACE_ID];
+
+/// `surface.inject` (plan 5f-1 Task 9).
+const SURFACE_INJECT_PARAMS: &[ParamSpec] = &[
+    SURFACE_ID,
+    ParamSpec {
+        name: "bytes",
+        kind: ParamKind::Text,
+        required: true,
+        help: "What the surface sends, as hex bytes, e.g. \"90 68 7f\" (at most 1024).",
+    },
+];
+
+/// `surface.learn` and `surface.unlearn` (plan 5f-1 Ruling 16): exactly
+/// one of `target` and `command` (the app checks it).
+const SURFACE_LEARN_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "target",
+        kind: ParamKind::Text,
+        required: false,
+        help: "An automatable control, spelt as `automation.gesture` spells it (`fader:<strip>`, `pan:<strip>`, …).",
+    },
+    ParamSpec {
+        name: "command",
+        kind: ParamKind::Text,
+        required: false,
+        help: "A key-bindable registry command ID.",
+    },
+];
+
 /// `destination.measure_return` (plan 5c-2 Ruling 11).
 const MEASURE_RETURN_PARAMS: &[ParamSpec] = &[id_param(
     "dest",
@@ -623,6 +824,16 @@ pub const COMMANDS: &[CommandSpec] = &[
             None,
             true,
         )
+    },
+    CommandSpec {
+        params: BOUNCE_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Bounce",
+            when: "always",
+            always: true,
+            answered_by: &["path", "add_to_project"],
+        }],
+        ..cmd("file.bounce", "File", "Bounce…", None, true)
     },
     CommandSpec {
         menu_item: false,
@@ -859,6 +1070,29 @@ pub const COMMANDS: &[CommandSpec] = &[
         true,
     ),
     cmd("region.remove_fades", "Region", "Remove Fades", None, true),
+    CommandSpec {
+        params: EXTERNAL_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Choose External Editor",
+            when: "no editor is set in Settings > Editing",
+            always: false,
+            answered_by: &["app"],
+        }],
+        ..cmd(
+            "region.open_external",
+            "Region",
+            "Open in External Editor",
+            None,
+            true,
+        )
+    },
+    cmd(
+        "region.reload_external",
+        "Region",
+        "Reload External Edit",
+        None,
+        true,
+    ),
     cmd(
         "transport.play_stop",
         "Transport",
@@ -867,6 +1101,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         true,
     ),
     cmd("transport.stop", "Transport", "Stop", Some("S"), true),
+    // A surface's Play: only starts (plan 5f-1 Ruling 5).
+    key_only(cmd("transport.play", "Transport", "Play", None, true)),
     cmd(
         "transport.play_selection",
         "Transport",
@@ -1063,6 +1299,80 @@ pub const COMMANDS: &[CommandSpec] = &[
             "destination.add_midi",
             "Destination",
             "New MIDI Destination",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: AUTOMATION_MODE_PARAMS,
+        ..key_only(cmd(
+            "automation.set_mode",
+            "Mixer",
+            "Set Automation Mode",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: AUTOMATION_GESTURE_PARAMS,
+        ..key_only(cmd(
+            "automation.gesture",
+            "Mixer",
+            "Automation Gesture",
+            None,
+            true,
+        ))
+    },
+    cmd("automation.mode.off", "Automation", "Off", None, true),
+    cmd("automation.mode.read", "Automation", "Read", None, true),
+    cmd("automation.mode.touch", "Automation", "Touch", None, true),
+    cmd("automation.mode.latch", "Automation", "Latch", None, true),
+    cmd("automation.mode.write", "Automation", "Write", None, true),
+    cmd("automation.mode.trim", "Automation", "Trim", None, true),
+    CommandSpec {
+        params: ON,
+        ..cmd(
+            "automation.suspend",
+            "Automation",
+            "Suspend Automation",
+            None,
+            false,
+        )
+    },
+    CommandSpec {
+        params: SURFACE_ADD_PARAMS,
+        ..key_only(cmd("surface.add", "Surfaces", "Add Surface", None, false))
+    },
+    CommandSpec {
+        params: SURFACE_ID_PARAMS,
+        ..key_only(cmd(
+            "surface.remove",
+            "Surfaces",
+            "Remove Surface",
+            None,
+            false,
+        ))
+    },
+    CommandSpec {
+        params: SURFACE_INJECT_PARAMS,
+        ..key_only(cmd(
+            "surface.inject",
+            "Surfaces",
+            "Inject Surface Bytes",
+            None,
+            true,
+        ))
+    },
+    CommandSpec {
+        params: SURFACE_LEARN_PARAMS,
+        ..key_only(cmd("surface.learn", "Surfaces", "MIDI Learn", None, true))
+    },
+    CommandSpec {
+        params: SURFACE_LEARN_PARAMS,
+        ..key_only(cmd(
+            "surface.unlearn",
+            "Surfaces",
+            "Remove MIDI Learn",
             None,
             true,
         ))

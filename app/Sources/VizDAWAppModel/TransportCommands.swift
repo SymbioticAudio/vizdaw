@@ -29,7 +29,7 @@ public enum TransportCommands {
 
     public static let ids: Set<String> = Set(
         [
-            "transport.stop", "transport.play_selection", "transport.play_from_selection",
+            "transport.stop", "transport.play", "transport.play_selection", "transport.play_from_selection",
             "transport.play_from_edit_in", "transport.record", "transport.scrub",
             "transport.previous_marker", "transport.next_marker", "transport.overdub", "transport.punch",
             "transport.arm_previous", "transport.arm_next", "record.keep_pass", "record.discard_pass",
@@ -56,6 +56,7 @@ public enum TransportCommands {
         case "transport.record": m.selectedSeq != nil || m.record.isRecording
         case "record.keep_pass", "record.discard_pass": m.record.isLoopRecording
         case "transport.stop": m.isPlaying
+        case "transport.play": m.canPlay
         case "transport.overdub", "transport.punch", "editors.snap": true
         case "transport.play_from_edit_in": m.selectedSeq != nil && m.editor.selection.timeRange != nil
         // Locators need no sequence, as in `run`.
@@ -103,6 +104,15 @@ public enum TransportCommands {
         case "editors.snap":
             m.editor.updateLayout { $0.snap.enabled = on ?? !$0.snap.enabled }
             return .done
+        case "transport.play":
+            // Play only starts (plan 5f-1 Ruling 5): while playing it does
+            // nothing; a stopped transport plays from where it stands.
+            m.poll()
+            guard !m.isPlaying else { return .done }
+            guard m.canPlay else { return .unavailable("Select a sequence to play.") }
+            let started = attempt { try m.startPlaying() }
+            m.poll()
+            return started
         case "transport.stop":
             m.poll()
             guard m.isPlaying else { return .unavailable("Nothing is playing.") }

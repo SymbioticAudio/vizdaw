@@ -74,16 +74,6 @@ import VizDAWCore
         #expect(m.destinations.map(\.name) == ["Piano"])
     }
 
-    @Test func aFaderDragIsOneEditAndHeardOnEveryMove() throws {
-        let f = mixerFake()
-        let m = try model(f)
-        m.dragStarted("Set Fader")
-        m.setGain(1, db: -3)
-        m.setGain(1, db: -6)
-        m.dragEnded()
-        #expect(f.calls == ["begin Set Fader", "setGain 1 -3.0", "setGain 1 -6.0", "end"])
-    }
-
     @Test func theMixerIsRefetchedOnlyWhenTheDocumentOrSlotsChange() throws {
         let f = mixerFake()
         let doc = try DocumentModel(session: f)
@@ -129,8 +119,9 @@ import VizDAWCore
         m.toggleBypass(m.strips[0].inserts[0])
         m.setSidechain(10, source: 2)
         m.moveInsert(10, to: 2, at: 0)
+        #expect(f.gestures.map(\.0) == [.stripMute(strip: 1), .stripMute(strip: 1), .stripMute(strip: 1)], "mute is a gesture (5e-2)")
         #expect(f.calls == [
-            "addBus Bus 2", "mute 1 true", "output 1 2", "addSend 1 2",
+            "addBus Bus 2", "output 1 2", "addSend 1 2",
             "editSend 1 0 2 0.0 true true", "bypass 10 true", "sidechain 10 2", "moveInsert 10 2 0",
         ])
     }
@@ -185,40 +176,6 @@ import VizDAWCore
         #expect(doc.alert == nil)
     }
 
-    @Test func aDragIsEndedOnceWhenTheWindowClosesOrTheStripGoes() throws {
-        let f = mixerFake()
-        let m = try model(f)
-        m.dragStarted("Set Fader", strip: 1)
-        m.endOpenDrag()  // window closes
-        m.endOpenDrag()
-        m.dragEnded()
-        #expect(f.calls == ["begin Set Fader", "end"])
-        f.calls = []
-        m.dragStarted("Set Fader", strip: 2)
-        f.mixerSnap.strips.removeAll { $0.id == 2 }
-        m.setGain(1, db: 0)  // refetch sees strip 2 gone
-        #expect(f.calls == ["begin Set Fader", "setGain 1 0.0", "end"])
-        m.dragEnded()
-        #expect(f.calls.filter { $0 == "end" }.count == 1)
-    }
-
-    @Test func aFailedBeginMeansNoEnd() throws {
-        let f = mixerFake()
-        let m = try model(f)
-        f.beginError = .Model(message: "open")
-        m.dragStarted("Set Fader", strip: 1)
-        m.dragEnded()
-        #expect(!f.calls.contains("end"))
-    }
-
-    @Test func aNewDragEndsTheOldOne() throws {
-        let f = mixerFake()
-        let m = try model(f)
-        m.dragStarted("A", strip: 1)
-        m.dragStarted("B", strip: 1)
-        #expect(f.calls == ["begin A", "end", "begin B"])
-    }
-
     @Test func browserModelsAreReusedWhileOpenAndResetOnClose() throws {
         let m = try model(mixerFake())
         m.browser = .instrument
@@ -259,9 +216,9 @@ import VizDAWCore
         let f = mixerFake()
         let m = try model(f)
         f.mixerError = .Model(message: "no")
-        m.setGain(1, db: 0)
+        m.setOutput(1, bus: 2)
         let first = m.document.alert
-        m.setGain(1, db: 1)
+        m.setOutput(1, bus: nil)
         #expect(m.document.alert?.id == first?.id)
     }
 
@@ -273,6 +230,33 @@ import VizDAWCore
         m.load(m.heldSlots(of: m.strips[0]))
         #expect(f.loadedPlugins == [[10]])
         #expect(m.held.isEmpty)
+    }
+
+    /// 5d-2 T6 Minor 3: a strip's input lane plays through its own path,
+    /// in the shown sequence only.
+    @Test func anAudioPathStripIgnoresOtherPathsAndOtherSequences() throws {
+        let f = mixerFake()
+        f.mixerSnap.strips.insert(stripRow(4, "Vocal", kind: .audioPath(path: 7)), at: 0)
+        var other = lane(30, "Elsewhere")
+        other.audioOut = 8
+        f.laneTable[3] = [other]
+        var hidden = lane(40, "Hidden")
+        hidden.audioOut = 7
+        f.laneTable[4] = [hidden]
+        let m = try model(f)
+        m.document.select(3)
+        let strip = try #require(m.strips.first)
+        #expect(m.inputLane(for: strip) == nil, "another path, and another sequence's lane")
+
+        // Positive control: a lane on the strip's own path in the shown
+        // sequence is the input lane (the nil above is not a blind spot).
+        var own = lane(31, "Own")
+        own.audioOut = 7
+        f.laneTable[3] = [other, own]
+        let m2 = try model(f)
+        m2.document.select(3)
+        let strip2 = try #require(m2.strips.first)
+        #expect(m2.inputLane(for: strip2)?.id == 31)
     }
 }
 

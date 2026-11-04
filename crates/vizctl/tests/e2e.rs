@@ -22,6 +22,9 @@ const WAIT_MS: u64 = 60_000;
 struct App {
     launched: Launched,
     client: Client,
+    /// The throwaway home: removed when the app is dropped (declared
+    /// last, so the process and the client go first).
+    _home: tempfile::TempDir,
 }
 
 impl App {
@@ -48,13 +51,12 @@ impl App {
         let home = tempfile::Builder::new()
             .prefix("vze")
             .tempdir_in("/tmp")
-            .unwrap()
-            .keep();
+            .unwrap();
         // Media retention moves files here, never to the real Trash (plan 5b).
-        let trash = home.join("Trash").display().to_string();
+        let trash = home.path().join("Trash").display().to_string();
         let launched = launch(&LaunchOptions {
             app,
-            home: Some(home),
+            home: Some(home.path().to_path_buf()),
             demo: false,
             timeout: Duration::from_secs(180),
             env: [
@@ -67,7 +69,11 @@ impl App {
         })
         .unwrap_or_else(|e| panic!("launch: {e}"));
         let client = Client::connect(&launched.socket).unwrap();
-        App { launched, client }
+        App {
+            launched,
+            client,
+            _home: home,
+        }
     }
 
     /// Calls `cmd`; panics with the app's log on an error.
@@ -1389,5 +1395,616 @@ fn arms_meters_counts_in_and_draws_the_take() {
         (m["items"][0]["peak"].as_f64().unwrap() - 0.251).abs() < 0.01,
         "{m}"
     );
+    app.quit();
+}
+
+/// Spec §12.3 through the channel (plan 5e-1): with the Built-in Synth
+/// strip on Touch, a fader touched, moved and released while playing
+/// lands at Stop as one "Write Automation" step in a lane "Built-in Synth
+/// Fader"; hostile gestures are refused before anything changes.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn touch_writes_a_fader_over_the_channel() {
+    let mut app = App::start();
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["suspended"], false, "{state}");
+    let synth = state["modes"][0]["strip"]
+        .as_u64()
+        .expect("the synth strip first");
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    run(
+        &mut app,
+        "automation.set_mode",
+        json!({"strips": synth.to_string(), "mode": "touch"}),
+    );
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["modes"][0]["mode"], "touch", "{state}");
+    // Hostile input: refused, nothing touched.
+    for (params, code) in [
+        (
+            json!({"target": "fader:999999", "phase": "touch"}),
+            core_control::ErrorCode::Failed,
+        ),
+        (
+            json!({"target": format!("fader:{synth}"), "phase": "value", "value": "nan"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+        (
+            json!({"target": "fader", "phase": "touch"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "automation.gesture", "params": params, "window": w}),
+        );
+        assert_eq!(e.code, code, "{e}");
+    }
+    run(&mut app, "transport.play_stop", json!({}));
+    app.wait(&w, json!({"condition": "playing"}));
+    // Pre-flight C1 (Ruling 24): the first idle after Play must not end
+    // the pass.
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["writing"], true, "{state}");
+    let target = format!("fader:{synth}");
+    run(
+        &mut app,
+        "automation.gesture",
+        json!({"target": target, "phase": "touch", "value": "0.5"}),
+    );
+    for v in ["0.55", "0.6", "0.65", "0.7"] {
+        std::thread::sleep(Duration::from_millis(30));
+        run(
+            &mut app,
+            "automation.gesture",
+            json!({"target": target, "phase": "value", "value": v}),
+        );
+    }
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["touched"][0], target, "{state}");
+    assert_eq!(state["writing"], true, "{state}");
+    run(
+        &mut app,
+        "automation.gesture",
+        json!({"target": target, "phase": "release"}),
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    run(&mut app, "transport.play_stop", json!({}));
+    app.wait(&w, json!({"condition": "stopped"}));
+    let doc = wait_for_state(&mut app, &w, "document", |d| {
+        d["undo"] == "Write Automation"
+    });
+    assert!(
+        doc["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["name"] == "Built-in Synth Fader"),
+        "{doc}"
+    );
+    let state = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(state["touched"], json!([]), "{state}");
+    app.quit();
+}
+
+/// Plan 5f-1 Task 11 (spec §12.3): an MCU-compatible unit added and fed
+/// through the channel (`surface.inject`, no CoreMIDI port: the offline
+/// app uses the fake port transport) touches, moves and releases fader 1
+/// as one "Set Fader" step, mutes strip 1, gets the ride's value back once
+/// after the release and the mute LED, ignores and counts a cut message.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn drives_a_fader_and_a_button_from_an_mcu() {
+    let mut app = App::start();
+    // The launch window adopts an empty document (`documentForWindow`):
+    // close it first, so the call below has no document to answer for.
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        if let Some(d) = ws["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "document")
+        {
+            let n = d["number"].clone();
+            app.call("command.run", json!({"id": "file.close", "window": n}));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no launch document window in {ws}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Pre-flight M29: surfaces are app-wide, so `state.get surfaces` answers without a document.
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let st = loop {
+        let st = app.call("state.get", json!({"target": "surfaces"}));
+        if st["doc"].is_null() {
+            break st;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the launch document closes: {st}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        st["feedback"].as_array().is_some_and(|f| f.is_empty()),
+        "{st}"
+    );
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    for (params, code) in [
+        (
+            json!({"type": "mcu", "input": "", "output": "E2E Out"}),
+            core_control::ErrorCode::Failed,
+        ),
+        (
+            json!({"type": "nope", "input": "a", "output": "b"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "surface.add", "params": params, "window": w}),
+        );
+        assert_eq!(e.code, code, "{e}");
+    }
+    run(
+        &mut app,
+        "surface.add",
+        json!({"type": "mcu", "input": "E2E In", "output": "E2E Out"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(st["surfaces"][0]["connected"], true, "{st}");
+    let id = st["surfaces"][0]["id"].as_u64().unwrap();
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    let synth = auto["modes"][0]["strip"].as_u64().unwrap();
+    // The synth is the demo's first strip: fader 1, mute 1.
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68 7f e0 00 20"}),
+    );
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(auto["touched"][0], format!("fader:{synth}"), "{auto}");
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68 00"}),
+    );
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Fader");
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 10 7f"}),
+    );
+    let st = wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"]
+            .as_array()
+            .is_some_and(|m| m.iter().any(|x| x == "90 10 7f"))
+    });
+    let messages = st["feedback"][0]["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().any(|x| x == "e0 00 20"),
+        "the fader got the ride's value (0.25) once, after the release: {st}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|x| x.as_str().is_some_and(|t| !t.starts_with("d0 "))),
+        "meters are counted, not listed"
+    );
+    let ignored = st["surfaces"][0]["ignored"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(
+        st["surfaces"][0]["ignored"].as_u64(),
+        Some(ignored + 1),
+        "a cut message is ignored and counted: {st}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "surface.inject", "params": {"surface": id, "bytes": "zz"}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams);
+    run(&mut app, "surface.remove", json!({"surface": id}));
+    app.quit();
+}
+
+/// Plan 5f-4 Task 8 (spec §8.4): a Kontrol S-Series MK3 added and fed
+/// through the channel (offline: the fake port transport) answers the
+/// handshake and gets its display, rides fader 1 from knob 1 as one "Set
+/// Fader" step, starts and stops the transport, sets the tempo as one "Set
+/// Tempo" step (owner, 2026-11-03), and counts a cut SysEx.
+/// (`messages` keeps the last 64 sent, so the identity at the head of the
+/// first refresh may have scrolled out: the test waits for any NI SysEx;
+/// `core-ffi/tests/kontrol.rs` pins the identity.)
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn drives_the_mixer_from_a_kontrol_mk3() {
+    let mut app = App::start();
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    let port = "KONTROL S88 MK3 DAW";
+    run(
+        &mut app,
+        "surface.add",
+        json!({"type": "kontrol_mk3", "input": port, "output": port}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(st["surfaces"][0]["type"], "kontrol_mk3", "{st}");
+    assert_eq!(st["surfaces"][0]["online"], false, "{st}");
+    let id = st["surfaces"][0]["id"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 01 04"}),
+    );
+    let ni = "f0 00 21 09 00 00 44 43 01 00";
+    let st = wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"].as_array().is_some_and(|m| {
+            m.iter()
+                .any(|x| x.as_str().is_some_and(|t| t.starts_with(ni)))
+        })
+    });
+    assert_eq!(st["surfaces"][0]["online"], true, "{st}");
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    let synth = auto["modes"][0]["strip"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 50 05"}),
+    );
+    wait_for_state(&mut app, &w, "automation", |a| {
+        a["touched"][0] == format!("fader:{synth}")
+    });
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Fader");
+    // The ride ends 500 ms after the last turn; the tempo is refused while
+    // its edit is open.
+    wait_for_state(&mut app, &w, "automation", |a| {
+        a["touched"].as_array().is_some_and(|t| t.is_empty())
+    });
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 10 01"}),
+    );
+    app.wait(&w, json!({"condition": "playing"}));
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 14 01"}),
+    );
+    app.wait(&w, json!({"condition": "stopped"}));
+    // The keyboard's tempo control: 100 BPM is 60 000 000 × 10 ns, sent as
+    // 00 0e 4e 1c 00 (Ruling 5).
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "f0 00 21 09 00 00 44 43 01 00 19 00 00 00 0e 4e 1c 00 f7"}),
+    );
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Tempo");
+    // VizDAW plays 100 BPM: no state target carries the tempo, but the
+    // keyboard is sent VizDAW's own tempo after its turn (final review T8
+    // M1), so the last tempo in its log is 100's.
+    let tempo = format!("{ni} 19 ");
+    wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"].as_array().is_some_and(|m| {
+            m.iter()
+                .rev()
+                .filter_map(|x| x.as_str())
+                .find(|t| t.starts_with(&tempo))
+                == Some("f0 00 21 09 00 00 44 43 01 00 19 00 00 00 0e 4e 1c 00 f7")
+        })
+    });
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    let ignored = st["surfaces"][0]["ignored"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "f0 00 21 09 00 00 44 43 01 00 48"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(
+        st["surfaces"][0]["ignored"].as_u64(),
+        Some(ignored + 1),
+        "a cut SysEx is ignored and counted: {st}"
+    );
+    run(&mut app, "surface.remove", json!({"surface": id}));
+    app.quit();
+}
+
+/// `(rate, channels, bits, frames, 16-bit samples)` of a 16-bit PCM WAV.
+fn read_wav16(path: &std::path::Path) -> (u32, u16, u16, u64, Vec<i16>) {
+    let b = std::fs::read(path).unwrap();
+    assert_eq!((&b[0..4], &b[8..12]), (&b"RIFF"[..], &b"WAVE"[..]));
+    let mut at = 12;
+    let (mut rate, mut ch, mut bits, mut data) = (0, 0, 0, Vec::new());
+    while at + 8 <= b.len() {
+        let n = u32::from_le_bytes(b[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = &b[at + 8..at + 8 + n];
+        match &b[at..at + 4] {
+            b"fmt " => {
+                ch = u16::from_le_bytes(body[2..4].try_into().unwrap());
+                rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+                bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
+            }
+            b"data" => {
+                data = body
+                    .chunks(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+            }
+            _ => {}
+        }
+        at += 8 + n + (n & 1);
+    }
+    let frames = (data.len() / usize::from(ch.max(1))) as u64;
+    (rate, ch, bits, frames, data)
+}
+
+/// README steps 180–184 through the channel (plan 5f-2; spec §12.3 "bounce
+/// and check the file"): a bounce of four bars to a 16-bit WAV, refused
+/// over the same file without `replace`, then Add to project; hostile
+/// calls refused.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn bounces_the_demo_and_checks_the_file() {
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    let src = home.join("tone.caf");
+    audio_file(&src, 96_000);
+    let demo = app.call("command.run", json!({"id": "file.create_demo_audio"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": src, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+
+    // Four bars from tick 0 at 120 BPM: 16 × 15 360 ticks, 16 × 24 000 frames.
+    let (end, range) = (16 * 15_360, 384_000u64);
+    let mix = home.join("mix.wav");
+    let params = json!({"path": mix, "bits": "16", "rate": 48_000, "range": "selection", "start": 0, "end": end});
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.bounce", "params": params.clone(), "window": w}),
+    );
+    let status = r["status"].as_str().unwrap_or("").to_string();
+    assert!(
+        status.starts_with("wrote ") && status.contains(&mix.display().to_string()),
+        "{r}"
+    );
+    let (rate, ch, bits, frames, samples) = read_wav16(&mix);
+    assert_eq!((rate, ch, bits), (48_000, 2, 16), "{status}");
+    assert!(
+        (range..=range + 480_000).contains(&frames),
+        "{frames} frames: the range plus at most the 10 s tail (pre-flight M11)"
+    );
+    assert!(
+        samples[..2 * 96_000].iter().any(|s| *s != 0),
+        "the imported 0.25 tone sounds in the first bar"
+    );
+    let before = std::fs::read(&mix).unwrap();
+
+    // The same path without `replace`: refused, the file unchanged.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": params, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Failed, "{e:?}");
+    assert!(e.message.contains("exists"), "{e:?}");
+    assert_eq!(std::fs::read(&mix).unwrap(), before);
+
+    // Add to project: one undo step, a lane "Mix", a Bounced item.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"add_to_project": true, "range": "selection", "start": 0, "end": end}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Bounce", "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(
+        doc["lanes"].as_array().unwrap().last().unwrap()["name"],
+        "Mix",
+        "{doc}"
+    );
+    let m = app.call("state.get", json!({"target": "media", "window": w}));
+    assert!(
+        m["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["origin"] == "bounced"),
+        "{m}"
+    );
+
+    // Hostile calls.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"format": "mp3", "path": mix}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::DialogRequired, "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"add_to_project": false}, "window": w}),
+    );
+    assert_eq!(
+        e.code,
+        core_control::ErrorCode::DialogRequired,
+        "the app's check (pre-flight M6): {e:?}"
+    );
+    app.quit();
+}
+
+/// A 48 kHz mono 16-bit WAV of `frames` frames at `level`: an editor's
+/// save (plan 5f-3).
+fn wav(path: &std::path::Path, frames: usize, level: f32) {
+    let fmt = core_media::export::ExportFormat {
+        container: core_media::export::Container::Wav,
+        depth: core_model::format::BitDepth::Int16,
+        rate: 48_000,
+        dither: false,
+        dither_stream: 0,
+    };
+    let mut w = core_media::export::PcmWriter::create(path, &fmt, 1).unwrap();
+    w.write(&vec![level; frames]).unwrap();
+    w.finish().unwrap();
+}
+
+/// README steps 185–188 through the channel (plan 5f-3; spec §11, §12.1):
+/// with `VIZDAW_EXTERNAL_EDITOR=stub`, which launches nothing, a region of
+/// an imported tone opens in the "editor"; the test saves the copy as an
+/// editor that replaces its file would, and the region plays the edit as
+/// one "External Edit" step; a second save in place, on the file the
+/// rename put there, lands too, which pins the watch re-armed on the
+/// replaced file (pre-flight I8); Reload with nothing changed is
+/// "unchanged"; hostile calls are refused.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn edits_a_region_through_the_stub_editor() {
+    let mut app = App::start_with(&[("VIZDAW_EXTERNAL_EDITOR", "stub")]);
+    let home = app.launched.home.clone();
+    let tone = home.join("tone.caf");
+    audio_file(&tone, 96_000);
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+
+    // 1. Nothing selected: refused; a relative `app`: refused by type.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.open_external", "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Unavailable, "{e}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.open_external", "params": {"app": "relative.app"}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
+
+    // 2. The tone at bar 1 (the demo's own audio is offline: pre-flight
+    // C1), its region selected by its element.
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": tone, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let (region, label) = wait_for_label_like(&mut app, &w, "Region tone on ", "gain 0.0 dB");
+    app.call("ui.click", json!({"window": w, "element": region}));
+    let sel = app.call("state.get", json!({"target": "selection", "window": w}));
+    assert_eq!(sel["events"].as_array().unwrap().len(), 1, "{label}: {sel}");
+
+    // 3. Open: the copy's path, in the scratch package in the home.
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.open_external", "window": w}),
+    );
+    let status = r["status"].as_str().unwrap_or("").to_string();
+    let copy = PathBuf::from(
+        status
+            .strip_prefix("editing ")
+            .unwrap_or_else(|| panic!("{r}")),
+    );
+    assert!(
+        copy.starts_with(&home) && copy.ends_with("Media/Edits/tone edit 1.wav"),
+        "{r}"
+    );
+    assert!(copy.is_file(), "{}", copy.display());
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.reload_external", "window": w}),
+    );
+    assert_eq!(
+        r["status"], "unchanged",
+        "right after Open (pre-flight I10): {r}"
+    );
+
+    // 4. The editor saves by replacing the file (pre-flight M11).
+    let tmp = copy.with_file_name(".tone edit 1.tmp.wav");
+    wav(&tmp, 24_000, 0.5);
+    std::fs::rename(&tmp, &copy).unwrap();
+    wait_for_undo(&mut app, &w, "External Edit");
+    let edited = |m: &Value, frames: u64| {
+        m["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["origin"] == "external_edit" && i["frames"] == frames)
+    };
+    wait_for_state(&mut app, &w, "media", |m| edited(m, 24_000));
+
+    // 5. A second save, in place on the file the rename put there: it
+    // lands only if the watch followed the rename (pre-flight I8).
+    let bytes = {
+        let t = home.join("short.wav");
+        wav(&t, 12_000, 0.25);
+        std::fs::read(&t).unwrap()
+    };
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&copy)
+            .unwrap();
+        f.write_all(&bytes).unwrap();
+        f.sync_all().unwrap();
+    }
+    let m = wait_for_state(&mut app, &w, "media", |m| edited(m, 12_000));
+    let edits = m["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["origin"] == "external_edit")
+        .count();
+    assert_eq!(edits, 2, "one import per save: {m}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(doc["undo"], "External Edit", "{doc}");
+
+    // 6. Reload with nothing changed since; an `app` that is no application.
+    let r = app.call(
+        "command.run",
+        json!({"id": "region.reload_external", "window": w}),
+    );
+    assert_eq!(r["status"], "unchanged", "{r}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "region.open_external", "params": {"app": "/Applications/Nope-VizDAW-e2e.app"}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Failed, "{e}");
     app.quit();
 }

@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        129,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi"
+        147,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1285,4 +1285,350 @@ fn audio_and_destination_commands_check_their_params() {
         let (code, _) = err("command.run", run(id, params.clone()));
         assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
     }
+}
+
+/// Plan 5e-1 Task 10: the automation commands take their parameters by
+/// type and range; hostile values never reach the app.
+#[test]
+fn automation_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        (
+            "automation.set_mode",
+            json!({ "strips": "all", "mode": "touch" }),
+        ),
+        (
+            "automation.set_mode",
+            json!({ "strips": "1,2,3", "mode": "off" }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": "fader:3", "phase": "touch" }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": "send:3:1", "phase": "value", "value": "0.25" }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": "param:9:100", "phase": "release" }),
+        ),
+        ("automation.suspend", json!({})),
+        ("automation.suspend", json!({ "on": true })),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        ("automation.set_mode", json!({ "mode": "touch" })),
+        ("automation.set_mode", json!({ "strips": "all" })),
+        (
+            "automation.set_mode",
+            json!({ "strips": "all", "mode": "loud" }),
+        ),
+        (
+            "automation.set_mode",
+            json!({ "strips": [1, 2], "mode": "read" }),
+        ),
+        (
+            "automation.set_mode",
+            json!({ "strips": "1".repeat(100_000), "mode": "read" }),
+        ),
+        ("automation.gesture", json!({ "phase": "touch" })),
+        ("automation.gesture", json!({ "target": "fader:3" })),
+        (
+            "automation.gesture",
+            json!({ "target": "fader:3", "phase": "wiggle" }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": "fader:3", "phase": "value", "value": 0.5 }),
+        ),
+        (
+            "automation.gesture",
+            json!({ "target": 3, "phase": "touch" }),
+        ),
+        ("automation.suspend", json!({ "on": "yes" })),
+        ("automation.suspend", json!({ "now": true })),
+    ] {
+        let (code, _) = err("command.run", run(id, params.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id} {params}");
+    }
+    let spec = |id: &str| registry::find(id).unwrap();
+    assert!(!spec("automation.set_mode").menu_item && spec("automation.set_mode").document);
+    assert!(spec("automation.gesture").document);
+    assert!(!spec("automation.suspend").document);
+    assert_eq!(
+        ok("state.get", json!({"target": "automation"})),
+        Command::StateGet {
+            target: StateTarget::Automation,
+            window: None
+        }
+    );
+}
+
+/// Plan 5e-2 Task 4: the mode commands are Automation menu items with no
+/// parameters; Suspend Automation is a menu item now.
+#[test]
+fn automation_menu_commands_take_no_params() {
+    for m in ["off", "read", "touch", "latch", "write", "trim"] {
+        let id = format!("automation.mode.{m}");
+        let spec = registry::find(&id).unwrap();
+        assert!(
+            spec.menu_item && spec.document && spec.menu == "Automation",
+            "{id}"
+        );
+        assert!(matches!(
+            ok("command.run", json!({ "id": id })),
+            Command::CommandRun { .. }
+        ));
+        let (code, _) = err(
+            "command.run",
+            json!({ "id": id, "params": { "strips": "all" } }),
+        );
+        assert_eq!(code, ErrorCode::InvalidParams, "{id}");
+    }
+    let s = registry::find("automation.suspend").unwrap();
+    assert!(s.menu_item && s.menu == "Automation" && !s.document);
+}
+
+/// Plan 5f-1 Task 9: the surface commands take their parameters by type
+/// and range; hostile values never reach the app.
+#[test]
+fn surface_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for (id, params) in [
+        ("transport.play", json!({})),
+        (
+            "surface.add",
+            json!({ "type": "mcu", "input": "A", "output": "B" }),
+        ),
+        (
+            "surface.add",
+            json!({ "type": "mcu_xt", "input": "A", "output": "B", "position": 3 }),
+        ),
+        (
+            "surface.add",
+            json!({ "type": "hui", "input": "A", "output": "B" }),
+        ),
+        ("surface.remove", json!({ "surface": 1 })),
+        (
+            "surface.inject",
+            json!({ "surface": 1, "bytes": "90 68 7f" }),
+        ),
+        ("surface.inject", json!({ "surface": 1, "bytes": "90 68" })),
+        ("surface.learn", json!({ "target": "fader:3" })),
+        ("surface.learn", json!({ "command": "transport.play_stop" })),
+        ("surface.unlearn", json!({ "target": "fader:3" })),
+        (
+            "surface.unlearn",
+            json!({ "command": "transport.play_stop" }),
+        ),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(id, params.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{id} {params}"
+        );
+    }
+    for (id, params) in [
+        (
+            "surface.add",
+            json!({ "type": "mackie", "input": "A", "output": "B" }),
+        ),
+        ("surface.add", json!({ "type": "mcu", "input": "A" })),
+        (
+            "surface.add",
+            json!({ "type": "mcu", "input": "A", "output": "B", "position": 4 }),
+        ),
+        (
+            "surface.add",
+            json!({ "type": "mcu", "input": 7, "output": "B" }),
+        ),
+        ("surface.remove", json!({ "surface": -1 })),
+        ("surface.remove", json!({})),
+        ("surface.inject", json!({ "surface": 1 })),
+        (
+            "surface.inject",
+            json!({ "surface": 1, "bytes": "x".repeat(5000) }),
+        ),
+        ("surface.learn", json!({ "target": 3 })),
+    ] {
+        assert!(
+            err("command.run", run(id, params.clone())).0 == ErrorCode::InvalidParams,
+            "{id} {params}"
+        );
+    }
+    assert_eq!(
+        ok("state.get", json!({ "target": "surfaces" })),
+        Command::StateGet {
+            target: StateTarget::Surfaces,
+            window: None
+        }
+    );
+}
+
+/// Plan 5f-2 Task 5: `file.bounce` takes the Bounce dialog's answers as
+/// parameters; hostile values are refused by type and range before they
+/// reach the app (strip lists are text here; the app checks their form).
+#[test]
+fn bounce_commands_check_their_params() {
+    let run = |params: Value| json!({ "id": "file.bounce", "params": params });
+    for good in [
+        json!({ "source": "mix", "path": "/tmp/x.wav" }),
+        json!({ "add_to_project": true }),
+        json!({ "source": "stems", "strips": "1,2", "path": "/tmp/stems" }),
+        json!({ "range": "selection", "start": 0, "end": 15360, "path": "/tmp/x.aif", "format": "aiff", "bits": "16", "rate": 44100, "dither": false }),
+        json!({ "path": "/tmp/x.wav", "replace": true, "bits": "32f", "rate": 8000 }),
+        // Presence answers the dialog here; the app refuses this one (pre-flight M6).
+        json!({ "add_to_project": false }),
+        json!({ "source": "stems", "strips": "1,,2", "path": "/tmp/stems" }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    for bad in [
+        json!({ "path": "/tmp/x.wav", "format": "mp3" }),
+        json!({ "path": "/tmp/x.wav", "bits": "8" }),
+        json!({ "path": "/tmp/x.wav", "bits": 16 }),
+        json!({ "path": "/tmp/x.wav", "rate": 1000 }),
+        json!({ "path": "/tmp/x.wav", "rate": 384_001 }),
+        json!({ "path": "relative.wav" }),
+        json!({ "path": "/tmp/x.wav", "start": -1 }),
+        json!({ "path": "/tmp/x.wav", "end": i64::MAX }),
+        json!({ "path": "/tmp/x.wav", "source": "both" }),
+        json!({ "path": "/tmp/x.wav", "dither": "yes" }),
+        json!({ "path": format!("/tmp/{}.wav", "a".repeat(1100)) }),
+        json!({ "path": "/tmp/x.wav", "seq": 1 }),
+    ] {
+        let (code, _) = err("command.run", run(bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    // More wrong types and values (Task 5 dispatch): each is refused here.
+    for bad in [
+        json!({ "path": 7 }),
+        json!({ "path": "/tmp/x\u{0}.wav" }),
+        json!({ "path": "/tmp/x.wav", "strips": 12 }),
+        json!({ "path": "/tmp/x.wav", "strips": ["1", "2"] }),
+        json!({ "path": "/tmp/x.wav", "range": "all" }),
+        json!({ "path": "/tmp/x.wav", "rate": "48000" }),
+        json!({ "path": "/tmp/x.wav", "rate": 48_000.5 }),
+        json!({ "path": "/tmp/x.wav", "add_to_project": "true" }),
+        json!({ "path": "/tmp/x.wav", "replace": 1 }),
+        json!({ "path": "/tmp/x.wav", "format": "WAV" }),
+    ] {
+        let (code, _) = err("command.run", run(bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    // These pass here and are refused further in: `..` and a place inside
+    // the open package by the core (Ruling 3, `hostile_bounce_requests_are_refused`),
+    // the largest range by the core's length check.
+    for passes in [
+        json!({ "path": "/tmp/../x.wav" }),
+        json!({ "range": "selection", "start": 0, "end": i64::MAX / 2, "path": "/tmp/x.wav" }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run(passes.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{passes}"
+        );
+    }
+    let (code, message) = err("command.run", run(json!({})));
+    assert_eq!(code, ErrorCode::DialogRequired);
+    assert!(message.contains("Bounce"), "{message}");
+}
+
+/// Plan 5f-3 (Ruling 5): `region.open_external` takes an optional
+/// absolute `.app` path and opens no dialog for a programmatic call;
+/// `region.reload_external` takes nothing.
+#[test]
+fn external_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for good in [
+        json!({}),
+        json!({ "app": "/Applications/X.app" }),
+        json!({ "app": "/Applications/Sound Editor.app" }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run("region.open_external", good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    for bad in [
+        json!({ "app": "X.app" }),
+        json!({ "app": "/tmp/x.wav" }),
+        json!({ "app": "/Applications/X" }),
+        json!({ "app": 7 }),
+        json!({ "app": "/tmp/x\u{0}.app" }),
+        json!({ "app": format!("/{}.app", "a".repeat(1100)) }),
+        json!({ "path": "/tmp/x.app" }),
+    ] {
+        let (code, _) = err("command.run", run("region.open_external", bad.clone()));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+    }
+    assert!(matches!(
+        ok("command.run", run("region.reload_external", json!({}))),
+        Command::CommandRun { .. }
+    ));
+    let (code, _) = err(
+        "command.run",
+        run(
+            "region.reload_external",
+            json!({ "app": "/Applications/X.app" }),
+        ),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams, "Reload takes no parameters");
+    for id in ["region.open_external", "region.reload_external"] {
+        let c = COMMANDS.iter().find(|c| c.id == id).unwrap();
+        assert!(c.document && c.menu == "Region" && c.menu_item, "{id}");
+        assert!(
+            c.dialogs.iter().all(|d| !d.always),
+            "{id}: a programmatic call never needs a dialog"
+        );
+    }
+    let open = COMMANDS
+        .iter()
+        .find(|c| c.id == "region.open_external")
+        .unwrap();
+    assert_eq!(open.dialogs[0].name, "Choose External Editor");
+    assert_eq!(open.dialogs[0].answered_by, ["app"]);
+}
+
+/// Plan 5f-4 Ruling 2: `surface.add` takes the Kontrol type.
+#[test]
+fn kontrol_mk3_is_a_surface_type() {
+    let run = |params: Value| json!({ "id": "surface.add", "params": params });
+    assert!(matches!(
+        ok(
+            "command.run",
+            run(json!({ "type": "kontrol_mk3", "input": "A", "output": "A" }))
+        ),
+        Command::CommandRun { .. }
+    ));
+    // Final review T1 m3: the Choice is exact; another casing is refused.
+    let (code, _) = err(
+        "command.run",
+        run(json!({ "type": "Kontrol_MK3", "input": "A", "output": "A" })),
+    );
+    assert_eq!(code, ErrorCode::InvalidParams);
+    let spec = registry::find("surface.add").unwrap();
+    let help = spec.params.iter().find(|p| p.name == "type").unwrap().help;
+    assert!(help.contains("kontrol_mk3"), "{help}");
 }

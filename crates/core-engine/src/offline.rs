@@ -716,6 +716,9 @@ pub struct OfflineBackend {
     left: Vec<f32>,
     right: Vec<f32>,
     fake: Option<Fake>,
+    /// A device's I/O buffer and output latency it reports, as a live
+    /// device does ([`OfflineBackend::with_device`]).
+    device: Option<(u32, u32)>,
 }
 
 impl OfflineBackend {
@@ -730,7 +733,17 @@ impl OfflineBackend {
             left: Vec::new(),
             right: Vec::new(),
             fake: None,
+            device: None,
         }
+    }
+
+    /// The backend reporting an I/O buffer of `buffer` frames and `output`
+    /// frames of output latency, as a live device does: its blocks are
+    /// heard `output` frames later (their host time says so). Whoever
+    /// drives it should render `buffer` frames ahead of real time.
+    pub fn with_device(mut self, buffer: u32, output: u32) -> OfflineBackend {
+        self.device = Some((buffer, output));
+        self
     }
 
     /// The backend with a fake input (spec §12.1).
@@ -753,10 +766,12 @@ impl OfflineBackend {
 
     /// `(output, input)` latency the fake device reports, in frames.
     fn latencies(&self) -> (u32, u32) {
-        match &self.fake {
+        let (out, inp) = match &self.fake {
             Some(f) => (f.delay / 2, f.delay - f.delay / 2),
             None => (0, 0),
-        }
+        };
+        let extra = self.device.map_or(0, |d| d.1);
+        (out.saturating_add(extra), inp)
     }
 
     /// Frames rendered so far.
@@ -930,7 +945,7 @@ impl AudioBackend for OfflineBackend {
         Ok(StreamInfo {
             device_name: "offline".into(),
             sample_rate: self.sample_rate,
-            buffer_frames: self.block,
+            buffer_frames: self.device.map_or(self.block, |d| d.0),
             channels: u32::try_from(self.channels).unwrap_or(2),
             input_channels: inputs as u32,
             input_channel_names: (1..=inputs).map(|k| format!("Fake In {k}")).collect(),

@@ -19,12 +19,14 @@ public struct AudioSettings: Codable, Equatable, Sendable {
     public var countInBars: UInt8 = 0
     public var preRollBars: UInt8 = 0
     public var passesAsTakes = true
+    /// The bounce's longest tail in seconds, 0–30 (plan 5f-2 Ruling 4).
+    public var bounceTailSeconds: UInt32 = 10
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case softwareMonitoring, bufferFrames, inputDevice, latencyTrim, cacheMb, readAheadSeconds
-        case defaultMonitor, countInBars, preRollBars, passesAsTakes
+        case defaultMonitor, countInBars, preRollBars, passesAsTakes, bounceTailSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -45,6 +47,8 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         countInBars = min(c.field(.countInBars, d.countInBars), 4)
         preRollBars = min(c.field(.preRollBars, d.preRollBars), 8)
         passesAsTakes = c.field(.passesAsTakes, d.passesAsTakes)
+        let tail: UInt32 = c.field(.bounceTailSeconds, d.bounceTailSeconds)
+        bounceTailSeconds = tail <= 30 ? tail : d.bounceTailSeconds
     }
 
     static let monitors = ["auto", "input", "off"]
@@ -74,6 +78,8 @@ public protocol AudioSink: AnyObject {
     func latencyTrim(_ frames: Int32)
     func stream(cacheMb: UInt32, readAheadSeconds: UInt32) throws
     func defaultMonitor(_ mode: MonitorModeRow)
+    /// The bounce's tail limit (plan 5f-2).
+    func bounceTail(ms: UInt32)
 }
 
 /// The audio settings the app keeps (plan 5d-2 Ruling 2): every change
@@ -108,6 +114,7 @@ public final class AudioPreferences {
         sink.inputDevice(s.inputDevice)
         sink.latencyTrim(s.latencyTrim)
         sink.defaultMonitor(s.monitorRow)
+        sink.bounceTail(ms: s.bounceTailSeconds * 1000)
         RecordModel.defaults = RecordDefaults(s)
         do {
             try sink.bufferFrames(s.bufferFrames)
@@ -184,6 +191,14 @@ public final class AudioPreferences {
         var s = settings
         s.defaultMonitor = mode
         sink.defaultMonitor(s.monitorRow)
+        save(s)
+    }
+
+    /// Settings › Audio's bounce tail limit, clamped to 0–30 s (plan 5f-2).
+    public func setBounceTail(seconds: UInt32) {
+        var s = settings
+        s.bounceTailSeconds = min(seconds, 30)
+        sink.bounceTail(ms: s.bounceTailSeconds * 1000)
         save(s)
     }
 

@@ -164,6 +164,12 @@ pub fn epoch() -> u64 {
     EPOCH.load(Ordering::Acquire)
 }
 
+/// A change a load publishes that is not an audio setting (plan 5e-1
+/// Ruling 3: automation suspend): the holder reloads at its next idle.
+pub(crate) fn bump_epoch() {
+    EPOCH.fetch_add(1, Ordering::Release);
+}
+
 /// Every setting back to its default (test hook: a test binary's tests
 /// share the process).
 #[cfg(feature = "test-hooks")]

@@ -33,6 +33,12 @@ struct DocumentView: View {
             RelinkSheet(media: model.media)
         }
         .sheet(
+            isPresented: Binding(
+                get: { model.bounce.shown && !ControlChannel.active }, set: { model.bounce.shown = $0 })
+        ) {
+            BounceSheet(bounce: model.bounce)
+        }
+        .sheet(
             item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
         ) { _ in
             TrackSynthSheet(

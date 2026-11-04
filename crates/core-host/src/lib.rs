@@ -35,8 +35,8 @@ pub use error::HostError;
 pub use host::{GESTURE_TIMEOUT, Gesture, IdleReport, PluginHost, SlotState};
 pub use info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Tail};
 pub use instance::{
-    AudioProcessor, InstanceEvents, LoadRequest, ParentView, PluginEditor, PluginFormat,
-    PluginInstance, PrepareJob, Prepared,
+    AudioProcessor, InstanceEvents, LoadRequest, OfflineRender, ParentView, PluginEditor,
+    PluginFormat, PluginInstance, PrepareJob, Prepared, Presets,
 };
 pub use process::{
     MAX_EVENTS, MAX_PARAM_EVENTS, MidiEvent, ParamChange, ParamEvent, ParamOut, ProcessCtx,

@@ -42,6 +42,20 @@ import VizDAWCore
         #expect(!f.state.playing && f.state.tick == 30_000)
     }
 
+    /// Plan 5f-1 Ruling 5 (owner answer 2026-11-02): Play only starts.
+    @Test func playOnlyStarts() throws {
+        let (s, id, m, f) = try demo()
+        #expect(failure(run("transport.play", s, id)) == nil)
+        #expect(f.state.playing && m.isPlaying)
+        f.playError = .Model(message: "played twice")
+        #expect(failure(run("transport.play", s, id)) == nil, "Play while playing does nothing")
+        #expect(f.state.playing)
+        _ = run("transport.stop", s, id)
+        f.playError = nil
+        #expect(failure(run("transport.play", s, id)) == nil)
+        #expect(f.state.playing, "a stopped transport plays")
+    }
+
     @Test func playSelectionPlaysItsSpanOnceOrOnwards() throws {
         let (s, id, m, f) = try demo()
         #expect(failure(run("transport.play_selection", s, id))?.code == .unavailable, "nothing selected")
