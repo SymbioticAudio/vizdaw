@@ -51,6 +51,21 @@ import VizDAWCore
         didSet { if showsMaps && !oldValue { refreshMaps() } }
     }
 
+    /// Where the sheet shows (the button that opened it sets it).
+    public var mapsPlacement: MixerPlacement = .window
+
+    public func showMaps(in p: MixerPlacement) {
+        mapsPlacement = p
+        showsMaps = true
+    }
+
+    public func showsMaps(in p: MixerPlacement) -> Bool { showsMaps && mapsPlacement == p }
+
+    /// Closes the sheet only when `p` is the placement showing it.
+    public func closeMaps(from p: MixerPlacement) {
+        if mapsPlacement == p { showsMaps = false }
+    }
+
     public init(document: DocumentModel, core: any SurfaceCore) {
         self.document = document
         self.session = document.session

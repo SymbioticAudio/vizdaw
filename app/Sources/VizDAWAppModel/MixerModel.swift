@@ -95,6 +95,15 @@ public final class MixerModel {
     public private(set) var destinations: [DestRow] = []
     /// The strip whose name is being edited.
     public private(set) var renamingStrip: UInt64?
+    /// Where the rename field shows (the button that began it sets it).
+    public private(set) var renamePlacement: MixerPlacement = .window
+    /// Where the open browser's popover shows.
+    public var browserPlacement: MixerPlacement = .window
+    /// The placements showing this mixer now (the window, a pane, a view,
+    /// the left strip).
+    public private(set) var placements: Set<MixerPlacement> = []
+    /// The last `tick` that polled, in the caller's monotonic seconds.
+    @ObservationIgnored private var lastTick: Double?
     public var renameDraft = ""
     /// The open plugin browser.
     public var browser: BrowserTarget? {
@@ -211,6 +220,41 @@ public final class MixerModel {
 
     // MARK: Polling
 
+    /// The least time between two polls (30 Hz).
+    public static let tickInterval: Double = 0.030
+
+    /// One poll per frame, however many placements call it. `now` is seconds
+    /// from any monotonic clock. True when it polled.
+    @discardableResult
+    public func tick(now: Double) -> Bool {
+        if let last = lastTick, now - last < Self.tickInterval, now >= last { return false }
+        lastTick = now
+        refreshIfNeeded()
+        pollLevels()
+        pollAutomation()
+        return true
+    }
+
+    /// Opens the plugin browser for `t`, shown in placement `p`.
+    public func openBrowser(_ t: BrowserTarget, in p: MixerPlacement) {
+        browserPlacement = p
+        browser = t
+    }
+
+    public func showsBrowser(in p: MixerPlacement) -> Bool { browser != nil && browserPlacement == p }
+
+    public func isRenaming(_ strip: UInt64, in p: MixerPlacement) -> Bool {
+        renamingStrip == strip && renamePlacement == p
+    }
+
+    public func appeared(_ p: MixerPlacement) { placements.insert(p) }
+
+    /// The last placement gone ends any open drag.
+    public func disappeared(_ p: MixerPlacement) {
+        placements.remove(p)
+        if placements.isEmpty { endOpenDrag() }
+    }
+
     /// Refetches the mixer when the document or its slots changed.
     public func refreshIfNeeded() {
         let now = (document.snapshot.version, document.slotsVersion)
@@ -247,7 +291,8 @@ public final class MixerModel {
         command("Remove Bus Failed") { try $0.removeBus(strip: strip) }
     }
 
-    public func beginRename(_ strip: StripRow) {
+    public func beginRename(_ strip: StripRow, in p: MixerPlacement = .window) {
+        renamePlacement = p
         renameDraft = strip.name
         renamingStrip = strip.id
     }
