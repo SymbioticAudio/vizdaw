@@ -22,4 +22,31 @@ import Testing
             matching: #"systemImage:|systemName:|systemSymbolName:"#)
         #expect(hits.isEmpty, "\(hits)")
     }
+    /// The Settings tab icons (`VizDAWApp.tab`: `image(size: 16, theme:
+    /// .classicLight)`) are templates with a transparent background and ink
+    /// only where the glyph is: AppKit tints them, so an opaque or filled
+    /// image would draw as a solid box (B3 fix round 1).
+    @Test func theSettingsTabImagesAreTransparentTemplates() throws {
+        let tabs: [AppIcon] = [
+            .settingsEditing, .settingsKeys, .settingsAudio, .settingsRecording, .settingsAutomation,
+            .settingsSurfaces, .settingsAppearance,
+        ]
+        for i in tabs {
+            let img = i.image(size: 16, theme: .classicLight)
+            #expect(img.isTemplate, "\(i)")
+            var rect = NSRect(x: 0, y: 0, width: 32, height: 32)
+            let cg = try #require(img.cgImage(forProposedRect: &rect, context: nil, hints: nil), "\(i)")
+            let rep = NSBitmapImageRep(cgImage: cg)
+            #expect(rep.pixelsWide == 32 && rep.pixelsHigh == 32, "\(i)")
+            for (x, y) in [(0, 0), (31, 0), (0, 31), (31, 31)] {
+                #expect((rep.colorAt(x: x, y: y)?.alphaComponent ?? 1) == 0, "\(i) corner \(x),\(y)")
+            }
+            var inked = 0
+            for y in 0..<32 {
+                for x in 0..<32 where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.5 { inked += 1 }
+            }
+            // Some ink, and far from a filled square.
+            #expect(inked > 8 && inked < 32 * 32 / 2, "\(i): \(inked) inked pixels")
+        }
+    }
 }
