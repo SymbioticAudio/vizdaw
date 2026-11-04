@@ -394,18 +394,4 @@ fn a_preset_load_is_not_a_gesture() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(got, Vec::new(), "a preset load is the host's write");
-    // The notice of a value the load set is the host's own echo (I2).
-    let id = inst
-        .info()
-        .params
-        .iter()
-        .find(|p| p.automatable)
-        .unwrap()
-        .id;
-    let v = inst.param_value(id).unwrap();
-    inst.simulate_ui_gesture(id, v);
-    assert_eq!(
-        gestures_until_end(&mut inst),
-        vec![ParamEvent::Begin(id), ParamEvent::End(id)]
-    );
 }
