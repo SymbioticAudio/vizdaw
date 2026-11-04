@@ -272,6 +272,32 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func setBypass(slot: UInt64, bypass: Bool) throws -> DocSnapshot {
         try mixerCall("bypass \(slot) \(bypass)")
     }
+    /// Loads or empties the fake strip's EQ (plan 7b Ruling 7): an empty
+    /// slot cannot be emptied, as the core refuses it.
+    func setEq(strip: UInt64, plugin: PluginRefRow?) throws -> DocSnapshot {
+        if let e = mixerError { throw e }
+        guard let i = mixerSnap.strips.firstIndex(where: { $0.id == strip }) else {
+            throw VizError.Model(message: "unknown id strip\(strip)")
+        }
+        if plugin == nil, mixerSnap.strips[i].eq == nil {
+            throw VizError.Model(message: "the EQ slot is empty")
+        }
+        let r = try mixerCall("setEq \(strip) \(plugin?.id ?? "none")")
+        mixerSnap.strips[i].eq = plugin.map { p in
+            var s = slotRow(900 + strip, p.name)
+            s.plugin = p
+            return s
+        }
+        return r
+    }
+    /// Sets the fake strip's own colour (controller ruling C-1).
+    func setStripColour(strip: UInt64, colour: SwatchRow?) throws -> DocSnapshot {
+        let r = try mixerCall("setStripColour \(strip) \(colour.map { "\($0)" } ?? "none")")
+        if let i = mixerSnap.strips.firstIndex(where: { $0.id == strip }) {
+            mixerSnap.strips[i].colour = colour
+        }
+        return r
+    }
     func setSidechain(slot: UInt64, source: UInt64?) throws -> DocSnapshot {
         try mixerCall("sidechain \(slot) \(source.map(String.init) ?? "none")")
     }
@@ -963,7 +989,19 @@ func stripRow(
     StripRow(
         id: id, name: name, kind: kind, kindLabel: "\(kind)", instrument: nil, inserts: inserts,
         gainDb: 0, pan: 0, mute: false, solo: false, soloMuted: false, sends: sends,
-        output: output, freeOutputs: [], automation: .read)
+        output: output, freeOutputs: [], automation: .read, eq: nil,
+        kindColour: kindColour(kind), colour: nil)
+}
+
+/// The kind colour the core gives `kind` (plan 7b Ruling 10), a bus
+/// taken as fed by an output.
+func kindColour(_ kind: StripKindRow) -> StripColourRow {
+    switch kind {
+    case .builtinSynth, .instrument, .instrumentOutput: .instrument
+    case .audioPath: .channel
+    case .bus: .bus
+    case .master: .master
+    }
 }
 
 /// A mixer: Synth (built-in, one insert) and Bus 1, then Master.

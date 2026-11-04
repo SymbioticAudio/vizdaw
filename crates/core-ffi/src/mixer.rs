@@ -5,7 +5,7 @@ use crate::plugins::slot_row;
 use crate::snapshot::SlotRow;
 use core_host::PluginHost;
 use core_model::document::{DestKind, Document};
-use core_model::mixer::{Output, Strip, StripKind};
+use core_model::mixer::{Mixer, Output, Strip, StripKind, Swatch};
 use core_model::mixer_rules::audible;
 use std::collections::BTreeSet;
 
@@ -35,6 +35,99 @@ pub enum StripKindRow {
     Bus,
     /// The master.
     Master,
+}
+
+/// The colour a strip's kind gives it (plan 7b Ruling 10, spec §2 item
+/// 8). Fader caps always take it; the colour bar takes it when the strip
+/// has no colour of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum StripColourRow {
+    /// An audio path's channel.
+    Channel,
+    /// An instrument: the built-in synth, a plugin instrument or one of
+    /// its extra outputs.
+    Instrument,
+    /// A bus fed only by sends.
+    AuxReturn,
+    /// Any other bus (one a strip's output feeds, or one with no feed).
+    Bus,
+    /// The master.
+    Master,
+}
+
+/// A strip's own colour (controller ruling C-1, plan 7b Ruling 12), one
+/// to one with `core_model::mixer::Swatch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum SwatchRow {
+    /// Red.
+    Red,
+    /// Orange.
+    Orange,
+    /// Yellow.
+    Yellow,
+    /// Green.
+    Green,
+    /// Teal.
+    Teal,
+    /// Blue.
+    Blue,
+    /// Purple.
+    Purple,
+    /// Pink.
+    Pink,
+}
+
+impl From<Swatch> for SwatchRow {
+    fn from(s: Swatch) -> Self {
+        match s {
+            Swatch::Red => SwatchRow::Red,
+            Swatch::Orange => SwatchRow::Orange,
+            Swatch::Yellow => SwatchRow::Yellow,
+            Swatch::Green => SwatchRow::Green,
+            Swatch::Teal => SwatchRow::Teal,
+            Swatch::Blue => SwatchRow::Blue,
+            Swatch::Purple => SwatchRow::Purple,
+            Swatch::Pink => SwatchRow::Pink,
+        }
+    }
+}
+
+impl From<SwatchRow> for Swatch {
+    fn from(s: SwatchRow) -> Self {
+        match s {
+            SwatchRow::Red => Swatch::Red,
+            SwatchRow::Orange => Swatch::Orange,
+            SwatchRow::Yellow => Swatch::Yellow,
+            SwatchRow::Green => Swatch::Green,
+            SwatchRow::Teal => Swatch::Teal,
+            SwatchRow::Blue => Swatch::Blue,
+            SwatchRow::Purple => Swatch::Purple,
+            SwatchRow::Pink => Swatch::Pink,
+        }
+    }
+}
+
+/// The colour `s`'s kind gives it in `m` (plan 7b Ruling 10): a bus is a
+/// bus when any strip's output goes to it, else an aux return when a send
+/// feeds it, else (no feed at all) a bus.
+pub fn strip_colour(m: &Mixer, s: &Strip) -> StripColourRow {
+    match s.kind {
+        StripKind::Master => StripColourRow::Master,
+        StripKind::Instrument(_) | StripKind::InstrumentOutput(..) | StripKind::BuiltinSynth => {
+            StripColourRow::Instrument
+        }
+        StripKind::AudioPath(_) => StripColourRow::Channel,
+        StripKind::Bus => {
+            let all = || m.order().iter().filter_map(|id| m.strip(*id).ok());
+            if all().any(|x| x.output == Output::Bus(s.id)) {
+                StripColourRow::Bus
+            } else if all().any(|x| x.sends.iter().any(|t| t.target == s.id)) {
+                StripColourRow::AuxReturn
+            } else {
+                StripColourRow::Bus
+            }
+        }
+    }
 }
 
 /// An aux send.
@@ -85,6 +178,14 @@ pub struct StripRow {
     pub free_outputs: Vec<u16>,
     /// Its automation mode (sub-project 5 spec §4.6).
     pub automation: crate::automation::AutomationModeRow,
+    /// The EQ slot, which processes before the inserts (plan 7b Ruling
+    /// 7); `None` when empty.
+    pub eq: Option<SlotRow>,
+    /// The colour its kind gives it (Ruling 10): fader caps always take
+    /// it.
+    pub kind_colour: StripColourRow,
+    /// Its own colour, if any (C-1): the colour bar takes it when set.
+    pub colour: Option<SwatchRow>,
 }
 
 /// A destination of the instrument list (lanes play through these).
@@ -259,6 +360,12 @@ fn strip_row(
         },
         free_outputs,
         automation: s.automation.into(),
+        eq: s
+            .eq
+            .as_ref()
+            .map(|slot| slot_row(slot, false, host.as_deref_mut())),
+        kind_colour: strip_colour(doc.mixer(), s),
+        colour: s.colour.map(SwatchRow::from),
     }
 }
 
@@ -293,9 +400,10 @@ pub fn snapshot(doc: &Document, version: u64, mut host: Option<&mut PluginHost>)
     }
 }
 
-/// Every plugin slot ID of `doc` (instruments' own slots and inserts).
+/// Every plugin slot ID of `doc` (instruments' own slots, and every
+/// strip's chain: its EQ, then its inserts).
 pub fn slot_ids(doc: &Document) -> BTreeSet<core_model::ids::PluginInstanceId> {
-    let mut ids: BTreeSet<_> = doc.mixer().inserts().map(|(_, _, s)| s.id).collect();
+    let mut ids: BTreeSet<_> = doc.mixer().slots().map(|(_, s)| s.id).collect();
     for d in doc.instruments().values() {
         if let DestKind::PluginInstrument { slot } = &d.kind {
             ids.insert(slot.id);

@@ -2279,6 +2279,37 @@ impl Session {
         })
     }
 
+    /// Loads `plugin` into a strip's EQ slot (replacing any EQ there; its
+    /// state is captured first, so Undo restores it), or empties the slot
+    /// (`None`; refused when it is empty). Plan 7b Ruling 7.
+    pub fn set_eq(
+        &self,
+        strip: u64,
+        plugin: Option<PluginRefRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetEq {
+                strip: StripId(strip),
+                plugin: plugin.as_ref().map(Into::into),
+            }))
+        })
+    }
+
+    /// Sets a strip's own colour, or clears it (`None`: the kind's
+    /// colour). Controller ruling C-1.
+    pub fn set_strip_colour(
+        &self,
+        strip: u64,
+        colour: Option<crate::mixer::SwatchRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetColour {
+                strip: StripId(strip),
+                colour: colour.map(Into::into),
+            }))
+        })
+    }
+
     /// Bypasses a plugin, or turns it back on.
     pub fn set_bypass(&self, slot: u64, bypass: bool) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
@@ -9553,8 +9584,9 @@ impl Session {
         }
     }
 
-    /// The first selected strip's first insert's first 8 automatable
-    /// parameters, by the plugin's list order, with heard values (Ruling 5).
+    /// The first 8 automatable parameters of the first selected strip's
+    /// first chain plug-in (its EQ, else its first insert), by the
+    /// plugin's list order, with heard values (Ruling 5).
     fn surface_params(
         &self,
         inner: &Inner,
@@ -9566,7 +9598,7 @@ impl Session {
             .selection
             .iter()
             .find_map(|s| m.strip(*s).ok())
-            .and_then(|s| s.inserts.front().map(|i| i.id))
+            .and_then(|s| s.chain().next().map(|i| i.id))
         else {
             return Vec::new();
         };

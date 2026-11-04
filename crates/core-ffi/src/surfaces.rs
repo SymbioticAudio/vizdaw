@@ -1709,7 +1709,8 @@ pub(crate) struct PageFocus {
     pub page: usize,
 }
 
-/// The chain of `strip`: its plug-in instrument, then its inserts (Ruling 6).
+/// The chain of `strip`: its plug-in instrument, then its EQ and its
+/// inserts (Ruling 6; plan 7b Ruling 7).
 pub(crate) fn chain(
     doc: &core_model::document::Document,
     strip: StripId,
@@ -1729,7 +1730,7 @@ pub(crate) fn chain(
     };
     instrument
         .into_iter()
-        .chain(s.inserts.iter())
+        .chain(s.chain())
         .map(|x| (x.id, x.plugin.name.clone()))
         .collect()
 }

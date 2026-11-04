@@ -69,6 +69,9 @@ pub enum StateTarget {
     Surfaces,
     /// Its window's main view and panes (plan 7a).
     Layout,
+    /// Its mixer's strips: kind and user colours, levels, routing, the
+    /// EQ, inserts and sends (plan 7b Ruling 11).
+    Mixer,
 }
 
 /// Where a click or drag lands.
@@ -248,9 +251,10 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 "automation" => StateTarget::Automation,
                 "surfaces" => StateTarget::Surfaces,
                 "layout" => StateTarget::Layout,
+                "mixer" => StateTarget::Mixer,
                 _ => {
                     return Err(p.error(
-                        "`target` must be transport, document, editor, selection, windows, media, project, record, input, automation, surfaces or layout",
+                        "`target` must be transport, document, editor, selection, windows, media, project, record, input, automation, surfaces, layout or mixer",
                     ));
                 }
             };

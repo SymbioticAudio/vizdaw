@@ -128,6 +128,8 @@ pub enum StateTargetRow {
     Surfaces,
     /// Its window's main view and panes (plan 7a).
     Layout,
+    /// Its mixer's strips (plan 7b Ruling 11).
+    Mixer,
 }
 
 /// One pane of a main view (plan 7a).
@@ -607,6 +609,13 @@ pub enum ControlResult {
         /// The main view and panes.
         layout: LayoutStateRow,
     },
+    /// `state.get mixer` (plan 7b Ruling 11).
+    Mixer {
+        /// Document ID.
+        doc: String,
+        /// Its strips, master last.
+        mixer: crate::mixer::MixerSnapshot,
+    },
     /// `destination.measure_return` (plan 5c-2).
     Measured {
         /// Document ID.
@@ -902,6 +911,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 StateTarget::Automation => StateTargetRow::Automation,
                 StateTarget::Surfaces => StateTargetRow::Surfaces,
                 StateTarget::Layout => StateTargetRow::Layout,
+                StateTarget::Mixer => StateTargetRow::Mixer,
             },
             window: window_row(window),
         },
@@ -1097,6 +1107,45 @@ fn transport_json(doc: &str, t: &TransportState) -> Value {
     })
 }
 
+/// A slot as `state.get mixer` spells it.
+fn slot_json(s: &crate::snapshot::SlotRow) -> Value {
+    json!({ "slot": s.id, "name": s.plugin.name, "bypass": s.bypass })
+}
+
+/// A strip as `state.get mixer` spells it (plan 7b Ruling 11).
+fn strip_json(s: &crate::mixer::StripRow) -> Value {
+    use crate::mixer::{StripColourRow as K, SwatchRow as W};
+    json!({
+        "id": s.id, "name": s.name, "kind_label": s.kind_label,
+        "kind_colour": match s.kind_colour {
+            K::Channel => "channel",
+            K::Instrument => "instrument",
+            K::AuxReturn => "aux_return",
+            K::Bus => "bus",
+            K::Master => "master",
+        },
+        "colour": s.colour.map(|c| match c {
+            W::Red => "red",
+            W::Orange => "orange",
+            W::Yellow => "yellow",
+            W::Green => "green",
+            W::Teal => "teal",
+            W::Blue => "blue",
+            W::Purple => "purple",
+            W::Pink => "pink",
+        }),
+        "gain_db": s.gain_db, "pan": s.pan, "mute": s.mute, "solo": s.solo,
+        "output": s.output,
+        "automation": crate::automation::mode_text(s.automation),
+        "eq": s.eq.as_ref().map(slot_json),
+        "inserts": s.inserts.iter().map(slot_json).collect::<Vec<_>>(),
+        "sends": s.sends.iter().map(|x| json!({
+            "target": x.target, "level_db": x.level_db,
+            "pre_fader": x.pre_fader, "enabled": x.enabled,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// The reply's `result` for `r` (control spec §5.5).
 pub fn result_json(r: &ControlResult) -> Value {
     match r {
@@ -1192,6 +1241,10 @@ pub fn result_json(r: &ControlResult) -> Value {
                     "size": p.size, "views": p.views,
                 })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
+        }),
+        ControlResult::Mixer { doc, mixer } => json!({
+            "doc": doc,
+            "strips": mixer.strips.iter().map(strip_json).collect::<Vec<_>>(),
         }),
         ControlResult::Surfaces { doc, state } => json!({
             "doc": doc,

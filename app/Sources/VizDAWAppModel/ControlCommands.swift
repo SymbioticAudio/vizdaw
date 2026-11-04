@@ -728,6 +728,9 @@ public enum ControlStates {
                 layout: ViewCommands.layoutRow(
                     m, strips: (try? m.session.mixer().strips) ?? [],
                     destinations: (try? m.session.destinations()) ?? []))
+        case .mixer:
+            guard let s = try? m.session.mixer() else { return nil }
+            return .mixer(doc: doc, mixer: s)
         case .surfaces:
             guard let s = try? m.session.surfaceState() else { return nil }
             return .surfaces(doc: doc, state: s)

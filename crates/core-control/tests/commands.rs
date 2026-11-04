@@ -65,7 +65,7 @@ fn unknown_commands_and_parameters_are_refused() {
         err("app.quit", json!({"now": true})).0,
         ErrorCode::InvalidParams
     );
-    let (code, msg) = err("state.get", json!({"target": "mixer"}));
+    let (code, msg) = err("state.get", json!({"target": "mixers"}));
     assert_eq!(code, ErrorCode::InvalidParams);
     assert!(msg.starts_with("state.get: "), "{msg}");
 }
@@ -1727,5 +1727,25 @@ fn state_get_reads_layout() {
     );
     let (code, msg) = err("state.get", json!({ "target": "panes" }));
     assert_eq!(code, ErrorCode::InvalidParams);
-    assert!(msg.contains("surfaces or layout"), "{msg}");
+    assert!(msg.contains("surfaces, layout"), "{msg}");
+}
+
+/// Plan 7b Ruling 11: `state.get mixer` reads the strips; a near miss is
+/// refused.
+#[test]
+fn mixer_state_target_parses() {
+    assert_eq!(
+        ok("state.get", json!({ "target": "mixer" })),
+        Command::StateGet {
+            target: StateTarget::Mixer,
+            window: None
+        }
+    );
+    for bad in [json!("mixers"), json!("Mixer"), json!(""), json!(3)] {
+        let (code, msg) = err("state.get", json!({ "target": bad }));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    let (_, msg) = err("state.get", json!({ "target": "mixers" }));
+    assert!(msg.contains("layout or mixer"), "{msg}");
 }

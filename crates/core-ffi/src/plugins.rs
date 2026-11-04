@@ -268,7 +268,7 @@ pub fn start_bounce(
             names.insert(slot.id, slot.plugin.name.clone());
         }
     }
-    for (_, _, slot) in doc.mixer().inserts() {
+    for (_, slot) in doc.mixer().slots() {
         names.insert(slot.id, slot.plugin.name.clone());
     }
     let ready = Arc::new(AtomicBool::new(false));
@@ -506,7 +506,7 @@ pub fn slot_row(
 }
 
 /// Every plugin slot of `doc`: instruments' own slots (by destination),
-/// then inserts (by strip, in chain order).
+/// then each strip's chain (by strip: its EQ, then its inserts).
 pub fn slot_rows(
     doc: &Document,
     mut host: Option<&mut PluginHost>,
@@ -518,7 +518,7 @@ pub fn slot_rows(
             rows.push(slot_row(slot, true, host.as_deref_mut()));
         }
     }
-    for (_, _, slot) in doc.mixer().inserts() {
+    for (_, slot) in doc.mixer().slots() {
         rows.push(slot_row(slot, false, host.as_deref_mut()));
     }
     rows

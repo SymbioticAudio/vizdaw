@@ -3251,9 +3251,10 @@ pub fn service(owner: u64, doc: &Document, plugins: &mut PluginHost) -> IdleRepo
     }
 }
 
-/// Whether `doc` has a plugin slot (an insert or a plugin instrument).
+/// Whether `doc` has a plugin slot (an EQ, an insert or a plugin
+/// instrument).
 fn has_slots(doc: &Document) -> bool {
-    doc.mixer().inserts().next().is_some()
+    doc.mixer().slots().next().is_some()
         || doc.instruments().values().any(|d| {
             matches!(
                 d.kind,
@@ -3721,6 +3722,28 @@ pub fn debug_inputs(owner: u64) -> Option<InputSpec> {
 mod tests {
     use super::*;
     use platform_macos::permission::{DENIED_MESSAGE, MicAccess};
+
+    /// Review carry (B1 M1): a document whose only plug-in is an EQ has
+    /// slots, so the engine-reuse guard counts it.
+    #[test]
+    fn an_eq_only_document_has_slots() {
+        use core_model::command::{Command, MixerCmd, apply};
+        use core_model::mixer::PluginRef;
+        let d = Document::new();
+        assert!(!has_slots(&d));
+        let master = d.mixer().master();
+        let d = apply(
+            &d,
+            &Command::Mixer(MixerCmd::SetEq {
+                strip: master,
+                plugin: Some(PluginRef::from_legacy("clap:eq")),
+            }),
+        )
+        .unwrap()
+        .doc;
+        assert!(d.mixer().inserts().next().is_none(), "no insert");
+        assert!(has_slots(&d));
+    }
 
     /// Review I2: a refused buffer size is tried again with the device's
     /// own; a refusal without a size asked for is not retried.

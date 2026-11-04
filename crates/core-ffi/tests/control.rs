@@ -812,3 +812,126 @@ fn layout_result_json() {
     );
     assert_eq!(j["views"][0]["panes"][2]["shown"], false);
 }
+
+/// Plan 7b Ruling 11: `state.get mixer` answers each strip with exactly
+/// the ruling's keys; the demo's synth has no EQ, the instrument kind
+/// colour and no colour of its own.
+#[test]
+fn state_get_mixer_answers_json() {
+    use core_control::request::StateTarget;
+    assert!(matches!(
+        request_of(
+            Command::StateGet {
+                target: StateTarget::Mixer,
+                window: None
+            },
+            || unreachable!()
+        ),
+        Some(ControlRequest::State {
+            target: vizdaw_ffi::StateTargetRow::Mixer,
+            window: None
+        })
+    ));
+    let session = Session::new_demo().unwrap();
+    let mixer = session.mixer().unwrap();
+    let j = result_json(&ControlResult::Mixer {
+        doc: "D".into(),
+        mixer,
+    });
+    assert_eq!(j["doc"], "D");
+    let strips = j["strips"].as_array().unwrap();
+    assert_eq!(strips.len(), 2);
+    let keys = [
+        "id",
+        "name",
+        "kind_label",
+        "kind_colour",
+        "colour",
+        "gain_db",
+        "pan",
+        "mute",
+        "solo",
+        "output",
+        "automation",
+        "eq",
+        "inserts",
+        "sends",
+    ];
+    for s in strips {
+        let mut have: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
+        have.sort_unstable();
+        let mut want = keys.to_vec();
+        want.sort_unstable();
+        assert_eq!(have, want, "{s}");
+    }
+    let synth = &strips[0];
+    assert_eq!(synth["name"], "Built-in Synth");
+    assert_eq!(synth["kind_label"], "Built-in Synth");
+    assert_eq!(synth["kind_colour"], "instrument");
+    assert_eq!(synth["eq"], Value::Null);
+    assert_eq!(synth["colour"], Value::Null);
+    assert_eq!(synth["output"], Value::Null);
+    assert_eq!(synth["automation"], "read");
+    assert_eq!(synth["gain_db"], 0.0);
+    assert_eq!(synth["inserts"], json!([]));
+    assert_eq!(synth["sends"], json!([]));
+    assert_eq!(strips[1]["kind_colour"], "master");
+}
+
+/// Plan 7b Ruling 11: the EQ, inserts and sends in the channel's
+/// spelling, and a user colour by its swatch name.
+#[test]
+fn state_get_mixer_spells_slots_sends_and_colours() {
+    use vizdaw_ffi::{
+        MixerSnapshot, PluginFormatTag, PluginRefRow, SendRow, SlotRow, SlotStatus, StripColourRow,
+        SwatchRow,
+    };
+    let session = Session::new_demo().unwrap();
+    let mut m: MixerSnapshot = session.mixer().unwrap();
+    let slot = |id: u64, name: &str, bypass: bool| SlotRow {
+        id,
+        plugin: PluginRefRow {
+            format: PluginFormatTag::Clap,
+            id: "x".into(),
+            name: name.into(),
+            vendor: "V".into(),
+            version: "1".into(),
+        },
+        instrument: false,
+        bypass,
+        sidechain: None,
+        status: SlotStatus::Live,
+        latency: 0,
+        has_sidechain_input: false,
+        outputs: 1,
+        has_editor: false,
+    };
+    m.strips[0].eq = Some(slot(9, "Tone", true));
+    m.strips[0].inserts = vec![slot(10, "Gain", false)];
+    m.strips[0].sends = vec![SendRow {
+        target: 7,
+        level_db: -6.0,
+        pre_fader: false,
+        enabled: true,
+    }];
+    m.strips[0].colour = Some(SwatchRow::Pink);
+    m.strips[0].output = Some(7);
+    m.strips[1].kind_colour = StripColourRow::AuxReturn;
+    let j = result_json(&ControlResult::Mixer {
+        doc: "D".into(),
+        mixer: m,
+    });
+    let s = &j["strips"][0];
+    assert_eq!(s["eq"], json!({"slot": 9, "name": "Tone", "bypass": true}));
+    assert_eq!(
+        s["inserts"],
+        json!([{"slot": 10, "name": "Gain", "bypass": false}])
+    );
+    assert_eq!(
+        s["sends"],
+        json!([{"target": 7, "level_db": -6.0, "pre_fader": false, "enabled": true}])
+    );
+    assert_eq!(s["colour"], "pink");
+    assert_eq!(s["output"], 7);
+    assert_eq!(j["strips"][1]["kind_colour"], "aux_return");
+}
