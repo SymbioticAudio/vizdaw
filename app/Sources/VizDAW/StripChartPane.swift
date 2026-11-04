@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -41,7 +42,9 @@ struct StripChartHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> StripChartView { StripChartView(model: model) }
 
-    func updateNSView(_ view: StripChartView, context: Context) {}
+    func updateNSView(_ view: StripChartView, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 /// Mode, operation, shape and its parameters, step, the lane shown and the

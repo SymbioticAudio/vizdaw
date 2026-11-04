@@ -216,7 +216,7 @@ enum ControlChannel {
             if target == .windows {
                 answer(server, token, .done(.windows(windows: ControlWindows.list(), alerts: alerts.map {
                     AlertRow(title: $0.title, message: $0.message)
-                })))
+                }, theme: appearancePreferences.theme.id)))
             } else if let (id, m) = ControlWindows.document(window),
                 let r = ControlStates.state(target, id, m)
             {
@@ -530,6 +530,8 @@ final class AppControlHost: ControlHost {
 
     var nudge: NudgeSettings { editingPreferences.nudge }
     var keys: KeyBindings { keyBindings }
+    /// `ui.theme`'s preference (plan 7b Task B4).
+    var appearance: AppearancePreferences { appearancePreferences }
     var externalEditor: ExternalEditorChoice {
         if ProcessInfo.processInfo.environment["VIZDAW_EXTERNAL_EDITOR"] == "stub" { return .stub }
         return editingPreferences.externalEditor.map { .app($0) } ?? .none

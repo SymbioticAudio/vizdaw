@@ -1,10 +1,17 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
 /// The list's table: hands keys and focus changes to its view first.
-public final class ListTable: NSTableView {
+public final class ListTable: NSTableView, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     weak var owner: ListEditorView?
 
     public override func keyDown(with e: NSEvent) {
@@ -27,7 +34,13 @@ public final class ListTable: NSTableView {
 /// A cell's text field: tells the list the moment it takes the keyboard
 /// (the field editor goes in), before any key is typed, so a first Space
 /// types a space and Return ends the edit.
-final class ListCellField: NSTextField {
+final class ListCellField: NSTextField, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     weak var list: ListEditorView?
 
     override func becomeFirstResponder() -> Bool {
@@ -42,7 +55,13 @@ final class ListCellField: NSTextField {
 /// column headers and plain text-field cells, so VoiceOver reads it as a
 /// table (Plan 4c Ruling 20).
 @MainActor
-public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     /// The text-editing owner while a cell is edited (Plan 4c Ruling 21);
     /// each slot's list registers its own, so two lists editing at once
     /// (the pane and a torn window) don't end each other's.

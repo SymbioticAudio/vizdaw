@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -21,7 +22,9 @@ struct PianoRollHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> PianoRollContainer { PianoRollContainer(model: model) }
 
-    func updateNSView(_ view: PianoRollContainer, context: Context) {}
+    func updateNSView(_ view: PianoRollContainer, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 /// Tool, keyboard, shown lanes, edit lane, panes, row height and zoom.

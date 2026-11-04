@@ -1,4 +1,5 @@
 import AppKit
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -11,7 +12,13 @@ public enum KeyboardLabels {
 /// aligned with the note rows; a click auditions through the edit lane's
 /// destination, a drag plays each key it crosses (Plan 4b Ruling 6).
 @MainActor
-public final class PianoKeyboardView: NSView {
+public final class PianoKeyboardView: NSView, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public let model: PianoRollModel
     public var pitchAxis = PitchAxis() { didSet { needsDisplay = true } }
     private(set) var pressed: UInt8?

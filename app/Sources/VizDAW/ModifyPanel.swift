@@ -41,8 +41,9 @@ final class ModifyPanelController: NSWindowController, NSWindowDelegate {
         panel.title = "Select and Modify — \(model.snapshot.title)"
         super.init(window: panel)
         ControlWindows.tag(panel, .modifyPanel, doc: doc)
+        ThemeWindows.style(panel)
         panel.contentView = NSHostingView(
-            rootView: SelectModifyPanelView(model: model.selectModify, editor: model.editor))
+            rootView: SelectModifyPanelView(model: model.selectModify, editor: model.editor).themedRoot())
         panel.delegate = self
         panel.center()
     }

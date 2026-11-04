@@ -29,6 +29,29 @@ pub enum ParamKind {
     },
     /// An absolute path with any extension.
     File,
+    /// One of `values`, or `prefix` followed by 1 to [`MAX_SLUG`] lowercase
+    /// ASCII letters, digits and inner hyphens (a user theme, plan 7b).
+    ChoiceOrPrefixed {
+        /// The fixed choices.
+        values: &'static [&'static str],
+        /// What starts an open-ended choice (`user.`).
+        prefix: &'static str,
+    },
+}
+
+/// The longest slug after a [`ParamKind::ChoiceOrPrefixed`] prefix.
+pub const MAX_SLUG: usize = 64;
+
+/// `s` is 1 to [`MAX_SLUG`] lowercase ASCII letters, digits and hyphens,
+/// starting and ending with a letter or digit.
+pub fn is_slug(s: &str) -> bool {
+    let b = s.as_bytes();
+    let alnum = |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    !b.is_empty()
+        && b.len() <= MAX_SLUG
+        && b.iter().all(|c| alnum(c) || *c == b'-')
+        && b.first().is_some_and(alnum)
+        && b.last().is_some_and(alnum)
 }
 
 /// One parameter of a command.
@@ -227,6 +250,30 @@ const ON: &[ParamSpec] = &[ParamSpec {
     kind: ParamKind::Flag,
     required: false,
     help: "Set on or off; absent toggles.",
+}];
+
+/// The built-in themes' IDs (symbiotic-design 0.2.0 `Theme.all`).
+pub const THEME_IDS: &[&str] = &[
+    "classic-light",
+    "studio-dark",
+    "flat",
+    "console",
+    "symbiotic",
+    "eg13",
+];
+
+/// The prefix of a user theme's ID (controller ruling R-UT).
+pub const USER_THEME_PREFIX: &str = "user.";
+
+/// `ui.theme`'s parameter (plan 7b Ruling 11, R-UT).
+const UI_THEME_PARAMS: &[ParamSpec] = &[ParamSpec {
+    name: "theme",
+    kind: ParamKind::ChoiceOrPrefixed {
+        values: THEME_IDS,
+        prefix: USER_THEME_PREFIX,
+    },
+    required: true,
+    help: "A built-in theme, or a user theme's `user.` ID (see Settings › Appearance).",
 }];
 
 /// `ui.pane`'s parameters (plan 7a Task 5).
@@ -945,6 +992,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         params: UI_PANE_PARAMS,
         ..key_only(cmd("ui.pane", "View", "Set Pane", None, true))
     },
+    CommandSpec {
+        params: UI_THEME_PARAMS,
+        ..key_only(cmd("ui.theme", "View", "Theme", None, false))
+    },
     cmd(
         "editors.piano_roll",
         "Editors",
@@ -1557,6 +1608,22 @@ pub fn validate_args(
                     )));
                 }
             },
+            ParamKind::ChoiceOrPrefixed { values, prefix } => match p.opt_str(s.name, MAX_PATH)? {
+                None => None,
+                Some(v)
+                    if values.contains(&v.as_str())
+                        || v.strip_prefix(prefix).is_some_and(is_slug) =>
+                {
+                    Some(ArgValue::Text(v))
+                }
+                Some(_) => {
+                    return Err(p.error(format!(
+                        "`{}` must be one of {}, or {prefix}name (lowercase letters, digits and hyphens)",
+                        s.name,
+                        values.join(", ")
+                    )));
+                }
+            },
         };
         match v {
             Some(v) => out.push((s.name.to_string(), v)),
@@ -1631,6 +1698,9 @@ fn kind_json(k: ParamKind) -> Value {
         ParamKind::Choice(values) => json!({"type": "choice", "values": values}),
         ParamKind::Int { min, max } => json!({"type": "int", "min": min, "max": max}),
         ParamKind::File => json!({"type": "path"}),
+        ParamKind::ChoiceOrPrefixed { values, prefix } => {
+            json!({"type": "choice", "values": values, "or_prefixed": prefix})
+        }
     }
 }
 

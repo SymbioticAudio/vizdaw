@@ -11,6 +11,8 @@ final class FakeControlHost: ControlHost {
     /// The editor `region.open_external` uses without `app` (plan 5f-3).
     var externalEditor: ExternalEditorChoice = .none
     let keys = KeyBindings(defaults: MemoryDefaults())
+    /// The theme preference `ui.theme` sets (plan 7b Task B4).
+    let appearance = AppearancePreferences(defaults: MemoryDefaults())
     /// Whether `focus` finds the fields.
     var fieldsShown = true
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {

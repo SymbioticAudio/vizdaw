@@ -682,6 +682,8 @@ pub enum ControlResult {
         windows: Vec<WindowRow>,
         /// App-level alerts not shown (the channel suppresses them).
         alerts: Vec<AlertRow>,
+        /// The app's theme ID (plan 7b Ruling 11): app-wide, not per window.
+        theme: String,
     },
     /// `ui.tree`.
     Tree {
@@ -1349,13 +1351,18 @@ pub fn result_json(r: &ControlResult) -> Value {
             "lanes": s.lanes.iter().map(|l| json!({ "seq": l.seq, "lane": l.lane })).collect::<Vec<_>>(),
             "events": s.events,
         }),
-        ControlResult::Windows { windows, alerts } => json!({
+        ControlResult::Windows {
+            windows,
+            alerts,
+            theme,
+        } => json!({
             "windows": windows.iter().map(|w| json!({
                 "number": w.number, "title": w.title, "kind": window_kind(w.kind), "doc": w.doc,
                 "key": w.key, "main": w.main, "visible": w.visible,
                 "frame": frame(w.x, w.y, w.width, w.height),
             })).collect::<Vec<_>>(),
             "alerts": alerts.iter().map(alert_json).collect::<Vec<_>>(),
+            "theme": theme,
         }),
         ControlResult::Tree {
             window,

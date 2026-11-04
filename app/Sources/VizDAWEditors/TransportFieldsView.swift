@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -9,7 +10,13 @@ import VizDAWCore
 /// position, Escape reverts. Each field is an accessibility element named
 /// by its title, so `vizctl find Position` reaches it.
 @MainActor
-public final class TransportFieldsView: NSView, NSTextFieldDelegate {
+public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     /// The text-editing owner while a field has the keyboard.
     public static let textOwner = "transport"
     public let document: DocumentModel
@@ -181,7 +188,13 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate {
 /// A transport field takes the keyboard only when clicked or focused by
 /// its key, never as the window's first text field when it opens, so the
 /// transport and step keys work from the start (plan 4f Ruling 16).
-final class TransportTextField: NSTextField {
+final class TransportTextField: NSTextField, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     var armed = false
     /// Its name for VoiceOver and the control channel ("Position").
     var title = "" {
@@ -223,7 +236,13 @@ public protocol KeyCapturing: AnyObject {}
 /// Records one key for a binding (plan 4f Ruling 17): press it (or press
 /// its button with VoiceOver), then press the key; Escape cancels.
 @MainActor
-public final class KeyRecorderView: NSView, KeyCapturing {
+public final class KeyRecorderView: NSView, KeyCapturing, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     /// The command whose key is recorded (its title names the button).
     public var title = ""
     /// Called with the recorded key's chord text (`⇧⌘K`).

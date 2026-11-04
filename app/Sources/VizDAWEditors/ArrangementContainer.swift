@@ -1,10 +1,17 @@
 import AppKit
+import SymbioticTokens
 import VizDAWAppModel
 
 /// Lane headers on the left, the arrangement canvas on the right; they
 /// scroll vertically together.
 @MainActor
-public final class ArrangementContainer: NSView {
+public final class ArrangementContainer: NSView, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public let headers: LaneHeaderView
     public let canvas: ArrangementView
 

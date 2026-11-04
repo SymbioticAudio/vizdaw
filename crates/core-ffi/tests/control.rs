@@ -935,3 +935,17 @@ fn state_get_mixer_spells_slots_sends_and_colours() {
     assert_eq!(s["output"], 7);
     assert_eq!(j["strips"][1]["kind_colour"], "aux_return");
 }
+
+/// Plan 7b Ruling 11: `state.get windows` names the app's theme, which is
+/// app-wide (not per window).
+#[test]
+fn windows_json_names_the_theme() {
+    let j = result_json(&ControlResult::Windows {
+        windows: vec![],
+        alerts: vec![],
+        theme: "flat".into(),
+    });
+    assert_eq!(j["theme"], "flat");
+    assert_eq!(j["windows"], json!([]));
+    assert_eq!(j["alerts"], json!([]));
+}

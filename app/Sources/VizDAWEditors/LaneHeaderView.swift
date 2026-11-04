@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -7,7 +8,13 @@ import VizDAWCore
 /// renames), monitor/mute/solo/arm, destination and input menus, the input
 /// meter (plan 5d-2 Task 5), and an "Add Lane" row.
 @MainActor
-public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwner {
+public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwner, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public let document: DocumentModel
     var editor: EditorModel { document.editor }
     public var verticalOffset: CGFloat = 0 {

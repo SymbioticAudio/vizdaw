@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -24,7 +25,9 @@ struct ListHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> ListEditorView { ListEditorView(model: model) }
 
-    func updateNSView(_ view: ListEditorView, context: Context) {}
+    func updateNSView(_ view: ListEditorView, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 /// Insert, columns, what is shown, and MIDI In (Plan 4c Rulings 14, 18, 19).

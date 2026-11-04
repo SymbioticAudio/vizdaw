@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -10,7 +11,13 @@ import VizDAWCore
 /// below the last lane for a lane of its own), the context menu holds the
 /// row commands.
 @MainActor
-public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
+public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public static let width: CGFloat = 150
 
     public let model: DrumGridModel
@@ -316,7 +323,13 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate {
 /// The drum grid's views: the row headers beside the hits, sharing one
 /// vertical scroll.
 @MainActor
-public final class DrumGridContainer: NSView {
+public final class DrumGridContainer: NSView, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public let model: DrumGridModel
     public let canvas: DrumGridView
     public let headers: DrumRowHeaderView

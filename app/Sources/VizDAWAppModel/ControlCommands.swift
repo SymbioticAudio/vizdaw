@@ -166,6 +166,8 @@ public protocol ControlHost: AnyObject {
     /// Ruling 5): the stub when `VIZDAW_EXTERNAL_EDITOR=stub`, else Settings
     /// › Editing's choice (pre-flight I7(c)).
     var externalEditor: ExternalEditorChoice { get }
+    /// The app's theme preference (plan 7b Task B4): `ui.theme` sets it.
+    var appearance: AppearancePreferences { get }
 }
 
 /// Runs registered menu commands (control spec §6) on a document model
@@ -210,7 +212,7 @@ public enum ControlCommands {
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
-            .union(ViewCommands.ids)
+            .union(ViewCommands.ids).union(AppearanceCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -251,6 +253,9 @@ public enum ControlCommands {
             return AudioCommands.runSet(args, host: host)
         case AutomationCommands.suspend:
             return AutomationCommands.runSuspend(args)
+        case _ where AppearanceCommands.ids.contains(id):
+            // App-wide (plan 7b Ruling 11): no document needed.
+            return AppearanceCommands.run(args, prefs: host.appearance)
         case _ where SurfaceCommands.ids.contains(id):
             // Process-wide or per document (plan 5f-1 Task 9).
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)

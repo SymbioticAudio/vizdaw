@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -31,7 +32,9 @@ struct DrumGridHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> DrumGridContainer { DrumGridContainer(model: model) }
 
-    func updateNSView(_ view: DrumGridContainer, context: Context) {}
+    func updateNSView(_ view: DrumGridContainer, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 /// Tool, view, step, spacing, length, velocity, Add Row, and a menu with

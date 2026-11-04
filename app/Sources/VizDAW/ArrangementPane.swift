@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -39,7 +40,9 @@ struct ArrangementHost: NSViewRepresentable {
         ArrangementContainer(document: document)
     }
 
-    func updateNSView(_ view: ArrangementContainer, context: Context) {}
+    func updateNSView(_ view: ArrangementContainer, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 struct ArrangementBar: View {
@@ -191,7 +194,9 @@ struct TransportFieldsHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TransportFieldsView { TransportFieldsView(document: document) }
 
-    func updateNSView(_ view: TransportFieldsView, context: Context) {}
+    func updateNSView(_ view: TransportFieldsView, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 
     /// Its fitting width when asked for its ideal size, so the transport
     /// bar can tell whether one row holds it; else what it is offered.

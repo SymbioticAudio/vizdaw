@@ -447,8 +447,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        153,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands"
+        154,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1714,6 +1714,72 @@ fn ui_commands_check_their_params() {
             .unwrap()
             .menu_item
     );
+}
+
+/// Plan 7b Task B4 (Ruling 11, controller ruling R-UT): `ui.theme` takes a
+/// built-in theme's ID or a user theme's `user.` ID, and nothing else.
+#[test]
+fn ui_theme_checks_its_params() {
+    let run = |params: Value| json!({ "id": "ui.theme", "params": params });
+    for id in [
+        "classic-light",
+        "studio-dark",
+        "flat",
+        "console",
+        "symbiotic",
+        "eg13",
+        "user.my-dark",
+        "user.a",
+        "user.2026-blue",
+    ] {
+        assert_eq!(
+            ok("command.run", run(json!({ "theme": id }))),
+            Command::CommandRun {
+                id: "ui.theme".into(),
+                args: vec![("theme".into(), ArgValue::Text(id.into()))],
+                window: None,
+            },
+            "{id}"
+        );
+    }
+    let long = format!("user.{}", "a".repeat(65));
+    for bad in [
+        json!({}),
+        json!({ "theme": "svp-light" }),
+        json!({ "theme": 7 }),
+        json!({ "theme": "console", "extra": 1 }),
+        json!({ "theme": "" }),
+        json!({ "theme": "Console" }),
+        json!({ "theme": "user." }),
+        json!({ "theme": "user.My-Dark" }),
+        json!({ "theme": "user.a/b" }),
+        json!({ "theme": "user.a b" }),
+        json!({ "theme": "user.-a" }),
+        json!({ "theme": "user.a\u{0}" }),
+        json!({ "theme": long }),
+        json!({ "theme": "x".repeat(70_000) }),
+        json!({ "theme": null }),
+        json!({ "theme": ["flat"] }),
+    ] {
+        assert_eq!(
+            err("command.run", run(bad.clone())).0,
+            ErrorCode::InvalidParams,
+            "{bad}"
+        );
+    }
+    let spec = registry::find("ui.theme").unwrap();
+    assert!(!spec.menu_item && !spec.document);
+    assert_eq!((spec.menu, spec.title), ("View", "Theme"));
+    let list = registry::list_json();
+    let theme = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "ui.theme")
+        .unwrap();
+    assert_eq!(theme["params"][0]["type"], "choice");
+    assert_eq!(theme["params"][0]["values"][5], "eg13");
+    assert_eq!(theme["params"][0]["or_prefixed"], "user.");
 }
 
 #[test]

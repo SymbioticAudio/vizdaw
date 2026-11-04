@@ -159,7 +159,8 @@ final class PluginWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         ControlWindows.tag(window, .plugin, doc: docID)
         window.delegate = self
-        let hosting = NSHostingView(rootView: PluginWindowContent(model: model, editorHost: editorHost))
+        ThemeWindows.style(window)
+        let hosting = NSHostingView(rootView: PluginWindowContent(model: model, editorHost: editorHost).themedRoot())
         // The window, not the SwiftUI content, decides the size.
         hosting.sizingOptions = []
         window.contentView = hosting

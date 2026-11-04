@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -7,7 +8,13 @@ import VizDAWCore
 /// Ruling 14): the edit lane's notes' values of one kind; any tool but the
 /// eraser draws them, the eraser removes them; a stroke is one undo step.
 @MainActor
-public final class ExpressionPaneView: NSView, TimeAxisFollower {
+public final class ExpressionPaneView: NSView, TimeAxisFollower, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public let model: PianoRollModel
     var editor: EditorModel { model.editor }
     public var timeAxis = TimeAxis() { didSet { needsDisplay = true } }

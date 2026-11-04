@@ -1,12 +1,19 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
 /// The audio regions of the shown lanes, one line per output path, with
 /// mute and solo per path (spec §4b, Plan 4b Ruling 13).
 @MainActor
-public final class RegionStripView: NSView, TimeAxisFollower {
+public final class RegionStripView: NSView, TimeAxisFollower, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public let model: PianoRollModel
     var editor: EditorModel { model.editor }
     public var timeAxis = TimeAxis() { didSet { needsDisplay = true } }

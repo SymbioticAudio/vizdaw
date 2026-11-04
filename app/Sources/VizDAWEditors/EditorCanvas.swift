@@ -1,11 +1,18 @@
 import AppKit
 import QuartzCore
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
 /// A layer-backed, flipped view that draws through a closure and lets
 /// every event through to its canvas.
-public final class CanvasLayerView: NSView {
+public final class CanvasLayerView: NSView, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     var paint: (@MainActor (CGRect) -> Void)?
 
     override init(frame: NSRect) {
@@ -98,7 +105,13 @@ final class CanvasElement: NSAccessibilityElement {
 /// scrolling, zoom, the ruler, auto-scroll, snap toggling, the playhead
 /// and the accessibility container.
 @MainActor
-open class EditorCanvas: NSView {
+open class EditorCanvas: NSView, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = .classicLight {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public static let rulerHeight: CGFloat = 22
 
     public let grid = CanvasLayerView()
