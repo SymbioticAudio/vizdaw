@@ -38,6 +38,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     public init(document: DocumentModel) {
         self.document = document
         super.init(frame: .zero)
+        clipsToBounds = true
         wantsLayer = true
         observe()
         observeMeters()

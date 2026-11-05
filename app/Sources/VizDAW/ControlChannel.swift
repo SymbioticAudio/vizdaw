@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import ScreenCaptureKit
 import SwiftUI
 import VizDAWAppModel
 import VizDAWCore
@@ -164,6 +165,47 @@ enum ControlChannel {
         }
     }
 
+    /// `ui.screenshot {live: true}`: the window as the window server shows
+    /// it (control spec §9), through ScreenCaptureKit. It needs Screen
+    /// Recording access, which it never asks for: `CGPreflightScreenCaptureAccess`
+    /// only reports it. Only the `Sendable` facts of the window go into the
+    /// task; the framework's objects stay inside it (Swift 6.1).
+    static func liveScreenshot(_ server: ControlServer, _ token: UInt64, of w: NSWindow, path: String, scale: Double?) {
+        guard CGPreflightScreenCaptureAccess() else {
+            return answer(server, token, .failed(.of(.failed,
+                "live screenshots need Screen Recording access for VizDAW (System Settings › Privacy & Security); omit `live` for the app-drawn picture")))
+        }
+        let factor = scale.map { CGFloat($0) } ?? w.backingScaleFactor
+        let dw = (Double(w.frame.width) * Double(factor)).rounded()
+        let dh = (Double(w.frame.height) * Double(factor)).rounded()
+        guard let id = CGWindowID(exactly: w.windowNumber), id != 0, dw.isFinite, dh.isFinite, dw >= 1, dh >= 1,
+            dw <= 16_384, dh <= 16_384, dw * dh <= 64_000_000
+        else { return answer(server, token, .failed(.of(.failed, "the window could not be captured"))) }
+        let (width, height, number) = (Int(dw), Int(dh), Int64(w.windowNumber))
+        Task { @MainActor in
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let target = content.windows.first(where: { $0.windowID == id }) else {
+                    return answer(server, token, .failed(.of(.failed,
+                        "the window is not on screen; live screenshots need it visible")))
+                }
+                let config = SCStreamConfiguration()
+                config.width = width
+                config.height = height
+                let image = try await SCScreenshotManager.captureImage(
+                    contentFilter: SCContentFilter(desktopIndependentWindow: target), configuration: config)
+                guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+                    return answer(server, token, .failed(.of(.failed, "the capture could not be encoded")))
+                }
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+                answer(server, token, .done(.screenshot(
+                    window: number, path: path, width: UInt32(image.width), height: UInt32(image.height))))
+            } catch {
+                answer(server, token, .failed(.of(.failed, "live capture failed: \(error.localizedDescription)")))
+            }
+        }
+    }
+
     static func later(_ token: UInt64, seconds: Double, _ step: @escaping @MainActor (Bool) -> Bool) {
         if !step(false) {
             deferred.append(Deferred(token: token, deadline: clock.now + .seconds(seconds), step: step))
@@ -258,8 +300,9 @@ enum ControlChannel {
             // The focusing click first; the keys once it was handled (and a
             // number box it started editing has the keyboard).
             send(server, token, click, w, at, focusing: true) { keys(server, token, strokes, w) }
-        case .screenshot(let window, let path, let scale):
+        case .screenshot(let window, let path, let scale, let live):
             guard let w = ControlWindows.window(window) else { return answer(server, token, noWindow) }
+            if live { return liveScreenshot(server, token, of: w, path: path, scale: scale) }
             guard let png = WindowSnapshot.png(of: w, scale: scale.map { CGFloat($0) }) else {
                 return answer(server, token, .failed(.of(.failed, "the window could not be rendered")))
             }
@@ -509,6 +552,13 @@ struct WindowTag: NSViewRepresentable {
     let doc: UUID?
 
     final class Marker: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+        }
+
+        required init?(coder: NSCoder) { nil }
+
         var kind: WindowKindRow = .other
         var doc: UUID?
         // Inert for the user: clicks and VoiceOver pass through it.

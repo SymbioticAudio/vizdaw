@@ -31,6 +31,9 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     /// The field being typed in.
     private(set) var editing: TransportField?
     private let stack = NSStackView()
+    /// The stack's insets: `theme.spacing.xs` each, so a field's focus ring
+    /// (it draws outside the field) lies inside this view, which clips.
+    private var insets: [NSLayoutConstraint] = []
     /// While a field edits: the mouse-down monitor and the window's
     /// resign-key observer that end the edit (plan 7d pre-flight C1).
     private var mouseMonitor: Any?
@@ -39,6 +42,7 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     public init(document: DocumentModel) {
         self.document = document
         super.init(frame: .zero)
+        clipsToBounds = true
         stack.orientation = .horizontal
         stack.translatesAutoresizingMaskIntoConstraints = false
         // Narrower than its fitting width, the fields give (not the edge).
@@ -68,14 +72,14 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         let order = TransportField.allCases.compactMap { fields[$0] }
         for (i, field) in order.enumerated() { field.nextKeyView = order[(i + 1) % order.count] }
         addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
-            // The last field stays inside: the fields narrow before it is cut.
-            (order.last ?? stack).trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
+        let leading = stack.leadingAnchor.constraint(equalTo: leadingAnchor)
+        let top = stack.topAnchor.constraint(equalTo: topAnchor)
+        let bottom = stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+        // The last field stays inside: the fields narrow before it is cut.
+        let last = (order.last ?? stack).trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor)
+        insets = [leading, top, bottom, last]
+        NSLayoutConstraint.activate(
+            insets + [stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor)])
         applyTheme()
         observe()
     }
@@ -87,6 +91,13 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         let t = theme
         appearance = NSAppearance(named: t.appearance.nsAppearanceName)
         stack.spacing = t.spacing.s
+        let inset = t.spacing.xs
+        if insets.count == 4 {
+            insets[0].constant = inset
+            insets[1].constant = inset
+            insets[2].constant = -inset
+            insets[3].constant = -inset
+        }
         for (f, field) in fields where f == .position || f == .editOut {
             stack.setCustomSpacing(t.spacing.l, after: field)
         }
@@ -104,7 +115,10 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
 
     /// The width the five fields and their labels need (the transport bar
     /// puts them on a row of their own when its row cannot give it).
-    public var fittingWidth: CGFloat { stack.fittingSize.width }
+    public var fittingWidth: CGFloat { stack.fittingSize.width + 2 * theme.spacing.xs }
+
+    /// The height the fields and their focus-ring room need.
+    public var fittingHeight: CGFloat { stack.fittingSize.height + 2 * theme.spacing.xs }
 
     /// A field's width, and the least it narrows to.
     static let fieldWidth: CGFloat = 86
@@ -409,6 +423,13 @@ public final class KeyRecorderView: NSView, KeyCapturing, ThemedView {
     public private(set) var recording = false {
         didSet { needsDisplay = true }
     }
+
+    public override init(frame: NSRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+    }
+
+    public required init?(coder: NSCoder) { nil }
 
     public override var acceptsFirstResponder: Bool { true }
 

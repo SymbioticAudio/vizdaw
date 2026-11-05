@@ -231,7 +231,7 @@ struct TransportFieldsHost: NSViewRepresentable {
         // Asked for no width, it reports its least (the bar's flow keeps it
         // at least this wide).
         let w = proposal.width.flatMap { $0.isFinite ? max($0, nsView.minimumWidth) : nil } ?? fit
-        return CGSize(width: w, height: 22)
+        return CGSize(width: w, height: nsView.fittingHeight)
     }
 }
 

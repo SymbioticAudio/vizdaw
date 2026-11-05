@@ -56,18 +56,18 @@ private let beat: Int64 = 15_360
         // The second row at the 700-point minimum (700 − 16): every field
         // shows, narrowed from 86 towards 72, its label whole.
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 684, height: 22), styleMask: [.titled], backing: .buffered,
+            contentRect: NSRect(x: 0, y: 0, width: 684, height: v.fittingHeight), styleMask: [.titled], backing: .buffered,
             defer: true)
         w.isReleasedWhenClosed = false
         defer { w.close() }
         // As SwiftUI sizes its host: a width the fields cannot push.
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 684, height: 22))
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 684, height: v.fittingHeight))
         w.contentView = box
         v.translatesAutoresizingMaskIntoConstraints = false
         box.addSubview(v)
         NSLayoutConstraint.activate([
             v.leadingAnchor.constraint(equalTo: box.leadingAnchor), v.topAnchor.constraint(equalTo: box.topAnchor),
-            v.widthAnchor.constraint(equalToConstant: 684), v.heightAnchor.constraint(equalToConstant: 22),
+            v.widthAnchor.constraint(equalToConstant: 684), v.heightAnchor.constraint(equalToConstant: v.fittingHeight),
         ])
         box.layoutSubtreeIfNeeded()
         for f in TransportField.allCases {

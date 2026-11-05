@@ -1,4 +1,5 @@
 import AppKit
+import SymbioticTokens
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -309,5 +310,67 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         h.removeFromSuperview()
         #expect(m.editor.textEditors.isEmpty)
         #expect(m.transportKeysEnabled)
+    }
+}
+
+// MARK: What AppKit draws
+
+private final class Swatch: NSView {
+    var colour = NSColor.white
+    override func draw(_ dirtyRect: NSRect) {
+        colour.setFill()
+        bounds.fill()
+    }
+}
+
+extension ArrangementViewTests {
+    /// The sRGB components of the pixel at `x`, `y` (row 0 is the top).
+    private func rgb(_ rep: NSBitmapImageRep, _ x: Int, _ y: Int) throws -> [CGFloat] {
+        let c = try #require(rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+        return [c.redComponent, c.greenComponent, c.blueComponent]
+    }
+
+    /// What `colour` becomes as a pixel of a snapshot (colour management
+    /// shifts exact values): a swatch of it, snapshotted and decoded alike.
+    private func painted(_ colour: NSColor) throws -> [CGFloat] {
+        let swatch = Swatch(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
+        swatch.wantsLayer = true
+        swatch.colour = colour
+        let png = try #require(WindowSnapshot.png(of: swatch, scale: 1))
+        return try rgb(try #require(NSBitmapImageRep(data: png.data)), 2, 2)
+    }
+
+    private func near(_ a: [CGFloat], _ b: [CGFloat]) -> Bool {
+        zip(a, b).allSatisfy { abs($0 - $1) <= 2.0 / 255 }
+    }
+
+    @Test func theHeadersAndAddRowShowBesideTheCanvas() throws {
+        let f = demoFake()
+        f.laneTable[3] = [lane(30, "Groove")]
+        let m = try DocumentModel(session: f)
+        #expect(m.selectedSeq == 3 && m.lanes.count == 1)
+        let container = ArrangementContainer(document: m)
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 400), styleMask: [.borderless],
+            backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        w.contentView = container
+        container.frame = NSRect(x: 0, y: 0, width: 800, height: 400)
+        container.layoutSubtreeIfNeeded()
+        let png = try #require(WindowSnapshot.png(of: w, scale: 1))
+        let rep = try #require(NSBitmapImageRep(data: png.data))
+        let theme = container.theme
+        let canvas = try painted(theme.canvas)
+        let headerBackground = try painted(theme.rulerBackground)
+        let laneHeight = container.headers.laneHeight
+        let header = try rgb(rep, Int(LaneHeaderLayout.width / 2), Int(EditorCanvas.rulerHeight + laneHeight / 2))
+        #expect(!near(header, canvas), "the header column shows, the canvas does not paint over it: \(header)")
+        // The row's bottom edge is a separator line, which the ruler or
+        // the canvas would hide if they painted over the header.
+        let rule = try rgb(rep, 50, Int(EditorCanvas.rulerHeight + laneHeight) - 1)
+        #expect(!near(rule, headerBackground), "the lane row's separator line shows: \(rule)")
+        let addTop = Int(EditorCanvas.rulerHeight + laneHeight)
+        let add = try rgb(rep, 8, addTop + 4)
+        #expect(near(add, headerBackground), "the add row is the header background: \(add) vs \(headerBackground)")
     }
 }

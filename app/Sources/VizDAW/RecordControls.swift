@@ -63,6 +63,13 @@ struct RecordControls: View {
 /// the user: clicks and VoiceOver pass through it.
 struct RecordButtonMarker: NSViewRepresentable {
     final class Marker: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+        }
+
+        required init?(coder: NSCoder) { nil }
+
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func isAccessibilityElement() -> Bool { false }
 
@@ -88,6 +95,13 @@ struct RecordPopoverAnchor: NSViewRepresentable {
     let shown: Bool
 
     final class Anchor: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+        }
+
+        required init?(coder: NSCoder) { nil }
+
         var controller: RecordPopoverController?
         var shown = false
         override func hitTest(_ point: NSPoint) -> NSView? { nil }

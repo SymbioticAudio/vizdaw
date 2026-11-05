@@ -19,6 +19,7 @@ public final class ArrangementContainer: NSView, ThemedView {
         headers = LaneHeaderView(document: document)
         canvas = ArrangementView(document: document)
         super.init(frame: .zero)
+        clipsToBounds = true
         addSubview(headers)
         addSubview(canvas)
         canvas.onVerticalScroll = { [unowned self] y in self.headers.verticalOffset = y }

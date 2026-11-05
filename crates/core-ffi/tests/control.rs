@@ -1063,3 +1063,22 @@ fn audio_editor_result_json() {
         assert_eq!(j["region"]["fade_out"]["shape"], name);
     }
 }
+
+#[test]
+fn screenshot_requests_carry_live() {
+    for live in [false, true] {
+        let r = request_of(
+            Command::UiScreenshot {
+                window: None,
+                path: Some("/tmp/a.png".into()),
+                scale: None,
+                live,
+            },
+            || unreachable!("a path was given"),
+        );
+        match r {
+            Some(ControlRequest::Screenshot { live: got, .. }) => assert_eq!(got, live),
+            other => panic!("{other:?}"),
+        }
+    }
+}

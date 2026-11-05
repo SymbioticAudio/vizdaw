@@ -46,6 +46,13 @@ public enum WindowTheming {
 /// it arrives in a window and whenever its theme changes, so a window made
 /// after the last theme change is styled at once (B4 review I1).
 public final class WindowThemeMarker: NSView {
+    public override init(frame: NSRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+    }
+
+    public required init?(coder: NSCoder) { nil }
+
     public var theme: Theme = ThemedViews.current {
         didSet { if theme != oldValue { styleWindow() } }
     }

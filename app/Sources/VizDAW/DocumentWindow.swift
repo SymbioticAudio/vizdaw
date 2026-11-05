@@ -99,6 +99,13 @@ struct WindowFrameKeeper: NSViewRepresentable {
     let model: DocumentModel
 
     final class Keeper: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+        }
+
+        required init?(coder: NSCoder) { nil }
+
         var editor: EditorModel?
         private var applied = false
         private var observers: [NSObjectProtocol] = []

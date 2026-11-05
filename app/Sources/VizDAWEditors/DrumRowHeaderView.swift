@@ -32,6 +32,7 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
     public init(model: DrumGridModel) {
         self.model = model
         super.init(frame: .zero)
+        clipsToBounds = true
         wantsLayer = true
         observe()
     }
@@ -340,6 +341,7 @@ public final class DrumGridContainer: NSView, ThemedView {
         canvas = DrumGridView(model: model)
         headers = DrumRowHeaderView(model: model)
         super.init(frame: .zero)
+        clipsToBounds = true
         addSubview(headers)
         addSubview(canvas)
         canvas.onVerticalScroll = { [weak self] y in self?.headers.verticalOffset = y }

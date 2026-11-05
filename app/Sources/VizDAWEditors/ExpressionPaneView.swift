@@ -32,6 +32,7 @@ public final class ExpressionPaneView: NSView, TimeAxisFollower, ThemedView {
     public init(model: PianoRollModel) {
         self.model = model
         super.init(frame: .zero)
+        clipsToBounds = true
         wantsLayer = true
         observe()
     }

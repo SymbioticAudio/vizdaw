@@ -42,7 +42,10 @@ fn every_command_validates_its_minimal_form() {
             json!({"from": {"x": 1, "y": 2}, "to": "0.1:00000000"}),
         ),
         ("ui.key", json!({"key": "space"})),
-        ("ui.screenshot", json!({"path": shot.to_str().unwrap()})),
+        (
+            "ui.screenshot",
+            json!({"path": shot.to_str().unwrap(), "live": false}),
+        ),
         ("app.new_demo", json!({})),
         ("app.open", json!({"path": "/tmp/a.vizdaw"})),
         ("app.quit", json!({})),
@@ -204,6 +207,25 @@ fn paths_are_absolute_and_screenshots_need_an_existing_folder() {
     );
     assert_eq!(
         err("ui.screenshot", json!({"scale": 9})).0,
+        ErrorCode::InvalidParams
+    );
+}
+
+#[test]
+fn screenshot_live_is_a_bool() {
+    let live = |params: Value| match ok("ui.screenshot", params) {
+        Command::UiScreenshot { live, .. } => live,
+        other => panic!("{other:?}"),
+    };
+    assert!(live(json!({"live": true})));
+    assert!(!live(json!({"live": false})));
+    assert!(!live(json!({})));
+    assert_eq!(
+        err("ui.screenshot", json!({"live": "yes"})).0,
+        ErrorCode::InvalidParams
+    );
+    assert_eq!(
+        err("ui.screenshot", json!({"live": 1})).0,
         ErrorCode::InvalidParams
     );
 }
