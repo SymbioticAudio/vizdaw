@@ -213,7 +213,6 @@ final class HoldButtonView: NSButton {
 
     private var timer: Timer?
     private var holding = false
-    private var ticks = 0
     /// `systemUptime` at the press (internal: tests age it).
     var holdStartedAt: TimeInterval = 0
 
@@ -226,9 +225,21 @@ final class HoldButtonView: NSButton {
         guard isEnabled else { return super.mouseDown(with: event) }
         beginHold(shift: Self.shift(of: event))
         super.mouseDown(with: event)  // the tracking loop
-        var inside = true
-        if let w = window { inside = bounds.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil)) }
+        // The mouse-up that ended tracking decides, not the live pointer, so
+        // a channel click (a synthetic pair away from the pointer) counts.
+        let up = NSApp.currentEvent
+        let inside = Self.endedInside(
+            up, in: window, bounds: bounds, locationInView: { self.convert($0, from: nil) })
         endHold(inside: inside)
+    }
+
+    /// Whether the mouse-up `up` (when it is one, in `window`) is inside
+    /// `bounds`; with no such event, inside.
+    static func endedInside(
+        _ up: NSEvent?, in window: NSWindow?, bounds: NSRect, locationInView: (NSPoint) -> NSPoint
+    ) -> Bool {
+        guard let up, up.type == .leftMouseUp, up.window === window else { return true }
+        return bounds.contains(locationInView(up.locationInWindow))
     }
 
     override func accessibilityPerformPress() -> Bool {
@@ -246,7 +257,6 @@ final class HoldButtonView: NSButton {
     func beginHold(shift: Bool) {
         if holding { cancelHold() }
         holding = true
-        ticks = 0
         holdStartedAt = ProcessInfo.processInfo.systemUptime
         onPress(shift)
         // `onPress` may have ended the hold (a view torn down).
@@ -262,18 +272,16 @@ final class HoldButtonView: NSButton {
 
     func timerFired() {
         guard holding else { return }
-        ticks += 1
         onTick()
     }
 
-    /// The hold ends. A release always follows at least one tick when one
-    /// was due, so a stalled main thread (whose timer never fired) does not
-    /// turn a hold into a click.
+    /// The hold ends. Past `tickEvery` a release always follows a tick at
+    /// its own time, so a stalled main thread (whose timer lagged) does not
+    /// turn a hold into a click. A tick at the instant of another winds 0.
     func endHold(inside: Bool = true) {
         guard holding else { return }
         stopTimer()
-        if ticks == 0, ProcessInfo.processInfo.systemUptime - holdStartedAt >= TransportShuttle.tickEvery {
-            ticks = 1
+        if ProcessInfo.processInfo.systemUptime - holdStartedAt >= TransportShuttle.tickEvery {
             onTick()
         }
         holding = false

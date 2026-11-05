@@ -132,7 +132,30 @@ import Testing
         v.holdStartedAt -= 1
         v.timerFired()
         v.endHold()
-        #expect(log.events == ["press false", "tick", "release true"], "no second owed tick")
+        #expect(log.events == ["press false", "tick", "tick", "release true"], "a hold past 0.4 s ticks at its release")
+    }
+
+    /// The release is judged by the mouse-up that ended tracking, wherever
+    /// the live pointer is (a channel click).
+    @Test func aReleaseIsInsideByTheMouseUpEvent() throws {
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        defer { w.close() }
+        let bounds = NSRect(x: 10, y: 10, width: 30, height: 20)
+        func up(_ p: NSPoint, type: NSEvent.EventType = .leftMouseUp) throws -> NSEvent {
+            try #require(
+                NSEvent.mouseEvent(
+                    with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: w.windowNumber, context: nil,
+                    eventNumber: 0, clickCount: 1, pressure: 0))
+        }
+        let id: (NSPoint) -> NSPoint = { $0 }
+        #expect(HoldButtonView.endedInside(try up(NSPoint(x: 20, y: 20)), in: w, bounds: bounds, locationInView: id))
+        #expect(!HoldButtonView.endedInside(try up(NSPoint(x: 60, y: 20)), in: w, bounds: bounds, locationInView: id))
+        // No event, a drag, or another window's event: not an outside.
+        #expect(HoldButtonView.endedInside(nil, in: w, bounds: bounds, locationInView: id))
+        #expect(HoldButtonView.endedInside(try up(NSPoint(x: 60, y: 20), type: .leftMouseDragged), in: w, bounds: bounds, locationInView: id))
+        #expect(HoldButtonView.endedInside(try up(NSPoint(x: 60, y: 20)), in: nil, bounds: bounds, locationInView: id))
     }
 
     @Test func leavingTheWindowMidHoldCancels() {

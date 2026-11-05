@@ -211,6 +211,15 @@ public enum TransportCommands {
         }
     }
 
+    /// The status-line text a refused transport action shows: what the
+    /// shuttle says for a failed wind (⏮ uses it too).
+    public static func statusText(_ error: any Error) -> String {
+        switch refused(error) {
+        case .refused(let why), .busy(let why), .unavailable(let why): why
+        case .done: ""
+        }
+    }
+
     static func refused(_ error: any Error) -> KeyOutcome {
         if case VizError.Busy(let message) = error { return .busy(message) }
         return .refused(AlertItem(error, title: "").message)

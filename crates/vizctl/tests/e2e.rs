@@ -1274,6 +1274,27 @@ fn tracks_the_fake_synth() {
     app.quit();
 }
 
+/// Clicks the number box `label` until it is editing (its node is
+/// `focused`), at most three times. The channel's window is not key, so
+/// the refocus symbiotic-design 0.2.2 gives a box after Esc or Return can
+/// stay pending there and the next click only lands it. Callers then type
+/// with no element, so a click that already edited is not repeated.
+fn focus_number_box(app: &mut App, window: &Value, label: &str) {
+    for _ in 0..3 {
+        let el = wait_for_label(app, window, label);
+        app.call("ui.click", json!({"window": window, "element": el}));
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < deadline {
+            let tree = app.call("ui.tree", json!({"window": window}));
+            if find_node(&tree["nodes"], label).is_some_and(|n| n["focused"] == true) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    panic!("{label} never started editing");
+}
+
 /// Polls `state.get target` until `ok` holds.
 fn wait_for_state(
     app: &mut App,
@@ -2474,15 +2495,9 @@ fn themes_and_the_strip_over_the_channel() {
     assert_eq!(version(&mut app), v0, "Esc added no undo step");
     // 5c. A 300-digit entry (the channel's paste) is refused, not cut. A
     // `ui.key` holds at most 256 characters: two calls into the one field.
-    let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
-    // symbiotic-design 0.2.2: after Esc the box takes the keyboard back, and
-    // the first click on it only lands that focus; the next one edits.
-    app.call("ui.click", json!({"window": window, "element": level}));
+    focus_number_box(&mut app, &window, &format!("Level of {SYNTH}"));
     let half = "9".repeat(150);
-    app.call(
-        "ui.key",
-        json!({"window": window, "element": level, "text": half}),
-    );
+    app.call("ui.key", json!({"window": window, "text": half}));
     app.call(
         "ui.key",
         json!({"window": window, "text": format!("{half}\n")}),
@@ -2507,13 +2522,8 @@ fn themes_and_the_strip_over_the_channel() {
     });
     let m = app.call("state.get", json!({"target": "mixer", "window": window}));
     assert_eq!(strip_named(&m, SYNTH)["pan"].as_f64(), Some(0.0), "{m}");
-    let pan = wait_for_label(&mut app, &window, &format!("Pan of {SYNTH}"));
-    // 0.2.2: the box took the keyboard back after Return; this click lands it.
-    app.call("ui.click", json!({"window": window, "element": pan}));
-    app.call(
-        "ui.key",
-        json!({"window": window, "element": pan, "text": "L 24\n"}),
-    );
+    focus_number_box(&mut app, &window, &format!("Pan of {SYNTH}"));
+    app.call("ui.key", json!({"window": window, "text": "L 24\n"}));
     wait_for_state(&mut app, &window, "mixer", |m| {
         (strip_named(m, SYNTH)["pan"].as_f64().unwrap() + 0.24).abs() < 1e-6
     });

@@ -96,7 +96,7 @@ struct DocumentTransportBar: View {
                         "Return to Start", icon: .returnToStart, enabled: model.selectedSeq != nil,
                         help: "Return to Start"
                     ) {
-                        do { try model.moveTo(0) } catch { model.editor.status = AlertItem(error, title: "Locate Failed").message }
+                        do { try model.moveTo(0) } catch { model.editor.status = TransportCommands.statusText(error) }
                     }
                     .fixedSize()
                     holdButton("Rewind", icon: .rewind, forward: false,
