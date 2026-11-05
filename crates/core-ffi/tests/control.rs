@@ -647,6 +647,32 @@ fn lanes_show_takes_input_and_monitor() {
     assert!(l[2]["takes"].is_number() && l[2]["active_take"].is_string());
 }
 
+/// Plan tracks Task 2: `state.get document`'s lanes say what kind of track
+/// each is.
+#[test]
+fn document_state_lanes_carry_kind() {
+    use vizdaw_ffi::TrackKindRow;
+    let session = Session::new_empty().unwrap();
+    let seq = session.snapshot().unwrap().sequences[0].id;
+    session.new_track(seq, TrackKindRow::Audio, None).unwrap();
+    session
+        .new_track(seq, TrackKindRow::Instrument, None)
+        .unwrap();
+    session.new_track(seq, TrackKindRow::Midi, None).unwrap();
+    let v = result_json(&ControlResult::Document {
+        doc: "D".into(),
+        path: None,
+        snapshot: session.snapshot().unwrap(),
+        selected_seq: Some(seq),
+        lanes: session.lanes(seq).unwrap(),
+        alert: None,
+    });
+    let l = v["lanes"].as_array().unwrap();
+    assert_eq!(l[0]["kind"], json!("audio"));
+    assert_eq!(l[1]["kind"], json!("instrument"));
+    assert_eq!(l[2]["kind"], json!("midi"));
+}
+
 /// Plan 5d-1 Task 12 (Ruling 26): `state.get transport` says whether a
 /// count-in is playing.
 #[test]

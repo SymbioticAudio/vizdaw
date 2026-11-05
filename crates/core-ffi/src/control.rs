@@ -1433,6 +1433,11 @@ pub fn result_json(r: &ControlResult) -> Value {
                 "takes": l.take_count, "active_take": l.active_take,
                 "input": l.input.as_ref().map(lane_input_json),
                 "monitor": monitor_name(l.monitor),
+                "kind": match l.kind {
+                    crate::tracks::TrackKindRow::Audio => "audio",
+                    crate::tracks::TrackKindRow::Instrument => "instrument",
+                    crate::tracks::TrackKindRow::Midi => "midi",
+                },
             })).collect::<Vec<_>>(),
             "warnings": s.warnings,
             "alert": alert.as_ref().map(alert_json),

@@ -532,6 +532,41 @@ const fn id_param(name: &'static str, help: &'static str) -> ParamSpec {
     }
 }
 
+/// An optional id parameter (an integer of at least 0).
+const fn opt_id_param(name: &'static str, help: &'static str) -> ParamSpec {
+    ParamSpec {
+        required: false,
+        ..id_param(name, help)
+    }
+}
+
+/// `track.new_*` (plan tracks Ruling 5).
+const NEW_TRACK_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param(
+        "after",
+        "The track to put the new one below (default: the selection's first track, else the end).",
+    ),
+];
+
+/// `track.duplicate` and `track.delete`.
+const TRACK_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param("lane", "The track (default: the selection's first track)."),
+];
+
+/// `track.rename`.
+const TRACK_RENAME_PARAMS: &[ParamSpec] = &[
+    opt_id_param("seq", "The sequence (default: the selected one)."),
+    opt_id_param("lane", "The track (default: the selection's first track)."),
+    ParamSpec {
+        name: "name",
+        kind: ParamKind::Text,
+        required: false,
+        help: "The track's new name (answers the Rename Track dialog).",
+    },
+];
+
 /// `record.set` (plan 5c Ruling 18): every option of the next Record.
 const RECORD_SET_PARAMS: &[ParamSpec] = &[
     ParamSpec {
@@ -1601,6 +1636,57 @@ pub const COMMANDS: &[CommandSpec] = &[
         None,
         false,
     )),
+    CommandSpec {
+        params: NEW_TRACK_PARAMS,
+        yields: true,
+        ..cmd(
+            "track.new_audio",
+            "Track",
+            "New Audio Track",
+            Some("⌥⌘A"),
+            true,
+        )
+    },
+    CommandSpec {
+        params: NEW_TRACK_PARAMS,
+        yields: true,
+        ..cmd(
+            "track.new_instrument",
+            "Track",
+            "New Instrument Track",
+            Some("⌥⌘S"),
+            true,
+        )
+    },
+    CommandSpec {
+        params: NEW_TRACK_PARAMS,
+        yields: true,
+        ..cmd(
+            "track.new_midi",
+            "Track",
+            "New MIDI Track",
+            Some("⌥⌘X"),
+            true,
+        )
+    },
+    CommandSpec {
+        params: TRACK_PARAMS,
+        ..cmd("track.duplicate", "Track", "Duplicate Track", None, true)
+    },
+    CommandSpec {
+        params: TRACK_PARAMS,
+        ..cmd("track.delete", "Track", "Delete Track", None, true)
+    },
+    CommandSpec {
+        params: TRACK_RENAME_PARAMS,
+        dialogs: &[DialogSpec {
+            name: "Rename Track",
+            when: "always",
+            always: true,
+            answered_by: &["name"],
+        }],
+        ..cmd("track.rename", "Track", "Rename Track", None, true)
+    },
 ];
 
 /// The command with `id`.

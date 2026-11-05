@@ -672,6 +672,30 @@ impl Session {
     }
 }
 
+/// A new project's document (plan tracks Ruling 3): `doc` with the
+/// sequence "Sequence 1" and none of its tracks, made without a history
+/// step, so there is nothing to undo and the project is not dirty.
+fn starting_document(doc: Document) -> Result<Document, VizError> {
+    let made = core_model::command::apply(
+        &doc,
+        &Command::Sequence(SequenceCmd::New {
+            name: "Sequence 1".into(),
+        }),
+    )?;
+    let ids = made.report.created.iter().find_map(|id| match id {
+        core_model::ids::AnyId::Lane(l) => Some(*l),
+        _ => None,
+    });
+    let seq = made.report.created.iter().find_map(|id| match id {
+        core_model::ids::AnyId::Seq(s) => Some(*s),
+        _ => None,
+    });
+    let (Some(seq), Some(lane)) = (seq, ids) else {
+        return Err(crate::events::bad("the first sequence was not made"));
+    };
+    Ok(core_model::command::apply(&made.doc, &Command::Lane(LaneCmd::Remove { seq, lane }))?.doc)
+}
+
 /// Saving and autosaving one at a time (the package's blob pruning reads
 /// the autosaves; 3a: the FFI serializes them).
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
@@ -1326,7 +1350,7 @@ impl Session {
     /// An untitled, empty document.
     #[uniffi::constructor]
     pub fn new_empty() -> Result<Arc<Session>, VizError> {
-        ffi_guard(|| Session::with(Document::new(), None, false))
+        ffi_guard(|| Session::with(starting_document(Document::new())?, None, false))
     }
 
     /// An untitled copy of the demo project.
@@ -1365,7 +1389,7 @@ impl Session {
                 )?
                 .doc;
             }
-            Session::with(doc, None, false)
+            Session::with(starting_document(doc)?, None, false)
         })
     }
 
@@ -3670,6 +3694,76 @@ impl Session {
                 Err(e) => {
                     inner.history.abort()?;
                     return Err(e);
+                }
+            }
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+
+    /// A new track of `kind` in sequence `seq`, below track `after` (an
+    /// unknown or absent `after`: at the end), as one undo step named "New
+    /// Audio Track", "New Instrument Track" or "New MIDI Track" (plan
+    /// tracks Ruling 4). It may add the built-in synth destination or the
+    /// first audio output path in the same step. `Model` for an unknown
+    /// sequence; `Busy` while an edit is open or recording.
+    pub fn new_track(
+        &self,
+        seq: u64,
+        kind: crate::tracks::TrackKindRow,
+        after: Option<u64>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let monitor = crate::audio::default_monitor();
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(edit_open_busy());
+            }
+            records_busy(&inner)?;
+            let seq = crate::snapshot::seq_id(inner.doc(), seq)?;
+            let index = crate::tracks::index_below(inner.doc(), seq, after);
+            inner.history.begin(crate::tracks::new_track_label(kind))?;
+            match crate::tracks::build_track(&mut inner.history, seq, kind, index, monitor) {
+                Ok(_) => inner.history.commit()?,
+                Err(e) => {
+                    inner.history.abort()?;
+                    return Err(e);
+                }
+            }
+            inner.version += 1;
+            host::clear_input_failure_of(self.id);
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            inner.snapshot()
+        })
+    }
+
+    /// Duplicates track `lane` of sequence `seq` just below it (plan
+    /// tracks Ruling 4), as one undo step "Duplicate Track". `Model` for an
+    /// unknown id or a Track Synth return track; `Busy` while an edit is
+    /// open or recording.
+    pub fn duplicate_track(&self, seq: u64, lane: u64) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let mut inner = lock(&self.inner);
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(edit_open_busy());
+            }
+            records_busy(&inner)?;
+            inner.history.begin("Duplicate Track")?;
+            let r = inner.history.execute(
+                &Command::Lane(LaneCmd::Duplicate {
+                    seq: SeqId(seq),
+                    lane: LaneId(lane),
+                }),
+                &ViewFilter::default(),
+            );
+            match r {
+                Ok(_) => inner.history.commit()?,
+                Err(e) => {
+                    inner.history.abort()?;
+                    return Err(e.into());
                 }
             }
             inner.version += 1;

@@ -447,3 +447,26 @@ fn a_keys_file_key_wins_over_a_new_default() {
         Some("transport.fast_forward")
     );
 }
+
+/// Plan tracks Task 2 (7d controller ruling I3): the Track menu's default
+/// keys give way to a key the user's keys file gave another command.
+#[test]
+fn a_keys_file_key_wins_over_the_track_defaults() {
+    let (opt_cmd_a, opt_cmd_s, opt_cmd_x) = (c("⌥⌘A"), c("⌥⌘S"), c("⌥⌘X"));
+    let file = json!({"vizdaw_keys": 1, "bindings": {"transport.loop": ["⌥⌘A"]}});
+    let (k, skipped) = Keymap::from_json(COMMANDS, &file.to_string()).unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(k.lookup(opt_cmd_a, false, false), Some("transport.loop"));
+    assert!(k.chords("track.new_audio").is_empty());
+    assert_eq!(k.chords("track.new_instrument"), vec![opt_cmd_s]);
+    let k = Keymap::new(COMMANDS);
+    assert_eq!(k.chords("track.new_audio"), vec![opt_cmd_a]);
+    assert_eq!(k.chords("track.new_instrument"), vec![opt_cmd_s]);
+    assert_eq!(k.chords("track.new_midi"), vec![opt_cmd_x]);
+    for s in COMMANDS.iter().filter(|s| !s.id.starts_with("track.new_")) {
+        let held = k.chords(s.id);
+        for ch in [opt_cmd_a, opt_cmd_s, opt_cmd_x] {
+            assert!(!held.contains(&ch), "{} holds a track key", s.id);
+        }
+    }
+}

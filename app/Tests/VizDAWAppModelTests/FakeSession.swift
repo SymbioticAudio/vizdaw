@@ -851,6 +851,38 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return commandResult()
     }
 
+    var newTracks: [(seq: UInt64, kind: TrackKindRow, after: UInt64?)] = []
+    var duplicated: [(seq: UInt64, lane: UInt64)] = []
+    /// A new track: a row with the given kind appended (below `after`
+    /// when it names a row), `midiDest == nil` for MIDI.
+    func newTrack(seq: UInt64, kind: TrackKindRow, after: UInt64?) throws -> DocSnapshot {
+        newTracks.append((seq, kind, after))
+        guard var rows = laneTable[seq] else {
+            throw VizError.Model(message: "unknown id seq\(seq)")
+        }
+        var row = lane((rows.map(\.id).max() ?? 0) + 1, "Track \(rows.count + 1)")
+        row.kind = kind
+        row.midiDest = kind == .instrument ? 1 : nil
+        let at = after.flatMap { a in rows.firstIndex { $0.id == a } }.map { $0 + 1 } ?? rows.count
+        rows.insert(row, at: at)
+        laneTable[seq] = rows
+        return commandResult()
+    }
+
+    func duplicateTrack(seq: UInt64, lane id: UInt64) throws -> DocSnapshot {
+        duplicated.append((seq, id))
+        guard var rows = laneTable[seq], let i = rows.firstIndex(where: { $0.id == id }) else {
+            throw VizError.Model(message: "unknown id lane\(id)")
+        }
+        var copy = rows[i]
+        copy.id = (rows.map(\.id).max() ?? 0) + 1
+        copy.name += " copy"
+        copy.arm = false
+        rows.insert(copy, at: i + 1)
+        laneTable[seq] = rows
+        return commandResult()
+    }
+
     var layout: String?
     func uiLayout() throws -> String? { layout }
     func setUiLayout(json: String) throws { layout = json }
@@ -1017,12 +1049,12 @@ func seq(_ id: UInt64, _ name: String, topLevel: Bool, uses: UInt32 = 0) -> SeqR
         laneCount: 1, comment: "", keyboardSlot: nil)
 }
 
-func lane(_ id: UInt64, _ name: String, mute: Bool = false) -> LaneRow {
+func lane(_ id: UInt64, _ name: String, mute: Bool = false, kind: TrackKindRow = .midi) -> LaneRow {
     LaneRow(
         id: id, name: name, destination: nil, midiEventCount: 0, regionCount: 0,
         referenceCount: 0, mute: mute, solo: false, looped: false, takeCount: 1,
         activeTake: "Take 1", isDrum: false, arm: false, midiDest: nil, audioOut: nil, input: nil,
-        monitor: .auto)
+        monitor: .auto, kind: kind)
 }
 
 /// Song (top-level) using Groove, which uses Beat.

@@ -3,6 +3,7 @@
 use super::Report;
 use crate::document::Document;
 use crate::error::{ModelError, Result};
+use crate::event::EventBody;
 use crate::ids::{AnyId, DestId, LaneId, OutputPathId, SeqId, TakeId};
 use crate::lane::{InputChannels, Lane, LaneInput, MonitorMode, QuantizeSpec, Take};
 use crate::rules::check_positive;
@@ -36,7 +37,19 @@ pub enum LaneCmd {
         /// New index.
         to: usize,
     },
-    /// Rename a lane.
+    /// Duplicate a lane (Plan Tracks Ruling 4): a copy just below it named
+    /// "‹name› copy", with its settings and every take's events and
+    /// regions under fresh IDs and `arm` off. Automation points are not
+    /// copied (they target strips, plugin parameters and destinations, not
+    /// the lane). A Track Synth return lane is refused.
+    Duplicate {
+        /// Sequence.
+        seq: SeqId,
+        /// The lane to copy.
+        lane: LaneId,
+    },
+    /// Rename a lane; the name is trimmed and must not be empty or hold
+    /// control characters.
     Rename {
         /// Sequence.
         seq: SeqId,
@@ -171,6 +184,7 @@ impl LaneCmd {
             LaneCmd::Add { .. } => "Add Lane",
             LaneCmd::Remove { .. } => "Remove Lane",
             LaneCmd::Reorder { .. } => "Reorder Lane",
+            LaneCmd::Duplicate { .. } => "Duplicate Lane",
             LaneCmd::Rename { .. } => "Rename Lane",
             LaneCmd::SetDest { .. } => "Set Lane Destination",
             LaneCmd::SetOutput { .. } => "Set Lane Output",
@@ -215,7 +229,19 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
             let at = (*to).min(s.lanes.len());
             s.lanes.insert(at, l);
         }
-        LaneCmd::Rename { seq, lane, name } => d.lane_mut(*seq, *lane)?.name = name.clone(),
+        LaneCmd::Duplicate { seq, lane } => duplicate(d, *seq, *lane, r)?,
+        LaneCmd::Rename { seq, lane, name } => {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(ModelError::invalid("a track name cannot be empty"));
+            }
+            if name.chars().any(char::is_control) {
+                return Err(ModelError::invalid(
+                    "a track name cannot hold control characters",
+                ));
+            }
+            d.lane_mut(*seq, *lane)?.name = name.to_string();
+        }
         LaneCmd::SetDest { seq, lane, dest } => {
             if let Some(id) = dest {
                 if !d.instruments().contains_key(id) {
@@ -315,6 +341,69 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
             arm_midi,
         } => track_synth(d, *seq, *lane, *channels, *arm_midi, r)?,
     }
+    Ok(())
+}
+
+/// [`LaneCmd::Duplicate`].
+fn duplicate(d: &mut Document, seq: SeqId, lane: LaneId, r: &mut Report) -> Result<()> {
+    let mut s = d.sequence(seq)?.clone();
+    let at = s
+        .lane_index(lane)
+        .ok_or(ModelError::UnknownId(AnyId::Lane(lane)))?;
+    let src = s
+        .lanes
+        .get(at)
+        .ok_or(ModelError::UnknownId(AnyId::Lane(lane)))?
+        .clone();
+    if matches!(
+        src.input,
+        Some(LaneInput::Audio {
+            return_of: Some(_),
+            ..
+        })
+    ) {
+        return Err(ModelError::invalid(
+            "Duplicate Track does not copy a Track Synth return track: duplicate its MIDI track and run Track Synth again.",
+        ));
+    }
+    let c = d.counters_mut();
+    let mut copy = src.clone();
+    copy.id = c.alloc_lane();
+    copy.name = format!("{} copy", src.name);
+    copy.arm = false;
+    r.created.push(AnyId::Lane(copy.id));
+    let mut takes = im::Vector::new();
+    for t in &src.takes {
+        let tid = c.alloc_take();
+        if t.id == src.active_take {
+            copy.active_take = tid;
+        }
+        r.created.push(AnyId::Take(tid));
+        let mut events = im::OrdMap::new();
+        for e in t.events.values() {
+            if matches!(e.body, EventBody::Automation { .. }) {
+                continue;
+            }
+            let mut ne = e.clone();
+            ne.id = c.alloc_event();
+            r.created.push(AnyId::Event(ne.id));
+            events.insert(ne.key(), ne);
+        }
+        takes.push_back(Take {
+            id: tid,
+            name: t.name.clone(),
+            events,
+        });
+    }
+    copy.takes = takes;
+    if let Some(dl) = copy.drum.as_mut() {
+        for row in dl.rows.iter_mut() {
+            row.id = c.alloc_drum_row();
+            r.created.push(AnyId::DrumRow(row.id));
+        }
+    }
+    s.lanes.insert(at.saturating_add(1), copy);
+    d.put_sequence(s);
     Ok(())
 }
 

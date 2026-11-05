@@ -220,6 +220,12 @@ The facts are gathered on the main thread every tick (the target document's tran
 | `modify.exact_mode` | Modify > Exact Mode | ⌃⌘E | `on` (absent toggles) |
 | `sequence.make_reference` | Sequence > Make Reference from Selection | ⌥⌘R | |
 | `sequence.back` | Sequence > Back to Parent Sequence | ⌘[ | |
+| `track.new_audio` | Track > New Audio Track | ⌥⌘A | `seq`, `after` (both optional) |
+| `track.new_instrument` | Track > New Instrument Track | ⌥⌘S | `seq`, `after` (both optional) |
+| `track.new_midi` | Track > New MIDI Track | ⌥⌘X | `seq`, `after` (both optional) |
+| `track.duplicate` | Track > Duplicate Track | | `seq`, `lane` (both optional) |
+| `track.delete` | Track > Delete Track | | `seq`, `lane` (both optional) |
+| `track.rename` | Track > Rename Track | | `seq`, `lane` (optional), `name` ("Rename Track", always) |
 | `transport.play_stop` | Transport > Play / Stop | Space | |
 | `transport.loop` | Transport > Loop | | `on` (absent toggles) |
 | `transport.return_to_start` | Transport > Return to Start | Return | |

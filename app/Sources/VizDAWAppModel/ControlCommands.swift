@@ -224,7 +224,7 @@ public enum ControlCommands {
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
-            .union(ViewCommands.ids).union(AppearanceCommands.ids)
+            .union(ViewCommands.ids).union(AppearanceCommands.ids).union(TrackCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -453,6 +453,8 @@ public enum ControlCommands {
             if let f = failure(ViewCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where SynthCommands.ids.contains(id):
             return SynthCommands.run(id, args: args, doc: docID, m)
+        case _ where TrackCommands.ids.contains(id):
+            return TrackCommands.run(id, args: args, doc: docID, m)
         case _ where AutomationCommands.ids.contains(id):
             return AutomationCommands.run(id, args: args, doc: docID, m)
         case AudioCommands.addMidi:

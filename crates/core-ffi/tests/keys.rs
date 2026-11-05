@@ -187,9 +187,20 @@ fn the_keymap_lists_every_command_with_its_keys() {
     assert!(ff.yields && !ff.customised);
     assert_eq!(ff.keys, vec!["⇧.", "Keypad+"]);
     assert!(row(&k, "transport.rewind").yields);
+    // Plan tracks Task 2: the three New Track keys yield too.
+    let yielding = [
+        "transport.rewind",
+        "transport.fast_forward",
+        "track.new_audio",
+        "track.new_instrument",
+        "track.new_midi",
+    ];
+    for id in &yielding[2..] {
+        assert!(row(&k, id).yields, "{id}");
+    }
     assert!(
         rows.iter()
-            .filter(|r| r.id != "transport.rewind" && r.id != "transport.fast_forward")
+            .filter(|r| !yielding.contains(&r.id.as_str()))
             .all(|r| !r.yields && !r.customised)
     );
     k.load_json(r#"{"vizdaw_keys": 1, "bindings": {"transport.fast_forward": ["F5"]}}"#.into())

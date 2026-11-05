@@ -102,6 +102,8 @@ pub struct LaneRow {
     pub input: Option<crate::edit::LaneInputRow>,
     /// When its input is heard (plan 5c).
     pub monitor: crate::edit::MonitorModeRow,
+    /// What the track is for, from its routing (plan tracks Ruling 6).
+    pub kind: crate::tracks::TrackKindRow,
 }
 
 /// What the transport is doing.
@@ -178,8 +180,9 @@ pub fn seq_rows(doc: &Document) -> Result<Vec<SeqRow>, VizError> {
 
 /// The lane rows of sequence `seq`.
 pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
-    let s = doc.sequence(seq_id(doc, seq)?)?;
-    Ok(s.lanes
+    let sid = seq_id(doc, seq)?;
+    let s = doc.sequence(sid)?;
+    s.lanes
         .iter()
         .map(|l| {
             let (mut midi, mut regions, mut refs) = (0usize, 0usize, 0usize);
@@ -193,7 +196,7 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                     }
                 }
             }
-            LaneRow {
+            Ok(LaneRow {
                 id: l.id.0,
                 name: l.name.clone(),
                 destination: l
@@ -213,9 +216,10 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                 audio_out: l.audio_out.map(|o| o.0),
                 input: l.input.as_ref().map(Into::into),
                 monitor: l.monitor.into(),
-            }
+                kind: crate::tracks::track_kind(doc, sid, l.id)?,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Problems worth showing for `doc`.

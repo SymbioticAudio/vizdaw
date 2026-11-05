@@ -55,7 +55,20 @@ fn hostile_steps_and_winds_are_refused_or_clamped() {
     s.close().unwrap();
 
     // No sequence to move in.
+    // (A new project opens with "Sequence 1": delete it first.)
     let empty = Session::new_empty().unwrap();
+    let first = empty.snapshot().unwrap().sequences[0].id;
+    empty
+        .edit(
+            vizdaw_ffi::EditCommand::Sequence {
+                edit: vizdaw_ffi::SequenceEdit::Delete {
+                    seq: first,
+                    delete_references: false,
+                },
+            },
+            None,
+        )
+        .unwrap();
     assert!(empty.snapshot().unwrap().sequences.is_empty());
     let no_seq = |r: Result<i64, VizError>| match r {
         Err(VizError::Model { message }) => assert_eq!(message, "select a sequence first"),
