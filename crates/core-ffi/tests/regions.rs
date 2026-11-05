@@ -537,6 +537,13 @@ fn hostile_trims_are_refused_and_change_nothing() {
         );
         assert_eq!(state(&s), before, "trim({event}, {front}, {back})");
     }
+    // No refusal added an undo step: one undo is the first trim's, and
+    // brings back the whole file.
+    s.undo().unwrap();
+    let undone = region(&s, seq, lane);
+    assert_eq!((undone.source_offset, undone.frames), (0, 48_000));
+    s.redo().unwrap();
+    assert_eq!(state(&s), before, "redo: the first trim again");
     trim(ev, -1000, 0).unwrap();
     let after = state(&s);
     assert_eq!((after.1, after.2), (0, 11_000));

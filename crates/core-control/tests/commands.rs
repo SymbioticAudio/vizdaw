@@ -1859,6 +1859,27 @@ fn audio_editor_state_target_parses() {
     }
     let (_, msg) = err("state.get", json!({ "target": "audio-editor" }));
     assert!(msg.contains("mixer or audio_editor"), "{msg}");
+    // Task 5 review M1: an unknown extra param and a bad window.
+    for bad in [
+        json!({ "target": "audio_editor", "extra": 1 }),
+        json!({ "target": "audio_editor", "window": 0 }),
+        json!({ "target": "audio_editor", "window": "front" }),
+        json!({ "target": "audio_editor", "window": -1 }),
+    ] {
+        let (code, msg) = err("state.get", bad.clone());
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    assert_eq!(
+        ok(
+            "state.get",
+            json!({ "target": "audio_editor", "window": 3 })
+        ),
+        Command::StateGet {
+            target: StateTarget::AudioEditor,
+            window: Some(WindowRef::Number(3))
+        }
+    );
 }
 
 #[test]
@@ -1873,6 +1894,19 @@ fn ui_pane_names_the_audio_editor() {
             "command.run",
             json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": bad } }),
         );
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    // Task 5 review M1: an unknown extra param, a bad window and a
+    // wrong-typed view.
+    for bad in [
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": "audio_editor", "extra": 1 } }),
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": "audio_editor" }, "window": 0 }),
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": "audio_editor" }, "window": "front" }),
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": 7 } }),
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": ["audio_editor"] } }),
+    ] {
+        let (code, msg) = err("command.run", bad.clone());
         assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
         assert!(!msg.is_empty());
     }

@@ -411,10 +411,10 @@ fn trimmed_region() -> (Arc<Session>, u64, u64, tempfile::TempDir) {
     (s, ev, note, dir)
 }
 
-fn assert_envelope(v: &[f32]) {
+fn assert_envelope(v: &[f32], gain_db: f64) {
     use core_engine::schedule::fade_curve;
     use core_model::event::FadeShape;
-    let g = core_model::mixer::db_to_gain(-6.0) as f32;
+    let g = core_model::mixer::db_to_gain(gain_db) as f32;
     let want = [
         0.0,
         g * fade_curve(FadeShape::Linear, 0.25),
@@ -439,7 +439,29 @@ fn assert_envelope(v: &[f32]) {
 fn region_envelope_matches_the_heard_gain_and_fades() {
     let (s, ev, _note, _dir) = trimmed_region();
     let v = s.region_envelope(ev, 0, 12_000, 12).unwrap();
-    assert_envelope(&v);
+    assert_envelope(&v, -6.0);
+    // Above 0 dB the envelope is above 1, as the engine plays it.
+    let gain = |db: f32| {
+        s.edit(
+            EditCommand::Audio {
+                edit: AudioEdit::SetGain {
+                    event: ev,
+                    gain_db: db,
+                },
+            },
+            None,
+        )
+        .unwrap();
+    };
+    gain(12.0);
+    let v = s.region_envelope(ev, 0, 12_000, 12).unwrap();
+    assert_envelope(&v, 12.0);
+    assert!(v[3] > 3.9 && v[3] < 4.0, "+12 dB is about 3.98: {}", v[3]);
+    // At the floor (-144 dB) the envelope is exactly 0, as the engine
+    // plays it (Ruling 4), not a tiny 10^(-144/20).
+    gain(-144.0);
+    let v = s.region_envelope(ev, 0, 12_000, 12).unwrap();
+    assert_eq!(v, vec![0.0; 12]);
     s.close().unwrap();
 }
 
