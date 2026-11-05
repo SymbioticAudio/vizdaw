@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -6,6 +7,7 @@ import VizDAWCore
 /// channels, arming the MIDI lane too, muting it after recording; then
 /// Measure, which runs off the main thread.
 struct TrackSynthSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var sheets: SynthSheets
     let editor: EditorModel
     /// The device's input channels (the core accepts 1–256).
@@ -13,10 +15,10 @@ struct TrackSynthSheet: View {
 
     var body: some View {
         if let d = sheets.trackSynth {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Track \(d.synthName)").font(.headline)
+            VStack(alignment: .leading, spacing: theme.spacing.m) {
+                Text("Track \(d.synthName)").font(theme.type.title.font)
                 Text("Records \(d.synthName)'s audio return into a lane below this one, armed and monitored, in the same pass as its MIDI.")
-                    .font(.callout)
+                    .font(theme.type.body.font)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Form {
@@ -39,7 +41,7 @@ struct TrackSynthSheet: View {
                 }
                 if let msg = sheets.message {
                     Text(msg)
-                        .font(.callout)
+                        .font(theme.type.body.font)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
@@ -52,7 +54,7 @@ struct TrackSynthSheet: View {
                     }
                 }
             }
-            .padding(20)
+            .padding(theme.spacing.xl)
             .frame(width: 440)
             .onAppear { editor.beginTextEditing("synthSheet") }
             .onDisappear { editor.endTextEditing("synthSheet") }
@@ -79,13 +81,14 @@ extension TrackSynthDraft {
 /// a name, one of the system's MIDI destinations and a channel; the lane
 /// then plays to it.
 struct NewMidiDestinationSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var sheets: SynthSheets
     let editor: EditorModel
 
     var body: some View {
         if let d = sheets.newDestination {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("New MIDI Destination").font(.headline)
+            VStack(alignment: .leading, spacing: theme.spacing.m) {
+                Text("New MIDI Destination").font(theme.type.title.font)
                 Form {
                     TextField(
                         "Name", text: Binding(get: { d.name }, set: { sheets.newDestination?.name = $0 }))
@@ -101,7 +104,7 @@ struct NewMidiDestinationSheet: View {
                         value: Binding(get: { d.channel }, set: { sheets.newDestination?.channel = $0 }), in: 1...16)
                 }
                 if let msg = sheets.destinationMessage {
-                    Text(msg).font(.callout).foregroundStyle(.red)
+                    Text(msg).font(theme.type.body.font).foregroundStyle(theme.state.error.color)
                 }
                 HStack {
                     Spacer()
@@ -112,7 +115,7 @@ struct NewMidiDestinationSheet: View {
                         .disabled(!sheets.canAddDestination)
                 }
             }
-            .padding(20)
+            .padding(theme.spacing.xl)
             .frame(width: 400)
             .onAppear { editor.beginTextEditing("destinationSheet") }
             .onDisappear { editor.endTextEditing("destinationSheet") }

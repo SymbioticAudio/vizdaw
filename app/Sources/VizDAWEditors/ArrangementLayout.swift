@@ -202,17 +202,28 @@ public enum LaneHeaderLayout {
     }
 
     /// The input meter, under the controls (shown while the lane is armed
-    /// or monitors its input).
-    public static func meterRect(rowTop y: CGFloat) -> CGRect {
-        CGRect(x: 8, y: y + 43, width: 178, height: 3)
+    /// or monitors its input). At 48 points and up it is 3 high at `y + 43`;
+    /// at 46 and 47 it is 2 high at `y + 42`, so it clears the separator
+    /// along the row's bottom edge.
+    public static func meterRect(rowTop y: CGFloat, laneHeight: CGFloat) -> CGRect {
+        laneHeight >= 48
+            ? CGRect(x: 8, y: y + 43, width: 178, height: 3)
+            : CGRect(x: 8, y: y + 42, width: 178, height: 2)
     }
 
     /// Whether a lane this tall has room for the meter under its controls.
     public static func showsMeter(laneHeight: CGFloat) -> Bool { laneHeight >= 46 }
 
     /// The clip mark at the meter's end.
-    public static func clipRect(rowTop y: CGFloat) -> CGRect {
-        CGRect(x: 189, y: y + 43, width: 5, height: 3)
+    public static func clipRect(rowTop y: CGFloat, laneHeight: CGFloat) -> CGRect {
+        let m = meterRect(rowTop: y, laneHeight: laneHeight)
+        return CGRect(x: 189, y: m.minY, width: 5, height: m.height)
+    }
+
+    /// The strip colour bar down the row's left edge (owner G1 Q2), clear
+    /// of the controls.
+    public static func colourBar(rowTop y: CGFloat, laneHeight: CGFloat) -> CGRect {
+        CGRect(x: 1, y: y + 2, width: 4, height: max(laneHeight - 4, 0))
     }
 
     public static func control(at p: CGPoint, rowTop: CGFloat) -> HeaderControl? {

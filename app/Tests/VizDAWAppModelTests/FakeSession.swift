@@ -58,6 +58,46 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func path() throws -> String? { savedPath }
 
+    /// The bar's rewind and fast forward (plan 7d Task B1): clicks, held
+    /// keys' steps, winds (quarter notes), every wind tried (counted
+    /// before `jumpError` throws), and hold ends. A step is ±61 440 and a
+    /// wind `round(q × 15 360)` from `state.tick`, floored at 0.
+    var stepBars: [Bool] = []
+    var keySteps: [Bool] = []
+    var winds: [Double] = []
+    var windAttempts = 0
+    var holdEnds = 0
+    /// Thrown by the steps and the wind when set.
+    var jumpError: VizError?
+    private func jump(by: Int64) -> Int64 {
+        let (to, over) = state.tick.addingReportingOverflow(by)
+        state.tick = max(0, over ? (by > 0 ? Int64.max : 0) : to)
+        return state.tick
+    }
+    func transportStepBar(forward: Bool) throws -> Int64 {
+        if let e = jumpError { throw e }
+        stepBars.append(forward)
+        return jump(by: forward ? 61_440 : -61_440)
+    }
+    func transportKeyStep(forward: Bool) throws -> Int64 {
+        if let e = jumpError { throw e }
+        keySteps.append(forward)
+        return jump(by: forward ? 61_440 : -61_440)
+    }
+    func transportWind(quarters: Double) throws -> Int64 {
+        windAttempts += 1
+        if let e = jumpError { throw e }
+        winds.append(quarters)
+        let by = (quarters * 15_360).rounded()
+        let limit = Double(Int64.max)
+        if !by.isFinite { return jump(by: 0) }
+        return jump(by: by >= limit ? .max : by <= -limit ? .min : Int64(by))
+    }
+    func transportHoldEnd() throws -> Int64 {
+        holdEnds += 1
+        return state.tick
+    }
+
     func play(seq: UInt64) throws {
         if let e = playError { throw e }
         state.playing = true
@@ -272,6 +312,32 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     func setBypass(slot: UInt64, bypass: Bool) throws -> DocSnapshot {
         try mixerCall("bypass \(slot) \(bypass)")
     }
+    /// Loads or empties the fake strip's EQ (plan 7b Ruling 7): an empty
+    /// slot cannot be emptied, as the core refuses it.
+    func setEq(strip: UInt64, plugin: PluginRefRow?) throws -> DocSnapshot {
+        if let e = mixerError { throw e }
+        guard let i = mixerSnap.strips.firstIndex(where: { $0.id == strip }) else {
+            throw VizError.Model(message: "unknown id strip\(strip)")
+        }
+        if plugin == nil, mixerSnap.strips[i].eq == nil {
+            throw VizError.Model(message: "the EQ slot is empty")
+        }
+        let r = try mixerCall("setEq \(strip) \(plugin?.id ?? "none")")
+        mixerSnap.strips[i].eq = plugin.map { p in
+            var s = slotRow(900 + strip, p.name)
+            s.plugin = p
+            return s
+        }
+        return r
+    }
+    /// Sets the fake strip's own colour (controller ruling C-1).
+    func setStripColour(strip: UInt64, colour: SwatchRow?) throws -> DocSnapshot {
+        let r = try mixerCall("setStripColour \(strip) \(colour.map { "\($0)" } ?? "none")")
+        if let i = mixerSnap.strips.firstIndex(where: { $0.id == strip }) {
+            mixerSnap.strips[i].colour = colour
+        }
+        return r
+    }
     func setSidechain(slot: UInt64, source: UInt64?) throws -> DocSnapshot {
         try mixerCall("sidechain \(slot) \(source.map(String.init) ?? "none")")
     }
@@ -369,14 +435,28 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var waveformRows: OverviewRows?
     /// `regionWaveform` calls: event, from, to, columns.
     var waveformCalls: [(event: UInt64, from: Int64, to: Int64, columns: UInt32)] = []
+    /// `overview` calls: media, from, to, columns (plan 7c Task 6).
+    var overviewCalls: [(media: UInt64, from: UInt64, to: UInt64, columns: UInt32)] = []
     func overview(media: UInt64, fromFrame: UInt64, toFrame: UInt64, columns: UInt32) throws -> OverviewRows {
+        overviewCalls.append((media, fromFrame, toFrame, columns))
+        return rows(columns: columns)
+    }
+    private func rows(columns: UInt32) -> OverviewRows {
         waveformRows ?? OverviewRows(
             state: .pending, channels: 1, columns: columns, min: Array(repeating: 0, count: Int(columns)),
             max: Array(repeating: 0, count: Int(columns)))
     }
     func regionWaveform(event: UInt64, fromTick: Int64, toTick: Int64, columns: UInt32) throws -> OverviewRows {
         waveformCalls.append((event, fromTick, toTick, columns))
-        return try overview(media: 0, fromFrame: 0, toFrame: 1, columns: columns)
+        return rows(columns: columns)
+    }
+    /// What `regionEnvelope` answers (nil: `columns` ones).
+    var envelope: [Float]?
+    /// `regionEnvelope` calls: event, from, to, columns.
+    var envelopeCalls: [(event: UInt64, from: UInt64, to: UInt64, columns: UInt32)] = []
+    func regionEnvelope(event: UInt64, fromFrame: UInt64, toFrame: UInt64, columns: UInt32) throws -> [Float] {
+        envelopeCalls.append((event, fromFrame, toFrame, columns))
+        return envelope ?? Array(repeating: 1, count: Int(columns))
     }
     // MARK: Live input (plan 5c Task 8)
 
@@ -660,7 +740,15 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     var infoTable: [UInt64: SequenceInfo] = [:]
     var infoCalls = 0
-    func secondsAt(seq: UInt64, ticks: [Int64]) throws -> [Double] { ticks.map { Double($0) / 30_720 } }
+    /// Thrown by `secondsAt`.
+    var secondsAtError: VizError?
+    /// A tempo map for `secondsAt`; nil keeps the linear 120 BPM map (30 720 ticks a second).
+    var secondsAtMap: (([Int64]) -> [Double])?
+    func secondsAt(seq: UInt64, ticks: [Int64]) throws -> [Double] {
+        if let e = secondsAtError { throw e }
+        if let map = secondsAtMap { return map(ticks) }
+        return ticks.map { Double($0) / 30_720 }
+    }
     func ticksAt(seq: UInt64, seconds: [Double]) throws -> [Int64] { seconds.map { Int64(($0 * 30_720).rounded()) } }
 
     // MARK: Select-and-modify and the list (plan 4c)
@@ -963,7 +1051,19 @@ func stripRow(
     StripRow(
         id: id, name: name, kind: kind, kindLabel: "\(kind)", instrument: nil, inserts: inserts,
         gainDb: 0, pan: 0, mute: false, solo: false, soloMuted: false, sends: sends,
-        output: output, freeOutputs: [], automation: .read)
+        output: output, freeOutputs: [], automation: .read, eq: nil,
+        kindColour: kindColour(kind), colour: nil)
+}
+
+/// The kind colour the core gives `kind` (plan 7b Ruling 10), a bus
+/// taken as fed by an output.
+func kindColour(_ kind: StripKindRow) -> StripColourRow {
+    switch kind {
+    case .builtinSynth, .instrument, .instrumentOutput: .instrument
+    case .audioPath: .channel
+    case .bus: .bus
+    case .master: .master
+    }
 }
 
 /// A mixer: Synth (built-in, one insert) and Bus 1, then Master.

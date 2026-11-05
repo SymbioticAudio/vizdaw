@@ -1,7 +1,13 @@
 import AppKit
 import SwiftUI
+import SymbioticIcons
 import VizDAWAppModel
 import VizDAWCore
+import VizDAWEditors
+
+#if canImport(SymbioticBrand)
+import SymbioticBrand
+#endif
 
 /// The one store of open documents (main actor).
 @MainActor let appStore = DocumentStore.live()
@@ -22,6 +28,17 @@ import VizDAWCore
 /// Settings › Surfaces (plan 5f-1 Rulings 9–11).
 @MainActor let surfaceSettings = SurfaceSettings(core: AppControlHost.shared.surfaces)
 
+/// The user themes (controller ruling R-UT): JSON files in the support
+/// folder's `Themes` (`~/Library/Application Support/VizDAW/Themes`; a
+/// temporary folder under `vizctl launch`), read again when they change.
+@MainActor let userThemes = UserThemes(
+    folder: AppSetup.supportDir.appendingPathComponent("Themes", isDirectory: true), watching: LiveFileWatching())
+
+/// The theme and the colour bars (plan 7b Ruling 12): a preference of this
+/// Mac, in memory under `vizctl launch`.
+@MainActor let appearancePreferences = AppearancePreferences(
+    defaults: MemoryDefaults.appStore(), userThemes: userThemes)
+
 /// Notes played on MIDI sources, for list editors with MIDI In on (Plan 4c
 /// Ruling 11).
 @MainActor let noteInputHub = NoteInputHub(input: NoteInput())
@@ -31,6 +48,12 @@ struct VizDAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
+        // The branded glyphs first, before any icon draws (plan 7b Ruling 6;
+        // a VIZDAW_NO_BRAND=1 build has the standard icons only). AppIcon's
+        // glyph cases draw them; its angular cases do not (final fix wave B).
+        #if canImport(SymbioticBrand)
+        Icons.register(SymbioticBrand.provider)
+        #endif
         appStore.keyBindings = keyBindings
         // The external sample editor (plan 5f-3 Ruling 5): the stub launches
         // nothing (CI, the e2e).
@@ -83,6 +106,14 @@ struct VizDAWApp: App {
         // The catalog and support folder exist before any project can open
         // (launch arguments, Finder opens), so "Disable ‹plugin›" works.
         LaunchArguments.parseFlags(CommandLine.arguments)
+        // The theme (Ruling 12): every change restyles the AppKit windows;
+        // the first apply is the AppDelegate's (NSApp may be nil here).
+        // The user themes are read before the first window draws (R-UT).
+        userThemes.start()
+        appearancePreferences.onChange = { ThemeWindows.apply($0) }
+        AppearancePreferences.current = appearancePreferences
+        // Views made before launch finishes (state restoration) start in it.
+        ThemedViews.current = appearancePreferences.theme
         // The audio settings reach the core before any document opens
         // (plan 5d-2 Ruling 2; 5d-1 carry: before the first host opens).
         audioPreferences.applyAll()
@@ -102,35 +133,42 @@ struct VizDAWApp: App {
     var body: some Scene {
         WindowGroup(for: UUID.self) { $id in
             DocumentWindow(id: $id, store: appStore)
+                .themedRoot()
         }
         .defaultSize(width: 980, height: 620)
         .commands { AppCommands(store: appStore) }
         WindowGroup("Mixer", id: "mixer", for: UUID.self) { $id in
             MixerWindow(id: $id, store: appStore)
+                .themedRoot()
         }
         .defaultSize(width: 760, height: 560)
         WindowGroup("Media Pool", id: "media-pool", for: UUID.self) { $id in
             MediaPoolWindow(id: $id, store: appStore)
+                .themedRoot()
         }
         .defaultSize(width: 760, height: 420)
         Window("Plugin Manager", id: "plugins") {
             PluginManagerView(model: pluginManager)
+                .themedRoot()
         }
         Settings {
             TabView {
+                AppearanceSettingsView(prefs: appearancePreferences)
+                    .tabItem { AppIcon.settingsAppearance.label("Appearance") }
                 EditingSettingsView(prefs: editingPreferences)
-                    .tabItem { Label("Editing", systemImage: "pencil") }
+                    .tabItem { AppIcon.settingsEditing.label("Editing") }
                 KeysSettingsView(keys: keyBindings, store: appStore)
-                    .tabItem { Label("Keys", systemImage: "keyboard") }
+                    .tabItem { AppIcon.settingsKeys.label("Keys") }
                 AudioSettingsView(prefs: audioPreferences, store: appStore)
-                    .tabItem { Label("Audio", systemImage: "hifispeaker") }
+                    .tabItem { AppIcon.settingsAudio.label("Audio") }
                 RecordingSettingsView(prefs: audioPreferences, store: appStore)
-                    .tabItem { Label("Recording", systemImage: "record.circle") }
+                    .tabItem { AppIcon.settingsRecording.label("Recording") }
                 AutomationSettingsView(prefs: automationPreferences)
-                    .tabItem { Label("Automation", systemImage: "slider.vertical.3") }
+                    .tabItem { AppIcon.settingsAutomation.label("Automation") }
                 SurfacesSettingsView(settings: surfaceSettings, keys: keyBindings)
-                    .tabItem { Label("Surfaces", systemImage: "dial.medium") }
+                    .tabItem { AppIcon.settingsSurfaces.label("Surfaces") }
             }
+            .themedRoot()
         }
     }
 }
@@ -139,6 +177,9 @@ struct VizDAWApp: App {
 /// packages handed over by Finder.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // First (Ruling 12): windows, menus and alerts made from here on
+        // follow the theme.
+        ThemeWindows.apply(appearancePreferences.theme)
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         StoreAlerts.watch(appStore)

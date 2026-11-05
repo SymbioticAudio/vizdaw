@@ -12,7 +12,22 @@ public struct GrowingTake: Equatable, Sendable {
     public let toFrame: UInt64
 }
 
+/// One piece of a growing take's visible part: its span in points and the
+/// file frames and columns that fill it.
+public struct GrowingSlice: Equatable, Sendable {
+    public var minX, maxX: CGFloat
+    public var from, to: UInt64
+    public var columns: UInt32
+}
+
 extension GrowingTake {
+    /// The width of one piece of a growing take, in points.
+    public static let pieceWidth: CGFloat = 64
+    /// The most pieces a take is cut into.
+    public static let maxPieces = 32
+    /// The core's column limit for one request, shared by the pieces.
+    static let maxColumns = 8192
+
     /// The frames to ask the writer's file for, and the columns to draw
     /// them in, for the part of a take's `rect` that is `visible` (at most
     /// 8192 columns); nil when nothing is visible or the frames are empty.
@@ -85,6 +100,48 @@ extension RecordModel {
             out.append(
                 GrowingTake(
                     lane: lane.lane, startTick: startTick, endTick: t[1], fromFrame: UInt64(from), toFrame: UInt64(to)))
+        }
+        return out
+    }
+
+    /// The visible part of a growing take's `rect`, cut into pieces of
+    /// `GrowingTake.pieceWidth` points (at most 32, widened when needed), each
+    /// with the file frames that sound under it. Every piece edge's tick
+    /// (`tickAt` gives the tick at an x) goes through the sequence's tempo
+    /// map in one `secondsAt` call, so a tempo change inside the take bends
+    /// the waveform to where it is heard: frame `fromFrame +
+    /// round((secs(tick) − secs(startTick)) × rate)`, held within `fromFrame…toFrame`.
+    /// The columns of all pieces total at most 8192.
+    public func growingSlices(
+        _ t: GrowingTake, rect: CGRect, visible: CGRect, tickAt: (CGFloat) -> Int64
+    ) -> [GrowingSlice] {
+        let vis = rect.intersection(visible)
+        guard !vis.isNull, vis.width > 0, vis.width.isFinite, t.toFrame > t.fromFrame,
+            let m = document, let seq = m.selectedSeq, let rate = m.projectInfo?.format.sampleRate, rate > 0
+        else { return [] }
+        let count = max(1, min(GrowingTake.maxPieces, Int((vis.width / GrowingTake.pieceWidth).rounded(.up))))
+        let step = vis.width / CGFloat(count)
+        let xs = (0...count).map { i in i == count ? vis.maxX : vis.minX + CGFloat(i) * step }
+        let ticks = [t.startTick] + xs.map(tickAt)
+        guard let secs = try? m.session.secondsAt(seq: seq, ticks: ticks), secs.count == ticks.count else { return [] }
+        let hz = Double(rate)
+        let span = Double(t.toFrame - t.fromFrame)
+        var frames: [UInt64] = []
+        for s in secs.dropFirst() {
+            let off = ((s - secs[0]) * hz).rounded()
+            guard off.isFinite else { return [] }
+            let clamped = min(max(off, 0), span)
+            // Never behind the previous edge, so the pieces stay contiguous.
+            frames.append(max(t.fromFrame + UInt64(clamped), frames.last ?? 0))
+        }
+        let perPiece = UInt32(max(1, GrowingTake.maxColumns / count))
+        var out: [GrowingSlice] = []
+        for i in 0..<count where frames[i + 1] > frames[i] {
+            let cols = UInt32(clamping: Int((xs[i + 1] - xs[i]).rounded(.up)))
+            out.append(
+                GrowingSlice(
+                    minX: xs[i], maxX: xs[i + 1], from: frames[i], to: frames[i + 1],
+                    columns: max(1, min(cols, perPiece))))
         }
         return out
     }

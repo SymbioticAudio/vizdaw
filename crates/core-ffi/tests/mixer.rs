@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vizdaw_ffi::host::{force_offline, reset_host};
 use vizdaw_ffi::{
-    PluginFormatTag, PluginRefRow, SendRow, Session, SlotStatus, StripKindRow, StripRow, VizError,
+    OpenOptions, PluginFormatTag, PluginRefRow, SendRow, Session, SlotStatus, StripColourRow,
+    StripKindRow, StripRow, SwatchRow, VizError,
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -345,4 +346,243 @@ fn a_destination_can_play_a_plugin_instrument() {
         s.set_destination_plugin(999, test_plugin("x", "x"))
             .is_err()
     );
+}
+
+/// The synth's EQ, once it runs.
+fn eq_live(s: &Session) -> bool {
+    strip(s, "Built-in Synth")
+        .eq
+        .is_some_and(|e| e.status == SlotStatus::Live)
+}
+
+/// Plan 7b Ruling 7: the EQ slot loads, stays put while the inserts
+/// reorder, is saved and reopened, and comes back with its state on redo.
+#[test]
+fn the_eq_slot_loads_and_survives_reordering_saving_and_undo() {
+    let _g = serial();
+    let s = demo();
+    let synth = strip(&s, "Built-in Synth").id;
+    let snap = s
+        .set_eq(synth, Some(test_plugin("vizdaw.test.gain", "Test Gain")))
+        .unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Load EQ"));
+    let eq = strip(&s, "Built-in Synth").eq.unwrap();
+    assert_eq!(eq.plugin.name, "Test Gain");
+    assert!(!eq.instrument);
+    assert!(
+        strip(&s, "Built-in Synth").inserts.is_empty(),
+        "not an insert"
+    );
+    idle_until(&s, eq_live);
+    assert!(
+        s.plugin_slots().unwrap().iter().any(|r| r.id == eq.id),
+        "the plug-in list shows the EQ"
+    );
+    s.add_insert(synth, None, test_plugin("vizdaw.test.gain", "Test Gain"))
+        .unwrap();
+    s.add_insert(synth, None, test_plugin("vizdaw.test.bank", "Test Bank"))
+        .unwrap();
+    let ins = strip(&s, "Built-in Synth").inserts;
+    let (a, b) = (ins[0].id, ins[1].id);
+    s.move_insert(b, synth, 0).unwrap();
+    let row = strip(&s, "Built-in Synth");
+    assert_eq!(row.eq.as_ref().unwrap().id, eq.id, "the EQ stays first");
+    assert_eq!(row.inserts.iter().map(|i| i.id).collect::<Vec<_>>(), [b, a]);
+    // Saving captures the EQ's state.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("eq.vizdaw").to_string_lossy().into_owned();
+    s.save_as(path.clone()).unwrap();
+    let state = saved_state(&s, eq.id);
+    assert!(state.is_some(), "saved with its state");
+    // Undo until the EQ goes, then redo it all.
+    for _ in 0..4 {
+        s.undo().unwrap();
+    }
+    assert!(strip(&s, "Built-in Synth").eq.is_none());
+    for _ in 0..4 {
+        s.redo().unwrap();
+    }
+    let row = strip(&s, "Built-in Synth");
+    assert_eq!(row.eq.as_ref().unwrap().id, eq.id);
+    assert_eq!(saved_state(&s, eq.id), state, "the same state is back");
+    s.close().unwrap();
+    drop(s);
+    let r = Session::open(path).unwrap();
+    let row = strip(&r, "Built-in Synth");
+    let back = row.eq.unwrap();
+    assert_eq!((back.id, back.plugin.name.as_str()), (eq.id, "Test Gain"));
+    assert_eq!(row.inserts.iter().map(|i| i.id).collect::<Vec<_>>(), [b, a]);
+    assert_eq!(saved_state(&r, eq.id), state);
+}
+
+/// Review carry (B1 M1): replacing the EQ captures the old one first, so
+/// Undo brings it back with its state.
+#[test]
+fn replacing_the_eq_keeps_the_old_state_for_undo() {
+    let _g = serial();
+    let s = demo();
+    let synth = strip(&s, "Built-in Synth").id;
+    s.set_eq(synth, Some(test_plugin("vizdaw.test.gain", "Test Gain")))
+        .unwrap();
+    let a = strip(&s, "Built-in Synth").eq.unwrap().id;
+    idle_until(&s, eq_live);
+    s.debug_set_slot_param(a, 0, 0.25).unwrap();
+    assert_eq!(saved_state(&s, a), None, "never captured yet");
+    s.set_eq(synth, Some(test_plugin("vizdaw.test.bank", "Test Bank")))
+        .unwrap();
+    let b = strip(&s, "Built-in Synth").eq.unwrap();
+    assert_ne!(b.id, a);
+    assert_eq!(b.plugin.name, "Test Bank");
+    s.undo().unwrap();
+    let back = strip(&s, "Built-in Synth").eq.unwrap();
+    assert_eq!((back.id, back.plugin.name.as_str()), (a, "Test Gain"));
+    assert!(saved_state(&s, a).is_some(), "captured before the replace");
+}
+
+/// Review carry (B1 M1): a project opened with plug-ins off holds its
+/// EQ, as it holds every other slot.
+#[test]
+fn opening_with_plugins_off_holds_the_eq() {
+    let _g = serial();
+    let s = demo();
+    let synth = strip(&s, "Built-in Synth").id;
+    s.set_eq(synth, Some(test_plugin("vizdaw.test.gain", "Test Gain")))
+        .unwrap();
+    let eq = strip(&s, "Built-in Synth").eq.unwrap().id;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("off.vizdaw").to_string_lossy().into_owned();
+    s.save_as(path.clone()).unwrap();
+    s.close().unwrap();
+    drop(s);
+    let r = Session::open_with(
+        path,
+        OpenOptions {
+            plugins_off: true,
+            autosave: None,
+        },
+    )
+    .unwrap();
+    for _ in 0..20 {
+        r.idle().unwrap();
+    }
+    assert_eq!(r.held_slots().unwrap(), vec![eq]);
+    assert_eq!(
+        strip(&r, "Built-in Synth").eq.unwrap().status,
+        SlotStatus::Placeholder {
+            reason: "Plugins off (safe mode)".into()
+        }
+    );
+}
+
+/// Plan 7b Ruling 7: the EQ is not an insert, an unknown strip has none,
+/// and an empty slot cannot be emptied; each refusal changes nothing.
+#[test]
+fn hostile_eq_calls_are_refused() {
+    let _g = serial();
+    let s = demo();
+    let synth = strip(&s, "Built-in Synth").id;
+    let v = s.snapshot().unwrap().version;
+    assert!(
+        s.set_eq(999_999, Some(test_plugin("vizdaw.test.gain", "Test Gain")))
+            .is_err()
+    );
+    assert!(s.set_eq(u64::MAX, None).is_err());
+    let e = s.set_eq(synth, None).unwrap_err();
+    assert!(matches!(e, VizError::Model { .. }), "{e:?}");
+    assert_eq!(s.snapshot().unwrap().version, v);
+    s.set_eq(synth, Some(test_plugin("vizdaw.test.gain", "Test Gain")))
+        .unwrap();
+    let eq = strip(&s, "Built-in Synth").eq.unwrap().id;
+    let v = s.snapshot().unwrap().version;
+    assert!(s.remove_insert(eq).is_err());
+    assert!(s.move_insert(eq, synth, 0).is_err());
+    assert_eq!(s.snapshot().unwrap().version, v);
+    assert_eq!(strip(&s, "Built-in Synth").eq.unwrap().id, eq);
+    assert!(strip(&s, "Built-in Synth").inserts.is_empty());
+}
+
+/// Controller ruling C-1: an unknown strip takes no colour; every swatch
+/// reads back as itself, and each choice is one undo step.
+#[test]
+fn hostile_strip_colour_calls_are_refused() {
+    let _g = serial();
+    let s = demo();
+    let synth = strip(&s, "Built-in Synth").id;
+    let v = s.snapshot().unwrap().version;
+    assert!(s.set_strip_colour(999_999, Some(SwatchRow::Red)).is_err());
+    assert!(s.set_strip_colour(u64::MAX, None).is_err());
+    assert_eq!(s.snapshot().unwrap().version, v);
+    assert_eq!(strip(&s, "Built-in Synth").colour, None);
+    let snap = s.set_strip_colour(synth, Some(SwatchRow::Blue)).unwrap();
+    assert_eq!(snap.undo_label.as_deref(), Some("Set Strip Colour"));
+    assert_eq!(strip(&s, "Built-in Synth").colour, Some(SwatchRow::Blue));
+    s.undo().unwrap();
+    assert_eq!(strip(&s, "Built-in Synth").colour, None);
+    for c in [
+        SwatchRow::Red,
+        SwatchRow::Orange,
+        SwatchRow::Yellow,
+        SwatchRow::Green,
+        SwatchRow::Teal,
+        SwatchRow::Blue,
+        SwatchRow::Purple,
+        SwatchRow::Pink,
+    ] {
+        s.set_strip_colour(synth, Some(c)).unwrap();
+        assert_eq!(strip(&s, "Built-in Synth").colour, Some(c));
+    }
+    s.set_strip_colour(synth, None).unwrap();
+    assert_eq!(strip(&s, "Built-in Synth").colour, None);
+    // Fader caps go by kind (owner, G1): a colour leaves the kind alone.
+    s.set_strip_colour(synth, Some(SwatchRow::Green)).unwrap();
+    assert_eq!(
+        strip(&s, "Built-in Synth").kind_colour,
+        StripColourRow::Instrument
+    );
+}
+
+/// Plan 7b Ruling 10 (spec §2 item 8): strips are coloured by kind; a
+/// bus fed only by sends is an aux return, any other bus a bus.
+#[test]
+fn strips_are_coloured_by_kind() {
+    let _g = serial();
+    let s = Session::new_demo_audio().unwrap();
+    let m = s.mixer().unwrap();
+    for r in &m.strips {
+        let want = match r.kind {
+            StripKindRow::BuiltinSynth
+            | StripKindRow::Instrument { .. }
+            | StripKindRow::InstrumentOutput { .. } => StripColourRow::Instrument,
+            StripKindRow::AudioPath { .. } => StripColourRow::Channel,
+            StripKindRow::Master => StripColourRow::Master,
+            StripKindRow::Bus => continue,
+        };
+        assert_eq!(r.kind_colour, want, "{}", r.name);
+    }
+    assert_eq!(
+        strip(&s, "Built-in Synth").kind_colour,
+        StripColourRow::Instrument
+    );
+    assert_eq!(strip(&s, "Master").kind_colour, StripColourRow::Master);
+    let audio = m
+        .strips
+        .iter()
+        .find(|r| matches!(r.kind, StripKindRow::AudioPath { .. }))
+        .expect("the audio demo has an audio path")
+        .clone();
+    assert_eq!(audio.kind_colour, StripColourRow::Channel);
+    s.add_bus("FX".into()).unwrap();
+    let fx = strip(&s, "FX").id;
+    assert_eq!(strip(&s, "FX").kind_colour, StripColourRow::Bus, "no feed");
+    let synth = strip(&s, "Built-in Synth").id;
+    s.add_send(synth, fx).unwrap();
+    assert_eq!(strip(&s, "FX").kind_colour, StripColourRow::AuxReturn);
+    s.set_output(audio.id, Some(fx)).unwrap();
+    assert_eq!(
+        strip(&s, "FX").kind_colour,
+        StripColourRow::Bus,
+        "fed by an output"
+    );
+    s.undo().unwrap();
+    assert_eq!(strip(&s, "FX").kind_colour, StripColourRow::AuxReturn);
 }

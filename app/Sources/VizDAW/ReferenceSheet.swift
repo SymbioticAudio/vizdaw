@@ -3,6 +3,7 @@ import VizDAWAppModel
 
 /// A reference's per-use length, repeats and transpose (spec §4a "set params").
 struct ReferenceSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var editor: EditorModel
 
     private func binding<T>(_ path: WritableKeyPath<ReferenceDraft, T>, _ fallback: T) -> Binding<T> {
@@ -31,7 +32,7 @@ struct ReferenceSheet: View {
                 Button("Apply") { editor.commitReference() }.keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 340)
     }
 }

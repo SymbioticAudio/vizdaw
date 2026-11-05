@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -6,11 +7,12 @@ import VizDAWCore
 /// core's warning and the files it would write; progress and Cancel while
 /// it runs. All state lives in `BounceModel`.
 struct BounceSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var bounce: BounceModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Bounce").font(.headline)
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
+            Text("Bounce").font(theme.type.title.font)
             Picker("Bounce", selection: $bounce.source) {
                 Text("Mix").tag(BounceModel.Source.mix)
                 Text("Stems").tag(BounceModel.Source.stems)
@@ -30,11 +32,11 @@ struct BounceSheet: View {
             Text(
                 "Files ignore mute and solo. Add to project bounces as heard: muted and solo-silenced strips, and strips routed into a muted bus, are silent."
             )
-            .font(.caption)
+            .font(theme.type.caption.font)
             .foregroundStyle(.secondary)
             if bounce.source == .stems {
                 Text("Files already in the folder are kept; new stems take the next free number.")
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
             }
             Toggle("Time selection only", isOn: $bounce.useSelection)
@@ -68,16 +70,16 @@ struct BounceSheet: View {
                 Toggle("Also write the files", isOn: $bounce.writeFiles)
             }
             if let w = bounce.warning {
-                Label(w, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
+                AppIcon.warning.label(w)
+                    .font(theme.type.body.font)
             }
             if !bounce.length.isEmpty {
-                Text("Length \(bounce.length)").font(.caption).foregroundStyle(.secondary)
+                Text("Length \(bounce.length)").font(theme.type.caption.font).foregroundStyle(.secondary)
             }
             if let e = bounce.error {
-                Label(e, systemImage: "xmark.octagon")
-                    .font(.callout)
-                    .foregroundStyle(.red)
+                AppIcon.fault.label(e)
+                    .font(theme.type.body.font)
+                    .foregroundStyle(theme.state.error.color)
             }
             if let p = bounce.progress {
                 ProgressView(value: Double(p))
@@ -96,7 +98,7 @@ struct BounceSheet: View {
                 }
             }
         }
-        .padding(16)
+        .padding(theme.spacing.l)
         .frame(width: 440)
         .onChange(of: bounce.running) { was, now in
             if was && !now { bounce.finished() }

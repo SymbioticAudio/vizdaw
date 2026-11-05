@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Testing
 import VizDAWCore
 @testable import VizDAWEditors
@@ -179,6 +180,120 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         #expect(huge.first?.type == .leftMouseDown && huge.last?.type == .leftMouseUp)
     }
 
+    /// SwiftUI's hosting view takes no first click, and VizDAW under the
+    /// channel is not the active app, so its windows are never key: a
+    /// channel click on a strip's number box was spent on the window
+    /// (plan 7b Task B8). Once the channel has aimed at it, the hosting
+    /// view takes the channel's clicks as first clicks; a user's are as
+    /// before.
+    @Test func aHostingViewTakesTheChannelsFirstClick() throws {
+        let w = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 200, height: 100), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: Color.clear.frame(width: 200, height: 100))
+        w.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let click = ControlUI.clickEvents(w, at: CGPoint(x: 100, y: 60), button: .left, count: 1, modifiers: none)
+        let user = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: NSPoint(x: 100, y: 40), modifierFlags: [],
+                timestamp: click[0].timestamp + 0.5, windowNumber: w.windowNumber, context: nil, eventNumber: 2,
+                clickCount: 1, pressure: 1))
+        let before = host.acceptsFirstMouse(for: user)
+        #expect(!host.acceptsFirstMouse(for: click[0]), "SwiftUI's own answer")
+        ControlUI.remember(click)
+        #expect(ControlUI.allowFirstMouse(click, in: w), "SwiftUI took no first click there: it may start editing")
+        #expect(host.acceptsFirstMouse(for: click[0]))
+        #expect(host.acceptsFirstMouse(for: user) == before, "a user's click is unchanged")
+        #expect(ControlUI.allowFirstMouse(click, in: w), "taught once, answered alike")
+        // A plain AppKit view keeps its own answer.
+        let plain = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        w.contentView = plain
+        #expect(!ControlUI.allowFirstMouse(click, in: w))
+        #expect(!plain.acceptsFirstMouse(for: click[0]))
+    }
+
+    /// A channel click that starts a number box editing in a window that
+    /// is not key leaves SwiftUI's field without the keyboard (plan 7b
+    /// Task B8): the channel gives it the keyboard, as a click into a key
+    /// window would.
+    @Test func aClickedTextFieldGetsTheKeyboard() {
+        let w = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 200, height: 100), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        let field = NSTextField(frame: NSRect(x: 10, y: 10, width: 80, height: 22))
+        let label = NSTextField(labelWithString: "read only")
+        label.frame = NSRect(x: 100, y: 10, width: 80, height: 22)
+        let plain = NSView(frame: NSRect(x: 0, y: 50, width: 200, height: 50))
+        for v in [field, label, plain] { w.contentView?.addSubview(v) }
+        let titleBar = w.frame.height - w.contentLayoutRect.height
+        // Window points, top-left origin: the field's centre.
+        let atField = CGPoint(x: 50, y: titleBar + 100 - 21)
+        let atLabel = CGPoint(x: 140, y: titleBar + 100 - 21)
+        let atPlain = CGPoint(x: 50, y: titleBar + 20)
+        #expect(!ControlUI.focusTextField(at: atPlain, in: w), "no field there")
+        #expect(!ControlUI.focusTextField(at: atLabel, in: w), "a label takes no typing")
+        #expect(field.currentEditor() == nil)
+        #expect(ControlUI.focusTextField(at: atField, in: w))
+        #expect(field.currentEditor() != nil && w.firstResponder === field.currentEditor())
+        #expect(ControlUI.focusTextField(at: atField, in: w), "it keeps it")
+    }
+
+    /// Final review m3: only a click on a number box (marked with
+    /// `ControlUI.numberBoxID`) or a text field waits for a field to show;
+    /// a fader, a knob, a toggle or a pane background answers at once.
+    @Test func onlyANumberBoxOrTextFieldClickMayStartEditing() {
+        typealias T = ControlUI.EditTarget
+        let box = ControlUI.numberBoxID
+        let targets = [
+            T(frame: CGRect(x: 0, y: 0, width: 400, height: 300), role: "AXGroup", identifier: nil),
+            T(frame: CGRect(x: 10, y: 10, width: 56, height: 24), role: "AXButton", identifier: box),
+            T(frame: CGRect(x: 100, y: 10, width: 36, height: 200), role: "AXUnknown", identifier: nil),
+            T(frame: CGRect(x: 200, y: 10, width: 24, height: 24), role: "AXButton", identifier: nil),
+            T(frame: CGRect(x: 300, y: 10, width: 56, height: 24), role: "AXTextField", identifier: nil),
+        ]
+        #expect(ControlUI.mayEdit(targets, at: CGPoint(x: 30, y: 20)), "the number box")
+        #expect(ControlUI.mayEdit(targets, at: CGPoint(x: 320, y: 20)), "a text field")
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: 110, y: 100)), "a fader")
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: 210, y: 20)), "a toggle (a button with a value)")
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: 380, y: 280)), "the background")
+        #expect(!ControlUI.mayEdit(targets, at: CGPoint(x: CGFloat.nan, y: 20)))
+    }
+
+    /// The marker reaches the channel's walk on a real SwiftUI element.
+    @Test func aMarkedSwiftUIViewIsANumberBoxToTheChannel() {
+        let w = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 200, height: 100), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        let host = NSHostingView(
+            rootView: HStack(spacing: 0) {
+                Text("0.0 dB").frame(width: 100, height: 100)
+                    .accessibilityElement(children: .ignore).accessibilityLabel("Level")
+                    .accessibilityAddTraits(.isButton).accessibilityIdentifier(ControlUI.numberBoxID)
+                Text("M").frame(width: 100, height: 100)
+                    .accessibilityElement(children: .ignore).accessibilityLabel("Mute")
+                    .accessibilityAddTraits(.isButton)
+            })
+        w.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let titleBar = w.frame.height - w.contentLayoutRect.height
+        #expect(ControlUI.mayEdit(at: CGPoint(x: 50, y: titleBar + 50), in: w), "the marked box")
+        #expect(!ControlUI.mayEdit(at: CGPoint(x: 150, y: titleBar + 50), in: w), "the unmarked toggle")
+    }
+
+    /// B8 review m1: a focusing click that found no editable field says
+    /// which view it hit.
+    @Test func aClickWithNoFieldNamesTheViewItHit() {
+        let (w, _, _) = window()
+        let titleBar = w.frame.height - w.contentLayoutRect.height
+        let note = ControlUI.noFieldNote(at: CGPoint(x: 50, y: titleBar + 250), in: w)
+        #expect(note == "channel: no editable field under the click (hit: VizDAWEditorsTests.RecordingView)", "\(note)")
+        #expect(ControlUI.noFieldNote(at: CGPoint(x: -50, y: -50), in: w).hasSuffix("(hit: none)"))
+    }
+
     @Test func aClickPointNeedsAVisibleFiniteElement() throws {
         let (w, _, _) = window()
         #expect(ControlUI.point(.point(x: .nan, y: 3), in: w) == nil)
@@ -199,5 +314,70 @@ let none = ModifiersRow(shift: false, control: false, option: false, command: fa
         #expect(at(NSRect(x: original.minX, y: original.minY, width: .nan, height: 10)) == nil, "not finite")
         #expect(at(NSRect(x: original.minX + 5000, y: original.minY, width: 20, height: 20)) == nil, "outside")
         #expect(at(NSRect(x: original.minX, y: original.minY - 5000, width: 20, height: 20)) == nil, "above")
+    }
+}
+
+/// An element that answers the accessibility selectors without declaring
+/// `NSAccessibilityProtocol`, as SwiftUI's `AccessibilityNode` does (plan
+/// 7b Task B7: the strip's knobs, fader and number boxes are such nodes).
+@MainActor
+final class InformalNode: NSObject {
+    let label: String
+    let frame: NSRect
+    init(label: String, frame: NSRect) {
+        self.label = label
+        self.frame = frame
+    }
+    @objc func accessibilityRole() -> String { "AXGroup" }
+    @objc func accessibilityLabel() -> String { label }
+    @objc func accessibilityValue() -> Any { "0.0 dB" }
+    @objc func accessibilityFrame() -> NSRect { frame }
+    @objc func accessibilityChildren() -> [Any] { [] }
+    @objc func isAccessibilityEnabled() -> Bool { true }
+}
+
+/// The same through the attribute API only.
+@MainActor
+final class AttributeNode: NSObject {
+    let label: String
+    init(label: String) { self.label = label }
+    @objc override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
+        switch attribute.rawValue {
+        case "AXRole": return "AXButton"
+        case "AXDescription": return label
+        default: return nil
+        }
+    }
+}
+
+/// A view whose children are informal nodes.
+@MainActor
+final class InformalHost: NSView {
+    var nodes: [Any] = []
+    override func accessibilityChildren() -> [Any]? { nodes }
+}
+
+@MainActor
+@Suite struct ControlUIInformalTests {
+    @Test func theTreeReadsElementsThatDoNotDeclareTheProtocol() throws {
+        let w = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 400, height: 300), styleMask: [.titled],
+            backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        let host = InformalHost(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        w.contentView?.addSubview(host)
+        let screen = w.convertToScreen(NSRect(x: 10, y: 20, width: 56, height: 24))
+        host.nodes = [InformalNode(label: "Level of Synth", frame: screen), AttributeNode(label: "Old")]
+        let nodes = ControlUI.tree(of: w, maxDepth: 64).nodes
+        let level = try #require(nodes.first { $0.label == "Level of Synth" })
+        #expect(level.role == "AXGroup" && level.value == "0.0 dB" && level.enabled)
+        #expect(abs(level.width - 56) < 0.5 && abs(level.height - 24) < 0.5)
+        let old = try #require(nodes.first { $0.label == "Old" })
+        #expect(old.role == "AXButton" && old.actions == ["press"])
+        let check = controlElementCheck(role: level.role, label: level.label, title: level.title)
+        let ref = ElementRefRow(id: "", path: level.path, check: check)
+        let p = try #require(ControlUI.point(.element(element: ref), in: w))
+        let titleBar = w.frame.height - w.contentLayoutRect.height
+        #expect(abs(p.x - 38) < 0.5 && abs(p.y - (titleBar + 300 - 32)) < 0.5, "\(p)")
     }
 }

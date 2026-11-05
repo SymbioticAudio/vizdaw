@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use vizdaw_ffi::control::{request_of, result_json};
 use vizdaw_ffi::{
     AlertRow, ControlCall, ControlErrorCode, ControlFailure, ControlRequest, ControlResult,
-    ControlServer, CrashAnswerRow, DocFactsRow, Session, UiNodeRow, WaitConditionRow, WaitFactsRow,
-    control_command_ids, control_element_check, control_wait_met,
+    ControlServer, CrashAnswerRow, DocFactsRow, LayoutStateRow, PaneRow, Session, UiNodeRow,
+    ViewPanesRow, WaitConditionRow, WaitFactsRow, control_command_ids, control_element_check,
+    control_wait_met,
 };
 
 const LONG: Duration = Duration::from_secs(20);
@@ -774,4 +775,291 @@ fn surfaces_state_answers_in_the_channels_spelling() {
     assert_eq!(none["feedback"], json!([]), "{none}");
     assert_eq!(none["learning"], Value::Null, "{none}");
     assert_eq!(none["surfaces"].as_array().map(Vec::len), Some(3), "{none}");
+}
+
+#[test]
+fn layout_result_json() {
+    let pane = |p: &str, v: &str| PaneRow {
+        pane: p.into(),
+        shown: p != "right",
+        view: v.into(),
+        size: 220.0,
+        views: vec![v.into()],
+    };
+    let j = result_json(&ControlResult::Layout {
+        doc: "D".into(),
+        layout: LayoutStateRow {
+            main: "arrange".into(),
+            left_strip: Some(3),
+            left_shows: "strip".into(),
+            views: vec![ViewPanesRow {
+                main: "arrange".into(),
+                panes: vec![
+                    pane("left", "strip"),
+                    pane("bottom", "piano_roll"),
+                    pane("right", "markers"),
+                ],
+            }],
+        },
+    });
+    assert_eq!(j["doc"], "D");
+    assert_eq!(j["main"], "arrange");
+    assert_eq!(j["left_strip"], 3);
+    assert_eq!(j["left_shows"], "strip");
+    assert_eq!(
+        j["views"][0]["panes"][1],
+        json!({"pane": "bottom", "shown": true, "view": "piano_roll", "size": 220.0, "views": ["piano_roll"]})
+    );
+    assert_eq!(j["views"][0]["panes"][2]["shown"], false);
+}
+
+/// Plan 7b Ruling 11: `state.get mixer` answers each strip with exactly
+/// the ruling's keys; the demo's synth has no EQ, the instrument kind
+/// colour and no colour of its own.
+#[test]
+fn state_get_mixer_answers_json() {
+    use core_control::request::StateTarget;
+    assert!(matches!(
+        request_of(
+            Command::StateGet {
+                target: StateTarget::Mixer,
+                window: None
+            },
+            || unreachable!()
+        ),
+        Some(ControlRequest::State {
+            target: vizdaw_ffi::StateTargetRow::Mixer,
+            window: None
+        })
+    ));
+    let session = Session::new_demo().unwrap();
+    let mixer = session.mixer().unwrap();
+    let j = result_json(&ControlResult::Mixer {
+        doc: "D".into(),
+        mixer,
+    });
+    assert_eq!(j["doc"], "D");
+    let strips = j["strips"].as_array().unwrap();
+    assert_eq!(strips.len(), 2);
+    let keys = [
+        "id",
+        "name",
+        "kind_label",
+        "kind_colour",
+        "colour",
+        "gain_db",
+        "pan",
+        "mute",
+        "solo",
+        "output",
+        "automation",
+        "eq",
+        "inserts",
+        "sends",
+    ];
+    for s in strips {
+        let mut have: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
+        have.sort_unstable();
+        let mut want = keys.to_vec();
+        want.sort_unstable();
+        assert_eq!(have, want, "{s}");
+    }
+    let synth = &strips[0];
+    assert_eq!(synth["name"], "Built-in Synth");
+    assert_eq!(synth["kind_label"], "Built-in Synth");
+    assert_eq!(synth["kind_colour"], "instrument");
+    assert_eq!(synth["eq"], Value::Null);
+    assert_eq!(synth["colour"], Value::Null);
+    assert_eq!(synth["output"], Value::Null);
+    assert_eq!(synth["automation"], "read");
+    assert_eq!(synth["gain_db"], 0.0);
+    assert_eq!(synth["inserts"], json!([]));
+    assert_eq!(synth["sends"], json!([]));
+    assert_eq!(strips[1]["kind_colour"], "master");
+}
+
+/// Plan 7b Ruling 11: the EQ, inserts and sends in the channel's
+/// spelling, and a user colour by its swatch name.
+#[test]
+fn state_get_mixer_spells_slots_sends_and_colours() {
+    use vizdaw_ffi::{
+        MixerSnapshot, PluginFormatTag, PluginRefRow, SendRow, SlotRow, SlotStatus, StripColourRow,
+        SwatchRow,
+    };
+    let session = Session::new_demo().unwrap();
+    let mut m: MixerSnapshot = session.mixer().unwrap();
+    let slot = |id: u64, name: &str, bypass: bool| SlotRow {
+        id,
+        plugin: PluginRefRow {
+            format: PluginFormatTag::Clap,
+            id: "x".into(),
+            name: name.into(),
+            vendor: "V".into(),
+            version: "1".into(),
+        },
+        instrument: false,
+        bypass,
+        sidechain: None,
+        status: SlotStatus::Live,
+        latency: 0,
+        has_sidechain_input: false,
+        outputs: 1,
+        has_editor: false,
+    };
+    m.strips[0].eq = Some(slot(9, "Tone", true));
+    m.strips[0].inserts = vec![slot(10, "Gain", false)];
+    m.strips[0].sends = vec![SendRow {
+        target: 7,
+        level_db: -6.0,
+        pre_fader: false,
+        enabled: true,
+    }];
+    m.strips[0].colour = Some(SwatchRow::Pink);
+    m.strips[0].output = Some(7);
+    m.strips[1].kind_colour = StripColourRow::AuxReturn;
+    let j = result_json(&ControlResult::Mixer {
+        doc: "D".into(),
+        mixer: m,
+    });
+    let s = &j["strips"][0];
+    assert_eq!(s["eq"], json!({"slot": 9, "name": "Tone", "bypass": true}));
+    assert_eq!(
+        s["inserts"],
+        json!([{"slot": 10, "name": "Gain", "bypass": false}])
+    );
+    assert_eq!(
+        s["sends"],
+        json!([{"target": 7, "level_db": -6.0, "pre_fader": false, "enabled": true}])
+    );
+    assert_eq!(s["colour"], "pink");
+    assert_eq!(s["output"], 7);
+    assert_eq!(j["strips"][1]["kind_colour"], "aux_return");
+}
+
+/// Plan 7b Ruling 11: `state.get windows` names the app's theme, which is
+/// app-wide (not per window).
+#[test]
+fn windows_json_names_the_theme() {
+    let j = result_json(&ControlResult::Windows {
+        windows: vec![],
+        alerts: vec![],
+        theme: "flat".into(),
+    });
+    assert_eq!(j["theme"], "flat");
+    assert_eq!(j["windows"], json!([]));
+    assert_eq!(j["alerts"], json!([]));
+}
+
+/// Plan 7c Ruling 10: `state.get audio_editor` serialises to the ruling's
+/// JSON; `gain_db` is rounded to thousandths and `boxes` is an object.
+#[test]
+fn audio_editor_result_json() {
+    use vizdaw_ffi::{
+        AudioEditorBoxRow, AudioEditorRegionRow, AudioEditorStateRow, FadeRow, FadeShapeRow,
+    };
+    let boxes = [
+        ("gain", "\u{2212}4.2 dB"),
+        ("fade_in", "250 ms"),
+        ("fade_out", "0 ms"),
+        ("start", "0:00.500"),
+        ("length", "0:01.000"),
+        ("peak", "\u{2212}0.3 dB"),
+    ]
+    .map(|(n, t)| AudioEditorBoxRow {
+        name: n.into(),
+        text: t.into(),
+    })
+    .to_vec();
+    let editor = AudioEditorStateRow {
+        shown: true,
+        region: Some(AudioEditorRegionRow {
+            event: 71,
+            media: 5,
+            name: "tone".into(),
+            gain_db: -4.2_f32,
+            fade_in: FadeRow {
+                length: 12000,
+                shape: FadeShapeRow::Linear,
+            },
+            fade_out: FadeRow {
+                length: 0,
+                shape: FadeShapeRow::Linear,
+            },
+            source_offset: 24000,
+            length: 48000,
+            media_frames: 96000,
+            sample_rate: 48000,
+            offline: false,
+        }),
+        message: None,
+        frames_per_point: 88.0,
+        origin_frame: 21600.0,
+        amplitude: 1,
+        boxes,
+    };
+    let j = result_json(&ControlResult::AudioEditor {
+        doc: "D".into(),
+        editor,
+    });
+    assert_eq!(
+        j,
+        json!({"doc": "D", "shown": true, "message": null,
+            "frames_per_point": 88.0, "origin_frame": 21600.0, "amplitude": 1,
+            "boxes": {"gain": "\u{2212}4.2 dB", "fade_in": "250 ms", "fade_out": "0 ms",
+                      "start": "0:00.500", "length": "0:01.000", "peak": "\u{2212}0.3 dB"},
+            "region": {"event": 71, "media": 5, "name": "tone", "gain_db": -4.2,
+                "fade_in": {"frames": 12000, "shape": "linear"},
+                "fade_out": {"frames": 0, "shape": "linear"},
+                "source_offset": 24000, "length": 48000,
+                "media_frames": 96000, "sample_rate": 48000, "offline": false}})
+    );
+    let empty = result_json(&ControlResult::AudioEditor {
+        doc: "D".into(),
+        editor: AudioEditorStateRow {
+            shown: false,
+            region: None,
+            message: Some("Select one audio region to edit it.".into()),
+            frames_per_point: 512.0,
+            origin_frame: 0.0,
+            amplitude: 1,
+            boxes: vec![],
+        },
+    });
+    assert_eq!(empty["region"], Value::Null);
+    assert_eq!(empty["boxes"], json!({}));
+    assert_eq!(empty["message"], "Select one audio region to edit it.");
+    for (shape, name) in [
+        (FadeShapeRow::SCurve, "s_curve"),
+        (FadeShapeRow::EqualPower, "equal_power"),
+        (FadeShapeRow::Exponential, "exponential"),
+    ] {
+        let mut e = AudioEditorRegionRow {
+            event: 1,
+            media: 0,
+            name: String::new(),
+            gain_db: 0.0,
+            fade_in: FadeRow { length: 1, shape },
+            fade_out: FadeRow { length: 1, shape },
+            source_offset: 0,
+            length: 1,
+            media_frames: 0,
+            sample_rate: 0,
+            offline: true,
+        };
+        e.gain_db = 6.0;
+        let j = result_json(&ControlResult::AudioEditor {
+            doc: "D".into(),
+            editor: AudioEditorStateRow {
+                shown: true,
+                region: Some(e),
+                message: None,
+                frames_per_point: 1.0,
+                origin_frame: 0.0,
+                amplitude: 1,
+                boxes: vec![],
+            },
+        });
+        assert_eq!(j["region"]["fade_in"]["shape"], name);
+        assert_eq!(j["region"]["fade_out"]["shape"], name);
+    }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -24,11 +25,14 @@ struct ListHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> ListEditorView { ListEditorView(model: model) }
 
-    func updateNSView(_ view: ListEditorView, context: Context) {}
+    func updateNSView(_ view: ListEditorView, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 /// Insert, columns, what is shown, and MIDI In (Plan 4c Rulings 14, 18, 19).
 struct ListBar: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: ListEditorModel
 
     private func column(_ key: WritableKeyPath<ListColumns, Bool>) -> Binding<Bool> {
@@ -52,7 +56,7 @@ struct ListBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: theme.spacing.m) {
             Menu {
                 ForEach(model.insertKinds, id: \.self) { k in
                     Button(k.title) { model.insert(k) }
@@ -98,9 +102,9 @@ struct ListBar: View {
             Button("Modify…") { model.document?.selectModify.open(.change, filter: model.filter.viewFilter) }
                 .help("Select and Modify, hiding the kinds this list hides")
             Spacer()
-            Text("\(model.rows.count) rows").foregroundStyle(.secondary).font(.caption)
+            Text("\(model.rows.count) rows").foregroundStyle(.secondary).font(theme.type.caption.font)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 }

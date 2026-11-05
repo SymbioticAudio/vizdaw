@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -41,8 +42,9 @@ final class ModifyPanelController: NSWindowController, NSWindowDelegate {
         panel.title = "Select and Modify — \(model.snapshot.title)"
         super.init(window: panel)
         ControlWindows.tag(panel, .modifyPanel, doc: doc)
+        ThemeWindows.style(panel)
         panel.contentView = NSHostingView(
-            rootView: SelectModifyPanelView(model: model.selectModify, editor: model.editor))
+            rootView: SelectModifyPanelView(model: model.selectModify, editor: model.editor).themedRoot())
         panel.delegate = self
         panel.center()
     }
@@ -60,11 +62,12 @@ final class ModifyPanelController: NSWindowController, NSWindowDelegate {
 }
 
 struct SelectModifyPanelView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: SelectModifyModel
     let editor: EditorModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
             HStack {
                 Picker("Task", selection: Binding(get: { model.task }, set: { model.open($0, filter: model.filter) })) {
                     ForEach(PanelTask.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -85,15 +88,15 @@ struct SelectModifyPanelView: View {
                 }
                 .frame(width: 120)
             }
-            Toggle("Select", isOn: $model.config.select.enabled).font(.headline)
+            Toggle("Select", isOn: $model.config.select.enabled).font(theme.type.title.font)
             if model.config.select.enabled { SelectHalfView(model: model) }
             Divider()
-            Toggle("Modify", isOn: $model.config.modify.enabled).font(.headline)
+            Toggle("Modify", isOn: $model.config.modify.enabled).font(theme.type.title.font)
             if model.config.modify.enabled { ModifyHalfView(model: model) }
             Divider()
             if let notice = model.notice {
-                Label(notice, systemImage: "info.circle")
-                    .font(.callout)
+                AppIcon.info.label(notice)
+                    .font(theme.type.body.font)
                     .foregroundStyle(.secondary)
             }
             HStack {
@@ -103,8 +106,8 @@ struct SelectModifyPanelView: View {
                 Button("Save as Template") { model.saveTemplate() }
                 Spacer()
                 Text(model.applyTarget)
-                    .font(.caption)
-                    .foregroundStyle(model.actsOnDraggedEvents ? Color.accentColor : Color.secondary)
+                    .font(theme.type.caption.font)
+                    .foregroundStyle(model.actsOnDraggedEvents ? theme.accent.accent.color : theme.text.secondary.color)
                 Button("Modify Again") { model.modifyAgain() }
                     .disabled(!model.canModifyAgain)
                     .help(SelectModifyModel.modifyAgainHelp)
@@ -112,16 +115,17 @@ struct SelectModifyPanelView: View {
             }
             StatusLine(editor: editor)
         }
-        .padding(12)
+        .padding(theme.spacing.m)
         .frame(minWidth: 580, minHeight: 320, alignment: .topLeading)
     }
 }
 
 struct SelectHalfView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: SelectModifyModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             HStack {
                 Picker("Result", selection: $model.config.select.mode) {
                     Text("Replace the Selection").tag(SelectModeRow.select)
@@ -149,13 +153,14 @@ struct SelectHalfView: View {
 }
 
 struct ConditionRowView: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: SelectModifyModel
     let index: Int
 
     var body: some View {
         if model.config.select.conditions.indices.contains(index) {
             let c = model.config.select.conditions[index]
-            HStack(spacing: 6) {
+            HStack(spacing: theme.spacing.s) {
                 Text(ConditionKind(c.test).title).frame(width: 120, alignment: .leading)
                 Picker("", selection: Binding(get: { Comparison.of(c) }, set: { model.setComparison($0, at: index) })) {
                     ForEach(Comparison.choices(for: c.test), id: \.self) { Text($0.title).tag($0) }
@@ -180,7 +185,9 @@ struct ConditionRowView: View {
                         )
                         .panelTextOwner(model, "c\(index).\(j)")
                         .frame(width: 84)
-                        .foregroundStyle(model.invalid.contains("c\(index).\(j)") ? Color.red : Color.primary)
+                        .foregroundStyle(
+                            model.invalid.contains("c\(index).\(j)")
+                                ? theme.state.error.color : theme.text.primary.color)
                         .accessibilityLabel("\(ConditionKind(c.test).title) \(f.label)")
                     }
                 }
@@ -188,7 +195,7 @@ struct ConditionRowView: View {
                 Button {
                     model.removeCondition(at: index)
                 } label: {
-                    Image(systemName: "minus.circle")
+                    AppIcon.remove.image
                 }
                 .buttonStyle(.borderless)
                 .help("Remove Condition")
@@ -267,12 +274,13 @@ enum SubstituteChoice: String, CaseIterable {
 }
 
 struct ModifyHalfView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: SelectModifyModel
 
     private var op: ModifyRow { model.config.modify.op }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             HStack {
                 Picker("Operation", selection: Binding(get: { ModifyKind(op) }, set: { model.setModifyKind($0) })) {
                     ForEach(ModifyKind.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -285,13 +293,14 @@ struct ModifyHalfView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 200)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: theme.spacing.s) {
                 specials
                 ForEach(Array(op.fields.enumerated()), id: \.offset) { j, f in
                     TextField(f.label, text: Binding(get: { model.modifyText(j) }, set: { model.setModifyText($0, j) }))
                         .panelTextOwner(model, "m\(j)")
                         .frame(width: 84)
-                        .foregroundStyle(model.invalid.contains("m\(j)") ? Color.red : Color.primary)
+                        .foregroundStyle(
+                            model.invalid.contains("m\(j)") ? theme.state.error.color : theme.text.primary.color)
                         .accessibilityLabel(f.label)
                 }
                 Spacer()
@@ -314,13 +323,13 @@ struct ModifyHalfView: View {
             TextField("C2>D2, E2>F#2", text: Binding(get: { model.noteMapText }, set: { model.setNoteMapText($0) }))
                 .panelTextOwner(model, "map")
                 .frame(width: 260)
-                .foregroundStyle(model.invalid.contains("map") ? Color.red : Color.primary)
+                .foregroundStyle(model.invalid.contains("map") ? theme.state.error.color : theme.text.primary.color)
                 .accessibilityLabel("Note Map")
         case .quantize:
             TextField("Groove offsets", text: Binding(get: { model.offsetsText }, set: { model.setOffsetsText($0) }))
                 .panelTextOwner(model, "offsets")
                 .frame(width: 140)
-                .foregroundStyle(model.invalid.contains("offsets") ? Color.red : Color.primary)
+                .foregroundStyle(model.invalid.contains("offsets") ? theme.state.error.color : theme.text.primary.color)
                 .help("Groove offsets in ticks, one per grid line; empty for a plain grid")
         case let .change(target, changeOp, amount):
             Picker("", selection: Binding(get: { target }, set: { model.setTarget($0) })) {

@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -7,7 +8,13 @@ import VizDAWCore
 /// Ruling 14): the edit lane's notes' values of one kind; any tool but the
 /// eraser draws them, the eraser removes them; a stroke is one undo step.
 @MainActor
-public final class ExpressionPaneView: NSView, TimeAxisFollower {
+public final class ExpressionPaneView: NSView, TimeAxisFollower, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = ThemedViews.current {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public let model: PianoRollModel
     var editor: EditorModel { model.editor }
     public var timeAxis = TimeAxis() { didSet { needsDisplay = true } }
@@ -63,27 +70,27 @@ public final class ExpressionPaneView: NSView, TimeAxisFollower {
     // MARK: Drawing
 
     public override func draw(_ dirty: NSRect) {
-        NSColor.textBackgroundColor.setFill()
+        theme.canvas.setFill()
         dirty.fill()
-        NSColor.windowBackgroundColor.setFill()
+        theme.rulerBackground.setFill()
         NSRect(x: 0, y: 0, width: side, height: bounds.height).fill()
-        NSColor.separatorColor.setFill()
+        theme.separatorLine.setFill()
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
         NSString(string: ExpressionGeometry.shortTitle(kind) + " ▾").draw(
             at: CGPoint(x: 6, y: 6),
-            withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.labelColor])
+            withAttributes: [.font: theme.type.label.nsFont, .foregroundColor: theme.label])
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: NSRect(x: side, y: 0, width: max(bounds.width - side, 0), height: bounds.height)).addClip()
         let v = values
         if kind == .pitchBend {
-            NSColor.separatorColor.setFill()
+            theme.separatorLine.setFill()
             NSRect(x: side, y: v.y(0x8000_0000), width: bounds.width, height: 0.5).fill()
         }
         guard let lane = model.editLane else {
             NSGraphicsContext.restoreGraphicsState()
             return
         }
-        let color = PianoRollPalette.color(model.colorIndex(lane))
+        let color = PianoRollPalette.color(model.colorIndex(lane), in: theme)
         let from = timeAxis.tick(atX: dirty.minX - side)
         let to = timeAxis.tick(atX: dirty.maxX - side)
         for n in editNotes() where n.tick <= to && n.tick + n.duration >= from {
@@ -99,7 +106,7 @@ public final class ExpressionPaneView: NSView, TimeAxisFollower {
                 if i == 0 { path.move(to: a) } else { path.line(to: a) }
                 path.line(to: b)
             }
-            (selected ? NSColor.controlAccentColor : color).setStroke()
+            (selected ? theme.regionSelected : color).setStroke()
             path.lineWidth = selected ? 2 : 1.5
             path.stroke()
         }

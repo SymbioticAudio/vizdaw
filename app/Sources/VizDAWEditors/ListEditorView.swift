@@ -1,11 +1,28 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
 /// The list's table: hands keys and focus changes to its view first.
-public final class ListTable: NSTableView {
+public final class ListTable: NSTableView, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = ThemedViews.current {
+        didSet {
+            themeDidChange(from: oldValue)
+            backgroundColor = theme.canvas
+        }
+    }
+
     weak var owner: ListEditorView?
+
+    public override init(frame: NSRect) {
+        super.init(frame: frame)
+        backgroundColor = theme.canvas
+    }
+
+    public required init?(coder: NSCoder) { nil }
 
     public override func keyDown(with e: NSEvent) {
         if owner?.key(e.keyCode, modifiers: e.modifierFlags) != true { super.keyDown(with: e) }
@@ -27,8 +44,39 @@ public final class ListTable: NSTableView {
 /// A cell's text field: tells the list the moment it takes the keyboard
 /// (the field editor goes in), before any key is typed, so a first Space
 /// types a space and Return ends the edit.
-final class ListCellField: NSTextField {
+final class ListCellField: NSTextField, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and recolours its text.
+    /// A cell made later (scrolled into view) starts in the current theme
+    /// (B4 review M1).
+    public var theme: Theme = ThemedViews.current {
+        didSet {
+            themeDidChange(from: oldValue)
+            applyTheme()
+        }
+    }
+
     weak var list: ListEditorView?
+    /// A read-only cell's text is secondary.
+    var secondary = false {
+        didSet { if secondary != oldValue { applyTheme() } }
+    }
+    /// On a selected row its text is the text on the selection.
+    var onSelectedRow = false {
+        didSet { if onSelectedRow != oldValue { applyTheme() } }
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        applyTheme()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func applyTheme() {
+        font = theme.digitsFont(theme.type.body)
+        textColor = onSelectedRow ? theme.selectionText : secondary ? theme.secondaryLabel : theme.label
+    }
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
@@ -37,12 +85,55 @@ final class ListCellField: NSTextField {
     }
 }
 
+/// A list row in the theme: the canvas, every other row shaded, and the
+/// selection in the theme's selection colour with its cells' text on it.
+final class ListRowView: NSTableRowView, ThemedView {
+    public var theme: Theme = ThemedViews.current {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
+    var odd = false
+
+    override var isSelected: Bool {
+        didSet { passSelection() }
+    }
+
+    override func didAddSubview(_ v: NSView) {
+        super.didAddSubview(v)
+        passSelection()
+    }
+
+    private func passSelection() {
+        for case let f as ListCellField in subviews { f.onSelectedRow = isSelected }
+    }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        theme.canvas.setFill()
+        dirtyRect.fill()
+        if odd {
+            theme.label.withAlphaComponent(0.04).setFill()
+            dirtyRect.fill()
+        }
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        theme.selectionFill.setFill()
+        dirtyRect.fill()
+    }
+}
+
 /// The list editor (spec §4c): one row per event (and tempo, meter and
 /// marker entry), keyboard-first, edited in place. An `NSTableView` with
 /// column headers and plain text-field cells, so VoiceOver reads it as a
 /// table (Plan 4c Ruling 20).
 @MainActor
-public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = ThemedViews.current {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     /// The text-editing owner while a cell is edited (Plan 4c Ruling 21);
     /// each slot's list registers its own, so two lists editing at once
     /// (the pane and a torn window) don't end each other's.
@@ -69,7 +160,8 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
         table.dataSource = self
         table.delegate = self
         table.allowsMultipleSelection = true
-        table.usesAlternatingRowBackgroundColors = true
+        // Every other row is shaded by its `ListRowView`, in the theme.
+        table.usesAlternatingRowBackgroundColors = false
         table.rowHeight = 18
         table.style = .plain
         table.target = self
@@ -202,7 +294,7 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
         // A read-only cell never takes the keyboard (nor turns the
         // transport keys off).
         field.isSelectable = field.isEditable
-        field.textColor = field.isEditable ? .labelColor : .secondaryLabelColor
+        (field as? ListCellField)?.secondary = !field.isEditable
         return field
     }
 
@@ -212,14 +304,14 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
         f.identifier = id
         f.isBordered = false
         f.drawsBackground = false
-        f.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         f.lineBreakMode = .byTruncatingTail
         f.delegate = self
         return f
     }
 
     public func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        let v = NSTableRowView()
+        let v = ListRowView()
+        v.odd = row % 2 == 1
         if shown.indices.contains(row) { v.setAccessibilityLabel(ListText.summary(shown[row], context)) }
         return v
     }

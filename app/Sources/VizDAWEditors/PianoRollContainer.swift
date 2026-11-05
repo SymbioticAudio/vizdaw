@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 
 /// A view under the notes that shares their time axis.
@@ -13,7 +14,13 @@ public protocol TimeAxisFollower: AnyObject {
 /// (region strip, expression pane), whose own side columns hold their
 /// headers, so every pane shares one time axis and x origin.
 @MainActor
-public final class PianoRollContainer: NSView {
+public final class PianoRollContainer: NSView, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = ThemedViews.current {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public static let sideWidth: CGFloat = 64
 
     public let model: PianoRollModel

@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -7,11 +8,12 @@ import VizDAWCore
 /// and Remove. Every change is an undo step of the project. All state
 /// lives in `LearnModel`.
 struct LearnMapsSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var learn: LearnModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("MIDI Learn Maps").font(.headline)
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
+            Text("MIDI Learn Maps").font(theme.type.title.font)
             if learn.maps.isEmpty {
                 Text("No MIDI controls are learned in this project. Choose MIDI Learn in a control's menu.")
                     .foregroundStyle(.secondary)
@@ -30,7 +32,7 @@ struct LearnMapsSheet: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 640)
         .alert(
             learn.alert?.title ?? "",
@@ -47,7 +49,7 @@ struct LearnMapsSheet: View {
             VStack(alignment: .leading) {
                 Text(map.text)
                 Text(learn.targetText(map))
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -77,6 +79,7 @@ struct LearnMapsSheet: View {
 /// what the learn waits for and, with two or more projects open, the
 /// project (final review R2, T11 m9).
 struct LearnBanner: View {
+    @Environment(\.symbioticTheme) private var theme
     let learn: LearnModel
     /// The learn's document, named when two or more are open.
     let document: DocumentModel?
@@ -84,15 +87,15 @@ struct LearnBanner: View {
     var body: some View {
         if let text = learn.bannerText(project: learnProject(document)) {
             HStack {
-                Image(systemName: "pianokeys")
+                AppIcon.midiLearn.image
                 Text(text)
                 Spacer()
                 Button("Cancel") { learn.cancel() }
                     .controlSize(.small)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.accentColor.opacity(0.15))
+            .padding(.horizontal, theme.spacing.s)
+            .padding(.vertical, theme.spacing.xs)
+            .background(theme.accent.accent.color.opacity(0.15))
         }
     }
 }

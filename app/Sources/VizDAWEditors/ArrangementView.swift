@@ -84,6 +84,10 @@ public final class ArrangementView: EditorCanvas {
             // Not `transport`: it changes on every poll; the playhead moves
             // without redrawing.
             _ = document.playKey
+            // The strip colours the lanes and regions take (owner G1 Q2).
+            _ = document.mixerVersion
+            _ = document.storeMixer?.snapshot
+            _ = document.storeMixer?.destinations
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.refresh()
@@ -150,7 +154,7 @@ public final class ArrangementView: EditorCanvas {
     public override func drawContent(in dirty: CGRect) {
         light = LightDrawing.isLight(editor.layout.lightMode, visibleBlocks: visibleBlockCount)
         for (i, key, blocks) in blocks(in: dirty) {
-            NSColor.separatorColor.setFill()
+            theme.separatorLine.setFill()
             CGRect(x: dirty.minX, y: geometry.rowTop(i + 1) - 0.5, width: dirty.width, height: 1).fill()
             for b in blocks { draw(b, row: i, key: key, dirty: dirty) }
         }
@@ -172,21 +176,23 @@ public final class ArrangementView: EditorCanvas {
                 height: max(geometry.laneHeight - 2 * inset, 1))
             let vis = rect.intersection(dirty).intersection(content.bounds)
             guard !vis.isNull, vis.width > 0 else { continue }
-            let shape = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
-            NSColor.systemRed.withAlphaComponent(0.18).setFill()
+            let r = theme.radius.s
+            let shape = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: r, yRadius: r)
+            theme.armColour.withAlphaComponent(0.18).setFill()
             shape.fill()
-            NSColor.systemRed.setStroke()
+            theme.armColour.setStroke()
             shape.stroke()
-            guard let (f0, f1, columns) = GrowingTake.slice(rect: rect, visible: vis, from: t.fromFrame, to: t.toFrame)
-            else { continue }
-            guard let rows = try? document.session.recordingWaveform(
-                    lane: t.lane, fromFileFrame: f0, toFileFrame: f1, columns: columns)
-            else { continue }
-            let wave = CGRect(x: vis.minX, y: rect.minY + 2, width: vis.width, height: max(rect.height - 4, 1))
+            let slices = document.record.growingSlices(t, rect: rect, visible: vis) { axis.tick(atX: $0) }
             NSGraphicsContext.saveGraphicsState()
             NSBezierPath(rect: vis).addClip()
-            NSColor.systemRed.withAlphaComponent(0.7).setFill()
-            for b in WaveformGeometry.bars(rows, in: wave) { b.fill() }
+            theme.armColour.withAlphaComponent(0.7).setFill()
+            for s in slices {
+                guard let rows = try? document.session.recordingWaveform(
+                        lane: t.lane, fromFileFrame: s.from, toFileFrame: s.to, columns: s.columns)
+                else { continue }
+                let wave = CGRect(x: s.minX, y: rect.minY + 2, width: s.maxX - s.minX, height: max(rect.height - 4, 1))
+                for b in WaveformGeometry.bars(rows, in: wave) { b.fill() }
+            }
             NSGraphicsContext.restoreGraphicsState()
         }
     }
@@ -194,13 +200,17 @@ public final class ArrangementView: EditorCanvas {
     private func draw(_ b: BlockRow, row: Int, key: LaneKey, dirty: CGRect) {
         let r = geometry.blockRect(b, row: row, axis: axis)
         let selected = editor.isSelected(b)
-        let color: NSColor = b.kind == .reference ? .systemPurple : .systemBlue
-        let shape = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+        // Events blocks are regions; a reference takes a swatch of its own.
+        let reference = b.kind == .reference
+        let fill = reference ? theme.swatch.purple.nsColor.withAlphaComponent(0.30) : theme.regionFill(tint: tint(row))
+        let line = reference ? theme.swatch.purple.nsColor : theme.regionLine
+        let shape = NSBezierPath(
+            roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: theme.radius.s, yRadius: theme.radius.s)
         if !light {
-            color.withAlphaComponent(b.muted ? 0.12 : 0.30).setFill()
+            fill.withAlphaComponent(fill.alphaComponent * (b.muted ? 0.4 : 1)).setFill()
             shape.fill()
         }
-        (selected ? NSColor.controlAccentColor : color).setStroke()
+        (selected ? theme.regionSelected : line).setStroke()
         shape.lineWidth = selected ? 2 : 1
         if b.muted { shape.setLineDash([3, 2], count: 2, phase: 0) }
         shape.stroke()
@@ -212,11 +222,18 @@ public final class ArrangementView: EditorCanvas {
             NSBezierPath(rect: r.insetBy(dx: 3, dy: 1)).addClip()
             text.draw(
                 at: CGPoint(x: r.minX + 4, y: r.minY + 3),
-                withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.labelColor])
+                withAttributes: [.font: theme.type.label.nsFont, .foregroundColor: theme.label])
             NSGraphicsContext.restoreGraphicsState()
         } else {
             sketch(b, in: r, key: key)
         }
+    }
+
+    /// Row `row`'s strip colour (owner G1 Q2): its regions take it, as its
+    /// header's colour bar does.
+    func tint(_ row: Int) -> NSColor? {
+        guard document.lanes.indices.contains(row) else { return nil }
+        return document.laneColour(document.lanes[row], theme)?.nsColor
     }
 
     /// Mini notes inside an events block (normal drawing only).
@@ -231,7 +248,7 @@ public final class ArrangementView: EditorCanvas {
         let notes = rows[lo...].prefix(while: { $0.tick <= b.end }).filter { $0.kind == .note }
         guard let minP = notes.map(\.pitch).min(), let maxP = notes.map(\.pitch).max() else { return }
         let span = CGFloat(max(Int(maxP) - Int(minP), 1))
-        NSColor.labelColor.withAlphaComponent(0.55).setFill()
+        theme.label.withAlphaComponent(0.55).setFill()
         for n in notes {
             let y = r.maxY - 5 - CGFloat(Int(n.pitch) - Int(minP)) / span * (r.height - 10)
             let x = axis.x(n.tick)
@@ -262,7 +279,7 @@ public final class ArrangementView: EditorCanvas {
                 height: max(rect.height - RegionHandles.band - 2, 1))
             RegionDrawing.draw(
                 r, in: rect, rows: rows, waveRect: wave, offline: offline, selected: editor.isSelected(event: r.id),
-                handles: editor.tool == .arrow)
+                handles: editor.tool == .arrow, theme: theme, tint: tint(row))
         }
     }
 
@@ -335,7 +352,7 @@ public final class ArrangementView: EditorCanvas {
     }
 
     public override func drawOverlay(in dirty: CGRect) {
-        if let r = readout { RegionDrawing.readout(r.text, at: r.at) }
+        if let r = readout { RegionDrawing.readout(r.text, at: r.at, theme: theme) }
     }
 
     public override func contentMouseDown(_ p: CGPoint, clicks: Int, modifiers: Modifiers) {

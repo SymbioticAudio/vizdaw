@@ -344,3 +344,51 @@ fn instrument_outputs_become_out_taps() {
         vec!["strip \"Ghost\" is silent: its instrument has 2 output(s)".to_string()]
     );
 }
+
+/// Plan 7b Ruling 9: the EQ is its strip's first insert spec, so it runs
+/// before the inserts and its latency counts toward PDC.
+#[test]
+fn the_eq_slot_runs_before_the_inserts() {
+    use core_engine::graph::plan;
+    let mut b = routed();
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    let i1 = b.insert(synth, PluginRef::from_legacy("clap:i1")).unwrap();
+    let i2 = b.insert(synth, PluginRef::from_legacy("clap:i2")).unwrap();
+    let r = b
+        .mixer(MixerCmd::SetEq {
+            strip: synth,
+            plugin: Some(PluginRef::from_legacy("clap:eq")),
+        })
+        .unwrap();
+    let eq = match r.created.as_slice() {
+        [core_model::ids::AnyId::Plugin(p)] => *p,
+        other => panic!("{other:?}"),
+    };
+    let mut lat = |s: &PluginSlot| if s.id == eq { 64 } else { 0 };
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut lat,
+    );
+    let node = g.strips.iter().find(|(_, id)| *id == synth).unwrap().0;
+    let ids: Vec<_> = strip(&g.spec, node)
+        .inserts
+        .iter()
+        .map(|k| k.instance)
+        .collect();
+    assert_eq!(ids, vec![Some(eq), Some(i1), Some(i2)]);
+    assert_eq!(strip(&g.spec, node).inserts[0].latency, 64);
+    assert_eq!(plan(&g.spec, 96_000).unwrap().latency, 64);
+    // Without the EQ, nothing has latency.
+    b.mixer(MixerCmd::SetEq {
+        strip: synth,
+        plugin: None,
+    })
+    .unwrap();
+    let g = mixer_spec(
+        b.doc(),
+        &[InstrumentFeed::builtin(TargetIdx(0), 0)],
+        &mut lat,
+    );
+    assert_eq!(plan(&g.spec, 96_000).unwrap().latency, 0);
+}

@@ -189,6 +189,12 @@ fn render_path_never_allocates() {
     b.start(renderer).unwrap();
     b.reserve(4096);
     engine.set_loop(true).unwrap();
+    // The song's whole bars, for the wind burst to wrap inside (plan 7d).
+    const BAR: i64 = 4 * 15_360;
+    let mut song_ticks = BAR;
+    while engine.tick_frame(Tick(song_ticks + BAR)) < engine.length_frames() {
+        song_ticks += BAR;
+    }
     engine.play().unwrap();
     // What the phases exercised (read outside the armed blocks).
     let (mut wraps, mut stops, mut locates, mut tails, mut ended) = (0, 0, 0, 0, 0);
@@ -202,6 +208,14 @@ fn render_path_never_allocates() {
             310 => engine.play().unwrap(),
             500 => {
                 engine.locate_tick(Tick(15_360 * 40)).unwrap();
+                locates += 1;
+                moved = true;
+            }
+            // One wind burst (plan 7d): a locate a block, each a bar on,
+            // wrapped back inside the song.
+            600..650 if i < 1000 => {
+                let to = (engine.position_tick().0.max(0) + BAR) % song_ticks;
+                engine.locate_tick(Tick(to)).unwrap();
                 locates += 1;
                 moved = true;
             }
@@ -242,7 +256,7 @@ fn render_path_never_allocates() {
     assert_eq!(rt_check::count() - before, 0, "allocations into the tail");
     assert!(wraps >= 1, "no loop wrap was rendered");
     assert!(
-        stops >= 1 && locates >= 1,
+        stops >= 1 && locates == 10 + 50 + 1,
         "stops {stops}, locates {locates}"
     );
     assert!(tails >= 1, "the tail was never rendered");

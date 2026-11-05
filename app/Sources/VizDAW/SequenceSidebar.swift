@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -6,6 +7,7 @@ import VizDAWCore
 /// use count per sequence; drag to reorder; duplicate, delete, comment,
 /// slot and new-from-template from the context menu and the "+" menu.
 struct SequenceSidebar: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
 
     var body: some View {
@@ -26,14 +28,14 @@ struct SequenceSidebar: View {
                     Button("New Sequence") { model.newSequence(.empty) }
                     TemplateItems(model: model)
                 } label: {
-                    Image(systemName: "plus")
+                    AppIcon.add.image
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 32)
                 .help("New Sequence")
                 Spacer()
             }
-            .padding(6)
+            .padding(theme.spacing.s)
         }
         .sheet(item: $model.commentDraft) { _ in CommentSheet(model: model) }
         .sheet(item: $model.slotDraft) { _ in KeySlotSheet(model: model) }
@@ -67,13 +69,14 @@ struct TemplateItems: View {
 }
 
 struct SequenceRow: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
     let row: SeqRow
     @FocusState private var focused: Bool
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: theme.spacing.xxs) {
                 if model.renamingSeq == row.id {
                     TextField("Name", text: $model.renameDraft)
                         .focused($focused)
@@ -89,7 +92,7 @@ struct SequenceRow: View {
                 }
                 if !row.comment.isEmpty {
                     Text(row.comment)
-                        .font(.caption)
+                        .font(theme.type.caption.font)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -97,15 +100,15 @@ struct SequenceRow: View {
             Spacer()
             if row.keyboardSlot != nil {
                 Text(KeySlotFormat.text(row.keyboardSlot))
-                    .font(.caption.monospaced())
+                    .font(theme.type.caption.font.monospaced())
                     .foregroundStyle(.secondary)
                     .help("Keyboard slot")
             }
             if row.useCount > 0 {
                 Text("\(row.useCount)")
-                    .font(.caption.monospacedDigit())
-                    .padding(.horizontal, 6)
-                    .background(Capsule().fill(.quaternary))
+                    .font(theme.type.caption.font.monospacedDigit())
+                    .padding(.horizontal, theme.spacing.s)
+                    .background(Capsule().fill(theme.surface.raised.color))
                     .help("Used by \(row.useCount) reference(s)")
             }
         }
@@ -124,11 +127,12 @@ struct SequenceRow: View {
 }
 
 struct CommentSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Comment").font(.headline)
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
+            Text("Comment").font(theme.type.title.font)
             TextEditor(
                 text: Binding(
                     get: { model.commentDraft?.text ?? "" },
@@ -141,11 +145,12 @@ struct CommentSheet: View {
                 Button("Save") { model.commitComment() }.keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
     }
 }
 
 struct KeySlotSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
 
     private func flag(_ title: String, _ path: WritableKeyPath<KeySlotDraft, Bool>) -> some View {
@@ -157,8 +162,8 @@ struct KeySlotSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Keyboard Slot").font(.headline)
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
+            Text("Keyboard Slot").font(theme.type.title.font)
             TextField(
                 "Key (empty clears the slot)",
                 text: Binding(get: { model.slotDraft?.key ?? "" }, set: { model.slotDraft?.key = $0 }))
@@ -169,7 +174,7 @@ struct KeySlotSheet: View {
                 flag("⌘", \.command)
             }
             if let problem = model.slotDraft?.problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
+                Text(problem).font(theme.type.caption.font).foregroundStyle(theme.state.error.color)
             }
             HStack {
                 Spacer()
@@ -177,7 +182,7 @@ struct KeySlotSheet: View {
                 Button("Save") { model.commitSlot() }.keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 320)
     }
 }

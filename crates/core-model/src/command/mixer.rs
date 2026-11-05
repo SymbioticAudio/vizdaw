@@ -6,7 +6,7 @@ use crate::automation::AutomationMode;
 use crate::document::{DestKind, Document, SlotOwner};
 use crate::error::{ModelError, Result};
 use crate::ids::{AnyId, DestId, PluginInstanceId, StripId};
-use crate::mixer::{AuxSend, Output, ParamId, PluginRef, PluginSlot, Strip, StripKind};
+use crate::mixer::{AuxSend, Output, ParamId, PluginRef, PluginSlot, Strip, StripKind, Swatch};
 use crate::mixer_rules::{check_routing, check_strip_values};
 
 /// Mixer edits.
@@ -157,6 +157,21 @@ pub enum MixerCmd {
         /// The mode.
         mode: AutomationMode,
     },
+    /// Load a plugin into a strip's EQ slot with a new instance ID,
+    /// replacing any EQ there, or empty the slot (plan 7b Ruling 7).
+    SetEq {
+        /// The strip (any kind, master included).
+        strip: StripId,
+        /// The plugin, or none to empty the slot (refused when empty).
+        plugin: Option<PluginRef>,
+    },
+    /// Set or clear a strip's own colour (plan 7b Ruling 12).
+    SetColour {
+        /// The strip.
+        strip: StripId,
+        /// The swatch, or none for the kind's colour.
+        colour: Option<Swatch>,
+    },
 }
 
 impl MixerCmd {
@@ -183,6 +198,11 @@ impl MixerCmd {
             MixerCmd::SetPluginParams { .. } => "Change Plugin Parameter",
             MixerCmd::AddInstrumentOutput { .. } => "Add Instrument Output",
             MixerCmd::SetAutomationMode { .. } => "Set Automation Mode",
+            MixerCmd::SetEq {
+                plugin: Some(_), ..
+            } => "Load EQ",
+            MixerCmd::SetEq { plugin: None, .. } => "Remove EQ",
+            MixerCmd::SetColour { .. } => "Set Strip Colour",
         }
     }
 }
@@ -192,6 +212,19 @@ fn insert_owner(d: &Document, slot: PluginInstanceId) -> Result<(StripId, usize)
         Some(SlotOwner::Insert(s, i)) => Ok((s, i)),
         Some(SlotOwner::Instrument(_)) => Err(ModelError::invalid(
             "an instrument's own slot is not an insert",
+        )),
+        Some(SlotOwner::Eq(_)) => Err(ModelError::invalid("the EQ slot is not an insert")),
+        None => Err(ModelError::UnknownId(AnyId::Plugin(slot))),
+    }
+}
+
+/// The strip whose chain (an insert or the EQ) holds `slot`, for the
+/// commands that work on either (plan 7b Ruling 7).
+fn chain_owner(d: &Document, slot: PluginInstanceId) -> Result<StripId> {
+    match d.find_slot(slot) {
+        Some(SlotOwner::Insert(s, _) | SlotOwner::Eq(s)) => Ok(s),
+        Some(SlotOwner::Instrument(_)) => Err(ModelError::invalid(
+            "an instrument's own slot is not in a strip's chain",
         )),
         None => Err(ModelError::UnknownId(AnyId::Plugin(slot))),
     }
@@ -283,7 +316,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &MixerCmd, r: &mut Report) -> Result<
         }
         MixerCmd::SetBypass { slot, bypass } => d.slot_mut(*slot)?.bypass = *bypass,
         MixerCmd::SetSidechain { slot, source } => {
-            insert_owner(d, *slot)?;
+            chain_owner(d, *slot)?;
             d.slot_mut(*slot)?.sidechain = *source;
         }
         MixerCmd::SetPluginParams { slot, params } => {
@@ -310,6 +343,32 @@ pub(crate) fn apply(d: &mut Document, cmd: &MixerCmd, r: &mut Report) -> Result<
                 }
                 d.mixer_mut().strip_mut(*s)?.automation = *mode;
             }
+        }
+        MixerCmd::SetEq { strip, plugin } => {
+            d.mixer().strip(*strip)?;
+            let old = match plugin {
+                Some(p) => {
+                    let id = d.counters_mut().alloc_plugin();
+                    r.created.push(AnyId::Plugin(id));
+                    d.mixer_mut()
+                        .strip_mut(*strip)?
+                        .eq
+                        .replace(PluginSlot::new(id, p.clone()))
+                }
+                None => Some(
+                    d.mixer_mut()
+                        .strip_mut(*strip)?
+                        .eq
+                        .take()
+                        .ok_or_else(|| ModelError::invalid("the EQ slot is empty"))?,
+                ),
+            };
+            if let Some(o) = old {
+                r.removed.push(AnyId::Plugin(o.id));
+            }
+        }
+        MixerCmd::SetColour { strip, colour } => {
+            d.mixer_mut().strip_mut(*strip)?.colour = *colour;
         }
         MixerCmd::AddInstrumentOutput { dest, index, name } => {
             let plugin = matches!(

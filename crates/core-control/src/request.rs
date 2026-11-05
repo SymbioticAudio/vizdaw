@@ -67,6 +67,14 @@ pub enum StateTarget {
     Automation,
     /// Control surfaces and MIDI learn (plan 5f-1).
     Surfaces,
+    /// Its window's main view and panes (plan 7a).
+    Layout,
+    /// Its mixer's strips: kind and user colours, levels, routing, the
+    /// EQ, inserts and sends (plan 7b Ruling 11).
+    Mixer,
+    /// The audio editor: the shown region, its zoom and its typed boxes
+    /// (plan 7c Ruling 10).
+    AudioEditor,
 }
 
 /// Where a click or drag lands.
@@ -245,9 +253,12 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
                 "input" => StateTarget::Input,
                 "automation" => StateTarget::Automation,
                 "surfaces" => StateTarget::Surfaces,
+                "layout" => StateTarget::Layout,
+                "mixer" => StateTarget::Mixer,
+                "audio_editor" => StateTarget::AudioEditor,
                 _ => {
                     return Err(p.error(
-                        "`target` must be transport, document, editor, selection, windows, media, project, record, input, automation or surfaces",
+                        "`target` must be transport, document, editor, selection, windows, media, project, record, input, automation, surfaces, layout, mixer or audio_editor",
                     ));
                 }
             };

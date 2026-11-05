@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -16,7 +17,7 @@ struct DrumGridEditor: View {
             Divider()
             if model.lanes.isEmpty {
                 ContentUnavailableView(
-                    "No Drum Lanes", systemImage: "square.grid.3x3",
+                    "No Drum Lanes", icon: .drumGrid,
                     description: Text(
                         "Make a lane a drum lane with Drum > Drum Lane or its header's menu, or add a Drum Kit sequence."))
             } else {
@@ -31,13 +32,16 @@ struct DrumGridHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> DrumGridContainer { DrumGridContainer(model: model) }
 
-    func updateNSView(_ view: DrumGridContainer, context: Context) {}
+    func updateNSView(_ view: DrumGridContainer, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 /// Tool, view, step, spacing, length, velocity, Add Row, and a menu with
 /// the current lane's play quantize and nudge (Plan 4e Rulings 10, 11):
 /// one line that fits the detail pane of a default-sized window.
 struct DrumGridBar: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DrumGridModel
     @Bindable var editor: EditorModel
 
@@ -65,7 +69,7 @@ struct DrumGridBar: View {
 
     var body: some View {
         let s = editor.layout.drumGrid
-        HStack(spacing: 6) {
+        HStack(spacing: theme.spacing.s) {
             Picker("Tool", selection: erasing) {
                 Text("Paint").tag(false)
                 Text("Erase").tag(true)
@@ -93,7 +97,7 @@ struct DrumGridBar: View {
             Button {
                 model.addRow()
             } label: {
-                Image(systemName: "plus")
+                AppIcon.add.image
             }
             .help("Add Drum Row")
             .accessibilityLabel("Add Row")
@@ -102,8 +106,8 @@ struct DrumGridBar: View {
                 laneMenu(lane)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 
     /// Play quantize choices (the current one checked) and nudge.

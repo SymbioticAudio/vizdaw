@@ -244,10 +244,13 @@ fn click_play_and_press_space() {
     app.quit();
 }
 
-/// The ID of the first tree node labelled exactly `label`.
+/// The ID of the first tree node whose label, title or value is exactly `label`.
 fn labelled(nodes: &Value, label: &str) -> Option<Value> {
     nodes.as_array().into_iter().flatten().find_map(|n| {
-        if n["label"].as_str() == Some(label) {
+        if ["label", "title", "value"]
+            .iter()
+            .any(|k| n[*k].as_str() == Some(label))
+        {
             Some(n["id"].clone())
         } else {
             labelled(&n["children"], label)
@@ -619,6 +622,59 @@ fn audio_import_plays_and_reports_media() {
         json!({"id": "transport.play_stop", "window": w2}),
     );
     app.wait(&w2, json!({"condition": "stopped"}));
+
+    // Plan 7c Task 6 review I1: at the default window, with the left pane
+    // shown, every control the channel drives in the audio editor (Ruling
+    // 10's and the boxes Task 7 types into) lies inside its pane and the
+    // window.
+    let (region, _) = wait_for_label_like(&mut app, &w2, "Region tone", "");
+    app.call("ui.click", json!({"window": w2, "element": region}));
+    app.call(
+        "command.run",
+        json!({"id": "editors.audio_editor", "window": w2}),
+    );
+    wait_for_label(&mut app, &w2, "Audio Editor Pane");
+    let windows = app.call("state.get", json!({"target": "windows"}));
+    let win = windows["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["number"] == w2)
+        .unwrap()
+        .clone();
+    let width = win["frame"]["width"].as_f64().unwrap();
+    let tree = app.call("ui.tree", json!({"window": w2}));
+    let pane = find_node(&tree["nodes"], "Audio Editor Pane").expect("the pane");
+    let (px, pw) = (
+        pane["frame"]["x"].as_f64().unwrap(),
+        pane["frame"]["width"].as_f64().unwrap(),
+    );
+    assert!(px > 0.0, "the left pane is shown: {pane}");
+    for label in [
+        "Audio Editor",
+        "Region Gain",
+        "Fade In Length",
+        "Fade Out Length",
+        "Region Start",
+        "Region Length",
+        "Normalize Peak",
+        "Normalize",
+        "Zoom Out",
+        "Zoom In",
+        "Fit Region",
+        "Shorter Waveform",
+        "Taller Waveform",
+    ] {
+        let n = find_node(&tree["nodes"], label).unwrap_or_else(|| panic!("no {label:?}"));
+        let (x, w) = (
+            n["frame"]["x"].as_f64().unwrap(),
+            n["frame"]["width"].as_f64().unwrap(),
+        );
+        assert!(
+            x >= px - 0.5 && x + w <= px + pw + 0.5 && x + w <= width + 0.5,
+            "{label:?} at {x}+{w} is outside the pane {px}+{pw} or the window {width}"
+        );
+    }
 
     // Project Settings: 24-bit to float, every file converted.
     let r = app.call(
@@ -1216,6 +1272,27 @@ fn tracks_the_fake_synth() {
         );
     }
     app.quit();
+}
+
+/// Clicks the number box `label` until it is editing (its node is
+/// `focused`), at most three times. The channel's window is not key, so
+/// the refocus symbiotic-design 0.2.2 gives a box after Esc or Return can
+/// stay pending there and the next click only lands it. Callers then type
+/// with no element, so a click that already edited is not repeated.
+fn focus_number_box(app: &mut App, window: &Value, label: &str) {
+    for _ in 0..3 {
+        let el = wait_for_label(app, window, label);
+        app.call("ui.click", json!({"window": window, "element": el}));
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < deadline {
+            let tree = app.call("ui.tree", json!({"window": window}));
+            if find_node(&tree["nodes"], label).is_some_and(|n| n["focused"] == true) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    panic!("{label} never started editing");
 }
 
 /// Polls `state.get target` until `ok` holds.
@@ -2006,5 +2083,1032 @@ fn edits_a_region_through_the_stub_editor() {
         json!({"id": "region.open_external", "params": {"app": "/Applications/Nope-VizDAW-e2e.app"}, "window": w}),
     );
     assert_eq!(e.code, core_control::ErrorCode::Failed, "{e}");
+    app.quit();
+}
+
+/// One pane of one main view in a `state.get layout` answer.
+fn layout_pane(layout: &Value, main: &str, pane: &str) -> Value {
+    layout["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["main"] == main)
+        .and_then(|v| {
+            v["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["pane"] == pane)
+        })
+        .unwrap_or_else(|| panic!("no {main} {pane} in {layout}"))
+        .clone()
+}
+
+/// Polls `state.get layout` until `ok` holds; returns that answer.
+fn wait_for_layout(app: &mut App, window: &Value, ok: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let l = app.call("state.get", json!({"target": "layout", "window": window}));
+        if ok(&l) {
+            return l;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the layout did not settle within {WAIT_MS} ms: {l}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// README steps 199–206 through the channel (plan 7a): the defaults,
+/// hostile `ui.pane` calls that change nothing and open no dialog, the
+/// main-view keys, a pane set for the other view, the mixer in the bottom
+/// pane and in its own window (with its own transport bar), and the
+/// layout saved per document.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn window_views_and_panes_over_the_channel() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    // 1. The defaults.
+    let window = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    let layout =
+        |app: &mut App| app.call("state.get", json!({"target": "layout", "window": window}));
+    let l0 = layout(&mut app);
+    assert_eq!(l0["main"], "arrange", "{l0}");
+    let left = layout_pane(&l0, "arrange", "left");
+    assert_eq!(
+        (left["shown"].clone(), left["view"].clone()),
+        (json!(true), json!("strip")),
+        "{l0}"
+    );
+    assert_eq!(layout_pane(&l0, "arrange", "bottom")["shown"], true, "{l0}");
+    assert_eq!(layout_pane(&l0, "arrange", "right")["shown"], false, "{l0}");
+    for side in ["left", "bottom", "right"] {
+        assert_eq!(
+            layout_pane(&l0, "mix", side)["shown"],
+            false,
+            "mix {side}: {l0}"
+        );
+    }
+    // The transport bar's controls are in the tree (final review I1): an
+    // agent finds Loop, Record and the pane buttons, not only Play.
+    for label in [
+        "Loop",
+        "Record",
+        "Record Options",
+        "Left Pane",
+        "Bottom Pane",
+        "Right Pane",
+    ] {
+        wait_for_label(&mut app, &window, label);
+    }
+
+    // 2. Hostile calls change nothing and open no dialog.
+    let w0 = app.call("state.get", json!({"target": "windows"}));
+    let numbers = |w: &Value| -> Vec<(Value, Value)> {
+        w["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["number"].clone(), x["kind"].clone()))
+            .collect()
+    };
+    for (params, mentions) in [
+        (json!({}), None),
+        (json!({"pane": "left", "view": "mixer"}), None),
+        (
+            json!({"pane": "bottom", "view": "mixer", "main": "mix"}),
+            None,
+        ),
+        (json!({"pane": "left", "size": "wide"}), None),
+        (json!({"pane": "left"}), None),
+        (
+            json!({"pane": "right", "view": "piano_roll"}),
+            Some("piano_roll"),
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "ui.pane", "params": params, "window": window}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {e}");
+        if let Some(word) = mentions {
+            assert!(e.to_string().contains(word), "{params}: {e}");
+        }
+    }
+    let e = app.call_err("state.get", json!({"target": "panes", "window": window}));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert_eq!(layout(&mut app), l0, "no layout change");
+    let w1 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(numbers(&w1), numbers(&w0), "no window opened");
+    assert_eq!(w1["alerts"].as_array().unwrap().len(), 0, "{w1}");
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    assert!(doc["alert"].is_null(), "no dialog: {doc}");
+
+    // 3. ⌃2 and ⌃1.
+    let tree_has = |app: &mut App, label: &str| {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        labelled(&tree["nodes"], label).is_some()
+    };
+    app.call(
+        "ui.key",
+        json!({"window": window, "key": "2", "modifiers": ["control"]}),
+    );
+    wait_for_layout(&mut app, &window, |l| l["main"] == "mix");
+    // Only the Mix view's mixer has the Instruments menu: once it is in the
+    // tree the view has switched, so the absent Arrangement means something.
+    wait_for_label(&mut app, &window, "Instruments");
+    assert!(
+        !tree_has(&mut app, "Arrangement"),
+        "the Mix view has no arrangement"
+    );
+    app.call(
+        "ui.key",
+        json!({"window": window, "key": "1", "modifiers": ["control"]}),
+    );
+    wait_for_layout(&mut app, &window, |l| l["main"] == "arrange");
+    wait_for_label(&mut app, &window, "Arrangement");
+    app.call(
+        "command.run",
+        json!({"id": "ui.toggle_right", "window": window}),
+    );
+    let l = wait_for_layout(&mut app, &window, |l| {
+        layout_pane(l, "arrange", "right")["shown"] == true
+    });
+    assert_eq!(l["main"], "arrange", "{l}");
+
+    // 4. A pane of the other view; the main view stays.
+    let r = app.call(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "right", "view": "markers", "size": 300, "shown": true, "main": "mix"}, "window": window}),
+    );
+    assert_eq!(r["status"], "right markers 300 shown", "{r}");
+    let l = layout(&mut app);
+    assert_eq!(l["main"], "arrange", "{l}");
+    // The Mix view's right pane took it at once (Task 9 review M1).
+    let right = layout_pane(&l, "mix", "right");
+    assert_eq!(
+        (
+            right["shown"].clone(),
+            right["view"].clone(),
+            right["size"].clone()
+        ),
+        (json!(true), json!("markers"), json!(300.0)),
+        "{l}"
+    );
+
+    // 5. The mixer in arrange's bottom pane.
+    app.call(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "bottom", "view": "mixer"}, "window": window}),
+    );
+    let l = layout(&mut app);
+    assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
+    // The mixer bar's Add Bus is an AppKit button, in the tree (Task 9
+    // fix round 1 finding, final review I1).
+    wait_for_label(&mut app, &window, "Add Bus");
+
+    // 6. The mixer window has its own transport bar.
+    app.call(
+        "command.run",
+        json!({"id": "window.mixer", "window": window}),
+    );
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let mixer = loop {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        if let Some(m) = ws["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "mixer")
+        {
+            break m["number"].clone();
+        }
+        assert!(Instant::now() < deadline, "no mixer window in {ws}");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let id = loop {
+        let tree = app.call("ui.tree", json!({"window": mixer}));
+        if let Some(id) = play_button(&tree["nodes"]) {
+            break id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no Play in the mixer window's tree: {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    app.call("ui.click", json!({"window": mixer, "element": id}));
+    app.wait(&window, json!({"condition": "playing"}));
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": window}),
+    );
+    app.wait(&window, json!({"condition": "stopped"}));
+
+    // 7. Saved per document.
+    let path = app.launched.home.join("views.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": path}, "window": window}),
+    );
+    app.call("command.run", json!({"id": "file.close", "window": window}));
+    let w2 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w2, json!({"condition": "documents_at_least", "count": 1}));
+    let l = app.call("state.get", json!({"target": "layout", "window": w2}));
+    let right = layout_pane(&l, "mix", "right");
+    assert_eq!(
+        (
+            right["shown"].clone(),
+            right["view"].clone(),
+            right["size"].clone()
+        ),
+        (json!(true), json!("markers"), json!(300.0)),
+        "{l}"
+    );
+    assert_eq!(layout_pane(&l, "arrange", "bottom")["view"], "mixer", "{l}");
+    app.quit();
+}
+
+/// The strip named `name` in a `state.get mixer` answer.
+fn strip_named(mixer: &Value, name: &str) -> Value {
+    mixer["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == name)
+        .unwrap_or_else(|| panic!("no strip {name:?} in {mixer}"))
+        .clone()
+}
+
+/// README steps 207–216 through the channel (plan 7b): hostile `ui.theme`
+/// and `state.get` calls that change nothing and open no dialog, a theme
+/// chosen live, the mixer state's colours and EQ slot, the typed level
+/// and pan on the real number boxes (Return commits, a refusal and Esc
+/// change nothing, a 300-digit entry is refused, not cut), the mixer
+/// window's strips, and the values saved with the project while the
+/// theme stays a preference.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn themes_and_the_strip_over_the_channel() {
+    use core_control::ErrorCode;
+    const SYNTH: &str = "Built-in Synth";
+    let mut app = App::start();
+    // 1. The default theme; the windows as they are.
+    let window = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    let numbers = |w: &Value| -> Vec<(Value, Value)> {
+        w["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["number"].clone(), x["kind"].clone()))
+            .collect()
+    };
+    let w0 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w0["theme"], "classic-light", "{w0}");
+
+    // 2. Hostile calls change nothing and open no dialog.
+    for params in [
+        json!({}),
+        json!({"theme": "svp-light"}),
+        json!({"theme": "console", "extra": 1}),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "ui.theme", "params": params, "window": window}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}: {e}");
+    }
+    let e = app.call_err("state.get", json!({"target": "mixers", "window": window}));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    let w1 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w1["theme"], "classic-light", "{w1}");
+    assert_eq!(numbers(&w1), numbers(&w0), "no window opened or closed");
+    assert_eq!(w1["alerts"].as_array().unwrap().len(), 0, "{w1}");
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    assert!(doc["alert"].is_null(), "no dialog: {doc}");
+
+    // 3. Console, live; no window opens or closes.
+    let r = app.call(
+        "command.run",
+        json!({"id": "ui.theme", "params": {"theme": "console"}, "window": window}),
+    );
+    assert_eq!(r["status"], "theme console", "{r}");
+    let w2 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w2["theme"], "console", "{w2}");
+    assert_eq!(numbers(&w2), numbers(&w0), "no window opened or closed");
+
+    // 3b. Nothing is selected: the left pane says so and shows no strip.
+    wait_for_label(&mut app, &window, "Select a lane to see its channel strip.");
+    let tree = app.call("ui.tree", json!({"window": window}));
+    assert!(
+        labelled_like(&tree["nodes"], "Level of ", "").is_none(),
+        "no strip in the left pane: {tree}"
+    );
+    app.call(
+        "command.run",
+        json!({"id": "ui.view_mix", "window": window}),
+    );
+    wait_for_state(&mut app, &window, "layout", |l| l["main"] == "mix");
+
+    // 4. The mixer state: kind colours, no strip colours, no EQ.
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    for s in m["strips"].as_array().unwrap() {
+        // B8 review m4: a kind colour that is a name, and a colour key that
+        // is there and null (not missing).
+        assert!(
+            s["kind_colour"].as_str().is_some_and(|k| !k.is_empty()),
+            "{s}"
+        );
+        assert_eq!(
+            s.get("colour"),
+            Some(&Value::Null),
+            "no strip colour yet: {s}"
+        );
+        assert!(s["eq"].is_null(), "no EQ yet: {s}");
+    }
+    assert_eq!(strip_named(&m, SYNTH)["kind_colour"], "instrument", "{m}");
+    assert_eq!(strip_named(&m, "Master")["kind_colour"], "master", "{m}");
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(eq) = find_node(&tree["nodes"], &format!("EQ of {SYNTH}")) {
+            assert_eq!(eq["value"], "empty", "{eq}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no EQ of {SYNTH} in {tree}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // 5. The level box: one call clicks it and types.
+    let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
+    app.call(
+        "ui.key",
+        json!({"window": window, "element": level, "text": "-4.2\n"}),
+    );
+    wait_for_state(&mut app, &window, "mixer", |m| {
+        (strip_named(m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6
+    });
+    wait_for_undo(&mut app, &window, "Set Fader");
+    let version = |app: &mut App| {
+        app.call("state.get", json!({"target": "document", "window": window}))["version"].clone()
+    };
+    let v0 = version(&mut app);
+
+    // 5b. Esc while typing changes nothing (A4 review M4).
+    let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
+    app.call(
+        "ui.key",
+        json!({"window": window, "element": level, "text": "-9"}),
+    );
+    // B8 review m2: the box is editing the typed draft before Esc (its
+    // field has the keyboard; the node's value stays the committed level
+    // until Return), so the Esc below is not tested vacuously.
+    let box_node = |app: &mut App| {
+        find_node(
+            &app.call("ui.tree", json!({"window": window}))["nodes"],
+            &format!("Level of {SYNTH}"),
+        )
+        .unwrap()
+    };
+    let editing = box_node(&mut app);
+    assert_eq!(editing["focused"], true, "the box is editing -9: {editing}");
+    app.call("ui.key", json!({"window": window, "key": "escape"}));
+    let after = box_node(&mut app);
+    assert!(after["focused"].is_null(), "Esc ended the edit: {after}");
+    // Had Esc not ended the edit, this Return would commit −9.
+    app.call("ui.key", json!({"window": window, "key": "return"}));
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert!(
+        (strip_named(&m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6,
+        "Esc cancelled the typed -9: {m}"
+    );
+    assert_eq!(version(&mut app), v0, "Esc added no undo step");
+    // 5c. A 300-digit entry (the channel's paste) is refused, not cut. A
+    // `ui.key` holds at most 256 characters: two calls into the one field.
+    focus_number_box(&mut app, &window, &format!("Level of {SYNTH}"));
+    let half = "9".repeat(150);
+    app.call("ui.key", json!({"window": window, "text": half}));
+    app.call(
+        "ui.key",
+        json!({"window": window, "text": format!("{half}\n")}),
+    );
+    wait_for_state(&mut app, &window, "editor", |e| {
+        e["status"] == "Type a level in dB, like \u{2212}4.2 or \u{2212}inf."
+    });
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert!(
+        (strip_named(&m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6,
+        "Esc and the refusal changed nothing: {m}"
+    );
+    assert_eq!(version(&mut app), v0, "no undo step was added");
+    wait_for_undo(&mut app, &window, "Set Fader");
+
+    // 6. The pan box: a refused pan, then L 24.
+    let pan = wait_for_label(&mut app, &window, &format!("Pan of {SYNTH}"));
+    app.call("ui.click", json!({"window": window, "element": pan}));
+    app.call("ui.key", json!({"window": window, "text": "LR\n"}));
+    wait_for_state(&mut app, &window, "editor", |e| {
+        e["status"] == "Type a pan like L 24, C or R 10."
+    });
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert_eq!(strip_named(&m, SYNTH)["pan"].as_f64(), Some(0.0), "{m}");
+    focus_number_box(&mut app, &window, &format!("Pan of {SYNTH}"));
+    app.call("ui.key", json!({"window": window, "text": "L 24\n"}));
+    wait_for_state(&mut app, &window, "mixer", |m| {
+        (strip_named(m, SYNTH)["pan"].as_f64().unwrap() + 0.24).abs() < 1e-6
+    });
+    // Leaving the level box committed no draft: Esc had cancelled it (and
+    // since symbiotic-design 0.2.1 a blur cancels too).
+    let m = app.call("state.get", json!({"target": "mixer", "window": window}));
+    assert!(
+        (strip_named(&m, SYNTH)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6,
+        "{m}"
+    );
+
+    // 7. The mixer window shows the same strips.
+    app.call(
+        "command.run",
+        json!({"id": "window.mixer", "window": window}),
+    );
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let mixer = loop {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        if let Some(m) = ws["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "mixer")
+        {
+            break m["number"].clone();
+        }
+        assert!(Instant::now() < deadline, "no mixer window in {ws}");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    wait_for_label(&mut app, &mixer, &format!("Fader of {SYNTH}"));
+
+    // 8. The values are saved; the theme is a preference.
+    let path = app.launched.home.join("strip.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": path}, "window": window}),
+    );
+    app.call("command.run", json!({"id": "file.close", "window": window}));
+    let w3 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w3, json!({"condition": "documents_at_least", "count": 1}));
+    let m = app.call("state.get", json!({"target": "mixer", "window": w3}));
+    let s = strip_named(&m, SYNTH);
+    assert!((s["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6, "{m}");
+    assert!((s["pan"].as_f64().unwrap() + 0.24).abs() < 1e-6, "{m}");
+    let w4 = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(w4["theme"], "console", "{w4}");
+    app.quit();
+}
+
+/// Whether `label` holds the whole word `word` (split on non-letters, so
+/// "Pane" and "Panel" do not count; Ruling 11, no regex crate).
+fn has_word(label: &str, word: &str) -> bool {
+    label.split(|c: char| !c.is_alphabetic()).any(|w| w == word)
+}
+
+/// Every label and title in `nodes` and their subtrees holding `word`.
+fn labels_with_word(nodes: &Value, word: &str, out: &mut Vec<String>) {
+    for n in nodes.as_array().into_iter().flatten() {
+        for k in ["label", "title"] {
+            if let Some(l) = n[k].as_str().filter(|l| has_word(l, word)) {
+                out.push(l.to_string());
+            }
+        }
+        labels_with_word(&n["children"], word, out);
+    }
+}
+
+/// The last edit is one undo step named `label` (Task 7 review M1): one
+/// Undo gives `undone` and the undo label `prev`, one Redo gives `redone`
+/// and `label` again.
+fn one_undo_step(
+    app: &mut App,
+    w: &Value,
+    label: &str,
+    prev: &str,
+    undone: impl Fn(&Value) -> bool,
+    redone: impl Fn(&Value) -> bool,
+) {
+    wait_for_undo(app, w, label);
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_state(app, w, "audio_editor", undone);
+    wait_for_undo(app, w, prev);
+    app.call("command.run", json!({"id": "edit.redo", "window": w}));
+    wait_for_state(app, w, "audio_editor", redone);
+    wait_for_undo(app, w, label);
+}
+
+/// The node labelled `label` inside the "Audio Editor Pane" container
+/// (the arrangement has zoom buttons of its own).
+fn in_editor(app: &mut App, window: &Value, label: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(n) = find_node(&tree["nodes"], "Audio Editor Pane")
+            .and_then(|pane| find_node(&pane["children"], label))
+        {
+            return n;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {label:?} in the Audio Editor Pane within {WAIT_MS} ms: {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// README steps 217–224 through the channel (plan 7c): hostile calls that
+/// change nothing, ⌘5 on the selected region, no pan in the editor, the
+/// typed gain, fade, length and start, a gain drag, Normalize and its
+/// undo, a zoom, and the edits and the bottom view saved.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn edits_a_region_in_the_audio_editor() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let home = app.launched.home.clone();
+    // 1. 2 s of stereo at 0.25 (−12.04 dBFS) at bar 1 of the demo, its
+    // region selected by its element.
+    let tone = home.join("tone.caf");
+    audio_file(&tone, 96_000);
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": tone, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let (region, label) = wait_for_label_like(&mut app, &w, "Region tone on ", "gain 0.0 dB");
+    app.call("ui.click", json!({"window": w, "element": region}));
+    let sel = app.call("state.get", json!({"target": "selection", "window": w}));
+    assert_eq!(sel["events"].as_array().unwrap().len(), 1, "{label}: {sel}");
+    let event = sel["events"][0].clone();
+
+    // 2. Hostile calls change nothing and open no dialog.
+    let layout =
+        |app: &mut App, w: &Value| app.call("state.get", json!({"target": "layout", "window": w}));
+    let l0 = layout(&mut app, &w);
+    let e = app.call_err("state.get", json!({"target": "audio-editor", "window": w}));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "left", "view": "audio_editor"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert_eq!(
+        e.message, "audio_editor is not on the left pane's list in the arrange view.",
+        "{e}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "bottom", "view": "audio"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert_eq!(layout(&mut app, &w), l0, "no layout change");
+    let ws = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(ws["alerts"].as_array().unwrap().len(), 0, "{ws}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert!(doc["alert"].is_null(), "no dialog: {doc}");
+
+    // 3. ⌘5: the bottom pane shows the editor on the region.
+    app.call(
+        "command.run",
+        json!({"id": "editors.audio_editor", "window": w}),
+    );
+    wait_for_layout(&mut app, &w, |l| {
+        let b = layout_pane(l, "arrange", "bottom");
+        b["view"] == "audio_editor" && b["shown"] == true
+    });
+    let s = wait_for_state(&mut app, &w, "audio_editor", |s| {
+        s["shown"] == true && s["region"]["event"] == event
+    });
+    assert_eq!(
+        (
+            s["boxes"]["gain"].clone(),
+            s["boxes"]["start"].clone(),
+            s["boxes"]["length"].clone()
+        ),
+        (json!("0.0 dB"), json!("0:00.000"), json!("0:02.000")),
+        "{s}"
+    );
+    // No pan anywhere in the editor (Ruling 11): "Bottom Pane" and the
+    // left strip's "Pan of …" lie outside its container.
+    in_editor(&mut app, &w, "Audio Editor");
+    let tree = app.call("ui.tree", json!({"window": w}));
+    let root = find_node(&tree["nodes"], "Audio Editor Pane").expect("the pane");
+    let mut pans = Vec::new();
+    labels_with_word(&json!([root]), "Pan", &mut pans);
+    assert!(pans.is_empty(), "pan in the audio editor: {pans:?}");
+
+    let region_of = |s: &Value| s["region"].clone();
+    let gain = |s: &Value| s["region"]["gain_db"].as_f64().unwrap_or(f64::NAN);
+    let state = |app: &mut App, w: &Value| {
+        app.call("state.get", json!({"target": "audio_editor", "window": w}))
+    };
+
+    // 4. The typed gain; a refused one changes nothing.
+    let id = in_editor(&mut app, &w, "Region Gain")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "-4.2\n"}),
+    );
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) + 4.2).abs() < 1e-6
+    });
+    wait_for_undo(&mut app, &w, "Set Region Gain");
+    let id = in_editor(&mut app, &w, "Region Gain")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "abc\n"}),
+    );
+    wait_for_state(&mut app, &w, "editor", |e| {
+        e["status"] == "Type a gain in dB, like \u{2212}4.2 or +6."
+    });
+    let s = state(&mut app, &w);
+    assert!((gain(&s) + 4.2).abs() < 1e-6, "{s}");
+
+    // 5. The fade in, in ms: 250 ms at 48 kHz.
+    let id = in_editor(&mut app, &w, "Fade In Length")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "250\n"}),
+    );
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        region_of(s)["fade_in"]["frames"] == 12_000
+    });
+    one_undo_step(
+        &mut app,
+        &w,
+        "Set Region Fades",
+        "Set Region Gain",
+        |s| region_of(s)["fade_in"]["frames"] == 0,
+        |s| region_of(s)["fade_in"]["frames"] == 12_000,
+    );
+
+    // 6. The length, then the start: the end stays.
+    let id = in_editor(&mut app, &w, "Region Length")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "1.5\n"}),
+    );
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        region_of(s)["length"] == 72_000
+    });
+    one_undo_step(
+        &mut app,
+        &w,
+        "Trim Region",
+        "Set Region Fades",
+        |s| region_of(s)["length"] == 96_000,
+        |s| region_of(s)["length"] == 72_000,
+    );
+    let id = in_editor(&mut app, &w, "Region Start")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "0.5\n"}),
+    );
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        region_of(s)["source_offset"] == 24_000 && region_of(s)["length"] == 48_000
+    });
+    // One step: a start sent as two edits would undo to a third state.
+    one_undo_step(
+        &mut app,
+        &w,
+        "Trim Region",
+        "Trim Region",
+        |s| region_of(s)["source_offset"] == 0 && region_of(s)["length"] == 72_000,
+        |s| region_of(s)["source_offset"] == 24_000 && region_of(s)["length"] == 48_000,
+    );
+
+    // 7. Drag the gain band 20 points up: +5 dB at 0.25 dB a point.
+    let handle = in_editor(&mut app, &w, "Gain Handle");
+    let f = &handle["frame"];
+    let (cx, cy) = (
+        f["x"].as_f64().unwrap() + f["width"].as_f64().unwrap() / 2.0,
+        f["y"].as_f64().unwrap() + f["height"].as_f64().unwrap() / 2.0,
+    );
+    app.call(
+        "ui.drag",
+        json!({"window": w, "from": handle["id"], "to": {"x": cx, "y": cy - 20.0}, "steps": 8}),
+    );
+    let s = wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) - 0.8).abs() < 0.3
+    });
+    wait_for_undo(&mut app, &w, "Region Gain");
+    let dragged = gain(&s);
+
+    // 8. Normalize to −1 dBFS: −1 − (−12.04) = +11.04 dB; undo brings the
+    // dragged gain back.
+    let id = in_editor(&mut app, &w, "Normalize Peak")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "-1\n"}),
+    );
+    let id = in_editor(&mut app, &w, "Normalize")["id"].clone();
+    app.call("ui.click", json!({"window": w, "element": id}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) - 11.04).abs() < 0.05
+    });
+    wait_for_undo(&mut app, &w, "Normalize");
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) - dragged).abs() < 1e-6
+    });
+    // A bare Return on a negative gain that is not a tenth sends nothing
+    // (final review I1): Normalize to −13 dBFS gives −0.96 dB, shown as
+    // "−1.0 dB"; then undo it.
+    let id = in_editor(&mut app, &w, "Normalize Peak")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "-13\n"}),
+    );
+    let id = in_editor(&mut app, &w, "Normalize")["id"].clone();
+    app.call("ui.click", json!({"window": w, "element": id}));
+    let s = wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) + 0.96).abs() < 0.05
+    });
+    wait_for_undo(&mut app, &w, "Normalize");
+    let normalized = gain(&s);
+    let id = in_editor(&mut app, &w, "Region Gain")["id"].clone();
+    app.call("ui.key", json!({"window": w, "element": id, "text": "\n"}));
+    let s = state(&mut app, &w);
+    assert_eq!(gain(&s), normalized, "{s}");
+    wait_for_undo(&mut app, &w, "Normalize");
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) - dragged).abs() < 1e-6
+    });
+
+    // 9. Zoom In halves the frames per point.
+    let fpp = state(&mut app, &w)["frames_per_point"].as_f64().unwrap();
+    let id = in_editor(&mut app, &w, "Zoom In")["id"].clone();
+    app.call("ui.click", json!({"window": w, "element": id}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (s["frames_per_point"].as_f64().unwrap_or(f64::NAN) - fpp / 2.0).abs() <= 1.0
+    });
+
+    // 10. Saved and opened again: the edits and the bottom view.
+    let path = home.join("edited.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": path}, "window": w}),
+    );
+    app.call("command.run", json!({"id": "file.close", "window": w}));
+    let w3 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w3, json!({"condition": "documents_at_least", "count": 1}));
+    let (region, _) = wait_for_label_like(&mut app, &w3, "Region tone on ", "");
+    app.call("ui.click", json!({"window": w3, "element": region}));
+    let s = wait_for_state(&mut app, &w3, "audio_editor", |s| !s["region"].is_null());
+    let r = region_of(&s);
+    assert!((gain(&s) - dragged).abs() < 1e-6, "{s}");
+    assert_eq!(
+        (
+            r["fade_in"]["frames"].clone(),
+            r["source_offset"].clone(),
+            r["length"].clone()
+        ),
+        (json!(12_000), json!(24_000), json!(48_000)),
+        "{s}"
+    );
+    let l = layout(&mut app, &w3);
+    assert_eq!(
+        layout_pane(&l, "arrange", "bottom")["view"],
+        "audio_editor",
+        "{l}"
+    );
+    app.quit();
+}
+
+/// The first tree node whose label is exactly `label`.
+fn find_node(nodes: &Value, label: &str) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        if n["label"].as_str() == Some(label) {
+            Some(n.clone())
+        } else {
+            find_node(&n["children"], label)
+        }
+    })
+}
+
+/// Polls the window's tree until the node labelled exactly `label`
+/// exists; returns it (its `id`, `value` and `focused`).
+fn wait_for_node(app: &mut App, window: &Value, label: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(n) = find_node(&tree["nodes"], label) {
+            return n;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {label:?} within {WAIT_MS} ms in {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Polls the tree until the node labelled `label` has the value `value`.
+fn wait_for_value(app: &mut App, window: &Value, label: &str, value: &str) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let n = wait_for_node(app, window, label);
+        if n["value"].as_str() == Some(value) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label} is not {value:?} within {WAIT_MS} ms: {n}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// README steps 225–228 through the channel (plan 7d): the readouts, a
+/// click on Fast Forward, Rewind and Return to Start, a ⇧-click with no
+/// marker, ⇧. and the keypad's minus, hostile parameters, a typed field
+/// cancelled by a click away, and a typed punch time that refuses Record
+/// until Return sets it.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn transport_jumps_readouts_and_fields_over_the_channel() {
+    use core_control::ErrorCode;
+    const BAR: i64 = 61_440;
+    const DRAFT: &str = "Press Return to set the punch, or Esc to discard it.";
+    let mut app = App::start();
+    // The demo's shown sequence: 4/4 at 120 BPM over its first ten bars.
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let tick = |app: &mut App| {
+        app.call("state.get", json!({"target": "transport", "window": w}))["tick"]
+            .as_i64()
+            .unwrap()
+    };
+    let click = |app: &mut App, label: &str, mods: Value| {
+        let n = wait_for_node(app, &w, label);
+        app.call(
+            "ui.click",
+            json!({"window": w, "element": n["id"], "modifiers": mods}),
+        );
+    };
+    // One click in a field selects all its text (plan 7d final wave), so
+    // what is typed replaces it.
+    let select_field = |app: &mut App, label: &str| click(app, label, json!([]));
+    let no_alert = |app: &mut App| {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        assert_eq!(ws["alerts"].as_array().unwrap().len(), 0, "{ws}");
+        let doc = app.call("state.get", json!({"target": "document", "window": w}));
+        assert!(doc["alert"].is_null(), "no dialog: {doc}");
+    };
+
+    // 1. The readouts at the start.
+    wait_for_tick(&mut app, &w, 0);
+    let t0 = app.call("state.get", json!({"target": "transport", "window": w}));
+    let bbu0 = t0["position"].as_str().unwrap().to_string();
+    assert_eq!(bbu0, "1.1.0", "{t0}");
+    wait_for_value(&mut app, &w, "Bar Readout", &bbu0);
+    wait_for_value(&mut app, &w, "Time Readout", "0:00.000");
+    wait_for_value(&mut app, &w, "Tempo Readout", "120.00");
+    wait_for_value(&mut app, &w, "Signature Readout", "4/4");
+
+    // 2. A click on Fast Forward goes one bar; the command another;
+    // Rewind one back; Return to Start to 0; Rewind at 0 stays there.
+    click(&mut app, "Fast Forward", json!([]));
+    wait_for_tick(&mut app, &w, BAR);
+    wait_for_value(&mut app, &w, "Time Readout", "0:02.000");
+    app.call(
+        "command.run",
+        json!({"id": "transport.fast_forward", "window": w}),
+    );
+    wait_for_tick(&mut app, &w, 2 * BAR);
+    click(&mut app, "Rewind", json!([]));
+    wait_for_tick(&mut app, &w, BAR);
+    click(&mut app, "Return to Start", json!([]));
+    wait_for_tick(&mut app, &w, 0);
+    wait_for_value(&mut app, &w, "Bar Readout", &bbu0);
+    click(&mut app, "Rewind", json!([]));
+    assert_eq!(tick(&mut app), 0, "Rewind stops at bar 1");
+    no_alert(&mut app);
+
+    // 3. A ⇧-click with no marker: the status line says so, nothing moves.
+    click(&mut app, "Fast Forward", json!(["shift"]));
+    let e = wait_for_editor(&mut app, &w, "no marker", |e| {
+        e["status"] == "No marker after the position."
+    });
+    assert_eq!(tick(&mut app), 0, "{e}");
+    no_alert(&mut app);
+
+    // 4. ⇧. one bar on, the keypad's minus one bar back.
+    app.call(
+        "ui.key",
+        json!({"window": w, "key": ".", "modifiers": ["shift"]}),
+    );
+    wait_for_tick(&mut app, &w, BAR);
+    app.call("ui.key", json!({"window": w, "key": "keypad_minus"}));
+    wait_for_tick(&mut app, &w, 0);
+
+    // 5. Hostile parameters are refused and move nothing.
+    for (id, params) in [
+        ("transport.rewind", json!({"bars": 2})),
+        ("transport.fast_forward", json!("x")),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{id} {params}: {e}");
+        assert_eq!(tick(&mut app), 0, "{id} {params}");
+    }
+    no_alert(&mut app);
+
+    // 6. A typed position is cancelled by a click on a view that never
+    // takes the keyboard, and by one on the arrangement (which does);
+    // Return commits (the click selects all, so no stale digit is left).
+    let old = wait_for_node(&mut app, &w, "Position")["value"].clone();
+    for away in ["Bar Readout", "Arrangement"] {
+        click(&mut app, "Position", json!([]));
+        app.call("ui.key", json!({"window": w, "text": "5"}));
+        // The typed text replaced the old one before the click away, so
+        // the wait below sees the cancel and not a click that never began
+        // an edit.
+        wait_for_value(&mut app, &w, "Position", "5");
+        click(&mut app, away, json!([]));
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        loop {
+            let n = wait_for_node(&mut app, &w, "Position");
+            if n["value"] == old {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a click on {away} leaves Position showing {old}: {n}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(tick(&mut app), 0, "a click on {away} commits nothing");
+    }
+    select_field(&mut app, "Position");
+    app.call("ui.key", json!({"window": w, "text": "5\n"}));
+    wait_for_tick(&mut app, &w, 4 * BAR);
+
+    // 7. A typed bar Punch In refuses Record (plan 7d controller ruling
+    // I5, fix round 1 M4): a real click on the bar's Record keeps the
+    // draft and the keyboard, and Return then sets the punch. The record
+    // popover's own punch fields are out of the channel's reach: its
+    // window has no title, so `state.get windows` does not list it and
+    // `ui.tree` and `ui.key` cannot name it; README step 228 checks them.
+    let recording = |app: &mut App| {
+        app.call("state.get", json!({"target": "record", "window": w}))["recording"].clone()
+    };
+    let punch_in = |e: &Value| e["transport"]["punch_in"].clone();
+    let before = punch_in(&app.call("state.get", json!({"target": "editor", "window": w})));
+    select_field(&mut app, "Punch In");
+    app.call("ui.key", json!({"window": w, "text": "3"}));
+    click(&mut app, "Record", json!([]));
+    wait_for_editor(&mut app, &w, "Record refused", |e| e["status"] == DRAFT);
+    assert_eq!(recording(&mut app), false, "nothing records");
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    assert_eq!(punch_in(&e), before, "the punch is not set yet: {e}");
+    let n = wait_for_node(&mut app, &w, "Punch In");
+    assert_eq!(n["focused"], true, "Punch In keeps the keyboard: {n}");
+    app.call("ui.key", json!({"window": w, "key": "return"}));
+    wait_for_editor(&mut app, &w, "the punch set", |e| {
+        e["transport"]["punch_in"] == 2 * BAR
+    });
+    // The channel's (and a surface's) transport.record refuses the same way.
+    select_field(&mut app, "Punch In");
+    app.call("ui.key", json!({"window": w, "text": "4"}));
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e}");
+    assert_eq!(e.message, DRAFT, "{e}");
+    assert_eq!(recording(&mut app), false, "nothing records");
+    app.call("ui.key", json!({"window": w, "key": "escape"}));
+    let n = wait_for_node(&mut app, &w, "Punch In");
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    assert_eq!(
+        e["transport"]["punch_in"],
+        2 * BAR,
+        "Esc sets nothing: {e} {n}"
+    );
+    assert_eq!(tick(&mut app), 4 * BAR);
+    no_alert(&mut app);
     app.quit();
 }

@@ -72,12 +72,13 @@ pub use catalog::{
     ScanProgress,
 };
 pub use control::{
-    AlertRow, ControlArg, ControlCall, ControlErrorCode, ControlFailure, ControlRequest,
-    ControlResult, ControlServer, ControlValue, CrashAnswerRow, DetailRow, DocFactsRow,
-    EditorStateRow, ElementRefRow, KeyStrokeRow, ModifiersRow, MouseButtonRow, PointerRow,
+    AlertRow, AudioEditorBoxRow, AudioEditorRegionRow, AudioEditorStateRow, ControlArg,
+    ControlCall, ControlErrorCode, ControlFailure, ControlRequest, ControlResult, ControlServer,
+    ControlValue, CrashAnswerRow, DetailRow, DocFactsRow, EditorStateRow, ElementRefRow,
+    KeyStrokeRow, LayoutStateRow, ModifiersRow, MouseButtonRow, PaneRow, PointerRow,
     RecoveryAnswersRow, StateTargetRow, StepEntryStateRow, TornRow, TransportMarksRow, UiNodeRow,
-    WaitConditionRow, WaitFactsRow, WindowKindRow, WindowRefRow, WindowRow, control_command_ids,
-    control_element_check, control_host_busy, control_wait_met,
+    ViewPanesRow, WaitConditionRow, WaitFactsRow, WindowKindRow, WindowRefRow, WindowRow,
+    control_command_ids, control_element_check, control_host_busy, control_wait_met,
 };
 pub use drum::{
     DrumBandKindRow, DrumBandRow, DrumCellRow, DrumEdit, DrumGridLayoutRow, DrumGridSettingsRow,
@@ -104,7 +105,8 @@ pub use keys::{BindingRow, Keymap, chord_text, key_code_for};
 pub use live::InputInfoRow;
 pub use media::{MediaOriginRow, MediaRow, MediaUseRow, OfflineReasonRow};
 pub use mixer::{
-    BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripKindRow, StripRow,
+    BusRow, DestRow, MeterRow, MixerLevels, MixerSnapshot, SendRow, StripColourRow, StripKindRow,
+    StripRow, SwatchRow,
 };
 pub use modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow,

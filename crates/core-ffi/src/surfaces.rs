@@ -1709,7 +1709,8 @@ pub(crate) struct PageFocus {
     pub page: usize,
 }
 
-/// The chain of `strip`: its plug-in instrument, then its inserts (Ruling 6).
+/// The chain of `strip`: its plug-in instrument, then its EQ and its
+/// inserts (Ruling 6; plan 7b Ruling 7).
 pub(crate) fn chain(
     doc: &core_model::document::Document,
     strip: StripId,
@@ -1729,7 +1730,7 @@ pub(crate) fn chain(
     };
     instrument
         .into_iter()
-        .chain(s.inserts.iter())
+        .chain(s.chain())
         .map(|x| (x.id, x.plugin.name.clone()))
         .collect()
 }
@@ -1780,7 +1781,7 @@ fn check_unit(
             None | Some(0) => 0,
             Some(_) => {
                 return Err(crate::events::bad(
-                    "a Kontrol S-Series MK3 keyboard is a bank of its own: `position` must be 0",
+                    "a host-integration keyboard is a bank of its own: `position` must be 0",
                 ));
             }
         },
@@ -2545,6 +2546,21 @@ pub fn kontrol_ports() -> SurfacePortsRow {
         }
     })
     .unwrap_or_default()
+}
+
+/// The quarter notes a transport bar hold winds between `from_ms` and
+/// `to_ms` after the press (plan 7d Ruling 3): the surfaces' shuttle
+/// curve, so the bar and a keyboard's Rewind wind alike. 0 when `to_ms`
+/// is not after `from_ms`, or on a panic.
+#[uniffi::export]
+pub fn shuttle_quarters(from_ms: u64, to_ms: u64) -> f64 {
+    std::panic::catch_unwind(|| {
+        if to_ms <= from_ms {
+            return 0.0;
+        }
+        core_surface::shuttle::wound(Duration::from_millis(from_ms), Duration::from_millis(to_ms))
+    })
+    .unwrap_or(0.0)
 }
 
 /// `state.get surfaces` without a document (pre-flight M29): no feedback

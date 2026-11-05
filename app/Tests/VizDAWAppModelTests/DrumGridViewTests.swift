@@ -1,4 +1,5 @@
 import AppKit
+import SymbioticTokens
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -140,16 +141,19 @@ private func paint(_ ticks: [Int64], velocity: UInt16 = 100 << 9, row: UInt64 = 
         #expect(c.canvas.content.layer?.contents == nil, "never drawn")
         let png = try #require(WindowSnapshot.png(of: w, scale: 1))
         let rep = try #require(NSBitmapImageRep(data: png.data))
-        func orange(_ x: CGFloat, _ y: CGFloat) -> Bool {
+        // A hit is the theme's note fill (plan 7b Ruling 13): Classic
+        // Light's pale blue over its white canvas.
+        func hit(_ x: CGFloat, _ y: CGFloat) -> Bool {
             let top = w.frame.height - c.frame.height + EditorCanvas.rulerHeight
             guard let p = rep.colorAt(x: Int(x), y: Int(top + y))?.usingColorSpace(.sRGB) else { return false }
-            return p.redComponent > 0.7 && p.greenComponent > 0.3 && p.greenComponent < 0.7 && p.blueComponent < 0.4
+            return p.blueComponent > 0.8 && p.redComponent < 0.8 && p.blueComponent - p.redComponent > 0.15
         }
+        #expect(c.theme == .classicLight)
         // Kick (content 22–42) at 0 and a beat; Snare (42–62) at a beat.
-        #expect(orange(DrumRowHeaderView.width + 20, 32))
-        #expect(orange(DrumRowHeaderView.width + 180, 32))
-        #expect(orange(DrumRowHeaderView.width + 180, 52))
-        #expect(!orange(DrumRowHeaderView.width + 60, 32), "an empty cell")
+        #expect(hit(DrumRowHeaderView.width + 20, 32))
+        #expect(hit(DrumRowHeaderView.width + 180, 32))
+        #expect(hit(DrumRowHeaderView.width + 180, 52))
+        #expect(!hit(DrumRowHeaderView.width + 60, 32), "an empty cell")
     }
 
     @Test func escapeInTheRenameFieldCancelsTheRename() throws {

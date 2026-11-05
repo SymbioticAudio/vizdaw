@@ -2,6 +2,10 @@ import Foundation
 import Observation
 import VizDAWCore
 
+/// Where the record popover shows (plan 7a final review I2): the document
+/// window's transport bar or the mixer window's.
+public enum RecordPopoverHost: Equatable, Sendable { case document, mixerWindow }
+
 /// Recording in a document (plan 5c Task 13; sub-project 5 spec §6.4,
 /// §6.5): what Record asks the core for, what the core reports while it
 /// records, and the crash-recovery offer. Replace, punch and loop come
@@ -26,19 +30,42 @@ public final class RecordModel {
     public var preRollBars: UInt8 = 0
     /// Kept loop passes become takes.
     public var passesAsTakes = true
-    /// The toolbar's record popover is open; closing it commits the punch
-    /// drafts (5d-2 final review I3).
+    /// The toolbar's record popover is open; closing it drops the punch
+    /// drafts (plan 7d Ruling 7). A press on Record with a draft open never
+    /// closes it (`closeAllowed(pressOnRecord:draftOpen:)`).
     public var showsPopover = false {
         didSet {
             if !showsPopover {
-                commitPunchDrafts()
+                dropPunchDrafts()
                 document?.editor.endTextEditing("recordPopover")
             }
         }
     }
-    /// Text typed in the popover's punch fields, until Return, the field
-    /// losing focus, the popover closing or Record.
+    /// The window whose chevron opened the popover (plan 7a final review
+    /// I2): the mixer window has a transport bar too, and the popover shows
+    /// under one chevron only.
+    public private(set) var popoverHost: RecordPopoverHost = .document
+
+    /// The chevron in `host`: closes the popover open there, else opens it
+    /// there (closing it elsewhere first, which drops the drafts).
+    public func togglePopover(in host: RecordPopoverHost) {
+        if showsPopover(in: host) {
+            showsPopover = false
+            return
+        }
+        if showsPopover { showsPopover = false }
+        popoverHost = host
+        showsPopover = true
+    }
+
+    /// The popover is open in `host`.
+    public func showsPopover(in host: RecordPopoverHost) -> Bool { showsPopover && popoverHost == host }
+    /// Text typed in the popover's punch fields, until Return, focus
+    /// moving within or leaving the pair, or the popover closing.
     var punchDrafts: [TransportField: String] = [:]
+    /// The bar's Punch In or Out while it is typed in, and its text (fix
+    /// round 1 M4: Record waits for it as for the popover's).
+    @ObservationIgnored var barPunchDraft: (TransportField, String)?
     /// Free bytes on a project's volume (tests replace it; plan 5d-2 Task
     /// 2).
     public static var freeSpace: (String?) -> UInt64? = RecordModel.volumeFreeSpace
@@ -51,6 +78,9 @@ public final class RecordModel {
 
     /// Why Record is refused while step entry is on (spec §6.4).
     public static let stepEntryOn = "Step entry is on: turn it off to record."
+    /// Why Record is refused while a punch draft is open (plan 7d
+    /// controller ruling I5).
+    public static let openDraftMessage = "Press Return to set the punch, or Esc to discard it."
 
     init(document: DocumentModel) {
         self.document = document
@@ -102,13 +132,10 @@ public final class RecordModel {
         guard let seq = m.selectedSeq else { return .unavailable(TransportCommands.noSequence) }
         guard !m.stepEntry.isOn else { return .refused(Self.stepEntryOn) }
         guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
-        // A punch time typed in the popover is what this pass punches at
-        // (5d-2 final review I3).
-        // A draft that is not a position refuses the pass (5d-2 final
-        // re-review N1): it must not punch at the old range.
-        guard commitPunchDrafts() else {
-            return .refused(m.editor.status ?? "The punch time is not a position.")
-        }
+        // A punch time typed in the popover but not yet set refuses the
+        // pass (controller ruling I5): it must never punch at the old range
+        // with a typed time on screen (5d-2 final review I3, re-review N1).
+        guard !hasOpenPunchDraft else { return .refused(Self.openDraftMessage) }
         do {
             try m.session.record(seq: seq, spec: spec())
         } catch {

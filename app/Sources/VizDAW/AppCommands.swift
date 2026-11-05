@@ -105,6 +105,14 @@ struct AppCommands: Commands {
                     .disabled(docID == nil)
                 Divider()
             }
+            CommandGroup(before: .toolbar) {
+                ForEach(["ui.view_arrange", "ui.view_mix"], id: \.self) { commandToggle($0, ViewCommands.self) }
+                Divider()
+                ForEach(["ui.toggle_left", "ui.toggle_bottom", "ui.toggle_right"], id: \.self) {
+                    commandToggle($0, ViewCommands.self)
+                }
+                Divider()
+            }
         }
         CommandMenu("Editors") {
             ForEach(DetailEditorKind.allCases, id: \.self) { kind in
@@ -118,6 +126,9 @@ struct AppCommands: Commands {
                 .keyboardShortcut(KeyMenu.shortcut("editors.\(ControlStates.kindName(kind))"))
                 .disabled(doc == nil)
             }
+            Button("Audio Editor") { if let doc { ViewCommands.run(ViewCommands.audioEditor, on: nil, doc) } }
+                .keyboardShortcut(KeyMenu.shortcut("editors.audio_editor"))
+                .disabled(doc == nil)
             Divider()
             ForEach(DetailEditorKind.allCases, id: \.self) { kind in
                 Button("Open \(kind.title) in Window") {
@@ -222,6 +233,8 @@ struct AppCommands: Commands {
             Button("Return to Start") { doc?.returnToStart() }
                 .keyboardShortcut(KeyMenu.shortcut("transport.return_to_start"))
                 .disabled(!(doc?.returnKeyEnabled ?? false))
+            commandItem("transport.rewind", TransportCommands.self)
+            commandItem("transport.fast_forward", TransportCommands.self)
             commandItem("transport.previous_marker", TransportCommands.self)
             commandItem("transport.next_marker", TransportCommands.self)
             Divider()

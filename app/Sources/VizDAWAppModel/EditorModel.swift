@@ -382,11 +382,20 @@ public final class EditorModel {
     @ObservationIgnored var selectSequence: (UInt64) -> Void = { _ in }
     @ObservationIgnored var currentSequence: () -> UInt64? = { nil }
 
+    /// Ends the pane text edits (set by `DocumentModel`): `openDetail` calls
+    /// it first when the bottom pane is not on the editor, so a strip rename
+    /// over the mixer is committed, not dropped.
+    @ObservationIgnored var paneEditsEnder: (@MainActor () -> Void)?
+
     /// Shows `target` in the detail pane, in `kind` or the last-used
     /// editor (spec §3.7). The piano roll's shown lanes stay while the
-    /// target is the same.
-    public func openDetail(_ target: EditorTarget, kind: DetailEditorKind? = nil) {
+    /// target is the same. The bottom pane of `main` (the current view) shows it.
+    public func openDetail(_ target: EditorTarget, kind: DetailEditorKind? = nil, in main: MainView? = nil) {
+        if layout.views[main ?? layout.views.main].bottom.view != .editor { paneEditsEnder?() }
         updateLayout { l in
+            let m = main ?? l.views.main
+            l.views[m].bottom.shown = true
+            l.views[m].bottom.view = .editor
             let k = kind ?? l.lastKind
             l.lastKind = k
             let lanes = l.detail?.target == target ? l.detail?.lanes : nil

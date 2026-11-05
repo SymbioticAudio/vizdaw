@@ -239,7 +239,8 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         let h = LaneHeaderView(document: m)
         var lane = m.lanes[1]
         let titles = h.laneMenu(seq: 3, lane: lane).items.filter { !$0.isSeparatorItem }.map(\.title)
-        #expect(titles == ["Drum Lane", "Track Synth…", "New MIDI Destination…"])
+        // Colour ▸ last (plan 7b Task B7; StripColourTests covers it).
+        #expect(titles == ["Drum Lane", "Track Synth…", "New MIDI Destination…", "Colour"])
         #expect(!h.laneMenu(seq: 3, lane: lane).items[2].isEnabled, "Chords plays no external synth")
         let saved = f.dests
         f.dests = saved + [DestRow(id: 7, name: "Juno", plugin: nil, external: true)]

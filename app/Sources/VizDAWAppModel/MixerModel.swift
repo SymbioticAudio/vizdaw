@@ -95,6 +95,15 @@ public final class MixerModel {
     public private(set) var destinations: [DestRow] = []
     /// The strip whose name is being edited.
     public private(set) var renamingStrip: UInt64?
+    /// Where the rename field shows (the button that began it sets it).
+    public private(set) var renamePlacement: MixerPlacement = .window
+    /// Where the open browser's popover shows.
+    public var browserPlacement: MixerPlacement = .window
+    /// The placements showing this mixer now (the window, a pane, a view,
+    /// the left strip).
+    public private(set) var placements: Set<MixerPlacement> = []
+    /// The last `tick` that polled, in the caller's monotonic seconds.
+    @ObservationIgnored private var lastTick: Double?
     public var renameDraft = ""
     /// The open plugin browser.
     public var browser: BrowserTarget? {
@@ -111,11 +120,16 @@ public final class MixerModel {
         case instrument
         /// An existing destination, which then plays the plugin.
         case destination(UInt64)
+        /// A strip's EQ slot (an effect, which processes before the inserts).
+        case eq(strip: UInt64)
 
-        /// The browser lists instruments for it (effects for an insert).
+        /// The browser lists instruments for it (effects for an insert or
+        /// the EQ).
         public var wantsInstrument: Bool {
-            if case .insert = self { return false }
-            return true
+            switch self {
+            case .insert, .eq: false
+            case .instrument, .destination: true
+            }
         }
     }
 
@@ -206,10 +220,45 @@ public final class MixerModel {
 
     /// The held slots of `strip` (its "Load All").
     public func heldSlots(of strip: StripRow) -> [UInt64] {
-        ([strip.instrument].compactMap { $0 } + strip.inserts).map(\.id).filter(held.contains)
+        strip.slots.map(\.id).filter(held.contains)
     }
 
     // MARK: Polling
+
+    /// The least time between two polls (30 Hz).
+    public static let tickInterval: Double = 0.030
+
+    /// One poll per frame, however many placements call it. `now` is seconds
+    /// from any monotonic clock. True when it polled.
+    @discardableResult
+    public func tick(now: Double) -> Bool {
+        if let last = lastTick, now - last < Self.tickInterval, now >= last { return false }
+        lastTick = now
+        refreshIfNeeded()
+        pollLevels()
+        pollAutomation()
+        return true
+    }
+
+    /// Opens the plugin browser for `t`, shown in placement `p`.
+    public func openBrowser(_ t: BrowserTarget, in p: MixerPlacement) {
+        browserPlacement = p
+        browser = t
+    }
+
+    public func showsBrowser(in p: MixerPlacement) -> Bool { browser != nil && browserPlacement == p }
+
+    public func isRenaming(_ strip: UInt64, in p: MixerPlacement) -> Bool {
+        renamingStrip == strip && renamePlacement == p
+    }
+
+    public func appeared(_ p: MixerPlacement) { placements.insert(p) }
+
+    /// The last placement gone ends any open drag.
+    public func disappeared(_ p: MixerPlacement) {
+        placements.remove(p)
+        if placements.isEmpty { endOpenDrag() }
+    }
 
     /// Refetches the mixer when the document or its slots changed.
     public func refreshIfNeeded() {
@@ -247,7 +296,8 @@ public final class MixerModel {
         command("Remove Bus Failed") { try $0.removeBus(strip: strip) }
     }
 
-    public func beginRename(_ strip: StripRow) {
+    public func beginRename(_ strip: StripRow, in p: MixerPlacement = .window) {
+        renamePlacement = p
         renameDraft = strip.name
         renamingStrip = strip.id
     }
@@ -317,9 +367,27 @@ public final class MixerModel {
             command("New Instrument Failed") { try $0.addPluginInstrument(name: plugin.name, plugin: plugin) }
         case .destination(let dest):
             command("Instrument Failed") { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }
+        case .eq(let strip):
+            // The plug-in already in the slot is no change, so no undo step.
+            if snapshot.strips.first(where: { $0.id == strip })?.eq?.plugin == plugin { return }
+            command("Load EQ Failed") { try $0.setEq(strip: strip, plugin: plugin) }
         case nil:
             break
         }
+    }
+
+    /// Empties the strip's EQ slot. An empty slot is no call: the core
+    /// refuses it, which would show a spurious alert (B6 review).
+    public func clearEq(_ s: StripRow) {
+        guard s.eq != nil else { return }
+        command("Clear EQ Failed") { try $0.setEq(strip: s.id, plugin: nil) }
+    }
+
+    /// Sets or clears the strip's own colour (one undo step); the colour it
+    /// already has is no change.
+    public func setColour(_ s: StripRow, _ c: SwatchRow?) {
+        guard c != s.colour else { return }
+        command("Strip Colour Failed") { try $0.setStripColour(strip: s.id, colour: c) }
     }
 
     public func removeInsert(_ slot: UInt64) {
@@ -472,6 +540,57 @@ public final class MixerModel {
         guard let a = try? session.automationState() else { return }
         let now = Set(a.touched)
         if now != coreTouched { coreTouched = now }
+    }
+
+    // MARK: Typed values (Ruling 15)
+
+    /// Applies a typed level as one click. False, with the status line set,
+    /// when the text is refused or `target` is touched.
+    private func type(_ target: AutomationTargetRow, _ norm: Double?, hint: String) -> Bool {
+        guard let norm else {
+            document.editor.status = hint
+            return false
+        }
+        guard !isTouched(target) else {
+            document.editor.status = StripEntry.touchedHint
+            return false
+        }
+        click(target, norm)
+        return true
+    }
+
+    public func typeLevel(_ s: StripRow, _ text: String) -> Bool {
+        type(.stripFader(strip: s.id), StripEntry.level(text).map(AutomationLaw.faderNorm), hint: StripEntry.levelHint)
+    }
+
+    public func typePan(_ s: StripRow, _ text: String) -> Bool {
+        type(.stripPan(strip: s.id), StripEntry.pan(text).map { ($0 + 1) / 2 }, hint: StripEntry.panHint)
+    }
+
+    public func typeSend(_ s: StripRow, _ index: Int, _ text: String) -> Bool {
+        guard index >= 0, index < s.sends.count else { return false }
+        return type(
+            .sendLevel(strip: s.id, send: Self.sendIndex(index)),
+            StripEntry.level(text).map(AutomationLaw.faderNorm), hint: StripEntry.levelHint)
+    }
+
+    // MARK: Record arm and monitor (audio-path strips only)
+
+    /// R and I work on a strip with an input lane (an audio path); the
+    /// instrument strips and master leave them disabled.
+    public func canArm(_ s: StripRow) -> Bool { inputLane(for: s) != nil }
+
+    /// Toggles the arm of the strip's input lane (one undo step), as the
+    /// lane header and the surfaces' rec buttons do.
+    public func toggleArm(_ s: StripRow) {
+        guard let lane = inputLane(for: s), let seq = document.selectedSeq else { return }
+        _ = document.editor.edit(.lane(edit: .setFlags(seq: seq, lane: lane.id, mute: nil, solo: nil, arm: !lane.arm)))
+    }
+
+    /// The monitor button: A, I, then off.
+    public func cycleMonitor(_ s: StripRow) {
+        guard let lane = inputLane(for: s) else { return }
+        document.inputs.cycleMonitor(lane)
     }
 
     // MARK: Modes and selection (Rulings 5, 6)

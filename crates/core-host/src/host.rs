@@ -490,7 +490,7 @@ impl PluginHost {
                 wanted.push((slot.id, slot, true));
             }
         }
-        for (_, _, slot) in doc.mixer().inserts() {
+        for (_, slot) in doc.mixer().slots() {
             wanted.push((slot.id, slot, false));
         }
         wanted
@@ -641,7 +641,7 @@ impl PluginHost {
                 wanted.insert(slot.id, Want::of(doc, slot, true));
             }
         }
-        for (_, _, slot) in doc.mixer().inserts() {
+        for (_, slot) in doc.mixer().slots() {
             wanted.insert(slot.id, Want::of(doc, slot, false));
         }
         // Slots that went, or now hold another plugin.

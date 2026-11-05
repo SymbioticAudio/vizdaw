@@ -222,4 +222,46 @@ import VizDAWCore
         #expect(failure(run("transport.arm_next", s, id)) == .of(.unavailable, EditorModel.gestureOpenMessage))
         #expect(f.armMoves.count == moves)
     }
+
+    /// Plan 7d Task B2: the menu items, keys and the channel step one bar.
+    @Test func rewindAndFastForwardStepABar() throws {
+        let (_, _, m, f) = try demo()
+        #expect(TransportCommands.run("transport.fast_forward", m) == .done)
+        #expect(m.transport.tick == 61_440)
+        #expect(TransportCommands.run("transport.fast_forward", m) == .done)
+        #expect(m.transport.tick == 122_880)
+        #expect(TransportCommands.run("transport.rewind", m) == .done)
+        #expect(f.stepBars == [true, true, false])
+        #expect(m.transport.tick == 61_440)
+        #expect(f.winds.isEmpty && f.holdEnds == 0)
+    }
+
+    /// Plan 7d controller ruling I7: they wait for a text field and need a
+    /// sequence, as the other transport keys do; a refusal opens nothing.
+    @Test func rewindAndFastForwardWaitAndRefuseAsTheOtherTransportKeys() throws {
+        let (s, id, m, f) = try demo()
+        let ids = ["transport.rewind", "transport.fast_forward"]
+        m.editor.beginTextEditing("laneName")
+        for cmd in ids {
+            #expect(TransportCommands.run(cmd, m) == .unavailable("A text field has the keyboard."), "\(cmd)")
+            #expect(failure(run(cmd, s, id)) == .of(.unavailable, "A text field has the keyboard."), "\(cmd)")
+            #expect(!TransportCommands.enabled(cmd, m), "\(cmd)")
+        }
+        #expect(f.stepBars.isEmpty)
+        m.editor.endTextEditing("laneName")
+        for cmd in ids { #expect(TransportCommands.enabled(cmd, m), "\(cmd)") }
+        m.select(nil)
+        for cmd in ids {
+            #expect(TransportCommands.run(cmd, m) == .unavailable("Select a sequence first."), "\(cmd)")
+            #expect(!TransportCommands.enabled(cmd, m), "\(cmd)")
+        }
+        #expect(f.stepBars.isEmpty)
+        m.select(3)
+        f.jumpError = .Busy(message: "Stop recording first.")
+        for cmd in ids {
+            #expect(TransportCommands.run(cmd, m) == .busy("Stop recording first."), "\(cmd)")
+            #expect(failure(run(cmd, s, id)) == .of(.busy, "Stop recording first."), "\(cmd)")
+        }
+        #expect(f.stepBars.isEmpty && m.alert == nil)
+    }
 }

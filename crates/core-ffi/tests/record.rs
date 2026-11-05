@@ -640,6 +640,18 @@ fn bad_requests_are_refused_and_recording_holds_the_transport() {
     ] {
         assert!(matches!(r, Err(VizError::Busy { .. })), "{r:?}");
     }
+    // The transport bar's steps and winds (plan 7d review M2).
+    for r in [
+        s.transport_step_bar(true),
+        s.transport_key_step(false),
+        s.transport_wind(1.0),
+    ] {
+        match r {
+            Err(VizError::Busy { message }) => assert_eq!(message, "Stop recording first."),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(s.transport_hold_end().is_ok(), "no hold is owed");
     assert!(model(s.keep_pass()), "not loop recording");
     s.stop().unwrap();
     s.close().unwrap();

@@ -4,6 +4,7 @@ import VizDAWAppModel
 /// Settings > Editing: both nudge steps on one page (parent spec §9, Plan
 /// 4b Ruling 16).
 struct EditingSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var prefs: EditingPreferences
 
     private enum TimeChoice: Hashable { case grid, division, ticks }
@@ -108,6 +109,6 @@ struct EditingSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 460)
-        .padding()
+        .padding(theme.spacing.l)
     }
 }

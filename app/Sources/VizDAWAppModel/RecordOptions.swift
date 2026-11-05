@@ -42,10 +42,14 @@ extension RecordModel {
         punchDrafts[f] = text
     }
 
-    /// The popover's punch focus moved (Ruling 12): the old field's draft
-    /// is committed; text editing is held while a field has focus.
+    /// The popover's punch focus moved (Ruling 12; plan 7d Ruling 7):
+    /// moving to the other punch field commits the one it left; leaving
+    /// the pair drops its draft. Text editing is held while a field has
+    /// focus.
     public func punchFocusChanged(from old: TransportField?, to new: TransportField?) {
-        if let old { commitPunch(old) }
+        if let old {
+            if new != nil { commitPunch(old) } else { dropPunch(old) }
+        }
         if new != nil {
             document?.editor.beginTextEditing("recordPopover")
         } else {
@@ -53,28 +57,63 @@ extension RecordModel {
         }
     }
 
-    /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
-    /// the status line and keeps the old value). A refused draft is dropped: the
-    /// field shows the old value again. Returns whether every draft was taken.
+    /// Return in a punch field, or moving to the other one: commits its
+    /// draft (a refusal says why in the status line and keeps the old
+    /// value). A refused draft is dropped: the field shows the old value
+    /// again. Returns whether the draft was taken.
     @discardableResult public func commitPunch(_ f: TransportField) -> Bool {
         guard let text = punchDrafts.removeValue(forKey: f) else { return true }
         return document?.commitField(f, text) == true
     }
 
-    /// Commits every punch draft, In first (5d-2 final review I3: the
-    /// popover closing or Record pressed never leaves a typed time shown
-    /// but unused). A refusal says why in the status line. Returns whether
-    /// every draft was taken.
-    @discardableResult public func commitPunchDrafts() -> Bool {
-        // Both are committed even when In is refused, so each refusal is
-        // said once and the last stays in the status line.
-        let punchIn = commitPunch(.punchIn)
-        let punchOut = commitPunch(.punchOut)
-        return punchIn && punchOut
+    /// Drops `f`'s draft: the field shows the value in use again.
+    public func dropPunch(_ f: TransportField) {
+        punchDrafts[f] = nil
+    }
+
+    /// Drops every punch draft (the popover closing, plan 7d Ruling 7):
+    /// the fields show the range a pass will use.
+    public func dropPunchDrafts() {
+        punchDrafts.removeAll()
+    }
+
+    /// A punch field shows typed text that is not the value in use, in the
+    /// popover or in the bar's own Punch In or Out: Record waits for Return
+    /// or Esc (controller ruling I5; fix round 1 M4).
+    public var hasOpenPunchDraft: Bool {
+        let fieldText = { (f: TransportField) in self.document?.fieldText(f) ?? "" }
+        if let (f, text) = barPunchDraft, text != fieldText(f) { return true }
+        return punchDrafts.contains { f, text in text != fieldText(f) }
+    }
+
+    /// The bar's Punch In or Out is being typed in (`TransportFieldsView`
+    /// reports each change); other fields are ignored.
+    public func barPunchTyped(_ f: TransportField, _ text: String) {
+        guard f == .punchIn || f == .punchOut else { return }
+        barPunchDraft = (f, text)
+    }
+
+    /// The bar's punch field edit ended (committed or cancelled).
+    public func barPunchEnded() { barPunchDraft = nil }
+
+    /// Whether the record popover may close for a press (Ruling 7's bar
+    /// Record rule, fix round 1 I1): a press on a Record button with a
+    /// punch draft open keeps it open, so Record refuses with the draft
+    /// still shown and its field keeping the keyboard. Every other close
+    /// is allowed (and drops the drafts). The bar's punch fields keep
+    /// their edit by the same rule.
+    public static func closeAllowed(pressOnRecord: Bool, draftOpen: Bool) -> Bool {
+        !(pressOnRecord && draftOpen)
     }
 
     /// The count-in is playing (the timeline waits).
     public var countingIn: Bool { document?.transport.countingIn ?? false }
+
+    /// The bar's Record button is enabled: a sequence is shown, or a pass
+    /// records. Unlike the R key's menu item, a text edit holding the
+    /// keyboard does not disable it: a click is no keystroke, and with a
+    /// punch draft open it refuses and says why (fix round 2 N2).
+    public var buttonEnabled: Bool { document?.selectedSeq != nil || isRecording }
 
     /// The toolbar's Record button: like the R key, and a refusal shows in
     /// the status line.

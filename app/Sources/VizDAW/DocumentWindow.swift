@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import VizDAWAppModel
 
@@ -25,6 +26,7 @@ struct DocumentWindow: View {
             if let id, let model = store.model(id) {
                 DocumentView(model: model, docID: id)
                     .background(WindowTag(kind: .document, doc: id))
+                    .background(WindowFrameKeeper(model: model))
                     .focusedSceneValue(\.documentModel, model)
                     .focusedSceneValue(\.documentID, id)
                     .task(id: PollKey(key: activeState == .key, playing: model.isPlaying || model.record.isRecording)) {
@@ -91,7 +93,71 @@ struct KeyDoc: Equatable {
     }
 }
 
-private struct PollKey: Equatable {
-    let key: Bool
-    let playing: Bool
+/// Restores the document window's saved frame once and saves it after each
+/// move or resize (plan 7a Ruling 11), in `ui.json` with the panes.
+struct WindowFrameKeeper: NSViewRepresentable {
+    let model: DocumentModel
+
+    final class Keeper: NSView {
+        var editor: EditorModel?
+        private var applied = false
+        private var observers: [NSObjectProtocol] = []
+
+        // Inert for the user: clicks and VoiceOver pass through it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            removeObservers()
+            guard let w = window, let editor else { return }
+            // Swift 6.1: the closures capture only strong lets made here,
+            // never the window or a weak self (plan 7a Global Constraints).
+            let view = self
+            let saved = applied ? nil : editor.layout.views.frame
+            applied = true
+            for name in [NSWindow.didMoveNotification, NSWindow.didEndLiveResizeNotification] {
+                observers.append(
+                    NotificationCenter.default.addObserver(forName: name, object: w, queue: .main) { note in
+                        nonisolated(unsafe) let n = note
+                        MainActor.assumeIsolated {
+                            if let w = n.object as? NSWindow {
+                                editor.setDocumentFrame([w.frame.minX, w.frame.minY, w.frame.width, w.frame.height])
+                            }
+                        }
+                    })
+            }
+            guard let saved else { return }
+            // On the next turn, so SwiftUI's own restoration does not
+            // overwrite it.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let w = view.window,
+                        let r = PaneGeometry.sanitizedFrame(saved, screens: NSScreen.screens.map(\.frame))
+                    else { return }
+                    // `setFrame` does not keep the title bar on a screen;
+                    // the screen it is on does (final review n1).
+                    let screen = NSScreen.screens.first { $0.frame.intersects(r) }
+                    w.setFrame(w.constrainFrameRect(r, to: screen), display: true)
+                }
+            }
+        }
+
+        func removeObservers() {
+            for o in observers { NotificationCenter.default.removeObserver(o) }
+            observers = []
+        }
+    }
+
+    func makeNSView(context: Context) -> Keeper {
+        let k = Keeper()
+        k.editor = model.editor
+        return k
+    }
+
+    func updateNSView(_ k: Keeper, context: Context) {}
+
+    static func dismantleNSView(_ k: Keeper, coordinator: ()) {
+        k.removeObservers()
+    }
 }

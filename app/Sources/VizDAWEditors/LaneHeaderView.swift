@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -7,8 +8,19 @@ import VizDAWCore
 /// renames), monitor/mute/solo/arm, destination and input menus, the input
 /// meter (plan 5d-2 Task 5), and an "Add Lane" row.
 @MainActor
-public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwner {
+public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwner, ThemedView {
+    /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
+    /// view above it, sets it; a change redraws it and the themed views below.
+    public var theme: Theme = ThemedViews.current {
+        didSet { themeDidChange(from: oldValue) }
+    }
+
     public let document: DocumentModel
+    /// The preferences whose "Show channel colour bars" shows the lane's
+    /// bar (controller ruling on review M3; region tints always show).
+    public var appearancePrefs: AppearancePreferences? = AppearancePreferences.current {
+        didSet { needsDisplay = true }
+    }
     var editor: EditorModel { document.editor }
     public var verticalOffset: CGFloat = 0 {
         didSet {
@@ -102,6 +114,12 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         withObservationTracking {
             _ = document.lanes
             _ = editor.layout
+            // The strip colours the bars take (owner G1 Q2), the mixer's
+            // arrival, and the colour bars' preference.
+            _ = document.mixerVersion
+            _ = document.storeMixer?.snapshot
+            _ = document.storeMixer?.destinations
+            _ = appearancePrefs?.colourBars
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.needsDisplay = true
@@ -121,9 +139,25 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             _ = document.inputs.opening
         } onChange: { [weak self] in
             Task { @MainActor in
-                self?.needsDisplay = true
+                if let self {
+                    for r in self.meterInvalidation { self.setNeedsDisplay(r) }
+                }
                 self?.observeMeters()
             }
+        }
+    }
+
+    /// What a meter change redraws: the union of each visible row's meter
+    /// and clip rect (nothing when the lanes are too short for a meter).
+    var meterInvalidation: [CGRect] {
+        let n = document.lanes.count
+        guard LaneHeaderLayout.showsMeter(laneHeight: laneHeight), n > 0, laneHeight.isFinite, bounds.height > 0
+        else { return [] }
+        return (0..<n).compactMap { i in
+            let top = rowTop(i)
+            guard top + laneHeight >= 0, top <= bounds.height else { return nil }
+            return LaneHeaderLayout.meterRect(rowTop: top, laneHeight: laneHeight)
+                .union(LaneHeaderLayout.clipRect(rowTop: top, laneHeight: laneHeight))
         }
     }
 
@@ -133,9 +167,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     }
 
     public override func draw(_ dirty: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
+        theme.rulerBackground.setFill()
         dirty.fill()
-        let small = NSFont.systemFont(ofSize: 11)
+        let small = theme.font(theme.type.label)
         let inputs = document.inputs
         for (i, lane) in document.lanes.enumerated() {
             let top = rowTop(i)
@@ -146,70 +180,77 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                     NSString(string: lane.name).draw(
                         in: r,
                         withAttributes: [
-                            .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.labelColor,
+                            .font: theme.font(theme.type.body, weight: .medium), .foregroundColor: theme.label,
                         ])
                 case .monitor:
                     toggle(
                         LaneInputs.label(lane.monitor), on: lane.monitor != .off,
-                        color: lane.monitor == .input ? .systemOrange : .systemTeal, in: r)
-                case .mute: toggle("M", on: lane.mute, color: .systemYellow, in: r)
-                case .solo: toggle("S", on: lane.solo, color: .systemGreen, in: r)
-                case .arm: toggle("R", on: lane.arm, color: .systemRed, in: r)
+                        color: StripPalette.monitor(lane.monitor, theme).nsColor, in: r)
+                case .mute: toggle("M", on: lane.mute, color: theme.muteColour, in: r)
+                case .solo: toggle("S", on: lane.solo, color: theme.soloColour, in: r)
+                case .arm: toggle("R", on: lane.arm, color: theme.armColour, in: r)
                 // One line, truncated (Task 5 review M4): the input keeps
                 // its channel at the end ("▾ ⇠ Ju…o · In 3").
                 case .destination:
                     NSString(string: "▾ " + (lane.destination ?? "No Destination")).draw(
-                        in: r, withAttributes: Self.oneLine(small, .byTruncatingTail))
+                        in: r, withAttributes: oneLine(small, .byTruncatingTail))
                 case .input:
                     let badge = inputs.badge(lane).map { $0 + " · " } ?? ""
                     NSString(string: "▾ " + badge + LaneInputs.title(lane.input)).draw(
-                        in: r, withAttributes: Self.oneLine(small, .byTruncatingMiddle))
+                        in: r, withAttributes: oneLine(small, .byTruncatingMiddle))
                 }
+            }
+            if let bar = colourBar(lane) {
+                bar.setFill()
+                LaneHeaderLayout.colourBar(rowTop: top, laneHeight: laneHeight).fill()
             }
             if LaneHeaderLayout.showsMeter(laneHeight: laneHeight), inputs.showsMeter(lane) {
                 meter(lane.id, rowTop: top, inputs: inputs)
             }
-            NSColor.separatorColor.setFill()
+            theme.separatorLine.setFill()
             NSRect(x: 0, y: top + laneHeight - 0.5, width: bounds.width, height: 1).fill()
         }
         let add = rowTop(document.lanes.count)
         NSString(string: "+ Add Lane").draw(
             at: CGPoint(x: 8, y: add + 6),
-            withAttributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor])
-        NSColor.windowBackgroundColor.setFill()
+            withAttributes: [.font: small, .foregroundColor: theme.secondaryLabel])
+        theme.rulerBackground.setFill()
         NSRect(x: 0, y: 0, width: bounds.width, height: EditorCanvas.rulerHeight).fill()
-        NSColor.separatorColor.setFill()
+        theme.separatorLine.setFill()
         NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill()
     }
 
     /// Secondary text on one line, cut by `mode`.
-    static func oneLine(_ font: NSFont, _ mode: NSLineBreakMode) -> [NSAttributedString.Key: Any] {
+    func oneLine(_ font: NSFont, _ mode: NSLineBreakMode) -> [NSAttributedString.Key: Any] {
         let p = NSMutableParagraphStyle()
         p.lineBreakMode = mode
-        return [.font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: p]
+        return [.font: font, .foregroundColor: theme.secondaryLabel, .paragraphStyle: p]
     }
 
     /// The thin input meter and its clip mark (spec §6.9); the track is
-    /// yellow while the input is still opening (pre-flight I5).
+    /// the theme's mid meter colour while the input is still opening
+    /// (pre-flight I5); the meter colours are the theme's `meter` group.
     private func meter(_ lane: UInt64, rowTop top: CGFloat, inputs: LaneInputs) {
-        let r = LaneHeaderLayout.meterRect(rowTop: top)
-        (inputs.opening ? NSColor.systemYellow.withAlphaComponent(0.5) : NSColor.quaternaryLabelColor).setFill()
+        let r = LaneHeaderLayout.meterRect(rowTop: top, laneHeight: laneHeight)
+        let m = theme.meter
+        (inputs.opening ? m.mid.nsColor.withAlphaComponent(0.5) : m.background.nsColor).setFill()
         r.fill()
         let fill = CGFloat(MixerMath.meterFill(inputs.level(lane)))
-        NSColor.systemGreen.setFill()
+        m.low.nsColor.setFill()
         CGRect(x: r.minX, y: r.minY, width: r.width * fill, height: r.height).fill()
-        (inputs.isClipped(lane) ? NSColor.systemRed : NSColor.quaternaryLabelColor).setFill()
-        LaneHeaderLayout.clipRect(rowTop: top).fill()
+        (inputs.isClipped(lane) ? m.clip.nsColor : m.background.nsColor).setFill()
+        LaneHeaderLayout.clipRect(rowTop: top, laneHeight: laneHeight).fill()
     }
 
     private func toggle(_ letter: String, on: Bool, color: NSColor, in r: CGRect) {
-        let box = NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3)
-        (on ? color : NSColor.quaternaryLabelColor).setFill()
+        let box = NSBezierPath(roundedRect: r, xRadius: theme.radius.s, yRadius: theme.radius.s)
+        let fill = on ? color : theme.surface.raised.nsColor
+        fill.setFill()
         box.fill()
         let s = NSString(string: letter)
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .bold),
-            .foregroundColor: on ? NSColor.black : NSColor.secondaryLabelColor,
+            .font: theme.font(theme.type.caption, weight: .bold),
+            .foregroundColor: on ? theme.legend(on: fill) : theme.secondaryLabel,
         ]
         let size = s.size(withAttributes: attrs)
         s.draw(at: CGPoint(x: r.midX - size.width / 2, y: r.midY - size.height / 2), withAttributes: attrs)
@@ -272,7 +313,41 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         menu.addItem(trackItem)
         let add = MenuAction(title: "New MIDI Destination…") { sheets.beginNewDestination(seq: seq, lane: lane) }
         menu.addItem(add.item(checked: false))
+        menu.addItem(.separator())
+        menu.addItem(colourItem(lane))
         return menu
+    }
+
+    /// The lane's colour bar: its strip colour, unless colour bars are off.
+    func colourBar(_ lane: LaneRow) -> NSColor? {
+        guard appearancePrefs?.colourBars ?? true else { return nil }
+        return document.laneColour(lane, theme)?.nsColor
+    }
+
+    /// "Colour ▸": None and the eight swatches, each in its colour, for the
+    /// strip the lane plays through (the strip name's menu, the same call);
+    /// disabled for a lane with no strip (owner G1 Q2).
+    func colourItem(_ lane: LaneRow) -> NSMenuItem {
+        let item = NSMenuItem(title: "Colour", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        sub.autoenablesItems = false
+        item.submenu = sub
+        guard let mixer = document.mixer,
+            let strip = StripPalette.laneStrip(lane, destinations: mixer.destinations, strips: mixer.snapshot.strips)
+        else {
+            item.isEnabled = false
+            return item
+        }
+        let none = MenuAction(title: StripPalette.noColourTitle) { mixer.setColour(strip, nil) }
+        sub.addItem(none.item(checked: strip.colour == nil))
+        sub.addItem(.separator())
+        for c in StripPalette.swatches {
+            let a = MenuAction(title: StripPalette.title(c)) { mixer.setColour(strip, c) }
+            let i = a.item(checked: strip.colour == c)
+            i.image = SwatchImage.make(StripPalette.swatch(c, theme).nsColor)
+            sub.addItem(i)
+        }
+        return item
     }
 
     private func flags(_ seq: UInt64, _ lane: UInt64, mute: Bool? = nil, solo: Bool? = nil, arm: Bool? = nil) {
@@ -445,4 +520,18 @@ final class MenuAction: NSObject {
     }
 
     @objc func fire() { run() }
+}
+
+/// A menu item's colour dot (the Colour menus): not a template, so the menu
+/// draws it in its colour.
+public enum SwatchImage {
+    @MainActor public static func make(_ colour: NSColor, side: CGFloat = 12) -> NSImage {
+        let image = NSImage(size: CGSize(width: side, height: side), flipped: false) { r in
+            colour.setFill()
+            NSBezierPath(ovalIn: r.insetBy(dx: 1, dy: 1)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
 }

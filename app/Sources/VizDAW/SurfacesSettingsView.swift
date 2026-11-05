@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -6,6 +7,7 @@ import VizDAWCore
 /// their connection state, Add and Remove, and the commands learned to
 /// MIDI controls. All state lives in `SurfaceSettings`.
 struct SurfacesSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var settings: SurfaceSettings
     @Bindable var keys: KeyBindings
 
@@ -15,7 +17,7 @@ struct SurfacesSettingsView: View {
         Form {
             Section("Surfaces") {
                 if settings.rows.isEmpty {
-                    Text("No surfaces. Add an MCU-compatible, MCU XT-compatible or HUI-compatible unit, or a Kontrol S-Series MK3 keyboard.")
+                    Text("No surfaces. Add an MCU-compatible, MCU XT-compatible or HUI-compatible unit, or a host-integration keyboard.")
                         .foregroundStyle(.secondary)
                 }
                 ForEach(settings.rows, id: \.id) { row in
@@ -23,18 +25,19 @@ struct SurfacesSettingsView: View {
                         VStack(alignment: .leading) {
                             Text(title(row))
                             Text("\(row.input) → \(row.output)")
-                                .font(.caption)
+                                .font(theme.type.caption.font)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
                         VStack(alignment: .trailing) {
                             Text(SurfaceSettings.status(row))
-                                .foregroundStyle(row.connected && row.online ? Color.primary : Color.secondary)
+                                .foregroundStyle(
+                                    row.connected && row.online ? theme.text.primary.color : theme.text.secondary.color)
                             // Why it is not answering (pre-flight I4).
                             if let why = settings.problem(for: row.id) {
                                 Text(why)
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
+                                    .font(theme.type.caption.font)
+                                    .foregroundStyle(theme.state.warning.color)
                                     .multilineTextAlignment(.trailing)
                             }
                         }
@@ -42,12 +45,7 @@ struct SurfacesSettingsView: View {
                     }
                 }
                 ForEach(settings.otherProblems, id: \.self) { line in
-                    Text(line).font(.caption).foregroundStyle(.orange)
-                }
-                if settings.showsKontrolNotice {
-                    Text(SurfaceSettings.kontrolNotice)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text(line).font(theme.type.caption.font).foregroundStyle(theme.state.warning.color)
                 }
                 Button("Add Surface…") { settings.beginAdd() }
             }
@@ -69,7 +67,7 @@ struct SurfacesSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 560)
-        .padding()
+        .padding(theme.spacing.l)
         .task {
             // Connection states change on their own (Ruling 10's 2 s check).
             while !Task.isCancelled {
@@ -105,8 +103,8 @@ struct SurfacesSettingsView: View {
     }
 
     private var addSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Add Surface").font(.headline)
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
+            Text("Add Surface").font(theme.type.title.font)
             Form {
                 Picker("Type", selection: Binding(
                     get: { settings.draft?.kind ?? .mcu },
@@ -123,26 +121,25 @@ struct SurfacesSettingsView: View {
                     ForEach(settings.ports.destinations, id: \.self) { Text($0).tag($0) }
                 }
                 if settings.draft?.kind == .kontrolMk3 {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: theme.spacing.xs) {
                         if let note = settings.draftNote {
-                            Text(note).foregroundStyle(.orange)
+                            Text(note).foregroundStyle(theme.state.warning.color)
                         }
                         Text(SurfaceSettings.kontrolHelp)
-                        Text(SurfaceSettings.kontrolNotice)
                     }
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
                 }
                 if settings.draft?.kind == .mcuXt {
                     Stepper(
                         "Position: \(settings.draft?.position ?? 1)", value: field(\.position, 1), in: 0...3)
                     Text("Units are banked left to right by position; the MCU-compatible main unit takes a free one.")
-                        .font(.caption)
+                        .font(theme.type.caption.font)
                         .foregroundStyle(.secondary)
                 }
             }
             if let problem = settings.draftProblem {
-                Text(problem).foregroundStyle(.red)
+                Text(problem).foregroundStyle(theme.state.error.color)
             }
             HStack {
                 Spacer()
@@ -153,7 +150,7 @@ struct SurfacesSettingsView: View {
                     .disabled((settings.draft?.input ?? "").isEmpty || (settings.draft?.output ?? "").isEmpty)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 420)
     }
 }

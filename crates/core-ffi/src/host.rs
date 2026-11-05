@@ -2843,6 +2843,18 @@ pub fn stop(owner: u64) -> Result<(), VizError> {
     }
 }
 
+/// Engine locates sent through [`locate`] (counted and read by a test
+/// hook only).
+#[cfg(feature = "test-hooks")]
+static LOCATES: AtomicU64 = AtomicU64::new(0);
+
+/// How many engine locates [`locate`] has sent (test hook, plan 7d
+/// review I1).
+#[cfg(feature = "test-hooks")]
+pub fn debug_locates() -> u64 {
+    LOCATES.load(Ordering::Relaxed)
+}
+
 /// Moves `owner`'s transport. Returns false when `owner` does not hold
 /// the engine (the caller keeps the position for its next Play).
 pub fn locate(owner: u64, tick: Tick) -> Result<bool, VizError> {
@@ -2850,6 +2862,8 @@ pub fn locate(owner: u64, tick: Tick) -> Result<bool, VizError> {
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             h.engine.locate_tick(tick)?;
+            #[cfg(feature = "test-hooks")]
+            LOCATES.fetch_add(1, Ordering::Relaxed);
             Ok(true)
         }
         _ => Ok(false),
@@ -3251,9 +3265,10 @@ pub fn service(owner: u64, doc: &Document, plugins: &mut PluginHost) -> IdleRepo
     }
 }
 
-/// Whether `doc` has a plugin slot (an insert or a plugin instrument).
+/// Whether `doc` has a plugin slot (an EQ, an insert or a plugin
+/// instrument).
 fn has_slots(doc: &Document) -> bool {
-    doc.mixer().inserts().next().is_some()
+    doc.mixer().slots().next().is_some()
         || doc.instruments().values().any(|d| {
             matches!(
                 d.kind,
@@ -3576,6 +3591,25 @@ pub fn position(owner: u64) -> Option<(SeqId, Tick)> {
         .map(|h| (h.seq, h.engine.position_tick()))
 }
 
+/// Where `owner`'s transport is in the schedule, not reduced by the
+/// graph latency, when it holds the engine: where a transport bar step
+/// starts (plan 7d review I2), so a latency never holds it back.
+pub fn transport_position(owner: u64) -> Option<(SeqId, Tick)> {
+    lock_host()
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| (h.seq, h.engine.transport_tick()))
+}
+
+/// Whether `owner` holds the engine and its transport is not stopped
+/// (the back step's rule, plan 7d final review I-1).
+pub fn transport_playing(owner: u64) -> bool {
+    lock_host()
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .is_some_and(|h| h.engine.state() != PlayState::Stopped)
+}
+
 /// `owner`'s input, when it holds the engine.
 pub fn input_info(owner: u64) -> Option<(String, InputInfo)> {
     lock_host()
@@ -3721,6 +3755,28 @@ pub fn debug_inputs(owner: u64) -> Option<InputSpec> {
 mod tests {
     use super::*;
     use platform_macos::permission::{DENIED_MESSAGE, MicAccess};
+
+    /// Review carry (B1 M1): a document whose only plug-in is an EQ has
+    /// slots, so the engine-reuse guard counts it.
+    #[test]
+    fn an_eq_only_document_has_slots() {
+        use core_model::command::{Command, MixerCmd, apply};
+        use core_model::mixer::PluginRef;
+        let d = Document::new();
+        assert!(!has_slots(&d));
+        let master = d.mixer().master();
+        let d = apply(
+            &d,
+            &Command::Mixer(MixerCmd::SetEq {
+                strip: master,
+                plugin: Some(PluginRef::from_legacy("clap:eq")),
+            }),
+        )
+        .unwrap()
+        .doc;
+        assert!(d.mixer().inserts().next().is_none(), "no insert");
+        assert!(has_slots(&d));
+    }
 
     /// Review I2: a refused buffer size is tried again with the device's
     /// own; a refusal without a size asked for is not retried.

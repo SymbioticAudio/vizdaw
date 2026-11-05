@@ -4,7 +4,7 @@ use core_model::document::{DestKind, Document, MediaOrigin};
 use core_model::event::{EventBody, EventSpec};
 use core_model::file::{
     FORMAT, Migration, VERSION, autosave, from_json, list_autosaves, load, migrate_v1_to_v2,
-    migrate_v2_to_v3, run_migrations, save, to_json,
+    migrate_v2_to_v3, migrate_v3_to_v4, run_migrations, save, to_json,
 };
 use core_model::format::{AudioFormat, BitDepth};
 use core_model::history::Timestamp;
@@ -239,10 +239,10 @@ fn golden(name: &str) {
     let text = fixture(name);
     // Version-1 input: loading migrates it.
     let d = from_json(&text).unwrap();
-    let v3 = to_json(&d).unwrap();
-    assert!(v3.contains("\"version\": 3"), "{name}");
-    // Canonical: a version-3 file re-serializes byte for byte.
-    assert_eq!(to_json(&from_json(&v3).unwrap()).unwrap(), v3, "{name}");
+    let now = to_json(&d).unwrap();
+    assert!(now.contains(&format!("\"version\": {VERSION}")), "{name}");
+    // Canonical: a current-version file re-serializes byte for byte.
+    assert_eq!(to_json(&from_json(&now).unwrap()).unwrap(), now, "{name}");
     insta::assert_json_snapshot!(name, summary(&d));
 }
 
@@ -372,6 +372,16 @@ fn unknown_fields_inside_persisted_enums_are_rejected() {
             "{name}: bogus field accepted"
         );
     }
+    // An unknown strip colour (plan 7b Ruling 12) is corrupt.
+    let mut v = base.clone();
+    v["document"]["mixer"]["strips"][0]["colour"] = json!("neon");
+    assert!(
+        matches!(
+            from_json(&serde_json::to_string(&v).unwrap()),
+            Err(ModelError::Corrupt { .. })
+        ),
+        "neon colour accepted"
+    );
 }
 
 #[test]
@@ -414,7 +424,7 @@ fn v1_plugin_instruments_migrate_to_slots_and_strips() {
     );
     assert_eq!((d.counters().strip, d.counters().plugin), (3, 1));
     let v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
-    assert_eq!(v["version"], 3);
+    assert_eq!(v["version"], VERSION);
     assert_eq!(
         v["document"]["instruments"][0]["kind"]["plugin_instrument"]["slot"]["plugin"]["format"],
         "au"
@@ -466,7 +476,7 @@ fn version_2_projects_migrate_to_version_3() {
     // 960 ticks at 120 BPM = 1/16 beat = 31.25 ms = 1500 frames at 48 kHz.
     assert_eq!(region_fades(&d), vec![(1500, 0)]);
     let text = to_json(&d).unwrap();
-    assert!(text.contains("\"version\": 3"));
+    assert!(text.contains(&format!("\"version\": {VERSION}")));
     assert!(text.contains("\"length_frames\": 1500"));
     assert!(text.contains("\"depth\": \"int24\""));
 }
@@ -553,4 +563,83 @@ fn new_documents_default_to_48k_24_bit() {
         AudioFormat::RATES,
         [44_100, 48_000, 88_200, 96_000, 176_400, 192_000]
     );
+}
+
+/// Plan 7b Ruling 7: an EQ slot saves and loads; an empty one is not
+/// written, so a strip without one looks as before.
+#[test]
+fn an_eq_slot_round_trips_and_an_empty_one_is_not_written() {
+    use core_model::command::MixerCmd;
+    let d = small_doc();
+    let m = d.mixer().master();
+    let text = to_json(&d).unwrap();
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let strip = &v["document"]["mixer"]["strips"][0];
+    assert!(strip.is_object() && strip.get("eq").is_none(), "{strip}");
+    let d = apply(
+        &d,
+        &Command::Mixer(MixerCmd::SetEq {
+            strip: m,
+            plugin: Some(PluginRef::from_legacy("clap:eq")),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let text = to_json(&d).unwrap();
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        v["document"]["mixer"]["strips"][0]["eq"]["plugin"]["id"],
+        "clap:eq"
+    );
+    assert_eq!(from_json(&text).unwrap(), d);
+    let pkg = temp_package("eq");
+    save(&d, &pkg).unwrap();
+    assert_eq!(load(&pkg).unwrap(), d);
+    std::fs::remove_dir_all(&pkg).unwrap();
+}
+
+/// Ruling 8: a version-3 project loads (its strips have no EQ and no
+/// colour) and saves as version 4.
+#[test]
+fn version_3_projects_migrate_to_version_4() {
+    assert_eq!(VERSION, 4);
+    let d = small_doc();
+    let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    v["version"] = json!(3);
+    let back = from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+    assert!(
+        back.mixer()
+            .strips()
+            .values()
+            .all(|s| s.eq.is_none() && s.colour.is_none())
+    );
+    assert_eq!(back, d);
+    assert!(to_json(&back).unwrap().contains("\"version\": 4"));
+    // The step itself is the identity.
+    assert_eq!(migrate_v3_to_v4(v.clone()).unwrap(), v);
+}
+
+/// C-1, Ruling 12: a strip colour round-trips by its snake_case name; no
+/// colour is not written.
+#[test]
+fn a_strip_colour_round_trips_and_none_is_not_written() {
+    use core_model::command::MixerCmd;
+    use core_model::mixer::Swatch;
+    let d = small_doc();
+    let m = d.mixer().master();
+    let v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
+    assert!(v["document"]["mixer"]["strips"][0].get("colour").is_none());
+    let d = apply(
+        &d,
+        &Command::Mixer(MixerCmd::SetColour {
+            strip: m,
+            colour: Some(Swatch::Red),
+        }),
+    )
+    .unwrap()
+    .doc;
+    let text = to_json(&d).unwrap();
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["document"]["mixer"]["strips"][0]["colour"], "red");
+    assert_eq!(from_json(&text).unwrap(), d);
 }

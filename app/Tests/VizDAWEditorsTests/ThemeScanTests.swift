@@ -1,0 +1,421 @@
+import AppKit
+import Foundation
+import SymbioticTokens
+import Testing
+import VizDAWAppModel
+@testable import VizDAWEditors
+
+/// Scans the app's own sources (`app/Sources/<dir>/**/*.swift`, found from
+/// this file's path) for lines matching regular expressions (plan 7b Task
+/// B5). This target's own copy: the two test targets share no files.
+enum SourceScan {
+    struct ScanError: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    /// `app/Sources`, from `app/Tests/VizDAWEditorsTests/ThemeScanTests.swift`.
+    static var sourcesRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // VizDAWEditorsTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // app
+            .appendingPathComponent("Sources", isDirectory: true)
+    }
+
+    /// `"file:line: text"` for every line of `dirs`' Swift files that matches
+    /// any of `patterns`, files in path order, skipping the files in `except`
+    /// (paths below `app/Sources`).
+    static func lines(in dirs: [String], matching patterns: [String], except: Set<String> = []) throws
+        -> [String]
+    {
+        let regexes = try patterns.map { try NSRegularExpression(pattern: $0) }
+        let fm = FileManager.default
+        var hits: [String] = []
+        for dir in dirs {
+            let root = sourcesRoot.appendingPathComponent(dir, isDirectory: true)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else {
+                throw ScanError(description: "no source directory \(root.path)")
+            }
+            guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: nil) else {
+                throw ScanError(description: "cannot list \(root.path)")
+            }
+            var files: [URL] = []
+            for case let url as URL in walker where url.pathExtension == "swift" {
+                files.append(url)
+            }
+            for url in files.sorted(by: { $0.path < $1.path }) {
+                let name = url.path.replacingOccurrences(of: sourcesRoot.path + "/", with: "")
+                if except.contains(name) { continue }
+                let text = try String(contentsOf: url, encoding: .utf8)
+                for (i, line) in text.components(separatedBy: "\n").enumerated()
+                where matches(line, regexes) > 0 {
+                    hits.append("\(name):\(i + 1): \(line.trimmingCharacters(in: .whitespaces))")
+                }
+            }
+        }
+        return hits
+    }
+
+    /// How many matches `regexes` find in `line`, in all.
+    static func matches(_ line: String, _ regexes: [NSRegularExpression]) -> Int {
+        let range = NSRange(line.startIndex..., in: line)
+        return regexes.reduce(0) { $0 + $1.numberOfMatches(in: line, range: range) }
+    }
+
+    static func matches(_ line: String, patterns: [String]) throws -> Int {
+        matches(line, try patterns.map { try NSRegularExpression(pattern: $0) })
+    }
+}
+
+/// Every colour, radius and font size from the theme (plan 7b Ruling 13).
+@MainActor
+@Suite struct ThemeScanTests {
+    static let dirs = ["VizDAW", "VizDAWEditors", "VizDAWAppModel"]
+    /// The only files that may name a concrete colour.
+    static let bridges: Set<String> = ["VizDAW/Theming.swift", "VizDAWEditors/EditorTheme.swift"]
+
+    /// Ruling 13's colour forms. The bare-member list is the ruling's, plus
+    /// five more system colours and SwiftUI's `.quaternary` the sweep found
+    /// (`ThemedRoot` maps only `.primary`, `.secondary` and `.tertiary`).
+    /// B5 review I2 widened it: CoreGraphics colours, colour literals,
+    /// `Color(.sRGB, …)`, every `NSColor(<space>…:` initialiser, more system
+    /// colour names and bare `.accentColor`.
+    static let colourPatterns = [
+        #"\b(NS)?Color\.(?!clear\b)[A-Za-z_]"#,
+        #"\bColor\(red:|\bNSColor\(red:|\bNSColor\(calibrated|\b(NS)?Color\((white|hue|srgbRed|deviceRed|deviceWhite):"#,
+        #"(?<![A-Za-z0-9_])\.(system(Red|Orange|Yellow|Green|Mint|Teal|Cyan|Blue|Indigo|Purple|Pink|Brown|Gray)|labelColor|secondaryLabelColor|tertiaryLabelColor|separatorColor|controlAccentColor|windowBackgroundColor|textColor|quaternaryLabelColor|textBackgroundColor|controlBackgroundColor|underPageBackgroundColor|selectedContentBackgroundColor|quaternary|controlTextColor|disabledControlTextColor|selectedControlTextColor|alternateSelectedControlTextColor|selectedTextColor|selectedTextBackgroundColor|selectedControlColor|unemphasizedSelectedTextColor|unemphasizedSelectedTextBackgroundColor|unemphasizedSelectedContentBackgroundColor|controlColor|gridColor|headerTextColor|highlightColor|shadowColor|linkColor|placeholderTextColor|keyboardFocusIndicatorColor|findHighlightColor|scrubberTexturedBackground|systemFill|accentColor|black|white|red|orange|yellow|green|mint|teal|cyan|blue|indigo|purple|pink|brown|gray)\b"#,
+        #"\bCGColor(\.|\()"#,
+        #"#colorLiteral"#,
+        #"\bColor\(\."#,
+        #"\bNSColor\((displayP3|device|generic|srgb|calibrated)\w*:"#,
+    ]
+
+    /// Radii and font sizes: SwiftUI's and AppKit's forms (B5 review I2).
+    static let metricPatterns = [
+        #"cornerRadius:\s*[0-9]"#, #"cornerRadius\s*=\s*[0-9]"#, #"[xy]Radius:\s*[0-9]"#,
+        #"\.system\(size:\s*[0-9]"#, #"(?i)systemFont\(ofSize:"#, #"SystemFontSize"#,
+    ]
+
+    /// Plan 7d Ruling 9: every numeric gap or padding in the app comes from
+    /// `theme.spacing`. Zero written `(?!0(?![.0-9]))` so `0.5` counts; `0`
+    /// stays (no gap is not a token).
+    static let spacingPatterns = [
+        #"\.padding\((?:[^()]*,\s*)?-?(?!0(?![.0-9]))[0-9]"#,
+        #"\bspacing:\s*-?(?!0(?![.0-9]))[0-9]"#,
+        #"minLength:\s*(?!0(?![.0-9]))[0-9]"#,
+        #"\.padding\(\s*$"#,
+        #"\.padding\(\)"#,
+        #"\.spacing\s*=\s*(?!0(?![.0-9]))[0-9]"#,
+        #"setCustomSpacing\(\s*(?!0(?![.0-9]))[0-9]"#,
+        #"\b(horizontal|vertical|row|line)Spacing:\s*-?(?!0(?![.0-9]))[0-9]"#,
+        #"(?:\bspacing:|\.padding\(|\bSpacing:)\s*-?\.[0-9]"#,
+        #"\.padding\((?:\.\w+|\[[^\]]*\]),\s*$"#,
+        #"(?:\bspacing:|\bSpacing:|\.padding\((?:[^()]*,\s*)?|minLength:)\s*CGFloat\((?!0\))"#,
+    ]
+
+    @Test func everyViewTakesItsSpacingFromTheTheme() throws {
+        let hits = try SourceScan.lines(in: Self.dirs, matching: Self.spacingPatterns)
+        #expect(hits.isEmpty, "\(hits.count) spacing literals:\n\(hits.joined(separator: "\n"))")
+    }
+
+    @Test func theSpacingScanSeesEachForm() throws {
+        for bad in [
+            "VStack(spacing: 2) {", "HStack(alignment: .top, spacing: 4) {", ".padding(8)",
+            ".padding(.horizontal, 5)", ".padding(.vertical, 3)", ".padding([.top, .bottom], 6)",
+            ".padding(0.5)", "HStack(spacing: 0.5)", "Spacer(minLength: 12)", "    .padding(", ".padding()",
+            "Grid(horizontalSpacing: 8, verticalSpacing: theme.spacing.xs) {", "Grid(verticalSpacing: 4) {", "VStack(spacing: .5) {", ".padding(.horizontal,",
+            "HStack(spacing: CGFloat(6)) {", ".padding(CGFloat(8))",
+            "stack.spacing = 6", "stack.setCustomSpacing(16, after: f)",
+        ] {
+            #expect(try SourceScan.matches(bad, patterns: Self.spacingPatterns) == 1, "\(bad)")
+        }
+        for good in [
+            "VStack(spacing: 0) {", "Spacer(minLength: 0)", ".padding(0)", "HStack(spacing: theme.spacing.xs) {",
+            ".padding(theme.spacing.s)", "Grid(horizontalSpacing: theme.spacing.s, verticalSpacing: 0)", "stack.spacing = theme.spacing.s",
+            ".padding(.top, ControlMetrics.faderCap.height / 2 - 2)", ".padding(.horizontal, -StripPadding.horizontal)",
+        ] {
+            #expect(try SourceScan.matches(good, patterns: Self.spacingPatterns) == 0, "\(good)")
+        }
+    }
+
+    @Test func noColourLiteralsOutsideTheThemeBridges() throws {
+        let hits = try SourceScan.lines(in: Self.dirs, matching: Self.colourPatterns, except: Self.bridges)
+        #expect(hits.isEmpty, "\(hits.count) colour literals:\n\(hits.joined(separator: "\n"))")
+    }
+
+    @Test func noCornerRadiusOrFontSizeLiterals() throws {
+        let hits = try SourceScan.lines(in: Self.dirs, matching: Self.metricPatterns, except: Self.bridges)
+        #expect(hits.isEmpty, "\(hits.count) radius or font-size literals:\n\(hits.joined(separator: "\n"))")
+    }
+
+    @Test func theScanSeesEachForbiddenForm() throws {
+        let bad = [
+            "NSColor.red.setFill()",
+            "Text(x).foregroundStyle(Color.blue)",
+            "let c = Color(red: 1, green: 0, blue: 0)",
+            "let c = NSColor(calibratedRed: 1, green: 0, blue: 0, alpha: 1)",
+            ".background(Color.accentColor)",
+            "return .red",
+            #"case "green": .green"#,
+            "let lanes: [NSColor] = [.systemBlue, .systemOrange]",
+            "field.textColor = .labelColor",
+            "RoundedRectangle(cornerRadius: 4)",
+            ".font(.system(size: 11, weight: .medium))",
+            "label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)",
+        ]
+        let all = Self.colourPatterns + Self.metricPatterns
+        for line in bad {
+            #expect(try SourceScan.matches(line, patterns: all) >= 1, "\(line)")
+        }
+        // The forms B5 review I2 added, one planted line each.
+        let widened = [
+            "NSBezierPath(roundedRect: r, xRadius: 4, yRadius: 4)",
+            "layer.cornerRadius = 4",
+            "let f = NSFont.boldSystemFont(ofSize: 11)",
+            "let f = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)",
+            "layer.borderColor = CGColor.black",
+            "let c = CGColor(gray: 0, alpha: 1)",
+            "let c = CGColor(red: 1, green: 0, blue: 0, alpha: 1)",
+            "let c = #colorLiteral(red: 1, green: 0, blue: 0, alpha: 1)",
+            "let c = Color(.sRGB, red: 1, green: 0, blue: 0)",
+            "let c = NSColor(displayP3Red: 1, green: 0, blue: 0, alpha: 1)",
+            "field.textColor = .controlTextColor",
+            "ctx.setStrokeColor(NSColor.gridColor.cgColor)",
+            "let c: NSColor = .highlightColor",
+            "let c: NSColor = .linkColor",
+            "let c: NSColor = .placeholderTextColor",
+            "Text(x).foregroundStyle(.accentColor)",
+        ]
+        for line in widened {
+            #expect(try SourceScan.matches(line, patterns: all) >= 1, "\(line)")
+        }
+        #expect(try SourceScan.matches(bad[7], patterns: all) == 2)
+        #expect(try SourceScan.matches(bad[11], patterns: all) == 2)
+        #expect(try SourceScan.matches("theme.state.error.color", patterns: all) == 0)
+        #expect(try SourceScan.matches("NSColor.clear.setFill()", patterns: all) == 0)
+    }
+
+    /// Plan 7d Ruling 8's forms: a semantic style or a discarded token
+    /// weight.
+    static let fontPatterns = [
+        #"\.font\(\.(caption2?|footnote|callout|body|subheadline|headline|title[23]?|largeTitle)\b"#,
+        #"preferredFont\(forTextStyle:"#,
+        #"\.fontWeight\("#,
+        #"\.bold\(\)"#,
+        #"weight: \.regular\)"#,
+        #"\bFont\.(caption2?|footnote|callout|body|subheadline|headline|title[23]?|largeTitle)\b"#,
+        #"\.system\(\."#,
+        #":\s*Font\s*=\s*\.(caption2?|footnote|callout|body|subheadline|headline|title[23]?|largeTitle)\b"#,
+    ]
+
+    @Test func noSemanticFontsOrDiscardedWeights() throws {
+        let hits = try SourceScan.lines(in: Self.dirs, matching: Self.fontPatterns, except: Self.bridges)
+        #expect(hits.isEmpty, "\(hits.count) semantic fonts or discarded weights:\n\(hits.joined(separator: "\n"))")
+        let bad = [
+            ".font(.caption)",
+            ".font(.headline)",
+            #"Text("a").font(.callout)"#,
+            "NSFont.preferredFont(forTextStyle: .body)",
+            ".fontWeight(.bold)",
+            ".bold()",
+            "theme.font(theme.type.label, weight: .regular)",
+            "let f = Font.caption",
+            ".font(.system(.body, design: .monospaced))",
+            "let f: Font = .caption",
+        ]
+        for line in bad {
+            #expect(try SourceScan.matches(line, patterns: Self.fontPatterns) == 1, "\(line)")
+        }
+        let clean = [
+            ".font(theme.type.caption.font)",
+            "theme.font(theme.type.body, weight: .semibold)",
+            "theme.type.caption.font.monospacedDigit()",
+        ]
+        for line in clean {
+            #expect(try SourceScan.matches(line, patterns: Self.fontPatterns) == 0, "\(line)")
+        }
+    }
+
+    @Test func theTokenWeightIsKept() {
+        func weight(_ f: NSFont) -> CGFloat {
+            let traits = f.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
+            return traits?[.weight] as? CGFloat ?? -9
+        }
+        func expect(_ theme: Theme, _ w: NSFont.Weight) {
+            let f = theme.font(theme.type.label)
+            #expect(f.pointSize == 11)
+            #expect(abs(weight(f) - weight(.systemFont(ofSize: 11, weight: w))) < 0.001)
+            #expect(weight(f) != weight(.systemFont(ofSize: 11, weight: .regular)))
+        }
+        expect(.flat, .semibold)
+        expect(.symbiotic, .bold)
+        expect(.classicLight, .medium)
+    }
+
+    @Test func anEditorRedrawsWhenItsThemeChanges() throws {
+        let canvas = EditorCanvas(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        canvas.wantsLayer = true
+        // AppKit keeps `needsDisplay` only for a view in a window (outside
+        // one it always reads false), so the canvas is in one, never shown.
+        let w = NSWindow(contentRect: canvas.frame, styleMask: [.titled], backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        w.contentView = canvas
+        canvas.needsDisplay = false
+        canvas.theme = .console
+        #expect(canvas.needsDisplay)
+        let bg = try #require(canvas.layer?.backgroundColor)
+        let shown = try #require(NSColor(cgColor: bg))
+        #expect(shown.usingColorSpace(.sRGB) == Theme.console.canvas.usingColorSpace(.sRGB))
+    }
+
+    /// B4 review M1: a themed view made after the last theme change starts
+    /// in the current theme, not Classic Light.
+    @Test func aThemedViewMadeLaterStartsInTheCurrentTheme() {
+        let before = ThemedViews.current
+        defer { ThemedViews.current = before }
+        ThemedViews.current = .studioDark
+        let canvas = EditorCanvas(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        #expect(canvas.theme == .studioDark)
+        #expect(canvas.content.theme == .studioDark && canvas.ruler.theme == .studioDark)
+        #expect(ListCellField().theme == .studioDark)
+        #expect(KeyRecorderView().theme == .studioDark)
+        let bg = canvas.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) }
+        #expect(bg?.usingColorSpace(.sRGB) == Theme.studioDark.canvas.usingColorSpace(.sRGB))
+    }
+
+    /// The editor roles (Ruling 13's table) and the lane colours.
+    @Test func theEditorRolesAreTheTablesTokens() {
+        let t = Theme.studioDark
+        func same(_ a: NSColor, _ b: ThemeColor) -> Bool {
+            a.usingColorSpace(.sRGB) == b.nsColor.usingColorSpace(.sRGB)
+        }
+        #expect(same(t.canvas, t.surface.inset) && same(t.rulerBackground, t.surface.panel))
+        #expect(same(t.label, t.text.primary) && same(t.secondaryLabel, t.text.secondary))
+        #expect(same(t.regionFill, t.graph.fill) && same(t.playhead, t.state.record))
+        #expect(same(t.whiteKey, t.keys.white) && same(t.blackKey, t.keys.black))
+        #expect(same(t.laneColour(0), t.swatch.red) && same(t.laneColour(7), t.swatch.pink))
+        #expect(same(t.laneColour(9), t.swatch.orange) && same(t.laneColour(-1), t.swatch.pink))
+        // Plan 7c Ruling 12: the audio editor's roles, in every theme.
+        for t in Theme.all {
+            let roles: [(NSColor, ThemeColor)] = [
+                (t.audioWave, t.graph.line), (t.audioWaveTrimmed, t.text.disabled),
+                (t.audioEnvelope, t.graph.handle), (t.audioHandle, t.graph.handle),
+                (t.audioHandleSelected, t.graph.handleSelected), (t.audioClip, t.meter.clip),
+                (t.audioScaleText, t.text.secondary), (t.audioScaleLine, t.graph.grid),
+                (t.audioOutside, t.surface.panel),
+            ]
+            for (i, (role, token)) in roles.enumerated() { #expect(same(role, token), "\(t.id) role \(i)") }
+        }
+    }
+    /// B5 review I1: a lit toggle's letter reads on its fill in every theme
+    /// (WCAG 4.5:1), the lane header's and the region strip's.
+    /// Lit fills on which neither `keys.black` nor `keys.white` reaches
+    /// 4.5:1 (the token owner's to fix). Since the I toggle took the state
+    /// tokens (final review m4): Flat's and EG13's state.play, the auto
+    /// fill (4.40 and 4.33). The orange swatches B5 listed are no longer a
+    /// fill.
+    static let shortFills: Set<String> = ["flat monitor auto", "eg13 monitor auto"]
+
+    @Test func litLegendsReadOnTheirFills() {
+        for t in Theme.all {
+            let fills: [(String, ThemeColor)] = [
+                ("mute", t.state.mute), ("solo", t.state.solo), ("arm", t.state.record),
+                ("monitor input", StripPalette.monitor(.input, t)), ("monitor auto", StripPalette.monitor(.auto, t)),
+            ]
+            for (name, fill) in fills {
+                let f = fill.nsColor
+                let ink = t.legend(on: f)
+                let ratio = Theme.contrast(ink, f)
+                let other = Theme.contrast(ink == t.keys.black.nsColor ? t.keys.white.nsColor : t.keys.black.nsColor, f)
+                #expect(ratio >= other, "\(t.id) \(name): the better ink")
+                if Self.shortFills.contains("\(t.id) \(name)") {
+                    // Neither ink reaches 4.5 on these tokens (reported,
+                    // tokens unchanged): the better one stays above 4.3.
+                    #expect(ratio < 4.5 && ratio >= 4.3, "\(t.id) \(name): \(ratio)")
+                } else {
+                    #expect(ratio >= 4.5, "\(t.id) \(name): \(ratio)")
+                }
+            }
+        }
+    }
+
+    /// B5 rereview N1: the region strip's M and S buttons, lit, take the
+    /// legend for their fill, not the plain label colour; unlit, the label.
+    @Test func theRegionStripsLitLegendsUseTheLegendInk() {
+        for t in Theme.all {
+            for fill in [t.state.mute.nsColor, t.state.solo.nsColor] {
+                let lit = RegionStripView.buttonAttributes(on: true, color: fill, theme: t)
+                #expect(lit[.foregroundColor] as? NSColor == t.legend(on: fill), "\(t.id) lit")
+                let unlit = RegionStripView.buttonAttributes(on: false, color: fill, theme: t)
+                #expect(unlit[.foregroundColor] as? NSColor == t.label, "\(t.id) unlit")
+            }
+        }
+    }
+
+    /// B5 review M4 and M5: offline text and icons on the window (4.5:1),
+    /// the key recorder's ring on the window and a tool overlay on the
+    /// canvas (3:1, non-text), in every theme.
+    @Test func statusInksReadOnTheirBackgrounds() {
+        for t in Theme.all {
+            let window = t.surface.window.nsColor
+            let offline = Theme.contrast(t.offlineText, window)
+            #expect(offline >= 4.5, "\(t.id) offline text: \(offline)")
+            let ring = Theme.contrast(t.recordingRing, window)
+            #expect(ring >= 3, "\(t.id) recording ring: \(ring)")
+            let tool = Theme.contrast(t.toolOverlay, t.canvas)
+            #expect(tool >= 3, "\(t.id) tool overlay: \(tool)")
+        }
+    }
+
+    /// Owner decision (2026-11-03, overruling Ruling 13's key row): piano
+    /// keys are white and black in every theme, from the `keys` group; the
+    /// key labels, drawn on the white keys, are the black key colour.
+    @Test func pianoKeysAreWhiteAndBlackInEveryTheme() {
+        for t in [Theme.studioDark, .console] {
+            #expect(Theme.relativeLuminance(t.whiteKey) > 0.8, "\(t.id) white key")
+            #expect(Theme.relativeLuminance(t.blackKey) < 0.2, "\(t.id) black key")
+            #expect(Theme.relativeLuminance(t.keyLabel) < 0.2, "\(t.id) key label")
+        }
+    }
+
+    /// The B4 run's findings, in pixels and colours: the ruler band takes
+    /// the theme's ruler background (it stayed black in Classic Light),
+    /// and a region's name is the theme's text, not white on a pale fill.
+    @Test func theRulerBandAndRegionNamesAreInTheTheme() throws {
+        for t in [Theme.classicLight, .studioDark] {
+            let c = EditorCanvas(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+            c.theme = t
+            c.layout()
+            let shown = try #require(ThemePixels.at(c.ruler, x: 150, y: 1))
+            #expect(ThemePixels.near(shown, t.rulerBackground), "\(t.id): \(shown)")
+            let name = RegionDrawing.stripLabelAttributes(font: t.type.caption.nsFont, offline: false, theme: t)
+            let colour = try #require(name[.foregroundColor] as? NSColor)
+            #expect(ThemePixels.near(colour, t.label), "\(t.id)")
+        }
+        let light = RegionDrawing.stripLabelAttributes(
+            font: Theme.classicLight.type.caption.nsFont, offline: false, theme: .classicLight)
+        let ink = try #require((light[.foregroundColor] as? NSColor)?.usingColorSpace(.sRGB))
+        #expect(ink.redComponent < 0.2, "dark text on Classic Light's pale region fill")
+    }
+}
+
+/// Reading a view's drawn pixels, for the theme tests.
+@MainActor
+enum ThemePixels {
+    /// The sRGB colour `v` draws at `x`, `y` (`y` from the top).
+    static func at(_ v: NSView, x: Int, y: Int) -> NSColor? {
+        guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return nil }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        let sx = Int(CGFloat(x) * CGFloat(rep.pixelsWide) / max(v.bounds.width, 1))
+        let sy = Int(CGFloat(y) * CGFloat(rep.pixelsHigh) / max(v.bounds.height, 1))
+        return rep.colorAt(x: sx, y: sy)?.usingColorSpace(.sRGB)
+    }
+
+    /// Within a few percent, in sRGB.
+    static func near(_ a: NSColor, _ b: NSColor) -> Bool {
+        guard let a = a.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        return abs(a.redComponent - b.redComponent) < 0.04 && abs(a.greenComponent - b.greenComponent) < 0.04
+            && abs(a.blueComponent - b.blueComponent) < 0.04
+    }
+}

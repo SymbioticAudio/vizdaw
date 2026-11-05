@@ -65,7 +65,7 @@ fn unknown_commands_and_parameters_are_refused() {
         err("app.quit", json!({"now": true})).0,
         ErrorCode::InvalidParams
     );
-    let (code, msg) = err("state.get", json!({"target": "mixer"}));
+    let (code, msg) = err("state.get", json!({"target": "mixers"}));
     assert_eq!(code, ErrorCode::InvalidParams);
     assert!(msg.starts_with("state.get: "), "{msg}");
 }
@@ -297,6 +297,56 @@ fn the_drum_menu_commands_are_registered() {
     );
 }
 
+/// Plan 7d Ruling 4: rewind and fast forward on ⇧, and ⇧. with keypad
+/// twins; during step entry Keypad+ stays Tie.
+#[test]
+fn rewind_and_fast_forward_have_their_keys() {
+    use core_control::bindings::{Chord, Keymap};
+    let k = Keymap::default();
+    let key = |t: &str, step: bool| k.lookup(Chord::parse(t).unwrap(), step, false);
+    assert_eq!(key("⇧,", false), Some("transport.rewind"));
+    assert_eq!(key("Keypad-", false), Some("transport.rewind"));
+    assert_eq!(key("⇧.", false), Some("transport.fast_forward"));
+    assert_eq!(key("Keypad+", false), Some("transport.fast_forward"));
+    assert_eq!(key("Keypad+", true), Some("step.tie"), "step entry wins");
+    for (id, title) in [
+        ("transport.rewind", "Rewind"),
+        ("transport.fast_forward", "Fast Forward"),
+    ] {
+        let c = registry::find(id).unwrap();
+        assert_eq!((c.title, c.menu), (title, "Transport"));
+        assert!(c.menu_item && c.document && c.yields, "{id}");
+    }
+    let yielding: Vec<&str> = COMMANDS.iter().filter(|c| c.yields).map(|c| c.id).collect();
+    assert_eq!(yielding, ["transport.rewind", "transport.fast_forward"]);
+}
+
+/// Plan 7d hostile input: rewind and fast forward take no parameters, and
+/// a misspelt id is no command.
+#[test]
+fn rewind_and_fast_forward_take_no_parameters() {
+    for id in ["transport.rewind", "transport.fast_forward"] {
+        assert_eq!(
+            ok("command.run", json!({ "id": id })),
+            Command::CommandRun {
+                id: id.into(),
+                args: vec![],
+                window: None,
+            }
+        );
+        let (code, message) = err("command.run", json!({"id": id, "params": {"bars": 2}}));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id}");
+        assert!(
+            message.ends_with(": unknown parameter \"bars\" (allowed: none)"),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        err("command.run", json!({"id": "transport.Rewind"})).0,
+        ErrorCode::UnknownId
+    );
+}
+
 #[test]
 fn every_transport_key_has_a_command() {
     use core_control::bindings::{Chord, Keymap};
@@ -313,6 +363,10 @@ fn every_transport_key_has_a_command() {
         ("Return", "transport.return_to_start"),
         (",", "transport.previous_marker"),
         (".", "transport.next_marker"),
+        ("⇧,", "transport.rewind"),
+        ("⇧.", "transport.fast_forward"),
+        ("Keypad-", "transport.rewind"),
+        ("Keypad+", "transport.fast_forward"),
         ("L", "transport.loop"),
         ("O", "transport.overdub"),
         ("I", "transport.punch"),
@@ -447,8 +501,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        147,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external"
+        157,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1631,4 +1685,287 @@ fn kontrol_mk3_is_a_surface_type() {
     let spec = registry::find("surface.add").unwrap();
     let help = spec.params.iter().find(|p| p.name == "type").unwrap().help;
     assert!(help.contains("kontrol_mk3"), "{help}");
+}
+
+/// Plan 7a Task 5: the view and pane commands refuse hostile params by type and range.
+#[test]
+fn ui_commands_check_their_params() {
+    let run = |id: &str, params: Value| json!({ "id": id, "params": params });
+    for good in [
+        json!({ "pane": "left" }),
+        json!({ "pane": "bottom", "view": "piano_roll", "shown": true, "size": 300, "main": "mix" }),
+        json!({ "pane": "right", "size": 0 }),
+    ] {
+        assert!(
+            matches!(
+                ok("command.run", run("ui.pane", good.clone())),
+                Command::CommandRun { .. }
+            ),
+            "{good}"
+        );
+    }
+    for bad in [
+        json!({}),
+        json!({ "pane": "top" }),
+        json!({ "pane": "left", "view": "Mixer" }),
+        json!({ "pane": "left", "view": 3 }),
+        json!({ "pane": "left", "shown": "yes" }),
+        json!({ "pane": "left", "size": 1e12 }),
+        json!({ "pane": "left", "size": -1 }),
+        json!({ "pane": "left", "size": "300" }),
+        json!({ "pane": "left", "main": "edit" }),
+        json!({ "pane": "left", "width": 300 }),
+        json!({ "pane": "x".repeat(70_000) }),
+    ] {
+        assert_eq!(
+            err("command.run", run("ui.pane", bad.clone())).0,
+            ErrorCode::InvalidParams,
+            "{bad}"
+        );
+    }
+    for id in ["ui.view_arrange", "ui.view_mix"] {
+        assert_eq!(
+            err("command.run", run(id, json!({ "on": true }))).0,
+            ErrorCode::InvalidParams,
+            "{id}"
+        );
+    }
+    for id in ["ui.toggle_left", "ui.toggle_bottom", "ui.toggle_right"] {
+        assert!(matches!(
+            ok("command.run", run(id, json!({ "on": false }))),
+            Command::CommandRun { .. }
+        ));
+        assert_eq!(
+            err("command.run", run(id, json!({ "on": "no" }))).0,
+            ErrorCode::InvalidParams,
+            "{id}"
+        );
+    }
+    let keys: Vec<_> = [
+        "ui.view_arrange",
+        "ui.view_mix",
+        "ui.toggle_left",
+        "ui.toggle_bottom",
+        "ui.toggle_right",
+    ]
+    .iter()
+    .map(|id| COMMANDS.iter().find(|c| c.id == *id).unwrap().shortcut)
+    .collect();
+    assert_eq!(
+        keys,
+        [
+            Some("⌃1"),
+            Some("⌃2"),
+            Some("⌃⌘←"),
+            Some("⌃⌘↓"),
+            Some("⌃⌘→")
+        ]
+    );
+    assert!(
+        !COMMANDS
+            .iter()
+            .find(|c| c.id == "ui.pane")
+            .unwrap()
+            .menu_item
+    );
+}
+
+/// Plan 7b Task B4 (Ruling 11, controller ruling R-UT): `ui.theme` takes a
+/// built-in theme's ID or a user theme's `user.` ID, and nothing else.
+#[test]
+fn ui_theme_checks_its_params() {
+    let run = |params: Value| json!({ "id": "ui.theme", "params": params });
+    for id in [
+        "classic-light",
+        "studio-dark",
+        "flat",
+        "console",
+        "symbiotic",
+        "eg13",
+        "user.my-dark",
+        "user.a",
+        "user.2026-blue",
+        "user.a1",
+    ] {
+        assert_eq!(
+            ok("command.run", run(json!({ "theme": id }))),
+            Command::CommandRun {
+                id: "ui.theme".into(),
+                args: vec![("theme".into(), ArgValue::Text(id.into()))],
+                window: None,
+            },
+            "{id}"
+        );
+    }
+    // The longest slug, 64 characters, is accepted.
+    let longest = format!("user.{}", "a".repeat(64));
+    assert!(
+        matches!(
+            ok("command.run", run(json!({ "theme": longest }))),
+            Command::CommandRun { .. }
+        ),
+        "{longest}"
+    );
+    let long = format!("user.{}", "a".repeat(65));
+    for bad in [
+        json!({}),
+        json!({ "theme": "svp-light" }),
+        json!({ "theme": 7 }),
+        json!({ "theme": "console", "extra": 1 }),
+        json!({ "theme": "" }),
+        json!({ "theme": "Console" }),
+        json!({ "theme": "user." }),
+        json!({ "theme": "user.My-Dark" }),
+        json!({ "theme": "user.a/b" }),
+        json!({ "theme": "user.a b" }),
+        json!({ "theme": "user.-a" }),
+        json!({ "theme": "user.a\u{0}" }),
+        json!({ "theme": long }),
+        json!({ "theme": "x".repeat(70_000) }),
+        json!({ "theme": null }),
+        json!({ "theme": ["flat"] }),
+        json!({ "theme": "user.a-" }),
+        json!({ "theme": "user.user.a" }),
+        json!({ "theme": "user.café" }),
+        json!({ "theme": "user.ａ" }),
+        json!({ "theme": "flat " }),
+        json!({ "theme": " flat" }),
+        json!({ "theme": "user" }),
+        json!({ "theme": "USER.a" }),
+        json!({ "theme": true }),
+        json!({ "theme": { "id": "flat" } }),
+    ] {
+        assert_eq!(
+            err("command.run", run(bad.clone())).0,
+            ErrorCode::InvalidParams,
+            "{bad}"
+        );
+    }
+    let spec = registry::find("ui.theme").unwrap();
+    assert!(!spec.menu_item && !spec.document);
+    assert_eq!((spec.menu, spec.title), ("View", "Theme"));
+    let list = registry::list_json();
+    let theme = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "ui.theme")
+        .unwrap();
+    assert_eq!(theme["params"][0]["type"], "choice");
+    assert_eq!(theme["params"][0]["values"][5], "eg13");
+    assert_eq!(theme["params"][0]["or_prefixed"], "user.");
+}
+
+#[test]
+fn state_get_reads_layout() {
+    assert_eq!(
+        ok("state.get", json!({ "target": "layout" })),
+        Command::StateGet {
+            target: StateTarget::Layout,
+            window: None
+        }
+    );
+    let (code, msg) = err("state.get", json!({ "target": "panes" }));
+    assert_eq!(code, ErrorCode::InvalidParams);
+    assert!(msg.contains("surfaces, layout"), "{msg}");
+}
+
+/// Plan 7b Ruling 11: `state.get mixer` reads the strips; a near miss is
+/// refused.
+#[test]
+fn mixer_state_target_parses() {
+    assert_eq!(
+        ok("state.get", json!({ "target": "mixer" })),
+        Command::StateGet {
+            target: StateTarget::Mixer,
+            window: None
+        }
+    );
+    for bad in [json!("mixers"), json!("Mixer"), json!(""), json!(3)] {
+        let (code, msg) = err("state.get", json!({ "target": bad }));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    let (_, msg) = err("state.get", json!({ "target": "mixers" }));
+    assert!(msg.contains("mixer or audio_editor"), "{msg}");
+}
+
+#[test]
+fn audio_editor_state_target_parses() {
+    assert_eq!(
+        ok("state.get", json!({ "target": "audio_editor" })),
+        Command::StateGet {
+            target: StateTarget::AudioEditor,
+            window: None
+        }
+    );
+    for bad in [
+        json!("audio-editor"),
+        json!("audioEditor"),
+        json!("AUDIO_EDITOR"),
+        json!("audio_editor "),
+        json!(""),
+        json!(7),
+    ] {
+        let (code, msg) = err("state.get", json!({ "target": bad }));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    let (_, msg) = err("state.get", json!({ "target": "audio-editor" }));
+    assert!(msg.contains("mixer or audio_editor"), "{msg}");
+    // Task 5 review M1: an unknown extra param and a bad window.
+    for bad in [
+        json!({ "target": "audio_editor", "extra": 1 }),
+        json!({ "target": "audio_editor", "window": 0 }),
+        json!({ "target": "audio_editor", "window": "front" }),
+        json!({ "target": "audio_editor", "window": -1 }),
+    ] {
+        let (code, msg) = err("state.get", bad.clone());
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    assert_eq!(
+        ok(
+            "state.get",
+            json!({ "target": "audio_editor", "window": 3 })
+        ),
+        Command::StateGet {
+            target: StateTarget::AudioEditor,
+            window: Some(WindowRef::Number(3))
+        }
+    );
+}
+
+#[test]
+fn ui_pane_names_the_audio_editor() {
+    let c = ok(
+        "command.run",
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": "audio_editor" } }),
+    );
+    assert!(matches!(c, Command::CommandRun { .. }), "{c:?}");
+    for bad in ["audio", "Audio_Editor"] {
+        let (code, msg) = err(
+            "command.run",
+            json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": bad } }),
+        );
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    // Task 5 review M1: an unknown extra param, a bad window and a
+    // wrong-typed view.
+    for bad in [
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": "audio_editor", "extra": 1 } }),
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": "audio_editor" }, "window": 0 }),
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": "audio_editor" }, "window": "front" }),
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": 7 } }),
+        json!({ "id": "ui.pane", "params": { "pane": "bottom", "view": ["audio_editor"] } }),
+    ] {
+        let (code, msg) = err("command.run", bad.clone());
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(!msg.is_empty());
+    }
+    let c = registry::find("editors.audio_editor").unwrap();
+    assert_eq!(c.shortcut, Some("⌘5"));
+    assert_eq!(c.menu, "Editors");
+    assert!(c.document);
 }

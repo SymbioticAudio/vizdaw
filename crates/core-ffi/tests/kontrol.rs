@@ -300,23 +300,31 @@ fn has(sent: &[Vec<u8>], m: &[u8]) {
 fn plugin_mode(
     plugins: &[(&str, &str)],
 ) -> (std::sync::Arc<vizdaw_ffi::Session>, u32, u64, Vec<u64>) {
+    plugin_mode_with_eq(None, plugins)
+}
+
+/// `plugin_mode`, with `eq` (a CLAP test id and name) in the synth's EQ
+/// slot first (plan 7b Ruling 7). The slot ids are the inserts'.
+fn plugin_mode_with_eq(
+    eq: Option<(&str, &str)>,
+    plugins: &[(&str, &str)],
+) -> (std::sync::Arc<vizdaw_ffi::Session>, u32, u64, Vec<u64>) {
     use vizdaw_ffi::{PluginFormatTag, PluginRefRow, SlotStatus};
     vizdaw_ffi::catalog::add_test_bundle(&test_plugins::bundle()).unwrap();
     let s = vizdaw_ffi::Session::new_demo().unwrap();
     let (synth, _) = synth(&s);
+    let row = |id: &str, name: &str| PluginRefRow {
+        format: PluginFormatTag::Clap,
+        id: id.into(),
+        name: name.into(),
+        vendor: "VizDAW".into(),
+        version: "1.0.0".into(),
+    };
+    if let Some((id, name)) = eq {
+        s.set_eq(synth, Some(row(id, name))).unwrap();
+    }
     for (id, name) in plugins {
-        s.add_insert(
-            synth,
-            None,
-            PluginRefRow {
-                format: PluginFormatTag::Clap,
-                id: (*id).into(),
-                name: (*name).into(),
-                vendor: "VizDAW".into(),
-                version: "1.0.0".into(),
-            },
-        )
-        .unwrap();
+        s.add_insert(synth, None, row(id, name)).unwrap();
     }
     s.play(song(&s)).unwrap();
     wait_until("the plugins to run", || {
@@ -588,6 +596,21 @@ fn plugin_mode_pages_through_the_chain_and_a_knob_moves_the_parameter() {
         value(&s) > before,
         "knob 1 of page 2 moved the ninth parameter"
     );
+}
+
+/// Plan 7b B2 review M1: the EQ shows on the plug-in page, first in the
+/// chain, before the inserts.
+#[test]
+fn the_plugin_page_shows_the_eq_first() {
+    let _g = serial();
+    let (s, _, _, _) = plugin_mode_with_eq(
+        Some(("vizdaw.test.gain", "Test Gain")),
+        &[("vizdaw.test.bank", "Test Bank")],
+    );
+    let sent = debug_sent(DAW);
+    has(&sent, &sysex(0x71, 0, 0, b"Test Gain\0Test Bank\0\0"));
+    has(&sent, &sysex(0x72, 0, 0, b"Gain"));
+    s.stop().unwrap();
 }
 
 #[test]

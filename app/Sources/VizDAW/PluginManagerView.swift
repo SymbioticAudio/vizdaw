@@ -1,10 +1,12 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
 /// The Plugin Manager window (spec §9).
 struct PluginManagerView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: PluginManagerModel
 
     var body: some View {
@@ -23,13 +25,16 @@ struct PluginManagerView: View {
             TableColumn("Type", value: \.kindText).width(80)
             TableColumn("Status") { r in
                 Text(r.statusText)
-                    .foregroundStyle(r.isBlocklisted ? Color.red : (r.row.status == .ok ? Color.primary : Color.orange))
+                    .foregroundStyle(
+                        r.isBlocklisted
+                            ? theme.state.error.color
+                            : (r.row.status == .ok ? theme.text.primary.color : theme.state.warning.color))
                     .help(r.row.path)
             }
         }
         Text("Turning a plugin off unloads it from all open projects; its settings are kept.")
-            .font(.caption).foregroundStyle(.secondary)
-            .padding(6)
+            .font(theme.type.caption.font).foregroundStyle(.secondary)
+            .padding(theme.spacing.s)
         }
         .searchable(text: $model.search)
         .toolbar {
@@ -38,7 +43,7 @@ struct PluginManagerView: View {
                     ForEach(PluginManagerModel.FormatFilter.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Text(model.progressText).font(.caption).foregroundStyle(.secondary)
+                Text(model.progressText).font(theme.type.caption.font).foregroundStyle(.secondary)
                 Button("Rescan Selected") { model.rescanSelected() }
                     .disabled(!model.canRescan)
                 Button("Rescan All") { model.rescanAll() }

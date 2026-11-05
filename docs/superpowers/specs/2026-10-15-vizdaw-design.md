@@ -55,7 +55,7 @@ Studio Vision is still the intellectual property of its rights holder.
 
 ### Naming and versioning
 
-- Product name **VizDAW**. Repository: `github.com/wblatta/vizdaw`.
+- Product name **VizDAW**. Repository: `github.com/SymbioticAudio/vizdaw` (moved from `github.com/wblatta/vizdaw` on 2026-10-20).
 - Year-based versions: the first release line is **VizDAW 26**, tagged `26.0.0`, `26.1.0`, … and next year's is `27.x.y`.
 - The project package extension `.vizdaw` stays the same across versions; the document inside carries its own format version.
 

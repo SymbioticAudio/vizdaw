@@ -103,6 +103,27 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         #expect(k.message == nil)
     }
 
+    /// Pre-flight M-25: a keys file naming the new ids loads; one naming
+    /// an id this build does not know skips it, as an older build skips
+    /// the new ids.
+    @Test func aKeysFileWithTheNewIdsLoadsAndAnUnknownOneIsSkipped() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vzk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let k = KeyBindings(defaults: MemoryDefaults())
+        let path = dir.appendingPathComponent("new.vizkeys")
+        try Data(#"{"vizdaw_keys": 1, "bindings": {"transport.rewind": ["⌥,"]}}"#.utf8).write(to: path)
+        try k.load(from: path.path)
+        #expect(k.row("transport.rewind")?.keys == ["⌥,"])
+        #expect(k.message == nil)
+        try Data(
+            #"{"vizdaw_keys": 1, "bindings": {"transport.rewind": ["⌥,"], "transport.not_a_command": ["F7"]}}"#.utf8
+        ).write(to: path)
+        try k.load(from: path.path)
+        #expect(k.row("transport.rewind")?.keys == ["⌥,"])
+        #expect(k.message == "Skipped: no command \"transport.not_a_command\"")
+    }
+
     @Test func aSlotThatClashesNamesTheCommand() {
         let k = KeyBindings(defaults: MemoryDefaults())
         #expect(k.slotClash(KeySlotRow(key: "s", modifiers: 8)) == "Save")
@@ -198,6 +219,38 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         }
         #expect(!KeyDispatch.runsOnRepeat(.slot(1)))
         #expect(KeyDispatch.runsOnRepeat(.pass) && KeyDispatch.runsOnRepeat(.typing))
+    }
+
+    /// Plan 7d Ruling 4: a held ⏪ or ⏩ key steps again at the key-repeat
+    /// rate; Return to Start still runs once per press.
+    @Test func heldRewindAndFastForwardKeysRepeat() {
+        #expect(KeyDispatch.runsOnRepeat(.command("transport.rewind")))
+        #expect(KeyDispatch.runsOnRepeat(.command("transport.fast_forward")))
+        #expect(!KeyDispatch.runsOnRepeat(.command("transport.return_to_start")))
+    }
+
+    /// Controller ruling I3: a saved keyboard slot keeps its key over a
+    /// new command's default; a key the user binds to the command wins,
+    /// as commands win over slots.
+    @Test func aSavedKeyboardSlotKeepsItsKeyOverANewDefault() throws {
+        let plus = try #require(keyCodeFor(name: "Keypad+"))
+        let shift = ModifiersRow(shift: true, control: false, option: false, command: false)
+        var beat = seq(1, "Beat", topLevel: false)
+        beat.keyboardSlot = KeySlotRow(key: "Keypad+", modifiers: 0)
+        #expect(route(plus) == .command("transport.fast_forward"), "no slot: the default")
+        #expect(route(plus, seqs: [beat]) == .slot(1))
+        #expect(route(47, shift, seqs: [beat]) == .command("transport.fast_forward"), "⇧. still fast forwards")
+        // The user's keys file binds Keypad+ to Fast Forward: its row is
+        // the user's (customised), so the command wins.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vzk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("mine.vizkeys")
+        try Data(#"{"vizdaw_keys": 1, "bindings": {"transport.fast_forward": ["Keypad+"]}}"#.utf8)
+            .write(to: path)
+        try keys.load(from: path.path)
+        #expect(keys.row("transport.fast_forward")?.customised == true)
+        #expect(route(plus, seqs: [beat]) == .command("transport.fast_forward"))
     }
 
     /// M-2: the channel delivers a key whose command cannot run in this

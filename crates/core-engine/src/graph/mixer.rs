@@ -251,7 +251,8 @@ pub fn mixer_spec(
                 .map(|x| x.into_iter().collect())
                 .unwrap_or_else(|| vec![s.id]),
         });
-        for slot in s.inserts.iter() {
+        // The EQ first, then the inserts (plan 7b Ruling 9).
+        for slot in s.chain() {
             let sidechain = slot.sidechain.and_then(|src| {
                 let from = node(src)?;
                 let explicit = m.strip(src).map(|x| x.mute).unwrap_or(false);

@@ -62,6 +62,13 @@ jobs:
         run: scripts/build-ffi.sh
       - name: Swift build
         run: scripts/swift.sh build
+      - name: App builds without the branded glyphs
+        run: |
+          VIZDAW_NO_BRAND=1 scripts/swift.sh build --scratch-path "$RUNNER_TEMP/nobrand"
+          if [ -n "$(find "$RUNNER_TEMP/nobrand" \( -name 'SymbioticBrand*.o' -o -name 'SymbioticBrand*.swiftmodule' \))" ]; then
+            echo "the no-brand build has SymbioticBrand in it" >&2
+            exit 1
+          fi
       - name: Swift tests
         run: scripts/swift.sh test
       - name: App bundle

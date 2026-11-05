@@ -166,6 +166,20 @@ public protocol ControlHost: AnyObject {
     /// Ruling 5): the stub when `VIZDAW_EXTERNAL_EDITOR=stub`, else Settings
     /// › Editing's choice (pre-flight I7(c)).
     var externalEditor: ExternalEditorChoice { get }
+    /// The app's theme preference (plan 7b Task B4): `ui.theme` sets it.
+    var appearance: AppearancePreferences { get }
+}
+
+/// Which window's transport fields the P, E and U keys focus (plan 7d
+/// Ruling 7; backlog row "P, E and U in the mixer window", 7a n6): this
+/// document's mixer window when it is key, else the document window.
+public enum TransportFieldsTarget: Equatable, Sendable {
+    case document, mixerWindow
+
+    /// `.mixerWindow` only when the key window is a mixer window of `doc`.
+    public static func choose(keyKind: WindowKindRow?, keyDoc: UUID?, doc: UUID) -> TransportFieldsTarget {
+        keyKind == .mixer && keyDoc == doc ? .mixerWindow : .document
+    }
 }
 
 /// Runs registered menu commands (control spec §6) on a document model
@@ -210,6 +224,7 @@ public enum ControlCommands {
             .union(fieldKeys.keys).union(RegionCommands.ids).union(SynthCommands.ids)
             .union(TransportCommands.ids).union(StepCommands.ids).union(AudioCommands.ids)
             .union(AutomationCommands.ids).union(SurfaceCommands.ids).union(BounceCommands.ids)
+            .union(ViewCommands.ids).union(AppearanceCommands.ids)
     }
 
     /// Runs command `id` with `args` on `doc` (the target window's document,
@@ -250,6 +265,9 @@ public enum ControlCommands {
             return AudioCommands.runSet(args, host: host)
         case AutomationCommands.suspend:
             return AutomationCommands.runSuspend(args)
+        case _ where AppearanceCommands.ids.contains(id):
+            // App-wide (plan 7b Ruling 11): no document needed.
+            return AppearanceCommands.run(args, prefs: host.appearance)
         case _ where SurfaceCommands.ids.contains(id):
             // Process-wide or per document (plan 5f-1 Task 9).
             return SurfaceCommands.run(id, args: args, doc: doc.map { ($0.id, $0.model) }, surfaces: host.surfaces)
@@ -425,6 +443,14 @@ public enum ControlCommands {
             } catch {
                 return .failed(.thrown(error, "MIDI Injection Failed"))
             }
+        case ViewCommands.pane:
+            // A key bound to Set Pane sends no arguments: it is unavailable
+            // and passes on (Task 6 review M2); the channel always sends
+            // `pane`, which the core requires.
+            if args.isEmpty, let f = failure(ViewCommands.run(id, on: nil, m)) { return f }
+            return ViewCommands.runPane(args, m, doc: docID)
+        case _ where ViewCommands.ids.contains(id):
+            if let f = failure(ViewCommands.run(id, on: args.flag("on"), m)) { return f }
         case _ where SynthCommands.ids.contains(id):
             return SynthCommands.run(id, args: args, doc: docID, m)
         case _ where AutomationCommands.ids.contains(id):
@@ -713,6 +739,17 @@ public enum ControlStates {
         case .automation:
             guard let s = try? m.session.automationState() else { return nil }
             return .automation(doc: doc, state: s)
+        case .layout:
+            return .layout(
+                doc: doc,
+                layout: ViewCommands.layoutRow(
+                    m, strips: (try? m.session.mixer().strips) ?? [],
+                    destinations: (try? m.session.destinations()) ?? []))
+        case .mixer:
+            guard let s = try? m.session.mixer() else { return nil }
+            return .mixer(doc: doc, mixer: s)
+        case .audioEditor:
+            return .audioEditor(doc: doc, editor: m.audioEditor.stateRow())
         case .surfaces:
             guard let s = try? m.session.surfaceState() else { return nil }
             return .surfaces(doc: doc, state: s)

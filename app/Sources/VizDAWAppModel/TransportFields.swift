@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import VizDAWCore
 
@@ -102,5 +103,52 @@ extension DocumentModel {
             editor.updateLayout { $0.transport = marks }
         }
         return true
+    }
+}
+
+/// The transport bar's rows (Task 7 review I1): one when its leading
+/// controls, the fields and its trailing controls fit side by side inside
+/// its padding, else two, the fields on the second row.
+public enum TransportBarRows {
+    /// The bar's padding at each end.
+    public static let padding: CGFloat = 8
+
+    public static func count(
+        width: CGFloat, leading: CGFloat, fields: CGFloat, trailing: CGFloat, spacing: CGFloat
+    ) -> Int {
+        guard width.isFinite, width > 0 else { return 2 }
+        let need = leading + spacing + fields + spacing + trailing
+        return need.isFinite && width - 2 * padding >= need ? 1 : 2
+    }
+}
+
+/// The transport bar's middle part: items in order on lines (plan 7d
+/// Ruling 6).
+public enum TransportFlow {
+    /// Which items share a line, greedily and in order. The last item (the
+    /// fields) fits a line if what is left is at least `lastMinimum`. A
+    /// width that is not finite and positive puts every item on its own
+    /// line.
+    public static func lines(
+        widths: [CGFloat], lastMinimum: CGFloat, width: CGFloat, spacing: CGFloat
+    ) -> [[Int]] {
+        guard width.isFinite, width > 0 else { return widths.indices.map { [$0] } }
+        var lines: [[Int]] = []
+        var used: CGFloat = 0
+        for (i, w) in widths.enumerated() {
+            let isLast = i == widths.count - 1
+            if var line = lines.last {
+                let left = width - used - spacing
+                if isLast ? left >= lastMinimum : w <= left {
+                    line.append(i)
+                    lines[lines.count - 1] = line
+                    used += spacing + w
+                    continue
+                }
+            }
+            lines.append([i])
+            used = w
+        }
+        return lines
     }
 }

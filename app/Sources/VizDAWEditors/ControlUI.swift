@@ -35,22 +35,20 @@ public enum ControlUI {
         var nodes: [UiNodeRow] = []
         var truncated = false
         var seen: Set<ObjectIdentifier> = [ObjectIdentifier(window)]
-        func walk(_ e: any NSAccessibilityProtocol, _ path: [UInt32]) {
+        func walk(_ e: AXElement, _ path: [UInt32]) {
             guard path.count < maxDepth else { return }
-            for (i, child) in (e.accessibilityChildren() ?? []).enumerated() {
+            for (i, child) in e.children.enumerated() {
                 guard nodes.count < maxNodes else {
                     truncated = true
                     return
                 }
-                guard let c = child as? (any NSAccessibilityProtocol & NSObjectProtocol),
-                    seen.insert(ObjectIdentifier(c)).inserted
-                else { continue }
+                guard let c = AXElement(child), seen.insert(ObjectIdentifier(c.object)).inserted else { continue }
                 let p = path + [UInt32(i)]
                 nodes.append(row(c, path: p, in: window))
                 walk(c, p)
             }
         }
-        walk(window, [])
+        walk(AXElement(window), [])
         return (nodes, truncated)
     }
 
@@ -68,15 +66,15 @@ public enum ControlUI {
         "AXDisclosureTriangle", "AXCell", "AXRow", "AXLink",
     ]
 
-    static func row(_ e: any NSAccessibilityProtocol, path: [UInt32], in window: NSWindow) -> UiNodeRow {
-        let role = e.accessibilityRole()?.rawValue ?? "AXUnknown"
-        let f = windowRect(e.accessibilityFrame(), in: window)
+    static func row(_ e: AXElement, path: [UInt32], in window: NSWindow) -> UiNodeRow {
+        let role = e.role ?? "AXUnknown"
+        let f = windowRect(e.frame, in: window)
         return UiNodeRow(
-            path: path, role: role, subrole: e.accessibilitySubrole()?.rawValue,
-            label: e.accessibilityLabel(), title: e.accessibilityTitle(), value: text(e.accessibilityValue()),
+            path: path, role: role, subrole: e.subrole,
+            label: e.label, title: e.title, value: text(e.value),
             x: f.minX, y: f.minY, width: f.width, height: f.height,
-            enabled: e.isAccessibilityEnabled(), selected: e.isAccessibilitySelected(),
-            focused: e.isAccessibilityFocused(), actions: pressable.contains(role) ? ["press"] : [])
+            enabled: e.enabled, selected: e.selected,
+            focused: e.focused, actions: pressable.contains(role) ? ["press"] : [])
     }
 
     /// A screen rect (AppKit, bottom-left origin) in window points with a
@@ -88,16 +86,19 @@ public enum ControlUI {
 
     /// The element `ref` names, if it is still there with the same role
     /// and label.
-    public static func element(_ ref: ElementRefRow, in window: NSWindow) -> (any NSAccessibilityProtocol)? {
+    public static func element(_ ref: ElementRefRow, in window: NSWindow) -> Any? {
+        found(ref, in: window)?.object
+    }
+
+    static func found(_ ref: ElementRefRow, in window: NSWindow) -> AXElement? {
         enableAccessibility()
-        var e: any NSAccessibilityProtocol = window
+        var e = AXElement(window)
         for i in ref.path {
-            let kids = e.accessibilityChildren() ?? []
-            guard Int(i) < kids.count, let next = kids[Int(i)] as? any NSAccessibilityProtocol else { return nil }
+            let kids = e.children
+            guard Int(i) < kids.count, let next = AXElement(kids[Int(i)]) else { return nil }
             e = next
         }
-        let role = e.accessibilityRole()?.rawValue ?? "AXUnknown"
-        let check = controlElementCheck(role: role, label: e.accessibilityLabel(), title: e.accessibilityTitle())
+        let check = controlElementCheck(role: e.role ?? "AXUnknown", label: e.label, title: e.title)
         return check == ref.check ? e : nil
     }
 
@@ -115,8 +116,8 @@ public enum ControlUI {
         case .point(let x, let y):
             return x.isFinite && y.isFinite ? CGPoint(x: x, y: y) : nil
         case .element(let ref):
-            guard let e = element(ref, in: window) else { return nil }
-            let f = windowRect(e.accessibilityFrame(), in: window)
+            guard let e = found(ref, in: window) else { return nil }
+            let f = windowRect(e.frame, in: window)
             guard f.minX.isFinite, f.minY.isFinite, f.width.isFinite, f.height.isFinite,
                 f.width > 0, f.height > 0
             else { return nil }
@@ -232,10 +233,146 @@ public enum ControlUI {
     /// on activating the window. A user's own clicks are not affected.
     /// Orders `window` to the front (without stealing focus from the
     /// active app) and queues `events` behind anything already queued.
-    public static func post(_ events: [NSEvent], to window: NSWindow) {
+    /// SwiftUI's views take the press too (`allowFirstMouse`); whether it
+    /// lands on one that may start editing (then `focusTextField`).
+    @discardableResult
+    public static func post(_ events: [NSEvent], to window: NSWindow) -> Bool {
         remember(events)
+        let mayEdit = allowFirstMouse(events, in: window)
         window.orderFront(nil)
         for e in events { NSApp.postEvent(e, atStart: false) }
+        return mayEdit
+    }
+
+    typealias FirstMouse = @convention(c) (NSView, Selector, NSEvent?) -> Bool
+
+    /// Each taught view class's own `acceptsFirstMouse(for:)`.
+    private static var firstMouseOriginals: [ObjectIdentifier: IMP] = [:]
+
+    /// Lets the SwiftUI view under `events`' first press take the
+    /// channel's clicks as first clicks, as the editors' AppKit views do
+    /// (plan 7b Task B8). VizDAW under the channel is not the active app,
+    /// so its windows are never key, and SwiftUI takes no first click on a
+    /// gesture view (a strip's number box, knob or fader): the click only
+    /// tried to activate the window. That view's class (in the mixer, a
+    /// SwiftUI scroll view's container) gets an `acceptsFirstMouse(for:)`
+    /// that answers yes for a channel event (`isChannel`) and as before
+    /// for any other, so a user's own clicks are not affected. Other views
+    /// keep their own answer.
+    ///
+    /// Whether the press lands on a SwiftUI view that takes no first click
+    /// of its own there (SwiftUI's buttons do take one): such a click may
+    /// start a number box editing (see `focusTextField`).
+    @discardableResult
+    static func allowFirstMouse(_ events: [NSEvent], in window: NSWindow) -> Bool {
+        guard
+            let down = events.first(where: { $0.type == .leftMouseDown || $0.type == .rightMouseDown }),
+            let frame = window.contentView?.superview ?? window.contentView,
+            let hit = frame.hitTest(down.locationInWindow),
+            let cls = object_getClass(hit), isSwiftUIView(cls)
+        else { return false }
+        let sel = #selector(NSView.acceptsFirstMouse(for:))
+        let key = ObjectIdentifier(cls)
+        if firstMouseOriginals[key] == nil {
+            guard let method = class_getInstanceMethod(cls, sel) else { return false }
+            let imp = method_getImplementation(method)
+            firstMouseOriginals[key] = imp
+            let original = unsafeBitCast(imp, to: FirstMouse.self)
+            let answer: @convention(block) (NSView, NSEvent?) -> Bool = { view, event in
+                nonisolated(unsafe) let e = event
+                let channel = MainActor.assumeIsolated { ControlUI.isChannel(e) }
+                return channel || original(view, sel, event)
+            }
+            class_replaceMethod(cls, sel, imp_implementationWithBlock(answer), method_getTypeEncoding(method))
+        }
+        guard let imp = firstMouseOriginals[key] else { return false }
+        return !unsafeBitCast(imp, to: FirstMouse.self)(hit, sel, down)
+    }
+
+    /// Gives the keyboard to the editable text field at `p` (window
+    /// points, top-left origin) when it does not have it; whether such a
+    /// field has it now. A channel click that starts a number box editing
+    /// in a window that is not key leaves SwiftUI's field without the
+    /// keyboard (plan 7b Task B8), so typed keys would go to the key
+    /// bindings: this does what the click does in a key window.
+    public static func focusTextField(at p: CGPoint, in window: NSWindow) -> Bool {
+        guard p.x.isFinite, p.y.isFinite, let frame = window.contentView?.superview ?? window.contentView else {
+            return false
+        }
+        var v = frame.hitTest(NSPoint(x: p.x, y: window.frame.height - p.y))
+        while let view = v, !(view is NSTextField) { v = view.superview }
+        guard let field = v as? NSTextField, field.isEditable, field.isEnabled else { return false }
+        if let editor = field.currentEditor(), window.firstResponder === editor { return true }
+        return window.makeFirstResponder(field) && field.currentEditor() != nil
+    }
+
+    /// The accessibility identifier VizDAW gives its number boxes, so the
+    /// channel tells them from toggles and slots, which are buttons with a
+    /// value too (final review m3). It changes no label.
+    public static let numberBoxID = "vizdaw.number-box"
+
+    /// One element under a click, as `mayEdit` reads it.
+    struct EditTarget {
+        var frame: CGRect
+        var role: String
+        var identifier: String?
+    }
+
+    /// Whether a click at `p` (window points, top-left origin) is on what
+    /// may start editing (final review m3): the smallest of `targets`
+    /// under it is a text field or a number box. Other clicks (a fader, a
+    /// knob, a toggle, a pane) need not wait for a field.
+    static func mayEdit(_ targets: [EditTarget], at p: CGPoint) -> Bool {
+        guard p.x.isFinite, p.y.isFinite else { return false }
+        let under = targets.filter { $0.frame.contains(p) }
+        guard let hit = under.min(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+        else { return false }
+        return hit.role == "AXTextField" || hit.identifier == numberBoxID
+    }
+
+    /// `mayEdit` on `window`'s elements as they are now (before the click).
+    public static func mayEdit(at p: CGPoint, in window: NSWindow) -> Bool {
+        enableAccessibility()
+        var targets: [EditTarget] = []
+        var seen: Set<ObjectIdentifier> = [ObjectIdentifier(window)]
+        func walk(_ e: AXElement, depth: Int) {
+            guard depth < 64 else { return }
+            for child in e.children {
+                guard targets.count < maxNodes else { return }
+                guard let c = AXElement(child), seen.insert(ObjectIdentifier(c.object)).inserted else { continue }
+                targets.append(
+                    EditTarget(frame: windowRect(c.frame, in: window), role: c.role ?? "AXUnknown", identifier: c.identifier))
+                walk(c, depth: depth + 1)
+            }
+        }
+        walk(AXElement(window), depth: 0)
+        return mayEdit(targets, at: p)
+    }
+
+    /// The line logged when a focusing click found no editable field (B8
+    /// review m1): the class of the view under `p`, so a SwiftUI change
+    /// that breaks the first-mouse hook is named, not a bare timeout.
+    public static func noFieldNote(at p: CGPoint, in window: NSWindow) -> String {
+        var hit: NSView?
+        if p.x.isFinite, p.y.isFinite, let frame = window.contentView?.superview ?? window.contentView {
+            hit = frame.hitTest(NSPoint(x: p.x, y: window.frame.height - p.y))
+        }
+        let name = hit.map { NSStringFromClass(type(of: $0)) } ?? "none"
+        return "channel: no editable field under the click (hit: \(name))"
+    }
+
+    /// Whether `cls` is one of SwiftUI's own views (its `NSHostingView`,
+    /// in any generic specialisation, or the containers it builds inside,
+    /// such as a scroll view's), or a subclass of one: its name or an
+    /// ancestor's is in SwiftUI's module.
+    static func isSwiftUIView(_ cls: AnyClass) -> Bool {
+        var c: AnyClass? = cls
+        while let k = c {
+            let name = NSStringFromClass(k)
+            if name.hasPrefix("SwiftUI.") || name.contains("7SwiftUI") { return true }
+            c = class_getSuperclass(k)
+        }
+        return false
     }
 
     /// Sends key `events` straight to `window` (its first responder), which
@@ -250,5 +387,105 @@ public enum ControlUI {
             .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .keyDown, .keyUp,
         ]
         return NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: false) != nil
+    }
+}
+
+/// An accessibility element, whether it declares `NSAccessibilityProtocol`
+/// (AppKit's views and elements) or only answers its selectors or the
+/// older attribute API (SwiftUI's nodes, such as the channel strip's knobs,
+/// fader and number boxes; plan 7b Task B7), so the channel's tree lists
+/// both.
+@MainActor
+struct AXElement {
+    let object: NSObject
+
+    init(_ formal: NSObject) { object = formal }
+
+    init?(_ any: Any) {
+        guard let o = any as? NSObject else { return nil }
+        object = o
+    }
+
+    private var formal: (any NSAccessibilityProtocol)? { object as? any NSAccessibilityProtocol }
+
+    /// The getter `name`'s answer, when the object has it.
+    private func get(_ name: String, key: String? = nil) -> Any? {
+        guard object.responds(to: NSSelectorFromString(name)) else { return nil }
+        return object.value(forKey: key ?? name)
+    }
+
+    /// The attribute API's answer for `name`.
+    private func attribute(_ name: String) -> Any? {
+        let sel = NSSelectorFromString("accessibilityAttributeValue:")
+        guard object.responds(to: sel) else { return nil }
+        return object.perform(sel, with: name)?.takeUnretainedValue()
+    }
+
+    private func string(_ getter: String, _ attr: String) -> String? {
+        (get(getter) as? String) ?? (attribute(attr) as? String)
+    }
+
+    private func flag(_ getter: String, key: String, _ attr: String, default d: Bool) -> Bool {
+        (get(getter, key: key) as? Bool) ?? (attribute(attr) as? Bool) ?? d
+    }
+
+    var children: [Any] {
+        if let f = formal { return f.accessibilityChildren() ?? [] }
+        return (get("accessibilityChildren") as? [Any]) ?? (attribute("AXChildren") as? [Any]) ?? []
+    }
+
+    var role: String? {
+        if let f = formal { return f.accessibilityRole()?.rawValue }
+        return string("accessibilityRole", "AXRole")
+    }
+
+    var identifier: String? {
+        if let f = formal { return f.accessibilityIdentifier() }
+        return string("accessibilityIdentifier", "AXIdentifier")
+    }
+
+    var subrole: String? {
+        if let f = formal { return f.accessibilitySubrole()?.rawValue }
+        return string("accessibilitySubrole", "AXSubrole")
+    }
+
+    var label: String? {
+        if let f = formal { return f.accessibilityLabel() }
+        return string("accessibilityLabel", "AXDescription")
+    }
+
+    var title: String? {
+        if let f = formal { return f.accessibilityTitle() }
+        return string("accessibilityTitle", "AXTitle")
+    }
+
+    var value: Any? {
+        if let f = formal { return f.accessibilityValue() }
+        return get("accessibilityValue") ?? attribute("AXValue")
+    }
+
+    /// In screen coordinates (bottom-left origin).
+    var frame: NSRect {
+        if let f = formal { return f.accessibilityFrame() }
+        if let v = get("accessibilityFrame") as? NSValue { return v.rectValue }
+        if let p = attribute("AXPosition") as? NSValue, let s = attribute("AXSize") as? NSValue {
+            return NSRect(origin: p.pointValue, size: s.sizeValue)
+        }
+        return .zero
+    }
+
+    var enabled: Bool {
+        if let f = formal { return f.isAccessibilityEnabled() }
+        return flag("isAccessibilityEnabled", key: "accessibilityEnabled", "AXEnabled", default: true)
+    }
+
+    var selected: Bool {
+        if let f = formal { return f.isAccessibilitySelected() }
+        return flag("isAccessibilitySelected", key: "accessibilitySelected", "AXSelected", default: false)
+    }
+
+    var focused: Bool {
+        if let f = formal { return f.isAccessibilityFocused() }
+        return flag("isAccessibilityFocused", key: "accessibilityFocused", "AXFocused", default: false)
     }
 }

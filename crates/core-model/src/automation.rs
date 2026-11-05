@@ -123,7 +123,7 @@ impl AutomationMode {
 }
 
 /// The strip whose automation mode governs `t` (plan 5e-1 Ruling 3): a
-/// strip's own controls and sends, an insert's strip, a plugin
+/// strip's own controls and sends, an insert's or EQ's strip, a plugin
 /// instrument's Instrument strip; `None` for velocity scale or a target
 /// whose strip or slot does not exist.
 pub fn strip_of(doc: &Document, t: AutomationTarget) -> Option<StripId> {
@@ -134,7 +134,7 @@ pub fn strip_of(doc: &Document, t: AutomationTarget) -> Option<StripId> {
         | AutomationTarget::StripSolo(s)
         | AutomationTarget::SendLevel(s, _) => doc.mixer().strip(s).ok().map(|x| x.id),
         AutomationTarget::PluginParam(p, _) => match doc.find_slot(p)? {
-            SlotOwner::Insert(s, _) => Some(s),
+            SlotOwner::Insert(s, _) | SlotOwner::Eq(s) => Some(s),
             SlotOwner::Instrument(dest) => doc.mixer().find_kind(StripKind::Instrument(dest)),
         },
         AutomationTarget::VelocityScale(_) => None,

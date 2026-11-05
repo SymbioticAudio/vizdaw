@@ -116,8 +116,30 @@ import VizDAWCore
         image.lockFocus()
         v.drawContent(in: CGRect(x: 0, y: 0, width: 800, height: 300))
         image.unlockFocus()
-        let call = try #require(f.recordingWaveformCalls.last)
-        #expect(call.lane == 30 && call.from == 96_000 && call.to == 192_000 && call.columns > 0)
+        let calls = f.recordingWaveformCalls
+        #expect(!calls.isEmpty && calls.allSatisfy { $0.lane == 30 && $0.columns > 0 })
+        #expect(calls.map(\.from).min() == 96_000 && calls.map(\.to).max() == 192_000, "the slices cover the take")
+    }
+
+    /// A four-bar take over a tempo change: 120 BPM for two bars (4 s), 60 after (8 s).
+    @Test func aGrowingTakeFollowsATempoChange() throws {
+        let (m, f) = try recording()
+        f.secondsAtMap = { ticks in
+            ticks.map { $0 <= 122_880 ? Double($0) / 30_720 : 4 + Double($0 - 122_880) / 15_360 }
+        }
+        let take = GrowingTake(lane: 30, startTick: 0, endTick: 245_760, fromFrame: 0, toFrame: 576_000)
+        let rect = CGRect(x: 0, y: 0, width: 512, height: 40)
+        let slices = m.record.growingSlices(take, rect: rect, visible: rect) { Int64(($0 * 480).rounded()) }
+        #expect(!slices.isEmpty && slices.count <= 32)
+        #expect(slices.count == 8, "eight 64-point pieces")
+        let mid = try #require(slices.first { $0.minX == 256 })
+        #expect(mid.from == 192_000, "not 288 000, as a linear map gives")
+        #expect(slices.first?.from == 0 && slices.last?.to == 576_000)
+        for (a, b) in zip(slices, slices.dropFirst()) { #expect(a.to == b.from && a.maxX == b.minX) }
+        #expect(slices.reduce(0) { $0 + Int($1.columns) } <= 8192)
+        let far = CGRect(x: 0, y: 0, width: 100_000, height: 40)
+        let many = m.record.growingSlices(take, rect: far, visible: far) { Int64($0) }
+        #expect(many.count <= 32 && many.reduce(0) { $0 + Int($1.columns) } <= 8192)
     }
 
     /// 5d-2 T9 M3: only the visible slice's frames are asked for, at most

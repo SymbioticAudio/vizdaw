@@ -1,4 +1,5 @@
 import AppKit
+import SymbioticTokens
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -362,9 +363,12 @@ private func log(_ f: FakeSession) -> [String] {
     }
 
     @Test func laneColoursWrapAroundThePalette() {
-        #expect(PianoRollPalette.color(8) == PianoRollPalette.color(0))
-        #expect(PianoRollPalette.color(-1) == PianoRollPalette.color(7))
-        #expect(PianoRollPalette.color(1) != PianoRollPalette.color(0))
+        // The theme's swatches, in order (plan 7b Ruling 13).
+        let t = Theme.classicLight
+        #expect(PianoRollPalette.color(8, in: t) == PianoRollPalette.color(0, in: t))
+        #expect(PianoRollPalette.color(-1, in: t) == PianoRollPalette.color(7, in: t))
+        #expect(PianoRollPalette.color(1, in: t) != PianoRollPalette.color(0, in: t))
+        #expect(PianoRollPalette.color(0, in: t) == t.swatch.red.nsColor)
     }
 }
 

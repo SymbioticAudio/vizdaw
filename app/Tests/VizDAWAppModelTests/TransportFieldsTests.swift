@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SymbioticTokens
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -15,6 +16,65 @@ private let beat: Int64 = 15_360
     func model() throws -> (FakeSession, DocumentModel) {
         let f = demoFake()
         return (f, try DocumentModel(session: f))
+    }
+
+    /// The B4 run found the field labels and values faint in Classic
+    /// Light: both take the theme's text colour, from the start and on a
+    /// change (plan 7b Task B5).
+    @Test func theFieldsLabelsAndValuesAreInTheThemesText() throws {
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        for t in [v.theme, .classicLight, .studioDark] {
+            v.theme = t
+            for f in TransportField.allCases {
+                #expect(v.labels[f]?.textColor == t.label, "\(t.id) \(f) label")
+                #expect(v.fields[f]?.textColor == t.label, "\(t.id) \(f) value")
+                #expect(v.fields[f]?.backgroundColor == t.canvas, "\(t.id) \(f) background")
+            }
+        }
+    }
+
+    /// Task 7 review I1: the transport bar puts the fields (with step
+    /// entry's summary in front) on a second row when one row cannot hold
+    /// them, so none is cut at the default 980-point window or at 700.
+    @Test func theTransportBarTakesTwoRowsWhenTheFieldsDoNotFit() throws {
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let fields = v.fittingWidth
+        #expect(fields > 5 * 86 && fields < 900, "five 86-point fields and their labels: \(fields)")
+        // The bar's other controls in the demo: Play to the position (325),
+        // the device to the right pane toggle (345).
+        func rows(_ width: CGFloat) -> Int {
+            TransportBarRows.count(width: width, leading: 325, fields: fields, trailing: 345, spacing: 10)
+        }
+        #expect(rows(1600) == 1, "a wide window keeps one row")
+        #expect(rows(980) == 2, "the default window")
+        #expect(rows(700) == 2, "the minimum window")
+        #expect(rows(325 + 10 + fields + 10 + 345 + 16) == 1, "exactly enough, with the bar's padding")
+        #expect(rows(325 + 10 + fields + 10 + 345 + 15) == 2)
+        #expect(rows(.nan) == 2 && rows(-1) == 2, "a bad width is never one row")
+        // The second row at the 700-point minimum (700 − 16): every field
+        // shows, narrowed from 86 towards 72, its label whole.
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 684, height: 22), styleMask: [.titled], backing: .buffered,
+            defer: true)
+        w.isReleasedWhenClosed = false
+        defer { w.close() }
+        // As SwiftUI sizes its host: a width the fields cannot push.
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 684, height: 22))
+        w.contentView = box
+        v.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(v)
+        NSLayoutConstraint.activate([
+            v.leadingAnchor.constraint(equalTo: box.leadingAnchor), v.topAnchor.constraint(equalTo: box.topAnchor),
+            v.widthAnchor.constraint(equalToConstant: 684), v.heightAnchor.constraint(equalToConstant: 22),
+        ])
+        box.layoutSubtreeIfNeeded()
+        for f in TransportField.allCases {
+            let r = try #require(v.fields[f]).convert(try #require(v.fields[f]).bounds, to: v)
+            #expect(r.maxX <= 684 && r.width >= 72, "\(f): \(r)")
+        }
+        #expect(v.fittingWidth == fields, "the row rule still sees the full width")
     }
 
     @Test func fieldsShowAndTakeBarBeatUnit() throws {
@@ -174,6 +234,194 @@ private let beat: Int64 = 15_360
         (w.firstResponder as? NSTextView)?.insertTab(nil)
         #expect(v.fields[.punchOut]?.currentEditor() != nil, "Tab: Punch Out")
         #expect(punchIn.currentEditor() == nil)
+    }
+
+    func endEditing(_ v: TransportFieldsView, _ field: NSTextField, _ movement: NSTextMovement?) {
+        let info: [AnyHashable: Any]? = movement.map { ["NSTextMovement": $0.rawValue] }
+        v.controlTextDidEndEditing(
+            Notification(name: NSControl.textDidEndEditingNotification, object: field, userInfo: info))
+    }
+
+    /// Final wave (queued carry): the first click into any of the five
+    /// fields selects all its text, so a click and typing replaces it; a
+    /// click into a field already being edited leaves its selection to
+    /// the click. The same view serves the document bar and the mixer
+    /// window's.
+    @Test func theFirstClickIntoAFieldSelectsAllItsText() throws {
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        w.contentView = v
+        for f in TransportField.allCases {
+            let field = try #require(v.fields[f] as? TransportTextField)
+            field.stringValue = "12.3.456"
+            field.armed = true
+            #expect(w.makeFirstResponder(field), "\(f)")
+            let editor = try #require(field.currentEditor())
+            editor.selectedRange = NSRange(location: 3, length: 0)
+            field.afterClick(wasEditing: true)
+            #expect(editor.selectedRange == NSRange(location: 3, length: 0), "\(f): not the first click")
+            field.afterClick(wasEditing: false)
+            #expect(editor.selectedRange == NSRange(location: 0, length: 8), "\(f): the first click")
+            w.makeFirstResponder(nil)
+        }
+    }
+
+    /// Plan 7d Ruling 7: only Return, Tab and Shift-Tab commit; a click
+    /// elsewhere (movement `.other`) or no movement at all cancels.
+    @Test func clickingAwayCancelsATypedField() throws {
+        let (f, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        w.contentView = v
+        let pos = try #require(v.fields[.position])
+        for movement in [NSTextMovement.other, nil] {
+            #expect(v.focus(.position))
+            v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+            pos.stringValue = "5"
+            endEditing(v, pos, movement)
+            #expect(f.locates.isEmpty, "\(String(describing: movement)): nothing moves")
+            #expect(pos.stringValue == m.fieldText(.position))
+            #expect(m.editor.textEditors.isEmpty)
+            w.makeFirstResponder(nil)
+        }
+    }
+
+    /// Pre-flight C1: a press that does not take the keyboard (a bar
+    /// button, the readouts) still ends the edit, and so does the window
+    /// resigning key; a bar button then acts (controller ruling I-4).
+    @Test func aMouseDownOutsideTheFieldEndsTheEdit() throws {
+        #expect(TransportFieldsView.endsOnMouseDown(inField: false))
+        #expect(!TransportFieldsView.endsOnMouseDown(inField: true))
+        let (f, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let readouts = TransportReadoutsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 80), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        let content = NSView(frame: CGRect(x: 0, y: 0, width: 900, height: 80))
+        w.contentView = content
+        v.frame = CGRect(x: 0, y: 0, width: 700, height: 30)
+        readouts.frame = CGRect(x: 0, y: 40, width: 400, height: 40)
+        content.addSubview(v)
+        content.addSubview(readouts)
+        content.layoutSubtreeIfNeeded()
+        let pos = try #require(v.fields[.position])
+        let over = CGPoint(x: 100, y: 60)
+        #expect(readouts.frame.contains(over) && !readouts.acceptsFirstResponder)
+        let press = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: over, modifierFlags: [], timestamp: 0,
+                windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        let ends: [(String, () -> Void)] = [
+            ("a press on the readouts", { v.handleMouseDown(press) }),
+            ("the window resigning key", { v.resignKeyCancels() }),
+        ]
+        for (what, end) in ends {
+            #expect(v.focus(.position))
+            v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+            pos.stringValue = "5"
+            #expect(!m.transportKeysEnabled)
+            end()
+            #expect(w.firstResponder !== pos.currentEditor() && pos.currentEditor() == nil, "\(what)")
+            #expect(f.locates.isEmpty, "\(what): nothing moves")
+            #expect(pos.stringValue == m.fieldText(.position), "\(what): the old text")
+            #expect(m.transportKeysEnabled, "\(what): a bar button then acts")
+        }
+    }
+
+    /// A window holding the fields view and nothing else, laid out.
+    /// Not deferred: a real window number, so a press's `window` is it.
+    func laidOut(_ m: DocumentModel) -> (TransportFieldsView, NSWindow) {
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: false)
+        w.contentView = v
+        v.layoutSubtreeIfNeeded()
+        return (v, w)
+    }
+
+    /// Fix round 1 M5: a press inside the field being edited (placing the
+    /// caret) passes through: the edit, its text and its watch stay.
+    @Test func aPressInsideTheFieldKeepsTheEdit() throws {
+        let (f, m) = try model()
+        let (v, w) = laidOut(m)
+        let pos = try #require(v.fields[.position])
+        #expect(v.focus(.position))
+        v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+        pos.stringValue = "5"
+        let inside = pos.convert(CGPoint(x: pos.bounds.midX, y: pos.bounds.midY), to: nil)
+        let press = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: inside, modifierFlags: [], timestamp: 0,
+                windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        v.handleMouseDown(press)
+        #expect(pos.currentEditor() != nil && w.firstResponder === pos.currentEditor())
+        #expect(v.editing == .position && v.isWatching && pos.stringValue == "5")
+        #expect(f.locates.isEmpty && !m.transportKeysEnabled)
+    }
+
+    /// Fix round 1 M5 (pre-flight C1): the mouse-down monitor and the
+    /// resign-key observer go when the edit ends: Return, Esc, a click
+    /// elsewhere, the window losing key and teardown.
+    @Test func theEditsWatchIsRemovedWhenItEnds() throws {
+        let (_, m) = try model()
+        let (v, w) = laidOut(m)
+        let pos = try #require(v.fields[.position])
+        func begin() {
+            v.focus(.position)
+            v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+            #expect(v.isWatching)
+        }
+        begin()
+        pos.stringValue = "2"
+        endEditing(v, pos, .return)
+        #expect(!v.isWatching, "Return")
+        w.makeFirstResponder(nil)
+        begin()
+        #expect(v.control(pos, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        #expect(!v.isWatching, "Esc")
+        begin()
+        w.makeFirstResponder(nil)
+        #expect(!v.isWatching, "the field editor resigning")
+        begin()
+        v.resignKeyCancels()
+        #expect(!v.isWatching, "the window losing key")
+        begin()
+        w.contentView = nil
+        #expect(!v.isWatching && m.editor.textEditors.isEmpty, "teardown")
+    }
+
+    /// Ruling 7: Tab commits and moves on (README 101 types Edit In, then
+    /// tabs to Edit Out, as one entry).
+    @Test func tabCommitsAndMovesOn() throws {
+        #expect(TransportFieldsView.commits(.return))
+        #expect(TransportFieldsView.commits(.tab) && TransportFieldsView.commits(.backtab))
+        #expect(!TransportFieldsView.commits(.other) && !TransportFieldsView.commits(.cancel))
+        #expect(!TransportFieldsView.commits(nil))
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        w.contentView = v
+        let editIn = try #require(v.fields[.editIn])
+        #expect(v.focus(.editIn))
+        v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: editIn))
+        editIn.stringValue = "3"
+        endEditing(v, editIn, .tab)
+        #expect(m.editor.selection.timeRange?.start == 2 * bar)
+        #expect((v.fields[.editOut] as? TransportTextField)?.armed == true, "the next field is armed")
+    }
+
+    /// Plan 7a n6: P, E and U focus the key mixer window's own fields.
+    @Test func fieldKeysGoToTheKeyMixerWindow() {
+        let d = UUID()
+        let other = UUID()
+        #expect(TransportFieldsTarget.choose(keyKind: .mixer, keyDoc: d, doc: d) == .mixerWindow)
+        #expect(TransportFieldsTarget.choose(keyKind: .mixer, keyDoc: other, doc: d) == .document)
+        #expect(TransportFieldsTarget.choose(keyKind: .document, keyDoc: d, doc: d) == .document)
+        #expect(TransportFieldsTarget.choose(keyKind: nil, keyDoc: nil, doc: d) == .document)
     }
 
     @Test func fieldKeysFocusTheirField() throws {

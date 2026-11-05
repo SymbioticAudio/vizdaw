@@ -16,6 +16,7 @@ public protocol MenuCommands {
 
 extension TransportCommands: MenuCommands {}
 extension DrumCommands: MenuCommands {}
+extension ViewCommands: MenuCommands {}
 
 /// The transport keys, modes and locators (editors spec §4f, plan 4f
 /// Rulings 7–10): one implementation for the menu items, the keys and
@@ -31,7 +32,8 @@ public enum TransportCommands {
         [
             "transport.stop", "transport.play", "transport.play_selection", "transport.play_from_selection",
             "transport.play_from_edit_in", "transport.record", "transport.scrub",
-            "transport.previous_marker", "transport.next_marker", "transport.overdub", "transport.punch",
+            "transport.previous_marker", "transport.next_marker", "transport.rewind", "transport.fast_forward",
+            "transport.overdub", "transport.punch",
             "transport.arm_previous", "transport.arm_next", "record.keep_pass", "record.discard_pass",
             "editors.snap",
         ]
@@ -87,6 +89,12 @@ public enum TransportCommands {
     /// Runs `id` on `m`; `on` sets a toggle (nil flips it).
     @discardableResult
     public static func run(_ id: String, on: Bool? = nil, _ m: DocumentModel) -> KeyOutcome {
+        // A typed punch time not yet set (the popover's, or the bar's own
+        // Punch In or Out) refuses Record with one message on every path,
+        // before the text-field gate (controller ruling I5, fix round 1 M4).
+        if id == "transport.record", !m.record.isRecording, m.record.hasOpenPunchDraft {
+            return .refused(RecordModel.openDraftMessage)
+        }
         if typesText(id) && !m.transportKeysEnabled { return .unavailable(textFieldHasKeyboard) }
         switch id {
         case "transport.scrub":
@@ -150,6 +158,14 @@ public enum TransportCommands {
                 return .unavailable(forward ? "No marker after the position." : "No marker before the position.")
             }
             return attempt { try m.moveTo(t) }
+        case "transport.rewind", "transport.fast_forward":
+            // One bar, as a click on the bar's button (plan 7d Ruling 3):
+            // the menu items and the channel. A held key goes to
+            // `TransportShuttle.keyStep` instead.
+            let forward = id == "transport.fast_forward"
+            let stepped = attempt { _ = try m.session.transportStepBar(forward: forward) }
+            m.poll()
+            return stepped
         case "transport.arm_previous", "transport.arm_next":
             let forward = id == "transport.arm_next"
             guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
@@ -201,7 +217,16 @@ public enum TransportCommands {
         }
     }
 
-    private static func refused(_ error: any Error) -> KeyOutcome {
+    /// The status-line text a refused transport action shows: what the
+    /// shuttle says for a failed wind (⏮ uses it too).
+    public static func statusText(_ error: any Error) -> String {
+        switch refused(error) {
+        case .refused(let why), .busy(let why), .unavailable(let why): why
+        case .done: ""
+        }
+    }
+
+    static func refused(_ error: any Error) -> KeyOutcome {
         if case VizError.Busy(let message) = error { return .busy(message) }
         return .refused(AlertItem(error, title: "").message)
     }

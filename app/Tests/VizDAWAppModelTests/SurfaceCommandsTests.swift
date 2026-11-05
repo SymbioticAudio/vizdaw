@@ -155,7 +155,7 @@ final class FakeSurfaceCore: SurfaceCore, @unchecked Sendable {
     /// and added without a position (a bank of its own).
     @Test func aKontrolIsAddedWithoutAPosition() throws {
         #expect(SurfaceCommands.parseKind("kontrol_mk3") == .kontrolMk3)
-        #expect(SurfaceSettings.title(.kontrolMk3) == "Kontrol S-Series MK3 (DAW mode)")
+        #expect(SurfaceSettings.title(.kontrolMk3) == "Host-integration keyboard (DAW mode)")
         let c = FakeSurfaceCore()
         let s = SurfaceSettings(core: c)
         s.add(.kontrolMk3, input: "In A", output: "Out A", position: 3)

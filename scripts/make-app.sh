@@ -13,6 +13,9 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/VizDAW" "$app/Contents/MacOS/VizDAW"
 cp target/ffi/vizdaw-scan "$app/Contents/MacOS/vizdaw-scan"
+# The licence, with its GPL section 7 permission for the branded icons
+# (plan 7b Ruling 6): the conveyed app carries it.
+cp LICENSE "$app/Contents/Resources/LICENSE"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

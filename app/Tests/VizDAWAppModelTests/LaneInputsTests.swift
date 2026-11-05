@@ -34,6 +34,24 @@ import VizDAWCore
         Dictionary(g.map { ($0.title, $0.choices.map(\.title)) }, uniquingKeysWith: { a, _ in a })
     }
 
+    @Test func aSharedPathsPickerNamesItsLane() throws {
+        let f = editorFake()
+        f.laneTable[3]?[0].audioOut = 7
+        f.laneTable[3]?[1].audioOut = 7
+        f.laneTable[3]?[0].name = "Vox"
+        f.laneTable[3]?[0].input = .audio(first: 0, stereo: false, returnOf: nil)
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        let vox = m.lanes[0]
+        #expect(m.inputs.pickerTitle(vox, sharesPath: true) == "Vox: In 1")
+        #expect(m.inputs.pickerTitle(vox, sharesPath: false) == "In 1")
+        #expect(m.inputs.pickerTitle(vox) == "Vox: In 1")
+        f.laneTable[3]?[1].audioOut = 8
+        let alone = try DocumentModel(session: f)
+        alone.select(3)
+        #expect(alone.inputs.pickerTitle(alone.lanes[0]) == "In 1")
+    }
+
     @Test func audioChoicesNameTheDevicesChannels() throws {
         let l = audioLane(30, nil)
         let (m, f) = try doc([l])

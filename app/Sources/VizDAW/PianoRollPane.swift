@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -21,11 +22,14 @@ struct PianoRollHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> PianoRollContainer { PianoRollContainer(model: model) }
 
-    func updateNSView(_ view: PianoRollContainer, context: Context) {}
+    func updateNSView(_ view: PianoRollContainer, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 /// Tool, keyboard, shown lanes, edit lane, panes, row height and zoom.
 struct PianoRollBar: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: PianoRollModel
     @Bindable var editor: EditorModel
 
@@ -38,7 +42,7 @@ struct PianoRollBar: View {
     private var editLaneName: String { model.editLane.flatMap { model.row($0)?.name } ?? "—" }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: theme.spacing.m) {
             Picker("Tool", selection: $editor.tool) {
                 ForEach(Tool.allCases, id: \.self) { Text($0.title).tag($0) }
             }
@@ -69,29 +73,29 @@ struct PianoRollBar: View {
             Button {
                 editor.updateLayout { $0.pianoRoll.rowHeight = max($0.pianoRoll.rowHeight - 2, 4) }
             } label: {
-                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                AppIcon.collapse.image
             }
             .help("Shorter Rows")
             Button {
                 editor.updateLayout { $0.pianoRoll.rowHeight = min($0.pianoRoll.rowHeight + 2, 40) }
             } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                AppIcon.expand.image
             }
             .help("Taller Rows")
             Button {
                 editor.updateLayout { $0.pianoRoll.ticksPerPoint = min($0.pianoRoll.ticksPerPoint * 1.5, 61_440) }
             } label: {
-                Image(systemName: "minus.magnifyingglass")
+                AppIcon.zoomOut.image
             }
             .help("Zoom Out")
             Button {
                 editor.updateLayout { $0.pianoRoll.ticksPerPoint = max($0.pianoRoll.ticksPerPoint / 1.5, 2) }
             } label: {
-                Image(systemName: "plus.magnifyingglass")
+                AppIcon.zoomIn.image
             }
             .help("Zoom In")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 }

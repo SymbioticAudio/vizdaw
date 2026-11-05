@@ -37,6 +37,14 @@ pub struct BindingRow {
     /// Settings › Keys can learn it to a MIDI control (plan 5f-1 Ruling
     /// 8): `learn_command` takes it.
     pub learnable: bool,
+    /// Its default keys give way to a user's binding or keyboard slot on
+    /// the same key (plan 7d controller ruling I3).
+    pub yields: bool,
+    /// The user set its bindings: a keys file's entry for it (any keys,
+    /// its defaults included) or its own row in Settings › Keys (plan 7d
+    /// controller ruling, customised, after B2). Losing a default to
+    /// another command's binding does not make it customised.
+    pub customised: bool,
 }
 
 fn mods_row(m: u8) -> ModifiersRow {
@@ -91,6 +99,7 @@ impl Keymap {
             .iter()
             .map(|c| {
                 let now = k.chords(c.id);
+                let defaults = default_chords(c);
                 BindingRow {
                     id: c.id.to_string(),
                     menu: c.menu.to_string(),
@@ -98,10 +107,12 @@ impl Keymap {
                     menu_item: c.menu_item,
                     step_entry: c.context == KeyContext::StepEntry,
                     keys: now.iter().map(Chord::text).collect(),
-                    defaults: default_chords(c).iter().map(Chord::text).collect(),
+                    defaults: defaults.iter().map(Chord::text).collect(),
                     menu_key: now.first().map(Chord::menu_key),
                     menu_modifiers: mods_row(now.first().map_or(0, |ch| ch.mods)),
                     learnable: crate::surfaces::bindable(c.id).is_ok(),
+                    yields: c.yields,
+                    customised: k.explicit(c.id),
                 }
             })
             .collect()

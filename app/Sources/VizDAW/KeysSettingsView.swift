@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -8,6 +9,7 @@ import VizDAWEditors
 /// keys; record a new key, reset one or all, save and load a bindings
 /// file, and keep the number row for locators.
 struct KeysSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var keys: KeyBindings
     let store: DocumentStore
 
@@ -30,14 +32,14 @@ struct KeysSettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             Toggle("Number keys always go to locators (step entry uses the keypad)", isOn: $keys.reserveNumberRow)
             if let learn = document?.learn {
                 LearnBanner(learn: learn, document: document)
             }
             if let m = keys.message {
                 HStack {
-                    Text(m).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                    Text(m).font(theme.type.caption.font).foregroundStyle(.secondary).lineLimit(3)
                     if keys.pending != nil {
                         Button("Replace") { keys.confirmReplace() }
                         Button("Cancel") { keys.cancelReplace() }
@@ -51,12 +53,13 @@ struct KeysSettingsView: View {
                             HStack {
                                 Text(row.title)
                                 if row.stepEntry {
-                                    Text("step entry").font(.caption2).foregroundStyle(.secondary)
+                                    Text("step entry").font(theme.type.caption.font).foregroundStyle(.secondary)
                                 }
                                 Spacer()
                                 Text(row.keys.joined(separator: "  "))
-                                    .font(.system(.body, design: .monospaced))
-                                    .foregroundStyle(row.keys == row.defaults ? .primary : Color.accentColor)
+                                    .font(theme.type.body.font.monospaced())
+                                    .foregroundStyle(
+                                        row.keys == row.defaults ? theme.text.primary.color : theme.accent.accent.color)
                                 KeyRecorder(title: row.title) { keys.record(row.id, key: $0) }
                                     .frame(width: 96, height: 20)
                                 learnButton(row)
@@ -74,7 +77,7 @@ struct KeysSettingsView: View {
                 Button("Reset All") { keys.resetAll() }
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 720, height: 520)
         .modifier(KeysLearnAlert(document: document))
     }
@@ -136,11 +139,14 @@ struct KeyRecorder: NSViewRepresentable {
         let v = KeyRecorderView()
         v.title = title
         v.onKey = onKey
+        v.theme = context.environment.symbioticTheme
         return v
     }
 
+    /// In the theme of its root (B4 review M1: it was never themed).
     func updateNSView(_ v: KeyRecorderView, context: Context) {
         v.title = title
         v.onKey = onKey
+        v.theme = context.environment.symbioticTheme
     }
 }

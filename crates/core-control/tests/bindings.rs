@@ -29,6 +29,7 @@ const fn spec(
         document: true,
         params: &[],
         dialogs: &[],
+        yields: false,
     }
 }
 
@@ -397,4 +398,52 @@ fn a_slot_cannot_take_a_system_key() {
     assert_eq!(k.slot_clash("w", 8), Some("Close Window"), "kept unbound");
     assert_eq!(k.slot_clash("q", 0), None, "plain Q is free");
     assert_eq!(k.slot_clash("q", 4), None, "⌥Q is free");
+}
+
+/// Controller ruling I3 (plan 7d Ruling 4): a key the user's keys file
+/// gives another command stays that command's; the new default gives way
+/// silently. With nothing bound, or bound to the new command itself, the
+/// defaults stand.
+#[test]
+fn a_keys_file_key_wins_over_a_new_default() {
+    let load = |bindings: serde_json::Value| {
+        let doc = json!({"vizdaw_keys": 1, "bindings": bindings}).to_string();
+        Keymap::from_json(COMMANDS, &doc).unwrap()
+    };
+    let (k, skipped) = load(json!({"transport.loop": ["Keypad+"]}));
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(k.lookup(c("Keypad+"), false, false), Some("transport.loop"));
+    assert_eq!(k.chords("transport.loop"), vec![c("Keypad+")]);
+    assert_eq!(k.chords("transport.fast_forward"), vec![c("⇧.")]);
+    assert_eq!(
+        k.chords("transport.rewind"),
+        vec![c("⇧,"), c("Keypad-")],
+        "untouched"
+    );
+    assert_eq!(k.lookup(c("Keypad+"), true, false), Some("step.tie"));
+
+    let (k, skipped) = load(json!({}));
+    assert!(skipped.is_empty());
+    assert_eq!(
+        k.chords("transport.fast_forward"),
+        vec![c("⇧."), c("Keypad+")]
+    );
+    assert_eq!(k.chords("transport.rewind"), vec![c("⇧,"), c("Keypad-")]);
+
+    let (k, skipped) = load(json!({"transport.fast_forward": ["Keypad+"]}));
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(
+        k.lookup(c("Keypad+"), false, false),
+        Some("transport.fast_forward")
+    );
+    // Bound explicitly, it is a user binding like any other.
+    let (k, skipped) = load(json!({
+        "transport.fast_forward": ["Keypad+"],
+        "transport.loop": ["Keypad+"],
+    }));
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        k.lookup(c("Keypad+"), false, false),
+        Some("transport.fast_forward")
+    );
 }

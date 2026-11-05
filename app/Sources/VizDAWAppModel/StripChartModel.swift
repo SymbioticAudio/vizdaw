@@ -32,7 +32,7 @@ public enum AutomationTargets {
             lanes += [.automation(.mute(strip: s.id)), .automation(.solo(strip: s.id))]
             lanes += s.sends.indices.map { .automation(.send(strip: s.id, index: UInt16(clamping: $0))) }
             menus.append(StripMenu(title: s.name, lanes: lanes))
-            for slot in (s.instrument.map { [$0] } ?? []) + s.inserts {
+            for slot in s.slots {
                 n.slots[slot.id] = slot.plugin.name
                 let params = (try Self.read { try session.params(slot: slot.id) } ?? []).filter { $0.automatable && !$0.hidden }
                 n.params[slot.id] = params
@@ -114,6 +114,27 @@ public final class StripChartModel {
             document: document,
             read: { [weak document] in document?.editor.layout.detail },
             write: { [weak document] d in document?.editor.updateLayout { $0.detail = d } })
+    }
+
+    /// The right pane's controllers chart (plan 7a Ruling 7): it follows the
+    /// selected lane (else the armed one) and keeps its rows per lane.
+    public static func controllers(_ document: DocumentModel) -> StripChartModel {
+        StripChartModel(
+            document: document,
+            read: { [weak document] in
+                guard let document, let seq = document.selectedSeq, let lane = document.focusLanes().first
+                else { return nil }
+                return DetailState(
+                    kind: .stripChart, target: .lane(seq: seq, lane: lane.id),
+                    stripRows: document.editor.layout.controllers[EditorLayout.controllersKey(seq, lane.id)],
+                    stripRowsLane: LaneKey(seq, lane.id))
+            },
+            write: { [weak document] d in
+                // Keyed on the lane the state was read for, not the focus
+                // now (Task 4 review M4: a surface may arm a lane mid-stroke).
+                guard let document, case .lane(let seq, let lane) = d.target, let rows = d.stripRows else { return }
+                document.editor.updateLayout { $0.controllers[EditorLayout.controllersKey(seq, lane)] = rows }
+            })
     }
 
     /// The Strip Chart of torn-off window `id`.

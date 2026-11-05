@@ -19,7 +19,7 @@ it runs plain `swift`.
 Launch arguments: `--demo` opens the demo project; a path ending in
 `.vizdaw` opens that project; `--no-scan` skips the plugin scan at launch;
 `--control PATH` turns on the agent control channel (below); `--smoke`
-plays the demo for 3 s with the mixer open, puts Apple's AUDelay
+plays the demo for 3 s with the mixer open, puts the system's AUDelay
 on the first strip and opens its window, prints the transport, the mixer
 and the editor size, and exits 0 when all of them worked. `--smoke` uses a
 temporary support folder and never scans.
@@ -43,12 +43,15 @@ temporary support folder and never scans.
 ## Editors (plan 4a)
 
 - The document window shows the arrangement (the selected sequence's
-  lanes and their blocks) over a detail pane. The piano roll (plan 4b)
-  is built; the other detail editors arrive in plans 4c-4e and until
-  then the pane names its target and event count.
-  Cmd-1 to Cmd-4 choose piano roll, list, Strip Chart or drum grid;
+  lanes and their blocks) over the bottom pane's editor (plan 7a: Left,
+  Bottom and Right Pane, see steps 199-206). The piano roll (plan 4b),
+  list (4c), Strip Chart (4d), drum grid (4e) and audio editor (7c) are
+  all built.
+  Cmd-1 to Cmd-4 choose piano roll, list, Strip Chart or drum grid and
+  Cmd-5 the audio editor;
   Option-Cmd-1 to Option-Cmd-4 open one in its own window.
-- Blocks follow the toolbar's rule (silence gap, fixed bars, whole lane);
+- Blocks follow the arrangement bar's rule (silence gap, fixed bars,
+  whole lane);
   a reference is always its own purple block named after its sequence.
   Drag moves, Option-drag copies, dragging onto another lane merges; G
   toggles snap; Escape cancels a drag; a drag in the ruler selects a time
@@ -57,7 +60,7 @@ temporary support folder and never scans.
   not, has a stable ID and can be bound in VizDAW > Settings > Keys;
   menus show the bound keys. Single unmodified keys drive the transport
   and the modes (Space, S, R, Y, K, Return, comma and period, L, O, I, T,
-  G); P, E and U focus the Position, Edit In and Punch In fields; 0-9 go
+  G; Shift-comma and Shift-period rewind and fast-forward a bar, plan 7d); P, E and U focus the Position, Edit In and Punch In fields; 0-9 go
   to locators, Option-digit sets one and Option-Shift-digit clears it.
   A text field always keeps the keys it types: a letter typed into any
   field is never a shortcut, and while a text field (rename, comment,
@@ -68,9 +71,11 @@ temporary support folder and never scans.
   (the single-key transport shortcuts do not work while a plugin window
   is in front; Command keys do). While an input method is composing,
   keys go to the text.
-- The editor layout (detail pane, editor windows and their frames, the
-  sidebar order, block rule, light mode, snap, zoom) is saved in the
-  project's `ui.json` when you save; it is not an undo step.
+- The editor layout (the bottom pane's editor, editor windows and their
+  frames, the sequence list's order, block rule, light mode, snap, zoom,
+  and from plan 7a each main view's panes and the document window's
+  frame) is saved in the project's `ui.json` when you save; it is not an
+  undo step.
 
 `VIZDAW_AUDIO=offline` renders through the offline backend in real time
 (no sound, device label "Offline"). Never set it for normal use.
@@ -114,6 +119,21 @@ whether automation is suspended or being written. `state.get input`'s
 `levels` are each channel's peak since the last read (held, so a quiet
 read can still show a recent peak) and its list is as long as the channel
 count at the last poll (one poll stale after a device change).
+
+Windows and panes (plan 7a): `state.get layout` answers the document
+window's main view (`arrange` or `mix`), each view's left, bottom and
+right panes (shown, view, size and the views on that pane's list) and
+what the left pane shows (`left_shows`: `strip`, `inspector`, `sequences`,
+`nothing` or `hidden`; `left_strip`: the strip the rule picks).
+`state.get editor`'s `detail` is the bottom pane's editor whether or not
+it shows; `state.get layout` says whether it does.
+`ui.view_arrange` and `ui.view_mix` switch the main view;
+`ui.toggle_left`, `ui.toggle_bottom` and `ui.toggle_right` show and hide
+a pane (absent `on` toggles); `ui.pane {"pane": "right", "view":
+"markers", "size": 300, "shown": true, "main": "mix"}` sets one pane of
+one view, refusing a view off that pane's list with `invalid_params` and
+changing nothing. None of them opens a dialog; `window.mixer` and
+`window.media_pool` still open their own windows.
 
 `vizctl` drives it from a shell:
 
@@ -159,13 +179,14 @@ VoiceOver or real devices.
 ## Manual smoke test
 
 1. `scripts/build-ffi.sh && scripts/swift.sh run VizDAW`. A window appears
-   in front with a menu bar (File, Edit, Editors, Sequence, Transport).
+   in front with a menu bar (File, Edit, View, Editors, Modify, Sequence,
+   Region, Drum, Transport, Step, Automation, Window).
 2. File > Create Demo Project. A second window opens; the sidebar shows
    Song under "Top-level" and Beat (1) and Groove (2) under "Used as
    reference".
 3. Song is selected; the arrangement shows the lanes Groove and Chords. Press
    Space: the demo sounds through the speakers, the position display
-   advances (bar.beat.unit and m:ss.fff), the tempo slows over the last two
+   advances (the Bar readout reads bar.beat.unit, the Time readout m:ss.fff), the tempo slows over the last two
    bars, and playback stops by itself at the end.
 4. Press Space again and, while it plays, click M in the Chords lane header: the
    chords drop out within a moment. Edit > Undo Set Lane Mute/Solo/Arm
@@ -194,8 +215,9 @@ multi-output drum instrument).
    and the AU/CLAP filter narrow the table.
 10. Open the demo, then Window > Mixer: strips "Built-in Synth" and
     "Master", each with a fader, pan, M/S, an output menu and a meter that
-    moves while playing. The toolbar shows the DSP load.
-11. Mixer toolbar > Instruments > "Built-in Piano: MIDI → Plugin…": the
+    moves while playing. The bar along the top of the mixer shows the
+    DSP load.
+11. The mixer's bar > Instruments > "Built-in Piano: MIDI → Plugin…": the
     browser lists instruments grouped by vendor; pick Diva. A "Built-in
     Piano" instrument strip appears; its slot turns green once loaded.
     Play Song: the chords sound through Diva. (Instruments > New Plugin
@@ -255,7 +277,7 @@ Use the demo project (File > Create Demo Project; its window is titled
     Stop: the playhead stays where playback stopped.
 23. Ruler: drag in the ruler from bar 2 to bar 4 with any tool chosen: the
     range is shaded (snapped to beats) in the ruler and across both lanes.
-    Click in the ruler: the position display jumps there.
+    Click in the ruler: the Bar and Time readouts and the Position field jump there.
 24. Drag feel: press on the second Groove block and move 2 points: nothing
     moves. Drag it one bar right: it follows the pointer (and, while
     playing, the music follows within a moment). Press Escape before
@@ -295,7 +317,7 @@ Use the demo project (File > Create Demo Project; its window is titled
     status line and changes nothing; Parameters... (the repeats sheet) with
     Repeats 2 doubles the block, Transpose +5 is audible. Each is one Undo
     step.
-32. Detail pane: double-click the Chords block: the pane below shows the
+32. Bottom pane: double-click the Chords block: the pane below shows the
     piano roll (see plan 4b); Cmd-2 switches to List; Option-Cmd-1 opens a
     "Piano Roll — Untitled" window. Option-Cmd-2 also opens a List window.
     Select Beat in the sidebar, open a window on it, then Delete... Beat:
@@ -320,7 +342,8 @@ Use the demo project (File > Create Demo Project; its window is titled
     through it reads blocks such as "Block on Chords, bars 1 to 12, 40
     events" and "Reference to Groove on Groove, bars 1 to 4"; VO-Space on a
     block selects it. The lane headers read "Chords, Built-in Piano"; the
-    toolbar controls (tool, Snap, Blocks, Light, Follow, zoom) are labelled.
+    arrangement bar's controls (tool, Snap, Blocks, Light, Follow, zoom)
+    are labelled.
 
 ### Piano roll (plan 4b)
 
@@ -329,8 +352,8 @@ otherwise. The audio engine starts on the first Play: until then pressing a
 note shows "Notes sound once the audio engine runs: press Play once." once,
 so press Space twice (play, stop) before the sound steps.
 
-36. Double-click the Chords block: the detail pane shows the piano roll with
-    a toolbar (Arrow/Pencil/Eraser, Keyboard, Lanes, Insert Into, Audio,
+36. Double-click the Chords block: the bottom pane shows the piano roll with
+    its bar (Arrow/Pencil/Eraser, Keyboard, Lanes, Insert Into, Audio,
     Expression, row-height and zoom buttons), a keyboard on the left with
     its C keys labelled (C4, C5), the ruler, and one three-note chord per
     bar in orange (Chords is Song's second lane, after Groove; lane colours
@@ -442,7 +465,7 @@ bar 12 (the block has 40 events); Song's tempo map is 120 BPM at 1.1.0, a
 120 ramp at 11.1.0 and 90 at 13.1.0. The status line is the strip under the
 editors (and at the bottom of the panel).
 
-51. List: double-click the Chords block and press Cmd-2: the detail pane
+51. List: double-click the Chords block and press Cmd-2: the bottom pane
     shows an "Event List" table with the columns Position, Length, Kind,
     Destination, Data 1, Data 2 and Mute (a Lane column appears only when
     the list covers more than one lane) and "40 rows" in its bar. The first
@@ -470,7 +493,7 @@ editors (and at the bottom of the panel).
     ("Undo Delete Events").
 54. Typing never plays: while a cell is edited, Space types a space and the
     transport does not start, and Return commits the cell without the
-    position display jumping to the start. With the list focused but not
+    playhead jumping to the start. With the list focused but not
     editing, Return edits the selected row (it does not return to the
     start) and Space plays and stops. Click the arrangement: Return returns
     to the start again.
@@ -594,9 +617,10 @@ editors (and at the bottom of the panel).
     Modify menu is greyed again. Saving a template with no name says "Name
     the template first."
 66. Exact mode: open the piano roll (Cmd-1) on Chords and choose Modify >
-    Exact Mode (Ctrl-Cmd-E; the toolbar's Exact toggle shows it too). Drag a
-    chord note's left edge one beat right: it follows the pointer and, on
-    release, goes back while the panel opens on Move with "by" 1.0 and "Apply
+    Exact Mode (Ctrl-Cmd-E; the piano roll bar's Exact toggle shows it
+    too). Drag a chord note's left edge one beat right: it follows the
+    pointer and, on release, goes back while the panel opens on Move with
+    "by" 1.0 and "Apply
     acts on the dragged events."; Apply moves it as one undo step. A
     middle-zone drag straight up three rows opens Transpose with semitones
     3; a diagonal middle drag opens whichever axis is stronger with a
@@ -636,7 +660,7 @@ otherwise. Its built-in synth plays through the "Built-in Synth" strip; Song
 holds Groove and Chords. Turn snap on (the default, quarters) unless a step
 says otherwise. "The level" means what you hear and the master meter.
 
-68. Strip Chart: double-click the Chords block and press Cmd-3: the detail
+68. Strip Chart: double-click the Chords block and press Cmd-3: the bottom
     pane shows "Strip Chart" with one row titled "Velocity ▾" and a bar
     (Mode: Draw, Modify, Erase; Shape; Step; Rows: 1). The chords' 36
     velocities show as bars at their starts; selected notes are accented.
@@ -689,7 +713,7 @@ says otherwise. "The level" means what you hear and the master meter.
     bar 3 (the mute row shows a held block) and pans across; with a bus and
     a send (mixer), Send 1 automation changes the bus level; Solo on a bus
     silences what does not feed it.
-76. Plugin parameters: add Apple's AUDelay (or the CLAP test gain if
+76. Plugin parameters: add the system's AUDelay (or the CLAP test gain if
     installed) as an insert on Built-in Synth; Automation lists it with its
     automatable parameters; draw Dry/Wet Mix (or Gain) from 0 to full over
     bars 1–4 and play: the effect follows; the plugin's own window moves its
@@ -751,8 +775,9 @@ Run these from a shell in the repository, with `V=target/debug/vizctl`.
     "Save" and no panel appears; `$V run file.save '{"path":
     "/tmp/Demo.vizdaw"}'` saves (the window title becomes "Demo").
     `$V open /tmp/Demo.vizdaw` opens a second window.
-85. Input: `$V find Play` gives the toolbar button's ID; `$V click <ID>`
-    plays without the pointer moving or VizDAW coming to the front;
+85. Input: `$V find Play` gives the transport bar's Play button ID;
+    `$V click <ID>` plays without the pointer moving or VizDAW coming to
+    the front;
     `$V key space` stops; `$V drag 600,168 800,168` (points in the
     arrangement's ruler, from `$V find Arrangement`) selects a range
     (`$V state selection` shows `time_range`); with VoiceOver on, its
@@ -769,7 +794,7 @@ rows Kick, Snare and Closed Hat. Groove's own Drums lane is a plain lane
 that references Beat, not a drum lane. Snap stays on (quarters) unless a
 step says otherwise.
 
-87. Open: click Beat's block and press Cmd-4. The detail pane shows
+87. Open: click Beat's block and press Cmd-4. The bottom pane shows
     "Drum Grid" with a bar (Paint/Erase, Step Matrix, 1/16, 1/16, 1/32,
     Vel 100, +, "Drums: Off") and row headers Kick C2, Snare D2 and
     Closed Hat F#2 under a "Drums" header. Kick lights the cells at beats
@@ -856,9 +881,10 @@ preferences). Keys are the defaults unless a step changes them.
 
 99. Menus and defaults: the Transport menu lists Play / Stop (Space),
     Stop (S), Play Selection (Option-Space), Play from Selection
-    (Shift-Space), Play from Edit-In (Y), Record (R) and Scrub (K), both
-    disabled until sub-project 5, Return to Start (Return), Previous and
-    Next Marker (comma, period), Loop (L), Overdub (O), Punch (I), the Go
+    (Shift-Space), Play from Edit-In (Y), Record (R, dimmed until a
+    sequence is selected) and Scrub (K, always dimmed), Return to Start
+    (Return), Rewind and Fast Forward (Shift-comma, Shift-period; plan 7d),
+    Previous and Next Marker (comma, period), Loop (L), Overdub (O), Punch (I), the Go
     to ... Field items (P, E, U) and Arm Previous/Next Lane
     (Option-Shift-Up/Down). The Step menu lists Step Entry (T) and the
     note values 1/1 to 1/32 (1-6), Dotted (.), Triplet (/), Tie (=), Rest
@@ -872,21 +898,24 @@ preferences). Keys are the defaults unless a step changes them.
     Option-Space: only the range plays, loop on or off; Shift-Space plays
     on from its start; with markers in Song (list editor: insert two
     Marker rows), comma and period jump between them. O and I tick
-    Overdub and Punch (they record nothing yet); R and K do nothing
-    (`$V run transport.record` answers `unavailable` with the reason).
+    Overdub and Punch (they matter once you record, steps 144-154); K does
+    nothing (`$V run transport.scrub` answers `unavailable`: "Scrubbing is
+    not available yet."); R records (plan 7d: the old "R does nothing" is gone).
     Open a plugin's window (Plugins) and type letters: they go to the
     plugin, not to VizDAW's commands (single-key transport shortcuts do
     not work while a plugin window is in front; Command keys do). A plain
     key VizDAW does not use never rings through to the main menu.
-101. Fields: P selects the Position field: type `5` and Return: the
+101. Fields: P (or one click on the field) selects the Position field's text: type `5` and Return: the
     playhead jumps to bar 5 and the keys work again; `9:3:480` (colons,
     commas or spaces separate like dots) lands on bar 9 beat 3 and a half.
-    E focuses Edit In: typing `3` selects bar 3 in the ruler; Tab to Edit
+    E focuses Edit In: typing `3` and pressing Return selects bar 3 in the
+    ruler; Tab to Edit
     Out and type `7` and Return: the range runs to bar 7 (Tab and
     Shift-Tab go round all five fields, so Edit Out and Punch Out, which
     have no key, are reached from the keyboard); an Edit Out
     before Edit In is refused in the status line. U focuses Punch In; Punch Out
-    before Punch In is refused. Escape in a field puts its text back.
+    before Punch In is refused. Escape in a field puts its text back; so does clicking away
+    (plan 7d: Return or Tab commits, nothing else does).
     Typing letters into any text field (a field, the sidebar rename, the
     list editor's cells) types them and never runs a key; while such a
     field has the keyboard, the single-key and Option/Shift transport,
@@ -1093,7 +1122,7 @@ These steps use real hardware, so they are by eye: an audio interface
 with a microphone or a line source, a MIDI keyboard, and a loopback
 cable (an output wired back to an input). Use a throwaway home
 (`vizctl launch`) for the channel steps. The lane headers' input
-pickers, monitor buttons and meters, the toolbar's Record button and
+pickers, monitor buttons and meters, the transport bar's Record button and
 Settings › Audio (steps 144–159) do what the channel commands below do;
 the channel steps stay as they are.
 
@@ -1283,7 +1312,7 @@ checks the same behaviour through the channel. Steps that record
 (144, 145, 149, 153, 154) record over lanes: use a throwaway project or
 a copy, not one you care about.
 
-144. Record button and popover: the toolbar shows a Record button (a
+144. Record button and popover: the transport bar shows a Record button (a
      circle) and a chevron after Loop. R and the button both record; the
      button turns red while recording and stops on the next press. A
      refusal (no lane armed with an input, step entry on) shows in the
@@ -1296,17 +1325,17 @@ a copy, not one you care about.
      "Audio overdub replaces what it overlaps: record into another lane or
      take to layer." While recording the popover's controls are dimmed.
 145. Count-in: set Count-in to 1 bar and press Record: four clicks (the
-     first higher) play while the toolbar shows "Count-in" and the
+     first higher) play while the transport bar shows "Count-in" and the
      playhead waits, then the transport rolls on the downbeat. 2 bars at
      3/4 is six clicks. The click is never recorded. If the audio device
      restarts during the count-in (another device chosen, a sample-rate
      change), the rest of the count-in is skipped and recording starts at
      once (known; backlog).
 146. Time left and loop counters: with one stereo audio lane armed, the
-     toolbar shows the recording time left (for 48 kHz / 24-bit stereo,
+     transport bar shows the recording time left (for 48 kHz / 24-bit stereo,
      about one hour per 1 GB free beyond the last 100 MB); arming a second
      stereo lane halves it; with only MIDI lanes armed it is gone. Loop
-     record: the toolbar counts "Pass 2", then "Pass 3 · 1 kept" after
+     record: the transport bar counts "Pass 2", then "Pass 3 · 1 kept" after
      Keep Pass.
 147. Lane header: each lane has a monitor button (A, I or –) left of M:
      clicking cycles Auto → Input → Off, one undo step "Set Lane Monitor"
@@ -1414,7 +1443,7 @@ a copy, not one you care about.
      measurement while other calls (`$V state transport`) keep answering
      meanwhile.
 158. VoiceOver: a lane header reads like "Vocal, no destination, armed,
-     input In 1+2, monitoring input"; the toolbar's buttons read "Record"
+     input In 1+2, monitoring input"; the transport bar's buttons read "Record"
      (or "Stop Recording") and "Record Options"; a mixer strip's monitor
      button reads its mode.
 159. Microphone prompt left up (plan 5d-1 final review m1): on a Mac where
@@ -1734,30 +1763,27 @@ By hand; the watcher is tested (`ExternalEditWatcherTests`), the core
      copies: they stay in the old package, still watched, until that
      package is next saved or closed.
 
-### Kontrol S-Series MK3 keyboards (plan 5f-4)
+### Host-integration keyboards (plan 5f-4)
 
-By hand, on the owner's S88 MK3 (newest firmware, MIDI 1.0 mode). The
-protocol is tested byte by byte (`core-surface` `kontrol_*` tests), the
+By hand, on the owner's 88-key host-integration keyboard (newest
+firmware, MIDI 1.0 mode). The protocol is tested byte by byte (`core-surface` `kontrol_*` tests), the
 core through the fake ports (`core-ffi/tests/kontrol.rs`), presets on
-Apple's AUDistortion (`platform-macos/tests/au.rs`) and the e2e
+the system's AUDistortion (`platform-macos/tests/au.rs`) and the e2e
 `drives_the_mixer_from_a_kontrol_mk3`. Each step is an action, then what
 you should see; report anything else, and every value step 198 asks for.
 
 189. Adding the keyboard, in three cases:
      a. Plug the keyboard in by USB and open Settings › Surfaces › Add
-        Surface…. Choose Type "Kontrol S-Series MK3 (DAW mode)": Input
+        Surface…. Choose Type "Host-integration keyboard (DAW mode)": Input
         and Output both switch to the keyboard's DAW port (named like
-        "KONTROL S88 MK3 DAW"), and the sheet shows the help line and
-        "Kontrol and Native Instruments are trademarks of Native
-        Instruments GmbH. VizDAW is not affiliated with or endorsed by
-        Native Instruments." Write down the exact names the Input and
+        "KONTROL S88 MK3 DAW"), and the sheet shows the help line.
+        Write down the exact names the Input and
         Output pickers list for every port of the keyboard. Click Add:
-        the row says "Connected", the same notice shows under the
-        surface list, and within 2 s the keyboard's screen leaves its
+        the row says "Connected", and within 2 s the keyboard's screen leaves its
         own view and shows the mixer with the project's first eight
         tracks' names.
      b. With the keyboard unplugged, choose the type: the sheet says "No
-        Kontrol S-Series MK3 “DAW” port is connected: pick its ports by
+        host-integration keyboard “DAW” port is connected: pick its ports by
         hand." and leaves the pickers as they were.
      c. With firmware older than 2.0, add it: the row says "Connected ·
         not answering" and, under it in orange, "the keyboard answered
@@ -1815,7 +1841,7 @@ you should see; report anything else, and every value step 198 asks for.
      does not change, the screen goes back to it within 2 s, and Tap
      Tempo's light is dark until you stop.
 195. Plug-in mode: select a track with a plug-in instrument and an insert
-     (for example an Apple AU instrument plus AUDelay) and press the
+     (for example a system AU instrument plus AUDelay) and press the
      keyboard's Plug-in button: at once the soft buttons name the chain
      (the instrument first), the screen shows eight parameter names and
      values, "Page 1" and the page count. Turn knob 1: that parameter
@@ -1849,7 +1875,7 @@ you should see; report anything else, and every value step 198 asks for.
 198. Hardware checks to report (the research could not settle them):
      the firmware version the keyboard shows; the macOS port names (step
      189), including in MIDI 2.0 mode, and whether the DAW port works with
-     NI's Hardware Connection Service quit; where the page name (SysEx
+     the keyboard maker's hardware connection service quit; where the page name (SysEx
      0x75) appears; how many characters of a long track name, parameter
      name, value and volume text fit; whether the "Generic" background is
      readable (else try "VizDAW", Ruling 4), and how readable it is in
@@ -1869,3 +1895,376 @@ you should see; report anything else, and every value step 198 asks for.
      back, and how the tempo control steps (half a second between turns
      makes a new Undo step); and whether the Count-in, Tap and Automation
      lights light.
+
+### Window, main views and panes (plan 7a)
+
+Checked by hand; the layout rules are tested (`WindowLayoutTests`,
+`PaneGeometryTests`, `LeftPaneTests`, `RightPaneTests`, `ViewCommandsTests`)
+and the e2e `window_views_and_panes_over_the_channel`. Where earlier steps
+say the sidebar, use the left pane's picker, Sequences; the toolbar is now the
+transport bar; the mixer's toolbar is the bar along the top of the mixer;
+the detail pane is the bottom pane's editor.
+
+199. File > Create Demo Project. The window shows the transport bar along
+     the top (Return to Start, Rewind, Fast Forward, Play, Loop, Record
+     with its chevron, the Bar, Time, Tempo and Sig readouts, the transport
+     fields, Arrange | Mix and three pane buttons; when the window is too
+     narrow for one row, the readouts and fields move to a second row or
+     more, and the step-entry summary, shown only while step entry is on,
+     sits in front of them or above them; plan 7d), the
+     left pane (Channel Strip) running the full height, which says
+     "Select a lane to see its channel strip." until a lane is selected
+     or armed, the arrangement in the centre and the "No Editor Open"
+     pane below it. The right pane is hidden.
+200. Scroll the arrangement to bar 9 and zoom in once. Press ⌃2: the
+     mixer fills the window under the transport bar, with no arrangement.
+     Press ⌃1: the arrangement comes back where you left it (bar 9, the
+     same zoom), with the panes as they were. (If macOS switches desktops
+     instead, Mission Control owns ⌃1/⌃2: rebind Arrange View and Mix View
+     in Settings › Keys › View.) A sequence's keyboard slot on ⌃1, ⌃2 or
+     ⌃⌘←/↓/→ no longer fires: the View command wins (backlog).
+201. Press ⌃⌘→: the right pane opens beside the bottom pane, under the
+     arrangement. Press ⌃⌘↓: the bottom pane hides and the right pane runs
+     beside the arrangement for the full height. Press ⌃⌘↓: the bottom
+     pane comes back. Press ⌃⌘← twice: the left pane hides and comes back
+     with the same view and size. The View menu's Left, Bottom and Right
+     Pane items show the same check marks. In the left pane's picker
+     choose Sequences, double-click Song, type `Verse` and press ⌃⌘←: the
+     left pane hides and the rename is kept, as Return would keep it (⌃⌘←
+     again shows the new name). Press Space: the transport plays, and the status line
+     does not say "A text field has the keyboard.". Undo the rename.
+     Double-click the Chords block and select a note, press ⌃⌘↓, press
+     Delete, then ⌃⌘↓ again: the note is still there.
+202. Drag the line between the arrangement and the bottom pane up and down:
+     the line follows the pointer, without running ahead of it, and stops
+     at the pane's smallest and largest size; the pane takes the new size
+     when you let go. With the right pane shown, shrink the window as far
+     as it goes (700×450): the panes shrink to their smallest and the
+     arrangement keeps a usable area; nothing hides at this size. Grow it again: the panes go back to their sizes.
+203. Click the Chords lane header and play Song: the left pane shows the
+     Built-in Synth's strip. Move its fader: the mixer (⌥⌘M) and the Mix
+     view (⌃2) show the same level, and the meters fall at the same speed
+     in all three. Press ⌃1. With the mixer window open, click the left
+     strip's insert "+": the browser opens on the left strip only, not in
+     the mixer window. Right-click the Chords lane, choose New MIDI
+     Destination… (any port, such as the IAC Driver; with none listed,
+     turn on the IAC Driver in Audio MIDI Setup) and Add, which points the
+     lane at it (step 156): the left pane shows the Inspector, naming that
+     destination. Undo twice: Chords plays Built-in Piano again and the
+     strip comes back.
+204. Open each pane's picker: the left lists Channel Strip, Sequences and
+     Inspector; the bottom lists Piano Roll, List, Strip Chart, Drum Grid
+     and Mixer (the Mix view's bottom has no Mixer), and the bottom pane
+     shows no second row of editor buttons; the right lists Controllers,
+     Media Pool, Plug-ins and Markers. Choose each one: each shows its
+     view, and nothing opens a dialog. Press ⌘1: the bottom pane
+     shows the piano roll on the selection; ⌥⌘1 still opens it in a window.
+205. In the right pane, Plug-ins: with the Chords lane selected, choose an
+     effect: it appears as the last insert on the left strip and in the
+     mixer; double-click its slot: its window opens floating. Markers:
+     click a row: the position moves there. Controllers: the Strip Chart
+     shows the selected lane's controller. Press ⌃2 and ⌃⌘→ (Plug-ins),
+     click the Built-in Synth strip's name to select it, choose an effect:
+     it appears as that strip's last insert.
+206. Window > Mixer opens the mixer in its own window with its own
+     transport bar: Play there plays the document. Set the Mix view's
+     right pane to Markers, save, close and reopen the project: both views
+     come back as you left them, and the window at the same size and place.
+
+### Themes and the channel strip (plan 7b)
+
+Checked by hand; the rules are tested (`AppearanceTests`, `AppIconTests`,
+`ThemeScanTests`, `UserThemeTests`, `StripEntryTests`, `StripLayoutTests`,
+`MixerStripTests`, the core's EQ slot and strip colour tests) and the e2e
+`themes_and_the_strip_over_the_channel`.
+
+207. Open Settings › Appearance, choose Classic Light if another theme is
+     chosen, then File > Create Demo Project: light grey panels, white
+     editing areas, dark text and one blue selection colour. Settings ›
+     Appearance lists Classic Light, Studio Dark, Flat, Console, Symbiotic
+     and EG13, with Classic Light chosen.
+208. With the demo window, the mixer window (⌥⌘M), a torn-off piano roll
+     (⌥⌘1), Modify › Transpose and Settings open, choose each theme in
+     turn: every window changes at once, the arrangement and piano roll
+     canvases included, and no window keeps the old colours. Open Window >
+     Mixer and File > New: both come up in the chosen theme, and a strip's
+     context menu and the File menu follow it too. In every theme the
+     piano roll's keys stay white and black. Turn macOS Dark Mode on:
+     Classic Light stays light and Studio Dark stays dark. Quit and start
+     VizDAW again: the last theme is still chosen.
+209. Press ⌃2: each strip shows, from the top, a colour bar and its name;
+     the input (audio strips); "EQ ＋"; the inserts and "+"; its sends,
+     each a name over a knob and its level; "→ Master"; a pan knob
+     reading "C"; a large fader cap beside a dB scale and a meter;
+     "0.0 dB"; M S R I; the automation mode. The Built-in Synth's cap, an
+     audio strip's cap and master's cap have three different colours. Add
+     a bus and give the synth a send to it: the bus's cap takes the
+     aux-return colour. Route an audio strip's output to the bus: the
+     bus's cap changes to the bus colour.
+210. Right-click the Built-in Synth's name and open Colour ▸: it lists
+     None and eight swatches, and each swatch's dot shows its own colour,
+     not one grey. Choose Blue: its colour bar turns blue in the Mix view,
+     the bottom pane's mixer, the mixer window and (select a lane that
+     plays through the Built-in Synth) the left strip; the lanes that play
+     through it and their regions turn blue too, and its fader cap keeps
+     the instrument colour. Undo: the bar shows the instrument colour
+     again. Redo, save, close and reopen: the bar is still blue.
+211. Right-click a lane header in the arrangement and open Colour ▸: None
+     and the same eight swatches, each dot in its own colour. Choose
+     Green: that lane's header bar and regions, every other lane on the
+     same strip, and the strip's bar in the mixer turn green; the fader
+     cap keeps its kind's colour (channel, instrument, aux return, bus or
+     master). Choose None: they show the kind's colour again. Then
+     Settings › Appearance › Show channel colour bars off: the strips'
+     and lane headers' colour bars go, in all four places, and the
+     regions keep their colour. Turn it back on: the bars return.
+212. Click the Built-in Synth's level box, type `-4.2` and press Return:
+     the fader moves down and the box reads "−4.2 dB"; Edit shows "Undo
+     Set Fader", and one Undo puts it back to "0.0 dB". Type `abc` and
+     press Return: the box still reads "0.0 dB" and the status line says
+     "Type a level in dB, like −4.2 or −inf.". Type `-inf`: "−∞ dB" and
+     the cap at the bottom. Type `40`: "+12.0 dB". Type `-0.04`: "0.0 dB".
+     Paste a long line of 9s and press Return: refused, the box unchanged.
+     Press Escape while typing: nothing changes. Type `-9` and click
+     the fader (or anywhere outside the box) without pressing Return: the
+     box goes back to its value and nothing changes, because a number
+     box cancels when you click away and only Return commits. In its pan box type
+     `L 24`: the knob turns left and the box reads "L 24"; then `r10`:
+     "R 10"; then `c`: "C"; then `LR`: refused, with "Type a pan like
+     L 24, C or R 10." in the status line.
+213. Drag the pan knob up and down on the trackpad: it follows without
+     jumping; press ⌥ half-way through a drag: the knob does not jump,
+     then moves a tenth as far. Click the knob once without moving:
+     nothing changes. Double-click it: it returns to C. Focus it and
+     press the arrow keys: it steps. Do the same on a send knob and its
+     level box. Drag the fader cap from the bottom to the top: the cap is
+     easy to grab, the throw is long, and the "0" mark lines up with
+     0.0 dB; the scale reads +12 down to −48, then "−∞" at the bottom.
+     Drag the bottom pane's divider down to its smallest size with the
+     bottom pane on Mixer: the strips scroll, the fader keeps a usable
+     throw, and M S R I stay reachable. Show the left strip on a 700×450
+     window: it scrolls the same way.
+214. On an audio strip click "EQ ＋" and choose any effect plug-in: the
+     slot shows its name. Click it: the plug-in's window opens. Turn its
+     bypass on and off from the slot: the slot shows each state. Add two
+     inserts and drag the second above the first: the EQ stays at the
+     top. Try to drag the EQ among the inserts: it does not move. Save,
+     close and reopen: the EQ is still there. Remove EQ from its menu:
+     "EQ ＋" again; Undo brings it back with its settings. Open the
+     project in a VizDAW build from before plan 7b (`git worktree add
+     /tmp/vz7a 9375170 && (cd /tmp/vz7a && scripts/build-ffi.sh &&
+     scripts/make-app.sh)`, then open `/tmp/vz7a/dist/VizDAW.app`): it
+     refuses with "project format version 4 is newer than this build
+     supports". Quit it, then `git worktree remove /tmp/vz7a`.
+215. Choose Console: fader caps, knobs and panels look shaded and
+     bevelled, like hardware, drawn with no photographs or textures and no
+     brand names. Choose each of the other five: their knobs and caps are
+     flat. In every theme the pan knob's ring and the send knobs' rings
+     have their own colours, and the fader caps keep their kinds' colours.
+216. In Settings › Appearance click Duplicate as File…: a new JSON file
+     appears in the Themes folder (`~/Library/Application
+     Support/VizDAW/Themes`; Show Themes Folder opens it), "‹theme› Copy.json"
+     (then " 2", " 3" …), never over an existing file. Its "name" and
+     "base" are required: the name must not be a built-in theme's, and the
+     base is one of classic-light, studio-dark, flat, console, symbiotic or
+     eg13. Edit it: under "values" change `accent.accent` and
+     `strip.master`. Save the file:
+     Settings lists the theme at once, and choosing it shows the new
+     accent and master cap. Give a token a bad value (`"accent": "blue"`)
+     and an unknown group: those tokens fall back to the base theme, and
+     Settings › Appearance lists each problem. Set both "style" →
+     "corners" and a "radius" value: the radius wins. A file may set
+     "appearance", "knobFinish", "style" (labels, legendFamily,
+     numberFamily, corners, panelBands, knobSkirt, capStyle, tile) and,
+     under "values", these groups and items: surface (window, panel,
+     raised, inset, separator, selection, focusRing), text (primary,
+     secondary, disabled, inverse), accent (accent, onAccent), state
+     (record, play, solo, mute, warning, error, offline), meter
+     (background, low, mid, high, clip), graph (line, fill, grid, handle,
+     handleSelected), control (gain, eqLow, eqLowMid, eqHighMid, eqHigh,
+     send, pan, dynamics, filter), strip (channel, instrument, auxReturn,
+     bus, master), spacing (xxs, xs, s, m, l, xl), radius (none, s, m, l),
+     iconStroke (s16, s24, s32), type (caption, body, label, title,
+     display), knob (skirt, cap, track, indicator), fader (well, scale,
+     capLine), relief (highlight, shadow, capTop, capBottom, panelTop,
+     panelBottom), swatch (red, orange, yellow, green, teal, blue, purple,
+     pink), keys (white, black), readout (background, text) and band
+     (light, dark); "brand" is not theirs to change. Delete the file: the
+     theme leaves the list.
+
+     No-brand check, after the theme check: `rm -rf app/.build`, build
+     with `VIZDAW_NO_BRAND=1 scripts/make-app.sh` and open
+     `dist/VizDAW.app`: every control that shows an icon still shows one.
+     The folder is emptied first because a build folder left over from a
+     branded build keeps the branded module. Rebuild without the variable
+     afterwards (`rm -rf app/.build && scripts/make-app.sh`).
+
+### Audio editor (plan 7c)
+
+Checked by hand; the rules are tested (`AudioEditorEntryTests`,
+`FrameAxisTests`, `AudioEditorGeometryTests`, `AudioEditorModelTests`,
+`AudioEditorViewTests`, the core's envelope and trim tests) and the e2e
+`edits_a_region_in_the_audio_editor`.
+
+217. File > Create Demo Project, import a stereo audio file of a few
+     seconds (File > Import Audio…), click its region and press ⌘5: the
+     bottom pane's picker reads "Audio Editor" and shows the region's
+     waveform across the pane, each channel in its own band; the file's
+     audio outside the region is dimmed; a ruler along the top reads the
+     file's time (0:00.000 …); the level scale at the left reads 0 at the
+     top of each band and −∞ at its centre line. At the default bottom-pane
+     height the scale shows only 0 and −∞: drag the pane's top edge up to
+     make it taller, and the scale shows its other marks too. Click an
+     empty part of the arrangement: "Select one audio region to edit it.";
+     select two regions: the same; select the region again: it comes back.
+218. Click Zoom In, Zoom Out and Fit Region, then ⌘-scroll and pinch over
+     the waveform: it zooms around the pointer and stops at its limits;
+     scroll sideways: it stops when the file's start or end reaches the
+     middle of the pane. Click Taller Waveform: quiet parts grow and the
+     level marks relabel, and after the first click the "0" mark is gone;
+     Shorter Waveform undoes it. Select another region: the editor fits it;
+     select the first again: it fits again.
+219. Drag the band along the top of the region up: a readout follows
+     ("+3.0 dB") and the waveform grows; hold ⇧ for finer steps; release:
+     Edit shows "Undo Region Gain". Drag the band again and press Esc
+     before releasing: the gain snaps back and nothing is added to Edit's
+     Undo. ⌥-click the band: 0.0 dB. In the Gain box type `-4.2` and press
+     Return: "−4.2 dB", the waveform shrinks, and Edit shows "Undo Set
+     Region Gain". Type `abc`: the box is unchanged and
+     the status line says "Type a gain in dB, like −4.2 or +6.". Type `30`:
+     "+24.0 dB", and red clip marks appear along the band tops where the
+     audio now goes over 0 dBFS. Type `-inf`: "−∞ dB" and a flat line.
+     Type `-9` and click away without Return: nothing changes; type `-9`
+     and press Esc: nothing changes either.
+220. Drag the square at the region's top-left corner right: a fade-in curve
+     is drawn over the waveform and the Fade In box follows in ms; the
+     square stops at the fade-out's square; release: "Undo Fade In". Choose
+     each Fade In Shape (Linear, Equal Power, Exponential, S-Curve): the
+     curve changes and its length stays. Right-click inside the fade: the
+     same four shapes, the current one checked. Type `250` in Fade In:
+     "250 ms"; `1.5 s`: "1500 ms"; a length longer than the region: it stops
+     where the fade out begins; `-5`: refused with "Type a fade like 250 ms
+     or 1.5 s.". Do the same with the fade out at the top-right corner.
+221. Drag the region's left edge right: the region starts later in the file
+     and in the arrangement by the same time, its audio stays where it was,
+     and the Start box follows; drag it left past the file's start: it
+     stops at 0:00.000, or where the region would begin before the
+     sequence's start, whichever is nearer (a region at bar 1 cannot be
+     extended earlier); release: "Undo Trim Start". Drag the right edge past
+     the file's end: it stops there; "Undo Trim End". Type `0.5` in Start:
+     the region's end stays put; type `1` in Length: its start stays put;
+     each is "Undo Trim Region". Type `10:00` in Length: it stops at the
+     file's end. Trim the region shorter than its fades: the fades shorten
+     to fit.
+222. Type `-1` in Peak and click Normalize: the gain becomes what brings the
+     loudest sample to −1 dBFS (a file peaking at −12 dBFS reads "+11.0 dB")
+     and Edit shows "Undo Normalize"; no dialog opens. Type `-inf` in Peak:
+     refused with "Type a peak from −96 to 0 dB, like −0.3."; `+3`: the Peak
+     box reads "0.0 dB" (the region's gain is unchanged).
+     Right after an import Normalize may say the waveform is still being
+     built: try again a moment later. Move the region's file away in Finder
+     so it goes offline: the region is hatched with "Offline" and its fades
+     and gain line still show; Normalize says to relink it, in the status
+     line, with no alert.
+223. Play while dragging a handle and while typing: each change is heard at
+     once. Undo and Redo step through the edits one at a time. Save, close
+     and reopen: the gain, fades, shapes and trim are as you left them, and
+     the bottom pane still shows the Audio Editor. Open the project in a
+     build from before plan 7c (`git worktree add /tmp/vz7b ba0224b && (cd
+     /tmp/vz7b && scripts/build-ffi.sh && scripts/make-app.sh)`, then open
+     `/tmp/vz7b/dist/VizDAW.app`): it opens with the same gain, fades and
+     trim, and its bottom pane shows its default editor. Quit it, then
+     `git worktree remove /tmp/vz7b`.
+224. Press ⌃2: the Mix view's bottom pane picker lists Audio Editor too, and
+     shows the same region. Choose each theme in Settings › Appearance: the
+     editor's waveform, scale, handles and boxes change with it. The editor
+     has no pan control and nothing that changes the audio file: after
+     every step above, the file in the project's Media folder has its
+     original modification date.
+
+### Clean-up (plan 7d)
+
+Checked by hand; the rules are tested (`TransportShuttleTests`,
+`TransportCommandsTests`, `TransportReadoutsTests`, `TransportFieldsTests`,
+`RecordOptionsTests`, `KeyBindingsTests`, `AppKitButtonTests`,
+`ThemeScanTests`, `NameScanTests`, the core's bar step and wind tests) and
+the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
+
+225. File > Create Demo Project. The transport bar shows four readouts, Bar,
+     Time, Tempo and Sig, labelled in capitals (lower case in themes whose
+     labels are lower case), reading "1.1.0", "0:00.000", "120.00" and
+     "4/4". Choose each
+     theme in Settings › Appearance and compare the readouts with the
+     design repo's 0.2.0 mockups (`docs/mockups/0.2.0`): Flat shows them as
+     tiles in the accent colour, the other themes as one edged group. Play:
+     the digits change and no box changes width. Narrow the window to its
+     700-pt minimum: the readouts and the fields wrap onto lines below the
+     buttons and nothing is covered or cut. Do the same in the mixer
+     window (⌥⌘M).
+226. Click ⏮ (Return to Start), then ⏪ (Rewind) and ⏩ (Fast Forward):
+     each click moves one bar. ⇧-click ⏪ or ⏩: it goes to the previous or
+     next marker; with none, the status line says "No marker after the
+     position." (or "before"). Hold ⏩: after a moment it starts to move,
+     then speeds up; hold ⏪ and it stops at bar 1. While playing, each of
+     these moves the playhead and playing continues from the new place.
+     While playing, ⏪ (also ⇧, and the keypad −) within a beat after a
+     bar line goes to the bar before, and further into the bar goes to
+     that bar's start: click it twice, a moment apart, to go back two
+     bars.
+     While recording, click ⏪: the status line says "Stop recording
+     first." and nothing moves. Put a strip in Write and play, then hold ⏩
+     for a few seconds: Edit shows one "Undo Write Automation" step for the
+     whole hold, and the strip switches to its After Write mode once; a
+     click instead of a hold lands the pass as a ruler click does. Click ⏮
+     (or the ruler), then ⏩ at once: it lands one bar after where ⏮ went.
+     Start typing a strip's name and hold ⏩: the status line says "A text
+     field has the keyboard." and nothing moves. Type in Position, then
+     press ⏩: the typing is cancelled and ⏩ moves one bar. Hold ⇧. while a
+     strip writes: one "Write Automation" step, made when you let go.
+227. Press ⇧, and ⇧.: one bar back and on. The keypad's − and + do the same.
+     Hold a key: it steps bar by bar until you let go. The Transport menu
+     has Rewind and Fast Forward, showing ⇧, and ⇧. as their keys; each
+     moves one bar. Rebind them in Settings › Keys: the new keys work and
+     the menu shows them. Load a keys file made before plan 7d that gives
+     Keypad+ to another command: Keypad+ still runs that command and Fast
+     Forward has only ⇧.; a saved sequence's keyboard slot on Keypad+ still
+     plays it.
+228. In each of the five fields (Position, Edit In, Edit Out, Punch In and
+     Punch Out) and the record popover's Punch In and Punch Out, type a
+     position: Return sets it; Tab sets it and moves to the next field.
+     One click on any of the five fields selects all its text, so typing
+     replaces it (in the mixer window's bar too). Type again, then click a
+     bar button, a readout or the arrangement,
+     press Esc, switch to another window or app, or close the popover: the
+     typing is dropped and the field shows the value in use. Type a punch
+     time in the popover and, with it still open, use Record on a surface
+     (or `vizctl run transport.record`; an R from the keyboard goes into
+     the field as an "r"): the status line says "Press Return to set the punch, or Esc
+     to discard it." and nothing records. Type a punch time in the popover
+     and click the bar's Record button: the same status line, nothing
+     records, and the popover stays open showing what you typed; Return
+     then sets it. Type a punch time and click elsewhere: the popover
+     closes and its fields show the old range. In the mixer window, P, E
+     and U give its own Position, Edit In and Punch In the keyboard. In a
+     strip's number box and in an audio editor box, press Esc, or type a
+     refused value and press Return: one click on the box starts editing
+     it again.
+229. Choose Flat, Symbiotic and Studio Dark in turn and open each Settings
+     tab, Bounce, Relink, MIDI Learn Maps and the synth sheets: the text
+     uses the theme's sizes and weights and the gaps are even. In Flat the
+     sheet and pane titles read clearly at the theme's title size and
+     weight. Open the record popover (the chevron next to Record) in each
+     theme: it follows the theme, as the rest of the window does.
+230. Settings › Surfaces › Add: the keyboard entry reads "Host-integration
+     keyboard (DAW mode)" with plain wording and no product names. A
+     keyboard added before still connects and drives the mixer.
+231. Set a lane's height to 46, 47 and 48 pt: its meter stays clear of the
+     separator below it at each height. Give two lanes the same input path:
+     the strip's input picker shows "Vox: In 1" for the shared lane. Record
+     across a tempo change: the growing waveform lines up with the region
+     drawn at Stop.
+232. Import a 44.1 kHz file into a 48 kHz project and set a fade: the
+     inspector's fade in ms equals the audio editor's. Make a region 16 pt
+     high: its gain band can still be dragged. Drag a pane divider and let
+     go outside it: the cursor goes back to the arrow. Start renaming a
+     strip in the bottom pane's mixer, then press ⌘1: the rename is kept.

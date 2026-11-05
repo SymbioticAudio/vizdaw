@@ -693,6 +693,52 @@ fn copies_render_offline_with_the_live_state() {
     );
 }
 
+/// Plan 7b B2 review M1: a project whose only plug-in is an EQ still makes
+/// its copies, so the bounce renders the EQ with its live state (the case
+/// where an empty `slot_ids` would have skipped them and bounced dry).
+#[test]
+fn an_eq_only_project_bounces_through_its_eq() {
+    let _g = serial();
+    let p = project(|b, _, path| {
+        b.mixer(MixerCmd::SetEq {
+            strip: path,
+            plugin: Some(plugin("vizdaw.test.gain", "Test Gain")),
+        })
+        .unwrap();
+    });
+    idle_until(&p.s, |s| {
+        s.plugin_slots()
+            .unwrap()
+            .first()
+            .is_some_and(|r| r.status == SlotStatus::Live)
+    });
+    let slots = p.s.plugin_slots().unwrap();
+    assert_eq!(slots.len(), 1, "the EQ is the only plug-in: {slots:?}");
+    let slot = slots[0].id;
+    let bounce = |name: &str| {
+        let dest = p.dir.path().join(name);
+        let j = wait_job(&p.s, p.s.bounce(mix_to(&p, &dest)).unwrap());
+        assert_eq!(j.state, JobStateRow::Done, "{j:?}");
+        assert!(j.problems.is_empty(), "the EQ renders offline: {j:?}");
+        wav_channel(&dest, 0)
+    };
+    let full = bounce("full.wav");
+    assert!(sounds(&full));
+    p.s.set_param(slot, 0, 0.5).unwrap();
+    let half = bounce("half.wav");
+    for f in 0..BARS4_FRAMES as usize {
+        assert!(
+            (half[f] - full[f] / 2.0).abs() <= 2.0 * STEP24,
+            "frame {f}: the EQ's copy has the live 0.5"
+        );
+    }
+    p.s.set_param(slot, 0, 0.0).unwrap();
+    assert!(
+        !sounds(&bounce("silent.wav")),
+        "the EQ applied: not the dry signal"
+    );
+}
+
 /// Ruling 6: a copy that cannot load is a pass-through, named in the problems.
 #[test]
 fn a_copy_that_fails_is_a_pass_through_and_named() {

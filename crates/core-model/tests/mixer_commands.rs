@@ -513,6 +513,20 @@ fn instrument_outputs_and_solo() {
     assert!(set.contains(&StripId(1)) && set.contains(&StripId(0)) && !set.contains(&StripId(4)));
 }
 
+fn swatch() -> impl Strategy<Value = core_model::mixer::Swatch> {
+    use core_model::mixer::Swatch;
+    prop_oneof![
+        Just(Swatch::Red),
+        Just(Swatch::Orange),
+        Just(Swatch::Yellow),
+        Just(Swatch::Green),
+        Just(Swatch::Teal),
+        Just(Swatch::Blue),
+        Just(Swatch::Purple),
+        Just(Swatch::Pink),
+    ]
+}
+
 fn arb_cmd() -> impl Strategy<Value = MixerCmd> {
     let strip = (0u64..8).prop_map(StripId);
     let slot = (0u64..5).prop_map(PluginInstanceId);
@@ -557,7 +571,14 @@ fn arb_cmd() -> impl Strategy<Value = MixerCmd> {
             slot,
             params: vec![(ParamId(p), v)]
         }),
-        (strip, 0usize..8).prop_map(|(strip, index)| MixerCmd::MoveStrip { strip, index }),
+        (strip.clone(), 0usize..8).prop_map(|(strip, index)| MixerCmd::MoveStrip { strip, index }),
+        (
+            strip.clone(),
+            proptest::option::of(Just(PluginRef::from_legacy("clap:eq")))
+        )
+            .prop_map(|(strip, plugin)| MixerCmd::SetEq { strip, plugin }),
+        (strip, proptest::option::of(swatch()))
+            .prop_map(|(strip, colour)| MixerCmd::SetColour { strip, colour }),
     ]
 }
 
@@ -715,4 +736,317 @@ fn every_target_names_the_strip_whose_mode_governs_it() {
     assert!(target_exists(&d, T::StripMute(StripId(5))));
     assert!(!target_exists(&d, T::StripMute(StripId(50))));
     assert!(!target_exists(&d, T::SendLevel(StripId(1), SendIndex(3))));
+}
+
+/// The chain ids of `strip` in `d`: the EQ, then the inserts.
+fn chain_ids(d: &Document, strip: StripId) -> Vec<PluginInstanceId> {
+    d.mixer()
+        .strip(strip)
+        .unwrap()
+        .chain()
+        .map(|p| p.id)
+        .collect()
+}
+
+fn set_eq(strip: StripId, plugin: Option<&str>) -> Command {
+    Command::Mixer(MixerCmd::SetEq {
+        strip,
+        plugin: plugin.map(plug),
+    })
+}
+
+/// Plan 7b Ruling 7: `SetEq` loads, replaces and empties the EQ slot, each
+/// one undo step titled "Load EQ" or "Remove EQ"; an empty slot cannot be
+/// emptied again; master has one too.
+#[test]
+fn the_eq_slot_loads_replaces_and_empties_as_undo_steps() {
+    let s = StripId(1);
+    let mut h = History::new(base());
+    let f = ViewFilter::default();
+    let c = set_eq(s, Some("eq-a"));
+    assert_eq!(c.name(), "Load EQ");
+    let r = h.execute(&c, &f).unwrap();
+    let id1 = PluginInstanceId(1);
+    assert_eq!(r.created, vec![AnyId::Plugin(id1)]);
+    assert_eq!(h.undo_label(), Some("Load EQ"));
+    let eq = h.doc().mixer().strip(s).unwrap().eq.clone().unwrap();
+    assert_eq!((eq.id, eq.plugin.id.as_str()), (id1, "eq-a"));
+    let after_a = h.doc().clone();
+
+    let r = h.execute(&set_eq(s, Some("eq-b")), &f).unwrap();
+    let id2 = match r.created.as_slice() {
+        [AnyId::Plugin(p)] => *p,
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(id2, id1);
+    assert_eq!(r.removed, vec![AnyId::Plugin(id1)]);
+    let eq = h.doc().mixer().strip(s).unwrap().eq.clone().unwrap();
+    assert_eq!((eq.id, eq.plugin.id.as_str()), (id2, "eq-b"));
+
+    let c = set_eq(s, None);
+    assert_eq!(c.name(), "Remove EQ");
+    let r = h.execute(&c, &f).unwrap();
+    assert_eq!(r.removed, vec![AnyId::Plugin(id2)]);
+    assert_eq!(h.undo_label(), Some("Remove EQ"));
+    assert_eq!(h.doc().mixer().strip(s).unwrap().eq, None);
+    assert!(validate(h.doc()).is_empty(), "{:?}", validate(h.doc()));
+
+    let before = h.doc().clone();
+    let again = apply(&before, &set_eq(s, None));
+    assert!(
+        matches!(&again, Err(ModelError::Invalid { reason }) if reason == "the EQ slot is empty"),
+        "{again:?}"
+    );
+    assert_eq!(h.doc(), &before);
+
+    // Each was one undo step.
+    h.undo().unwrap();
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &after_a);
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &base());
+
+    // Master takes an EQ too; an unknown strip is refused.
+    let m = base().mixer().master();
+    let d = apply(&base(), &set_eq(m, Some("eq-m"))).unwrap().doc;
+    assert!(d.mixer().strip(m).unwrap().eq.is_some());
+    assert!(validate(&d).is_empty(), "{:?}", validate(&d));
+    assert!(matches!(
+        apply(&base(), &set_eq(StripId(99), Some("eq"))),
+        Err(ModelError::UnknownId(AnyId::Strip(StripId(99))))
+    ));
+}
+
+/// Ruling 7: insert indices count inserts only, so no insert move or add
+/// reaches the EQ slot.
+#[test]
+fn the_eq_slot_stays_first_when_inserts_move() {
+    let s = StripId(1);
+    let mut d = apply(&base(), &set_eq(s, Some("eq"))).unwrap().doc;
+    let eq = PluginInstanceId(1);
+    for name in ["a", "b", "c"] {
+        d = mx(
+            &d,
+            MixerCmd::AddInsert {
+                strip: s,
+                index: None,
+                plugin: plug(name),
+            },
+        )
+        .unwrap();
+    }
+    let (a, b, c) = (
+        PluginInstanceId(2),
+        PluginInstanceId(3),
+        PluginInstanceId(4),
+    );
+    assert_eq!(chain_ids(&d, s), vec![eq, a, b, c]);
+    let eq_before = d.mixer().strip(s).unwrap().eq.clone();
+    let d = mx(
+        &d,
+        MixerCmd::MoveInsert {
+            slot: c,
+            strip: s,
+            index: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(chain_ids(&d, s), vec![eq, c, a, b]);
+    assert_eq!(d.mixer().strip(s).unwrap().eq, eq_before);
+    let r = apply(
+        &d,
+        &Command::Mixer(MixerCmd::AddInsert {
+            strip: s,
+            index: Some(0),
+            plugin: plug("first"),
+        }),
+    )
+    .unwrap();
+    let n = PluginInstanceId(5);
+    assert_eq!(r.report.created, vec![AnyId::Plugin(n)]);
+    assert_eq!(chain_ids(&r.doc, s), vec![eq, n, c, a, b]);
+}
+
+/// Ruling 7: the EQ is not an insert (no move, no remove), but bypass,
+/// parameters, sidechain and automation reach it.
+#[test]
+fn the_eq_slot_is_not_an_insert() {
+    use core_model::automation::{AutomationTarget, strip_of};
+    let s = StripId(1);
+    let d = apply(&base(), &set_eq(s, Some("eq"))).unwrap().doc;
+    let eq = PluginInstanceId(1);
+    for c in [
+        MixerCmd::MoveInsert {
+            slot: eq,
+            strip: StripId(4),
+            index: 0,
+        },
+        MixerCmd::RemoveInsert { slot: eq },
+    ] {
+        let r = mx(&d, c.clone());
+        assert!(
+            matches!(&r, Err(ModelError::Invalid { reason }) if reason == "the EQ slot is not an insert"),
+            "{c:?}: {r:?}"
+        );
+    }
+    let d2 = mx(
+        &d,
+        MixerCmd::SetBypass {
+            slot: eq,
+            bypass: true,
+        },
+    )
+    .unwrap();
+    assert!(d2.plugin_slot(eq).unwrap().bypass);
+    let d2 = mx(
+        &d2,
+        MixerCmd::SetPluginParams {
+            slot: eq,
+            params: vec![(ParamId(3), 0.75)],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        d2.plugin_slot(eq).unwrap().params.get(&ParamId(3)),
+        Some(&0.75)
+    );
+    let d2 = mx(
+        &d2,
+        MixerCmd::SetSidechain {
+            slot: eq,
+            source: Some(StripId(3)),
+        },
+    )
+    .unwrap();
+    assert_eq!(d2.plugin_slot(eq).unwrap().sidechain, Some(StripId(3)));
+    assert!(validate(&d2).is_empty(), "{:?}", validate(&d2));
+    // A sidechain from its own strip is still a cycle.
+    assert!(matches!(
+        mx(
+            &d,
+            MixerCmd::SetSidechain {
+                slot: eq,
+                source: Some(s)
+            }
+        ),
+        Err(ModelError::RoutingCycle { .. })
+    ));
+    // A non-finite EQ value is refused, and validate checks EQ values.
+    assert!(
+        mx(
+            &d,
+            MixerCmd::SetPluginParams {
+                slot: eq,
+                params: vec![(ParamId(3), f64::NAN)]
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(
+        strip_of(&d2, AutomationTarget::PluginParam(eq, ParamId(3))),
+        Some(s)
+    );
+}
+
+/// Ruling 7: every "all slots" lookup sees the EQ.
+#[test]
+fn every_slot_lookup_sees_the_eq() {
+    use core_model::document::SlotOwner;
+    let s = StripId(1);
+    let d = apply(&base(), &set_eq(s, Some("eq"))).unwrap().doc;
+    let eq = PluginInstanceId(1);
+    let d = mx(
+        &d,
+        MixerCmd::AddInsert {
+            strip: s,
+            index: None,
+            plugin: plug("a"),
+        },
+    )
+    .unwrap();
+    let a = PluginInstanceId(2);
+    assert_eq!(d.find_slot(eq), Some(SlotOwner::Eq(s)));
+    assert_eq!(d.find_slot(a), Some(SlotOwner::Insert(s, 0)));
+    assert_eq!(d.plugin_slot(eq).unwrap().plugin.id, "eq");
+    let slots: Vec<(StripId, PluginInstanceId)> =
+        d.mixer().slots().map(|(st, p)| (st, p.id)).collect();
+    assert_eq!(slots, vec![(s, eq), (s, a)]);
+    // Inserts alone are unchanged.
+    let inserts: Vec<PluginInstanceId> = d.mixer().inserts().map(|(_, _, p)| p.id).collect();
+    assert_eq!(inserts, vec![a]);
+    let (d, blob) = core_model::state::capture(&d, eq, b"eq state").unwrap();
+    assert!(d.referenced_states().contains(&blob));
+    assert_eq!(d.state_blob(blob), Some(&b"eq state"[..]));
+    assert!(d.missing_states().is_empty());
+}
+
+#[test]
+fn removing_a_bus_clears_an_eq_sidechain_from_it() {
+    let mut h = History::new(base());
+    let f = ViewFilter::default();
+    h.execute(&set_eq(StripId(5), Some("eq")), &f).unwrap();
+    let eq = PluginInstanceId(1);
+    h.execute(
+        &Command::Mixer(MixerCmd::SetSidechain {
+            slot: eq,
+            source: Some(StripId(4)),
+        }),
+        &f,
+    )
+    .unwrap();
+    let before = h.doc().clone();
+    h.execute(
+        &Command::Mixer(MixerCmd::RemoveBus { strip: StripId(4) }),
+        &f,
+    )
+    .unwrap();
+    assert_eq!(h.doc().plugin_slot(eq).unwrap().sidechain, None);
+    assert!(validate(h.doc()).is_empty(), "{:?}", validate(h.doc()));
+    h.undo().unwrap();
+    assert_eq!(h.doc(), &before);
+}
+
+/// C-1, Ruling 12: a strip colour is one undo step, saved, and cleared by
+/// `None`; an unknown strip is refused.
+#[test]
+fn a_strip_colour_is_set_saved_and_undone() {
+    use core_model::file::{from_json, to_json};
+    use core_model::mixer::Swatch;
+    let s = StripId(2);
+    let mut h = History::new(base());
+    let f = ViewFilter::default();
+    let c = Command::Mixer(MixerCmd::SetColour {
+        strip: s,
+        colour: Some(Swatch::Red),
+    });
+    assert_eq!(c.name(), "Set Strip Colour");
+    h.execute(&c, &f).unwrap();
+    assert_eq!(h.undo_label(), Some("Set Strip Colour"));
+    assert_eq!(h.doc().mixer().strip(s).unwrap().colour, Some(Swatch::Red));
+    let back = from_json(&to_json(h.doc()).unwrap()).unwrap();
+    assert_eq!(&back, h.doc());
+    h.undo().unwrap();
+    assert_eq!(h.doc().mixer().strip(s).unwrap().colour, None);
+    h.redo().unwrap();
+    h.execute(
+        &Command::Mixer(MixerCmd::SetColour {
+            strip: s,
+            colour: None,
+        }),
+        &f,
+    )
+    .unwrap();
+    assert_eq!(h.doc().mixer().strip(s).unwrap().colour, None);
+    let before = h.doc().clone();
+    assert!(matches!(
+        apply(
+            &before,
+            &Command::Mixer(MixerCmd::SetColour {
+                strip: StripId(99),
+                colour: Some(Swatch::Blue),
+            })
+        ),
+        Err(ModelError::UnknownId(AnyId::Strip(StripId(99))))
+    ));
+    assert_eq!(h.doc(), &before);
 }

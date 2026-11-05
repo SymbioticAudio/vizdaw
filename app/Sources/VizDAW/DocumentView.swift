@@ -1,130 +1,268 @@
+import AppKit
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
+import VizDAWEditors
 
-/// Sidebar of sequences, table of lanes, transport toolbar.
+/// One document's window: the shell (transport bar, layout A's panes,
+/// status line) with the document's sheets and alerts (plan 7a Task 7).
 struct DocumentView: View {
     @Bindable var model: DocumentModel
     let docID: UUID
 
     var body: some View {
-        NavigationSplitView {
-            SequenceSidebar(model: model)
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
-        } detail: {
-            VStack(spacing: 0) {
-                ProjectBanners(model: model)
-                EditorSplit(model: model, docID: docID)
+        DocumentShell(model: model, docID: docID)
+            .navigationTitle(model.windowTitle)
+            .sheet(
+                item: Binding(
+                    get: { model.editor.referenceDraft }, set: { model.editor.referenceDraft = $0 })
+            ) { _ in
+                ReferenceSheet(editor: model.editor)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.media.showsRelinkSheet(channelOn: ControlChannel.active) },
+                    set: { if !$0 { model.media.leaveOffline() } })
+            ) {
+                RelinkSheet(media: model.media)
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { model.bounce.shown && !ControlChannel.active }, set: { model.bounce.shown = $0 })
+            ) {
+                BounceSheet(bounce: model.bounce)
+            }
+            .sheet(
+                item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
+            ) { _ in
+                TrackSynthSheet(
+                    sheets: model.synth, editor: model.editor, channels: model.inputs.knownChannels ?? 256)
+            }
+            .sheet(
+                item: Binding(
+                    get: { model.synth.newDestination }, set: { if $0 == nil { model.synth.closeNewDestination() } })
+            ) { _ in
+                NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
+            }
+            .alert(
+                "Recovered Recordings",
+                isPresented: Binding(
+                    get: { model.record.showsRecoveryAlert(channelOn: ControlChannel.active) },
+                    set: { if !$0 { model.record.answerRecovery(import: nil) } })
+            ) {
+                Button("Import into New Lanes") { model.record.answerRecovery(import: true) }
+                Button("Move to Trash", role: .destructive) { model.record.answerRecovery(import: false) }
+                Button("Later", role: .cancel) { model.record.answerRecovery(import: nil) }
+            } message: {
+                Text(model.record.recoveryMessage)
+            }
+            .alert(
+                model.alert?.title ?? "",
+                // With the control channel on no sheet opens (control spec §7):
+                // the channel reports the alert and it stays on the document.
+                isPresented: Binding(
+                    get: { ControlAlertLog.showsSheet(model.alert, channelOn: ControlChannel.active) },
+                    set: { if !$0 { model.alert = nil } }),
+                presenting: model.alert
+            ) { _ in
+                Button("OK") { model.alert = nil }
+            } message: { item in
+                Text(item.message)
             }
         }
-        .navigationTitle(model.windowTitle)
-        .toolbar { TransportToolbar(model: model) }
-        .sheet(
-            item: Binding(
-                get: { model.editor.referenceDraft }, set: { model.editor.referenceDraft = $0 })
-        ) { _ in
-            ReferenceSheet(editor: model.editor)
+}
+
+/// The transport bar along the top of the window (plan 7a Ruling 9): an
+/// ordinary view, not a toolbar. Return to Start, Rewind, Fast Forward,
+/// Play, Loop and Record, the readouts, the transport fields, the device
+/// and (document window only) the faults button, the main-view tabs and
+/// the pane toggles. The mixer window
+/// shows it with `showsViews` false.
+struct DocumentTransportBar: View {
+    @Environment(\.symbioticTheme) private var theme
+    @Bindable var model: DocumentModel
+    let docID: UUID
+    let showsViews: Bool
+
+    var body: some View {
+        // One row when it fits, else the fields on a second row (Task 7
+        // review I1): never cut at the default window or the minimum.
+        TransportBarLayout(spacing: theme.spacing.m, rowSpacing: theme.spacing.xs) {
+            HStack(spacing: theme.spacing.m) {
+                // AppKit controls and text: the channel's tree walks AppKit's
+                // elements and sees no SwiftUI button or text (final review I1).
+                HStack(spacing: theme.spacing.s) {
+                    AppKitButton(
+                        "Return to Start", icon: .returnToStart, enabled: model.selectedSeq != nil,
+                        help: "Return to Start"
+                    ) {
+                        do { try model.moveTo(0) } catch { model.editor.status = TransportCommands.statusText(error) }
+                    }
+                    .fixedSize()
+                    holdButton("Rewind", icon: .rewind, forward: false,
+                        help: "Rewind one bar; hold to wind; ⇧-click: previous marker")
+                    holdButton("Fast Forward", icon: .fastForward, forward: true,
+                        help: "Fast Forward one bar; hold to wind; ⇧-click: next marker")
+                    AppKitButton(
+                        model.isPlaying ? "Stop" : "Play", icon: model.isPlaying ? .stop : .play,
+                        enabled: model.canPlay, help: model.isPlaying ? "Stop (Space)" : "Play (Space)"
+                    ) { model.playStop() }
+                    .fixedSize()
+                    AppKitButton("Loop", icon: .loop, isOn: model.looping, help: "Loop") { model.toggleLoop() }
+                        .fixedSize()
+                    RecordControls(model: model, record: model.record, host: showsViews ? .document : .mixerWindow)
+                }
+                .fixedSize()
+            }
+            // In a row narrower than they like, the fields narrow (to 72 pt).
+            TransportBar(model: model)
+                .clipped()
+            HStack(spacing: theme.spacing.m) {
+                AppKitLabel(
+                    Formatting.device(model.transport), font: theme.type.caption.nsFont, secondary: true,
+                    truncatesMiddle: true)
+                if showsViews {
+                    faults
+                    views
+                        .fixedSize()
+                }
+            }
         }
-        .sheet(
-            isPresented: Binding(
-                get: { model.media.showsRelinkSheet(channelOn: ControlChannel.active) },
-                set: { if !$0 { model.media.leaveOffline() } })
-        ) {
-            RelinkSheet(media: model.media)
+        .padding(.horizontal, TransportBarRows.padding)
+        .padding(.vertical, theme.spacing.xs)
+        .background(.bar)
+    }
+
+    private func holdButton(_ title: String, icon: AppIcon, forward: Bool, help: String) -> some View {
+        let m = model
+        return AppKitHoldButton(
+            title, icon: icon, enabled: m.selectedSeq != nil, help: help,
+            onPress: { shift in
+                m.shuttle.press(forward: forward, shift: shift, at: ProcessInfo.processInfo.systemUptime)
+            },
+            onTick: { m.shuttle.tick(at: ProcessInfo.processInfo.systemUptime) },
+            onRelease: { inside in
+                m.shuttle.release(at: ProcessInfo.processInfo.systemUptime, inside: inside)
+            },
+            onCancel: { m.shuttle.cancel() }
+        )
+        .fixedSize()
+    }
+
+    /// Attached only in the document window, so `showsFaults` opens one
+    /// popover (Ruling 8).
+    @ViewBuilder private var faults: some View {
+        if model.hasFaults || model.hasReport {
+            AppKitButton(
+                "Faults", icon: .faultIndicator, help: "Faults and compile messages",
+                tint: model.hasFaults ? theme.state.error.nsColor : theme.state.warning.nsColor
+            ) { model.showsFaults.toggle() }
+            .fixedSize()
+            .popover(isPresented: $model.showsFaults) {
+                VStack(alignment: .leading, spacing: theme.spacing.xs) {
+                    ForEach(Array(model.messages.enumerated()), id: \.offset) {
+                        Text($0.element)
+                    }
+                }
+                .padding(theme.spacing.l)
+                .frame(minWidth: 240)
+            }
         }
-        .sheet(
-            isPresented: Binding(
-                get: { model.bounce.shown && !ControlChannel.active }, set: { model.bounce.shown = $0 })
-        ) {
-            BounceSheet(bounce: model.bounce)
+    }
+
+    /// The main-view tabs and the pane toggles, through the View menu's
+    /// commands (`ui.*`).
+    private var views: some View {
+        HStack(spacing: theme.spacing.s) {
+            Picker(
+                "Main View",
+                selection: Binding(
+                    get: { model.editor.layout.views.main },
+                    set: { ViewCommands.run($0 == .arrange ? "ui.view_arrange" : "ui.view_mix", on: nil, model) })
+            ) {
+                ForEach(MainView.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            paneToggle("ui.toggle_left", .left, icon: .leftPane, key: "⌃⌘←")
+            paneToggle("ui.toggle_bottom", .bottom, icon: .bottomPane, key: "⌃⌘↓")
+            paneToggle("ui.toggle_right", .right, icon: .rightPane, key: "⌃⌘→")
         }
-        .sheet(
-            item: Binding(get: { model.synth.trackSynth }, set: { if $0 == nil { model.synth.closeTrackSynth() } })
-        ) { _ in
-            TrackSynthSheet(
-                sheets: model.synth, editor: model.editor, channels: model.inputs.knownChannels ?? 256)
+    }
+
+    private func paneToggle(_ id: String, _ side: PaneSide, icon: AppIcon, key: String) -> some View {
+        AppKitButton(side.title, icon: icon, isOn: ViewCommands.isOn(id, model), help: "\(side.title) (\(key))") {
+            ViewCommands.run(id, on: nil, model)
         }
-        .sheet(
-            item: Binding(
-                get: { model.synth.newDestination }, set: { if $0 == nil { model.synth.closeNewDestination() } })
-        ) { _ in
-            NewMidiDestinationSheet(sheets: model.synth, editor: model.editor)
-        }
-        .alert(
-            "Recovered Recordings",
-            isPresented: Binding(
-                get: { model.record.showsRecoveryAlert(channelOn: ControlChannel.active) },
-                set: { if !$0 { model.record.answerRecovery(import: nil) } })
-        ) {
-            Button("Import into New Lanes") { model.record.answerRecovery(import: true) }
-            Button("Move to Trash", role: .destructive) { model.record.answerRecovery(import: false) }
-            Button("Later", role: .cancel) { model.record.answerRecovery(import: nil) }
-        } message: {
-            Text(model.record.recoveryMessage)
-        }
-        .alert(
-            model.alert?.title ?? "",
-            // With the control channel on no sheet opens (control spec §7):
-            // the channel reports the alert and it stays on the document.
-            isPresented: Binding(
-                get: { ControlAlertLog.showsSheet(model.alert, channelOn: ControlChannel.active) },
-                set: { if !$0 { model.alert = nil } }),
-            presenting: model.alert
-        ) { _ in
-            Button("OK") { model.alert = nil }
-        } message: { item in
-            Text(item.message)
-        }
+        .fixedSize()
     }
 }
 
-struct TransportToolbar: ToolbarContent {
-    @Bindable var model: DocumentModel
+/// The transport bar's three parts (leading controls, the fields, trailing
+/// controls) on one row, or, when `TransportBarRows` says it does not fit,
+/// the leading and trailing on the first row and the fields on the second.
+/// One layout, so the fields view is never remade when the window resizes.
+struct TransportBarLayout: Layout {
+    var spacing: CGFloat
+    var rowSpacing: CGFloat
 
-    var body: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button {
-                model.playStop()
-            } label: {
-                Label(
-                    model.isPlaying ? "Stop" : "Play",
-                    systemImage: model.isPlaying ? "stop.fill" : "play.fill")
-            }
-            .disabled(!model.canPlay)
-            Toggle(
-                isOn: Binding(get: { model.looping }, set: { _ in model.toggleLoop() })
-            ) {
-                Label("Loop", systemImage: "repeat")
-            }
-            RecordControls(model: model, record: model.record)
-        }
-        ToolbarItemGroup(placement: .principal) {
-            Text(Formatting.position(model.transport))
-                .font(.system(.title3, design: .monospaced))
-                .frame(minWidth: 220)
-        }
-        ToolbarItemGroup(placement: .primaryAction) {
-            Text(Formatting.device(model.transport))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if model.hasFaults || model.hasReport {
-                Button {
-                    model.showsFaults.toggle()
-                } label: {
-                    Image(systemName: "circle.fill")
-                        .foregroundStyle(model.hasFaults ? .red : .orange)
-                }
-                .help("Faults and compile messages")
-                .popover(isPresented: $model.showsFaults) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(model.messages.enumerated()), id: \.offset) {
-                            Text($0.element)
-                        }
-                    }
-                    .padding()
-                    .frame(minWidth: 240)
-                }
-            }
+    private func ideal(_ subviews: Subviews) -> [CGSize] {
+        subviews.map { $0.sizeThatFits(.unspecified) }
+    }
+
+    private func rows(_ width: CGFloat, _ s: [CGSize]) -> Int {
+        guard s.count == 3 else { return 1 }
+        // The width here is inside the bar's padding: add it back for the rule.
+        return TransportBarRows.count(
+            width: width + 2 * TransportBarRows.padding, leading: s[0].width, fields: s[1].width,
+            trailing: s[2].width, spacing: spacing)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let s = ideal(subviews)
+        guard s.count == 3 else { return .zero }
+        let one = s[0].width + spacing + s[1].width + spacing + s[2].width
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? one
+        let top = max(s[0].height, s[2].height)
+        guard rows(width, s) == 2 else { return CGSize(width: width, height: max(top, s[1].height)) }
+        // On a row of its own the fields part may wrap (the summary above).
+        let fields = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return CGSize(width: width, height: top + rowSpacing + fields.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let s = ideal(subviews)
+        guard s.count == 3 else { return }
+        let w = bounds.width
+        if rows(w, s) == 1 {
+            let top = max(s[0].height, s[1].height, s[2].height)
+            subviews[0].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + top / 2), anchor: .leading,
+                proposal: ProposedViewSize(s[0]))
+            let fieldsW = max(w - s[0].width - s[2].width - 2 * spacing, 0)
+            subviews[1].place(
+                at: CGPoint(x: bounds.minX + s[0].width + spacing, y: bounds.minY + top / 2), anchor: .leading,
+                proposal: ProposedViewSize(width: fieldsW, height: s[1].height))
+            subviews[2].place(
+                at: CGPoint(x: bounds.maxX, y: bounds.minY + top / 2), anchor: .trailing,
+                proposal: ProposedViewSize(s[2]))
+        } else {
+            let top = max(s[0].height, s[2].height)
+            subviews[0].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + top / 2), anchor: .leading,
+                proposal: ProposedViewSize(s[0]))
+            // The trailing part gives way (the device text truncates) before
+            // it covers the leading part.
+            let trailingW = max(min(s[2].width, w - s[0].width - spacing), 0)
+            subviews[2].place(
+                at: CGPoint(x: bounds.maxX, y: bounds.minY + top / 2), anchor: .trailing,
+                proposal: ProposedViewSize(width: trailingW, height: s[2].height))
+            let fields = subviews[1].sizeThatFits(ProposedViewSize(width: w, height: nil))
+            subviews[1].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + top + rowSpacing), anchor: .topLeading,
+                proposal: ProposedViewSize(width: w, height: fields.height))
         }
     }
 }

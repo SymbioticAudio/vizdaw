@@ -191,6 +191,10 @@ pub(crate) struct Inner {
     /// Control surfaces: the app's events, selection, last wind, heard
     /// values' cache (plan 5f-1 Task 8).
     surfaces: crate::surfaces::SessionSurfaces,
+    /// A transport bar hold (a wind or a held key's step) moved the
+    /// position without landing an open automation pass: its end lands
+    /// it once (plan 7d controller ruling I4).
+    wind_hold: bool,
     /// The meter holds of the mixer window and the surfaces (plan 5f-1
     /// Ruling 13, pre-flight I4).
     meters: crate::surfaces::MeterHolds,
@@ -314,6 +318,7 @@ impl Inner {
             restart_step: None,
             landed_in_group: false,
             surfaces: Default::default(),
+            wind_hold: false,
             meters: Default::default(),
             bounce_copies: None,
             bounce_results: Default::default(),
@@ -1736,9 +1741,103 @@ impl Session {
         })
     }
 
-    /// Moves the position to `tick`.
+    /// Moves the position to `tick`. The next bar step or wind starts
+    /// from here, not from the last one's target (plan 7d controller
+    /// ruling I6): the locate is remembered as their base, so a step at
+    /// once does not wait for the engine's position to catch up.
     pub fn locate(&self, tick: i64) -> Result<(), VizError> {
-        self.transport_call(|| self.locate_in(&mut lock(&self.inner), tick))
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            self.locate_in(&mut inner, tick)?;
+            inner.surfaces.wind = Some((crate::surfaces::now(), tick));
+            Ok(())
+        })
+    }
+
+    /// A click on the transport bar's rewind (`forward` false) or fast
+    /// forward, their menu items or the channel's command (plan 7d Ruling
+    /// 3): one bar, as a ruler click locates (an open automation pass
+    /// lands). Starts from the last step's or wind's target when that was
+    /// under 250 ms ago. While playing, back from within a beat after a
+    /// barline goes to the bar before (`bar_step_from`, review I-1). Busy while recording; a `Model` error with no
+    /// sequence. Returns the new tick.
+    pub fn transport_step_bar(&self, forward: bool) -> Result<i64, VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let now = crate::surfaces::now();
+            let to = self.bar_target(&inner, forward, now)?;
+            self.locate_in(&mut inner, to)?;
+            inner.surfaces.wind = Some((now, to));
+            Ok(to)
+        })
+    }
+
+    /// A rewind or fast forward key-down, first or auto-repeat (plan 7d
+    /// Ruling 4): one bar, as [`Session::transport_step_bar`] steps, but
+    /// moved as a wind is, landing nothing; the key-up's
+    /// [`Session::transport_hold_end`] lands once. Returns the new tick.
+    pub fn transport_key_step(&self, forward: bool) -> Result<i64, VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let now = crate::surfaces::now();
+            let to = self.bar_target(&inner, forward, now)?;
+            self.wind_move(&mut inner, to, now)?;
+            Ok(to)
+        })
+    }
+
+    /// One tick of a held rewind or fast forward (plan 7d Ruling 3):
+    /// `quarters` quarter notes on (negative: back) from the last target
+    /// (under 250 ms ago) or the position, in `0..=2⁵⁰`. Moves the
+    /// position only: an open automation pass goes on writing, and
+    /// [`Session::transport_hold_end`] lands it. Non-finite `quarters`
+    /// are a `Model` error, as is having no sequence; Busy while
+    /// recording. Returns the new tick.
+    pub fn transport_wind(&self, quarters: f64) -> Result<i64, VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let now = crate::surfaces::now();
+            let (_, base) = self.jump_base(&inner, now)?;
+            let to = core_editor::transport::wind_target(base, quarters).ok_or_else(|| {
+                VizError::Model {
+                    message: "quarters must be finite".into(),
+                }
+            })?;
+            self.wind_move(&mut inner, to, now)?;
+            Ok(to)
+        })
+    }
+
+    /// The end of a hold (a release, a cancel or a key-up; plan 7d
+    /// controller ruling I4): after a wind or a held key's step while an
+    /// automation pass is open, it lands the pass once and begins a new
+    /// one where the transport is, as one ruler click does, but without
+    /// a second locate: a key tap while playing is one locate (review
+    /// I1). Otherwise it does nothing. Returns the tick.
+    pub fn transport_hold_end(&self) -> Result<i64, VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let now = crate::surfaces::now();
+            let tick = match inner.surfaces.wind {
+                Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
+                _ => self
+                    .step_where(&inner)
+                    .map_or(inner.cursor.unwrap_or(Tick::ZERO), |(_, t)| t)
+                    .0
+                    .clamp(0, core_editor::transport::WIND_LIMIT),
+            };
+            // The hold is cleared before the landing on purpose: a refused
+            // landing (Busy while recording) must not leave it owed, so
+            // `wind_hold` never stays set (fold check M-7).
+            if std::mem::take(&mut inner.wind_hold) && inner.writing.is_some() {
+                // A pass is open whenever the transport plays, so the
+                // landing does not locate again (review I1): the new pass
+                // begins where the transport is.
+                let at = host::transport_position(self.id).map_or(tick, |(_, t)| t.0);
+                self.land_at(&mut inner, at, false)?;
+            }
+            Ok(tick)
+        })
     }
 
     /// Loops from bar 1 to the end of the sequence, or stops looping.
@@ -2279,6 +2378,37 @@ impl Session {
         })
     }
 
+    /// Loads `plugin` into a strip's EQ slot (replacing any EQ there; its
+    /// state is captured first, so Undo restores it), or empties the slot
+    /// (`None`; refused when it is empty). Plan 7b Ruling 7.
+    pub fn set_eq(
+        &self,
+        strip: u64,
+        plugin: Option<PluginRefRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetEq {
+                strip: StripId(strip),
+                plugin: plugin.as_ref().map(Into::into),
+            }))
+        })
+    }
+
+    /// Sets a strip's own colour, or clears it (`None`: the kind's
+    /// colour). Controller ruling C-1.
+    pub fn set_strip_colour(
+        &self,
+        strip: u64,
+        colour: Option<crate::mixer::SwatchRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            self.execute(Command::Mixer(MixerCmd::SetColour {
+                strip: StripId(strip),
+                colour: colour.map(Into::into),
+            }))
+        })
+    }
+
     /// Bypasses a plugin, or turns it back on.
     pub fn set_bypass(&self, slot: u64, bypass: bool) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
@@ -2611,6 +2741,13 @@ fn slot_name(doc: &Document, id: core_model::ids::PluginInstanceId) -> String {
     let place = match doc.find_slot(id) {
         Some(SlotOwner::Insert(strip, _)) => doc.mixer().strip(strip).ok().map(|s| s.name.clone()),
         Some(SlotOwner::Instrument(d)) => doc.instruments().get(&d).map(|d| d.name.clone()),
+        // "‹strip› — EQ ‹plugin›" (plan 7b Ruling 7).
+        Some(SlotOwner::Eq(strip)) => {
+            return match doc.mixer().strip(strip) {
+                Ok(s) => format!("{} — EQ {plugin}", s.name),
+                Err(_) => format!("EQ {plugin}"),
+            };
+        }
         None => None,
     };
     match place {
@@ -7770,6 +7907,58 @@ impl Session {
             ))
         })
     }
+
+    /// The gain the engine plays across a region, one value per column
+    /// (plan 7c Ruling 4): the region gain times its fades at the centre
+    /// of each of `columns` equal slices of media frames `[from_frame,
+    /// to_frame)`, and 0 outside the region. Read-only; needs no file, so
+    /// an offline region answers too.
+    pub fn region_envelope(
+        &self,
+        event: u64,
+        from_frame: u64,
+        to_frame: u64,
+        columns: u32,
+    ) -> Result<Vec<f32>, VizError> {
+        ffi_guard(|| {
+            use core_model::event::EventBody;
+            crate::overviews::check_columns(columns)?;
+            if from_frame >= to_frame {
+                return Err(crate::events::bad("from_frame must be before to_frame"));
+            }
+            let shape = {
+                let inner = lock(&self.inner);
+                let doc = inner.doc();
+                let (ev, _) = doc.event(core_model::ids::EventId(event))?;
+                let EventBody::AudioRegion {
+                    media,
+                    source_offset,
+                    length,
+                    gain_db,
+                    fade_in,
+                    fade_out,
+                } = ev.body
+                else {
+                    return Err(crate::events::bad(&format!(
+                        "{event} is not an audio region"
+                    )));
+                };
+                if !doc.media().contains_key(&media) {
+                    return Err(crate::events::bad(&format!("unknown media {media}")));
+                }
+                crate::overviews::RegionShape {
+                    source_offset,
+                    length,
+                    gain_db,
+                    fade_in,
+                    fade_out,
+                }
+            };
+            Ok(crate::overviews::envelope(
+                &shape, from_frame, to_frame, columns,
+            ))
+        })
+    }
 }
 
 /// Media and jobs (plan 5a Task 10).
@@ -9001,6 +9190,15 @@ impl Session {
     /// Moves the position to `tick` (the body of [`Session::locate`], also
     /// the surfaces' skips and winds; plan 5f-1 Ruling 5).
     fn locate_in(&self, inner: &mut Inner, tick: i64) -> Result<(), VizError> {
+        self.land_at(inner, tick, true)
+    }
+
+    /// [`Session::locate_in`]'s body. Lands an open pass and begins a new
+    /// one at `tick` (plan 5e-1 Ruling 23); with `relocate` the transport
+    /// moves to `tick` first. Without it (a hold's end, plan 7d review
+    /// I1) the transport stays where the hold left it, so a key tap is
+    /// one locate.
+    fn land_at(&self, inner: &mut Inner, tick: i64, relocate: bool) -> Result<(), VizError> {
         if inner.recording.is_some() {
             return Err(recording_busy());
         }
@@ -9013,7 +9211,9 @@ impl Session {
             .map(|w| (w.seq, w.handles.status.rolled()));
         self.finish_writing(inner);
         self.apply_pending_automation(inner);
-        if !host::locate(self.id, Tick(tick))? {
+        // This landed what a hold wound over (plan 7d ruling I4).
+        inner.wind_hold = false;
+        if relocate && !host::locate(self.id, Tick(tick))? {
             inner.cursor = Some(Tick(tick));
             inner.cursor_seq = inner.selected_seq();
         }
@@ -9265,7 +9465,9 @@ impl Session {
         if inner.recording.is_some() {
             return None;
         }
-        let (seq, tick) = host::position(self.id)?;
+        // The schedule's position, as a transport bar step starts from
+        // (review I2), so a latency never holds a skip or wind back.
+        let (seq, tick) = host::transport_position(self.id)?;
         let tick = match inner.surfaces.wind {
             Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
             _ => tick.0,
@@ -9283,29 +9485,71 @@ impl Session {
             return false;
         };
         let forward = dir > 0;
-        let to = core_editor::transport::marker_step(s, Tick(tick), forward).unwrap_or_else(|| {
-            if forward {
-                s.meter.barline_at_or_after(Tick(tick.saturating_add(1)))
-            } else if tick <= 0 {
-                Tick::ZERO
-            } else {
-                s.meter.barline_at_or_before(Tick(tick.saturating_sub(1)))
-            }
-        });
+        let to = core_editor::transport::marker_step(s, Tick(tick), forward)
+            .unwrap_or_else(|| core_editor::transport::bar_step(&s.meter, Tick(tick), forward));
         self.surface_locate(inner, to.0.max(0), now)
     }
 
-    /// `Wind(q)`: `base + round(q × PPQ)`, never below 0.
+    /// `Wind(q)`: `base + round(q × PPQ)`, in `0..=WIND_LIMIT`.
     fn surface_wind(&self, inner: &mut Inner, q: f64, now: Instant) -> bool {
         let Some((_, base)) = self.wind_base(inner, now) else {
             return false;
         };
-        if !q.is_finite() {
+        let Some(to) = core_editor::transport::wind_target(base, q) else {
             return false;
+        };
+        self.surface_locate(inner, to, now)
+    }
+
+    /// Where a transport bar step stands with no recent target: the
+    /// transport's schedule position (not reduced by the graph latency,
+    /// review I2), else the cursor of the sequence a play would start, as
+    /// [`Session::surface_where`] chooses it.
+    fn step_where(&self, inner: &Inner) -> Option<(SeqId, Tick)> {
+        let doc = inner.doc();
+        host::transport_position(self.id)
+            .filter(|(s, _)| doc.sequence(*s).is_ok())
+            .or_else(|| Some((inner.selected_seq()?, inner.cursor.unwrap_or(Tick::ZERO))))
+    }
+
+    /// Where a transport bar step or wind starts (plan 7d Ruling 3): the
+    /// sequence of [`Session::step_where`], and the last step's or wind's
+    /// (or locate's) target when under [`WIND_RECENT`] ago, else its tick.
+    fn jump_base(&self, inner: &Inner, now: Instant) -> Result<(SeqId, i64), VizError> {
+        if inner.recording.is_some() {
+            return Err(recording_busy());
         }
-        // `as` saturates; a wind step is a fraction of a beat.
-        let by = (q * core_model::time::PPQ as f64).round() as i64;
-        self.surface_locate(inner, base.saturating_add(by).max(0), now)
+        let (seq, tick) = self.step_where(inner).ok_or_else(|| VizError::Model {
+            message: "select a sequence first".into(),
+        })?;
+        let tick = match inner.surfaces.wind {
+            Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
+            _ => tick.0,
+        };
+        Ok((seq, tick))
+    }
+
+    /// One bar on from [`Session::jump_base`], by its sequence's meter.
+    fn bar_target(&self, inner: &Inner, forward: bool, now: Instant) -> Result<i64, VizError> {
+        let (seq, base) = self.jump_base(inner, now)?;
+        let s = inner.doc().sequence(seq)?;
+        // Playing, a back step from just after a barline goes one bar
+        // further (plan 7d final review I-1).
+        let playing = host::transport_playing(self.id);
+        Ok(core_editor::transport::bar_step_from(&s.meter, Tick(base), forward, playing).0)
+    }
+
+    /// A hold's move (plan 7d controller ruling I4): the engine's position
+    /// only (the cursor with no engine), nothing landed; remembered as the
+    /// next step's base, and the hold's end owed.
+    fn wind_move(&self, inner: &mut Inner, tick: i64, now: Instant) -> Result<(), VizError> {
+        if !host::locate(self.id, Tick(tick))? {
+            inner.cursor = Some(Tick(tick));
+            inner.cursor_seq = inner.selected_seq();
+        }
+        inner.surfaces.wind = Some((now, tick));
+        inner.wind_hold = true;
+        Ok(())
     }
 
     /// A surface's locate, remembered as the next wind's base.
@@ -9546,8 +9790,9 @@ impl Session {
         }
     }
 
-    /// The first selected strip's first insert's first 8 automatable
-    /// parameters, by the plugin's list order, with heard values (Ruling 5).
+    /// The first 8 automatable parameters of the first selected strip's
+    /// first chain plug-in (its EQ, else its first insert), by the
+    /// plugin's list order, with heard values (Ruling 5).
     fn surface_params(
         &self,
         inner: &Inner,
@@ -9559,7 +9804,7 @@ impl Session {
             .selection
             .iter()
             .find_map(|s| m.strip(*s).ok())
-            .and_then(|s| s.inserts.front().map(|i| i.id))
+            .and_then(|s| s.chain().next().map(|i| i.id))
         else {
             return Vec::new();
         };
@@ -9817,8 +10062,31 @@ type PageChain = Vec<(PluginInstanceId, String)>;
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_warning;
+    use super::{normalize_warning, slot_name};
     use core_model::ids::EventId;
+
+    /// Plan 7b Ruling 7: a message about an EQ names its strip and "EQ".
+    #[test]
+    fn an_eq_slot_is_named_after_its_strip() {
+        use core_model::command::{Command, MixerCmd, apply};
+        use core_model::document::Document;
+        use core_model::ids::PluginInstanceId;
+        use core_model::mixer::PluginRef;
+        let d = Document::new();
+        let m = d.mixer().master();
+        let mut p = PluginRef::from_legacy("clap:eq");
+        p.name = "Tone".into();
+        let d = apply(
+            &d,
+            &Command::Mixer(MixerCmd::SetEq {
+                strip: m,
+                plugin: Some(p),
+            }),
+        )
+        .unwrap()
+        .doc;
+        assert_eq!(slot_name(&d, PluginInstanceId(0)), "Master — EQ Tone");
+    }
 
     /// 5b final review m1: a note about `ev12` is never named after
     /// `ev1`'s media, whichever comes first.

@@ -37,9 +37,8 @@ public struct SurfaceDraft: Equatable, Sendable {
     /// `state.get surfaces`' problem lines as of the last refresh (pre-flight I4).
     public private(set) var problems: [String] = []
 
-    nonisolated public static let noKontrol = "No Kontrol S-Series MK3 “DAW” port is connected: pick its ports by hand."
+    nonisolated public static let noKontrol = "No host-integration keyboard “DAW” port is connected: pick its ports by hand."
     nonisolated public static let kontrolHelp = "Use the keyboard's “DAW” port for input and output. Its “Main” port stays a MIDI keyboard for your lanes."
-    nonisolated public static let kontrolNotice = "Kontrol and Native Instruments are trademarks of Native Instruments GmbH. VizDAW is not affiliated with or endorsed by Native Instruments."
 
     /// Reads nothing yet: Settings refreshes when it opens, so making this
     /// at launch asks the core nothing before `surfacesLoad`.
@@ -75,9 +74,6 @@ public struct SurfaceDraft: Equatable, Sendable {
         let prefixes = Set(rows.map { "surface \($0.id): " })
         return problems.filter { line in !prefixes.contains { line.hasPrefix($0) } }
     }
-
-    /// A Kontrol is configured: the list shows the notice (M11).
-    public var showsKontrolNotice: Bool { rows.contains { $0.kind == .kontrolMk3 } }
 
     /// Sets the sheet's type; a Kontrol takes its DAW port when one is found
     /// (Ruling 10), each side on its own (final review T6 m1). The ports are
@@ -167,14 +163,14 @@ public struct SurfaceDraft: Equatable, Sendable {
         draft = nil
     }
 
-    /// "MCU-compatible", "MCU XT-compatible", "HUI-compatible", "Kontrol
-    /// S-Series MK3 (DAW mode)".
+    /// "MCU-compatible", "MCU XT-compatible", "HUI-compatible", "Host-integration
+    /// keyboard (DAW mode)".
     nonisolated public static func title(_ k: SurfaceKindRow) -> String {
         switch k {
         case .mcu: "MCU-compatible"
         case .mcuXt: "MCU XT-compatible"
         case .hui: "HUI-compatible"
-        case .kontrolMk3: "Kontrol S-Series MK3 (DAW mode)"
+        case .kontrolMk3: "Host-integration keyboard (DAW mode)"
         }
     }
 

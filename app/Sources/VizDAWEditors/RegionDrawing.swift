@@ -1,23 +1,34 @@
 import AppKit
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
-/// The colours audio regions are drawn in, by meaning (plan 5b Ruling 16).
-/// Every one is a system colour; the SP7 light and dark themes replace
-/// this one place.
-@MainActor
-public enum RegionPalette {
-    public static var body: NSColor { .systemTeal }
-    public static var outline: NSColor { .systemTeal }
-    public static var waveform: NSColor { .labelColor.withAlphaComponent(0.65) }
-    public static var fadeLine: NSColor { .secondaryLabelColor }
-    public static var handle: NSColor { .controlAccentColor }
-    public static var gainLine: NSColor { .systemOrange }
-    public static var offline: NSColor { .systemRed }
+/// The colours audio regions are drawn in, by meaning (plan 5b Ruling 16),
+/// from a theme's editor roles (plan 7b Ruling 13).
+public struct RegionPalette {
+    public let theme: Theme
+    /// The lane's strip colour (owner G1 Q2), when it has one.
+    public let tint: NSColor?
+
+    public init(_ theme: Theme, tint: NSColor? = nil) {
+        self.theme = theme
+        self.tint = tint
+    }
+
+    public var body: NSColor { theme.regionFill(tint: tint) }
+    public var outline: NSColor { theme.regionLine }
+    public var selectedOutline: NSColor { theme.regionSelected }
+    public var waveform: NSColor { theme.regionLine.withAlphaComponent(0.65) }
+    public var fadeLine: NSColor { theme.secondaryLabel }
+    public var handle: NSColor { theme.graph.handle.nsColor }
+    public var gainLine: NSColor { theme.control.gain.nsColor }
+    public var offline: NSColor { theme.offlineColour }
+    /// The region strip's label: text on the region fill.
+    public var name: NSColor { theme.label }
     /// Behind the "Offline" label, so it reads over the hatching (V2).
-    public static var offlineLabelBackground: NSColor { .textBackgroundColor }
-    public static var readoutText: NSColor { .labelColor }
-    public static var readoutBackground: NSColor { .textBackgroundColor }
+    public var offlineLabelBackground: NSColor { theme.canvas }
+    public var readoutText: NSColor { theme.readout.text.nsColor }
+    public var readoutBackground: NSColor { theme.readout.background.nsColor }
 }
 
 /// Drawing an audio region (spec §10.1–10.2), shared by the arrangement
@@ -36,7 +47,7 @@ public enum RegionDrawing {
     }
 
     /// The "Offline" label's font.
-    static let offlineFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+    static func offlineFont(_ t: Theme) -> NSFont { t.font(t.type.caption, weight: .semibold) }
 
     /// Where an arrangement region's "Offline" pill goes: top left, under
     /// the gain band and after the fade-in handle (clear of the fade-in
@@ -61,20 +72,22 @@ public enum RegionDrawing {
     /// final review V1).
     public static func draw(
         _ r: EventRow, in rect: CGRect, rows: OverviewRows?, waveRect: CGRect, offline: Bool, selected: Bool,
-        handles: Bool, offlineLabel: Bool = true
+        handles: Bool, offlineLabel: Bool = true, theme: Theme, tint: NSColor? = nil
     ) {
-        let body = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 2, yRadius: 2)
-        RegionPalette.body.withAlphaComponent(r.mute ? 0.10 : 0.22).setFill()
+        let palette = RegionPalette(theme, tint: tint)
+        let body = NSBezierPath(
+            roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: theme.radius.s, yRadius: theme.radius.s)
+        palette.body.withAlphaComponent(palette.body.alphaComponent * (r.mute ? 0.4 : 1)).setFill()
         body.fill()
         NSGraphicsContext.saveGraphicsState()
         body.addClip()
         if offline {
-            hatch(rect)
+            hatch(rect, palette)
         } else if let rows, rows.state == .ready || rows.state == .coarse {
-            RegionPalette.waveform.setFill()
+            palette.waveform.setFill()
             for b in WaveformGeometry.bars(rows, in: waveRect) { b.fill() }
         }
-        RegionPalette.fadeLine.setStroke()
+        palette.fadeLine.setStroke()
         if r.fadeIn.length > 0 {
             let p = NSBezierPath()
             p.move(to: CGPoint(x: rect.minX, y: rect.maxY))
@@ -90,32 +103,37 @@ public enum RegionDrawing {
             p.stroke()
         }
         NSGraphicsContext.restoreGraphicsState()
-        (selected ? NSColor.controlAccentColor : RegionPalette.outline).setStroke()
+        (selected ? palette.selectedOutline : palette.outline).setStroke()
         body.lineWidth = outlineWidth(selected: selected)
         if r.mute { body.setLineDash([3, 2], count: 2, phase: 0) }
         body.stroke()
         // After the outline, below its stroke (V4).
         if r.gainDb != 0 {
-            RegionPalette.gainLine.setFill()
+            palette.gainLine.setFill()
             gainLineRect(in: rect).fill()
         }
         if handles {
-            RegionPalette.handle.setFill()
+            palette.handle.setFill()
             for (h, box) in RegionHandles.rects(r, in: rect) where h != .gain { NSBezierPath(rect: box).fill() }
         }
         if offline, offlineLabel {
-            let attrs: [NSAttributedString.Key: Any] = [.font: offlineFont, .foregroundColor: RegionPalette.offline]
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: offlineFont(theme), .foregroundColor: palette.offline,
+            ]
             let text = NSString(string: "Offline")
             if let box = offlineLabelRect(r, in: rect, size: text.size(withAttributes: attrs)) {
-                pill(text, in: box, attrs: attrs)
+                pill(text, in: box, attrs: attrs, palette)
             }
         }
     }
 
     /// `text` on the offline label background in `box`.
-    static func pill(_ text: NSString, in box: CGRect, attrs: [NSAttributedString.Key: Any]) {
-        RegionPalette.offlineLabelBackground.setFill()
-        NSBezierPath(roundedRect: box, xRadius: 3, yRadius: 3).fill()
+    static func pill(
+        _ text: NSString, in box: CGRect, attrs: [NSAttributedString.Key: Any], _ palette: RegionPalette
+    ) {
+        palette.offlineLabelBackground.setFill()
+        let radius = palette.theme.radius.s
+        NSBezierPath(roundedRect: box, xRadius: radius, yRadius: radius).fill()
         text.draw(at: CGPoint(x: box.minX + 4, y: box.minY + 1), withAttributes: attrs)
     }
 
@@ -133,23 +151,33 @@ public enum RegionDrawing {
 
     /// Draws the region strip's label `text` for a region in `rect`: on the
     /// offline label background in the offline colour when offline.
-    public static func drawStripLabel(_ text: String, in rect: CGRect, offline: Bool, font: NSFont) {
-        let at = stripLabelOrigin(in: rect)
+    public static func drawStripLabel(_ text: String, in rect: CGRect, offline: Bool, font: NSFont, theme: Theme) {
+        let palette = RegionPalette(theme)
         let s = NSString(string: text)
+        let attrs = stripLabelAttributes(font: font, offline: offline, theme: theme)
+        let at = stripLabelOrigin(in: rect)
         if offline {
-            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: RegionPalette.offline]
             let size = s.size(withAttributes: attrs)
             pill(
                 s, in: CGRect(x: at.x - 4, y: at.y - 0.5, width: size.width + 8, height: size.height + 1),
-                attrs: attrs)
+                attrs: attrs, palette)
         } else {
-            s.draw(at: at, withAttributes: [.font: font, .foregroundColor: NSColor.labelColor])
+            s.draw(at: at, withAttributes: attrs)
         }
     }
 
+    /// The region strip label's attributes: the theme's text colour on the
+    /// region fill (never a fixed white), or the offline colour.
+    public static func stripLabelAttributes(font: NSFont, offline: Bool, theme: Theme)
+        -> [NSAttributedString.Key: Any]
+    {
+        let palette = RegionPalette(theme)
+        return [.font: font, .foregroundColor: offline ? palette.offline : palette.name]
+    }
+
     /// Diagonal hatching for offline media (parent spec §10).
-    static func hatch(_ rect: CGRect) {
-        RegionPalette.offline.withAlphaComponent(0.55).setStroke()
+    static func hatch(_ rect: CGRect, _ palette: RegionPalette) {
+        palette.offline.withAlphaComponent(0.55).setStroke()
         let p = NSBezierPath()
         var x = rect.minX - rect.height
         while x < rect.maxX {
@@ -162,16 +190,18 @@ public enum RegionDrawing {
     }
 
     /// The ±dB readout while the gain band is dragged.
-    public static func readout(_ text: String, at p: CGPoint) {
+    public static func readout(_ text: String, at p: CGPoint, theme: Theme) {
+        let palette = RegionPalette(theme)
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
-            .foregroundColor: RegionPalette.readoutText,
+            .font: theme.digitsFont(theme.type.label, weight: .medium),
+            .foregroundColor: palette.readoutText,
         ]
         let s = NSString(string: text)
         let size = s.size(withAttributes: attrs)
         let box = CGRect(x: p.x, y: p.y, width: size.width + 8, height: size.height + 4)
-        RegionPalette.readoutBackground.setFill()
-        NSBezierPath(roundedRect: box, xRadius: 3, yRadius: 3).fill()
+        palette.readoutBackground.setFill()
+        let radius = theme.radius.s
+        NSBezierPath(roundedRect: box, xRadius: radius, yRadius: radius).fill()
         s.draw(at: CGPoint(x: box.minX + 4, y: box.minY + 2), withAttributes: attrs)
     }
 

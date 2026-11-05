@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -6,6 +7,7 @@ import VizDAWCore
 /// Software Monitoring, the I/O buffer size with the round trip, the
 /// latency trim, and the streamer's RAM cache and read-ahead.
 struct AudioSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var prefs: AudioPreferences
     let store: DocumentStore
 
@@ -22,7 +24,7 @@ struct AudioSettingsView: View {
                     }
                 }
                 Text("A new device takes effect at once; while recording or measuring, once that stops.")
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
                 Toggle(
                     "Software Monitoring",
@@ -36,7 +38,7 @@ struct AudioSettingsView: View {
                     "Off: VizDAW never plays an input back; listen through your interface's direct monitoring. "
                         + "Recording and MIDI thru are unaffected."
                 )
-                .font(.caption)
+                .font(theme.type.caption.font)
                 .foregroundStyle(.secondary)
             }
             Section("Latency") {
@@ -52,7 +54,7 @@ struct AudioSettingsView: View {
                     ForEach(AudioCommands.bufferSizes, id: \.self) { Text("\($0) frames").tag($0) }
                 }
                 Text(AudioPreferences.roundTripText(prefs.device, bufferFrames: prefs.settings.bufferFrames))
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
                 Stepper(
                     value: Binding(
@@ -74,7 +76,7 @@ struct AudioSettingsView: View {
                         get: { prefs.settings.bounceTailSeconds }, set: { prefs.setBounceTail(seconds: $0) }),
                     in: 0...30)
                 Text("A bounce renders on after the range until it is quiet, at most this long.")
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
             }
             Section("Streaming") {
@@ -95,16 +97,16 @@ struct AudioSettingsView: View {
                         set: { prefs.setStream(cacheMb: prefs.settings.cacheMb, readAheadSeconds: $0) }),
                     in: 2...8)
                 Text("Cache and read-ahead apply from the next playback.")
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
             }
             if let p = prefs.problem {
-                Text(p).foregroundStyle(.red)
+                Text(p).foregroundStyle(theme.state.error.color)
             }
         }
         .formStyle(.grouped)
         .frame(width: 500)
-        .padding()
+        .padding(theme.spacing.l)
         .task {
             while !Task.isCancelled {
                 readDevice()
@@ -123,6 +125,7 @@ struct AudioSettingsView: View {
 /// record options new documents start with, the monitor mode Add Lane
 /// gives, and the low-disk thresholds.
 struct RecordingSettingsView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var prefs: AudioPreferences
     let store: DocumentStore
 
@@ -188,8 +191,8 @@ struct RecordingSettingsView: View {
                     Text("Input").tag("input")
                     Text("Off").tag("off")
                 }
-                Text("Open documents keep their own options: change those in the toolbar's record popover.")
-                    .font(.caption)
+                Text("Open documents keep their own options: change those in the transport bar's record popover.")
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
             }
             Section("Disk") {
@@ -199,6 +202,6 @@ struct RecordingSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 500)
-        .padding()
+        .padding(theme.spacing.l)
     }
 }

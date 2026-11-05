@@ -1,4 +1,5 @@
 import SwiftUI
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 import VizDAWEditors
@@ -21,12 +22,14 @@ struct StripChartEditor: View {
     }
 }
 
-/// A refused row "MIDI Learn" ("MIDI Learn Failed").
+/// A refused row "MIDI Learn" ("MIDI Learn Failed"), unless the document
+/// window's shell hosts the alert (plan 7a Ruling 8).
 private struct StripChartLearnAlert: ViewModifier {
     let document: DocumentModel?
+    @Environment(\.learnAlertHosted) var hosted
 
     func body(content: Content) -> some View {
-        if let learn = document?.learn {
+        if let learn = document?.learn, !hosted {
             content.learnAlert(learn, shown: !learn.showsMaps)
         } else {
             content
@@ -39,12 +42,15 @@ struct StripChartHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> StripChartView { StripChartView(model: model) }
 
-    func updateNSView(_ view: StripChartView, context: Context) {}
+    func updateNSView(_ view: StripChartView, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
 }
 
 /// Mode, operation, shape and its parameters, step, the lane shown and the
 /// number of rows (Plan 4d Rulings 17, 21, 22).
 struct StripChartBar: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: StripChartModel
     @Bindable var editor: EditorModel
 
@@ -67,7 +73,7 @@ struct StripChartBar: View {
 
     var body: some View {
         let s = editor.layout.stripChart
-        HStack(spacing: 10) {
+        HStack(spacing: theme.spacing.m) {
             Picker("Mode", selection: binding(\.mode)) {
                 ForEach(StripMode.allCases, id: \.self) { Text($0.title).tag($0) }
             }
@@ -123,8 +129,8 @@ struct StripChartBar: View {
             )
             .accessibilityLabel("Rows")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 
     @ViewBuilder

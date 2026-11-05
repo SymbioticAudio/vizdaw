@@ -84,12 +84,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         win.title = "\(w.detail.kind.title) — \(model.snapshot.title)"
         super.init(window: win)
         ControlWindows.tag(win, .editor, doc: doc)
+        ThemeWindows.style(win)
         win.contentView = NSHostingView(
             rootView: TornEditorView(model: model, id: w.id) { [weak self] in
                 // onGone runs inside a SwiftUI update of this window's own hosting view;
                 // closing (and freeing) the window there is unsafe, so close on the next hop.
                 DispatchQueue.main.async { [weak self] in self?.closeForDocument() }
-            })
+            }
+            .themedRoot())
         win.delegate = self
         if let saved {
             win.setFrame(saved, display: false)
@@ -141,7 +143,7 @@ struct TornEditorView: View {
                 StatusLine(editor: model.editor)
             }
         } else {
-            ContentUnavailableView("Editor Closed", systemImage: "xmark.rectangle")
+            ContentUnavailableView("Editor Closed", icon: .empty)
                 .onAppear(perform: onGone)
         }
     }

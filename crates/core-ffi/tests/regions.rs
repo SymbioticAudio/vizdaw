@@ -481,3 +481,73 @@ fn a_fade_out_shortens_the_fade_in_and_unknown_ids_are_refused() {
     );
     s.close().unwrap();
 }
+
+/// A characterisation test (plan 7c Task 1): it pins how the trim treats
+/// hostile input today, so it may pass at once. A refused trim changes
+/// nothing and adds no undo step.
+#[test]
+fn hostile_trims_are_refused_and_change_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = caf(&dir.path().join("t.caf"), 1, &vec![0.25; 48_000]);
+    let (s, seq, lane, ev) = demo_with(&src);
+    let note = a_note(&s, seq);
+    let trim = |event: u64, front_frames: i64, back_frames: i64| {
+        s.edit(
+            EditCommand::Audio {
+                edit: AudioEdit::Trim {
+                    event,
+                    front_frames,
+                    back_frames,
+                },
+            },
+            None,
+        )
+    };
+    // Offset 1000, length 10 000, in a file of 48 000 frames.
+    trim(ev, 1000, 37_000).unwrap();
+    let state = |s: &Session| {
+        let r = region(s, seq, lane);
+        let snap = s.snapshot().unwrap();
+        (
+            r.tick,
+            r.source_offset,
+            r.frames,
+            r.fade_in,
+            r.fade_out,
+            snap.undo_label,
+        )
+    };
+    let before = state(&s);
+    assert_eq!((before.1, before.2), (1000, 10_000));
+    for (event, front, back) in [
+        (ev, -1001, 0),
+        (ev, 0, -37_001),
+        (ev, 10_000, 0),
+        (ev, 6000, 4000),
+        (ev, i64::MIN, 0),
+        (ev, i64::MAX, 0),
+        (ev, 0, i64::MIN),
+        (ev, 0, i64::MAX),
+        (u64::MAX, 0, 0),
+        (note, 0, 0),
+    ] {
+        assert!(
+            trim(event, front, back).is_err(),
+            "trim({event}, {front}, {back}) must be refused"
+        );
+        assert_eq!(state(&s), before, "trim({event}, {front}, {back})");
+    }
+    // No refusal added an undo step: one undo is the first trim's, and
+    // brings back the whole file.
+    s.undo().unwrap();
+    let undone = region(&s, seq, lane);
+    assert_eq!((undone.source_offset, undone.frames), (0, 48_000));
+    s.redo().unwrap();
+    assert_eq!(state(&s), before, "redo: the first trim again");
+    trim(ev, -1000, 0).unwrap();
+    let after = state(&s);
+    assert_eq!((after.1, after.2), (0, 11_000));
+    assert!(after.0 < before.0, "the region starts earlier");
+    assert_eq!(after.5.as_deref(), Some("Trim Region"));
+    s.close().unwrap();
+}

@@ -127,6 +127,8 @@ pub enum SlotOwner {
     Instrument(DestId),
     /// Insert `index` of a strip.
     Insert(StripId, usize),
+    /// A strip's EQ slot (plan 7b Ruling 7).
+    Eq(StripId),
 }
 
 /// Program and optional bank `(msb, lsb)`, each 0–127.
@@ -397,6 +399,14 @@ impl Document {
                 }
             }
         }
+        if let Some(s) = self
+            .mixer
+            .strips()
+            .values()
+            .find(|s| s.eq.as_ref().is_some_and(|p| p.id == id))
+        {
+            return Some(SlotOwner::Eq(s.id));
+        }
         self.mixer
             .inserts()
             .find(|(_, _, p)| p.id == id)
@@ -411,6 +421,7 @@ impl Document {
                 DestKind::MidiEndpoint { .. } => None,
             },
             SlotOwner::Insert(s, i) => self.mixer.strip(s).ok()?.inserts.get(i),
+            SlotOwner::Eq(s) => self.mixer.strip(s).ok()?.eq.as_ref(),
         }
     }
 
@@ -425,7 +436,7 @@ impl Document {
             DestKind::PluginInstrument { slot } => slot.state,
             DestKind::MidiEndpoint { .. } => None,
         });
-        let inserts = self.mixer.inserts().filter_map(|(_, _, p)| p.state);
+        let inserts = self.mixer.slots().filter_map(|(_, p)| p.state);
         insts.chain(inserts).collect()
     }
 
@@ -522,6 +533,7 @@ impl Document {
                 _ => Err(unknown),
             },
             SlotOwner::Insert(s, i) => self.mixer.strip_mut(s)?.inserts.get_mut(i).ok_or(unknown),
+            SlotOwner::Eq(s) => self.mixer.strip_mut(s)?.eq.as_mut().ok_or(unknown),
         }
     }
 

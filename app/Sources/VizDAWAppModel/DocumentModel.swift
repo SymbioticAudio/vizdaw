@@ -18,6 +18,31 @@ public final class DocumentModel {
     /// The app's key bindings (set by `DocumentStore`; keyboard slots are
     /// checked against them, plan 4f Ruling 15).
     @ObservationIgnored public var keys: KeyBindings?
+    /// The document's mixer, set by `DocumentStore.mixer(_:)` when it makes
+    /// it, so the View commands can commit its strip rename (plan 7a Ruling 10).
+    @ObservationIgnored public weak var storeMixer: MixerModel?
+    /// Makes the document's mixer on demand (`DocumentStore.mixer(_:)`), so
+    /// Arrange's lane colours and Colour menu need no pane to have made it
+    /// (B7 review I1).
+    @ObservationIgnored public var mixerProvider: (() -> MixerModel?)?
+    /// When the mixer was last asked for (the snapshot's and the mixer's
+    /// versions): a mixer that cannot be made is not retried on every draw,
+    /// only once the document moves on (final review m5).
+    @ObservationIgnored private var mixerAsked: (snapshot: UInt64, mixer: Int)?
+    /// Bumped when the mixer arrives, so views drawn before it redraw.
+    public private(set) var mixerVersion = 0
+
+    /// The mixer has been made (`DocumentStore` calls it).
+    public func mixerArrived() { mixerVersion += 1 }
+
+    /// The document's mixer, made on first use when none is yet.
+    public var mixer: MixerModel? {
+        if let m = storeMixer { return m }
+        let now = (snapshot: snapshot.version, mixer: mixerVersion)
+        guard mixerAsked.map({ $0 != now }) ?? true, let provider = mixerProvider else { return nil }
+        mixerAsked = now
+        return provider()
+    }
     public private(set) var selectedSeq: UInt64?
     public private(set) var lanes: [LaneRow] = []
     public private(set) var transport: TransportState
@@ -136,6 +161,16 @@ public final class DocumentModel {
         return m
     }
 
+    /// The transport bar's rewind and fast forward held to wind, and the
+    /// held ⏪ ⏩ keys (plan 7d Ruling 3), made once.
+    public var shuttle: TransportShuttle {
+        if let s = shuttleModel { return s }
+        let s = TransportShuttle(document: self)
+        shuttleModel = s
+        return s
+    }
+    @ObservationIgnored private var shuttleModel: TransportShuttle?
+
     /// File › Bounce… (plan 5f-2), made once.
     public var bounce: BounceModel {
         if let m = bounceModel { return m }
@@ -202,6 +237,26 @@ public final class DocumentModel {
         case .window(let id): m = .window(id, of: self)
         }
         stripCharts[slot] = m
+        return m
+    }
+
+    @ObservationIgnored private var controllersModel: StripChartModel?
+
+    /// The right pane's controllers chart, made once (plan 7a Ruling 7).
+    public var controllersChart: StripChartModel {
+        if let m = controllersModel { return m }
+        let m = StripChartModel.controllers(self)
+        controllersModel = m
+        return m
+    }
+
+    @ObservationIgnored private var audioEditorModel: AudioEditorModel?
+
+    /// The bottom pane's audio editor, made once (plan 7c Task 4).
+    public var audioEditor: AudioEditorModel {
+        if let m = audioEditorModel { return m }
+        let m = AudioEditorModel(document: self)
+        audioEditorModel = m
         return m
     }
 
@@ -349,6 +404,7 @@ public final class DocumentModel {
         apply(snap)
         projectInfo = try? session.projectInfo()
         editor.applySnapshot = { [weak self] in self?.apply($0) }
+        editor.paneEditsEnder = { [weak self] in self?.endPaneEdits() }
         editor.selectSequence = { [weak self] in self?.select($0) }
         editor.currentSequence = { [weak self] in self?.selectedSeq }
         selectModify.document = self
