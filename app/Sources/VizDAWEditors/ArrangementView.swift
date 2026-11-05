@@ -182,16 +182,17 @@ public final class ArrangementView: EditorCanvas {
             shape.fill()
             theme.armColour.setStroke()
             shape.stroke()
-            guard let (f0, f1, columns) = GrowingTake.slice(rect: rect, visible: vis, from: t.fromFrame, to: t.toFrame)
-            else { continue }
-            guard let rows = try? document.session.recordingWaveform(
-                    lane: t.lane, fromFileFrame: f0, toFileFrame: f1, columns: columns)
-            else { continue }
-            let wave = CGRect(x: vis.minX, y: rect.minY + 2, width: vis.width, height: max(rect.height - 4, 1))
+            let slices = document.record.growingSlices(t, rect: rect, visible: vis) { axis.tick(atX: $0) }
             NSGraphicsContext.saveGraphicsState()
             NSBezierPath(rect: vis).addClip()
             theme.armColour.withAlphaComponent(0.7).setFill()
-            for b in WaveformGeometry.bars(rows, in: wave) { b.fill() }
+            for s in slices {
+                guard let rows = try? document.session.recordingWaveform(
+                        lane: t.lane, fromFileFrame: s.from, toFileFrame: s.to, columns: s.columns)
+                else { continue }
+                let wave = CGRect(x: s.minX, y: rect.minY + 2, width: s.maxX - s.minX, height: max(rect.height - 4, 1))
+                for b in WaveformGeometry.bars(rows, in: wave) { b.fill() }
+            }
             NSGraphicsContext.restoreGraphicsState()
         }
     }

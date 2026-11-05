@@ -12,7 +12,7 @@ struct StripInputView: View {
 
     var body: some View {
         HStack(spacing: theme.spacing.xs) {
-            Menu(LaneInputs.title(lane.input)) {
+            Menu(inputs.pickerTitle(lane)) {
                 ForEach(Array(inputs.groups(for: lane).enumerated()), id: \.offset) { _, group in
                     Section(group.title) {
                         ForEach(Array(group.choices.enumerated()), id: \.offset) { _, choice in

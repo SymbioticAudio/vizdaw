@@ -88,6 +88,19 @@ private let media: UInt64 = 96_000
         #expect(target(r, .gain, dy: .nan) == nil)
     }
 
+    @Test func atSixteenPointsTheGainBandIsReachable() {
+        let w = CGRect(x: 0, y: 0, width: 800, height: 100)
+        let ax = FrameAxis(framesPerPoint: 100, originFrame: 0)
+        let left = ax.x(24_000)
+        func hit(_ frames: UInt64, _ dx: CGFloat, _ y: CGFloat) -> AudioEditorHandle? {
+            AudioEditorGeometry.hit(CGPoint(x: left + dx, y: y), row: region(offset: 24_000, frames: frames), axis: ax, in: w)
+        }
+        #expect(hit(1600, 8, 3) == .gain, "16.0 points wide: the top 6 points")
+        #expect(hit(1600, 2, 50) == .start && hit(1600, 14, 50) == .end)
+        #expect(hit(1590, 8, 3) == .gain, "15.9 points: unchanged")
+        #expect(hit(2400, 12, 3) == .gain, "24 points: unchanged")
+    }
+
     @Test func handlesOfATinyRegionStayReachable() {
         // 6 points wide: 600 frames at 100 per point.
         let tiny = region(offset: 24_000, frames: 600)

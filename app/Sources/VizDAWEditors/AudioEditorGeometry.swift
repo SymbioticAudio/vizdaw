@@ -91,7 +91,7 @@ public enum AudioEditorGeometry {
     /// Focus 5: every handle of a tiny region stays reachable).
     public static func handles(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> [(AudioEditorHandle, CGRect)] {
         let d = drawn(r, axis: axis, in: wave)
-        let narrow = regionRect(r, axis: axis, in: wave).width < 2 * edgeWidth
+        let narrow = regionRect(r, axis: axis, in: wave).width <= 2 * edgeWidth
         let ordered = narrow ? d.filter { $0.0 == .gain } + d.filter { $0.0 != .gain } : d
         return ordered.compactMap { h, d in
             var area = d

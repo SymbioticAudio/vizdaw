@@ -25,6 +25,20 @@ private func row(_ id: UInt64, tick: Int64) -> EventRow {
         eightBit: false)
 }
 
+@Suite struct MeterSeparatorTests {
+    @Test func theMeterStaysClearOfTheSeparator() {
+        for height in [46.0, 47, 48, 80] {
+            let h = CGFloat(height)
+            let bottom: CGFloat = 100 + h - 1.5
+            let m = LaneHeaderLayout.meterRect(rowTop: 100, laneHeight: h)
+            let c = LaneHeaderLayout.clipRect(rowTop: 100, laneHeight: h)
+            #expect(m.maxY <= bottom, "\(h)")
+            #expect(m.minY >= CGFloat(142), "\(h): below the controls' bottom at 41")
+            #expect(c.minY == m.minY && c.height == m.height, "\(h)")
+        }
+    }
+}
+
 private let a = LaneKey(3, 30)
 private let b = LaneKey(3, 31)
 

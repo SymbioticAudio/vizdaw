@@ -262,6 +262,8 @@ struct PaneDivider: View {
     var dragStart = State<Double?>(initialValue: nil)
     /// The size the drag would give, shown by the line until it ends.
     var live = State<Double?>(initialValue: nil)
+    /// The resize cursor it has pushed (balanced by `DividerCursor`).
+    var cursor = State<DividerCursor>(initialValue: DividerCursor())
 
     /// The hit area across the line.
     private static let grip: CGFloat = 7
@@ -278,13 +280,8 @@ struct PaneDivider: View {
                        height: side == .bottom ? (dragging ? 2 : 1) : r.height)
                 .frame(width: side == .bottom ? r.width : Self.grip, height: side == .bottom ? Self.grip : r.height)
                 .contentShape(Rectangle())
-                .onHover { inside in
-                    if inside {
-                        (side == .bottom ? NSCursor.resizeUpDown : NSCursor.resizeLeftRight).push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .onHover { inside in apply(cursor.wrappedValue.hover(inside)) }
+                .onDisappear { apply(cursor.wrappedValue.disappear()) }
                 .gesture(
                     DragGesture(minimumDistance: 1, coordinateSpace: .global)
                         .onChanged { v in changed(v.translation, frames: f, setup: setup) }
@@ -339,7 +336,16 @@ struct PaneDivider: View {
         live.wrappedValue = PaneGeometry.drag(seeded, side: side, by: delta, in: size)
     }
 
+    private func apply(_ op: CursorOp?) {
+        switch op {
+        case .push: (side == .bottom ? NSCursor.resizeUpDown : NSCursor.resizeLeftRight).push()
+        case .pop: NSCursor.pop()
+        case nil: break
+        }
+    }
+
     private func ended() {
+        apply(cursor.wrappedValue.dragEnded(inside: cursor.wrappedValue.inside))
         if let size = live.wrappedValue, size != dragStart.wrappedValue {
             _ = model.editor.setPane(side, view: nil, shown: nil, size: size, in: nil)
         }

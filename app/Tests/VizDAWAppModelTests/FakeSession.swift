@@ -742,8 +742,11 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var infoCalls = 0
     /// Thrown by `secondsAt`.
     var secondsAtError: VizError?
+    /// A tempo map for `secondsAt`; nil keeps the linear 120 BPM map (30 720 ticks a second).
+    var secondsAtMap: (([Int64]) -> [Double])?
     func secondsAt(seq: UInt64, ticks: [Int64]) throws -> [Double] {
         if let e = secondsAtError { throw e }
+        if let map = secondsAtMap { return map(ticks) }
         return ticks.map { Double($0) / 30_720 }
     }
     func ticksAt(seq: UInt64, seconds: [Double]) throws -> [Int64] { seconds.map { Int64(($0 * 30_720).rounded()) } }

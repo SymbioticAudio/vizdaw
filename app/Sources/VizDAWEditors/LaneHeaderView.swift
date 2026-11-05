@@ -139,9 +139,25 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             _ = document.inputs.opening
         } onChange: { [weak self] in
             Task { @MainActor in
-                self?.needsDisplay = true
+                if let self {
+                    for r in self.meterInvalidation { self.setNeedsDisplay(r) }
+                }
                 self?.observeMeters()
             }
+        }
+    }
+
+    /// What a meter change redraws: the union of each visible row's meter
+    /// and clip rect (nothing when the lanes are too short for a meter).
+    var meterInvalidation: [CGRect] {
+        let n = document.lanes.count
+        guard LaneHeaderLayout.showsMeter(laneHeight: laneHeight), n > 0, laneHeight.isFinite, bounds.height > 0
+        else { return [] }
+        return (0..<n).compactMap { i in
+            let top = rowTop(i)
+            guard top + laneHeight >= 0, top <= bounds.height else { return nil }
+            return LaneHeaderLayout.meterRect(rowTop: top, laneHeight: laneHeight)
+                .union(LaneHeaderLayout.clipRect(rowTop: top, laneHeight: laneHeight))
         }
     }
 
@@ -215,7 +231,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     /// the theme's mid meter colour while the input is still opening
     /// (pre-flight I5); the meter colours are the theme's `meter` group.
     private func meter(_ lane: UInt64, rowTop top: CGFloat, inputs: LaneInputs) {
-        let r = LaneHeaderLayout.meterRect(rowTop: top)
+        let r = LaneHeaderLayout.meterRect(rowTop: top, laneHeight: laneHeight)
         let m = theme.meter
         (inputs.opening ? m.mid.nsColor.withAlphaComponent(0.5) : m.background.nsColor).setFill()
         r.fill()
@@ -223,7 +239,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         m.low.nsColor.setFill()
         CGRect(x: r.minX, y: r.minY, width: r.width * fill, height: r.height).fill()
         (inputs.isClipped(lane) ? m.clip.nsColor : m.background.nsColor).setFill()
-        LaneHeaderLayout.clipRect(rowTop: top).fill()
+        LaneHeaderLayout.clipRect(rowTop: top, laneHeight: laneHeight).fill()
     }
 
     private func toggle(_ letter: String, on: Bool, color: NSColor, in r: CGRect) {

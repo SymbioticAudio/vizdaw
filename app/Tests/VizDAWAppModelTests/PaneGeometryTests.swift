@@ -3,6 +3,52 @@ import Testing
 @testable import VizDAWAppModel
 
 @Suite struct PaneGeometryTests {
+    @Test func theDividerCursorAlwaysPopsWhatItPushed() {
+        var c = DividerCursor()
+        #expect(c.hover(true) == .push)
+        #expect(c.hover(true) == nil)
+        #expect(c.hover(false) == .pop)
+        #expect(c.hover(false) == nil)
+        #expect(c.hover(true) == .push)
+        #expect(c.disappear() == .pop)
+        #expect(c.disappear() == nil)
+        // The pointer leaves during a drag, which then ends outside.
+        var d = DividerCursor()
+        var net = 0
+        for op in [d.hover(true), d.hover(false), d.dragEnded(inside: false)] {
+            if op == .push { net += 1 } else if op == .pop { net -= 1 }
+        }
+        #expect(net == 0)
+        var pops = 0
+        var e = DividerCursor()
+        _ = e.hover(true)
+        for op in [e.hover(false), e.dragEnded(inside: false)] where op == .pop { pops += 1 }
+        #expect(pops == 1)
+        // Random sequences (fixed seed).
+        var seed: UInt64 = 0x5EED
+        func next() -> UInt64 {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return seed >> 33
+        }
+        for _ in 0..<200 {
+            var r = DividerCursor()
+            var depth = 0
+            for _ in 0..<8 {
+                let op: CursorOp?
+                switch next() % 4 {
+                case 0: op = r.hover(true)
+                case 1: op = r.hover(false)
+                case 2: op = r.dragEnded(inside: next() % 2 == 0)
+                default: op = r.disappear()
+                }
+                if op == .push { depth += 1 } else if op == .pop { depth -= 1 }
+                #expect(depth == 0 || depth == 1)
+            }
+            if r.disappear() == .pop { depth -= 1 }
+            #expect(depth == 0)
+        }
+    }
+
     @Test func layoutAPutsTheLeftPaneFullHeightAndTheRightBesideTheBottom() {
         var s = ViewLayouts().arrange; s.right.shown = true   // left 220, bottom 260, right 260
         let f = PaneGeometry.frames(in: CGSize(width: 1400, height: 900), setup: s)

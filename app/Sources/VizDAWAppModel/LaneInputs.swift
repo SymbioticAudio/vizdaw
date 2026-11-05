@@ -148,6 +148,19 @@ public final class LaneInputs {
         }
     }
 
+    /// What the strip's input picker shows: the input alone, or led by the
+    /// lane's name when another lane plays through the same path (the strip
+    /// is shared, so it says whose input this is).
+    public func pickerTitle(_ lane: LaneRow, sharesPath: Bool) -> String {
+        sharesPath ? "\(lane.name): \(Self.title(lane.input))" : Self.title(lane.input)
+    }
+
+    /// `pickerTitle` with `sharesPath` read from the shown lanes.
+    public func pickerTitle(_ lane: LaneRow) -> String {
+        let shared = (document?.lanes ?? []).filter { $0.audioOut == lane.audioOut }.count > 1
+        return pickerTitle(lane, sharesPath: shared)
+    }
+
     /// The link badge of a lane that records a synth's return (spec §6.9):
     /// "⇠ ‹synth›"; nil for other lanes.
     public func badge(_ lane: LaneRow) -> String? {

@@ -162,3 +162,41 @@ public enum PaneGeometry {
         return ok && reachable ? r : nil
     }
 }
+
+/// What a divider asks of the cursor stack.
+public enum CursorOp: Equatable, Sendable { case push, pop }
+
+/// The resize cursor a pane divider pushes while the pointer is over it.
+/// Pushes and pops always balance: it pops only what it pushed, so a drag
+/// that leaves the line, or a divider that goes away, never leaves the
+/// stack unbalanced.
+public struct DividerCursor: Equatable, Sendable {
+    private var pushed = false
+    /// Whether the pointer was last over the line.
+    public private(set) var inside = false
+
+    public init() {}
+
+    public mutating func hover(_ inside: Bool) -> CursorOp? {
+        self.inside = inside
+        return settle(inside)
+    }
+
+    /// A drag ended with the pointer `inside` the line or not.
+    public mutating func dragEnded(inside: Bool) -> CursorOp? {
+        self.inside = inside
+        return settle(inside)
+    }
+
+    /// The divider left the screen.
+    public mutating func disappear() -> CursorOp? {
+        inside = false
+        return settle(false)
+    }
+
+    private mutating func settle(_ want: Bool) -> CursorOp? {
+        guard want != pushed else { return nil }
+        pushed = want
+        return want ? .push : .pop
+    }
+}

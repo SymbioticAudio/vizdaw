@@ -44,10 +44,33 @@ import VizDAWCore
             }
             #expect(a.1.maxX <= LaneHeaderLayout.width)
         }
-        let meter = LaneHeaderLayout.meterRect(rowTop: 0)
+        let meter = LaneHeaderLayout.meterRect(rowTop: 0, laneHeight: 48)
         #expect(controls.allSatisfy { !$0.1.intersects(meter) })
         #expect(meter.maxY <= 48, "inside the default lane height")
-        #expect(LaneHeaderLayout.clipRect(rowTop: 0).minX >= meter.maxX)
+        #expect(LaneHeaderLayout.clipRect(rowTop: 0, laneHeight: 48).minX >= meter.maxX)
+    }
+
+    @Test func theMeterRedrawCoversOnlyTheMeters() throws {
+        let f = editorFake()
+        f.laneTable[3]?.append(lane(32, "Third"))
+        f.layout = #"{"laneHeight":60}"#
+        let m = try DocumentModel(session: f)
+        m.select(3)
+        let h = LaneHeaderView(document: m)
+        h.frame = NSRect(x: 0, y: 0, width: LaneHeaderLayout.width, height: 400)
+        let rects = h.meterInvalidation
+        #expect(rects.count == 3)
+        for (i, r) in rects.enumerated() {
+            let band = LaneHeaderLayout.meterRect(rowTop: h.rowTop(i), laneHeight: 60)
+            #expect(r.height == 3 && r.minY == band.minY && r.minX == band.minX, "row \(i)")
+            #expect(r.maxX >= LaneHeaderLayout.clipRect(rowTop: h.rowTop(i), laneHeight: 60).maxX)
+        }
+        f.layout = #"{"laneHeight":40}"#
+        let short = try DocumentModel(session: f)
+        short.select(3)
+        let hs = LaneHeaderView(document: short)
+        hs.frame = h.frame
+        #expect(hs.meterInvalidation.isEmpty)
     }
 
     @Test func voiceOverSaysTheInputAndMonitoring() throws {
