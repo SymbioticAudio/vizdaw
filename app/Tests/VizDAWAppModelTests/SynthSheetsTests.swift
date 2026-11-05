@@ -63,7 +63,7 @@ import VizDAWCore
         let (m, _) = try demo()
         m.synth.beginTrackSynth(seq: 3, lane: m.lanes[0], channelOn: false)
         #expect(m.synth.trackSynth == nil)
-        #expect(m.editor.status == "Track Synth needs a lane that plays an external MIDI destination.")
+        #expect(m.editor.status == "Track Synth needs a track that plays an external MIDI destination.")
         m.synth.beginTrackSynth(seq: 3, lane: m.lanes[1], channelOn: true)
         #expect(m.synth.trackSynth == nil && m.editor.status == SynthSheets.trackSynthOnChannel)
         m.synth.beginNewDestination(seq: 3, lane: m.lanes[1], channelOn: true)
@@ -140,7 +140,7 @@ import VizDAWCore
         f.destinationsError = .Internal(message: "no list")
         sheets.commitNewDestination()
         #expect(f.addedDestinations.count == 1 && sheets.newDestination == nil)
-        #expect(m.editor.status == "Added Sub 37; choose it in the lane's destination menu.")
+        #expect(m.editor.status == "Added Sub 37; choose it in the track's destination menu.")
     }
 
     @Test func newDestinationAddsItAndPointsTheLaneAtIt() throws {

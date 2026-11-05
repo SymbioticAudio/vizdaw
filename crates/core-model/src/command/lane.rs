@@ -181,21 +181,21 @@ impl LaneCmd {
     /// Stable command name.
     pub fn name(&self) -> &'static str {
         match self {
-            LaneCmd::Add { .. } => "Add Lane",
-            LaneCmd::Remove { .. } => "Remove Lane",
-            LaneCmd::Reorder { .. } => "Reorder Lane",
-            LaneCmd::Duplicate { .. } => "Duplicate Lane",
-            LaneCmd::Rename { .. } => "Rename Lane",
-            LaneCmd::SetDest { .. } => "Set Lane Destination",
-            LaneCmd::SetOutput { .. } => "Set Lane Output",
-            LaneCmd::SetFlags { .. } => "Set Lane Mute/Solo/Arm",
-            LaneCmd::SetLength { .. } => "Set Lane Length",
+            LaneCmd::Add { .. } => "Add Track",
+            LaneCmd::Remove { .. } => "Remove Track",
+            LaneCmd::Reorder { .. } => "Reorder Track",
+            LaneCmd::Duplicate { .. } => "Duplicate Track",
+            LaneCmd::Rename { .. } => "Rename Track",
+            LaneCmd::SetDest { .. } => "Set Track Destination",
+            LaneCmd::SetOutput { .. } => "Set Track Output",
+            LaneCmd::SetFlags { .. } => "Set Track Mute/Solo/Arm",
+            LaneCmd::SetLength { .. } => "Set Track Length",
             LaneCmd::SetPlayQuantize { .. } => "Set Play Quantize",
             LaneCmd::SetPlayShift { .. } => "Set Play Shift",
             LaneCmd::AddTake { .. } => "Add Take",
             LaneCmd::SetActiveTake { .. } => "Set Active Take",
-            LaneCmd::SetInput { .. } => "Set Lane Input",
-            LaneCmd::SetMonitor { .. } => "Set Lane Monitor",
+            LaneCmd::SetInput { .. } => "Set Track Input",
+            LaneCmd::SetMonitor { .. } => "Set Track Monitor",
             LaneCmd::TrackSynth { .. } => "Track Synth",
         }
     }
@@ -413,7 +413,7 @@ fn track_synth(
     r: &mut Report,
 ) -> Result<()> {
     let dest = d.lane(seq, lane)?.midi_dest.ok_or_else(|| {
-        ModelError::invalid("Track Synth needs a lane that plays an external MIDI destination")
+        ModelError::invalid("Track Synth needs a track that plays an external MIDI destination")
     })?;
     super::routing::check_external(d, dest)?;
     let input = LaneInput::Audio {

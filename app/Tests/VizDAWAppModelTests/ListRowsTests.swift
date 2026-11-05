@@ -80,7 +80,7 @@ func listContext() -> ListContext {
         #expect(ListText.cell(nr, .position, c) == "1.2.0")
         #expect(ListText.cell(nr, .duration, c) == "1.240")
         #expect(ListText.cell(nr, .end, c) == "1.3.240")
-        #expect(ListText.cell(nr, .dest, c) == "Lane")
+        #expect(ListText.cell(nr, .dest, c) == "Track")
         #expect(ListText.cell(nr, .lane, c) == "Chords")
         #expect(ListText.summary(nr, c) == "Note C4, bar 1 beat 2, velocity 100")
         var cc = listEvent(2, 0, .cc)

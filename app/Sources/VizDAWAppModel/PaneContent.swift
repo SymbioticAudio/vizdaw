@@ -11,7 +11,7 @@ public enum StripFocus {
         case nothing
     }
 
-    public static let nothingMessage = "Select a lane to see its channel strip."
+    public static let nothingMessage = "Select a track to see its channel strip."
 
     /// The strip `lane` plays through: its audio path's, its plugin
     /// instrument's, or the built-in synth's; nil for an external
@@ -126,7 +126,7 @@ public struct InspectorRow: Equatable, Sendable {
 
 /// The left pane's read-only inspector (plan 7a Ruling 6).
 public enum Inspector {
-    public static let emptyMessage = "Select a lane or a region."
+    public static let emptyMessage = "Select a track or a region."
 
     /// `region` is an `EventRow` (an audio region event); `sampleRate` turns
     /// its fades' frames into ms (without it they show as frames).
@@ -210,7 +210,7 @@ public enum MarkerList {
 
 /// The right pane's actions.
 @MainActor public enum PaneContent {
-    public static let noStripMessage = "Select a lane or one mixer strip first."
+    public static let noStripMessage = "Select a track or one mixer strip first."
 
     /// Puts `p` on the end of the insert chain of the strip the view points
     /// at (Ruling 7); returns the refusal text, or nil when it went in.

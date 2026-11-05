@@ -189,15 +189,15 @@ fn every_drum_edit_applies_and_undoes() {
         },
     ];
     let labels = [
-        "Mark as Drum Lane",
-        "Mark as Drum Lane",
+        "Mark as Drum Track",
+        "Mark as Drum Track",
         "Add Drum Row",
         "Rename Drum Row",
         "Show Drum Row Velocity",
         "Reorder Drum Row",
         "Remove Drum Row",
-        "Move Drum Row to Lane",
-        "Split Drum Row to Lane",
+        "Move Drum Row to Track",
+        "Split Drum Row to Track",
         "Paint Drum Hits",
     ];
     for (edit, label) in all.into_iter().zip(labels) {

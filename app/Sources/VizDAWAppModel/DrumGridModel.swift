@@ -261,7 +261,7 @@ public final class DrumGridModel {
     @discardableResult
     public func addRow() -> Bool {
         guard let seq, let lane = currentLane else {
-            editor.status = "There is no drum lane to add a row to."
+            editor.status = "There is no drum track to add a row to."
             return false
         }
         // A `Vec<u8>` crosses the FFI as `Data`.

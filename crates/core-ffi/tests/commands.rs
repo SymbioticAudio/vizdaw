@@ -40,7 +40,7 @@ fn lane_mute_is_one_undo_step() {
     let song = id_of(&s.snapshot().unwrap(), "Song");
     let chords = s.lanes(song).unwrap()[1].id;
     let snap = s.set_lane_mute(song, chords, true).unwrap();
-    assert_eq!(snap.undo_label.as_deref(), Some("Set Lane Mute/Solo/Arm"));
+    assert_eq!(snap.undo_label.as_deref(), Some("Set Track Mute/Solo/Arm"));
     assert!(s.lanes(song).unwrap()[1].mute);
     s.undo().unwrap();
     assert!(!s.lanes(song).unwrap()[1].mute);

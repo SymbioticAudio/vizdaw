@@ -981,7 +981,7 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         let mut inner = lock(&self.inner);
         let h = &mut inner.history;
-        h.begin("Add Lane")?;
+        h.begin("Add Track")?;
         let made = h.execute(&cmd, filter).and_then(|r| {
             let lane = r
                 .created
@@ -990,7 +990,7 @@ impl Session {
                     core_model::ids::AnyId::Lane(l) => Some(*l),
                     _ => None,
                 })
-                .ok_or_else(|| core_model::error::ModelError::invalid("no lane was added"))?;
+                .ok_or_else(|| core_model::error::ModelError::invalid("no track was added"))?;
             h.execute(
                 &Command::Lane(LaneCmd::SetMonitor { seq, lane, monitor }),
                 filter,
@@ -1716,9 +1716,9 @@ impl Session {
             let ids: Vec<u64> = s.lanes.iter().map(|l| l.id.0).collect();
             let m = core_editor::transport::arm_move(&armed, forward).ok_or_else(|| {
                 crate::events::bad(if forward {
-                    "there is no lane after the armed one"
+                    "there is no track after the armed one"
                 } else {
-                    "there is no lane before the armed one"
+                    "there is no track before the armed one"
                 })
             })?;
             Ok((ids, m))
@@ -4162,7 +4162,7 @@ fn apply_import_as(
                             _ => None,
                         })
                         .ok_or_else(|| VizError::Internal {
-                            message: "no lane created".into(),
+                            message: "no track created".into(),
                         })?
                 }
             };
@@ -4610,7 +4610,7 @@ fn edit_open_busy() -> VizError {
 }
 
 /// Why an arm or input change waits for Stop (plan 5d-1 Ruling 18).
-pub const RECORDING_LANES: &str = "Stop recording to change which lanes record.";
+pub const RECORDING_LANES: &str = "Stop recording to change which tracks record.";
 
 /// `Busy` [`RECORDING_LANES`] while `inner` records, finishes a pass or
 /// waits to apply one.
@@ -4840,7 +4840,7 @@ impl Session {
                 .ok_or_else(|| crate::events::bad("nothing is recording"))?;
             r.waveform(LaneId(lane), from_file_frame, to_file_frame, columns)
                 .ok_or_else(|| {
-                    crate::events::bad(&format!("lane {lane} records no audio in this pass"))
+                    crate::events::bad(&format!("track {lane} records no audio in this pass"))
                 })
         })
     }
@@ -5063,7 +5063,7 @@ fn recover_into_lanes(
                     _ => None,
                 })
                 .ok_or_else(|| VizError::Internal {
-                    message: "no lane created".into(),
+                    message: "no track created".into(),
                 })?;
             h.execute(
                 &Command::Audio(AudioCmd::Insert {
@@ -5172,7 +5172,9 @@ impl Session {
             }
         }
         if audio.is_empty() && midi_lanes.is_empty() {
-            return Err(crate::events::bad("arm a lane that has an input to record"));
+            return Err(crate::events::bad(
+                "arm a track that has an input to record",
+            ));
         }
         let root = inner.root(self.id);
         if !audio.is_empty() {
@@ -5524,7 +5526,7 @@ impl Session {
                         });
                         if let Err(e) = inner.history.execute(&mute, &ViewFilter::default()) {
                             inner.news.problems.push(format!(
-                                "The MIDI lane could not be muted after recording ({e})."
+                                "The MIDI track could not be muted after recording ({e})."
                             ));
                         }
                     }
@@ -5702,7 +5704,7 @@ impl Session {
                 let Some((seq, _, name, channels)) = crate::synth::return_lane(inner.doc(), dest)
                 else {
                     return Err(crate::events::bad(&format!(
-                        "no lane records the return of {}: set one up with Track Synth first",
+                        "no track records the return of {}: set one up with Track Synth first",
                         d.name
                     )));
                 };

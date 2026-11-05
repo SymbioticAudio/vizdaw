@@ -637,7 +637,7 @@ impl Engine {
         for (lane, why) in &thru_unroutable {
             report
                 .warnings
-                .push(format!("MIDI thru of lane {lane} not played: {why}"));
+                .push(format!("MIDI thru of track {lane} not played: {why}"));
         }
         report.thru_unroutable = thru_unroutable;
         report.graph = self.compile_graph(doc)?;
@@ -1358,7 +1358,7 @@ impl Engine {
         };
         let Some(target) = kinds.iter().find_map(|k| self.targets.find(k)) else {
             return Ok(Err(format!(
-                "{} is not loaded: no lane of the loaded sequence records its return",
+                "{} is not loaded: no track of the loaded sequence records its return",
                 d.name
             )));
         };

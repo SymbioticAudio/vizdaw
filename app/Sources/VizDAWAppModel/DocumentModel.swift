@@ -804,7 +804,7 @@ public final class DocumentModel {
             lanes = try session.lanes(seq: seq)
         } catch {
             lanes = []
-            alert = AlertItem(error, title: "Lanes Unavailable")
+            alert = AlertItem(error, title: "Tracks Unavailable")
         }
     }
 }

@@ -38,7 +38,7 @@ public struct SurfaceDraft: Equatable, Sendable {
     public private(set) var problems: [String] = []
 
     nonisolated public static let noKontrol = "No host-integration keyboard “DAW” port is connected: pick its ports by hand."
-    nonisolated public static let kontrolHelp = "Use the keyboard's “DAW” port for input and output. Its “Main” port stays a MIDI keyboard for your lanes."
+    nonisolated public static let kontrolHelp = "Use the keyboard's “DAW” port for input and output. Its “Main” port stays a MIDI keyboard for your tracks."
 
     /// Reads nothing yet: Settings refreshes when it opens, so making this
     /// at launch asks the core nothing before `surfacesLoad`.

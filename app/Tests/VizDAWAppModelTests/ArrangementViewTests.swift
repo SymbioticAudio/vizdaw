@@ -241,7 +241,7 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         var lane = m.lanes[1]
         let titles = h.laneMenu(seq: 3, lane: lane).items.filter { !$0.isSeparatorItem }.map(\.title)
         // Colour ▸ last (plan 7b Task B7; StripColourTests covers it).
-        #expect(titles == ["Drum Lane", "Track Synth…", "New MIDI Destination…", "Colour"])
+        #expect(titles == ["Drum Track", "Track Synth…", "New MIDI Destination…", "Colour"])
         #expect(!h.laneMenu(seq: 3, lane: lane).items[2].isEnabled, "Chords plays no external synth")
         let saved = f.dests
         f.dests = saved + [DestRow(id: 7, name: "Juno", plugin: nil, external: true)]
@@ -250,7 +250,7 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(h.laneMenu(seq: 3, lane: juno).items[2].isEnabled, "Juno is an external synth")
         f.dests = saved
         let item = try #require(h.laneMenu(seq: 3, lane: lane).items.first)
-        #expect(item.title == "Drum Lane" && item.state == .off)
+        #expect(item.title == "Drum Track" && item.state == .off)
         _ = item.target?.perform(item.action)
         #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 31, drum: true)))
         lane.isDrum = true

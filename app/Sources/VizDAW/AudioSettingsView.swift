@@ -184,7 +184,7 @@ struct RecordingSettingsView: View {
                                 passesAsTakes: $0)
                         }))
                 Picker(
-                    "Monitoring for new lanes",
+                    "Monitoring for new tracks",
                     selection: Binding(get: { prefs.settings.defaultMonitor }, set: { prefs.setDefaultMonitor($0) })
                 ) {
                     Text("Auto").tag("auto")

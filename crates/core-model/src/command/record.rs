@@ -289,7 +289,9 @@ pub(crate) fn apply(d: &mut Document, pass: &RecordPass, r: &mut Report) -> Resu
 fn check_write(d: &Document, w: &AutomationWrite) -> Result<()> {
     d.sequence(w.seq)?;
     if w.lane_name.trim().is_empty() {
-        return Err(ModelError::invalid("an automation write needs a lane name"));
+        return Err(ModelError::invalid(
+            "an automation write needs a track name",
+        ));
     }
     check_ticks("automation.start", w.start.0)?;
     check_ticks("automation.end", w.end.0)?;

@@ -84,7 +84,7 @@ pub fn request_microphone(limit: std::time::Duration) -> MicAccess {
 
 /// The message arming an audio lane shows when input is refused (spec
 /// §6.1).
-pub const DENIED_MESSAGE: &str = "VizDAW may not use audio input. Allow it in System Settings › Privacy & Security › Microphone, then arm the lane again.";
+pub const DENIED_MESSAGE: &str = "VizDAW may not use audio input. Allow it in System Settings › Privacy & Security › Microphone, then arm the track again.";
 
 #[cfg(test)]
 mod tests {

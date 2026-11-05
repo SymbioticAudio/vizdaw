@@ -25,7 +25,7 @@ struct RecordControls: View {
                 // a punch draft open reaches Record, which refuses and says
                 // why (fix round 2 N2).
                 enabled: record.buttonEnabled,
-                help: record.isRecording ? "Stop recording (R)" : "Record the armed lanes (R)",
+                help: record.isRecording ? "Stop recording (R)" : "Record the armed tracks (R)",
                 tint: record.isRecording ? theme.state.record.nsColor : nil
             ) { record.pressRecord() }
             .fixedSize()
@@ -53,7 +53,7 @@ struct RecordControls: View {
                 Text(t)
                     .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
-                    .help("Recording time left on the project's disk for the armed audio lanes")
+                    .help("Recording time left on the project's disk for the armed audio tracks")
             }
         }
     }

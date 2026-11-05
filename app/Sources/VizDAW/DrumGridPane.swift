@@ -17,9 +17,9 @@ struct DrumGridEditor: View {
             Divider()
             if model.lanes.isEmpty {
                 ContentUnavailableView(
-                    "No Drum Lanes", icon: .drumGrid,
+                    "No Drum Tracks", icon: .drumGrid,
                     description: Text(
-                        "Make a lane a drum lane with Drum > Drum Lane or its header's menu, or add a Drum Kit sequence."))
+                        "Make a track a drum track with Drum > Drum Track or its header's menu, or add a Drum Kit sequence."))
             } else {
                 DrumGridHost(model: model)
             }
@@ -129,7 +129,7 @@ struct DrumGridBar: View {
             }
         }
         .frame(width: 160)
-        .help("The lane's play quantize (grid or swing) and nudge, applied as it plays")
-        .accessibilityLabel("Lane")
+        .help("The track's play quantize (grid or swing) and nudge, applied as it plays")
+        .accessibilityLabel("Track")
     }
 }

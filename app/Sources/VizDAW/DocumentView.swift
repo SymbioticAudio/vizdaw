@@ -51,7 +51,7 @@ struct DocumentView: View {
                     get: { model.record.showsRecoveryAlert(channelOn: ControlChannel.active) },
                     set: { if !$0 { model.record.answerRecovery(import: nil) } })
             ) {
-                Button("Import into New Lanes") { model.record.answerRecovery(import: true) }
+                Button("Import into New Tracks") { model.record.answerRecovery(import: true) }
                 Button("Move to Trash", role: .destructive) { model.record.answerRecovery(import: false) }
                 Button("Later", role: .cancel) { model.record.answerRecovery(import: nil) }
             } message: {

@@ -115,7 +115,7 @@ struct StripChartBar: View {
             .help("Distance between drawn points; the spacing of Thin and Thicken")
             .accessibilityLabel("Step")
             if model.target?.lane == nil, let seq = model.seq {
-                Menu("Lane: \(laneName)") {
+                Menu("Track: \(laneName)") {
                     ForEach(editor.laneRows(seq), id: \.id) { l in
                         Button(l.name) { model.chosenLane = LaneKey(seq, l.id) }
                     }

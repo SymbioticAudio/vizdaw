@@ -51,8 +51,8 @@ public final class StepEntryModel {
     static let playingMessage = "Stop playing to enter steps."
     static let offMessage = "Step entry is off (Step > Step Entry)."
     static let sequenceChanged = "Step entry ended: the sequence changed."
-    static let laneGone = "Step entry ended: its lane is gone."
-    static let noLane = "Select a sequence with a lane first."
+    static let laneGone = "Step entry ended: its track is gone."
+    static let noLane = "Select a sequence with a track first."
 
     /// Why the target is no longer where steps can go (nil while it is).
     func endReason(_ m: DocumentModel) -> String? {
@@ -133,7 +133,7 @@ public final class StepEntryModel {
     public var summary: String? {
         guard let s = state, let t = target, let m = document else { return nil }
         guard endReason(m) == nil else { return nil }
-        let lane = m.lanes.first { $0.id == t.lane }?.name ?? "Lane \(t.lane)"
+        let lane = m.lanes.first { $0.id == t.lane }?.name ?? "Track \(t.lane)"
         var v = Self.title(s.value)
         if s.dotted { v += " dotted" }
         if s.triplet { v += " triplet" }

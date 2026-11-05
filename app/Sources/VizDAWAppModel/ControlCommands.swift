@@ -407,7 +407,7 @@ public enum ControlCommands {
         case "lane.set_input", "lane.set_monitor":
             guard let seq = args.int("seq").flatMap({ UInt64(exactly: $0) }),
                 let lane = args.int("lane").flatMap({ UInt64(exactly: $0) })
-            else { return .failed(.of(.invalidParams, "\(id): `seq` and `lane` name the lane")) }
+            else { return .failed(.of(.invalidParams, "\(id): `seq` and `lane` name the track")) }
             guard m.editor.gesture == nil else { return unavailable(EditorModel.gestureOpenMessage) }
             let edit: LaneEdit
             if id == "lane.set_input" {

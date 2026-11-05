@@ -358,11 +358,11 @@ impl Plan {
         match self.external_lanes {
             0 => {}
             1 => sentences.push(
-                "1 lane plays external MIDI and will be silent. Track it as audio first: Track Synth…"
+                "1 track plays external MIDI and will be silent. Track it as audio first: Track Synth…"
                     .to_string(),
             ),
             n => sentences.push(format!(
-                "{n} lanes play external MIDI and will be silent. Track them as audio first: Track Synth…"
+                "{n} tracks play external MIDI and will be silent. Track them as audio first: Track Synth…"
             )),
         }
         sentences.extend(self.offline_sentence());

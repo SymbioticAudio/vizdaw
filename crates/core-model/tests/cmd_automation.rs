@@ -280,7 +280,7 @@ fn bad_writes_refuse_the_whole_pass() {
         ..good.clone()
     };
     w.target = AutomationTarget::StripSolo(d.mixer().master());
-    cases.push((w, "lane name")); // a new lane needs a name
+    cases.push((w, "track name")); // a new lane needs a name
     for (bad, why) in cases {
         let r = apply(&d, &Command::Record(pass(vec![good.clone(), bad.clone()])));
         let e = r

@@ -958,9 +958,9 @@ fn external_midi_is_counted_in_the_check() {
         let c = p.s.bounce_check(req.clone()).unwrap();
         assert_eq!(c.external_lanes, lanes);
         let want = if lanes == 1 {
-            "1 lane plays external MIDI and will be silent. Track it as audio first: Track Synth…"
+            "1 track plays external MIDI and will be silent. Track it as audio first: Track Synth…"
         } else {
-            "2 lanes play external MIDI and will be silent. Track them as audio first: Track Synth…"
+            "2 tracks play external MIDI and will be silent. Track them as audio first: Track Synth…"
         };
         assert_eq!(c.warning.as_deref(), Some(want));
         assert_eq!(

@@ -375,7 +375,7 @@ const IMPORT_PARAMS: &[ParamSpec] = &[
             max: i64::MAX / 2,
         },
         required: false,
-        help: "Lane for a mono or stereo file; without it, new lanes.",
+        help: "Track for a mono or stereo file; without it, new tracks.",
     },
     ParamSpec {
         name: "tick",
@@ -463,7 +463,7 @@ const BOUNCE_PARAMS: &[ParamSpec] = &[
         name: "add_to_project",
         kind: ParamKind::Flag,
         required: false,
-        help: "Also place the bounce on new lanes (default false; answers the Bounce dialog). It bounces as heard: a muted or solo-silenced strip, or one routed into a muted bus, is silent; files ignore mute and solo.",
+        help: "Also place the bounce on new tracks (default false; answers the Bounce dialog). It bounces as heard: a muted or solo-silenced strip, or one routed into a muted bus, is silent; files ignore mute and solo.",
     },
     ParamSpec {
         name: "replace",
@@ -611,17 +611,17 @@ const RECOVER_PARAMS: &[ParamSpec] = &[ParamSpec {
     name: "action",
     kind: ParamKind::Choice(&["import", "trash"]),
     required: true,
-    help: "Import the recordings a crash left onto new lanes, or move them to the Trash.",
+    help: "Import the recordings a crash left onto new tracks, or move them to the Trash.",
 }];
 
 const SET_INPUT_PARAMS: &[ParamSpec] = &[
-    id_param("seq", "The lane's sequence."),
+    id_param("seq", "The track's sequence."),
     id_param("lane", "The lane."),
     ParamSpec {
         name: "kind",
         kind: ParamKind::Choice(&["none", "audio", "midi"]),
         required: true,
-        help: "What the lane records: nothing, audio or MIDI.",
+        help: "What the track records: nothing, audio or MIDI.",
     },
     ParamSpec {
         name: "channel",
@@ -654,14 +654,14 @@ const SET_INPUT_PARAMS: &[ParamSpec] = &[
             max: i64::MAX / 2,
         },
         required: false,
-        help: "Audio: the external MIDI destination whose return the lane records (Track Synth); absent: plain audio, which unlinks a lane that recorded a synth's return.",
+        help: "Audio: the external MIDI destination whose return the track records (Track Synth); absent: plain audio, which unlinks a track that recorded a synth's return.",
     },
 ];
 
 /// `lane.track_synth` (plan 5c-2 Ruling 11).
 const TRACK_SYNTH_PARAMS: &[ParamSpec] = &[
-    id_param("seq", "The MIDI lane's sequence."),
-    id_param("lane", "The MIDI lane playing the external synth."),
+    id_param("seq", "The MIDI track's sequence."),
+    id_param("lane", "The MIDI track playing the external synth."),
     ParamSpec {
         name: "channel",
         kind: ParamKind::Int { min: 1, max: 256 },
@@ -678,13 +678,13 @@ const TRACK_SYNTH_PARAMS: &[ParamSpec] = &[
         name: "arm_midi",
         kind: ParamKind::Flag,
         required: false,
-        help: "Also arm the MIDI lane to record the performance (default: disarm it, so its part plays and is never replaced).",
+        help: "Also arm the MIDI track to record the performance (default: disarm it, so its part plays and is never replaced).",
     },
     ParamSpec {
         name: "mute_after",
         kind: ParamKind::Flag,
         required: false,
-        help: "Mute the MIDI lane after the next recording, in the same undo step.",
+        help: "Mute the MIDI track after the next recording, in the same undo step.",
     },
 ];
 
@@ -863,17 +863,17 @@ const SURFACE_LEARN_PARAMS: &[ParamSpec] = &[
 /// `destination.measure_return` (plan 5c-2 Ruling 11).
 const MEASURE_RETURN_PARAMS: &[ParamSpec] = &[id_param(
     "dest",
-    "The external MIDI destination to measure (a lane must record its return: Track Synth). Blocks for about 3 s (at most 10 s) with the transport stopped.",
+    "The external MIDI destination to measure (a track must record its return: Track Synth). Blocks for about 3 s (at most 10 s) with the transport stopped.",
 )];
 
 const SET_MONITOR_PARAMS: &[ParamSpec] = &[
-    id_param("seq", "The lane's sequence."),
+    id_param("seq", "The track's sequence."),
     id_param("lane", "The lane."),
     ParamSpec {
         name: "mode",
         kind: ParamKind::Choice(&["auto", "input", "off"]),
         required: true,
-        help: "When the lane's input is heard: auto (armed, stopped or recording in range), input (always) or off.",
+        help: "When the track's input is heard: auto (armed, stopped or recording in range), input (always) or off.",
     },
 ];
 
@@ -882,7 +882,7 @@ const INJECT_PARAMS: &[ParamSpec] = &[
         name: "port",
         kind: ParamKind::Text,
         required: true,
-        help: "The MIDI source the bytes come from, as lanes name it.",
+        help: "The MIDI source the bytes come from, as tracks name it.",
     },
     ParamSpec {
         name: "bytes",
@@ -1194,7 +1194,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     CommandSpec {
         params: ON,
-        ..cmd("drum.mark_lane", "Drum", "Drum Lane", None, true)
+        ..cmd("drum.mark_lane", "Drum", "Drum Track", None, true)
     },
     cmd("drum.add_row", "Drum", "Add Drum Row", None, true),
     CommandSpec {
@@ -1204,7 +1204,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     cmd(
         "drum.split_row",
         "Drum",
-        "Split Row to Own Lane",
+        "Split Row to Own Track",
         None,
         true,
     ),
@@ -1369,14 +1369,14 @@ pub const COMMANDS: &[CommandSpec] = &[
     cmd(
         "transport.arm_previous",
         "Transport",
-        "Arm Previous Lane",
+        "Arm Previous Track",
         Some("⌥⇧↑"),
         true,
     ),
     cmd(
         "transport.arm_next",
         "Transport",
-        "Arm Next Lane",
+        "Arm Next Track",
         Some("⌥⇧↓"),
         true,
     ),
@@ -1439,14 +1439,20 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         params: SET_INPUT_PARAMS,
-        ..key_only(cmd("lane.set_input", "Lane", "Set Lane Input", None, true))
+        ..key_only(cmd(
+            "lane.set_input",
+            "Track",
+            "Set Track Input",
+            None,
+            true,
+        ))
     },
     CommandSpec {
         params: SET_MONITOR_PARAMS,
         ..key_only(cmd(
             "lane.set_monitor",
-            "Lane",
-            "Set Lane Monitor",
+            "Track",
+            "Set Track Monitor",
             None,
             true,
         ))
@@ -1457,7 +1463,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         params: TRACK_SYNTH_PARAMS,
-        ..key_only(cmd("lane.track_synth", "Lane", "Track Synth", None, true))
+        ..key_only(cmd("lane.track_synth", "Track", "Track Synth", None, true))
     },
     CommandSpec {
         params: RETURN_LATENCY_PARAMS,

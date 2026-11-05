@@ -81,7 +81,7 @@ public final class SynthSheets {
             return
         }
         guard let d = synth(of: lane) else {
-            m.editor.status = "Track Synth needs a lane that plays an external MIDI destination."
+            m.editor.status = "Track Synth needs a track that plays an external MIDI destination."
             return
         }
         message = nil
@@ -173,7 +173,7 @@ public final class SynthSheets {
                 m.editor.edit(.lane(edit: .setDest(seq: d.seq, lane: d.lane, dest: added.id)))
             } else {
                 // Added, but not found again (Task 8 review M5): said.
-                m.editor.status = "Added \(name); choose it in the lane's destination menu."
+                m.editor.status = "Added \(name); choose it in the track's destination menu."
             }
             newDestination = nil
         } catch {

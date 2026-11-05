@@ -175,7 +175,7 @@ struct ControllersPane: View {
         if chart.state != nil {
             StripChartEditor(model: chart)
         } else {
-            PaneNote(text: "Select a lane to see its controllers.")
+            PaneNote(text: "Select a track to see its controllers.")
         }
     }
 }

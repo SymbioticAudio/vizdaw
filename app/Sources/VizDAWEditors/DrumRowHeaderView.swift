@@ -228,7 +228,7 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
             MenuAction(title: "Show Velocity") { [weak self] in self?.model.showVelocity(!shown) }.item(checked: shown))
         menu.addItem(.separator())
         menu.addItem(
-            MenuAction(title: "Split Row to Own Lane") { [weak self] in self?.model.splitSelectedRow() }.item(
+            MenuAction(title: "Split Row to Own Track") { [weak self] in self?.model.splitSelectedRow() }.item(
                 checked: false))
         menu.addItem(
             MenuAction(title: "Remove Row") { [weak self] in self?.model.removeSelectedRow() }.item(checked: false))

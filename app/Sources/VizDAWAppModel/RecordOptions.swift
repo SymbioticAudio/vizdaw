@@ -8,7 +8,7 @@ import VizDAWCore
 /// loop pass is recording and when audio overdub replaces.
 extension RecordModel {
     /// Spec §6.4: one lane plays one region at a time.
-    public static let overdubNote = "Audio overdub replaces what it overlaps: record into another lane or take to layer."
+    public static let overdubNote = "Audio overdub replaces what it overlaps: record into another track or take to layer."
     /// File › Save while recording (plan 5d-1 Ruling 19).
     public static let savedDuringPass = "Saved. The take is saved when recording stops."
     /// Save of a new, untitled project while recording: it has no package

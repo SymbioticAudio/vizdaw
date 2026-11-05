@@ -2408,7 +2408,11 @@ fn themes_and_the_strip_over_the_channel() {
     assert_eq!(numbers(&w2), numbers(&w0), "no window opened or closed");
 
     // 3b. Nothing is selected: the left pane says so and shows no strip.
-    wait_for_label(&mut app, &window, "Select a lane to see its channel strip.");
+    wait_for_label(
+        &mut app,
+        &window,
+        "Select a track to see its channel strip.",
+    );
     let tree = app.call("ui.tree", json!({"window": window}));
     assert!(
         labelled_like(&tree["nodes"], "Level of ", "").is_none(),

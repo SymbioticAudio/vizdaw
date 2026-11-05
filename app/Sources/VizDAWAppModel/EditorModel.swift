@@ -146,7 +146,7 @@ public final class EditorModel {
         let alive = Set(s.laneRevs.map { LaneKey($0.seq, $0.lane) })
         guard !g.lanes.isSubset(of: alive) else { return }
         cancelGesture()
-        status = "The lane was removed; the drag was cancelled."
+        status = "The track was removed; the drag was cancelled."
     }
 
     // MARK: Reads

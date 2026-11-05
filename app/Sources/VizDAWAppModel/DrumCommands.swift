@@ -24,7 +24,7 @@ public enum DrumCommands {
 
     public static let ids: Set<String> = [markLane, addRow, showVelocity, splitRow, removeRow, timeline]
 
-    static let noLane = "Select a lane in the arrangement first."
+    static let noLane = "Select a track in the arrangement first."
     static let noGrid = "Open a drum grid first."
 
     /// Whether `id` can run on `m` now (its menu item is enabled).
@@ -64,7 +64,7 @@ public enum DrumCommands {
         }
         guard let g = m.drumGridForCommands() else { return .unavailable(noGrid) }
         if id == addRow {
-            guard g.currentLane != nil else { return .unavailable("The drum grid shows no drum lane.") }
+            guard g.currentLane != nil else { return .unavailable("The drum grid shows no drum track.") }
             return g.addRow() ? .done : refused(m)
         }
         guard g.selected != nil else { return .unavailable(DrumGridModel.noRowMessage) }

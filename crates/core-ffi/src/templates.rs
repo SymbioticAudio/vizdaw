@@ -42,7 +42,7 @@ fn lane_of(r: &Report) -> Result<LaneId, VizError> {
             AnyId::Lane(l) => Some(*l),
             _ => None,
         })
-        .ok_or_else(|| bad("no lane was created"))
+        .ok_or_else(|| bad("no track was created"))
 }
 
 fn drum_row_of(r: &Report) -> Result<core_model::ids::DrumRowId, VizError> {

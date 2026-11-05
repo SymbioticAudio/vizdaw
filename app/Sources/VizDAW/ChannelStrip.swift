@@ -811,7 +811,7 @@ struct StripButtons: View {
                 model.toggleArm(strip)
             }
             .disabled(!armable)
-            .help(armable ? "Record arm" : "Arm an audio lane in its header")
+            .help(armable ? "Record arm" : "Arm an audio track in its header")
             StripToggle(
                 letter: "I", on: (lane?.monitor ?? .off) != .off,
                 colour: StripPalette.monitor(lane?.monitor ?? .off, theme),
@@ -820,7 +820,7 @@ struct StripButtons: View {
                 model.cycleMonitor(strip)
             }
             .disabled(!armable)
-            .help(lane.map { LaneInputs.help($0.monitor) } ?? "Input monitoring is for audio lanes")
+            .help(lane.map { LaneInputs.help($0.monitor) } ?? "Input monitoring is for audio tracks")
         }
         .frame(maxWidth: .infinity)
         .help(strip.soloMuted ? "Silent: other strips are soloed" : "Mute / Solo")

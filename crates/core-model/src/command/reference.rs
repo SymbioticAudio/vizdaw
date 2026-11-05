@@ -163,7 +163,7 @@ fn flatten_ref(d: &mut Document, event: EventId, r: &mut Report) -> Result<()> {
         .count();
     if lost_out > 0 {
         r.warnings.push(format!(
-            "{lost_out} flattened audio regions now use this lane's audio output instead of their own"
+            "{lost_out} flattened audio regions now use this track's audio output instead of their own"
         ));
     }
     if owner_lane.play_quantize.is_some() {
@@ -173,7 +173,7 @@ fn flatten_ref(d: &mut Document, event: EventId, r: &mut Report) -> Result<()> {
             .count();
         if notes > 0 {
             r.warnings.push(format!(
-                "{notes} flattened notes are now subject to this lane's play quantize"
+                "{notes} flattened notes are now subject to this track's play quantize"
             ));
         }
     }
@@ -183,7 +183,7 @@ fn flatten_ref(d: &mut Document, event: EventId, r: &mut Report) -> Result<()> {
         .count();
     if unresolved > 0 {
         r.warnings.push(format!(
-            "{unresolved} flattened events had no destination and now follow this lane's"
+            "{unresolved} flattened events had no destination and now follow this track's"
         ));
     }
     let old_len = seq_length(d, loc.seq)?;
@@ -244,7 +244,7 @@ fn from_selection(
     let any_solo = parent.lanes.iter().any(|l| l.solo);
     if lanes.is_empty() {
         return Err(ModelError::invalid(
-            "no lanes of that sequence are selected",
+            "no tracks of that sequence are selected",
         ));
     }
     let groups: Vec<Vec<Lane>> = if per_lane {
@@ -313,7 +313,7 @@ fn from_selection(
             .iter()
             .find(|l| !l.mute && (!any_solo || l.solo))
             .or_else(|| group.first())
-            .ok_or_else(|| ModelError::invalid("empty lane group"))?;
+            .ok_or_else(|| ModelError::invalid("empty track group"))?;
         let (host_id, host_shift) = (host.id, host.play_shift);
         let spec = EventSpec::new(
             a - host_shift,

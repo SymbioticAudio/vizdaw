@@ -355,7 +355,7 @@ fn duplicate_lane_copies_and_indexes_events() {
     let d = a.doc;
     let s = d.sequence(SeqId(0)).unwrap();
     let names: Vec<_> = s.lanes.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, vec!["Lane 1", "Lane 1 copy", "B"]);
+    assert_eq!(names, vec!["Track 1", "Track 1 copy", "B"]);
     let (src, copy) = (&s.lanes[0], &s.lanes[1]);
     assert!(!copy.arm);
     assert!(copy.mute, "settings are copied");

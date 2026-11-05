@@ -283,10 +283,10 @@ fn the_drum_menu_commands_are_registered() {
     assert_eq!(
         drum,
         vec![
-            ("drum.mark_lane", "Drum Lane", true),
+            ("drum.mark_lane", "Drum Track", true),
             ("drum.add_row", "Add Drum Row", false),
             ("drum.show_velocity", "Show Velocity", true),
-            ("drum.split_row", "Split Row to Own Lane", false),
+            ("drum.split_row", "Split Row to Own Track", false),
             ("drum.remove_row", "Remove Drum Row", false),
             ("drum.timeline", "Timeline View", true),
         ]

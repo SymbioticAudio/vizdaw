@@ -194,3 +194,112 @@ fn no_refusal_text_names_a_third_party_product() {
         hits.join("\n")
     );
 }
+
+/// Ruling 7's rule on one registry text (plan Tracks): strip `{…}`, the id
+/// tokens `lane.xxx` and `` `lane` ``, and the allow-listed phrases; a hit
+/// has whitespace and the word lane/lanes, or is exactly `Lane`/`Lanes`.
+fn says_lane(lit: &str) -> bool {
+    let mut s = String::new();
+    let mut depth = 0u32;
+    for c in lit.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            _ if depth == 0 => s.push(c),
+            _ => {}
+        }
+    }
+    for tok in ["`lanes`", "`lane`"] {
+        s = s.replace(tok, "");
+    }
+    let mut t = String::new();
+    let mut rest = s.as_str();
+    while let Some(i) = rest.find("lane.") {
+        t.push_str(&rest[..i]);
+        let tail = &rest[i + 5..];
+        let n = tail
+            .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+            .unwrap_or(tail.len());
+        rest = &tail[n..];
+    }
+    t.push_str(rest);
+    if t == "Lane" || t == "Lanes" {
+        return true;
+    }
+    if !t.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let mut u = t.to_ascii_lowercase();
+    for phrase in [
+        "velocity lanes",
+        "velocity lane",
+        "automation lanes",
+        "automation lane",
+    ] {
+        u = u.replace(phrase, "");
+    }
+    let b = u.as_bytes();
+    let mut i = 0;
+    while let Some(k) = u[i..].find("lane") {
+        let at = i + k;
+        let mut end = at + 4;
+        if b.get(end) == Some(&b's') {
+            end += 1;
+        }
+        if (at == 0 || !is_word(b[at - 1])) && (end >= b.len() || !is_word(b[end])) {
+            return true;
+        }
+        i = at + 4;
+    }
+    false
+}
+
+#[test]
+fn no_command_text_says_lane() {
+    for bad in [
+        "Select a lane first.",
+        "Lanes",
+        "Lane ",
+        "lane {lane} records",
+    ] {
+        assert!(says_lane(bad), "must catch {bad:?}");
+    }
+    for clean in [
+        "lane.track_synth",
+        "lanes",
+        "`lane` names the track",
+        "{lane.name}",
+        "a velocity lane",
+        "automation lanes",
+        "lane",
+    ] {
+        assert!(!says_lane(clean), "must pass {clean:?}");
+    }
+    let mut hits = Vec::new();
+    let mut check = |what: String, text: &str| {
+        if says_lane(text) {
+            hits.push(format!("{what}: {text:?}"));
+        }
+    };
+    for c in COMMANDS {
+        check(format!("{} title", c.id), c.title);
+        check(format!("{} menu", c.id), c.menu);
+        for p in c.params {
+            check(format!("{} param {} help", c.id, p.name), p.help);
+        }
+        for d in c.dialogs {
+            check(format!("{} dialog name", c.id), d.name);
+            check(format!("{} dialog when", c.id), d.when);
+        }
+    }
+    for d in OPEN_DIALOGS {
+        check(format!("open dialog {}", d.name), d.name);
+        check(format!("open dialog {}", d.name), d.when);
+    }
+    assert!(
+        hits.is_empty(),
+        "{} registry texts say lane:\n{}",
+        hits.len(),
+        hits.join("\n")
+    );
+}

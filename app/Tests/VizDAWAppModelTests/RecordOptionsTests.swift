@@ -465,9 +465,9 @@ import VizDAWCore
 
     @Test func theRecordButtonShowsWhyItWasRefused() throws {
         let (m, f) = try armed()
-        f.recordError = .Model(message: "arm a lane that has an input to record")
+        f.recordError = .Model(message: "arm a track that has an input to record")
         m.record.pressRecord()
-        #expect(m.editor.status == "arm a lane that has an input to record")
+        #expect(m.editor.status == "arm a track that has an input to record")
         f.recordError = nil
         m.editor.clearStatus()
         m.record.pressRecord()

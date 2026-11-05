@@ -212,7 +212,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             NSRect(x: 0, y: top + laneHeight - 0.5, width: bounds.width, height: 1).fill()
         }
         let add = rowTop(document.lanes.count)
-        NSString(string: "+ Add Lane").draw(
+        NSString(string: "+ Add Track").draw(
             at: CGPoint(x: 8, y: add + 6),
             withAttributes: [.font: small, .foregroundColor: theme.secondaryLabel])
         theme.rulerBackground.setFill()
@@ -269,7 +269,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         let lanes = document.lanes
         guard i < lanes.count else {
             if i == lanes.count {
-                editor.edit(.lane(edit: .add(seq: seq, name: "Lane \(lanes.count + 1)", index: nil)))
+                editor.edit(.lane(edit: .add(seq: seq, name: "Track \(lanes.count + 1)", index: nil)))
             }
             return
         }
@@ -302,7 +302,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     func laneMenu(seq: UInt64, lane: LaneRow) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let drum = MenuAction(title: "Drum Lane") { [weak self] in
+        let drum = MenuAction(title: "Drum Track") { [weak self] in
             self?.editor.markDrumLane(seq: seq, lane: lane.id, on: !lane.isDrum)
         }
         menu.addItem(drum.item(checked: lane.isDrum))
@@ -476,7 +476,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
 
     public override func isAccessibilityElement() -> Bool { true }
     public override func accessibilityRole() -> NSAccessibility.Role? { .group }
-    public override func accessibilityLabel() -> String? { "Lane Headers" }
+    public override func accessibilityLabel() -> String? { "Track Headers" }
 
     public override func accessibilityChildren() -> [Any]? {
         guard let seq = document.selectedSeq else {

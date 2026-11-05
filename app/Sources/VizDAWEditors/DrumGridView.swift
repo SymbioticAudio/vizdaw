@@ -170,7 +170,7 @@ public final class DrumGridView: EditorCanvas {
                 }
                 if b.height > b.cells { drawVelocities(r, b, dirty) }
             case .newLane:
-                NSString(string: "Drop a row here to give it a lane of its own").draw(
+                NSString(string: "Drop a row here to give it a track of its own").draw(
                     at: CGPoint(x: max(dirty.minX, 0) + 8, y: y + 7),
                     withAttributes: [
                         .font: theme.font(theme.type.label),

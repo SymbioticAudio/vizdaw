@@ -135,7 +135,7 @@ extension EditorModel {
     public func title(_ t: EditorTarget, sequences: [SeqRow]) -> String {
         let seqName = sequences.first { $0.id == t.seq }?.name ?? "Sequence"
         guard let laneID = t.lane else { return seqName }
-        let laneName = ((try? session.lanes(seq: t.seq)) ?? []).first { $0.id == laneID }?.name ?? "Lane"
+        let laneName = ((try? session.lanes(seq: t.seq)) ?? []).first { $0.id == laneID }?.name ?? "Track"
         guard case let .block(_, _, start, end) = t else { return "\(seqName) › \(laneName)" }
         let meter = info(t.seq)?.meter ?? []
         let first = MeterMath.bar(at: start, meter).number
