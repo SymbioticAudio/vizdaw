@@ -5,6 +5,7 @@ import VizDAWCore
 /// The plugin browser popover (spec §9): search, plugins grouped by
 /// vendor; choosing one calls `pick`. The right pane shows it too.
 struct PluginBrowserView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: PluginBrowserModel
     /// The popover's width; nil fills the pane (plan 7a Ruling 7).
     var width: CGFloat? = 320
@@ -31,7 +32,7 @@ struct PluginBrowserView: View {
                                         Text(p.name)
                                         Spacer()
                                         Text(p.format == .au ? "AU" : "CLAP")
-                                            .font(.caption)
+                                            .font(theme.type.caption.font)
                                             .foregroundStyle(.secondary)
                                     }
                                 }

@@ -32,6 +32,7 @@ struct ListHost: NSViewRepresentable {
 
 /// Insert, columns, what is shown, and MIDI In (Plan 4c Rulings 14, 18, 19).
 struct ListBar: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: ListEditorModel
 
     private func column(_ key: WritableKeyPath<ListColumns, Bool>) -> Binding<Bool> {
@@ -101,7 +102,7 @@ struct ListBar: View {
             Button("Modify…") { model.document?.selectModify.open(.change, filter: model.filter.viewFilter) }
                 .help("Select and Modify, hiding the kinds this list hides")
             Spacer()
-            Text("\(model.rows.count) rows").foregroundStyle(.secondary).font(.caption)
+            Text("\(model.rows.count) rows").foregroundStyle(.secondary).font(theme.type.caption.font)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)

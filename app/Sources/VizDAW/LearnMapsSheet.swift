@@ -8,11 +8,12 @@ import VizDAWCore
 /// and Remove. Every change is an undo step of the project. All state
 /// lives in `LearnModel`.
 struct LearnMapsSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var learn: LearnModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("MIDI Learn Maps").font(.headline)
+            Text("MIDI Learn Maps").font(theme.type.title.font)
             if learn.maps.isEmpty {
                 Text("No MIDI controls are learned in this project. Choose MIDI Learn in a control's menu.")
                     .foregroundStyle(.secondary)
@@ -48,7 +49,7 @@ struct LearnMapsSheet: View {
             VStack(alignment: .leading) {
                 Text(map.text)
                 Text(learn.targetText(map))
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
             }
             Spacer()

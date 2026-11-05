@@ -43,15 +43,15 @@ struct RecordControls: View {
                 RecordPopoverAnchor(model: model, record: record, host: host, shown: record.showsPopover(in: host)))
             if record.countingIn {
                 Text("Count-in")
-                    .font(.caption.weight(.semibold))
+                    .font(theme.type.label.font)
                     .foregroundStyle(theme.state.record.color)
             }
             if let p = record.passText {
-                Text(p).font(.caption.monospacedDigit())
+                Text(p).font(theme.type.caption.font.monospacedDigit())
             }
             if let t = record.remainingText {
                 Text(t)
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
                     .help("Recording time left on the project's disk for the armed audio lanes")
             }
@@ -132,6 +132,7 @@ struct RecordPopoverAnchor: NSViewRepresentable {
 /// The record options (spec §6.9). Fixed while a pass records: the core
 /// took them at Record.
 struct RecordPopover: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
     @Bindable var record: RecordModel
     /// The punch field being edited: moving to the other one commits its
@@ -147,7 +148,7 @@ struct RecordPopover: View {
             .pickerStyle(.segmented)
             if let note = record.overdubNote {
                 Text(note)
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -177,7 +178,7 @@ struct RecordPopover: View {
 
     private func punchField(_ f: TransportField) -> some View {
         TextField(f.title, text: Binding(get: { record.punchText(f) }, set: { record.setPunchText(f, $0) }))
-            .font(.body.monospacedDigit())
+            .font(theme.type.body.font.monospacedDigit())
             .focused($focusedPunch, equals: f)
             .onSubmit { record.commitPunch(f) }
     }

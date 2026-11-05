@@ -247,7 +247,7 @@ struct StatusLine: View {
                 Spacer()
                 Button("Dismiss") { editor.clearStatus() }.buttonStyle(.borderless)
             }
-            .font(.caption)
+            .font(theme.type.caption.font)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(.bar)

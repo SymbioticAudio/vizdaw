@@ -5,6 +5,7 @@ import VizDAWAppModel
 /// and the editor: the piano roll (4b), the list (4c), the Strip Chart
 /// (4d) or the drum grid (4e).
 struct DetailPane: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
     let state: DetailState
     /// This frame's piano roll (the pane's or the torn window's).
@@ -31,7 +32,7 @@ struct DetailPane: View {
                     .frame(width: 380)
                 }
                 Text(model.editor.title(state.target, sequences: model.snapshot.sequences))
-                    .font(.headline)
+                    .font(theme.type.title.font)
                     .lineLimit(1)
                 Spacer()
                 if let onTearOff {

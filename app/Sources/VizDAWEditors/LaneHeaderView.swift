@@ -153,7 +153,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     public override func draw(_ dirty: NSRect) {
         theme.rulerBackground.setFill()
         dirty.fill()
-        let small = theme.font(theme.type.label, weight: .regular)
+        let small = theme.font(theme.type.label)
         let inputs = document.inputs
         for (i, lane) in document.lanes.enumerated() {
             let top = rowTop(i)

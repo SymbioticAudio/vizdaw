@@ -190,6 +190,63 @@ enum SourceScan {
         #expect(try SourceScan.matches("NSColor.clear.setFill()", patterns: all) == 0)
     }
 
+    /// Plan 7d Ruling 8's forms: a semantic style or a discarded token
+    /// weight.
+    static let fontPatterns = [
+        #"\.font\(\.(caption2?|footnote|callout|body|subheadline|headline|title[23]?|largeTitle)\b"#,
+        #"preferredFont\(forTextStyle:"#,
+        #"\.fontWeight\("#,
+        #"\.bold\(\)"#,
+        #"weight: \.regular\)"#,
+        #"\bFont\.(caption2?|footnote|callout|body|subheadline|headline|title[23]?|largeTitle)\b"#,
+        #"\.system\(\."#,
+        #":\s*Font\s*=\s*\.(caption2?|footnote|callout|body|subheadline|headline|title[23]?|largeTitle)\b"#,
+    ]
+
+    @Test func noSemanticFontsOrDiscardedWeights() throws {
+        let hits = try SourceScan.lines(in: Self.dirs, matching: Self.fontPatterns, except: Self.bridges)
+        #expect(hits.isEmpty, "\(hits.count) semantic fonts or discarded weights:\n\(hits.joined(separator: "\n"))")
+        let bad = [
+            ".font(.caption)",
+            ".font(.headline)",
+            #"Text("a").font(.callout)"#,
+            "NSFont.preferredFont(forTextStyle: .body)",
+            ".fontWeight(.bold)",
+            ".bold()",
+            "theme.font(theme.type.label, weight: .regular)",
+            "let f = Font.caption",
+            ".font(.system(.body, design: .monospaced))",
+            "let f: Font = .caption",
+        ]
+        for line in bad {
+            #expect(try SourceScan.matches(line, patterns: Self.fontPatterns) == 1, "\(line)")
+        }
+        let clean = [
+            ".font(theme.type.caption.font)",
+            "theme.font(theme.type.body, weight: .semibold)",
+            "theme.type.caption.font.monospacedDigit()",
+        ]
+        for line in clean {
+            #expect(try SourceScan.matches(line, patterns: Self.fontPatterns) == 0, "\(line)")
+        }
+    }
+
+    @Test func theTokenWeightIsKept() {
+        func weight(_ f: NSFont) -> CGFloat {
+            let traits = f.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
+            return traits?[.weight] as? CGFloat ?? -9
+        }
+        func expect(_ theme: Theme, _ w: NSFont.Weight) {
+            let f = theme.font(theme.type.label)
+            #expect(f.pointSize == 11)
+            #expect(abs(weight(f) - weight(.systemFont(ofSize: 11, weight: w))) < 0.001)
+            #expect(weight(f) != weight(.systemFont(ofSize: 11, weight: .regular)))
+        }
+        expect(.flat, .semibold)
+        expect(.symbiotic, .bold)
+        expect(.classicLight, .medium)
+    }
+
     @Test func anEditorRedrawsWhenItsThemeChanges() throws {
         let canvas = EditorCanvas(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
         canvas.wantsLayer = true

@@ -91,7 +91,7 @@ struct SequenceRow: View {
                 }
                 if !row.comment.isEmpty {
                     Text(row.comment)
-                        .font(.caption)
+                        .font(theme.type.caption.font)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -99,13 +99,13 @@ struct SequenceRow: View {
             Spacer()
             if row.keyboardSlot != nil {
                 Text(KeySlotFormat.text(row.keyboardSlot))
-                    .font(.caption.monospaced())
+                    .font(theme.type.caption.font.monospaced())
                     .foregroundStyle(.secondary)
                     .help("Keyboard slot")
             }
             if row.useCount > 0 {
                 Text("\(row.useCount)")
-                    .font(.caption.monospacedDigit())
+                    .font(theme.type.caption.font.monospacedDigit())
                     .padding(.horizontal, 6)
                     .background(Capsule().fill(theme.surface.raised.color))
                     .help("Used by \(row.useCount) reference(s)")
@@ -126,11 +126,12 @@ struct SequenceRow: View {
 }
 
 struct CommentSheet: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Comment").font(.headline)
+            Text("Comment").font(theme.type.title.font)
             TextEditor(
                 text: Binding(
                     get: { model.commentDraft?.text ?? "" },
@@ -161,7 +162,7 @@ struct KeySlotSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Keyboard Slot").font(.headline)
+            Text("Keyboard Slot").font(theme.type.title.font)
             TextField(
                 "Key (empty clears the slot)",
                 text: Binding(get: { model.slotDraft?.key ?? "" }, set: { model.slotDraft?.key = $0 }))
@@ -172,7 +173,7 @@ struct KeySlotSheet: View {
                 flag("⌘", \.command)
             }
             if let problem = model.slotDraft?.problem {
-                Text(problem).font(.caption).foregroundStyle(theme.state.error.color)
+                Text(problem).font(theme.type.caption.font).foregroundStyle(theme.state.error.color)
             }
             HStack {
                 Spacer()

@@ -88,15 +88,15 @@ struct SelectModifyPanelView: View {
                 }
                 .frame(width: 120)
             }
-            Toggle("Select", isOn: $model.config.select.enabled).font(.headline)
+            Toggle("Select", isOn: $model.config.select.enabled).font(theme.type.title.font)
             if model.config.select.enabled { SelectHalfView(model: model) }
             Divider()
-            Toggle("Modify", isOn: $model.config.modify.enabled).font(.headline)
+            Toggle("Modify", isOn: $model.config.modify.enabled).font(theme.type.title.font)
             if model.config.modify.enabled { ModifyHalfView(model: model) }
             Divider()
             if let notice = model.notice {
                 AppIcon.info.label(notice)
-                    .font(.callout)
+                    .font(theme.type.body.font)
                     .foregroundStyle(.secondary)
             }
             HStack {
@@ -106,7 +106,7 @@ struct SelectModifyPanelView: View {
                 Button("Save as Template") { model.saveTemplate() }
                 Spacer()
                 Text(model.applyTarget)
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(model.actsOnDraggedEvents ? theme.accent.accent.color : theme.text.secondary.color)
                 Button("Modify Again") { model.modifyAgain() }
                     .disabled(!model.canModifyAgain)

@@ -119,7 +119,7 @@ struct DocumentTransportBar: View {
                 .clipped()
             HStack(spacing: 10) {
                 AppKitLabel(
-                    Formatting.device(model.transport), font: .preferredFont(forTextStyle: .caption1), secondary: true,
+                    Formatting.device(model.transport), font: theme.type.caption.nsFont, secondary: true,
                     truncatesMiddle: true)
                 if showsViews {
                     faults

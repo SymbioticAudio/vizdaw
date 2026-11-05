@@ -25,7 +25,7 @@ struct AppearanceSettingsView: View {
             .pickerStyle(.radioGroup)
             Toggle("Show channel colour bars", isOn: Binding(get: { prefs.colourBars }, set: { prefs.setColourBars($0) }))
             Text("The theme applies to every window. It is a preference of this Mac, not saved in projects.")
-                .font(.caption)
+                .font(current.type.caption.font)
                 .foregroundStyle(.secondary)
             if let lib = prefs.userThemes {
                 Section("Your Themes") {
@@ -34,7 +34,7 @@ struct AppearanceSettingsView: View {
                             + Theme.all.map(\.id).joined(separator: ", ")
                             + ") and any tokens to change. Files are read again when they change."
                     )
-                    .font(.caption)
+                    .font(current.type.caption.font)
                     .foregroundStyle(.secondary)
                     HStack {
                         Button("Duplicate as File…") { duplicate(lib) }
@@ -44,11 +44,11 @@ struct AppearanceSettingsView: View {
                         }
                     }
                     if let said = lib.lastDuplicate {
-                        Text(said).font(.caption).foregroundStyle(.secondary)
+                        Text(said).font(current.type.caption.font).foregroundStyle(.secondary)
                     }
                     ForEach(lib.problems) { p in
                         Text(p.file.isEmpty ? "\(p.message)." : "\(p.file) \(p.message).")
-                            .font(.caption)
+                            .font(current.type.caption.font)
                             .foregroundStyle(current.state.warning.color)
                     }
                 }

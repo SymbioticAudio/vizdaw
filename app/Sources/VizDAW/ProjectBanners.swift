@@ -5,6 +5,7 @@ import VizDAWCore
 /// The bars above a document's editors (plan 5a Task 13): jobs, media in
 /// another format, a device at another rate, disk underruns, problems.
 struct ProjectBanners: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
 
     var body: some View {
@@ -48,7 +49,7 @@ struct ProjectBanners: View {
                 Button("Dismiss") { model.dismissProblems() }
             }
         }
-        .font(.callout)
+        .font(theme.type.body.font)
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(.bar)

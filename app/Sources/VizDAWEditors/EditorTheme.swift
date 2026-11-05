@@ -135,7 +135,13 @@ public extension Theme {
 
     // MARK: Fonts
 
-    /// `style`'s size in another weight.
+    /// `style` at its own token weight (plan 7d Ruling 8).
+    func font(_ style: TypeStyle) -> NSFont {
+        .systemFont(ofSize: style.size, weight: style.weight.appKit)
+    }
+
+    /// `style`'s size in another weight: a deliberate emphasis (a lane's
+    /// name, the clip mark), never a way to drop the token's own weight.
     func font(_ style: TypeStyle, weight: NSFont.Weight) -> NSFont {
         .systemFont(ofSize: style.size, weight: weight)
     }

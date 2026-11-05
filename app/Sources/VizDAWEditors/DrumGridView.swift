@@ -173,7 +173,7 @@ public final class DrumGridView: EditorCanvas {
                 NSString(string: "Drop a row here to give it a lane of its own").draw(
                     at: CGPoint(x: max(dirty.minX, 0) + 8, y: y + 7),
                     withAttributes: [
-                        .font: theme.font(theme.type.label, weight: .regular),
+                        .font: theme.font(theme.type.label),
                         .foregroundColor: theme.text.disabled.nsColor,
                     ])
             }

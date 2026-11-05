@@ -75,7 +75,7 @@ public final class DrumRowHeaderView: NSView, NSTextFieldDelegate, ThemedView {
     public override func draw(_ dirty: NSRect) {
         theme.rulerBackground.setFill()
         dirty.fill()
-        let small = theme.font(theme.type.label, weight: .regular)
+        let small = theme.font(theme.type.label)
         let lanes = model.lanes
         for b in model.layout.bands {
             let r = rect(b)

@@ -25,7 +25,7 @@ struct SurfacesSettingsView: View {
                         VStack(alignment: .leading) {
                             Text(title(row))
                             Text("\(row.input) → \(row.output)")
-                                .font(.caption)
+                                .font(theme.type.caption.font)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -36,7 +36,7 @@ struct SurfacesSettingsView: View {
                             // Why it is not answering (pre-flight I4).
                             if let why = settings.problem(for: row.id) {
                                 Text(why)
-                                    .font(.caption)
+                                    .font(theme.type.caption.font)
                                     .foregroundStyle(theme.state.warning.color)
                                     .multilineTextAlignment(.trailing)
                             }
@@ -45,11 +45,11 @@ struct SurfacesSettingsView: View {
                     }
                 }
                 ForEach(settings.otherProblems, id: \.self) { line in
-                    Text(line).font(.caption).foregroundStyle(theme.state.warning.color)
+                    Text(line).font(theme.type.caption.font).foregroundStyle(theme.state.warning.color)
                 }
                 if settings.showsKontrolNotice {
                     Text(SurfaceSettings.kontrolNotice)
-                        .font(.caption)
+                        .font(theme.type.caption.font)
                         .foregroundStyle(.secondary)
                 }
                 Button("Add Surface…") { settings.beginAdd() }
@@ -109,7 +109,7 @@ struct SurfacesSettingsView: View {
 
     private var addSheet: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Add Surface").font(.headline)
+            Text("Add Surface").font(theme.type.title.font)
             Form {
                 Picker("Type", selection: Binding(
                     get: { settings.draft?.kind ?? .mcu },
@@ -133,14 +133,14 @@ struct SurfacesSettingsView: View {
                         Text(SurfaceSettings.kontrolHelp)
                         Text(SurfaceSettings.kontrolNotice)
                     }
-                    .font(.caption)
+                    .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
                 }
                 if settings.draft?.kind == .mcuXt {
                     Stepper(
                         "Position: \(settings.draft?.position ?? 1)", value: field(\.position, 1), in: 0...3)
                     Text("Units are banked left to right by position; the MCU-compatible main unit takes a free one.")
-                        .font(.caption)
+                        .font(theme.type.caption.font)
                         .foregroundStyle(.secondary)
                 }
             }

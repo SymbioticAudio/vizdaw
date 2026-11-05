@@ -135,6 +135,7 @@ struct InspectorPane: View {
 /// The right pane's markers and locators (Ruling 7): a click moves the
 /// playhead there.
 struct MarkersPane: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
 
     var body: some View {
@@ -151,7 +152,7 @@ struct MarkersPane: View {
                         Text(row.name).lineLimit(1)
                         Spacer(minLength: 6)
                         Text(row.position)
-                            .font(.caption.monospacedDigit())
+                            .font(theme.type.caption.font.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                     .contentShape(Rectangle())

@@ -39,7 +39,7 @@ struct KeysSettingsView: View {
             }
             if let m = keys.message {
                 HStack {
-                    Text(m).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                    Text(m).font(theme.type.caption.font).foregroundStyle(.secondary).lineLimit(3)
                     if keys.pending != nil {
                         Button("Replace") { keys.confirmReplace() }
                         Button("Cancel") { keys.cancelReplace() }
@@ -53,11 +53,11 @@ struct KeysSettingsView: View {
                             HStack {
                                 Text(row.title)
                                 if row.stepEntry {
-                                    Text("step entry").font(.caption2).foregroundStyle(.secondary)
+                                    Text("step entry").font(theme.type.caption.font).foregroundStyle(.secondary)
                                 }
                                 Spacer()
                                 Text(row.keys.joined(separator: "  "))
-                                    .font(.system(.body, design: .monospaced))
+                                    .font(theme.type.body.font.monospaced())
                                     .foregroundStyle(
                                         row.keys == row.defaults ? theme.text.primary.color : theme.accent.accent.color)
                                 KeyRecorder(title: row.title) { keys.record(row.id, key: $0) }

@@ -14,9 +14,9 @@ struct RelinkSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Some audio files of this project are missing or changed")
-                .font(.headline)
+                .font(theme.type.title.font)
             Text("Their regions stay silent until each item is relinked to its file. Each relink is one undo step.")
-                .font(.callout)
+                .font(theme.type.body.font)
                 .foregroundStyle(.secondary)
             List(media.relinkable, id: \.id) { r in
                 HStack(spacing: 8) {
@@ -26,7 +26,7 @@ struct RelinkSheet: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(r.name)
                         Text("\(r.offline.map(MediaModel.reasonText) ?? "") · \(r.path)")
-                            .font(.caption)
+                            .font(theme.type.caption.font)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()

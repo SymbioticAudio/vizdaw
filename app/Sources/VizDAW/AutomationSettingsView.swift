@@ -43,16 +43,16 @@ struct AutomationSettingsView: View {
                 Text("High").tag("high")
             }
             Text("How closely written automation follows the move: 0.1 dB on faders and sends, 0.25 % elsewhere at Medium.")
-                .font(.caption)
+                .font(theme.type.caption.font)
                 .foregroundStyle(.secondary)
             Toggle("Write plugin parameters only when touched", isOn: .constant(true))
                 .disabled(true)
             Text("Always on: writing every parameter of every plugin would bury the lanes.")
-                .font(.caption)
+                .font(theme.type.caption.font)
                 .foregroundStyle(.secondary)
             // Read when a pass starts (5e-1 Ruling 19; final review m7).
             Text("Changes apply from the next Play.")
-                .font(.caption)
+                .font(theme.type.caption.font)
                 .foregroundStyle(.secondary)
             if let problem = prefs.problem {
                 Text(problem).foregroundStyle(theme.state.error.color)

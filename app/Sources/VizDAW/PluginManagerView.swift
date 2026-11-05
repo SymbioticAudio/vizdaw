@@ -33,7 +33,7 @@ struct PluginManagerView: View {
             }
         }
         Text("Turning a plugin off unloads it from all open projects; its settings are kept.")
-            .font(.caption).foregroundStyle(.secondary)
+            .font(theme.type.caption.font).foregroundStyle(.secondary)
             .padding(6)
         }
         .searchable(text: $model.search)
@@ -43,7 +43,7 @@ struct PluginManagerView: View {
                     ForEach(PluginManagerModel.FormatFilter.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Text(model.progressText).font(.caption).foregroundStyle(.secondary)
+                Text(model.progressText).font(theme.type.caption.font).foregroundStyle(.secondary)
                 Button("Rescan Selected") { model.rescanSelected() }
                     .disabled(!model.canRescan)
                 Button("Rescan All") { model.rescanAll() }

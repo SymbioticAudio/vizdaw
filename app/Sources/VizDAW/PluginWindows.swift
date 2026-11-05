@@ -313,6 +313,7 @@ struct EditorHost: NSViewRepresentable {
 /// A plugin without an editor (or not running): its parameters as
 /// sliders; a drag is one undo step.
 struct ParameterList: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: PluginWindowModel
 
     var body: some View {
@@ -333,7 +334,7 @@ struct ParameterList: View {
                                 if editing { model.beginParam(p.id) } else { model.commitParam(p.id) }
                             }
                             Text(PluginWindowModel.valueText(p))
-                                .font(.caption.monospacedDigit())
+                                .font(theme.type.caption.font.monospacedDigit())
                                 .frame(width: 48, alignment: .trailing)
                         }
                     }

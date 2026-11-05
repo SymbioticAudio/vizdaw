@@ -89,7 +89,7 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         let t = theme
         appearance = NSAppearance(named: t.appearance.nsAppearanceName)
         for label in labels.values {
-            label.font = t.font(t.type.label, weight: .regular)
+            label.font = t.font(t.type.label)
             label.textColor = t.label
         }
         for field in fields.values {
@@ -446,7 +446,7 @@ public final class KeyRecorderView: NSView, KeyCapturing, ThemedView {
         p.stroke()
         let s = recording ? "Press a key…" : "Record"
         let a: [NSAttributedString.Key: Any] = [
-            .font: theme.font(theme.type.label, weight: .regular),
+            .font: theme.font(theme.type.label),
             .foregroundColor: theme.label,
         ]
         let size = s.size(withAttributes: a)
