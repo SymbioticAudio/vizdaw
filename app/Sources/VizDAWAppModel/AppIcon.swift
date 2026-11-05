@@ -8,7 +8,7 @@ public enum IconSource: Sendable, Hashable {
     /// The default set: the registered brand glyph where it maps the role,
     /// else the standard icon (a `VIZDAW_NO_BRAND=1` build).
     case glyph
-    /// The angular set (symbiotic-design 0.2.1), brand or not.
+    /// The angular set (symbiotic-design 0.2.2), brand or not.
     case angular
 
     /// The SymbioticIcons set this source draws.
@@ -47,6 +47,8 @@ public enum AppIcon: CaseIterable, Sendable {
     case eq
     // Beyond the plan's list (the transport bar and the learn banner).
     case play, stop, midiLearn
+    // The transport bar's jumps.
+    case returnToStart, rewind, fastForward
 
     public var role: IconRole {
         switch self {
@@ -92,17 +94,20 @@ public enum AppIcon: CaseIterable, Sendable {
         case .play: .transportPlay
         case .stop: .transportStop
         case .midiLearn: .controlMidiLearn
+        case .returnToStart: .transportReturnToZero
+        case .rewind: .transportRewind
+        case .fastForward: .transportFastForward
         }
     }
 
     /// The set the case draws from (owner, 2026-11-04): the owner's 26
-    /// glyph picks and the 15 angular icons. Switching one icon back is a
+    /// glyph picks and the 18 angular icons. Switching one icon back is a
     /// one-line change here. settingsAppearance, in neither list, draws the
     /// default set.
     public var source: IconSource {
         switch self {
         case .fault, .faultIndicator, .remove, .zoomIn, .zoomOut, .audio, .pianoRoll, .record, .armed, .recording,
-            .settingsKeys, .settingsAudio, .settingsRecording, .play, .stop:
+            .settingsKeys, .settingsAudio, .settingsRecording, .play, .stop, .returnToStart, .rewind, .fastForward:
             .angular
         case .warning, .problem, .info, .mixer, .add, .confirm, .close, .drumGrid, .list, .muted, .loop, .split,
             .empty, .pencil, .diskSlow, .expand, .collapse, .menuDown, .leftPane, .bottomPane, .rightPane,
@@ -159,6 +164,9 @@ public enum AppIcon: CaseIterable, Sendable {
         case .play: "play.fill"
         case .stop: "stop.fill"
         case .midiLearn: "pianokeys"
+        case .returnToStart: "backward.end.fill"
+        case .rewind: "backward.fill"
+        case .fastForward: "forward.fill"
         }
     }
 

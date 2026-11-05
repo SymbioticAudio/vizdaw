@@ -2475,6 +2475,9 @@ fn themes_and_the_strip_over_the_channel() {
     // 5c. A 300-digit entry (the channel's paste) is refused, not cut. A
     // `ui.key` holds at most 256 characters: two calls into the one field.
     let level = wait_for_label(&mut app, &window, &format!("Level of {SYNTH}"));
+    // symbiotic-design 0.2.2: after Esc the box takes the keyboard back, and
+    // the first click on it only lands that focus; the next one edits.
+    app.call("ui.click", json!({"window": window, "element": level}));
     let half = "9".repeat(150);
     app.call(
         "ui.key",
@@ -2505,6 +2508,8 @@ fn themes_and_the_strip_over_the_channel() {
     let m = app.call("state.get", json!({"target": "mixer", "window": window}));
     assert_eq!(strip_named(&m, SYNTH)["pan"].as_f64(), Some(0.0), "{m}");
     let pan = wait_for_label(&mut app, &window, &format!("Pan of {SYNTH}"));
+    // 0.2.2: the box took the keyboard back after Return; this click lands it.
+    app.call("ui.click", json!({"window": window, "element": pan}));
     app.call(
         "ui.key",
         json!({"window": window, "element": pan, "text": "L 24\n"}),

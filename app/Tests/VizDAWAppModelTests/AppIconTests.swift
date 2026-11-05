@@ -47,7 +47,7 @@ private struct SquareBrand: IconProvider {
         ]
         let angular: [AppIcon] = [
             .fault, .faultIndicator, .remove, .zoomIn, .zoomOut, .audio, .pianoRoll, .record, .armed, .recording,
-            .settingsKeys, .settingsAudio, .settingsRecording, .play, .stop,
+            .settingsKeys, .settingsAudio, .settingsRecording, .play, .stop, .returnToStart, .rewind, .fastForward,
         ]
         for i in glyph { #expect(i.source == .glyph, "\(i)") }
         for i in angular { #expect(i.source == .angular, "\(i)") }
@@ -58,6 +58,23 @@ private struct SquareBrand: IconProvider {
         #expect(listed.count == glyph.count + angular.count + 1, "a case is in both lists")
         #expect(listed == Set(AppIcon.allCases))
         #expect(IconSource.glyph.set == .standard && IconSource.angular.set == .angular)
+    }
+
+    /// The three transport jump icons are angular, on 0.2.2's roles, and
+    /// draw ink at 16 points with and without the brand.
+    @Test func theTransportJumpIconsAreAngular() throws {
+        let cases: [(AppIcon, IconRole)] = [
+            (.returnToStart, .transportReturnToZero), (.rewind, .transportRewind), (.fastForward, .transportFastForward),
+        ]
+        for (icon, role) in cases {
+            #expect(icon.role == role, "\(icon)")
+            #expect(icon.source == .angular, "\(icon)")
+            for resolver in [Self.none, Self.brand] {
+                let img = icon.nsImage(accessibilityDescription: nil, size: 16, theme: .classicLight, resolver: resolver)
+                #expect(img.isTemplate && img.size == NSSize(width: 16, height: 16), "\(icon)")
+                #expect(try alpha(img).filter { $0 > 0 }.count > 8, "\(icon): blank")
+            }
+        }
     }
 
     /// 0.2.1's own roles for the fault dot and the Record button while

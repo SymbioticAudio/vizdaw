@@ -93,6 +93,17 @@ struct DocumentTransportBar: View {
                 // elements and sees no SwiftUI button or text (final review I1).
                 HStack(spacing: 6) {
                     AppKitButton(
+                        "Return to Start", icon: .returnToStart, enabled: model.selectedSeq != nil,
+                        help: "Return to Start"
+                    ) {
+                        do { try model.moveTo(0) } catch { model.editor.status = AlertItem(error, title: "Locate Failed").message }
+                    }
+                    .fixedSize()
+                    holdButton("Rewind", icon: .rewind, forward: false,
+                        help: "Rewind one bar; hold to wind; ⇧-click: previous marker")
+                    holdButton("Fast Forward", icon: .fastForward, forward: true,
+                        help: "Fast Forward one bar; hold to wind; ⇧-click: next marker")
+                    AppKitButton(
                         model.isPlaying ? "Stop" : "Play", icon: model.isPlaying ? .stop : .play,
                         enabled: model.canPlay, help: model.isPlaying ? "Stop (Space)" : "Play (Space)"
                     ) { model.playStop() }
@@ -125,6 +136,22 @@ struct DocumentTransportBar: View {
         .padding(.horizontal, TransportBarRows.padding)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+
+    private func holdButton(_ title: String, icon: AppIcon, forward: Bool, help: String) -> some View {
+        let m = model
+        return AppKitHoldButton(
+            title, icon: icon, enabled: m.selectedSeq != nil, help: help,
+            onPress: { shift in
+                m.shuttle.press(forward: forward, shift: shift, at: ProcessInfo.processInfo.systemUptime)
+            },
+            onTick: { m.shuttle.tick(at: ProcessInfo.processInfo.systemUptime) },
+            onRelease: { inside in
+                m.shuttle.release(at: ProcessInfo.processInfo.systemUptime, inside: inside)
+            },
+            onCancel: { m.shuttle.cancel() }
+        )
+        .fixedSize()
     }
 
     /// The position's font, and the width of its widest usual text.

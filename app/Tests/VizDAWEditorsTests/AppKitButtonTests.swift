@@ -73,3 +73,100 @@ import Testing
         #expect(AppKitLabel.width(of: "abc", font: f) == probe.intrinsicContentSize.width)
     }
 }
+
+/// The hold buttons (plan 7d Task B3): press, ticks while held, one release.
+@MainActor
+@Suite struct HoldButtonTests {
+    final class Log {
+        var events: [String] = []
+    }
+
+    func makeView(_ log: Log) -> HoldButtonView {
+        let v = HoldButtonView(frame: NSRect(x: 0, y: 0, width: 30, height: 20))
+        v.onPress = { log.events.append("press \($0)") }
+        v.onTick = { log.events.append("tick") }
+        v.onRelease = { log.events.append("release \($0)") }
+        v.onCancel = { log.events.append("cancel") }
+        return v
+    }
+
+    @Test func aHoldButtonPressesAndReleasesOnce() throws {
+        let log = Log()
+        let v = makeView(log)
+        v.beginHold(shift: false)
+        #expect(v.timerIsRunning)
+        v.endHold()
+        #expect(!v.timerIsRunning)
+        #expect(log.events == ["press false", "release true"])
+        // A second end is nothing; outside is reported.
+        v.endHold()
+        v.beginHold(shift: false)
+        v.endHold(inside: false)
+        #expect(log.events == ["press false", "release true", "press false", "release false"])
+        #expect(!log.events.contains("cancel"))
+        // A shift in the event's own flags.
+        let e = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown, location: .zero, modifierFlags: [.shift], timestamp: 0, windowNumber: 0, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1))
+        #expect(HoldButtonView.shift(of: e))
+        v.beginHold(shift: HoldButtonView.shift(of: e))
+        v.endHold()
+        #expect(log.events.suffix(2) == ["press true", "release true"])
+    }
+
+    /// A stalled main thread must not turn a hold into a click: a release
+    /// delivers at least one tick first (B2 review M2).
+    @Test func aReleaseDeliversAtLeastOneTickFirst() {
+        let log = Log()
+        let v = makeView(log)
+        v.beginHold(shift: false)
+        v.endHold()
+        #expect(log.events == ["press false", "release true"], "a click: no tick was due")
+        log.events = []
+        v.beginHold(shift: false)
+        v.holdStartedAt -= 1  // the press was long ago, the timer never fired
+        v.endHold()
+        #expect(log.events == ["press false", "tick", "release true"])
+        log.events = []
+        v.beginHold(shift: false)
+        v.holdStartedAt -= 1
+        v.timerFired()
+        v.endHold()
+        #expect(log.events == ["press false", "tick", "release true"], "no second owed tick")
+    }
+
+    @Test func leavingTheWindowMidHoldCancels() {
+        let log = Log()
+        let v = makeView(log)
+        v.beginHold(shift: false)
+        v.cancelHold()
+        #expect(!v.timerIsRunning)
+        #expect(log.events == ["press false", "cancel"])
+        v.cancelHold()
+        #expect(log.events.count == 2)
+    }
+
+    @Test func anAccessibilityPressIsAClick() throws {
+        let log = Log()
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 60), styleMask: [.titled], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        defer { w.close() }
+        w.contentView = NSHostingView(
+            rootView: AppKitHoldButton(
+                "Rewind", icon: .rewind, enabled: true, help: "h",
+                onPress: { log.events.append("press \($0)") }, onTick: { log.events.append("tick") },
+                onRelease: { log.events.append("release \($0)") }, onCancel: { log.events.append("cancel") }))
+        w.contentView?.layoutSubtreeIfNeeded()
+        func find(_ v: NSView) -> HoldButtonView? {
+            (v as? HoldButtonView) ?? v.subviews.lazy.compactMap { find($0) }.first
+        }
+        let root = try #require(w.contentView)
+        let b = try #require(find(root))
+        #expect(b.accessibilityPerformPress())
+        #expect(log.events == ["press false", "release true"])
+        #expect(b.refusesFirstResponder)
+        let node = try #require(ControlUI.tree(of: w, maxDepth: 64).nodes.first { $0.label == "Rewind" })
+        #expect(node.role == "AXButton" && node.actions == ["press"])
+    }
+}

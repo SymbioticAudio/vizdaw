@@ -18,7 +18,7 @@ let package = Package(
         .executable(name: "VizDAW", targets: ["VizDAW"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SymbioticAudio/symbiotic-design", exact: "0.2.1")
+        .package(url: "https://github.com/SymbioticAudio/symbiotic-design", exact: "0.2.2")
     ],
     targets: [
         // Generated header + module map (scripts/build-ffi.sh).

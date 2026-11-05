@@ -138,3 +138,157 @@ public struct AppKitLabel: NSViewRepresentable {
         return CGSize(width: max(min(w, ideal.width), 0), height: ideal.height)
     }
 }
+
+/// A bar button that is held (plan 7d Task B3): `onPress` at mouse-down
+/// (with ⇧), `onTick` every `TransportShuttle.tickEvery` while it is held,
+/// `onRelease` once at the end (with whether the pointer ended inside), and
+/// `onCancel` if the button leaves its window mid-hold. An accessibility
+/// press is a click: `onPress(false)` then `onRelease(true)`. Like
+/// `AppKitButton` it is an `AXButton` named `title` and never takes the
+/// keyboard.
+public struct AppKitHoldButton: View {
+    let button: HoldButton
+
+    public init(
+        _ title: String, icon: AppIcon, enabled: Bool, help: String,
+        onPress: @escaping @MainActor (Bool) -> Void, onTick: @escaping @MainActor () -> Void,
+        onRelease: @escaping @MainActor (Bool) -> Void, onCancel: @escaping @MainActor () -> Void
+    ) {
+        button = HoldButton(
+            title: title, icon: icon, enabled: enabled, help: help, onPress: onPress, onTick: onTick,
+            onRelease: onRelease, onCancel: onCancel)
+    }
+
+    public var body: some View { button.disabled(!button.enabled) }
+}
+
+/// `AppKitHoldButton`'s representable.
+struct HoldButton: NSViewRepresentable {
+    let title: String
+    let icon: AppIcon
+    let enabled: Bool
+    let help: String
+    let onPress: @MainActor (Bool) -> Void
+    let onTick: @MainActor () -> Void
+    let onRelease: @MainActor (Bool) -> Void
+    let onCancel: @MainActor () -> Void
+
+    func makeNSView(context: Context) -> HoldButtonView {
+        let b = HoldButtonView(frame: .zero)
+        b.bezelStyle = .push
+        b.refusesFirstResponder = true
+        b.title = ""
+        update(b)
+        return b
+    }
+
+    func updateNSView(_ b: HoldButtonView, context: Context) { update(b) }
+
+    private func update(_ b: HoldButtonView) {
+        b.onPress = onPress
+        b.onTick = onTick
+        b.onRelease = onRelease
+        b.onCancel = onCancel
+        b.image = icon.nsImage(accessibilityDescription: title, theme: ThemedViews.current)
+        b.imagePosition = .imageOnly
+        b.setAccessibilityLabel(title)
+        b.toolTip = help
+        b.isEnabled = enabled
+    }
+}
+
+/// Holds the view for the timer's `@Sendable` block (Swift 6.1: the block
+/// captures this `@MainActor` class, never the view).
+@MainActor
+private final class HoldTimerBox {
+    weak var view: HoldButtonView?
+}
+
+/// The hold button's `NSButton`.
+final class HoldButtonView: NSButton {
+    var onPress: @MainActor (Bool) -> Void = { _ in }
+    var onTick: @MainActor () -> Void = {}
+    var onRelease: @MainActor (Bool) -> Void = { _ in }
+    var onCancel: @MainActor () -> Void = {}
+
+    private var timer: Timer?
+    private var holding = false
+    private var ticks = 0
+    /// `systemUptime` at the press (internal: tests age it).
+    var holdStartedAt: TimeInterval = 0
+
+    var timerIsRunning: Bool { timer?.isValid == true }
+
+    /// ⇧ in the event's own flags, so a synthesized ⇧ counts.
+    static func shift(of event: NSEvent) -> Bool { event.modifierFlags.contains(.shift) }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return super.mouseDown(with: event) }
+        beginHold(shift: Self.shift(of: event))
+        super.mouseDown(with: event)  // the tracking loop
+        var inside = true
+        if let w = window { inside = bounds.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil)) }
+        endHold(inside: inside)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        onPress(false)
+        onRelease(true)
+        return true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { cancelHold() }
+    }
+
+    func beginHold(shift: Bool) {
+        if holding { cancelHold() }
+        holding = true
+        ticks = 0
+        holdStartedAt = ProcessInfo.processInfo.systemUptime
+        onPress(shift)
+        // `onPress` may have ended the hold (a view torn down).
+        guard holding else { return }
+        let box = HoldTimerBox()
+        box.view = self
+        let t = Timer(timeInterval: TransportShuttle.tickEvery, repeats: true) { _ in
+            MainActor.assumeIsolated { box.view?.timerFired() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func timerFired() {
+        guard holding else { return }
+        ticks += 1
+        onTick()
+    }
+
+    /// The hold ends. A release always follows at least one tick when one
+    /// was due, so a stalled main thread (whose timer never fired) does not
+    /// turn a hold into a click.
+    func endHold(inside: Bool = true) {
+        guard holding else { return }
+        stopTimer()
+        if ticks == 0, ProcessInfo.processInfo.systemUptime - holdStartedAt >= TransportShuttle.tickEvery {
+            ticks = 1
+            onTick()
+        }
+        holding = false
+        onRelease(inside)
+    }
+
+    func cancelHold() {
+        guard holding else { return }
+        holding = false
+        stopTimer()
+        onCancel()
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+}
