@@ -175,7 +175,7 @@ fn synth_dest(history: &mut History) -> Result<DestId, VizError> {
 
 /// Makes a track of `kind` in `seq` (at `index`, else last) from the
 /// existing commands, inside the caller's open transaction (the caller
-/// aborts it on error). Audio gets the monitor `monitor`, the first input
+/// aborts it on error). Every kind gets the monitor `monitor`; Audio the first input
 /// channel and an output path; Instrument the built-in synth; MIDI the
 /// first external destination, if any. Returns the new lane.
 pub(crate) fn build_track(
@@ -190,12 +190,13 @@ pub(crate) fn build_track(
         history,
         Command::Lane(LaneCmd::Add { seq, name, index }),
     )?)?;
+    // Every kind takes the "Monitoring for new tracks" default.
+    step(
+        history,
+        Command::Lane(LaneCmd::SetMonitor { seq, lane, monitor }),
+    )?;
     match kind {
         TrackKindRow::Audio => {
-            step(
-                history,
-                Command::Lane(LaneCmd::SetMonitor { seq, lane, monitor }),
-            )?;
             step(
                 history,
                 Command::Lane(LaneCmd::SetInput {

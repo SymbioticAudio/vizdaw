@@ -148,6 +148,8 @@ fn new_track_makes_each_kind_in_one_undo_step() {
         })
     );
     assert_eq!(l[1].destination.as_deref(), Some("Built-in Synth"));
+    // Every kind takes the "Monitoring for new tracks" default.
+    assert_eq!(l[1].monitor, MonitorModeRow::Input);
     assert_eq!(counts(&s), (2, 1, 1));
     s.undo().unwrap();
     assert_eq!(counts(&s), (1, 0, 1));
@@ -159,6 +161,7 @@ fn new_track_makes_each_kind_in_one_undo_step() {
     let l = s.lanes(seq).unwrap();
     assert_eq!(l[2].name, "Inst 2");
     assert_eq!(l[2].midi_dest, l[1].midi_dest);
+    assert_eq!(l[2].monitor, MonitorModeRow::Input);
     assert_eq!(synth_dests(&s), 1);
     assert_eq!(counts(&s), (3, 1, 1));
     s.undo().unwrap();
@@ -436,5 +439,49 @@ fn same_tracks_as_copes_with_blank_source_names() {
         .map(|l| l.name)
         .collect();
     assert_eq!(names, ["Keep", "Track 2", "Track 3"]);
+    s.close().unwrap();
+}
+
+#[test]
+fn a_midi_track_takes_the_new_track_monitor_default() {
+    let _g = serial();
+    vizdaw_ffi::audio::set_default_monitor_mode(MonitorModeRow::Input);
+    let s = Session::new_empty().unwrap();
+    let seq = first_seq(&s);
+    s.new_track(seq, TrackKindRow::Midi, None).unwrap();
+    assert_eq!(s.lanes(seq).unwrap()[0].monitor, MonitorModeRow::Input);
+    vizdaw_ffi::audio::reset_audio_settings();
+    s.close().unwrap();
+}
+
+#[test]
+fn a_new_empty_sequence_has_no_tracks_and_is_one_undo_step() {
+    use vizdaw_ffi::templates::SequenceTemplate;
+    let _g = serial();
+    let s = Session::new_empty().unwrap();
+    let before = s.snapshot().unwrap().sequences.len();
+    let snap = s
+        .new_sequence_from_template("Plain".into(), SequenceTemplate::Empty)
+        .unwrap();
+    assert_eq!(snap.sequences.len(), before + 1);
+    let plain = snap
+        .sequences
+        .iter()
+        .find(|q| q.name == "Plain")
+        .unwrap()
+        .id;
+    assert!(s.lanes(plain).unwrap().is_empty());
+    assert_eq!(
+        snap.undo_label.as_deref(),
+        Some("New Sequence from Template")
+    );
+    let snap = s.undo().unwrap();
+    assert_eq!(snap.sequences.len(), before);
+    // The other templates still make their tracks.
+    let snap = s
+        .new_sequence_from_template("Kit".into(), SequenceTemplate::DrumKit)
+        .unwrap();
+    let kit = snap.sequences.iter().find(|q| q.name == "Kit").unwrap().id;
+    assert_eq!(s.lanes(kit).unwrap().len(), 1);
     s.close().unwrap();
 }

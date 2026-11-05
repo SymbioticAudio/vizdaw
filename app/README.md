@@ -1402,10 +1402,9 @@ a copy, not one you care about.
 152. Settings › Recording: the sample rate and bit depth are what File >
      New offers first. Count-in, Pre-roll and Passes as takes are what
      the next opened document's popover starts with (open documents keep
-     theirs). Monitoring for new tracks set to Input: "+ Add Track" › New
-     Audio Track makes a track showing I, and one Undo removes the track;
-     a New Instrument Track or New MIDI Track still shows A (the setting
-     applies to audio tracks only). The low-disk
+     theirs). Monitoring for new tracks set to Input: "+ Add Track" makes a
+     track of any kind (audio, instrument, MIDI) showing I, and one Undo
+     removes the track (the setting applies to every new track). The low-disk
      thresholds read "Recording warns below 1 GB … and stops below 100
      MB."
 153. Save while recording (plan 5d-1 Ruling 19): in a saved project,
@@ -2303,7 +2302,9 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
      built-in synth; a second track on the same output or synth shares its
      strip. At the default window size every strip of a small project fits.
 237. Delete every sequence: "No Sequence" shows a New Sequence button,
-     which makes and selects one. Nowhere in the menus, headers, Settings,
+     which makes and selects one with no tracks, like a new project's
+     "Sequence 1" (the sidebar's "+" › Empty does the same; one Undo
+     removes it; Drum Kit and Same Tracks still make their tracks). Nowhere in the menus, headers, Settings,
      status lines or alerts says "lane" (a rare "unknown id" refusal still
      prints an id such as lane5). An old project's "Lane 1" keeps
      its name.

@@ -175,6 +175,11 @@ pub fn build(
                 }
             }
         }
+        (SequenceTemplate::Empty, _) => {
+            // Like a new project's "Sequence 1": no tracks. Inside the same
+            // transaction, so it stays one undo step.
+            run(Command::Lane(LaneCmd::Remove { seq, lane: first }))?;
+        }
         _ => {}
     }
     Ok(seq)
