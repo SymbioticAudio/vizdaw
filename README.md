@@ -38,7 +38,9 @@ after the first release).
 ## Getting around
 
 - Each project has one window. The transport bar along its top has Play,
-  Loop, Record, the position and the transport fields.
+  Loop, Record, Return to Start, Rewind and Fast Forward (click for a bar,
+  hold to wind, ⇧-click for a marker), bar, time, tempo and signature
+  readouts, and the transport fields.
 - Two main views: Arrange (⌃1) and Mix (⌃2). Switching keeps each view's
   panes as you left them.
 - Three panes, left (⌃⌘←), bottom (⌃⌘↓) and right (⌃⌘→), each with a

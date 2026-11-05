@@ -2169,3 +2169,81 @@ Checked by hand; the rules are tested (`AudioEditorEntryTests`,
      has no pan control and nothing that changes the audio file: after
      every step above, the file in the project's Media folder has its
      original modification date.
+
+### Clean-up (plan 7d)
+
+Checked by hand; the rules are tested (`TransportShuttleTests`,
+`TransportCommandsTests`, `TransportReadoutsTests`, `TransportFieldsTests`,
+`RecordOptionsTests`, `KeyBindingsTests`, `AppKitButtonTests`,
+`ThemeScanTests`, `NameScanTests`, the core's bar step and wind tests) and
+the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
+
+225. File > Create Demo Project. The transport bar shows four readouts, Bar,
+     Time, Tempo and Sig ("1.1.0", "0:00.000", "120.00", "4/4"). Choose each
+     theme in Settings › Appearance and compare the readouts with the
+     design repo's 0.2.0 mockups (`docs/mockups/0.2.0`): Flat shows them as
+     tiles in the accent colour, the other themes as one edged group. Play:
+     the digits change and no box changes width. Narrow the window to its
+     700-pt minimum: the readouts and the fields wrap onto lines below the
+     buttons and nothing is covered or cut. Do the same in the mixer
+     window (⌥⌘M).
+226. Click ⏮ (Return to Start), then ⏪ (Rewind) and ⏩ (Fast Forward):
+     each click moves one bar. ⇧-click ⏪ or ⏩: it goes to the previous or
+     next marker; with none, the status line says "No marker after the
+     position." (or "before"). Hold ⏩: after a moment it starts to move,
+     then speeds up; hold ⏪ and it stops at bar 1. While playing, each of
+     these moves the playhead and playing continues from the new place.
+     While recording, click ⏪: the status line says "Stop recording
+     first." and nothing moves. Put a strip in Write and play, then hold ⏩
+     for a few seconds: Edit shows one "Undo Write Automation" step for the
+     whole hold, and the strip switches to its After Write mode once; a
+     click instead of a hold lands the pass as a ruler click does. Click ⏮
+     (or the ruler), then ⏩ at once: it lands one bar after where ⏮ went.
+     Start typing a strip's name and hold ⏩: the status line says "A text
+     field has the keyboard." and nothing moves. Type in Position, then
+     press ⏩: the typing is cancelled and ⏩ moves one bar. Hold ⇧. while a
+     strip writes: one "Write Automation" step, made when you let go.
+227. Press ⇧, and ⇧.: one bar back and on. The keypad's − and + do the same.
+     Hold a key: it steps bar by bar until you let go. The Transport menu
+     has Rewind and Fast Forward, showing ⇧, and ⇧. as their keys; each
+     moves one bar. Rebind them in Settings › Keys: the new keys work and
+     the menu shows them. Load a keys file made before plan 7d that gives
+     Keypad+ to another command: Keypad+ still runs that command and Fast
+     Forward has only ⇧.; a saved sequence's keyboard slot on Keypad+ still
+     plays it.
+228. In each of the five fields (Position, Edit In, Edit Out, Punch In and
+     Punch Out) and the record popover's Punch In and Punch Out, type a
+     position: Return sets it; Tab sets it and moves to the next field.
+     Type again, then click a bar button, a readout or the arrangement,
+     press Esc, switch to another window or app, or close the popover: the
+     typing is dropped and the field shows the value in use. Type a punch
+     time in the popover and, with it still open, press R (or Record on a
+     surface): the status line says "Press Return to set the punch, or Esc
+     to discard it." and nothing records. Type a punch time in the popover
+     and click the bar's Record button: the same status line, nothing
+     records, and the popover stays open showing what you typed; Return
+     then sets it. Type a punch time and click elsewhere: the popover
+     closes and its fields show the old range. In the mixer window, P, E
+     and U give its own Position, Edit In and Punch In the keyboard. In a
+     strip's number box and in an audio editor box, press Esc, or type a
+     refused value and press Return: one click on the box starts editing
+     it again.
+229. Choose Flat, Symbiotic and Studio Dark in turn and open each Settings
+     tab, Bounce, Relink, MIDI Learn Maps and the synth sheets: the text
+     uses the theme's sizes and weights and the gaps are even. In Flat the
+     sheet and pane titles read clearly at the theme's title size and
+     weight. Open the record popover (the chevron next to Record) in each
+     theme: it follows the theme, as the rest of the window does.
+230. Settings › Surfaces › Add: the keyboard entry reads "Host-integration
+     keyboard (DAW mode)" with plain wording and no product names. A
+     keyboard added before still connects and drives the mixer.
+231. Set a lane's height to 46, 47 and 48 pt: its meter stays clear of the
+     separator below it at each height. Give two lanes the same input path:
+     the strip's input picker shows "Vox: In 1" for the shared lane. Record
+     across a tempo change: the growing waveform lines up with the region
+     drawn at Stop.
+232. Import a 44.1 kHz file into a 48 kHz project and set a fade: the
+     inspector's fade in ms equals the audio editor's. Make a region 16 pt
+     high: its gain band can still be dragged. Drag a pane divider and let
+     go outside it: the cursor goes back to the arrow. Start renaming a
+     strip in the bottom pane's mixer, then press ⌘1: the rename is kept.

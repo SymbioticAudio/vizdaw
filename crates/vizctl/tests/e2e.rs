@@ -2905,3 +2905,212 @@ fn find_node(nodes: &Value, label: &str) -> Option<Value> {
         }
     })
 }
+
+/// Polls the window's tree until the node labelled exactly `label`
+/// exists; returns it (its `id`, `value` and `focused`).
+fn wait_for_node(app: &mut App, window: &Value, label: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": window}));
+        if let Some(n) = find_node(&tree["nodes"], label) {
+            return n;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {label:?} within {WAIT_MS} ms in {tree}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Polls the tree until the node labelled `label` has the value `value`.
+fn wait_for_value(app: &mut App, window: &Value, label: &str, value: &str) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let n = wait_for_node(app, window, label);
+        if n["value"].as_str() == Some(value) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label} is not {value:?} within {WAIT_MS} ms: {n}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// README steps 225–228 through the channel (plan 7d): the readouts, a
+/// click on Fast Forward, Rewind and Return to Start, a ⇧-click with no
+/// marker, ⇧. and the keypad's minus, hostile parameters, a typed field
+/// cancelled by a click away, and a typed punch time that refuses Record
+/// until Return sets it.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn transport_jumps_readouts_and_fields_over_the_channel() {
+    use core_control::ErrorCode;
+    const BAR: i64 = 61_440;
+    const DRAFT: &str = "Press Return to set the punch, or Esc to discard it.";
+    let mut app = App::start();
+    // The demo's shown sequence: 4/4 at 120 BPM over its first ten bars.
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let tick = |app: &mut App| {
+        app.call("state.get", json!({"target": "transport", "window": w}))["tick"]
+            .as_i64()
+            .unwrap()
+    };
+    let click = |app: &mut App, label: &str, mods: Value| {
+        let n = wait_for_node(app, &w, label);
+        app.call(
+            "ui.click",
+            json!({"window": w, "element": n["id"], "modifiers": mods}),
+        );
+    };
+    // A click in a field puts the caret where it lands, as in any text
+    // field; three select its text, so what is typed replaces it.
+    let select_field = |app: &mut App, label: &str| {
+        let n = wait_for_node(app, &w, label);
+        app.call(
+            "ui.click",
+            json!({"window": w, "element": n["id"], "count": 3}),
+        );
+    };
+    let no_alert = |app: &mut App| {
+        let ws = app.call("state.get", json!({"target": "windows"}));
+        assert_eq!(ws["alerts"].as_array().unwrap().len(), 0, "{ws}");
+        let doc = app.call("state.get", json!({"target": "document", "window": w}));
+        assert!(doc["alert"].is_null(), "no dialog: {doc}");
+    };
+
+    // 1. The readouts at the start.
+    wait_for_tick(&mut app, &w, 0);
+    let t0 = app.call("state.get", json!({"target": "transport", "window": w}));
+    let bbu0 = t0["position"].as_str().unwrap().to_string();
+    assert_eq!(bbu0, "1.1.0", "{t0}");
+    wait_for_value(&mut app, &w, "Bar Readout", &bbu0);
+    wait_for_value(&mut app, &w, "Time Readout", "0:00.000");
+    wait_for_value(&mut app, &w, "Tempo Readout", "120.00");
+    wait_for_value(&mut app, &w, "Signature Readout", "4/4");
+
+    // 2. A click on Fast Forward goes one bar; the command another;
+    // Rewind one back; Return to Start to 0; Rewind at 0 stays there.
+    click(&mut app, "Fast Forward", json!([]));
+    wait_for_tick(&mut app, &w, BAR);
+    wait_for_value(&mut app, &w, "Time Readout", "0:02.000");
+    app.call(
+        "command.run",
+        json!({"id": "transport.fast_forward", "window": w}),
+    );
+    wait_for_tick(&mut app, &w, 2 * BAR);
+    click(&mut app, "Rewind", json!([]));
+    wait_for_tick(&mut app, &w, BAR);
+    click(&mut app, "Return to Start", json!([]));
+    wait_for_tick(&mut app, &w, 0);
+    wait_for_value(&mut app, &w, "Bar Readout", &bbu0);
+    click(&mut app, "Rewind", json!([]));
+    assert_eq!(tick(&mut app), 0, "Rewind stops at bar 1");
+    no_alert(&mut app);
+
+    // 3. A ⇧-click with no marker: the status line says so, nothing moves.
+    click(&mut app, "Fast Forward", json!(["shift"]));
+    let e = wait_for_editor(&mut app, &w, "no marker", |e| {
+        e["status"] == "No marker after the position."
+    });
+    assert_eq!(tick(&mut app), 0, "{e}");
+    no_alert(&mut app);
+
+    // 4. ⇧. one bar on, the keypad's minus one bar back.
+    app.call(
+        "ui.key",
+        json!({"window": w, "key": ".", "modifiers": ["shift"]}),
+    );
+    wait_for_tick(&mut app, &w, BAR);
+    app.call("ui.key", json!({"window": w, "key": "keypad_minus"}));
+    wait_for_tick(&mut app, &w, 0);
+
+    // 5. Hostile parameters are refused and move nothing.
+    for (id, params) in [
+        ("transport.rewind", json!({"bars": 2})),
+        ("transport.fast_forward", json!("x")),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{id} {params}: {e}");
+        assert_eq!(tick(&mut app), 0, "{id} {params}");
+    }
+    no_alert(&mut app);
+
+    // 6. A typed position is cancelled by a click on a view that never
+    // takes the keyboard, and by one on the arrangement (which does);
+    // Return commits (the click selects all, so no stale digit is left).
+    let old = wait_for_node(&mut app, &w, "Position")["value"].clone();
+    for away in ["Bar Readout", "Arrangement"] {
+        click(&mut app, "Position", json!([]));
+        app.call("ui.key", json!({"window": w, "text": "5"}));
+        click(&mut app, away, json!([]));
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        loop {
+            let n = wait_for_node(&mut app, &w, "Position");
+            if n["value"] == old {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a click on {away} leaves Position showing {old}: {n}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(tick(&mut app), 0, "a click on {away} commits nothing");
+    }
+    select_field(&mut app, "Position");
+    app.call("ui.key", json!({"window": w, "text": "5\n"}));
+    wait_for_tick(&mut app, &w, 4 * BAR);
+
+    // 7. A typed bar Punch In refuses Record (plan 7d controller ruling
+    // I5, fix round 1 M4): a real click on the bar's Record keeps the
+    // draft and the keyboard, and Return then sets the punch. The record
+    // popover's own punch fields are out of the channel's reach: its
+    // window has no title, so `state.get windows` does not list it and
+    // `ui.tree` and `ui.key` cannot name it; README step 228 checks them.
+    let recording = |app: &mut App| {
+        app.call("state.get", json!({"target": "record", "window": w}))["recording"].clone()
+    };
+    let punch_in = |e: &Value| e["transport"]["punch_in"].clone();
+    let before = punch_in(&app.call("state.get", json!({"target": "editor", "window": w})));
+    select_field(&mut app, "Punch In");
+    app.call("ui.key", json!({"window": w, "text": "3"}));
+    click(&mut app, "Record", json!([]));
+    wait_for_editor(&mut app, &w, "Record refused", |e| e["status"] == DRAFT);
+    assert_eq!(recording(&mut app), false, "nothing records");
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    assert_eq!(punch_in(&e), before, "the punch is not set yet: {e}");
+    let n = wait_for_node(&mut app, &w, "Punch In");
+    assert_eq!(n["focused"], true, "Punch In keeps the keyboard: {n}");
+    app.call("ui.key", json!({"window": w, "key": "return"}));
+    wait_for_editor(&mut app, &w, "the punch set", |e| {
+        e["transport"]["punch_in"] == 2 * BAR
+    });
+    // The channel's (and a surface's) transport.record refuses the same way.
+    select_field(&mut app, "Punch In");
+    app.call("ui.key", json!({"window": w, "text": "4"}));
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e}");
+    assert_eq!(e.message, DRAFT, "{e}");
+    assert_eq!(recording(&mut app), false, "nothing records");
+    app.call("ui.key", json!({"window": w, "key": "escape"}));
+    let n = wait_for_node(&mut app, &w, "Punch In");
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    assert_eq!(
+        e["transport"]["punch_in"],
+        2 * BAR,
+        "Esc sets nothing: {e} {n}"
+    );
+    assert_eq!(tick(&mut app), 4 * BAR);
+    no_alert(&mut app);
+    app.quit();
+}
