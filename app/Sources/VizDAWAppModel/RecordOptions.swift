@@ -109,6 +109,12 @@ extension RecordModel {
     /// The count-in is playing (the timeline waits).
     public var countingIn: Bool { document?.transport.countingIn ?? false }
 
+    /// The bar's Record button is enabled: a sequence is shown, or a pass
+    /// records. Unlike the R key's menu item, a text edit holding the
+    /// keyboard does not disable it: a click is no keystroke, and with a
+    /// punch draft open it refuses and says why (fix round 2 N2).
+    public var buttonEnabled: Bool { document?.selectedSeq != nil || isRecording }
+
     /// The toolbar's Record button: like the R key, and a refusal shows in
     /// the status line.
     public func pressRecord() {

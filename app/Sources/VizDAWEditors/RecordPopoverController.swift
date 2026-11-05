@@ -34,6 +34,9 @@ public final class RecordPopoverController: NSObject, NSPopoverDelegate {
     /// The view it shows under (the chevron): a press on it is the chevron's
     /// own toggle, not an outside click.
     public weak var anchor: NSView?
+    /// The event being dispatched (tests give their own: posting one into
+    /// `NSApp`'s queue to make it current ends the test run).
+    var currentEvent: () -> NSEvent? = { NSApp.currentEvent }
 
     public init(record: RecordModel, host: RecordPopoverHost, content: NSViewController) {
         self.record = record
@@ -66,12 +69,13 @@ public final class RecordPopoverController: NSObject, NSPopoverDelegate {
     }
 
     public func popoverShouldClose(_ popover: NSPopover) -> Bool {
-        let ok = shouldClose(for: NSApp.currentEvent)
-        if !ok, RecordButtons.contains(NSApp.currentEvent) {
+        let event = currentEvent()
+        let ok = shouldClose(for: event)
+        if !ok, RecordButtons.contains(event) {
             // The press makes the bar's window key: give the keyboard back to
             // the popover's field, so Return sets the punch (fix round 1 M2).
             let p = popover
-            DispatchQueue.main.async { p.contentViewController?.view.window?.makeKey() }
+            DispatchQueue.main.async { p.contentViewController?.viewIfLoaded?.window?.makeKey() }
         }
         return ok
     }

@@ -231,6 +231,68 @@ import VizDAWCore
         #expect(old != 245_760)
     }
 
+    /// Fix round 2 N2: the bar's Record button stays enabled while a text
+    /// edit holds the keyboard (the popover's punch field or the bar's), so
+    /// a click with a draft open reaches Record, which refuses and says why;
+    /// the R key's menu item still waits.
+    @Test func theRecordButtonIsEnabledWhatever() throws {
+        let (m, f) = try armed()
+        let r = m.record
+        r.setPunch(true)
+        #expect(r.buttonEnabled)
+        r.showsPopover = true
+        r.punchFocusChanged(from: nil, to: .punchIn)
+        r.setPunchText(.punchIn, "5")
+        #expect(m.editor.textEditing && r.hasOpenPunchDraft)
+        #expect(r.buttonEnabled && !TransportCommands.enabled("transport.record", m))
+        r.pressRecord()
+        #expect(m.editor.status == RecordModel.openDraftMessage && f.recordCalls.isEmpty)
+        r.showsPopover = false
+        m.editor.beginTextEditing(TransportFieldsView.textOwner)
+        r.barPunchTyped(.punchOut, "9")
+        #expect(r.buttonEnabled && r.hasOpenPunchDraft)
+        r.barPunchEnded()
+        m.editor.endTextEditing(TransportFieldsView.textOwner)
+        #expect(r.buttonEnabled)
+    }
+
+    /// Fix round 2 N3: `popoverShouldClose` itself decides from the event
+    /// being dispatched (`NSApp.currentEvent` in the app; a synthetic
+    /// mouse-down here, through the controller's `currentEvent` seam).
+    @Test func thePopoversVetoReadsTheCurrentEvent() throws {
+        let (m, _) = try armed()
+        let r = m.record
+        r.setPunch(true)
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 400, height: 60), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        let content = NSView(frame: CGRect(x: 0, y: 0, width: 400, height: 60))
+        window.contentView = content
+        let recordButton = NSView(frame: CGRect(x: 10, y: 10, width: 40, height: 30))
+        content.addSubview(recordButton)
+        RecordButtons.register(recordButton)
+        defer { RecordButtons.unregister(recordButton) }
+        let c = RecordPopoverController(record: r, host: .document, content: NSViewController())
+        r.togglePopover(in: .document)
+        r.setPunchText(.punchIn, "5")
+        var current: NSEvent?
+        c.currentEvent = { current }
+        func press(_ x: CGFloat) throws -> NSEvent {
+            try #require(
+                NSEvent.mouseEvent(
+                    with: .leftMouseDown, location: CGPoint(x: x, y: 20), modifierFlags: [], timestamp: 0,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        current = try press(20)
+        #expect(!c.popoverShouldClose(c.popover), "a press on Record with a draft: vetoed")
+        current = try press(300)
+        #expect(c.popoverShouldClose(c.popover), "a press elsewhere: it closes")
+        current = nil
+        #expect(c.popoverShouldClose(c.popover), "no press (a key, the app resigning): it closes")
+        current = try press(20)
+        r.commitPunch(.punchIn)
+        #expect(c.popoverShouldClose(c.popover), "no draft: a press on Record closes it")
+    }
+
     /// Fix round 1 M4: the bar's own Punch In or Out, typed in, refuses
     /// Record with the same message on every path: the bar's Record (the
     /// edit stays), the R key's command, a surface and the channel.

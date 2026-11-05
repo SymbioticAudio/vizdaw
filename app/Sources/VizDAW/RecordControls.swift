@@ -21,7 +21,10 @@ struct RecordControls: View {
             AppKitButton(
                 record.isRecording ? "Stop Recording" : "Record",
                 icon: record.isRecording ? .recording : .record,
-                enabled: TransportCommands.enabled("transport.record", model),
+                // Enabled while a text edit holds the keyboard: a click with
+                // a punch draft open reaches Record, which refuses and says
+                // why (fix round 2 N2).
+                enabled: record.buttonEnabled,
                 help: record.isRecording ? "Stop recording (R)" : "Record the armed lanes (R)",
                 tint: record.isRecording ? theme.state.record.nsColor : nil
             ) { record.pressRecord() }
@@ -37,9 +40,7 @@ struct RecordControls: View {
             .fixedSize()
             // An AppKit popover, whose close veto reads the press (I1).
             .background(
-                RecordPopoverAnchor(
-                    model: model, record: record, host: host, theme: theme,
-                    shown: record.showsPopover(in: host)))
+                RecordPopoverAnchor(model: model, record: record, host: host, shown: record.showsPopover(in: host)))
             if record.countingIn {
                 Text("Count-in")
                     .font(.caption.weight(.semibold))
@@ -82,7 +83,6 @@ struct RecordPopoverAnchor: NSViewRepresentable {
     let model: DocumentModel
     let record: RecordModel
     let host: RecordPopoverHost
-    let theme: Theme
     /// The model's `showsPopover(in: host)`, read in the body so a change
     /// updates this view.
     let shown: Bool
@@ -90,7 +90,6 @@ struct RecordPopoverAnchor: NSViewRepresentable {
     final class Anchor: NSView {
         var controller: RecordPopoverController?
         var shown = false
-        var theme: Theme?
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func isAccessibilityElement() -> Bool { false }
 
@@ -104,13 +103,11 @@ struct RecordPopoverAnchor: NSViewRepresentable {
         }
     }
 
-    private func content() -> AnyView {
-        AnyView(RecordPopover(model: model, record: record).environment(\.symbioticTheme, theme))
-    }
-
     func makeNSView(context: Context) -> Anchor {
         let a = Anchor()
-        let hosting = NSHostingController(rootView: content())
+        // Themed like every other hosting view (plan 7b Ruling 12; fix
+        // round 2 N1): it follows the appearance preferences live.
+        let hosting = NSHostingController(rootView: RecordPopover(model: model, record: record).themedRoot())
         hosting.sizingOptions = [.preferredContentSize]
         let c = RecordPopoverController(record: record, host: host, content: hosting)
         c.anchor = a
@@ -119,13 +116,6 @@ struct RecordPopoverAnchor: NSViewRepresentable {
     }
 
     func updateNSView(_ a: Anchor, context: Context) {
-        // Only a theme change replaces the content, so the punch field
-        // keeps its focus across other updates (fix round 1 M2).
-        if a.theme != theme {
-            a.theme = theme
-            (a.controller?.popover.contentViewController as? NSHostingController<AnyView>)?.rootView = content()
-            a.controller?.popover.appearance = NSAppearance(named: theme.appearance.nsAppearanceName)
-        }
         a.shown = shown
         // Next turn: the anchor is laid out, and a close and reopen in the
         // other window's bar happen in order.
