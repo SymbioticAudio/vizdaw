@@ -2268,3 +2268,36 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
      high: its gain band can still be dragged. Drag a pane divider and let
      go outside it: the cursor goes back to the arrow. Start renaming a
      strip in the bottom pane's mixer, then press ⌘1: the rename is kept.
+
+### Tracks (plan tracks)
+
+233. Make a new project. Arrange shows "Sequence 1", the bar, the empty
+     track headers and "+ Add Track". Nothing grey covers them, and the
+     ruler starts at 1. The window opens large: 1440 × 900 pt, or 90% of
+     the screen if that is smaller (a saved window keeps its own size).
+     Scroll and zoom the arrangement, and open the piano roll, drum grid
+     and strip chart: no editor paints outside its frame. Click into each
+     transport field and into a list cell: each focus ring shows whole, and
+     the list's rows are a little taller than before. If you have granted
+     Screen Recording, `vizctl screenshot --live` matches what you see (a
+     rebuilt app needs the grant again); without it, it says how to grant
+     it and asks nothing.
+234. Track › New Audio Track (⌥⌘A), New Instrument Track (⌥⌘S) and New
+     MIDI Track (⌥⌘X): each adds a track below the selected one, with its
+     kind's icon and routing (an audio track's header shows "→" and its
+     output). The tracks are named Audio 1, Inst 1 and MIDI 1. Edit › Undo
+     removes each in one step. Play the instrument track: the built-in
+     synth sounds. The MIDI track with no external destination says so in
+     the status line.
+235. Duplicate Track copies the notes but not the automation; on a Track
+     Synth return track it says why it cannot. Rename Track opens the
+     header's field; an empty name is refused. Delete the last track: the
+     "+ Add Track" row stays, and its click offers the three kinds.
+236. The Mix view's Add Track beside Add Bus offers the same three kinds.
+     A strip appears when the track brings a new output or the first
+     built-in synth; a second track on the same output or synth shares its
+     strip. At the default window size every strip of a small project fits.
+237. Delete every sequence: "No Sequence" shows a New Sequence button,
+     which makes and selects one. Nowhere in the menus, headers, Settings,
+     status lines or alerts says "lane". An old project's "Lane 1" keeps
+     its name.
