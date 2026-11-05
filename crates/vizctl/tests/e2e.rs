@@ -2577,6 +2577,26 @@ fn labels_with_word(nodes: &Value, word: &str, out: &mut Vec<String>) {
     }
 }
 
+/// The last edit is one undo step named `label` (Task 7 review M1): one
+/// Undo gives `undone` and the undo label `prev`, one Redo gives `redone`
+/// and `label` again.
+fn one_undo_step(
+    app: &mut App,
+    w: &Value,
+    label: &str,
+    prev: &str,
+    undone: impl Fn(&Value) -> bool,
+    redone: impl Fn(&Value) -> bool,
+) {
+    wait_for_undo(app, w, label);
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_state(app, w, "audio_editor", undone);
+    wait_for_undo(app, w, prev);
+    app.call("command.run", json!({"id": "edit.redo", "window": w}));
+    wait_for_state(app, w, "audio_editor", redone);
+    wait_for_undo(app, w, label);
+}
+
 /// The node labelled `label` inside the "Audio Editor Pane" container
 /// (the arrangement has zoom buttons of its own).
 fn in_editor(app: &mut App, window: &Value, label: &str) -> Value {
@@ -2717,6 +2737,14 @@ fn edits_a_region_in_the_audio_editor() {
     wait_for_state(&mut app, &w, "audio_editor", |s| {
         region_of(s)["fade_in"]["frames"] == 12_000
     });
+    one_undo_step(
+        &mut app,
+        &w,
+        "Set Region Fades",
+        "Set Region Gain",
+        |s| region_of(s)["fade_in"]["frames"] == 0,
+        |s| region_of(s)["fade_in"]["frames"] == 12_000,
+    );
 
     // 6. The length, then the start: the end stays.
     let id = in_editor(&mut app, &w, "Region Length")["id"].clone();
@@ -2727,6 +2755,14 @@ fn edits_a_region_in_the_audio_editor() {
     wait_for_state(&mut app, &w, "audio_editor", |s| {
         region_of(s)["length"] == 72_000
     });
+    one_undo_step(
+        &mut app,
+        &w,
+        "Trim Region",
+        "Set Region Fades",
+        |s| region_of(s)["length"] == 96_000,
+        |s| region_of(s)["length"] == 72_000,
+    );
     let id = in_editor(&mut app, &w, "Region Start")["id"].clone();
     app.call(
         "ui.key",
@@ -2735,6 +2771,15 @@ fn edits_a_region_in_the_audio_editor() {
     wait_for_state(&mut app, &w, "audio_editor", |s| {
         region_of(s)["source_offset"] == 24_000 && region_of(s)["length"] == 48_000
     });
+    // One step: a start sent as two edits would undo to a third state.
+    one_undo_step(
+        &mut app,
+        &w,
+        "Trim Region",
+        "Trim Region",
+        |s| region_of(s)["source_offset"] == 0 && region_of(s)["length"] == 72_000,
+        |s| region_of(s)["source_offset"] == 24_000 && region_of(s)["length"] == 48_000,
+    );
 
     // 7. Drag the gain band 20 points up: +5 dB at 0.25 dB a point.
     let handle = in_editor(&mut app, &w, "Gain Handle");
@@ -2765,6 +2810,31 @@ fn edits_a_region_in_the_audio_editor() {
     wait_for_state(&mut app, &w, "audio_editor", |s| {
         (gain(s) - 11.04).abs() < 0.05
     });
+    wait_for_undo(&mut app, &w, "Normalize");
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) - dragged).abs() < 1e-6
+    });
+    // A bare Return on a negative gain that is not a tenth sends nothing
+    // (final review I1): Normalize to −13 dBFS gives −0.96 dB, shown as
+    // "−1.0 dB"; then undo it.
+    let id = in_editor(&mut app, &w, "Normalize Peak")["id"].clone();
+    app.call(
+        "ui.key",
+        json!({"window": w, "element": id, "text": "-13\n"}),
+    );
+    let id = in_editor(&mut app, &w, "Normalize")["id"].clone();
+    app.call("ui.click", json!({"window": w, "element": id}));
+    let s = wait_for_state(&mut app, &w, "audio_editor", |s| {
+        (gain(s) + 0.96).abs() < 0.05
+    });
+    wait_for_undo(&mut app, &w, "Normalize");
+    let normalized = gain(&s);
+    let id = in_editor(&mut app, &w, "Region Gain")["id"].clone();
+    app.call("ui.key", json!({"window": w, "element": id, "text": "\n"}));
+    std::thread::sleep(Duration::from_millis(500));
+    let s = state(&mut app, &w);
+    assert_eq!(gain(&s), normalized, "{s}");
     wait_for_undo(&mut app, &w, "Normalize");
     app.call("command.run", json!({"id": "edit.undo", "window": w}));
     wait_for_state(&mut app, &w, "audio_editor", |s| {

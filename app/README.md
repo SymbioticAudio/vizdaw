@@ -2117,13 +2117,16 @@ Checked by hand; the rules are tested (`AudioEditorEntryTests`,
      select the first again: it fits again.
 219. Drag the band along the top of the region up: a readout follows
      ("+3.0 dB") and the waveform grows; hold ⇧ for finer steps; release:
-     Edit shows "Undo Region Gain". ⌥-click the band: 0.0 dB. In the Gain
-     box type `-4.2` and press Return: "−4.2 dB", the waveform shrinks, and
-     Edit shows "Undo Set Region Gain". Type `abc`: the box is unchanged and
+     Edit shows "Undo Region Gain". Drag the band again and press Esc
+     before releasing: the gain snaps back and nothing is added to Edit's
+     Undo. ⌥-click the band: 0.0 dB. In the Gain box type `-4.2` and press
+     Return: "−4.2 dB", the waveform shrinks, and Edit shows "Undo Set
+     Region Gain". Type `abc`: the box is unchanged and
      the status line says "Type a gain in dB, like −4.2 or +6.". Type `30`:
      "+24.0 dB", and red clip marks appear along the band tops where the
      audio now goes over 0 dBFS. Type `-inf`: "−∞ dB" and a flat line.
-     Type `-9` and click away without Return: nothing changes.
+     Type `-9` and click away without Return: nothing changes; type `-9`
+     and press Esc: nothing changes either.
 220. Drag the square at the region's top-left corner right: a fade-in curve
      is drawn over the waveform and the Fade In box follows in ms; the
      square stops at the fade-out's square; release: "Undo Fade In". Choose
@@ -2147,7 +2150,8 @@ Checked by hand; the rules are tested (`AudioEditorEntryTests`,
 222. Type `-1` in Peak and click Normalize: the gain becomes what brings the
      loudest sample to −1 dBFS (a file peaking at −12 dBFS reads "+11.0 dB")
      and Edit shows "Undo Normalize"; no dialog opens. Type `-inf` in Peak:
-     refused with "Type a peak from −96 to 0 dB, like −0.3."; `+3`: "0.0 dB".
+     refused with "Type a peak from −96 to 0 dB, like −0.3."; `+3`: the Peak
+     box reads "0.0 dB" (the region's gain is unchanged).
      Right after an import Normalize may say the waveform is still being
      built: try again a moment later. Move the region's file away in Finder
      so it goes offline: the region is hatched with "Offline" and its fades
