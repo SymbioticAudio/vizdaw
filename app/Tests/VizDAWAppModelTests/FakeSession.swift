@@ -862,7 +862,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         guard var rows = laneTable[seq] else {
             throw VizError.Model(message: "unknown id seq\(seq)")
         }
-        var row = lane((rows.map(\.id).max() ?? 0) + 1, "Track \(rows.count + 1)")
+        let prefix = kind == .audio ? "Audio" : kind == .instrument ? "Inst" : "MIDI"
+        var row = lane((rows.map(\.id).max() ?? 0) + 1, "\(prefix) \(rows.count + 1)")
         row.kind = kind
         row.midiDest = kind == .instrument ? 1 : nil
         let at = after.flatMap { a in rows.firstIndex { $0.id == a } }.map { $0 + 1 } ?? rows.count

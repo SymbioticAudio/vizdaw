@@ -110,8 +110,9 @@ fn new_track_makes_each_kind_in_one_undo_step() {
     assert_eq!(snap.undo_label.as_deref(), Some("New Audio Track"));
     let l = s.lanes(seq).unwrap();
     assert_eq!(l.len(), 1);
-    assert_eq!(l[0].name, "Track 1");
+    assert_eq!(l[0].name, "Audio 1");
     assert_eq!(l[0].kind, TrackKindRow::Audio);
+    assert_eq!(l[0].audio_out_name.as_deref(), Some("Audio 1"));
     assert_eq!(
         l[0].input,
         Some(LaneInputRow::Audio {
@@ -137,7 +138,7 @@ fn new_track_makes_each_kind_in_one_undo_step() {
     let snap = s.new_track(seq, TrackKindRow::Instrument, None).unwrap();
     assert_eq!(snap.undo_label.as_deref(), Some("New Instrument Track"));
     let l = s.lanes(seq).unwrap();
-    assert_eq!(l[1].name, "Track 2");
+    assert_eq!(l[1].name, "Inst 1");
     assert_eq!(l[1].kind, TrackKindRow::Instrument);
     assert_eq!(
         l[1].input,
@@ -156,7 +157,7 @@ fn new_track_makes_each_kind_in_one_undo_step() {
     let snap = s.new_track(seq, TrackKindRow::Instrument, None).unwrap();
     assert_eq!(snap.undo_label.as_deref(), Some("New Instrument Track"));
     let l = s.lanes(seq).unwrap();
-    assert_eq!(l[2].name, "Track 3");
+    assert_eq!(l[2].name, "Inst 2");
     assert_eq!(l[2].midi_dest, l[1].midi_dest);
     assert_eq!(synth_dests(&s), 1);
     assert_eq!(counts(&s), (3, 1, 1));
@@ -213,12 +214,12 @@ fn new_track_goes_below_after() {
     s.new_track(seq, TrackKindRow::Audio, Some(ids[0])).unwrap();
     let l = s.lanes(seq).unwrap();
     assert_eq!(l[0].id, ids[0]);
-    assert_eq!(l[1].name, "Track 3");
+    assert_eq!(l[1].name, "Audio 1");
     assert_eq!(l[2].id, ids[1]);
     s.new_track(seq, TrackKindRow::Audio, Some(999)).unwrap();
     let l = s.lanes(seq).unwrap();
     assert_eq!(l.len(), 4);
-    assert_eq!(l[3].name, "Track 4");
+    assert_eq!(l[3].name, "Audio 2");
     // The smallest free number is used.
     s.edit(
         vizdaw_ffi::EditCommand::Lane {
@@ -234,7 +235,7 @@ fn new_track_goes_below_after() {
     s.new_track(seq, TrackKindRow::Midi, None).unwrap();
     assert_eq!(
         names(&s),
-        ["Bass", "Track 3", "Track 2", "Track 4", "Track 1"]
+        ["Bass", "Audio 1", "MIDI 2", "Audio 2", "MIDI 1"]
     );
     s.close().unwrap();
 }
@@ -355,7 +356,7 @@ fn duplicate_track_is_one_undo_step() {
     assert_eq!(snap.undo_label.as_deref(), Some("Duplicate Track"));
     let l = s.lanes(seq).unwrap();
     assert_eq!(l.len(), 2);
-    assert_eq!(l[1].name, "Track 1 copy");
+    assert_eq!(l[1].name, "Inst 1 copy");
     assert_eq!(l[1].kind, TrackKindRow::Instrument);
     s.undo().unwrap();
     assert_eq!(s.lanes(seq).unwrap().len(), 1);

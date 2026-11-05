@@ -75,14 +75,27 @@ pub(crate) fn index_below(doc: &Document, seq: SeqId, after: Option<u64>) -> Opt
     Some(i.saturating_add(1))
 }
 
-/// "Track N" with the smallest N no track of `seq` has.
-fn next_name(doc: &Document, seq: SeqId) -> Result<String, VizError> {
+/// The name prefix of a new track of `kind`: "Audio", "Inst" or "MIDI"
+/// ("Inst", not "Instrument", so the name fits the header's name field).
+fn name_prefix(kind: TrackKindRow) -> &'static str {
+    match kind {
+        TrackKindRow::Audio => "Audio",
+        TrackKindRow::Instrument => "Inst",
+        TrackKindRow::Midi => "MIDI",
+    }
+}
+
+/// "<prefix> N" with the smallest N no track of `seq` has, counted per
+/// prefix, so "Audio 1", "Inst 1" and "MIDI 1" can coexist.
+fn next_name(doc: &Document, seq: SeqId, kind: TrackKindRow) -> Result<String, VizError> {
     let s = doc.sequence(seq)?;
     let taken: std::collections::BTreeSet<&str> = s.lanes.iter().map(|l| l.name.as_str()).collect();
+    let prefix = name_prefix(kind);
     let mut n = 1usize;
     loop {
-        let name = format!("Track {n}");
+        let name = format!("{prefix} {n}");
         if !taken.contains(name.as_str()) {
+            debug_assert!(core_model::lane::valid_name(&name).is_some());
             return Ok(name);
         }
         n = n.saturating_add(1);
@@ -172,7 +185,7 @@ pub(crate) fn build_track(
     index: Option<usize>,
     monitor: MonitorMode,
 ) -> Result<LaneId, VizError> {
-    let name = next_name(history.doc(), seq)?;
+    let name = next_name(history.doc(), seq, kind)?;
     let lane = created_lane(&step(
         history,
         Command::Lane(LaneCmd::Add { seq, name, index }),

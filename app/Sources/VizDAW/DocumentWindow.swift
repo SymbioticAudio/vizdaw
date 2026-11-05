@@ -152,9 +152,15 @@ struct WindowFrameKeeper: NSViewRepresentable {
             // overwrite it.
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let w = view.window,
-                        let r = PaneGeometry.sanitizedFrame(saved, screens: NSScreen.screens.map(\.frame))
-                    else { return }
+                    guard let w = view.window else { return }
+                    // A saved frame off every screen falls back to the
+                    // default size, as a window with none does.
+                    guard let r = PaneGeometry.sanitizedFrame(saved, screens: NSScreen.screens.map(\.frame)) else {
+                        if let screen = w.screen ?? NSScreen.main {
+                            w.setFrame(PaneGeometry.defaultDocumentFrame(visible: screen.visibleFrame), display: true)
+                        }
+                        return
+                    }
                     // `setFrame` does not keep the title bar on a screen;
                     // the screen it is on does (final review n1).
                     let screen = NSScreen.screens.first { $0.frame.intersects(r) }

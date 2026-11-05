@@ -76,9 +76,14 @@ public enum TrackCommands {
         guard let lane else { return .unavailable(noTrack) }
         switch id {
         case duplicate:
+            let before = Set(m.lanes.map(\.id))
             do {
                 m.apply(try m.session.duplicateTrack(seq: seq, lane: lane))
                 m.editor.refreshSelection()
+                // The copy is selected, so the next Rename or Delete acts on it.
+                if seq == m.selectedSeq, let copy = m.lanes.first(where: { !before.contains($0.id) }) {
+                    m.editor.setSelection(SelectionRow(timeRange: nil, lanes: [LaneKey(seq, copy.id).ref], events: []))
+                }
                 return .done
             } catch VizError.Busy(let message) {
                 m.editor.status = message

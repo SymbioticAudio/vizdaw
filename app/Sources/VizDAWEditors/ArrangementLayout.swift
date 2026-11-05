@@ -175,7 +175,9 @@ public enum ArrangementA11y {
 
     /// `returnOf`: the synth whose return the lane records (its badge).
     public static func header(_ lane: LaneRow, returnOf: String? = nil) -> String {
-        var parts = [lane.name, lane.destination ?? "no destination"]
+        // An audio track plays to an output path, not a MIDI destination.
+        let routing = lane.kind == .audio ? "output " + (lane.audioOutName ?? "none") : lane.destination ?? "no destination"
+        var parts = [lane.name, routing]
         if lane.mute { parts.append("muted") }
         if lane.solo { parts.append("soloed") }
         if lane.arm { parts.append("armed") }
@@ -200,13 +202,18 @@ public enum HeaderControl: Equatable, Sendable {
 public enum LaneHeaderLayout {
     public static let width: CGFloat = 200
 
-    /// The row's controls. The kind icon is a square of the theme's label
-    /// size at x 8, centred on the name's line; the name starts
+    /// The kind icon's side: 16 pt, the size AppIcon is designed at (the
+    /// theme's icon strokes are defined for 16 and 24 pt, so a smaller icon
+    /// draws hairlines).
+    public static let kindSide: CGFloat = 16
+
+    /// The row's controls. The kind icon is a `kindSide` square at x 8,
+    /// centred on the name's line; the name starts
     /// `theme.spacing.xs` after it and ends where it always did (x 109), so
     /// the monitor button stays at x 113.
     @MainActor
     public static func controls(rowTop y: CGFloat, theme: Theme = ThemedViews.current) -> [(HeaderControl, CGRect)] {
-        let side = theme.type.label.size
+        let side = kindSide
         let nameX = 8 + side + theme.spacing.xs
         return [
             (.kind, CGRect(x: 8, y: y + 13 - side / 2, width: side, height: side)),

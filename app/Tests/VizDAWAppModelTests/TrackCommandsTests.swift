@@ -40,7 +40,7 @@ import VizDAWCore
             #expect(TrackCommands.perform(id, m) == .done, "\(id)")
             let call = try #require(f.newTracks.last)
             #expect(call.seq == 3 && call.kind == kind && call.after == 30, "\(id)")
-            let made = try #require(m.lanes.first { $0.kind == kind && $0.name.hasPrefix("Track") })
+            let made = try #require(m.lanes.first { $0.kind == kind && $0.id > 31 })
             #expect(m.selectedLane?.id == made.id, "\(id): the new track is selected")
             #expect(m.lanes.firstIndex { $0.id == made.id } == 1, "\(id): below A")
         }

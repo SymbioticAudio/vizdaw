@@ -321,6 +321,8 @@ public final class DocumentModel {
     /// in a window and cleared when it leaves (plan tracks Ruling 5, I11).
     /// Nil while no header shows (Mix, or another main view).
     @ObservationIgnored public var beginTrackRename: (@MainActor (UInt64, UInt64) -> Bool)?
+    /// The header that installed `beginTrackRename`: only it clears it.
+    @ObservationIgnored public weak var trackRenameOwner: AnyObject?
 
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()

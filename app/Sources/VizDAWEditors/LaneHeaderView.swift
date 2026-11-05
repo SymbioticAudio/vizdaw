@@ -33,8 +33,6 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     /// The lane being renamed, fixed when editing began (the shown
     /// sequence may change before it ends).
     private(set) var renaming: (seq: UInt64, lane: UInt64, name: String, field: NSTextField)?
-    /// This header installed `document.beginTrackRename`.
-    private var installedRename = false
     /// VoiceOver children, kept so their identity is stable between queries.
     private var a11yElements: [CanvasElement] = []
 
@@ -196,6 +194,10 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                 case .arm: toggle("R", on: lane.arm, color: theme.armColour, in: r)
                 // One line, truncated (Task 5 review M4): the input keeps
                 // its channel at the end ("▾ ⇠ Ju…o · In 3").
+                // An audio track shows its output path, with no menu yet.
+                case .destination where lane.kind == .audio:
+                    NSString(string: "→ " + (lane.audioOutName ?? "No Output")).draw(
+                        in: r, withAttributes: oneLine(small, .byTruncatingTail))
                 case .destination:
                     NSString(string: "▾ " + (lane.destination ?? "No Destination")).draw(
                         in: r, withAttributes: oneLine(small, .byTruncatingTail))
@@ -225,18 +227,30 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill()
     }
 
-    /// `icon` in the secondary label colour: a template image, so it is
-    /// filled with the colour where it has ink.
+    /// `icon` in the label colour: a template image, so it is filled with
+    /// the colour where it has ink.
     private func kindIcon(_ icon: AppIcon, in r: CGRect) {
-        let image = icon.nsImage(accessibilityDescription: nil, size: r.width, theme: theme)
-        let colour = theme.secondaryLabel
-        let tinted = NSImage(size: r.size, flipped: false) { rect in
+        let tinted = kindImage(icon, side: r.width)
+        tinted.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+    }
+
+    /// The tinted kind images, kept per theme, icon and size.
+    private var kindImages: [String: NSImage] = [:]
+
+    private func kindImage(_ icon: AppIcon, side: CGFloat) -> NSImage {
+        let key = "\(theme.id)/\(icon)/\(side)"
+        if let cached = kindImages[key] { return cached }
+        let image = icon.nsImage(accessibilityDescription: nil, size: side, theme: theme)
+        let colour = theme.label
+        let tinted = NSImage(size: CGSize(width: side, height: side), flipped: false) { rect in
             image.draw(in: rect)
             colour.set()
             rect.fill(using: .sourceIn)
             return true
         }
-        tinted.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        if kindImages.count > 64 { kindImages = [:] }
+        kindImages[key] = tinted
+        return tinted
     }
 
     /// Secondary text on one line, cut by `mode`.
@@ -296,6 +310,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         case .mute: flags(seq, lane.id, mute: !lane.mute)
         case .solo: flags(seq, lane.id, solo: !lane.solo)
         case .arm: flags(seq, lane.id, arm: !lane.arm)
+        // No output picker yet: a click on an audio track's output does
+        // nothing (it must not set a MIDI destination on an audio track).
+        case .destination where lane.kind == .audio: break
         case .destination: destinationMenu(seq: seq, lane: lane, at: p)
         case .name where e.clickCount >= 2: beginRename(lane, seq: seq, row: i)
         case .name, .kind, nil: break
@@ -517,10 +534,11 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
                 self.beginRename(self.document.lanes[i], seq: seq, row: i)
                 return self.renaming != nil
             }
-            installedRename = true
-        } else if installedRename {
+            document.trackRenameOwner = self
+        } else if document.trackRenameOwner === self {
+            // Only its own: a second header's hook stays.
             document.beginTrackRename = nil
-            installedRename = false
+            document.trackRenameOwner = nil
         }
     }
 

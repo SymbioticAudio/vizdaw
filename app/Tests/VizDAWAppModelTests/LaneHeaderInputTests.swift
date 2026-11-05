@@ -78,12 +78,16 @@ import VizDAWCore
     /// before the name at the label's size.
     @Test func theHeaderShowsEachTracksKind() throws {
         let f = editorFake()
-        f.laneTable[3] = [lane(40, "A", kind: .audio), lane(41, "B", kind: .instrument), lane(42, "C", kind: .midi)]
+        var audio = lane(40, "A", kind: .audio)
+        audio.audioOut = 7
+        audio.audioOutName = "Audio 1"
+        f.laneTable[3] = [audio, lane(41, "B", kind: .instrument), lane(42, "C", kind: .midi)]
         let m = try DocumentModel(session: f)
         let h = LaneHeaderView(document: m)
         let labels = (h.accessibilityChildren() ?? []).compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
         #expect(labels.count == 4)
-        #expect(labels[0].hasPrefix("Audio track, A, "))
+        #expect(labels[0].hasPrefix("Audio track, A, output Audio 1"))
+        #expect(!labels[0].contains("no destination"))
         #expect(labels[1].hasPrefix("Instrument track, B, "))
         #expect(labels[2].hasPrefix("MIDI track, C, "))
         #expect(labels[3] == "Add Track")
@@ -92,7 +96,8 @@ import VizDAWCore
             let kind = try #require(controls.first { $0.0 == .kind }?.1)
             let name = try #require(controls.first { $0.0 == .name }?.1)
             let monitor = try #require(controls.first { $0.0 == .monitor }?.1)
-            #expect(kind.width == theme.type.label.size && kind.height == kind.width, "\(theme.id)")
+            #expect(kind.width == LaneHeaderLayout.kindSide && kind.height == 16, "\(theme.id)")
+            #expect(name.width == 81, "\(theme.id)")
             #expect(kind.minX == 8)
             #expect(name.minX == kind.maxX + theme.spacing.xs, "\(theme.id)")
             #expect(kind.midY == name.midY)
@@ -120,6 +125,46 @@ import VizDAWCore
         )
         #expect(f.calls.count == calls && f.newTracks.isEmpty && f.edits.isEmpty)
         #expect(h.addTrackMenu().items.map(\.title) == ["New Audio Track", "New Instrument Track", "New MIDI Track"])
+    }
+
+    /// An audio track's header names its output with no menu: a click on it
+    /// sends nothing, and never sets a MIDI destination on the track.
+    @Test func anAudioHeaderShowsItsOutputAndItsClickDoesNothing() throws {
+        let f = editorFake()
+        var audio = lane(40, "A", kind: .audio)
+        audio.audioOut = 7
+        audio.audioOutName = "Audio 1"
+        f.laneTable[3] = [audio]
+        let m = try DocumentModel(session: f)
+        let h = LaneHeaderView(document: m)
+        h.frame = NSRect(x: 0, y: 0, width: LaneHeaderLayout.width, height: 300)
+        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(0), theme: h.theme).first { $0.0 == .destination }?.1)
+        let e = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: h.convert(CGPoint(x: r.midX, y: r.midY), to: nil), modifierFlags: [],
+                timestamp: 1, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+        let calls = f.calls.count
+        h.mouseDown(with: e)  // would pop up the destination menu, which tracks modally
+        #expect(f.calls.count == calls && f.edits.isEmpty)
+        #expect(ArrangementA11y.header(audio) == "A, output Audio 1")
+        audio.audioOutName = nil
+        #expect(ArrangementA11y.header(audio) == "A, output none")
+    }
+
+    /// Duplicate selects the copy, and a second header leaves the first's
+    /// rename hook alone.
+    @Test func duplicateSelectsTheCopyAndASecondHeaderKeepsTheHook() throws {
+        let (m, _, h, w) = try shown(select: 31)
+        defer { w.close() }
+        #expect(TrackCommands.perform(TrackCommands.duplicate, m) == .done)
+        #expect(m.selectedLane?.name == "Chords copy")
+        let second = LaneHeaderView(document: m)
+        w.contentView?.addSubview(second)
+        #expect(m.trackRenameOwner === second)
+        h.removeFromSuperview()
+        #expect(m.beginTrackRename != nil, "the first header leaving does not clear the second's hook")
+        second.removeFromSuperview()
+        #expect(m.beginTrackRename == nil)
     }
 
     @Test func theControlsShareTheRowWithoutOverlapping() {

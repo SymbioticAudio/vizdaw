@@ -104,6 +104,10 @@ pub struct LaneRow {
     pub monitor: crate::edit::MonitorModeRow,
     /// What the track is for, from its routing (plan tracks Ruling 6).
     pub kind: crate::tracks::TrackKindRow,
+    /// Name of the lane's audio output path (an audio track's header shows
+    /// it); `None` with no output path.
+    #[uniffi(default)]
+    pub audio_out_name: Option<String>,
 }
 
 /// What the transport is doing.
@@ -217,6 +221,9 @@ pub fn lane_rows(doc: &Document, seq: u64) -> Result<Vec<LaneRow>, VizError> {
                 input: l.input.as_ref().map(Into::into),
                 monitor: l.monitor.into(),
                 kind: crate::tracks::track_kind(doc, sid, l.id)?,
+                audio_out_name: l
+                    .audio_out
+                    .and_then(|o| doc.outputs().get(&o).map(|p| p.name.clone())),
             })
         })
         .collect()
