@@ -44,10 +44,11 @@ temporary support folder and never scans.
 
 - The document window shows the arrangement (the selected sequence's
   lanes and their blocks) over the bottom pane's editor (plan 7a: Left,
-  Bottom and Right Pane, see steps 199-206). The piano roll (plan 4b)
-  is built; the other detail editors arrive in plans 4c-4e and until
-  then the pane names its target and event count.
-  Cmd-1 to Cmd-4 choose piano roll, list, Strip Chart or drum grid;
+  Bottom and Right Pane, see steps 199-206). The piano roll (plan 4b),
+  list (4c), Strip Chart (4d), drum grid (4e) and audio editor (7c) are
+  all built.
+  Cmd-1 to Cmd-4 choose piano roll, list, Strip Chart or drum grid and
+  Cmd-5 the audio editor;
   Option-Cmd-1 to Option-Cmd-4 open one in its own window.
 - Blocks follow the arrangement bar's rule (silence gap, fixed bars,
   whole lane);
@@ -59,7 +60,7 @@ temporary support folder and never scans.
   not, has a stable ID and can be bound in VizDAW > Settings > Keys;
   menus show the bound keys. Single unmodified keys drive the transport
   and the modes (Space, S, R, Y, K, Return, comma and period, L, O, I, T,
-  G); P, E and U focus the Position, Edit In and Punch In fields; 0-9 go
+  G; Shift-comma and Shift-period rewind and fast-forward a bar, plan 7d); P, E and U focus the Position, Edit In and Punch In fields; 0-9 go
   to locators, Option-digit sets one and Option-Shift-digit clears it.
   A text field always keeps the keys it types: a letter typed into any
   field is never a shortcut, and while a text field (rename, comment,
@@ -178,13 +179,14 @@ VoiceOver or real devices.
 ## Manual smoke test
 
 1. `scripts/build-ffi.sh && scripts/swift.sh run VizDAW`. A window appears
-   in front with a menu bar (File, Edit, Editors, Sequence, Transport).
+   in front with a menu bar (File, Edit, View, Editors, Modify, Sequence,
+   Region, Drum, Transport, Step, Automation, Window).
 2. File > Create Demo Project. A second window opens; the sidebar shows
    Song under "Top-level" and Beat (1) and Groove (2) under "Used as
    reference".
 3. Song is selected; the arrangement shows the lanes Groove and Chords. Press
    Space: the demo sounds through the speakers, the position display
-   advances (bar.beat.unit and m:ss.fff), the tempo slows over the last two
+   advances (the Bar readout reads bar.beat.unit, the Time readout m:ss.fff), the tempo slows over the last two
    bars, and playback stops by itself at the end.
 4. Press Space again and, while it plays, click M in the Chords lane header: the
    chords drop out within a moment. Edit > Undo Set Lane Mute/Solo/Arm
@@ -275,7 +277,7 @@ Use the demo project (File > Create Demo Project; its window is titled
     Stop: the playhead stays where playback stopped.
 23. Ruler: drag in the ruler from bar 2 to bar 4 with any tool chosen: the
     range is shaded (snapped to beats) in the ruler and across both lanes.
-    Click in the ruler: the position display jumps there.
+    Click in the ruler: the Bar and Time readouts and the Position field jump there.
 24. Drag feel: press on the second Groove block and move 2 points: nothing
     moves. Drag it one bar right: it follows the pointer (and, while
     playing, the music follows within a moment). Press Escape before
@@ -491,7 +493,7 @@ editors (and at the bottom of the panel).
     ("Undo Delete Events").
 54. Typing never plays: while a cell is edited, Space types a space and the
     transport does not start, and Return commits the cell without the
-    position display jumping to the start. With the list focused but not
+    playhead jumping to the start. With the list focused but not
     editing, Return edits the selected row (it does not return to the
     start) and Space plays and stops. Click the arrangement: Return returns
     to the start again.
@@ -879,9 +881,10 @@ preferences). Keys are the defaults unless a step changes them.
 
 99. Menus and defaults: the Transport menu lists Play / Stop (Space),
     Stop (S), Play Selection (Option-Space), Play from Selection
-    (Shift-Space), Play from Edit-In (Y), Record (R) and Scrub (K), both
-    disabled until sub-project 5, Return to Start (Return), Previous and
-    Next Marker (comma, period), Loop (L), Overdub (O), Punch (I), the Go
+    (Shift-Space), Play from Edit-In (Y), Record (R, dimmed until a
+    sequence is selected) and Scrub (K, always dimmed), Return to Start
+    (Return), Rewind and Fast Forward (Shift-comma, Shift-period; plan 7d),
+    Previous and Next Marker (comma, period), Loop (L), Overdub (O), Punch (I), the Go
     to ... Field items (P, E, U) and Arm Previous/Next Lane
     (Option-Shift-Up/Down). The Step menu lists Step Entry (T) and the
     note values 1/1 to 1/32 (1-6), Dotted (.), Triplet (/), Tie (=), Rest
@@ -895,8 +898,9 @@ preferences). Keys are the defaults unless a step changes them.
     Option-Space: only the range plays, loop on or off; Shift-Space plays
     on from its start; with markers in Song (list editor: insert two
     Marker rows), comma and period jump between them. O and I tick
-    Overdub and Punch (they record nothing yet); R and K do nothing
-    (`$V run transport.record` answers `unavailable` with the reason).
+    Overdub and Punch (they matter once you record, steps 144-154); K does
+    nothing (`$V run transport.scrub` answers `unavailable`: "Scrubbing is
+    not available yet."); R records (plan 7d: the old "R does nothing" is gone).
     Open a plugin's window (Plugins) and type letters: they go to the
     plugin, not to VizDAW's commands (single-key transport shortcuts do
     not work while a plugin window is in front; Command keys do). A plain
@@ -904,12 +908,14 @@ preferences). Keys are the defaults unless a step changes them.
 101. Fields: P selects the Position field: type `5` and Return: the
     playhead jumps to bar 5 and the keys work again; `9:3:480` (colons,
     commas or spaces separate like dots) lands on bar 9 beat 3 and a half.
-    E focuses Edit In: typing `3` selects bar 3 in the ruler; Tab to Edit
+    E focuses Edit In: typing `3` and pressing Return selects bar 3 in the
+    ruler; Tab to Edit
     Out and type `7` and Return: the range runs to bar 7 (Tab and
     Shift-Tab go round all five fields, so Edit Out and Punch Out, which
     have no key, are reached from the keyboard); an Edit Out
     before Edit In is refused in the status line. U focuses Punch In; Punch Out
-    before Punch In is refused. Escape in a field puts its text back.
+    before Punch In is refused. Escape in a field puts its text back; so does clicking away
+    (plan 7d: Return or Tab commits, nothing else does).
     Typing letters into any text field (a field, the sidebar rename, the
     list editor's cells) types them and never runs a key; while such a
     field has the keyboard, the single-key and Option/Shift transport,
@@ -1900,10 +1906,12 @@ transport bar; the mixer's toolbar is the bar along the top of the mixer;
 the detail pane is the bottom pane's editor.
 
 199. File > Create Demo Project. The window shows the transport bar along
-     the top (Play, Loop, Record, the position, Arrange | Mix, three pane
-     buttons; when the window is too narrow for one row, the transport
-     fields move to a second row, and the step-entry summary, shown only
-     while step entry is on, sits in front of them or above them), the
+     the top (Return to Start, Rewind, Fast Forward, Play, Loop, Record
+     with its chevron, the Bar, Time, Tempo and Sig readouts, the transport
+     fields, Arrange | Mix and three pane buttons; when the window is too
+     narrow for one row, the readouts and fields move to a second row or
+     more, and the step-entry summary, shown only while step entry is on,
+     sits in front of them or above them; plan 7d), the
      left pane (Channel Strip) running the full height, which says
      "Select a lane to see its channel strip." until a lane is selected
      or armed, the arrangement in the centre and the "No Editor Open"
@@ -2010,7 +2018,10 @@ Checked by hand; the rules are tested (`AppearanceTests`, `AppIconTests`,
      Settings › Appearance › Show channel colour bars off: the strips'
      and lane headers' colour bars go, in all four places, and the
      regions keep their colour. Turn it back on: the bars return.
-212. Click the Built-in Synth's level box, type `-4.2` and press Return:
+212. Select the text of the Built-in Synth's level box (a single click
+     should select it all; today it puts the caret where you clicked, a
+     fault queued for the final wave, so this wording is to be revisited),
+     type `-4.2` and press Return:
      the fader moves down and the box reads "−4.2 dB"; Edit shows "Undo
      Set Fader", and one Undo puts it back to "0.0 dB". Type `abc` and
      press Return: the box still reads "0.0 dB" and the status line says
@@ -2082,10 +2093,14 @@ Checked by hand; the rules are tested (`AppearanceTests`, `AppIconTests`,
      panelBottom), swatch (red, orange, yellow, green, teal, blue, purple,
      pink), keys (white, black), readout (background, text) and band
      (light, dark); "brand" is not theirs to change. Delete the file: the
-     theme leaves the list. Finally, `rm -rf app/.build`, build with
-     `VIZDAW_NO_BRAND=1 scripts/make-app.sh` and open `dist/VizDAW.app`:
-     every control that shows an icon still shows one. Rebuild without
-     the variable afterwards (`rm -rf app/.build && scripts/make-app.sh`).
+     theme leaves the list.
+
+     No-brand check, after the theme check: `rm -rf app/.build`, build
+     with `VIZDAW_NO_BRAND=1 scripts/make-app.sh` and open
+     `dist/VizDAW.app`: every control that shows an icon still shows one.
+     The folder is emptied first because a build folder left over from a
+     branded build keeps the branded module. Rebuild without the variable
+     afterwards (`rm -rf app/.build && scripts/make-app.sh`).
 
 ### Audio editor (plan 7c)
 
@@ -2179,7 +2194,9 @@ Checked by hand; the rules are tested (`TransportShuttleTests`,
 the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
 
 225. File > Create Demo Project. The transport bar shows four readouts, Bar,
-     Time, Tempo and Sig ("1.1.0", "0:00.000", "120.00", "4/4"). Choose each
+     Time, Tempo and Sig, labelled in capitals (lower case in themes whose
+     labels are lower case), reading "1.1.0", "0:00.000", "120.00" and
+     "4/4". Choose each
      theme in Settings › Appearance and compare the readouts with the
      design repo's 0.2.0 mockups (`docs/mockups/0.2.0`): Flat shows them as
      tiles in the accent colour, the other themes as one edged group. Play:
