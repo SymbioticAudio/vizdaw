@@ -1095,6 +1095,35 @@ fn a_key_tap_while_playing_locates_once() {
     s.close().unwrap();
 }
 
+/// Plan 7d final review I-1 (controller ruling): while playing, a back
+/// step slower than the wind memory, taken within a beat after a barline,
+/// goes to the bar before; further on it goes to the bar's start. Both
+/// the click and the key.
+#[test]
+fn a_slow_back_step_while_playing_goes_one_bar_back_not_to_the_same_bar() {
+    const BAR: i64 = 4 * Q;
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    wait_until("playing", || {
+        s.idle().unwrap();
+        s.transport().unwrap().playing
+    });
+    // Just after bar 5 (the memory has expired): 300 ms is 0.6 beat.
+    s.locate(4 * BAR).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(s.transport_step_bar(false).unwrap(), 3 * BAR, "click");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(s.transport_key_step(false).unwrap(), 2 * BAR, "key");
+    s.transport_hold_end().unwrap();
+    // More than a beat in (650 ms, 1.3 beats): this bar's start.
+    s.locate(4 * BAR).unwrap();
+    std::thread::sleep(Duration::from_millis(650));
+    assert_eq!(s.transport_step_bar(false).unwrap(), 4 * BAR, "click");
+    stop_and_land(&s);
+    s.close().unwrap();
+}
+
 /// Pre-flight check I-2, Ruling 23: a Locate that arrives after Play
 /// returned but before the renderer rolled (a ruler click queued during
 /// the disk wait) starts the new pass all the same.

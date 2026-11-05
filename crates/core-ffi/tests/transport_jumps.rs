@@ -22,7 +22,7 @@ fn step_bar_and_wind_move_the_cursor_and_remember_the_target() {
     assert_eq!(s.transport_step_bar(true).unwrap(), BAR);
     assert_eq!(s.transport().unwrap().tick, BAR);
     // With no engine the cursor holds the target too, so this does not
-    // prove the memory; `a_locate_forgets_the_wind_memory` does.
+    // prove the memory; `a_locate_is_the_next_steps_base` does.
     assert_eq!(s.transport_step_bar(true).unwrap(), 2 * BAR);
     assert_eq!(s.transport_step_bar(false).unwrap(), BAR);
     assert_eq!(s.transport_wind(1.5).unwrap(), 84_480);
@@ -82,7 +82,7 @@ fn shuttle_quarters_is_the_surfaces_curve() {
 /// Controller ruling I6: a locate (a ruler click, return to start, a
 /// marker jump) just before a step is where the step starts.
 #[test]
-fn a_locate_forgets_the_wind_memory() {
+fn a_locate_is_the_next_steps_base() {
     let s = demo();
     assert_eq!(s.transport_step_bar(true).unwrap(), BAR);
     s.locate(0).unwrap();

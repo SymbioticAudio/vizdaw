@@ -2843,7 +2843,9 @@ pub fn stop(owner: u64) -> Result<(), VizError> {
     }
 }
 
-/// Engine locates sent through [`locate`] (read by a test hook).
+/// Engine locates sent through [`locate`] (counted and read by a test
+/// hook only).
+#[cfg(feature = "test-hooks")]
 static LOCATES: AtomicU64 = AtomicU64::new(0);
 
 /// How many engine locates [`locate`] has sent (test hook, plan 7d
@@ -2860,6 +2862,7 @@ pub fn locate(owner: u64, tick: Tick) -> Result<bool, VizError> {
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             h.engine.locate_tick(tick)?;
+            #[cfg(feature = "test-hooks")]
             LOCATES.fetch_add(1, Ordering::Relaxed);
             Ok(true)
         }
@@ -3596,6 +3599,15 @@ pub fn transport_position(owner: u64) -> Option<(SeqId, Tick)> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| (h.seq, h.engine.transport_tick()))
+}
+
+/// Whether `owner` holds the engine and its transport is not stopped
+/// (the back step's rule, plan 7d final review I-1).
+pub fn transport_playing(owner: u64) -> bool {
+    lock_host()
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .is_some_and(|h| h.engine.state() != PlayState::Stopped)
 }
 
 /// `owner`'s input, when it holds the engine.

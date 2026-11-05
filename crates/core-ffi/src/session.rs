@@ -1758,7 +1758,8 @@ impl Session {
     /// forward, their menu items or the channel's command (plan 7d Ruling
     /// 3): one bar, as a ruler click locates (an open automation pass
     /// lands). Starts from the last step's or wind's target when that was
-    /// under 250 ms ago. Busy while recording; a `Model` error with no
+    /// under 250 ms ago. While playing, back from within a beat after a
+    /// barline goes to the bar before (`bar_step_from`, review I-1). Busy while recording; a `Model` error with no
     /// sequence. Returns the new tick.
     pub fn transport_step_bar(&self, forward: bool) -> Result<i64, VizError> {
         self.transport_call(|| {
@@ -9464,7 +9465,9 @@ impl Session {
         if inner.recording.is_some() {
             return None;
         }
-        let (seq, tick) = host::position(self.id)?;
+        // The schedule's position, as a transport bar step starts from
+        // (review I2), so a latency never holds a skip or wind back.
+        let (seq, tick) = host::transport_position(self.id)?;
         let tick = match inner.surfaces.wind {
             Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
             _ => tick.0,
@@ -9530,7 +9533,10 @@ impl Session {
     fn bar_target(&self, inner: &Inner, forward: bool, now: Instant) -> Result<i64, VizError> {
         let (seq, base) = self.jump_base(inner, now)?;
         let s = inner.doc().sequence(seq)?;
-        Ok(core_editor::transport::bar_step(&s.meter, Tick(base), forward).0)
+        // Playing, a back step from just after a barline goes one bar
+        // further (plan 7d final review I-1).
+        let playing = host::transport_playing(self.id);
+        Ok(core_editor::transport::bar_step_from(&s.meter, Tick(base), forward, playing).0)
     }
 
     /// A hold's move (plan 7d controller ruling I4): the engine's position

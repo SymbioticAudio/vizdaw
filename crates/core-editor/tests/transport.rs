@@ -1,6 +1,8 @@
 //! The transport keys' logic (plan 4f Task 3): markers and record arm.
 
-use core_editor::transport::{ArmMove, WIND_LIMIT, arm_move, bar_step, marker_step, wind_target};
+use core_editor::transport::{
+    ArmMove, WIND_LIMIT, arm_move, bar_step, bar_step_from, marker_step, wind_target,
+};
 use core_model::ids::SeqId;
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
 use core_model::sequence::{Marker, Sequence};
@@ -152,4 +154,60 @@ fn bar_step_and_wind_target_clamp() {
     assert_eq!(wind_target(100, -1e300), Some(0));
     assert_eq!(wind_target(i64::MIN, 0.0), Some(0));
     assert_eq!(wind_target(30_720, -0.5), Some(23_040));
+}
+
+/// Plan 7d final review I-1 (controller ruling): while playing, a back
+/// step within one beat after the current bar's barline goes to the
+/// previous bar's start; otherwise to the current bar's start. Stopped,
+/// and forward, are `bar_step`.
+#[test]
+fn a_back_step_while_playing_just_after_a_barline_goes_to_the_one_before() {
+    const BAR: i64 = 61_440;
+    const BEAT: i64 = 15_360;
+    let m = four_then_three();
+    // Bar 5 of 4/4 starts at 4 × BAR in a plain 4/4 map.
+    let four = MeterMap::default();
+    let bar5 = 4 * BAR;
+    assert_eq!(
+        bar_step_from(&four, Tick(bar5 + BEAT + 1), false, true),
+        Tick(bar5)
+    );
+    assert_eq!(
+        bar_step_from(&four, Tick(bar5 + BEAT - 1), false, true),
+        Tick(bar5 - BAR)
+    );
+    assert_eq!(
+        bar_step_from(&four, Tick(bar5), false, true),
+        Tick(bar5 - BAR)
+    );
+    assert_eq!(
+        bar_step_from(&four, Tick(bar5 + 1), false, true),
+        Tick(bar5 - BAR)
+    );
+    // Stopped is unchanged: the last barline before.
+    for from in [bar5 + BEAT + 1, bar5 + BEAT - 1, bar5 + 1, bar5] {
+        assert_eq!(
+            bar_step_from(&four, Tick(from), false, false),
+            bar_step(&four, Tick(from), false),
+            "stopped from {from}"
+        );
+    }
+    // Forward is the same playing or not.
+    assert_eq!(
+        bar_step_from(&four, Tick(bar5 + 1), true, true),
+        Tick(bar5 + BAR)
+    );
+    // A beat of the meter in effect: 3/4 beats are the same 15 360 here,
+    // and the previous bar is a 3/4 one.
+    assert_eq!(bar_step_from(&m, Tick(130_000), false, true), Tick(61_440));
+    assert_eq!(
+        bar_step_from(&m, Tick(122_880 + BEAT + 1), false, true),
+        Tick(122_880)
+    );
+    // The first bar, and below it, stay at 0; hostile ticks clamp.
+    assert_eq!(bar_step_from(&four, Tick(5), false, true), Tick(0));
+    assert_eq!(bar_step_from(&four, Tick(0), false, true), Tick(0));
+    assert_eq!(bar_step_from(&four, Tick(-9), false, true), Tick(0));
+    assert!(bar_step_from(&four, Tick(i64::MAX), false, true).0 <= WIND_LIMIT);
+    assert_eq!(bar_step_from(&four, Tick(i64::MIN), false, true), Tick(0));
 }

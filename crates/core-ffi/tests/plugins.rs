@@ -432,3 +432,50 @@ fn fast_forward_clicks_behind_a_latency_move_a_bar_each() {
     }
     s.close().unwrap();
 }
+
+/// A surface's fast forward and skip start from the schedule's position
+/// too (plan 7d final wave, with review I2), so behind a latency a tap
+/// moves a bar, not nothing.
+#[test]
+fn a_surface_fast_forward_behind_a_latency_moves_a_bar() {
+    use vizdaw_ffi::surfaces::{
+        SurfaceKindRow, debug_advance, debug_freeze_clock, debug_reset, surface_add, surface_remove,
+    };
+    const BAR: i64 = 61_440;
+    let _g = serial();
+    debug_reset();
+    let (_d, path, song, id) = project("vizdaw.test.gain");
+    let s = open(&path);
+    s.play(song).unwrap();
+    idle_until(&s, |s| {
+        placeholder_lines(s).is_empty() && slot(s, id).status == SlotStatus::Live && playing(s)
+    });
+    s.set_param(id, u64::from(test_plugins::PARAM_LATENCY), 4_800.0)
+        .unwrap();
+    s.stop().unwrap();
+    idle_until(&s, |s| !playing(s));
+    s.locate(BAR).unwrap();
+    idle_until(&s, |s| {
+        slot(s, id).latency == 4_800 && s.transport().unwrap().tick == BAR - 3_072
+    });
+    debug_freeze_clock(true);
+    let unit = surface_add(SurfaceKindRow::Mcu, "L In".into(), "L Out".into(), None).unwrap();
+    s.focus_surfaces().unwrap();
+    // Past the wind memory the locate left, which would be the base.
+    debug_advance(1_000);
+    s.idle().unwrap();
+    // Fast forward: from the schedule's BAR to 2 BAR (the heard 2 BAR
+    // less the latency), not from the heard position to BAR.
+    s.inject_surface(unit, vec![0x90, 0x5C, 0x7F, 0x90, 0x5C, 0x00])
+        .unwrap();
+    idle_until(&s, |s| s.transport().unwrap().tick == 2 * BAR - 3_072);
+    debug_advance(1_000);
+    // Rewind: from the schedule's 2 BAR back to BAR (the heard BAR less
+    // the latency), not from the heard position back to 0.
+    s.inject_surface(unit, vec![0x90, 0x5B, 0x7F, 0x90, 0x5B, 0x00])
+        .unwrap();
+    idle_until(&s, |s| s.transport().unwrap().tick == BAR - 3_072);
+    debug_freeze_clock(false);
+    surface_remove(unit).unwrap();
+    s.close().unwrap();
+}

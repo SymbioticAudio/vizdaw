@@ -106,6 +106,27 @@ pub fn bar_step(meter: &MeterMap, tick: Tick, forward: bool) -> Tick {
     Tick(to.clamp(0, WIND_LIMIT))
 }
 
+/// [`bar_step`] for a transport bar step from where the transport is
+/// (plan 7d final review I-1, controller ruling). Forward, and back while
+/// stopped, are `bar_step`. Back while `playing`: from within one beat
+/// after a barline (the play has just passed it, as a click on the
+/// previous step leaves it) it goes to the previous bar's start, else to
+/// the current bar's start. Always in `0..=WIND_LIMIT`.
+pub fn bar_step_from(meter: &MeterMap, tick: Tick, forward: bool, playing: bool) -> Tick {
+    if forward || !playing {
+        return bar_step(meter, tick, forward);
+    }
+    let t = tick.0.clamp(0, WIND_LIMIT);
+    let bar = meter.barline_at_or_before(Tick(t));
+    let beat = meter.entry_at(Tick(t)).meter.beat_ticks();
+    let to = if t.saturating_sub(bar.0) < beat {
+        bar_step(meter, bar, false)
+    } else {
+        bar
+    };
+    Tick(to.0.clamp(0, WIND_LIMIT))
+}
+
 /// Where a wind of `quarters` quarter notes from `base` goes (plan 7d
 /// Ruling 5): `base + round(quarters × PPQ)`, saturating, in
 /// `0..=WIND_LIMIT`. None when `quarters` is not finite.
