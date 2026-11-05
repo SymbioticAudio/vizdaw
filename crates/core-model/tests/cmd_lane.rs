@@ -525,7 +525,16 @@ fn rename_refuses_a_blank_name() {
             },
         )
     };
-    for bad in ["", "   ", "a\u{7}b", "\t"] {
+    for bad in [
+        "",
+        "   ",
+        "a\u{7}b",
+        "\t",
+        "a\u{200B}b",
+        "\u{FEFF}",
+        "x\u{2060}",
+        "\u{200D}",
+    ] {
         assert!(rename(bad).is_err(), "{bad:?}");
     }
     let d = rename("  Bass ").unwrap();

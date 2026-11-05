@@ -404,3 +404,36 @@ fn new_track_refuses_unknown_ids_and_busy() {
     assert_eq!(counts(&s), (1, 0, 0));
     s.close().unwrap();
 }
+
+/// Same Tracks as…: a source track whose (old-file) name Rename would
+/// refuse gets "Track N" in the copy instead of failing the template.
+#[test]
+fn same_tracks_as_copes_with_blank_source_names() {
+    let _g = serial();
+    let mut b = Builder::new();
+    let (seq, first) = b.sequence("Song", "Keep", None).unwrap();
+    let blank = b.lane(seq, "", None).unwrap();
+    let spaces = b.lane(seq, "  ", None).unwrap();
+    let _ = (first, blank, spaces);
+    let s = Session::from_document(b.finish()).unwrap();
+    s.new_sequence_from_template(
+        "Shape".into(),
+        vizdaw_ffi::SequenceTemplate::SameLanesAs { seq: seq.0 },
+    )
+    .unwrap();
+    let shape = s
+        .snapshot()
+        .unwrap()
+        .sequences
+        .into_iter()
+        .find(|q| q.name == "Shape")
+        .unwrap();
+    let names: Vec<String> = s
+        .lanes(shape.id)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.name)
+        .collect();
+    assert_eq!(names, ["Keep", "Track 2", "Track 3"]);
+    s.close().unwrap();
+}

@@ -231,15 +231,11 @@ pub(crate) fn apply(d: &mut Document, cmd: &LaneCmd, r: &mut Report) -> Result<(
         }
         LaneCmd::Duplicate { seq, lane } => duplicate(d, *seq, *lane, r)?,
         LaneCmd::Rename { seq, lane, name } => {
-            let name = name.trim();
-            if name.is_empty() {
-                return Err(ModelError::invalid("a track name cannot be empty"));
-            }
-            if name.chars().any(char::is_control) {
-                return Err(ModelError::invalid(
-                    "a track name cannot hold control characters",
-                ));
-            }
+            let name = crate::lane::valid_name(name).ok_or_else(|| {
+                ModelError::invalid(
+                    "a track name cannot be empty or hold control or zero-width characters",
+                )
+            })?;
             d.lane_mut(*seq, *lane)?.name = name.to_string();
         }
         LaneCmd::SetDest { seq, lane, dest } => {

@@ -682,7 +682,7 @@ fn starting_document(doc: Document) -> Result<Document, VizError> {
             name: "Sequence 1".into(),
         }),
     )?;
-    let ids = made.report.created.iter().find_map(|id| match id {
+    let lane_id = made.report.created.iter().find_map(|id| match id {
         core_model::ids::AnyId::Lane(l) => Some(*l),
         _ => None,
     });
@@ -690,7 +690,7 @@ fn starting_document(doc: Document) -> Result<Document, VizError> {
         core_model::ids::AnyId::Seq(s) => Some(*s),
         _ => None,
     });
-    let (Some(seq), Some(lane)) = (seq, ids) else {
+    let (Some(seq), Some(lane)) = (seq, lane_id) else {
         return Err(crate::events::bad("the first sequence was not made"));
     };
     Ok(core_model::command::apply(&made.doc, &Command::Lane(LaneCmd::Remove { seq, lane }))?.doc)
