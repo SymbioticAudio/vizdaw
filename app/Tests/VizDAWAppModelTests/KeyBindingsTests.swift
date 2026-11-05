@@ -240,13 +240,13 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         #expect(route(plus) == .command("transport.fast_forward"), "no slot: the default")
         #expect(route(plus, seqs: [beat]) == .slot(1))
         #expect(route(47, shift, seqs: [beat]) == .command("transport.fast_forward"), "⇧. still fast forwards")
-        // The user's keys file gives Fast Forward a key of its own besides
-        // Keypad+, so its row is the user's (customised).
+        // The user's keys file binds Keypad+ to Fast Forward: its row is
+        // the user's (customised), so the command wins.
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vzk-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("mine.vizkeys")
-        try Data(#"{"vizdaw_keys": 1, "bindings": {"transport.fast_forward": ["Keypad+", "F6"]}}"#.utf8)
+        try Data(#"{"vizdaw_keys": 1, "bindings": {"transport.fast_forward": ["Keypad+"]}}"#.utf8)
             .write(to: path)
         try keys.load(from: path.path)
         #expect(keys.row("transport.fast_forward")?.customised == true)

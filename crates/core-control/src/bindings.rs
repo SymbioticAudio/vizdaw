@@ -9,7 +9,7 @@
 use crate::protocol::truncate;
 use crate::registry::{COMMANDS, CommandSpec, KeyContext};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// ⇧ in [`Chord::mods`] (the keyboard slot's bitmask too).
 pub const SHIFT: u8 = 1;
@@ -321,6 +321,11 @@ pub struct Keymap {
     /// Commands whose keys differ from their defaults (an empty list
     /// unbinds).
     overrides: BTreeMap<&'static str, Vec<Chord>>,
+    /// Commands whose bindings the user set: a keys file's entry for them
+    /// or their own row in Settings › Keys, even to their defaults (plan
+    /// 7d controller ruling, customised). Losing a default to another
+    /// command's binding does not put a command here.
+    explicit: BTreeSet<&'static str>,
 }
 
 impl Default for Keymap {
@@ -344,6 +349,7 @@ impl Keymap {
         Keymap {
             table,
             overrides: BTreeMap::new(),
+            explicit: BTreeSet::new(),
         }
     }
 
@@ -440,6 +446,7 @@ impl Keymap {
             self.set(other, left);
         }
         self.set(spec.id, want);
+        self.explicit.insert(spec.id);
         Ok(())
     }
 
@@ -457,6 +464,7 @@ impl Keymap {
     pub fn reset_one(&mut self, id: &str) {
         let Some(spec) = self.spec(id) else { return };
         self.overrides.remove(spec.id);
+        self.explicit.remove(spec.id);
         let mine: Vec<Chord> = default_chords(spec)
             .into_iter()
             .filter(|c| {
@@ -472,6 +480,7 @@ impl Keymap {
     /// Every command back to its defaults.
     pub fn reset(&mut self) {
         self.overrides.clear();
+        self.explicit.clear();
     }
 
     /// The commands whose keys differ from their defaults.
@@ -479,14 +488,21 @@ impl Keymap {
         self.overrides.keys().copied().collect()
     }
 
+    /// Whether the user set command `id`'s bindings (a keys file's entry
+    /// or its own row in Settings › Keys), whatever its keys now are.
+    pub fn explicit(&self, id: &str) -> bool {
+        self.explicit.contains(id)
+    }
+
     /// The bindings document: `{"vizdaw_keys": 1, "bindings": {id:
-    /// [chord text, ...]}}`, holding only the changed commands.
+    /// [chord text, ...]}}`, holding the changed commands and the ones
+    /// the user set (even to their defaults), so a reload reads the same.
     pub fn to_json(&self) -> String {
         let mut b = Map::new();
-        for (id, chords) in &self.overrides {
+        for id in self.overrides.keys().chain(self.explicit.iter()) {
             b.insert(
                 (*id).to_string(),
-                Value::from(chords.iter().map(Chord::text).collect::<Vec<_>>()),
+                Value::from(self.chords(id).iter().map(Chord::text).collect::<Vec<_>>()),
             );
         }
         json!({"vizdaw_keys": VERSION, "bindings": Value::Object(b)}).to_string()
@@ -572,6 +588,32 @@ impl Keymap {
                 }
             }
             k.set(id, kept);
+        }
+        // Every entry is the user's, except a command that only lost
+        // defaults to the file's other entries: the copy of a command
+        // whose key another command took, which `to_json` writes (plan 7d
+        // controller ruling, customised).
+        for &id in &listed {
+            let Some(spec) = k.spec(id) else { continue };
+            let defaults = default_chords(spec);
+            let now = k.chords(id);
+            let lost: Vec<Chord> = defaults
+                .iter()
+                .copied()
+                .filter(|c| !now.contains(c))
+                .collect();
+            let victim = !lost.is_empty()
+                && now.iter().all(|c| defaults.contains(c))
+                && lost.iter().all(|c| {
+                    listed.iter().any(|&o| {
+                        o != id
+                            && k.spec(o).is_some_and(|s| s.context == spec.context)
+                            && k.chords(o).contains(c)
+                    })
+                });
+            if !victim {
+                k.explicit.insert(spec.id);
+            }
         }
         Ok((k, skipped))
     }

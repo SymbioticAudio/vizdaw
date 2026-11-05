@@ -40,9 +40,10 @@ pub struct BindingRow {
     /// Its default keys give way to a user's binding or keyboard slot on
     /// the same key (plan 7d controller ruling I3).
     pub yields: bool,
-    /// It has a key that is not one of its defaults: the user gave it one
-    /// (plan 7d fold check I-3, controller ruling after the B1 review).
-    /// Losing a default to another command does not make it customised.
+    /// The user set its bindings: a keys file's entry for it (any keys,
+    /// its defaults included) or its own row in Settings › Keys (plan 7d
+    /// controller ruling, customised, after B2). Losing a default to
+    /// another command's binding does not make it customised.
     pub customised: bool,
 }
 
@@ -111,7 +112,7 @@ impl Keymap {
                     menu_modifiers: mods_row(now.first().map_or(0, |ch| ch.mods)),
                     learnable: crate::surfaces::bindable(c.id).is_ok(),
                     yields: c.yields,
-                    customised: !now.iter().all(|ch| defaults.contains(ch)),
+                    customised: k.explicit(c.id),
                 }
             })
             .collect()
