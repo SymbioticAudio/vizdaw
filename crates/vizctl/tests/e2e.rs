@@ -2832,7 +2832,6 @@ fn edits_a_region_in_the_audio_editor() {
     let normalized = gain(&s);
     let id = in_editor(&mut app, &w, "Region Gain")["id"].clone();
     app.call("ui.key", json!({"window": w, "element": id, "text": "\n"}));
-    std::thread::sleep(Duration::from_millis(500));
     let s = state(&mut app, &w);
     assert_eq!(gain(&s), normalized, "{s}");
     wait_for_undo(&mut app, &w, "Normalize");
