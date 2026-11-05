@@ -170,6 +170,18 @@ public protocol ControlHost: AnyObject {
     var appearance: AppearancePreferences { get }
 }
 
+/// Which window's transport fields the P, E and U keys focus (plan 7d
+/// Ruling 7; backlog row "P, E and U in the mixer window", 7a n6): this
+/// document's mixer window when it is key, else the document window.
+public enum TransportFieldsTarget: Equatable, Sendable {
+    case document, mixerWindow
+
+    /// `.mixerWindow` only when the key window is a mixer window of `doc`.
+    public static func choose(keyKind: WindowKindRow?, keyDoc: UUID?, doc: UUID) -> TransportFieldsTarget {
+        keyKind == .mixer && keyDoc == doc ? .mixerWindow : .document
+    }
+}
+
 /// Runs registered menu commands (control spec §6) on a document model
 /// the way the menu items do, minus their dialogs (spec §7).
 @MainActor

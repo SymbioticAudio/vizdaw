@@ -236,6 +236,106 @@ private let beat: Int64 = 15_360
         #expect(punchIn.currentEditor() == nil)
     }
 
+    func endEditing(_ v: TransportFieldsView, _ field: NSTextField, _ movement: NSTextMovement?) {
+        let info: [AnyHashable: Any]? = movement.map { ["NSTextMovement": $0.rawValue] }
+        v.controlTextDidEndEditing(
+            Notification(name: NSControl.textDidEndEditingNotification, object: field, userInfo: info))
+    }
+
+    /// Plan 7d Ruling 7: only Return, Tab and Shift-Tab commit; a click
+    /// elsewhere (movement `.other`) or no movement at all cancels.
+    @Test func clickingAwayCancelsATypedField() throws {
+        let (f, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        w.contentView = v
+        let pos = try #require(v.fields[.position])
+        for movement in [NSTextMovement.other, nil] {
+            #expect(v.focus(.position))
+            v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+            pos.stringValue = "5"
+            endEditing(v, pos, movement)
+            #expect(f.locates.isEmpty, "\(String(describing: movement)): nothing moves")
+            #expect(pos.stringValue == m.fieldText(.position))
+            #expect(m.editor.textEditors.isEmpty)
+            w.makeFirstResponder(nil)
+        }
+    }
+
+    /// Pre-flight C1: a press that does not take the keyboard (a bar
+    /// button, the readouts) still ends the edit, and so does the window
+    /// resigning key; a bar button then acts (controller ruling I-4).
+    @Test func aMouseDownOutsideTheFieldEndsTheEdit() throws {
+        #expect(TransportFieldsView.endsOnMouseDown(inField: false))
+        #expect(!TransportFieldsView.endsOnMouseDown(inField: true))
+        let (f, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let readouts = TransportReadoutsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 80), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        let content = NSView(frame: CGRect(x: 0, y: 0, width: 900, height: 80))
+        w.contentView = content
+        v.frame = CGRect(x: 0, y: 0, width: 700, height: 30)
+        readouts.frame = CGRect(x: 0, y: 40, width: 400, height: 40)
+        content.addSubview(v)
+        content.addSubview(readouts)
+        content.layoutSubtreeIfNeeded()
+        let pos = try #require(v.fields[.position])
+        let over = CGPoint(x: 100, y: 60)
+        #expect(readouts.frame.contains(over) && !readouts.acceptsFirstResponder)
+        let press = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: over, modifierFlags: [], timestamp: 0,
+                windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        let ends: [(String, () -> Void)] = [
+            ("a press on the readouts", { v.handleMouseDown(press) }),
+            ("the window resigning key", { v.resignKeyCancels() }),
+        ]
+        for (what, end) in ends {
+            #expect(v.focus(.position))
+            v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+            pos.stringValue = "5"
+            #expect(!m.transportKeysEnabled)
+            end()
+            #expect(w.firstResponder !== pos.currentEditor() && pos.currentEditor() == nil, "\(what)")
+            #expect(f.locates.isEmpty, "\(what): nothing moves")
+            #expect(pos.stringValue == m.fieldText(.position), "\(what): the old text")
+            #expect(m.transportKeysEnabled, "\(what): a bar button then acts")
+        }
+    }
+
+    /// Ruling 7: Tab commits and moves on (README 101 types Edit In, then
+    /// tabs to Edit Out, as one entry).
+    @Test func tabCommitsAndMovesOn() throws {
+        #expect(TransportFieldsView.commits(.return))
+        #expect(TransportFieldsView.commits(.tab) && TransportFieldsView.commits(.backtab))
+        #expect(!TransportFieldsView.commits(.other) && !TransportFieldsView.commits(.cancel))
+        #expect(!TransportFieldsView.commits(nil))
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        w.contentView = v
+        let editIn = try #require(v.fields[.editIn])
+        #expect(v.focus(.editIn))
+        v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: editIn))
+        editIn.stringValue = "3"
+        endEditing(v, editIn, .tab)
+        #expect(m.editor.selection.timeRange?.start == 2 * bar)
+        #expect((v.fields[.editOut] as? TransportTextField)?.armed == true, "the next field is armed")
+    }
+
+    /// Plan 7a n6: P, E and U focus the key mixer window's own fields.
+    @Test func fieldKeysGoToTheKeyMixerWindow() {
+        let d = UUID()
+        let other = UUID()
+        #expect(TransportFieldsTarget.choose(keyKind: .mixer, keyDoc: d, doc: d) == .mixerWindow)
+        #expect(TransportFieldsTarget.choose(keyKind: .mixer, keyDoc: other, doc: d) == .document)
+        #expect(TransportFieldsTarget.choose(keyKind: .document, keyDoc: d, doc: d) == .document)
+        #expect(TransportFieldsTarget.choose(keyKind: nil, keyDoc: nil, doc: d) == .document)
+    }
+
     @Test func fieldKeysFocusTheirField() throws {
         let host = FakeControlHost()
         let f = demoFake()

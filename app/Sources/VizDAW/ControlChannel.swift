@@ -570,7 +570,13 @@ final class AppControlHost: ControlHost {
     }
 
     func focus(_ field: TransportField, _ doc: UUID) -> Bool {
-        guard let w = ControlWindows.window(of: doc),
+        // The key mixer window of this document has fields of its own
+        // (plan 7d Ruling 7); else the document window's.
+        let key = NSApp.keyWindow
+        let tag = key.map(ControlWindows.tagOf)
+        let target = TransportFieldsTarget.choose(keyKind: tag?.kind, keyDoc: tag?.doc, doc: doc)
+        let window = target == .mixerWindow ? key : ControlWindows.window(of: doc)
+        guard let w = window,
             let v = TransportFieldsView.find(in: w.contentView?.superview ?? w.contentView)
         else { return false }
         return v.focus(field)

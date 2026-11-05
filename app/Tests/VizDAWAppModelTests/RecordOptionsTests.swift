@@ -47,13 +47,13 @@ import VizDAWCore
         r.commitPunch(.punchIn)
         #expect(m.editor.layout.transport.punchIn == 61_440)
         #expect(r.punchText(.punchIn) == m.fieldText(.punchIn))
-        // Closing the popover commits a draft (final review I3); one that
-        // is not a position is refused, says why, and shows the value.
+        // Closing the popover drops a draft (plan 7d Ruling 7): the field
+        // shows the value in use, and nothing is said.
         r.showsPopover = true
         r.setPunchText(.punchOut, "x")
         r.showsPopover = false
         #expect(r.punchText(.punchOut) == m.fieldText(.punchOut))
-        #expect(m.editor.status?.contains("is not a position") == true)
+        #expect(m.editor.status == nil)
         // Only the punch fields keep drafts (Task 2 review M5).
         r.setPunchText(.position, "9")
         #expect(r.punchText(.position) == m.fieldText(.position))
@@ -72,57 +72,123 @@ import VizDAWCore
         r.togglePopover(in: .document)
         #expect(!r.showsPopover && !r.showsPopover(in: .document))
     }
-    /// 5d-2 final review I3: In typed, Tab, Out typed, then the popover
-    /// closes without Return: both are committed, never shown but stale.
-    @Test func closingThePopoverCommitsEveryPunchDraft() throws {
+    /// Plan 7d Ruling 7: In typed, Out typed, then the popover closes
+    /// without Return: both drafts are dropped, and the fields show the
+    /// range a pass will use.
+    @Test func closingThePopoverDropsEveryPunchDraft() throws {
         let (m, _) = try demo()
         m.select(3)
         let r = m.record
         r.setPunch(true)
+        let before = m.editor.layout.transport
         r.showsPopover = true
         r.setPunchText(.punchIn, "3")
         r.setPunchText(.punchOut, "6")
         r.showsPopover = false
-        #expect(m.editor.layout.transport.punchIn == 122_880)
-        #expect(m.editor.layout.transport.punchOut == 307_200)
-        #expect(r.spec().punch == TickRange(start: 122_880, end: 307_200))
+        #expect(m.editor.layout.transport.punchIn == before.punchIn)
+        #expect(m.editor.layout.transport.punchOut == before.punchOut)
+        #expect(r.punchText(.punchIn) == m.fieldText(.punchIn) && r.punchText(.punchOut) == m.fieldText(.punchOut))
+        #expect(!r.hasOpenPunchDraft && m.editor.status == nil)
     }
 
-    /// The toolbar's Record button records at the typed punch time, not
-    /// the old one (final review I3).
-    @Test func recordCommitsThePunchDraftsFirst() throws {
+    /// Controller ruling I5: Record waits for an open punch draft, from
+    /// every path (`toggle()` is the bar's, the R key's, a surface's and
+    /// `transport.record`'s), so a pass never punches at the old range
+    /// with a typed time on screen. Return sets it; then Record records.
+    @Test func recordRefusesWhileAPunchDraftIsOpen() throws {
         let (m, f) = try armed()
         let r = m.record
         r.setPunch(true)
         r.showsPopover = true
-        r.setPunchText(.punchIn, "2")
-        r.pressRecord()
-        #expect(r.isRecording)
-        #expect(f.recordCalls.last?.1.punch?.start == 61_440)
-        #expect(r.punchText(.punchIn) == m.fieldText(.punchIn))
+        r.setPunchText(.punchIn, "5")
+        #expect(r.hasOpenPunchDraft)
+        guard case .refused(let why) = r.toggle() else {
+            Issue.record("Record with an open draft is refused")
+            return
+        }
+        #expect(why == RecordModel.openDraftMessage)
+        #expect(f.recordCalls.isEmpty && !r.isRecording)
+        #expect(r.punchText(.punchIn) == "5", "the draft is still there")
+        r.commitPunch(.punchIn)
+        #expect(r.toggle() == .done && r.isRecording)
+        #expect(f.recordCalls.last?.spec.punch?.start == 245_760)
+        _ = r.toggle()
+        // A draft equal to the field's text is not open.
+        r.setPunchText(.punchIn, m.fieldText(.punchIn))
+        #expect(!r.hasOpenPunchDraft)
+        #expect(r.toggle() == .done && r.isRecording)
     }
 
-    /// 5d-2 final re-review N1: a punch draft that is not a position (or
-    /// is past the song limit) refuses Record, so the pass never punches
-    /// at the old range; the status line says why. Once the field is
-    /// right, Record records at the typed time.
+    /// 5d-2 final re-review N1: a punch draft that is not a position
+    /// refuses Record, so the pass never punches at the old range; the
+    /// status line says why. Once the field is set (Return), Record
+    /// records at the typed time.
     @Test func aRefusedPunchDraftRefusesRecord() throws {
         let (m, f) = try armed()
         let r = m.record
         r.setPunch(true)
         r.showsPopover = true
         let before = m.fieldText(.punchIn)
-        r.setPunchText(.punchIn, "x")
+        r.setPunchText(.punchIn, "abc")
         r.pressRecord()
         #expect(!r.isRecording && f.recordCalls.isEmpty)
-        #expect(m.editor.status?.contains("is not a position") == true)
+        #expect(m.editor.status == RecordModel.openDraftMessage)
         // 5e-1 Task 1 review m3: the old punch range is kept.
-        #expect(m.fieldText(.punchIn) == before && r.punchText(.punchIn) == before)
+        #expect(m.fieldText(.punchIn) == before)
         r.setPunchText(.punchIn, "2")
+        r.commitPunch(.punchIn)
         m.editor.clearStatus()
         r.pressRecord()
         #expect(r.isRecording)
         #expect(f.recordCalls.count == 1 && f.recordCalls.last?.spec.punch?.start == 61_440)
+    }
+
+    /// Ruling 7: focus moving to the other punch field commits the one it
+    /// left; focus leaving the pair drops the draft.
+    @Test func thePopoversPunchFieldsCancelWhenFocusLeavesThem() throws {
+        let (m, _) = try demo()
+        m.select(3)
+        let r = m.record
+        r.showsPopover = true
+        let before = m.editor.layout.transport.punchIn
+        r.punchFocusChanged(from: nil, to: .punchIn)
+        r.setPunchText(.punchIn, "3")
+        r.punchFocusChanged(from: .punchIn, to: nil)
+        #expect(m.editor.layout.transport.punchIn == before)
+        #expect(r.punchText(.punchIn) == m.fieldText(.punchIn))
+        r.punchFocusChanged(from: nil, to: .punchIn)
+        r.setPunchText(.punchIn, "3")
+        r.punchFocusChanged(from: .punchIn, to: .punchOut)
+        #expect(m.editor.layout.transport.punchIn == 122_880, "moving within the pair commits")
+    }
+
+    /// Ruling 7's bar Record rule: a press on the bar's Record button with
+    /// an open draft closes the popover, but the draft is kept, Record is
+    /// refused and the popover opens again showing it.
+    @Test func aBarRecordClickWithAnOpenDraftRefusesAndKeepsIt() throws {
+        let (m, f) = try armed()
+        let r = m.record
+        r.setPunch(true)
+        let old = m.editor.layout.transport.punchIn
+        r.showsPopover = true
+        r.setPunchText(.punchIn, "5")
+        r.recordPressBegins()
+        r.showsPopover = false
+        r.pressRecord()
+        #expect(m.editor.status == RecordModel.openDraftMessage)
+        #expect(f.recordCalls.isEmpty && !r.isRecording)
+        #expect(r.punchText(.punchIn) == "5")
+        #expect(r.showsPopover, "it opens again")
+        // Without the press beginning on Record, the close drops it.
+        m.editor.clearStatus()
+        r.showsPopover = false
+        #expect(!r.keepDraftsOnClose)
+        r.showsPopover = true
+        r.setPunchText(.punchIn, "5")
+        r.showsPopover = false
+        r.pressRecord()
+        #expect(r.isRecording && m.editor.status == nil)
+        #expect(f.recordCalls.last?.spec.punch?.start == old)
     }
 
     @Test func theTimeLeftCountsTheArmedAudioChannels() throws {
@@ -140,7 +206,7 @@ import VizDAWCore
         #expect(r.remainingText == "Less than a minute left")
         // While recording, the core's reading counts.
         f.recordRow.freeBytes = 288_000 * 7_200 + RecordModel.stopBytes
-        _ = r.toggle()
+        r.toggle()
         #expect(r.isRecording)
         #expect(r.remainingText == "2 h left")
         // MIDI only: no readout.
@@ -161,7 +227,7 @@ import VizDAWCore
         f.recordRow.pass = 3
         f.recordRow.kept = 1
         f.recordRow.discarded = 1
-        _ = r.toggle()
+        r.toggle()
         #expect(r.passText == "Pass 3 · 1 kept · 1 discarded")
         f.recordRow.kept = 0
         f.recordRow.discarded = 0

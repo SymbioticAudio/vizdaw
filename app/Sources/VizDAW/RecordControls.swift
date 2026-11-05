@@ -26,6 +26,10 @@ struct RecordControls: View {
                 tint: record.isRecording ? theme.state.record.nsColor : nil
             ) { record.pressRecord() }
             .fixedSize()
+            // A press on Record with a punch draft open keeps the draft
+            // through the popover's close, so Record refuses and shows it
+            // again (plan 7d Ruling 7's bar Record rule).
+            .background(RecordPressWatcher(record: record))
             AppKitButton(
                 "Record Options", icon: .menuDown,
                 help: "Replace or overdub, punch, loop, count-in, pre-roll and takes"
@@ -60,13 +64,63 @@ struct RecordControls: View {
     }
 }
 
+/// Watches for a press on the Record button it sits behind: with a punch
+/// draft open, it calls `recordPressBegins()` from a local mouse-down
+/// monitor, before the popover's own outside-click handling closes the
+/// popover (which would drop the draft). Inert for the user: clicks and
+/// VoiceOver pass through it.
+struct RecordPressWatcher: NSViewRepresentable {
+    let record: RecordModel
+
+    final class Watcher: NSView {
+        var record: RecordModel?
+        private var monitor: Any?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let m = monitor { NSEvent.removeMonitor(m) }
+            monitor = nil
+            guard window != nil else { return }
+            // An NSView is a `@MainActor` class: the block captures it
+            // strongly; the monitor goes when the view leaves its window.
+            let me = self
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { e in
+                // Mouse events arrive on the main thread.
+                nonisolated(unsafe) let event = e
+                MainActor.assumeIsolated { me.pressed(event) }
+                return e
+            }
+        }
+
+        func pressed(_ event: NSEvent) {
+            guard let record, let w = window, event.window === w, record.hasOpenPunchDraft,
+                bounds.contains(convert(event.locationInWindow, from: nil))
+            else { return }
+            record.recordPressBegins()
+        }
+    }
+
+    func makeNSView(context: Context) -> Watcher {
+        let w = Watcher()
+        w.record = record
+        return w
+    }
+
+    func updateNSView(_ w: Watcher, context: Context) { w.record = record }
+
+    static func dismantleNSView(_ w: Watcher, coordinator: ()) { w.record = nil }
+}
+
 /// The record options (spec §6.9). Fixed while a pass records: the core
 /// took them at Record.
 struct RecordPopover: View {
     let model: DocumentModel
     @Bindable var record: RecordModel
-    /// The punch field being edited: leaving it commits its draft, as a
-    /// macOS text field does (5d-2 final review I3).
+    /// The punch field being edited: moving to the other one commits its
+    /// draft; leaving the pair drops it (plan 7d Ruling 7).
     @FocusState private var focusedPunch: TransportField?
 
     var body: some View {

@@ -6,9 +6,10 @@ import VizDAWCore
 
 /// The transport bar's fields (parent spec §9, plan 4f Ruling 16):
 /// Position, Edit In and Out, Punch In and Out, each a text field showing
-/// bar.beat.unit. A key (P, E, U) focuses one; Enter commits the typed
-/// position, Escape reverts. Each field is an accessibility element named
-/// by its title, so `vizctl find Position` reaches it.
+/// bar.beat.unit. A key (P, E, U) focuses one; Return, Tab and Shift-Tab
+/// commit the typed position; Escape, a click elsewhere and the window
+/// losing key cancel it (plan 7d Ruling 7). Each field is an accessibility
+/// element named by its title, so `vizctl find Position` reaches it.
 @MainActor
 public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
@@ -30,6 +31,10 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     /// The field being typed in.
     private(set) var editing: TransportField?
     private let stack = NSStackView()
+    /// While a field edits: the mouse-down monitor and the window's
+    /// resign-key observer that end the edit (plan 7d pre-flight C1).
+    private var mouseMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
 
     public init(document: DocumentModel) {
         self.document = document
@@ -144,17 +149,100 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         fields.first { $0.value === obj.object as? NSTextField }?.key
     }
 
+    /// Ruling 7: an edit that ends with Return, Tab or Shift-Tab commits;
+    /// any other end (a click elsewhere, the window losing key, Escape,
+    /// teardown) cancels.
+    static func commits(_ m: NSTextMovement?) -> Bool {
+        m == .return || m == .tab || m == .backtab
+    }
+
+    /// A press while a field edits ends the edit unless it is in that
+    /// field (pre-flight C1: a press on a bar button, the readouts or the
+    /// bar's background never takes the keyboard, so nothing else would).
+    static func endsOnMouseDown(inField: Bool) -> Bool { !inField }
+
     public func controlTextDidBeginEditing(_ obj: Notification) {
         editing = field(of: obj)
         document.editor.beginTextEditing(Self.textOwner)
+        watchForTheEditsEnd()
+    }
+
+    /// Installs the mouse-down monitor and the resign-key observer while a
+    /// field edits; `stopWatching()` removes them when the edit ends.
+    private func watchForTheEditsEnd() {
+        guard mouseMonitor == nil, let w = window else { return }
+        // A `@MainActor` final class is Sendable: the blocks capture it
+        // strongly, and the monitor is removed when the edit ends.
+        let me = self
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { e in
+            // Mouse events arrive on the main thread.
+            nonisolated(unsafe) let event = e
+            MainActor.assumeIsolated { me.handleMouseDown(event) }
+            return e
+        }
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: w, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { me.resignKeyCancels() }
+        }
+    }
+
+    private func stopWatching() {
+        if let m = mouseMonitor { NSEvent.removeMonitor(m) }
+        mouseMonitor = nil
+        if let o = resignObserver { NotificationCenter.default.removeObserver(o) }
+        resignObserver = nil
+    }
+
+    /// The monitor's seam: a press outside the editing field ends the
+    /// edit (movement `.other`: it cancels), then the press goes on to
+    /// what it hit, so a bar button acts (controller ruling I-4).
+    func handleMouseDown(_ event: NSEvent) {
+        guard let f = editing, let field = fields[f], let w = window else { return }
+        let inField = event.window === w && field.bounds.contains(field.convert(event.locationInWindow, from: nil))
+        guard Self.endsOnMouseDown(inField: inField) else { return }
+        endTheEdit(f)
+    }
+
+    /// The observer's seam: the window losing key cancels the edit.
+    func resignKeyCancels() {
+        guard let f = editing else { return }
+        endTheEdit(f)
+    }
+
+    /// Ends `f`'s edit as a click elsewhere does: the field editor
+    /// resigns with movement `.other`, which cancels.
+    private func endTheEdit(_ f: TransportField) {
+        if let w = window, let editor = fields[f]?.currentEditor(), w.firstResponder === editor {
+            w.makeFirstResponder(nil)
+        }
+        // Not ended by the field editor (it had already resigned): end it here.
+        if editing == f { cancel(f) }
+    }
+
+    /// Drops `f`'s typed text: it shows the value in use, and the keys
+    /// work again.
+    private func cancel(_ f: TransportField) {
+        editing = nil
+        stopWatching()
+        document.editor.endTextEditing(Self.textOwner)
+        (fields[f] as? TransportTextField)?.armed = false
+        fields[f]?.stringValue = document.fieldText(f)
+        refresh()
     }
 
     public func controlTextDidEndEditing(_ obj: Notification) {
         guard let f = field(of: obj) ?? editing, let text = fields[f]?.stringValue else { return }
         editing = nil
+        stopWatching()
         document.editor.endTextEditing(Self.textOwner)
         let movement = (obj.userInfo?["NSTextMovement"] as? Int).flatMap(NSTextMovement.init(rawValue:))
-        if movement != .cancel, text != document.fieldText(f) { document.commitField(f, text) }
+        if Self.commits(movement) {
+            if text != document.fieldText(f) { document.commitField(f, text) }
+        } else {
+            // Ruling 7: the field shows the value in use again.
+            fields[f]?.stringValue = document.fieldText(f)
+        }
         (fields[f] as? TransportTextField)?.armed = false
         refresh()
         // Enter commits and gives the keyboard back to the keys. Next
@@ -191,6 +279,7 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
             let f = fields.first(where: { $0.value === control })?.key
         else { return false }
         editing = nil
+        stopWatching()
         document.editor.endTextEditing(Self.textOwner)
         fields[f]?.abortEditing()
         (fields[f] as? TransportTextField)?.armed = false
@@ -212,9 +301,12 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     /// Torn down mid-edit: give the keyboard back to the transport keys.
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil, editing != nil {
-            editing = nil
-            document.editor.endTextEditing(Self.textOwner)
+        if window == nil {
+            stopWatching()
+            if editing != nil {
+                editing = nil
+                document.editor.endTextEditing(Self.textOwner)
+            }
         }
     }
 }

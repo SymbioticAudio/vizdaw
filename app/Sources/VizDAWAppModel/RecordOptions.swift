@@ -42,10 +42,18 @@ extension RecordModel {
         punchDrafts[f] = text
     }
 
-    /// The popover's punch focus moved (Ruling 12): the old field's draft
-    /// is committed; text editing is held while a field has focus.
+    /// The popover's punch focus moved (Ruling 12; plan 7d Ruling 7):
+    /// moving to the other punch field commits the one it left; leaving
+    /// the pair drops its draft (the popover closing has already dealt with
+    /// its drafts). Text editing is held while a field has focus.
     public func punchFocusChanged(from old: TransportField?, to new: TransportField?) {
-        if let old { commitPunch(old) }
+        if let old {
+            if new != nil {
+                commitPunch(old)
+            } else if showsPopover, !keepDraftsOnClose {
+                dropPunch(old)
+            }
+        }
         if new != nil {
             document?.editor.beginTextEditing("recordPopover")
         } else {
@@ -53,36 +61,56 @@ extension RecordModel {
         }
     }
 
-    /// Return in a punch field, or leaving it: commits its draft (a refusal says why in
-    /// the status line and keeps the old value). A refused draft is dropped: the
-    /// field shows the old value again. Returns whether every draft was taken.
+    /// Return in a punch field, or moving to the other one: commits its
+    /// draft (a refusal says why in the status line and keeps the old
+    /// value). A refused draft is dropped: the field shows the old value
+    /// again. Returns whether the draft was taken.
     @discardableResult public func commitPunch(_ f: TransportField) -> Bool {
         guard let text = punchDrafts.removeValue(forKey: f) else { return true }
         return document?.commitField(f, text) == true
     }
 
-    /// Commits every punch draft, In first (5d-2 final review I3: the
-    /// popover closing or Record pressed never leaves a typed time shown
-    /// but unused). A refusal says why in the status line. Returns whether
-    /// every draft was taken.
-    @discardableResult public func commitPunchDrafts() -> Bool {
-        // Both are committed even when In is refused, so each refusal is
-        // said once and the last stays in the status line.
-        let punchIn = commitPunch(.punchIn)
-        let punchOut = commitPunch(.punchOut)
-        return punchIn && punchOut
+    /// Drops `f`'s draft: the field shows the value in use again.
+    public func dropPunch(_ f: TransportField) {
+        punchDrafts[f] = nil
+    }
+
+    /// Drops every punch draft (the popover closing, plan 7d Ruling 7):
+    /// the fields show the range a pass will use.
+    public func dropPunchDrafts() {
+        punchDrafts.removeAll()
+    }
+
+    /// A punch field shows typed text that is not the value in use: Record
+    /// waits for Return or Esc (controller ruling I5).
+    public var hasOpenPunchDraft: Bool {
+        punchDrafts.contains { f, text in text != (document?.fieldText(f) ?? "") }
+    }
+
+    /// A press on the bar's Record button begins with a draft open (its
+    /// mouse-down monitor calls this before the popover's outside-click
+    /// handling sees the press): the popover's close keeps the drafts, so
+    /// `pressRecord()` can refuse and show them again.
+    public func recordPressBegins() {
+        guard showsPopover, hasOpenPunchDraft else { return }
+        keepDraftsOnClose = true
     }
 
     /// The count-in is playing (the timeline waits).
     public var countingIn: Bool { document?.transport.countingIn ?? false }
 
     /// The toolbar's Record button: like the R key, and a refusal shows in
-    /// the status line.
+    /// the status line. Refused for an open punch draft, it opens the
+    /// popover again showing the draft (Ruling 7's bar Record rule).
     public func pressRecord() {
-        switch toggle() {
+        // A press that did not close the popover leaves no flag behind.
+        keepDraftsOnClose = false
+        let outcome = toggle()
+        switch outcome {
         case .done: break
         case .refused(let why), .busy(let why), .unavailable(let why): document?.editor.status = why
         }
+        if outcome == .refused(Self.openDraftMessage), !showsPopover { showsPopover = true }
     }
 
     /// The channels the shown sequence's armed audio lanes record.
