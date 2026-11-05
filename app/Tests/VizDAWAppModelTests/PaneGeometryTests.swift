@@ -133,6 +133,12 @@ import Testing
         let wide = CGRect(x: 1600, y: 0, width: 3000, height: 800)
         #expect(
             PaneGeometry.defaultDocumentFrame(visible: wide) == CGRect(x: 2380, y: 40, width: 1440, height: 720))
+        // A small screen (1024×768 less the menu bar): not under the old
+        // 980×620 default, 90% where that is more.
+        let small = PaneGeometry.defaultDocumentFrame(visible: CGRect(x: 0, y: 0, width: 1024, height: 743))
+        #expect(small.width == 980 && abs(small.height - 668.7) < 1e-9)
+        // A screen under 980 wide: its own width, no more.
+        #expect(PaneGeometry.defaultDocumentFrame(visible: CGRect(x: 0, y: 0, width: 800, height: 600)).width == 800)
         // Never under the window's own minimum.
         let tiny = CGRect(x: 0, y: 0, width: 640, height: 400)
         let r = PaneGeometry.defaultDocumentFrame(visible: tiny)

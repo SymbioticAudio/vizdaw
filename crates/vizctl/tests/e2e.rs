@@ -3203,6 +3203,25 @@ fn new_project_tracks_over_the_channel() {
     assert_eq!(doc["selected_seq"], seqs[0]["id"], "{doc}");
     assert!(track_list(&mut app, &window).is_empty(), "{doc}");
     let add = wait_for_node(&mut app, &window, "Add Track");
+    // A channel click on Add Track opens no menu: the status says what to
+    // run instead, and the app answers at once. Here, before any track, so
+    // the row is in view in a small window (a CI runner's 980×620).
+    app.call("ui.click", json!({"window": window, "element": add["id"]}));
+    let editor = wait_for_state(&mut app, &window, "editor", |e| {
+        e["status"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Add Track opens a menu"))
+    });
+    assert_eq!(
+        editor["status"],
+        "Add Track opens a menu: use track.new_audio, track.new_instrument or track.new_midi over the control channel."
+    );
+    let t = Instant::now();
+    app.call("state.get", json!({"target": "document", "window": window}));
+    assert!(
+        t.elapsed() < Duration::from_secs(2),
+        "no modal menu holds the main thread"
+    );
 
     // Paint, not accessibility frames: the header column differs from the
     // canvas, and so does the Add Track row.
@@ -3296,26 +3315,6 @@ fn new_project_tracks_over_the_channel() {
     );
     assert_eq!(e.code, ErrorCode::Failed, "{e}");
     assert_eq!(track_list(&mut app, &window), before);
-
-    // A channel click on Add Track opens no menu: the status says what to
-    // run instead, and the app answers at once.
-    let add = wait_for_node(&mut app, &window, "Add Track");
-    app.call("ui.click", json!({"window": window, "element": add["id"]}));
-    let editor = wait_for_state(&mut app, &window, "editor", |e| {
-        e["status"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("Add Track opens a menu"))
-    });
-    assert_eq!(
-        editor["status"],
-        "Add Track opens a menu: use track.new_audio, track.new_instrument or track.new_midi over the control channel."
-    );
-    let t = Instant::now();
-    app.call("state.get", json!({"target": "document", "window": window}));
-    assert!(
-        t.elapsed() < Duration::from_secs(2),
-        "no modal menu holds the main thread"
-    );
 
     // `live` is a boolean; the test never asks for a live capture.
     let e = app.call_err("ui.screenshot", json!({"window": window, "live": "yes"}));

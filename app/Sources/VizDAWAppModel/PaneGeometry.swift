@@ -148,8 +148,11 @@ public enum PaneGeometry {
     /// where that is smaller, each side on its own, centred in the visible
     /// frame. Never under the window's own minimum, 700×450.
     public static func defaultDocumentFrame(visible: CGRect) -> CGRect {
-        let w = max(min(1440, visible.width * 0.9), 700)
-        let h = max(min(900, visible.height * 0.9), 450)
+        // 90% of the screen up to 1440×900, never under the old default
+        // 980×620 where the screen holds it (a small screen's 90% squeezed
+        // the panes), and never under the window's minimum 700×450.
+        let w = max(min(1440, max(visible.width * 0.9, min(980, visible.width))), 700)
+        let h = max(min(900, max(visible.height * 0.9, min(620, visible.height))), 450)
         return CGRect(x: visible.midX - w / 2, y: visible.midY - h / 2, width: w, height: h)
     }
 
