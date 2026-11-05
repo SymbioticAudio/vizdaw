@@ -123,71 +123,94 @@ struct ArrangementBar: View {
     }
 }
 
-/// The transport fields and step entry's line (plan 4f Rulings 11, 16), in
-/// the transport bar.
+/// The transport bar's middle part (plan 4f Rulings 11, 16; plan 7d Ruling
+/// 6): step entry's summary when there is one, the bar, time, tempo and
+/// signature readouts, then the fields. They share a line when they fit
+/// and otherwise each takes a line of its own, so a narrow bar grows a line
+/// rather than cover its buttons.
 struct TransportBar: View {
     @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
 
     var body: some View {
-        // Step entry's summary in front of the fields, or above them when
-        // both do not fit on one line, so a narrow bar never cuts either
-        // (Task 7 review I1).
-        SummaryAndFields(spacing: 12) {
+        TransportFlowLayout(spacing: theme.spacing.m, lineSpacing: theme.spacing.xxs) {
             if let s = model.stepEntry.summary {
                 Text(s)
-                    .font(.caption)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
+                    .font(theme.type.caption.font)
+                    .padding(.horizontal, theme.spacing.s)
+                    .padding(.vertical, theme.spacing.xxs)
                     .background(
                         theme.accent.accent.color.opacity(0.18), in: RoundedRectangle(cornerRadius: theme.radius.s))
                     .accessibilityLabel(s)
                     .fixedSize()
             }
+            TransportReadoutsHost(document: model)
             TransportFieldsHost(document: model)
                 .frame(height: 22)
         }
     }
 }
 
-/// The summary (when there is one) then the fields on one line, or the
-/// summary above the fields when the line is narrower than both at their
-/// ideal widths. The last subview is the fields, which take what is left.
-struct SummaryAndFields: Layout {
+/// The summary (when there is one), the readouts, then the fields, in
+/// lines by `TransportFlow`. The last subview is the fields, which take
+/// what is left of a line, down to their minimum width.
+struct TransportFlowLayout: Layout {
     var spacing: CGFloat
-    var lineSpacing: CGFloat = 2
+    var lineSpacing: CGFloat
 
-    private func oneLine(_ width: CGFloat, _ s: [CGSize]) -> Bool {
-        s.count < 2 || width >= s[0].width + spacing + s[1].width
+    /// The fields' least width: a subview asked for no width reports it.
+    private func minimum(_ subviews: Subviews) -> CGFloat {
+        subviews.last?.sizeThatFits(.zero).width ?? 0
+    }
+
+    private func lines(_ width: CGFloat, _ s: [CGSize], _ subviews: Subviews) -> [[Int]] {
+        TransportFlow.lines(
+            widths: s.map(\.width), lastMinimum: minimum(subviews), width: width, spacing: spacing)
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let s = subviews.map { $0.sizeThatFits(.unspecified) }
-        guard let fields = s.last else { return .zero }
-        let ideal = s.count < 2 ? fields.width : s[0].width + spacing + fields.width
+        guard !s.isEmpty else { return .zero }
+        // Its ideal width is every item on one line.
+        let ideal = s.map(\.width).reduce(0, +) + spacing * CGFloat(s.count - 1)
         let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? ideal
-        let height = oneLine(width, s) ? (s.map(\.height).max() ?? 0) : s[0].height + lineSpacing + fields.height
-        return CGSize(width: width, height: height)
+        let rows = lines(width, s, subviews)
+        let heights = rows.map { row in row.map { s[$0].height }.max() ?? 0 }
+        return CGSize(width: width, height: heights.reduce(0, +) + lineSpacing * CGFloat(max(rows.count - 1, 0)))
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let s = subviews.map { $0.sizeThatFits(.unspecified) }
-        guard let fields = subviews.last, let fs = s.last else { return }
-        if s.count < 2 {
-            fields.place(
-                at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading,
-                proposal: ProposedViewSize(width: bounds.width, height: fs.height))
-        } else if oneLine(bounds.width, s) {
-            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(s[0]))
-            fields.place(
-                at: CGPoint(x: bounds.minX + s[0].width + spacing, y: bounds.midY), anchor: .leading,
-                proposal: ProposedViewSize(width: max(bounds.width - s[0].width - spacing, 0), height: fs.height))
-        } else {
-            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY), anchor: .topLeading, proposal: ProposedViewSize(s[0]))
-            fields.place(
-                at: CGPoint(x: bounds.minX, y: bounds.minY + s[0].height + lineSpacing), anchor: .topLeading,
-                proposal: ProposedViewSize(width: bounds.width, height: fs.height))
+        guard !s.isEmpty else { return }
+        var y = bounds.minY
+        for row in lines(bounds.width, s, subviews) {
+            let height = row.map { s[$0].height }.max() ?? 0
+            var x = bounds.minX
+            for i in row {
+                // The fields take what is left of their line.
+                let w = i == s.count - 1 ? max(bounds.maxX - x, 0) : s[i].width
+                subviews[i].place(
+                    at: CGPoint(x: x, y: y + height / 2), anchor: .leading,
+                    proposal: ProposedViewSize(width: w, height: s[i].height))
+                x += w + spacing
+            }
+            y += height + lineSpacing
         }
+    }
+}
+
+struct TransportReadoutsHost: NSViewRepresentable {
+    let document: DocumentModel
+
+    func makeNSView(context: Context) -> TransportReadoutsView { TransportReadoutsView(document: document) }
+
+    func updateNSView(_ view: TransportReadoutsView, context: Context) {
+        view.theme = context.environment.symbioticTheme
+    }
+
+    /// Its own fixed size: the boxes keep their widths.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TransportReadoutsView, context: Context) -> CGSize? {
+        nsView.intrinsicContentSize
     }
 }
 
@@ -204,7 +227,9 @@ struct TransportFieldsHost: NSViewRepresentable {
     /// bar can tell whether one row holds it; else what it is offered.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TransportFieldsView, context: Context) -> CGSize? {
         let fit = nsView.fittingWidth
-        let w = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? fit
+        // Asked for no width, it reports its least (the bar's flow keeps it
+        // at least this wide).
+        let w = proposal.width.flatMap { $0.isFinite ? max($0, nsView.minimumWidth) : nil } ?? fit
         return CGSize(width: w, height: 22)
     }
 }

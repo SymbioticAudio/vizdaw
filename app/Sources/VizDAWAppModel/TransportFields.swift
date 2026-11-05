@@ -121,3 +121,34 @@ public enum TransportBarRows {
         return need.isFinite && width - 2 * padding >= need ? 1 : 2
     }
 }
+
+/// The transport bar's middle part: items in order on lines (plan 7d
+/// Ruling 6).
+public enum TransportFlow {
+    /// Which items share a line, greedily and in order. The last item (the
+    /// fields) fits a line if what is left is at least `lastMinimum`. A
+    /// width that is not finite and positive puts every item on its own
+    /// line.
+    public static func lines(
+        widths: [CGFloat], lastMinimum: CGFloat, width: CGFloat, spacing: CGFloat
+    ) -> [[Int]] {
+        guard width.isFinite, width > 0 else { return widths.indices.map { [$0] } }
+        var lines: [[Int]] = []
+        var used: CGFloat = 0
+        for (i, w) in widths.enumerated() {
+            let isLast = i == widths.count - 1
+            if var line = lines.last {
+                let left = width - used - spacing
+                if isLast ? left >= lastMinimum : w <= left {
+                    line.append(i)
+                    lines[lines.count - 1] = line
+                    used += spacing + w
+                    continue
+                }
+            }
+            lines.append([i])
+            used = w
+        }
+        return lines
+    }
+}

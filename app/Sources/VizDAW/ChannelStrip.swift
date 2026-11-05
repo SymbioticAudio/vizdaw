@@ -916,7 +916,7 @@ extension Theme {
 
     /// A section heading: capitals, except in a lower-case theme.
     func stripHeading(_ text: String) -> String {
-        style.labels == .lowercase ? text.lowercased() : text.uppercased()
+        TransportReadouts.label(text, self)
     }
 }
 

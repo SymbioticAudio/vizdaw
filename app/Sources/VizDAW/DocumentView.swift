@@ -113,11 +113,6 @@ struct DocumentTransportBar: View {
                     RecordControls(model: model, record: model.record, host: showsViews ? .document : .mixerWindow)
                 }
                 .fixedSize()
-                // A steady width, so the bar does not jitter as the digits
-                // change (Task 7 review M5).
-                AppKitLabel(Formatting.position(model.transport), font: Self.positionFont)
-                    .fixedSize()
-                    .frame(minWidth: Self.positionWidth, alignment: .leading)
             }
             // In a row narrower than they like, the fields narrow (to 72 pt).
             TransportBar(model: model)
@@ -153,11 +148,6 @@ struct DocumentTransportBar: View {
         )
         .fixedSize()
     }
-
-    /// The position's font, and the width of its widest usual text.
-    @MainActor static let positionFont = NSFont.monospacedSystemFont(
-        ofSize: NSFont.preferredFont(forTextStyle: .title3).pointSize, weight: .regular)
-    @MainActor static let positionWidth = AppKitLabel.width(of: "999.4.960  00:00.000", font: positionFont)
 
     /// Attached only in the document window, so `showsFaults` opens one
     /// popover (Ruling 8).

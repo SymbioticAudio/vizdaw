@@ -50,10 +50,10 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
             field.identifier = NSUserInterfaceItemIdentifier("transport.\(f.rawValue)")
             // 86 points, narrowing to 72 in a row too narrow for all five
             // (Task 7 review I1); `fittingWidth` reports the 86.
-            let preferred = field.widthAnchor.constraint(equalToConstant: 86)
+            let preferred = field.widthAnchor.constraint(equalToConstant: Self.fieldWidth)
             preferred.priority = .defaultLow
             preferred.isActive = true
-            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+            field.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.narrowFieldWidth).isActive = true
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             fields[f] = field
             stack.addArrangedSubview(label)
@@ -98,6 +98,16 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     /// The width the five fields and their labels need (the transport bar
     /// puts them on a row of their own when its row cannot give it).
     public var fittingWidth: CGFloat { stack.fittingSize.width }
+
+    /// A field's width, and the least it narrows to.
+    static let fieldWidth: CGFloat = 86
+    static let narrowFieldWidth: CGFloat = 72
+
+    /// The least width the fields take: the labels, the five fields at 72
+    /// and the spacing (the bar's flow keeps the fields at least this wide).
+    public var minimumWidth: CGFloat {
+        fittingWidth - CGFloat(fields.count) * (Self.fieldWidth - Self.narrowFieldWidth)
+    }
 
     public required init?(coder: NSCoder) { nil }
 
