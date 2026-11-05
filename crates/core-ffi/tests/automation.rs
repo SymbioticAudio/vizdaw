@@ -3383,7 +3383,14 @@ fn the_preview_does_not_flatten_the_sequence_per_call() {
     s.gesture(t, Phase::Touch { value: Some(0.6) }).unwrap();
     pace(&s);
     s.gesture(t, Phase::Value { value: 0.7 }).unwrap();
-    pace(&s);
+    // The renderer takes the write before it is held (a slow runner).
+    wait_until("the write to reach the preview", || {
+        s.idle().unwrap();
+        s.automation_preview(t)
+            .unwrap()
+            .iter()
+            .any(|p| (p.value - 0.7).abs() < 1e-9)
+    });
     hold(&s);
     let first = s.automation_preview(t).unwrap();
     assert!(!first.is_empty(), "the write in progress");
@@ -3470,11 +3477,17 @@ fn the_preview_after_a_wrap_landing_shows_only_the_next_cycle() {
     s.gesture(t, Phase::Value { value: 0.4 }).unwrap();
     pace(&s);
     s.gesture(t, Phase::Release).unwrap();
-    let p0 = s.automation_preview(t).unwrap();
-    assert!(has_value(
-        &p0.iter().map(|p| (p.tick, p.value)).collect::<Vec<_>>(),
-        0.4
-    ));
+    wait_until("cycle 0's writes in the preview", || {
+        s.idle().unwrap();
+        has_value(
+            &s.automation_preview(t)
+                .unwrap()
+                .iter()
+                .map(|p| (p.tick, p.value))
+                .collect::<Vec<_>>(),
+            0.4,
+        )
+    });
     wait_wrap(&s);
     wait_until("cycle 0 to land", || {
         s.idle().unwrap();
@@ -3484,7 +3497,19 @@ fn the_preview_after_a_wrap_landing_shows_only_the_next_cycle() {
     wait_tick_in(&s, 5 * Q / 2, 3 * Q);
     let from = tick(&s);
     s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
-    pace(&s);
+    // The renderer takes the touch before it is held: on a slow runner
+    // 12 ms is not always enough, and a held renderer never takes it.
+    wait_until("the touch to reach the preview", || {
+        s.idle().unwrap();
+        has_value(
+            &s.automation_preview(t)
+                .unwrap()
+                .iter()
+                .map(|p| (p.tick, p.value))
+                .collect::<Vec<_>>(),
+            0.7,
+        )
+    });
     hold(&s);
     let p1 = s.automation_preview(t).unwrap();
     let pts: Vec<(i64, f64)> = p1.iter().map(|p| (p.tick, p.value)).collect();
