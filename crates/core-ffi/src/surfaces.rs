@@ -1781,7 +1781,7 @@ fn check_unit(
             None | Some(0) => 0,
             Some(_) => {
                 return Err(crate::events::bad(
-                    "a Kontrol S-Series MK3 keyboard is a bank of its own: `position` must be 0",
+                    "a host-integration keyboard is a bank of its own: `position` must be 0",
                 ));
             }
         },

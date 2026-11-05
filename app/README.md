@@ -1768,19 +1768,16 @@ you should see; report anything else, and every value step 198 asks for.
 
 189. Adding the keyboard, in three cases:
      a. Plug the keyboard in by USB and open Settings › Surfaces › Add
-        Surface…. Choose Type "Kontrol S-Series MK3 (DAW mode)": Input
+        Surface…. Choose Type "Host-integration keyboard (DAW mode)": Input
         and Output both switch to the keyboard's DAW port (named like
-        "KONTROL S88 MK3 DAW"), and the sheet shows the help line and
-        "Kontrol and Native Instruments are trademarks of Native
-        Instruments GmbH. VizDAW is not affiliated with or endorsed by
-        Native Instruments." Write down the exact names the Input and
+        "KONTROL S88 MK3 DAW"), and the sheet shows the help line.
+        Write down the exact names the Input and
         Output pickers list for every port of the keyboard. Click Add:
-        the row says "Connected", the same notice shows under the
-        surface list, and within 2 s the keyboard's screen leaves its
+        the row says "Connected", and within 2 s the keyboard's screen leaves its
         own view and shows the mixer with the project's first eight
         tracks' names.
      b. With the keyboard unplugged, choose the type: the sheet says "No
-        Kontrol S-Series MK3 “DAW” port is connected: pick its ports by
+        host-integration keyboard “DAW” port is connected: pick its ports by
         hand." and leaves the pickers as they were.
      c. With firmware older than 2.0, add it: the row says "Connected ·
         not answering" and, under it in orange, "the keyboard answered

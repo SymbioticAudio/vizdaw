@@ -772,7 +772,7 @@ const SURFACE_ADD_PARAMS: &[ParamSpec] = &[
         name: "type",
         kind: ParamKind::Choice(&["mcu", "mcu_xt", "hui", "kontrol_mk3"]),
         required: true,
-        help: "mcu, mcu_xt, hui or kontrol_mk3 (a Kontrol S-Series MK3 keyboard's DAW port).",
+        help: "mcu, mcu_xt, hui or kontrol_mk3 (a host-integration keyboard's DAW port).",
     },
     ParamSpec {
         name: "input",

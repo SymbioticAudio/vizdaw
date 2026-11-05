@@ -295,7 +295,6 @@ import VizDAWCore
         s.commitAdd()
         #expect(s.draft == nil)
         #expect(c.rows.first?.kind == .kontrolMk3 && c.rows.first?.position == 0)
-        #expect(s.showsKontrolNotice, "the list shows the notice once a Kontrol is there (M11)")
     }
 
     /// Ruling 10: with no DAW port, the ports stay and the sheet says why.
@@ -319,7 +318,6 @@ import VizDAWCore
     @Test func aKontrolWithOldFirmwareSaysWhy() {
         let c = FakeSurfaceCore()
         let s = SurfaceSettings(core: c)
-        #expect(!s.showsKontrolNotice)
         s.add(.kontrolMk3, input: "KONTROL S88 MK3 DAW", output: "KONTROL S88 MK3 DAW", position: nil)
         let old = "the keyboard answered protocol version 3; VizDAW needs version 4 (keyboard firmware 2.0 or later)"
         let kept = "surface 3: “future_box” needs a newer VizDAW; it is kept in surfaces.json and not driven"
@@ -330,7 +328,6 @@ import VizDAWCore
         #expect(s.problem(for: 0) == old, "the last line about it, without the prefix")
         #expect(s.problem(for: 1) == nil)
         #expect(s.otherProblems == [kept])
-        #expect(s.showsKontrolNotice)
     }
 
     /// Final review I2: a row that answers shows no problem line (the core
@@ -395,8 +392,8 @@ import VizDAWCore
 
     /// Ruling 11: descriptive wording only.
     @Test func theKontrolSheetSpeaksDescriptively() {
-        #expect(SurfaceSettings.kontrolNotice
-            == "Kontrol and Native Instruments are trademarks of Native Instruments GmbH. VizDAW is not affiliated with or endorsed by Native Instruments.")
+        #expect(SurfaceSettings.title(.kontrolMk3) == "Host-integration keyboard (DAW mode)")
+        #expect(SurfaceSettings.noKontrol == "No host-integration keyboard “DAW” port is connected: pick its ports by hand.")
         for text in [SurfaceSettings.kontrolHelp, SurfaceSettings.noKontrol, SurfaceSettings.title(.kontrolMk3)] {
             #expect(!text.localizedCaseInsensitiveContains("official"))
             #expect(!text.contains("NKS"))

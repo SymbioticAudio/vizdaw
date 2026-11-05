@@ -17,7 +17,7 @@ struct SurfacesSettingsView: View {
         Form {
             Section("Surfaces") {
                 if settings.rows.isEmpty {
-                    Text("No surfaces. Add an MCU-compatible, MCU XT-compatible or HUI-compatible unit, or a Kontrol S-Series MK3 keyboard.")
+                    Text("No surfaces. Add an MCU-compatible, MCU XT-compatible or HUI-compatible unit, or a host-integration keyboard.")
                         .foregroundStyle(.secondary)
                 }
                 ForEach(settings.rows, id: \.id) { row in
@@ -46,11 +46,6 @@ struct SurfacesSettingsView: View {
                 }
                 ForEach(settings.otherProblems, id: \.self) { line in
                     Text(line).font(theme.type.caption.font).foregroundStyle(theme.state.warning.color)
-                }
-                if settings.showsKontrolNotice {
-                    Text(SurfaceSettings.kontrolNotice)
-                        .font(theme.type.caption.font)
-                        .foregroundStyle(.secondary)
                 }
                 Button("Add Surface…") { settings.beginAdd() }
             }
@@ -131,7 +126,6 @@ struct SurfacesSettingsView: View {
                             Text(note).foregroundStyle(theme.state.warning.color)
                         }
                         Text(SurfaceSettings.kontrolHelp)
-                        Text(SurfaceSettings.kontrolNotice)
                     }
                     .font(theme.type.caption.font)
                     .foregroundStyle(.secondary)
