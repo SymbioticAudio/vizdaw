@@ -4,6 +4,16 @@ import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
+/// The room a control's focus ring needs inside its clipping container.
+public enum FocusRing {
+    /// How far the system's ring reaches past a control, in points.
+    public static let reach: CGFloat = 3
+
+    /// The inset for a theme whose `xs` spacing is `xs`: `xs`, but never
+    /// less than the ring needs (a user theme may set `xs` smaller).
+    public static func inset(xs: CGFloat) -> CGFloat { max(xs, reach) }
+}
+
 /// The transport bar's fields (parent spec §9, plan 4f Ruling 16):
 /// Position, Edit In and Out, Punch In and Out, each a text field showing
 /// bar.beat.unit. A key (P, E, U) focuses one; Return, Tab and Shift-Tab
@@ -91,7 +101,7 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         let t = theme
         appearance = NSAppearance(named: t.appearance.nsAppearanceName)
         stack.spacing = t.spacing.s
-        let inset = t.spacing.xs
+        let inset = FocusRing.inset(xs: t.spacing.xs)
         if insets.count == 4 {
             insets[0].constant = inset
             insets[1].constant = inset
@@ -115,10 +125,10 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
 
     /// The width the five fields and their labels need (the transport bar
     /// puts them on a row of their own when its row cannot give it).
-    public var fittingWidth: CGFloat { stack.fittingSize.width + 2 * theme.spacing.xs }
+    public var fittingWidth: CGFloat { stack.fittingSize.width + 2 * FocusRing.inset(xs: theme.spacing.xs) }
 
     /// The height the fields and their focus-ring room need.
-    public var fittingHeight: CGFloat { stack.fittingSize.height + 2 * theme.spacing.xs }
+    public var fittingHeight: CGFloat { stack.fittingSize.height + 2 * FocusRing.inset(xs: theme.spacing.xs) }
 
     /// A field's width, and the least it narrows to.
     static let fieldWidth: CGFloat = 86

@@ -141,7 +141,7 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
     public var theme: Theme = ThemedViews.current {
         didSet {
             themeDidChange(from: oldValue)
-            table.intercellSpacing = NSSize(width: 2 * theme.spacing.xs, height: 2 * theme.spacing.xs)
+            table.intercellSpacing = NSSize(width: 2 * FocusRing.inset(xs: theme.spacing.xs), height: 2 * FocusRing.inset(xs: theme.spacing.xs))
         }
     }
 
@@ -177,7 +177,7 @@ public final class ListEditorView: NSView, NSTableViewDataSource, NSTableViewDel
         table.rowHeight = 18
         // Each cell sits `spacing.xs` inside its row (half of this on each
         // side), so a cell's focus ring lies inside the row, which clips.
-        table.intercellSpacing = NSSize(width: 2 * theme.spacing.xs, height: 2 * theme.spacing.xs)
+        table.intercellSpacing = NSSize(width: 2 * FocusRing.inset(xs: theme.spacing.xs), height: 2 * FocusRing.inset(xs: theme.spacing.xs))
         table.style = .plain
         table.target = self
         table.doubleAction = #selector(doubleClicked)

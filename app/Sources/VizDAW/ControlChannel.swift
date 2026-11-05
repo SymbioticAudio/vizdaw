@@ -182,29 +182,49 @@ enum ControlChannel {
             dw <= 16_384, dh <= 16_384, dw * dh <= 64_000_000
         else { return answer(server, token, .failed(.of(.failed, "the window could not be captured"))) }
         let (width, height, number) = (Int(dw), Int(dh), Int64(w.windowNumber))
+        // One answer: the capture's or, if it hangs, the timeout's.
+        let reply = LiveReply()
+        func finish(_ outcome: ControlOutcome) {
+            guard !reply.done else { return }
+            reply.done = true
+            answer(server, token, outcome)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(liveTimeout))
+            finish(.failed(.of(.timeout,
+                "the live capture did not finish within \(Int(liveTimeout)) s; omit `live` for the app-drawn picture")))
+        }
         Task { @MainActor in
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
                 guard let target = content.windows.first(where: { $0.windowID == id }) else {
-                    return answer(server, token, .failed(.of(.failed,
+                    return finish(.failed(.of(.failed,
                         "the window is not on screen; live screenshots need it visible")))
                 }
                 let config = SCStreamConfiguration()
                 config.width = width
                 config.height = height
+                config.ignoreShadowsSingleWindow = true
                 let image = try await SCScreenshotManager.captureImage(
                     contentFilter: SCContentFilter(desktopIndependentWindow: target), configuration: config)
                 guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
-                    return answer(server, token, .failed(.of(.failed, "the capture could not be encoded")))
+                    return finish(.failed(.of(.failed, "the capture could not be encoded")))
                 }
+                guard !reply.done else { return }
                 try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-                answer(server, token, .done(.screenshot(
+                finish(.done(.screenshot(
                     window: number, path: path, width: UInt32(image.width), height: UInt32(image.height))))
             } catch {
-                answer(server, token, .failed(.of(.failed, "live capture failed: \(error.localizedDescription)")))
+                finish(.failed(.of(.failed, "live capture failed: \(error.localizedDescription)")))
             }
         }
     }
+
+    /// Seconds a live capture may take before the call is refused.
+    static let liveTimeout: Double = 10
+
+    /// Whether a live capture's call was answered already.
+    @MainActor final class LiveReply { var done = false }
 
     static func later(_ token: UInt64, seconds: Double, _ step: @escaping @MainActor (Bool) -> Bool) {
         if !step(false) {

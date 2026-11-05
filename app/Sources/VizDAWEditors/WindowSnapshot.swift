@@ -3,7 +3,8 @@ import ObjectiveC
 import QuartzCore
 
 /// A window as a PNG, rendered by the app itself (control spec §9), with
-/// no Screen Recording permission:
+/// no Screen Recording permission (`ui.screenshot`'s opt-in `live` capture
+/// is another path, in the control channel, and needs it):
 ///
 /// 1. the window's layer tree is drawn with `CALayer.render(in:)`, which
 ///    brings in SwiftUI and Core Animation content;

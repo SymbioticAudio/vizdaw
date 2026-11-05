@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -20,7 +21,7 @@ enum ClipScan {
     /// The three controls whose focus ring is drawn outside their bounds.
     static let allowed: Set<String> = ["TransportTextField", "ListCellField", "HoldButtonView"]
 
-    static let appKitView = try! NSRegularExpression(pattern: #"^(NS\w*View|NSButton|NSTextField|NSControl)$"#)
+    static let appKitView = try! NSRegularExpression(pattern: #"^NS\w*(View|Button|Control|Field|Slider|Indicator|Stepper|Well|Box|ComboBox|Picker)$"#)
     static let declaration = try! NSRegularExpression(
         pattern: #"\bclass\s+(\w+)\s*(?:<[^>{]*>)?\s*:\s*([\w.]+)"#)
     static let clipLine = try! NSRegularExpression(pattern: #"^\s*(self\.)?clipsToBounds\s*=\s*true"#)
@@ -74,22 +75,41 @@ enum ClipScan {
         return nil
     }
 
-    /// Every `class Name: Super` in `source`, with its brace-matched body.
+    /// `body` without the bodies of the classes declared inside it.
+    static func ownBody(_ body: String) -> String {
+        var text = body as NSString
+        var pos = 1  // past the body's own `{`
+        while pos < text.length,
+            let m = declaration.firstMatch(
+                in: text as String, range: NSRange(location: pos, length: text.length - pos))
+        {
+            let end = m.range.location + m.range.length
+            let chars = Array((text as String)[...])
+            let charStart = (text.substring(to: end) as String).count
+            guard let inner = braced(chars, from: charStart) else { break }
+            let r = text.range(of: inner, options: [], range: NSRange(location: end, length: text.length - end))
+            guard r.location != NSNotFound else { break }
+            text = text.replacingCharacters(in: r, with: "{}") as NSString
+            pos = end + 2
+        }
+        return text as String
+    }
+
+    /// Every `class Name: Super` in `source` (the superclass may be on the
+    /// next line), with its brace-matched body.
     static func declarations(in source: String, file: String) -> [ClassDecl] {
         let text = Array(source)
         let ns = source as NSString
         var out: [ClassDecl] = []
-        var offset = 0
-        for line in source.components(separatedBy: "\n") {
-            defer { offset += line.utf16.count + 1 }
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("//") { continue }
-            let range = NSRange(location: offset, length: line.utf16.count)
-            guard let m = declaration.firstMatch(in: ns as String, range: range) else { continue }
+        for m in declaration.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
+            // Not in a `//` comment.
+            let lineStart = ns.range(of: "\n", options: .backwards, range: NSRange(location: 0, length: m.range.location))
+            let prefix = ns.substring(from: lineStart.location == NSNotFound ? 0 : lineStart.location + 1)
+                .prefix(m.range.location - (lineStart.location == NSNotFound ? 0 : lineStart.location + 1))
+            if prefix.contains("//") { continue }
             let name = ns.substring(with: m.range(at: 1))
             guard !["var", "func", "let"].contains(name) else { continue }
             let sup = ns.substring(with: m.range(at: 2)).split(separator: ".").last.map(String.init) ?? ""
-            // The body starts at the first `{` after the declaration's end.
             let end = source.index(source.startIndex, offsetBy: m.range.location + m.range.length)
             let charIndex = source.distance(from: source.startIndex, to: end)
             guard let body = braced(text, from: charIndex) else { continue }
@@ -115,8 +135,19 @@ enum ClipScan {
         return all.filter { names.contains($0.name) }
     }
 
+    /// The class sets `clipsToBounds = true` on itself in an initializer
+    /// or `setUp` of its own (not in another method, nor a nested class).
     static func setsClip(_ d: ClassDecl) -> Bool {
-        d.body.components(separatedBy: "\n").contains { matches(clipLine, $0) }
+        let own = ownBody(d.body)
+        let chars = Array(own)
+        let entry = try! NSRegularExpression(pattern: #"\b(init\s*\(|func\s+setUp\s*\()"#)
+        let ns = own as NSString
+        for m in entry.matches(in: own, range: NSRange(location: 0, length: ns.length)) {
+            let start = own.distance(from: own.startIndex, to: own.index(own.startIndex, offsetBy: m.range.location + m.range.length))
+            guard let block = braced(chars, from: start) else { continue }
+            if block.components(separatedBy: "\n").contains(where: { matches(clipLine, $0) }) { return true }
+        }
+        return false
     }
 
     /// "file: Class" for each collected class that neither sets
@@ -170,22 +201,42 @@ enum ClipScan {
             }
             final class Child: Good { }
             final class Plain: NSObject { }
+            final class Never: NSView { func later() { clipsToBounds = true } }
+            final class Outer: NSView {
+                init() { super.init(frame: .zero) }
+                final class Inner: NSView {
+                    init() { super.init(frame: .zero)
+                        clipsToBounds = true
+                    }
+                }
+            }
+            final class Slider: NSSlider { }
+            final class NextLine: NSPopUpButton,
+                Foo { init() { super.init(frame: .zero)
+                    self.clipsToBounds = true
+                } }
             final class Field: NSTextField { }
             final class DrawingField: NSTextField { override func draw(_ r: NSRect) {} }
             // final class Commented: NSView { }
             """
         let decls = ClipScan.declarations(in: snippet, file: "x.swift")
-        #expect(decls.map(\.name) == ["Bad", "Good", "Child", "Plain", "Field", "DrawingField"])
-        #expect(ClipScan.collected(decls).map(\.name) == ["Bad", "Good", "Child", "Field", "DrawingField"])
         #expect(
-            ClipScan.violations(decls) == ["x.swift: Bad", "x.swift: Field", "x.swift: DrawingField"],
+            decls.map(\.name) == [
+                "Bad", "Good", "Child", "Plain", "Never", "Outer", "Inner", "Slider", "NextLine", "Field",
+                "DrawingField",
+            ])
+        #expect(
+            ClipScan.violations(decls) == [
+                "x.swift: Bad", "x.swift: Never", "x.swift: Outer", "x.swift: Slider", "x.swift: Field",
+                "x.swift: DrawingField",
+            ],
             "another object's clipsToBounds does not count; Child inherits Good's")
         let allowed = ClipScan.violations(decls.map {
             ClipScan.ClassDecl(
                 name: $0.name == "Field" ? "ListCellField" : $0.name == "DrawingField" ? "HoldButtonView" : $0.name,
                 superName: $0.superName, body: $0.body, file: $0.file)
         })
-        #expect(allowed == ["x.swift: Bad", "x.swift: HoldButtonView"], "an allowed control must not draw itself")
+        #expect(allowed == ["x.swift: Bad", "x.swift: Never", "x.swift: Outer", "x.swift: Slider", "x.swift: HoldButtonView"], "an allowed control must not draw itself")
 
         let all = try ClipScan.sources()
         let found = ClipScan.collected(all)
@@ -250,5 +301,50 @@ enum ClipScan {
             #expect(c.superview?.clipsToBounds == true, "the row clips, so the cell must sit inside it")
             #expect(ringFits(c), "cell ring: \(c.frame) in \(String(describing: c.superview?.bounds))")
         }
+    }
+}
+
+/// The transport fields hosted as the app hosts them (`TransportFieldsHost`
+/// sizes by `fittingWidth` and `fittingHeight`), with no fixed height.
+private struct HostedFields: NSViewRepresentable {
+    let document: DocumentModel
+    func makeNSView(context: Context) -> TransportFieldsView { TransportFieldsView(document: document) }
+    func updateNSView(_ view: TransportFieldsView, context: Context) {}
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TransportFieldsView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? nsView.fittingWidth, height: nsView.fittingHeight)
+    }
+}
+
+@MainActor
+@Suite struct FocusRingRoomTests {
+    @Test func theInsetIsNeverLessThanTheRing() {
+        #expect(FocusRing.inset(xs: 1) == FocusRing.reach)
+        #expect(FocusRing.inset(xs: 0) == FocusRing.reach)
+        #expect(FocusRing.inset(xs: 4) == 4)
+    }
+
+    @Test func hostedFieldsKeepTheirHeightAndRingRoom() throws {
+        let m = try DocumentModel(session: demoFake())
+        let host = NSHostingView(rootView: HostedFields(document: m).frame(width: 900))
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 200), styleMask: [.titled], backing: .buffered,
+            defer: true)
+        w.isReleasedWhenClosed = false
+        w.contentView = host
+        host.layoutSubtreeIfNeeded()
+        func find(_ v: NSView) -> TransportFieldsView? {
+            (v as? TransportFieldsView) ?? v.subviews.lazy.compactMap(find).first
+        }
+        let t = try #require(find(host))
+        #expect(t.frame.height >= t.fittingHeight - 0.5, "\(t.frame.height) of \(t.fittingHeight)")
+        for case let f as NSTextField in t.fields.values {
+            #expect(f.frame.height >= f.intrinsicContentSize.height - 0.5, "a field is not squeezed: \(f.frame)")
+        }
+    }
+
+    /// The host reports its own height: nothing pins the fields to 22 pt.
+    @Test func nothingPinsTheFieldsHost() throws {
+        let hits = try SourceScan.lines(in: ["VizDAW"], matching: #"\.frame\(height:\s*22\)"#)
+        #expect(hits.isEmpty, "\(hits)")
     }
 }

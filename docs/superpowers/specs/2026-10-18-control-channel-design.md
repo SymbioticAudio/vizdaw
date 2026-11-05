@@ -256,7 +256,7 @@ Rendered in-process, no Screen Recording permission (unless `live`, below):
 
 Known limits: content the window server composites alone (vibrancy materials such as the sidebar, Metal and video layers, out-of-process plugin views) renders flat or blank; SwiftUI-hosted AppKit controls that never drew while occluded may be missing; views redrawn in step 2 are painted over floating overlays in front of them (the sidebar). Screenshots are evidence for agents and reviewers, not pixel-exact golden images.
 
-`live: true` captures the window through ScreenCaptureKit (`SCScreenshotManager.captureImage` of an `SCContentFilter(desktopIndependentWindow:)`), which needs Screen Recording access even for the app's own windows. The app only checks it with `CGPreflightScreenCaptureAccess()`, which never prompts, and never requests it: without access the call fails with "live screenshots need Screen Recording access for VizDAW (System Settings › Privacy & Security); omit `live` for the app-drawn picture". A window that is not on screen (occluded, minimised, on another Space) fails with "the window is not on screen; live screenshots need it visible". The answer has the same shape. Tests and the end-to-end run never pass `live`.
+`live: true` captures the window through ScreenCaptureKit (`SCScreenshotManager.captureImage` of an `SCContentFilter(desktopIndependentWindow:)`), which needs Screen Recording access even for the app's own windows. The app only checks it with `CGPreflightScreenCaptureAccess()`, which never prompts, and never requests it (the system may still show its own periodic "continue to allow" prompt on a capture, which is the OS's, not the app's): without access the call fails with "live screenshots need Screen Recording access for VizDAW (System Settings › Privacy & Security); omit `live` for the app-drawn picture". A window that is not on screen (occluded, minimised, on another Space) fails with "the window is not on screen; live screenshots need it visible". The answer has the same shape. Tests and the end-to-end run never pass `live`.
 
 The default picture models AppKit's clipping for views that do not clip (macOS 14+ default): each self-drawn view is drawn into the part of the window its clipping ancestors let show (`WindowSnapshot.clipRect`), so a view that paints past its frame shows as it does on screen.
 
@@ -266,7 +266,7 @@ The default picture models AppKit's clipping for views that do not clip (macOS 1
 vizctl [--socket PATH] [--timeout SECONDS] COMMAND [ARGS]      (socket default: $VIZDAW_CONTROL)
   launch [--app PATH] [--home DIR] [--demo] [--env K=V]...      ping · commands · run ID [PARAMS-JSON]
   state TARGET · tree [--depth N] · find TEXT · click ID | X Y [--right] [--count N] [--mod LIST]
-  drag FROM TO [--steps N] · key KEY [--mod LIST] · type TEXT · screenshot [--out PATH] [--scale S]
+  drag FROM TO [--steps N] · key KEY [--mod LIST] · type TEXT · screenshot [--out PATH] [--scale S] [--live]
   wait CONDITION [--tick N | --count N | --title T | --kind K] [--timeout-ms N]
   new-demo [--audio] · open PATH [--plugins …] [--restore-autosave true|false] · quit · call CMD [PARAMS-JSON]
   every command but launch takes --window N

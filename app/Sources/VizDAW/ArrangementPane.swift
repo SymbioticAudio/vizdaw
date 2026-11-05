@@ -146,8 +146,9 @@ struct TransportBar: View {
                     .fixedSize()
             }
             TransportReadoutsHost(document: model)
+            // No fixed height: the host reports its own (`fittingHeight`),
+            // which holds the fields and their focus-ring room.
             TransportFieldsHost(document: model)
-                .frame(height: 22)
         }
     }
 }

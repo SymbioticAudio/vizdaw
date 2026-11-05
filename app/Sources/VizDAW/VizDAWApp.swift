@@ -135,7 +135,9 @@ struct VizDAWApp: App {
             DocumentWindow(id: $id, store: appStore)
                 .themedRoot()
         }
-        .defaultSize(width: 980, height: 620)
+        // 8 pt taller than before: the transport fields row grew by their
+        // focus-ring room (plan tracks Task 1).
+        .defaultSize(width: 980, height: 628)
         .commands { AppCommands(store: appStore) }
         WindowGroup("Mixer", id: "mixer", for: UUID.self) { $id in
             MixerWindow(id: $id, store: appStore)
