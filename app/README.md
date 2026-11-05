@@ -290,8 +290,10 @@ Use the demo project (File > Create Demo Project; its window is titled
     the right edge and hold: the view scrolls and the block keeps following.
 26. Track headers: M, S and R toggle mute, solo and record arm (mute is
     audible while playing); the destination menu lists the instruments;
-    double-click a track name, type, Return renames it; "+ Add Track" adds
-    "Track 3". Light drawing: Light > On draws outlines only; Automatic
+    double-click a track name, type, Return renames it; "+ Add Track" opens
+    a menu of New Audio Track, New Instrument Track and New MIDI Track, and
+    the new track is named "Audio 1", "Inst 1" or "MIDI 1" (the number
+    counts up per kind). Light drawing: Light > On draws outlines only; Automatic
     draws filled blocks for the demo (fewer than 1 500 visible).
 27. Blocks menu > 1 Bar: Chords splits into twelve blocks; Whole Track joins
     them.
@@ -341,7 +343,7 @@ Use the demo project (File > Create Demo Project; its window is titled
 35. VoiceOver (Cmd-F5): the arrangement is a group "Arrangement"; moving
     through it reads blocks such as "Block on Chords, bars 1 to 12, 40
     events" and "Reference to Groove on Groove, bars 1 to 4"; VO-Space on a
-    block selects it. The track headers read "Chords, Built-in Piano"; the
+    block selects it. The track headers read "Instrument track, Chords, Built-in Piano"; the
     arrangement bar's controls (tool, Snap, Blocks, Light, Follow, zoom)
     are labelled.
 
@@ -1343,7 +1345,8 @@ a copy, not one you care about.
      picker: an audio track's picker lists "No Input", each device channel
      by its name ("In 1 (Mic)") and the pairs ("In 1+2"); a MIDI track's
      lists All MIDI Inputs and each keyboard, then Any Channel and
-     channels 1–16. On a new project, before any Play or arm, the audio
+     channels 1–16. On a new project (it has no tracks: add one with
+     Track › New Audio Track), before any Play or arm, the audio
      picker already lists every channel of the chosen input device by
      name, and no microphone prompt appears (5d-2 final review I4); a
      mono input lists In 1 alone. The track's input is checked; choosing
@@ -1399,8 +1402,10 @@ a copy, not one you care about.
 152. Settings › Recording: the sample rate and bit depth are what File >
      New offers first. Count-in, Pre-roll and Passes as takes are what
      the next opened document's popover starts with (open documents keep
-     theirs). Monitoring for new tracks set to Input: "+ Add Track" makes a
-     track showing I, and one Undo removes the track. The low-disk
+     theirs). Monitoring for new tracks set to Input: "+ Add Track" › New
+     Audio Track makes a track showing I, and one Undo removes the track;
+     a New Instrument Track or New MIDI Track still shows A (the setting
+     applies to audio tracks only). The low-disk
      thresholds read "Recording warns below 1 GB … and stops below 100
      MB."
 153. Save while recording (plan 5d-1 Ruling 19): in a saved project,
@@ -2299,5 +2304,6 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
      strip. At the default window size every strip of a small project fits.
 237. Delete every sequence: "No Sequence" shows a New Sequence button,
      which makes and selects one. Nowhere in the menus, headers, Settings,
-     status lines or alerts says "lane". An old project's "Lane 1" keeps
+     status lines or alerts says "lane" (a rare "unknown id" refusal still
+     prints an id such as lane5). An old project's "Lane 1" keeps
      its name.

@@ -155,7 +155,7 @@ fn layout_mut(d: &mut Document, seq: SeqId, lane: LaneId) -> Result<&mut DrumLay
     d.lane_mut(seq, lane)?
         .drum
         .as_mut()
-        .ok_or_else(|| ModelError::invalid(format!("{lane} is not a drum track")))
+        .ok_or_else(|| ModelError::invalid(format!("track {} is not a drum track", lane.0)))
 }
 
 fn find_row(d: &Document, seq: SeqId, lane: LaneId, row: DrumRowId) -> Result<DrumRow> {

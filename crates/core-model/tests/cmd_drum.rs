@@ -642,3 +642,21 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn not_a_drum_track_refusal_prints_no_lane_prefix() {
+    let e = run(
+        &kit(),
+        drum(DrumCmd::AddRow {
+            seq: SeqId(0),
+            lane: LaneId(1),
+            name: "X".into(),
+            note: 40,
+            dest: None,
+        }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("is not a drum track"), "{e}");
+    assert!(!e.contains("lane"), "{e}");
+}

@@ -31,11 +31,16 @@ fn says_lane(lit: &str) -> bool {
     let mut t = String::new();
     let mut rest = s.as_str();
     while let Some(i) = rest.find("lane.") {
-        t.push_str(&rest[..i]);
         let tail = &rest[i + 5..];
         let n = tail
             .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
             .unwrap_or(tail.len());
+        if n == 0 {
+            // "The lane." is a sentence, not an id: keep it.
+            t.push_str(&rest[..i + 5]);
+        } else {
+            t.push_str(&rest[..i]);
+        }
         rest = &tail[n..];
     }
     t.push_str(rest);
@@ -80,6 +85,7 @@ fn self_check() {
         "Lane ",
         "lane {lane} records",
         "Lane {n}",
+        "The lane.",
     ] {
         assert!(says_lane(bad), "must catch {bad:?}");
     }
@@ -101,10 +107,18 @@ fn self_check() {
 /// `#[cfg(test)]` line. Normal, raw and continued strings are read whole;
 /// character literals are skipped.
 fn literals(src: &str) -> Vec<(usize, String)> {
-    let src = match src
-        .lines()
-        .position(|l| l.trim_start().starts_with("#[cfg(test)]"))
-    {
+    // Stop at a test module only: `#[cfg(test)]` followed by a `mod` line,
+    // not a field or item attribute.
+    let lines: Vec<&str> = src.lines().collect();
+    let cut = (0..lines.len()).find(|&i| {
+        lines[i].trim_start().starts_with("#[cfg(test)]")
+            && lines.get(i + 1).is_some_and(|n| {
+                n.trim_start()
+                    .trim_start_matches("pub ")
+                    .starts_with("mod ")
+            })
+    });
+    let src = match cut {
         Some(n) => src.lines().take(n).collect::<Vec<_>>().join("\n"),
         None => src.to_string(),
     };
@@ -231,6 +245,11 @@ fn no_refusal_or_undo_text_says_lane() {
             (3, "a lane b".to_string())
         ]
     );
+    // A field attribute does not end the scan; a test module does.
+    let after_field = literals(
+        "struct S {\n    #[cfg(test)]\n    f: u8,\n}\nlet a = \"kept\";\n#[cfg(test)]\nmod tests {\n    \"dropped\";\n}",
+    );
+    assert_eq!(after_field, vec![(5, "kept".to_string())]);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
     for d in [
@@ -334,6 +353,72 @@ fn no_refusal_or_undo_text_says_lane() {
     for n in names {
         if n.contains("Lane") {
             hits.push(format!("LaneCmd name {n:?}"));
+        }
+    }
+    assert!(hits.is_empty(), "{} hits:\n{}", hits.len(), hits.join("\n"));
+}
+
+/// The `<string>…</string>` values of a plist or of a script that writes one.
+fn plist_strings(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (n, l) in text.lines().enumerate() {
+        let mut rest = l;
+        while let Some(i) = rest.find("<string>") {
+            let tail = &rest[i + 8..];
+            let Some(j) = tail.find("</string>") else {
+                break;
+            };
+            out.push((n + 1, tail[..j].to_string()));
+            rest = &tail[j + 9..];
+        }
+    }
+    out
+}
+
+#[test]
+fn plist_strings_say_track() {
+    // A planted line proves the scan catches the permission prompt's text.
+    let planted =
+        "<key>NSMicrophoneUsageDescription</key><string>VizDAW records into armed lanes.</string>";
+    let found = plist_strings(planted);
+    assert_eq!(found.len(), 1);
+    assert!(says_lane(&found[0].1), "the planted line must be caught");
+    assert!(!says_lane("org.vizdaw.project"));
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("scripts"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "sh"))
+        .collect();
+    files.sort();
+    // Any Info.plist checked in under app/.
+    fn plists(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for p in rd.map(|e| e.unwrap().path()) {
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n != ".build") {
+                    plists(&p, out);
+                }
+            } else if p.file_name().is_some_and(|n| n == "Info.plist") {
+                out.push(p);
+            }
+        }
+    }
+    plists(&root.join("app"), &mut files);
+    assert!(
+        files.iter().any(|f| f.ends_with("make-app.sh")),
+        "make-app.sh was found"
+    );
+    let mut hits = Vec::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        for (line, s) in plist_strings(&text) {
+            if says_lane(&s) {
+                hits.push(format!("{}:{line}: {s:?}", f.display()));
+            }
         }
     }
     assert!(hits.is_empty(), "{} hits:\n{}", hits.len(), hits.join("\n"));

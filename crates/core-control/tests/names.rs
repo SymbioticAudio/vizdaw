@@ -215,11 +215,16 @@ fn says_lane(lit: &str) -> bool {
     let mut t = String::new();
     let mut rest = s.as_str();
     while let Some(i) = rest.find("lane.") {
-        t.push_str(&rest[..i]);
         let tail = &rest[i + 5..];
         let n = tail
             .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
             .unwrap_or(tail.len());
+        if n == 0 {
+            // "The lane." is a sentence, not an id: keep it.
+            t.push_str(&rest[..i + 5]);
+        } else {
+            t.push_str(&rest[..i]);
+        }
         rest = &tail[n..];
     }
     t.push_str(rest);
@@ -261,6 +266,7 @@ fn no_command_text_says_lane() {
         "Lanes",
         "Lane ",
         "lane {lane} records",
+        "The lane.",
     ] {
         assert!(says_lane(bad), "must catch {bad:?}");
     }

@@ -3231,18 +3231,25 @@ fn new_project_tracks_over_the_channel() {
     let tracks = track_list(&mut app, &window);
     let kinds: Vec<&str> = tracks.iter().map(|t| t.0.as_str()).collect();
     assert_eq!(kinds, ["audio", "instrument", "midi"], "{tracks:?}");
+    let mut first_label = String::new();
     for prefix in [
         "Audio track, Audio 1",
         "Instrument track, Inst 1",
         "MIDI track, MIDI 1",
     ] {
-        wait_for_label_like(&mut app, &window, prefix, "");
+        let (_, label) = wait_for_label_like(&mut app, &window, prefix, "");
+        if first_label.is_empty() {
+            first_label = label;
+        }
     }
+    let tree = app.call("ui.tree", json!({"window": window}));
+    let first_row = find_node(&tree["nodes"], &first_label).expect("the first row");
     // A header row's separator line shows on the screenshot.
     let (bmp, s) = window_bmp(&mut app, &window, "three");
     let px = |x: f64, y: f64| bmp_pixel(&bmp, (x * s) as u32, (y * s) as u32);
     let x = f(&headers, "x") + f(&headers, "width") - 8.0;
-    let row_bottom = f(&headers, "y") + 22.0 + 48.0;
+    // The first row's bottom edge, from its own frame (not a fixed height).
+    let row_bottom = f(&first_row, "y") + f(&first_row, "height");
     let body = px(x, row_bottom - 4.0);
     let line = (-1..=1)
         .map(|d| px(x, row_bottom + d as f64 * 0.5))

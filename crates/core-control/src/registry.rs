@@ -616,7 +616,7 @@ const RECOVER_PARAMS: &[ParamSpec] = &[ParamSpec {
 
 const SET_INPUT_PARAMS: &[ParamSpec] = &[
     id_param("seq", "The track's sequence."),
-    id_param("lane", "The lane."),
+    id_param("lane", "The track."),
     ParamSpec {
         name: "kind",
         kind: ParamKind::Choice(&["none", "audio", "midi"]),
@@ -868,7 +868,7 @@ const MEASURE_RETURN_PARAMS: &[ParamSpec] = &[id_param(
 
 const SET_MONITOR_PARAMS: &[ParamSpec] = &[
     id_param("seq", "The track's sequence."),
-    id_param("lane", "The lane."),
+    id_param("lane", "The track."),
     ParamSpec {
         name: "mode",
         kind: ParamKind::Choice(&["auto", "input", "off"]),

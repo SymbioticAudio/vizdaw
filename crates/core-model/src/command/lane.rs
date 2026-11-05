@@ -182,7 +182,7 @@ impl LaneCmd {
     pub fn name(&self) -> &'static str {
         match self {
             LaneCmd::Add { .. } => "Add Track",
-            LaneCmd::Remove { .. } => "Remove Track",
+            LaneCmd::Remove { .. } => "Delete Track",
             LaneCmd::Reorder { .. } => "Reorder Track",
             LaneCmd::Duplicate { .. } => "Duplicate Track",
             LaneCmd::Rename { .. } => "Rename Track",

@@ -95,6 +95,14 @@ fn remove_reports_lane() {
     .unwrap();
     assert_eq!(a.report.removed, vec![AnyId::Lane(LaneId(0))]);
     assert!(lane_ids(&a.doc).is_empty());
+    assert_eq!(
+        Command::Lane(LaneCmd::Remove {
+            seq: SeqId(0),
+            lane: LaneId(0),
+        })
+        .name(),
+        "Delete Track"
+    );
 }
 
 #[test]
