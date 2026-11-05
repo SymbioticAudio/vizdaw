@@ -106,7 +106,7 @@ struct AudioSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 500)
-        .padding()
+        .padding(theme.spacing.l)
         .task {
             while !Task.isCancelled {
                 readDevice()
@@ -202,6 +202,6 @@ struct RecordingSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 500)
-        .padding()
+        .padding(theme.spacing.l)
     }
 }

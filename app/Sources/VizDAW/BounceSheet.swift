@@ -11,7 +11,7 @@ struct BounceSheet: View {
     @Bindable var bounce: BounceModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
             Text("Bounce").font(theme.type.title.font)
             Picker("Bounce", selection: $bounce.source) {
                 Text("Mix").tag(BounceModel.Source.mix)
@@ -98,7 +98,7 @@ struct BounceSheet: View {
                 }
             }
         }
-        .padding(16)
+        .padding(theme.spacing.l)
         .frame(width: 440)
         .onChange(of: bounce.running) { was, now in
             if was && !now { bounce.finished() }

@@ -19,7 +19,7 @@ struct ProjectBanners: View {
 
     @ViewBuilder
     private func row(_ b: ProjectBanner) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: theme.spacing.s) {
             switch b {
             case .job(let id, let kind, let progress):
                 ProgressView(value: Double(progress)).frame(width: 120)
@@ -50,8 +50,8 @@ struct ProjectBanners: View {
             }
         }
         .font(theme.type.body.font)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.horizontal, theme.spacing.m)
+        .padding(.vertical, theme.spacing.xs)
         .background(.bar)
     }
 

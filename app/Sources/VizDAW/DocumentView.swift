@@ -87,11 +87,11 @@ struct DocumentTransportBar: View {
     var body: some View {
         // One row when it fits, else the fields on a second row (Task 7
         // review I1): never cut at the default window or the minimum.
-        TransportBarLayout(spacing: 10) {
-            HStack(spacing: 10) {
+        TransportBarLayout(spacing: theme.spacing.m) {
+            HStack(spacing: theme.spacing.m) {
                 // AppKit controls and text: the channel's tree walks AppKit's
                 // elements and sees no SwiftUI button or text (final review I1).
-                HStack(spacing: 6) {
+                HStack(spacing: theme.spacing.s) {
                     AppKitButton(
                         "Return to Start", icon: .returnToStart, enabled: model.selectedSeq != nil,
                         help: "Return to Start"
@@ -117,7 +117,7 @@ struct DocumentTransportBar: View {
             // In a row narrower than they like, the fields narrow (to 72 pt).
             TransportBar(model: model)
                 .clipped()
-            HStack(spacing: 10) {
+            HStack(spacing: theme.spacing.m) {
                 AppKitLabel(
                     Formatting.device(model.transport), font: theme.type.caption.nsFont, secondary: true,
                     truncatesMiddle: true)
@@ -129,7 +129,7 @@ struct DocumentTransportBar: View {
             }
         }
         .padding(.horizontal, TransportBarRows.padding)
-        .padding(.vertical, 4)
+        .padding(.vertical, theme.spacing.xs)
         .background(.bar)
     }
 
@@ -159,12 +159,12 @@ struct DocumentTransportBar: View {
             ) { model.showsFaults.toggle() }
             .fixedSize()
             .popover(isPresented: $model.showsFaults) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: theme.spacing.xs) {
                     ForEach(Array(model.messages.enumerated()), id: \.offset) {
                         Text($0.element)
                     }
                 }
-                .padding()
+                .padding(theme.spacing.l)
                 .frame(minWidth: 240)
             }
         }
@@ -173,7 +173,7 @@ struct DocumentTransportBar: View {
     /// The main-view tabs and the pane toggles, through the View menu's
     /// commands (`ui.*`).
     private var views: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: theme.spacing.s) {
             Picker(
                 "Main View",
                 selection: Binding(

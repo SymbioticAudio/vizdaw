@@ -67,7 +67,7 @@ struct SelectModifyPanelView: View {
     let editor: EditorModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
             HStack {
                 Picker("Task", selection: Binding(get: { model.task }, set: { model.open($0, filter: model.filter) })) {
                     ForEach(PanelTask.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -115,16 +115,17 @@ struct SelectModifyPanelView: View {
             }
             StatusLine(editor: editor)
         }
-        .padding(12)
+        .padding(theme.spacing.m)
         .frame(minWidth: 580, minHeight: 320, alignment: .topLeading)
     }
 }
 
 struct SelectHalfView: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: SelectModifyModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             HStack {
                 Picker("Result", selection: $model.config.select.mode) {
                     Text("Replace the Selection").tag(SelectModeRow.select)
@@ -159,7 +160,7 @@ struct ConditionRowView: View {
     var body: some View {
         if model.config.select.conditions.indices.contains(index) {
             let c = model.config.select.conditions[index]
-            HStack(spacing: 6) {
+            HStack(spacing: theme.spacing.s) {
                 Text(ConditionKind(c.test).title).frame(width: 120, alignment: .leading)
                 Picker("", selection: Binding(get: { Comparison.of(c) }, set: { model.setComparison($0, at: index) })) {
                     ForEach(Comparison.choices(for: c.test), id: \.self) { Text($0.title).tag($0) }
@@ -279,7 +280,7 @@ struct ModifyHalfView: View {
     private var op: ModifyRow { model.config.modify.op }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             HStack {
                 Picker("Operation", selection: Binding(get: { ModifyKind(op) }, set: { model.setModifyKind($0) })) {
                     ForEach(ModifyKind.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -292,7 +293,7 @@ struct ModifyHalfView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 200)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: theme.spacing.s) {
                 specials
                 ForEach(Array(op.fields.enumerated()), id: \.offset) { j, f in
                     TextField(f.label, text: Binding(get: { model.modifyText(j) }, set: { model.setModifyText($0, j) }))

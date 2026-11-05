@@ -6,11 +6,12 @@ import VizDAWCore
 /// (spec §6.9; plan 5d-2 Task 6): the same controls as the lane header,
 /// for the lane that plays through the strip (Ruling 4).
 struct StripInputView: View {
+    @Environment(\.symbioticTheme) private var theme
     let inputs: LaneInputs
     let lane: LaneRow
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: theme.spacing.xs) {
             Menu(LaneInputs.title(lane.input)) {
                 ForEach(Array(inputs.groups(for: lane).enumerated()), id: \.offset) { _, group in
                     Section(group.title) {

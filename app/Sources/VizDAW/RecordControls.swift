@@ -16,7 +16,7 @@ struct RecordControls: View {
     let host: RecordPopoverHost
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: theme.spacing.s) {
             // AppKit buttons, so the channel's tree finds them (final review I1).
             AppKitButton(
                 record.isRecording ? "Stop Recording" : "Record",

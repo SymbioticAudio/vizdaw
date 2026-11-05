@@ -46,11 +46,12 @@ struct ArrangementHost: NSViewRepresentable {
 }
 
 struct ArrangementBar: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
     @Bindable var editor: EditorModel
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: theme.spacing.m) {
             if let parent = editor.navigation.last,
                 let name = model.snapshot.sequences.first(where: { $0.id == parent })?.name
             {
@@ -118,8 +119,8 @@ struct ArrangementBar: View {
             }
             .help("Zoom In")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 }
 
@@ -248,8 +249,8 @@ struct StatusLine: View {
                 Button("Dismiss") { editor.clearStatus() }.buttonStyle(.borderless)
             }
             .font(theme.type.caption.font)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+            .padding(.horizontal, theme.spacing.s)
+            .padding(.vertical, theme.spacing.xs)
             .background(.bar)
             .task(id: s) {
                 try? await Task.sleep(for: .seconds(6))

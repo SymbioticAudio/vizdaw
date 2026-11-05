@@ -32,7 +32,7 @@ struct KeysSettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             Toggle("Number keys always go to locators (step entry uses the keypad)", isOn: $keys.reserveNumberRow)
             if let learn = document?.learn {
                 LearnBanner(learn: learn, document: document)
@@ -77,7 +77,7 @@ struct KeysSettingsView: View {
                 Button("Reset All") { keys.resetAll() }
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 720, height: 520)
         .modifier(KeysLearnAlert(document: document))
     }

@@ -37,6 +37,7 @@ struct PollKey: Equatable {
 /// The left pane's "Channel Strip" (plan 7a Rulings 5 and 8): the strip the
 /// selected lane plays through, the inspector when it has none, or a note.
 struct LeftStripPane: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
     let docID: UUID
     @Environment(\.controlActiveState) var activeState
@@ -78,7 +79,7 @@ struct LeftStripPane: View {
                 // (Ruling 14): it needs the pane's height for its throw.
                 GeometryReader { g in
                     ChannelStrip(model: mixer, strip: strip, height: max(g.size.height - 16, 0))
-                        .padding(8)
+                        .padding(theme.spacing.s)
                         .frame(maxWidth: .infinity)
                 }
             } else {
@@ -101,6 +102,7 @@ struct LeftStripPane: View {
 /// The left pane's read-only inspector (Ruling 6): the followed lane, then
 /// the single selected audio region.
 struct InspectorPane: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: DocumentModel
     let docID: UUID
 
@@ -125,7 +127,7 @@ struct InspectorPane: View {
                         }
                     }
                 }
-                .padding(8)
+                .padding(theme.spacing.s)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -150,7 +152,7 @@ struct MarkersPane: View {
                 } label: {
                     HStack {
                         Text(row.name).lineLimit(1)
-                        Spacer(minLength: 6)
+                        Spacer(minLength: theme.spacing.s)
                         Text(row.position)
                             .font(theme.type.caption.font.monospacedDigit())
                             .foregroundStyle(.secondary)
@@ -203,13 +205,14 @@ struct PluginsPane: View {
 
 /// A pane's one-line note when it has nothing to show.
 private struct PaneNote: View {
+    @Environment(\.symbioticTheme) private var theme
     let text: String
 
     var body: some View {
         Text(text)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
-            .padding(12)
+            .padding(theme.spacing.m)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

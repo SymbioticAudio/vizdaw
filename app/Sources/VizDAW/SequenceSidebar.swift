@@ -7,6 +7,7 @@ import VizDAWCore
 /// use count per sequence; drag to reorder; duplicate, delete, comment,
 /// slot and new-from-template from the context menu and the "+" menu.
 struct SequenceSidebar: View {
+    @Environment(\.symbioticTheme) private var theme
     @Bindable var model: DocumentModel
 
     var body: some View {
@@ -34,7 +35,7 @@ struct SequenceSidebar: View {
                 .help("New Sequence")
                 Spacer()
             }
-            .padding(6)
+            .padding(theme.spacing.s)
         }
         .sheet(item: $model.commentDraft) { _ in CommentSheet(model: model) }
         .sheet(item: $model.slotDraft) { _ in KeySlotSheet(model: model) }
@@ -75,7 +76,7 @@ struct SequenceRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: theme.spacing.xxs) {
                 if model.renamingSeq == row.id {
                     TextField("Name", text: $model.renameDraft)
                         .focused($focused)
@@ -106,7 +107,7 @@ struct SequenceRow: View {
             if row.useCount > 0 {
                 Text("\(row.useCount)")
                     .font(theme.type.caption.font.monospacedDigit())
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, theme.spacing.s)
                     .background(Capsule().fill(theme.surface.raised.color))
                     .help("Used by \(row.useCount) reference(s)")
             }
@@ -130,7 +131,7 @@ struct CommentSheet: View {
     @Bindable var model: DocumentModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
             Text("Comment").font(theme.type.title.font)
             TextEditor(
                 text: Binding(
@@ -144,7 +145,7 @@ struct CommentSheet: View {
                 Button("Save") { model.commitComment() }.keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
     }
 }
 
@@ -161,7 +162,7 @@ struct KeySlotSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
             Text("Keyboard Slot").font(theme.type.title.font)
             TextField(
                 "Key (empty clears the slot)",
@@ -181,7 +182,7 @@ struct KeySlotSheet: View {
                 Button("Save") { model.commitSlot() }.keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 320)
     }
 }

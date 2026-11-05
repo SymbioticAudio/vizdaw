@@ -29,6 +29,7 @@ struct PianoRollHost: NSViewRepresentable {
 
 /// Tool, keyboard, shown lanes, edit lane, panes, row height and zoom.
 struct PianoRollBar: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: PianoRollModel
     @Bindable var editor: EditorModel
 
@@ -41,7 +42,7 @@ struct PianoRollBar: View {
     private var editLaneName: String { model.editLane.flatMap { model.row($0)?.name } ?? "—" }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: theme.spacing.m) {
             Picker("Tool", selection: $editor.tool) {
                 ForEach(Tool.allCases, id: \.self) { Text($0.title).tag($0) }
             }
@@ -94,7 +95,7 @@ struct PianoRollBar: View {
             }
             .help("Zoom In")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 }

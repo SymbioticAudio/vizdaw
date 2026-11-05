@@ -97,36 +97,36 @@ enum SourceScan {
         #"\.system\(size:\s*[0-9]"#, #"(?i)systemFont\(ofSize:"#, #"SystemFontSize"#,
     ]
 
-    /// The views 7b redraws take their gaps and padding from `theme.spacing`
-    /// (Ruling 13; final review I1): a numeric `spacing:` or `.padding(…)`
-    /// other than 0 is refused in these files.
-    static let spacingFiles = [
-        "VizDAW/ChannelStrip.swift", "VizDAW/MixerView.swift", "VizDAW/DocumentShell.swift",
-        "VizDAW/AppearanceSettingsView.swift", "VizDAW/AudioEditorPane.swift",
-    ]
+    /// Plan 7d Ruling 9: every numeric gap or padding in the app comes from
+    /// `theme.spacing`. Zero written `(?!0(?![.0-9]))` so `0.5` counts; `0`
+    /// stays (no gap is not a token).
     static let spacingPatterns = [
-        #"\.padding\((?:[^()]*,\s*)?-?(?!0\b)[0-9]"#, #"\bspacing:\s*-?(?!0\b)[0-9]"#,
+        #"\.padding\((?:[^()]*,\s*)?-?(?!0(?![.0-9]))[0-9]"#,
+        #"\bspacing:\s*-?(?!0(?![.0-9]))[0-9]"#,
+        #"minLength:\s*(?!0(?![.0-9]))[0-9]"#,
+        #"\.padding\(\s*$"#,
+        #"\.padding\(\)"#,
+        #"\.spacing\s*=\s*(?!0(?![.0-9]))[0-9]"#,
+        #"setCustomSpacing\(\s*(?!0(?![.0-9]))[0-9]"#,
     ]
 
-    @Test func theRedrawnViewsTakeTheirSpacingFromTheTheme() throws {
-        var hits: [String] = []
-        for file in Self.spacingFiles {
-            let url = SourceScan.sourcesRoot.appendingPathComponent(file)
-            let text = try String(contentsOf: url, encoding: .utf8)
-            for (i, line) in text.components(separatedBy: "\n").enumerated()
-            where try SourceScan.matches(line, patterns: Self.spacingPatterns) > 0 {
-                hits.append("\(file):\(i + 1): \(line.trimmingCharacters(in: .whitespaces))")
-            }
-        }
+    @Test func everyViewTakesItsSpacingFromTheTheme() throws {
+        let hits = try SourceScan.lines(in: Self.dirs, matching: Self.spacingPatterns)
         #expect(hits.isEmpty, "\(hits.count) spacing literals:\n\(hits.joined(separator: "\n"))")
+    }
+
+    @Test func theSpacingScanSeesEachForm() throws {
         for bad in [
             "VStack(spacing: 2) {", "HStack(alignment: .top, spacing: 4) {", ".padding(8)",
             ".padding(.horizontal, 5)", ".padding(.vertical, 3)", ".padding([.top, .bottom], 6)",
+            ".padding(0.5)", "HStack(spacing: 0.5)", "Spacer(minLength: 12)", "    .padding(", ".padding()",
+            "stack.spacing = 6", "stack.setCustomSpacing(16, after: f)",
         ] {
             #expect(try SourceScan.matches(bad, patterns: Self.spacingPatterns) == 1, "\(bad)")
         }
         for good in [
-            "VStack(spacing: 0) {", "HStack(spacing: theme.spacing.xs) {", ".padding(theme.spacing.s)",
+            "VStack(spacing: 0) {", "Spacer(minLength: 0)", ".padding(0)", "HStack(spacing: theme.spacing.xs) {",
+            ".padding(theme.spacing.s)", "stack.spacing = theme.spacing.s",
             ".padding(.top, ControlMetrics.faderCap.height / 2 - 2)", ".padding(.horizontal, -StripPadding.horizontal)",
         ] {
             #expect(try SourceScan.matches(good, patterns: Self.spacingPatterns) == 0, "\(good)")

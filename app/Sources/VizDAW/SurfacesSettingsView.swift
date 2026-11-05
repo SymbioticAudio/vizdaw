@@ -72,7 +72,7 @@ struct SurfacesSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 560)
-        .padding()
+        .padding(theme.spacing.l)
         .task {
             // Connection states change on their own (Ruling 10's 2 s check).
             while !Task.isCancelled {
@@ -108,7 +108,7 @@ struct SurfacesSettingsView: View {
     }
 
     private var addSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
             Text("Add Surface").font(theme.type.title.font)
             Form {
                 Picker("Type", selection: Binding(
@@ -126,7 +126,7 @@ struct SurfacesSettingsView: View {
                     ForEach(settings.ports.destinations, id: \.self) { Text($0).tag($0) }
                 }
                 if settings.draft?.kind == .kontrolMk3 {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: theme.spacing.xs) {
                         if let note = settings.draftNote {
                             Text(note).foregroundStyle(theme.state.warning.color)
                         }
@@ -156,7 +156,7 @@ struct SurfacesSettingsView: View {
                     .disabled((settings.draft?.input ?? "").isEmpty || (settings.draft?.output ?? "").isEmpty)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 420)
     }
 }

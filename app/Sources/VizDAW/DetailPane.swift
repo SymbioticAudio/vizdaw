@@ -45,8 +45,8 @@ struct DetailPane: View {
                         .help("Close Detail Editor")
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, theme.spacing.s)
+            .padding(.vertical, theme.spacing.xs)
             Divider()
             if state.kind == .pianoRoll {
                 PianoRollEditor(model: roll)

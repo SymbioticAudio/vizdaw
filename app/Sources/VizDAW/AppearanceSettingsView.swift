@@ -16,7 +16,7 @@ struct AppearanceSettingsView: View {
                 ForEach(prefs.themes) { t in
                     HStack(spacing: current.spacing.s) {
                         Text(t.name)
-                        Spacer(minLength: 12)
+                        Spacer(minLength: current.spacing.m)
                         ThemeSwatches(theme: t)
                     }
                     .tag(t.id)

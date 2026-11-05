@@ -40,7 +40,6 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         self.document = document
         super.init(frame: .zero)
         stack.orientation = .horizontal
-        stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
         // Narrower than its fitting width, the fields give (not the edge).
         stack.setClippingResistancePriority(.defaultLow, for: .horizontal)
@@ -63,7 +62,6 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
             fields[f] = field
             stack.addArrangedSubview(label)
             stack.addArrangedSubview(field)
-            if f == .position || f == .editOut { stack.setCustomSpacing(16, after: field) }
         }
         // Tab and Shift-Tab go round the fields in order (Edit Out and
         // Punch Out have no key of their own; Ruling 16, final review I-2).
@@ -88,6 +86,10 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     private func applyTheme() {
         let t = theme
         appearance = NSAppearance(named: t.appearance.nsAppearanceName)
+        stack.spacing = t.spacing.s
+        for (f, field) in fields where f == .position || f == .editOut {
+            stack.setCustomSpacing(t.spacing.l, after: field)
+        }
         for label in labels.values {
             label.font = t.font(t.type.label)
             label.textColor = t.label

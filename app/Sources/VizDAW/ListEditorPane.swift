@@ -56,7 +56,7 @@ struct ListBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: theme.spacing.m) {
             Menu {
                 ForEach(model.insertKinds, id: \.self) { k in
                     Button(k.title) { model.insert(k) }
@@ -104,7 +104,7 @@ struct ListBar: View {
             Spacer()
             Text("\(model.rows.count) rows").foregroundStyle(.secondary).font(theme.type.caption.font)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 }

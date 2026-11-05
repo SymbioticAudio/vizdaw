@@ -12,18 +12,18 @@ struct RelinkSheet: View {
     @Bindable var media: MediaModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
             Text("Some audio files of this project are missing or changed")
                 .font(theme.type.title.font)
             Text("Their regions stay silent until each item is relinked to its file. Each relink is one undo step.")
                 .font(theme.type.body.font)
                 .foregroundStyle(.secondary)
             List(media.relinkable, id: \.id) { r in
-                HStack(spacing: 8) {
+                HStack(spacing: theme.spacing.s) {
                     AppIcon.warning.image
                         .foregroundStyle(Color(nsColor: theme.offlineText))
                         .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: theme.spacing.xxs) {
                         Text(r.name)
                         Text("\(r.offline.map(MediaModel.reasonText) ?? "") · \(r.path)")
                             .font(theme.type.caption.font)
@@ -47,7 +47,7 @@ struct RelinkSheet: View {
                     .keyboardShortcut(.cancelAction)
             }
         }
-        .padding(16)
+        .padding(theme.spacing.l)
         .frame(width: 540)
     }
 }

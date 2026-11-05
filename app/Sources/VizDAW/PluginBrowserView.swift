@@ -12,7 +12,7 @@ struct PluginBrowserView: View {
     let pick: (PluginRefRow) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             TextField("Search", text: $model.search)
                 .textFieldStyle(.roundedBorder)
             let groups = model.groups
@@ -44,7 +44,7 @@ struct PluginBrowserView: View {
                 .frame(minHeight: 240)
             }
         }
-        .padding(10)
+        .padding(theme.spacing.m)
         .frame(width: width)
         .frame(maxWidth: width == nil ? .infinity : nil, maxHeight: width == nil ? .infinity : nil, alignment: .top)
     }

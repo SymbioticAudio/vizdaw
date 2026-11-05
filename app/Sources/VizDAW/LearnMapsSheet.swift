@@ -12,7 +12,7 @@ struct LearnMapsSheet: View {
     @Bindable var learn: LearnModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
             Text("MIDI Learn Maps").font(theme.type.title.font)
             if learn.maps.isEmpty {
                 Text("No MIDI controls are learned in this project. Choose MIDI Learn in a control's menu.")
@@ -32,7 +32,7 @@ struct LearnMapsSheet: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(theme.spacing.l)
         .frame(width: 640)
         .alert(
             learn.alert?.title ?? "",
@@ -93,8 +93,8 @@ struct LearnBanner: View {
                 Button("Cancel") { learn.cancel() }
                     .controlSize(.small)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, theme.spacing.s)
+            .padding(.vertical, theme.spacing.xs)
             .background(theme.accent.accent.color.opacity(0.15))
         }
     }

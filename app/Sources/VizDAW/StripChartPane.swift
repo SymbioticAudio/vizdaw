@@ -50,6 +50,7 @@ struct StripChartHost: NSViewRepresentable {
 /// Mode, operation, shape and its parameters, step, the lane shown and the
 /// number of rows (Plan 4d Rulings 17, 21, 22).
 struct StripChartBar: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: StripChartModel
     @Bindable var editor: EditorModel
 
@@ -72,7 +73,7 @@ struct StripChartBar: View {
 
     var body: some View {
         let s = editor.layout.stripChart
-        HStack(spacing: 10) {
+        HStack(spacing: theme.spacing.m) {
             Picker("Mode", selection: binding(\.mode)) {
                 ForEach(StripMode.allCases, id: \.self) { Text($0.title).tag($0) }
             }
@@ -128,8 +129,8 @@ struct StripChartBar: View {
             )
             .accessibilityLabel("Rows")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, theme.spacing.s)
+        .padding(.vertical, theme.spacing.xs)
     }
 
     @ViewBuilder

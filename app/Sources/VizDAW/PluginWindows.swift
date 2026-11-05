@@ -250,6 +250,7 @@ final class PluginWindowController: NSWindowController, NSWindowDelegate {
 
 /// The window's SwiftUI content.
 struct PluginWindowContent: View {
+    @Environment(\.symbioticTheme) private var theme
     let model: PluginWindowModel
     let editorHost: NSView
 
@@ -275,7 +276,7 @@ struct PluginWindowContent: View {
                 }
                 Spacer()
             }
-            .padding(6)
+            .padding(theme.spacing.s)
             .frame(height: PluginWindowController.headerHeight - 1)
             Divider()
             if let size = model.editorSize {
@@ -323,7 +324,7 @@ struct ParameterList: View {
                 .frame(width: 360, height: 120)
         } else {
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: theme.spacing.s) {
                     ForEach(model.visibleParams, id: \.id) { p in
                         HStack {
                             Text(p.name).frame(width: 110, alignment: .leading).lineLimit(1)
@@ -339,7 +340,7 @@ struct ParameterList: View {
                         }
                     }
                 }
-                .padding(10)
+                .padding(theme.spacing.m)
             }
             .frame(width: 400, height: min(420, CGFloat(model.visibleParams.count) * 30 + 30))
         }

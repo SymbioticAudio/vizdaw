@@ -34,7 +34,7 @@ struct PluginManagerView: View {
         }
         Text("Turning a plugin off unloads it from all open projects; its settings are kept.")
             .font(theme.type.caption.font).foregroundStyle(.secondary)
-            .padding(6)
+            .padding(theme.spacing.s)
         }
         .searchable(text: $model.search)
         .toolbar {

@@ -59,14 +59,14 @@ struct MediaPoolView: View {
                 .accessibilityLabel("Media items")
             Divider()
             if compact {
-                HStack(spacing: 8) {
+                HStack(spacing: theme.spacing.s) {
                     Menu("Actions") { actions }
                         .fixedSize()
                     Spacer(minLength: 0)
                 }
-                .padding(6)
+                .padding(theme.spacing.s)
             } else {
-                HStack(spacing: 8) {
+                HStack(spacing: theme.spacing.s) {
                     Button("Select Regions") { if let id = selected { media.selectUsers(id) } }
                         .disabled(selected == nil)
                     Button("Select Unused") { media.selectUnused() }
@@ -80,7 +80,7 @@ struct MediaPoolView: View {
                     Button("Delete", role: .destructive) { if let id = selected { delete(id) } }
                         .disabled(selected == nil)
                 }
-                .padding(8)
+                .padding(theme.spacing.s)
             }
         }
         .frame(minWidth: compact ? nil : 620, minHeight: compact ? nil : 280)
