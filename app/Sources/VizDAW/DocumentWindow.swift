@@ -26,7 +26,9 @@ struct DocumentWindow: View {
             if let id, let model = store.model(id) {
                 DocumentView(model: model, docID: id)
                     .background(WindowTag(kind: .document, doc: id))
-                    .background(WindowFrameKeeper(model: model))
+                    // The document goes as its window closes: SwiftUI's
+                    // onDisappear does not always come for the last window.
+                    .background(WindowFrameKeeper(model: model, onClose: { store.close(id) }))
                     .focusedSceneValue(\.documentModel, model)
                     .focusedSceneValue(\.documentID, id)
                     .task(id: PollKey(key: activeState == .key, playing: model.isPlaying || model.record.isRecording)) {
@@ -97,6 +99,8 @@ struct KeyDoc: Equatable {
 /// move or resize (plan 7a Ruling 11), in `ui.json` with the panes.
 struct WindowFrameKeeper: NSViewRepresentable {
     let model: DocumentModel
+    /// Runs when the window will close.
+    var onClose: @MainActor @Sendable () -> Void = {}
 
     final class Keeper: NSView {
         override init(frame: NSRect) {
@@ -107,6 +111,7 @@ struct WindowFrameKeeper: NSViewRepresentable {
         required init?(coder: NSCoder) { nil }
 
         var editor: EditorModel?
+        var onClose: @MainActor @Sendable () -> Void = {}
         private var applied = false
         private var observers: [NSObjectProtocol] = []
 
@@ -121,6 +126,11 @@ struct WindowFrameKeeper: NSViewRepresentable {
             // Swift 6.1: the closures capture only strong lets made here,
             // never the window or a weak self (plan 7a Global Constraints).
             let view = self
+            let close = onClose
+            observers.append(
+                NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { _ in
+                    MainActor.assumeIsolated { close() }
+                })
             let first = !applied
             let saved = first ? editor.layout.views.frame : nil
             applied = true
@@ -178,6 +188,7 @@ struct WindowFrameKeeper: NSViewRepresentable {
     func makeNSView(context: Context) -> Keeper {
         let k = Keeper()
         k.editor = model.editor
+        k.onClose = onClose
         return k
     }
 
