@@ -201,6 +201,14 @@ public final class AudioEditorCanvas: NSView, ThemedView {
         needsDisplay = true
     }
 
+    /// A canvas taken out of its window mid-drag (the selection changed
+    /// before mouse-up) may never get its `mouseUp`: the drag is cancelled
+    /// so no gesture is left open (final review M1).
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil, pressed?.began == true { cancelKey() }
+    }
+
     /// Escape: the drag is cancelled, and so is a gesture whose final edit
     /// is still pending on Busy.
     public func cancelKey() {

@@ -73,6 +73,28 @@ private func centre(_ h: AudioEditorHandle, _ m: DocumentModel) throws -> CGPoin
         #expect(m.editor.gesture == nil)
     }
 
+    /// Final review M1: a canvas taken out of its window mid-drag (the
+    /// selection changed before mouse-up) leaves no gesture open; a press
+    /// that never began cancels nothing.
+    @Test func aCanvasTornDownMidDragClosesItsGesture() throws {
+        let (f, m, c, w) = audioCanvas()
+        defer { w.close() }
+        let p = try centre(.gain, m)
+        c.press(p, clicks: 1, modifiers: [])
+        w.contentView = NSView()
+        #expect(!f.calls.contains("abort"))
+        w.contentView = c
+        c.press(p, clicks: 1, modifiers: [])
+        c.drag(CGPoint(x: p.x, y: p.y - 10), modifiers: [])
+        #expect(m.editor.gesture != nil)
+        w.contentView = NSView()
+        #expect(m.editor.gesture == nil)
+        #expect(f.calls.filter { $0 == "abort" }.count == 1)
+        #expect(!f.calls.contains("end"))
+        c.release(CGPoint(x: p.x, y: p.y - 10), modifiers: [])
+        #expect(!f.calls.contains("end"), "a late mouse-up ends nothing")
+    }
+
     @Test func aTrimDragPastTheFileStartClamps() throws {
         let (f, m, c, w) = audioCanvas()
         defer { w.close() }

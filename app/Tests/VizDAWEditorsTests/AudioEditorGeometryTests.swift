@@ -101,6 +101,15 @@ private let media: UInt64 = 96_000
         #expect(hit(tiny, left + 4, 50) == .end)
         #expect(hit(tiny, left - 3, 50) == .start)
         #expect(!AudioEditorGeometry.handles(tiny, axis: ax, in: w).contains { $0.0 == .fadeIn || $0.0 == .fadeOut })
+        #expect(hit(tiny, left + 3, 3) == .gain, "the band's top 6 points (final review M3)")
+        // 10 points wide (final review M3): below 16 points the gain band's
+        // top 6 points come before the trim edges; below it, the edges.
+        let ten = region(offset: 24_000, frames: 1000)
+        #expect(hit(ten, left + 5, 3) == .gain && hit(ten, left + 1, 5.5) == .gain && hit(ten, left + 9, 0) == .gain)
+        #expect(hit(ten, left + 2, 7) == .start && hit(ten, left + 8, 7) == .end, "the band's slack is the edges'")
+        #expect(hit(ten, left + 2, 50) == .start && hit(ten, left + 8, 50) == .end)
+        #expect(hit(ten, left - 3, 3) == .start && hit(ten, left + 13, 3) == .end, "the edges' outer slack")
+        #expect(AudioEditorGeometry.drawn(ten, axis: ax, in: w).first { $0.0 == .gain }?.1.width == 10)
 
         // 400 points wide.
         let wide = region(offset: 24_000, frames: 40_000)
@@ -119,11 +128,13 @@ private let media: UInt64 = 96_000
         let mid = region(offset: 24_000, frames: 2000)
         #expect(hit(mid, l + 10, 2) == .gain)
         #expect(!AudioEditorGeometry.handles(mid, axis: ax, in: w).contains { $0.0 == .fadeIn })
+        // Below `minWidth` the band is drawn across the whole region (Task 3 re-review M1).
+        #expect(AudioEditorGeometry.drawn(mid, axis: ax, in: w).first { $0.0 == .gain }?.1.width == 20)
         // Fades that meet: both corners stay reachable.
         let met = region(fadeIn: 20_000, fadeOut: 20_000, frames: 40_000)
         #expect(hit(met, l + 199, 2) == .fadeIn && hit(met, l + 201, 2) == .fadeOut)
         // Each drawn rect lies inside its hit area.
-        for r in [tiny, wide, mid, met] {
+        for r in [tiny, ten, wide, mid, met] {
             let hits = AudioEditorGeometry.handles(r, axis: ax, in: w)
             for (h, d) in AudioEditorGeometry.drawn(r, axis: ax, in: w) {
                 guard let area = hits.first(where: { $0.0 == h })?.1 else { continue }
@@ -135,6 +146,14 @@ private let media: UInt64 = 96_000
         #expect(AudioEditorGeometry.hit(CGPoint(x: 30, y: 20), row: region(), axis: shifted, in: self.wave) == nil)
         #expect(AudioEditorGeometry.hit(CGPoint(x: 60, y: 20), row: region(), axis: shifted, in: self.wave) == .gain)
         #expect(AudioEditorGeometry.hit(CGPoint(x: 284, y: 16), row: region(), axis: axis, in: self.wave) == nil)
+        // Clipped at the wave's right and bottom edges too (Task 3 re-review):
+        // a wave 300 wide and 8 high, the 400-point region running past it.
+        let low = CGRect(x: 0, y: 0, width: 300, height: 8)
+        let clipped = AudioEditorGeometry.handles(wide, axis: ax, in: low)
+        #expect(clipped.allSatisfy { low.contains($0.1) })
+        #expect(clipped.first { $0.0 == .gain }?.1 == CGRect(x: 240, y: 0, width: 60, height: 8))
+        #expect(clipped.first { $0.0 == .fadeIn }?.1 == CGRect(x: 231, y: 0, width: 18, height: 8))
+        #expect(!clipped.contains { $0.0 == .end || $0.0 == .fadeOut })
     }
 
     @Test func scaleMarksNeverOverlap() {

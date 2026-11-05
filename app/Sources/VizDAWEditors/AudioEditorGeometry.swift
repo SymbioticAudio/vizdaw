@@ -62,7 +62,8 @@ public enum AudioEditorGeometry {
         return CGRect(x: x0, y: wave.minY, width: max(x1 - x0, 0), height: wave.height)
     }
 
-    /// The drawn handles, in hit order: the fade corners (only when the
+    /// The drawn handles, in hit order (except below `2 × edgeWidth`: see
+    /// `handles`): the fade corners (only when the
     /// region is at least `RegionHandles.minWidth` wide), the trim edges
     /// (`min(edgeWidth, width / 2)` wide, the wave's full height) and the
     /// gain band along the top. Not clipped to the wave.
@@ -84,15 +85,21 @@ public enum AudioEditorGeometry {
     }
 
     /// The hit areas, in hit order: each drawn rect plus its slack (corners
-    /// all round, edges outward, the band below), clipped to `wave`.
+    /// all round, edges outward, the band below), clipped to `wave`. Below
+    /// `2 × edgeWidth` the edges would cover the whole region, so the gain
+    /// band's drawn rect (no slack) comes first (final review M3, Review
+    /// Focus 5: every handle of a tiny region stays reachable).
     public static func handles(_ r: EventRow, axis: FrameAxis, in wave: CGRect) -> [(AudioEditorHandle, CGRect)] {
-        drawn(r, axis: axis, in: wave).compactMap { h, d in
+        let d = drawn(r, axis: axis, in: wave)
+        let narrow = regionRect(r, axis: axis, in: wave).width < 2 * edgeWidth
+        let ordered = narrow ? d.filter { $0.0 == .gain } + d.filter { $0.0 != .gain } : d
+        return ordered.compactMap { h, d in
             var area = d
             switch h {
             case .fadeIn, .fadeOut: area = d.insetBy(dx: -slack, dy: -slack)
             case .start: area = CGRect(x: d.minX - slack, y: d.minY, width: d.width + slack, height: d.height)
             case .end: area = CGRect(x: d.minX, y: d.minY, width: d.width + slack, height: d.height)
-            case .gain: area = CGRect(x: d.minX, y: d.minY, width: d.width, height: d.height + gainSlack)
+            case .gain: if !narrow { area = CGRect(x: d.minX, y: d.minY, width: d.width, height: d.height + gainSlack) }
             }
             let clipped = area.intersection(wave)
             return clipped.isNull || clipped.isEmpty ? nil : (h, clipped)
