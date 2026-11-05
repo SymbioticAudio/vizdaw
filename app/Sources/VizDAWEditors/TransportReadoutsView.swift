@@ -45,7 +45,8 @@ public final class TransportReadoutsView: NSView, ThemedView {
     public var theme: Theme = ThemedViews.current {
         didSet {
             themeDidChange(from: oldValue)
-            applyTheme()
+            // Measuring is per theme: an unchanged one does nothing.
+            if theme != oldValue { applyTheme() }
         }
     }
 
@@ -53,7 +54,12 @@ public final class TransportReadoutsView: NSView, ThemedView {
     private(set) var boxes: [TransportReadouts.Box: BoxView] = [:]
     /// Each box's width, for the theme's fonts.
     private var widths: [TransportReadouts.Box: CGFloat] = [:]
+    /// Each box's value width (the widest text in the value font), kept
+    /// with the widths so a layout pass measures nothing.
+    private var valueWidths: [TransportReadouts.Box: CGFloat] = [:]
     private var rowHeight: CGFloat = 0
+    /// How many times a theme has been applied (a test reads it).
+    private(set) var themeApplications = 0
 
     public init(document: DocumentModel) {
         self.document = document
@@ -76,8 +82,7 @@ public final class TransportReadoutsView: NSView, ThemedView {
 
     /// The width of `box`'s value: its widest text in the value font.
     public func valueWidth(_ box: TransportReadouts.Box) -> CGFloat {
-        guard let v = boxes[box]?.value else { return 0 }
-        return measure(TransportReadouts.widest.text(box), v.font)
+        valueWidths[box] ?? 0
     }
 
     /// A text's width in `font`, with a little room each side so the label
@@ -93,6 +98,7 @@ public final class TransportReadoutsView: NSView, ThemedView {
 
     /// Fonts and colours from the theme; widths measured once per theme.
     private func applyTheme() {
+        themeApplications += 1
         let t = theme
         let look = TransportReadouts.look(t)
         appearance = NSAppearance(named: t.appearance.nsAppearanceName)
@@ -105,7 +111,9 @@ public final class TransportReadoutsView: NSView, ThemedView {
             v.title.font = caption
             v.title.textColor = look.label.nsColor
             v.title.stringValue = TransportReadouts.label(b.title, t)
-            let inner = max(measure(TransportReadouts.widest.text(b), digits), ceil(v.title.intrinsicContentSize.width))
+            let valueWidth = measure(TransportReadouts.widest.text(b), digits)
+            valueWidths[b] = valueWidth
+            let inner = max(valueWidth, ceil(v.title.intrinsicContentSize.width))
             widths[b] = inner + 2 * look.padding
             tallest = max(tallest, ceil(v.title.intrinsicContentSize.height + v.value.intrinsicContentSize.height))
         }

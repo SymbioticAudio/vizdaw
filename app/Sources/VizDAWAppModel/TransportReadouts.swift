@@ -89,7 +89,7 @@ public enum TransportReadouts {
 
     /// The widest text each box shows: its fixed width is this in its font.
     public static let widest = ReadoutTexts(
-        bar: "9999.4.960", time: "999:59.999", tempo: "999.99", signature: "15/16")
+        bar: "9999.4.960", time: "999:59.999", tempo: "999.99", signature: "255/128")
 
     /// How the boxes draw in a theme.
     public struct ReadoutLook: Equatable, Sendable {

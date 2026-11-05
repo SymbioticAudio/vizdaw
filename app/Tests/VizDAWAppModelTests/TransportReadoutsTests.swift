@@ -83,6 +83,42 @@ import VizDAWCore
         #expect(v.valueWidth(.bar) > 0)
     }
 
+    /// Final wave (B4 carry): the widest text of each box fits its value
+    /// field in every theme, so nothing is cut at the tail; the signature
+    /// takes the widest meter a file can hold, 255/128.
+    @Test func theWidestTextFitsEachValueFieldInEveryTheme() throws {
+        let doc = try DocumentModel(session: demoFake())
+        let v = TransportReadoutsView(document: doc)
+        #expect(TransportReadouts.widest.signature == "255/128")
+        for t in Theme.all {
+            v.theme = t
+            v.frame = NSRect(origin: .zero, size: v.intrinsicContentSize)
+            v.layoutSubtreeIfNeeded()
+            for b in TransportReadouts.Box.allCases {
+                let field = try #require(v.valueField(b))
+                let saved = field.stringValue
+                for text in [TransportReadouts.widest.text(b), b == .signature ? "255/128" : saved] {
+                    field.stringValue = text
+                    let need = ceil(field.intrinsicContentSize.width)
+                    #expect(field.frame.width >= need, "\(t.id) \(b) \(text): \(field.frame.width) < \(need)")
+                }
+                field.stringValue = saved
+            }
+        }
+    }
+
+    /// Final wave (B4 carry): a theme set again, unchanged, measures and
+    /// lays out nothing.
+    @Test func aThemeSetAgainUnchangedIsNotAppliedAgain() throws {
+        let v = TransportReadoutsView(document: try DocumentModel(session: demoFake()))
+        v.theme = .classicLight
+        let n = v.themeApplications
+        v.theme = .classicLight
+        #expect(v.themeApplications == n)
+        v.theme = .flat
+        #expect(v.themeApplications == n + 1)
+    }
+
     @Test func theReadoutLookFollowsTheTheme() {
         for t in Theme.all {
             let look = TransportReadouts.look(t)
