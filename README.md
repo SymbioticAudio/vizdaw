@@ -37,9 +37,9 @@ after the first release).
 
 ## Getting around
 
-- Each project has one window. The transport bar along its top has Play,
-  Loop, Record, Return to Start, Rewind and Fast Forward (click for a bar,
-  hold to wind, ⇧-click for a marker), bar, time, tempo and signature
+- Each project has one window. The transport bar along its top has Return
+  to Start, Rewind and Fast Forward (click for a bar, hold to wind,
+  ⇧-click for a marker), Play, Loop and Record, bar, time, tempo and signature
   readouts, and the transport fields.
 - Two main views: Arrange (⌃1) and Mix (⌃2). Switching keeps each view's
   panes as you left them.

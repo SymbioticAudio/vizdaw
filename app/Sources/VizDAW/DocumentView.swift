@@ -74,9 +74,10 @@ struct DocumentView: View {
 }
 
 /// The transport bar along the top of the window (plan 7a Ruling 9): an
-/// ordinary view, not a toolbar. Play, Loop and Record, the position, the
-/// transport fields, the device and (document window only) the faults
-/// button, the main-view tabs and the pane toggles. The mixer window
+/// ordinary view, not a toolbar. Return to Start, Rewind, Fast Forward,
+/// Play, Loop and Record, the readouts, the transport fields, the device
+/// and (document window only) the faults button, the main-view tabs and
+/// the pane toggles. The mixer window
 /// shows it with `showsViews` false.
 struct DocumentTransportBar: View {
     @Environment(\.symbioticTheme) private var theme

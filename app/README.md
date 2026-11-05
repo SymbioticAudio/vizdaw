@@ -905,7 +905,7 @@ preferences). Keys are the defaults unless a step changes them.
     plugin, not to VizDAW's commands (single-key transport shortcuts do
     not work while a plugin window is in front; Command keys do). A plain
     key VizDAW does not use never rings through to the main menu.
-101. Fields: P selects the Position field: type `5` and Return: the
+101. Fields: P (or one click on the field) selects the Position field's text: type `5` and Return: the
     playhead jumps to bar 5 and the keys work again; `9:3:480` (colons,
     commas or spaces separate like dots) lands on bar 9 beat 3 and a half.
     E focuses Edit In: typing `3` and pressing Return selects bar 3 in the
@@ -2018,10 +2018,7 @@ Checked by hand; the rules are tested (`AppearanceTests`, `AppIconTests`,
      Settings › Appearance › Show channel colour bars off: the strips'
      and lane headers' colour bars go, in all four places, and the
      regions keep their colour. Turn it back on: the bars return.
-212. Select the text of the Built-in Synth's level box (a single click
-     should select it all; today it puts the caret where you clicked, a
-     fault queued for the final wave, so this wording is to be revisited),
-     type `-4.2` and press Return:
+212. Click the Built-in Synth's level box, type `-4.2` and press Return:
      the fader moves down and the box reads "−4.2 dB"; Edit shows "Undo
      Set Fader", and one Undo puts it back to "0.0 dB". Type `abc` and
      press Return: the box still reads "0.0 dB" and the status line says
@@ -2210,6 +2207,10 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
      position." (or "before"). Hold ⏩: after a moment it starts to move,
      then speeds up; hold ⏪ and it stops at bar 1. While playing, each of
      these moves the playhead and playing continues from the new place.
+     While playing, ⏪ (also ⇧, and the keypad −) within a beat after a
+     bar line goes to the bar before, and further into the bar goes to
+     that bar's start: click it twice, a moment apart, to go back two
+     bars.
      While recording, click ⏪: the status line says "Stop recording
      first." and nothing moves. Put a strip in Write and play, then hold ⏩
      for a few seconds: Edit shows one "Undo Write Automation" step for the
@@ -2231,11 +2232,14 @@ the e2e `transport_jumps_readouts_and_fields_over_the_channel`.
 228. In each of the five fields (Position, Edit In, Edit Out, Punch In and
      Punch Out) and the record popover's Punch In and Punch Out, type a
      position: Return sets it; Tab sets it and moves to the next field.
-     Type again, then click a bar button, a readout or the arrangement,
+     One click on any of the five fields selects all its text, so typing
+     replaces it (in the mixer window's bar too). Type again, then click a
+     bar button, a readout or the arrangement,
      press Esc, switch to another window or app, or close the popover: the
      typing is dropped and the field shows the value in use. Type a punch
-     time in the popover and, with it still open, press R (or Record on a
-     surface): the status line says "Press Return to set the punch, or Esc
+     time in the popover and, with it still open, use Record on a surface
+     (or `vizctl run transport.record`; an R from the keyboard goes into
+     the field as an "r"): the status line says "Press Return to set the punch, or Esc
      to discard it." and nothing records. Type a punch time in the popover
      and click the bar's Record button: the same status line, nothing
      records, and the popover stays open showing what you typed; Return
