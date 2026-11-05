@@ -49,13 +49,19 @@ public enum ViewCommands {
             m.editor.setPaneShown(side, shown)
             return .done
         }
-        if id == audioEditor {
-            m.endPaneEdits()
-            choose(.bottom, .audioEditor, kind: nil, shown: true, size: nil, in: nil, m)
-            return .done
-        }
+        if id == audioEditor { return show(.audioEditor, on: .bottom, m) }
         if id == pane { return .unavailable("Set Pane needs `pane` and a `view`, `shown` or `size`.") }
         return .unavailable("VizDAW has no handler for \(id).")
+    }
+
+    /// Shows `side` on `view` in the current main view (⌘5). A view off
+    /// the pane's list is refused, as `runPane` refuses it, and changes
+    /// nothing (final review M2).
+    static func show(_ view: PaneView, on side: PaneSide, _ m: DocumentModel) -> KeyOutcome {
+        if let refused = choose(side, view, kind: nil, shown: true, size: nil, in: nil, m) {
+            return .unavailable(refused)
+        }
+        return .done
     }
 
     /// The one path that changes a pane once its arguments are checked

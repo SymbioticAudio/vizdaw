@@ -99,7 +99,7 @@ fileprivate extension ControlOutcome {
         #expect(bad.message == "audio_editor is not on the left pane's list in the arrange view.")
         #expect(doc.model.editor.layout == before)
     }
-    @Test func theAudioEditorKeyShowsTheBottomPane() {
+    @Test func theAudioEditorKeyShowsTheBottomPane() throws {
         let (doc, store) = storeDocument()
         let m = doc.model
         _ = ViewCommands.choose(.bottom, .mixer, kind: nil, shown: false, size: nil, in: nil, m)
@@ -114,6 +114,15 @@ fileprivate extension ControlOutcome {
         #expect(m.editor.layout.views.mix.bottom.view == .audioEditor)
         #expect(m.alert == nil)
         #expect(m.editor.layout.detail == detail)
+        // Final review M2: a refused choice is reported, as `runPane` does,
+        // and changes nothing.
+        m.beginRename(try #require(m.selectedSeq))
+        let kept = m.editor.layout
+        #expect(
+            ViewCommands.show(.audioEditor, on: .left, m)
+                == .unavailable("audio_editor is not on the left pane's list in the mix view."))
+        #expect(m.editor.layout == kept)
+        #expect(m.renamingSeq != nil, "a refused choice ends no edit")
     }
     @Test func uiCommandsCheckTheirArguments() {
         let (doc, store) = storeDocument()
