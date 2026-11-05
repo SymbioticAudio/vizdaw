@@ -1743,12 +1743,14 @@ impl Session {
 
     /// Moves the position to `tick`. The next bar step or wind starts
     /// from here, not from the last one's target (plan 7d controller
-    /// ruling I6).
+    /// ruling I6): the locate is remembered as their base, so a step at
+    /// once does not wait for the engine's position to catch up.
     pub fn locate(&self, tick: i64) -> Result<(), VizError> {
         self.transport_call(|| {
             let mut inner = lock(&self.inner);
-            inner.surfaces.wind = None;
-            self.locate_in(&mut inner, tick)
+            self.locate_in(&mut inner, tick)?;
+            inner.surfaces.wind = Some((crate::surfaces::now(), tick));
+            Ok(())
         })
     }
 
@@ -1806,10 +1808,11 @@ impl Session {
     }
 
     /// The end of a hold (a release, a cancel or a key-up; plan 7d
-    /// controller ruling I4): after a wind or a held key's step it locates
-    /// once where the hold got to, as one ruler click does (an open pass
-    /// lands and a new one begins); otherwise it does nothing. Returns
-    /// the tick.
+    /// controller ruling I4): after a wind or a held key's step while an
+    /// automation pass is open, it lands the pass once and begins a new
+    /// one where the transport is, as one ruler click does, but without
+    /// a second locate: a key tap while playing is one locate (review
+    /// I1). Otherwise it does nothing. Returns the tick.
     pub fn transport_hold_end(&self) -> Result<i64, VizError> {
         self.transport_call(|| {
             let mut inner = lock(&self.inner);
@@ -1817,14 +1820,20 @@ impl Session {
             let tick = match inner.surfaces.wind {
                 Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
                 _ => self
-                    .surface_where(&inner)
+                    .step_where(&inner)
                     .map_or(inner.cursor.unwrap_or(Tick::ZERO), |(_, t)| t)
                     .0
                     .clamp(0, core_editor::transport::WIND_LIMIT),
             };
-            if std::mem::take(&mut inner.wind_hold) {
-                self.locate_in(&mut inner, tick)?;
-                inner.surfaces.wind = Some((now, tick));
+            // The hold is cleared before the landing on purpose: a refused
+            // landing (Busy while recording) must not leave it owed, so
+            // `wind_hold` never stays set (fold check M-7).
+            if std::mem::take(&mut inner.wind_hold) && inner.writing.is_some() {
+                // A pass is open whenever the transport plays, so the
+                // landing does not locate again (review I1): the new pass
+                // begins where the transport is.
+                let at = host::transport_position(self.id).map_or(tick, |(_, t)| t.0);
+                self.land_at(&mut inner, at, false)?;
             }
             Ok(tick)
         })
@@ -9180,6 +9189,15 @@ impl Session {
     /// Moves the position to `tick` (the body of [`Session::locate`], also
     /// the surfaces' skips and winds; plan 5f-1 Ruling 5).
     fn locate_in(&self, inner: &mut Inner, tick: i64) -> Result<(), VizError> {
+        self.land_at(inner, tick, true)
+    }
+
+    /// [`Session::locate_in`]'s body. Lands an open pass and begins a new
+    /// one at `tick` (plan 5e-1 Ruling 23); with `relocate` the transport
+    /// moves to `tick` first. Without it (a hold's end, plan 7d review
+    /// I1) the transport stays where the hold left it, so a key tap is
+    /// one locate.
+    fn land_at(&self, inner: &mut Inner, tick: i64, relocate: bool) -> Result<(), VizError> {
         if inner.recording.is_some() {
             return Err(recording_busy());
         }
@@ -9194,7 +9212,7 @@ impl Session {
         self.apply_pending_automation(inner);
         // This landed what a hold wound over (plan 7d ruling I4).
         inner.wind_hold = false;
-        if !host::locate(self.id, Tick(tick))? {
+        if relocate && !host::locate(self.id, Tick(tick))? {
             inner.cursor = Some(Tick(tick));
             inner.cursor_seq = inner.selected_seq();
         }
@@ -9480,14 +9498,25 @@ impl Session {
         self.surface_locate(inner, to, now)
     }
 
+    /// Where a transport bar step stands with no recent target: the
+    /// transport's schedule position (not reduced by the graph latency,
+    /// review I2), else the cursor of the sequence a play would start, as
+    /// [`Session::surface_where`] chooses it.
+    fn step_where(&self, inner: &Inner) -> Option<(SeqId, Tick)> {
+        let doc = inner.doc();
+        host::transport_position(self.id)
+            .filter(|(s, _)| doc.sequence(*s).is_ok())
+            .or_else(|| Some((inner.selected_seq()?, inner.cursor.unwrap_or(Tick::ZERO))))
+    }
+
     /// Where a transport bar step or wind starts (plan 7d Ruling 3): the
-    /// sequence of [`Session::surface_where`], and the last step's or
-    /// wind's target when under [`WIND_RECENT`] ago, else its tick.
+    /// sequence of [`Session::step_where`], and the last step's or wind's
+    /// (or locate's) target when under [`WIND_RECENT`] ago, else its tick.
     fn jump_base(&self, inner: &Inner, now: Instant) -> Result<(SeqId, i64), VizError> {
         if inner.recording.is_some() {
             return Err(recording_busy());
         }
-        let (seq, tick) = self.surface_where(inner).ok_or_else(|| VizError::Model {
+        let (seq, tick) = self.step_where(inner).ok_or_else(|| VizError::Model {
             message: "select a sequence first".into(),
         })?;
         let tick = match inner.surfaces.wind {

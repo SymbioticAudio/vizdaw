@@ -47,20 +47,24 @@ fn hostile_steps_and_winds_are_refused_or_clamped() {
     }
     assert_eq!(s.transport_wind(f64::MAX).unwrap(), 1 << 50);
     assert_eq!(s.transport_step_bar(true).unwrap(), 1 << 50);
+    assert_eq!(s.transport_key_step(true).unwrap(), 1 << 50);
+    assert!(s.transport_key_step(false).unwrap() < 1 << 50);
     assert_eq!(s.transport_wind(-f64::MAX).unwrap(), 0);
+    assert_eq!(s.transport_key_step(false).unwrap(), 0);
+    assert_eq!(s.transport_hold_end().unwrap(), 0);
     s.close().unwrap();
 
     // No sequence to move in.
     let empty = Session::new_empty().unwrap();
     assert!(empty.snapshot().unwrap().sequences.is_empty());
-    assert!(matches!(
-        empty.transport_step_bar(true),
-        Err(VizError::Model { .. })
-    ));
-    assert!(matches!(
-        empty.transport_wind(1.0),
-        Err(VizError::Model { .. })
-    ));
+    let no_seq = |r: Result<i64, VizError>| match r {
+        Err(VizError::Model { message }) => assert_eq!(message, "select a sequence first"),
+        other => panic!("{other:?}"),
+    };
+    no_seq(empty.transport_step_bar(true));
+    no_seq(empty.transport_key_step(false));
+    no_seq(empty.transport_wind(1.0));
+    assert_eq!(empty.transport_hold_end().unwrap(), 0, "nothing owed");
     empty.close().unwrap();
 }
 
@@ -83,5 +87,11 @@ fn a_locate_forgets_the_wind_memory() {
     assert_eq!(s.transport_step_bar(true).unwrap(), BAR);
     s.locate(0).unwrap();
     assert_eq!(s.transport_step_bar(true).unwrap(), BAR, "not 2 bars");
+    s.locate(3 * BAR).unwrap();
+    assert_eq!(
+        s.transport_step_bar(true).unwrap(),
+        4 * BAR,
+        "from the locate"
+    );
     s.close().unwrap();
 }

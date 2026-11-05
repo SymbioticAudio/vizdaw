@@ -40,8 +40,9 @@ pub struct BindingRow {
     /// Its default keys give way to a user's binding or keyboard slot on
     /// the same key (plan 7d controller ruling I3).
     pub yields: bool,
-    /// Its keys differ from its defaults: the user's keys file or Settings
-    /// › Keys set them (plan 7d fold check I-3).
+    /// It has a key that is not one of its defaults: the user gave it one
+    /// (plan 7d fold check I-3, controller ruling after the B1 review).
+    /// Losing a default to another command does not make it customised.
     pub customised: bool,
 }
 
@@ -93,11 +94,11 @@ impl Keymap {
     /// Every command with its keys, in registry order.
     pub fn rows(&self) -> Vec<BindingRow> {
         let k = lock(&self.inner);
-        let changed = k.changed();
         COMMANDS
             .iter()
             .map(|c| {
                 let now = k.chords(c.id);
+                let defaults = default_chords(c);
                 BindingRow {
                     id: c.id.to_string(),
                     menu: c.menu.to_string(),
@@ -105,12 +106,12 @@ impl Keymap {
                     menu_item: c.menu_item,
                     step_entry: c.context == KeyContext::StepEntry,
                     keys: now.iter().map(Chord::text).collect(),
-                    defaults: default_chords(c).iter().map(Chord::text).collect(),
+                    defaults: defaults.iter().map(Chord::text).collect(),
                     menu_key: now.first().map(Chord::menu_key),
                     menu_modifiers: mods_row(now.first().map_or(0, |ch| ch.mods)),
                     learnable: crate::surfaces::bindable(c.id).is_ok(),
                     yields: c.yields,
-                    customised: changed.contains(&c.id),
+                    customised: !now.iter().all(|ch| defaults.contains(ch)),
                 }
             })
             .collect()

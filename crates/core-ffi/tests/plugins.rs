@@ -402,3 +402,33 @@ fn a_fresh_engine_for_another_document_first_releases_an_audition_note() {
         "a no longer holds the engine"
     );
 }
+
+/// Plan 7d review I2: a step starts from the schedule's position, not the
+/// heard one (the graph latency earlier), so behind a latency, stopped
+/// fast forward clicks more than the wind memory apart move a bar each.
+#[test]
+fn fast_forward_clicks_behind_a_latency_move_a_bar_each() {
+    const BAR: i64 = 61_440;
+    let _g = serial();
+    let (_d, path, song, id) = project("vizdaw.test.gain");
+    let s = open(&path);
+    s.play(song).unwrap();
+    idle_until(&s, |s| {
+        placeholder_lines(s).is_empty() && slot(s, id).status == SlotStatus::Live && playing(s)
+    });
+    s.set_param(id, u64::from(test_plugins::PARAM_LATENCY), 4_800.0)
+        .unwrap();
+    s.stop().unwrap();
+    idle_until(&s, |s| !playing(s));
+    s.locate(BAR).unwrap();
+    // The latency is in once the slot reports it and the heard position
+    // is behind the bar (4 800 frames: 3 072 ticks at 120 BPM).
+    idle_until(&s, |s| {
+        slot(s, id).latency == 4_800 && s.transport().unwrap().tick == BAR - 3_072
+    });
+    for bars in 2..=3 {
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(s.transport_step_bar(true).unwrap(), bars * BAR);
+    }
+    s.close().unwrap();
+}

@@ -256,7 +256,7 @@ fn render_path_never_allocates() {
     assert_eq!(rt_check::count() - before, 0, "allocations into the tail");
     assert!(wraps >= 1, "no loop wrap was rendered");
     assert!(
-        stops >= 1 && locates > 50,
+        stops >= 1 && locates == 10 + 50 + 1,
         "stops {stops}, locates {locates}"
     );
     assert!(tails >= 1, "the tail was never rendered");

@@ -381,3 +381,51 @@ fn rows_say_which_commands_can_be_learned_to_midi() {
     assert!(!learnable("file.open"), "a dialog that always opens");
     assert!(!learnable("surface.add"), "a surface command");
 }
+
+/// Plan 7d controller ruling (B1 review): a row is customised only when it
+/// has a key that is not one of its defaults; losing a default to another
+/// command (a keys file, its saved copy reloaded, Settings' Replace) does
+/// not make it the user's.
+#[test]
+fn a_row_is_customised_only_with_a_key_of_its_own() {
+    let ff = |k: &vizdaw_ffi::Keymap| {
+        k.rows()
+            .into_iter()
+            .find(|r| r.id == "transport.fast_forward")
+            .unwrap()
+    };
+    // b: a keys file gives Keypad+ to Loop.
+    let k = vizdaw_ffi::Keymap::new();
+    k.load_json(r#"{"vizdaw_keys": 1, "bindings": {"transport.loop": ["Keypad+"]}}"#.into())
+        .unwrap();
+    let row = ff(&k);
+    assert_eq!(row.keys, vec!["⇧."]);
+    assert!(row.yields && !row.customised, "b");
+    // c: saved and read back.
+    let saved = k.to_json();
+    let again = vizdaw_ffi::Keymap::new();
+    assert!(again.load_json(saved).unwrap().is_empty());
+    let row = ff(&again);
+    assert_eq!(row.keys, vec!["⇧."]);
+    assert!(!row.customised, "c");
+    // g: Settings' Replace takes Keypad+ for Loop.
+    let k = vizdaw_ffi::Keymap::new();
+    k.bind("transport.loop".into(), vec!["Keypad+".into()], true)
+        .unwrap();
+    assert!(!ff(&k).customised, "g");
+    // M3: a file listing exactly the defaults reads as the defaults.
+    let k = vizdaw_ffi::Keymap::new();
+    k.load_json(
+        r#"{"vizdaw_keys": 1, "bindings": {"transport.fast_forward": ["⇧.", "Keypad+"]}}"#.into(),
+    )
+    .unwrap();
+    assert!(!ff(&k).customised, "M3");
+    // A key of its own is the user's.
+    k.bind(
+        "transport.fast_forward".into(),
+        vec!["⇧.".into(), "F6".into()],
+        false,
+    )
+    .unwrap();
+    assert!(ff(&k).customised);
+}

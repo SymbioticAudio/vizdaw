@@ -20,7 +20,7 @@ use vizdaw_ffi::automation::{
     reset_automation_settings, set_automation_settings, set_automation_suspended,
 };
 use vizdaw_ffi::host::{
-    debug_hold_offline, fader_override, force_offline, reset_host, simulate_event,
+    debug_hold_offline, debug_locates, fader_override, force_offline, reset_host, simulate_event,
 };
 use vizdaw_ffi::{AutomationTargetRow as Target, EventRow, Session, VizError};
 
@@ -982,6 +982,7 @@ fn writing_demo() -> (Arc<Session>, u64) {
 fn a_hold_while_writing_lands_once() {
     let _g = serial();
     let (s, synth) = writing_demo();
+    let locates = debug_locates();
     let mut to = 0;
     for _ in 0..3 {
         to = s.transport_wind(4.0).unwrap();
@@ -995,6 +996,11 @@ fn a_hold_while_writing_lands_once() {
     assert_eq!(mode_of(&s, synth), Some(Mode::Write));
     assert!(s.automation_state().unwrap().writing);
     assert!(s.transport_hold_end().unwrap() >= to);
+    assert_eq!(
+        debug_locates() - locates,
+        3,
+        "the winds only: the landing does not locate"
+    );
     s.idle().unwrap();
     assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
     assert_eq!(mode_of(&s, synth), Some(Mode::Latch), "After Write, once");
@@ -1033,6 +1039,7 @@ fn a_hold_while_writing_lands_once() {
 fn a_held_key_lands_once_on_key_up() {
     let _g = serial();
     let (s, synth) = writing_demo();
+    let locates = debug_locates();
     let mut to = 0;
     for _ in 0..3 {
         to = s.transport_key_step(true).unwrap();
@@ -1052,6 +1059,7 @@ fn a_held_key_lands_once_on_key_up() {
     assert!(s.automation_state().unwrap().writing);
     s.transport_hold_end().unwrap();
     s.idle().unwrap();
+    assert_eq!(debug_locates() - locates, 3, "the steps only");
     stop_and_land(&s);
     assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
     s.undo().unwrap();
@@ -1061,6 +1069,29 @@ fn a_held_key_lands_once_on_key_up() {
         "one step for the key hold"
     );
     assert_eq!(mode_of(&s, synth), Some(Mode::Write));
+    s.close().unwrap();
+}
+
+/// Plan 7d review I1: a key tap while playing is one locate: the key-up
+/// lands the pass that is open whenever the transport plays, but does not
+/// locate again (which would play the time since the key-down twice).
+#[test]
+fn a_key_tap_while_playing_locates_once() {
+    let _g = serial();
+    let (s, song) = demo();
+    s.play(song).unwrap();
+    wait_until("a beat", || {
+        s.idle().unwrap();
+        tick(&s) > Q
+    });
+    assert!(s.automation_state().unwrap().writing, "a pass is open");
+    let locates = debug_locates();
+    let to = s.transport_key_step(true).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(s.transport_hold_end().unwrap() >= to);
+    assert_eq!(debug_locates() - locates, 1, "the key-down's only");
+    assert!(s.automation_state().unwrap().writing, "a new pass");
+    stop_and_land(&s);
     s.close().unwrap();
 }
 

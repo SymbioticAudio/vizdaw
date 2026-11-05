@@ -2843,6 +2843,16 @@ pub fn stop(owner: u64) -> Result<(), VizError> {
     }
 }
 
+/// Engine locates sent through [`locate`] (read by a test hook).
+static LOCATES: AtomicU64 = AtomicU64::new(0);
+
+/// How many engine locates [`locate`] has sent (test hook, plan 7d
+/// review I1).
+#[cfg(feature = "test-hooks")]
+pub fn debug_locates() -> u64 {
+    LOCATES.load(Ordering::Relaxed)
+}
+
 /// Moves `owner`'s transport. Returns false when `owner` does not hold
 /// the engine (the caller keeps the position for its next Play).
 pub fn locate(owner: u64, tick: Tick) -> Result<bool, VizError> {
@@ -2850,6 +2860,7 @@ pub fn locate(owner: u64, tick: Tick) -> Result<bool, VizError> {
     match slot.as_mut() {
         Some(h) if h.owner == owner => {
             h.engine.locate_tick(tick)?;
+            LOCATES.fetch_add(1, Ordering::Relaxed);
             Ok(true)
         }
         _ => Ok(false),
@@ -3575,6 +3586,16 @@ pub fn position(owner: u64) -> Option<(SeqId, Tick)> {
         .as_ref()
         .filter(|h| h.owner == owner)
         .map(|h| (h.seq, h.engine.position_tick()))
+}
+
+/// Where `owner`'s transport is in the schedule, not reduced by the
+/// graph latency, when it holds the engine: where a transport bar step
+/// starts (plan 7d review I2), so a latency never holds it back.
+pub fn transport_position(owner: u64) -> Option<(SeqId, Tick)> {
+    lock_host()
+        .as_ref()
+        .filter(|h| h.owner == owner)
+        .map(|h| (h.seq, h.engine.transport_tick()))
 }
 
 /// `owner`'s input, when it holds the engine.
