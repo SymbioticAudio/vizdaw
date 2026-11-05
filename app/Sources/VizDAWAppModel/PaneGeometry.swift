@@ -143,6 +143,16 @@ public enum PaneGeometry {
         return min(max(start + signed, range.lowerBound), upper)
     }
 
+    /// The frame a new document window opens at when it has no saved one
+    /// (owner, 2026-11-05): 1440×900, or 90% of the screen's visible frame
+    /// where that is smaller, each side on its own, centred in the visible
+    /// frame. Never under the window's own minimum, 700×450.
+    public static func defaultDocumentFrame(visible: CGRect) -> CGRect {
+        let w = max(min(1440, visible.width * 0.9), 700)
+        let h = max(min(900, visible.height * 0.9), 450)
+        return CGRect(x: visible.midX - w / 2, y: visible.midY - h / 2, width: w, height: h)
+    }
+
     /// A saved `[x, y, width, height]` if it is four finite numbers, at least 700×450,
     /// shows at least 100×100 on some screen and has the strip of its title bar
     /// (the top 30 pt) on a screen, so it can be dragged (final review n1);

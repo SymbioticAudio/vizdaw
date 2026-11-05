@@ -316,6 +316,12 @@ public final class DocumentModel {
         return lanes.first { $0.id == ref.lane }
     }
 
+    /// Starts renaming track (seq, lane) in the arrangement's header on
+    /// screen, and answers whether it did: installed by the `LaneHeaderView`
+    /// in a window and cleared when it leaves (plan tracks Ruling 5, I11).
+    /// Nil while no header shows (Mix, or another main view).
+    @ObservationIgnored public var beginTrackRename: (@MainActor (UInt64, UInt64) -> Bool)?
+
     /// The list default filter and columns (set by `DocumentStore`).
     @ObservationIgnored public var listPreferences = ListPreferences()
     /// One list editor per slot, while that slot shows a list.

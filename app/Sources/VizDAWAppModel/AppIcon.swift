@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import SymbioticIcons
 import SymbioticTokens
+import VizDAWCore
 
 /// Which SymbioticAudio set an AppIcon case draws from (final fix wave B).
 public enum IconSource: Sendable, Hashable {
@@ -49,6 +50,18 @@ public enum AppIcon: CaseIterable, Sendable {
     case play, stop, midiLearn
     // The transport bar's jumps.
     case returnToStart, rewind, fastForward
+    // The track-kind icons (plan tracks Ruling 6): symbiotic-design 0.2.2 has
+    // no track-kind roles, so each borrows one.
+    case audioTrack, instrumentTrack, midiTrack
+
+    /// The icon of a track of `kind`.
+    public static func track(_ kind: TrackKindRow) -> AppIcon {
+        switch kind {
+        case .audio: .audioTrack
+        case .instrument: .instrumentTrack
+        case .midi: .midiTrack
+        }
+    }
 
     public var role: IconRole {
         switch self {
@@ -97,6 +110,9 @@ public enum AppIcon: CaseIterable, Sendable {
         case .returnToStart: .transportReturnToZero
         case .rewind: .transportRewind
         case .fastForward: .transportFastForward
+        case .audioTrack: .inputAudio
+        case .instrumentTrack: .slotSource
+        case .midiTrack: .controlMidiLearn
         }
     }
 
@@ -107,11 +123,13 @@ public enum AppIcon: CaseIterable, Sendable {
     public var source: IconSource {
         switch self {
         case .fault, .faultIndicator, .remove, .zoomIn, .zoomOut, .audio, .pianoRoll, .record, .armed, .recording,
-            .settingsKeys, .settingsAudio, .settingsRecording, .play, .stop, .returnToStart, .rewind, .fastForward:
+            .settingsKeys, .settingsAudio, .settingsRecording, .play, .stop, .returnToStart, .rewind, .fastForward,
+            .audioTrack:
             .angular
         case .warning, .problem, .info, .mixer, .add, .confirm, .close, .drumGrid, .list, .muted, .loop, .split,
             .empty, .pencil, .diskSlow, .expand, .collapse, .menuDown, .leftPane, .bottomPane, .rightPane,
-            .settingsEditing, .settingsAutomation, .settingsSurfaces, .settingsAppearance, .eq, .midiLearn:
+            .settingsEditing, .settingsAutomation, .settingsSurfaces, .settingsAppearance, .eq, .midiLearn,
+            .instrumentTrack, .midiTrack:
             .glyph
         }
     }
@@ -167,6 +185,9 @@ public enum AppIcon: CaseIterable, Sendable {
         case .returnToStart: "backward.end.fill"
         case .rewind: "backward.fill"
         case .fastForward: "forward.fill"
+        case .audioTrack: "waveform"
+        case .instrumentTrack: "pianokeys"
+        case .midiTrack: "pianokeys.inverse"
         }
     }
 

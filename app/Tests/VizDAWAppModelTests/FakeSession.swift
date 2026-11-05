@@ -853,6 +853,8 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     var newTracks: [(seq: UInt64, kind: TrackKindRow, after: UInt64?)] = []
     var duplicated: [(seq: UInt64, lane: UInt64)] = []
+    /// What `duplicateTrack` refuses with (the core's refusal of a return track).
+    var duplicateError: VizError?
     /// A new track: a row with the given kind appended (below `after`
     /// when it names a row), `midiDest == nil` for MIDI.
     func newTrack(seq: UInt64, kind: TrackKindRow, after: UInt64?) throws -> DocSnapshot {
@@ -870,6 +872,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
 
     func duplicateTrack(seq: UInt64, lane id: UInt64) throws -> DocSnapshot {
+        if let e = duplicateError { throw e }
         duplicated.append((seq, id))
         guard var rows = laneTable[seq], let i = rows.firstIndex(where: { $0.id == id }) else {
             throw VizError.Model(message: "unknown id lane\(id)")

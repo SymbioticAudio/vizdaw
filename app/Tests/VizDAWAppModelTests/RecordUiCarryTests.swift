@@ -41,9 +41,9 @@ import VizDAWCore
         f.laneTable[3]?[1].monitor = .input
         let m = try DocumentModel(session: f)
         let h = LaneHeaderView(document: m)
-        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1)).first { $0.0 == .monitor }?.1)
+        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1), theme: h.theme).first { $0.0 == .monitor }?.1)
         #expect(h.toolTipText(at: CGPoint(x: r.midX, y: r.midY)) == LaneInputs.help(.input))
-        let name = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1)).first { $0.0 == .name }?.1)
+        let name = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1), theme: h.theme).first { $0.0 == .name }?.1)
         #expect(h.toolTipText(at: CGPoint(x: name.midX, y: name.midY)) == nil)
     }
 
@@ -74,7 +74,7 @@ import VizDAWCore
         let m = try DocumentModel(session: f)
         m.select(3)
         let h = LaneHeaderView(document: m)
-        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1)).first { $0.0 == .monitor }?.1)
+        let r = try #require(LaneHeaderLayout.controls(rowTop: h.rowTop(1), theme: h.theme).first { $0.0 == .monitor }?.1)
         let at = h.convert(NSPoint(x: r.midX, y: r.midY), to: nil)
         let e = try #require(
             NSEvent.mouseEvent(
@@ -99,7 +99,7 @@ import VizDAWCore
         m.select(3)
         let h = LaneHeaderView(document: m)
         h.frame = NSRect(x: 0, y: 0, width: LaneHeaderLayout.width, height: 300)
-        func monitorRect(_ i: Int) -> CGRect? { LaneHeaderLayout.controls(rowTop: h.rowTop(i)).first { $0.0 == .monitor }?.1 }
+        func monitorRect(_ i: Int) -> CGRect? { LaneHeaderLayout.controls(rowTop: h.rowTop(i), theme: h.theme).first { $0.0 == .monitor }?.1 }
         h.layout()
         let visible = Int((300 / h.laneHeight).rounded(.up)) + 1
         #expect(!h.toolTipRects.isEmpty && h.toolTipRects.count <= visible, "\(h.toolTipRects.count) rects")

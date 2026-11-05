@@ -124,6 +124,24 @@ let optMod = ModifiersRow(shift: false, control: false, option: true, command: f
         #expect(k.message == "Skipped: no command \"transport.not_a_command\"")
     }
 
+    /// Risk 4: a keys file that gives ⌥⌘A to another command keeps it
+    /// there; the new Track command starts unbound on that key, so the menu
+    /// shows no shortcut for it.
+    @Test func aSavedBindingKeepsItsKeyOverTheTrackDefaults() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vzk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let k = KeyBindings(defaults: MemoryDefaults())
+        #expect(k.row("track.new_audio")?.menuKey == "a", "unbound elsewhere: the default")
+        let path = dir.appendingPathComponent("mine.vizkeys")
+        try Data(#"{"vizdaw_keys": 1, "bindings": {"transport.loop": ["⌥⌘A"]}}"#.utf8).write(to: path)
+        let mine = KeyBindings(defaults: MemoryDefaults())
+        try mine.load(from: path.path)
+        #expect(mine.row("track.new_audio")?.menuKey == nil)
+        let loop = try #require(mine.row("transport.loop"))
+        #expect(loop.menuKey == "a" && loop.menuModifiers.option && loop.menuModifiers.command)
+    }
+
     @Test func aSlotThatClashesNamesTheCommand() {
         let k = KeyBindings(defaults: MemoryDefaults())
         #expect(k.slotClash(KeySlotRow(key: "s", modifiers: 8)) == "Save")

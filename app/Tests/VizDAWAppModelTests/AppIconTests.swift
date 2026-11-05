@@ -3,6 +3,7 @@ import Foundation
 import SymbioticIcons
 import SymbioticTokens
 import Testing
+import VizDAWCore
 @testable import VizDAWAppModel
 
 /// Stands in for SymbioticBrand (no test target links it): a filled square
@@ -43,11 +44,12 @@ private struct SquareBrand: IconProvider {
         let glyph: [AppIcon] = [
             .warning, .problem, .info, .mixer, .add, .confirm, .close, .drumGrid, .list, .muted, .loop, .split,
             .empty, .pencil, .diskSlow, .expand, .collapse, .menuDown, .leftPane, .bottomPane, .rightPane,
-            .settingsEditing, .settingsAutomation, .settingsSurfaces, .eq, .midiLearn,
+            .settingsEditing, .settingsAutomation, .settingsSurfaces, .eq, .midiLearn, .instrumentTrack, .midiTrack,
         ]
         let angular: [AppIcon] = [
             .fault, .faultIndicator, .remove, .zoomIn, .zoomOut, .audio, .pianoRoll, .record, .armed, .recording,
             .settingsKeys, .settingsAudio, .settingsRecording, .play, .stop, .returnToStart, .rewind, .fastForward,
+            .audioTrack,
         ]
         for i in glyph { #expect(i.source == .glyph, "\(i)") }
         for i in angular { #expect(i.source == .angular, "\(i)") }
@@ -58,6 +60,23 @@ private struct SquareBrand: IconProvider {
         #expect(listed.count == glyph.count + angular.count + 1, "a case is in both lists")
         #expect(listed == Set(AppIcon.allCases))
         #expect(IconSource.glyph.set == .standard && IconSource.angular.set == .angular)
+    }
+
+    /// Ruling 6: symbiotic-design 0.2.2 has no track-kind roles, so each
+    /// kind borrows one, and `track(_:)` picks by kind.
+    @Test func theTrackKindIconsBorrowTheirRoles() throws {
+        let cases: [(AppIcon, IconRole, IconSource, TrackKindRow)] = [
+            (.audioTrack, .inputAudio, .angular, .audio), (.instrumentTrack, .slotSource, .glyph, .instrument),
+            (.midiTrack, .controlMidiLearn, .glyph, .midi),
+        ]
+        for (icon, role, source, kind) in cases {
+            #expect(icon.role == role && icon.source == source, "\(icon)")
+            #expect(AppIcon.track(kind) == icon)
+            for resolver in [Self.none, Self.brand] {
+                let img = icon.nsImage(accessibilityDescription: nil, size: 16, theme: .classicLight, resolver: resolver)
+                #expect(try alpha(img).filter { $0 > 0 }.count > 8, "\(icon): blank")
+            }
+        }
     }
 
     /// The three transport jump icons are angular, on 0.2.2's roles, and

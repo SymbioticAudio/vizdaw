@@ -119,6 +119,27 @@ import Testing
         #expect(none.size(.left) == nil && none.size(.bottom) == nil && none.size(.right) == nil)
     }
 
+    /// Owner carry, 2026-11-05: a new document window opens at 1440×900 or
+    /// 90% of the screen's visible frame, whichever is smaller, centred.
+    @Test func aNewWindowOpensAtMostAt1440By900AndCentred() {
+        let big = CGRect(x: 0, y: 0, width: 2560, height: 1415)
+        #expect(PaneGeometry.defaultDocumentFrame(visible: big) == CGRect(x: 560, y: 257.5, width: 1440, height: 900))
+        // A laptop: 90% of the visible frame (the menu bar and Dock are out of it).
+        let laptop = CGRect(x: 0, y: 40, width: 1512, height: 900)
+        let l = PaneGeometry.defaultDocumentFrame(visible: laptop)
+        #expect(abs(l.width - 1360.8) < 1e-9 && abs(l.height - 810) < 1e-9)
+        #expect(abs(l.minX - 75.6) < 1e-9 && abs(l.minY - 85) < 1e-9)
+        // Each side is capped alone, on a second display too.
+        let wide = CGRect(x: 1600, y: 0, width: 3000, height: 800)
+        #expect(
+            PaneGeometry.defaultDocumentFrame(visible: wide) == CGRect(x: 2380, y: 40, width: 1440, height: 720))
+        // Never under the window's own minimum.
+        let tiny = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let r = PaneGeometry.defaultDocumentFrame(visible: tiny)
+        #expect(r.width >= 700 && r.height >= 450)
+        #expect(PaneGeometry.defaultDocumentFrame(visible: .zero).width >= 700)
+    }
+
     @Test func aSavedFrameOffEveryScreenIsIgnored() {
         let screens = [CGRect(x: 0, y: 0, width: 1512, height: 982)]
         #expect(PaneGeometry.sanitizedFrame([100, 100, 1200, 800], screens: screens)

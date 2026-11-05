@@ -25,7 +25,10 @@ struct ArrangementPane: View {
             if model.selectedSeq == nil {
                 ContentUnavailableView(
                     "No Sequence", icon: .list,
-                    description: Text("Choose File > Create Demo Project to try VizDAW."))
+                    description: Text("Add a sequence to arrange tracks in.")
+                ) {
+                    Button("New Sequence") { model.newSequence(.empty) }
+                }
             } else {
                 ArrangementHost(document: model)
             }

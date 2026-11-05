@@ -139,6 +139,16 @@ struct MixerBar: View {
                 .fixedSize()
             AppKitButton("Add Bus", help: "Add a bus") { model.addBus() }
                 .fixedSize()
+            Menu("Add Track") {
+                Button("New Audio Track") { TrackCommands.performFromMenu(TrackCommands.newAudio, model.document) }
+                Button("New Instrument Track") {
+                    TrackCommands.performFromMenu(TrackCommands.newInstrument, model.document)
+                }
+                Button("New MIDI Track") { TrackCommands.performFromMenu(TrackCommands.newMidi, model.document) }
+            }
+            .fixedSize()
+            .disabled(model.document.selectedSeq == nil)
+            .help(model.document.selectedSeq == nil ? "Select a sequence first" : "Add a track")
             Menu("Instruments") {
                 Button("New Plugin Instrument…") { model.openBrowser(.instrument, in: placement) }
                 Divider()

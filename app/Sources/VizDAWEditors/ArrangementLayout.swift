@@ -1,4 +1,5 @@
 import CoreGraphics
+import SymbioticTokens
 import VizDAWAppModel
 import VizDAWCore
 
@@ -163,6 +164,15 @@ public enum ArrangementA11y {
         }
     }
 
+    /// The kind a header's label starts with (Ruling 6).
+    public static func kindName(_ kind: TrackKindRow) -> String {
+        switch kind {
+        case .audio: "Audio track"
+        case .instrument: "Instrument track"
+        case .midi: "MIDI track"
+        }
+    }
+
     /// `returnOf`: the synth whose return the lane records (its badge).
     public static func header(_ lane: LaneRow, returnOf: String? = nil) -> String {
         var parts = [lane.name, lane.destination ?? "no destination"]
@@ -181,17 +191,26 @@ public enum ArrangementA11y {
 }
 
 /// The clickable parts of a lane header (Plan Ruling 24; the monitor
-/// button and the input picker, plan 5d-2 Task 5).
+/// button and the input picker, plan 5d-2 Task 5; the kind icon, plan
+/// tracks Ruling 6).
 public enum HeaderControl: Equatable, Sendable {
-    case name, monitor, mute, solo, arm, destination, input
+    case kind, name, monitor, mute, solo, arm, destination, input
 }
 
 public enum LaneHeaderLayout {
     public static let width: CGFloat = 200
 
-    public static func controls(rowTop y: CGFloat) -> [(HeaderControl, CGRect)] {
-        [
-            (.name, CGRect(x: 8, y: y + 4, width: 101, height: 18)),
+    /// The row's controls. The kind icon is a square of the theme's label
+    /// size at x 8, centred on the name's line; the name starts
+    /// `theme.spacing.xs` after it and ends where it always did (x 109), so
+    /// the monitor button stays at x 113.
+    @MainActor
+    public static func controls(rowTop y: CGFloat, theme: Theme = ThemedViews.current) -> [(HeaderControl, CGRect)] {
+        let side = theme.type.label.size
+        let nameX = 8 + side + theme.spacing.xs
+        return [
+            (.kind, CGRect(x: 8, y: y + 13 - side / 2, width: side, height: side)),
+            (.name, CGRect(x: nameX, y: y + 4, width: 109 - nameX, height: 18)),
             (.monitor, CGRect(x: 113, y: y + 4, width: 18, height: 18)),
             (.mute, CGRect(x: 134, y: y + 4, width: 18, height: 18)),
             (.solo, CGRect(x: 155, y: y + 4, width: 18, height: 18)),
@@ -226,7 +245,8 @@ public enum LaneHeaderLayout {
         CGRect(x: 1, y: y + 2, width: 4, height: max(laneHeight - 4, 0))
     }
 
-    public static func control(at p: CGPoint, rowTop: CGFloat) -> HeaderControl? {
-        controls(rowTop: rowTop).first { $0.1.contains(p) }?.0
+    @MainActor
+    public static func control(at p: CGPoint, rowTop: CGFloat, theme: Theme = ThemedViews.current) -> HeaderControl? {
+        controls(rowTop: rowTop, theme: theme).first { $0.1.contains(p) }?.0
     }
 }

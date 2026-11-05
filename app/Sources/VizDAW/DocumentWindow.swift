@@ -121,7 +121,8 @@ struct WindowFrameKeeper: NSViewRepresentable {
             // Swift 6.1: the closures capture only strong lets made here,
             // never the window or a weak self (plan 7a Global Constraints).
             let view = self
-            let saved = applied ? nil : editor.layout.views.frame
+            let first = !applied
+            let saved = first ? editor.layout.views.frame : nil
             applied = true
             for name in [NSWindow.didMoveNotification, NSWindow.didEndLiveResizeNotification] {
                 observers.append(
@@ -134,7 +135,19 @@ struct WindowFrameKeeper: NSViewRepresentable {
                         }
                     })
             }
-            guard let saved else { return }
+            guard let saved else {
+                // No saved frame: a new window opens at the default size,
+                // centred, on the screen it is on (owner, 2026-11-05). Only
+                // its first appearance: a later move into a window is not.
+                guard first else { return }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let w = view.window, let screen = w.screen ?? NSScreen.main else { return }
+                        w.setFrame(PaneGeometry.defaultDocumentFrame(visible: screen.visibleFrame), display: true)
+                    }
+                }
+                return
+            }
             // On the next turn, so SwiftUI's own restoration does not
             // overwrite it.
             DispatchQueue.main.async {

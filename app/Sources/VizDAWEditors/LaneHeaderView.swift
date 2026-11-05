@@ -5,8 +5,9 @@ import VizDAWAppModel
 import VizDAWCore
 
 /// Lane headers beside the arrangement (Plan Ruling 24): name (double-click
-/// renames), monitor/mute/solo/arm, destination and input menus, the input
-/// meter (plan 5d-2 Task 5), and an "Add Lane" row.
+/// renames), the kind icon, monitor/mute/solo/arm, destination and input menus,
+/// the input meter (plan 5d-2 Task 5), and an "Add Track" row that opens a
+/// menu of the three kinds.
 @MainActor
 public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwner, ThemedView {
     /// The theme it draws in (plan 7b Ruling 12): its host, or the themed
@@ -32,6 +33,8 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     /// The lane being renamed, fixed when editing began (the shown
     /// sequence may change before it ends).
     private(set) var renaming: (seq: UInt64, lane: UInt64, name: String, field: NSTextField)?
+    /// This header installed `document.beginTrackRename`.
+    private var installedRename = false
     /// VoiceOver children, kept so their identity is stable between queries.
     private var a11yElements: [CanvasElement] = []
 
@@ -57,7 +60,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
     /// The monitor button's tooltip: `LaneInputs.help` for its mode.
     func toolTipText(at p: CGPoint) -> String? {
         guard let i = row(at: p.y), document.lanes.indices.contains(i),
-            LaneHeaderLayout.control(at: p, rowTop: rowTop(i)) == .monitor
+            LaneHeaderLayout.control(at: p, rowTop: rowTop(i), theme: theme) == .monitor
         else { return nil }
         return LaneInputs.help(document.lanes[i].monitor)
     }
@@ -98,7 +101,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         let hi = Int(max(0, min(last, CGFloat(n - 1))))
         guard lo <= hi else { return [] }
         return (lo...hi).compactMap { i in
-            LaneHeaderLayout.controls(rowTop: rowTop(i)).first { $0.0 == .monitor }?.1
+            LaneHeaderLayout.controls(rowTop: rowTop(i), theme: theme).first { $0.0 == .monitor }?.1
         }.filter { $0.maxY > 0 && $0.minY < bounds.height }
     }
 
@@ -175,8 +178,9 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         for (i, lane) in document.lanes.enumerated() {
             let top = rowTop(i)
             guard top + laneHeight >= dirty.minY, top <= dirty.maxY else { continue }
-            for (control, r) in LaneHeaderLayout.controls(rowTop: top) {
+            for (control, r) in LaneHeaderLayout.controls(rowTop: top, theme: theme) {
                 switch control {
+                case .kind: kindIcon(AppIcon.track(lane.kind), in: r)
                 case .name:
                     NSString(string: lane.name).draw(
                         in: r,
@@ -219,6 +223,20 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         NSRect(x: 0, y: 0, width: bounds.width, height: EditorCanvas.rulerHeight).fill()
         theme.separatorLine.setFill()
         NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill()
+    }
+
+    /// `icon` in the secondary label colour: a template image, so it is
+    /// filled with the colour where it has ink.
+    private func kindIcon(_ icon: AppIcon, in r: CGRect) {
+        let image = icon.nsImage(accessibilityDescription: nil, size: r.width, theme: theme)
+        let colour = theme.secondaryLabel
+        let tinted = NSImage(size: r.size, flipped: false) { rect in
+            image.draw(in: rect)
+            colour.set()
+            rect.fill(using: .sourceIn)
+            return true
+        }
+        tinted.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     }
 
     /// Secondary text on one line, cut by `mode`.
@@ -268,13 +286,11 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         guard let seq = document.selectedSeq, let i = row(at: p.y) else { return }
         let lanes = document.lanes
         guard i < lanes.count else {
-            if i == lanes.count {
-                editor.edit(.lane(edit: .add(seq: seq, name: "Track \(lanes.count + 1)", index: nil)))
-            }
+            if i == lanes.count { addTrackClicked(e, at: p) }
             return
         }
         let lane = lanes[i]
-        switch LaneHeaderLayout.control(at: p, rowTop: rowTop(i)) {
+        switch LaneHeaderLayout.control(at: p, rowTop: rowTop(i), theme: theme) {
         case .monitor: document.inputs.cycleMonitor(lane)
         case .input: inputMenu(seq: seq, lane: lane).popUp(positioning: nil, at: p, in: self)
         case .mute: flags(seq, lane.id, mute: !lane.mute)
@@ -282,8 +298,33 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
         case .arm: flags(seq, lane.id, arm: !lane.arm)
         case .destination: destinationMenu(seq: seq, lane: lane, at: p)
         case .name where e.clickCount >= 2: beginRename(lane, seq: seq, row: i)
-        case .name, nil: break
+        case .name, .kind, nil: break
         }
+    }
+
+    /// A click on the "+ Add Track" row: the menu of the three kinds. The
+    /// control channel's click opens none (a menu tracks modally); the
+    /// status line names the commands to use instead (Ruling 5).
+    func addTrackClicked(_ e: NSEvent, at p: CGPoint) {
+        guard !ControlUI.isChannel(e) else {
+            editor.status = TrackCommands.addTrackOnChannel
+            return
+        }
+        addTrackMenu().popUp(positioning: nil, at: p, in: self)
+    }
+
+    /// New Audio, Instrument and MIDI Track, each as the Track menu runs it.
+    func addTrackMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let doc = document
+        for (title, id) in [
+            ("New Audio Track", TrackCommands.newAudio), ("New Instrument Track", TrackCommands.newInstrument),
+            ("New MIDI Track", TrackCommands.newMidi),
+        ] {
+            menu.addItem(MenuAction(title: title) { TrackCommands.performFromMenu(id, doc) }.item(checked: false))
+        }
+        return menu
     }
 
     /// Right-click or Control-click on a lane: its menu.
@@ -417,7 +458,7 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
 
     func beginRename(_ lane: LaneRow, seq: UInt64, row i: Int) {
         renaming?.field.removeFromSuperview()
-        guard let r = LaneHeaderLayout.controls(rowTop: rowTop(i)).first(where: { $0.0 == .name })?.1 else { return }
+        guard let r = LaneHeaderLayout.controls(rowTop: rowTop(i), theme: theme).first(where: { $0.0 == .name })?.1 else { return }
         let field = NSTextField(string: lane.name)
         field.frame = r.insetBy(dx: -2, dy: -2)
         field.delegate = self
@@ -466,6 +507,21 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             renaming = nil
             editor.endTextEditing("laneName")
         }
+        // The Track menu's Rename starts here while this header is on screen
+        // (Ruling 5, I11), and has nowhere to go once it leaves.
+        if window != nil {
+            document.beginTrackRename = { [weak self] seq, lane in
+                guard let self, self.document.selectedSeq == seq,
+                    let i = self.document.lanes.firstIndex(where: { $0.id == lane })
+                else { return false }
+                self.beginRename(self.document.lanes[i], seq: seq, row: i)
+                return self.renaming != nil
+            }
+            installedRename = true
+        } else if installedRename {
+            document.beginTrackRename = nil
+            installedRename = false
+        }
     }
 
     public override func scrollWheel(with e: NSEvent) {
@@ -488,13 +544,22 @@ public final class LaneHeaderView: NSView, NSTextFieldDelegate, NSViewToolTipOwn
             let r = NSRect(x: 0, y: rowTop(i), width: bounds.width, height: laneHeight)
             let opening = inputs.opening && inputs.showsMeter(lane)
             let item = CanvasAccessibilityItem(
-                label: ArrangementA11y.header(lane, returnOf: inputs.returnName(lane)) + (opening ? ", input opening" : ""),
+                label: ArrangementA11y.kindName(lane.kind) + ", "
+                    + ArrangementA11y.header(lane, returnOf: inputs.returnName(lane)) + (opening ? ", input opening" : ""),
                 frame: r, selected: false,
                 press: { [weak self] in self?.flags(seq, lane.id, mute: !lane.mute) })
             return (item: item, frame: r)
         }
+        // The "+ Add Track" row is the last child; its press opens the menu.
+        let addFrame = NSRect(x: 0, y: rowTop(document.lanes.count), width: bounds.width, height: laneHeight)
+        let add = CanvasAccessibilityItem(
+            label: "Add Track", frame: addFrame, selected: false,
+            press: { [weak self] in
+                guard let self else { return }
+                self.addTrackMenu().popUp(positioning: nil, at: CGPoint(x: addFrame.minX + 8, y: addFrame.midY), in: self)
+            })
         // Reused like EditorCanvas's, so their identity is stable between queries.
-        a11yElements = CanvasElement.reuse(a11yElements, for: items, parent: self)
+        a11yElements = CanvasElement.reuse(a11yElements, for: items + [(item: add, frame: addFrame)], parent: self)
         return a11yElements
     }
 }
