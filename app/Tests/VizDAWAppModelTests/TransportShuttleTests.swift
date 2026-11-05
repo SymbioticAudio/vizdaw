@@ -112,6 +112,34 @@ import VizDAWCore
         #expect(m.editor.status == "A text field has the keyboard.")
     }
 
+    /// Final wave (B2 carry): a text field that takes the keyboard in the
+    /// middle of a hold stops it where it got to. After a wind it lands
+    /// once (the teardown path); before one it lands nothing; the later
+    /// ticks and the release do nothing more.
+    @Test func aTextFieldTakingTheKeyboardMidHoldStopsTheHold() throws {
+        let (m, f) = try demo()
+        m.shuttle.press(forward: true, shift: false, at: 0)
+        m.shuttle.tick(at: 0.5)
+        #expect(f.winds == [0.4] && m.shuttle.holding)
+        m.editor.beginTextEditing("laneName")
+        m.shuttle.tick(at: 0.6)
+        #expect(!m.shuttle.holding)
+        #expect(m.editor.status == "A text field has the keyboard.")
+        #expect(f.holdEnds == 1, "wound, so the pass lands where the wind got to")
+        m.shuttle.tick(at: 1.5)
+        m.shuttle.release(at: 1.6)
+        #expect(f.winds == [0.4] && f.holdEnds == 1 && f.stepBars.isEmpty, "nothing after the stop")
+        m.editor.endTextEditing("laneName")
+        // Before any wind: stopped, with nothing to land.
+        m.editor.status = nil
+        m.shuttle.press(forward: false, shift: false, at: 2)
+        m.editor.beginTextEditing("laneName")
+        m.shuttle.tick(at: 2.2)
+        #expect(!m.shuttle.holding)
+        #expect(m.editor.status == "A text field has the keyboard.")
+        #expect(f.holdEnds == 1 && f.winds == [0.4])
+    }
+
     @Test func aRefusedWindStopsTheHoldAndSaysWhy() throws {
         let (m, f) = try demo()
         f.jumpError = .Busy(message: "Stop recording first.")
