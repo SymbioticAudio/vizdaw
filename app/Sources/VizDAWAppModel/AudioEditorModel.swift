@@ -203,9 +203,11 @@ public final class AudioEditorModel {
             editor.status = AudioEditorEntry.noMediaHint
             return false
         }
-        // The box shows a rounded value (fades in whole ms): its own text
-        // back moves nothing (Task 2 review M1).
-        if text.trimmingCharacters(in: .whitespaces) == self.text(box) { return true }
+        // The box shows a rounded value (fades in whole ms, gain in
+        // tenths): its own text back moves nothing (Task 2 review M1). Both
+        // sides are compared cleaned, as `NumberBox` commits its text with
+        // U+2212 read as "-" (final review I1).
+        if let typed = StripEntry.clean(text), typed == StripEntry.clean(self.text(box)) { return true }
         guard let parsed = command(box, text, r) else {
             editor.status = box.hint
             return false

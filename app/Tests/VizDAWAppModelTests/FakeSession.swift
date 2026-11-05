@@ -700,7 +700,12 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
 
     var infoTable: [UInt64: SequenceInfo] = [:]
     var infoCalls = 0
-    func secondsAt(seq: UInt64, ticks: [Int64]) throws -> [Double] { ticks.map { Double($0) / 30_720 } }
+    /// Thrown by `secondsAt`.
+    var secondsAtError: VizError?
+    func secondsAt(seq: UInt64, ticks: [Int64]) throws -> [Double] {
+        if let e = secondsAtError { throw e }
+        return ticks.map { Double($0) / 30_720 }
+    }
     func ticksAt(seq: UInt64, seconds: [Double]) throws -> [Int64] { seconds.map { Int64(($0 * 30_720).rounded()) } }
 
     // MARK: Select-and-modify and the list (plan 4c)

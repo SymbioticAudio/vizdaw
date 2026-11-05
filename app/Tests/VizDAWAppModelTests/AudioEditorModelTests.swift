@@ -1,4 +1,5 @@
 import Foundation
+import SymbioticControls
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
@@ -87,6 +88,35 @@ private let toneLane = LaneKey(3, 30)
         #expect(m.audioEditor.shownRegion == nil)
         // No region: every box shows the dash, the Peak box too (Task 4 review M2).
         for box in AudioEditorBox.allCases { #expect(m.audioEditor.text(box) == "\u{2013}", "\(box)") }
+        // Normalize with no region: refused, and nothing is measured (Task 4 review M3).
+        #expect(m.audioEditor.normalize() == .unavailable(AudioEditorModel.emptyMessage))
+        #expect(f.normalizations.isEmpty)
+    }
+
+    /// Final review I1: `NumberBox` commits its text through
+    /// `NumberEntry.clean`, which reads U+2212 as "-". Return on any
+    /// untouched box, a negative gain that is not a tenth included, sends
+    /// nothing.
+    @Test func anUntouchedReturnSendsNothing() throws {
+        let (f, m) = audioEditorDocument(gainDb: -0.63, fadeIn: 100, fadeOut: 12_000)
+        selectEvents([71], in: m)
+        let a = m.audioEditor
+        #expect(a.text(.gain) == "\u{2212}0.6 dB")
+        #expect(a.text(.peak) == "\u{2212}0.3 dB")
+        for box in AudioEditorBox.allCases {
+            let shown = a.text(box)
+            let committed = try #require(NumberEntry.clean(shown))
+            #expect(a.type(box, committed), "\(box) \(committed)")
+            #expect(a.type(box, shown), "\(box) \(shown)")
+        }
+        #expect(f.edits.isEmpty)
+        #expect(m.editedRegion?.row.gainDb == -0.63)
+        #expect(a.peakDb == RegionCommands.defaultPeakDb)
+        // A typed value still commits.
+        #expect(a.type(.gain, "-0.6 dB "))
+        #expect(f.edits.isEmpty, "the same text, trimmed")
+        #expect(a.type(.gain, "-0.7"))
+        #expect(f.edits == [.audio(edit: .setGain(event: 71, gainDb: -0.7))])
     }
 
     @Test func typedGainIsOneUndoStepAndARefusalSendsNothing() {
@@ -144,6 +174,11 @@ private let toneLane = LaneKey(3, 30)
         #expect(trims(.length, "10") == .audio(edit: .trim(event: 71, frontFrames: 0, backFrames: -24_000)))
         #expect(trims(.length, "0") == .audio(edit: .trim(event: 71, frontFrames: 0, backFrames: 47_999)))
         #expect(a.startRoom == 75_000)
+        // An unreadable time is no room (Task 4 review M3, Ruling 13.8).
+        f.secondsAtError = .Busy(message: "busy")
+        #expect(a.startRoom == 0)
+        #expect(trims(.start, "0") == nil)
+        f.secondsAtError = nil
 
         // The sequence start (Ruling 13.8): region 73 is at tick 0.
         selectEvents([73], in: m)

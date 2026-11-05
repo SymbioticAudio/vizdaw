@@ -79,7 +79,8 @@ public enum AudioEditorEntry {
         guard rate > 0 else { return 0 }
         let v = (seconds * Double(rate)).rounded()
         guard v.isFinite else { return 0 }
-        return Int64(min(max(v, 0), Double(Int64.max / 2)))
+        // `Double(Int64.max / 2)` rounds up to 2^62: clamp the integer too.
+        return min(Int64(min(max(v, 0), Double(Int64.max / 2))), Int64.max / 2)
     }
 
     /// "−4.2 dB", "+24.0 dB", "−∞ dB".
