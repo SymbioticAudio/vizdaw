@@ -242,6 +242,32 @@ private let beat: Int64 = 15_360
             Notification(name: NSControl.textDidEndEditingNotification, object: field, userInfo: info))
     }
 
+    /// Final wave (queued carry): the first click into any of the five
+    /// fields selects all its text, so a click and typing replaces it; a
+    /// click into a field already being edited leaves its selection to
+    /// the click. The same view serves the document bar and the mixer
+    /// window's.
+    @Test func theFirstClickIntoAFieldSelectsAllItsText() throws {
+        let (_, m) = try model()
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: true)
+        w.contentView = v
+        for f in TransportField.allCases {
+            let field = try #require(v.fields[f] as? TransportTextField)
+            field.stringValue = "12.3.456"
+            field.armed = true
+            #expect(w.makeFirstResponder(field), "\(f)")
+            let editor = try #require(field.currentEditor())
+            editor.selectedRange = NSRange(location: 3, length: 0)
+            field.afterClick(wasEditing: true)
+            #expect(editor.selectedRange == NSRange(location: 3, length: 0), "\(f): not the first click")
+            field.afterClick(wasEditing: false)
+            #expect(editor.selectedRange == NSRange(location: 0, length: 8), "\(f): the first click")
+            w.makeFirstResponder(nil)
+        }
+    }
+
     /// Plan 7d Ruling 7: only Return, Tab and Shift-Tab commit; a click
     /// elsewhere (movement `.other`) or no movement at all cancels.
     @Test func clickingAwayCancelsATypedField() throws {

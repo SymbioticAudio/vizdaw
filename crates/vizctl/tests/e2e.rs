@@ -2966,15 +2966,9 @@ fn transport_jumps_readouts_and_fields_over_the_channel() {
             json!({"window": w, "element": n["id"], "modifiers": mods}),
         );
     };
-    // A click in a field puts the caret where it lands, as in any text
-    // field; three select its text, so what is typed replaces it.
-    let select_field = |app: &mut App, label: &str| {
-        let n = wait_for_node(app, &w, label);
-        app.call(
-            "ui.click",
-            json!({"window": w, "element": n["id"], "count": 3}),
-        );
-    };
+    // One click in a field selects all its text (plan 7d final wave), so
+    // what is typed replaces it.
+    let select_field = |app: &mut App, label: &str| click(app, label, json!([]));
     let no_alert = |app: &mut App| {
         let ws = app.call("state.get", json!({"target": "windows"}));
         assert_eq!(ws["alerts"].as_array().unwrap().len(), 0, "{ws}");
@@ -3049,6 +3043,10 @@ fn transport_jumps_readouts_and_fields_over_the_channel() {
     for away in ["Bar Readout", "Arrangement"] {
         click(&mut app, "Position", json!([]));
         app.call("ui.key", json!({"window": w, "text": "5"}));
+        // The typed text replaced the old one before the click away, so
+        // the wait below sees the cancel and not a click that never began
+        // an edit.
+        wait_for_value(&mut app, &w, "Position", "5");
         click(&mut app, away, json!([]));
         let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
         loop {

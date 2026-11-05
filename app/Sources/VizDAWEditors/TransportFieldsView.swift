@@ -363,7 +363,17 @@ final class TransportTextField: NSTextField, ThemedView {
 
     override func mouseDown(with event: NSEvent) {
         armed = true
+        let wasEditing = currentEditor() != nil
         super.mouseDown(with: event)
+        afterClick(wasEditing: wasEditing)
+    }
+
+    /// The first click into a field selects all its text, so a click and
+    /// typing replaces it (final wave; AppKit would put the caret where it
+    /// landed). A click into a field already being edited is the caret's.
+    func afterClick(wasEditing: Bool) {
+        guard !wasEditing else { return }
+        currentEditor()?.selectAll(nil)
     }
 
     override func becomeFirstResponder() -> Bool {
