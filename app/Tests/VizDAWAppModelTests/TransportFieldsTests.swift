@@ -305,6 +305,68 @@ private let beat: Int64 = 15_360
         }
     }
 
+    /// A window holding the fields view and nothing else, laid out.
+    /// Not deferred: a real window number, so a press's `window` is it.
+    func laidOut(_ m: DocumentModel) -> (TransportFieldsView, NSWindow) {
+        let v = TransportFieldsView(document: m)
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 40), styleMask: [.titled],
+                         backing: .buffered, defer: false)
+        w.contentView = v
+        v.layoutSubtreeIfNeeded()
+        return (v, w)
+    }
+
+    /// Fix round 1 M5: a press inside the field being edited (placing the
+    /// caret) passes through: the edit, its text and its watch stay.
+    @Test func aPressInsideTheFieldKeepsTheEdit() throws {
+        let (f, m) = try model()
+        let (v, w) = laidOut(m)
+        let pos = try #require(v.fields[.position])
+        #expect(v.focus(.position))
+        v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+        pos.stringValue = "5"
+        let inside = pos.convert(CGPoint(x: pos.bounds.midX, y: pos.bounds.midY), to: nil)
+        let press = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: inside, modifierFlags: [], timestamp: 0,
+                windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        v.handleMouseDown(press)
+        #expect(pos.currentEditor() != nil && w.firstResponder === pos.currentEditor())
+        #expect(v.editing == .position && v.isWatching && pos.stringValue == "5")
+        #expect(f.locates.isEmpty && !m.transportKeysEnabled)
+    }
+
+    /// Fix round 1 M5 (pre-flight C1): the mouse-down monitor and the
+    /// resign-key observer go when the edit ends: Return, Esc, a click
+    /// elsewhere, the window losing key and teardown.
+    @Test func theEditsWatchIsRemovedWhenItEnds() throws {
+        let (_, m) = try model()
+        let (v, w) = laidOut(m)
+        let pos = try #require(v.fields[.position])
+        func begin() {
+            v.focus(.position)
+            v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: pos))
+            #expect(v.isWatching)
+        }
+        begin()
+        pos.stringValue = "2"
+        endEditing(v, pos, .return)
+        #expect(!v.isWatching, "Return")
+        w.makeFirstResponder(nil)
+        begin()
+        #expect(v.control(pos, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        #expect(!v.isWatching, "Esc")
+        begin()
+        w.makeFirstResponder(nil)
+        #expect(!v.isWatching, "the field editor resigning")
+        begin()
+        v.resignKeyCancels()
+        #expect(!v.isWatching, "the window losing key")
+        begin()
+        w.contentView = nil
+        #expect(!v.isWatching && m.editor.textEditors.isEmpty, "teardown")
+    }
+
     /// Ruling 7: Tab commits and moves on (README 101 types Edit In, then
     /// tabs to Edit Out, as one entry).
     @Test func tabCommitsAndMovesOn() throws {

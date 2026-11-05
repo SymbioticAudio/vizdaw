@@ -31,24 +31,16 @@ public final class RecordModel {
     /// Kept loop passes become takes.
     public var passesAsTakes = true
     /// The toolbar's record popover is open; closing it drops the punch
-    /// drafts (plan 7d Ruling 7), unless the press that closed it began
-    /// on the bar's Record button (`recordPressBegins()`).
+    /// drafts (plan 7d Ruling 7). A press on Record with a draft open never
+    /// closes it (`closeAllowed(pressOnRecord:draftOpen:)`).
     public var showsPopover = false {
         didSet {
             if !showsPopover {
-                if keepDraftsOnClose {
-                    keepDraftsOnClose = false
-                } else {
-                    dropPunchDrafts()
-                }
+                dropPunchDrafts()
                 document?.editor.endTextEditing("recordPopover")
             }
         }
     }
-    /// The next close of the popover keeps the punch drafts: a press on the
-    /// bar's Record button began with a draft open (Ruling 7's bar Record
-    /// rule), so Record can refuse and show it again.
-    public internal(set) var keepDraftsOnClose = false
     /// The window whose chevron opened the popover (plan 7a final review
     /// I2): the mixer window has a transport bar too, and the popover shows
     /// under one chevron only.
@@ -71,6 +63,9 @@ public final class RecordModel {
     /// Text typed in the popover's punch fields, until Return, focus
     /// moving within or leaving the pair, or the popover closing.
     var punchDrafts: [TransportField: String] = [:]
+    /// The bar's Punch In or Out while it is typed in, and its text (fix
+    /// round 1 M4: Record waits for it as for the popover's).
+    @ObservationIgnored var barPunchDraft: (TransportField, String)?
     /// Free bytes on a project's volume (tests replace it; plan 5d-2 Task
     /// 2).
     public static var freeSpace: (String?) -> UInt64? = RecordModel.volumeFreeSpace

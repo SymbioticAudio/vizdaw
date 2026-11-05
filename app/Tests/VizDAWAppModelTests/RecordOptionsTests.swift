@@ -1,7 +1,9 @@
+import AppKit
 import Foundation
 import Testing
 import VizDAWCore
 @testable import VizDAWAppModel
+@testable import VizDAWEditors
 
 /// The record popover's model (plan 5d-2 Task 2; spec §6.9): the modes
 /// it sets on the transport, the punch fields, the time left on disk, the
@@ -162,33 +164,140 @@ import VizDAWCore
         #expect(m.editor.layout.transport.punchIn == 122_880, "moving within the pair commits")
     }
 
-    /// Ruling 7's bar Record rule: a press on the bar's Record button with
-    /// an open draft closes the popover, but the draft is kept, Record is
-    /// refused and the popover opens again showing it.
+    /// Ruling 7's bar Record rule (fix round 1 I1): the popover's close
+    /// veto keeps it open only for a press on Record with a draft open.
+    @Test func thePopoverClosesForEveryPressButRecordWithADraft() {
+        #expect(!RecordModel.closeAllowed(pressOnRecord: true, draftOpen: true))
+        #expect(RecordModel.closeAllowed(pressOnRecord: true, draftOpen: false))
+        #expect(RecordModel.closeAllowed(pressOnRecord: false, draftOpen: true))
+        #expect(RecordModel.closeAllowed(pressOnRecord: false, draftOpen: false))
+    }
+
+    /// Ruling 7's bar Record rule (fix round 1 I1, M2): a press on the
+    /// bar's Record button with a draft open does not close the popover
+    /// (its veto reads the press), so the draft stays with the keyboard,
+    /// Record refuses and Return then sets the punch. A press elsewhere
+    /// closes it and drops the draft.
     @Test func aBarRecordClickWithAnOpenDraftRefusesAndKeepsIt() throws {
         let (m, f) = try armed()
         let r = m.record
         r.setPunch(true)
         let old = m.editor.layout.transport.punchIn
-        r.showsPopover = true
+        // Not deferred: a real window number, so the press's `window` is it.
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 400, height: 60), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        let content = NSView(frame: CGRect(x: 0, y: 0, width: 400, height: 60))
+        window.contentView = content
+        let recordButton = NSView(frame: CGRect(x: 10, y: 10, width: 40, height: 30))
+        let chevron = NSView(frame: CGRect(x: 60, y: 10, width: 30, height: 30))
+        content.addSubview(recordButton)
+        content.addSubview(chevron)
+        RecordButtons.register(recordButton)
+        defer { RecordButtons.unregister(recordButton) }
+        let c = RecordPopoverController(record: r, host: .document, content: NSViewController())
+        c.anchor = chevron
+        func press(_ x: CGFloat, _ type: NSEvent.EventType = .leftMouseDown) throws -> NSEvent {
+            try #require(
+                NSEvent.mouseEvent(
+                    with: type, location: CGPoint(x: x, y: 20), modifierFlags: [], timestamp: 0,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        r.togglePopover(in: .document)
+        r.punchFocusChanged(from: nil, to: .punchIn)
         r.setPunchText(.punchIn, "5")
-        r.recordPressBegins()
-        r.showsPopover = false
+        #expect(!c.shouldClose(for: try press(20)), "a press on Record with a draft: it stays open")
+        #expect(!c.shouldClose(for: try press(70)), "the chevron toggles it itself")
+        let rightOnRecord = try press(20, .rightMouseDown)
+        let elsewhere = try press(200)
+        #expect(c.shouldClose(for: rightOnRecord) && c.shouldClose(for: elsewhere))
+        #expect(c.shouldClose(for: nil), "a key or the app resigning: it closes")
+        // The press goes on to Record, which refuses; the draft and its
+        // keyboard stay, and Return sets the punch.
         r.pressRecord()
         #expect(m.editor.status == RecordModel.openDraftMessage)
         #expect(f.recordCalls.isEmpty && !r.isRecording)
-        #expect(r.punchText(.punchIn) == "5")
-        #expect(r.showsPopover, "it opens again")
-        // Without the press beginning on Record, the close drops it.
+        #expect(r.showsPopover && r.punchText(.punchIn) == "5" && m.editor.textEditing)
+        r.commitPunch(.punchIn)
+        #expect(c.shouldClose(for: try press(20)), "no draft: Record closes it")
         m.editor.clearStatus()
-        r.showsPopover = false
-        #expect(!r.keepDraftsOnClose)
-        r.showsPopover = true
-        r.setPunchText(.punchIn, "5")
-        r.showsPopover = false
         r.pressRecord()
-        #expect(r.isRecording && m.editor.status == nil)
-        #expect(f.recordCalls.last?.spec.punch?.start == old)
+        #expect(r.isRecording && f.recordCalls.last?.spec.punch?.start == 245_760)
+        _ = r.toggle()
+        // A press elsewhere closes it: the draft is dropped.
+        r.setPunchText(.punchIn, "7")
+        #expect(c.shouldClose(for: try press(200)))
+        c.popoverWillClose(Notification(name: NSPopover.willCloseNotification))
+        #expect(!r.showsPopover && !r.hasOpenPunchDraft && m.editor.layout.transport.punchIn == 245_760)
+        #expect(old != 245_760)
+    }
+
+    /// Fix round 1 M4: the bar's own Punch In or Out, typed in, refuses
+    /// Record with the same message on every path: the bar's Record (the
+    /// edit stays), the R key's command, a surface and the channel.
+    @Test func aTypedBarPunchTimeRefusesRecordOnEveryPath() throws {
+        let f = demoFake()
+        var audio = lane(30, "Vocal")
+        audio.arm = true
+        audio.input = .audio(first: 0, stereo: true, returnOf: nil)
+        f.laneTable[3] = [audio]
+        let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
+        let id = try #require(s.newDemo())
+        let m = try #require(s.model(id))
+        m.select(3)
+        m.record.setPunch(true)
+        let v = TransportFieldsView(document: m)
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 80), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        let content = NSView(frame: CGRect(x: 0, y: 0, width: 900, height: 80))
+        window.contentView = content
+        v.frame = CGRect(x: 0, y: 0, width: 700, height: 30)
+        content.addSubview(v)
+        let recordButton = NSView(frame: CGRect(x: 10, y: 40, width: 40, height: 30))
+        content.addSubview(recordButton)
+        RecordButtons.register(recordButton)
+        defer { RecordButtons.unregister(recordButton) }
+        content.layoutSubtreeIfNeeded()
+        let punchIn = try #require(v.fields[.punchIn])
+        #expect(v.focus(.punchIn))
+        v.controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: punchIn))
+        punchIn.stringValue = "5"
+        v.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: punchIn))
+        #expect(m.record.hasOpenPunchDraft)
+        // The bar's Record: the press keeps the edit; the button refuses.
+        let press = try #require(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: CGPoint(x: 20, y: 50), modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        v.handleMouseDown(press)
+        #expect(punchIn.currentEditor() != nil && v.isWatching, "the edit stays")
+        m.record.pressRecord()
+        #expect(m.editor.status == RecordModel.openDraftMessage)
+        // The R key's command.
+        #expect(TransportCommands.run("transport.record", m) == .refused(RecordModel.openDraftMessage))
+        // A surface's Record button (the fake surface path, through idle).
+        var surface: [KeyOutcome] = []
+        m.surfaceCommandSink = { surface.append(TransportCommands.run($0, m)) }
+        f.surfaceEvents = [.command(id: "transport.record", programmatic: false)]
+        m.idle()
+        #expect(surface == [.refused(RecordModel.openDraftMessage)])
+        // The channel.
+        let host = FakeControlHost()
+        guard case .failed(let e) = ControlCommands.run("transport.record", args: [], doc: (id, m), store: s, host: host)
+        else {
+            Issue.record("the channel recorded")
+            return
+        }
+        #expect(e.message == RecordModel.openDraftMessage)
+        #expect(f.recordCalls.isEmpty && !m.record.isRecording)
+        // Return sets it; then Record records there.
+        v.controlTextDidEndEditing(
+            Notification(
+                name: NSControl.textDidEndEditingNotification, object: punchIn,
+                userInfo: ["NSTextMovement": NSTextMovement.return.rawValue]))
+        #expect(!m.record.hasOpenPunchDraft && !v.isWatching)
+        m.editor.clearStatus()
+        m.record.pressRecord()
+        #expect(m.record.isRecording && f.recordCalls.last?.spec.punch?.start == 245_760)
     }
 
     @Test func theTimeLeftCountsTheArmedAudioChannels() throws {
@@ -206,7 +315,7 @@ import VizDAWCore
         #expect(r.remainingText == "Less than a minute left")
         // While recording, the core's reading counts.
         f.recordRow.freeBytes = 288_000 * 7_200 + RecordModel.stopBytes
-        r.toggle()
+        _ = r.toggle()
         #expect(r.isRecording)
         #expect(r.remainingText == "2 h left")
         // MIDI only: no readout.
@@ -227,7 +336,7 @@ import VizDAWCore
         f.recordRow.pass = 3
         f.recordRow.kept = 1
         f.recordRow.discarded = 1
-        r.toggle()
+        _ = r.toggle()
         #expect(r.passText == "Pass 3 · 1 kept · 1 discarded")
         f.recordRow.kept = 0
         f.recordRow.discarded = 0

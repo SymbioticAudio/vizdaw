@@ -44,15 +44,11 @@ extension RecordModel {
 
     /// The popover's punch focus moved (Ruling 12; plan 7d Ruling 7):
     /// moving to the other punch field commits the one it left; leaving
-    /// the pair drops its draft (the popover closing has already dealt with
-    /// its drafts). Text editing is held while a field has focus.
+    /// the pair drops its draft. Text editing is held while a field has
+    /// focus.
     public func punchFocusChanged(from old: TransportField?, to new: TransportField?) {
         if let old {
-            if new != nil {
-                commitPunch(old)
-            } else if showsPopover, !keepDraftsOnClose {
-                dropPunch(old)
-            }
+            if new != nil { commitPunch(old) } else { dropPunch(old) }
         }
         if new != nil {
             document?.editor.beginTextEditing("recordPopover")
@@ -81,36 +77,45 @@ extension RecordModel {
         punchDrafts.removeAll()
     }
 
-    /// A punch field shows typed text that is not the value in use: Record
-    /// waits for Return or Esc (controller ruling I5).
+    /// A punch field shows typed text that is not the value in use, in the
+    /// popover or in the bar's own Punch In or Out: Record waits for Return
+    /// or Esc (controller ruling I5; fix round 1 M4).
     public var hasOpenPunchDraft: Bool {
-        punchDrafts.contains { f, text in text != (document?.fieldText(f) ?? "") }
+        let fieldText = { (f: TransportField) in self.document?.fieldText(f) ?? "" }
+        if let (f, text) = barPunchDraft, text != fieldText(f) { return true }
+        return punchDrafts.contains { f, text in text != fieldText(f) }
     }
 
-    /// A press on the bar's Record button begins with a draft open (its
-    /// mouse-down monitor calls this before the popover's outside-click
-    /// handling sees the press): the popover's close keeps the drafts, so
-    /// `pressRecord()` can refuse and show them again.
-    public func recordPressBegins() {
-        guard showsPopover, hasOpenPunchDraft else { return }
-        keepDraftsOnClose = true
+    /// The bar's Punch In or Out is being typed in (`TransportFieldsView`
+    /// reports each change); other fields are ignored.
+    public func barPunchTyped(_ f: TransportField, _ text: String) {
+        guard f == .punchIn || f == .punchOut else { return }
+        barPunchDraft = (f, text)
+    }
+
+    /// The bar's punch field edit ended (committed or cancelled).
+    public func barPunchEnded() { barPunchDraft = nil }
+
+    /// Whether the record popover may close for a press (Ruling 7's bar
+    /// Record rule, fix round 1 I1): a press on a Record button with a
+    /// punch draft open keeps it open, so Record refuses with the draft
+    /// still shown and its field keeping the keyboard. Every other close
+    /// is allowed (and drops the drafts). The bar's punch fields keep
+    /// their edit by the same rule.
+    public static func closeAllowed(pressOnRecord: Bool, draftOpen: Bool) -> Bool {
+        !(pressOnRecord && draftOpen)
     }
 
     /// The count-in is playing (the timeline waits).
     public var countingIn: Bool { document?.transport.countingIn ?? false }
 
     /// The toolbar's Record button: like the R key, and a refusal shows in
-    /// the status line. Refused for an open punch draft, it opens the
-    /// popover again showing the draft (Ruling 7's bar Record rule).
+    /// the status line.
     public func pressRecord() {
-        // A press that did not close the popover leaves no flag behind.
-        keepDraftsOnClose = false
-        let outcome = toggle()
-        switch outcome {
+        switch toggle() {
         case .done: break
         case .refused(let why), .busy(let why), .unavailable(let why): document?.editor.status = why
         }
-        if outcome == .refused(Self.openDraftMessage), !showsPopover { showsPopover = true }
     }
 
     /// The channels the shown sequence's armed audio lanes record.

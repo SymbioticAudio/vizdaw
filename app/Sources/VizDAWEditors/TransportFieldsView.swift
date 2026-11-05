@@ -165,7 +165,20 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
         editing = field(of: obj)
         document.editor.beginTextEditing(Self.textOwner)
         watchForTheEditsEnd()
+        reportPunchText()
     }
+
+    /// Each change to Punch In or Out goes to the record model, so Record
+    /// waits for it on every path (fix round 1 M4).
+    public func controlTextDidChange(_ obj: Notification) { reportPunchText() }
+
+    private func reportPunchText() {
+        guard let f = editing, let field = fields[f] else { return }
+        document.record.barPunchTyped(f, field.stringValue)
+    }
+
+    /// The edit's mouse-down monitor or resign-key observer is installed.
+    var isWatching: Bool { mouseMonitor != nil || resignObserver != nil }
 
     /// Installs the mouse-down monitor and the resign-key observer while a
     /// field edits; `stopWatching()` removes them when the edit ends.
@@ -188,6 +201,7 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
     }
 
     private func stopWatching() {
+        document.record.barPunchEnded()
         if let m = mouseMonitor { NSEvent.removeMonitor(m) }
         mouseMonitor = nil
         if let o = resignObserver { NotificationCenter.default.removeObserver(o) }
@@ -196,11 +210,18 @@ public final class TransportFieldsView: NSView, NSTextFieldDelegate, ThemedView 
 
     /// The monitor's seam: a press outside the editing field ends the
     /// edit (movement `.other`: it cancels), then the press goes on to
-    /// what it hit, so a bar button acts (controller ruling I-4).
+    /// what it hit, so a bar button acts (controller ruling I-4). A press
+    /// on Record while Punch In or Out holds a typed time keeps the edit,
+    /// so Record refuses and Return still sets it (fix round 1 M4).
     func handleMouseDown(_ event: NSEvent) {
         guard let f = editing, let field = fields[f], let w = window else { return }
         let inField = event.window === w && field.bounds.contains(field.convert(event.locationInWindow, from: nil))
         guard Self.endsOnMouseDown(inField: inField) else { return }
+        reportPunchText()
+        guard
+            RecordModel.closeAllowed(
+                pressOnRecord: RecordButtons.contains(event), draftOpen: document.record.hasOpenPunchDraft)
+        else { return }
         endTheEdit(f)
     }
 

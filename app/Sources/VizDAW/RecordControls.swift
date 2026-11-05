@@ -26,18 +26,20 @@ struct RecordControls: View {
                 tint: record.isRecording ? theme.state.record.nsColor : nil
             ) { record.pressRecord() }
             .fixedSize()
-            // A press on Record with a punch draft open keeps the draft
-            // through the popover's close, so Record refuses and shows it
-            // again (plan 7d Ruling 7's bar Record rule).
-            .background(RecordPressWatcher(record: record))
+            // Marks the Record button, so the popover's close veto and the
+            // bar's punch fields know a press on it (plan 7d Ruling 7's bar
+            // Record rule, fix round 1 I1).
+            .background(RecordButtonMarker())
             AppKitButton(
                 "Record Options", icon: .menuDown,
                 help: "Replace or overdub, punch, loop, count-in, pre-roll and takes"
             ) { [host] in record.togglePopover(in: host) }
             .fixedSize()
-            .popover(isPresented: popoverShown, arrowEdge: .bottom) {
-                RecordPopover(model: model, record: record)
-            }
+            // An AppKit popover, whose close veto reads the press (I1).
+            .background(
+                RecordPopoverAnchor(
+                    model: model, record: record, host: host, theme: theme,
+                    shown: record.showsPopover(in: host)))
             if record.countingIn {
                 Text("Count-in")
                     .font(.caption.weight(.semibold))
@@ -54,64 +56,87 @@ struct RecordControls: View {
             }
         }
     }
-
-    private var popoverShown: Binding<Bool> {
-        let r = record
-        let h = host
-        // Only this window's dismissal closes it: one that moved to the
-        // other window stays open there.
-        return Binding(get: { r.showsPopover(in: h) }, set: { if !$0, r.showsPopover(in: h) { r.showsPopover = false } })
-    }
 }
 
-/// Watches for a press on the Record button it sits behind: with a punch
-/// draft open, it calls `recordPressBegins()` from a local mouse-down
-/// monitor, before the popover's own outside-click handling closes the
-/// popover (which would drop the draft). Inert for the user: clicks and
-/// VoiceOver pass through it.
-struct RecordPressWatcher: NSViewRepresentable {
-    let record: RecordModel
-
-    final class Watcher: NSView {
-        var record: RecordModel?
-        private var monitor: Any?
-
+/// Marks the Record button it sits behind in `RecordButtons`. Inert for
+/// the user: clicks and VoiceOver pass through it.
+struct RecordButtonMarker: NSViewRepresentable {
+    final class Marker: NSView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func isAccessibilityElement() -> Bool { false }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if let m = monitor { NSEvent.removeMonitor(m) }
-            monitor = nil
-            guard window != nil else { return }
-            // An NSView is a `@MainActor` class: the block captures it
-            // strongly; the monitor goes when the view leaves its window.
-            let me = self
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { e in
-                // Mouse events arrive on the main thread.
-                nonisolated(unsafe) let event = e
-                MainActor.assumeIsolated { me.pressed(event) }
-                return e
+            if window != nil { RecordButtons.register(self) } else { RecordButtons.unregister(self) }
+        }
+    }
+
+    func makeNSView(context: Context) -> Marker { Marker() }
+
+    func updateNSView(_ m: Marker, context: Context) {}
+}
+
+/// Shows the record popover under the chevron it sits behind, through a
+/// `RecordPopoverController` (fix round 1 I1). Inert for the user.
+struct RecordPopoverAnchor: NSViewRepresentable {
+    let model: DocumentModel
+    let record: RecordModel
+    let host: RecordPopoverHost
+    let theme: Theme
+    /// The model's `showsPopover(in: host)`, read in the body so a change
+    /// updates this view.
+    let shown: Bool
+
+    final class Anchor: NSView {
+        var controller: RecordPopoverController?
+        var shown = false
+        var theme: Theme?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil {
+                controller?.sync(shown: shown)
+            } else if let c = controller, c.popover.isShown {
+                c.popover.close()
             }
         }
+    }
 
-        func pressed(_ event: NSEvent) {
-            guard let record, let w = window, event.window === w, record.hasOpenPunchDraft,
-                bounds.contains(convert(event.locationInWindow, from: nil))
-            else { return }
-            record.recordPressBegins()
+    private func content() -> AnyView {
+        AnyView(RecordPopover(model: model, record: record).environment(\.symbioticTheme, theme))
+    }
+
+    func makeNSView(context: Context) -> Anchor {
+        let a = Anchor()
+        let hosting = NSHostingController(rootView: content())
+        hosting.sizingOptions = [.preferredContentSize]
+        let c = RecordPopoverController(record: record, host: host, content: hosting)
+        c.anchor = a
+        a.controller = c
+        return a
+    }
+
+    func updateNSView(_ a: Anchor, context: Context) {
+        // Only a theme change replaces the content, so the punch field
+        // keeps its focus across other updates (fix round 1 M2).
+        if a.theme != theme {
+            a.theme = theme
+            (a.controller?.popover.contentViewController as? NSHostingController<AnyView>)?.rootView = content()
+            a.controller?.popover.appearance = NSAppearance(named: theme.appearance.nsAppearanceName)
         }
+        a.shown = shown
+        // Next turn: the anchor is laid out, and a close and reopen in the
+        // other window's bar happen in order.
+        let c = a.controller
+        let s = shown
+        DispatchQueue.main.async { c?.sync(shown: s) }
     }
 
-    func makeNSView(context: Context) -> Watcher {
-        let w = Watcher()
-        w.record = record
-        return w
+    static func dismantleNSView(_ a: Anchor, coordinator: ()) {
+        if let c = a.controller, c.popover.isShown { c.popover.close() }
     }
-
-    func updateNSView(_ w: Watcher, context: Context) { w.record = record }
-
-    static func dismantleNSView(_ w: Watcher, coordinator: ()) { w.record = nil }
 }
 
 /// The record options (spec §6.9). Fixed while a pass records: the core

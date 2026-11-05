@@ -89,6 +89,12 @@ public enum TransportCommands {
     /// Runs `id` on `m`; `on` sets a toggle (nil flips it).
     @discardableResult
     public static func run(_ id: String, on: Bool? = nil, _ m: DocumentModel) -> KeyOutcome {
+        // A typed punch time not yet set (the popover's, or the bar's own
+        // Punch In or Out) refuses Record with one message on every path,
+        // before the text-field gate (controller ruling I5, fix round 1 M4).
+        if id == "transport.record", !m.record.isRecording, m.record.hasOpenPunchDraft {
+            return .refused(RecordModel.openDraftMessage)
+        }
         if typesText(id) && !m.transportKeysEnabled { return .unavailable(textFieldHasKeyboard) }
         switch id {
         case "transport.scrub":
