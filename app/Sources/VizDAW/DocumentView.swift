@@ -87,7 +87,7 @@ struct DocumentTransportBar: View {
     var body: some View {
         // One row when it fits, else the fields on a second row (Task 7
         // review I1): never cut at the default window or the minimum.
-        TransportBarLayout(spacing: theme.spacing.m) {
+        TransportBarLayout(spacing: theme.spacing.m, rowSpacing: theme.spacing.xs) {
             HStack(spacing: theme.spacing.m) {
                 // AppKit controls and text: the channel's tree walks AppKit's
                 // elements and sees no SwiftUI button or text (final review I1).
@@ -205,7 +205,7 @@ struct DocumentTransportBar: View {
 /// One layout, so the fields view is never remade when the window resizes.
 struct TransportBarLayout: Layout {
     var spacing: CGFloat
-    var rowSpacing: CGFloat = 4
+    var rowSpacing: CGFloat
 
     private func ideal(_ subviews: Subviews) -> [CGSize] {
         subviews.map { $0.sizeThatFits(.unspecified) }

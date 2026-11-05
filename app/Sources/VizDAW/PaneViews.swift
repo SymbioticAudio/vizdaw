@@ -114,7 +114,7 @@ struct InspectorPane: View {
             PaneNote(text: Inspector.emptyMessage)
         } else {
             ScrollView(.vertical) {
-                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 8, verticalSpacing: 4) {
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: theme.spacing.s, verticalSpacing: theme.spacing.xs) {
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
                         GridRow {
                             Text(r.label)

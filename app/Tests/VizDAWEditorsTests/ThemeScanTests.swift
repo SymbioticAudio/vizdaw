@@ -108,6 +108,10 @@ enum SourceScan {
         #"\.padding\(\)"#,
         #"\.spacing\s*=\s*(?!0(?![.0-9]))[0-9]"#,
         #"setCustomSpacing\(\s*(?!0(?![.0-9]))[0-9]"#,
+        #"\b(horizontal|vertical|row|line)Spacing:\s*-?(?!0(?![.0-9]))[0-9]"#,
+        #"(?:\bspacing:|\.padding\(|\bSpacing:)\s*-?\.[0-9]"#,
+        #"\.padding\((?:\.\w+|\[[^\]]*\]),\s*$"#,
+        #"(?:\bspacing:|\bSpacing:|\.padding\((?:[^()]*,\s*)?|minLength:)\s*CGFloat\((?!0\))"#,
     ]
 
     @Test func everyViewTakesItsSpacingFromTheTheme() throws {
@@ -120,13 +124,15 @@ enum SourceScan {
             "VStack(spacing: 2) {", "HStack(alignment: .top, spacing: 4) {", ".padding(8)",
             ".padding(.horizontal, 5)", ".padding(.vertical, 3)", ".padding([.top, .bottom], 6)",
             ".padding(0.5)", "HStack(spacing: 0.5)", "Spacer(minLength: 12)", "    .padding(", ".padding()",
+            "Grid(horizontalSpacing: 8, verticalSpacing: theme.spacing.xs) {", "Grid(verticalSpacing: 4) {", "VStack(spacing: .5) {", ".padding(.horizontal,",
+            "HStack(spacing: CGFloat(6)) {", ".padding(CGFloat(8))",
             "stack.spacing = 6", "stack.setCustomSpacing(16, after: f)",
         ] {
             #expect(try SourceScan.matches(bad, patterns: Self.spacingPatterns) == 1, "\(bad)")
         }
         for good in [
             "VStack(spacing: 0) {", "Spacer(minLength: 0)", ".padding(0)", "HStack(spacing: theme.spacing.xs) {",
-            ".padding(theme.spacing.s)", "stack.spacing = theme.spacing.s",
+            ".padding(theme.spacing.s)", "Grid(horizontalSpacing: theme.spacing.s, verticalSpacing: 0)", "stack.spacing = theme.spacing.s",
             ".padding(.top, ControlMetrics.faderCap.height / 2 - 2)", ".padding(.horizontal, -StripPadding.horizontal)",
         ] {
             #expect(try SourceScan.matches(good, patterns: Self.spacingPatterns) == 0, "\(good)")
