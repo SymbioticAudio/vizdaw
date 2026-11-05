@@ -191,6 +191,10 @@ pub(crate) struct Inner {
     /// Control surfaces: the app's events, selection, last wind, heard
     /// values' cache (plan 5f-1 Task 8).
     surfaces: crate::surfaces::SessionSurfaces,
+    /// A transport bar hold (a wind or a held key's step) moved the
+    /// position without landing an open automation pass: its end lands
+    /// it once (plan 7d controller ruling I4).
+    wind_hold: bool,
     /// The meter holds of the mixer window and the surfaces (plan 5f-1
     /// Ruling 13, pre-flight I4).
     meters: crate::surfaces::MeterHolds,
@@ -314,6 +318,7 @@ impl Inner {
             restart_step: None,
             landed_in_group: false,
             surfaces: Default::default(),
+            wind_hold: false,
             meters: Default::default(),
             bounce_copies: None,
             bounce_results: Default::default(),
@@ -1736,9 +1741,93 @@ impl Session {
         })
     }
 
-    /// Moves the position to `tick`.
+    /// Moves the position to `tick`. The next bar step or wind starts
+    /// from here, not from the last one's target (plan 7d controller
+    /// ruling I6).
     pub fn locate(&self, tick: i64) -> Result<(), VizError> {
-        self.transport_call(|| self.locate_in(&mut lock(&self.inner), tick))
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            inner.surfaces.wind = None;
+            self.locate_in(&mut inner, tick)
+        })
+    }
+
+    /// A click on the transport bar's rewind (`forward` false) or fast
+    /// forward, their menu items or the channel's command (plan 7d Ruling
+    /// 3): one bar, as a ruler click locates (an open automation pass
+    /// lands). Starts from the last step's or wind's target when that was
+    /// under 250 ms ago. Busy while recording; a `Model` error with no
+    /// sequence. Returns the new tick.
+    pub fn transport_step_bar(&self, forward: bool) -> Result<i64, VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let now = crate::surfaces::now();
+            let to = self.bar_target(&inner, forward, now)?;
+            self.locate_in(&mut inner, to)?;
+            inner.surfaces.wind = Some((now, to));
+            Ok(to)
+        })
+    }
+
+    /// A rewind or fast forward key-down, first or auto-repeat (plan 7d
+    /// Ruling 4): one bar, as [`Session::transport_step_bar`] steps, but
+    /// moved as a wind is, landing nothing; the key-up's
+    /// [`Session::transport_hold_end`] lands once. Returns the new tick.
+    pub fn transport_key_step(&self, forward: bool) -> Result<i64, VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let now = crate::surfaces::now();
+            let to = self.bar_target(&inner, forward, now)?;
+            self.wind_move(&mut inner, to, now)?;
+            Ok(to)
+        })
+    }
+
+    /// One tick of a held rewind or fast forward (plan 7d Ruling 3):
+    /// `quarters` quarter notes on (negative: back) from the last target
+    /// (under 250 ms ago) or the position, in `0..=2⁵⁰`. Moves the
+    /// position only: an open automation pass goes on writing, and
+    /// [`Session::transport_hold_end`] lands it. Non-finite `quarters`
+    /// are a `Model` error, as is having no sequence; Busy while
+    /// recording. Returns the new tick.
+    pub fn transport_wind(&self, quarters: f64) -> Result<i64, VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let now = crate::surfaces::now();
+            let (_, base) = self.jump_base(&inner, now)?;
+            let to = core_editor::transport::wind_target(base, quarters).ok_or_else(|| {
+                VizError::Model {
+                    message: "quarters must be finite".into(),
+                }
+            })?;
+            self.wind_move(&mut inner, to, now)?;
+            Ok(to)
+        })
+    }
+
+    /// The end of a hold (a release, a cancel or a key-up; plan 7d
+    /// controller ruling I4): after a wind or a held key's step it locates
+    /// once where the hold got to, as one ruler click does (an open pass
+    /// lands and a new one begins); otherwise it does nothing. Returns
+    /// the tick.
+    pub fn transport_hold_end(&self) -> Result<i64, VizError> {
+        self.transport_call(|| {
+            let mut inner = lock(&self.inner);
+            let now = crate::surfaces::now();
+            let tick = match inner.surfaces.wind {
+                Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
+                _ => self
+                    .surface_where(&inner)
+                    .map_or(inner.cursor.unwrap_or(Tick::ZERO), |(_, t)| t)
+                    .0
+                    .clamp(0, core_editor::transport::WIND_LIMIT),
+            };
+            if std::mem::take(&mut inner.wind_hold) {
+                self.locate_in(&mut inner, tick)?;
+                inner.surfaces.wind = Some((now, tick));
+            }
+            Ok(tick)
+        })
     }
 
     /// Loops from bar 1 to the end of the sequence, or stops looping.
@@ -9103,6 +9192,8 @@ impl Session {
             .map(|w| (w.seq, w.handles.status.rolled()));
         self.finish_writing(inner);
         self.apply_pending_automation(inner);
+        // This landed what a hold wound over (plan 7d ruling I4).
+        inner.wind_hold = false;
         if !host::locate(self.id, Tick(tick))? {
             inner.cursor = Some(Tick(tick));
             inner.cursor_seq = inner.selected_seq();
@@ -9373,29 +9464,57 @@ impl Session {
             return false;
         };
         let forward = dir > 0;
-        let to = core_editor::transport::marker_step(s, Tick(tick), forward).unwrap_or_else(|| {
-            if forward {
-                s.meter.barline_at_or_after(Tick(tick.saturating_add(1)))
-            } else if tick <= 0 {
-                Tick::ZERO
-            } else {
-                s.meter.barline_at_or_before(Tick(tick.saturating_sub(1)))
-            }
-        });
+        let to = core_editor::transport::marker_step(s, Tick(tick), forward)
+            .unwrap_or_else(|| core_editor::transport::bar_step(&s.meter, Tick(tick), forward));
         self.surface_locate(inner, to.0.max(0), now)
     }
 
-    /// `Wind(q)`: `base + round(q × PPQ)`, never below 0.
+    /// `Wind(q)`: `base + round(q × PPQ)`, in `0..=WIND_LIMIT`.
     fn surface_wind(&self, inner: &mut Inner, q: f64, now: Instant) -> bool {
         let Some((_, base)) = self.wind_base(inner, now) else {
             return false;
         };
-        if !q.is_finite() {
+        let Some(to) = core_editor::transport::wind_target(base, q) else {
             return false;
+        };
+        self.surface_locate(inner, to, now)
+    }
+
+    /// Where a transport bar step or wind starts (plan 7d Ruling 3): the
+    /// sequence of [`Session::surface_where`], and the last step's or
+    /// wind's target when under [`WIND_RECENT`] ago, else its tick.
+    fn jump_base(&self, inner: &Inner, now: Instant) -> Result<(SeqId, i64), VizError> {
+        if inner.recording.is_some() {
+            return Err(recording_busy());
         }
-        // `as` saturates; a wind step is a fraction of a beat.
-        let by = (q * core_model::time::PPQ as f64).round() as i64;
-        self.surface_locate(inner, base.saturating_add(by).max(0), now)
+        let (seq, tick) = self.surface_where(inner).ok_or_else(|| VizError::Model {
+            message: "select a sequence first".into(),
+        })?;
+        let tick = match inner.surfaces.wind {
+            Some((at, t)) if now.saturating_duration_since(at) < WIND_RECENT => t,
+            _ => tick.0,
+        };
+        Ok((seq, tick))
+    }
+
+    /// One bar on from [`Session::jump_base`], by its sequence's meter.
+    fn bar_target(&self, inner: &Inner, forward: bool, now: Instant) -> Result<i64, VizError> {
+        let (seq, base) = self.jump_base(inner, now)?;
+        let s = inner.doc().sequence(seq)?;
+        Ok(core_editor::transport::bar_step(&s.meter, Tick(base), forward).0)
+    }
+
+    /// A hold's move (plan 7d controller ruling I4): the engine's position
+    /// only (the cursor with no engine), nothing landed; remembered as the
+    /// next step's base, and the hold's end owed.
+    fn wind_move(&self, inner: &mut Inner, tick: i64, now: Instant) -> Result<(), VizError> {
+        if !host::locate(self.id, Tick(tick))? {
+            inner.cursor = Some(Tick(tick));
+            inner.cursor_seq = inner.selected_seq();
+        }
+        inner.surfaces.wind = Some((now, tick));
+        inner.wind_hold = true;
+        Ok(())
     }
 
     /// A surface's locate, remembered as the next wind's base.

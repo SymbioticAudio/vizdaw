@@ -126,6 +126,10 @@ pub struct CommandSpec {
     pub params: &'static [ParamSpec],
     /// The dialogs its parameters answer.
     pub dialogs: &'static [DialogSpec],
+    /// Its default keys give way to a key the user's keys file gives
+    /// another command (plan 7d controller ruling I3): true only for
+    /// commands whose defaults came after users had keys files.
+    pub yields: bool,
 }
 
 /// A validated `command.run` argument.
@@ -157,6 +161,7 @@ const fn cmd(
         document,
         params: &[],
         dialogs: &[],
+        yields: false,
     }
 }
 
@@ -1261,6 +1266,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("Return"),
         true,
     ),
+    // Plan 7d Ruling 4: a click (or the menu, or the channel) steps one
+    // bar; the keys are new defaults, so they give way (ruling I3).
+    CommandSpec {
+        extra_keys: &["Keypad-"],
+        yields: true,
+        ..cmd("transport.rewind", "Transport", "Rewind", Some("⇧,"), true)
+    },
+    CommandSpec {
+        extra_keys: &["Keypad+"],
+        yields: true,
+        ..cmd(
+            "transport.fast_forward",
+            "Transport",
+            "Fast Forward",
+            Some("⇧."),
+            true,
+        )
+    },
     cmd(
         "transport.previous_marker",
         "Transport",

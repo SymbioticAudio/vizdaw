@@ -223,6 +223,8 @@ The facts are gathered on the main thread every tick (the target document's tran
 | `transport.play_stop` | Transport > Play / Stop | Space | |
 | `transport.loop` | Transport > Loop | | `on` (absent toggles) |
 | `transport.return_to_start` | Transport > Return to Start | Return | |
+| `transport.rewind` | Transport > Rewind | ⇧, | |
+| `transport.fast_forward` | Transport > Fast Forward | ⇧. | |
 
 The select-and-modify panel is a non-modal window, not a dialog: the `modify.*` panel commands open it.
 

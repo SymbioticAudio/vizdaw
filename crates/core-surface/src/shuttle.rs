@@ -29,9 +29,11 @@ pub fn wind_rate(held: Duration) -> f64 {
         .map_or(0.0, |&(_, rate)| rate)
 }
 
-/// The quarter notes wound over held time `[a, b)`: the exact integral of
-/// `wind_rate`, summed piece by piece.
-fn wound(a: Duration, b: Duration) -> f64 {
+/// The quarter notes wound over held time `[a, b)` (both measured from
+/// the press): the exact integral of [`wind_rate`], summed piece by
+/// piece; 0 when `b` is not after `a`. The transport bar's hold winds by
+/// it too (plan 7d Ruling 3), so a surface and the bar wind alike.
+pub fn wound(a: Duration, b: Duration) -> f64 {
     let mut sum = 0.0;
     for (k, &(from, rate)) in STEPS.iter().enumerate() {
         let lo = Duration::from_millis(from).max(a);

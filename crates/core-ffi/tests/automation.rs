@@ -946,6 +946,124 @@ fn a_locate_while_writing_lands_and_starts_a_new_pass() {
     s.close().unwrap();
 }
 
+/// The strip's automation mode now.
+fn mode_of(s: &Session, strip: u64) -> Option<Mode> {
+    s.automation_state()
+        .unwrap()
+        .modes
+        .into_iter()
+        .find(|m| m.strip == strip)
+        .map(|m| m.mode)
+}
+
+fn undo_label(s: &Session) -> Option<String> {
+    s.snapshot().unwrap().undo_label
+}
+
+/// A Write strip writing while the demo's Song plays, a beat in.
+fn writing_demo() -> (Arc<Session>, u64) {
+    let (s, song) = demo();
+    let synth = strip(&s, "Built-in Synth");
+    s.set_automation_mode(vec![synth], Mode::Write).unwrap();
+    s.play(song).unwrap();
+    wait_until("a beat", || {
+        s.idle().unwrap();
+        tick(&s) > Q
+    });
+    assert!(s.automation_state().unwrap().writing);
+    (s, synth)
+}
+
+/// Plan 7d controller ruling I4: a held rewind or fast forward winds
+/// without landing; its release lands the pass once (one "Write
+/// Automation" step, one After Write switch) and writes on from where the
+/// wind went. A click afterwards lands as a ruler click does.
+#[test]
+fn a_hold_while_writing_lands_once() {
+    let _g = serial();
+    let (s, synth) = writing_demo();
+    let mut to = 0;
+    for _ in 0..3 {
+        to = s.transport_wind(4.0).unwrap();
+        s.idle().unwrap();
+    }
+    assert_eq!(
+        undo_label(&s).as_deref(),
+        Some("Set Automation Mode"),
+        "a wind lands nothing"
+    );
+    assert_eq!(mode_of(&s, synth), Some(Mode::Write));
+    assert!(s.automation_state().unwrap().writing);
+    assert!(s.transport_hold_end().unwrap() >= to);
+    s.idle().unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
+    assert_eq!(mode_of(&s, synth), Some(Mode::Latch), "After Write, once");
+    assert!(
+        s.automation_state().unwrap().writing,
+        "a new pass from the new position"
+    );
+    wait_until("the final position", || tick(&s) >= to);
+    // A click lands once more: a ride, then one bar on.
+    let t = Target::StripFader { strip: synth };
+    s.gesture(t, Phase::Touch { value: Some(0.7) }).unwrap();
+    pace(&s);
+    s.gesture(t, Phase::Release).unwrap();
+    pace(&s);
+    s.transport_step_bar(true).unwrap();
+    s.idle().unwrap();
+    assert!(s.automation_state().unwrap().writing);
+    stop_and_land(&s);
+    assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
+    s.undo().unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
+    assert_eq!(mode_of(&s, synth), Some(Mode::Latch), "the click's step");
+    s.undo().unwrap();
+    assert_eq!(
+        undo_label(&s).as_deref(),
+        Some("Set Automation Mode"),
+        "one step for the hold"
+    );
+    assert_eq!(mode_of(&s, synth), Some(Mode::Write));
+    s.close().unwrap();
+}
+
+/// Plan 7d Ruling 4: a held key steps a bar per key-down and auto-repeat
+/// without landing; the key-up lands once, and a second key-up nothing.
+#[test]
+fn a_held_key_lands_once_on_key_up() {
+    let _g = serial();
+    let (s, synth) = writing_demo();
+    let mut to = 0;
+    for _ in 0..3 {
+        to = s.transport_key_step(true).unwrap();
+        s.idle().unwrap();
+    }
+    assert_eq!(to, 3 * 4 * Q, "three bars");
+    assert_eq!(
+        undo_label(&s).as_deref(),
+        Some("Set Automation Mode"),
+        "a key-down lands nothing"
+    );
+    assert_eq!(mode_of(&s, synth), Some(Mode::Write));
+    s.transport_hold_end().unwrap();
+    s.idle().unwrap();
+    assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
+    assert_eq!(mode_of(&s, synth), Some(Mode::Latch));
+    assert!(s.automation_state().unwrap().writing);
+    s.transport_hold_end().unwrap();
+    s.idle().unwrap();
+    stop_and_land(&s);
+    assert_eq!(undo_label(&s).as_deref(), Some("Write Automation"));
+    s.undo().unwrap();
+    assert_eq!(
+        undo_label(&s).as_deref(),
+        Some("Set Automation Mode"),
+        "one step for the key hold"
+    );
+    assert_eq!(mode_of(&s, synth), Some(Mode::Write));
+    s.close().unwrap();
+}
+
 /// Pre-flight check I-2, Ruling 23: a Locate that arrives after Play
 /// returned but before the renderer rolled (a ruler click queued during
 /// the disk wait) starts the new pass all the same.

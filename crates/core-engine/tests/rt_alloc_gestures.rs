@@ -20,6 +20,7 @@ use core_model::command::MixerCmd;
 use core_model::event::EventBody;
 use core_model::ids::PluginInstanceId;
 use core_model::mixer::{AuxSend, ParamId, StripKind};
+use core_model::time::Tick;
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -165,6 +166,26 @@ fn gestures_never_allocate() {
         for _ in 0..30 {
             armed_block(&mut b, 512);
         }
+    }
+    // A wind burst while a write gesture is open (plan 7d): a locate a
+    // block, each a bar on, wrapped back inside the song; then one
+    // landing locate.
+    let mut song_ticks = 4 * Q;
+    while engine.tick_frame(Tick(song_ticks + 4 * Q)) < engine.length_frames() {
+        song_ticks += 4 * Q;
+    }
+    send(dests[0], GesturePhase::Touch(0.4));
+    armed_block(&mut b, 512);
+    for k in 0..50u32 {
+        let to = (engine.position_tick().0.max(0) + 4 * Q) % song_ticks;
+        engine.locate_tick(Tick(to)).unwrap();
+        send(dests[0], GesturePhase::Value(f64::from(k) / 50.0));
+        armed_block(&mut b, 512);
+    }
+    send(dests[0], GesturePhase::Release);
+    engine.locate_frame(0).unwrap();
+    for _ in 0..4 {
+        armed_block(&mut b, 512);
     }
     engine.stop_gestures().unwrap();
     armed_block(&mut b, 512);

@@ -37,6 +37,12 @@ pub struct BindingRow {
     /// Settings › Keys can learn it to a MIDI control (plan 5f-1 Ruling
     /// 8): `learn_command` takes it.
     pub learnable: bool,
+    /// Its default keys give way to a user's binding or keyboard slot on
+    /// the same key (plan 7d controller ruling I3).
+    pub yields: bool,
+    /// Its keys differ from its defaults: the user's keys file or Settings
+    /// › Keys set them (plan 7d fold check I-3).
+    pub customised: bool,
 }
 
 fn mods_row(m: u8) -> ModifiersRow {
@@ -87,6 +93,7 @@ impl Keymap {
     /// Every command with its keys, in registry order.
     pub fn rows(&self) -> Vec<BindingRow> {
         let k = lock(&self.inner);
+        let changed = k.changed();
         COMMANDS
             .iter()
             .map(|c| {
@@ -102,6 +109,8 @@ impl Keymap {
                     menu_key: now.first().map(Chord::menu_key),
                     menu_modifiers: mods_row(now.first().map_or(0, |ch| ch.mods)),
                     learnable: crate::surfaces::bindable(c.id).is_ok(),
+                    yields: c.yields,
+                    customised: changed.contains(&c.id),
                 }
             })
             .collect()

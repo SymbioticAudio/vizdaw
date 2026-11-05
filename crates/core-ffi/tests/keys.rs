@@ -180,6 +180,23 @@ fn the_keymap_lists_every_command_with_its_keys() {
         None,
         "not a key: never pressed"
     );
+    // Plan 7d controller ruling I3: only the new defaults give way, and
+    // a keys file binding one makes it the user's.
+    let row = |k: &vizdaw_ffi::Keymap, id: &str| k.rows().into_iter().find(|r| r.id == id).unwrap();
+    let ff = row(&k, "transport.fast_forward");
+    assert!(ff.yields && !ff.customised);
+    assert_eq!(ff.keys, vec!["⇧.", "Keypad+"]);
+    assert!(row(&k, "transport.rewind").yields);
+    assert!(
+        rows.iter()
+            .filter(|r| r.id != "transport.rewind" && r.id != "transport.fast_forward")
+            .all(|r| !r.yields && !r.customised)
+    );
+    k.load_json(r#"{"vizdaw_keys": 1, "bindings": {"transport.fast_forward": ["F5"]}}"#.into())
+        .unwrap();
+    let ff = row(&k, "transport.fast_forward");
+    assert!(ff.yields && ff.customised);
+    assert_eq!(ff.keys, vec!["F5"]);
 }
 
 #[test]

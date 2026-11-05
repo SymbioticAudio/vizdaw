@@ -58,6 +58,46 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     }
     func path() throws -> String? { savedPath }
 
+    /// The bar's rewind and fast forward (plan 7d Task B1): clicks, held
+    /// keys' steps, winds (quarter notes), every wind tried (counted
+    /// before `jumpError` throws), and hold ends. A step is ±61 440 and a
+    /// wind `round(q × 15 360)` from `state.tick`, floored at 0.
+    var stepBars: [Bool] = []
+    var keySteps: [Bool] = []
+    var winds: [Double] = []
+    var windAttempts = 0
+    var holdEnds = 0
+    /// Thrown by the steps and the wind when set.
+    var jumpError: VizError?
+    private func jump(by: Int64) -> Int64 {
+        let (to, over) = state.tick.addingReportingOverflow(by)
+        state.tick = max(0, over ? (by > 0 ? Int64.max : 0) : to)
+        return state.tick
+    }
+    func transportStepBar(forward: Bool) throws -> Int64 {
+        if let e = jumpError { throw e }
+        stepBars.append(forward)
+        return jump(by: forward ? 61_440 : -61_440)
+    }
+    func transportKeyStep(forward: Bool) throws -> Int64 {
+        if let e = jumpError { throw e }
+        keySteps.append(forward)
+        return jump(by: forward ? 61_440 : -61_440)
+    }
+    func transportWind(quarters: Double) throws -> Int64 {
+        windAttempts += 1
+        if let e = jumpError { throw e }
+        winds.append(quarters)
+        let by = (quarters * 15_360).rounded()
+        let limit = Double(Int64.max)
+        if !by.isFinite { return jump(by: 0) }
+        return jump(by: by >= limit ? .max : by <= -limit ? .min : Int64(by))
+    }
+    func transportHoldEnd() throws -> Int64 {
+        holdEnds += 1
+        return state.tick
+    }
+
     func play(seq: UInt64) throws {
         if let e = playError { throw e }
         state.playing = true

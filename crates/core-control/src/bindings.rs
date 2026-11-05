@@ -496,7 +496,9 @@ impl Keymap {
     /// bindings document (not JSON, too large, another version) is an
     /// error; inside one, an unknown command, an unreadable key, a fifth
     /// key or a key another command already has is skipped and named in
-    /// the returned list, so a file from another version still loads.
+    /// the returned list, so a file from another version still loads. A
+    /// key that is only a yielding command's default ([`CommandSpec::yields`],
+    /// the command not in the file) goes to the file's command instead.
     pub fn from_json(
         table: &'static [CommandSpec],
         text: &str,
@@ -545,11 +547,24 @@ impl Keymap {
             k.set(spec.id, Vec::new());
             wanted.push((spec.id, chords));
         }
+        let listed: Vec<&'static str> = wanted.iter().map(|(id, _)| *id).collect();
         for (id, chords) in wanted {
             let mut kept = Vec::new();
             for c in chords {
                 let context = k.spec(id).map_or(KeyContext::Global, |s| s.context);
                 match k.holder(c, context) {
+                    // A yielding default the file does not bind gives the
+                    // key way, silently (plan 7d controller ruling I3).
+                    Some(other)
+                        if other != id
+                            && !listed.contains(&other)
+                            && k.spec(other).is_some_and(|s| s.yields) =>
+                    {
+                        let left: Vec<Chord> =
+                            k.chords(other).into_iter().filter(|x| *x != c).collect();
+                        k.set(other, left);
+                        kept.push(c);
+                    }
                     Some(other) if other != id => {
                         skipped.push(format!("{id}: {} is already the key of {other}", c.text()))
                     }

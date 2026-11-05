@@ -297,6 +297,56 @@ fn the_drum_menu_commands_are_registered() {
     );
 }
 
+/// Plan 7d Ruling 4: rewind and fast forward on ⇧, and ⇧. with keypad
+/// twins; during step entry Keypad+ stays Tie.
+#[test]
+fn rewind_and_fast_forward_have_their_keys() {
+    use core_control::bindings::{Chord, Keymap};
+    let k = Keymap::default();
+    let key = |t: &str, step: bool| k.lookup(Chord::parse(t).unwrap(), step, false);
+    assert_eq!(key("⇧,", false), Some("transport.rewind"));
+    assert_eq!(key("Keypad-", false), Some("transport.rewind"));
+    assert_eq!(key("⇧.", false), Some("transport.fast_forward"));
+    assert_eq!(key("Keypad+", false), Some("transport.fast_forward"));
+    assert_eq!(key("Keypad+", true), Some("step.tie"), "step entry wins");
+    for (id, title) in [
+        ("transport.rewind", "Rewind"),
+        ("transport.fast_forward", "Fast Forward"),
+    ] {
+        let c = registry::find(id).unwrap();
+        assert_eq!((c.title, c.menu), (title, "Transport"));
+        assert!(c.menu_item && c.document && c.yields, "{id}");
+    }
+    let yielding: Vec<&str> = COMMANDS.iter().filter(|c| c.yields).map(|c| c.id).collect();
+    assert_eq!(yielding, ["transport.rewind", "transport.fast_forward"]);
+}
+
+/// Plan 7d hostile input: rewind and fast forward take no parameters, and
+/// a misspelt id is no command.
+#[test]
+fn rewind_and_fast_forward_take_no_parameters() {
+    for id in ["transport.rewind", "transport.fast_forward"] {
+        assert_eq!(
+            ok("command.run", json!({ "id": id })),
+            Command::CommandRun {
+                id: id.into(),
+                args: vec![],
+                window: None,
+            }
+        );
+        let (code, message) = err("command.run", json!({"id": id, "params": {"bars": 2}}));
+        assert_eq!(code, ErrorCode::InvalidParams, "{id}");
+        assert!(
+            message.ends_with(": unknown parameter \"bars\" (allowed: none)"),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        err("command.run", json!({"id": "transport.Rewind"})).0,
+        ErrorCode::UnknownId
+    );
+}
+
 #[test]
 fn every_transport_key_has_a_command() {
     use core_control::bindings::{Chord, Keymap};
@@ -313,6 +363,10 @@ fn every_transport_key_has_a_command() {
         ("Return", "transport.return_to_start"),
         (",", "transport.previous_marker"),
         (".", "transport.next_marker"),
+        ("⇧,", "transport.rewind"),
+        ("⇧.", "transport.fast_forward"),
+        ("Keypad-", "transport.rewind"),
+        ("Keypad+", "transport.fast_forward"),
         ("L", "transport.loop"),
         ("O", "transport.overdub"),
         ("I", "transport.punch"),
@@ -447,8 +501,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        155,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor"
+        157,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.

@@ -1,7 +1,8 @@
 //! The transport keys' logic (plan 4f Task 3): markers and record arm.
 
-use core_editor::transport::{ArmMove, arm_move, marker_step};
+use core_editor::transport::{ArmMove, WIND_LIMIT, arm_move, bar_step, marker_step, wind_target};
 use core_model::ids::SeqId;
+use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
 use core_model::sequence::{Marker, Sequence};
 use core_model::time::Tick;
 use proptest::prelude::*;
@@ -89,4 +90,66 @@ proptest! {
             }
         }
     }
+}
+
+/// 4/4 from 0, 3/4 from bar 3 (122 880).
+fn four_then_three() -> MeterMap {
+    let entry = |tick, num| MeterEntry {
+        tick: Tick(tick),
+        meter: Meter { num, den: 4 },
+        key: KeySig::default(),
+    };
+    MeterMap::new(vec![entry(0, 4), entry(122_880, 3)]).unwrap()
+}
+
+/// Plan 7d Ruling 3: a click on rewind or fast forward moves one bar of
+/// the meter in effect, never below 0.
+#[test]
+fn bar_step_moves_one_bar_across_meter_changes() {
+    let m = four_then_three();
+    for (from, to) in [
+        (0, 61_440),
+        (61_440, 122_880),
+        (122_880, 168_960),
+        (130_000, 168_960),
+        (-100, 0),
+    ] {
+        assert_eq!(
+            bar_step(&m, Tick(from), true),
+            Tick(to),
+            "forward from {from}"
+        );
+    }
+    for (from, to) in [
+        (168_960, 122_880),
+        (130_000, 122_880),
+        (122_880, 61_440),
+        (1, 0),
+        (0, 0),
+        (-100, 0),
+    ] {
+        assert_eq!(
+            bar_step(&m, Tick(from), false),
+            Tick(to),
+            "back from {from}"
+        );
+    }
+}
+
+/// Plan 7d Ruling 5: steps and winds stay inside 0…=WIND_LIMIT, and a
+/// non-finite wind is refused.
+#[test]
+fn bar_step_and_wind_target_clamp() {
+    let m = four_then_three();
+    assert_eq!(WIND_LIMIT, 1 << 50);
+    assert_eq!(bar_step(&m, Tick(WIND_LIMIT), true), Tick(WIND_LIMIT));
+    assert_eq!(bar_step(&m, Tick(i64::MAX), true), Tick(WIND_LIMIT));
+    for q in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(wind_target(0, q), None, "{q}");
+    }
+    assert_eq!(wind_target(0, 1.0), Some(15_360));
+    assert_eq!(wind_target(0, 1e300), Some(WIND_LIMIT));
+    assert_eq!(wind_target(100, -1e300), Some(0));
+    assert_eq!(wind_target(i64::MIN, 0.0), Some(0));
+    assert_eq!(wind_target(30_720, -0.5), Some(23_040));
 }

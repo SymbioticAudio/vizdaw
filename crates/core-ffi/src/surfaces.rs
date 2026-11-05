@@ -2548,6 +2548,21 @@ pub fn kontrol_ports() -> SurfacePortsRow {
     .unwrap_or_default()
 }
 
+/// The quarter notes a transport bar hold winds between `from_ms` and
+/// `to_ms` after the press (plan 7d Ruling 3): the surfaces' shuttle
+/// curve, so the bar and a keyboard's Rewind wind alike. 0 when `to_ms`
+/// is not after `from_ms`, or on a panic.
+#[uniffi::export]
+pub fn shuttle_quarters(from_ms: u64, to_ms: u64) -> f64 {
+    std::panic::catch_unwind(|| {
+        if to_ms <= from_ms {
+            return 0.0;
+        }
+        core_surface::shuttle::wound(Duration::from_millis(from_ms), Duration::from_millis(to_ms))
+    })
+    .unwrap_or(0.0)
+}
+
 /// `state.get surfaces` without a document (pre-flight M29): no feedback
 /// rows.
 #[uniffi::export]
