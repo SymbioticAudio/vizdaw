@@ -30,11 +30,15 @@ private func strip(_ id: UInt64, _ kind: StripKindRow) -> StripRow { stripRow(id
 
 /// Song (seq 3) with Groove (30) armed and followed, and `events31` on
 /// Chords (31); media 7 is "loop".
-@MainActor private func inspectorDocument(_ events31: [EventRow], rate: UInt32 = 48_000) -> DocumentModel {
+@MainActor private func inspectorDocument(
+    _ events31: [EventRow], rate: UInt32 = 48_000, mediaRate: UInt32? = nil, media: Bool = true
+) -> DocumentModel {
     let f = editorFake()
     f.laneTable[3] = [lane(30, arm: true), lane(31)]
     f.laneEventTable["3/31"] = LaneEvents(seq: 3, lane: 31, rev: 2, events: events31)
-    f.mediaRows = [mediaRow(7, "loop")]
+    var loop = mediaRow(7, "loop")
+    if let mediaRate { loop.sampleRate = mediaRate }
+    f.mediaRows = media ? [loop] : []
     f.info.format.sampleRate = rate
     return try! DocumentModel(session: f)
 }
@@ -127,12 +131,29 @@ private let regionLabels: Set<String> = ["Region", "Gain", "Fade In", "Fade Out"
     }
     @Test func theInspectorsFadesUseTheProjectRate() {
         let m = inspectorDocument(
-            [regionRow(5, tick: 0, duration: 61_440, frames: 96_000, fadeIn: 4410)], rate: 44_100)
+            [regionRow(5, tick: 0, duration: 61_440, frames: 96_000, fadeIn: 4410)], rate: 44_100,
+            mediaRate: 0)
         select([5], in: m)
         #expect(m.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Fade In", value: "100 ms")))
         m.projectInfo = nil
         #expect(
             m.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Fade In", value: "4410 frames")))
+    }
+    @Test func theInspectorShowsFadesAtTheFilesRate() {
+        // A 44.1 kHz file in a 48 kHz project: 11 025 frames are 250 ms.
+        let m = inspectorDocument(
+            [regionRow(5, tick: 0, duration: 61_440, frames: 96_000, fadeIn: 11_025)], rate: 48_000,
+            mediaRate: 44_100)
+        select([5], in: m)
+        let expected = AudioEditorEntry.fadeText(frames: 11_025, rate: 44_100)
+        #expect(expected == "250 ms")
+        #expect(m.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Fade In", value: expected)))
+        // With the media row missing, the project rate is used (11 025 / 48 000 = 229.7 ms).
+        let bare = inspectorDocument(
+            [regionRow(5, tick: 0, duration: 61_440, frames: 96_000, fadeIn: 11_025)], rate: 48_000, media: false)
+        select([5], in: bare)
+        #expect(
+            bare.inspectorRows(destinations: [], strips: []).contains(InspectorRow(label: "Fade In", value: "230 ms")))
     }
     @Test func theInspectorNamesAnAudioPathAndARegion() {
         let ev = EventRow(

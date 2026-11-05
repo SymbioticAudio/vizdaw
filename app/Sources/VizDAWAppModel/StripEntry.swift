@@ -104,6 +104,7 @@ public enum StripEntry {
     public static func levelText(_ db: Double, max top: Double) -> String {
         if db.isNaN || db <= MixerMath.floorDb { return "\u{2212}\u{221E} dB" }
         let v = (min(db, top) * 10).rounded(.toNearestOrAwayFromZero) / 10
+        if v <= MixerMath.floorDb { return "\u{2212}\u{221E} dB" }
         if v == 0 { return "0.0 dB" }
         let body = String(format: "%.1f", abs(v))
         return (v < 0 ? String(minus) : "+") + body + " dB"

@@ -72,13 +72,20 @@ extension DocumentModel {
     public var inspectorRegion: EventRow? { editedRegion?.row }
 
     /// The left pane's inspector rows (Ruling 6): the followed lane, the
-    /// single selected audio region, with fades in ms at the project's rate.
+    /// single selected audio region, with fades in ms at the file's rate
+    /// (the project's when the media row is missing or has no rate).
     public func inspectorRows(destinations: [DestRow], strips: [StripRow]) -> [InspectorRow] {
         let region = inspectorRegion
         return Inspector.rows(
             lane: focusLanes().first, region: region, regionName: media.row(region?.media)?.name,
             destinations: destinations, strips: strips,
-            sampleRate: Double(projectInfo?.format.sampleRate ?? 0))
+            sampleRate: Double(fileRate(of: editedRegion?.media) ?? projectInfo?.format.sampleRate ?? 0))
+    }
+
+    /// A media row's own rate; nil for no row or a 0 rate.
+    private func fileRate(of media: MediaRow?) -> UInt32? {
+        guard let rate = media?.sampleRate, rate > 0 else { return nil }
+        return rate
     }
 
     /// `lane`'s colour in Arrange, through the document's mixer

@@ -60,6 +60,14 @@ import Testing
         for text in bad { #expect(StripEntry.pan(text) == nil, "\(text.prefix(20))") }
     }
 
+    @Test func aLevelThatRoundsToTheFloorReadsMinusInfinity() {
+        #expect(StripEntry.levelText(-143.96) == "\u{2212}\u{221E} dB")
+        #expect(StripEntry.levelText(-143.94) == "\u{2212}143.9 dB")
+        let back = StripEntry.level(StripEntry.levelText(-143.96))
+        #expect(back == StripEntry.level("\u{2212}\u{221E} dB"))
+        #expect(back == -144)
+    }
+
     @Test func typedValuesReadBackAsTheyShow() {
         for db in [-60.0, -4.2, 0, 12] { #expect(StripEntry.level(StripEntry.levelText(db)) == db, "\(db)") }
         for p in [-1.0, -0.24, 0, 0.1] { #expect(StripEntry.pan(StripEntry.panText(p)) == p, "\(p)") }

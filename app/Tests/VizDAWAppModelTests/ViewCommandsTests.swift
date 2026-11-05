@@ -189,6 +189,26 @@ fileprivate extension ControlOutcome {
         _ = run("ui.pane", [.text("pane", "left"), .text("view", "sequences")], doc, store)
         #expect(m.renamingSeq == nil)
     }
+    @Test func aDetailKeyOverTheMixerCommitsTheStripRename() throws {
+        let (doc, store) = storeDocument()
+        let m = doc.model
+        let f = try #require(m.session as? FakeSession)
+        let mixer = try #require(store.mixer(doc.id))
+        #expect(run("ui.pane", [.text("pane", "bottom"), .text("view", "mixer")], doc, store).isDone)
+        #expect(m.editor.layout.views.current.bottom.view == .mixer)
+        mixer.beginRename(try #require(mixer.strips.first), in: .pane)
+        mixer.renameDraft = "Vox 2"
+        #expect(run("editors.piano_roll", [], doc, store).isDone)   // ⌘1
+        #expect(f.calls.filter { $0.hasSuffix(" Vox 2") && $0.hasPrefix("renameStrip") }.count == 1)
+        #expect(mixer.renamingStrip == nil)
+        #expect(m.editor.layout.views.current.bottom.view == .editor)
+        // Already on the editor: this path commits nothing.
+        mixer.beginRename(try #require(mixer.strips.first), in: .pane)
+        mixer.renameDraft = "Vox 3"
+        #expect(run("editors.list", [], doc, store).isDone)
+        #expect(!f.calls.contains { $0.hasSuffix(" Vox 3") })
+        #expect(mixer.renamingStrip != nil)
+    }
     /// Task 6 review M1: the pane picker's `choose` refused by `setPane`
     /// (an editor kind in the right pane) opens no detail, shows no bottom
     /// pane, keeps `lastKind` and leaves an open rename alone.

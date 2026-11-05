@@ -404,6 +404,7 @@ public final class DocumentModel {
         apply(snap)
         projectInfo = try? session.projectInfo()
         editor.applySnapshot = { [weak self] in self?.apply($0) }
+        editor.paneEditsEnder = { [weak self] in self?.endPaneEdits() }
         editor.selectSequence = { [weak self] in self?.select($0) }
         editor.currentSequence = { [weak self] in self?.selectedSeq }
         selectModify.document = self
