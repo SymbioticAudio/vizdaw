@@ -30,6 +30,11 @@ enum KeyMenu {
 @MainActor
 enum KeyMonitor {
     private static var monitor: Any?
+    private static var upMonitor: Any?
+    private static var observers: [any NSObjectProtocol] = []
+    /// The held ⏪ or ⏩ key (plan 7d Ruling 4): its key code and the
+    /// shuttle its steps went to, which its key-up lands.
+    private static var held: (keyCode: UInt16, shuttle: TransportShuttle)?
 
     static func start() {
         guard monitor == nil else { return }
@@ -38,6 +43,48 @@ enum KeyMonitor {
             nonisolated(unsafe) let event = e
             let used = MainActor.assumeIsolated { consume(event) }
             return used ? nil : e
+        }
+        upMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { e in
+            nonisolated(unsafe) let event = e
+            MainActor.assumeIsolated { keyUp(event.keyCode) }
+            return e
+        }
+        // The window or the app losing the keyboard ends a held key too:
+        // its key-up would go elsewhere.
+        let center = NotificationCenter.default
+        for name in [NSWindow.didResignKeyNotification, NSApplication.didResignActiveNotification] {
+            observers.append(
+                center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                    MainActor.assumeIsolated { endHeld() }
+                })
+        }
+    }
+
+    /// A key-up: the held key's lands its hold once.
+    static func keyUp(_ keyCode: UInt16) {
+        guard held?.keyCode == keyCode else { return }
+        endHeld()
+    }
+
+    /// Lands the held key's hold, if one is held.
+    static func endHeld() {
+        let h = held
+        held = nil
+        h?.shuttle.keyUp()
+    }
+
+    /// A key-down or repeat of ⏪ or ⏩ in a document's window: one key
+    /// step on its shuttle (gated as the command is); whether the key was
+    /// used up. An unavailable step passes the key on, as the command's
+    /// would.
+    static func keyStep(_ id: String, _ e: NSEvent, _ m: DocumentModel) -> Bool {
+        if let h = held, h.shuttle !== m.shuttle || h.keyCode != e.keyCode { endHeld() }
+        switch m.shuttle.keyStep(forward: id == "transport.fast_forward") {
+        case .done:
+            held = (e.keyCode, m.shuttle)
+            return true
+        case .unavailable: return false
+        case .refused, .busy: return true
         }
     }
 
@@ -116,7 +163,14 @@ enum KeyMonitor {
         // A held key: toggles, transport keys and slots run once per press
         // (final review item 8).
         if e.isARepeat, !KeyDispatch.runsOnRepeat(r) { return true }
-        if perform(r, doc) { return true }
+        // A held ⏪ or ⏩ key is one hold, landed on key-up (plan 7d
+        // Ruling 4); a surface's button and the channel's keys step as a
+        // click does.
+        if case .command(let id) = r, KeyDispatch.held.contains(id), let m = doc?.model {
+            if keyStep(id, e, m) { return true }
+        } else if perform(r, doc) {
+            return true
+        }
         switch KeyDispatch.passed(modifiers: modifiers(e.modifierFlags)) {
         case .menus:
             // The Keys settings' recorder takes ⌘ and ⌃ keys before the

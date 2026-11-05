@@ -233,6 +233,8 @@ struct AppCommands: Commands {
             Button("Return to Start") { doc?.returnToStart() }
                 .keyboardShortcut(KeyMenu.shortcut("transport.return_to_start"))
                 .disabled(!(doc?.returnKeyEnabled ?? false))
+            commandItem("transport.rewind", TransportCommands.self)
+            commandItem("transport.fast_forward", TransportCommands.self)
             commandItem("transport.previous_marker", TransportCommands.self)
             commandItem("transport.next_marker", TransportCommands.self)
             Divider()

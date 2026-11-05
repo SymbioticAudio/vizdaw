@@ -177,6 +177,13 @@ public enum KeyRouter {
     ) -> KeyRoute {
         if typing && plain(m) { return .typing }
         if let id = keys.command(keyCode: keyCode, modifiers: m, stepEntry: stepEntry) {
+            // A saved keyboard slot keeps its key over a new command's
+            // default that the user never bound (controller ruling I3).
+            if let row = keys.row(id), row.yields, !row.customised,
+                let s = slot(keyCode: keyCode, modifiers: m, sequences: sequences)
+            {
+                return .slot(s)
+            }
             // Open in External Editor runs here, never through its menu
             // item: with no editor chosen a key says so and the menu item
             // alone opens the chooser (plan 5f-3, owner answer 2026-11-03).
@@ -187,12 +194,16 @@ public enum KeyRouter {
             }
             return .command(id)
         }
+        return slot(keyCode: keyCode, modifiers: m, sequences: sequences).map { .slot($0) } ?? .pass
+    }
+
+    /// The sequence whose keyboard slot is the press of `keyCode` with `m`.
+    private static func slot(keyCode: UInt16, modifiers m: ModifiersRow, sequences: [SeqRow]) -> UInt64? {
         let bits = UInt8(m.shift ? 1 : 0) | (m.control ? 2 : 0) | (m.option ? 4 : 0) | (m.command ? 8 : 0)
-        let slot = sequences.first { s in
+        return sequences.first { s in
             guard let k = s.keyboardSlot else { return false }
             return k.modifiers & 15 == bits && keyCodeFor(name: k.key) == keyCode
-        }
-        return slot.map { .slot($0.id) } ?? .pass
+        }?.id
     }
 
     /// Whether chord text `text` (`⇧⌘S`) is the press of `keyCode` with `m`.
@@ -277,12 +288,18 @@ public enum KeyPass: Equatable, Sendable {
 
 extension KeyDispatch {
     /// The commands a held key runs again at the key-repeat rate: step
-    /// entry's rest, tie and delete, the nudges, undo and redo. Every
-    /// other command, toggles and transport keys among them, and every
-    /// keyboard slot runs once per press (final review item 8).
+    /// entry's rest, tie and delete, the nudges, undo and redo, rewind and
+    /// fast forward. Every other command, toggles and the other transport
+    /// keys among them, and every keyboard slot runs once per press (final
+    /// review item 8, plan 7d Ruling 4).
     static let repeating: Set<String> = Set(ControlCommands.nudges.keys).union([
         "step.rest", "step.tie", "step.delete_last", "edit.undo", "edit.redo",
-    ])
+    ]).union(held)
+
+    /// The commands whose held key is one hold (plan 7d Ruling 4): each
+    /// key-down and repeat is `TransportShuttle.keyStep`, the key-up
+    /// `TransportShuttle.keyUp`, which lands once.
+    public static let held: Set<String> = ["transport.rewind", "transport.fast_forward"]
 
     /// Whether a key repeat (`NSEvent.isARepeat`) of route `r` runs it; a
     /// repeat that does not is used up. Keys VizDAW does not use repeat

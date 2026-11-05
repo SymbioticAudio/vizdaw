@@ -161,6 +161,16 @@ public final class DocumentModel {
         return m
     }
 
+    /// The transport bar's rewind and fast forward held to wind, and the
+    /// held ⏪ ⏩ keys (plan 7d Ruling 3), made once.
+    public var shuttle: TransportShuttle {
+        if let s = shuttleModel { return s }
+        let s = TransportShuttle(document: self)
+        shuttleModel = s
+        return s
+    }
+    @ObservationIgnored private var shuttleModel: TransportShuttle?
+
     /// File › Bounce… (plan 5f-2), made once.
     public var bounce: BounceModel {
         if let m = bounceModel { return m }

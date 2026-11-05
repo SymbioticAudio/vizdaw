@@ -32,7 +32,8 @@ public enum TransportCommands {
         [
             "transport.stop", "transport.play", "transport.play_selection", "transport.play_from_selection",
             "transport.play_from_edit_in", "transport.record", "transport.scrub",
-            "transport.previous_marker", "transport.next_marker", "transport.overdub", "transport.punch",
+            "transport.previous_marker", "transport.next_marker", "transport.rewind", "transport.fast_forward",
+            "transport.overdub", "transport.punch",
             "transport.arm_previous", "transport.arm_next", "record.keep_pass", "record.discard_pass",
             "editors.snap",
         ]
@@ -151,6 +152,14 @@ public enum TransportCommands {
                 return .unavailable(forward ? "No marker after the position." : "No marker before the position.")
             }
             return attempt { try m.moveTo(t) }
+        case "transport.rewind", "transport.fast_forward":
+            // One bar, as a click on the bar's button (plan 7d Ruling 3):
+            // the menu items and the channel. A held key goes to
+            // `TransportShuttle.keyStep` instead.
+            let forward = id == "transport.fast_forward"
+            let stepped = attempt { _ = try m.session.transportStepBar(forward: forward) }
+            m.poll()
+            return stepped
         case "transport.arm_previous", "transport.arm_next":
             let forward = id == "transport.arm_next"
             guard m.editor.gesture == nil else { return .unavailable(EditorModel.gestureOpenMessage) }
@@ -202,7 +211,7 @@ public enum TransportCommands {
         }
     }
 
-    private static func refused(_ error: any Error) -> KeyOutcome {
+    static func refused(_ error: any Error) -> KeyOutcome {
         if case VizError.Busy(let message) = error { return .busy(message) }
         return .refused(AlertItem(error, title: "").message)
     }
