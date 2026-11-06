@@ -16,9 +16,9 @@ cp target/ffi/vizdaw-scan "$app/Contents/MacOS/vizdaw-scan"
 # The licence, with its GPL section 7 permission for the branded icons
 # (plan 7b Ruling 6): the conveyed app carries it.
 cp LICENSE "$app/Contents/Resources/LICENSE"
-# The app icon: the branded "virus" glyph (glyph-02), drawn from the
+# The app icon: the SymbioticAudio mark (glyph-39, the figure with a cube head), drawn from the
 # symbiotic-design checkout. VIZDAW_NO_BRAND=1 (forks) keeps the default icon.
-glyph="app/.build/checkouts/symbiotic-design/icons/svg/glyph-02.svg"
+glyph="app/.build/checkouts/symbiotic-design/icons/svg/glyph-39.svg"
 if [[ "${VIZDAW_NO_BRAND:-}" != "1" && -f "$glyph" ]]; then
     mkdir -p target/icon
     swiftc -O scripts/make-icon.swift -o target/icon/make-icon
