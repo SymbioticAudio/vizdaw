@@ -107,6 +107,23 @@ public final class DrumGridModel {
         }
     }
 
+    /// Every MIDI and Instrument track of the shown sequence: what the
+    /// empty state offers to open as drums.
+    public var tracks: [LaneRow] {
+        guard let seq else { return [] }
+        return editor.drumGridTracks(seq: seq)
+    }
+
+    /// Opens `lane` in this grid (it gets a default drum layout if it has none).
+    public func open(lane: UInt64) {
+        guard let seq else { return }
+        let target = EditorTarget.lane(seq: seq, lane: lane)
+        switch slot {
+        case .pane: editor.openDetail(target, kind: .drumGrid)
+        case .window(let id): editor.setWindowTarget(id, target)
+        }
+    }
+
     public var settings: DrumGridSettings { editor.layout.drumGrid }
 
     public func updateSettings(_ change: (inout DrumGridSettings) -> Void) {
@@ -355,9 +372,29 @@ public final class DrumGridModel {
 
 extension EditorModel {
     /// Makes lane `lane` of `seq` a drum lane (rows for its notes) or a
-    /// normal lane again (Drum > Drum Lane, the lane header menu).
+    /// normal lane again. The Drum Grid does this when it opens a lane.
     @discardableResult
     public func markDrumLane(seq: UInt64, lane: UInt64, on: Bool) -> Bool {
         edit(.drum(edit: .markLane(seq: seq, lane: lane, drum: on)))
+    }
+
+    /// Whether the Drum Grid can edit `lane`: a MIDI or Instrument track.
+    public static func drumGridOffers(_ lane: LaneRow) -> Bool { lane.kind != .audio }
+
+    /// The tracks of `seq` the Drum Grid can open (MIDI and Instrument).
+    public func drumGridTracks(seq: UInt64) -> [LaneRow] {
+        laneRows(seq).filter(Self.drumGridOffers)
+    }
+
+    /// Opening a MIDI or Instrument track in the Drum Grid gives it a
+    /// default drum layout (one undoable edit, saved with the project)
+    /// unless it has one; a track that has one keeps it. Audio tracks and
+    /// non-track targets are left alone.
+    func prepareDrumGrid(_ target: EditorTarget) {
+        guard let lane = target.lane,
+            let row = laneRows(target.seq).first(where: { $0.id == lane }),
+            Self.drumGridOffers(row), !row.isDrum
+        else { return }
+        markDrumLane(seq: target.seq, lane: lane, on: true)
     }
 }

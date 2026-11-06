@@ -407,6 +407,7 @@ public final class EditorModel {
     /// target is the same. The bottom pane of `main` (the current view) shows it.
     public func openDetail(_ target: EditorTarget, kind: DetailEditorKind? = nil, in main: MainView? = nil) {
         if layout.views[main ?? layout.views.main].bottom.view != .editor { paneEditsEnder?() }
+        if (kind ?? layout.lastKind) == .drumGrid { prepareDrumGrid(target) }
         updateLayout { l in
             let m = main ?? l.views.main
             l.views[m].bottom.shown = true

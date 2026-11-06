@@ -220,8 +220,6 @@ struct AppCommands: Commands {
             .disabled(doc.map { !RegionCommands.enabled(RegionCommands.reloadExternal, $0) } ?? true)
         }
         CommandMenu("Drum") {
-            drumToggle("Drum Track", DrumCommands.markLane)
-            Divider()
             drumItem("Add Drum Row", DrumCommands.addRow)
             drumToggle("Show Velocity", DrumCommands.showVelocity)
             drumItem("Split Row to Own Track", DrumCommands.splitRow)

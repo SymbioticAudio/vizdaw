@@ -16,12 +16,37 @@ struct DrumGridEditor: View {
             DrumGridBar(model: model, editor: model.editor)
             Divider()
             if model.lanes.isEmpty {
-                ContentUnavailableView(
-                    "No Drum Tracks", icon: .drumGrid,
-                    description: Text(
-                        "Make a track a drum track with Drum > Drum Track or its header's menu, or add a Drum Kit sequence."))
+                DrumGridEmptyState(model: model)
             } else {
                 DrumGridHost(model: model)
+            }
+        }
+    }
+}
+
+/// No drum lane yet: every MIDI and Instrument track of the sequence can
+/// be opened as drums.
+struct DrumGridEmptyState: View {
+    @Environment(\.symbioticTheme) private var theme
+    let model: DrumGridModel
+
+    var body: some View {
+        let tracks = model.tracks
+        if tracks.isEmpty {
+            ContentUnavailableView(
+                "No MIDI or Instrument Tracks", icon: .drumGrid,
+                description: Text("Add a MIDI or Instrument track to edit it as drums."))
+        } else {
+            VStack(spacing: theme.spacing.m) {
+                ContentUnavailableView(
+                    "Choose a Track", icon: .drumGrid,
+                    description: Text("The Drum Grid edits a MIDI or Instrument track as drum rows."))
+                HStack {
+                    ForEach(tracks, id: \.id) { t in
+                        Button(t.name) { model.open(lane: t.id) }
+                    }
+                }
+                .padding(.bottom, theme.spacing.m)
             }
         }
     }

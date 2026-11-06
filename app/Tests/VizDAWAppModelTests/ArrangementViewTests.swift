@@ -271,30 +271,21 @@ private func arrangement(_ f: FakeSession) throws -> (DocumentModel, Arrangement
         #expect(m.alert?.title == "New Instrument Failed")
     }
 
-    @Test func theLaneMenuMarksAndUnmarksADrumLane() throws {
+    @Test func theLaneMenuHasNoDrumTrackItem() throws {
         let f = editorFake()
         let m = try DocumentModel(session: f)
         let h = LaneHeaderView(document: m)
-        var lane = m.lanes[1]
+        let lane = m.lanes[1]
         let titles = h.laneMenu(seq: 3, lane: lane).items.filter { !$0.isSeparatorItem }.map(\.title)
         // Colour ▸ last (plan 7b Task B7; StripColourTests covers it).
-        #expect(titles == ["Drum Track", "Track Synth…", "New MIDI Destination…", "Colour"])
-        #expect(!h.laneMenu(seq: 3, lane: lane).items[2].isEnabled, "Chords plays no external synth")
+        #expect(titles == ["Track Synth…", "New MIDI Destination…", "Colour"])
+        #expect(!h.laneMenu(seq: 3, lane: lane).items[0].isEnabled, "Chords plays no external synth")
         let saved = f.dests
         f.dests = saved + [DestRow(id: 7, name: "Juno", plugin: nil, external: true)]
         var juno = lane
         juno.midiDest = 7
-        #expect(h.laneMenu(seq: 3, lane: juno).items[2].isEnabled, "Juno is an external synth")
+        #expect(h.laneMenu(seq: 3, lane: juno).items[0].isEnabled, "Juno is an external synth")
         f.dests = saved
-        let item = try #require(h.laneMenu(seq: 3, lane: lane).items.first)
-        #expect(item.title == "Drum Track" && item.state == .off)
-        _ = item.target?.perform(item.action)
-        #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 31, drum: true)))
-        lane.isDrum = true
-        let on = try #require(h.laneMenu(seq: 3, lane: lane).items.first)
-        #expect(on.state == .on)
-        _ = on.target?.perform(on.action)
-        #expect(f.edits.last == .drum(edit: .markLane(seq: 3, lane: 31, drum: false)))
     }
 
     /// A header click selects its track; ⇧ or ⌘ adds or removes one, and

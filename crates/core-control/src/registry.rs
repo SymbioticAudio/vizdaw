@@ -1192,10 +1192,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         Some("⌘["),
         true,
     ),
-    CommandSpec {
-        params: ON,
-        ..cmd("drum.mark_lane", "Drum", "Drum Track", None, true)
-    },
     cmd("drum.add_row", "Drum", "Add Drum Row", None, true),
     CommandSpec {
         params: ON,
