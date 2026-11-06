@@ -376,7 +376,16 @@ fn a_destination_named_for_its_plugin_follows_a_replacement_unless_renamed() {
     );
     assert_eq!(b.doc.instruments()[&DestId(0)].name, "au:other");
     assert_eq!(
-        b.doc.mixer().strip(b.doc.mixer().find_kind(StripKind::Instrument(DestId(0))).unwrap()).unwrap().name,
+        b.doc
+            .mixer()
+            .strip(
+                b.doc
+                    .mixer()
+                    .find_kind(StripKind::Instrument(DestId(0)))
+                    .unwrap()
+            )
+            .unwrap()
+            .name,
         "au:other"
     );
     // A user-given name stays.

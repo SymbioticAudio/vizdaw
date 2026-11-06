@@ -333,8 +333,7 @@ pub(crate) fn apply(d: &mut Document, cmd: &RoutingCmd, r: &mut Report) -> Resul
             };
             let new_name = match &kind {
                 DestKind::PluginInstrument { slot }
-                    if default_name == Some(old.name.as_str())
-                        && !slot.plugin.name.is_empty() =>
+                    if default_name == Some(old.name.as_str()) && !slot.plugin.name.is_empty() =>
                 {
                     Some(slot.plugin.name.clone())
                 }

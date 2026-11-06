@@ -596,10 +596,20 @@ fn replacing_the_instrument_renames_the_destination_and_strip() {
     let seq = s.snapshot().unwrap().sequences[0].id;
     s.new_track(seq, TrackKindRow::Instrument, None).unwrap();
     let dests = s.destinations().unwrap();
-    let synth = dests.iter().find(|d| d.name == "Built-in Synth").unwrap().clone();
-    assert_eq!(s.lanes(seq).unwrap()[0].destination.as_deref(), Some("Built-in Synth"));
-    s.set_destination_plugin(synth.id, test_plugin("vizdaw.test.synth4", "Test Synth 4-Out"))
-        .unwrap();
+    let synth = dests
+        .iter()
+        .find(|d| d.name == "Built-in Synth")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        s.lanes(seq).unwrap()[0].destination.as_deref(),
+        Some("Built-in Synth")
+    );
+    s.set_destination_plugin(
+        synth.id,
+        test_plugin("vizdaw.test.synth4", "Test Synth 4-Out"),
+    )
+    .unwrap();
     let now = s.destinations().unwrap();
     let d = now.iter().find(|d| d.id == synth.id).unwrap();
     assert_eq!(d.name, "Test Synth 4-Out");
@@ -610,6 +620,12 @@ fn replacing_the_instrument_renames_the_destination_and_strip() {
     // Another plugin: still named for the plugin, so it follows.
     s.set_destination_plugin(synth.id, test_plugin("vizdaw.test.other", "Other"))
         .unwrap();
-    assert_eq!(strip(&s, "Other").kind, StripKindRow::Instrument { dest: synth.id });
-    assert_eq!(s.lanes(seq).unwrap()[0].destination.as_deref(), Some("Other"));
+    assert_eq!(
+        strip(&s, "Other").kind,
+        StripKindRow::Instrument { dest: synth.id }
+    );
+    assert_eq!(
+        s.lanes(seq).unwrap()[0].destination.as_deref(),
+        Some("Other")
+    );
 }
