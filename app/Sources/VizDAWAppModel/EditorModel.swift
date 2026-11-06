@@ -22,6 +22,9 @@ public final class EditorModel {
     public private(set) var selection = SelectionRow(timeRange: nil, lanes: [], events: [])
     public private(set) var layout = EditorLayout()
     public var tool: Tool = .arrow
+    /// The bar a pencil click in Arrange asked a piano roll to scroll to.
+    public internal(set) var pianoRollReveal: PianoRollReveal?
+    @ObservationIgnored var revealSerial = 0
     /// The last failure of a user action (spec §5: non-modal).
     public var status: String?
     /// Sequences left by opening a reference; Back returns to the last.
@@ -408,6 +411,7 @@ public final class EditorModel {
     public func openDetail(_ target: EditorTarget, kind: DetailEditorKind? = nil, in main: MainView? = nil) {
         if layout.views[main ?? layout.views.main].bottom.view != .editor { paneEditsEnder?() }
         if (kind ?? layout.lastKind) == .drumGrid { prepareDrumGrid(target) }
+        pianoRollReveal = nil
         updateLayout { l in
             let m = main ?? l.views.main
             l.views[m].bottom.shown = true
