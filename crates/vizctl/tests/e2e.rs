@@ -288,10 +288,17 @@ fn key_into_label(app: &mut App, window: &Value, label: &str, text: &str) {
             Err(e) if e.to_string().contains("no_element") && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(200));
             }
-            Err(e) => panic!(
-                "ui.key {params}: {e}\nVizDAW log:\n{}",
-                log_tail(&app.launched.log, 40)
-            ),
+            Err(e) => {
+                // Where the element is and how big the window is: an
+                // element whose centre is outside the window is "gone".
+                let tree = app.call("ui.tree", json!({"window": window}));
+                let node = find_node(&tree["nodes"], label);
+                let windows = app.call("state.get", json!({"target": "windows"}));
+                panic!(
+                    "ui.key {params}: {e}\nnode: {node:?}\nwindows: {windows}\nVizDAW log:\n{}",
+                    log_tail(&app.launched.log, 40)
+                )
+            }
         }
     }
 }
