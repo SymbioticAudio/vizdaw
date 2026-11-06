@@ -64,8 +64,13 @@ public final class WindowThemeMarker: NSView {
 
     public override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    /// On the next turn of the run loop: styling a window while SwiftUI is
+    /// still building it (a Settings window's toolbar) left its title bar,
+    /// tabs and window buttons undrawn.
     private func styleWindow() {
-        guard let w = window else { return }
-        WindowTheming.style(w, theme)
+        DispatchQueue.main.async { [self] in
+            guard let w = window else { return }
+            WindowTheming.style(w, theme)
+        }
     }
 }
