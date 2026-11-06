@@ -255,8 +255,46 @@ struct SlotView: View {
         .contentShape(Rectangle())
         .help(reason ?? "\(slot.plugin.name) (\(slot.plugin.vendor))")
         .onTapGesture(count: 2) { openWindow(slot.id) }
+        // After the double tap's, so a double click opens the window only:
+        // SwiftUI holds the single tap back until the double has failed.
+        .onTapGesture { if opensInstrumentMenu { popUpInstrumentMenu() } }
         .contextMenu { menu }
         .modifier(Reorder(model: model, strip: strip, slot: slot, index: index))
+        .accessibilityLabel(opensInstrumentMenu ? "\(slot.plugin.name), instrument" : slot.plugin.name)
+        .accessibilityHint(opensInstrumentMenu ? "Opens the instrument menu to choose another plugin" : "")
+        .accessibilityAddTraits(opensInstrumentMenu ? .isButton : [])
+    }
+
+    /// A click on an instrument strip's own slot picks its plugin.
+    private var opensInstrumentMenu: Bool {
+        if case .instrument = strip.kind { return index == nil }
+        return false
+    }
+
+    /// The menu of makers, popped where the pointer is (a click's menu).
+    private func popUpInstrumentMenu() {
+        let menu = NSMenu()
+        let edit = InstrumentMenuAction { openWindow(slot.id) }
+        menu.addItem(edit.item("Open Editor", checked: false))
+        menu.addItem(.separator())
+        let makers = MixerModel.instrumentMenu(appPlugins.browser(.instrument), current: slot.plugin)
+        if makers.isEmpty {
+            let none = NSMenuItem(title: "No Plugin Instruments", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        }
+        for maker in makers {
+            let sub = NSMenu(title: maker.vendor)
+            for c in maker.choices {
+                sub.addItem(
+                    InstrumentMenuAction { [model, strip] in model.pickInstrument(c.plugin, on: strip) }
+                        .item(c.plugin.name, checked: c.isCurrent))
+            }
+            let parent = NSMenuItem(title: maker.vendor, action: nil, keyEquivalent: "")
+            parent.submenu = sub
+            menu.addItem(parent)
+        }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     /// The slot dot (plan 7b Ruling 13).
@@ -326,4 +364,22 @@ struct LearnItem: View {
     var body: some View {
         Button("MIDI Learn") { model.document.learn.learn(target) }
     }
+}
+
+/// A menu item that runs a closure; the item keeps it alive.
+@MainActor
+private final class InstrumentMenuAction: NSObject {
+    let run: @MainActor () -> Void
+
+    init(_ run: @escaping @MainActor () -> Void) { self.run = run }
+
+    func item(_ title: String, checked: Bool) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: #selector(fire), keyEquivalent: "")
+        i.target = self
+        i.representedObject = self
+        i.state = checked ? .on : .off
+        return i
+    }
+
+    @objc func fire() { run() }
 }

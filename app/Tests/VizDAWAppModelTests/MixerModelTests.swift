@@ -142,6 +142,67 @@ import VizDAWCore
         #expect(MixerModel.BrowserTarget.insert(strip: 1).wantsInstrument == false)
     }
 
+    @Test func theInstrumentMenuGroupsByMakerAndMarksTheCurrentPlugin() throws {
+        let rows = [
+            catalogRow("b.2", "Zeta", vendor: "beta", kind: .instrument),
+            catalogRow("a.1", "Mono", vendor: "Alpha", kind: .instrument),
+            catalogRow("b.1", "alpha", vendor: "beta", kind: .instrument),
+            catalogRow("n.1", "Loose", vendor: "", kind: .instrument),
+        ]
+        let current = rows[2].plugin
+        let menu = MixerModel.instrumentMenu(rows, current: current)
+        #expect(menu.map(\.vendor) == ["Alpha", "beta", "Other"])
+        #expect(menu[1].choices.map(\.plugin.name) == ["alpha", "Zeta"])
+        #expect(menu.flatMap(\.choices).filter(\.isCurrent).map(\.plugin.id) == ["b.1"])
+        #expect(MixerModel.instrumentMenu(rows, current: nil).flatMap(\.choices).allSatisfy { !$0.isCurrent })
+    }
+
+    @Test func theInstrumentMenuLeavesOutEffectsAndDisabledPlugins() throws {
+        let rows = [
+            catalogRow("e", "Verb", vendor: "A", kind: .effect),
+            catalogRow("d", "Off", vendor: "A", kind: .instrument, status: .disabled),
+            catalogRow("m", "Gone", vendor: "A", kind: .instrument, status: .missing),
+            catalogRow("k", "Keys", vendor: "A", kind: .instrument),
+        ]
+        let menu = MixerModel.instrumentMenu(rows, current: nil)
+        #expect(menu.map(\.vendor) == ["A"])
+        #expect(menu[0].choices.map(\.plugin.id) == ["k"])
+        #expect(MixerModel.instrumentMenu([], current: nil).isEmpty)
+        #expect(MixerModel.instrumentMenu([rows[0]], current: nil).isEmpty)
+    }
+
+    @Test func pickingAnInstrumentReplacesItInThatDestination() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        var strip = stripRow(5, "Keys", kind: .instrument(dest: 7))
+        strip.instrument = slotRow(50, "Old")
+        let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
+        let before = f.calls.count
+        m.pickInstrument(new, on: strip)
+        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 7 u.diva"])
+        #expect(m.document.alert == nil)
+    }
+
+    @Test func pickingTheLoadedInstrumentOrOnANonInstrumentStripDoesNothing() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        var strip = stripRow(5, "Keys", kind: .instrument(dest: 7))
+        strip.instrument = slotRow(50, "Old")
+        let before = f.calls.count
+        m.pickInstrument(strip.instrument!.plugin, on: strip)
+        m.pickInstrument(strip.instrument!.plugin, on: stripRow(6, "Bus", kind: .bus))
+        #expect(f.calls.count == before)
+    }
+
+    @Test func aFailingInstrumentPickAlerts() throws {
+        let f = mixerFake()
+        let m = try model(f)
+        f.mixerError = .Model(message: "no such plugin")
+        let strip = stripRow(5, "Keys", kind: .instrument(dest: 7))
+        m.pickInstrument(PluginRefRow(format: .clap, id: "x", name: "X", vendor: "V", version: "1"), on: strip)
+        #expect(m.document.alert?.title == "Instrument Failed")
+    }
+
     @Test func renamingAndErrors() throws {
         let f = mixerFake()
         let m = try model(f)

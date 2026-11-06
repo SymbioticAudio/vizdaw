@@ -376,6 +376,44 @@ public final class MixerModel {
         }
     }
 
+    /// One plugin in the instrument menu.
+    public struct InstrumentChoice: Equatable, Sendable {
+        public let plugin: PluginRefRow
+        /// It is the plugin loaded now.
+        public let isCurrent: Bool
+    }
+
+    /// One maker's submenu of the instrument menu.
+    public struct InstrumentMaker: Equatable, Sendable {
+        public let vendor: String
+        public let choices: [InstrumentChoice]
+    }
+
+    /// The instrument menu's makers: the enabled, usable instruments of
+    /// `rows` grouped by maker (by name, any case; "Other" last), plugins
+    /// by name, the one `current` marked.
+    public nonisolated static func instrumentMenu(
+        _ rows: [CatalogRowFfi], current: PluginRefRow?
+    ) -> [InstrumentMaker] {
+        let usable = rows.filter { $0.kind == .instrument && $0.enabled && $0.status == .ok }
+        return PluginBrowserModel.groups(usable, search: "").map { g in
+            InstrumentMaker(
+                vendor: g.vendor,
+                choices: g.plugins.map { p in
+                    InstrumentChoice(
+                        plugin: p, isCurrent: current.map { $0.format == p.format && $0.id == p.id } ?? false)
+                })
+        }
+    }
+
+    /// Replaces the instrument of `strip` (an instrument strip) with the
+    /// plugin picked in its menu. The plugin already loaded is no change.
+    public func pickInstrument(_ plugin: PluginRefRow, on strip: StripRow) {
+        guard case .instrument(let dest) = strip.kind else { return }
+        if let cur = strip.instrument?.plugin, cur.format == plugin.format, cur.id == plugin.id { return }
+        command("Instrument Failed") { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }
+    }
+
     /// Empties the strip's EQ slot. An empty slot is no call: the core
     /// refuses it, which would show a spurious alert (B6 review).
     public func clearEq(_ s: StripRow) {
