@@ -69,6 +69,12 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+# The build, as About VizDAW shows it ("Version 0.1.0 (abc1234 · date)"),
+# so every bug report names the build it came from. "+" marks uncommitted
+# changes.
+build="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+git diff --quiet HEAD -- 2>/dev/null || build="$build+"
+plutil -replace CFBundleVersion -string "$build · $(date '+%Y-%m-%d %H:%M')" "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 codesign --force -s - --deep "$app"
 echo "built $app. Next: open $app"
