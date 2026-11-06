@@ -3346,3 +3346,37 @@ fn new_project_tracks_over_the_channel() {
     assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
     app.quit();
 }
+
+/// The Loop command: with Loop on, playing past the end of the sequence
+/// wraps to bar 1 instead of stopping.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn loop_wraps_at_the_end() {
+    let mut app = App::start();
+    let opened = app.call("app.new_demo", json!({}));
+    let window = opened["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "window": window, "params": params}),
+        )
+    };
+    let button = wait_for_label(&mut app, &window, "Loop");
+    app.call("ui.click", json!({"window": window, "element": button}));
+    for _ in 0..11 {
+        run(&mut app, "transport.fast_forward", json!({}));
+    }
+    run(&mut app, "transport.play", json!({}));
+    app.wait(&window, json!({"condition": "playing"}));
+    std::thread::sleep(Duration::from_millis(5000));
+    let t = app.call(
+        "state.get",
+        json!({"target": "transport", "window": window}),
+    );
+    assert_eq!(t["playing"], true, "the loop ended at the end: {t}");
+    app.quit();
+}
