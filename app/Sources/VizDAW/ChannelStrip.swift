@@ -89,6 +89,8 @@ private struct StripCells: View {
         row(.header) { StripHeader(model: model, strip: strip) }
         if let inst = strip.instrument {
             row(.instrument) { SlotView(model: model, strip: strip, slot: inst, index: nil) }
+        } else if strip.kind == .builtinSynth {
+            row(.instrument) { BuiltinSynthSlotView(model: model, strip: strip) }
         }
         if let lane = model.inputLane(for: strip) {
             row(.input) { StripInputView(inputs: model.document.inputs, lane: lane) }

@@ -406,11 +406,44 @@ public final class MixerModel {
         }
     }
 
+    /// The destination an instrument strip plays: its own, or for the
+    /// built-in synth strip (one strip for every built-in synth) the first
+    /// built-in synth destination. `nil` for other strips.
+    public func instrumentDestination(for strip: StripRow) -> UInt64? {
+        switch strip.kind {
+        case .instrument(let dest): return dest
+        case .builtinSynth: return destinations.first { $0.plugin == nil && !$0.external }?.id
+        default: return nil
+        }
+    }
+
+    /// The plugin destination `dest` plays; `nil` for the built-in synth
+    /// (and an unknown destination).
+    public func instrumentPlugin(ofDestination dest: UInt64) -> PluginRefRow? {
+        destinations.first { $0.id == dest }?.plugin
+    }
+
     /// Replaces the instrument of `strip` (an instrument strip) with the
     /// plugin picked in its menu. The plugin already loaded is no change.
     public func pickInstrument(_ plugin: PluginRefRow, on strip: StripRow) {
-        guard case .instrument(let dest) = strip.kind else { return }
-        if let cur = strip.instrument?.plugin, cur.format == plugin.format, cur.id == plugin.id { return }
+        switch strip.kind {
+        case .instrument(let dest):
+            if let cur = strip.instrument?.plugin, cur.format == plugin.format, cur.id == plugin.id { return }
+            command("Instrument Failed") { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }
+        case .builtinSynth:
+            guard let dest = instrumentDestination(for: strip) else { return }
+            pickInstrument(plugin, onDestination: dest)
+        default:
+            return
+        }
+    }
+
+    /// Makes destination `dest` play `plugin` (every track using it plays
+    /// the plugin). An unknown destination, or the plugin it already
+    /// plays, is no change.
+    public func pickInstrument(_ plugin: PluginRefRow, onDestination dest: UInt64) {
+        guard let d = destinations.first(where: { $0.id == dest }) else { return }
+        if let cur = d.plugin, cur.format == plugin.format, cur.id == plugin.id { return }
         command("Instrument Failed") { try $0.setDestinationPlugin(dest: dest, plugin: plugin) }
     }
 

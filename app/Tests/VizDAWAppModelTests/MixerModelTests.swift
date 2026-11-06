@@ -194,6 +194,50 @@ import VizDAWCore
         #expect(f.calls.count == before)
     }
 
+    @Test func theBuiltInSynthStripReplacesTheBuiltInSynthDestination() throws {
+        let f = mixerFake()
+        f.dests = [
+            DestRow(id: 3, name: "Juno", plugin: nil, external: true),
+            DestRow(id: 4, name: "Built-in Synth", plugin: nil),
+            DestRow(id: 9, name: "Other", plugin: nil),
+        ]
+        let m = try model(f)
+        let strip = stripRow(5, "Synth", kind: .builtinSynth)
+        #expect(m.instrumentDestination(for: strip) == 4)
+        let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
+        let before = f.calls.count
+        m.pickInstrument(new, on: strip)
+        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 4 u.diva"])
+    }
+
+    @Test func aBuiltInSynthStripWithNoSynthDestinationOrOtherKindsDoNothing() throws {
+        let f = mixerFake()
+        f.dests = [DestRow(id: 3, name: "Juno", plugin: nil, external: true)]
+        let m = try model(f)
+        let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
+        let before = f.calls.count
+        m.pickInstrument(new, on: stripRow(5, "Synth", kind: .builtinSynth))
+        #expect(m.instrumentDestination(for: stripRow(6, "Bus", kind: .bus)) == nil)
+        #expect(f.calls.count == before)
+    }
+
+    @Test func aDestinationsInstrumentIsReplacedUnlessItIsTheLoadedOne() throws {
+        let f = mixerFake()
+        let old = PluginRefRow(format: .clap, id: "u.old", name: "Old", vendor: "V", version: "1")
+        f.dests = [DestRow(id: 7, name: "Old", plugin: old), DestRow(id: 4, name: "Built-in Synth", plugin: nil)]
+        let m = try model(f)
+        let new = PluginRefRow(format: .clap, id: "u.diva", name: "Diva", vendor: "u-he", version: "1")
+        let before = f.calls.count
+        m.pickInstrument(old, onDestination: 7)
+        m.pickInstrument(new, onDestination: 99)  // unknown destination
+        #expect(f.calls.count == before)
+        m.pickInstrument(new, onDestination: 7)
+        m.pickInstrument(old, onDestination: 4)
+        #expect(Array(f.calls.dropFirst(before)) == ["destPlugin 7 u.diva", "destPlugin 4 u.old"])
+        #expect(m.instrumentPlugin(ofDestination: 7) == old)
+        #expect(m.instrumentPlugin(ofDestination: 4) == nil)
+    }
+
     @Test func aFailingInstrumentPickAlerts() throws {
         let f = mixerFake()
         let m = try model(f)
